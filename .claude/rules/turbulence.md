@@ -638,7 +638,10 @@ Many entries below are dated history written against the old API. Read them thro
   **AMG preconditioner built once and carried** (it only accelerates the Krylov iteration, and rebuilding
   it per sweep cost ~0.9 s (k) + ~1.0 s (ω) at 4k cells *and* re-compiled the whole solve every sweep).
   `SSTTurbulence` therefore splits `k_preconditioner`/`omega_preconditioner` (frozen, `scalar=`) from
-  `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`); `solve_segregated` builds the
+  `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`), each policy bundling the bare
+  diagonal `k_shift_diagonal`/`omega_shift_diagonal` — which the coupled `_coupled_shift_policy` reads
+  directly (#158), rather than building a policy to discard all but its `.shift_diagonal`, so one
+  definition damps a scalar on both paths; `solve_segregated` builds the
   former on the first sweep and the latter every sweep. Measured: traces per sweep went `[5,5,5,5,5]` →
   `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
   moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing
@@ -1275,6 +1278,14 @@ Many entries below are dated history written against the old API. Read them thro
     already spiked ~17× (β tripled while μ_t was stale) and collapsed the near-wall `k` onto its floor.
     The bordered solve makes `⟨U⟩ = U_bar` hold by construction; see `.claude/rules/flow.md`. An
     unconstrained `solve_flow` returns the assembler unchanged.
+    ⚠️ **Both library builders return this shape, typed `flow.drive.FlowSolve` (#158, 2026-10-10) —
+    and until then `reused_flow_solve` did NOT.** It returned the state alone, so the tests wrapped it
+    (`lambda m, s: (m, solve_flow(m, s))`) and the case runner, which hands it to the loop unwrapped
+    (`case/solver.py`, `Segregated` on any non-`MassFlow` drive), died on the first sweep with
+    `too many values to unpack`. Every case-runner test replaces `solve_segregated` with a recorder, so
+    nothing ran the handover. Pinned now at the builder (`test_flow_solve_seam.py`, solver stubbed,
+    mutation-checked three ways) and end to end (`test_case_solve.py`'s segregated RANS channel,
+    `slow`).
   - **The sweep body between the injected solves is jitted and assembles the flow fields once
     (binding, #106).** The pre-solve μ_t and the post-solve `(mdot, closure)` run in two module-level
     `eqx.filter_jit` prologues (`_sweep_eddy_viscosity`, `_sweep_closure`) instead of op-by-op eagerly

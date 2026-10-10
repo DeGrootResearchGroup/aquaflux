@@ -469,7 +469,7 @@ def test_reused_flow_solve_converges_across_viscosities() -> None:
     )
     for mu in (2e-3, 1e-3, 5e-4):  # Re = 500, 1000, 2000 — a viscosity sweep on the frozen build
         assembler = _channel(32, 24, mu, wall_growth=1.15)
-        state = solve_flow(assembler, assembler.initial_state())
+        _, state = solve_flow(assembler, assembler.initial_state())
         assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-8
 
 
@@ -486,7 +486,7 @@ def test_reused_flow_solve_is_differentiable() -> None:
 
     def mean_speed(mu):
         assembler = _channel(32, 24, mu, wall_growth=1.15)
-        state = solve_flow(assembler, assembler.initial_state())
+        _, state = solve_flow(assembler, assembler.initial_state())
         velocity, _ = assembler.unpack(state)
         return jnp.mean(jnp.abs(velocity[:, 0]))
 

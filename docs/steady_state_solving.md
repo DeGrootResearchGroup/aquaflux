@@ -317,7 +317,7 @@ the tolerances.
 | Linear residual (Stokes, scalar diffusion) | {func}`~aquaflux.solve.newton_step` | Called **directly**, not injected: `phi = newton_step(assembler.residual, phi)`. One correction, exact in one call for a linear residual, and differentiable in both modes. |
 | Nonlinear, moderate Reynolds number | {class}`~aquaflux.solve.DampedNewtonStep` | `strategy=DampedNewtonStep(preconditioner=precond)` — the default strategy. |
 | Convection-dominated / high Reynolds number | {func}`~aquaflux.flow.momentum_continuation` | `strategy=momentum_continuation(assembler)` — a builder that returns a configured {class}`~aquaflux.solve.PseudoTransientStep`. Pseudo-transient damping that ramps to zero; pair it with {func}`~aquaflux.flow.potential_flow`. |
-| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Replaces the solver entirely: returns a `solve_flow(momentum, state)` callable, with the preconditioned strategy built once and the compiled Newton step reused across calls. |
+| Repeated solves at varying viscosity | {func}`~aquaflux.flow.reused_flow_solve` | Replaces the solver entirely: returns a `solve_flow(momentum, state) -> (momentum, state)` callable, with the preconditioned strategy built once and the compiled Newton step reused across calls. |
 
 ```{note}
 The three kinds of name in that table are used in three different ways, which is worth

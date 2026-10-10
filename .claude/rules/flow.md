@@ -490,6 +490,11 @@ Engineering Principles.
   against exact fully-developed Poiseuille in `test_periodic_channel.py`. A uniform force needs no
   Rhie–Chow term and does not enter continuity. A force that is *solved for* rather than prescribed is
   a `MassFlow` drive instead — see the bullet above and the constraint below.
+- **`drive.FlowSolve` — the segregated loop's flow-solve signature, `(momentum, state) -> (momentum,
+  state)`, written once (#158).** `bulk_velocity_flow_solve` and `reused_flow_solve` both return one,
+  so either is handed to `solve_segregated` as it stands; `reused_flow_solve` returned the state alone
+  until 2026-10-10, which broke the case runner's `Segregated` path (see `turbulence.md`'s seam entry).
+  Not exported: it is an annotation, imported from `aquaflux.flow.drive`.
 - **Bulk-velocity constraint — BUILT (`flow/mean_velocity.py`, `bulk_velocity_flow_solve`).** A
   streamwise-periodic channel is driven to a target **bulk velocity** `U_bar` by making the body force
   `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with

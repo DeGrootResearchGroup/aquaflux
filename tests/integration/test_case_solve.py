@@ -17,6 +17,7 @@ import yaml
 from aquaflux.case import case_spec_from_mapping, read_case
 from aquaflux.flow import solve_flow_march
 from aquaflux.solve import Convergence, DualTimeLoop
+from aquaflux.turbulence import sst_initial_fields
 
 #: A laminar channel at a Reynolds number of about 50, fed a uniform velocity at its left side.
 _CHANNEL = """
@@ -30,6 +31,26 @@ boundaries:
   top: {kind: Wall}
 numerics:
   momentum_advection: {kind: FirstOrderUpwind}
+"""
+
+#: A RANS channel fed at its left side, solved by the segregated loop: an unconstrained flow, so its
+#: flow solve is :func:`~aquaflux.flow.reused_flow_solve` rather than the bulk-velocity one.
+_SEGREGATED_RANS_CHANNEL = """
+mesh: {kind: StructuredGrid, cells: [8, 4], lengths: [2.0, 1.0]}
+fluid: {density: 1.0, kinematic_viscosity: 1.0e-3}
+physics: {kind: RANS}
+boundaries:
+  left:
+    kind: Inlet
+    velocity: [1.0, 0.0]
+    turbulence: {kind: FixedTurbulence, k: 1.0e-3, omega: 1.0}
+  right: {kind: Outlet, pressure: 0.0}
+  bottom: {kind: Wall}
+  top: {kind: Wall}
+numerics:
+  momentum_advection: {kind: FirstOrderUpwind}
+  turbulence_advection: {kind: FirstOrderUpwind}
+solver: {kind: Segregated, sweeps: 60}
 """
 
 #: A dual-time march at a tight absolute stop, as a file states it.
@@ -82,3 +103,24 @@ def test_a_solver_section_reaches_the_march_it_describes(channel) -> None:
     default = checked.solve(problem)
     assert not np.array_equal(np.asarray(default), np.asarray(state))
     np.testing.assert_allclose(np.asarray(default), np.asarray(state), rtol=0, atol=1e-6)
+
+
+@pytest.mark.slow
+def test_an_inlet_driven_rans_case_runs_the_segregated_loop_from_its_file(tmp_path) -> None:
+    """The segregated loop calls its flow solve as ``(momentum, state) -> (momentum, state)``, and a
+    case hands it the library's own builder for an unconstrained flow, with no adapter between them.
+
+    The unit tests replace the loop with a recorder, so they cannot see whether the builder they
+    check is handed over and what the loop then does with its result; this runs both. A flow solve
+    returning the state alone fails on the loop's first sweep, so reaching a root at all is the check.
+    """
+    path = tmp_path / "case.yaml"
+    path.write_text(_SEGREGATED_RANS_CHANNEL)
+    checked = read_case(path).check()
+    problem = checked.build()
+
+    flow, k, omega = checked.solve(problem)
+
+    start = problem.pack_state(*sst_initial_fields(problem.momentum, problem.turbulence))
+    residual = float(jnp.linalg.norm(problem.residual(problem.pack_state(flow, k, omega))))
+    assert residual < 1e-3 * float(jnp.linalg.norm(problem.residual(start)))

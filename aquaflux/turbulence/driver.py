@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from aquaflux.flow import MomentumContinuity
+    from aquaflux.flow.drive import FlowSolve
 
     from .preconditioner import ScalarTransportPreconditioner
     from .transport import SSTClosureFields, SSTTurbulence
@@ -175,7 +176,7 @@ def bulk_velocity(
 def solve_segregated(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
-    solve_flow: Callable[[MomentumContinuity, jnp.ndarray], tuple[MomentumContinuity, jnp.ndarray]],
+    solve_flow: FlowSolve,
     solve_scalar: Callable[..., jnp.ndarray],
     flow: jnp.ndarray,
     k: jnp.ndarray,
@@ -207,7 +208,7 @@ def solve_segregated(
         assembler as well as the state because the solve may adjust it -- a bulk-velocity-constrained
         solve (:func:`~aquaflux.flow.bulk_velocity_flow_solve`) carries the converged body force out on
         the assembler, so a mass-flow-driven channel needs no separate controller. An unconstrained
-        solve returns the assembler unchanged.
+        solve returns the assembler unchanged, as :func:`~aquaflux.flow.reused_flow_solve` does.
     solve_scalar : callable
         ``solve_scalar(residual, state, policy) -> state`` solves a scalar residual function from
         ``state``, globalizing it by pseudo-transient continuation. ``policy`` is the per-sweep

@@ -1052,6 +1052,39 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     assert refreshed.flow_preconditioner is base.flow_preconditioner
 
 
+def test_the_coupled_and_segregated_scalar_shifts_are_one_definition() -> None:
+    """The coupled policy's k and omega transport shifts are the closure's own shift diagonals.
+
+    The segregated loop damps each scalar solve by the policy ``k_shift_policy`` bundles; the coupled
+    solve folds the same diagonal into the shift of the whole state. Both now read it from
+    ``k_shift_diagonal`` / ``omega_shift_diagonal``, so the two paths cannot damp a scalar differently.
+    """
+    from aquaflux.turbulence.coupled import _coupled_shift_policy
+
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    policy = _coupled_shift_policy(
+        coupled, state, UnpreconditionedScalars(), velocity=ViscousMultilevel()
+    )
+
+    flow, k, omega = coupled.physical_fields(state)
+    turbulence = coupled.turbulence
+    closure = turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+    mdot = coupled.momentum.with_eddy_viscosity(closure.nu_t).mass_flux(flow)
+
+    k_shift = turbulence.k_shift_diagonal(mdot, closure, k)
+    omega_shift = turbulence.omega_shift_diagonal(mdot, closure, omega)
+    assert jnp.array_equal(policy.k_shift_transport, k_shift)
+    assert jnp.array_equal(policy.omega_shift_transport, omega_shift)
+    assert jnp.array_equal(turbulence.k_shift_policy(mdot, closure, k).shift_diagonal, k_shift)
+    assert jnp.array_equal(
+        turbulence.omega_shift_policy(mdot, closure, omega).shift_diagonal, omega_shift
+    )
+    # The two equations' diagonals differ (their diffusivities do, and omega's wall cells are zeroed),
+    # so the comparisons above could not pass with one swapped for the other.
+    assert not jnp.allclose(k_shift, omega_shift)
+
+
 class _Recorded(Exception):
     """Raised by a recording march to end a solve once its arguments are captured."""
 

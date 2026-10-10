@@ -15,6 +15,7 @@ import pytest
 from aquaflux.solve import (
     CflResidualDualTimeControl,
     ConstantRelaxation,
+    DampedNewtonStep,
     DualTimeControl,
     DualTimeStep,
     PseudoTransientStep,
@@ -22,6 +23,7 @@ from aquaflux.solve import (
     ShiftTerm,
     StepReport,
     SwitchedEvolutionRelaxation,
+    newton_march,
 )
 
 
@@ -416,3 +418,35 @@ def test_a_refresh_boundary_holds_beta_for_every_control() -> None:
         _, (beta, memo) = ctrl.next_step(_dual_step(), None, (0.12, 0.3))
         assert beta == 0.12, f"{type(ctrl).__name__} reset β at a refresh boundary"
         assert memo == 0.3, f"{type(ctrl).__name__} dropped its memo at a refresh boundary"
+
+
+@pytest.mark.parametrize(
+    "control", [DualTimeControl(), ResidualRatioDualTimeControl(), CflResidualDualTimeControl()]
+)
+def test_a_shift_control_refuses_a_step_with_no_shift_before_the_march_takes_a_step(
+    control,
+) -> None:
+    """A damped-Newton step has no shift to drive, so the control says so rather than failing inside.
+
+    The march calls the control before its first step, so the refusal arrives there. Until the control
+    checked, the swap reached for a field the step does not have and the march died on an
+    ``AttributeError`` naming neither the control nor what it needs.
+    """
+    calls = []
+
+    def residual(phi):
+        calls.append(phi)
+        return phi**3 - 1.0
+
+    with pytest.raises(TypeError, match=r"DampedNewtonStep has none"):
+        newton_march(
+            DampedNewtonStep(),
+            residual,
+            jnp.array([2.0]),
+            max_steps=3,
+            rtol=0.0,
+            atol=1e-12,
+            step_control=control,
+        )
+    # Only the march's own opening measurement: no step was taken before the refusal.
+    assert len(calls) == 1
