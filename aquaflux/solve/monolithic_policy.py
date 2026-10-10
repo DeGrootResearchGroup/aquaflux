@@ -14,9 +14,9 @@ from collections.abc import Callable
 import equinox as eqx
 import jax.numpy as jnp
 
-from .amg_preconditioner import MonolithicAmgPreconditioner
+from .amg_preconditioner import MonolithicVCyclePreconditioner
 from .continuation import ShiftPolicy, ShiftTerm
-from .lu_preconditioner import MonolithicLuPreconditioner
+from .lu_preconditioner import CompleteLuPreconditioner
 from .root_adjoint import TransposedPreconditioner
 
 __all__ = ["FrozenTransposeFactory", "MonolithicFactorShiftPolicy"]
@@ -29,8 +29,8 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     Reuses a base policy's pseudo-transient shift diagonal -- the physics, whatever rows and scales it
     chose -- but replaces its preconditioner with a single monolithic inverse of the assembled Jacobian,
     which forms the true pressure Schur coupling rather than approximating it. That inverse is a complete LU
-    (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one cycle), or a multigrid V-cycle
-    (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`, bounded memory on a large three-dimensional
+    (:class:`~aquaflux.solve.CompleteLuPreconditioner`, exact, one cycle), or a multigrid V-cycle
+    (:class:`~aquaflux.solve.MonolithicVCyclePreconditioner`, bounded memory on a large three-dimensional
     mesh) -- this policy is agnostic to which, needing only the shared callback-matvec interface. On a
     convection-dominated collocated Rhie--Chow RANS saddle either reaches the forward tolerance
     where the block-triangular preconditioner needs hundreds of cycles.
@@ -47,13 +47,13 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     ----------
     base : ShiftPolicy
         The policy supplying the pseudo-transient shift diagonal (and its per-row relaxation).
-    preconditioner : MonolithicLuPreconditioner or MonolithicAmgPreconditioner
+    preconditioner : CompleteLuPreconditioner or MonolithicVCyclePreconditioner
         The frozen coupled inverse (a static field). Any object exposing the ``matvec`` /
         ``matvec(transpose=True)`` callback interface works.
     """
 
     base: ShiftPolicy
-    preconditioner: MonolithicLuPreconditioner | MonolithicAmgPreconditioner = eqx.field(
+    preconditioner: CompleteLuPreconditioner | MonolithicVCyclePreconditioner = eqx.field(
         static=True
     )
 

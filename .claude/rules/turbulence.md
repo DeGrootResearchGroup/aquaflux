@@ -1557,7 +1557,7 @@ Many entries below are dated history written against the old API. Read them thro
   - **`coupled_lu_continuation` — the COMPLETE-LU coupled PC, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(strategy=…)`
     that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian
-    *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
+    *completely* (`CompleteLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
     the block-diagonal SIMPLE composition, so the preconditioner is the operator's exact inverse and a
     Krylov solve converges in **one** iteration. It **forms the true pressure Schur through the
     factorization's fill** rather than approximating it — the block PC's measured wall is the Schur
@@ -1606,7 +1606,7 @@ Many entries below are dated history written against the old API. Read them thro
     stays on the algebraic-multigrid path (`.claude/rules/solve-direct-preconditioners.md`).
   - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
     (BUILT).** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
-    multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
+    multigrid V-cycle (`MonolithicVCyclePreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
     ~seconds with bounded memory where the complete LU hits the 3D wall (its fill OOMs; a monolithic
     threshold-incomplete-LU factorization was tried and measured to hit the same wall from the time side
@@ -1840,7 +1840,7 @@ Many entries below are dated history written against the old API. Read them thro
       and varies only the hierarchy's provenance — and the arms agree *to the digit*, which is a stronger
       form of agreement than any operating point could manufacture. But do not quote a cycle count from
       this table for anything else, and **re-run it at reach 3 before extending it.**
-    - The rebuild REUSES the aggregation coarse space (`MonolithicAmgPreconditioner.refactor` overwrites
+    - The rebuild REUSES the aggregation coarse space (`MonolithicVCyclePreconditioner.refactor` overwrites
     the operator values in place over a persistent CSR array and re-sets-up the PC with
     `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
     Galerkin coarse operators and the incomplete-LU factor values recompute, cutting the multigrid setup

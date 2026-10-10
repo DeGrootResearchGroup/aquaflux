@@ -41,7 +41,7 @@
     is the control that decides what a *smoother* plateau means: if degrading the coarse solve barely
     moves the cycle count then the coarse correction is not load-bearing, and a smoother plateau
     cannot be attributed to the coarse space at all. Always print the coarse grid's equation count
-    (`AmgVCycle.coarse_size`) beside the level count, so an arm that changed nothing is
+    (`MonolithicVCycleInverse.coarse_size`) beside the level count, so an arm that changed nothing is
     distinguishable from a setting that made no difference.
   - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
     **⚠️ THE COARSE-SPACE READING THAT SAT HERE IS DELETED — the two entries conflicted and the configured
@@ -767,7 +767,7 @@ data model. Each had nothing in `validation/` or any test selecting it.
   a per-matvec callback: 1 host iteration against ~90 on the identical system (no configuration
   recorded), but it marched slower per step and refused `field_split`, which both flagship cases run.
   The reason recorded for the slower march (the default path over-solving to machine zero) was stale.
-  With it went `AmgVCycle.solve_exact`, `MonolithicAmgPreconditioner.exact_solve`, and every
+  With it went `MonolithicVCycleInverse.solve_exact`, `MonolithicVCyclePreconditioner.exact_solve`, and every
   `has_exact_solve` / `solves_exactly_on_host` branch.
 
 - **The scheduled refresh cadence on `amg_beta_tracking_refresh` — DELETED, dominated by the cost
@@ -785,13 +785,13 @@ data model. Each had nothing in `validation/` or any test selecting it.
   β = 0.9364; every escalated step whose V-cycle *was* rebuilt came back with α ≥ 0.595. So "the retry
   ladder is futile" and "the ladder was never given a matched preconditioner" were never separated.
 - **The field split's PETSc blocks — DELETED, and with them `leading_options` / `trailing_options` /
-  `trailing_smoother_sweeps` and the `build_amg_vcycle` fallback.** A split now requires both
+  `trailing_smoother_sweeps` and the `monolithic_vcycle_inverse` fallback.** A split now requires both
   `leading_inverse` and `trailing_inverse`. Neither flagship case selected a PETSc split block. On the
   trailing half the traced `jacobi` inverse beat the host GAMG V-cycle in a controlled `bfs3d` pair,
   2124 s / 67 steps against 2893 s / 72 to the same `x_r/h` 8.36 (`zerogradient` k wall, 1e-08
   positivity floor; `solve-field-split.md`). On the leading half `petsc` stopped marching pitzDaily
   (§ "Incomplete-LU preconditioning of the pitzDaily flow block") and sat at parity with `hostilu` on
-  `bfs3d`; both cases ship `simplesmooth`. The monolithic `AmgVCycle` is unaffected.
+  `bfs3d`; both cases ship `simplesmooth`. The monolithic `MonolithicVCycleInverse` is unaffected.
 - **`flow_first=False` (the turbulence-first split, `_TrailingFirstFieldSplit`) — DELETED, never
   selected.** It tied flow-first on the forward operator (4 cycles each) and lost at the converged
   zero-shift operator, 13 against 11 (PETSc ILU(0) blocks on both halves, `bfs3d`;

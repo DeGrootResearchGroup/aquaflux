@@ -158,9 +158,9 @@ cfd/                                  # repo root
 │   │   ├── line_search_growth.py     #   LineSearchGrowth: how much the residual may grow and still be accepted
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
 │   │   ├── frozen_operator.py        #   ConvectionDiffusionStencil / decouple_dof: the one description of the frozen operator every AMG consumer coarsens
-│   │   ├── amg_preconditioner.py     #   MonolithicAmgPreconditioner for the coupled saddle-point solve
-│   │   ├── lu_preconditioner.py      #   MonolithicLuPreconditioner (complete sparse LU)
-│   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + BlockTriangularFieldSplit: block-triangular field-split preconditioning for flow-plus-transport
+│   │   ├── amg_preconditioner.py     #   MonolithicVCyclePreconditioner for the coupled saddle-point solve
+│   │   ├── lu_preconditioner.py      #   CompleteLuPreconditioner (complete sparse LU)
+│   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + FieldSplitInverse: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing

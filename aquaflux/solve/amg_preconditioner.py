@@ -24,7 +24,7 @@ smoother would make the operator nonlinear, which the outer Krylov solve and the
 use. The smoother's fill is the caller's (``smoother_fill_levels``, default one level of fill): which
 level wins depends on the pseudo-transient shift, and **zero fill is the validated choice for a march
 living at a low shift**, where one level of fill acquires negative pivots and diverges (see
-:func:`build_amg_vcycle`). It is a host object, built once off the jit path at a reference state and shift and
+:func:`monolithic_vcycle_inverse`). It is a host object, built once off the jit path at a reference state and shift and
 applied inside the jitted Krylov solve through ``jax.pure_callback`` — exactly like the complete LU. Because
 PETSc supplies the multigrid it is the one member of the family that requires the optional ``petsc``
 dependency; there is no pure-SciPy algebraic-multigrid fallback.
@@ -70,11 +70,11 @@ def _petsc():
     return PETSc
 
 
-class AmgVCycle:
+class MonolithicVCycleInverse:
     """A frozen algebraic-multigrid V-cycle on the equilibrated, cell-major coupled matrix.
 
     A pure host object (PETSc, no JAX) — the algebraic-multigrid counterpart of
-    :class:`~aquaflux.solve.lu_preconditioner.LuFactors`. :meth:`apply` runs **one** V-cycle
+    :class:`~aquaflux.solve.lu_preconditioner.CompleteLuInverse`. :meth:`apply` runs **one** V-cycle
     (``M ~= A^{-1}``, a fixed linear operator, not an inner solve); with ``transpose=True`` it runs the
     multigrid's transpose V-cycle (``M^T``), which the adjoint's transpose linear solve needs. The
     equilibration and cell-major reordering are applied around the cycle so the caller works in the raw
@@ -220,7 +220,7 @@ class AmgVCycle:
         opts = PETSc.Options()
         p = self._prefix
         # A stationary (Richardson) incomplete-LU smoother, at the caller's fill level
-        # (`smoother_fill_levels`; see `build_amg_vcycle` for which level wins at which shift). A
+        # (`smoother_fill_levels`; see `monolithic_vcycle_inverse` for which level wins at which shift). A
         # Krylov-accelerated smoother would make the V-cycle a nonlinear operator, which the outer
         # GMRES and the adjoint transpose cannot use.
         for key, value in {
@@ -367,7 +367,7 @@ class AmgVCycle:
         return matches
 
 
-def build_amg_vcycle(
+def monolithic_vcycle_inverse(
     matrix: sp.spmatrix,
     n_fields: int,
     *,
@@ -375,7 +375,7 @@ def build_amg_vcycle(
     smoother_sweeps: int = 2,
     coarse_eq_limit: int | None = None,
     extra_options: dict | None = None,
-) -> AmgVCycle:
+) -> MonolithicVCycleInverse:
     """Equilibrate + reorder a coupled block matrix and build a multigrid V-cycle preconditioner for it.
 
     Parameters
@@ -410,11 +410,11 @@ def build_amg_vcycle(
 
     Returns
     -------
-    AmgVCycle
+    MonolithicVCycleInverse
         The frozen V-cycle.
     """
     cell_major, scale, perm = equilibrate_cell_major(matrix, n_fields)
-    return AmgVCycle(
+    return MonolithicVCycleInverse(
         cell_major,
         scale,
         perm,
@@ -556,14 +556,14 @@ def _smallest_index(values: np.ndarray) -> np.ndarray:
 class MaterializedJacobianPreconditioner(HostPreconditioner):
     """Shared machinery for a preconditioner fitted to the coloured-probe materialized coupled Jacobian.
 
-    Extracted from :class:`MonolithicAmgPreconditioner` (#287) once a sibling —
-    :class:`~aquaflux.solve.field_split.FieldSplitAmgPreconditioner` — needed the materialize/shift/cache
-    machinery without the monolithic-only state built around one :class:`AmgVCycle` (the fixed-pattern
+    Extracted from :class:`MonolithicVCyclePreconditioner` (#287) once a sibling —
+    :class:`~aquaflux.solve.field_split.FieldSplitPreconditioner` — needed the materialize/shift/cache
+    machinery without the monolithic-only state built around one :class:`MonolithicVCycleInverse` (the fixed-pattern
     cell-major assembler). Holding both classes' *union* on one base was what forced the split to inherit
     attributes it cannot honour and re-implement its refresh bodies with parameters that do nothing on
     that path. What is here is exactly what every member needs: probing the Jacobian, adding the
     pseudo-transient shift, and -- for an inverse that re-fits to the shifted field-major matrix as it
-    stands -- the refresh. :class:`MonolithicAmgPreconditioner` overrides the refresh, because its
+    stands -- the refresh. :class:`MonolithicVCyclePreconditioner` overrides the refresh, because its
     V-cycle re-fits to an equilibrated, cell-major reordering of that matrix instead.
     """
 
@@ -620,7 +620,7 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         The arguments are the build's materialization arguments, evaluated at the developed state. The
         inverse's own configuration is fixed when it is built and cannot be changed by a refresh.
         Because this preconditioner is held as a **static field** of the shift policy and
-        :meth:`~aquaflux.solve.HostPreconditioner.matvec` reads ``self.factors`` at call time, re-fitting
+        :meth:`~aquaflux.solve.HostPreconditioner.matvec` reads ``self.inverse`` at call time, re-fitting
         the inverse here re-preconditions the **same compiled** Krylov solve.
 
         **Forward-march use ONLY -- the mutation is impure and must never touch a differentiated path.**
@@ -637,10 +637,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         Raises
         ------
         TypeError
-            If the inverse is not a :class:`~aquaflux.solve.RefactorableFactors` (an injected inverse need
+            If the inverse is not a :class:`~aquaflux.solve.RefactorableInverse` (an injected inverse need
             not be refreshable).
         """
-        inverse = require_refactorable(self.factors, f"this {type(self).__name__}")
+        inverse = require_refactorable(self.inverse, f"this {type(self).__name__}")
         timer = PhaseTimer()
         jacobian = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
@@ -653,11 +653,11 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         return timer.phases()
 
 
-class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
-    """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`AmgVCycle`.
+class MonolithicVCyclePreconditioner(MaterializedJacobianPreconditioner):
+    """The coupled algebraic-multigrid preconditioner as JAX matvecs, wrapping a frozen :class:`MonolithicVCycleInverse`.
 
     The algebraic-multigrid counterpart of
-    :class:`~aquaflux.solve.lu_preconditioner.MonolithicLuPreconditioner`, with the identical interface
+    :class:`~aquaflux.solve.lu_preconditioner.CompleteLuPreconditioner`, with the identical interface
     (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) so it is a drop-in for the coupled
     continuation's :class:`~aquaflux.turbulence.MonolithicFactorShiftPolicy`. Not an
     :class:`equinox.Module`: the V-cycle is a host PETSc object, held by a caller and captured in the
@@ -669,7 +669,7 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
 
     def __init__(
         self,
-        vcycle: AmgVCycle,
+        vcycle: MonolithicVCycleInverse,
         assembler: ShiftedCellMajorOperator | None = None,
     ) -> None:
         super().__init__(vcycle)
@@ -722,7 +722,7 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
         extra_options: dict | None = None,
-    ) -> MonolithicAmgPreconditioner:
+    ) -> MonolithicVCyclePreconditioner:
         """Materialize the shifted coupled Jacobian and build a V-cycle preconditioner for it, off the jit path.
 
         Parameters
@@ -736,9 +736,9 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` — the
             same block-diagonal shift the step solves against (velocity/scalar shifts, pressure zero).
         smoother_fill_levels, smoother_sweeps : int
-            The level-smoother controls (see :func:`build_amg_vcycle`).
+            The level-smoother controls (see :func:`monolithic_vcycle_inverse`).
         coarse_eq_limit : int or None
-            The coarse-grid direct-solve size (see :func:`build_amg_vcycle`). ``None`` keeps PETSc's default.
+            The coarse-grid direct-solve size (see :func:`monolithic_vcycle_inverse`). ``None`` keeps PETSc's default.
         batched_matvec : callable, optional
             A batched form of ``matvec`` (``(k, nf) -> (k, nf)``), built once and reused, so the coloured
             probes run as a few batched passes instead of a per-probe loop (a pure materialization speedup).
@@ -751,22 +751,22 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
             the fixed full-pattern CSR one probe-chunk at a time instead of a scatter loop + re-sort.
             Built once and reused across refreshes.
         extra_options : dict, optional
-            PETSc options for the V-cycle, applied after the defaults (see :func:`build_amg_vcycle`).
+            PETSc options for the V-cycle, applied after the defaults (see :func:`monolithic_vcycle_inverse`).
 
         Returns
         -------
-        MonolithicAmgPreconditioner
+        MonolithicVCyclePreconditioner
             The built preconditioner.
         """
         jacobian = cls._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
         assembler = cls._assembler_for(structure, plan.n_fields)
-        # `build_amg_vcycle` equilibrates and reorders internally, so the build takes the generic path
+        # `monolithic_vcycle_inverse` equilibrates and reorders internally, so the build takes the generic path
         # regardless; the assembler is constructed here so every later refresh has it.
         matrix = cls._shifted(jacobian, shift_diagonal)
         return cls(
-            build_amg_vcycle(
+            monolithic_vcycle_inverse(
                 matrix,
                 plan.n_fields,
                 smoother_fill_levels=smoother_fill_levels,
@@ -791,7 +791,7 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
 
         The smoother configuration is fixed at :meth:`build` and cannot be changed by a refresh — this
         takes only the arguments that describe the new state, evaluated at it. Because this preconditioner
-        is held as a **static field** of the shift policy and :meth:`matvec` reads ``self.factors`` at call
+        is held as a **static field** of the shift policy and :meth:`matvec` reads ``self.inverse`` at call
         time, mutating the V-cycle here re-preconditions the **same compiled** Krylov solve (a compilation
         cache hit -- no recompile).
 
@@ -817,6 +817,6 @@ class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):
             self._assembler = self._assembler_for(structure, plan.n_fields)
         cell_major, scale, perm = self._cell_major(jacobian, shift_diagonal, plan.n_fields)
         timer.lap("assemble")
-        self.factors.refactor(cell_major, scale, perm)
+        self.inverse.refactor(cell_major, scale, perm)
         timer.lap("refactor")
         return timer.phases()

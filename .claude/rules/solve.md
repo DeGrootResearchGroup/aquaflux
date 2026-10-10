@@ -21,7 +21,7 @@ The word meant **two opposite things** and neither described a method:
 
 - *ours, not PETSc* — `NativeSimpleInverse`, `NodalNativeInverse`, `NativeHierarchyInverse`,
   `native_saddle_inverse`, `native_nodal_inverse`, `FLOW_INVERSE="native"`;
-- *run the whole solve natively on the host, **in PETSc*** — `AmgVCycle(native=True)`,
+- *run the whole solve natively on the host, **in PETSc*** — `MonolithicVCycleInverse(native=True)`,
   `has_native_solve`, `is_exact_native`, `native_forward_solve`.
 
 The family is now named by its **level smoother**, which is the only thing its members differ in:
@@ -32,7 +32,7 @@ The family is now named by its **level smoother**, which is the only thing its m
 | `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` — *the factory is now the value object `SimpleSmoothed` (#371)* |
 | `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` — *the factory is now the value object `JacobiSmoothed` (#371); `air_inverse` is `AirReduction`* |
 | `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` — *deleted 2026-09-13 with the ILU(0) kernel, #371; neither name exists* |
-| `AmgVCycle(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | *(deleted 2026-09-13, #371 — there is no host exact forward solve, and none of these four names exists)* |
+| `MonolithicVCycleInverse(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | *(deleted 2026-09-13, #371 — there is no host exact forward solve, and none of these four names exists)* |
 | `solve/native_inverse.py` / `solve/host_vcycle.py` | `solve/hierarchy_inverse.py` / `solve/ilu_inverse.py` (*the latter deleted 2026-09-13, #371*) |
 | `BFS3D_FLOW_INVERSE=native` | `BFS3D_FLOW_INVERSE=simplesmooth` |
 | `BFS3D_TURBULENCE_INVERSE=native` | `BFS3D_TURBULENCE_INVERSE=jacobi` |
@@ -163,7 +163,7 @@ separately and pinned equal by a test — which is what found that a round-trip 
 
 > **⚠️ The guard scanned `aquaflux/` ONLY, and the boundary eroded where it did not look (extended
 > 2026-08-15).** `validation/` held **16** deep imports of names `__all__` already advertises —
-> `restart_cycles`, `MonolithicAmgPreconditioner`, `symmetrically_equilibrate`, the probe-plan types —
+> `restart_cycles`, `MonolithicVCyclePreconditioner`, `symmetrically_equilibrate`, the probe-plan types —
 > so "this cannot erode silently" was true of the directory under guard and false next door. Those
 > harnesses are the project's re-adjudication instruments, so a rename inside a preconditioner breaks a
 > *study* rather than a test: the more expensive failure, and the later-discovered one. The rule now
@@ -184,6 +184,36 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > file named, so this cannot erode silently.
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
+
+## ⚠️ RENAMED 2026-10-10 (#281 part 3) — the frozen-inverse family's names say which contract
+
+**The rule: the suffix names the contract, the stem names the settings value that builds it.** `*Inverse`
+is a `FrozenInverse` (`n_dofs` + `apply(residual, *, transpose)`); `*Preconditioner` in the host family is
+a `HostPreconditioner` (the `pure_callback` matvec seam a jitted Krylov solve takes, holding one
+`FrozenInverse` as `.inverse`). The value `X` builds `XInverse` (block level) or `XPreconditioner`
+(materialized level). A factory function for an inverse is `<method>_inverse`. Every left-column name is
+gone from the tree — no aliases.
+
+| was | is |
+|---|---|
+| `HostFactors` / `RefactorableFactors` / `ReleasableFactors` | `FrozenInverse` / `RefactorableInverse` / `ReleasableInverse` |
+| `HostPreconditioner.factors` | `HostPreconditioner.inverse` |
+| `LuFactors` / `factorize_lu` | `CompleteLuInverse` / `complete_lu_inverse` |
+| `AmgVCycle` / `build_amg_vcycle` | `MonolithicVCycleInverse` / `monolithic_vcycle_inverse` |
+| `BlockTriangularFieldSplit` / `build_block_triangular_field_split` | `FieldSplitInverse` / `field_split_inverse` |
+| `AirBlockInverse` | `AirReductionInverse` (built by `AirReduction`) |
+| `MonolithicLuPreconditioner` | `CompleteLuPreconditioner` (built by `CompleteLu`) |
+| `MonolithicAmgPreconditioner` | `MonolithicVCyclePreconditioner` (built by `MonolithicVCycle`) |
+| `FieldSplitAmgPreconditioner` | `FieldSplitPreconditioner` (built by `FieldSplit`; its blocks are any `FrozenInverse`, so "Amg" was false) |
+| `smoothed_multigrid_solve` / `convection_multigrid_solve` / `air_multigrid_solve`, private `_fixed_cycle_solve` | `smoothed_multigrid_cycles` / `convection_multigrid_cycles` / `air_multigrid_cycles`, `_fixed_cycles` — a FIXED cycle count with no convergence test, which "solve" contradicted |
+
+**Deliberately NOT renamed:** the traced `state -> M` preconditioners in physics packages
+(`flow.BlockPreconditioner`, the `turbulence.ScalarTransportPreconditioner` family,
+`schemes.GradientPreconditioner`) — a different contract, accurately called a preconditioner, so the word
+alone does not say host vs traced; the `HostPreconditioner` base does. `TracedFieldSplit` is a traced
+cycle (`OffersTracedCycle`), not a `FrozenInverse`, so it takes no `Inverse` suffix. The module files
+(`lu_preconditioner.py`, `amg_preconditioner.py`, …) keep their names. Measurements in these files that
+name an old class were taken with the same class under its old name; the rename changed no behaviour.
 
 ## ⚠️ RENAMED 2026-09-15 — grep this table before believing an old name is missing
 

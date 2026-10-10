@@ -46,11 +46,11 @@ import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    MonolithicVCyclePreconditioner,
     block_stencil_gather_map,
-    build_amg_vcycle,
+    monolithic_vcycle_inverse,
     build_convection_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     relative_residual_gmres,
     restart_cycles,  # noqa: E402
     solve_linear,
@@ -122,7 +122,7 @@ def _largest_singular_value(matrix: sp.spmatrix, iterations: int = 20) -> float:
 
 def petsc_cycle(block: sp.csr_matrix, *, smoother: str, sweeps: int):
     """One PETSc GAMG V-cycle over the block, at the shipped bundle's aggregation and coarse limit."""
-    vcycle = build_amg_vcycle(
+    vcycle = monolithic_vcycle_inverse(
         block,
         N_TRAILING,
         smoother_fill_levels=compare.FILL_LEVELS,
@@ -130,7 +130,7 @@ def petsc_cycle(block: sp.csr_matrix, *, smoother: str, sweeps: int):
         coarse_eq_limit=compare.COARSE_EQ_LIMIT,
         extra_options={"mg_levels_pc_type": smoother} if smoother != "ilu" else None,
     )
-    apply = MonolithicAmgPreconditioner(vcycle).matvec()
+    apply = MonolithicVCyclePreconditioner(vcycle).matvec()
     return apply, vcycle, f"{vcycle.levels} levels, {vcycle.coarse_size} coarse eq"
 
 
@@ -165,7 +165,7 @@ def smoothed_cycle(
     coarse = hierarchy.levels[-1].n
 
     def apply(residual: jnp.ndarray) -> jnp.ndarray:
-        return convection_multigrid_solve(
+        return convection_multigrid_cycles(
             hierarchy,
             residual,
             cycles=1,
@@ -191,7 +191,7 @@ def matched(**overrides):
 #: the coarsening, and an ILU sweep is both far stronger and the least parallel piece in the cycle.
 #:
 #: The aggressive level is not a tuning knob here — it is what PETSc does by default and we did not.
-#: ``build_amg_vcycle`` never sets ``pc_gamg_aggressive_coarsening``, so GAMG applies its own default
+#: ``monolithic_vcycle_inverse`` never sets ``pc_gamg_aggressive_coarsening``, so GAMG applies its own default
 #: of one aggressive level on level 0, coarsening the SQUARED graph. Our builder defaulted to none,
 #: which is why the two coarse spaces differed ~5× in size and why calling our hierarchy the same
 #: algorithm was wrong. (``use_aggressive_square_graph`` and ``aggressive_mis_k`` are *alternatives*,
@@ -402,7 +402,7 @@ def main() -> None:
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = materialize(coupled, state, plan, structure, n_fields)
     shift = frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
-    block = trailing_block(MonolithicAmgPreconditioner._shifted(jacobian, shift), groups)
+    block = trailing_block(MonolithicVCyclePreconditioner._shifted(jacobian, shift), groups)
     del jacobian
     gc.collect()
     print(

@@ -19,7 +19,7 @@ from aquaflux.solve import (
     FieldGroups,
     JacobiSmoothed,
     SimpleSmoothed,
-    build_block_triangular_field_split,
+    field_split_inverse,
 )
 from aquaflux.solve.traced_field_split import (
     TracedFieldSplit,
@@ -69,7 +69,7 @@ def _groups() -> FieldGroups:
 def _pair():
     """A host split and a traced split over the SAME two inverse objects."""
     matrix, groups = _operator(), _groups()
-    host = build_block_triangular_field_split(
+    host = field_split_inverse(
         matrix,
         groups,
         leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=4, max_coarse=200),
@@ -168,7 +168,7 @@ def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_hos
     a bundle was on device when the thing this module exists to remove was still there.
     """
     matrix, groups = _operator(), _groups()
-    host = build_block_triangular_field_split(
+    host = field_split_inverse(
         matrix,
         groups,
         leading_inverse=_HostOnlyInverse,
@@ -207,7 +207,7 @@ def test_a_split_rebuilt_after_a_refresh_reuses_the_compiled_solve_and_applies_t
     refreshed split's own eager answer and the host split's; the stale build was off by order one.
     """
     matrix, groups = _grid_operator(), _groups()
-    host = build_block_triangular_field_split(
+    host = field_split_inverse(
         matrix,
         groups,
         leading_inverse=SimpleSmoothed(max_levels=4, max_coarse=200),

@@ -26,12 +26,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner, MonolithicAmgPreconditioner
+from .amg_preconditioner import MaterializedJacobianPreconditioner, MonolithicVCyclePreconditioner
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
-from .field_split import FieldGroups, FieldSplitAmgPreconditioner
+from .field_split import FieldGroups, FieldSplitPreconditioner
 from .jacobian_probe import JacobianProbe
-from .lu_preconditioner import MonolithicLuPreconditioner
+from .lu_preconditioner import CompleteLuPreconditioner
 from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian, MonolithicVCycle
 from .refresh_timing import RefreshTiming
 from .shifted_step import LinearSolveRegime
@@ -659,7 +659,7 @@ class MaterializedSession:
         shift = frozen_shift_diagonal(base, build_beta, state)
         inverse = self._spec.inverse
         if isinstance(inverse, CompleteLu):
-            return MonolithicLuPreconditioner.build(matvec, probe.plan, shift, **inverse.settings())
+            return CompleteLuPreconditioner.build(matvec, probe.plan, shift, **inverse.settings())
 
         def batched_matvec(seeds):
             return batched_jacobian_matvec(probed, frozen, seeds)
@@ -670,7 +670,7 @@ class MaterializedSession:
             "structure": probe.structure,
         }
         if isinstance(inverse, MonolithicVCycle):
-            return MonolithicAmgPreconditioner.build(
+            return MonolithicVCyclePreconditioner.build(
                 matvec, probe.plan, shift, **inverse.settings(), **probing
             )
         if isinstance(inverse, BlockInverse):
@@ -682,7 +682,7 @@ class MaterializedSession:
                 n_fields=self._problem.layout.n_fields,
                 **probing,
             )
-        return FieldSplitAmgPreconditioner.build(
+        return FieldSplitPreconditioner.build(
             matvec,
             probe.plan,
             shift,

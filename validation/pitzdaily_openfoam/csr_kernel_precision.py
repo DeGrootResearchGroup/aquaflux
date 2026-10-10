@@ -51,7 +51,7 @@ def _best(f, *args, repeats=30):
 def _levels():
     replay = MarchReplay()
     next(replay.systems())  # the first target-station system, with the preconditioner fitted for it
-    return replay.preconditioner.factors._leading._hierarchy.levels
+    return replay.preconditioner.inverse._leading._hierarchy.levels
 
 
 def _kernels(levels):

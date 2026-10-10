@@ -48,7 +48,7 @@ class _LuBackend:
     """A host complete-LU backend: factor a matrix, solve with it (or its transpose), refactor in place.
 
     Concrete backends (:class:`_ScipyLuBackend`, :class:`_PetscUmfpackBackend`) implement the same three
-    operations so :class:`LuFactors` is backend-agnostic. All operate on the **raw field-major** matrix —
+    operations so :class:`CompleteLuInverse` is backend-agnostic. All operate on the **raw field-major** matrix —
     no equilibration or reordering.
     """
 
@@ -171,7 +171,7 @@ def _umfpack_available() -> bool:
         return False
 
 
-#: The factorization backends `factorize_lu` accepts. `CompleteLu.backend` spells the same three in a
+#: The factorization backends `complete_lu_inverse` accepts. `CompleteLu.backend` spells the same three in a
 #: ``Literal``, so a spec file's value is checked where it is read; a test pins the two lists equal.
 LU_BACKENDS = ("auto", "umfpack", "scipy")
 
@@ -184,11 +184,11 @@ def _make_backend(matrix: sp.spmatrix, backend: str) -> _LuBackend:
     if backend == "auto":
         return _PetscUmfpackBackend(matrix) if _umfpack_available() else _ScipyLuBackend(matrix)
     raise ValueError(
-        f"factorize_lu: unknown backend {backend!r} (want {', '.join(map(repr, LU_BACKENDS))})."
+        f"complete_lu_inverse: unknown backend {backend!r} (want {', '.join(map(repr, LU_BACKENDS))})."
     )
 
 
-class LuFactors:
+class CompleteLuInverse:
     """A frozen complete-LU factorization of the coupled Jacobian and its forward/transpose apply.
 
     A pure host object (no JAX). It applies ``M = A^{-1}`` (or ``M^T``) by a
@@ -241,7 +241,7 @@ class LuFactors:
         self.backend.destroy()
 
 
-def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
+def complete_lu_inverse(matrix: sp.spmatrix, *, backend: str = "auto") -> CompleteLuInverse:
     """Completely LU-factor an assembled coupled block matrix.
 
     Parameters
@@ -255,7 +255,7 @@ def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
 
     Returns
     -------
-    LuFactors
+    CompleteLuInverse
         The frozen factorization.
 
     Raises
@@ -264,15 +264,15 @@ def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
         If ``matrix`` is not square, or ``backend`` is unknown.
     """
     if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"factorize_lu: matrix must be square, got {matrix.shape}.")
-    return LuFactors(_make_backend(matrix, backend))
+        raise ValueError(f"complete_lu_inverse: matrix must be square, got {matrix.shape}.")
+    return CompleteLuInverse(_make_backend(matrix, backend))
 
 
-class MonolithicLuPreconditioner(HostPreconditioner):
-    """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`LuFactors`.
+class CompleteLuPreconditioner(HostPreconditioner):
+    """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`CompleteLuInverse`.
 
     Shares its interface (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) with
-    :class:`~aquaflux.solve.amg_preconditioner.MonolithicAmgPreconditioner`, so it is a drop-in for the
+    :class:`~aquaflux.solve.amg_preconditioner.MonolithicVCyclePreconditioner`, so it is a drop-in for the
     coupled continuation. Not an :class:`equinox.Module`: the factorization is a host object, held by a caller and
     captured in the ``jax.pure_callback`` closure rather than threaded through the jit as a traced
     argument. Because the factors are frozen (their coefficients ``stop_gradient``-ed by the solver), the
@@ -302,7 +302,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         shift_diagonal: np.ndarray,
         *,
         backend: str = "auto",
-    ) -> MonolithicLuPreconditioner:
+    ) -> CompleteLuPreconditioner:
         """Materialize the shifted coupled Jacobian and completely factor it, off the jit path.
 
         Parameters
@@ -316,15 +316,15 @@ class MonolithicLuPreconditioner(HostPreconditioner):
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` — the
             same block-diagonal shift the step solves against (velocity/scalar shifts, pressure zero).
         backend : {'auto', 'umfpack', 'scipy'}
-            The factorization backend (see :func:`factorize_lu`).
+            The factorization backend (see :func:`complete_lu_inverse`).
 
         Returns
         -------
-        MonolithicLuPreconditioner
+        CompleteLuPreconditioner
             The built preconditioner.
         """
         matrix = cls._shifted(cls._materialize(matvec, plan), shift_diagonal)
-        return cls(factorize_lu(matrix, backend=backend))
+        return cls(complete_lu_inverse(matrix, backend=backend))
 
     def refresh_in_place(
         self,
@@ -338,7 +338,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         new matrix (a fresh factorization -- the coupled Jacobian's sparsity grows as the flow develops,
         so the pattern is not fixed; the full factorization is fast enough that this is cheap). Because
         this preconditioner is held as a **static field** of the shift policy and :meth:`matvec` reads
-        ``self.factors`` at call time, mutating the factorization here re-preconditions the **same
+        ``self.inverse`` at call time, mutating the factorization here re-preconditions the **same
         compiled** Krylov solve (a compilation cache hit -- no recompile).
 
         **Forward-march use ONLY — the mutation is impure and must never touch a differentiated path.**
@@ -358,6 +358,6 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         timer.lap("probe")
         matrix = self._shifted(jacobian, shift_diagonal)
         timer.lap("assemble")
-        self.factors.refactor_block(matrix)
+        self.inverse.refactor_block(matrix)
         timer.lap("refactor")
         return timer.phases()

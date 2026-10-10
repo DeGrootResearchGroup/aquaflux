@@ -250,7 +250,7 @@ def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> N
     ).tocsr()
 
     b = np.random.default_rng(0).standard_normal(A.shape[0])
-    x = active.shift_policy.preconditioner.factors.apply(b)
+    x = active.shift_policy.preconditioner.inverse.apply(b)
     assert np.linalg.norm(A @ x - b) / np.linalg.norm(b) < 1e-10  # exact for the CURRENT beta
 
 

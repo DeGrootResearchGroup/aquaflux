@@ -60,7 +60,7 @@ def _install() -> None:
     def _refuse():
         raise ImportError(
             "aquaflux asked for PETSc, but this run blocks it. The configuration is NOT PETSc-free: "
-            "some block inverse fell back to build_amg_vcycle instead of an injected native one."
+            "some block inverse fell back to monolithic_vcycle_inverse instead of an injected native one."
         )
 
     amg_preconditioner._petsc = _refuse

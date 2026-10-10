@@ -166,7 +166,7 @@ What to take from it, none of which is specific to that mechanism:
     cap's error budget is bounded well below that and not merely "small".
 
 - **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
-  split has one ordering, so `BlockTriangularFieldSplit.apply` has one body that branches only on
+  split has one ordering, so `FieldSplitInverse.apply` has one body that branches only on
   `transpose` (which reverses the solve order and uses `Cᵀ`).
 
 - **Forward globalization is ONE injected strategy — `strategy: NewtonStrategy`.** The forward

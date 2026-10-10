@@ -14,7 +14,10 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import equilibrate_cell_major
-from aquaflux.solve.amg_preconditioner import MonolithicAmgPreconditioner, ShiftedCellMajorOperator
+from aquaflux.solve.amg_preconditioner import (
+    MonolithicVCyclePreconditioner,
+    ShiftedCellMajorOperator,
+)
 from aquaflux.solve.frozen_operator import row_chunks
 
 
@@ -63,7 +66,7 @@ def test_assemble_is_bit_identical_to_the_generic_sparse_composition(n_fields: i
     # assignment precisely so it does not prune, where `jacobian + sp.diags(shift)` would drop every
     # explicit zero and leave the two paths comparable only as dense arrays.
     expected, expected_scale, expected_perm = equilibrate_cell_major(
-        MonolithicAmgPreconditioner._shifted(jacobian, shift), n_fields
+        MonolithicVCyclePreconditioner._shifted(jacobian, shift), n_fields
     )
     operator = ShiftedCellMajorOperator(jacobian.indptr, jacobian.indices, n_fields)
     actual, scale, perm = operator.assemble(jacobian.data, shift)

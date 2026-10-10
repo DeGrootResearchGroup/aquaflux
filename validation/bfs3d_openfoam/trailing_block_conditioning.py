@@ -45,7 +45,7 @@ sys.path.insert(0, str(CASE.parents[1]))
 import compare  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    MonolithicVCyclePreconditioner,
     block_stencil_gather_map,
     build_convection_hierarchy,
 )
@@ -146,7 +146,7 @@ def main() -> None:
         ("preconditioner floor -- the shipped build", max(march_beta, FLOOR)),
     ):
         shift = frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs)
-        shifted = MonolithicAmgPreconditioner._shifted(jacobian, shift)
+        shifted = MonolithicVCyclePreconditioner._shifted(jacobian, shift)
         trailing = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])
         report(cell_blocks(trailing, n_cells), f"[k, omega] slice, {label} (beta {beta:g})")
         # The decisive question is not what the diagonal looks like but whether the builder ACCEPTS it:
