@@ -91,7 +91,8 @@ class ShiftStrengthControl(eqx.Module):
     beta_start : float
         β for the first step of the whole march (static).
     beta_min, beta_max : float
-        Clamps on β (static). ``beta_min`` bounds how large the pseudo-timestep may grow.
+        Clamps on β (static). ``beta_min`` bounds how large the pseudo-timestep may grow, until a
+        :attr:`release_floor` releases it.
     release_floor : float or None
         The shift strength β drops to once the march has settled at the target, in ``(0, beta_min)``
         (static). ``None`` (default) never releases. It must be positive: a retry escalates β by scaling

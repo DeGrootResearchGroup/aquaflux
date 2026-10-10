@@ -341,6 +341,36 @@ What to take from it, none of which is specific to that mechanism:
       can carry. The failure, the four-arm measurement, and why a learned floor under β or a cap on the
       growth rate are both *refuted* alternatives are in `.claude/rules/solve-march.md` under
       `ResidualHomotopy` / `redamp` — read there rather than restating here.
+  - **`release_floor` -- the floor comes off once the march has settled at the target (BUILT 2026-10-10,
+    opt-in, `None` by default).** A dual-time step at a fixed shift contracts each error mode by
+    `beta / (lambda + beta)`, so a march parked at `beta_min` near its root converges linearly at a rate
+    the FLOOR sets: on pitzDaily the target station's 15 steps all ran at 0.005 against a slowest mode at
+    0.5-0.8 of it. A field pair on the `ShiftStrengthControl` base (`release_floor`, `release_alpha`
+    default 1.0), so all three controls reach it and a case file writes it on any `step_control`. The rule
+    lives in one method, `_floored`, applied after every `_adapt`: **released** iff the previous step
+    `arrived`, the rule did not raise beta, and either it ran at or below `beta_min` with
+    `alpha >= release_alpha` (then beta = `release_floor`) or it already ran below `beta_min` (then the
+    rule's own beta). Anything else -- a clipped released step, a rising residual for a rule that reads one
+    -- puts `beta_min` back in one step, not by doubling up from the released shift. `_clamp`'s lower bound
+    is `release_floor` when set, so the rules may go below `beta_min` and `_floored` is the one place that
+    decides whether they may. The state is unchanged `(beta, memo)`: "released" is read off the previous
+    report's shift, so `carry_beta` / `redamp` / `rebase` / `resumed_at` needed nothing.
+    - **⚠️ The gate is the measured part, not a guess.** A zero-shift step from the state the ramp ARRIVED
+      at raised the residual (line search to `alpha` 0, 42-cycle steps, the same under an inverse fitted
+      at zero shift); two states later, after the first step at the floor with `alpha` 1, the same step
+      met the stopping bar. So `arrived` alone is the wrong signal, and the shift a state can take
+      belongs to the state -- the `(state, beta)` rule in `solve-march.md`, one more time.
+    - **`release_floor` must be positive**, refused at construction: a retry escalates beta by scaling it
+      (`RetryPolicy.escalate`), and zero scales to zero.
+    - **Measured:** pitzDaily 31 -> 22 steps, 161 -> 141 cycles, target station 15 -> 6 steps and 67 -> 30
+      inner solves, same `x_r/h`, final `|R|` 1.7e-6 against 8.3e-6. Cycles fall less than steps because
+      each released step's solves cost 2-3x a floor step's: the inverse is still re-fitted at
+      `refit_beta_floor` (0.05), and re-fitting at the released shift is the open half (worth 1-8 cycles per
+      released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
+    - **Not yet a default anywhere, by decision pending:** bfs3d is unmeasured (`BFS3D_RELEASE_FLOOR`),
+      and a loose terminal step is exactly what the three slow tests #645 names measure.
+    - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
+      rule turns a test red) and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
     spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
     (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from

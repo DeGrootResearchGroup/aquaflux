@@ -213,8 +213,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
       each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the
       floor, so the station converges linearly at 0.55-0.84 per step for 15 steps. From a settled target
       state (steps 21 and 27) ONE zero-shift step reaches the stopping bar; from the arrival state it does
-      not descend at all. Table, configuration and the pre-registered march in
-      `.claude/notes/solve-open-directions.md` entry 11.
+      not descend at all. `ShiftStrengthControl.release_floor` (opt-in) releases it after the first
+      full-length step at the floor on the target: 31 -> 22 steps, 161 -> 141 cycles at the same
+      `x_r/h`. See `solve-globalization.md` and `.claude/notes/solve-globalization-log.md`.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
   - **`station_step(step, station, arrived) -> step` — reshape the STEP for the station, the counterpart

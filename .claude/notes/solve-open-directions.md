@@ -34,8 +34,8 @@ So the two costs are coupled: the matvec is expensive because the matrix is expe
 preconditioner is stale because the matrix is expensive to build. Entries 1–2 tried to break that
 coupling and are closed (below): the coloured probe is already near the forward-mode floor. 4–6 attack the
 *number* of linear solves rather than their cost; 7–9 are platform and sweep-level levers; 11 attacks the
-number of OUTER steps the target station takes, which its shift floor sets (probed, the largest measured
-lever in this file).
+number of OUTER steps the target station takes, which its shift floor sets (measured and built opt-in;
+31 -> 22 steps on pitzDaily).
 
 ---
 
@@ -322,101 +322,19 @@ operator (the warm-start refutation is the cautionary tale).
 
 **Risk.** Highest in this file; measure on the captured hard iterates before touching the march.
 
-## 11. Release the shift floor once the target station has settled (the endgame)
+## 11. MEASURED AND BUILT (opt-in) -- releasing the shift floor once the target station has settled
 
-**What.** The shipped pitzDaily control walks `beta` down by `1/grow` per comfortable step from 0.5 and
-clamps it at `beta_min = 0.005`, which it reaches at ramp step 13 of 16 -- so every step of the target
-station (steps 17-31) runs at one fixed shift. Near a root a dual-time step at a fixed shift contracts
-each error mode by `beta / (lambda + beta)`, `lambda` the mode's generalized eigenvalue against the shift
-diagonal, so the slowest mode sets a LINEAR rate no number of steps turns quadratic. Let `beta` go to
-zero once the station has settled, with the inverse re-fitted at the shift it runs at.
-
-**Why it should win.** Nothing on record measured a shift below the floor at a settled target state:
-every recorded low-shift failure (the wall at `beta` 0.012 mid-ramp, the 0.05 warm-rung catastrophe,
-the decade-jump overshoot) was taken while the ramp was still moving the problem, and `solve-march.md`'s
-own verdict is that the wall belongs to `(state, beta)`, not to `beta`.
-
-**✅ Probed 2026-10-10 (`validation/pitzdaily_openfoam/endgame_shift_probe.py`) -- the floor sets the
-target station's rate, and a zero-shift step from a settled state is Newton.** The capture: the shipped
-`case.yaml` as it stands (residual stop, `rtol` 0.3, restart 15, `refresh_on_cycles` 2, dual time 5 /
-0.01, `CflResidualDualTimeControl(beta_start 0.5, beta_min 0.005)`, `refit_beta_floor` 0.05, field split
-`SimpleSmoothed` / `JacobiSmoothed`, `turbulence_damping` 3, 16 x 1 momentum-only ramp, stop `atol`
-1e-5 row-scaled), every step and inner iterate checkpointed; jax 0.11.2, CPU, 4-core Linux, cold
-compilation cache. The march: 31 steps, 1036 raw solver steps (the log's `cum`), final `|R|` 8.345e-06,
-`x_r/h` 8.07, no retries, `beta` at the floor from step 13. The probe takes ONE outer step from a
-checkpointed state at `beta` 0.005 / 0.0015 / 0.0005 / 0, the inverse re-fitted at that state at the
-shipped floor (`max(beta, 0.05)`) or at the shift itself (`tracking`, zero included), under the file's
-inner loop (5 / 0.01) or a tight one (12 / 1e-4), and reports the contraction of the row-equilibrated
-residual in the measure the march judged that step by. **The control -- the march's own step re-taken
-with the inverse walked to where the march had it -- reproduces the record at all three states** (ratio
-to four figures, cycle count, inner count and `alpha`), which is what makes the arms evidence about the
-march. `cycles` is the step's summed raw solver count, the same quantity as the log's; `lambda` is fitted
-from the control (`lambda = beta_c (1 / rho_c - 1)`) and `predict` is `beta / (lambda + beta)`.
-
-| state (steps done) | `beta` | shipped floor, file inner | tracking floor, file inner | tracking floor, tight inner | predict |
-|---|---|---|---|---|---|
-| 16, arrival (`|R|` 3.72e-3, `lambda` 0.01 `beta_c`) | 0.005 | 0.989 / 18 cyc / `a` 0.5 | 0.990 / 19 | 0.988 / 38 (10 inner) | 0.989 |
-| | 0.0015 | **1.055** / 54 / `a` 0.06 | 1.061 / 48 | 1.061 / 48 | 0.964 |
-| | 0.0005 | 1.033 / 48 / `a` 0 | 1.002 / 48 | 1.002 / 48 | 0.900 |
-| | 0 | 1.043 / 48 / `a` 0 | 1.009 / 48 | 1.009 / 48 | 0 |
-| 21, mid-station (`|R|` 8.24e-4, `lambda` 0.80 `beta_c`) | 0.005 | 0.555 / 15 / `a` 1 | 0.555 / 15 | 0.555 / 24 | 0.556 |
-| | 0.0015 | 0.271 / 18 / `a` 0.5 | 0.270 / 16 | 0.270 / 29 | 0.273 |
-| | 0.0005 | 0.112 / 19 / `a` 0.5 | 0.111 / 17 | 0.110 / 32 | 0.111 |
-| | 0 | **0.0167** / 20 / `a` 0.5 | 0.0136 / 18 | **1.0e-4** / 32 (9 inner, bar met) | 0 |
-| 27, tail (`|R|` 3.01e-5, `lambda` 0.51 `beta_c`) | 0.005 | 0.664 / 12 / `a` 1 | 0.663 / 12 | 0.663 / 26 | 0.664 |
-| | 0.0015 | 0.405 / 16 | 0.404 / 13 | 0.404 / 26 | 0.372 |
-| | 0.0005 | 0.204 / 20 | 0.203 / 16 | 0.202 / 28 | 0.165 |
-| | 0 | **0.0042** / 27 / `a` 1 | 0.0044 / 19 | **< 1e-4** / 33 (9 inner) | 0 |
-
-- **At the settled states the prediction holds and zero shift is Newton.** At state 21 the measured
-  contraction tracks `beta / (lambda + beta)` to three figures at every shift; at zero shift one outer
-  step takes the residual from 8.2e-4 to 1.4e-5 under the file's inner loop and to 8e-8 under the tight
-  one -- past the 1e-5 stopping bar in ONE step, for 32 solver steps, where the march spent its remaining
-  TEN steps and 174 solver steps getting there. From the tail state one zero-shift step reaches the bar
-  for 19-33 solver steps against the march's four steps and 62. No solve exceeded 4 cycles at any shift
-  there.
-- **The refit floor is worth a few cycles, not the rate.** Re-fitting at the shift itself instead of at
-  0.05 cuts the zero-shift step from 20 to 18 solver steps at state 21 and 27 to 19 at the tail, and
-  changes the contraction not at all; the march's inverse, built at a 10x mismatch, was never what
-  bounded the step.
-- **⚠️ At ARRIVAL the same step FAILS, and not because of the inverse.** With the ramp's last state in
-  hand (`alpha` 0.5, ratio 0.989 at the floor), every shift below 0.005 returns a residual that is
-  higher than it started, with the line search collapsing (`alpha` 0.06 then 0) and solves running to
-  14 cycles -- identically under the tracking inverse, so the operator is hard and the direction does
-  not descend there. The tight inner loop at the floor reaches its target (10 inner) and moves the outer
-  residual by 1 %: the arrival step is a large implicit timestep through a still-moving transient, and
-  no inner tolerance changes that. **So the release has to be gated on the state having settled, and
-  "arrived" alone is the wrong signal.** The march's own log shows the candidate: `alpha` is 0.5 at
-  steps 17-19 and 1.0 from step 20 on, all at the floor.
-- **What the single-mode fit does not capture:** at the tail the measured ratios at 0.0015 and 0.0005
-  sit 9-23 % above the prediction (0.405 against 0.372, 0.204 against 0.165) -- more than one slow
-  mode -- and still a third and a fifth of the floor's rate.
-
-- **The transition is located (same day, same capture; tracking inverse, tight inner loop).** The
-  states between arrival and 21, each after the step the log reports for it:
-
-  | state | the step before it took | `beta` 0.0015 | `beta` 0 |
-  |---|---|---|---|
-  | 18 | `alpha` 0.5 at the floor | 0.390 / 45 cyc / `a` 0.125 | **0.995** / 48 / `a` 0, 14-cycle solves |
-  | 19 | `alpha` 0.5 at the floor | 0.320 / 36 / `a` 0.25 | 0.0096 / 45 / `a` 0.06, a 7-cycle solve, target unmet |
-  | 20 | **`alpha` 1.0** at the floor | 0.283 / 29 / `a` 0.5 | **1.0e-4** / 40 / `a` 0.25, bar met |
-
-  So a zero-shift step is Newton from the first state that follows a full-length step at the floor
-  (state 20, the start of step 21), strained one state earlier and a failure two earlier -- which is the
-  gate: release after the first `alpha = 1` step at the floor, not at arrival. On this march that is
-  steps 17-20 at the floor (153 raw solver steps) plus one zero-shift step (40) in place of steps 17-31
-  (344): the target station in 5 steps instead of 15. The control rows of that run used the tight inner
-  loop (a harness quirk since fixed), so their cycle counts are not the march's; their ratios match the
-  record to four figures.
-
-**Pre-registered measurement (the march).** pitzDaily, shipped `case.yaml`, against the capture above
-(31 steps / 1036 raw solver steps / `x_r/h` 8.07): a control that keeps the Courant ramp through the
-ramp and, once arrived AND the previous step took `alpha = 1` at the floor, lets `beta` fall by the
-residual ratio (the switched-evolution rule, `ResidualRatioDualTimeControl`'s adaptation) to a floor near
-zero -- or drops it to zero outright, which the rows above license -- with the refit floor released to
-the running shift and the inner loop tightened on that step; the pass is fewer steps AND fewer raw
-solver steps to the same `x_r/h` with no retry. Then bfs3d (its mesh is not in this container), and the
-three slow tests #645 names, since a loose terminal step is what they measure.
+Probed and marched on pitzDaily 2026-10-10: the floor `beta_min` sets the target station's linear rate,
+and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 31 steps / 161 cycles to
+22 / 141 at the same `x_r/h`. The probe tables and the march are in `solve-globalization-log.md`
+("The shift floor sets the target station's rate"); the built control is in `solve-globalization.md`.
+⚠️ An earlier version of this entry quoted the march log's wall-clock column as solver work ("1036 raw
+solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
+**Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
+1-8 cycles per released step by the probe (most of the released steps' extra cost); (b) bfs3d
+(`BFS3D_RELEASE_FLOOR`, its mesh is not in this container); (c) whether pitzDaily's `case.yaml` and the
+library default should release, which is the project owner's call, after (b) and after the three slow
+tests #645 names (a loose terminal step is what they measure).
 
 ---
 
