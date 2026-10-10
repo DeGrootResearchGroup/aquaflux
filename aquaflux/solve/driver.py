@@ -38,7 +38,7 @@ from .refresh import RefreshPolicy
 from .resumption import Resumption
 from .retry import NO_RETRIES, RetryPolicy
 from .step_control import default_dual_time_control
-from .strategy import NewtonStrategy, StepControl, StepReport
+from .strategy import NewtonStrategy, ShiftCarryingControl, StepControl, StepReport
 
 __all__ = [
     "CallerBuiltSource",
@@ -338,7 +338,11 @@ def staged_march(
     # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
     # must still be marched, or the newly-refreshed preconditioner would never be used.
     control_state: object = None
-    if resume is not None and resume.shift is not None and hasattr(step_control, "resumed_at"):
+    if (
+        resume is not None
+        and resume.shift is not None
+        and isinstance(step_control, ShiftCarryingControl)
+    ):
         control_state = step_control.resumed_at(resume.shift)
     for segment in range(refresh.segments):
         result = newton_march(

@@ -4,6 +4,7 @@ paths:
   - "aquaflux/solve/march_log.py"
   - "aquaflux/solve/march_history.py"
   - "aquaflux/solve/checkpoint.py"
+  - "aquaflux/solve/step_control.py"
 ---
 
 # Rules — `aquaflux/solve/` the observed march (`newton_march`, triggers, controls, logging)
@@ -502,8 +503,9 @@ Pinned by `tests/unit/test_march_history.py`.
       it at a larger β. Yet the check lived only in `newton_march`, *after* the step returned — so the
       step kept running inner iterations whose results were already destined for the bin. The same
       predicate now sits in the inner loop's `cond`, and `newton_march` pushes its own `retry.abort_above_cycles`
-      down via `RetryPolicy.with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
-      so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
+      down via `RetryPolicy.with_inner_abort`, which calls the step's own `with_inner_abort` when the
+      step is an `AbortsInnerLoop` (#281; `DualTimeStep` implements it with `dataclasses.replace`, since the
+      fields are static and live in the treedef), so there is **one** number rather than two to keep
       in step.
       **It cannot bin an expensive success**, and the ordering is what guarantees that: `cond` tests the
       convergence target *before* either cost bailout, so a costly solve that brings `‖G‖` under the
@@ -606,13 +608,13 @@ Pinned by `tests/unit/test_march_history.py`.
       after an escalation `newton_march` seeds the control's carried β with the escalated value via
       `step_control.carry_beta(state, β)` — **one implementation on `ShiftStrengthControl`, over the shared
       `(beta, memo)` state, so no control can be missing it** (it once was: the deleted single-step
-      α-targeter had none, and the `hasattr` guard below meant its escalation feedback vanished in
-      silence). The memo is preserved across the seed, so a ratio-keyed control does not lose its
+      α-targeter had none, and the `hasattr` guard the march used then meant its escalation feedback
+      vanished in silence; since #281 the march asks `isinstance(control, ShiftCarryingControl)`). The memo is preserved across the seed, so a ratio-keyed control does not lose its
       reference and misread the next step as a huge reduction. The control then continues its grow/brake dynamics *from* the discovered-safe β, so
       `beta_min` can be driven toward zero and the controller — with escalation as the safety net and the
       carry as the memory — finds how large a timestep each region tolerates, rather than a global floor
-      capping it. Only fires when β was actually escalated and the control exposes `carry_beta`; no
-      escalation ⇒ byte-identical. Pinned by `test_newton_march.py`
+      capping it. Only fires when β was actually escalated and the control is a `ShiftCarryingControl`;
+      no escalation ⇒ byte-identical. Pinned by `test_newton_march.py`
       (`…carries_the_escalated_beta_into_the_control`) and `test_step_control.py`
       (`test_carry_beta_seeds_the_carried_state`).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
@@ -1080,7 +1082,7 @@ Pinned by `tests/unit/test_march_history.py`.
       universal and `memo` is whatever the rule remembers (`None` for the memoryless Courant rule, the
       previous residual for the two ratio rules). **Why it exists:** written three times, the bookkeeping
       drifted — `carry_beta` was byte-identical in two controls and *absent* from the third, which
-      `newton_march` probes for with `hasattr`, so that control silently dropped its escalation
+      `newton_march` then probed for with `hasattr`, so that control silently dropped its escalation
       feedback; and the same class reset β at a refresh boundary where the others held it, i.e. the
       sawtooth defect fixed for `DualTimeControl` never reached it. Both were invisible because each
       class carried its own `next_step`. The refactor is verified **bit-for-bit** against the previous

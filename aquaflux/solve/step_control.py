@@ -37,7 +37,13 @@ import jax.numpy as jnp
 
 from .continuation import DualTimeStep
 from .relaxation import ConstantRelaxation
-from .strategy import NewtonStrategy, ShiftedNewtonStrategy, StepControl, StepReport
+from .strategy import (
+    CarriesRelaxationSchedule,
+    NewtonStrategy,
+    ShiftedNewtonStrategy,
+    StepControl,
+    StepReport,
+)
 
 
 class ShiftStrengthControl(eqx.Module):
@@ -131,7 +137,7 @@ class ShiftStrengthControl(eqx.Module):
             has no shift for this control to drive. Refused here, on the march's first call and before
             any step is taken, rather than surfacing as an ``AttributeError`` from inside the swap.
         """
-        if not hasattr(base_step, "relaxation_schedule"):
+        if not isinstance(base_step, CarriesRelaxationSchedule):
             raise TypeError(
                 f"{type(self).__name__} drives the pseudo-transient shift strength, so the step it "
                 f"controls must carry a `relaxation_schedule` (a PseudoTransientStep or DualTimeStep); "
