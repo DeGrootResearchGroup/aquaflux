@@ -504,6 +504,9 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 KRYLOV_STOP = os.environ.get("PITZ_KRYLOV_STOP") or None
 if KRYLOV_STOP not in (None, "shipped", "residual"):
     raise SystemExit(f"PITZ_KRYLOV_STOP is 'shipped' or 'residual', got {KRYLOV_STOP!r}")
+#: The stop the march actually runs. Only ``lineax``'s work follows from its cycle count; the residual
+#: stop's is counted only when it reports it (``PITZ_KRYLOV_STOP=residual``).
+RUNNING_STOP = "residual" if KRYLOV_STOP == "residual" else (SOLVER.linear_solve.stop or "lineax")
 
 
 class _KrylovWork:
@@ -519,7 +522,7 @@ class _KrylovWork:
         self.solves = 0
 
     def on_inner(self, index, g_before, g_after, cycles, alpha, iterate):
-        if KRYLOV_STOP != "residual":
+        if RUNNING_STOP == "lineax":
             self.applications += 1 + (FORWARD_RESTART + 1) * (int(cycles) - 1)
             self.solves += 1
 
@@ -1479,11 +1482,18 @@ def main():
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",
         flush=True,
     )
-    print(
-        f"Krylov work: {KRYLOV_WORK.applications} applications of the preconditioned operator over "
-        f"{KRYLOV_WORK.solves} inner solves",
-        flush=True,
-    )
+    if KRYLOV_WORK.solves:
+        print(
+            f"Krylov work: {KRYLOV_WORK.applications} applications of the preconditioned operator "
+            f"over {KRYLOV_WORK.solves} inner solves",
+            flush=True,
+        )
+    else:
+        print(
+            "Krylov work: not counted -- the residual stop reports its own work only under "
+            "PITZ_KRYLOV_STOP=residual",
+            flush=True,
+        )
 
     from scipy.spatial import cKDTree
 
