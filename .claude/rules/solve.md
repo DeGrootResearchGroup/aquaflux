@@ -783,6 +783,25 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     but the passthrough alone was not sufficient, because the transpose solve needs ~1450 preconditioner
     applications and the first budget allowed ~900. See `solve-flow-block.md`'s *"`jax.grad` RUNS ON THIS
     CASE"* section for the costs, the arms, and the finite-difference trap that a loose root sets.
+  - **`default_linear_solver()` KEEPS lineax's restart 20 — measured, not overlooked (2026-10-09, #114).**
+    The continuation path's GMRES carries `restart=40, stagnation_iters=40`, and #114 asked whether the
+    adjoint's fallback should too. Swept with `validation/adjoint_gmres_restart.py` (restart 10/20/40/80,
+    `stagnation_iters` 20 throughout, `rtol=atol=1e-10`, forward solve unchanged so every arm differentiates
+    one root; operator applications counted exactly by wrapping the transpose matvec, true residual read
+    after the solve; `81a05c5`, jax 0.11.2, lineax 0.1.1, Linux x86_64, 4 cores). **No restart wins on
+    both operator classes:** on `test_flow_adjoint.py`'s skewed cavity (432–3072 unknowns, block
+    preconditioner transposed) restart 20 has the lowest backward time at every size, 40 is up to 1.7× slower,
+    80 is 1.3–2.1× slower; on `test_coupled_rans.py`'s 28×20 channel (2800 unknowns, `BlockDiagonal`) 40
+    is ~11 % and 80 ~30 % faster than 20 (736 → 698 → 487 applications), and **10 stagnates** — the default
+    sits one halving above failure there. All converged arms agree on the gradient to 4e-11. The table is
+    in the harness docstring. **Why a longer restart costs on an easy solve:** the confirming-cycle cost
+    measurement-discipline item 5 records for the forward solve applies to the adjoint too — restart 80
+    spends exactly `2 (80 + 1) + 1 = 163` applications on every cavity, converging inside one cycle and
+    paying for a second. So restart is a floor on easy solves and pays only on hard ones; an operator that
+    needs a real budget (`bfs3d`, ~1450 applications) passes its own `adjoint_solver`, which no shared
+    default would reach. Re-open only with a new operator class in the sweep, or if the adjoint adopts a
+    residual-only stop (`residual_stop_gmres`, forward-only today), which removes the confirming cycle and
+    would change this trade.
 
 
 ## Measurement discipline for preconditioner probes (BINDING)
