@@ -4543,7 +4543,7 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   part only, lamp body ids not offset past the reflectors'. **Dismissed, equivalent**: joining the
   reflectors under `NoOcclusion` too (adds zeros; the lamps-alone branch is cost only); and a
   Lambertian reflector profile replaced by the lamps' first (a zero emission weighs nothing; NOT run).
-- ⚠️ **THE TRANSFER LETS A FACET SEND REFLECTED LIGHT OUT OF ITS BACK; THE GATHERS DO NOT (found
+- ⚠️ **THE TRANSFER LETS A FACET SEND REFLECTED LIGHT OUT OF ITS BACK; THE GATHERS DO NOT (#667, found
   2026-10-10, open).** `transfer._row_block`'s geometric term is the receiver's projected solid angle
   of the sending triangle, clipped to the RECEIVER's half-space only, and a Lambertian set returns
   `common` with no source cosine (`reflected, reflected`), so nothing gates the sender's side. The
