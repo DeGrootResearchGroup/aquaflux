@@ -8,12 +8,14 @@ that it computes the same thing, and that it computes it without a callback.
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
+    AirReduction,
     FieldGroups,
     JacobiSmoothed,
     SimpleSmoothed,
@@ -35,6 +37,27 @@ def _operator(seed: int = 0) -> sp.csr_matrix:
     a = sp.random(n, n, density=0.01, random_state=seed, format="lil")
     a.setdiag(np.abs(rng.normal(size=n)) + 12.0)
     return sp.csr_matrix(a)
+
+
+def _grid_operator(seed: int = 0) -> sp.csr_matrix:
+    """A field-major operator over a 30 x 20 cell grid: a nonsymmetric five-point stencil per field pair.
+
+    Local coupling only, which a reduction (lAIR) hierarchy needs -- the random operator above couples
+    cells across the whole mesh, and an lAIR coarse grid built on it densifies and is refused.
+    """
+    rng = np.random.default_rng(seed)
+
+    def chain(m: int) -> sp.spmatrix:
+        return sp.diags(
+            [-1.3 * np.ones(m - 1), 2.6 * np.ones(m), -0.7 * np.ones(m - 1)], [-1, 0, 1]
+        )
+
+    cells = sp.kronsum(chain(30), chain(20))
+    n_fields = N_LEADING + N_TRAILING
+    fields = np.eye(n_fields) + 0.1 * rng.normal(size=(n_fields, n_fields))
+    a = sp.kron(fields, cells).tocsr()
+    a.data = a.data * rng.uniform(0.8, 1.2, a.nnz)
+    return a
 
 
 def _groups() -> FieldGroups:
@@ -152,12 +175,84 @@ def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_hos
         trailing_inverse=JacobiSmoothed(max_coarse=150),
     )
 
-    with pytest.raises(AttributeError, match="no traced cycle"):
+    with pytest.raises(TypeError, match="leading inverse _HostOnlyInverse offers no traced cycle"):
         traced_field_split(matrix, groups, host._leading, host._trailing)
 
 
+def _perturbed(matrix: sp.csr_matrix, seed: int) -> sp.csr_matrix:
+    """The same sparsity pattern with different values -- a march refresh on a fixed mesh."""
+    moved = matrix.copy()
+    moved.data = moved.data * np.random.default_rng(seed).uniform(0.5, 1.5, moved.nnz)
+    return moved
+
+
+# Structure-preserving refreshes on both families: an isotropic aggregation reads only the pattern, and an
+# lAIR refresh re-solves values on its frozen split. So a refresh moves values and no shapes.
+_TRAILING_INVERSES = {
+    "jacobi": JacobiSmoothed(max_coarse=150),
+    "air": AirReduction(max_coarse=150),
+}
+
+
+@pytest.mark.parametrize("trailing", sorted(_TRAILING_INVERSES))
+def test_a_split_rebuilt_after_a_refresh_reuses_the_compiled_solve_and_applies_the_refresh(
+    trailing: str,
+) -> None:
+    """A refresh at unchanged shapes must be BOTH a compilation-cache hit AND a changed answer.
+
+    Either alone is easy and wrong. Retracing every refresh is correct and pays a recompile per refresh;
+    hitting the cache with the hierarchy baked in as a constant is fast and applies the *old*
+    preconditioner with no error -- which a split reaching its inverses through a bound method did, since
+    tracing the method read the hierarchy and closed over it. Both answers are compared with the
+    refreshed split's own eager answer and the host split's; the stale build was off by order one.
+    """
+    matrix, groups = _grid_operator(), _groups()
+    host = build_block_triangular_field_split(
+        matrix,
+        groups,
+        leading_inverse=SimpleSmoothed(max_levels=4, max_coarse=200),
+        trailing_inverse=_TRAILING_INVERSES[trailing],
+    )
+    traces = []
+
+    @eqx.filter_jit
+    def apply(split: TracedFieldSplit, residual: jnp.ndarray) -> jnp.ndarray:
+        traces.append(1)
+        return split.apply(residual)
+
+    r = jnp.asarray(np.random.default_rng(5).normal(size=groups.n_dofs))
+    before = apply(traced_field_split(matrix, groups, host._leading, host._trailing), r)
+
+    refreshed = _perturbed(matrix, seed=9)
+    host.refactor(refreshed)
+    split = traced_field_split(refreshed, groups, host._leading, host._trailing)
+    after = apply(split, r)
+    expected = split.apply(r)
+
+    assert len(traces) == 1, "the refresh moved no shape, so it must not retrace"
+    assert np.linalg.norm(np.asarray(after - before)) > 1e-3 * np.linalg.norm(np.asarray(before))
+    np.testing.assert_allclose(np.asarray(after), np.asarray(expected), rtol=1e-12, atol=1e-14)
+    np.testing.assert_allclose(np.asarray(after), host.apply(np.asarray(r)), rtol=1e-12, atol=1e-14)
+
+
+def test_both_hierarchies_ride_as_leaves_not_as_constants() -> None:
+    """The hierarchies are arguments of the traced apply, so nothing array-sized is closed over.
+
+    This is the structural statement of the property the refresh test pins behaviourally: a jaxpr that
+    closes over an array has baked it into the compiled program, where a refresh cannot reach it.
+    """
+    _, traced, groups = _pair()
+    leaves, _ = jax.tree.flatten(eqx.filter(traced, eqx.is_array))
+    closed = jax.make_jaxpr(lambda split, r: split.apply(r))(traced, jnp.zeros(groups.n_dofs))
+
+    hierarchy_leaves = jax.tree.leaves(eqx.filter(traced.leading_cycle, eqx.is_array))
+    assert len(hierarchy_leaves) > 0
+    assert len(leaves) > len(jax.tree.leaves(traced.coupling))
+    assert not [c for c in closed.consts if np.ndim(c) > 0 and np.size(c) > 1]
+
+
 def test_the_split_rides_into_a_jit_as_an_argument_without_retracing() -> None:
-    """Every array it holds is a leaf, so re-deriving it at a new operator reuses the compiled cycle.
+    """Every array it holds is a leaf, so new values of the same shapes reuse the compiled cycle.
 
     That is the same property :class:`~aquaflux.solve.multigrid._CsrOperator` has and for the same
     reason: a mid-march refresh must not recompile the solve it is refreshing.
@@ -172,13 +267,8 @@ def test_the_split_rides_into_a_jit_as_an_argument_without_retracing() -> None:
 
     r = jnp.asarray(np.random.default_rng(5).normal(size=groups.n_dofs))
     apply(traced, r).block_until_ready()
-    # A different coupling of the same shape: values move, shapes do not.
-    moved = TracedFieldSplit(
-        leading_cycle=traced.leading_cycle,
-        trailing_cycle=traced.trailing_cycle,
-        coupling=jax.tree.map(lambda a: a, traced.coupling),
-        groups=traced.groups,
-    )
+    # Every leaf scaled -- coupling and both hierarchies: values move, shapes do not.
+    moved = jax.tree.map(lambda a: 1.5 * a if jnp.issubdtype(a.dtype, jnp.floating) else a, traced)
     apply(moved, r).block_until_ready()
 
     assert len(traces) == 1
