@@ -36,7 +36,7 @@ from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian, Mon
 from .refresh_timing import RefreshTiming
 from .shifted_step import LinearSolveRegime
 from .state import FieldLayout
-from .strategy import NewtonStrategy
+from .strategy import NewtonStrategy, shift_of
 
 __all__ = [
     "BUILD_BETA",
@@ -280,13 +280,12 @@ class BetaTrackingRefresh:
     def __call__(self, active_step: NewtonStrategy, state: jnp.ndarray) -> None:
         """Re-fit the step's preconditioner at ``state`` when this cadence calls for it."""
         self._active_step = active_step
-        schedule = active_step.relaxation_schedule
-        beta = getattr(schedule, "beta", None)
+        beta = shift_of(active_step)
         if beta is None:
             raise ValueError(
                 "a β-tracking refresh needs the step's shift strength as a readable constant -- pair it "
                 "with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
-                f"switched-evolution schedule ({type(schedule).__name__})."
+                f"switched-evolution schedule ({type(active_step).__name__} has no readable β)."
             )
         started = time.perf_counter()
         if not (self._every_step or self._full_rebuild_pending):
@@ -321,7 +320,7 @@ class BetaTrackingRefresh:
         if step is None:
             return
         started = time.perf_counter()
-        beta = float(step.relaxation_schedule.beta)
+        beta = float(shift_of(step))
         self._report("inner", started, self._materialize_at(step, iterate, beta))
 
     def rebind(self, companion: object) -> None:

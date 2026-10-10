@@ -118,11 +118,16 @@ from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
 from .lu_preconditioner import MonolithicLuPreconditioner
 from .strategy import (
+    AbortsInnerLoop,
+    CarriesRelaxationSchedule,
     NewtonStrategy,
+    ReadableShift,
+    ShiftCarryingControl,
     ShiftedNewtonStrategy,
     StepControl,
     StepOutcome,
     StepReport,
+    shift_of,
 )
 from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
 from .implicit import (
@@ -283,6 +288,7 @@ __all__ = [
     "PLAIN_RESIDUAL",
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
+    "AbortsInnerLoop",
     "AirHierarchy",
     "AirReduction",
     "AmgVCycle",
@@ -293,6 +299,7 @@ __all__ = [
     "BlockScaledNorm",
     "BlockTriangularFieldSplit",
     "CallerBuiltSource",
+    "CarriesRelaxationSchedule",
     "CellFields",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
@@ -352,6 +359,7 @@ __all__ = [
     "PreconditionerSession",
     "ProbeGather",
     "PseudoTransientStep",
+    "ReadableShift",
     "RefactorableFactors",
     "RefreshPolicy",
     "RefreshTiming",
@@ -375,6 +383,7 @@ __all__ = [
     "SettingsValue",
     "ShapeBudget",
     "ShiftBasis",
+    "ShiftCarryingControl",
     "ShiftPolicy",
     "ShiftSettings",
     "ShiftStrengthControl",
@@ -443,6 +452,7 @@ __all__ = [
     "resolve_linear_solve",
     "restart_cycles",
     "root_adjoint",
+    "shift_of",
     "shifted_jacobian",
     "shifted_step",
     "smoothed_multigrid_solve",
