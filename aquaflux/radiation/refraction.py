@@ -590,12 +590,17 @@ def _distinct(paths: Paths, separation) -> Paths:
 def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
     """``(n_starts, 3)`` points inside the deepest region passed, where a route's search begins.
 
-    The search starts from the polyline ``source -> aim -> receiver``. The aims stand about the
-    point ``b`` where the straight line is deepest in the region passed -- the middle of its chord
-    through it, or the line's nearest point to it where it misses -- moved across the line either way
-    along two directions perpendicular to it: through a sleeve, past both sides of its arc. They
-    reach :data:`_START_REACH` of the way to the region's edge, or, for a route that stops short of
-    a region nested inside, halfway between that region's edge and the inner one's, which is where
+    The search starts from the polyline ``source -> aim -> receiver``, so every aim must lie inside
+    the region, or the polyline would not cross its surfaces. The aims stand about the region's
+    middle: from the point ``b`` where the straight line is deepest in the region (the middle of its
+    chord through it, or the line's nearest point to it where it misses), the midpoint of the deepest
+    region's chord along the outer surface's normal at ``b`` -- the axis, for a sleeve. They are moved
+    from there either way along two directions across the way the light runs through the region,
+    the bisector of the directions in from the source and out to the receiver: through a sleeve,
+    past both sides of its arc. That holds whether or not the straight line meets the region, which
+    it need not: a gap near the critical angle turns light by tens of degrees. They reach
+    :data:`_START_REACH` of the way to the region's edge, or, for a route that stops short of a
+    region nested inside, halfway between that region's edge and the inner one's, which is where
     such a path runs.
     """
     nodes = media.nodes
@@ -609,15 +614,24 @@ def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
     nearest = along[jnp.argmin(outer.signed_distance(along))]
     middle = 0.5 * (jnp.where(meets, enter[0], 0.0) + jnp.where(meets, exit_[0], 0.0))
     b = jnp.where(meets, source + middle * straight, nearest)
-    unit = straight / jnp.where(norm(straight) > 0.0, norm(straight), 1.0)
-    axis = jnp.eye(3)[jnp.argmin(jnp.abs(unit))]
-    across = jnp.cross(unit, axis)
-    across = across / norm(across)
-    other = jnp.cross(unit, across)
+
+    def unit(vector, fallback):
+        size = norm(vector)
+        return jnp.where(size > 0.0, vector / jnp.where(size > 0.0, size, 1.0), fallback)
+
+    line = unit(straight, jnp.array([1.0, 0.0, 0.0]))
+    normal = unit(jax.grad(outer.signed_distance)(b), line)
+    low, high = deepest.body.intervals(b, normal)
+    across_chord = jnp.isfinite(low[0]) & jnp.isfinite(high[0]) & (high[0] > low[0])
+    centre = b + jnp.where(across_chord, 0.5 * (low[0] + high[0]), 0.0) * normal
+    way = unit(unit(centre - source, line) + unit(receiver - centre, line), line)
+    axis = jnp.eye(3)[jnp.argmin(jnp.abs(way))]
+    across = unit(jnp.cross(way, axis), jnp.eye(3)[jnp.argmax(jnp.abs(way))])
+    other = jnp.cross(way, across)
 
     def reach(body, direction):
-        """How far from ``b`` the body's boundary is along ``direction``, the nearer way."""
-        low, high = body.intervals(b, direction)
+        """How far from the centre the body's boundary is along ``direction``, the nearer way."""
+        low, high = body.intervals(centre, direction)
         inside = (low[0] < 0.0) & (high[0] > 0.0)
         return jnp.where(inside, jnp.minimum(-low[0], high[0]), 0.0)
 
@@ -630,7 +644,12 @@ def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
 
     distance = jnp.minimum(offset(across), offset(other))
     return jnp.stack(
-        [b + distance * across, b - distance * across, b + distance * other, b - distance * other]
+        [
+            centre + distance * across,
+            centre - distance * across,
+            centre + distance * other,
+            centre - distance * other,
+        ]
     )
 
 

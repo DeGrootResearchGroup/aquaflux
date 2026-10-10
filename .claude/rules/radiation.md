@@ -4760,14 +4760,20 @@ are bent too (no straight-through factor left anywhere).
   passable node, so a sleeve gives one route through its quartz and one across its gap too. `beside` per
   leg is every node not crossed and not in the leg's lineage: **a path meeting a region it does not pass
   through is invalid** (`_meets_any` in `_one_path`) — that light belongs to the route through it.
-- **Starts.** A passing route is solved from `n_starts = 4` aims (`_starts`: b ± offset along two
-  perpendiculars, b the straight chord's midpoint in N or its nearest point; offset `_START_REACH = 0.6`
-  of the distance from b to d's edge, or halfway to d's children's), deduplicated (`_distinct`, `_SAME_PATH
-  = 1e-6` of the separation); `Paths` carry a leading starts axis only on a passing route.
+- **Starts.** A passing route is solved from `n_starts = 4` aims (`_starts`), deduplicated (`_distinct`,
+  `_SAME_PATH = 1e-6` of the separation); `Paths` carry a leading starts axis only on a passing route.
+  The aims stand about the region's **middle** -- the midpoint of d's chord along N's outer normal at b
+  (b the straight chord's midpoint in N, or the line's nearest point to it) -- moved across the
+  bisector of in-from-source and out-to-receiver, `_START_REACH = 0.6` of the way to d's edge (halfway to
+  d's children's edge if it has any). ⚠️ **The first version put them at b itself**, which for a region
+  the straight line MISSES lies outside it: the polyline then never crossed its surfaces, every crossing
+  ended ~30 mm off them, and the route always read zero (see the probe below).
 - **Masks.** `Visibility.straight` (bool, `straight_reach`): same medium and the centroid segment meets no
   region. Refracted masks are per route, `(n_starts, n_occ, n_rows, n_facets)`; a passing route's rows
-  are culled to those whose straight segment from some facet meets N (`_pairs_meet`, compiled
-  `_segments_meet`).
+  are **not culled** (2026-10-10): every route is taken for every receiver. The first version kept only
+  rows whose straight segment from some facet met N, which dropped exactly the light below. A sound cull
+  needs a bound on how far a region can turn light; none is designed (the user's uncut run cost 6,278 s
+  against 1,456 s at 64 sectors, `optics`).
 - ⚠️ **THE DESCENT FINDS ONLY MINIMA, AND THE PATHS A LENS ADDS ARE SADDLES.** Glass rod radius 10 mm,
   n 1.5 in n 1.0, source 30 mm from its axis: a 2D Snell trace finds the axial path plus a symmetric pair
   (±0.27 / ±0.22 / ±0.15 rad departure) at receivers 18 / 22 / 26 mm beyond the axis; aquaflux finds the
@@ -4785,9 +4791,23 @@ are bent too (no straight-through factor left anywhere).
   (rows are culled, not pairs), and a vmapped batch iterates until its slowest path ends. The user is
   moving it to a larger machine; `validation/sleeve_optics/rerun_aquaflux.py` reruns aquaflux's side
   against `work/check_array-<mode>.json` (temporary, to be deleted once measured).
+- **THE USER'S RUN AND THE PROBE THAT FOLLOWED (2026-10-09/10, PR #643 comments).** At 64 sectors (64 vs 128
+  agree to 0.9998-1.0000) the routes left (55,25) / (50,50) 2.9 / 2.8 % low, and a per-route split showed
+  the through-neighbour routes carrying <= 0.07 % of the traced value. Single pair, lamp 1 (25,-25) to
+  (-25,41): the shortest path through lamp 3's gap passes 5.9-6.9 mm from its axis -- into its arc,
+  correctly shadowed. A 2D forward trace (Snell at every surface of all four sleeves, arcs absorbing,
+  400,001 directions from each of 7 arc points) finds **two real rays**, both missing every arc: (a)
+  through **lamp 2's** gap, 9.5-9.8 mm from its axis, turned ~45 deg near the critical angle -- the
+  straight line never comes near lamp 2; (b) through lamp 2's gap then lamp 3's (two neighbours, outside
+  the one-region design; left open). With the starts moved, `solve_paths` on the route through lamp 2's
+  gap finds ray (a): departure 1.49085 rad, as the trace, T 0.391 -- so (a) is a minimum and the starts,
+  not the saddle limit, hid it. **Not yet re-measured on the whole scene.**
 - **Tests**: routes (`test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way`),
   the ball's axial path through its route and invalid round it, `straight_reach`, a slab in one medium
   brings a small lamp nearer by `t (1 - n_w/n_q)` (scene, paraxial, 1e-3), and an absorbing slab against a
-  quadrature over directions (refracted, 2.5e-3). **Not yet mutation-checked**; the rod's three paths are
+  quadrature over directions (refracted, 2.5e-3), and a route through a region the straight line misses
+  by 30 mm against Nelder-Mead in the cross-section
+  (`test_a_route_through_a_region_the_straight_line_misses_is_found_and_is_the_shortest`, red on the old
+  starts: no valid path). **Not yet mutation-checked**; the rod's three paths are
   not a test (it would fail).
 

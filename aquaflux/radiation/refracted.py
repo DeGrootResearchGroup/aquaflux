@@ -108,9 +108,9 @@ class _Group:
 def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int) -> tuple:
     """Every group of pairs with a crossing, worked out on the host from concrete positions.
 
-    A route through a region is taken only for the receivers that some facet's straight segment
-    reaches through that region: the light of a pair whose segment misses it comes by the route
-    round it, and the paths through it, if any, graze its edge and carry next to nothing.
+    Every route is taken for every receiver: a route through a region carries light to receivers
+    whose straight segments miss the region altogether, because an air gap near the critical angle
+    turns light by tens of degrees. No bound on that turn is used to leave any out.
     """
     facet_region = media.region_of_facets(surfaces)
     receiver_region = media.region_of(points, "receiver")
@@ -137,18 +137,7 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int)
             for receiver in np.unique(receiver_region):
                 rows = np.flatnonzero(receiver_region == receiver)
                 for chain in Chain.routes(parents, int(source), int(receiver)):
-                    chosen = rows
-                    if chain.passing:
-                        met = _pairs_meet(
-                            media,
-                            (chain.passing[0],),
-                            centroid[facets],
-                            points[rows],
-                            pair_limit=pair_limit,
-                        )
-                        chosen = rows[np.any(met, axis=1)]
-                    if len(chosen):
-                        groups.append(_Group(chain, facets, chosen, profile))
+                    groups.append(_Group(chain, facets, rows, profile))
     return tuple(groups)
 
 

@@ -265,6 +265,58 @@ def test_out_of_a_sleeve_the_path_is_the_shortest_optical_one_off_the_cross_sect
     )
 
 
+def test_a_route_through_a_region_the_straight_line_misses_is_found_and_is_the_shortest():
+    """Light from one sleeved lamp turned round a second lamp's air gap, near the critical angle.
+
+    Two sleeves 50 mm apart; the source on the first lamp's arc faces a point beyond and beside the
+    second, which the straight line from it misses by more than a sleeve's radius. The light still
+    gets there through the second lamp's gap, entering it near grazing and turned by tens of
+    degrees, passing between where the arc would be (7.5 mm) and the gap's wall (10.25 mm). The
+    search must start inside the region it passes, not on the straight line, to find it; the path it
+    finds is checked against a general-purpose optimizer on the optical length, in the cross-section.
+    """
+    axis = [0.0, 0.0, 1.0]
+    centres = np.array([[0.025, -0.025], [0.025, 0.025]])
+
+    def lamp(x, y):
+        gap = Transparent(Cylinder([x, y, 0.0], axis, 0.01025, 1.0), AIR)
+        return Transparent(Cylinder([x, y, 0.0], axis, 0.0115, 1.0), QUARTZ, inside=(gap,))
+
+    media = Media(WATER, tuple(lamp(x, y) for x, y in centres))
+    receiver = np.array([-0.025, 0.041, 0.0])
+    toward = receiver[:2] - centres[0]
+    source = np.array([*(centres[0] + 0.0075 * 0.999 * toward / np.linalg.norm(toward)), 0.0])
+    line = receiver[:2] - source[:2]
+    to_second = centres[1] - source[:2]
+    offset = (line[0] * to_second[1] - line[1] * to_second[0]) / np.linalg.norm(line)
+    assert abs(offset) > 0.03  # The straight line passes nowhere near the second sleeve.
+    chain = Chain.between(media.parents, 1, -1, through=3)
+    paths = solve_paths(media, chain, jnp.asarray(source), jnp.asarray(receiver))
+    assert int(np.sum(np.asarray(paths.valid))) == 1
+    found = np.asarray(paths.points)[np.argmax(np.asarray(paths.valid))]
+    radius = np.linalg.norm(found[3:5, :2] - centres[1], axis=1)
+    np.testing.assert_allclose(radius, 0.01025, rtol=1e-9)
+    chord = found[4, :2] - found[3, :2]
+    to_axis = centres[1] - found[3, :2]
+    closest = abs(chord[0] * to_axis[1] - chord[1] * to_axis[0]) / np.linalg.norm(chord)
+    assert 0.0075 < closest < 0.01025
+
+    radii = (0.01025, 0.0115, 0.0115, 0.01025, 0.01025, 0.0115)
+    around = (0, 0, 1, 1, 1, 1)
+
+    def in_the_plane(angles):
+        return [
+            np.array([*(centres[c] + r * np.array([np.cos(a), np.sin(a)])), 0.0])
+            for a, r, c in zip(angles, radii, around, strict=True)
+        ]
+
+    angles = [np.arctan2(*(found[k, :2] - centres[around[k]])[::-1]) for k in range(6)]
+    guess = np.asarray(angles) + 0.02 * np.array([1, -1, 1, -1, 1, -1])
+    indices = (AIR, QUARTZ, WATER, QUARTZ, AIR, QUARTZ, WATER)
+    best = _optical_length_minimum(media, indices, in_the_plane, source, receiver, guess)
+    np.testing.assert_allclose(found, best, atol=1e-7 * np.linalg.norm(receiver - source))
+
+
 def test_a_crossing_off_the_end_of_its_face_is_no_crossing_and_carries_nothing():
     """A short air cylinder in glass, left by the side on the straight line and above it on the path.
 
