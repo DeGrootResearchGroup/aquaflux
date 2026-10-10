@@ -43,11 +43,11 @@ __all__ = [
     "FACTORIZATION_LINEAR_SOLVE",
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
+    "BetaTrackingRefresh",
     "MaterializedProblem",
     "MaterializedSession",
     "PreconditionerSession",
     "batched_jacobian_matvec",
-    "beta_tracking_refresh",
     "frozen_shift_diagonal",
     "jacobian_matvec",
 ]
@@ -211,23 +211,21 @@ class PreconditionerSession(Protocol):
         ...
 
 
-def beta_tracking_refresh(
-    assembler: object,
-    probe: JacobianProbe,
-    *,
-    every_step: bool,
-    refit_beta_floor: float = 0.0,
-    observer: Callable[[RefreshTiming], None] | None = None,
-) -> Callable[[NewtonStrategy, jnp.ndarray], None]:
+class BetaTrackingRefresh:
     """The ``refresh_preconditioner`` hook that re-fits a monolithic inverse as the shift strength moves.
 
-    Returns a ``refresh_preconditioner(active_step, state)`` that reads ``β`` from the step's
+    Called as ``refresh(active_step, state)`` before every step, it reads ``β`` from the step's
     :class:`~aquaflux.solve.ConstantRelaxation` schedule and re-factors the step's
     :class:`~aquaflux.solve.MonolithicFactorShiftPolicy` preconditioner in place at
     ``J(state) + β·d(state)``. With ``every_step`` it does so on every step (the cheap exact-LU cadence);
-    without, only on its first call and after each ``rebind`` -- a multigrid re-materialize is too
+    without, only on its first call and after each :meth:`rebind` -- a multigrid re-materialize is too
     expensive to pay every step, so between those the rebuild is left to the dual-time loop's cost
-    trigger, through ``refresh_at``.
+    trigger, through :meth:`refresh_at`.
+
+    It is a plain mutable object, deliberately not an ``equinox.Module``: it re-fits a host
+    preconditioner in place, so it runs only on the eager forward march and must never be on a
+    differentiated path, and a Newton step holds it in a *static* field compared by identity -- which is
+    what lets every continuation rung share one hook, and with it one compiled step.
 
     Parameters
     ----------
@@ -236,7 +234,7 @@ def beta_tracking_refresh(
     probe : JacobianProbe
         The shared colouring plan, de-compression map and assembler stand-in.
     every_step : bool
-        Re-factor on every step (``True``), or only on the first call and after each ``rebind``
+        Re-factor on every step (``True``), or only on the first call and after each :meth:`rebind`
         (``False``).
     refit_beta_floor : float
         A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
@@ -247,60 +245,41 @@ def beta_tracking_refresh(
         ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
         seconds, and its per-phase costs. ``None`` (default) elides the call.
 
-    Returns
-    -------
-    callable
-        ``refresh_preconditioner(active_step, state) -> None``, carrying ``refresh_at`` (the inner-loop
-        hook) and ``rebind`` (point it at another companion of the same case).
+    Attributes
+    ----------
+    assembler : object
+        The assembler this hook currently refreshes for; :meth:`rebind` changes it.
     """
-    plan, structure = probe.plan, probe.structure
 
-    # WHICH case this hook currently refreshes for, in a mutable binding rather than closed over, so
-    # `rebind` can point it at another companion of the same case. A continuation solves a sequence of
-    # companions that differ only in their molecular viscosity, and rebinding one hook lets them all share
-    # ONE preconditioner -- which is what keeps the compiled step a cache hit across a rung boundary,
-    # since the preconditioner rides in a static field compared by identity. Both probes below take the
-    # assembler as an argument to a module-level jitted function, so swapping it changes no compilation
-    # key of theirs either. `"probed"` is what the coloured probe differentiates, which is the assembler
-    # itself unless the probe carries a stand-in (`JacobianProbe.narrow`); it is stored rather than
-    # derived per call so a rebind narrows once.
-    bound = {"assembler": assembler, "probed": probe.narrow(assembler)}
-
-    # `frozen` a traced argument (not closed over) so the jvp-matvec compiles once and every refactor
-    # reuses it, rather than a fresh lambda recompiling each step.
-    def matvec_at(frozen, v):
-        return jacobian_matvec(bound["probed"], frozen, v)
-
-    # Batched form (vmapped over the tangent) so the coloured probes of a full materialize run as a few
-    # fused passes rather than a Python loop of separate calls. Used only by the AMG preconditioner's
-    # `refresh_in_place`.
-    def batched_matvec_at(frozen, seeds):
-        return batched_jacobian_matvec(bound["probed"], frozen, seeds)
-
-    # Pending on the first call -- the build froze the preconditioner at its own shift, not the march's --
-    # and again after `rebind`, since the standing preconditioner then describes the PREVIOUS companion.
-    forced_full = {"pending": True}
-
-    def _report_refresh(
-        kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
+    def __init__(
+        self,
+        assembler: object,
+        probe: JacobianProbe,
+        *,
+        every_step: bool,
+        refit_beta_floor: float = 0.0,
+        observer: Callable[[RefreshTiming], None] | None = None,
     ) -> None:
-        """Tell an injected observer which branch ran and what each part of it cost.
+        self._probe = probe
+        self._every_step = every_step
+        self._refit_beta_floor = refit_beta_floor
+        self._observer = observer
+        # Pending on the first call -- the build froze the preconditioner at its own shift, not the
+        # march's -- and again after `rebind`, since the standing preconditioner then describes the
+        # PREVIOUS companion.
+        self._full_rebuild_pending = True
+        # Which step `refresh_at` is refreshing, kept current by `__call__`: the march calls the hook
+        # before every step with the CURRENT one, and the step a builder returns still carries the
+        # default schedule, so binding once at construction cannot work.
+        self._active_step: NewtonStrategy | None = None
+        self.assembler = assembler
+        # What the coloured probe differentiates: the assembler itself unless the probe carries a
+        # stand-in (`JacobianProbe.narrow`). Stored rather than derived per call so a rebind narrows once.
+        self._probed = probe.narrow(assembler)
 
-        The total alone cannot be acted on: a refresh dominated by the coloured jvp probe and one
-        dominated by the multigrid setup take the same wall time and call for opposite fixes.
-        """
-        if observer is not None:
-            observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
-
-    # Which step the inner-loop hook is refreshing, kept current by `refresh_preconditioner` below.
-    bound_step: dict[str, NewtonStrategy] = {}
-
-    def refresh_preconditioner(active_step: NewtonStrategy, state: jnp.ndarray) -> None:
-        # The march calls this immediately before every step and again on every retry, always with the
-        # CURRENT step -- so this is also where the inner-loop hook learns which step it is refreshing.
-        # Binding once at construction cannot work: the step the builder returns still carries the
-        # default schedule, and the march replaces it each iteration with one the control has set β on.
-        bound_step["step"] = active_step
+    def __call__(self, active_step: NewtonStrategy, state: jnp.ndarray) -> None:
+        """Re-fit the step's preconditioner at ``state`` when this cadence calls for it."""
+        self._active_step = active_step
         schedule = active_step.relaxation_schedule
         beta = getattr(schedule, "beta", None)
         if beta is None:
@@ -309,44 +288,14 @@ def beta_tracking_refresh(
                 "with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
                 f"switched-evolution schedule ({type(schedule).__name__})."
             )
-        beta = float(beta)
         started = time.perf_counter()
-        # The preconditioner's shift is floored independently of the march's own beta. As beta -> 0 the
-        # shift's diagonal dominance vanishes and the frozen V-cycle degrades, but the OPERATOR must keep
-        # the small beta to make pseudo-transient progress. Flooring only the preconditioner's copy keeps
-        # the V-cycle in a regime it inverts well while the solved system is untouched, so the converged
-        # root and its adjoint are unchanged. The resulting mismatch SATURATES at `refit_beta_floor * d`
-        # rather
-        # than growing without bound the way a stale (never-refreshed) preconditioner's does.
-        pc_beta = max(beta, refit_beta_floor)
-        policy = active_step.shift_policy
-        pc = policy.preconditioner
-        if not (every_step or forced_full["pending"]):
-            _report_refresh("none", started)
+        if not (self._every_step or self._full_rebuild_pending):
+            self._report("none", started)
             return
-        forced_full["pending"] = False
-        frozen = jax.lax.stop_gradient(state)
-        shift = frozen_shift_diagonal(policy.base, pc_beta, state)
-        _report_refresh("full", started, _materialize_at(pc, frozen, shift))
+        self._full_rebuild_pending = False
+        self._report("full", started, self._materialize_at(active_step, state, float(beta)))
 
-    def _materialize_at(pc, frozen, shift) -> tuple[tuple[str, float], ...]:
-        """Re-materialize the preconditioner at ``frozen`` with shift diagonal ``shift``.
-
-        The AMG preconditioner materializes via the coloured probe and takes the batched form; the
-        complete-LU preconditioner does not, so pass it only on the AMG path.
-        """
-        extra = (
-            {
-                "batched_matvec": lambda seeds: batched_matvec_at(frozen, seeds),
-                "probe_batch_size": PROBE_BATCH_SIZE,
-                "structure": structure,
-            }
-            if isinstance(pc, MaterializedJacobianPreconditioner)
-            else {}
-        )
-        return pc.refresh_in_place(lambda v: matvec_at(frozen, v), plan, shift, **extra) or ()
-
-    def refresh_at(iterate) -> None:
+    def refresh_at(self, iterate: jnp.ndarray) -> None:
         """``inner_refresh`` hook: rebuild the preconditioner at this mid-step iterate.
 
         *When* to fire is decided by the dual-time loop (``DualTimeStep.refresh_on_cycles``), not here,
@@ -364,19 +313,18 @@ def beta_tracking_refresh(
         than an addition to one: a fixed cadence pays on every step to protect the minority that needs
         it, and the right interval is regime-dependent in a way no fixed cadence can track (one step of
         staleness is nearly free at a large shift and dominates the solve at a small one).
+
+        Does nothing before the hook has been called with a step, since until then there is no step
+        whose preconditioner to refresh.
         """
-        if "step" not in bound_step:
+        step = self._active_step
+        if step is None:
             return
         started = time.perf_counter()
-        step = bound_step["step"]
-        beta = max(float(step.relaxation_schedule.beta), refit_beta_floor)
-        frozen = jax.lax.stop_gradient(jnp.asarray(iterate))
-        shift = frozen_shift_diagonal(step.shift_policy.base, beta, frozen)
-        _report_refresh(
-            "inner", started, _materialize_at(step.shift_policy.preconditioner, frozen, shift)
-        )
+        beta = float(step.relaxation_schedule.beta)
+        self._report("inner", started, self._materialize_at(step, iterate, beta))
 
-    def rebind(companion) -> None:
+    def rebind(self, companion: object) -> None:
         """Point this hook at another companion of the same case, and force the next refresh to be full.
 
         A continuation solves a sequence of companions differing only in their molecular viscosity. Each
@@ -397,13 +345,59 @@ def beta_tracking_refresh(
         companion : object
             The assembler the following segment solves.
         """
-        bound["assembler"] = companion
-        bound["probed"] = probe.narrow(companion)
-        forced_full["pending"] = True
+        self.assembler = companion
+        self._probed = self._probe.narrow(companion)
+        self._full_rebuild_pending = True
 
-    refresh_preconditioner.refresh_at = refresh_at
-    refresh_preconditioner.rebind = rebind
-    return refresh_preconditioner
+    def _materialize_at(
+        self, step: NewtonStrategy, state: jnp.ndarray, beta: float
+    ) -> tuple[tuple[str, float], ...]:
+        """Re-materialize ``step``'s preconditioner at ``state``, shifted at the floored ``beta``.
+
+        The preconditioner's shift is floored independently of the march's own ``beta``. As ``beta -> 0``
+        the shift's diagonal dominance vanishes and a frozen V-cycle degrades, but the OPERATOR must keep
+        the small ``beta`` to make pseudo-transient progress. Flooring only the preconditioner's copy
+        keeps the V-cycle in a regime it inverts well while the solved system is untouched, so the
+        converged root and its adjoint are unchanged. The resulting mismatch SATURATES at
+        ``refit_beta_floor * d`` rather than growing without bound the way a stale (never-refreshed)
+        preconditioner's does.
+
+        The multigrid preconditioner materializes through the coloured probe and takes its batched form;
+        the complete-LU preconditioner does not, so that is passed on the multigrid path only. Both probes
+        take the assembler as an argument to a module-level jitted function, so a :meth:`rebind` changes
+        no compilation key of theirs.
+        """
+        policy = step.shift_policy
+        pc = policy.preconditioner
+        frozen = jax.lax.stop_gradient(jnp.asarray(state))
+        shift = frozen_shift_diagonal(policy.base, max(beta, self._refit_beta_floor), frozen)
+        probed = self._probed
+        extra = (
+            {
+                "batched_matvec": lambda seeds: batched_jacobian_matvec(probed, frozen, seeds),
+                "probe_batch_size": PROBE_BATCH_SIZE,
+                "structure": self._probe.structure,
+            }
+            if isinstance(pc, MaterializedJacobianPreconditioner)
+            else {}
+        )
+        return (
+            pc.refresh_in_place(
+                lambda v: jacobian_matvec(probed, frozen, v), self._probe.plan, shift, **extra
+            )
+            or ()
+        )
+
+    def _report(
+        self, kind: str, started: float, phases: tuple[tuple[str, float], ...] | None = None
+    ) -> None:
+        """Tell an injected observer which branch ran and what each part of it cost.
+
+        The total alone cannot be acted on: a refresh dominated by the coloured jvp probe and one
+        dominated by the multigrid setup take the same wall time and call for opposite fixes.
+        """
+        if self._observer is not None:
+            self._observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
 
 
 class MaterializedProblem(abc.ABC):
@@ -545,7 +539,7 @@ class MaterializedSession:
         self._on_build = on_build
         self._inverse_wrapper = inverse_wrapper
         self._probe: JacobianProbe | None = None
-        self._hook: Callable | None = None
+        self._hook: BetaTrackingRefresh | None = None
         self._preconditioner: object | None = None
 
         def refresh_preconditioner(active_step: NewtonStrategy, state: jnp.ndarray) -> None:
@@ -636,10 +630,10 @@ class MaterializedSession:
             )
         return self._probe
 
-    def _refresh_hook(self) -> Callable:
+    def _refresh_hook(self) -> BetaTrackingRefresh:
         if self._hook is None:
             refit_beta_floor = self._spec.refit_beta_floor
-            self._hook = beta_tracking_refresh(
+            self._hook = BetaTrackingRefresh(
                 self._problem.assembler,
                 self._probe_for(),
                 every_step=isinstance(self._spec.inverse, CompleteLu),
