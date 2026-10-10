@@ -21,9 +21,8 @@ defaults are pinned as **literal numbers**, so a moved default fails here instea
 every case. And one **override changes one setting** on every builder, with each refusal the object
 makes where it would otherwise drop a setting without a word.
 
-``coupled_step`` is built here with the block-diagonal and complete-LU preconditioners. A multigrid
-V-cycle needs ``petsc4py``, which CI does not install, and it shares ``_monolithic_factor_step`` with the
-complete LU, so its forwarding is the same code path.
+``coupled_step`` is built here with the block-diagonal and complete-LU preconditioners. A field split
+shares ``_monolithic_factor_step`` with the complete LU, so its forwarding is the same code path.
 """
 
 from __future__ import annotations
@@ -337,7 +336,7 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
         "lu": coupled_step(
             coupled,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             globalization=asked,
             **extra,
         ),

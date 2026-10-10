@@ -3,7 +3,7 @@
 When the session replaced the three preconditioner-specific builders, its steps were first pinned
 array-identical to theirs for every family; those comparisons went with the builders. What stays is
 what a session adds: one inverse and one set of hooks per session, the probe following the operator,
-the driver seams, and the refusals. Nothing here needs ``petsc4py``.
+the driver seams, and the refusals.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ def test_a_block_session_refresh_carries_the_flow_block(case) -> None:
 def test_a_frozen_step_refuses_a_refresh_count_but_a_session_build_wires_one(case) -> None:
     """A refresh count with nothing to fire is refused; as a loose keyword it was accepted and ignored."""
     coupled, state = case
-    spec = MaterializedJacobian(CompleteLu(backend="scipy"))
+    spec = MaterializedJacobian(CompleteLu())
     loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
     with pytest.raises(TypeError, match="refresh_on_cycles"):
         coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
@@ -59,7 +59,7 @@ def test_a_frozen_step_refuses_a_refresh_count_but_a_session_build_wires_one(cas
 def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) -> None:
     """A new object in a static field recompiles the coupled solve, so a session must hand back the same ones."""
     coupled, state = case
-    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
     hook = session.refresh_preconditioner
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
@@ -164,7 +164,7 @@ def test_a_session_cannot_be_re_pointed_at_a_different_case(case) -> None:
 
 def test_a_materialized_build_refuses_a_traced_state(case) -> None:
     coupled, state = case
-    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
 
     def objective(s):
         session.build(s)

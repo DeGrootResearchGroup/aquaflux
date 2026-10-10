@@ -5,7 +5,7 @@ paths:
 
 # Rules — `validation/` (the scientific cases and the study harnesses)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > **Provenance boundary (binding).** As with every rule file: what you read here informs your
 > understanding, and none of it may reach the shipped surface. See the root `CLAUDE.md`
@@ -657,32 +657,13 @@ the one operator a march never exercises, since the continuation ramps the shift
 is additionally floored. Without a checkpoint, every question about the zero-shift operator costs a full
 re-march to ask. The `zero_shift_arms.py` / `zero_shift_adjoint.py` harnesses are the consumers.
 
-## ⚠️ THE SLOW TIER FAILS LOCALLY BUT NOT ON CI — an ENVIRONMENT difference (observed 2026-08-19)
+## ⚠️ "Fails locally, green on CI" — the 2026-08-19 case was a SKIP, not a platform
 
-Three tests fail here with `RootSolver did not converge`, **at `dd1ea73` itself** (verified by
-stashing all local work and re-running each one, not inferred) — while `main` is **green on GitHub**:
-
-- `tests/integration/test_coupled_amg.py::test_amg_solve_converges_and_matches_the_block_preconditioned_solve`
-- `tests/integration/test_coupled_amg.py::test_amg_adjoint_matches_finite_difference`
-- `tests/integration/test_coupled_field_split.py::test_the_split_continuation_converges_to_the_monolithic_fixed_point`
-
-So this is not a code defect — it is a **platform-dependent** one, and that is worse in one specific
-way: it makes the local slow tier useless as a gate without telling you. A branch that genuinely breaks
-something in that tier is indistinguishable from this baseline.
-
-**Known environment differences** (local against CI): Python **3.13 on arm64** here versus **3.11/3.12
-on x86_64 Linux** in CI (`.github/workflows/ci.yml` installs `.[test]`, unpinned beyond
-`requires-python >= 3.10`), hence different BLAS and different floating-point summation order.
-
-**The likely mechanism, stated as a hypothesis and NOT yet measured:** these solves are marginal against
-their `max_steps = 40` budget, and a platform-level difference in the last bits tips them over. That is
-the same shape as the constrained mass-flow adjoint, where a **6.6e-12** relative difference in the warm
-state flipped a transpose solve from converging to raising — measured, on this machine, the same day.
-**To settle it, re-run one with `max_steps` raised and read how far past 40 it needs**; a couple of steps
-means fragility to be given headroom and documented, while an order of magnitude means a real
-platform-specific defect.
-
-**Binding until then: run the three at `HEAD` before believing any local slow-tier failure is yours.**
-Not doing so cost real time on 2026-08-19 — the failures were attributed to a local change, a guard was
-reverted on that basis, and a comment was committed claiming the revert was "measured" when the baseline
-had never been run.
+Three slow-tier tests failed locally with `RootSolver did not converge` while `main` was green on GitHub,
+and this section once explained it as a platform difference (arm64/Python 3.13 vs x86_64) with a
+`max_steps` hypothesis. **The real cause was simpler: all three were `pytest.importorskip("petsc4py")`-gated,
+CI did not install PETSc, so CI never ran them** (root `CLAUDE.md`, "CI is not a superset of a local run").
+Two of them (`test_coupled_amg.py`) were deleted with PETSc on 2026-10-10; the third, now
+`test_the_split_continuation_converges_to_the_complete_lu_fixed_point`, is PETSc-free and runs in CI.
+**The trap that survives: before attributing a local-only failure to your platform, check the CI skip
+counts** — a guard was once reverted on the strength of the platform story.

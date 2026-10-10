@@ -7,7 +7,7 @@ paths:
 
 # Rules — `aquaflux/solve/field_split.py` (the block-triangular field split)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and binding decisions this file assumes.
@@ -121,7 +121,9 @@ always solve the leading group first. There is no `flow_first`, `_TrailingFirstF
 `build_amg_vcycle`. Every measurement below of a PETSc/ILU(0) split block or a turbulence-first arm is
 history. Its harness arms (`field_split_probe.py`'s split arms, `turbulence_smoother_sweep.py`,
 `rung_hierarchy_reuse.py`) were deleted and survive only in git history before that change. The
-monolithic `AmgVCycle` is unchanged.
+monolithic `AmgVCycle` survived #371 and was **deleted with PETSc on 2026-10-10**; `field_split_probe.py`'s
+control arm is now the shipped split, and `tests/integration/test_coupled_field_split.py` is no longer
+PETSc-gated (its slow-tier fixed-point test compares the split against `CompleteLu` instead).
 
 - **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
   advection-dominated transported scalars, and that is probably why the saddle-point literature keeps
@@ -173,7 +175,7 @@ monolithic `AmgVCycle` is unchanged.
       `MaterializedJacobianPreconditioner`, `solve-direct-preconditioners.md`) reads only
       `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
       existing `pure_callback` path unchanged. Each diagonal block is fitted by its injected inverse
-      (`SimpleSmoothedInverse` / `JacobiSmoothedInverse` on both flagship cases; a PETSc `AmgVCycle`
+      (`SimpleSmoothedInverse` / `JacobiSmoothedInverse` on both flagship cases; a PETSc `AmgVCycle`, since deleted,
       by default until #371), working *within its own group* — the whole point, since a four-field saddle
       and a two-field transport pair want different inverses. Each block's `apply` returns the inverse in
       the **original** field-major space, so the retained coupling block is applied raw between the two
@@ -192,7 +194,9 @@ monolithic `AmgVCycle` is unchanged.
       with a `TypeError` before either block is touched (was an `AttributeError` after a `getattr`). See
       `solve-direct-preconditioners.md`'s capability-protocol entry.
     - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
-      the extracted `MaterializedJacobianPreconditioner` (`amg_preconditioner.py`, #287, 2026-09-11).**
+      the extracted `MaterializedJacobianPreconditioner` (#287, 2026-09-11; in
+      `materialized_preconditioner.py` since the monolithic class and its `amg_preconditioner.py` were
+      deleted with PETSc, 2026-10-10).**
       The underlying cause of that raise was inheriting the whole monolithic class — including the fixed-pattern cell-major
       assembler, which a split never builds or uses — for the sake
       of the genuinely shared coloured-probe materialize/shift/cache/teardown. `MaterializedJacobianPreconditioner`
@@ -201,9 +205,8 @@ monolithic `AmgVCycle` is unchanged.
       parameters — declared on both classes' refresh and immediately `del`-eted on both, because the union
       signature forced them there — are deleted from both signatures; passing either is now a `TypeError`.
       No behaviour change on either class's `build`, which still takes them where they are real (fitting
-      the V-cycle(s)). Pinned by `test_monolithic_and_field_split_share_the_materialized_jacobian_base`
-      (`tests/unit/test_amg_preconditioner.py`) and the two dead-parameter tests in
-      `tests/unit/test_amg_preconditioner.py` / `tests/unit/test_field_split.py`.
+      the V-cycle(s)). Pinned by the dead-parameter test in `tests/unit/test_field_split.py` (its
+      monolithic twin and the shared-base test went with `tests/unit/test_amg_preconditioner.py`).
     - **The transpose is closed-form, so the adjoint is served.** The transpose of a
       block-lower-triangular inverse is the block-upper-triangular one over the transposed blocks, so
       `apply(transpose=True)` reverses the two block solves and uses `Cᵀ` — pinned both as an exact dense
@@ -779,7 +782,7 @@ monolithic `AmgVCycle` is unchanged.
 
 **Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
 1M-cell target regardless of how deep either goes.** `FieldSplitAmgPreconditioner.build` /
-`refresh_in_place` (`aquaflux/solve/amg_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
+`refresh_in_place` (`aquaflux/solve/materialized_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
 `_monolithic_shift_source` / `JacobianProbe`) materialize the coupled Jacobian with **one**
 coloured-probe pass over all `dim+3` fields at reach 3, and `build_block_triangular_field_split` slices
 the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's

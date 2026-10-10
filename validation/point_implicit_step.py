@@ -94,7 +94,7 @@ def main() -> None:
     compare = importlib.import_module("compare")
 
     import jax.numpy as jnp
-    from aquaflux.solve import MonolithicAmgPreconditioner, block_stencil_gather_map
+    from aquaflux.solve import MaterializedJacobianPreconditioner, block_stencil_gather_map
     from aquaflux.initialization import hybrid_initialize
     from aquaflux.turbulence.coupled import (
         _coupled_jacobian_plan,
@@ -123,7 +123,7 @@ def main() -> None:
     # is built from -- so `D` is the operator the solver actually meets, not a model of it.
     plan = _coupled_jacobian_plan(coupled, REACH)
     structure = block_stencil_gather_map(plan)
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         plan,
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),

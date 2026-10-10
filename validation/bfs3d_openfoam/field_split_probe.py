@@ -1,13 +1,12 @@
-"""The monolithic coupled preconditioner at the hard states of the 3D backward-facing-step march.
+"""The shipped coupled preconditioner at the hard states of the 3D backward-facing-step march.
 
 This harness began as a study of whether splitting the turbulence out of the coupled preconditioner's
 hierarchy helps: giving the ``[u, v, w, p]`` saddle and the ``[k, omega]`` pair their own hierarchies while
-keeping one triangle of the coupling between them. **Every field-split arm has been removed**, together
-with the helpers that built them, because the library no longer builds a PETSc V-cycle on a split block
-and no longer offers the turbulence-first ordering (issue #371); the host incomplete-LU smoothed hierarchy
-some arms used is gone as well. Their recorded results remain in the project's records. What is left is
-the monolithic arm -- one V-cycle over all six fields -- and its two Jacobi-class smoother variants, plus
-the state table, materialization and solve machinery that other harnesses in this directory import.
+keeping one triangle of the coupling between them. Its PETSc-built arms -- the split blocks, the
+turbulence-first ordering, and the monolithic V-cycle over all six fields it was compared against -- are
+removed with the library's PETSc support; their recorded results remain
+in the project's records. What is left is the shipped field split as the control arm, plus the state table,
+materialization and solve machinery that other harnesses in this directory import.
 
 **Where the headroom is, and is not.** At the states the march visits, a preconditioner rebuilt at the
 iterate solves the forward system in one restart cycle *at the march's own loose stop*, so that pairing
@@ -34,8 +33,7 @@ kinds of state restore the discrimination, and both are configurations something
 * the REAL shift diagonal ``beta * d``, not a uniform stand-in;
 * one materialization per state, shared by every arm, so two arms can never differ for any reason but the
   options under test -- and so only one copy of a multi-gigabyte Jacobian is ever live;
-* a **faithfulness gate**: where a restart-cycle count is on record for the shipped monolithic arm at a
-  state, that arm must reproduce it or the run refuses to report. A state with nothing on record is
+* a **faithfulness gate**: where a restart-cycle count is on record for the shipped arm at a state, that arm must reproduce it or the run refuses to report. A state with nothing on record is
   gated only on the control converging at all;
 * **states from ONE march, whose bundle is written down beside them** (see ``STATES``). The checkpoint
   names come from a per-run counter over a rolling buffer, so they carry no date and no configuration:
@@ -62,13 +60,8 @@ rather than hard operators. Two consecutive iterates reproduce exactly one itera
 
     python3 -u validation/bfs3d_openfoam/field_split_probe.py state-00066 state-00065
 
-``--arms=key,key`` restricts the ladder (the control is always kept)::
-
-    python3 -u validation/bfs3d_openfoam/field_split_probe.py state-00067 --arms=mono/cheb
-
-Every smoother named here is a **fixed linear operator**, which the adjoint's transpose solve requires: a
-Chebyshev smoother is a fixed polynomial once its eigenvalue bounds are estimated during setup, unlike a
-GMRES-accelerated smoother, whose polynomial depends on the right-hand side.
+``--arms=key,key`` restricts the ladder (the control is always kept). Every arm must be a **fixed linear
+operator**, which the adjoint's transpose solve requires.
 """
 
 from __future__ import annotations
@@ -93,9 +86,10 @@ import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    HostPreconditioner,
+    MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
-    build_amg_vcycle,
+    build_block_triangular_field_split,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -132,7 +126,7 @@ SOLVER = relative_residual_gmres(RTOL, restart=15, stagnation_iters=40, max_rest
 #: names are a per-run counter over a rolling buffer, so they carry no date and nothing complains.
 #:
 #: Nothing is on record for any of them from this probe, so the self-check reduces to the control
-#: converging at all; the monolithic arm is in ``ARMS`` for that reason.
+#: converging at all.
 class _State(NamedTuple):
     """One probed operating point.
 
@@ -190,22 +184,9 @@ STATES = {
     ),
 }
 
-#: Level-smoother recipes for the monolithic V-cycle, as PETSc options layered over the shipped bundle.
-#: ``ilu0`` is the shipped default (an empty override). The other two are the Jacobi-class candidates a
-#: traced multigrid could actually implement, since neither needs a sequential triangular solve.
-SMOOTHERS = {
-    "ilu0": {},
-    "chebyshev": {"mg_levels_ksp_type": "chebyshev", "mg_levels_pc_type": "jacobi"},
-    "jacobi": {
-        "mg_levels_ksp_type": "richardson",
-        "mg_levels_ksp_richardson_scale": 0.7,
-        "mg_levels_pc_type": "jacobi",
-    },
-}
-
 FLOOR = (
     compare.PC_BETA_FLOOR
-)  # 0.05 -- the forward V-cycle is built here, the operator keeps its own beta
+)  # 0.05 -- the preconditioner is built here, the operator keeps its own beta
 
 
 def load_state(name: str) -> jnp.ndarray:
@@ -313,7 +294,7 @@ def materialize(coupled, state, plan, structure, n_fields) -> sp.csr_matrix:
     several-hundred-probe coloured jvp for each of them would dominate the run.
     """
     started = time.time()
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         plan,
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
@@ -328,28 +309,22 @@ def materialize(coupled, state, plan, structure, n_fields) -> sp.csr_matrix:
     return jacobian
 
 
-def monolithic(shifted, groups, n_fields, smoother):
-    """The shipped arrangement: one V-cycle over all six fields. The control."""
-    return MonolithicAmgPreconditioner(
-        build_amg_vcycle(
+def shipped_split(shifted, groups, n_fields):
+    """The shipped arrangement: the case's own field split, each block fitted by its injected inverse."""
+    del n_fields  # each block inverse is told its own field count by the split
+    return HostPreconditioner(
+        build_block_triangular_field_split(
             shifted,
-            n_fields,
-            smoother_fill_levels=compare.FILL_LEVELS,
-            smoother_sweeps=compare.SWEEPS,
-            coarse_eq_limit=compare.COARSE_EQ_LIMIT,
-            extra_options=SMOOTHERS[smoother] or None,
+            groups,
+            leading_inverse=compare.LEADING_INVERSE,
+            trailing_inverse=compare.TRAILING_INVERSE,
         )
     )
 
 
 #: ``(key, label, builder)``. The builder takes the shifted matrix rather than closing over it, so nothing
 #: holds a reference to a multi-gigabyte operator the run wants to free between operating points.
-ARMS = (
-    # The control, and the two Jacobi-class smoothers applied to the whole six-field block.
-    ("mono/ilu0", "monolithic, ILU(0)", lambda m, g, n: monolithic(m, g, n, "ilu0")),
-    ("mono/cheb", "monolithic, Chebyshev", lambda m, g, n: monolithic(m, g, n, "chebyshev")),
-    ("mono/jac", "monolithic, damped Jacobi", lambda m, g, n: monolithic(m, g, n, "jacobi")),
-)
+ARMS = (("split/shipped", "field split, shipped inverses", shipped_split),)
 
 
 def run_arm(label, preconditioner, built, coupled, state, rhs, op_shift, solver):
@@ -415,7 +390,7 @@ def one_arm(label, build, shifted, groups, n_fields, coupled, state, rhs, op_shi
         return None
     finally:
         if preconditioner is not None:
-            preconditioner.factors.destroy()
+            preconditioner.destroy()
         del preconditioner
         gc.collect()
 
@@ -442,7 +417,7 @@ def self_check(name, recorded, shifted, groups, n_fields, coupled, state, rhs, o
     """
     print("\n  -- self-check: the shipped preconditioner at the march's own solver", flush=True)
     measured = one_arm(
-        "monolithic, ILU(0), march solver",
+        "field split, march solver",
         ARMS[0][2],
         shifted,
         groups,
@@ -564,21 +539,18 @@ def main():
     stale = pc_state_name != name
     if stale:
         recorded = None  # nothing is on record for a deliberately mismatched pairing
-    # The V-cycle is built at the floor while the operator keeps the march's own beta -- the shipped
+    # The preconditioner is built at the floor while the operator keeps the march's own beta -- the shipped
     # mismatch. At the converged state's zero shift there is no floor: the adjoint has none, and flooring
     # it here would measure a preconditioner the gradient path never uses.
     pc_beta = max(march_beta, FLOOR) if march_beta > 0 else 0.0
 
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.n_fields
-    # The monolithic arms read nothing from the grouping; it carries the degree-of-freedom count and the
-    # cell count for the banner, and keeps the builder signature the importing harnesses share.
     groups = FieldGroups.split_before(coupled.layout, "k")
     print(
-        f"{'=' * 100}\nmonolithic preconditioner: {n_fields} fields over {groups.n_cells} cells\n"
-        "bundle: plain aggregation, "
-        f"ILU({compare.FILL_LEVELS}) x{compare.SWEEPS} where not overridden, coarse_eq_limit "
-        f"{compare.COARSE_EQ_LIMIT}, stencil reach 3, column reach "
+        f"{'=' * 100}\nfield-split preconditioner: {n_fields} fields over {groups.n_cells} cells\n"
+        f"bundle: leading {compare.FLOW_INVERSE}, trailing {compare.TURBULENCE_INVERSE}, "
+        "stencil reach 3, column reach "
         f"{'uniform' if compare.COLUMN_REACH is None else '/'.join(map(str, compare.COLUMN_REACH))}"
         f", GMRES restart 15, max restarts {MAX_RESTARTS}\n"
         f"operator beta {march_beta}, preconditioner beta {pc_beta}\n{'=' * 100}",
@@ -620,7 +592,7 @@ def main():
         if pc_beta > 0
         else np.zeros(groups.n_dofs)
     )
-    shifted = MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
+    shifted = MaterializedJacobianPreconditioner._shifted(jacobian, pc_shift)
     del jacobian
     gc.collect()
 

@@ -62,7 +62,7 @@ from aquaflux.schemes import (
     SkewCorrectedGradient,
 )
 from aquaflux.solve import CompleteLu, Convergence, DualTimeLoop, MaterializedJacobian
-from compare import BACKEND, INNER_STEPS, INNER_TOL, POLYMESH, RATIO, RETRY
+from compare import INNER_STEPS, INNER_TOL, POLYMESH, RATIO, RETRY
 from diffusion_operator_probe import (
     CorrectionCapped,
     FirstPassOnCells,
@@ -267,7 +267,7 @@ def seed(momentum: MomentumContinuity) -> jnp.ndarray:
 
 def main() -> None:
     print(f"=== laminar duct, Re_Dh {RE:g} (mu {MU:.2e}), flow residual only ===", flush=True)
-    preconditioner = MaterializedJacobian(CompleteLu(backend=BACKEND))
+    preconditioner = MaterializedJacobian(CompleteLu())
     dual_time = DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL)
     for label, path in meshes().items():
         mesh = read_openfoam(path)

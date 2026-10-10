@@ -87,15 +87,10 @@ def test_the_multigrid_surface_is_complete() -> None:
 #: reviewable instead of invisible. Adding a row is cheap and deliberate; the guard below is what stops
 #: the list growing by accident.
 VALIDATION_INTERNAL_REACHES = {
-    # The fixed-pattern shift/equilibrate/reorder assembler. It holds no PETSc, no V-cycle and no jax,
-    # so it is not really the AMG's -- but it has no better home yet, so it is not exported either.
-    "ShiftedCellMajorOperator",
     # The march's lock-up predicate, replayed over archived march logs to check a candidate rule fires
     # on the runs that stalled and on nothing that recovered. Replaying a private predicate is the
     # whole point of that harness, so this one is unlikely ever to become public.
     "_limit_collapsing",
-    # The square-root-diagonal scale alone, without the reorder `equilibrate_cell_major` pairs it with.
-    "equilibration_scale",
     # The aggregation's internals, reached by the harness that measured whether equilibration changes
     # the graph the coarsening sees (it does not -- 0.03% of edges). Running the real `_cell_graph` /
     # `_aggregation_edges` / `_mis_aggregate` is the point: a re-implementation would have measured a

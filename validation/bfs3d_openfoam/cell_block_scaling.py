@@ -40,7 +40,7 @@ import compare  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
     symmetrically_equilibrate,
 )
@@ -168,7 +168,7 @@ def main() -> None:
     jacobian = materialize(coupled, state, plan, structure, n_fields)
     shift = frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
     block = sp.csr_matrix(
-        MonolithicAmgPreconditioner._shifted(jacobian, shift)[groups.trailing, :][
+        MaterializedJacobianPreconditioner._shifted(jacobian, shift)[groups.trailing, :][
             :, groups.trailing
         ]
     )

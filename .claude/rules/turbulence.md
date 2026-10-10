@@ -113,11 +113,11 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | `CoupledJacobianProbe` (plan + gather map), `_coupled_jacobian_plan`'s graph logic | `solve.JacobianProbe`, `solve.jacobian_probe_plan` (`solve/jacobian_probe.py`) | the probe holds a `narrowing` callable for the assembler stand-in; `coupled_jacobian_probe(coupled, …)` builds one with `_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen)`. `probe.gradient_sweeps` is now `probe.narrowing.gradient_sweeps`. `_coupled_jacobian_plan` stays as the coupled adapter (mesh graph + layout) |
 | `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `solve.MonolithicFactorShiftPolicy`, `solve.FrozenTransposeFactory` (`solve/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
 | `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `BetaTrackingRefresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now the class `BetaTrackingRefresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` (a function `beta_tracking_refresh` until #661) |
-| `MaterializedJacobian`, `CompleteLu`, `MonolithicVCycle`, `FieldSplit`, `JacobianProbeSpec` | the same names in `aquaflux.solve` (`solve/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `solve.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `solve.materialized_spec_from_mapping` |
+| `MaterializedJacobian`, `CompleteLu`, `FieldSplit`, `JacobianProbeSpec` (and `MonolithicVCycle`, deleted with PETSc 2026-10-10) | the same names in `aquaflux.solve` (`solve/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `solve.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `solve.materialized_spec_from_mapping` |
 | `_SessionContinuation` | `solve.SessionSource` | shared with the flow march |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
 
-**Still here**: `open_session` and `_BlockSession` (the block-diagonal family is turbulence's own) and the mass-flow border. The materialized-Jacobian session, the probe, the monolithic shift policy and the specs have moved to `solve/`, and `solve_flow_march` uses them (`MaterializedJacobian` with `CompleteLu` or `MonolithicVCycle`). The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
+**Still here**: `open_session` and `_BlockSession` (the block-diagonal family is turbulence's own) and the mass-flow border. The materialized-Jacobian session, the probe, the monolithic shift policy and the specs have moved to `solve/`, and `solve_flow_march` uses them (`MaterializedJacobian` with `CompleteLu` or a bare `BlockInverse`). The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
 ⚠️ **Do not add a capability to the march here without checking `solve_flow_march` can reach it** — that is
 the drift this section exists to prevent (root `CLAUDE.md`, Principle 3.6).
 
@@ -128,8 +128,8 @@ Many entries below are dated history written against the old API. Read them thro
 | was | is |
 |---|---|
 | `coupled_continuation(coupled, state, method=M, **flow_opts, **march)` | `coupled_step(coupled, state, preconditioner=BlockDiagonal(scalar=S, **flow_opts), **march)` |
-| `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
-| `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
+| `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` — `backend` is gone (SuperLU only, 2026-10-10) |
+| `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | *nothing* — the monolithic PETSc V-cycle (`MonolithicVCycle`) was deleted 2026-10-10; use `MaterializedJacobian(FieldSplit(L, T), build_beta=b)` |
 | `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
 | `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., refit_beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, **march)` — since #370 the measure is not passed; the march hands every step its own |
@@ -349,9 +349,10 @@ Many entries below are dated history written against the old API. Read them thro
       here as on every other settings field.
   - **✅ `preconditioner_spec.py`, the preconditioner as a value (#371, 2026-09-14) — consumed by every
     session, and readable from a case file (#391).** `BlockDiagonal` | `MaterializedJacobian(inverse=
-    CompleteLu | MonolithicVCycle | FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta,
-    refit_beta_floor)`. `BlockDiagonal`, `CompleteLu`, `MonolithicVCycle` and `JacobianProbeSpec` are
-    `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
+    CompleteLu | FieldSplit(leading, trailing) | BlockInverse, probe=JacobianProbeSpec, build_beta,
+    refit_beta_floor)` (a `MonolithicVCycle` inverse existed until PETSc was removed, 2026-10-10).
+    `BlockDiagonal`, `CompleteLu` (which has no fields since its `backend` went with PETSc) and
+    `JacobianProbeSpec` are `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
     have required fields (`leading`/`trailing`, `inverse`) and `probe` defaults to `JacobianProbeSpec()`.
     `solve_coupled`, `coupled_step`, `open_session` and both Reynolds drivers take them.
     - **Their registry is PUBLIC, `PRECONDITIONER_SPEC_MAPPING` (was the private `_SPEC_MAPPING`, renamed
@@ -418,8 +419,8 @@ Many entries below are dated history written against the old API. Read them thro
     - **Each spec's field set is pinned to the constructor it feeds** (`test_preconditioner_spec.py`):
       `BlockDiagonal` to `BlockPreconditioner.build` minus `reference_state`, `JacobianProbeSpec` to
       `coupled_jacobian_probe`'s free settings (not `active_rows`, which follows from the inverse, nor
-      `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
-      to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
+      `production_viscosity_frozen`, which follows from the operator), `CompleteLu` to its `build` (no
+      keyword-only settings, so no fields). `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
       build-record sink is attached where the session is opened rather than bound into the inverse.
   - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
     `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
@@ -1406,7 +1407,7 @@ Many entries below are dated history written against the old API. Read them thro
       `# the cap now finds nothing binding`) — nobody had connected it to what a nonzero
       `positivity_floor` does under the shipped default. `_k_positivity_guards` (the single tail all
       four builders now call, checked **before** any preconditioner is built — including
-      `coupled_amg_continuation`'s, so the raise needs no `petsc4py`) raises `ValueError` naming both
+      the V-cycle's, so the raise needed no `petsc4py` while that existed) raises `ValueError` naming both
       keywords when `floor != 0` and the transform-appropriate limiter is real (i.e. `k` is
       `DirectScalars`) and `positivity_projection` is true. `positive_k_projection`'s own `floor=0.0`
       default is untouched and still deliberately not fed from `positivity_floor` — a projection has
@@ -1584,11 +1585,9 @@ Many entries below are dated history written against the old API. Read them thro
     exact factorization needs a small one. That **restart** difference is real; the stopping *measure* is
     not a per-family choice and is `_coupled_step`'s (#282). Verified: `solve_coupled(strategy=coupled_lu_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
-    (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
-    the complete factorization is exact regardless of backend). With the UMFPACK backend
-    (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
-    coupled Jacobian quickly, exact (1 GMRES iter), verified on the real forward operator
-    and the β=0 adjoint. For a differentiable solve the factorization is frozen at the reference state
+    (`tests/integration/test_coupled_lu.py`). It is SciPy's SuperLU only since PETSc was removed
+    (2026-10-10); the UMFPACK backend it once had factored the developed pitzDaily coupled Jacobian much
+    faster, exact (1 GMRES iter), verified on the real forward operator and the β=0 adjoint. For a differentiable solve the factorization is frozen at the reference state
     (state drift costs only a few cycles, and freezing keeps the adjoint valid). **A long developing march
     refreshes it with `lu_beta_tracking_refresh` (below)**, which re-factors in place at the step's own
     `(state, β)`. ⚠️ There is no `coupled_lu_refreshing_continuation` — that `RefreshPolicy(builder=...)`
@@ -1604,8 +1603,8 @@ Many entries below are dated history written against the old API. Read them thro
   - **SCOPE: a 2D / moderate-mesh tool** — the
     complete LU's fill (`O(n^{4/3})` in 3D) is a memory wall past ~10⁴ 3D cells (measured), so large 3D
     stays on the algebraic-multigrid path (`.claude/rules/solve-direct-preconditioners.md`).
-  - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
-    (BUILT).** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
+  - **⚠️ DELETED 2026-10-10 with PETSc — dated record follows.** **`coupled_amg_continuation` — the
+    ALGEBRAIC-MULTIGRID counterpart, once the coupled PC for large 3D.** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
     multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
     ~seconds with bounded memory where the complete LU hits the 3D wall (its fill OOMs; a monolithic

@@ -14,10 +14,11 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
+    FieldSplitAmgPreconditioner,
     HostFactors,
     HostPreconditioner,
+    MaterializedBlockPreconditioner,
     MaterializedJacobianPreconditioner,
-    MonolithicAmgPreconditioner,
     MonolithicLuPreconditioner,
     RefactorableFactors,
     ReleasableFactors,
@@ -25,12 +26,14 @@ from aquaflux.solve import (
 
 FAMILY = (
     MonolithicLuPreconditioner,
-    MonolithicAmgPreconditioner,
+    MaterializedJacobianPreconditioner,
+    FieldSplitAmgPreconditioner,
+    MaterializedBlockPreconditioner,
 )
 
 
 class _ExactInverse:
-    """An exact block inverse, standing in for a multigrid V-cycle so no PETSc build is needed."""
+    """An exact block inverse, standing in for a multigrid V-cycle so no hierarchy is built."""
 
     def __init__(self, block: np.ndarray) -> None:
         self._inverse = np.linalg.inv(np.asarray(block, dtype=np.float64))
@@ -119,7 +122,7 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     )
 
     for factors in (
-        factorize_lu(operator, backend="scipy"),
+        factorize_lu(operator),
         split,
     ):
         assert isinstance(factors, HostFactors), f"{type(factors).__name__} is not HostFactors"
@@ -178,12 +181,12 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     block = sp.block_diag([chain, chain], format="csr")
     hierarchy = JacobiSmoothed(max_coarse=8)(block, 2)
     reduction = AirReduction(max_coarse=8)(block, 2)
-    lu = factorize_lu(block, backend="scipy")
+    lu = factorize_lu(block)
     groups = FieldGroups.by_counts(n_cells=n_cells, n_leading_fields=1, n_trailing_fields=1)
     leading, _, coupling, trailing = groups.blocks(block)
     split = BlockTriangularFieldSplit(
-        factorize_lu(leading, backend="scipy"),
-        factorize_lu(trailing, backend="scipy"),
+        factorize_lu(leading),
+        factorize_lu(trailing),
         coupling,
         groups,
     )
@@ -191,7 +194,7 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     expected = {
         hierarchy: (RefactorableFactors, ReleasableFactors, OffersTracedCycle),
         reduction: (RefactorableFactors, ReleasableFactors, OffersTracedCycle),
-        lu: (RefactorableFactors, ReleasableFactors),
+        lu: (RefactorableFactors,),
         split: (RefactorableFactors, ReleasableFactors),
         _Doubling(): (),
     }
@@ -206,9 +209,9 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
 def test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything() -> None:
     """Every family member's ``destroy`` releases the frozen inverse -- and tolerates one with nothing.
 
-    The materialized-Jacobian base once carried a ``destroy`` with no body, so destroying a monolithic
-    V-cycle or a field-split preconditioner released nothing: the PETSc hierarchy a caller destroys
-    precisely to bound its memory stayed live until the collector found it.
+    The materialized-Jacobian base once carried a ``destroy`` with no body, so destroying a field-split
+    preconditioner released nothing: the hierarchies a caller destroys precisely to bound its memory
+    stayed live until the collector found it.
     """
     released = []
 

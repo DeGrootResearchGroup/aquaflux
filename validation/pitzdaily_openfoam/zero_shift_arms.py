@@ -192,8 +192,7 @@ def main() -> None:
     print(
         f"pitzDaily, {a.shape[0]} dofs, reach {compare.STENCIL_REACH}, nnz {a.nnz / 1e6:.2f} M; "
         f"zero shift; gmres rtol {RTOL}, restart {RESTART}; "
-        f"leading inverse {compare.FLOW_INVERSE}, smoother fill {compare.FILL_LEVELS}, "
-        f"sweeps {compare.SWEEPS}",
+        f"leading inverse {compare.FLOW_INVERSE}",
         flush=True,
     )
 
@@ -209,7 +208,7 @@ def main() -> None:
                 coupled,
                 state,
                 preconditioner=MaterializedJacobian(
-                    CompleteLu(backend="scipy"),
+                    CompleteLu(),
                     probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
                     build_beta=0.0,
                 ),

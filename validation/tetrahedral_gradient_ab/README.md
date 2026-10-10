@@ -89,7 +89,7 @@ unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with
 - From a plug every arm converges, so the mesh, the case and the gradient reconstruction can be marched;
   the reported failure was the single-step pseudo-transient march from rest, which fails with or without
   the staged driver. Dual time plus a materialized-Jacobian inverse converges it from rest in 13 steps,
-  and `SimpleSmoothed` does so without PETSc.
+  and `SimpleSmoothed` does so too.
 - The row-scaled measure divides by the mean speed and the mass throughput, both zero at rest, so it is
   NaN there (issue #459). Use `LAM_MEASURE=euclid` from rest.
 - With `LAM_SCHEME=multiple` (`MultipleCorrectionGradient` with the corner-cell fallback), the `lu` arm

@@ -1,9 +1,9 @@
 """A block-triangular field-split preconditioner for the coupled flow-plus-transport Newton solve.
 
-The monolithic preconditioners in this package (:mod:`~aquaflux.solve.amg_preconditioner`,
-:mod:`~aquaflux.solve.lu_preconditioner`) treat the coupled
-Jacobian as one undifferentiated block. That is the right default, but it forces every field to share a
-single multigrid hierarchy and a single level smoother — and the six fields of a Reynolds-averaged solve
+A monolithic preconditioner (the complete LU, :mod:`~aquaflux.solve.lu_preconditioner`, or one block
+inverse over the whole state) treats the coupled Jacobian as one undifferentiated block. That forces
+every field to share one inverse -- for a multigrid inverse, a single hierarchy and a single level
+smoother — and the six fields of a Reynolds-averaged solve
 are not one kind of equation. Four of them, ``[u, v, w, p]``, form a pressure-velocity saddle; the other
 two, ``k`` and ``omega``, are advection-dominated transported scalars, one of them customarily solved in
 a logarithmic variable. A method tuned for the saddle is not thereby tuned for the scalars.
@@ -49,9 +49,9 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import HostFactors, release, require_refactorable
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -266,8 +266,8 @@ class BlockTriangularFieldSplit:
     """A block-triangular approximate inverse over a two-group field partition.
 
     A pure host object (numpy/scipy plus whatever the block inverses are), with the same
-    ``apply(residual, transpose=...)`` interface as :class:`~aquaflux.solve.AmgVCycle`, so it is a drop-in
-    wherever a frozen approximate inverse of the coupled operator is wanted.
+    ``apply(residual, transpose=...)`` interface as any frozen block inverse
+    (:class:`~aquaflux.solve.HostFactors`), so it is a drop-in wherever a frozen approximate inverse of the coupled operator is wanted.
 
     One application solves the leading group, corrects the trailing group's right-hand side by the
     retained coupling, and solves the trailing group::
@@ -471,25 +471,18 @@ def build_block_triangular_field_split(
 
 
 class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
-    """The field split as JAX matvecs, sharing the materialized-Jacobian machinery with the monolithic PC.
+    """The field split as JAX matvecs, over the shared materialized-Jacobian machinery.
 
-    A sibling of :class:`~aquaflux.solve.amg_preconditioner.MonolithicAmgPreconditioner` over the shared
-    :class:`~aquaflux.solve.amg_preconditioner.MaterializedJacobianPreconditioner` base (#287), rather than
-    a subclass of the monolithic class itself: only the coloured jvp probe that materializes the coupled
-    Jacobian, the shift-diagonal add, the ``jax.pure_callback`` matvec (which reads ``self.factors`` at
-    call time, so an in-place refresh re-preconditions the same compiled solve) and the teardown are
-    genuinely shared — those live on the base. Everything the monolithic class builds *from* one
-    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler) is monolithic-only, and
-    inheriting it forced this class to declare two smoother parameters on its own refresh that a split's
-    construction never reads.
-
-    The monolithic path equilibrates and reorders the **whole** matrix to cell-major before handing it to
-    one V-cycle; a split leaves any such preparation to each block's own injected inverse, because the two
-    groups have different field counts and different scales. That is why the shift/equilibrate/reorder
-    assembler the monolithic refresh precomputes has no counterpart here.
+    Built on :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which holds the coloured jvp
+    probe that materializes the coupled Jacobian, the shift-diagonal add and the in-place refresh; the
+    ``jax.pure_callback`` matvec (which reads ``self.factors`` at call time, so an in-place refresh
+    re-preconditions the same compiled solve) and the teardown come from
+    :class:`~aquaflux.solve.HostPreconditioner`. Any preparation of a block -- equilibration, reordering
+    -- is left to that block's own injected inverse, because the two groups have different field counts
+    and different scales.
 
     .. warning::
-       ``refresh_in_place`` is forward-march only, for the same reason as the monolithic class's: the
+       ``refresh_in_place`` is forward-march only: the
        mutation is impure and would corrupt an adjoint transpose solve that read the inverse between its
        own calls.
     """

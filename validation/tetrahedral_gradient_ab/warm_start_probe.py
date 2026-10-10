@@ -34,7 +34,6 @@ from aquaflux.turbulence import (
     solve_coupled,
 )
 from compare import (
-    BACKEND,
     INNER_STEPS,
     INNER_TOL,
     INTENSITY,
@@ -71,7 +70,7 @@ def march(label, coupled, flow, k, omega, rtol, max_steps=STEPS):
             flow,
             k,
             omega,
-            preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             dual_time=DualTimeLoop(
                 inner_steps=INNER_STEPS, inner_tol=INNER_TOL, refresh_on_cycles=REFRESH_ON_CYCLES
             ),

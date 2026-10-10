@@ -53,10 +53,10 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    MonolithicAmgPreconditioner,
+    MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
+    equilibrate_cell_major,
 )
-from aquaflux.solve.amg_preconditioner import ShiftedCellMajorOperator  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
 from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
@@ -99,15 +99,13 @@ def main():
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
     policy = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         plan,
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
         PROBE_BATCH_SIZE,
         structure,
     )
-    indptr, indices, _ = structure
-    assembler = ShiftedCellMajorOperator(indptr, indices, n_fields)
     k = np.asarray(coupled.layout.unpack(state)[1])  # [flow, k, omega]
     print(
         f"state-{index:05d}: {n_cells} cells, block size {n_fields}, equilibrated to unit diagonals\n"
@@ -119,7 +117,9 @@ def main():
         diagonal = (
             frozen_shift_diagonal(policy, beta, state) if beta else np.zeros(n_cells * n_fields)
         )
-        cell_major, _, _ = assembler.assemble(jacobian.data, diagonal)
+        cell_major, _, _ = equilibrate_cell_major(
+            MaterializedJacobianPreconditioner._shifted(jacobian, diagonal), n_fields
+        )
         blocks = diagonal_blocks(cell_major, n_fields, n_cells)
         smallest, condition = conditioning(blocks)
         print(

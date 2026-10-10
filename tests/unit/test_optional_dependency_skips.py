@@ -1,12 +1,11 @@
 """Every test hidden behind an optional dependency is declared here, or this fails.
 
 ``pytest.importorskip`` is invisible in an exit status: a module that is skipped and a module that
-passed are the same green run. That is not a hypothetical cost. Two integration modules open with
-``pytest.importorskip("petsc4py")`` and the continuous-integration workflow installs the ``test``
-extra, which does not carry ``petsc`` -- so those modules have never run there. Three of their tests
-failed for four days while every required check stayed green, and the failure surfaced only on the one
-machine that happens to have PETSc, where it read as "broken on my machine" when the truth was the
-opposite: that machine was the only place they were checked at all.
+passed are the same green run. That is not a hypothetical cost. Modules once gated on an optional solver library the
+continuous-integration workflow did not install had never run there; three of their tests failed for
+four days while every required check stayed green, and the failure surfaced only on the one machine
+that had the library, where it read as "broken on my machine" when the truth was the opposite: that
+machine was the only place they were checked at all.
 
 This module is the standing answer to "which coverage is conditional, and where does it disappear?".
 It is the same shape as :mod:`tests.unit.test_check_hooks` and :mod:`tests.unit.test_sibling_builders`
@@ -43,12 +42,6 @@ _TESTS = Path(__file__).resolve().parents[1]
 #: a tier that already runs only on a merge; a gate on a fast-tier module removes it from the required
 #: check itself, which is the more surprising of the two and is where most of the hidden tests are.
 GATED_MODULES: dict[str, tuple[str, str]] = {
-    "unit/test_amg_preconditioner.py": ("petsc4py", "PCGAMG V-cycle; fast tier"),
-    "integration/test_coupled_amg.py": ("petsc4py", "AMG-preconditioned coupled solve; slow tier"),
-    "integration/test_coupled_field_split.py": (
-        "petsc4py",
-        "field-split coupled solve; mostly fast tier",
-    ),
     "unit/test_cad_step.py": (
         "OCP",
         "STEP reading through the OpenCASCADE kernel; fast tier. CI installs it through the `test` "
@@ -122,10 +115,9 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
 
 #: Distributions that CI does not install, so every gate above naming one is dead there.
 #:
-#: ``petsc4py`` has no wheels -- it builds PETSc from source -- which is why the ``petsc`` extra is
-#: kept out of ``test`` rather than merged into it. That is a defensible cost decision; what is not
-#: defensible is making it without recording that the coverage goes with it.
-NOT_INSTALLED_BY_CI: frozenset[str] = frozenset({"petsc4py", "scotchpy"})
+#: Keeping a distribution out of ``test`` is a defensible cost decision; what is not defensible is
+#: making it without recording that the coverage goes with it.
+NOT_INSTALLED_BY_CI: frozenset[str] = frozenset({"scotchpy"})
 
 
 def _module_level_gates(path: Path) -> set[str]:
@@ -233,7 +225,6 @@ def test_a_gate_on_a_dependency_ci_does_not_install_is_recorded_as_such(path: st
 #: reaches into the validation cases at all.
 CONDITIONALLY_SKIPPED: dict[str, str] = {
     "integration/test_bfs3d_species.py": "the whole module: the case data is not in the repository",
-    "unit/test_lu_preconditioner.py": "the UMFPACK backend's refactor, when PETSc is absent",
     "unit/test_openfoam_fields.py": "one ordering case, when the generated grid is already ordered",
     "unit/test_partitioner.py": "the Scotch binding and command-line partitioners",
     "unit/test_sibling_builders.py": "the tool is in the repository, not the installed package",

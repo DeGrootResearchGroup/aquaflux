@@ -91,12 +91,7 @@ from .frozen_operator import (
     decouple_dof,
     symmetrically_equilibrate,
 )
-from .amg_preconditioner import (
-    AmgVCycle,
-    MaterializedJacobianPreconditioner,
-    MonolithicAmgPreconditioner,
-    build_amg_vcycle,
-)
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .field_split import (
     JacobiSmoothedInverse,
     BlockTriangularFieldSplit,
@@ -240,7 +235,6 @@ from .materialized_spec import (
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
-    MonolithicVCycle,
     materialized_spec_from_mapping,
     materialized_spec_to_mapping,
     MATERIALIZED_MAPPING,
@@ -291,7 +285,6 @@ __all__ = [
     "AbortsInnerLoop",
     "AirHierarchy",
     "AirReduction",
-    "AmgVCycle",
     "BetaTrackingRefresh",
     "BlockColouring",
     "BlockInverse",
@@ -347,10 +340,8 @@ __all__ = [
     "MaterializedProblem",
     "MaterializedSession",
     "MeasureBuilder",
-    "MonolithicAmgPreconditioner",
     "MonolithicFactorShiftPolicy",
     "MonolithicLuPreconditioner",
-    "MonolithicVCycle",
     "MonotoneLineSearch",
     "NewtonStrategy",
     "PhaseTimer",
@@ -412,7 +403,6 @@ __all__ = [
     "block_stencil_colouring",
     "block_stencil_gather_map",
     "build_air_hierarchy",
-    "build_amg_vcycle",
     "build_block_triangular_field_split",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",

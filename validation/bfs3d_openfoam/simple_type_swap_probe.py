@@ -160,7 +160,7 @@ def main() -> None:
     state, march_beta = _load(name)
 
     print(
-        f"bundle: field_split={compare.FIELD_SPLIT}, flow_inverse={compare.FLOW_INVERSE}, "
+        f"bundle: flow_inverse={compare.FLOW_INVERSE}, "
         f"turbulence_inverse={compare.TURBULENCE_INVERSE}, column_reach={compare.COLUMN_REACH}, "
         f"GMRES restart 15, rtol {fsp.RTOL:.0e}, max_restarts {fsp.MAX_RESTARTS}",
         flush=True,
@@ -191,7 +191,7 @@ def main() -> None:
             if pc_beta > 0
             else np.zeros(groups.n_dofs)
         )
-        shifted = fsp.MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
+        shifted = fsp.MaterializedJacobianPreconditioner._shifted(jacobian, pc_shift)
         del jacobian
         gc.collect()
         print(f"  materialized in {time.time() - t0:.0f}s", flush=True)
