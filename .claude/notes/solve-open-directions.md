@@ -320,9 +320,14 @@ operator (the warm-start refutation is the cautionary tale).
   pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
 - **First-order seed for the second-order residual — CLOSED (2026-10-10), even at best.** See the
   ledger ("Seeding the second-order march from a first-order solve").
-- **Gradient reconstruction `sweeps`.** `schemes.md` is explicit that `sweeps=4` must not be lowered
-  globally; the open question is whether the *tangent* reconstruction inside the JVP needs the same
-  count as the primal (still open: entry 2, which would have made this moot, is closed).
+- **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry
+  was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
+  operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
+  identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
+  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d still ships
+  `CorrectedGreenGauss` and is unmeasured. ⚠️ `jacobian_gradient_sweeps` is not a case-file setting
+  (`case.md`: a script-only study arm), so a case cannot reach the measured gain — decide whether it
+  belongs in the solver section before measuring bfs3d.
 
 ## Where this file does not go
 
