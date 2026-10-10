@@ -111,12 +111,13 @@ paths:
     split's refit/atomicity tests in `test_field_split.py`; each was mutation-checked.
   - **`refresh_in_place` has ONE return type across the family (#281):** the `("probe", s),
     ("assemble", s), ("refactor", s)` tuple. The LU refresh returned `None` and its one caller papered
-    over it with `... or ()`; it now times its own phases. ⚠️ **The SIGNATURE is still two shapes** — LU
-    takes `(matvec, plan, shift_diagonal)` and the materialized family adds `batched_matvec`,
-    `probe_batch_size`, `structure` — and the session picks the keywords by `isinstance(pc,
-    MaterializedJacobianPreconditioner)`, a declared class rather than a feature probe. Unifying the
-    signature is the open design question on #281: `HostPreconditioner`'s own docstring argues against a
-    union signature.
+    over it with `... or ()`; it now times its own phases. **The SIGNATURE stays two shapes, by decision
+    (project owner, 2026-10-10, #281)** — LU takes `(matvec, plan, shift_diagonal)` and the materialized
+    family adds `batched_matvec`, `probe_batch_size`, `structure` — and the session picks the keywords by
+    `isinstance(pc, MaterializedJacobianPreconditioner)`, a declared class rather than a feature probe.
+    Do not unify it behind a union signature (LU accepting and ignoring the probe keywords): the split
+    follows the real difference in how each is materialized, which `HostPreconditioner`'s docstring
+    records.
   - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
     preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
     `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only
