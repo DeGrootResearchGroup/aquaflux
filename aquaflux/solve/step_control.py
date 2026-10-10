@@ -24,6 +24,10 @@ step's outcome. All three members here drive the pseudo-transient shift strength
   comfortable. It reduces exactly to :class:`DualTimeControl` at infinite ratio thresholds, which is
   pinned by a test rather than left as a claim.
 
+Any of them can also **release the shift below its floor once the march has settled at the target**
+(:attr:`ShiftStrengthControl.release_floor`), so the last steps are Newton steps rather than fixed-shift
+pseudo-timesteps converging at a linear rate the floor sets.
+
 All three are accelerators on the eager march — they read the previous step's concrete report between
 steps, which a traced loop cannot do — so they live here rather than on the traced Newton path. They
 never reach a gradient: the march runs on ``stop_gradient`` inputs, and the adjoint is attached at the
@@ -69,17 +73,49 @@ class ShiftStrengthControl(eqx.Module):
 
     A subclass supplies :meth:`_adapt` and its own fields, nothing else.
 
+    **Releasing the floor once the march has settled.** A dual-time step at a fixed shift contracts each
+    error mode by ``β / (λ + β)``, ``λ`` the mode's generalized eigenvalue against the shift diagonal, so
+    a march held at :attr:`beta_min` near its root converges linearly at a rate the floor sets, however
+    many steps it takes. With :attr:`release_floor` set, the floor is lifted after a step that drove the
+    **target** problem (``arrived``), ran at or below :attr:`beta_min` and took a line-search factor of at
+    least :attr:`release_alpha` without the rule backing off: β then drops straight to
+    :attr:`release_floor`, which is small enough that the step is an inexact Newton step. It stays
+    released while the rule's own adaptation does not raise β, and returns to :attr:`beta_min` the moment
+    it does (a clipped step, or a rising residual for a rule that reads one). Measured on a pitzDaily viscosity ramp, a step at zero shift from a state after the
+    first full-length step at the floor reached the stopping tolerance in one step, while from the state
+    the ramp arrived at it did not descend at all -- the shift a state can take belongs to the state, so
+    the release is gated on the march's own evidence rather than on arrival alone.
+
     Attributes
     ----------
     beta_start : float
         β for the first step of the whole march (static).
     beta_min, beta_max : float
         Clamps on β (static). ``beta_min`` bounds how large the pseudo-timestep may grow.
+    release_floor : float or None
+        The shift strength β drops to once the march has settled at the target, in ``(0, beta_min)``
+        (static). ``None`` (default) never releases. It must be positive: a retry escalates β by scaling
+        it, and a zero shift scales to zero.
+    release_alpha : float
+        The line-search factor, in ``(0, 1]``, a step at the floor must reach for the next one to be
+        released (static). Read only when :attr:`release_floor` is set.
     """
 
     beta_start: float = eqx.field(static=True, default=2.0)
     beta_min: float = eqx.field(static=True, default=0.02)
     beta_max: float = eqx.field(static=True, default=4.0)
+    release_floor: float | None = eqx.field(static=True, default=None)
+    release_alpha: float = eqx.field(static=True, default=1.0)
+
+    def __check_init__(self) -> None:
+        if self.release_floor is not None and not 0.0 < self.release_floor < self.beta_min:
+            raise ValueError(
+                f"release_floor must lie in (0, beta_min = {self.beta_min:g}); got "
+                f"{self.release_floor:g}. A release at or above the floor releases nothing, and a zero "
+                "shift cannot be escalated by a retry."
+            )
+        if not 0.0 < self.release_alpha <= 1.0:
+            raise ValueError(f"release_alpha must lie in (0, 1]; got {self.release_alpha:g}.")
 
     def _adapt(self, beta: float, previous: StepReport, memo: object) -> tuple[float, object]:
         """The control's rule: the next β and the next memo, from the step just taken.
@@ -102,12 +138,42 @@ class ShiftStrengthControl(eqx.Module):
         raise NotImplementedError
 
     def _clamp(self, beta: float) -> float:
-        """β held inside ``[beta_min, beta_max]``, as a plain ``float``.
+        """β held inside ``[lowest, beta_max]``, as a plain ``float``.
+
+        ``lowest`` is :attr:`beta_min`, or :attr:`release_floor` when one is set -- the lowest shift this
+        control can ever run at. Whether the march is released, and so whether :attr:`beta_min` still
+        binds, is decided once in :meth:`next_step` (:meth:`_floored`), not by each rule.
 
         Kept a method rather than inlined per rule because the bound is the same for every control and
         this was one of the three verbatim copies the base exists to remove.
         """
-        return float(min(max(beta, self.beta_min), self.beta_max))
+        lowest = self.beta_min if self.release_floor is None else self.release_floor
+        return float(min(max(beta, lowest), self.beta_max))
+
+    def _floored(self, carried: float, adapted: float, previous: StepReport) -> float:
+        """The rule's adapted β with the floor applied: :attr:`beta_min`, unless the march is released.
+
+        Released means :attr:`release_floor` is set, the previous step drove the target problem, the
+        rule did not raise β (no back-off: neither a clipped step nor a rising residual), and either the
+        step ran at or below :attr:`beta_min` and reached :attr:`release_alpha` (enter, or stay, at
+        :attr:`release_floor`) or it already ran below :attr:`beta_min` (stay, at the rule's own β).
+        Anything else -- the rule backing off from a released step included -- puts the floor back.
+
+        Parameters
+        ----------
+        carried : float
+            The β the previous step ran at, as this control carried it.
+        adapted : float
+            The β the rule chose for the next step, already within :meth:`_clamp`'s bounds.
+        previous : StepReport
+            The step just taken.
+        """
+        if self.release_floor is not None and previous.arrived and adapted <= carried:
+            if previous.shift <= self.beta_min and previous.alpha >= self.release_alpha:
+                return self.release_floor
+            if previous.shift < self.beta_min:
+                return adapted
+        return max(adapted, self.beta_min)
 
     def next_step(
         self, base_step: ShiftedNewtonStrategy, previous: StepReport | None, state: object
@@ -148,7 +214,8 @@ class ShiftStrengthControl(eqx.Module):
         else:
             beta, memo = state
             if previous is not None:  # within a segment; a refresh boundary holds instead
-                beta, memo = self._adapt(beta, previous, memo)
+                adapted, memo = self._adapt(beta, previous, memo)
+                beta = self._floored(beta, adapted, previous)
         controlled = eqx.tree_at(
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
@@ -183,8 +250,9 @@ class ShiftStrengthControl(eqx.Module):
         -------
         tuple
             The ``(beta, memo)`` state to hand :func:`~aquaflux.solve.newton_march` as ``control_state``,
-            with ``beta`` held inside ``[beta_min, beta_max]`` in case this control's bounds differ from
-            the interrupted march's.
+            with ``beta`` held inside ``[beta_min, beta_max]`` (``[release_floor, beta_max]`` when this
+            control releases, so a march stopped while released resumes released) in case this
+            control's bounds differ from the interrupted march's.
         """
         return (self._clamp(shift), None)
 

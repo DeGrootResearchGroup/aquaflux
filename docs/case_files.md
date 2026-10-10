@@ -232,7 +232,9 @@ The two marches share their settings, each a value of the solver library written
   its tolerance, restart length and cap, and `stop`, which rule ends a solve;
 - `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
-  {class}`~aquaflux.solve.CflResidualDualTimeControl`;
+  {class}`~aquaflux.solve.CflResidualDualTimeControl`. Any of them takes `release_floor`, a shift
+  below `beta_min` that the march drops to once a step on the target problem has run at the floor
+  at full length, so its last steps are Newton steps rather than a linear tail at the floor;
 - `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
 

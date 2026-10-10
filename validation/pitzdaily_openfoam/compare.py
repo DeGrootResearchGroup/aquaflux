@@ -203,9 +203,16 @@ def _solver_with_overrides(solver):
             "positivity_projection": projection,
             "positivity_floor": 0.0 if projection else 1e-8,
         }
-    beta_start = _environment("BETA_START", float)
-    if beta_start is not None:
-        edits["step_control"] = dataclasses.replace(solver.step_control, beta_start=beta_start)
+    control = {
+        name: value
+        for name, value in (
+            ("beta_start", _environment("BETA_START", float)),
+            ("release_floor", _environment("RELEASE_FLOOR", float)),
+        )
+        if value is not None
+    }
+    if control:
+        edits["step_control"] = dataclasses.replace(solver.step_control, **control)
     refresh = _environment("REFRESH_ON_CYCLES", int)
     if refresh is not None:
         edits["dual_time"] = dataclasses.replace(
@@ -859,6 +866,13 @@ def dual_time_control(beta_start: float) -> CflResidualDualTimeControl:
 
 
 CONTROL = SOLVER.step_control
+#: Release the shift below `beta_min` once the target station has settled (`PITZ_RELEASE_FLOOR`, the
+#: shift it drops to; unset keeps the file's, which never releases). After the first full-length step at
+#: the floor on the target, the next step runs at this shift and the station's linear tail becomes
+#: inexact Newton steps. A one-step probe from this march's own states (`endgame_shift_probe.py`): from
+#: the state after that first full step, one zero-shift step reached the stopping tolerance; from the
+#: state the ramp arrived at, it did not descend.
+RELEASE_FLOOR = CONTROL.release_floor
 
 #: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.
 #: Frozen at the cold reference state for a whole march, the preconditioner goes stale precisely as the
@@ -1157,7 +1171,9 @@ def solve_aquaflux(
         ("retry on cycles / alpha", f"{RETRY.abort_above_cycles} / {RETRY.on_alpha}"),
         (
             "step control",
-            f"{type(CONTROL).__name__} (beta_start {BETA_START} cold / {BETA_START_WARM} warm)",
+            f"{type(CONTROL).__name__} (beta_start {BETA_START} cold / {BETA_START_WARM} warm, "
+            f"beta_min {CONTROL.beta_min}, release "
+            f"{'off' if RELEASE_FLOOR is None else f'to {RELEASE_FLOOR:g}'})",
         ),
         ("seed repair (warm rungs)", SEED_REPAIR),
         (

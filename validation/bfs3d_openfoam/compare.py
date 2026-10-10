@@ -1042,7 +1042,18 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
-CONTROL = FILE_SOLVER.step_control
+#: Release the shift below `beta_min` once the target station has settled (`BFS3D_RELEASE_FLOOR`, the
+#: shift it drops to; unset keeps the file's, which never releases): after the first full-length step at
+#: the floor on the target, the next step runs at this shift, so the station's linear tail becomes
+#: inexact Newton steps. Measured on pitzDaily first (`pitzdaily_openfoam/endgame_shift_probe.py`); not
+#: yet run on this case.
+CONTROL = (
+    dataclasses.replace(
+        FILE_SOLVER.step_control, release_floor=float(os.environ["BFS3D_RELEASE_FLOOR"])
+    )
+    if os.environ.get("BFS3D_RELEASE_FLOOR")
+    else FILE_SOLVER.step_control
+)
 
 #: The march this run takes: the case file's solver with the environment's overrides applied, as the
 #: one value the solve is handed. With no `BFS3D_*` variable set it must be exactly the file's -- which
@@ -1418,6 +1429,12 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("retry on cycles / alpha", f"{RETRY_ON_CYCLES} / {RETRY_ON_ALPHA}"),
         ("cycle budget", CYCLE_BUDGET),
         ("preconditioner beta floor", PC_BETA_FLOOR),
+        (
+            "step control",
+            f"{type(CONTROL).__name__} (beta_start {CONTROL.beta_start}, beta_min "
+            f"{CONTROL.beta_min}, release "
+            f"{'off' if CONTROL.release_floor is None else f'to {CONTROL.release_floor:g}'})",
+        ),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
         ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),

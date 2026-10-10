@@ -25,6 +25,7 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DampedNewtonStep,
     DualTimeControl,
+    DualTimeStep,
     LinearSolverSpec,
     PseudoTransientStep,
     RetryPolicy,
@@ -2176,3 +2177,43 @@ def test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_som
     else:
         assert control.called == []
         assert beta == 1.0
+
+
+class _SlowMode(eqx.Module):
+    """``R(phi) = lam * phi - b``: a linear residual whose first mode is slow against a unit shift."""
+
+    lam: jnp.ndarray
+    b: jnp.ndarray
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return self.lam * phi - self.b
+
+
+def test_a_released_shift_turns_a_linear_tail_into_newton_steps() -> None:
+    """At a fixed shift a dual-time step contracts a mode by ``beta / (lam + beta)``; released, it is Newton.
+
+    With ``lam = 1e-3`` against a floor of 5e-3 the slow mode keeps 5/6 of its error per step, so the
+    floored march needs ~100 steps to fall 8 decades, and twenty steps leave it well short. Released
+    after its first full step at the floor, the same march keeps 1e-6/1e-3 per step and converges in a
+    handful. Both arms get the same twenty-step budget. Wrong answers caught: a release that never
+    reaches the march (both arms then stall alike) and one that reaches it at the wrong shift.
+    """
+    residual = _SlowMode(jnp.array([1.0e-3, 1.0]), jnp.array([1.0, 1.0]))
+    phi0 = jnp.zeros(2)
+    base = DualTimeStep(
+        _UnitShiftPolicy(), relaxation_schedule=SwitchedEvolutionRelaxation(beta0=2.0)
+    )
+    common = dict(max_steps=20, rtol=0.0, atol=1.0e-8)
+    floored = newton_march(
+        base, residual, phi0, step_control=DualTimeControl(beta_start=5e-3, beta_min=5e-3), **common
+    )
+    released = newton_march(
+        base,
+        residual,
+        phi0,
+        step_control=DualTimeControl(beta_start=5e-3, beta_min=5e-3, release_floor=1e-6),
+        **common,
+    )
+    assert not floored.converged
+    assert released.converged and len(released.reports) <= 5
+    assert released.reports[0].shift == 5e-3 and released.reports[1].shift == 1e-6
