@@ -46,8 +46,8 @@ class RetryPolicy:
     shift, and that conflation is a recorded defect rather than a tidiness complaint. A restart-cycle
     count is ``preconditioner strength × operator difficulty``, so any constant encodes an assumption
     about *which preconditioner is installed* — and the march already has the right response to a
-    growing cycle count, which is to **refresh the frozen preconditioner** (a ``RefreshPolicy``
-    trigger, fired mid-step). Escalating the shift on the same observation additionally assumed a
+    growing cycle count, which is to **refresh the frozen preconditioner** (the dual-time loop's
+    ``refresh_on_cycles``, which the march acts on before the next step). Escalating the shift on the same observation additionally assumed a
     bigger shift makes the block easier, which is not even true on every case: measured on a
     two-dimensional coupled saddle the flow block wants **140** Krylov applications at ``beta`` 0.5
     against **32** at 0.05, so "expensive, therefore stiffen" closed a loop that ran the wrong way and
@@ -84,9 +84,11 @@ class RetryPolicy:
         inner iterations and is judged on what it has. ``None`` (default) leaves the inner loop
         bounded only by its own iteration count.
 
-        This is a **cost guard**, not a diagnosis. It does **not** escalate the shift and does not
-        by itself discard the step. An aborted step that is finite and whose line search held is
-        accepted, and the step control adapts to the rate it achieved.
+        This is a **cost guard**, not a diagnosis. It does **not** escalate the shift: a step that
+        exceeded it without reaching its target is redone **once**, at the shift it already had, on a
+        preconditioner the march re-fits first (a second redo would repeat the first exactly). A step
+        that stopped because its dual-time loop asked for a re-fit (``refresh_on_cycles``) is not redone
+        at all -- it keeps what it reached and the re-fit happens before the next step.
 
         The abort is what stops a hopeless step spending its whole inner budget before ``on_alpha``
         catches it. ⚠️ But set it **above** what the installed preconditioner costs when it is
@@ -265,15 +267,17 @@ class RetryPolicy:
 
         The third is **not** stiffness, and this is the distinction the class docstring is about. A
         solve that ran long says the frozen preconditioner is struggling with this operator, and the
-        cure is a **fresh preconditioner**, which the dual-time loop's mid-step refresh has already
-        built by the time the step returns. So ``"cycles"`` redoes the step at the shift it already
-        had, on the factorization that refresh produced. Raising the shift instead assumes a stiffer
+        cure is a **fresh preconditioner**. So ``"cycles"`` redoes the step at the shift it already
+        had, and the march re-fits the preconditioner before the redo. Raising the shift instead assumes a stiffer
         operator is an easier one, which is not true on every case, and closed a divergent loop on the
         one where it is false.
 
         Cost and step length are only reasons when the step **missed its own stopping criterion**.
         Redoing a step that met it discards a good iterate and replaces it with a shorter one, whatever
-        it cost and however hard the ladder had to work to get there.
+        it cost and however hard the ladder had to work to get there. Cost is not a reason, either, for a
+        step that stopped to have its preconditioner re-fitted
+        (:attr:`~aquaflux.solve.StepOutcome.refresh_due`): that step already answered its cost, by
+        stopping where the refresh will be taken and keeping what it had reached.
 
         The reason is returned as a short string, which is also what the march reports through its
         retry seam -- so the decision and its explanation cannot disagree.
@@ -281,7 +285,8 @@ class RetryPolicy:
         Parameters
         ----------
         outcome : StepOutcome
-            The attempt's record; reads ``max_inner_cycles``, ``reached_target`` and ``alpha``.
+            The attempt's record; reads ``max_inner_cycles``, ``reached_target``, ``alpha`` and
+            ``refresh_due``.
         residual_norm : jnp.ndarray
             The residual measure at the state the attempt produced, a scalar.
         reference : float
@@ -333,6 +338,7 @@ class RetryPolicy:
         if (
             self.abort_above_cycles is not None
             and int(outcome.max_inner_cycles) > self.abort_above_cycles
+            and not bool(outcome.refresh_due)
         ):
             return "cycles"
         return None

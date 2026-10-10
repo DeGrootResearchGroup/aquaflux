@@ -79,8 +79,8 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     """
     pc = _RecordingPreconditioner()
     step = _stub_step(pc, beta=0.5, diagonal=_DIAGONAL)
-    # A full rebuild on the first call and after a rebind, none otherwise -- between those only the
-    # dual-time loop's cost trigger rebuilds the V-cycle.
+    # A full rebuild on the first call and after a rebind, none otherwise --
+    # between those only a re-fit the march asks for (``due``) rebuilds the V-cycle.
     refresh = _hook(gain=3.0)
 
     refresh(step, _STATE)  # the initializing call
@@ -102,58 +102,61 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     assert len(pc.calls) == 2
 
 
-def test_the_inner_refresh_rebuilds_at_the_iterate_it_is_given_for_the_current_step() -> None:
-    """``refresh_at`` re-materializes at the MID-STEP iterate, for the step the march last handed over.
+def test_an_asked_for_refit_is_built_at_the_state_and_shift_it_is_handed() -> None:
+    """``due`` re-materializes on the multigrid cadence, at the state and step the march hands over.
 
-    Two ways to get it wrong, both asserted: rebuilding at the state the step started from (the
-    Jacobian would be the stale one the refresh exists to replace), and refreshing a step other than
-    the current one -- the march replaces the step every iteration with one carrying a new ``β``.
+    The march passes ``due`` before the step after one that ended on a long inner solve, with the state
+    that step kept and the step it is about to take. Two ways to get it wrong, both asserted: ignoring
+    ``due`` on a cadence that would otherwise skip (the stale inverse the re-fit exists to replace), and
+    fitting at anything but the state and ``β`` it is handed.
     """
     pc = _RecordingPreconditioner()
     refresh = _hook(gain=3.0)
 
-    refresh.refresh_at(_STATE)  # before any step: nothing to refresh, and nothing to fail on
-    assert pc.calls == []
-
-    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)
-    current = _stub_step(pc, beta=0.25, diagonal=_DIAGONAL)
-    refresh(current, _STATE)  # no full rebuild after the first, but it is now the current step
+    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # the initializing call
+    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # skipped on this cadence
     assert len(pc.calls) == 1
 
     iterate = 2.0 * _STATE
-    refresh.refresh_at(iterate)
+    refresh(_stub_step(pc, beta=0.25, diagonal=_DIAGONAL), iterate, due=True)
     assert len(pc.calls) == 2
     assert np.allclose(pc.calls[1]["matvec"](_TANGENT), 3.0 * iterate)
     assert np.allclose(pc.calls[1]["shift"], 0.25 * np.asarray(_DIAGONAL))
 
 
-def test_the_refit_floor_bounds_the_preconditioners_shift_on_both_refreshes() -> None:
-    """``refit_beta_floor`` floors the shift the inverse is fitted at, per-step and mid-step alike.
+def test_the_refit_floor_bounds_the_preconditioners_shift_on_every_refresh() -> None:
+    """``refit_beta_floor`` floors the shift the inverse is fitted at, whichever branch asked for it.
 
-    A floor applied on only one of the two paths would leave the other fitting a V-cycle at a shift it
-    inverts badly, which is the regime the floor exists to keep it out of.
+    A floor applied on only one branch would leave the other fitting a V-cycle at a shift it inverts
+    badly, which is the regime the floor exists to keep it out of.
     """
     pc = _RecordingPreconditioner()
     refresh = _hook(refit_beta_floor=0.05)
 
-    refresh(_stub_step(pc, beta=0.01, diagonal=_DIAGONAL), _STATE)  # below the floor: floored
-    refresh.refresh_at(_STATE)
-    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # no rebuild, but now current
-    refresh.refresh_at(_STATE)  # above the floor: untouched
+    refresh(_stub_step(pc, beta=0.01, diagonal=_DIAGONAL), _STATE)  # full, below the floor: floored
+    refresh(
+        _stub_step(pc, beta=0.01, diagonal=_DIAGONAL), _STATE, due=True
+    )  # asked for: floored too
+    refresh.rebind(refresh.assembler)
+    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # above it: untouched
     assert [float(call["shift"][0]) for call in pc.calls] == [0.1, 0.1, 1.0]
 
 
 def test_the_observer_is_told_which_branch_each_refresh_took() -> None:
-    """A march log reads ``full`` / ``none`` / ``inner`` from here, so each must name its own branch."""
+    """A march log reads ``full`` / ``none`` / ``cost`` from here, so each must name its own branch.
+
+    ``cost`` is a re-fit only the march's ``due`` asked for; one the cadence would have run anyway (the
+    first call, or the first after a rebind) stays ``full`` even when ``due`` is passed too.
+    """
     timings: list[RefreshTiming] = []
     pc = _RecordingPreconditioner()
     refresh = _hook(observer=timings.append)
 
     step = _stub_step(pc, beta=0.5, diagonal=_DIAGONAL)
+    refresh(step, _STATE, due=True)
     refresh(step, _STATE)
-    refresh(step, _STATE)
-    refresh.refresh_at(_STATE)
-    assert [timing.kind for timing in timings] == ["full", "none", "inner"]
+    refresh(step, _STATE, due=True)
+    assert [timing.kind for timing in timings] == ["full", "none", "cost"]
 
 
 def test_a_schedule_with_no_readable_shift_is_refused() -> None:

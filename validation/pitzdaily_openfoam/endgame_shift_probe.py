@@ -153,7 +153,8 @@ def main() -> None:
         record = replay.states[k + 1]
         beta_c = float(record["shift"])
         # The march's preconditioner where the march had it when it built step k+1's measure: walking
-        # the replay's systems re-fits in full at a station change and mid-step where the march did.
+        # the replay's systems re-fits in full at a station change and before a step that follows one an
+        # expensive solve ended, as the march did.
         # The measure's velocity row scale reads the frozen inverse's `a_p`, and the march builds the
         # measure BEFORE the step's own pre-step refresh -- so at the arrival step it is built on the
         # ramp's last inverse, and the arrival's full re-fit at the target follows it.

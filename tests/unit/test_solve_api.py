@@ -52,6 +52,7 @@ USER_IMPLEMENTS = frozenset(
         "ShiftedNewtonStrategy",
         "StateBlock",
         "StepAcceptance",
+        "StopsForRefresh",
     }
 )
 USER_CONFIGURES = frozenset(

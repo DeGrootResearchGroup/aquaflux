@@ -348,7 +348,6 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "shift",
         # The per-step guards.
         "inner_observer",
-        "inner_refresh",
         "positivity_floor",
         "positivity_projection",
     }

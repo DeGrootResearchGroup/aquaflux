@@ -51,6 +51,7 @@ __all__ = [
     "StepFn",
     "StepOutcome",
     "StepReport",
+    "StopsForRefresh",
     "shift_of",
     "within_tolerance",
 ]
@@ -96,8 +97,8 @@ class LineSearchStep(NamedTuple):
 class StepOutcome(NamedTuple):
     """What one Newton step produced, what it cost, and how it ended.
 
-    A record rather than a widening tuple: these nine values travel together through every stepper and
-    both consumers, and a positional 9-tuple is where a caller silently mis-unpacks one for another.
+    A record rather than a widening tuple: these ten values travel together through every stepper and
+    both consumers, and a positional 10-tuple is where a caller silently mis-unpacks one for another.
 
     Attributes
     ----------
@@ -145,6 +146,11 @@ class StepOutcome(NamedTuple):
         ``G`` at the anchor is the steady residual; for a single-step strategy it is the accepted
         attempt's. ``nan`` when no full-length trial was evaluated (see
         :attr:`LineSearchStep.full_step_norm`).
+    refresh_due : jnp.ndarray
+        Whether one of the step's solves cost enough that its frozen preconditioner should be re-fitted
+        before the next attempt runs. A dual-time step with ``refresh_on_cycles`` set stops its inner loop
+        there, keeping the iterate it reached, and the march re-fits at that iterate before stepping on
+        (see :func:`~aquaflux.solve.newton_march`). ``False`` for a step that never asks.
     """
 
     phi: jnp.ndarray
@@ -156,6 +162,7 @@ class StepOutcome(NamedTuple):
     max_inner_cycles: jnp.ndarray
     binding_limit: jnp.ndarray
     full_step_ratio: jnp.ndarray
+    refresh_due: jnp.ndarray
 
 
 StepFn = Callable[
@@ -306,6 +313,24 @@ class AbortsInnerLoop(Protocol):
             The strategy carrying the thresholds.
         """
         ...
+
+
+@runtime_checkable
+class StopsForRefresh(Protocol):
+    """A strategy that can end a step early to have its preconditioner re-fitted before the next one.
+
+    Such a step reports :attr:`StepOutcome.refresh_due` and keeps the iterate it reached; the re-fit
+    itself is the march's (``newton_march(refresh_preconditioner=...)``). The march asks for this so it
+    can refuse, before the first step, a strategy configured to stop for a re-fit that nothing would
+    then take -- such a march would end every hard step early and never refresh.
+
+    Attributes
+    ----------
+    refresh_on_cycles : int or None
+        The single-solve cost, in restart cycles, at which the step stops for a re-fit; ``None`` never.
+    """
+
+    refresh_on_cycles: int | None
 
 
 @runtime_checkable

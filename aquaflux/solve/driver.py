@@ -65,7 +65,7 @@ class ContinuationSource(Protocol):
         The per-step refresh hook this source brings with it, or ``None``.
     """
 
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
+    refresh_preconditioner: Callable[..., None] | None
 
     def build(self, state: jnp.ndarray) -> NewtonStrategy:
         """The strategy to start the march with, frozen at ``state``."""
@@ -118,7 +118,7 @@ class SessionSource:
     march: dict
 
     @property
-    def refresh_preconditioner(self) -> Callable[[NewtonStrategy, jnp.ndarray], None] | None:
+    def refresh_preconditioner(self) -> Callable[..., None] | None:
         return self.session.refresh_preconditioner
 
     def build(self, state: jnp.ndarray) -> NewtonStrategy:

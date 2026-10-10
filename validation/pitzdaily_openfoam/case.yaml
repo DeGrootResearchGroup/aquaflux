@@ -78,8 +78,9 @@ solver:
     probe: {kind: JacobianProbeSpec, stencil_reach: 3}
     refit_beta_floor: 0.05
   # Each outer step a dual-time inner loop of up to five Newton iterations, stopping at a hundredth of
-  # the step's starting residual; the preconditioner is refitted mid-step once a solve runs 2 restart
-  # cycles (counted as cycles run, the residual stop's count; 2 measured fastest of 2-4 under it).
+  # the step's starting residual; a solve that runs 2 restart cycles ends the step, and the
+  # preconditioner is refitted before the next (counted as cycles run, the residual stop's count; 2
+  # measured fastest of 2-4 under it, when the refit still happened mid-step).
   dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 2}
   # An inexact-Newton stop on each inner solve, tested every iteration on the residual alone (about half
   # the march's time against the default stop, which also demands a settled solution and tests only at

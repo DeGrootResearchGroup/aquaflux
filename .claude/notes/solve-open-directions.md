@@ -158,6 +158,10 @@ Linux, one run each (this case's march is deterministic in its counts):
 | wall | 1306 s | **693 s** |
 | final `|R|` / `x_r/h` | 7.818e-06 / 8.0686 | 7.700e-06 / 8.0686 |
 
+⚠️ Every refresh count in this entry was taken while a cost re-fit still ran MID-STEP; since #290 a solve
+that reaches `refresh_on_cycles` ends its step and the re-fit precedes the next one, so the step counts
+above are not comparable with a march on the current tree.
+
 The control reproduces the shipped march exactly (31 / 99 / 203). The looser corrections cost about one
 inner Newton iteration per step and the cheaper solves pay for it twice over. ⚠️ **Not a pure stop
 effect:** the residual stop reports cycles run where `lineax` reports cycles run minus one, so the
