@@ -1529,19 +1529,15 @@ def _coupled_shift_policy(
     # diagonal and supplies its own inverse, so the block built here would never be applied.
     #
     # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
-    # mass-matrix scaling this used to hardcode. That scaling was chosen believing it necessary for a
-    # convection-dominated coupled solve; it is not, at the scale this block-diagonal preconditioner is
-    # actually used at -- swapping it for the default reaches the identical converged fixed point on
-    # every fixture this path is exercised by (residual and fields agree to machine precision). Where a
-    # Schur choice genuinely matters (a real, large, separated case), this whole block-diagonal
-    # preconditioner is dominated by the field-split / monolithic-AMG preconditioners the flagship
-    # validation cases use instead (`MaterializedJacobian`), so tuning the Schur here buys nothing
-    # a real case would ever see. Nor is the mass-matrix family a stronger option set aside: measured in
-    # the field-split leading-inverse role on a flagship-scale coupled Jacobian, even its best pairing
-    # (MSIMPLER: `schur_scaling="msimple", composition="simpler"`) took more outer Krylov cycles than the
-    # shipped SIMPLE-smoothed hierarchical inverse, and each of its cycles costs more (two Schur solves
-    # per application against one). It remains available (`BlockDiagonal(schur_scaling="msimple")`, or
-    # directly through `BlockPreconditioner`) for the one regime it is not
+    # mass-matrix scaling this used to hardcode, which is not needed at the scale this preconditioner is
+    # used at: the default reaches the identical fixed point on every fixture that exercises this path.
+    # Where a Schur choice matters (a large, separated case) this block-diagonal preconditioner is
+    # dominated by the `MaterializedJacobian` ones the flagship validation cases use. Nor is the mass-
+    # matrix family a stronger option set aside: as the field-split leading inverse on a flagship-scale
+    # coupled Jacobian, even its best pairing (MSIMPLER: `schur_scaling="msimple", composition=
+    # "simpler"`) took more outer Krylov cycles than the shipped SIMPLE-smoothed hierarchical inverse,
+    # at a higher cost per cycle (two Schur solves per application against one). It remains available
+    # (`BlockDiagonal(schur_scaling="msimple")`, or `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
     block = (
