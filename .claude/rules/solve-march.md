@@ -1021,7 +1021,7 @@ Pinned by `tests/unit/test_march_history.py`.
     **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
     outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
     compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
-    `_beta_tracking_refresh` skeleton: `lu_beta_tracking_refresh` re-factors the complete LU at the current
+    `_beta_tracking_refresh` skeleton (now `solve.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
     `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
     `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
     because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the

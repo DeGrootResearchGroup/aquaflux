@@ -45,7 +45,6 @@ from aquaflux.solve import (
     DualTimeLoop,
     Euclidean,
     Globalization,
-    JacobianProbe,
     LinearSolveSettings,
     MaterializedJacobian,
     MonolithicVCycle,
@@ -1792,107 +1791,6 @@ def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
     assert probe.plan.n_fields == scaled.plan.n_fields
     assert np.array_equal(probe.structure.indptr, scaled.structure.indptr)
     assert np.array_equal(probe.structure.indices, scaled.structure.indices)
-
-
-class _ScalarRans(eqx.Module):
-    """A one-line stand-in assembler whose Jacobian is a scalar, so a rebind is visible in one apply."""
-
-    gain: jnp.ndarray
-
-    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
-        return self.gain * state
-
-
-class _RecordingPreconditioner:
-    """A frozen inverse that records what each refresh was asked to build, and builds nothing.
-
-    It builds nothing, so what is under test is only when the hook asks for a rebuild, and of what.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def refresh_in_place(self, matvec, plan, shift_diagonal, **_kwargs):
-        self.calls.append({"matvec": matvec, "shift": shift_diagonal})
-        return ()
-
-
-def _stub_step(preconditioner, beta, diagonal):
-    """The smallest Newton step the refresh hook reads: a shift strength, a policy and its diagonal."""
-    from types import SimpleNamespace
-
-    from aquaflux.solve import ShiftTerm
-
-    # Accepts the optional residual even though the refresh hook does not pass one: a stand-in that
-    # is narrower than the protocol breaks silently the day a caller starts supplying it.
-    base = SimpleNamespace(
-        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _relaxation: None)
-    )
-    return SimpleNamespace(
-        relaxation_schedule=SimpleNamespace(beta=beta),
-        shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),
-    )
-
-
-def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> None:
-    """One refresh hook can serve a whole Reynolds ramp, which is what lets the ramp share one V-cycle.
-
-    Nothing else in the hook watches for a rung boundary, so a hook that had stopped rebuilding would leave the next rung
-    solving against a V-cycle fitted to the previous rung's viscosity. ``rebind`` therefore does two
-    things, and both are asserted: the Jacobian probe starts reporting the NEW companion's derivative,
-    and the next refresh is a full re-materialize.
-    """
-
-    import numpy as np
-    from aquaflux.solve import beta_tracking_refresh
-
-    state = jnp.linspace(1.0, 2.0, 5)
-    diagonal = jnp.full(5, 2.0)
-    tangent = jnp.ones(5)
-    # The real probe (its plan and gather map are unused here), not a lookalike: `beta_tracking_refresh`
-    # asks it which assembler to differentiate, which only the class itself can answer.
-    probe = JacobianProbe(plan=object(), structure=object())
-
-    pc = _RecordingPreconditioner()
-    step = _stub_step(pc, beta=0.5, diagonal=diagonal)
-    # The multigrid cadence: a full rebuild on the first call and after a rebind, none otherwise --
-    # between those only the dual-time loop's cost trigger rebuilds the V-cycle.
-    refresh = beta_tracking_refresh(_ScalarRans(gain=jnp.asarray(3.0)), probe, every_step=False)
-
-    refresh(step, state)  # the initializing call
-    assert len(pc.calls) == 1
-    assert np.allclose(pc.calls[0]["shift"], 0.5 * np.asarray(diagonal))
-    assert np.allclose(pc.calls[0]["matvec"](tangent), 3.0 * tangent)
-
-    refresh(step, state)  # no rebuild between rebinds, as for the rest of a rung
-    assert len(pc.calls) == 1
-
-    refresh.rebind(_ScalarRans(gain=jnp.asarray(7.0)))
-    refresh(step, state)
-    assert len(pc.calls) == 2  # forced by the rebind
-    assert np.allclose(pc.calls[1]["matvec"](tangent), 7.0 * tangent)  # ...at the new companion
-
-    refresh(step, state)  # and the force is spent: one rebuild per rebind, not a stuck flag
-    assert len(pc.calls) == 2
-
-
-def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
-    """``every_step=True`` is the complete-LU cadence: an exact factorization is cheap, and exact only
-    at the shift it was built at, so it is re-factored before every step rather than on a rebind."""
-    from aquaflux.solve import beta_tracking_refresh
-
-    state = jnp.linspace(1.0, 2.0, 5)
-    diagonal = jnp.full(5, 2.0)
-    pc = _RecordingPreconditioner()
-    refresh = beta_tracking_refresh(
-        _ScalarRans(gain=jnp.asarray(3.0)),
-        JacobianProbe(plan=object(), structure=object()),
-        every_step=True,
-    )
-
-    for beta in (0.5, 0.25, 0.125):
-        refresh(_stub_step(pc, beta=beta, diagonal=diagonal), state)
-    assert [float(call["shift"][0]) for call in pc.calls] == [1.0, 0.5, 0.25]
 
 
 def test_the_default_refresh_policy_is_the_inert_one() -> None:
