@@ -117,8 +117,8 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    AmgVCycle,
-    MonolithicAmgPreconditioner,
+    MonolithicVCycleInverse,
+    MonolithicVCyclePreconditioner,
     block_stencil_gather_map,
     cell_major_permutation,  # noqa: E402
 )
@@ -275,9 +275,9 @@ def _assemble_library(jacobian: sp.csr_matrix, shift: np.ndarray, n_fields: int)
     library, and every conclusion drawn from them is about the wrong thing. The fingerprints are what
     settle it, because they compare the arms' **values** rather than only their patterns.
     """
-    from aquaflux.solve import MonolithicAmgPreconditioner, equilibrate_cell_major
+    from aquaflux.solve import MonolithicVCyclePreconditioner, equilibrate_cell_major
 
-    return equilibrate_cell_major(MonolithicAmgPreconditioner._shifted(jacobian, shift), n_fields)
+    return equilibrate_cell_major(MonolithicVCyclePreconditioner._shifted(jacobian, shift), n_fields)
 
 
 SHIFTS = {"prune": _shift_pruning, "preserve": _shift_preserving}
@@ -472,8 +472,8 @@ def _run(label, cell_major, scale, perm, n_fields, coupled, state, rhs, op_shift
     preconditioner = None
     try:
         started = time.time()
-        preconditioner = MonolithicAmgPreconditioner(
-            AmgVCycle(
+        preconditioner = MonolithicVCyclePreconditioner(
+            MonolithicVCycleInverse(
                 cell_major,
                 scale,
                 perm,
@@ -484,8 +484,8 @@ def _run(label, cell_major, scale, perm, n_fields, coupled, state, rhs, op_shift
             )
         )
         print(
-            f"     hierarchy: {preconditioner.factors.levels} levels, "
-            f"{preconditioner.factors.coarse_size} coarse equations",
+            f"     hierarchy: {preconditioner.inverse.levels} levels, "
+            f"{preconditioner.inverse.coarse_size} coarse equations",
             flush=True,
         )
         return run_arm(
@@ -496,7 +496,7 @@ def _run(label, cell_major, scale, perm, n_fields, coupled, state, rhs, op_shift
         return None
     finally:
         if preconditioner is not None:
-            preconditioner.factors.destroy()
+            preconditioner.inverse.destroy()
         del preconditioner
         gc.collect()
 

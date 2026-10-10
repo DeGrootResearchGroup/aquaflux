@@ -1,6 +1,6 @@
 """The block-triangular field split as a **traced** map, so a bundle of traced blocks stays on device.
 
-:class:`~aquaflux.solve.BlockTriangularFieldSplit` composes its two block inverses in ``numpy`` on the
+:class:`~aquaflux.solve.FieldSplitInverse` composes its two block inverses in ``numpy`` on the
 host, and is reached from the jitted Krylov solve through a :func:`jax.pure_callback`. That is the right
 shape when a block inverse is a host factorization (an incomplete or complete LU), because the work
 itself is on the host and the vector has to travel anyway.
@@ -54,7 +54,7 @@ __all__ = ["TracedFieldSplit", "traced_field_split"]
 class TracedFieldSplit(eqx.Module):
     """A block-triangular approximate inverse over a two-group field partition, applied on device.
 
-    The traced counterpart of :class:`~aquaflux.solve.BlockTriangularFieldSplit`, with the same
+    The traced counterpart of :class:`~aquaflux.solve.FieldSplitInverse`, with the same
     approximation and the same ordering convention: one group is solved first, its effect on the other
     group's equations is subtracted through the retained coupling block, and the other group is solved
     against that corrected right-hand side. The discarded triangle is the same one.
@@ -103,7 +103,7 @@ class TracedFieldSplit(eqx.Module):
         Notes
         -----
         There is deliberately **no** ``transpose`` argument, unlike
-        :meth:`~aquaflux.solve.BlockTriangularFieldSplit.apply`. That one needs it because it is
+        :meth:`~aquaflux.solve.FieldSplitInverse.apply`. That one needs it because it is
         ``numpy``: transposing a block-triangular inverse means reversing the solve order, transposing
         the coupling, *and* transposing each block inverse, and on the host each of those has to be
         arranged by hand. This map is traced and linear, so :func:`jax.linear_transpose` produces
@@ -159,7 +159,7 @@ def traced_field_split(
     leading, trailing : OffersTracedCycle
         The two block inverses. Each must offer a **traced** cycle through ``traced_cycle()``, which
         :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` and
-        :class:`~aquaflux.solve.field_split.AirBlockInverse` both do. The leading group is solved first,
+        :class:`~aquaflux.solve.field_split.AirReductionInverse` both do. The leading group is solved first,
         retaining the trailing-by-leading coupling, as in the host split.
 
     Returns
@@ -176,7 +176,7 @@ def traced_field_split(
         if not isinstance(inverse, OffersTracedCycle):
             raise TypeError(
                 f"the {name} inverse {type(inverse).__name__} offers no traced cycle, so this bundle "
-                "cannot be composed on device; use BlockTriangularFieldSplit for a host inverse."
+                "cannot be composed on device; use FieldSplitInverse for a host inverse."
             )
     _, _, trailing_leading, _ = groups.blocks(matrix)
     return TracedFieldSplit(

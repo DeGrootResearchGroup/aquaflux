@@ -64,9 +64,9 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
-    AmgVCycle,
+    MonolithicVCycleInverse,
     ColumnProbePlan,
-    MonolithicAmgPreconditioner,
+    MonolithicVCyclePreconditioner,
     block_stencil_gather_map,
     relative_residual_gmres,
     restart_cycles,  # noqa: E402
@@ -279,11 +279,11 @@ def materialize(coupled, state, plan, structure, n_fields, pc_shift):
     bit-identical result. Sharing the assembly also makes it impossible for two arms to be compared on
     operators that differ for any reason other than the options under test.
 
-    Returns the ``(matrix, scale, perm)`` triple :class:`AmgVCycle` takes directly, skipping
-    ``build_amg_vcycle``'s internal equilibration. The matrix aliases the assembler's reused buffer,
+    Returns the ``(matrix, scale, perm)`` triple :class:`MonolithicVCycleInverse` takes directly, skipping
+    ``monolithic_vcycle_inverse``'s internal equilibration. The matrix aliases the assembler's reused buffer,
     which is safe here because the V-cycle copies the arrays it keeps.
     """
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         plan,
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
@@ -299,8 +299,8 @@ def arm(label, coupled, state, rhs, op_shift, assembled, n_fields, options, solv
     """Build one V-cycle and solve the REAL system with it; report cycles and the TRUE residual."""
     cell_major, scale, perm = assembled
     t0 = time.time()
-    pc = MonolithicAmgPreconditioner(
-        AmgVCycle(
+    pc = MonolithicVCyclePreconditioner(
+        MonolithicVCycleInverse(
             cell_major,
             scale,
             perm,
@@ -324,7 +324,7 @@ def arm(label, coupled, state, rhs, op_shift, assembled, n_fields, options, solv
     # The offset-corrected count, so a cycle here means what a cycle means in the march's log.
     cycles = restart_cycles(int(raw))
     print(
-        f"  {label:<28} levels {pc.factors.levels} coarse {pc.factors.coarse_size:>5}  "
+        f"  {label:<28} levels {pc.inverse.levels} coarse {pc.inverse.coarse_size:>5}  "
         f"build {build_s:>5.0f}s  cycles {cycles:>4}  "
         f"TRUE rel {true:.3e}  solve {time.time() - t1:>4.0f}s",
         flush=True,

@@ -775,7 +775,7 @@ def materialize_block_jacobian(
         three-dimensional coupled mesh), and handing them to the multigrid's incomplete-LU level smoother
         stops the zero-shift operator converging. They are pruned at the boundary where the operator
         reaches the factorization
-        (:meth:`~aquaflux.solve.amg_preconditioner.AmgVCycle._live`) rather than here, so this path stays
+        (:meth:`~aquaflux.solve.amg_preconditioner.MonolithicVCycleInverse._live`) rather than here, so this path stays
         fixed-pattern; a consumer that factors the matrix *without* going through that boundary must prune
         it first.
 

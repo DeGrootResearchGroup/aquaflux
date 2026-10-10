@@ -48,7 +48,7 @@ from tests.integration.test_coupled_lu import PRECONDITIONER, _channel
 #:
 #: The V-cycle's level smoother is a stationary incomplete-LU sweep, and an incomplete factorization
 #: takes its fill pattern from the entries that are **stored**, not from the ones that are nonzero --
-#: which is why ``AmgVCycle._live`` drops exactly-zero entries before handing the operator over.
+#: which is why ``MonolithicVCycleInverse._live`` drops exactly-zero entries before handing the operator over.
 #:
 #: This channel starts from ``hybrid_initialize``, whose wall-normal velocity is zero to rounding, so
 #: the wall-normal face mass fluxes are ~0 and the first-order upwind switch on the ``omega`` transport

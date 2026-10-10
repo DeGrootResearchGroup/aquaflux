@@ -15,11 +15,11 @@ import scipy.sparse as sp
 pytest.importorskip("petsc4py")
 
 from aquaflux.solve import (
-    AmgVCycle,
     MaterializedJacobianPreconditioner,
-    MonolithicAmgPreconditioner,
-    build_amg_vcycle,
+    MonolithicVCycleInverse,
+    MonolithicVCyclePreconditioner,
     equilibrate_cell_major,
+    monolithic_vcycle_inverse,
 )
 
 
@@ -48,10 +48,10 @@ def test_equilibrate_cell_major_balances_the_diagonal_and_reorders() -> None:
     assert np.allclose(scale, 1.0 / np.sqrt(diag))
 
 
-def test_amg_vcycle_reduces_the_residual() -> None:
+def test_monolithic_vcycle_inverse_reduces_the_residual() -> None:
     """One V-cycle is a genuine approximate inverse: it contracts the residual on the model Poisson."""
     a = _laplacian_2d(40)
-    vcycle = build_amg_vcycle(a, n_fields=1)
+    vcycle = monolithic_vcycle_inverse(a, n_fields=1)
     rng = np.random.default_rng(0)
     b = rng.standard_normal(a.shape[0])
     x = vcycle.apply(b)
@@ -65,7 +65,7 @@ def test_smoother_sweeps_is_forwarded_to_the_level_smoother() -> None:
     More stationary Richardson-ILU sweeps per level visit contract the residual further, so on the same
     2D model Poisson (``n=40``, all other options at their defaults: ILU(1) fill, plain aggregation, no
     coarse-equation limit), one sweep measures 0.0507 against four sweeps' 0.0196 -- comfortably
-    separated. Hardcoding ``mg_levels_ksp_max_it`` to a fixed value inside :meth:`AmgVCycle._configure`
+    separated. Hardcoding ``mg_levels_ksp_max_it`` to a fixed value inside :meth:`MonolithicVCycleInverse._configure`
     (ignoring ``self._smoother_sweeps``) would build the identical V-cycle at both settings and this
     ratio would not move, which is what the assertion below actually checks -- not just that each build
     is finite.
@@ -74,7 +74,7 @@ def test_smoother_sweeps_is_forwarded_to_the_level_smoother() -> None:
     b = np.random.default_rng(0).standard_normal(a.shape[0])
 
     def ratio_at(smoother_sweeps: int) -> float:
-        vcycle = build_amg_vcycle(a, n_fields=1, smoother_sweeps=smoother_sweeps)
+        vcycle = monolithic_vcycle_inverse(a, n_fields=1, smoother_sweeps=smoother_sweeps)
         x = vcycle.apply(b)
         return np.linalg.norm(a @ x - b) / np.linalg.norm(b)
 
@@ -114,7 +114,7 @@ def test_live_drops_stored_zeros_without_changing_the_operator() -> None:
     padded = _with_stored_zeros(a)
     assert (padded.data == 0.0).sum() > 0, "fixture stores no zeros, so it tests nothing"
 
-    live = AmgVCycle._live(padded)
+    live = MonolithicVCycleInverse._live(padded)
 
     assert live.nnz < padded.nnz  # positions really were removed
     assert (live.data == 0.0).sum() == 0
@@ -145,7 +145,7 @@ def test_the_vcycle_is_built_on_the_live_pattern_not_the_stored_one() -> None:
     # assert nothing, while a pattern-preserving one hands them straight through. This is the boundary
     # that has to stop them either way.
     identity_scale, identity_perm = np.ones(padded.shape[0]), np.arange(padded.shape[0])
-    vcycle = AmgVCycle(
+    vcycle = MonolithicVCycleInverse(
         padded, identity_scale, identity_perm, 1, smoother_fill_levels=0, smoother_sweeps=2
     )
 
@@ -161,7 +161,7 @@ def test_the_vcycle_is_built_on_the_live_pattern_not_the_stored_one() -> None:
 def test_a_refactor_does_not_reintroduce_stored_zeros() -> None:
     """The refresh prunes on the same terms as the build, or the first refresh undoes the guard."""
     a = _laplacian_2d(12)
-    vcycle = build_amg_vcycle(a, n_fields=1)
+    vcycle = monolithic_vcycle_inverse(a, n_fields=1)
     padded = _with_stored_zeros((2.5 * a).tocsr())
     assert (padded.data == 0.0).sum() > 0, "fixture stores no zeros, so it tests nothing"
     identity_scale, identity_perm = np.ones(padded.shape[0]), np.arange(padded.shape[0])
@@ -174,10 +174,10 @@ def test_a_refactor_does_not_reintroduce_stored_zeros() -> None:
     assert np.linalg.norm(padded @ vcycle.apply(b) - b) / np.linalg.norm(b) < 0.7
 
 
-def test_amg_vcycle_transpose_is_consistent() -> None:
+def test_monolithic_vcycle_inverse_transpose_is_consistent() -> None:
     """``M^T`` matches ``M`` acting on the other side: ``<y, M x> == <M^T y, x>``."""
     a = _laplacian_2d(30)
-    vcycle = build_amg_vcycle(a, n_fields=1)
+    vcycle = monolithic_vcycle_inverse(a, n_fields=1)
     rng = np.random.default_rng(1)
     x = rng.standard_normal(a.shape[0])
     y = rng.standard_normal(a.shape[0])
@@ -186,10 +186,10 @@ def test_amg_vcycle_transpose_is_consistent() -> None:
     assert abs(left - right) <= 1e-9 * (abs(left) + abs(right) + 1e-30)
 
 
-def test_amg_vcycle_refactor_rebuilds_at_a_new_matrix() -> None:
+def test_monolithic_vcycle_inverse_refactor_rebuilds_at_a_new_matrix() -> None:
     """``refactor`` rebuilds the V-cycle at a new (here rescaled) matrix and still preconditions it."""
     a = _laplacian_2d(30)
-    vcycle = build_amg_vcycle(a, n_fields=1)
+    vcycle = monolithic_vcycle_inverse(a, n_fields=1)
     scaled = (2.5 * a).tocsr()
     cell_major, scale, perm = equilibrate_cell_major(scaled, 1)
     vcycle.refactor(cell_major, scale, perm)
@@ -205,28 +205,28 @@ def test_monolithic_and_field_split_share_the_materialized_jacobian_base() -> No
     Written structurally, on the same reasoning as the hierarchy-inverse sibling test in
     ``test_field_split.py``: the failure this guards against is someone re-adding a private
     ``_materialize_jacobian``/``_shifted``/``destroy`` to one class, which would silently take it off
-    the shared path and let the two drift again. ``FieldSplitAmgPreconditioner`` is imported lazily to
+    the shared path and let the two drift again. ``FieldSplitPreconditioner`` is imported lazily to
     avoid a module-level dependency on ``field_split.py`` from this file.
     """
-    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
+    from aquaflux.solve.field_split import FieldSplitPreconditioner
 
-    for cls in (MonolithicAmgPreconditioner, FieldSplitAmgPreconditioner):
+    for cls in (MonolithicVCyclePreconditioner, FieldSplitPreconditioner):
         assert issubclass(cls, MaterializedJacobianPreconditioner)
         for shared in ("_materialize_jacobian", "_shifted", "destroy"):
             assert shared not in vars(cls), (
                 f"{cls.__name__} overrides {shared!r}, which the shared base owns"
             )
-    # And MonolithicAmgPreconditioner is no longer FieldSplitAmgPreconditioner's base -- the whole
+    # And MonolithicVCyclePreconditioner is no longer FieldSplitPreconditioner's base -- the whole
     # point of the split, since the union of the two used to force dead parameters onto the split.
-    assert not issubclass(FieldSplitAmgPreconditioner, MonolithicAmgPreconditioner)
+    assert not issubclass(FieldSplitPreconditioner, MonolithicVCyclePreconditioner)
 
 
 def test_monolithic_refresh_in_place_no_longer_takes_the_dead_smoother_parameters() -> None:
     """``smoother_fill_levels``/``smoother_sweeps`` were declared and immediately ``del``-eted -- the
-    smoother is fixed at :meth:`MonolithicAmgPreconditioner.build`, so a refresh cannot change it. They
+    smoother is fixed at :meth:`MonolithicVCyclePreconditioner.build`, so a refresh cannot change it. They
     are gone from the signature rather than merely unused, so passing either is now a ``TypeError``."""
-    vcycle = build_amg_vcycle(_laplacian_2d(10), n_fields=1)
-    pc = MonolithicAmgPreconditioner(vcycle)
+    vcycle = monolithic_vcycle_inverse(_laplacian_2d(10), n_fields=1)
+    pc = MonolithicVCyclePreconditioner(vcycle)
     with pytest.raises(TypeError):
         pc.refresh_in_place(
             lambda v: v, None, np.zeros(100), smoother_fill_levels=1, smoother_sweeps=2
@@ -245,7 +245,7 @@ def test_extra_options_reach_petsc_under_the_v_cycle_own_prefix() -> None:
     from petsc4py import PETSc
 
     matrix = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(240, 240), format="csr")
-    tuned = build_amg_vcycle(
+    tuned = monolithic_vcycle_inverse(
         matrix,
         1,
         smoother_fill_levels=0,
@@ -264,10 +264,10 @@ def test_extra_options_reach_petsc_under_the_v_cycle_own_prefix() -> None:
 def test_no_extra_options_is_the_shipped_configuration() -> None:
     """``None`` (the default) must leave the measured bundle exactly as it is."""
     matrix = sp.diags([-1.0, 2.0, -1.0], [-1, 0, 1], shape=(120, 120), format="csr")
-    plain = build_amg_vcycle(
+    plain = monolithic_vcycle_inverse(
         matrix, 1, smoother_fill_levels=0, smoother_sweeps=2, coarse_eq_limit=20
     )
-    explicit = build_amg_vcycle(
+    explicit = monolithic_vcycle_inverse(
         matrix, 1, smoother_fill_levels=0, smoother_sweeps=2, coarse_eq_limit=20, extra_options=None
     )
     rhs = np.ones(120)

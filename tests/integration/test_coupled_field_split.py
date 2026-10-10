@@ -29,12 +29,12 @@ from aquaflux.solve import (
     FieldSplit,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicAmgPreconditioner,
     MonolithicVCycle,
+    MonolithicVCyclePreconditioner,
     SimpleSmoothed,
-    build_amg_vcycle,
-    build_block_triangular_field_split,
+    field_split_inverse,
     jacobian_matvec,
+    monolithic_vcycle_inverse,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -53,13 +53,13 @@ def case():
     flow, k, omega = sst_initial_fields(momentum, turbulence)
     state = coupled.pack_state(flow, k, omega)
     n_fields = coupled.layout.n_fields
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         _coupled_jacobian_plan(coupled, 3),
     )
     groups = FieldGroups.split_before(coupled.layout, "k")
     # A shift keeps the cold operator away from the singular limit, as the march's own step does.
-    shifted = MonolithicAmgPreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
+    shifted = MonolithicVCyclePreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
     return {
         "coupled": coupled,
         "state": state,
@@ -86,7 +86,7 @@ def test_the_partition_matches_the_coupled_layout(case):
 
 def _split(shifted, groups):
     """The split with the traced inverses both flagship cases ship."""
-    return build_block_triangular_field_split(
+    return field_split_inverse(
         shifted,
         groups,
         leading_inverse=SimpleSmoothed(),
@@ -110,7 +110,7 @@ def _gmres_matvecs(shifted, preconditioner, b, *, rtol=1e-8):
         lambda v: operator @ v,
         jnp.asarray(b),
         relative_residual_gmres(rtol, restart=30, stagnation_iters=40, max_restarts=40),
-        preconditioner=MonolithicAmgPreconditioner(preconditioner).matvec(),
+        preconditioner=MonolithicVCyclePreconditioner(preconditioner).matvec(),
         throw=False,
     )
     true = float(jnp.linalg.norm(operator @ solution - jnp.asarray(b)) / jnp.linalg.norm(b))
@@ -155,11 +155,11 @@ def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
     """
     groups, shifted, n_fields = case["groups"], case["shifted"], case["n_fields"]
     split = _split(shifted, groups)
-    monolithic = build_amg_vcycle(shifted, n_fields, coarse_eq_limit=200)
+    monolithic = monolithic_vcycle_inverse(shifted, n_fields, coarse_eq_limit=200)
     rng = np.random.default_rng(3)
     b = jnp.asarray(rng.standard_normal(groups.n_dofs))
     for inverse in (split, monolithic):
-        applied = MonolithicAmgPreconditioner(inverse).matvec()(b)
+        applied = MonolithicVCyclePreconditioner(inverse).matvec()(b)
         assert applied.shape == b.shape
         assert bool(jnp.all(jnp.isfinite(applied)))
     split.destroy()
@@ -214,7 +214,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     returned a new object would silently keep preconditioning with the stale one -- and would still
     converge, just slower, which is exactly the kind of bug a march hides.
     """
-    from aquaflux.solve import FieldSplitAmgPreconditioner
+    from aquaflux.solve import FieldSplitPreconditioner
 
     groups = case["groups"]
     coupled, state = case["coupled"], case["state"]
@@ -224,7 +224,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         return jacobian_matvec(coupled, state, v)
 
     shift = np.full(groups.n_dofs, 0.5)
-    pc = FieldSplitAmgPreconditioner.build(
+    pc = FieldSplitPreconditioner.build(
         matvec,
         plan,
         shift,
@@ -232,16 +232,16 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         leading_inverse=SimpleSmoothed(),
         trailing_inverse=JacobiSmoothed(),
     )
-    split_before = pc.factors
+    split_before = pc.inverse
     rng = np.random.default_rng(4)
     b = rng.standard_normal(groups.n_dofs)
-    before = pc.factors.apply(b).copy()
+    before = pc.inverse.apply(b).copy()
 
     phases = pc.refresh_in_place(matvec, plan, shift * 4.0)
 
-    assert pc.factors is split_before, "the refresh replaced the object instead of mutating it"
+    assert pc.inverse is split_before, "the refresh replaced the object instead of mutating it"
     assert [name for name, _ in phases] == ["probe", "assemble", "refactor"]
-    assert not np.allclose(before, pc.factors.apply(b)), (
+    assert not np.allclose(before, pc.inverse.apply(b)), (
         "a 4x shift change left the inverse unchanged"
     )
     pc.destroy()

@@ -148,7 +148,7 @@ def main():
     replay = MarchReplay()
     linear = replay.solver.linear_solve
     print(f"{replay.describe()}; arms float64, float32; repeats {REPEATS}", flush=True)
-    split = replay.preconditioner.factors
+    split = replay.preconditioner.inverse
     setting = {"dtype": jnp.float64, "seen": set()}
     split._leading = InPrecision(split._leading, setting)
     split._trailing = InPrecision(split._trailing, setting)

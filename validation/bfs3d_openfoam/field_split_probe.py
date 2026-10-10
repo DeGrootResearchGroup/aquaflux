@@ -93,9 +93,9 @@ import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    MonolithicVCyclePreconditioner,
     block_stencil_gather_map,
-    build_amg_vcycle,
+    monolithic_vcycle_inverse,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -313,7 +313,7 @@ def materialize(coupled, state, plan, structure, n_fields) -> sp.csr_matrix:
     several-hundred-probe coloured jvp for each of them would dominate the run.
     """
     started = time.time()
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         plan,
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),
@@ -330,8 +330,8 @@ def materialize(coupled, state, plan, structure, n_fields) -> sp.csr_matrix:
 
 def monolithic(shifted, groups, n_fields, smoother):
     """The shipped arrangement: one V-cycle over all six fields. The control."""
-    return MonolithicAmgPreconditioner(
-        build_amg_vcycle(
+    return MonolithicVCyclePreconditioner(
+        monolithic_vcycle_inverse(
             shifted,
             n_fields,
             smoother_fill_levels=compare.FILL_LEVELS,
@@ -415,7 +415,7 @@ def one_arm(label, build, shifted, groups, n_fields, coupled, state, rhs, op_shi
         return None
     finally:
         if preconditioner is not None:
-            preconditioner.factors.destroy()
+            preconditioner.inverse.destroy()
         del preconditioner
         gc.collect()
 
@@ -620,7 +620,7 @@ def main():
         if pc_beta > 0
         else np.zeros(groups.n_dofs)
     )
-    shifted = MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
+    shifted = MonolithicVCyclePreconditioner._shifted(jacobian, pc_shift)
     del jacobian
     gc.collect()
 

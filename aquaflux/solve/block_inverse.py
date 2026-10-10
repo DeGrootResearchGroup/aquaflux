@@ -1,6 +1,6 @@
 """Block inverses for a field split, described as values.
 
-A block-triangular field split (:func:`~aquaflux.solve.build_block_triangular_field_split`) fits one
+A block-triangular field split (:func:`~aquaflux.solve.field_split_inverse`) fits one
 inverse to each of its diagonal blocks through a factory ``(block, n_fields) -> inverse``. The classes
 here are those factories written as **frozen value objects**: each names the settings of one inverse
 family, compares by value, and builds the inverse when called with a block. That makes a preconditioner
@@ -25,9 +25,9 @@ from typing import ClassVar, Literal
 
 import scipy.sparse as sp
 
-from .field_split import AirBlockInverse, JacobiSmoothedInverse
+from .field_split import AirReductionInverse, JacobiSmoothedInverse
 from .hierarchy_inverse import HierarchyBlockInverse
-from .host_preconditioner import RefactorableFactors
+from .host_preconditioner import RefactorableInverse
 from .multigrid import build_air_hierarchy
 from .saddle_multigrid import SimpleSmoothedInverse
 from .settings_value import SettingsValue
@@ -63,11 +63,11 @@ class BlockInverse(SettingsValue, abc.ABC):
 
     def _build(
         self, block: sp.spmatrix, n_fields: int, report: Callable[[str], None] | None
-    ) -> RefactorableFactors:
+    ) -> RefactorableInverse:
         extra = {} if report is None else {"report": report}
         return self._inverse_class()(block, n_fields, **self.settings(), **extra)
 
-    def __call__(self, block: sp.spmatrix, n_fields: int) -> RefactorableFactors:
+    def __call__(self, block: sp.spmatrix, n_fields: int) -> RefactorableInverse:
         """Build the inverse for ``block``, the ``(block, n_fields) -> inverse`` a field split calls.
 
         Parameters
@@ -79,14 +79,14 @@ class BlockInverse(SettingsValue, abc.ABC):
 
         Returns
         -------
-        RefactorableFactors
+        RefactorableInverse
             The inverse, re-fittable in place so that a march can refresh it.
         """
         return self._build(block, n_fields, None)
 
     def bound(
         self, *, report: Callable[[str], None] | None
-    ) -> Callable[[sp.spmatrix, int], RefactorableFactors]:
+    ) -> Callable[[sp.spmatrix, int], RefactorableInverse]:
         """The same factory with the inverse's build record sent to ``report``.
 
         Parameters
@@ -110,7 +110,7 @@ class BlockInverse(SettingsValue, abc.ABC):
                 "nothing to send to `report`."
             )
 
-        def build(block: sp.spmatrix, n_fields: int) -> RefactorableFactors:
+        def build(block: sp.spmatrix, n_fields: int) -> RefactorableInverse:
             return self._build(block, n_fields, report)
 
         return build
@@ -187,7 +187,7 @@ class JacobiSmoothed(BlockInverse):
 
 @dataclasses.dataclass(frozen=True)
 class AirReduction(BlockInverse):
-    """An :class:`~aquaflux.solve.field_split.AirBlockInverse`: a reduction-based (lAIR) hierarchy.
+    """An :class:`~aquaflux.solve.field_split.AirReductionInverse`: a reduction-based (lAIR) hierarchy.
 
     ``cycles``, ``f_iters``, ``c_iters`` and ``omega`` are the class's own keywords; the rest are the
     settings it forwards to :func:`~aquaflux.solve.build_air_hierarchy`. The block size is not a setting:
@@ -207,4 +207,4 @@ class AirReduction(BlockInverse):
     max_coarse: int | None = None
     max_levels: int | None = None
 
-    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (AirBlockInverse, build_air_hierarchy)
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (AirReductionInverse, build_air_hierarchy)

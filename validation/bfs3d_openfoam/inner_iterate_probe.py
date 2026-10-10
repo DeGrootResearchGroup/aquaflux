@@ -66,10 +66,10 @@ import compare  # noqa: E402
 import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402  # noqa: E402
-    AmgVCycle,
+    MonolithicVCycleInverse,
     DualTimeLoop,
     Globalization,
-    MonolithicAmgPreconditioner,
+    MonolithicVCyclePreconditioner,
     block_stencil_gather_map,
     relative_residual_gmres,
     restart_cycles,
@@ -157,7 +157,7 @@ def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields)
     op_shift = frozen_shift_diagonal(base, beta, state)
     pc_base = _coupled_shift_policy(coupled, pc_state, ScalarTwoLevel())
     pc_shift = frozen_shift_diagonal(pc_base, max(beta, FLOOR), pc_state)
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, pc_state, v),
         plan,
         lambda seeds: batched_jacobian_matvec(coupled, pc_state, seeds),
@@ -168,8 +168,8 @@ def solve_with(label, coupled, state, pc_state, beta, plan, structure, n_fields)
     cell_major, scale, perm = ShiftedCellMajorOperator(indptr, indices, n_fields).assemble(
         jacobian.data, pc_shift
     )
-    pc = MonolithicAmgPreconditioner(
-        AmgVCycle(
+    pc = MonolithicVCyclePreconditioner(
+        MonolithicVCycleInverse(
             cell_major,
             scale,
             perm,
