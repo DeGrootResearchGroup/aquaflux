@@ -53,6 +53,7 @@ from .amg_preconditioner import MaterializedJacobianPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import HostFactors, release, require_refactorable
 from .multigrid import (
+    AirHierarchy,
     SmoothedHierarchy,
     air_multigrid_solve,
     build_air_hierarchy,
@@ -60,6 +61,7 @@ from .multigrid import (
     refresh_air_hierarchy,
 )
 from .state import FieldLayout
+from .traced_cycle import TracedCycle
 
 __all__ = [
     "BlockTriangularFieldSplit",
@@ -710,6 +712,37 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
         return _jacobi_smoothed_cycle
 
 
+@eqx.filter_jit
+def _air_cycle(hierarchy: AirHierarchy, b: jnp.ndarray, settings: _AirStep) -> jnp.ndarray:
+    """A fixed number of lAIR V-cycles. Module-level, with the hierarchy an argument, so it is compiled
+    once per shape and settings and a refresh that holds the shapes reuses it."""
+    return air_multigrid_solve(
+        hierarchy,
+        b,
+        cycles=settings.cycles,
+        f_iters=settings.f_iters,
+        c_iters=settings.c_iters,
+        omega=settings.omega,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _AirStep:
+    """The static half of an lAIR inverse's :class:`~aquaflux.solve.traced_cycle.TracedCycle`.
+
+    Plain numbers only, so it hashes and compares by value and two inverses at the same settings share
+    one compiled cycle.
+    """
+
+    cycles: int
+    f_iters: int
+    c_iters: int
+    omega: float
+
+    def __call__(self, hierarchy: AirHierarchy, b: jnp.ndarray) -> jnp.ndarray:
+        return _air_cycle(hierarchy, b, self)
+
+
 class AirBlockInverse:
     """A block inverse from a **reduction-based** (lAIR) hierarchy over the whole group.
 
@@ -764,11 +797,7 @@ class AirBlockInverse:
         # starts with an empty compilation cache and recompiles whether or not anything moved --
         # measured at ~4x on a comparable block, with the control being a sibling that already passed
         # its hierarchy in and moved 1.01x.
-        self._cycle = jax.jit(
-            lambda hierarchy, b: air_multigrid_solve(
-                hierarchy, b, cycles=cycles, f_iters=f_iters, c_iters=c_iters, omega=omega
-            )
-        )
+        self._step = _AirStep(cycles=cycles, f_iters=f_iters, c_iters=c_iters, omega=omega)
         self._hierarchy = build_air_hierarchy(
             sp.csr_matrix(block), block_size=self._block_size, **settings
         )
@@ -778,9 +807,20 @@ class AirBlockInverse:
         """Degrees of freedom in this block."""
         return self._n_dofs
 
-    def apply_traced(self, residual: jnp.ndarray) -> jnp.ndarray:
-        """Approximate ``A^-1 r`` as a traced map, so a composition of traced inverses stays on device."""
-        return self._cycle(self._hierarchy, residual)
+    def traced_cycle(self) -> TracedCycle:
+        """The cycle over the current hierarchy, its arrays as leaves rather than constants.
+
+        A fresh value per call; take a new one after :meth:`refactor_block`.
+
+        Returns
+        -------
+        TracedCycle
+            ``r -> M r`` with the lAIR hierarchy as its array state and the cycle settings as its step.
+        """
+        return TracedCycle(state=self._hierarchy, step=self._step)
+
+    def _solve(self, vector: jnp.ndarray) -> jnp.ndarray:
+        return self.traced_cycle()(vector)
 
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-derive the values on the frozen coarsening, IN PLACE — required to survive a refresh.
@@ -802,10 +842,10 @@ class AirBlockInverse:
         """
         vector = jnp.asarray(residual, dtype=jnp.float64)
         if not transpose:
-            return np.asarray(self.apply_traced(vector), dtype=np.float64)
+            return np.asarray(self._solve(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self.apply_traced, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

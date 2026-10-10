@@ -399,7 +399,7 @@ def test_both_hierarchy_inverses_share_one_refresh_implementation() -> None:
     """
     for cls in (JacobiSmoothedInverse, SimpleSmoothedInverse):
         assert issubclass(cls, HierarchyBlockInverse)
-        for shared in ("refactor_block", "apply", "destroy", "n_dofs", "_rebuild", "apply_traced"):
+        for shared in ("refactor_block", "apply", "destroy", "n_dofs", "_rebuild", "_solve"):
             assert shared not in vars(cls), (
                 f"{cls.__name__} overrides {shared!r}, which the shared base owns"
             )

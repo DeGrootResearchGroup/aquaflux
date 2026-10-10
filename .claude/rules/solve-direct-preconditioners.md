@@ -79,7 +79,7 @@ paths:
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
     would naturally drive, which is why the original went unseen.
   - **The capabilities only SOME inverses have are declared protocols, asked by `isinstance` (BUILT
-    2026-10-10, #281).** Beside `HostFactors`, `host_preconditioner.py` declares three, each
+    2026-10-10, #281).** Beside `HostFactors`, `host_preconditioner.py` declares two, each
     `runtime_checkable` and exported from `aquaflux.solve`:
     - **`RefactorableFactors(HostFactors)`**: `refactor_block(block)`, re-fit IN PLACE to the raw
       field-major operator of the built shape. **One spelling across the family**: the split's
@@ -96,10 +96,10 @@ paths:
       `MaterializedBlockPreconditioner` overrode it with a `getattr` probe. Every validation harness that
       calls `pc.destroy()` "to keep one preconditioner in memory at a time" was relying on a no-op.
       `LuFactors` and its backends gained `destroy` (the PETSc backend frees its `KSP`/`Mat`).
-    - **`TracedFactors(HostFactors)`**: `apply_traced(residual)`, the inverse as a traced linear map.
-      The private `_solve` on `HierarchyBlockInverse` and `AirBlockInverse` is renamed to it, and
-      `traced_field_split` checks `isinstance(_, TracedFactors)` and raises `TypeError` (was
-      `hasattr(_, "_solve")` and `AttributeError`).
+    - **The traced capability is NOT here**: it is `OffersTracedCycle` / `TracedCycle` in
+      `traced_cycle.py` (#665), which holds the hierarchy as array leaves. A `TracedFactors` /
+      `apply_traced` protocol briefly existed on this PR's branch and was dropped in its merge with
+      main; neither name exists.
     - `require_refactorable(factors, owner)` raises a `TypeError` naming the inverse; the split checks
       BOTH blocks before re-fitting either, so a refusal never leaves it half re-fitted. A split also
       refuses a non-`HostFactors` block at construction (`TypeError`) rather than at first apply.

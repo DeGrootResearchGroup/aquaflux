@@ -21,9 +21,9 @@ capability is not in :class:`HostFactors`, do not reach for it through ``self.fa
 subclass an explicit answer instead.
 
 **The capabilities only some inverses have are declared too, one protocol each.** Re-fitting in place to
-a new operator (:class:`RefactorableFactors`), releasing held resources (:class:`ReleasableFactors`) and
-applying the inverse as a traced map that stays on device (:class:`TracedFactors`) are each offered by
-some members of the family and not others. A consumer asks with ``isinstance`` against the protocol,
+a new operator (:class:`RefactorableFactors`) and releasing held resources (:class:`ReleasableFactors`)
+are each offered by some members of the family and not others; running as a traced cycle inside an outer
+trace is the third, declared beside its value type in :mod:`~aquaflux.solve.traced_cycle`. A consumer asks with ``isinstance`` against the protocol,
 never with ``getattr(inverse, name, default)``: the protocol is where the capability's signature is
 written down, so an inverse that offers it under another name or another signature is reported as not
 offering it, rather than being probed for and silently answered "no".
@@ -96,32 +96,6 @@ class ReleasableFactors(Protocol):
 
     def destroy(self) -> None:
         """Release the held resources. The object must not be used afterwards."""
-        ...
-
-
-@runtime_checkable
-class TracedFactors(HostFactors, Protocol):
-    """A frozen inverse that can also be applied as a traced map, so a vector need not leave the device.
-
-    The host ``apply`` marshals a ``numpy`` vector in and out; a composition of several inverses that are
-    all traced (a block-triangular split over two multigrid cycles, say) can instead stay on device
-    throughout by calling each one's traced form.
-    """
-
-    def apply_traced(self, residual: jnp.ndarray) -> jnp.ndarray:
-        """Apply ``M ~= A^-1`` to a traced vector, returning a traced vector.
-
-        Parameters
-        ----------
-        residual : jnp.ndarray
-            The right-hand side, shape ``(n_dofs,)``.
-
-        Returns
-        -------
-        jnp.ndarray
-            ``M residual``, shape ``(n_dofs,)``. Linear in ``residual``, so its transpose is available
-            from :func:`jax.linear_transpose`.
-        """
         ...
 
 

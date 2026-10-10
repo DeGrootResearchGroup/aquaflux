@@ -112,7 +112,6 @@ from .host_preconditioner import (
     HostPreconditioner,
     RefactorableFactors,
     ReleasableFactors,
-    TracedFactors,
 )
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
@@ -393,7 +392,6 @@ __all__ = [
     "StepReport",
     "SubLayout",
     "SwitchedEvolutionRelaxation",
-    "TracedFactors",
     "TransposedPreconditioner",
     "VelocityShiftParts",
     "air_multigrid_solve",

@@ -239,7 +239,7 @@ testability seam. Everything subsystem-specific moved out:
 | `solve-amg-multigrid.md` | `amg_preconditioner.py`, `multigrid.py`, `hierarchy_inverse.py` | The monolithic AMG coupled PC, the traced multigrid, faithful smoothed aggregation, and `multigrid.py`'s own binding decisions |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | The full dated investigation behind the flow block, including qualified/retracted findings |
-| `solve-field-split.md` | `field_split.py`, `traced_field_split.py` | The block-triangular field split (saddle plus two transported scalars) |
+| `solve-field-split.md` | `field_split.py`, `traced_field_split.py`, `traced_cycle.py` | The block-triangular field split (saddle plus two transported scalars) |
 | `solve-globalization.md` | `strategy.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search — current status only |
 | `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | The dated investigation behind the globalization architecture |
 | `solve-march.md` | `march.py`, `march_log.py`, `checkpoint.py` | The observed march: `newton_march`, triggers, controls, logging |

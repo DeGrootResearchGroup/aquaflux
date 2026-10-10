@@ -21,7 +21,6 @@ from aquaflux.solve import (
     MonolithicLuPreconditioner,
     RefactorableFactors,
     ReleasableFactors,
-    TracedFactors,
 )
 
 FAMILY = (
@@ -170,6 +169,7 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     from aquaflux.solve import AirReduction, JacobiSmoothed
     from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
     from aquaflux.solve.lu_preconditioner import factorize_lu
+    from aquaflux.solve.traced_cycle import OffersTracedCycle
 
     n_cells = 40
     chain = sp.diags(
@@ -189,14 +189,14 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     )
 
     expected = {
-        hierarchy: (RefactorableFactors, ReleasableFactors, TracedFactors),
-        reduction: (RefactorableFactors, ReleasableFactors, TracedFactors),
+        hierarchy: (RefactorableFactors, ReleasableFactors, OffersTracedCycle),
+        reduction: (RefactorableFactors, ReleasableFactors, OffersTracedCycle),
         lu: (RefactorableFactors, ReleasableFactors),
         split: (RefactorableFactors, ReleasableFactors),
         _Doubling(): (),
     }
     for inverse, has in expected.items():
-        for capability in (RefactorableFactors, ReleasableFactors, TracedFactors):
+        for capability in (RefactorableFactors, ReleasableFactors, OffersTracedCycle):
             assert isinstance(inverse, capability) == (capability in has), (
                 f"{type(inverse).__name__} {'lacks' if capability in has else 'claims'} "
                 f"{capability.__name__}"
