@@ -1,6 +1,8 @@
 ---
 paths:
   - "aquaflux/solve/field_split.py"
+  - "aquaflux/solve/traced_field_split.py"
+  - "aquaflux/solve/traced_cycle.py"
 ---
 
 # Rules — `aquaflux/solve/field_split.py` (the block-triangular field split)
@@ -66,16 +68,42 @@ callable, and a bound method carries the module into that key; this one holds ar
 deliberately unhashable, so it raises `TypeError: unhashable type: ArrayImpl` from deep inside
 `equinox`'s `__hash__`. `matvec()` returns a plain closure for this reason. Cost an hour the first time.
 
+**✅ THE HIERARCHIES ARE LEAVES, NOT CONSTANTS (2026-10-10, #290).** The prototype as first merged held
+`leading_cycle` / `trailing_cycle` as **static** bound methods (`inverse._solve`), and `_solve` reads
+`self._hierarchy` when traced — so inside any outer jit both hierarchies were closed over as compile-time
+constants and only `coupling` was a leaf (its own docstring claimed otherwise). An in-place `refactor_block`
+left the static key unchanged, so the outer cache hit and **applied the pre-refresh hierarchy with no error**.
+This was not a property of one refresh option: **rebuilding the split after a refresh (option 1 below) hit
+the cache and was just as stale** — measured on `main` at `abdda0d` (jax 0.10.2 CPU, the unit fixture,
+same-pattern operator with values scaled by U(0.5, 1.5)): one trace, and the jitted answer 1.94 (norm)
+away from the refreshed split's own eager answer. Now each inverse offers
+**`traced_cycle() -> TracedCycle`** (`solve/traced_cycle.py`): an `equinox.Module` whose `state` (the
+hierarchy, plus `extras` on `HierarchyBlockInverse`) is array leaves and whose `step` is static and
+compares by value (`_HierarchyStep(cycle, smoother)`, `_AirStep(cycles, f_iters, c_iters, omega)` over a
+module-level `_air_cycle`). The inverses' own eager `_solve` routes through the same object, so there is
+one path. `traced_field_split` checks `isinstance(inverse, OffersTracedCycle)` (a `runtime_checkable`
+protocol) and raises **`TypeError`** (was `AttributeError` on a `hasattr(_solve)` probe).
+Pinned by `test_a_split_rebuilt_after_a_refresh_reuses_the_compiled_solve_and_applies_the_refresh`
+(Jacobi and lAIR trailing; asserts ONE trace **and** the refreshed answer, against both the eager split
+and the host split — on a grid operator, because lAIR refuses the random fixture as densifying) and
+`test_both_hierarchies_ride_as_leaves_not_as_constants` (no array-sized jaxpr constants). Mutation-checked:
+re-introducing a value-equal step that reaches the hierarchy at trace time fails both; making `_HierarchyStep`
+compare by identity fails the trace count. ⚠️ `TracedCycle` / `OffersTracedCycle` are deliberately **not**
+in `solve.__all__`, like the rest of this unwired prototype — but `HierarchyBlockInverse.traced_cycle` is a
+public method on a published class, so export them when the split is wired.
+
 **What remains before it can carry a march** (the honest boundary of the prototype):
 
-1. `FieldSplitAmgPreconditioner` still builds the host split; nothing constructs this one.
-2. **The refresh shape is the real design question.** `HostPreconditioner` is deliberately *not* an
-   `equinox.Module` so it can be mutated in place while riding as a **static** field of the shift
-   policy — that is what keeps a mid-march refresh a compilation-cache hit. `TracedFieldSplit` is a
-   Module with traced leaves and must ride as a jit **argument** instead. These are different plumbing
-   shapes and the second is not a drop-in for the first.
-3. It reaches the block inverses through the private `_solve`. A declared traced-cycle contract is the
-   right seam — see `solve-refuted-directions.md`'s pointer to the duck-typing issue.
+1. `FieldSplitAmgPreconditioner` still builds the host split; nothing constructs this one. The wiring
+   target is now `MaterializedSession` (`coupled_amg_continuation` was deleted in #371).
+2. **The refresh shape is the real design question** — now a pure plumbing question, since the split can be
+   rebuilt after a refresh and reuse the compiled solve soundly. `HostPreconditioner` is deliberately *not*
+   an `equinox.Module` so it can be mutated in place while riding as a **static** field of the shift policy.
+   `TracedFieldSplit` must ride as a jit **argument** instead. ⚠️ **`matvec()` returns a closure over the
+   split, and a jit over that closure captures the split's arrays as constants again** — a new closure per
+   split is a new cache key, so that is a recompile per refresh rather than a stale answer, but it is the
+   shape option 1 must replace, not reuse.
+3. The protocol is the narrow form; #281's `FrozenInverse` contract is still the place for it to live.
 4. No GPU measurement exists.
 
 ## The field split — a saddle plus two transported scalars
