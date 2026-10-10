@@ -557,11 +557,12 @@ doing two jobs: it stopped the dual-time inner loop *and* escalated β. It is no
 **`abort_above_cycles`**, a cost guard only. `retry_reason` returns `"diverged" | "alpha" | "cycles"`,
 and `ESCALATING_REASONS = {"diverged", "alpha"}` — one home, read by both the march and the log — says
 which of them raise the shift. A `"cycles"` retry **redoes the step at the shift it already had**, on
-the factorization the dual-time loop's mid-step refresh has by then rebuilt.
+a re-fitted factorization (the dual-time loop's mid-step refresh until 2026-10-10; now the march's
+`due=True` re-fit before the redo, #290).
 
 - **Why cost must not escalate.** A cycle count says the frozen preconditioner is struggling with this
   operator, not that the step is stiff. The march already has the right response — `refresh_on_cycles`
-  rebuilds it mid-step — and escalating on the same observation additionally assumes a stiffer operator
+  rebuilds it (mid-step when this was written; since #290 the step ends and the re-fit precedes the next) — and escalating on the same observation additionally assumes a stiffer operator
   is an easier one, which is false on this case (140 applications at β 0.5 against 32 at 0.05).
   **Stiffness is what `on_alpha` measures, and a step length is dimensionless**, so it needs no per-arm
   calibration. The abort threshold remains a number, but it is now a *resource* decision rather than a
@@ -1362,7 +1363,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   used to read but never print, so two differently-configured runs could produce identical banners.**
 
   **⚠️ FOUR METHODOLOGICAL TRAPS, each of which produced a wrong write-up today:**
-  1. **Probe the state the failure happens at.** The refusal fires from a *mid-step* refresh; step
+  1. **Probe the state the failure happens at.** The refusal fired from a *mid-step* refresh (before #290; it now fires from the re-fit before a step); step
      checkpoints and the inner-iterate dump both miss it (the inner observer writes only after an
      iteration succeeds). Three capture runs were wasted before dumping the operator *before* the
      build, which needs no state and no shift pairing — and even that missed twice, first by

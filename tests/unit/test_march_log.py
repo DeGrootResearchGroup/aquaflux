@@ -303,7 +303,7 @@ def test_the_preconditioner_column_is_reported_once_for_the_step_it_preceded() -
 
 
 def test_several_refreshes_inside_one_step_are_all_counted_and_their_cost_summed() -> None:
-    """A mid-step rebuild fires per retried attempt, so more than one can land between step rows.
+    """A re-fit can fire per retried attempt, so more than one can land between step rows.
 
     Keeping only the latest reported one refresh per step whatever happened, and reported a single
     refresh's seconds as the step's whole preconditioner cost -- so a reader costing refresh against

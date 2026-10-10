@@ -740,15 +740,13 @@ def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
     assert run(positive_block_limit(0, 3)) > 0  # a genuinely different block must still retrace
 
 
-def test_a_mid_step_refresh_buys_the_attempt_another_solve_before_the_abort() -> None:
-    """Refreshing must FORGIVE the abort, or the rebuild is paid for and then thrown away with the step.
+def test_refresh_on_cycles_ends_the_step_keeping_the_iterate_it_reached() -> None:
+    """A solve that asks for a re-fit ends the step there, and nothing it reached is thrown away.
 
-    ``abort_above_inner_cycles`` and the refresh trigger both fire after the same expensive solve, so
-    without this the attempt aborts anyway and the march escalates the shift -- discarding the inner
-    loop's progress *and* the pseudo-timestep, which is the cascade the refresh exists to prevent. So the
-    abort counts cycles since the last refresh rather than since the step began, and the rebuilt
-    preconditioner is judged on a solve of its own. A second expensive solve after it means the operator
-    really is hard, and the abort then does its job.
+    The step must hand back exactly the iterate its last inner iteration produced -- the one the march
+    will re-fit the preconditioner at -- and say so, rather than iterating on with a preconditioner it has
+    just reported as struggling. The reference is the same step allowed one inner iteration, which must
+    match it bit for bit: any other iterate (the starting state, a later one, a re-solved one) differs.
     """
     theta = jnp.array([8.0, 27.0, 64.0])
     phi0 = jnp.ones_like(theta)
@@ -757,27 +755,63 @@ def test_a_mid_step_refresh_buys_the_attempt_another_solve_before_the_abort() ->
     def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
         return _residual(p, theta)
 
-    def build(**extra):
-        return DualTimeStep(
+    def run(**fields) -> object:
+        step = DualTimeStep(
             UniformShiftPolicy(strength=1.0),
             relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
-            inner_steps=6,
-            inner_tol=1e-14,  # never met, so only the cost bailouts can end the loop
-            abort_above_inner_cycles=0,  # every solve looks over budget
-            **extra,
+            inner_tol=1e-14,  # never met, so only what is under test can end the loop early
+            **fields,
         )
+        return step.stepper()(residual_theta, phi0, r0, step.linear_solver())
 
-    refreshed: list[int] = []
-    without = build()
-    with_refresh = build(refresh_on_cycles=0, inner_refresh=lambda _it: refreshed.append(1))
-    bare = without.stepper()(residual_theta, phi0, r0, without.linear_solver())
-    bare.phi.block_until_ready()
-    forgiven = with_refresh.stepper()(residual_theta, phi0, r0, with_refresh.linear_solver())
-    forgiven.phi.block_until_ready()
+    stopped = run(inner_steps=6, refresh_on_cycles=0)  # every solve costs at least zero cycles
+    one_inner = run(inner_steps=1)
+    unstopped = run(inner_steps=6)
 
-    assert refreshed, "the refresh never fired"
-    # The bare step is cut at its first over-budget solve; the refreshed one is given another.
-    assert int(forgiven.inner_iterations) > int(bare.inner_iterations)
+    assert bool(stopped.refresh_due)
+    assert int(stopped.inner_iterations) == 1
+    assert jnp.array_equal(stopped.phi, one_inner.phi)
+    assert not jnp.array_equal(stopped.phi, phi0)
+    # Without the setting the same step runs to the end of its budget and asks for nothing.
+    assert not bool(unstopped.refresh_due)
+    assert int(unstopped.inner_iterations) == 6
+
+
+def test_a_step_only_asks_for_a_refit_once_a_solve_reaches_the_threshold() -> None:
+    """``refresh_due`` follows the solve cost: unreachable thresholds never stop the step.
+
+    Pins the threshold's direction and that it compares a SINGLE solve: a step whose solves each cost
+    a cycle or two runs to the end of its budget under a threshold above that, and stops at a threshold
+    at or below it.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    phi0 = jnp.ones_like(theta)
+    r0 = jnp.linalg.norm(_residual(phi0, theta))
+
+    def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    def run(threshold: int) -> object:
+        step = DualTimeStep(
+            UniformShiftPolicy(strength=1.0),
+            relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+            inner_steps=4,
+            inner_tol=1e-14,
+            refresh_on_cycles=threshold,
+        )
+        return step.stepper()(residual_theta, phi0, r0, step.linear_solver())
+
+    free = run(10_000)
+    assert not bool(free.refresh_due)
+    assert int(free.inner_iterations) == 4
+    hardest = int(free.max_inner_cycles)
+    assert hardest >= 1  # else a threshold of zero could not be told from one that compares cost
+    above = run(hardest + 1)
+    assert not bool(above.refresh_due)
+    assert int(above.inner_iterations) == 4
+    at = run(hardest)
+    assert bool(at.refresh_due)
+    assert int(at.inner_iterations) < 4
 
 
 def test_abort_below_alpha_stops_an_attempt_that_can_no_longer_move() -> None:

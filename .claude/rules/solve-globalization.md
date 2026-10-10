@@ -96,6 +96,11 @@ What to take from it, none of which is specific to that mechanism:
   - **`AbortsInnerLoop`** (`with_inner_abort(*, above_cycles, below_alpha)`, `None` = keep the step's
     own): `RetryPolicy.with_inner_abort` calls it instead of probing two field names and rewriting them
     with `dataclasses.replace` on a type it does not own. `DualTimeStep` implements it.
+  - **`StopsForRefresh`** (`refresh_on_cycles: int | None`, a data member): a strategy that can end a
+    step early for a preconditioner re-fit, reporting `StepOutcome.refresh_due` (the ninth field, added
+    with it, 2026-10-10, #290). `newton_march` asks it before the first step and refuses one with
+    `refresh_on_cycles` set and no `refresh_preconditioner`. `DualTimeStep` implements it; see
+    `solve-march.md` for the march side.
   - **`ShiftCarryingControl(StepControl)`** declares `carry_beta`, `resumed_at`, `redamp` and `rebase`
     **together**, and the march and `staged_march` call any of them only on a control that is one.
     ⚠️ **All four or none, by decision (project owner, 2026-10-10):** they are one capability — keeping

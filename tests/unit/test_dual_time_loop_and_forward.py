@@ -4,7 +4,7 @@ The coupled march's inner loop (``inner_steps``, ``inner_tol``, ``cycle_budget``
 and its Krylov regime (``krylov_solver`` and a ``forward_*`` trio) were loose keywords, several of them
 inert without another: loop settings on a single shifted step, a regime beside an explicit solver, a
 refresh count with nothing to fire. Each was accepted and reached nothing. As values the first two
-cannot be written at all, and the third is refused where the march knows whether a refresh exists.
+cannot be written at all, and the third is refused by the march, which knows whether a refresh exists.
 """
 
 from __future__ import annotations
@@ -15,16 +15,15 @@ import inspect
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
 from aquaflux.solve import (
-    CompleteLu,
     DualTimeLoop,
     DualTimeStep,
     LinearSolveSettings,
-    MaterializedJacobian,
     PseudoTransientStep,
+    newton_march,
     relative_residual_gmres,
     resolve_linear_solve,
 )
-from aquaflux.turbulence import BlockDiagonal, UnpreconditionedScalars, coupled_step, open_session
+from aquaflux.turbulence import BlockDiagonal, UnpreconditionedScalars, coupled_step
 from aquaflux.turbulence.coupled import (
     _BLOCK_LINEAR_SOLVE,
     _CONSTRAINED_LINEAR_SOLVE,
@@ -145,44 +144,46 @@ def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
     assert mass_flow.inner_steps == 3
 
 
-@pytest.mark.parametrize("hook", ["inner_observer", "inner_refresh"])
-def test_a_loop_hook_without_a_loop_is_refused(case, hook) -> None:
+def test_a_loop_hook_without_a_loop_is_refused(case) -> None:
     coupled, state = case
-    with pytest.raises(TypeError, match=hook):
+    with pytest.raises(TypeError, match="inner_observer"):
         coupled_step(
             coupled,
             state,
             preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
-            **{hook: lambda *a: None},
+            inner_observer=lambda *a: None,
         )
 
 
-def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_session_fires_it(
-    case,
-) -> None:
+def test_a_refresh_count_is_refused_by_a_march_with_nothing_to_take_the_refit(case) -> None:
+    """``refresh_on_cycles`` ends a step for a re-fit, so a march that cannot re-fit must refuse it.
+
+    The step itself is buildable with any preconditioner -- stopping is the step's own rule -- and it is
+    the march that knows whether a refresh hook exists. Refused before the first step, and accepted the
+    moment a hook is given (a trivial one here, so nothing else in the march is exercised).
+    """
     coupled, state = case
     loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
-    with pytest.raises(
-        TypeError, match="refresh_on_cycles"
-    ):  # a block-diagonal session has no refresh
-        open_session(BlockDiagonal(scalar=UnpreconditionedScalars()), coupled).build(
-            state, dual_time=loop
-        )
-    spec = MaterializedJacobian(CompleteLu(backend="scipy"))
-    with pytest.raises(TypeError, match="refresh_on_cycles"):  # nor does a frozen step
-        coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
-    session = open_session(spec, coupled)
-    first, second = session.build(state, dual_time=loop), session.build(state, dual_time=loop)
-    assert first.inner_refresh is not None
-    assert first.inner_refresh is second.inner_refresh
-    # ...and a caller's own refresh is enough on its own.
-    coupled_step(
+    step = coupled_step(
         coupled,
         state,
         preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
         dual_time=loop,
-        inner_refresh=lambda iterate: None,
     )
+    assert step.refresh_on_cycles == 3
+    with pytest.raises(ValueError, match="refresh_on_cycles=3"):
+        newton_march(step, coupled.residual, state, max_steps=1, rtol=0.0, atol=0.0)
+    taken: list[bool] = []
+    newton_march(
+        step,
+        coupled.residual,
+        state,
+        max_steps=1,
+        rtol=0.0,
+        atol=0.0,
+        refresh_preconditioner=lambda active, at, *, due: taken.append(due),
+    )
+    assert taken == [False]  # offered before the first step, not asked for
 
 
 def test_a_point_s_loop_and_forward_values_merge_field_by_field_over_the_shared_ones() -> None:

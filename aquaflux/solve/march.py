@@ -59,6 +59,7 @@ from .strategy import (
     StepControl,
     StepOutcome,
     StepReport,
+    StopsForRefresh,
     shift_of,
     within_tolerance,
 )
@@ -525,7 +526,7 @@ def newton_march(
     checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     drift_measure: Callable[[jnp.ndarray], float] | None = None,
     norm_builder: MeasureBuilder | None = None,
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None = None,
+    refresh_preconditioner: Callable[..., None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
     retry: RetryPolicy = NO_RETRIES,
     stop_on_limit_stall: int | None = 3,
@@ -625,11 +626,16 @@ def newton_march(
         step's shift; a solve builds one from its :class:`~aquaflux.solve.ResidualMeasure`.
         ``None`` (the default) uses ``strategy.norm()`` throughout.
     refresh_preconditioner : callable, optional
-        ``(active_step, state) -> None``, called before each step (after the control has set the shift
-        strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
-        state and shift. It runs in this eager loop -- a host operation outside the jitted ``_march_step``
-        -- and mutates the step's *static* preconditioner in place, so ``_march_step`` stays a
-        compilation-cache hit. The use case is a **complete-LU preconditioner re-factored at the current
+        ``(active_step, state, *, due) -> None``, called before each step (after the control has set the
+        shift strength on ``active_step``) to refresh that step's frozen host preconditioner from the
+        current state and shift. It runs in this eager loop -- a host operation outside the jitted
+        ``_march_step`` -- and mutates the step's *static* preconditioner in place, so ``_march_step``
+        stays a compilation-cache hit.
+
+        ``due`` is ``True`` when the march is ASKING for a re-fit rather than offering one: the previous
+        step stopped for one (:attr:`~aquaflux.solve.StepOutcome.refresh_due`, the dual-time loop's
+        ``refresh_on_cycles``), or the step is being redone for its cost. A hook that gates its own
+        cadence must re-fit when ``due`` is set; with ``due`` unset it decides for itself. The use case is a **complete-LU preconditioner re-factored at the current
         ``(state, β)``** so it is the exact inverse of the operator actually solved (a frozen factorization
         mis-preconditions the shifted operator once the march's β leaves the value it was built at). Like
         the trigger and the control it is **forward-only** -- an impure mutation that must never be on a
@@ -716,6 +722,12 @@ def newton_march(
     -------
     MarchResult
         The state reached, the per-step reports, and whether the march converged or was triggered.
+
+    Raises
+    ------
+    ValueError
+        If the step can stop for a preconditioner re-fit (a :class:`~aquaflux.solve.StopsForRefresh`
+        with ``refresh_on_cycles`` set) and no ``refresh_preconditioner`` is given to take it.
     """
     if solver is None:
         solver = strategy.linear_solver()
@@ -743,6 +755,20 @@ def newton_march(
     # finishing inner iterations whose results this loop is about to discard. One number each, set in
     # one place: a step that took its own copy would be a second spelling to keep in step with this one.
     strategy = retry.with_inner_abort(strategy)
+    # A step that stops for a re-fit only helps if something takes the re-fit. Refused here, before the
+    # first step, rather than at the first hard step -- which may be an hour into a march.
+    if (
+        isinstance(strategy, StopsForRefresh)
+        and strategy.refresh_on_cycles is not None
+        and refresh_preconditioner is None
+    ):
+        raise ValueError(
+            f"the step stops for a preconditioner re-fit (refresh_on_cycles="
+            f"{strategy.refresh_on_cycles}) but this march has no refresh_preconditioner to take it, so "
+            "every hard step would end early and the preconditioner would never be refreshed. March with a "
+            "preconditioner session (a MaterializedJacobian preconditioner supplies the hook), or leave "
+            "refresh_on_cycles unset."
+        )
     # Built once, so every divergence retry of the march hands the step the same solver.
     tight_solver = None if retry.solver is None else retry.solver.build()
 
@@ -751,6 +777,9 @@ def newton_march(
     reports: list[StepReport] = []
     triggered = False
     stalled = 0
+    # Whether the step just taken stopped to have its preconditioner re-fitted: the next refresh is then
+    # asked for rather than offered, at the iterate that step kept.
+    refresh_due = False
     # `control_state` is a parameter (the initial state), threaded and returned so a multi-segment
     # driver can continue a stateful control across a refresh instead of restarting it.
 
@@ -870,8 +899,10 @@ def newton_march(
             # is the exact inverse of the operator actually solved. Runs HERE, in the eager loop (a host
             # op outside the jitted `_march_step`), after the control has set β on `active_step`. It
             # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
-            # cache hit. Forward-only, like the trigger and the control.
-            refresh_preconditioner(active_step, state)
+            # cache hit. Forward-only, like the trigger and the control. `due` when the previous step
+            # stopped for exactly this: `state` is then the iterate it kept, so the re-fit is taken
+            # where that step's expensive solve left off.
+            refresh_preconditioner(active_step, state, due=refresh_due)
         prestep_state = state
         outcome, residual_norm = _march_step(
             active_step, step_residual, prestep_state, residual_norm_0, solver
@@ -879,9 +910,8 @@ def newton_march(
         # A step can go bad three ways -- a non-finite / diverging correction, a step length collapsed
         # to `retry.on_alpha`, or a solve truncated by `retry.abort_above_cycles` -- and they DO NOT
         # share one response. The first two are stiffness and are cured by MORE damping; the third is a
-        # statement about the frozen preconditioner, whose cure is a FRESH one (the dual-time loop's
-        # mid-step refresh has already built it by the time the step returns), so it is redone at the
-        # shift it already had. `RetryPolicy.retry_reason` names the reason and `ESCALATING_REASONS`
+        # statement about the frozen preconditioner, whose cure is a FRESH one (re-fitted below before
+        # the redo), so it is redone at the shift it already had. `RetryPolicy.retry_reason` names the reason and `ESCALATING_REASONS`
         # says which of them raise β. Escalate β FIRST (redo from the pre-step state at `β *= retry.beta_factor`,
         # re-matching the frozen preconditioner via `refresh_preconditioner`), because a larger β lifts the
         # correction out of the non-finite regime, cuts the cycle count AND shortens the implicit step until
@@ -904,7 +934,7 @@ def newton_march(
             escalating = reason in ESCALATING_REASONS
             if not escalating:
                 # The fresh-preconditioner redo is worth exactly ONE attempt. It differs from the first
-                # only in starting on the factorization the mid-step refresh rebuilt, so a second redo
+                # only in starting on the preconditioner re-fitted for it, so a second redo
                 # at the same shift on the same factorization would repeat it exactly -- burning the
                 # escalation budget on identical attempts and, with no other reason ever firing,
                 # spinning to `cycles_limit` every step.
@@ -931,7 +961,10 @@ def newton_march(
                     lambda s: s.relaxation_schedule.beta, active_step, escalated
                 )
             if refresh_preconditioner is not None:
-                # Re-match the preconditioner to the escalated β. Whether this actually rebuilds is the
+                # Re-match the preconditioner to the escalated β. A redo for COST asks for a re-fit
+                # (`due`): the cost said the frozen preconditioner is struggling, and redoing the
+                # attempt on the same one would repeat it exactly. So does a redo of an attempt that
+                # had itself stopped for a re-fit. Otherwise, whether this actually rebuilds is the
                 # HOOK'S decision, not this call's: a gated refresh may judge the move too small to be
                 # worth its cost and reuse the standing factorization. That is worth stating, because a
                 # hook gated so tightly that it never fires makes every escalated attempt solve against
@@ -943,7 +976,11 @@ def newton_march(
                 # established cause -- the same steps were also positivity-cap-bound, and the two
                 # explanations are not separated by that data. Whichever it is, a refresh hook used
                 # with escalation should let a doubling through: re-matching is what this call asks for.
-                refresh_preconditioner(active_step, prestep_state)
+                refresh_preconditioner(
+                    active_step,
+                    prestep_state,
+                    due=not escalating or bool(outcome.refresh_due),
+                )
             outcome, residual_norm = _march_step(
                 active_step, step_residual, prestep_state, residual_norm_0, solver
             )
@@ -984,6 +1021,7 @@ def newton_march(
             control_state = step_control.carry_beta(control_state, float(carried))
         state = outcome.phi
         current = float(residual_norm)
+        refresh_due = bool(outcome.refresh_due)
         # Not every NewtonStrategy carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
         step_shift = shift_of(active_step)

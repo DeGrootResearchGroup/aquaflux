@@ -282,10 +282,10 @@ class MarchLogger:
         # the rate is only meaningful over consecutive logged steps, so its state belongs to the
         # thing that is called once per step, in order.
         self._previous_residuals: dict[str, float] = {}
-        # EVERY refresh since the last step row, not the latest one. A mid-step rebuild
-        # (`refresh_on_cycles`) can fire more than once inside a step -- once per retried attempt -- and
-        # keeping only the last both under-counts them and under-reports their total cost, which is the
-        # one number a reader needs to judge whether refreshing is paying for itself.
+        # EVERY refresh since the last step row, not the latest one. The march refreshes before a step
+        # and again before each retried attempt, so several can land between two rows -- and keeping
+        # only the last both under-counts them and under-reports their total cost, which is the one
+        # number a reader needs to judge whether refreshing is paying for itself.
         self._refreshes: list[RefreshTiming] = []
         self._rtol = rtol
         self._atol = atol
@@ -418,13 +418,12 @@ class MarchLogger:
         """``observer`` callback for a β-tracking preconditioner refresh: record what it did.
 
         Matches what a materialized-Jacobian preconditioner session calls on each refresh
-        (``open_session(..., observer=logger.on_refresh)``). The record names the branch — ``"full"``, ``"inner"`` or
+        (``open_session(..., observer=logger.on_refresh)``). The record names the branch — ``"full"``, ``"cost"`` or
         ``"none"`` — its total, and each part's own cost; it rides on the *next* step row, since that is
         the step it was built for.
 
-        **Every call accumulates; they are not overwritten.** A refresh triggered by solve cost
-        (``refresh_on_cycles``) fires *inside* a step, and a step that is retried runs its inner loop
-        again, so several can land between two step rows. Keeping only the latest reported one refresh
+        **Every call accumulates; they are not overwritten.** The march refreshes before a step and
+        again before each retried attempt, so several can land between two step rows. Keeping only the latest reported one refresh
         per step whatever happened -- which reads as "the trigger barely fires" and, worse, reports one
         refresh's seconds as the step's whole preconditioner cost. Both of those are conclusions a
         reader would otherwise draw from the log and act on.

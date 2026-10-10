@@ -292,6 +292,9 @@
       operator would refresh on every inner iteration; a new inner loop re-arms it. Off by default
       (`None`), so a march that does not opt in is byte-identical. Pinned by
       `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`.
+      ⚠️ **That mechanism is gone (2026-10-10, #290)**: the step now ENDS at the expensive solve, keeping
+      its iterate, and the march re-fits there before the next step. No test or symbol above exists; the
+      measurement below was taken under the mid-step form and has not been re-taken.
 
       **Measured end to end on the 3D coupled backward-facing step, against the scheduled cadence:**
 
@@ -777,7 +780,9 @@ data model. Each had nothing in `validation/` or any test selecting it.
   step, monolithic V-cycle: scheduled 3632 s against 3140 s for the cost-triggered rule (−14 %) at
   unchanged Krylov cycles (290 vs 293), refresh time 758 s against 310 s; never measured under the field
   split. Both validation cases ran with every gate switched off. The hook now re-fits on its first call,
-  after `rebind`, and mid-step through `refresh_at`; the complete-LU hook still re-factors every step.
+  after `rebind`, and when the march asks (`due`, after a step that stopped at `refresh_on_cycles`); the
+  complete-LU hook still re-factors every step. (Until 2026-10-10 the cost re-fit ran mid-step through a
+  `refresh_at` callback; #290 moved it between steps.)
   **An observation the deleted `BFS3D_REFRESH_ON_BETA` comment carried, kept here because it outlives
   the knob:** with the β gate off, a β escalation's redo is solved against a V-cycle fitted for a β up to
   4x smaller. On three converging `bfs3d` marches an escalated step at β = 0.2341 on a stale V-cycle

@@ -42,7 +42,9 @@ from aquaflux.solve.march import _march_step
 _TRACES: list[int] = []
 
 
-def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residual_fn=None):
+def _outcome(
+    phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residual_fn=None, refresh_due=False
+):
     """A `StepOutcome` for a test double, so a fake step matches the real protocol in one place.
 
     The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
@@ -69,6 +71,7 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residu
         jnp.asarray(reached),
         jnp.maximum(cycles - 2, 0),
         jnp.asarray(binding),
+        jnp.asarray(refresh_due),
     )
 
 
@@ -624,8 +627,8 @@ class _CyclesFromBeta(eqx.Module):
 def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
     """A costly solve is a statement about the PRECONDITIONER, so the step is redone at the SAME β.
 
-    The cure for an expensive solve is a fresh factorization -- which the dual-time loop's mid-step
-    refresh has already built by the time the step returns -- not a stiffer operator. Escalating here
+    The cure for an expensive solve is a fresh factorization -- which the march asks its refresh hook
+    for before the redo -- not a stiffer operator. Escalating here
     additionally assumes a larger shift makes the block easier, which is false on at least one case,
     where it closed a loop that ran the wrong way and drove a working march to a non-finite residual.
 
@@ -652,6 +655,87 @@ def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
     )
     assert int(result.reports[0].cycles) == 40  # β never moved, so the count never dropped
     assert seen == [("cycles", 1.0)]  # one redo, at the shift it already had
+
+
+def test_a_cost_redo_asks_the_refresh_hook_for_a_refit() -> None:
+    """The redo exists to run on a FRESH preconditioner, so the march must ask for one, not offer.
+
+    A hook gating its own cadence (a multigrid session re-fits only when asked) would otherwise reuse
+    the standing inverse, and the redo would repeat the first attempt exactly. Before the first step the
+    refresh is only offered (``due`` false); before the redo it is asked for.
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    asked: list[bool] = []
+    newton_march(
+        _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0))),
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, cycles_limit=2),
+        refresh_preconditioner=lambda step, state, *, due: asked.append(due),
+    )
+    assert asked == [False, True]
+
+
+class _StopsForRefit(eqx.Module):
+    """A step that always ends early for a preconditioner re-fit, after an expensive solve.
+
+    It halves the state each step, so progress is visible, and reports a solve far over any cost
+    threshold -- which, on a step that did NOT stop for a re-fit, the march would redo.
+    """
+
+    relaxation_schedule: ConstantRelaxation
+    refresh_on_cycles: int = eqx.field(static=True, default=3)
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(0.5 * phi, 40, residual_fn=residual_fn, refresh_due=True)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def linear_solver(self):
+        return None
+
+
+def test_a_step_that_stopped_for_a_refit_is_kept_and_the_next_step_asks_for_it() -> None:
+    """Stopping for a re-fit keeps the step's work; the re-fit is taken before the next step.
+
+    The step's solve cost (38 corrected cycles) is far over ``abort_above_cycles``, so without the
+    exemption the march would redo it at the same shift -- discarding the iterate the refresh exists to
+    keep. Instead nothing is retried, each step's halving survives, and the hook is asked (``due``) before
+    every step after the first, at the state the previous one kept.
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    asked: list[tuple[bool, float]] = []
+    retried: list[str] = []
+    result = newton_march(
+        _StopsForRefit(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0))),
+        residual,
+        phi0,
+        max_steps=3,
+        rtol=0.0,
+        atol=0.0,
+        retry=RetryPolicy(abort_above_cycles=10),
+        on_retry=lambda reason, attempt, beta: retried.append(reason),
+        refresh_preconditioner=lambda step, state, *, due: asked.append((due, float(state[0]))),
+    )
+    assert retried == []
+    assert float(result.state[0]) == 0.125
+    assert asked == [(False, 1.0), (True, 0.5), (True, 0.25)]
+
+
+def test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it() -> None:
+    """Every hard step would end early and the preconditioner would never be refreshed: refuse it."""
+    step = _StopsForRefit(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    with pytest.raises(ValueError, match="refresh_on_cycles=3"):
+        newton_march(step, _Cubic(jnp.zeros((1,))), jnp.ones((1,)), max_steps=1, rtol=0.0, atol=0.0)
 
 
 def test_march_does_not_escalate_below_the_cycle_cap() -> None:

@@ -23,9 +23,9 @@ class RefreshTiming:
     Attributes
     ----------
     kind : str
-        What the refresh actually did — ``"full"`` (re-probed the Jacobian and re-factored), ``"inner"``
-        (the same, mid-step, at the inner loop's iterate) or ``"none"`` (the standing factorization was
-        reused).
+        What the refresh actually did — ``"full"`` (re-probed the Jacobian and re-factored on the
+        refresh's own cadence), ``"cost"`` (the same, because the previous step's solve cost asked for
+        it) or ``"none"`` (the standing factorization was reused).
     seconds : float
         Wall time for the whole refresh, including any part not attributed to a phase.
     phases : tuple of (str, float)

@@ -9,12 +9,14 @@ the driver seams, and the refusals. Nothing here needs ``petsc4py``.
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
     AirReduction,
     CompleteLu,
+    ConstantRelaxation,
     DualTimeLoop,
     FieldSplit,
     JacobianProbeSpec,
@@ -22,7 +24,7 @@ from aquaflux.solve import (
     MaterializedJacobian,
     SimpleSmoothed,
 )
-from aquaflux.turbulence import BlockDiagonal, coupled_step, open_session
+from aquaflux.turbulence import BlockDiagonal, open_session
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state
 
@@ -44,16 +46,57 @@ def test_a_block_session_refresh_carries_the_flow_block(case) -> None:
     assert refreshed.shift_policy.flow_preconditioner is first.shift_policy.flow_preconditioner
 
 
-def test_a_frozen_step_refuses_a_refresh_count_but_a_session_build_wires_one(case) -> None:
-    """A refresh count with nothing to fire is refused; as a loose keyword it was accepted and ignored."""
+def test_the_session_hook_refits_when_the_march_asks_and_not_otherwise(case) -> None:
+    """A multigrid session re-fits only on its first call, after a rebind, and when ``due`` is passed.
+
+    ``due`` is how the march asks for the re-fit a step stopped for (``refresh_on_cycles``), so a hook
+    that ignored it would leave every such step to run again on the preconditioner it reported as
+    struggling. The observer records what each call did: the first is the forced first fit, a call that
+    is only offered reuses the standing inverse, and an asked-for one re-fits and says why.
+    """
     coupled, state = case
-    spec = MaterializedJacobian(CompleteLu(backend="scipy"))
+    kinds: list[str] = []
+    session = open_session(
+        MaterializedJacobian(_SPLIT), coupled, observer=lambda timing: kinds.append(timing.kind)
+    )
     loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
-    with pytest.raises(TypeError, match="refresh_on_cycles"):
-        coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
-    session = open_session(spec, coupled)
-    assert session.build(state, dual_time=DualTimeLoop(inner_steps=3)).inner_refresh is None
-    assert session.build(state, dual_time=loop).inner_refresh is not None
+    step = session.build(state, dual_time=loop)
+    assert step.refresh_on_cycles == 3
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    session.refresh_preconditioner(active, state)
+    session.refresh_preconditioner(active, state)
+    session.refresh_preconditioner(active, state, due=True)
+    session.refresh_preconditioner(active, state, due=False)
+    assert kinds == ["full", "none", "cost", "none"]
+
+
+def test_an_asked_for_refit_is_built_at_the_state_the_march_hands_it(case, monkeypatch) -> None:
+    """The re-fit a step stopped for is materialized where that step got to, at the next step's shift.
+
+    The march hands the hook the iterate the stopped step kept, so a re-fit built anywhere else -- at
+    the state the session was first built at, say -- would reproduce the staleness it exists to remove.
+    The shift is the step's own ``beta`` times the base diagonal AT THAT STATE, which differs from the
+    diagonal at the build state, so the assertion cannot be met by building at the wrong state.
+    """
+    coupled, state = case
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    session.refresh_preconditioner(active, state)  # the forced first fit, not under test
+
+    built_at: list[jnp.ndarray] = []
+    monkeypatch.setattr(
+        type(active.shift_policy.preconditioner),
+        "refresh_in_place",
+        lambda _self, _mv, _plan, shift, **_kw: built_at.append(jnp.asarray(shift)),
+    )
+    iterate = state * 1.05
+    session.refresh_preconditioner(active, iterate, due=True)
+    assert len(built_at) == 1
+    at_iterate = 0.5 * active.shift_policy.base.shift_term(iterate).diagonal
+    at_start = 0.5 * active.shift_policy.base.shift_term(state).diagonal
+    assert jnp.allclose(built_at[0], at_iterate)
+    assert not jnp.allclose(built_at[0], at_start)
 
 
 def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) -> None:
@@ -64,7 +107,6 @@ def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) 
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     assert first.shift_policy.preconditioner is second.shift_policy.preconditioner
-    assert first.inner_refresh is second.inner_refresh
     assert session.refresh_preconditioner is hook
 
 
@@ -111,7 +153,7 @@ def test_the_precondition_wrapper_wraps_the_hook_the_march_calls(case) -> None:
     calls: list[object] = []
 
     def wrapper(hook):
-        def recorded(step, state):
+        def recorded(step, state, *, due=False):
             calls.append(step)
 
         return recorded

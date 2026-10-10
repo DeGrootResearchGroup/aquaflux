@@ -190,11 +190,12 @@ class PreconditionerSession(Protocol):
     Attributes
     ----------
     refresh_preconditioner : callable or None
-        ``(step, state) -> None``, called by the march before every step to re-fit the inverse at that
-        step's shift; ``None`` for a family with nothing to re-fit.
+        ``(step, state, *, due=False) -> None``, called by the march before every step to re-fit the
+        inverse at that step's shift -- unconditionally when ``due`` -- or ``None`` for a family with
+        nothing to re-fit.
     """
 
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
+    refresh_preconditioner: Callable[..., None] | None
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
         """The Newton step at ``state``, configured by the march keywords."""
@@ -214,13 +215,14 @@ class PreconditionerSession(Protocol):
 class BetaTrackingRefresh:
     """The ``refresh_preconditioner`` hook that re-fits a monolithic inverse as the shift strength moves.
 
-    Called as ``refresh(active_step, state)`` before every step, it reads ``β`` from the step's
+    Called as ``refresh(active_step, state, due=False)`` before every step, it reads ``β`` from the step's
     :class:`~aquaflux.solve.ConstantRelaxation` schedule and re-factors the step's
     :class:`~aquaflux.solve.MonolithicFactorShiftPolicy` preconditioner in place at
     ``J(state) + β·d(state)``. With ``every_step`` it does so on every step (the cheap exact-LU cadence);
-    without, only on its first call and after each :meth:`rebind` -- a multigrid re-materialize is too
-    expensive to pay every step, so between those the rebuild is left to the dual-time loop's cost
-    trigger, through :meth:`refresh_at`.
+    without, only on its first call, after each :meth:`rebind`, and whenever the march passes ``due`` --
+    a multigrid re-materialize is too expensive to pay every step, so between those the re-fit is left
+    to the cost of the step's own solves: the dual-time loop's ``refresh_on_cycles`` ends a step whose
+    solve ran long, and the march then calls this with ``due`` at the iterate that step kept.
 
     It is a plain mutable object, deliberately not an ``equinox.Module``: it re-fits a host
     preconditioner in place, so it runs only on the eager forward march and must never be on a
@@ -268,18 +270,27 @@ class BetaTrackingRefresh:
         # march's -- and again after `rebind`, since the standing preconditioner then describes the
         # PREVIOUS companion.
         self._full_rebuild_pending = True
-        # Which step `refresh_at` is refreshing, kept current by `__call__`: the march calls the hook
-        # before every step with the CURRENT one, and the step a builder returns still carries the
-        # default schedule, so binding once at construction cannot work.
-        self._active_step: NewtonStrategy | None = None
         self.assembler = assembler
         # What the coloured probe differentiates: the assembler itself unless the probe carries a
         # stand-in (`JacobianProbe.narrow`). Stored rather than derived per call so a rebind narrows once.
         self._probed = probe.narrow(assembler)
 
-    def __call__(self, active_step: NewtonStrategy, state: jnp.ndarray) -> None:
-        """Re-fit the step's preconditioner at ``state`` when this cadence calls for it."""
-        self._active_step = active_step
+    def __call__(
+        self, active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
+    ) -> None:
+        """Re-fit the step's preconditioner at ``state`` when this cadence calls for it, or when ``due``.
+
+        The march passes ``due`` before the step after one that ended because an inner solve reached
+        ``refresh_on_cycles``. The march's expensive inner solves are **stale-preconditioner** effects,
+        not hard operators: at the hardest solve of a three-dimensional coupled march a preconditioner
+        rebuilt at that very iterate converged in an order of magnitude fewer cycles than the march's
+        own. Ending the step there and re-fitting before the next keeps the step's progress, where the
+        alternative reaction (abort the step and escalate β) discards both the work and the
+        pseudo-timestep. Reacting is also what makes this a *replacement* for a scheduled refresh rather
+        than an addition to one: the right interval is regime-dependent in a way no fixed cadence can
+        track (one step of staleness is nearly free at a large shift and dominates the solve at a small
+        one).
+        """
         beta = shift_of(active_step)
         if beta is None:
             raise ValueError(
@@ -288,40 +299,14 @@ class BetaTrackingRefresh:
                 f"switched-evolution schedule ({type(active_step).__name__} has no readable β)."
             )
         started = time.perf_counter()
-        if not (self._every_step or self._full_rebuild_pending):
+        if not (self._every_step or self._full_rebuild_pending or due):
             self._report("none", started)
             return
+        # Named for WHY it ran: "cost" when only a step's solve cost asked for it, so a log can tell
+        # the re-fits the march's own cadence pays for from the ones its solves provoked.
+        kind = "cost" if due and not (self._every_step or self._full_rebuild_pending) else "full"
         self._full_rebuild_pending = False
-        self._report("full", started, self._materialize_at(active_step, state, float(beta)))
-
-    def refresh_at(self, iterate: jnp.ndarray) -> None:
-        """``inner_refresh`` hook: rebuild the preconditioner at this mid-step iterate.
-
-        *When* to fire is decided by the dual-time loop (``DualTimeStep.refresh_on_cycles``), not here,
-        so that the rule which triggers the refresh is the same one that forgives the abort it would
-        otherwise be discarded by.
-
-        The march's expensive inner solves are **stale-preconditioner** effects, not hard operators: at
-        the hardest solve of a three-dimensional coupled march a preconditioner rebuilt at that very
-        iterate converged in an order of magnitude fewer cycles than the march's own. Refreshing here --
-        between inner iterations, after the line search and before the next solve -- keeps the step's
-        progress, where the alternative reaction (abort the step and escalate β) discards both the work
-        and the pseudo-timestep.
-
-        Reacting is also what makes this worth doing as a *replacement* for a scheduled refresh rather
-        than an addition to one: a fixed cadence pays on every step to protect the minority that needs
-        it, and the right interval is regime-dependent in a way no fixed cadence can track (one step of
-        staleness is nearly free at a large shift and dominates the solve at a small one).
-
-        Does nothing before the hook has been called with a step, since until then there is no step
-        whose preconditioner to refresh.
-        """
-        step = self._active_step
-        if step is None:
-            return
-        started = time.perf_counter()
-        beta = float(shift_of(step))
-        self._report("inner", started, self._materialize_at(step, iterate, beta))
+        self._report(kind, started, self._materialize_at(active_step, state, float(beta)))
 
     def rebind(self, companion: object) -> None:
         """Point this hook at another companion of the same case, and force the next refresh to be full.
@@ -446,9 +431,7 @@ class MaterializedProblem(abc.ABC):
     def bind_march(self, march: dict) -> dict:
         """The march keywords validated and completed with their defaults.
 
-        The result **must** carry ``dual_time`` (a :class:`~aquaflux.solve.DualTimeLoop` or ``None``) and
-        ``inner_refresh`` (a callable or ``None``), which the session reads and may set; everything else
-        is the problem's to interpret in :meth:`shift_source` and :meth:`build_step`.
+        Everything in it is the problem's to interpret in :meth:`shift_source` and :meth:`build_step`.
         """
 
     @abc.abstractmethod
@@ -476,9 +459,9 @@ class MaterializedSession:
     Everything expensive or identity-bearing is created at most once. The probe (a colouring plan and
     its de-compression map, the largest allocation a three-dimensional case makes) and the refresh hook
     are created on first use; the inverse is fitted on the first :meth:`build`, at that build's
-    assembler, state and ``build_beta``, and every later build glues that same object in. The two
-    callables handed to the march -- :attr:`refresh_preconditioner` and the mid-step refresh -- are
-    created when the session is opened, so every step built from it carries the identical objects.
+    assembler, state and ``build_beta``, and every later build glues that same object in. The callable
+    handed to the march, :attr:`refresh_preconditioner`, is created when the session is opened, so every
+    march served by it calls the identical object.
 
     Parameters
     ----------
@@ -538,13 +521,11 @@ class MaterializedSession:
         self._hook: BetaTrackingRefresh | None = None
         self._preconditioner: object | None = None
 
-        def refresh_preconditioner(active_step: NewtonStrategy, state: jnp.ndarray) -> None:
-            self._refresh_hook()(active_step, state)
+        def refresh_preconditioner(
+            active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
+        ) -> None:
+            self._refresh_hook()(active_step, state, due=due)
 
-        def refresh_at(iterate: jnp.ndarray) -> None:
-            self._refresh_hook().refresh_at(iterate)
-
-        self._refresh_at = refresh_at
         self.refresh_preconditioner = (
             refresh_preconditioner
             if precondition_wrapper is None
@@ -557,13 +538,13 @@ class MaterializedSession:
         return self._problem
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        return self._build(state, march, track=True)
+        return self._build(state, march)
 
     def refresh(
         self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
     ) -> NewtonStrategy:
         del previous  # the shared inverse is re-fitted in place, not re-derived from the old step
-        step = self._build(state, march, track=True)
+        step = self._build(state, march)
         if self._hook is not None:
             # The standing inverse was fitted before the march moved; force the next refresh to be full.
             self._hook.rebind(self._problem.assembler)
@@ -582,8 +563,8 @@ class MaterializedSession:
         if self._hook is not None:
             self._hook.rebind(assembler)
 
-    def _build(self, state: jnp.ndarray, march: dict, *, track: bool) -> NewtonStrategy:
-        """Fit (once) and assemble; ``track`` wires the mid-step refresh, which a frozen step never has."""
+    def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
+        """Fit the inverse (once) and assemble the step around it."""
         problem = self._problem
         bound = problem.bind_march(march)
         if _is_traced((problem.assembler, state)):
@@ -596,14 +577,6 @@ class MaterializedSession:
         base = problem.shift_source(state, bound)
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
-        dual_time = bound["dual_time"]
-        if (
-            track
-            and dual_time is not None
-            and dual_time.refresh_on_cycles is not None
-            and bound["inner_refresh"] is None
-        ):
-            bound["inner_refresh"] = self._refresh_at
         step = problem.build_step(
             state,
             base,

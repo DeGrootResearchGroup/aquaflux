@@ -140,7 +140,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(scalar=S, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default) |
-| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
+| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` without a loop is refused where it used to be dropped, and a `refresh_on_cycles` with no refresh hook to take its re-fit (a frozen step or a block-diagonal session) is refused by `newton_march` before the first step. There is no `inner_refresh` (removed 2026-10-10, #290): the step ENDS for the re-fit and the march takes it |
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
 | `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
@@ -471,10 +471,10 @@ Many entries below are dated history written against the old API. Read them thro
       that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is
       restated. `preconditioner` and `jacobian_production_viscosity` are refused there: the session owns
       them (user decision Q1).
-    - **A frozen `coupled_step` never wires the refresh hook; a session `build` does**, and only when
-      `refresh_on_cycles` is set and no caller `inner_refresh` was given. The hook, `refresh_preconditioner`
-      and the mid-step refresh are created once per session, so every build carries the same objects
-      (the static-field identity that keeps the coupled solve a compilation-cache hit).
+    - **A frozen `coupled_step` has no refresh hook; a session has `refresh_preconditioner`**, created
+      once per session so every march it serves calls the same object. There is no mid-step hook any more
+      (2026-10-10, #290): a loop's `refresh_on_cycles` ends the step and the march calls the session's hook
+      with `due=True` before the next one (see `solve-march.md`).
     - **Two latent defects are fixed on the session path only, until S3c removes the other:** the probe
       follows `jacobian_production_viscosity` for every family (D2, and D7 for the complete LU, whose
       builder materializes the un-frozen assembler), and one probe serves the build and the hook (D3/D5).
@@ -1644,8 +1644,9 @@ Many entries below are dated history written against the old API. Read them thro
     `solve_coupled(refresh=RefreshPolicy(refresh_preconditioner=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
     `coupled_amg_continuation` step and a `DualTimeControl`.
     - **The refresh cadence is COST-TRIGGERED; the scheduled gates are DELETED (2026-09-13, #371).** The
-      hook re-fits on its first call, after `rebind`, and mid-step through `refresh_at` when an inner
-      solve reaches `refresh_on_cycles`. A fixed step-count cadence failed at the low-β tail (stale
+      hook re-fits on its first call, after `rebind`, and when the march passes `due` -- before the step
+      after one that stopped because an inner solve reached `refresh_on_cycles` (it re-fitted mid-step,
+      through a `refresh_at` callback, until 2026-10-10, #290). A fixed step-count cadence failed at the low-β tail (stale
       mid-interval); the β-mismatch and drift gates that replaced it measured 14 % slower than the cost
       trigger on `bfs3d` (3632 s against 3140 s at unchanged cycles, monolithic; see
       `.claude/notes/solve-refuted-directions.md`) and were switched off by both cases before being

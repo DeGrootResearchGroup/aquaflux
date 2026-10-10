@@ -1252,7 +1252,7 @@ def solve_aquaflux(
                 )
             ),
         ),
-        ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
+        ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (re-fit before the next step)"),
         (
             "smoother fill / sweeps / coarse limit",
             f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"

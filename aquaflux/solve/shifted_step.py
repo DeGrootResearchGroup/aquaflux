@@ -155,7 +155,6 @@ def shifted_step(
     krylov_solver: lx.AbstractLinearSolver | None,
     adjoint_preconditioner_factory: Callable | None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_residual: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
@@ -184,8 +183,11 @@ def shifted_step(
     adjoint_preconditioner_factory : callable or None
         Builds the preconditioner of the converged adjoint solve. Not the policy's to supply: a flow-only
         policy has no ``adjoint_factory`` method, its block preconditioner does.
-    inner_observer, inner_refresh, step_limit, step_projection, jacobian_residual
-        The dual-time loop's hooks and the per-step guards, forwarded to the step class. Forward-only.
+    inner_observer, step_limit, step_projection, jacobian_residual
+        The dual-time loop's observer and the per-step guards, forwarded to the step class.
+        Forward-only. A loop's ``refresh_on_cycles`` needs no hook here: the step stops for the re-fit
+        and the march takes it (:func:`~aquaflux.solve.newton_march`, which refuses a march with
+        nothing to take it).
     line_search : int or None
         The line-search rungs an unset ``globalization.line_search`` takes for this residual. ``None``
         leaves an unset one at the step class's own default (the full shifted step).
@@ -199,24 +201,18 @@ def shifted_step(
     Raises
     ------
     TypeError
-        If a dual-time hook is given without a dual-time loop, or the loop's ``refresh_on_cycles`` has no
-        ``inner_refresh`` to fire.
+        If the dual-time observer is given without a dual-time loop.
     """
     if krylov_solver is None and regime is not None:
         krylov_solver = regime.solver()
     if line_search is not None:
         globalization = globalization.with_defaults(line_search=line_search)
     if dual_time is None:
-        hooks = sorted(
-            name
-            for name, hook in (("inner_observer", inner_observer), ("inner_refresh", inner_refresh))
-            if hook is not None
-        )
-        if hooks:
+        if inner_observer is not None:
             raise TypeError(
-                f"{hooks} are hooks of the dual-time inner loop, and this march has none: the single "
-                "shifted step runs no inner iterations to observe or refresh. Give "
-                "dual_time=DualTimeLoop(...) to march in dual time, or leave them unset."
+                "inner_observer is a hook of the dual-time inner loop, and this march has none: the "
+                "single shifted step runs no inner iterations to observe. Give "
+                "dual_time=DualTimeLoop(...) to march in dual time, or leave it unset."
             )
         # The positivity guard is passed on BOTH branches: an escalation ladder is no substitute for
         # it, because the divergence guard fires on a non-finite residual, which is already the
@@ -228,13 +224,6 @@ def shifted_step(
             step_limit=step_limit,
             step_projection=step_projection,
             jacobian_residual=jacobian_residual,
-        )
-    if dual_time.refresh_on_cycles is not None and inner_refresh is None:
-        raise TypeError(
-            f"DualTimeLoop(refresh_on_cycles={dual_time.refresh_on_cycles}) has nothing to fire: no "
-            "inner_refresh was given, and only a materialized-Jacobian preconditioner's session supplies "
-            "one of its own -- a frozen step and a block-diagonal session do not. Open a session for a "
-            "MaterializedJacobian, pass inner_refresh, or leave refresh_on_cycles unset."
         )
     # Dual-time (backward-Euler) march: an inner Newton loop per outer timestep on the transient
     # residual, so the measured steady residual is the honest discrete time derivative rather than
@@ -248,7 +237,6 @@ def shifted_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=adjoint_preconditioner_factory,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_residual=jacobian_residual,

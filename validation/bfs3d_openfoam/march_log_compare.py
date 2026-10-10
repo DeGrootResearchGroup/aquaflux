@@ -54,7 +54,7 @@ _RUNG = re.compile(r"^\[point (\d+)/(\d+) \(([^)]*)\)\]")
 #:
 #: ⚠️ **The kinds compose, and enumerating them undercounts by an order of magnitude.** A step's aside
 #: is written ``pc full 3.6s``, ``pc none 0.0s``, ``pc none inner 3.0s`` or ``pc none 2x inner 2x 6.3s``
-#: -- the mid-step re-fit is a *compound* label, not one of three words. A pattern of the form
+#: -- the old mid-step re-fit was a *compound* label (it is ``pc cost`` since #290, but archived logs keep it), not one of three words. A pattern of the form
 #: ``pc (full|inner|none) ([\d.]+)s`` therefore matches only the two simple forms and silently drops
 #: every compound one, which is where the cost actually is: on ``run-20260908-170738.log`` it reported
 #: **10 s (1 %)** against the log's true **118 s (15.7 %)** over 38 refreshes, and the same shape on the

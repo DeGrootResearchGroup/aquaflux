@@ -87,7 +87,6 @@ def flow_march_step(
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: ShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     jacobian_gradient_sweeps: int | None = None,
 ) -> NewtonStrategy:
     """The flow march's Newton step, with its preconditioner **frozen** at ``reference_state``.
@@ -118,9 +117,9 @@ def flow_march_step(
         value :func:`~aquaflux.turbulence.coupled_step` takes (as :class:`~aquaflux.turbulence.CoupledShiftSettings`,
         which adds the closure's damping). Unset fields keep the full ``a_P`` from the frozen momentum
         diagonal.
-    inner_observer, inner_refresh : callable, optional
-        The dual-time loop's per-inner-iteration hook and mid-step rebuild. Forward-only, and refused
-        without ``dual_time``.
+    inner_observer : callable, optional
+        The dual-time loop's per-inner-iteration hook. Forward-only, and refused without
+        ``dual_time``.
     jacobian_gradient_sweeps : int or None
         Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian** is
         differentiated from, leaving the residual itself -- and so the root and the adjoint -- untouched.
@@ -149,7 +148,6 @@ def flow_march_step(
         dual_time=dual_time,
         linear_solve=linear_solve,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
     )
 
@@ -164,7 +162,6 @@ def _flow_shifted_step(
     dual_time: DualTimeLoop | None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None,
     inner_observer: Callable[..., None] | None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None,
     jacobian_gradient_sweeps: int | None,
 ) -> NewtonStrategy:
     """The flow's step around a composed policy: what every flow preconditioner shares.
@@ -182,7 +179,6 @@ def _flow_shifted_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=adjoint_preconditioner_factory,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         jacobian_residual=(
             None
             if jacobian_gradient_sweeps is None
@@ -285,7 +281,6 @@ class _FlowProblem(MaterializedProblem):
             dual_time=march["dual_time"],
             linear_solve=march["linear_solve"],
             inner_observer=march["inner_observer"],
-            inner_refresh=march["inner_refresh"],
             jacobian_gradient_sweeps=march["jacobian_gradient_sweeps"],
         )
 

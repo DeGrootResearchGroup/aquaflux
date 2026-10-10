@@ -59,9 +59,10 @@ class RefreshPolicy:
         materialized off the jit path -- refresh at all. It is also what lifts the restriction that a
         caller-supplied step cannot be refreshed: the builder is *how* the refresh rebuilds.
     refresh_preconditioner : callable or None
-        ``(active_step, state) -> None``, called before **each** march step to re-derive that
+        ``(active_step, state, *, due) -> None``, called before **each** march step to re-derive that
         step's frozen host preconditioner from the state and shift strength the step is about to run
-        at. It mutates in place, so the compiled step stays a cache hit.
+        at; ``due`` says the march is asking for a re-fit rather than offering one (see
+        :func:`~aquaflux.solve.newton_march`). It mutates in place, so the compiled step stays a cache hit.
 
         This is the per-step counterpart of the between-segment rebuild above, and the two suit
         opposite kinds of preconditioner. An *exact* factorization is exact only for the operator it
@@ -81,7 +82,7 @@ class RefreshPolicy:
     trigger: RefreshTrigger | None = None
     limit: int = 1
     builder: Callable[[Any], NewtonStrategy] | None = None
-    refresh_preconditioner: Callable[[NewtonStrategy, Any], None] | None = None
+    refresh_preconditioner: Callable[..., None] | None = None
 
     @property
     def refreshes(self) -> bool:

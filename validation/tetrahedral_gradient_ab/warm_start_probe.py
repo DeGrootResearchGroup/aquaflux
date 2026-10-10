@@ -47,7 +47,8 @@ from compare import (
 
 STEPS = int(os.environ.get("TET_STEPS", "25"))
 SEED_STEPS = 25
-#: Re-fit the complete LU mid-step once an inner solve takes this many restart cycles (0: never, the
+#: Re-fit the complete LU once an inner solve takes this many restart cycles (the step ends there and the
+#: next starts on the re-fit) (0: never, the
 #: first factorization is kept for the whole march -- exact only at the state and shift it was built at).
 REFRESH_ON_CYCLES = int(os.environ.get("TET_REFRESH_ON_CYCLES", "0")) or None
 ARMS = os.environ.get("TET_ARMS", "owner,repaired").split(",")

@@ -681,6 +681,7 @@ class PseudoTransientStep(ShiftedStep):
                 jnp.asarray(True),
                 corrected_cycles(step_cycles),
                 jnp.asarray(1.0),
+                jnp.asarray(False),
             )
 
         return step
@@ -792,30 +793,30 @@ class DualTimeStep(ShiftedStep):
         Prefer it wherever one near-zero entry would otherwise set the step length for the whole state.
         ``None`` (default) is byte-identical.
     refresh_on_cycles : int or None
-        Refresh the preconditioner **inside** the step once a single solve reaches this many restart
-        cycles, by calling :attr:`inner_refresh` at the iterate it reached (static). ``None`` (default)
-        never refreshes mid-step and is byte-identical.
+        Stop the inner loop once a single solve reaches this many restart cycles, **keeping** the iterate
+        it reached, and report :attr:`~aquaflux.solve.StepOutcome.refresh_due` so the march re-fits the
+        preconditioner there before stepping on (static). ``None`` (default) never stops for a refresh.
 
-        This is a *control* seam, not the profiling :attr:`inner_observer`, and the decision is taken in
-        the loop rather than by the hook so that one rule both fires the refresh and forgives the abort.
-        The pairing is the point: a march's expensive inner solves are stale-preconditioner effects
-        rather than hard operators — measured on a three-dimensional coupled march, a preconditioner
-        rebuilt at the very iterate of the hardest solve converged in **one** cycle where the march's own
-        took fifteen — so a refresh here can rescue an attempt that :attr:`abort_above_inner_cycles`
-        would otherwise discard along with its pseudo-timestep. Only one refresh fires per step; a second
-        expensive solve after it means the operator really is hard, and the abort then does its job.
-    inner_refresh : callable or None
-        ``(iterate) -> None``, rebuilding the step's frozen preconditioner at that iterate (static).
-        Impure and forward-only — it mutates host state, so never set it on a differentiated solve.
+        A march's expensive inner solves are stale-preconditioner effects rather than hard operators —
+        measured on a three-dimensional coupled march, a preconditioner rebuilt at the very iterate of
+        the hardest solve converged in **one** cycle where the march's own took fifteen. So the rest of
+        the step is worth running on a fresh preconditioner, and stopping here loses nothing: the iterate
+        already passed the line search, and the remaining work becomes the next step, which starts from
+        it with the preconditioner re-fitted. That is the same refresh, at the same iterate, as one taken
+        between two inner iterations would be, without a call to the host from inside the compiled step
+        -- which is a synchronization point on every inner iteration, and which an on-device
+        preconditioner could not honour anyway (its arrays are inputs to the running step).
+
+        A step that stopped here is not one the march redoes for its cost: the cost has been answered by
+        the refresh, and discarding the iterate would throw away work the refresh is meant to keep.
     cycle_budget : int or None
         An optional cap on the inner loop's **accumulated** linear-solve count (static). When set, the
         inner loop stops as soon as its summed cycle count reaches ``cycle_budget``, so a primary solve
         grinding on a stiff low-β operator is cut after ~one over-budget inner iteration rather than
         running the full ``inner_steps`` into the restart cap (~5× the cost on the 3D coupled march). The
         partial, non-converged iterate it then returns is meant to be **discarded**, by pairing this with
-        the march's ``retry.abort_above_cycles`` set below it -- which redoes the step at the SAME β on the
-        preconditioner the mid-step refresh has by then rebuilt. ⚠️ Pair the two or the truncated iterate
-        is simply accepted. It is deliberately *not* redone at a larger β: a cycle count says the frozen
+        the march's ``retry.abort_above_cycles`` set below it -- which redoes the step at the SAME β on a
+        re-fitted preconditioner. ⚠️ Pair the two or the truncated iterate is simply accepted. It is deliberately *not* redone at a larger β: a cycle count says the frozen
         factorization is struggling, not that the step is stiff, and on at least one case a larger β makes
         the block harder rather than easier. ``None`` (default) is unbounded and byte-identical.
         Forward-only, like the retry it pairs with.
@@ -868,7 +869,6 @@ class DualTimeStep(ShiftedStep):
     # plain callable has no array leaves, so it filters to the static side and the default is unchanged.
     inner_observer: Callable[..., None] | None = eqx.field(static=True, default=None)
     refresh_on_cycles: int | None = eqx.field(static=True, default=None)
-    inner_refresh: Callable[[jnp.ndarray], None] | None = eqx.field(static=True, default=None)
     cycle_budget: int | None = eqx.field(static=True, default=None)
     abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
     abort_below_alpha: float | None = eqx.field(static=True, default=None)
@@ -921,13 +921,7 @@ class DualTimeStep(ShiftedStep):
         norm = self.residual_norm
         inner_observer = self.inner_observer
         refresh_on_cycles = self.refresh_on_cycles
-        inner_refresh = self.inner_refresh
         cycle_budget = self.cycle_budget
-
-        def _refresh_if_due(due, iterate) -> None:
-            """Host side of the mid-step refresh: the loop has already decided, this just obeys."""
-            if bool(due):
-                inner_refresh(iterate)
 
         step_limit = self.step_limit
         step_projection = self.step_projection
@@ -967,7 +961,7 @@ class DualTimeStep(ShiftedStep):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, min_alpha, _, since_refresh, _, _ = carry
+                _, inner, gnorm, cycles, min_alpha, max_inner, refresh_due, _ = carry
                 # The convergence target is tested FIRST, and that ordering is what makes the cost
                 # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
                 # here with `reached_target` set and is kept, never binned for its cost.
@@ -985,18 +979,16 @@ class DualTimeStep(ShiftedStep):
                     keep = keep & (cycles < cycle_budget)
                 # Doomed-attempt bailout: one solve has already cost more than the march's discard
                 # threshold, and the target is still unmet (the test above), so this attempt WILL be
-                # thrown away and redone at a larger shift. Every further inner iteration is work that
-                # is discarded. Checking it here rather than after the step is the whole point: the
-                # threshold is a per-solve quantity, so it can be known the moment a solve returns.
-                # Measured on cycles since the LAST REFRESH, not since the step began. The march's
-                # expensive inner solves are stale-preconditioner effects rather than hard operators, so
-                # when `inner_refresh` has just rebuilt at this iterate the attempt deserves one more
-                # solve before being written off -- otherwise the refresh is paid for and then discarded
-                # along with the step, which is what happened before this counter was split out. With no
-                # refresh hook the two counters are identical and this is byte-identical to testing the
-                # step's maximum.
+                # thrown away and redone. Every further inner iteration is work that is discarded.
+                # Checking it here rather than after the step is the whole point: the threshold is a
+                # per-solve quantity, so it can be known the moment a solve returns.
                 if abort_above is not None:
-                    keep = keep & (since_refresh <= abort_above)
+                    keep = keep & (max_inner <= abort_above)
+                # Stop for a refresh: a solve has cost enough that the rest of the step should run on a
+                # re-fitted preconditioner. The iterate is kept and the march re-fits there before the
+                # next step, so nothing is discarded -- unlike the two bailouts either side of this.
+                if refresh_on_cycles is not None:
+                    keep = keep & jnp.logical_not(refresh_due)
                 # Doomed-attempt bailout, the other way an attempt dies: the ladder can no longer move.
                 # `min_alpha` is zero when an iteration failed to descend and tiny when a positivity cap
                 # bound the length, and neither recovers within the step -- the iterate is unchanged, so
@@ -1008,7 +1000,7 @@ class DualTimeStep(ShiftedStep):
                 return keep
 
             def body(carry: tuple) -> tuple:
-                p, inner, gnorm, cycles, min_alpha, max_inner, since_refresh, spent, binding = carry
+                p, inner, gnorm, cycles, min_alpha, max_inner, refresh_due, binding = carry
                 delta, step_cycles = _shifted_solve(
                     residual_fn,
                     p,
@@ -1060,15 +1052,13 @@ class DualTimeStep(ShiftedStep):
                         ordered=True,
                     )
                 corrected = corrected_cycles(step_cycles)
-                # Refresh the preconditioner mid-step once a solve gets expensive, and give the rebuilt
-                # one a fair hearing by restarting the abort's counter. The decision is made HERE, in the
-                # traced loop, and handed to the host hook -- so the rule that fires the refresh and the
-                # rule that forgives the abort are one rule, not two that can drift apart.
-                if refresh_on_cycles is not None and inner_refresh is not None:
-                    due = (corrected >= refresh_on_cycles) & jnp.logical_not(spent)
-                    jax.debug.callback(_refresh_if_due, due, candidate, ordered=True)
-                else:
-                    due = jnp.asarray(False)
+                # Decided here, on device, and acted on by the march between steps: no call to the host
+                # from inside the step, which would be a synchronization point on every inner iteration.
+                due = (
+                    corrected >= refresh_on_cycles
+                    if refresh_on_cycles is not None
+                    else jnp.asarray(False)
+                )
                 return (
                     candidate,
                     inner + 1,
@@ -1076,15 +1066,9 @@ class DualTimeStep(ShiftedStep):
                     cycles + step_cycles,
                     jnp.minimum(min_alpha, jnp.where(descended, alpha, 0.0)),
                     # The most expensive SINGLE solve, which is the inner-count-invariant difficulty
-                    # signal: the summed count above also counts how many times the step solved. Kept
-                    # un-reset by a refresh, so the step still REPORTS how hard it really was -- that is
-                    # the signal a study picks its probe states by, and hiding a refresh in it would make
-                    # the hardest steps look benign.
+                    # signal: the summed count above also counts how many times the step solved.
                     jnp.maximum(max_inner, corrected),
-                    # ...whereas the abort's counter restarts, so the refreshed preconditioner is judged
-                    # on its own solve rather than on the one that provoked it.
-                    jnp.where(due, 0, jnp.maximum(since_refresh, corrected)),
-                    spent | due,
+                    refresh_due | due,
                     # The cap only where it was the BINDING constraint: `alpha` reaching it means the
                     # ladder wanted a longer step and the limit, not the descent test, stopped it.
                     jnp.minimum(binding, jnp.where(alpha >= max_alpha, max_alpha, 1.0)),
@@ -1097,8 +1081,7 @@ class DualTimeStep(ShiftedStep):
                 cycles,
                 alpha,
                 max_inner,
-                _,
-                _,
+                refresh_due,
                 binding,
             ) = jax.lax.while_loop(
                 cond,
@@ -1109,7 +1092,6 @@ class DualTimeStep(ShiftedStep):
                     reference_norm,
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(1.0),
-                    jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(False),
                     jnp.asarray(1.0),
@@ -1135,6 +1117,7 @@ class DualTimeStep(ShiftedStep):
                 final_gnorm <= target,
                 max_inner,
                 binding,
+                refresh_due,
             )
 
         return step
@@ -1413,9 +1396,9 @@ class DualTimeLoop(SettingsValue):
         that many. Pair it with ``retry.abort_above_cycles`` below it, so a capped step is redone
         rather than accepted. Forward-only.
     refresh_on_cycles : int or None
-        Fire the march's mid-step refresh once an inner solve has cost this many restart cycles. It
-        needs a refresh to fire: a preconditioner session supplies one, or the builder's
-        ``inner_refresh``. Forward-only.
+        End the step once an inner solve has cost this many restart cycles, keeping the iterate, so the
+        march re-fits the preconditioner there before the next step. It needs a march that re-fits on
+        request: a preconditioner session's ``refresh_preconditioner`` does. Forward-only.
 
     Raises
     ------

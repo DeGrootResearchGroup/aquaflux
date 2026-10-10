@@ -571,9 +571,9 @@ JACOBI_TRAILING = {
     ),
 }
 #: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
-#: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
-#: iterate no observer records -- the inner-iterate dump happens after an iteration succeeds, so the
-#: one that fails is precisely the one never written. Dumping before the build inverts that: whatever
+#: The build refuses a singular cell block, and that refusal fires from a cost-triggered refresh whose
+#: operator no observer records -- it is built before the step that would have written anything, so
+#: the one that fails is precisely the one never written. Dumping before the build inverts that: whatever
 #: happens, the last file on disk is the operator that failed, with no state to reload and no shift to
 #: pair correctly. Off by default; it costs a ~35 MB write per refresh.
 DUMP_TRAILING_BLOCK = os.environ.get("BFS3D_DUMP_TRAILING_BLOCK", "") not in ("", "0")
@@ -982,16 +982,16 @@ INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # buffer would keep only that tail and throw away the step that started it.
 DUMP_STEP_LIMIT = float(os.environ.get("BFS3D_DUMP_STEP_LIMIT", "0") or 0.0)
 DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
-# Refresh the preconditioner MID-STEP as soon as one solve reaches this many restart cycles, and switch
-# the scheduled refreshes off. `0` selects the scheduled cadence instead.
+# Refresh the preconditioner as soon as one solve reaches this many restart cycles -- the step ends there,
+# keeping its iterate, and the next starts on the re-fit -- and switch the scheduled refreshes off. `0` selects the scheduled cadence instead.
 #
 # The point is the swap, not the addition. Measured on the 3501 s march: the scheduled refreshes cost
 # 742 s -- 21 % of the wall -- while 193 of 232 solves already took a single cycle, so most of that is
 # maintaining a freshness nothing consumes. And no fixed cadence can be right, because the interval that
 # matters is regime-dependent: one step of staleness is free at beta 0.333 and triples the cost at 0.029.
-# Reacting to the cost itself adapts; a schedule cannot. Refreshing mid-step (rather than at the next
-# step boundary) also keeps the inner loop's progress, where the current reaction -- abort and escalate
-# beta -- throws away the work and the pseudo-timestep together.
+# Reacting to the cost itself adapts; a schedule cannot. Ending the step there (rather than aborting it)
+# also keeps the inner loop's progress, where the old reaction -- abort and escalate beta -- threw away
+# the work and the pseudo-timestep together. (Until #290 the re-fit happened mid-step instead.)
 #
 # ⚠️ THE DEFAULT IS 3, AND IT USED TO BE 0. Every recorded measurement on this case was taken
 # cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
@@ -1124,16 +1124,16 @@ _STEP_BETA, _STEP_ANCHOR = float("nan"), None
 def _recording_precondition(refresh):
     """Wrap the preconditioner refresh so each attempt's shift and anchor are recorded for the dumps.
 
-    The march calls ``refresh_preconditioner(step, state)`` once per attempt, after the control has set beta
-    and before the step runs -- so it is the one place where both are in hand together. Delegates
+    The march calls ``refresh_preconditioner(step, state, due=...)`` once per attempt, after the control has
+    set beta and before the step runs -- so it is the one place where both are in hand together. Delegates
     unchanged; only used when the step-limit dump is switched on.
     """
 
-    def precondition(step, state):
+    def precondition(step, state, *, due=False):
         global _STEP_BETA, _STEP_ANCHOR
         _STEP_BETA = float(getattr(step.relaxation_schedule, "beta", float("nan")))
         _STEP_ANCHOR = np.asarray(state)
-        return refresh(step, state)
+        return refresh(step, state, due=due)
 
     return precondition
 

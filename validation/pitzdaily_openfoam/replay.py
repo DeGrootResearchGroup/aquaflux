@@ -10,8 +10,11 @@ step's start ``phi_n``, ``p_{i+1}`` the dumped iterate of inner ``i``) and solve
 
 with ``beta_k`` the step's recorded shift and ``d`` the step's own shift policy. That policy is built once,
 at the hybrid start of the anchor station, exactly as the ramp builds it, and the preconditioner is
-refitted where the march refitted it: in full at a station change, and at the iterate a solve reached
-``refresh_on_cycles`` restart cycles on, once per step, at ``max(beta, refit_beta_floor)``.
+refitted where the march refitted it: in full at a station change, and at the start of the step after
+one whose solve reached ``refresh_on_cycles`` restart cycles -- such a step ends there, keeping its
+iterate, so the next step starts from it on the re-fitted inverse -- at ``max(beta, refit_beta_floor)``
+of the step that re-fit serves. A capture made before the march stopped steps for a re-fit (it re-fitted
+inside the step instead) does not replay faithfully; re-run the capture.
 
 A replay that does not reproduce the march's recorded cycle counts is measuring some other sequence, so
 every consumer should check it: :meth:`MarchReplay.march_solver` is the march's own solver, bound to the
@@ -168,14 +171,18 @@ class MarchReplay:
 
         The default range is the target station to the last captured step, or ``PITZ_REPLAY_FROM`` /
         ``PITZ_REPLAY_TO``. Starting anywhere but at a station change is NOT faithful: the march's
-        inverse there dates from a mid-step refresh. The preconditioner is refitted after a system is
-        consumed, so a consumer sees each system with the inverse the march used for it.
+        inverse there dates from a re-fit at some earlier step's start. The preconditioner is refitted
+        at the start of the step it serves, so a consumer sees each system with the inverse the march
+        used for it.
         """
         if first is None:
             first = int(os.environ.get("PITZ_REPLAY_FROM", self.stations + 1))
         if last is None:
             last = int(os.environ.get("PITZ_REPLAY_TO", max(self.states)))
         previous = None
+        # Whether the previous step ended to have the inverse re-fitted, which the march then did at
+        # this step's start.
+        due = False
         for k in range(first, last + 1):
             phi_n = jnp.asarray(self.states[k - 1]["state"]) if k > 1 else self.seed
             beta = float(self.states[k]["shift"])
@@ -183,21 +190,21 @@ class MarchReplay:
             r_n = assembler.residual(phi_n)
             shift = jax.lax.stop_gradient(self.policy.shift_term(phi_n, r_n).shift(beta))
             measure = coupled_scaled_norm(self.coupled, self.policy, phi_n)
-            # A station change re-fits in full at the step's start.
-            if assembler is not previous:
+            # A station change re-fits in full at the step's start, and so does a step following one that
+            # stopped for a re-fit.
+            if assembler is not previous or due:
                 self._refit(assembler, beta, phi_n)
             previous = assembler
-            refreshed = False
+            due = False
             i, p = 0, phi_n
             while (k, i) in self.inner:
                 record = self.inner[(k, i)]
                 recorded = int(record["cycles"])
                 b = -(assembler.residual(p) + shift * (p - phi_n))
                 yield System(k, i, assembler, p, phi_n, shift, measure, b, recorded)
-                # The march's mid-step refresh: once per step, at the iterate the expensive solve reached.
-                if self.refresh_on is not None and recorded >= self.refresh_on and not refreshed:
-                    self._refit(assembler, beta, jnp.asarray(record["state"]))
-                    refreshed = True
+                # A solve this expensive ended the step; the re-fit is taken at the next step's start.
+                if self.refresh_on is not None and recorded >= self.refresh_on:
+                    due = True
                 p = jnp.asarray(record["state"])
                 i += 1
 

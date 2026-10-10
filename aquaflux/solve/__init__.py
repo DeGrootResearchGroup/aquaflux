@@ -127,6 +127,7 @@ from .strategy import (
     StepControl,
     StepOutcome,
     StepReport,
+    StopsForRefresh,
     shift_of,
 )
 from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
@@ -400,6 +401,7 @@ __all__ = [
     "StepHistory",
     "StepOutcome",
     "StepReport",
+    "StopsForRefresh",
     "SubLayout",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",

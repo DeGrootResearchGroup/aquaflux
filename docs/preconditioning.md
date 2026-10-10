@@ -496,8 +496,9 @@ shift falls, and that rise is not staleness.
 A {class}`~aquaflux.solve.MaterializedJacobian` preconditioner keeps itself current
 without a policy. Its session re-preconditions **in place**, so the compiled solve is reused
 rather than retraced: before the first step, after being pointed at a new case with `rebind`,
-before every step for a complete LU, and — once a single inner solve costs `refresh_on_cycles`
-restart cycles — mid-step. Open the session yourself to hear what each rebuild cost, through
+before every step for a complete LU, and before the step after one whose inner solve cost
+`refresh_on_cycles` restart cycles. Such a step ends there, keeping the iterate it reached, and the
+next step starts from it on the re-fitted preconditioner. Open the session yourself to hear what each rebuild cost, through
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts:
 
 ```python

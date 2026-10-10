@@ -121,7 +121,7 @@ Pinned by `tests/unit/test_march_history.py`.
   - **⚠️ "A STATION SPANS SEVERAL STEPS ON PURPOSE" IS RETRACTED (2026-09-10). Per-step viscosity is the
     CHEAPEST schedule measured, on both cases that have run it.** The claim here was that a station
     change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`), whose
-    `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe re-materialize —
+    `BetaTrackingRefresh._full_rebuild_pending` (`forced_full["pending"]` before #661) overrides **both** gates and forces a FULL coloured-probe re-materialize —
     "the most expensive single operation in the march" — so moving the parameter every step would pay a
     rebuild per step for a handful of saved steps. The mechanism is real; **every quantitative half of
     the argument is wrong.**
@@ -280,8 +280,9 @@ Pinned by `tests/unit/test_march_history.py`.
     `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt `refresh_preconditioner` hook (`amg_beta_tracking_refresh`, which since 2026-09-13
     (#371) re-fits only on its first call and after `rebind` — its scheduled gates were deleted).
     **Neither reads `alpha` or `binding_limit`**, so a collapsed line search can only ever escalate β — it
-    can never buy a rebuild — and the **only** live cost trigger is the reactive mid-step "one solve
-    reached `refresh_on_cycles` restart cycles". Two consequences worth holding: (a) an α-triggered
+    can never buy a rebuild — and the **only** live cost trigger is the reactive "one solve
+    reached `refresh_on_cycles` restart cycles" (since 2026-10-10 that ENDS the step and the march re-fits
+    before the next one, passing `due=True`; it used to re-fit mid-step). Two consequences worth holding: (a) an α-triggered
     refresh needs **no new trigger** — `refresh_preconditioner` is already called once per *attempt*, after the
     control has set β, so a rebuild on escalation would be a condition inside that hook (the deleted
     `beta_rel_change` gate was one, never measured in that role); (b) that would **not** address
@@ -590,9 +591,12 @@ Pinned by `tests/unit/test_march_history.py`.
       went below `a_min` 0.191, all four dead ones reported 0.000 (inner collapses at 0.001 and 0.003),
       so 0.01 sits an order of magnitude clear of both. Recalibrate on another case rather than porting
       the number.
-      **Known waste left on the table (deliberate, not yet fixed):** the mid-step cost refresh fires in
-      the *same* body call as the collapse, so a doomed attempt still pays it (~14.7 s) and the escalated
-      retry then re-matches the preconditioner anyway. Suppressing it would need to distinguish a
+      **Known waste left on the table, as measured under the old mid-step refresh:** the mid-step cost
+      refresh fired in the *same* body call as the collapse, so a doomed attempt paid it (~14.7 s) and the
+      escalated retry then re-matched the preconditioner anyway. ⚠️ **Since 2026-10-10 the shape is
+      different and unmeasured:** an attempt that asks for a re-fit stops there, and the escalated redo
+      takes the re-fit (`due=True`) at the pre-step state and the escalated β — one re-fit, at the operator
+      the redo solves, rather than one mid-attempt plus a gated re-match. Suppressing it would need to distinguish a
       constraint-bound step (`binding_limit < 1`, where no preconditioner can help) from a non-descending
       one (where a refresh might be exactly the cure) — `binding_limit` exists for precisely that
       distinction. Measured evidence that the refresh cannot rescue a constraint-bound step: at baseline
@@ -788,7 +792,7 @@ Pinned by `tests/unit/test_march_history.py`.
     number. Pinned by `tests/unit/test_text_table.py`.
   - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to eight
     values (`phi, residual_norm, cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
-    binding_limit`), which is the missing-object smell: a positional tuple is where a consumer silently
+    binding_limit`; a ninth, `refresh_due`, joined in 2026-10-10 with `StopsForRefresh`, #290), which is the missing-object smell: a positional tuple is where a consumer silently
     mis-unpacks one field for another, and every growth broke all five test doubles separately — which
     is why they are built by a single `_outcome` helper now. **The growth to eight demonstrated exactly
     that failure:** `residual_norm` was inserted *second*, and the one test still unpacking positionally
@@ -1015,6 +1019,38 @@ Pinned by `tests/unit/test_march_history.py`.
     Pinned by `tests/unit/test_march_log.py`, whose assertions read **cells** rather than substrings, so
     a column reordering is not a false failure while a wrong value still is.
 
+  - **A cost re-fit ENDS the step; the march takes it before the next one (binding, 2026-10-10, #290).**
+    `DualTimeStep(refresh_on_cycles=N)` stops its inner loop after the solve that reached `N` restart
+    cycles, **keeping** that iterate, and reports `StepOutcome.refresh_due`. The march then calls
+    `refresh_preconditioner(active_step, state, due=True)` before the next step, at the kept iterate and
+    the next step's shift. Before, the loop fired a `jax.debug.callback` (`inner_refresh` → the session's
+    `refresh_at`) and carried on inside the same step; that hook, its `since_refresh`/`spent` carry and the
+    `MaterializedProblem.bind_march` "must carry `inner_refresh`" contract are deleted.
+    - **Why:** the callback was an ordered host synchronization inside the compiled step on every inner
+      iteration whenever `refresh_on_cycles` was set, and an on-device (traced) preconditioner cannot be
+      swapped mid-step at all — its arrays are inputs to the running step. One mechanism now serves both;
+      the traced field split (#290) needs exactly this shape.
+    - **`due`** is keyword-only on every hook (session, `RefreshPolicy`, wrappers): `False` = offered (the
+      hook gates its own cadence — the multigrid session reports `"none"`), `True` = asked (it must
+      re-fit; the session reports kind **`"cost"`**, which replaces the old `"inner"`). The march passes
+      `due=True` before the step after a `refresh_due` step, before a **cost redo** (`"cycles"`, so the
+      redo is no longer on the same inverse — it repeated the first attempt exactly for any gated hook),
+      and before an escalated redo of an attempt that itself asked.
+    - **A `refresh_due` step is never a cost redo** (`RetryPolicy.retry_reason` skips `"cycles"` for it):
+      redoing it would discard the iterate the re-fit exists to keep. Divergence and step-length collapse
+      still redo it.
+    - **Refused, not ignored:** a strategy that `StopsForRefresh` with `refresh_on_cycles` set and no
+      `refresh_preconditioner` raises `ValueError` before the first step (`newton_march`) — the build-time
+      refusal in `shifted_step` went with `inner_refresh`, since a builder cannot know what the march holds.
+    - **What it changes in a march:** the rest of a step that used to continue after the mid-step re-fit
+      becomes the next outer step — re-anchored pseudo-time, the step control adapting the shift, the
+      measure rebuilt — so trajectories move and every recorded march under `refresh_on_cycles` predates
+      it. Pinned by `test_refresh_on_cycles_ends_the_step_keeping_the_iterate_it_reached`,
+      `test_a_step_only_asks_for_a_refit_once_a_solve_reaches_the_threshold` (`test_dual_time.py`),
+      `test_a_cost_redo_asks_the_refresh_hook_for_a_refit`,
+      `test_a_step_that_stopped_for_a_refit_is_kept_and_the_next_step_asks_for_it`,
+      `test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it` (`test_newton_march.py`),
+      and the two session tests in `test_preconditioner_session.py`.
   - **`refresh_preconditioner` — per-step refresh of the step's frozen host preconditioner (binding,
     forward-only).** `newton_march(refresh_preconditioner=…)` calls `refresh_preconditioner(active_step, state)`
     before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's

@@ -1859,7 +1859,6 @@ def _coupled_step(
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
@@ -1910,7 +1909,7 @@ def _coupled_step(
         The dual-time inner loop, or ``None`` for the single shifted step. Unlike the settings above
         this is not shared: the flow-only and scalar marches have no dual-time form, so the loop is a
         coupled choice and stays on the coupled builders.
-    krylov_solver, inner_observer, inner_refresh, step_limit, step_projection
+    krylov_solver, inner_observer, step_limit, step_projection
         The linear solve and the per-step guards. See the two step classes.
     jacobian_production_viscosity : bool
         Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
@@ -1979,7 +1978,6 @@ def _coupled_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_residual=jacobian_residual,
@@ -1998,7 +1996,6 @@ def _monolithic_factor_step(
     krylov_solver: lx.AbstractLinearSolver | None,
     regime: LinearSolveRegime,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
@@ -2021,7 +2018,6 @@ def _monolithic_factor_step(
         dual_time=dual_time,
         krylov_solver=krylov_solver,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
@@ -2116,7 +2112,7 @@ class _BlockSession:
         self._on_build = on_build
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        return self._build(state, march, track=True)
+        return self._build(state, march)
 
     def refresh(
         self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
@@ -2128,8 +2124,7 @@ class _BlockSession:
     def rebind(self, coupled: CoupledRANS) -> None:
         del coupled
 
-    def _build(self, state: jnp.ndarray, march: dict, *, track: bool) -> NewtonStrategy:
-        del track  # there is no hook to wire
+    def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
         return self._finish(self._step(state, _march_keywords(march), reuse=None))
 
     def _step(
@@ -2362,7 +2357,6 @@ def coupled_step(
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: CoupledShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
     jacobian_gradient_sweeps: int | None = None,
@@ -2398,10 +2392,10 @@ def coupled_step(
         outer timestep runs an inner Newton loop on the transient residual ``R + beta d (phi - phi_ref)``,
         so the measured steady residual is the honest discrete time derivative rather than
         ``beta x travel`` and a larger pseudo-timestep can be taken stably. ``None`` (default) is the
-        single shifted step, which has no inner loop, so neither ``inner_observer`` nor
-        ``inner_refresh`` can be given with it. The loop's ``refresh_on_cycles`` needs a refresh to fire:
-        a materialized-Jacobian preconditioner's session supplies one, while a frozen step and a
-        block-diagonal session have none, so there it is refused.
+        single shifted step, which has no inner loop, so ``inner_observer`` cannot be given with it. The
+        loop's ``refresh_on_cycles`` ends a step for a preconditioner re-fit, which the march must then
+        take: a materialized-Jacobian preconditioner's session supplies the hook, while a frozen step and
+        a block-diagonal session have none, so there the march refuses it.
     linear_solve : LinearSolveSettings, lineax.AbstractLinearSolver or None
         The shifted solve. A :class:`LinearSolveSettings` moves the regime -- unset, restart ``120`` for the
         block-diagonal family, ``10`` for a complete LU and ``15`` for a multigrid V-cycle or a field
@@ -2420,9 +2414,6 @@ def coupled_step(
         the path: the shift vanishes at the root.
     inner_observer : callable or None
         A per-inner-iteration hook forwarded to the dual-time step. Forward-only.
-    inner_refresh : callable or None
-        ``(iterate) -> None``, the mid-step rebuild the loop's ``refresh_on_cycles`` fires. A session
-        build wires its own when this is unset. Forward-only.
     positivity_floor : float
         Absolute room in ``k`` the step limiter gives every cell, so a numerically dead cell cannot set
         the step length for all of them. ``0.0`` (default) is the plain fraction-to-the-boundary rule. A
@@ -2456,12 +2447,10 @@ def coupled_step(
             "linear_solve": linear_solve,
             "shift": shift,
             "inner_observer": inner_observer,
-            "inner_refresh": inner_refresh,
             "positivity_floor": positivity_floor,
             "positivity_projection": positivity_projection,
             "jacobian_gradient_sweeps": jacobian_gradient_sweeps,
         },
-        track=False,
     )
 
 
@@ -2969,7 +2958,6 @@ def mass_flow_coupled_continuation(
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: CoupledShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
     jacobian_gradient_sweeps: int | None = None,
@@ -3038,7 +3026,6 @@ def mass_flow_coupled_continuation(
         dual_time=dual_time,
         krylov_solver=krylov_solver,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
