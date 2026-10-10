@@ -1536,7 +1536,11 @@ def _coupled_shift_policy(
     # Schur choice genuinely matters (a real, large, separated case), this whole block-diagonal
     # preconditioner is dominated by the field-split / monolithic-AMG preconditioners the flagship
     # validation cases use instead (`MaterializedJacobian`), so tuning the Schur here buys nothing
-    # a real case would ever see. It remains available (`BlockDiagonal(schur_scaling="msimple")`, or
+    # a real case would ever see. Nor is the mass-matrix family a stronger option set aside: measured in
+    # the field-split leading-inverse role on a flagship-scale coupled Jacobian, even its best pairing
+    # (MSIMPLER: `schur_scaling="msimple", composition="simpler"`) took more outer Krylov cycles than the
+    # shipped SIMPLE-smoothed hierarchical inverse, and each of its cycles costs more (two Schur solves
+    # per application against one). It remains available (`BlockDiagonal(schur_scaling="msimple")`, or
     # directly through `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
