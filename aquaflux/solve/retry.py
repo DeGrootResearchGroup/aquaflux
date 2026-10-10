@@ -21,7 +21,7 @@ from typing import ClassVar
 import jax.numpy as jnp
 
 from .linear_solver_spec import LinearSolverSpec
-from .strategy import NewtonStrategy, StepOutcome
+from .strategy import AbortsInnerLoop, NewtonStrategy, StepOutcome, shift_of
 
 #: Retry reasons whose response is to RAISE the pseudo-transient shift. The others redo the step at the
 #: shift it already had: ``"cycles"`` because the cure for an expensive solve is a fresh preconditioner
@@ -170,10 +170,9 @@ class RetryPolicy:
             If ``strategy`` carries no ``relaxation_schedule`` with a readable ``beta``.
         """
         # Checked against the SHIFT specifically, not `isinstance(..., ShiftedNewtonStrategy)`. The
-        # argument is already typed `NewtonStrategy`, so re-testing those four methods at runtime would
-        # reject a legitimate duck-typed step for a reason that has nothing to do with escalation.
-        schedule = getattr(strategy, "relaxation_schedule", None)
-        if schedule is None or not hasattr(schedule, "beta"):
+        # argument is already typed `NewtonStrategy`, so re-testing its methods at runtime would reject
+        # a legitimate duck-typed step for a reason that has nothing to do with escalation.
+        if shift_of(strategy) is None:
             raise TypeError(
                 "the beta-escalation retry (RetryPolicy.on_alpha) drives the "
                 "pseudo-transient shift strength, so it needs a Newton step whose "
@@ -190,9 +189,9 @@ class RetryPolicy:
 
         A step that runs an inner loop can stop the moment it crosses one, rather than iterating on
         inside a loop that will not help: a solve costing more than :attr:`abort_above_cycles`, or a
-        step length fallen to :attr:`on_alpha`. A step with no inner loop has nothing to stop and is
-        returned unchanged -- as is any step when neither threshold is set, so the default path is
-        byte-identical.
+        step length fallen to :attr:`on_alpha`. A step that is not an
+        :class:`~aquaflux.solve.AbortsInnerLoop` has no inner loop to stop and is returned unchanged --
+        as is any step when neither threshold is set, so the default path is byte-identical.
 
         ⚠️ **The two mean different things once the loop has stopped, and that asymmetry is the point
         of keeping them separate.** Crossing :attr:`on_alpha` is a diagnosis: the step is going nowhere
@@ -214,15 +213,13 @@ class RetryPolicy:
         NewtonStrategy
             The step carrying the thresholds it can act on, or ``strategy`` itself.
         """
-        # `dataclasses.replace`, not `eqx.tree_at`: the thresholds are STATIC fields, so they live in
-        # the treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach
-        # them.
-        fields = {}
-        if self.abort_above_cycles is not None and hasattr(strategy, "abort_above_inner_cycles"):
-            fields["abort_above_inner_cycles"] = self.abort_above_cycles
-        if self.on_alpha is not None and hasattr(strategy, "abort_below_alpha"):
-            fields["abort_below_alpha"] = self.on_alpha
-        return dataclasses.replace(strategy, **fields) if fields else strategy
+        if not isinstance(strategy, AbortsInnerLoop) or (
+            self.abort_above_cycles is None and self.on_alpha is None
+        ):
+            return strategy
+        return strategy.with_inner_abort(
+            above_cycles=self.abort_above_cycles, below_alpha=self.on_alpha
+        )
 
     def has_diverged(self, residual_norm: jnp.ndarray, reference: float) -> bool:
         """Whether a step's residual norm signals a diverged step this policy should redo.

@@ -620,6 +620,10 @@ class DampedNewtonStep(eqx.Module):
         """The residual measure the line search is judged by (the injected :attr:`residual_norm`)."""
         return self.residual_norm
 
+    def with_norm(self, norm: ResidualNorm) -> DampedNewtonStep:
+        """This step judging progress by ``norm``, swapped in as a data leaf (a compilation-cache hit)."""
+        return eqx.tree_at(lambda s: s.residual_norm, self, norm)
+
     def adjoint_preconditioner(
         self,
     ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:

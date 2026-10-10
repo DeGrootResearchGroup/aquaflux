@@ -7,6 +7,15 @@ controls and the retry policy: what a **strategy** must provide (:class:`NewtonS
 that report (:class:`StepControl`). None of them belongs to any one of those modules, and every one of
 them was living in whichever module happened to need it first.
 
+**What only some strategies or controls can do is declared here too, one protocol per capability, and
+the march asks with** ``isinstance``. A step that carries a relaxation schedule
+(:class:`CarriesRelaxationSchedule`), a schedule whose shift is readable (:class:`ReadableShift`), a
+step whose inner loop can be cut short (:class:`AbortsInnerLoop`), and a control that carries a shift
+across the march's boundaries (:class:`ShiftCarryingControl`) are each found by their protocol rather
+than by probing for an attribute name. A probe answers "no" in silence when a class offers the
+capability under another name, and a march that quietly skips a feature looks exactly like one that
+never needed it.
+
 **That is not tidiness; the placement had a cost that came due twice.** ``StepControl`` was declared in
 ``march.py`` with *zero* implementations there, so ``step_control.py`` had to import ``march`` -- which
 forbade the reverse, so a defaulting rule about two ``solve/`` objects could not be written in
@@ -31,13 +40,18 @@ from .norm import ResidualNorm
 from .relaxation import RelaxationSchedule
 
 __all__ = [
+    "AbortsInnerLoop",
+    "CarriesRelaxationSchedule",
     "LineSearchStep",
     "NewtonStrategy",
+    "ReadableShift",
+    "ShiftCarryingControl",
     "ShiftedNewtonStrategy",
     "StepControl",
     "StepFn",
     "StepOutcome",
     "StepReport",
+    "shift_of",
     "within_tolerance",
 ]
 
@@ -174,6 +188,25 @@ class NewtonStrategy(Protocol):
         :class:`~aquaflux.solve.BlockScaledNorm` so no single large-magnitude block dominates the
         stopping test or the globalization."""
 
+    def with_norm(self, norm: ResidualNorm) -> NewtonStrategy:
+        """This strategy judging progress by ``norm`` instead, everything else unchanged.
+
+        The march rebuilds the residual measure at the start of every outer iteration and hands it to
+        the step through this, so :meth:`norm` and the step's own globalization move together. The
+        returned strategy must differ only in a **data** leaf (``eqx.tree_at``), never in a static field:
+        swapping a static field is a new compilation key, and the swap happens every outer iteration.
+
+        Parameters
+        ----------
+        norm : ResidualNorm
+            The measure to judge progress by.
+
+        Returns
+        -------
+        NewtonStrategy
+            The same strategy with ``norm`` as its measure.
+        """
+
     def adjoint_preconditioner(
         self,
     ) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None:
@@ -181,7 +214,86 @@ class NewtonStrategy(Protocol):
 
 
 @runtime_checkable
-class ShiftedNewtonStrategy(NewtonStrategy, Protocol):
+class CarriesRelaxationSchedule(Protocol):
+    """Anything carrying a ``relaxation_schedule`` -- the shift-strength rule of a shifted step.
+
+    The data half of :class:`ShiftedNewtonStrategy`, declared on its own so it can be tested without
+    also testing every :class:`NewtonStrategy` method: a check that only needs the schedule should not
+    reject a step for a reason unrelated to it.
+    """
+
+    relaxation_schedule: RelaxationSchedule
+
+
+@runtime_checkable
+class ReadableShift(Protocol):
+    """A relaxation schedule whose shift strength ``beta`` is a readable, replaceable leaf.
+
+    :class:`~aquaflux.solve.ConstantRelaxation` is one; the default
+    :class:`~aquaflux.solve.SwitchedEvolutionRelaxation` is not -- it computes ``beta`` from the residual
+    ratio and holds nothing to read. A :class:`StepControl` is what installs a readable shift, once per
+    iteration, which is why a shift is read off the step that will actually run.
+    """
+
+    beta: jnp.ndarray
+
+
+def shift_of(strategy: object) -> jnp.ndarray | None:
+    """The shift strength ``strategy`` will run at, or ``None`` if it has no readable shift.
+
+    The one place the question is answered, for every caller that reads a shift (the march's reports,
+    the escalation and its carry, the beta-tracking refresh) or refuses a step that has none (the retry
+    policy). A plain damped-Newton step legitimately has no shift, so reading one is not demanding one.
+
+    Parameters
+    ----------
+    strategy : object
+        A Newton strategy.
+
+    Returns
+    -------
+    jnp.ndarray or None
+        ``strategy.relaxation_schedule.beta`` when the strategy carries a schedule that is a
+        :class:`ReadableShift`, else ``None``.
+    """
+    if not isinstance(strategy, CarriesRelaxationSchedule):
+        return None
+    schedule = strategy.relaxation_schedule
+    return schedule.beta if isinstance(schedule, ReadableShift) else None
+
+
+@runtime_checkable
+class AbortsInnerLoop(Protocol):
+    """A strategy running an inner loop that can stop the moment an attempt is known to be discarded.
+
+    The retry policy pushes its own thresholds down through :meth:`with_inner_abort`, so there is one
+    number rather than two to keep in step. A strategy with no inner loop has nothing to cut short and
+    does not implement this.
+    """
+
+    def with_inner_abort(
+        self, *, above_cycles: int | None, below_alpha: float | None
+    ) -> NewtonStrategy:
+        """This strategy with its inner loop stopping at the given thresholds.
+
+        Parameters
+        ----------
+        above_cycles : int or None
+            Stop once one inner solve costs more than this many restart cycles with the inner target
+            unmet; ``None`` leaves the strategy's own setting.
+        below_alpha : float or None
+            Stop once an inner step length falls to this; ``None`` leaves the strategy's own setting.
+
+        Returns
+        -------
+        NewtonStrategy
+            The strategy carrying the thresholds.
+        """
+        ...
+
+
+@runtime_checkable
+class ShiftedNewtonStrategy(NewtonStrategy, CarriesRelaxationSchedule, Protocol):
     """A :class:`NewtonStrategy` whose globalization is a **shift strength an external control can drive**.
 
     :class:`NewtonStrategy` says what every strategy must *do*. This says what a strategy must additionally
@@ -212,8 +324,6 @@ class ShiftedNewtonStrategy(NewtonStrategy, Protocol):
     the existing leaf so its dtype and weak-type are preserved, which is what keeps the jitted march step
     a compilation-cache hit rather than recompiling the whole coupled solve on every retry.
     """
-
-    relaxation_schedule: RelaxationSchedule
 
 
 class StepReport(NamedTuple):
@@ -367,6 +477,35 @@ class StepControl(Protocol):
         state : object
             The control's own state from the previous call (``None`` on the first call).
         """
+
+
+@runtime_checkable
+class ShiftCarryingControl(StepControl, Protocol):
+    """A :class:`StepControl` that carries a shift strength across the march's boundaries.
+
+    Four outside events change what the carried shift should be, and the march tells such a control
+    about each one. They are declared together because they are one capability -- keeping the carried
+    ``beta`` right -- and a control answering some of them and not others would carry a shift that is
+    right across one kind of boundary and silently wrong across another.
+    :class:`~aquaflux.solve.ShiftStrengthControl` implements all four. A control that drives no shift
+    implements none and is a plain :class:`StepControl`.
+    """
+
+    def carry_beta(self, state: object, beta: float) -> object:
+        """The carried state seeded with ``beta``, after a retry escalated the shift to it."""
+        ...
+
+    def resumed_at(self, shift: float) -> object:
+        """The carried state of a march resumed from one whose last step ran at ``shift``."""
+        ...
+
+    def redamp(self, state: object, factor: float) -> object:
+        """The carried state with the shift scaled by ``factor``, on entering a new homotopy station."""
+        ...
+
+    def rebase(self, state: object) -> object:
+        """The carried state with its residual reference dropped, after a homotopy station changed."""
+        ...
 
 
 def within_tolerance(residual_norm, residual_norm_0, rtol, atol):

@@ -36,7 +36,7 @@ from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian, Mon
 from .refresh_timing import RefreshTiming
 from .shifted_step import LinearSolveRegime
 from .state import FieldLayout
-from .strategy import NewtonStrategy
+from .strategy import NewtonStrategy, shift_of
 
 __all__ = [
     "BUILD_BETA",
@@ -301,13 +301,12 @@ def beta_tracking_refresh(
         # Binding once at construction cannot work: the step the builder returns still carries the
         # default schedule, and the march replaces it each iteration with one the control has set β on.
         bound_step["step"] = active_step
-        schedule = active_step.relaxation_schedule
-        beta = getattr(schedule, "beta", None)
+        beta = shift_of(active_step)
         if beta is None:
             raise ValueError(
                 "a β-tracking refresh needs the step's shift strength as a readable constant -- pair it "
                 "with a DualTimeControl (which sets a ConstantRelaxation β), not the default "
-                f"switched-evolution schedule ({type(schedule).__name__})."
+                f"switched-evolution schedule ({type(active_step).__name__} has no readable β)."
             )
         beta = float(beta)
         started = time.perf_counter()

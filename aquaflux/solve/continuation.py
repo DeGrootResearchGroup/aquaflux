@@ -367,6 +367,10 @@ class ShiftedStep(eqx.Module):
         """The residual measure the march and the outer stopping test share (:attr:`residual_norm`)."""
         return self.residual_norm
 
+    def with_norm(self, norm: ResidualNorm) -> ShiftedStep:
+        """This step judging progress by ``norm``, swapped in as a data leaf (a compilation-cache hit)."""
+        return eqx.tree_at(lambda s: s.residual_norm, self, norm)
+
     def linear_solver(self) -> lx.AbstractLinearSolver:
         """The injected :attr:`krylov_solver` when set, else the shared inexact continuation default.
 
@@ -868,6 +872,34 @@ class DualTimeStep(ShiftedStep):
     cycle_budget: int | None = eqx.field(static=True, default=None)
     abort_above_inner_cycles: int | None = eqx.field(static=True, default=None)
     abort_below_alpha: float | None = eqx.field(static=True, default=None)
+
+    def with_inner_abort(
+        self, *, above_cycles: int | None, below_alpha: float | None
+    ) -> DualTimeStep:
+        """This step with its inner loop stopping at the given thresholds; ``None`` keeps the current one.
+
+        ``dataclasses.replace`` rather than ``eqx.tree_at``: the thresholds are **static** fields, so
+        they live in the treedef rather than among the leaves, and ``tree_at`` (which addresses leaves)
+        cannot reach them.
+
+        Parameters
+        ----------
+        above_cycles : int or None
+            The new :attr:`abort_above_inner_cycles`, or ``None`` to keep the current one.
+        below_alpha : float or None
+            The new :attr:`abort_below_alpha`, or ``None`` to keep the current one.
+
+        Returns
+        -------
+        DualTimeStep
+            The step carrying the thresholds, or ``self`` when neither is given.
+        """
+        fields = {}
+        if above_cycles is not None:
+            fields["abort_above_inner_cycles"] = above_cycles
+        if below_alpha is not None:
+            fields["abort_below_alpha"] = below_alpha
+        return dataclasses.replace(self, **fields) if fields else self
 
     def stepper(self) -> StepFn:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
