@@ -5,8 +5,8 @@ factorization of the assembled coupled Jacobian (:class:`~aquaflux.turbulence.Co
 These check the two properties that make it a usable drop-in: handed to ``solve_coupled`` it converges
 the monolithic Newton to the **same** fixed point the block preconditioner reaches, and -- built once
 outside ``jax.grad`` on concrete parameters -- it yields the exact coupled adjoint matching finite
-differences. The channel setup (``_channel``, ``PRECONDITIONER``) is the one source of truth shared with
-the AMG and field-split integration tests.
+differences. The channel setup (``_channel``) is shared with the AMG and field-split integration tests, and
+``PRECONDITIONER`` with the AMG tests.
 
 Run under the always-available SciPy (SuperLU) backend so no optional dependency is needed; the complete
 factorization is exact regardless of backend, so these correctness/adjoint properties are backend-independent
