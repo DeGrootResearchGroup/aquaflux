@@ -211,8 +211,8 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   It was 2D only until a radiation case needed a small box (2026-10-05).
 - **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
   inputs); `BodyForce` reads no field and no gradient, so it needs nothing #362 would add.
-- **A passive-scalar case referring to another case's converged flow** (#375; `bfs3d_species` imports the
-  flow driver by path today) — a dependency edge between cases, not a field on one.
+- **A passive-scalar case referring to another case's converged flow** (#662, split from #375; `bfs3d_species`
+  imports the flow driver by path today) — a dependency edge between cases, not a field on one.
 - **Profiles** (`DirichletField`, a callable) — not plain data; a named-profile kind if ever needed.
 
 ## How the build derives what the drivers used to restate (binding)
