@@ -123,8 +123,9 @@ def main() -> None:
     shipped_floor = hook._refit_beta_floor
 
     # One step object per inner setting; the shift rides as a dynamic leaf, so every β is a cache hit.
+    # The file's own setting is always built: the control is the march's step whatever arms are run.
     steps = {}
-    for name in INNER:
+    for name in dict.fromkeys(("shipped", *INNER)):
         inner_steps, inner_tol = inner_values[name]
         march = dict(replay.march)
         march["dual_time"] = dataclasses.replace(
@@ -157,7 +158,7 @@ def main() -> None:
         # measure BEFORE the step's own pre-step refresh -- so at the arrival step it is built on the
         # ramp's last inverse, and the arrival's full re-fit at the target follows it.
         hook._refit_beta_floor = shipped_floor
-        step = steps["shipped"] if "shipped" in INNER else steps[INNER[0]]
+        step = steps["shipped"]
         if k == replay.stations:
             for _ in replay.systems(k, k):  # the ramp's last step, a station change itself
                 pass

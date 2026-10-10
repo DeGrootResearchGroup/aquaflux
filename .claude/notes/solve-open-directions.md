@@ -392,15 +392,31 @@ from the control (`lambda = beta_c (1 / rho_c - 1)`) and `predict` is `beta / (l
   sit 9-23 % above the prediction (0.405 against 0.372, 0.204 against 0.165) -- more than one slow
   mode -- and still a third and a fifth of the floor's rate.
 
+- **The transition is located (same day, same capture; tracking inverse, tight inner loop).** The
+  states between arrival and 21, each after the step the log reports for it:
+
+  | state | the step before it took | `beta` 0.0015 | `beta` 0 |
+  |---|---|---|---|
+  | 18 | `alpha` 0.5 at the floor | 0.390 / 45 cyc / `a` 0.125 | **0.995** / 48 / `a` 0, 14-cycle solves |
+  | 19 | `alpha` 0.5 at the floor | 0.320 / 36 / `a` 0.25 | 0.0096 / 45 / `a` 0.06, a 7-cycle solve, target unmet |
+  | 20 | **`alpha` 1.0** at the floor | 0.283 / 29 / `a` 0.5 | **1.0e-4** / 40 / `a` 0.25, bar met |
+
+  So a zero-shift step is Newton from the first state that follows a full-length step at the floor
+  (state 20, the start of step 21), strained one state earlier and a failure two earlier -- which is the
+  gate: release after the first `alpha = 1` step at the floor, not at arrival. On this march that is
+  steps 17-20 at the floor (153 raw solver steps) plus one zero-shift step (40) in place of steps 17-31
+  (344): the target station in 5 steps instead of 15. The control rows of that run used the tight inner
+  loop (a harness quirk since fixed), so their cycle counts are not the march's; their ratios match the
+  record to four figures.
+
 **Pre-registered measurement (the march).** pitzDaily, shipped `case.yaml`, against the capture above
 (31 steps / 1036 raw solver steps / `x_r/h` 8.07): a control that keeps the Courant ramp through the
 ramp and, once arrived AND the previous step took `alpha = 1` at the floor, lets `beta` fall by the
 residual ratio (the switched-evolution rule, `ResidualRatioDualTimeControl`'s adaptation) to a floor near
-zero, with the refit floor released to the running shift and the inner loop tightened on that step; the
-pass is fewer steps AND fewer raw solver steps to the same `x_r/h` with no retry. Watch for a release
-that fires on the first `alpha = 1` step and overshoots (the transition rows below say where that is).
-Then bfs3d (its mesh is not in this container), and the three slow tests #645 names, since a loose
-terminal step is what they measure.
+zero -- or drops it to zero outright, which the rows above license -- with the refit floor released to
+the running shift and the inner loop tightened on that step; the pass is fewer steps AND fewer raw
+solver steps to the same `x_r/h` with no retry. Then bfs3d (its mesh is not in this container), and the
+three slow tests #645 names, since a loose terminal step is what they measure.
 
 ---
 
