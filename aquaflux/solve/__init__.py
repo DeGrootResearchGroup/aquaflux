@@ -107,7 +107,12 @@ from .field_split import (
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
 from .settings_value import SettingsValue, filled_from
-from .host_preconditioner import HostFactors, HostPreconditioner
+from .host_preconditioner import (
+    HostFactors,
+    HostPreconditioner,
+    RefactorableFactors,
+    ReleasableFactors,
+)
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
@@ -347,11 +352,13 @@ __all__ = [
     "PreconditionerSession",
     "ProbeGather",
     "PseudoTransientStep",
+    "RefactorableFactors",
     "RefreshPolicy",
     "RefreshTiming",
     "RefreshTrigger",
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
+    "ReleasableFactors",
     "ResidualHomotopy",
     "ResidualMeasure",
     "ResidualMeasures",

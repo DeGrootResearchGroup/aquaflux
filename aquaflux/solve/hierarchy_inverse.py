@@ -30,6 +30,7 @@ split exists precisely to make the argument form possible; taking it is what col
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 
 import jax
@@ -38,6 +39,23 @@ import numpy as np
 import scipy.sparse as sp
 
 from .multigrid import ShapeBudget, SmoothedHierarchy, build_convection_hierarchy
+from .traced_cycle import TracedCycle
+
+
+@dataclasses.dataclass(frozen=True)
+class _HierarchyStep:
+    """The static half of a hierarchy inverse's :class:`~aquaflux.solve.traced_cycle.TracedCycle`.
+
+    Holds the module-level jitted cycle and the smoother's hashable settings, and takes the
+    ``(hierarchy, extras)`` state as an argument, so it compares by value and closes over no array.
+    """
+
+    cycle: Callable
+    smoother: object
+
+    def __call__(self, state, residual: jnp.ndarray) -> jnp.ndarray:
+        hierarchy, extras = state
+        return self.cycle(hierarchy, extras, residual, self.smoother)
 
 
 class HierarchyBlockInverse:
@@ -198,17 +216,33 @@ class HierarchyBlockInverse:
         # describes the hierarchy this call has just replaced.
         self._transpose_fn = None
 
+    def traced_cycle(self) -> TracedCycle:
+        """The cycle over what this inverse currently holds, its hierarchy as leaves rather than constants.
+
+        A fresh value per call, reading the current hierarchy, so a caller holding one from before a
+        refresh holds the old state; take a new one after :meth:`refactor_block`.
+
+        Returns
+        -------
+        TracedCycle
+            ``r -> M r`` with ``(hierarchy, extras)`` as its array state and the jitted cycle plus the
+            smoother's settings as its static step.
+        """
+        return TracedCycle(
+            state=(self._hierarchy, self._extras),
+            step=_HierarchyStep(self.cycle(), self.smoother()),
+        )
+
     def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The cycle over what this inverse currently holds, traced in and not captured."""
-        return self.cycle()(self._hierarchy, self._extras, residual, self.smoother())
+        return self.traced_cycle()(residual)
 
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Re-fit to a new operator on the same graph, IN PLACE. Required to survive a march refresh.
 
-        The field split refuses to refresh an inverse offering neither this nor ``refactor``, because
-        replacing the object would recompile the whole coupled solve -- so without it this
-        preconditioner cannot be used in a march at all, and a single-state probe never reaches the
-        code path.
+        A refresh refuses an inverse that does not offer this, because replacing the object would
+        recompile the whole coupled solve -- so without it this preconditioner cannot be used in a march
+        at all, and a single-state probe never reaches the code path.
 
         Takes the **raw field-major** block rather than the equilibrated cell-major form a host solver
         would want, because the nodal coarsening recovers each cell as ``index % n_cells``.

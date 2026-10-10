@@ -379,7 +379,9 @@ Many entries below are dated history written against the old API. Read them thro
       LOADER, not by the value's constructor** — so a refusal message moved from `TypeError` naming the
       family to `ValueError` naming the path. Constructing the same value in Python still meets the
       constructor's refusal, which is deliberately unchanged: #424 is about the file. Cross-field rules
-      (a setting that means nothing beside a given kind) remain #375's.
+      (a setting that means nothing beside a given kind — `mass_scale` beside `schur_scaling: simple`,
+      `strength_threshold` beside a `ConvectionAir` velocity block) are #663's, not yet built: both load
+      and are silently ignored.
     - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`.** One field
       breaks the "`None` for unset" wording: `MaterializedJacobian.probe`, where an absent key is the
       default probe and `probe: null` is refused. (`BlockDiagonal.method` was a second, with an `_UNSET`

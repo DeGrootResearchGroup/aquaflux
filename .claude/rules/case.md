@@ -211,8 +211,8 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   It was 2D only until a radiation case needed a small box (2026-10-05).
 - **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
   inputs); `BodyForce` reads no field and no gradient, so it needs nothing #362 would add.
-- **A passive-scalar case referring to another case's converged flow** (#375; `bfs3d_species` imports the
-  flow driver by path today) — a dependency edge between cases, not a field on one.
+- **A passive-scalar case referring to another case's converged flow** (#662, split from #375; `bfs3d_species`
+  imports the flow driver by path today) — a dependency edge between cases, not a field on one.
 - **Profiles** (`DirichletField`, a callable) — not plain data; a named-profile kind if ever needed.
 
 ## How the build derives what the drivers used to restate (binding)
@@ -699,8 +699,11 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   refused. **A file surface given under a patch-GROUP key is refused** in `mesh_misfits` (each member
   would take the whole surface); `MeshPatch` under a group is fine.
 - **Occluders** (`physics.occluders`): `CadSolid` / `CadFluid` (exact bodies from `CadModel.solid` /
-  `fluid`), `StlBody` and `PatchBody` (`TriangleBody`s). ⚠️ **The domain's own walls shadow nothing unless
-  listed** — exact in a convex room, wrong in an L-shaped one; documented on the docs page.
+  `fluid`), `StlBody` and `PatchBody` (`TriangleBody`s). ⚠️ **A black wall (no `reflectance`) shadows nothing
+  unless listed** — it is not in the scene at all; exact in a convex room, wrong in an L-shaped one;
+  documented on the docs page. A REFLECTING wall shadows the lamps' direct light and the reflected light
+  through the scene's own triangles whenever self-occlusion is on (#622, 2026-10-10;
+  `.claude/rules/radiation.md` → THE SCENE).
   `PatchBody` builds with `patch_triangles(..., allow_folded=True)` (`mesh.md`): the snapped bunny has
   **291 faces not star-shaped from their vertex mean**, which the first at-scale run refused.
 - **Receivers** (`Receivers(cells=True, patches=None)`): unset patches = every `Wall` not in a
@@ -727,7 +730,7 @@ whose runs write what every run writes. Decisions taken with the owner before bu
 - **Outputs (agreed with the owner; the `aquaflux_viz` viewer reads them):** cell fields in `fields.vtu`
   (`G`, plus `G_direct`/`G_reflected` when anything reflects); **`PatchVtk` → `patches.vtm` indexing
   `patches/<patch>.vtp`, one block per boundary patch named by it, EVERY boundary patch written**, face
-  fields `E`, `E_absorbed` = (1−ρ)E, plus `E_direct`/`E_reflected`. Writers now take `RunFields(cells,
+  fields `E`, `E_absorbed` = (1−ρ)E (read from `SceneSolution.irradiance_absorbed` since #622), plus `E_direct`/`E_reflected`. Writers now take `RunFields(cells,
   patches)`; `Physics.output_patch_fields` and `Physics.results` default to empty for flow. `run.yaml`
   gains `results:` (lamp power and facets, reflector facets, radiosity cycles, `volume_integral_G`,
   `medium_absorbed_power`, `lamp_absorbed_power` when anything reflects, per patch

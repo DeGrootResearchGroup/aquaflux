@@ -51,7 +51,7 @@ from .frozen_operator import (
     equilibration_scale,
     row_chunks,
 )
-from .host_preconditioner import HostPreconditioner
+from .host_preconditioner import HostPreconditioner, require_refactorable
 from .refresh_timing import PhaseTimer
 
 # A process-unique options prefix per V-cycle, so several preconditioners' PETSc options never collide.
@@ -561,8 +561,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
     machinery without the monolithic-only state built around one :class:`AmgVCycle` (the fixed-pattern
     cell-major assembler). Holding both classes' *union* on one base was what forced the split to inherit
     attributes it cannot honour and re-implement its refresh bodies with parameters that do nothing on
-    that path. What is here is exactly what both need: probing the Jacobian and adding the
-    pseudo-transient shift.
+    that path. What is here is exactly what every member needs: probing the Jacobian, adding the
+    pseudo-transient shift, and -- for an inverse that re-fits to the shifted field-major matrix as it
+    stands -- the refresh. :class:`MonolithicAmgPreconditioner` overrides the refresh, because its
+    V-cycle re-fits to an equilibrated, cell-major reordering of that matrix instead.
     """
 
     @staticmethod
@@ -603,8 +605,52 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
 
         return shifted_jacobian(jacobian_no_shift, shift_diagonal)
 
-    def destroy(self) -> None:
-        """Release the frozen inverse's own resources."""
+    def refresh_in_place(
+        self,
+        matvec: Callable[[jnp.ndarray], jnp.ndarray],
+        plan,
+        shift_diagonal: np.ndarray,
+        *,
+        batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+        probe_batch_size: int | None = None,
+        structure: ProbeGather | None = None,
+    ) -> tuple[tuple[str, float], ...]:
+        """Re-materialize at a developed state and re-fit the frozen inverse to it, IN PLACE.
+
+        The arguments are the build's materialization arguments, evaluated at the developed state. The
+        inverse's own configuration is fixed when it is built and cannot be changed by a refresh.
+        Because this preconditioner is held as a **static field** of the shift policy and
+        :meth:`~aquaflux.solve.HostPreconditioner.matvec` reads ``self.factors`` at call time, re-fitting
+        the inverse here re-preconditions the **same compiled** Krylov solve.
+
+        **Forward-march use ONLY -- the mutation is impure and must never touch a differentiated path.**
+        The adjoint's transpose solve reads the same inverse and would be corrupted by a change between
+        its calls; only the eager, non-differentiated march may refresh. The refresh never moves the
+        converged root (the shift vanishes there), so it changes only the forward Krylov path.
+
+        Returns
+        -------
+        tuple of (str, float)
+            ``("probe", s), ("assemble", s), ("refactor", s)`` -- the coloured jvp probe, the shift, and
+            the inverse's re-fit -- so a march log can say *where* a refresh spent its time.
+
+        Raises
+        ------
+        TypeError
+            If the inverse is not a :class:`~aquaflux.solve.RefactorableFactors` (an injected inverse need
+            not be refreshable).
+        """
+        inverse = require_refactorable(self.factors, f"this {type(self).__name__}")
+        timer = PhaseTimer()
+        jacobian = self._materialize_jacobian(
+            matvec, plan, batched_matvec, probe_batch_size, structure
+        )
+        timer.lap("probe")
+        shifted = self._shifted(jacobian, shift_diagonal)
+        timer.lap("assemble")
+        inverse.refactor_block(shifted)
+        timer.lap("refactor")
+        return timer.phases()
 
 
 class MonolithicAmgPreconditioner(MaterializedJacobianPreconditioner):

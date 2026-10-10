@@ -518,7 +518,8 @@ Everything above is single-state probing. The preconditioner has now been run in
 continuation march, which required three things a probe never reaches, and which are the reason no earlier
 arm could have been marched at all.
 
-**The host flow inverse needed a `refactor_block`.** `BlockTriangularFieldSplit.refactor` RAISES on an
+**The host flow inverse needed a `refactor_block`.** `BlockTriangularFieldSplit.refactor` (renamed
+`refactor_block` in #281; it now raises `TypeError`) RAISES on an
 inverse offering neither `refactor_block` nor `refactor`, because a mid-march refresh must mutate the same
 object the compiled Krylov solve holds — replacing it would recompile. A single-state probe exits before
 that path. `leading_inverse` is now threaded through `FieldSplitAmgPreconditioner.build` and the coupled

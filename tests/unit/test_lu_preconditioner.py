@@ -96,10 +96,12 @@ def test_monolithic_lu_preconditioner_matvec_and_refresh() -> None:
     assert float(jnp.linalg.norm(jnp.asarray(a @ np.asarray(x)) - b) / jnp.linalg.norm(b)) < 1e-10
     # refresh in place at a scaled operator: the same object now inverts the new matvec
     factors_before = pc.factors.backend
-    pc.refresh_in_place(
+    phases = pc.refresh_in_place(
         lambda v: 2.0 * matvec(v), ColumnProbePlan.uniform(colouring, n_fields), shift
     )
     assert pc.factors.backend is factors_before  # same backend object, refactored in place
+    # The same phase breakdown every materialized-Jacobian refresh reports, not `None`.
+    assert [name for name, _ in phases] == ["probe", "assemble", "refactor"]
     x2 = jax.jit(pc.matvec())(b)
     assert (
         float(jnp.linalg.norm(jnp.asarray(2.0 * (a @ np.asarray(x2))) - b) / jnp.linalg.norm(b))

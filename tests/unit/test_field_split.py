@@ -32,6 +32,10 @@ class ExactInverse:
     def __init__(self, block: np.ndarray) -> None:
         self._inverse = np.linalg.inv(np.asarray(block, dtype=np.float64))
 
+    @property
+    def n_dofs(self) -> int:
+        return self._inverse.shape[0]
+
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         matrix = self._inverse.T if transpose else self._inverse
         return matrix @ np.asarray(residual, dtype=np.float64)
@@ -232,6 +236,75 @@ class TestBlockTriangularAlgebra:
         )
         split.destroy()
         assert sorted(released) == ["leading", "trailing"]
+
+    def test_a_block_inverse_without_the_frozen_inverse_pair_is_refused_at_construction(
+        self, groups, operator
+    ):
+        """A block lacking ``n_dofs`` would otherwise be accepted and fail only when first applied."""
+
+        class NoSize:
+            def apply(self, residual, *, transpose=False):
+                return residual
+
+        leading, _, trailing_by_leading, _ = groups.blocks(sp.csr_matrix(operator))
+        with pytest.raises(
+            TypeError, match="trailing block inverse NoSize is not a frozen inverse"
+        ):
+            BlockTriangularFieldSplit(
+                ExactInverse(leading.toarray()), NoSize(), trailing_by_leading, groups
+            )
+
+    def test_a_refit_reproduces_a_split_built_at_the_new_operator(self, groups, operator):
+        """``refactor_block`` re-fits both blocks AND the retained coupling, in place.
+
+        Compared against a split built afresh at the new operator, so a refit that skipped either block
+        or kept the stale coupling is caught: each of those leaves a different matrix.
+        """
+
+        class Refittable(ExactInverse):
+            def refactor_block(self, block):
+                self._inverse = np.linalg.inv(np.asarray(block.toarray(), dtype=np.float64))
+
+        leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
+        split = BlockTriangularFieldSplit(
+            Refittable(leading.toarray()),
+            Refittable(trailing.toarray()),
+            trailing_by_leading,
+            groups,
+        )
+        developed = operator + np.random.default_rng(7).standard_normal(operator.shape)
+        split.refactor_block(sp.csr_matrix(developed))
+        np.testing.assert_allclose(
+            as_matrix(split, groups.n_dofs),
+            as_matrix(split_for(developed, groups), groups.n_dofs),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            as_matrix(split, groups.n_dofs, transpose=True),
+            as_matrix(split_for(developed, groups), groups.n_dofs, transpose=True),
+            atol=1e-12,
+        )
+
+    def test_a_refit_with_a_block_that_cannot_refit_changes_nothing(self, groups, operator):
+        """The refusal comes before either block is touched, so a split is never left half re-fitted."""
+        refitted = []
+
+        class Refittable(ExactInverse):
+            def refactor_block(self, block):
+                refitted.append(block.shape)
+
+        leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
+        split = BlockTriangularFieldSplit(
+            Refittable(leading.toarray()),
+            ExactInverse(trailing.toarray()),
+            trailing_by_leading,
+            groups,
+        )
+        before = as_matrix(split, groups.n_dofs)
+        with pytest.raises(TypeError, match="ExactInverse offers no refactor_block"):
+            split.refactor_block(sp.csr_matrix(operator * 3.0))
+        assert refitted == []
+        np.testing.assert_array_equal(as_matrix(split, groups.n_dofs), before)
 
 
 def _nodal_block(n_cells: int = 400, n_fields: int = 2, seed: int = 0) -> sp.csr_matrix:

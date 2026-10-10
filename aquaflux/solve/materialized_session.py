@@ -381,11 +381,8 @@ class BetaTrackingRefresh:
             if isinstance(pc, MaterializedJacobianPreconditioner)
             else {}
         )
-        return (
-            pc.refresh_in_place(
-                lambda v: jacobian_matvec(probed, frozen, v), self._probe.plan, shift, **extra
-            )
-            or ()
+        return pc.refresh_in_place(
+            lambda v: jacobian_matvec(probed, frozen, v), self._probe.plan, shift, **extra
         )
 
     def _report(

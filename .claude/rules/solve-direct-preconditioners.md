@@ -2,6 +2,7 @@
 paths:
   - "aquaflux/solve/lu_preconditioner.py"
   - "aquaflux/solve/sparse_jacobian.py"
+  - "aquaflux/solve/host_preconditioner.py"
 ---
 
 # Rules — `aquaflux/solve/` direct preconditioners (complete-LU) and Jacobian materialization
@@ -77,6 +78,46 @@ paths:
     (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
     would naturally drive, which is why the original went unseen.
+  - **The capabilities only SOME inverses have are declared protocols, asked by `isinstance` (BUILT
+    2026-10-10, #281).** Beside `HostFactors`, `host_preconditioner.py` declares two, each
+    `runtime_checkable` and exported from `aquaflux.solve`:
+    - **`RefactorableFactors(HostFactors)`**: `refactor_block(block)`, re-fit IN PLACE to the raw
+      field-major operator of the built shape. **One spelling across the family**: the split's
+      `BlockTriangularFieldSplit.refactor` is renamed `refactor_block` (there is no `split.refactor`), so a
+      split is itself refactorable and refreshes through the same path as a single block inverse.
+      `LuFactors` gained one too (it delegates to its backend), so the LU refresh no longer reaches
+      through `factors.backend.refactor`. `AmgVCycle.refactor(cell_major, scale, perm)` is a DIFFERENT
+      signature (an equilibrated, reordered matrix) and is deliberately not this protocol;
+      `MonolithicAmgPreconditioner` overrides the refresh for exactly that reason.
+    - **`ReleasableFactors`**: `destroy()`, with `release(factors)` the one place that asks.
+      `HostPreconditioner.destroy()` calls it, so every family member releases its inverse. ⚠️ **Before
+      this, `MaterializedJacobianPreconditioner.destroy` had an EMPTY body**, so destroying a
+      `MonolithicAmgPreconditioner` or a `FieldSplitAmgPreconditioner` released nothing — only
+      `MaterializedBlockPreconditioner` overrode it with a `getattr` probe. Every validation harness that
+      calls `pc.destroy()` "to keep one preconditioner in memory at a time" was relying on a no-op.
+      `LuFactors` and its backends gained `destroy` (the PETSc backend frees its `KSP`/`Mat`).
+    - **The traced capability is NOT here**: it is `OffersTracedCycle` / `TracedCycle` in
+      `traced_cycle.py` (#665), which holds the hierarchy as array leaves. A `TracedFactors` /
+      `apply_traced` protocol briefly existed on this PR's branch and was dropped in its merge with
+      main; neither name exists.
+    - `require_refactorable(factors, owner)` raises a `TypeError` naming the inverse; the split checks
+      BOTH blocks before re-fitting either, so a refusal never leaves it half re-fitted. A split also
+      refuses a non-`HostFactors` block at construction (`TypeError`) rather than at first apply.
+    - **The factory types say so**: `leading_inverse` / `trailing_inverse` / `inverse` are
+      `Callable[[sp.csr_matrix, int], HostFactors]` (were `... object`), and `BlockInverse.__call__`
+      returns `RefactorableFactors`.
+    Pinned by `test_each_inverse_declares_exactly_the_capabilities_it_has` (both directions, real
+    types), `test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything`, and the
+    split's refit/atomicity tests in `test_field_split.py`; each was mutation-checked.
+  - **`refresh_in_place` has ONE return type across the family (#281):** the `("probe", s),
+    ("assemble", s), ("refactor", s)` tuple. The LU refresh returned `None` and its one caller papered
+    over it with `... or ()`; it now times its own phases. **The SIGNATURE stays two shapes, by decision
+    (project owner, 2026-10-10, #281)** — LU takes `(matvec, plan, shift_diagonal)` and the materialized
+    family adds `batched_matvec`, `probe_batch_size`, `structure` — and the session picks the keywords by
+    `isinstance(pc, MaterializedJacobianPreconditioner)`, a declared class rather than a feature probe.
+    Do not unify it behind a union signature (LU accepting and ignoring the probe keywords): the split
+    follows the real difference in how each is materialized, which `HostPreconditioner`'s docstring
+    records.
   - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
     preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
     `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only

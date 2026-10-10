@@ -41,6 +41,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 from .host_preconditioner import HostPreconditioner
+from .refresh_timing import PhaseTimer
 
 
 class _LuBackend:
@@ -59,6 +60,9 @@ class _LuBackend:
     def refactor(self, matrix: sp.spmatrix) -> None:
         """Refactor at the given matrix (a fresh factorization; the coupled Jacobian's pattern may grow)."""
         raise NotImplementedError
+
+    def destroy(self) -> None:
+        """Release any host solver handles this backend holds; nothing by default."""
 
 
 class _ScipyLuBackend(_LuBackend):
@@ -137,9 +141,12 @@ class _PetscUmfpackBackend(_LuBackend):
     def refactor(self, matrix: sp.spmatrix) -> None:
         # Rebuild at the new matrix (the pattern may have grown as the flow developed), destroying the old
         # objects so their PETSc memory is released rather than leaked across a long refreshing march.
+        self.destroy()
+        self._factor(matrix)
+
+    def destroy(self) -> None:
         self._ksp.destroy()
         self._mat.destroy()
-        self._factor(matrix)
 
 
 def _umfpack_available() -> bool:
@@ -219,6 +226,20 @@ class LuFactors:
         """
         return self.backend.solve(residual, transpose=transpose)
 
+    def refactor_block(self, block: sp.spmatrix) -> None:
+        """Factor ``block`` afresh, IN PLACE, keeping this object's identity.
+
+        Parameters
+        ----------
+        block : scipy.sparse matrix
+            The new assembled field-major matrix, already shifted, shape ``(n_dofs, n_dofs)``.
+        """
+        self.backend.refactor(block)
+
+    def destroy(self) -> None:
+        """Release the backend's host solver handles, if it holds any."""
+        self.backend.destroy()
+
 
 def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
     """Completely LU-factor an assembled coupled block matrix.
@@ -260,14 +281,18 @@ class MonolithicLuPreconditioner(HostPreconditioner):
     """
 
     @staticmethod
-    def _materialize(
-        matvec: Callable[[jnp.ndarray], jnp.ndarray],
-        plan,
-        shift_diagonal: np.ndarray,
-    ) -> sp.spmatrix:
-        from .sparse_jacobian import materialize_block_jacobian, shifted_jacobian
+    def _materialize(matvec: Callable[[jnp.ndarray], jnp.ndarray], plan) -> sp.csr_matrix:
+        """The coupled Jacobian **without** the shift, by the coloured jvp probe."""
+        from .sparse_jacobian import materialize_block_jacobian
 
-        return shifted_jacobian(materialize_block_jacobian(matvec, plan).tocsr(), shift_diagonal)
+        return materialize_block_jacobian(matvec, plan).tocsr()
+
+    @staticmethod
+    def _shifted(jacobian: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
+        """The Jacobian with the pseudo-transient shift on its diagonal."""
+        from .sparse_jacobian import shifted_jacobian
+
+        return shifted_jacobian(jacobian, shift_diagonal)
 
     @classmethod
     def build(
@@ -298,7 +323,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         MonolithicLuPreconditioner
             The built preconditioner.
         """
-        matrix = cls._materialize(matvec, plan, shift_diagonal)
+        matrix = cls._shifted(cls._materialize(matvec, plan), shift_diagonal)
         return cls(factorize_lu(matrix, backend=backend))
 
     def refresh_in_place(
@@ -306,7 +331,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
         plan,
         shift_diagonal: np.ndarray,
-    ) -> None:
+    ) -> tuple[tuple[str, float], ...]:
         """Re-factor at a developed state and swap the factorization IN PLACE (no new object).
 
         The arguments are :meth:`build`'s, evaluated at the developed state. The backend re-factors at the
@@ -320,6 +345,19 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         The adjoint's transpose solve reads the same factorization and would be corrupted by a change
         between its calls; only the eager, non-differentiated march may refresh. The refresh never moves
         the converged root (the shift vanishes there), so it changes only the forward Krylov path.
+
+        Returns
+        -------
+        tuple of (str, float)
+            ``("probe", s), ("assemble", s), ("refactor", s)`` -- the same breakdown every
+            materialized-Jacobian refresh reports, so a march log reads identically whichever
+            preconditioner is installed. Here "assemble" is only the diagonal shift.
         """
-        matrix = self._materialize(matvec, plan, shift_diagonal)
-        self.factors.backend.refactor(matrix)
+        timer = PhaseTimer()
+        jacobian = self._materialize(matvec, plan)
+        timer.lap("probe")
+        matrix = self._shifted(jacobian, shift_diagonal)
+        timer.lap("assemble")
+        self.factors.refactor_block(matrix)
+        timer.lap("refactor")
+        return timer.phases()
