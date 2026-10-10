@@ -159,6 +159,63 @@ def main() -> None:
     water = UniformAbsorption(absorption)
     receivers = np.concatenate([points, np.zeros((len(points), 1))], axis=1)
     settings = RadiationSettings(self_occlusion=RayCastOcclusion(grid=True))
+
+    def write(mine, straight, seconds):
+        """Write the traced rows beside aquaflux's; called before the gather too, so a crash keeps the trace."""
+        rows = []
+        for k, point in enumerate(points):
+            full, full_error = traced["full"]["total"][k] if "full" in traced else (np.nan, np.nan)
+            alone, alone_error = traced["transmitted"]["total"][k]
+            shares = [
+                traced["transmitted"]["classes"][c][k][0] / alone if alone > 0 else float("nan")
+                for c in range(len(CLASSES))
+            ]
+            rows.append(
+                {
+                    "point_mm": [round(float(v) * 1e3, 1) for v in point],
+                    "traced_full": full,
+                    "traced_full_error": full_error,
+                    "traced_transmitted": alone,
+                    "traced_transmitted_error": alone_error,
+                    "transmitted_share_by_path": dict(zip(CLASSES, shares, strict=True)),
+                    "aquaflux": float(mine[k]),
+                    "aquaflux_over_transmitted": float(mine[k]) / alone,
+                    "aquaflux_over_transmitted_in_errors": (float(mine[k]) - alone) / alone_error,
+                    "transmitted_over_full": alone / full,
+                    "straight_over_full": float(straight[k]) / full,
+                }
+            )
+            _say(json.dumps(rows[-1]))
+        result = {
+            "neighbours": NEIGHBOURS,
+            "rays_per_lamp": RAYS,
+            "uvt_percent": UVT,
+            "absorption_per_m": absorption,
+            "pitch_m": PITCH,
+            "pixel_m": PIXEL,
+            "disc_m": DISC,
+            "facets": int(lamps.n_facets),
+            "aquaflux_seconds": round(seconds, 1),
+            "energy": {
+                name: {
+                    "emitted": entry["tally"].emitted,
+                    "water": entry["tally"].water,
+                    "arcs": entry["tally"].arcs,
+                    "wall": entry["tally"].wall,
+                    "discarded": entry["tally"].discarded,
+                    "lost": entry["tally"].lost,
+                }
+                for name, entry in traced.items()
+            },
+            "rows": rows,
+        }
+        out = HERE / "work" / f"check_array-{NEIGHBOURS}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(result, indent=2))
+        _say(f"written {out}")
+
+    write(np.full(len(points), np.nan), np.full(len(points), np.nan), float("nan"))
+
     started = time.perf_counter()
     if NEIGHBOURS == "optics":
         scenes = [(lamps, sleeves)]
@@ -190,57 +247,7 @@ def main() -> None:
         plain = Scene(lamps, absorption=water, volume=VolumeReceivers(receivers), settings=settings)
         straight = np.asarray(solve_scene(plain).fluence_rate_direct)
 
-    rows = []
-    for k, point in enumerate(points):
-        full, full_error = traced["full"]["total"][k] if "full" in traced else (np.nan, np.nan)
-        alone, alone_error = traced["transmitted"]["total"][k]
-        shares = [
-            traced["transmitted"]["classes"][c][k][0] / alone if alone > 0 else float("nan")
-            for c in range(len(CLASSES))
-        ]
-        rows.append(
-            {
-                "point_mm": [round(float(v) * 1e3, 1) for v in point],
-                "traced_full": full,
-                "traced_full_error": full_error,
-                "traced_transmitted": alone,
-                "traced_transmitted_error": alone_error,
-                "transmitted_share_by_path": dict(zip(CLASSES, shares, strict=True)),
-                "aquaflux": float(mine[k]),
-                "aquaflux_over_transmitted": float(mine[k]) / alone,
-                "aquaflux_over_transmitted_in_errors": (float(mine[k]) - alone) / alone_error,
-                "transmitted_over_full": alone / full,
-                "straight_over_full": float(straight[k]) / full,
-            }
-        )
-        _say(json.dumps(rows[-1]))
-    result = {
-        "neighbours": NEIGHBOURS,
-        "rays_per_lamp": RAYS,
-        "uvt_percent": UVT,
-        "absorption_per_m": absorption,
-        "pitch_m": PITCH,
-        "pixel_m": PIXEL,
-        "disc_m": DISC,
-        "facets": int(lamps.n_facets),
-        "aquaflux_seconds": round(seconds, 1),
-        "energy": {
-            name: {
-                "emitted": entry["tally"].emitted,
-                "water": entry["tally"].water,
-                "arcs": entry["tally"].arcs,
-                "wall": entry["tally"].wall,
-                "discarded": entry["tally"].discarded,
-                "lost": entry["tally"].lost,
-            }
-            for name, entry in traced.items()
-        },
-        "rows": rows,
-    }
-    out = HERE / "work" / f"check_array-{NEIGHBOURS}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=2))
-    _say(f"written {out}")
+    write(mine, straight, seconds)
 
 
 if __name__ == "__main__":
