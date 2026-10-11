@@ -127,7 +127,7 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver, jacobia
 class _Attempt(NamedTuple):
     """One shifted solve, line-searched and measured — everything a step learns for one ``β``.
 
-    These four values are produced together by a single (expensive) shifted linear solve and are
+    These five values are produced together by a single (expensive) shifted linear solve and are
     consumed together by the accept/reject decision, so they travel as one record rather than as a
     loose tuple.
 
@@ -141,12 +141,16 @@ class _Attempt(NamedTuple):
         Krylov cycles the shifted solve took — a scalar, the staleness signal a refresh trigger reads.
     alpha : jnp.ndarray
         The line-search factor actually taken — a scalar.
+    full_step_ratio : jnp.ndarray
+        The full-length trial's measure over the reference it was judged against — a scalar (see
+        :attr:`~aquaflux.solve.StepOutcome.full_step_ratio`).
     """
 
     candidate: jnp.ndarray
     residual_norm: jnp.ndarray
     cycles: jnp.ndarray
     alpha: jnp.ndarray
+    full_step_ratio: jnp.ndarray
 
 
 class ShiftTerm(NamedTuple):
@@ -614,6 +618,7 @@ class PseudoTransientStep(ShiftedStep):
                     residual_norm=searched.residual_norm,
                     cycles=cycles,
                     alpha=searched.alpha,
+                    full_step_ratio=searched.full_step_norm / residual_norm,
                 )
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
@@ -624,12 +629,14 @@ class PseudoTransientStep(ShiftedStep):
             # exits as soon as an attempt is accepted, so a healthy first attempt costs a single solve;
             # only a rejected step pays for extra, more-damped attempts.
             def cond(state: tuple) -> jnp.ndarray:
-                _, _, _, attempts, accepted, _, _ = state
+                _, _, _, attempts, accepted, _, _, _ = state
                 return (~accepted) & (attempts <= max_escalations)
 
             def record(state: tuple, trial: _Attempt, accept: jnp.ndarray) -> tuple:
                 """Fold one judged attempt into an escalation carry (the shared accept bookkeeping)."""
-                relaxation, best, best_norm, attempts, _, best_cycles, best_alpha = state
+                relaxation, best, best_norm, attempts, _, best_cycles, best_alpha, best_ratio = (
+                    state
+                )
                 return (
                     relaxation * escalation_factor,
                     jnp.where(accept, trial.candidate, best),
@@ -642,6 +649,7 @@ class PseudoTransientStep(ShiftedStep):
                     # rejected escalations'. (A fully-rejected step keeps the initial 0 / 1.)
                     jnp.where(accept, trial.cycles, best_cycles),
                     jnp.where(accept, trial.alpha, best_alpha),
+                    jnp.where(accept, trial.full_step_ratio, best_ratio),
                 )
 
             def body(state: tuple) -> tuple:
@@ -663,9 +671,12 @@ class PseudoTransientStep(ShiftedStep):
                 jnp.asarray(False),
                 jnp.asarray(0, dtype=jnp.int32),
                 jnp.asarray(1.0),
+                jnp.asarray(
+                    jnp.nan
+                ),  # a fully-rejected step measured no accepted full-length trial
             )
 
-            _, phi_next, next_norm, _, _, step_cycles, step_alpha = jax.lax.while_loop(
+            _, phi_next, next_norm, _, _, step_cycles, step_alpha, step_ratio = jax.lax.while_loop(
                 cond, body, start
             )
             # A single-step pseudo-transient attempt has no inner Newton loop; report 1 inner iteration
@@ -681,6 +692,7 @@ class PseudoTransientStep(ShiftedStep):
                 jnp.asarray(True),
                 corrected_cycles(step_cycles),
                 jnp.asarray(1.0),
+                step_ratio,
             )
 
         return step
@@ -967,7 +979,7 @@ class DualTimeStep(ShiftedStep):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, min_alpha, _, since_refresh, _, _ = carry
+                _, inner, gnorm, cycles, min_alpha, _, since_refresh, _, _, _ = carry
                 # The convergence target is tested FIRST, and that ordering is what makes the cost
                 # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
                 # here with `reached_target` set and is kept, never binned for its cost.
@@ -1008,7 +1020,18 @@ class DualTimeStep(ShiftedStep):
                 return keep
 
             def body(carry: tuple) -> tuple:
-                p, inner, gnorm, cycles, min_alpha, max_inner, since_refresh, spent, binding = carry
+                (
+                    p,
+                    inner,
+                    gnorm,
+                    cycles,
+                    min_alpha,
+                    max_inner,
+                    since_refresh,
+                    spent,
+                    binding,
+                    first_ratio,
+                ) = carry
                 delta, step_cycles = _shifted_solve(
                     residual_fn,
                     p,
@@ -1088,6 +1111,10 @@ class DualTimeStep(ShiftedStep):
                     # The cap only where it was the BINDING constraint: `alpha` reaching it means the
                     # ladder wanted a longer step and the limit, not the descent test, stopped it.
                     jnp.minimum(binding, jnp.where(alpha >= max_alpha, max_alpha, 1.0)),
+                    # The FIRST inner iteration's full-step ratio: its `G` at the anchor is the steady
+                    # residual, so this is the one ratio comparable from step to step -- the later
+                    # iterations start from wherever the earlier ones left them.
+                    jnp.where(inner == 0, searched.full_step_norm / gnorm, first_ratio),
                 )
 
             (
@@ -1100,6 +1127,7 @@ class DualTimeStep(ShiftedStep):
                 _,
                 _,
                 binding,
+                full_step_ratio,
             ) = jax.lax.while_loop(
                 cond,
                 body,
@@ -1113,6 +1141,7 @@ class DualTimeStep(ShiftedStep):
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(False),
                     jnp.asarray(1.0),
+                    jnp.asarray(jnp.nan),
                 ),
             )
             # `cycles` is the SUM of the inner solves' raw counts; report the inner-iteration count
@@ -1135,6 +1164,7 @@ class DualTimeStep(ShiftedStep):
                 final_gnorm <= target,
                 max_inner,
                 binding,
+                full_step_ratio,
             )
 
         return step

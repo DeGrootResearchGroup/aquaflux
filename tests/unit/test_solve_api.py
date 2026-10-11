@@ -73,6 +73,8 @@ USER_CALLS = frozenset(
     {
         # Functions a user calls, and what public drivers hand back.
         "MarchResult",
+        "RampPosition",
+        "RampWalk",
         "StagedResult",
         "StepOutcome",
         "default_linear_solver",

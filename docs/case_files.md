@@ -49,8 +49,9 @@ solver:
   kind: CoupledMarch
   convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-5}
   dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01}
-  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005}
-  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 16, steps_per_station: 1, scale: flow}
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005, grow: 3.0,
+    release_floor: 1.0e-4}
+  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 12, steps_per_station: 1, scale: flow}
 ```
 
 ```python
@@ -232,7 +233,9 @@ The two marches share their settings, each a value of the solver library written
   its tolerance, restart length and cap, and `stop`, which rule ends a solve;
 - `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
-  {class}`~aquaflux.solve.CflResidualDualTimeControl`;
+  {class}`~aquaflux.solve.CflResidualDualTimeControl`. Any of them takes `release_floor`, a shift
+  below `beta_min` that the march drops to once a step on the target problem has run at the floor
+  at full length, so its last steps are Newton steps rather than a linear tail at the floor;
 - `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
 
@@ -244,6 +247,14 @@ for `steps_per_station` outer steps, keeping the state and the preconditioner th
 `scale` says which viscosity a station scales: the flow's only (`flow`), or the flow's and the
 closure's (`both`, the default). A high-Reynolds-number case needs one: from a cold start at
 its own viscosity the march integrates a long transient before the flow develops.
+
+A ramp may also end before its last station: with `end: settled`, it ends after the first
+outer step taken at full length at the step control's smallest shift (`beta_min`), and the
+viscosity left is walked down in `finish` equal geometric steps (one, straight to the case's,
+when unset). `stations` then sets the pace rather than the length, which makes the ramp much
+less sensitive to it: walking down too slowly no longer costs steps spent on stations the
+march no longer needs. It needs the march's `step_control`, whose `beta_min` and
+`settle_alpha` say what settled means, and one step per station.
 
 `Segregated` takes `sweeps` (required: the most it may take), `relaxation` and
 `relaxation_max` (the closure update's under-relaxation), `increment_tol` (the change over a

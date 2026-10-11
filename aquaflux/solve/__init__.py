@@ -228,10 +228,8 @@ from .monolithic_policy import (
 )
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
-from .retry import (
-    NO_RETRIES,
-    RetryPolicy,
-)
+from .ramp_schedule import RampPosition, RampSchedule, RampWalk
+from .retry import NO_RETRIES, RetryPolicy
 from .shift_basis import (
     DEFAULT_SHIFT_BASIS,
     LocalCourantBasis,
@@ -313,6 +311,9 @@ __all__ = [
     "NewtonStrategy",
     "PreconditionerSession",
     "PseudoTransientStep",
+    "RampPosition",
+    "RampSchedule",
+    "RampWalk",
     "ReadableShift",
     "RefactorableInverse",
     "RefreshPolicy",

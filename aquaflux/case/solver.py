@@ -41,6 +41,7 @@ from aquaflux.solve import (
     MarchLogger,
     MarchRecorder,
     MaterializedJacobian,
+    RampSchedule,
     Resumption,
     RetryPolicy,
     RootSolveSettings,
@@ -302,6 +303,20 @@ def _both(log: Callable, recorded: Callable | None) -> Callable:
     return log if recorded is None else combine_observers(log, recorded)
 
 
+#: Why a ramp ending on the settle is refused without a step control, said where the file is read and
+#: where a script builds the schedule.
+_SETTLED_NEEDS_A_CONTROL = (
+    "a ramp that ends when the march has settled needs a step_control: its beta_min and settle_alpha "
+    "say what settled is."
+)
+
+
+def _never_settled(report: object) -> bool:
+    """A stand-in end test, so a ramp's settings are checked before there is a control to supply one."""
+    del report
+    return False
+
+
 #: The viscosity a ramp station scales, by the name a file gives it; unset leaves the ramp's own.
 _RAMP_SCALINGS = {"flow": scale_momentum_only, "both": scale_both_blocks, None: None}
 
@@ -320,19 +335,29 @@ class ViscosityRamp:
     anchor : float
         The factor the viscosity starts at, ``> 1``.
     stations : int
-        How many geometric steps the viscosity is walked down in, ``>= 1``.
+        How many geometric steps the viscosity is walked down in, ``>= 1``. With :attr:`end` set, the
+        pace: the number it would be walked in if the march never settled first.
     steps_per_station : int
-        Outer steps held at each station, ``>= 1``.
+        Outer steps held at each station, ``>= 1``; ``1`` when :attr:`end` is set.
     scale : {"flow", "both"} or None
         Which viscosity a station scales: the flow's only, leaving the closure at the case's own
         (``flow``), or both (``both``, a genuine lower-Reynolds problem at each station); unset, both.
     redamping : float or None
         How much the shift is raised on entering each station; unset, the ramp's own derived value.
+    end : {"settled"} or None
+        What ends the ramp before its last station. ``settled``: the first step taken at full length at
+        the step control's smallest shift (``ShiftStrengthControl.settled``), the same evidence its
+        release waits for on the case's own viscosity; the march then walks the rest of the way in
+        :attr:`finish` steps. Needs the march's ``step_control``. Unset, every station is walked.
+    finish : int or None
+        How many equal geometric steps the viscosity left when :attr:`end` fires is walked down in, the
+        last being the case's own, ``>= 1``; unset, one -- straight to the case's viscosity.
 
     Raises
     ------
     ValueError
-        If a count is not ``>= 1`` or the anchor is not above one.
+        If a count is not ``>= 1``, the anchor is not above one, ``finish`` is set without ``end``, or
+        ``end`` is set with more than one step per station.
     """
 
     anchor: float
@@ -340,6 +365,8 @@ class ViscosityRamp:
     steps_per_station: int
     scale: Literal["flow", "both"] | None = None
     redamping: float | None = None
+    end: Literal["settled"] | None = None
+    finish: int | None = None
 
     def __post_init__(self) -> None:
         if self.scale not in _RAMP_SCALINGS:
@@ -349,9 +376,44 @@ class ViscosityRamp:
             )
         if not self.anchor > 1.0:
             raise ValueError(f"ViscosityRamp.anchor must be above 1, got {self.anchor!r}.")
-        for name in ("stations", "steps_per_station"):
-            if getattr(self, name) < 1:
-                raise ValueError(f"ViscosityRamp.{name} must be >= 1, got {getattr(self, name)!r}.")
+        try:
+            # The schedule's own checks, with a stand-in for the test a step control supplies at solve.
+            self._schedule(None if self.end is None else _never_settled)
+        except ValueError as error:
+            raise ValueError(f"ViscosityRamp: {error}") from None
+
+    def _schedule(self, end_when: Callable | None) -> RampSchedule:
+        return RampSchedule(
+            self.stations,
+            self.steps_per_station,
+            end_when=end_when,
+            **_set(finish=self.finish),
+        )
+
+    def schedule(self, step_control: ShiftStrengthControl | None) -> RampSchedule:
+        """The ramp as a :class:`~aquaflux.solve.RampSchedule`, ending on ``step_control``'s settle if asked.
+
+        Parameters
+        ----------
+        step_control : ShiftStrengthControl or None
+            The march's control, whose :meth:`~aquaflux.solve.ShiftStrengthControl.settled` ends the
+            ramp when :attr:`end` is ``settled`` -- one definition of settled for the ramp and the
+            release.
+
+        Returns
+        -------
+        RampSchedule
+
+        Raises
+        ------
+        ValueError
+            If :attr:`end` is set and there is no ``step_control`` to say what settled is.
+        """
+        if self.end is None:
+            return self._schedule(None)
+        if step_control is None:
+            raise ValueError(_SETTLED_NEEDS_A_CONTROL)
+        return self._schedule(step_control.settled)
 
     def solve(self, coupled: object, options: dict[str, object], point_setup: Callable) -> object:
         """March ``coupled`` along this ramp, by :func:`~aquaflux.turbulence.solve_reynolds_ramp`.
@@ -374,8 +436,7 @@ class ViscosityRamp:
         return solve_reynolds_ramp(
             coupled,
             anchor=self.anchor,
-            stations=self.stations,
-            steps_per_station=self.steps_per_station,
+            ramp=self.schedule(options.get("step_control")),
             point_setup=point_setup,
             **_set(redamping=self.redamping, companion=companion),
             **options,
@@ -456,6 +517,9 @@ class CoupledMarch(_March):
         super().__post_init__()
         if self.continuation is not None and not isinstance(self.continuation, ViscosityRamp):
             raise TypeError(f"CoupledMarch.continuation got {self.continuation!r}.")
+        if self.continuation is not None and self.continuation.end is not None:
+            if self.step_control is None:
+                raise ValueError(f"CoupledMarch.continuation: {_SETTLED_NEEDS_A_CONTROL}")
 
     def _owned(self) -> frozenset[str]:
         """The march's keywords and the closure's -- see :meth:`_March._owned`."""
