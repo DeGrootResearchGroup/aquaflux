@@ -1382,3 +1382,43 @@ Every arm `x_r/h` 8.0686, no retry.
   arm exactly there.
 - **What it does not tell apart:** whether a smaller jump at the settle (an accelerated finish over two
   or three steps instead of one jump) would keep the first settle's benefit. Unmeasured.
+
+**Two further arms, same configuration (2026-10-11).**
+
+| arm | ramp ends after step | target settles at step | steps | cycles |
+|---|---|---|---|---|
+| 12 fixed stations (shipped) | 12 | 14 | 16 | 111 |
+| settle-ended, pace 24, the 21.5x walked in 3 steps (`PITZ_SETTLE_FINISH=3`, 2.78x each) | 11 | 14 | 16 | **114** |
+| settle-ended, pace 24, one jump | 9 | 14 | 16 | 118 |
+| settle-ended, pace 16, one jump | 13 | 15 | 17 | 124 |
+
+- **The 3-step finish meets the pre-registered bar (114 against 111) -- but not for the predicted reason.**
+  The smaller final steps did NOT keep the ramp's settle: steps 10-13 went back to `alpha` 0.5 and the
+  target settled again at step 14.
+- **⚠️ THE TARGET SETTLES AT STEP 14 IN THREE OF FOUR ARMS, whatever the ramp did before.** So on this
+  case the target's settle is set by the march's own transient, not by the ramp; a ramp only has to be
+  over a step or more before it, and costs when it is not (the pace-16 arm, done at 13, settles at 15).
+  The residual entering the target's first full-length step was 2.0-2.5e-3 in all four (about 7 % of
+  `|R0|`), an observation, not yet a predictor.
+
+**The full-step ratio `rho1` -- what the settle test actually reads (`PITZ_FULL_STEP_TRACE=1`, pace 16,
+one jump; the traced march is identical to the untraced one cycle for cycle and to `|R|` 1.788e-06).**
+`rho1 = |G(phi + delta)| / |G(phi)|` of each step's FIRST inner iteration, the number the line search
+compares with one (strict descent) to accept the full step:
+
+| step | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | **13** | 14 (3.16x jump) | 15 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `rho1` | 1.65 | 4.42 | 3.61 | 3.38 | 1.89 | 1.27 | 1.23 | 1.13 | 1.04 | **0.90** | 1.77 | 0.91 |
+
+- **It approaches one smoothly over the last four floor steps** (1.23, 1.13, 1.04, 0.90: about -0.1 per
+  step), so the crossing is visible a step or two ahead -- a two-point linear extrapolation made at step
+  12 predicts it at step 13, and at step 11 predicts no crossing on the next step, both right. It is
+  not uniformly smooth: the same extrapolation made at step 9 (after the fast fall 3.38 -> 1.89 -> 1.27)
+  predicts a crossing at step 10, three steps early.
+- **A viscosity jump raises it**: 0.90 -> 1.77 for 3.16x, and the target then re-settles in one step
+  (0.91). After the 21.5x jump of the pace-24 arm the re-settle took five steps (`rho1` not traced there).
+  So `rho1` responds to the size of the last viscosity step, which is what an adaptive ramp rate needs to
+  see -- and what `alpha` (a halving ladder, so 1 or 0.5 here) cannot show.
+- **What it does not tell apart yet:** whether `rho1`'s rise after a viscosity step scales predictably
+  with the step's size (two points: 3.16x -> +0.87; the 1.33x ramp steps are entangled with the
+  transient), which a rate controller would rely on.
