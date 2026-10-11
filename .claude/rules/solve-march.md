@@ -25,7 +25,14 @@ paths:
 `march_history.py::StepHistory(path, clock=)` is a host-side observer with the march hooks'
 names — `on_checkpoint(report, state)` writes a row; `on_refresh(timing)`, `on_retry(reason, attempt,
 beta)` and `on_residuals(terms)`, called while the step is under way, fill in the row it then writes
-and are reset after it. Columns: `step` (1-based, counting on across continuation segments), `seconds`
+and are reset after it. **What it offers is declared: `MarchRecorder` (same module, exported, `runtime_checkable`,
+#669)** — `on_checkpoint`, `on_retry`, `on_refresh` and an `on_residuals` that may be `None` (no taker,
+so the march skips their cost). A `StateCheckpointer` is not one (it records steps only). The case
+runner fans the hooks out by `isinstance(recorder, MarchRecorder)` and the solver specs type their
+recorder as one, so no hook is looked up by name; a recorder offering only some hooks gets none of the
+extras (pinned per missing hook in `test_case_run.py`). The one remaining attribute probe here,
+`hasattr(value, "item")` in `_cell`, deliberately recognizes NumPy/JAX array scalars without importing
+either; it is not a project contract. Columns: `step` (1-based, counting on across continuation segments), `seconds`
 (since construction, injected clock), every `StepReport` field under its own name with the report's own
 `step` renamed `segment_step` (it restarts per segment), `restart_cycles`, then (2026-10-07, for the
 browser interface's Run section) `refits` / `refit_seconds` (refreshes of kind `full` or `inner`; a
@@ -60,7 +67,9 @@ Pinned by `tests/unit/test_march_history.py`.
   `residual_norm` (pinned to `rel=1e-12` on a real flow march,
   `test_each_steps_residual_is_reported_by_equation_and_the_terms_make_up_its_norm`). It comes from
   `solve.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
-  (`_block_terms`, `filter_jit`), and is skipped for a measure with unnamed blocks: `RowScaledNorm` /
+  (`_block_terms`, `filter_jit`), and is skipped for a measure that is not a `NamedBlockMeasure` (`norm.py`, exported, `runtime_checkable`:
+`names` + `per_block`, #669 — `named_blocks` asks with `isinstance`, not `getattr(measure, "names", ())`)
+or whose blocks are unnamed: `RowScaledNorm` /
   `BlockScaledNorm` gained a static `names` (empty by default, refused unless it names each block once),
   and only the two row-scaled builders set it — `coupled_scaled_norm` (`coupled_equation_names`; both in
   `turbulence/measures.py`) and `FlowMeasures.row_scaled` (`flow.flow_equation_names`). The block-scaled

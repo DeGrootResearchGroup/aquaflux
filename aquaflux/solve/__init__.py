@@ -106,7 +106,7 @@ from .field_split import (
 )
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
-from .settings_value import SettingsValue, filled_from
+from .settings_value import MergeableSettings, SettingsValue, filled_from
 from .host_preconditioner import (
     FrozenInverse,
     HostPreconditioner,
@@ -171,7 +171,7 @@ from .march import (
     newton_march,
     refuse_a_transform_the_march_cannot_run_in,
 )
-from .march_history import StepHistory
+from .march_history import MarchRecorder, StepHistory
 from .march_log import MarchLogger, combine_metrics, field_change_metrics
 from .saddle_multigrid import (
     SimpleSmoothedInverse,
@@ -193,6 +193,7 @@ from .newton import newton_step
 from .norm import (
     BlockScaledNorm,
     ResidualNorm,
+    NamedBlockMeasure,
     RowScaledNorm,
     block_reference_scales,
     named_blocks,
@@ -340,6 +341,7 @@ __all__ = [
     "LinearSolverSpec",
     "LocalCourantBasis",
     "MarchLogger",
+    "MarchRecorder",
     "MarchResult",
     "MaterializedBlockPreconditioner",
     "MaterializedJacobian",
@@ -347,11 +349,13 @@ __all__ = [
     "MaterializedProblem",
     "MaterializedSession",
     "MeasureBuilder",
+    "MergeableSettings",
     "MonolithicFactorShiftPolicy",
     "MonolithicVCycle",
     "MonolithicVCycleInverse",
     "MonolithicVCyclePreconditioner",
     "MonotoneLineSearch",
+    "NamedBlockMeasure",
     "NewtonStrategy",
     "PhaseTimer",
     "PositiveBlockLimit",

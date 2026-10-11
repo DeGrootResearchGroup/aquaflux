@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from aquaflux.solve import ShiftSettings
+from aquaflux.solve import MergeableSettings, ShiftSettings
 
 if TYPE_CHECKING:
     from .coupled import TurbulenceDamping
@@ -79,6 +79,6 @@ def merged_march_options(base: dict[str, object], override: dict[str, object]) -
     merged = {**base, **override}
     for name, value in override.items():
         prior = base.get(name)
-        if type(prior) is type(value) and hasattr(value, "filled_from"):
+        if type(prior) is type(value) and isinstance(value, MergeableSettings):
             merged[name] = value.filled_from(prior)
     return merged
