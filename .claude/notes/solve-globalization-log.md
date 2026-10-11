@@ -1444,7 +1444,10 @@ extra `full_step_ratio` carry move nothing.
 shipped (12 stations x 1 step, `turbulence_damping` 5, `CflResidualDualTimeControl` `beta_start` 0.5,
 `beta_min` 0.005, `grow` 1.5; field split `simplesmooth` + Jacobi, `refit_beta_floor` 0.05, refresh on 3
 cycles, retry on 10 cycles / `alpha` 0.01, cycle budget 42, inner 5 / 0.01, forward rtol 0.3, stop `atol`
-1e-5), each arm one `BFS3D_*` edit of it and its banner checked. Apple M3 Pro, 11 cores, 18 GB, macOS,
+1e-5; the inner solve stops by lineax's default rule -- the file sets no `stop`, where pitzDaily's ships
+`stop: residual` with `refresh_on_cycles` 2, which counts cycles RUN, one more than lineax for the same
+work, so the cycle-triggered refresh and retry fire at a different difficulty), each arm one `BFS3D_*`
+edit of it and its banner checked. Apple M3 Pro, 11 cores, 18 GB, macOS,
 jax 0.10.2; one run per arm, back to back through `run_case.sh`, nothing else running. Wall clock
 indicative. **Cycles are counted two ways**: "accepted" is the log's `cum` (the accepted attempt of each
 step only), "all" adds every rejected attempt's inner cycles from the step blocks -- `cum` hides a retry's
@@ -1487,15 +1490,25 @@ two steps -- one root, the shipped arm merely stopping at the looser residual.
   at `grow` 3.
 - **The settle here moves with the ramp** (22 at `grow` 1.5, 17 in both `grow` 3 arms), unlike pitzDaily's
   fixed step 14 -- but both `grow` 3 arms settle at 17 although their ramps ended at 13 and 9.
-- **`rho1` gives no lead here.** It sits above one through the floor steps of arms 3 and 4 (up to 2.9) and
-  drops below 0.5 only on a step whose shift a retry or the control has just raised; there is no
-  pitzDaily-like smooth approach to one over the steps before the settle. This is evidence against
-  building the predictive ramp controller on `rho1` for this case.
+- **`rho1` gives no lead on the settle here, at either `grow`.** At `grow` 3 (arms 3, 4) it sits above one
+  through the floor steps (up to 2.9) and drops below 0.5 only on a step whose shift a retry or the
+  control has just raised; at the shipped `grow` 1.5 (arms 1, 2) it is below one from the first floor
+  step (0.92, 0.29, 0.36, 0.29). Neither shows pitzDaily's smooth approach to one ahead of the settle.
+  What it does track: **below one on the schedule that worked, above one on the two that redid steps** --
+  a "the shift outran the state" signal rather than a settle predictor. Necessary, not sufficient: on
+  pitzDaily's anchor sweep the cheapest arm ran `rho1` 1.3-4.6 at the floor with no step redone.
 - **The positivity limit bounded the step (`L`)** at 8 steps in arms 1 and 2, 5 in arm 3, 4 in arm 4; the
   production cap (`cap%`) was 0 throughout.
 - **Not run:** the optional `STATIONS` 8 / 16 at `grow` 3 and `RELEASE_FLOOR=1e-3`. No released step
   retried, so the second has no trigger; arm 3's failure is in the ramp, which a station count at `grow` 3
   might move, but pitzDaily's sweep put the optimum one step after the settle and arm 4 already ends there.
-- **What it does not tell apart:** whether arm 3's retries are `grow` 3 against this damping (`turbulence
-  damping` 5 redamps each station) or against bfs3d's harder transient; `grow` 2 would separate the
-  rate from the case. Unmeasured.
+- **What it does not tell apart.** No station change re-damps the shift on either shipped ramp:
+  `turbulence_damping` is the closure block's constant shift weight on every step, and at one step per
+  station `ViscosityRampHomotopy` forces `redamping` to exactly 1.0. So at `grow` 3 beta reaches 0.006 at
+  step 5 with 7 of 12 stations to go, unguarded, and that is where the redone steps sit (5-16); arm 4's
+  redone ramp steps (7-9) are its finish, the viscosity jumping at the floor again. pitzDaily tolerated
+  viscosity moving at the floor; bfs3d did not. Four candidates are not separated: **beta reaching the
+  floor before the ramp arrives**, bfs3d's `turbulence_damping` 5 against pitzDaily's 3, **the inner
+  stop rule** (lineax here, `residual` on the case the pairing was tuned on; five of arm 3's twelve extra
+  attempts were cycle-triggered), and the harder 3D transient. `grow` 2 moves the floor's arrival (partly
+  separating rate from case), `BFS3D_TURB_DAMPING=3` the damping, `BFS3D_FORWARD_STOP=residual` the stop.

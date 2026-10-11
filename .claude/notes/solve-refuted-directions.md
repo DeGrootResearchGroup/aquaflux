@@ -900,6 +900,9 @@ ending on the settle (pace 24, `finish` 3). **Why it lost:** at `grow` 3 the shi
 step 5, mid-ramp, and nine of the twelve steps 5-16 are redone (twelve extra attempts): 214 accepted / 459
 all-attempt cycles against the shipped 174 / 193, same root. Ending the ramp on the settle recovers part
 of it (187 / 267) but still loses to the shipped schedule. The release alone on bfs3d's own `grow` 1.5
-passes (24 steps / 173 cycles), so the loss is `grow` 3 against this ramp, not the release. Whether it is
-the rate against bfs3d's damping or against its transient is not separated (`grow` 2 would). Full tables:
+passes (24 steps / 173 cycles), so the loss is `grow` 3 against this ramp, not the release. **Not
+separated, so read "does not transfer" with them:** beta reaching the floor before the ramp arrives (no
+station change re-damps at one step per station), `turbulence_damping` 5 against pitzDaily's 3, the
+inner stop rule (lineax here, `residual` where the pairing was tuned; five of the twelve extra attempts
+were cycle-triggered), and the 3D transient. Full tables:
 `solve-globalization-log.md`, "bfs3d: the release, `grow` 3 and the settle-ended ramp".

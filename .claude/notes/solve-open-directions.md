@@ -351,9 +351,11 @@ four arms the target settled at step 14 whatever the ramp did. The rule is far l
 a fixed count. **bfs3d (2026-10-11, #678):** at `grow` 3 the rule ended the ramp itself after step 9 and
 cost 187 accepted / 267 all-attempt cycles, against 214 / 459 for a fixed 12 at `grow` 3 and 174 / 193 for
 the shipped `grow` 1.5 x 12 -- so it does not replace bfs3d's hand-tuned count, and its loss is `grow` 3's.
-**Still open, and weaker:** a predictive rate controller keyed on the logged `rho1` trend. On bfs3d
-`rho1` stayed above one (to 2.9) through the floor steps before each settle and fell only on a step whose
-shift had just been raised, so it gave no lead there; the pitzDaily trend is one case's. The text below is the proposal as written before the measurement.
+**Still open, and weaker:** a predictive rate controller keyed on the logged `rho1` trend. On bfs3d it
+gave no lead on the settle at either `grow`: at `grow` 3 it stayed above one (to 2.9) through the floor
+steps and fell only on a step whose shift had just been raised; at the shipped `grow` 1.5 it was below
+one from the first floor step. It did separate the schedule that worked (below one) from the two that
+redid steps (above) -- a "shift outran the state" signal, not a settle predictor. The text below is the proposal as written before the measurement.
 
 **What.** Replace `stations` with a rule: ramp the viscosity down at a fixed pace (2x per step cost
 nothing in `alpha`), and move to the target on the first full-length step at the floor -- the same gate
