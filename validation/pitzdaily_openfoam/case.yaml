@@ -86,8 +86,15 @@ solver:
   # restarts); the restart cap sits above the retry threshold below, so a solve past it is escalated
   # rather than accepted truncated.
   linear_solve: {kind: LinearSolveSettings, rtol: 0.3, restart: 15, max_restarts: 14, stop: residual}
-  # Grow the pseudo-timestep while the inner loop takes full steps and the residual is not rising.
-  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005}
+  # Grow the pseudo-timestep while the inner loop takes full steps and the residual is not rising, three
+  # times per comfortable step, so the shift reaches its floor in about seven steps, while the viscosity
+  # ramp below is still running. Floor steps at a raised viscosity take their full timestep and settle the
+  # state; the ramp then arrives about one step after it has. Once a step on the case's own viscosity has
+  # run at the floor at full length, the shift drops to a ten-thousandth, so the last steps are inexact
+  # Newton steps rather than a linear tail at the floor. Measured: 16 steps / 111 restart cycles, against
+  # 31 / 161 at the previous growth of 1.5, 16 stations and no release, to the same reattachment length.
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005, grow: 3.0,
+    release_floor: 1.0e-4}
   # Redo a step whose line search collapses at twice the shift; a step still non-finite after that is
   # redone with a tight solve.
   retry:
@@ -103,5 +110,6 @@ solver:
   positivity_projection: true
   # From a cold start at the case's viscosity the march integrates a long transient to develop the
   # recirculation. Start at a hundred times the viscosity -- the momentum equation's only, so the
-  # closure keeps its target near-wall omega -- and walk it down in 16 stations of one step each.
-  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 16, steps_per_station: 1, scale: flow}
+  # closure keeps its target near-wall omega -- and walk it down in 12 stations of one step each: long
+  # enough for the state to settle at the shift's floor before the target, and no longer.
+  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 12, steps_per_station: 1, scale: flow}

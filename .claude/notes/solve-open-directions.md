@@ -33,7 +33,9 @@ matched at the march's hardest solve).
 So the two costs are coupled: the matvec is expensive because the matrix is expensive to build, and the
 preconditioner is stale because the matrix is expensive to build. Entries 1–2 tried to break that
 coupling and are closed (below): the coloured probe is already near the forward-mode floor. 4–6 attack the
-*number* of linear solves rather than their cost; 7–9 are platform and sweep-level levers.
+*number* of linear solves rather than their cost; 7–9 are platform and sweep-level levers; 11 attacks the
+number of OUTER steps the target station takes, which its shift floor sets (measured and built opt-in;
+31 -> 22 steps on pitzDaily).
 
 ---
 
@@ -319,6 +321,49 @@ unchanged — but only if the eliminated residual is the *same* residual; do not
 operator (the warm-start refutation is the cautionary tale).
 
 **Risk.** Highest in this file; measure on the captured hard iterates before touching the march.
+
+## 11. MEASURED AND BUILT (opt-in) -- releasing the shift floor once the target station has settled
+
+Probed and marched on pitzDaily 2026-10-10: the floor `beta_min` sets the target station's linear rate,
+and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 31 steps / 161 cycles to
+22 / 141 at the same `x_r/h`. The probe tables and the march are in `solve-globalization-log.md`
+("The shift floor sets the target station's rate"); the built control is in `solve-globalization.md`.
+⚠️ An earlier version of this entry quoted the march log's wall-clock column as solver work ("1036 raw
+solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
+**Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
+1-8 cycles per released step by the probe (most of the released steps' extra cost); (b) bfs3d
+(`BFS3D_RELEASE_FLOOR`, its mesh is not in this container, #678); (c) whether the library default should
+release, after (b) and after the three slow tests #645 names (a loose terminal step is what they
+measure). pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
+
+## 12. End the viscosity ramp on the settle signal, not on a station count
+
+**BUILT 2026-10-11, opt-in** (`solve.RampSchedule`, case file `end: settled`; the prototype it was
+measured with, `settle_ramp_probe.py`, is deleted). **Pre-registered bar not met by a single jump** (table in
+`solve-globalization-log.md`, "Ending the ramp on the settle signal"): paces 16 and 24 cost 124 and 118
+cycles against the shipped 111, no retry, same `x_r/h`. The jump at the settle is tolerated at any size
+measured (up to 21.5x) but undoes the settle, so the target settles a second time. A 3-step finish
+(`finish: 3`) at pace 24 met the bar -- 114 against 111 -- though not by keeping the settle: in three of
+four arms the target settled at step 14 whatever the ramp did. The rule is far less pace-sensitive than
+a fixed count. **Still open:** a predictive rate controller keyed on the logged `rho1` trend (arrive a
+step before the settle), worth building only if bfs3d (#678) shows the simple rule leaving cost on the
+table. The text below is the proposal as written before the measurement.
+
+**What.** Replace `stations` with a rule: ramp the viscosity down at a fixed pace (2x per step cost
+nothing in `alpha`), and move to the target on the first full-length step at the floor -- the same gate
+`release_floor` uses. Needs `ResidualHomotopy` to see the previous `StepReport`, which it does not today.
+
+**Why it should win.** The `grow` x `stations` sweep (`solve-globalization-log.md`, 2026-10-11): the
+step count is set by 6-9 floor steps before the state settles, the station size does not move `alpha`,
+and the cheapest fixed schedule (`grow` 3, 12 stations, 111 cycles / 16 steps) is the one that arrives
+one step after the settle. A rule keyed on the settle removes the knob and lands there on any case.
+
+**What it is not.** Not an `alpha`-driven station controller (closed by the same sweep: `alpha` responds
+to the shift, not to the viscosity), and not a viscosity keyed to `beta` (refuted-directions ledger).
+
+**Pre-registered measurement.** pitzDaily at `grow` 3 with the rule against the 12-station arm its
+`case.yaml` ships (111 / 16): a pass is the same cycles within a few at the same `x_r/h`, with the ramp ending by itself. Then
+bfs3d, where neither `grow` 3 nor the ramp's end has been measured.
 
 ---
 

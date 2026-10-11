@@ -86,6 +86,7 @@ SUBPACKAGE_GROUPS = {
                 "step_control",
                 "relaxation",
                 "line_search_growth",
+                "ramp_schedule",
             ],
         ),
         (

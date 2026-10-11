@@ -315,7 +315,7 @@ testability seam. Everything subsystem-specific moved out:
 | `solve-field-split.md` | `field_split.py`, `traced_field_split.py`, `traced_cycle.py` | The block-triangular field split (saddle plus two transported scalars) |
 | `solve-globalization.md` | `strategy.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search — current status only |
 | `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | The dated investigation behind the globalization architecture |
-| `solve-march.md` | `march.py`, `march_log.py`, `march_history.py`, `checkpoint.py`, `step_control.py` | The observed march: `newton_march`, triggers, controls, logging |
+| `solve-march.md` | `march.py`, `march_log.py`, `march_history.py`, `checkpoint.py`, `step_control.py`, `ramp_schedule.py` | The observed march: `newton_march`, triggers, controls, logging, a homotopy's ramp schedule |
 | `.claude/notes/solve-refuted-directions.md` | *(never auto-loads)* | A cross-cutting ledger of closed/refuted ideas — check here before proposing something that sounds already tried |
 | `.claude/notes/solve-open-directions.md` | *(never auto-loads)* | The backlog of unmeasured speed-up directions for the fluid solve, each with a pre-registered measurement — read before starting solver-performance work; an entry leaves it once measured (a win into the matching rule, a loss into `solve-refuted-directions.md`) |
 

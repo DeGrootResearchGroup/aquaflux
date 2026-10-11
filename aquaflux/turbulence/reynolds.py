@@ -26,7 +26,7 @@ import equinox as eqx
 import jax
 
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import Convergence
+from aquaflux.solve import Convergence, RampSchedule
 
 from .coupled import open_session, solve_coupled
 from .march_settings import merged_march_options
@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     import jax.numpy as jnp
+
+    from aquaflux.solve import StepReport
 
     from .coupled import CoupledRANS
 
@@ -674,10 +676,12 @@ class ViscosityRampHomotopy:
     before carrying any of these numbers across -- including these.
 
     The ramp is **geometric**, for the same reason the ladder is: the convective nonlinearity scales
-    multiplicatively with the Reynolds number, so equal ratios are equal difficulty. Station ``s`` of
-    ``stations`` runs the viscosity scaled by ``anchor ** (1 - s / stations)``, from ``anchor`` at
-    ``s = 0`` down to the target's own viscosity at ``s = stations``, which is the last station and the
-    only one that may satisfy the march's stopping test.
+    multiplicatively with the Reynolds number, so equal ratios are equal difficulty. A station at
+    ``progress`` along the ramp (:class:`~aquaflux.solve.RampSchedule`; station ``s`` of ``stations`` is
+    at ``s / stations``) runs the viscosity scaled by ``anchor ** (1 - progress)``, from ``anchor`` at
+    the first station down to the target's own viscosity at the last, which is the only one that may
+    satisfy the march's stopping test. Where each step runs, and whether the march's own progress ends
+    the ramp early, is the schedule's to say; this class turns it into a viscosity.
 
     **⚠️ A station change is a compilation-cache hit only if the momentum viscosity is an ARRAY.**
     :meth:`~aquaflux.properties.Constant.scaled` on a plain Python ``float`` produces a value that
@@ -703,20 +707,16 @@ class ViscosityRampHomotopy:
     anchor : float
         The molecular-viscosity multiplier the ramp starts at, i.e. the Reynolds number is divided by
         this at the first station. Must be ``>= 1``.
-    stations : int
-        How many stations the ramp is walked in before the target. ``stations`` ramp stations are
-        visited (``s = 0 .. stations - 1``) and the target is station ``stations``, so the ratio
-        between neighbours is ``anchor ** (1 / stations)``. Must be ``>= 1``.
-    steps_per_station : int
-        Outer steps each ramp station is held for. The target station is held for as long as the march
-        needs, so this bounds only the ramp: it occupies ``stations * steps_per_station`` steps.
+    ramp : RampSchedule
+        The stations, how long each is held, and what may end the ramp early. Neighbouring stations
+        differ by ``anchor ** (1 / ramp.stations)``.
     redamping : float, optional
         What to multiply the pseudo-transient shift by on entering each ramp station, asking the march
         to re-damp for a problem that just got harder. ``1.0`` disables it.
 
         **Defaults to the station's own viscosity ratio raised to :data:`_REDAMPING_EXPONENT`**, so a
         station that barely moves the problem barely damps -- and to exactly ``1.0`` at
-        ``steps_per_station == 1``, which is a requirement rather than a rounding (see Raises). A
+        ``ramp.steps_per_station == 1``, which is a requirement rather than a rounding (see Raises). A
         constant cannot serve both ends of the range: the value calibrated for a coarse ramp is a
         runaway on a fine one.
 
@@ -753,14 +753,14 @@ class ViscosityRampHomotopy:
     A two-decade ramp in four stations of three steps each, re-pointing an AMG refresh::
 
         homotopy = ViscosityRampHomotopy(
-            coupled, anchor=100.0, stations=4, steps_per_station=3, rebind=refresh.rebind
+            coupled, anchor=100.0, ramp=RampSchedule(4, 3), rebind=refresh.rebind
         )
 
     Raises
     ------
     ValueError
-        If ``anchor < 1``, or ``stations < 1``, or ``steps_per_station < 1``, or ``redamping < 1``, or
-        ``redamping != 1`` when ``steps_per_station == 1`` -- every step then *enters* a station, so the
+        If ``anchor < 1``, or ``redamping < 1``, or ``redamping != 1`` when
+        ``ramp.steps_per_station == 1`` -- every step then *enters* a station, so the
         march holds the step control on every step and it never adapts at all, leaving the shift to
         run away as ``beta_start * redamping ** n``.
     """
@@ -770,8 +770,7 @@ class ViscosityRampHomotopy:
         coupled: CoupledRANS,
         *,
         anchor: float,
-        stations: int,
-        steps_per_station: int,
+        ramp: RampSchedule,
         redamping: float | None = None,
         rebind: Callable[[CoupledRANS], None] | None = None,
         companion: Callable[[CoupledRANS, float], CoupledRANS] = scale_both_blocks,
@@ -780,21 +779,17 @@ class ViscosityRampHomotopy:
             raise ValueError(
                 f"anchor must be >= 1 (the ramp walks DOWN to the target), got {anchor}"
             )
-        if stations < 1:
-            raise ValueError(f"stations must be >= 1, got {stations}")
-        if steps_per_station < 1:
-            raise ValueError(f"steps_per_station must be >= 1, got {steps_per_station}")
-        ratio = float(anchor) ** (1.0 / int(stations))
+        ratio = float(anchor) ** (1.0 / ramp.stations)
         if redamping is None:
             # Track the station's own size rather than sit at a constant: a station that moves the
             # viscosity a little warrants little damping. `1.0` at one step per station is not a
             # rounding of that rule but a requirement of it -- see the guard below.
-            redamping = 1.0 if int(steps_per_station) == 1 else ratio**_REDAMPING_EXPONENT
+            redamping = 1.0 if ramp.steps_per_station == 1 else ratio**_REDAMPING_EXPONENT
         if redamping < 1.0:
             raise ValueError(
                 f"redamping must be >= 1 (a station change damps, never accelerates), got {redamping}"
             )
-        if int(steps_per_station) == 1 and redamping != 1.0:
+        if ramp.steps_per_station == 1 and redamping != 1.0:
             raise ValueError(
                 "redamping must be exactly 1.0 when steps_per_station == 1: every step then enters a "
                 "station, so the step control is held on every step and never adapts at all, and the "
@@ -802,43 +797,46 @@ class ViscosityRampHomotopy:
             )
         self.coupled = coupled
         self.anchor = float(anchor)
-        self.stations = int(stations)
-        self.steps_per_station = int(steps_per_station)
+        self.ramp = ramp
         self.ratio = ratio
         self.redamping = float(redamping)
         self.rebind = rebind
         self.companion = companion
+        # This march's walk along the schedule: where each step ran, and whether the ramp has ended.
+        self._walk = ramp.walk()
         # The station whose assembler `_assembler` currently holds. -1 is "none entered yet", which is
         # not a station index, so the first `enter` always counts as a change and rebinds.
         self._station = -1
         self._assembler = coupled
 
     def station(self, step: int) -> int:
-        """The station index outer step ``step`` runs, saturating at :attr:`stations` (the target)."""
-        return min(step // self.steps_per_station, self.stations)
+        """The station an entered outer step ``step`` runs (see :class:`~aquaflux.solve.RampPosition`)."""
+        return self._walk.position(step).station
 
-    def scale(self, station: int) -> float:
-        """The molecular-viscosity multiplier at ``station``; exactly ``1.0`` at the target."""
-        if station >= self.stations:
+    def scale(self, progress: float) -> float:
+        """The molecular-viscosity multiplier ``progress`` along the ramp; exactly ``1.0`` at the target."""
+        if progress >= 1.0:
             return 1.0
-        return float(self.anchor ** (1.0 - station / self.stations))
+        return float(self.anchor ** (1.0 - progress))
 
-    def enter(self, step: int) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    def enter(self, step: int, previous: StepReport | None) -> Callable[[jnp.ndarray], jnp.ndarray]:
         """Make this step's station current -- rebinding on a change -- and return its residual.
 
+        Where the step runs is the schedule's walk's answer, given the previous step's report.
         Returns ``assembler.residual`` as a **bound method**, so its arrays ride as dynamic leaves of a
         pytree and the compiled step stays a cache hit across a station change rather than recompiling
         the whole coupled solve at each one.
         """
-        station = self.station(step)
-        if station != self._station:
-            self._station = station
-            scale = self.scale(station)
+        position = self._walk.enter(step, previous)
+        if position.station != self._station:
+            self._station = position.station
             # The target station is the caller's own assembler, not `with_scaled_molecular_viscosity(1)`
             # -- the root and adjoint must belong to the case, and a rescale by one is a different
             # object holding a multiplied array rather than the original.
             self._assembler = (
-                self.coupled if station >= self.stations else self.companion(self.coupled, scale)
+                self.coupled
+                if position.arrived
+                else self.companion(self.coupled, self.scale(position.progress))
             )
             if self.rebind is not None:
                 self.rebind(self._assembler)
@@ -846,7 +844,7 @@ class ViscosityRampHomotopy:
 
     def arrived(self, step: int) -> bool:
         """Whether ``step`` runs the target problem, which is the only station that may stop the march."""
-        return self.station(step) >= self.stations
+        return self._walk.position(step).arrived
 
     def shift_factor(self, step: int) -> float:
         """:attr:`redamping` -- the march re-damps by the same factor at every station change.
@@ -860,11 +858,6 @@ class ViscosityRampHomotopy:
         """
         del step
         return self.redamping
-
-    @property
-    def ramp_steps(self) -> int:
-        """Outer steps the ramp occupies before the target station begins."""
-        return self.stations * self.steps_per_station
 
 
 #: The keywords :func:`solve_reynolds_ramp` must NOT forward, derived from the two signatures rather
@@ -883,8 +876,7 @@ def solve_reynolds_ramp(
     coupled: CoupledRANS,
     *,
     anchor: float,
-    stations: int,
-    steps_per_station: int,
+    ramp: RampSchedule,
     point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict],
     redamping: float | None = None,
     companion: Callable[[CoupledRANS, float], CoupledRANS] = scale_both_blocks,
@@ -919,10 +911,11 @@ def solve_reynolds_ramp(
     anchor : float
         The factor the molecular viscosity is multiplied by at the first station. Pass the ladder's own
         anchor (its ``ratio ** n_points``) for the two arms to span the same range.
-    stations : int
-        How many ramp stations the span is divided into, geometrically.
-    steps_per_station : int
-        Outer steps each ramp station is held for.
+    ramp : RampSchedule
+        The ramp's stations, how long each is held, and what may end it early; passed through to
+        :class:`ViscosityRampHomotopy`. To end it once the march has settled at the floor, give it the
+        march's own step control's test (``end_when=step_control.settled``), so the ramp and the
+        release read one definition of settled.
     point_setup : callable
         The ladder's per-rung configuration hook, called **once**, for the anchor station. Its returned
         keywords are merged over the forwarded options exactly as the ladder merges them, and a
@@ -977,8 +970,7 @@ def solve_reynolds_ramp(
     homotopy = ViscosityRampHomotopy(
         coupled,
         anchor=anchor,
-        stations=stations,
-        steps_per_station=steps_per_station,
+        ramp=ramp,
         redamping=redamping,
         rebind=rebind,
         companion=companion,

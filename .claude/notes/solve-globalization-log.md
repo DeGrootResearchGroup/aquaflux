@@ -1204,3 +1204,236 @@ three orders from the stopping bar. **That was this hole**, and with it closed t
   **The phrase to grep when this behaviour changes again is `longest finite`** -- it reaches every site
   that describes this fallback, including the several that are correct, which is what a claim-grep is
   supposed to do: it hands you the whole set to adjudicate rather than only the ones that were renamed.
+
+## The shift floor sets the target station's rate; releasing it (`release_floor`), 2026-10-10
+
+**Configuration of every number here.** pitzDaily, the shipped `case.yaml` at commit `7972225`: residual
+stop, `rtol` 0.3, restart 15, `max_restarts` 14, `refresh_on_cycles` 2, dual time 5 / 0.01, cycle budget
+42, `CflResidualDualTimeControl(beta_start 0.5, beta_min 0.005)`, `refit_beta_floor` 0.05, field split
+`SimpleSmoothed` / `JacobiSmoothed`, `turbulence_damping` 3, 16 x 1 momentum-only viscosity ramp from 100,
+stop `atol` 1e-5 row-scaled. jax 0.11.2, lineax 0.1.1, CPU, 4-core Linux (16 GB), one run per arm.
+**Cycles are restart cycles as the march log's `cyc` column counts them** (`lineax`'s raw count less two
+per inner solve); the log's second column is wall-clock seconds, not work.
+
+**The capture.** That march with every step and inner iterate checkpointed (`PITZ_CHECKPOINT_KEEP=500
+PITZ_INNER_DUMP_ABOVE=1`): 31 steps, 161 cycles (85 on the ramp, 76 on the target station over 67 inner
+solves), final `|R|` 8.345e-06, `x_r/h` 8.07, no retries, 1036 s. `beta` reaches the floor at step 13
+(of a 16-step ramp) and sits there for the whole target station (steps 17-31), where the residual falls
+linearly at 0.55-0.84 per step.
+
+**The probe** (`validation/pitzdaily_openfoam/endgame_shift_probe.py`): ONE outer step from a checkpointed
+state at `beta` 0.005 / 0.0015 / 0.0005 / 0, the inverse re-fitted at that state at `max(beta, 0.05)`
+(`shipped`) or at the shift itself (`tracking`, zero included), under the file's inner loop (5 / 0.01) or a
+tight one (12 / 1e-4); the contraction is the row-scaled residual's, in the measure the march judged that
+step by. **Its control -- the march's own step re-taken with the inverse walked to where the march had it
+-- reproduced the record at states 16, 21 and 27** (ratio to four figures, raw count, inner count,
+`alpha`); a second run at states 18-20 printed a mismatch because it used the tight inner loop for the
+control, a harness defect since fixed (its ratios still match the record to four figures). `predict` is
+`beta / (lambda + beta)` with `lambda = beta_c (1 / rho_c - 1)` fitted from the control. Cells are
+ratio / cycles / inner solves / `alpha`, ✓ where the inner loop met its target; "state" is the number of
+steps completed, so state 20 is where step 21 starts.
+
+| state | `beta` | shipped inverse, file inner | tracking inverse, file inner | tracking inverse, tight inner | predict |
+|---|---|---|---|---|---|
+| 16 (arrival) | 0.005 | 0.989 / 8 / 5 / 0.5 | 0.99 / 9 / 5 / 0.5 | 0.988 / 18 / 10 / 0.5 ✓ | 0.989 |
+| | 0.0015 | 1.05 / 46 / 4 / 0.06 | 1.06 / 42 / 3 / 0.06 | 1.06 / 42 / 3 / 0.06 | 0.964 |
+| | 0.0005 | 1.03 / 42 / 3 / 0 | 1.00 / 42 / 3 / 0.5 | 1.00 / 42 / 3 / 0.5 | 0.900 |
+| | 0 | 1.04 / 42 / 3 / 0 | 1.01 / 42 / 3 / 0 | 1.01 / 42 / 3 / 0 | 0 |
+| 18 | 0.0015 | | | 0.39 / 27 / 9 / 0.125 | 0.473 |
+| | 0 | | | **0.995** / 42 / 3 / 0 | 0 |
+| 19 | 0.0015 | | | 0.32 / 16 / 10 / 0.25 ✓ | 0.356 |
+| | 0 | | | 0.0096 / 29 / 8 / 0.06 | 0 |
+| 20 | 0.0015 | | | 0.283 / 11 / 9 / 0.5 ✓ | 0.297 |
+| | 0 | | | **1e-4** / 20 / 10 / 0.25 ✓ | 0 |
+| 21 | 0.005 | 0.555 / 5 / 5 / 1 ✓ | 0.555 / 5 / 5 / 1 ✓ | 0.555 / 8 / 8 / 1 ✓ | 0.556 |
+| | 0.0015 | 0.271 / 8 / 5 / 0.5 ✓ | 0.270 / 6 / 5 / 0.5 ✓ | 0.270 / 11 / 9 / 0.5 ✓ | 0.273 |
+| | 0.0005 | 0.112 / 9 / 5 / 0.5 | 0.111 / 7 / 5 / 0.5 | 0.110 / 14 / 9 / 0.5 ✓ | 0.111 |
+| | 0 | 0.0167 / 10 / 5 / 0.5 | 0.0136 / 8 / 5 / 0.5 | **1e-4** / 14 / 9 / 0.5 ✓ | 0 |
+| 27 (tail) | 0.005 | 0.664 / 4 / 4 / 1 ✓ | 0.663 / 4 / 4 / 1 ✓ | 0.663 / 10 / 8 / 1 ✓ | 0.664 |
+| | 0.0015 | 0.405 / 8 / 4 / 1 ✓ | 0.404 / 5 / 4 / 1 ✓ | 0.404 / 10 / 8 / 1 ✓ | 0.372 |
+| | 0.0005 | 0.204 / 12 / 4 / 1 ✓ | 0.203 / 8 / 4 / 1 ✓ | 0.202 / 12 / 8 / 1 ✓ | 0.165 |
+| | 0 | 0.0042 / 17 / 5 / 1 ✓ | 0.0044 / 9 / 5 / 1 ✓ | < 1e-4 / 15 / 9 / 1 ✓ | 0 |
+
+- **At a settled state the floor is the rate and zero shift is Newton.** At state 21 the contraction
+  tracks `beta / (lambda + beta)` to three figures at every shift, and one zero-shift step with the tight
+  inner loop reaches the 1e-5 bar for 14 cycles, where the march took ten more steps and 43 cycles. At
+  the tail (state 27) the gain is steps, not cycles: one step for 15 against four for 16. The single-mode
+  fit under-predicts there by 9-23 % at the intermediate shifts (more than one slow mode).
+- **At arrival the same step fails, and the inverse is not why.** Every shift below the floor raises the
+  residual from state 16, with the line search collapsing and 42-cycle steps, identically under the
+  tracking inverse; the tight inner loop at the floor meets its own target and moves the outer residual
+  1 %. The transition is sharp: a zero-shift step fails from state 18, strains from 19 (0.0096 with
+  `alpha` 0.06 and the inner target unmet) and is Newton from 20 -- **the first state after a step at the
+  floor took `alpha` = 1** (steps 17-19 took 0.5). That is the gate the release uses.
+- **The refit floor is worth cycles, not rate:** fitting the inverse at the shift instead of at 0.05
+  saves 1-8 cycles per step and leaves the contraction unchanged to three figures.
+- **The tight inner loop buys nothing a second step does not.** At zero shift from state 21 the file's
+  loop (5 inner, forcing 0.3) contracts 0.014-0.017, the tight one (9 inner) 1e-4 for 14 cycles; two
+  file-loop steps cost about the same. Inexact Newton at forcing 0.3 converges linearly per inner solve,
+  so what matters is the number of inner solves, not how they are grouped into outer steps.
+
+**The march** (`PITZ_RELEASE_FLOOR=1e-4`, `release_alpha` 1.0 -- since renamed `settle_alpha`, everything else as above). Steps 1-20 are
+identical to the capture in `|R|`, inner count and cycles; step 20 is the first at the floor with
+`alpha` 1.000, step 21 runs released.
+
+| | capture | released to 1e-4 |
+|---|---|---|
+| outer steps | 31 | **22** |
+| cycles | 161 | **141** |
+| target station: steps / cycles / inner solves | 15 / 76 / 67 | **6 / 56 / 30** |
+| from step 21: steps / cycles / wall | 11 / 48 / 191 s | **2 / 28 / 117 s** |
+| final `|R|` | 8.345e-06 | 1.729e-06 |
+| `x_r/h` | 8.07 | 8.07 |
+
+The released steps contract 0.040 and 0.030 (step 21 at `alpha` 0.25, step 22 at 1.0), against 0.028
+predicted from `lambda` at `beta` 1e-4, and each costs more cycles than a floor step (11 and 17 against
+4-5) -- the inverse is still fitted at 0.05, a 500x mismatch, which is the deferred half below.
+⚠️ **Wall clock is indicative only:** steps 1-20 did identical work in 661 s and 605 s in the two runs
+(different compilation-cache state, light concurrent work in both), so a ~10 % spread; the tail's
+191 s against 117 s is outside it, but it is one run each.
+
+**Not built, and why (deviations from the agreed design, stated where they were made):** releasing the
+refit floor with the shift (no seam reaches the refresh hook from the control; worth 1-8 cycles per
+released step by the table above, i.e. most of the released steps' extra cost) and tightening the inner
+loop on the released step (a static field, so a recompile, for nothing per the last bullet).
+
+## The ramp's length is the shift's descent, not the viscosity's: `grow` x `stations`, 2026-10-11
+
+**Configuration.** pitzDaily, shipped `case.yaml` plus `PITZ_RELEASE_FLOOR=1e-4` on every arm (so the
+baseline is the released march above), `PITZ_GROW` (the control's growth factor, class default 1.5,
+never varied before) and `PITZ_RAMP_STATIONS`; everything else as recorded for the capture (residual
+stop, `rtol` 0.3, `refresh_on_cycles` 2, dual time 5 / 0.01, `beta_start` 0.5, `beta_min` 0.005,
+`refit_beta_floor` 0.05, momentum-only ramp from 100, `turbulence_damping` 3, stop `atol` 1e-5).
+jax 0.11.2, CPU, 4-core Linux, one run per arm, run back to back; cycles are restart cycles as the log
+counts them; wall is the marching time after step 1 and is indicative only. Every arm reached `x_r/h`
+8.07 with no retry.
+
+| `grow` | stations | steps | cycles (ramp / target) | `beta` floors at | first `alpha` 1 at the floor | released | wall |
+|---|---|---|---|---|---|---|---|
+| 1.5 | 16 (baseline) | 22 | 141 (85 / 56) | 13 | 20 | 21 | 722 s |
+| 1.5 | 8 | 23 | 166 (33 / 133) | 13 | 21 | 22 | 735 s |
+| 3 | 16 | 19 | 134 (101 / 33) | 7 | 13 | 18 | 782 s |
+| 3 | 8 | 18 | 145 (54 / 91) | 8 | 16 | 17 | 707 s |
+| **3** | **12** | **16** | **111 (76 / 35)** | 7 | 14 | 15 | **597 s** |
+
+The last arm was run after the first four, as the prediction the pattern below makes: a ramp that
+arrives about where the state settles at the floor.
+
+- **The step count is nearly invariant, and what is conserved is steps AT THE FLOOR before the state
+  settles** (⚠️ at these paces only: a slower ramp settles sooner, see the prototype entry below): 6-9 in every arm (the first full-length step at the floor is the 7th, 8th, 6th, 8th and
+  7th floor step). That is the recorded "insufficient elapsed pseudo-time" finding in a new form: the
+  transient needs a fixed amount of pseudo-time at the largest timestep, and no schedule removes it.
+- **The viscosity step does not move `alpha`; the shift does.** The two `grow` 3 arms have identical
+  `alpha` histories through step 6 at 1.33x and 2x viscosity per step, and the two `grow` 1.5 arms through
+  step 7. The clipping during the ramp is `beta` reaching what the state can take, not the station jump
+  (consistent with the predictor probe's 5-15 % jump share). **So `alpha` cannot drive a station
+  controller: it is not responding to the ramp.**
+- **Reach the floor fast, then ramp AT the floor.** Floor steps at a higher viscosity take their full
+  timestep (`alpha` 1 from step 13 in the 16-station `grow` 3 arm, 6-7 cycles); floor steps at the target
+  from an unsettled state are clipped to half and cap-limited (`L`, 7-11 cycles, the 8-station arms).
+  Ending the ramp when `beta` floors (`grow` 3, 8 stations) is therefore the WRONG pairing, and it is
+  what a viscosity keyed to `beta` would do -- that design is closed before being built (ledger entry).
+- **The waste is the ramp outlasting the settling.** In the 16-station `grow` 3 arm steps 13-16 ran at
+  `alpha` 1 at the floor before the schedule arrived: 24 cycles. Twelve stations end the ramp one step
+  after the settle and cost 111 cycles -- **21 % fewer than the released baseline and 31 % fewer than
+  the shipped march's 161**, at 16 steps against 31.
+- **What an adaptive ramp therefore keys on:** not `alpha` per station, but the settle signal -- the
+  first full-length step at the floor, the same gate the release uses. Pace is a secondary knob (2x per
+  step cost nothing in `alpha`); the end is the sensitive part. Expressing it needs the homotopy to see
+  the previous report (built 2026-10-11: `ResidualHomotopy.enter(step, previous)`, `solve.RampSchedule`).
+
+**pitzDaily's default since 2026-10-11 (project owner's decision, pitzDaily only):** its `case.yaml`
+ships `grow` 3, 12 stations and `release_floor` 1e-4. Confirmed by a run of the file as shipped,
+no `PITZ_*` overrides: 16 steps, 111 cycles (ramp 76 / target 35), shift at the floor from step 7,
+released at step 15, final `|R|` 1.98e-6, `x_r/h` 8.0686, no retry -- the sweep's arm exactly. The class defaults (`grow` 1.5, no release) and
+bfs3d's case are unchanged; bfs3d is #678. ⚠️ **"The shipped `case.yaml`" in any pitzDaily entry dated
+before 2026-10-11 means `grow` 1.5 x 16 stations with no release** (31 steps / 161 cycles at its last
+measurement).
+
+## Ending the ramp on the settle signal: a prototype, 2026-10-11
+
+**Configuration.** pitzDaily, `case.yaml` as shipped that day (`grow` 3, `release_floor` 1e-4, ramp anchor
+100, momentum-only, one step per station, everything else as in the sweep above), with
+a prototype standing in for `ViscosityRampHomotopy` (`settle_ramp_probe.py`, deleted once the library
+reproduced it -- the arms are now `PITZ_RAMP_END=settled`, `PITZ_RAMP_FINISH`, `PITZ_RAMP_STATIONS`, see
+"Built" below): station `s`
+at step `s` until the first step that ran off the target at `shift <= beta_min` with `alpha >= 1` (the
+release's gate), then the target from the next step. `PITZ_RAMP_STATIONS` is then only the pace. jax
+0.11.2, CPU, 4-core Linux, one run per arm, run back to back; restart cycles as the log counts them.
+Every arm `x_r/h` 8.0686, no retry.
+
+| arm | pace (per step) | settle after step | jump at the settle | steps | cycles (ramp / target) |
+|---|---|---|---|---|---|
+| 12 fixed stations (shipped) | 1.47x | -- (arrives at 13, settles on the target at 14) | -- | 16 | 111 (76 / 35) |
+| settle-ended, pace 16 | 1.33x | 13 (station 12 of 16) | 3.16x | 17 | 124 (83 / 41) |
+| settle-ended, pace 24 | 1.21x | **9** (station 8 of 24) | **21.5x** | 16 | 118 (54 / 64) |
+
+- **The jump is tolerated, whatever its size.** A 21.5x viscosity change in one step at the floor
+  shift cost no retry and no escalation; the first target step ran at `alpha` 0.5 and 12 cycles.
+- **But the jump undoes the settle, and the target has to settle again**: 2 steps after a 3.16x jump, 5
+  after a 21.5x one, before the first full-length step there and the release. The shipped 12-station
+  ramp avoids this by arriving one step BEFORE its settle, so the one settle it pays is on the target.
+- **⚠️ "6-9 floor steps before the settle" (the sweep above) is NOT conserved -- it depends on the pace.**
+  At 1.21x per step the state settled at the 4th floor step; at 1.33x and 1.47x, the 7th and 8th. A
+  slower-moving problem settles sooner. What WAS roughly conserved across all three: 16-17 steps and
+  111-124 cycles in total.
+- **Verdict against the pre-registered bar ("the same cycles within a few"): not met.** 118 and 124
+  against 111, +6 % and +12 %. What the rule does buy is insensitivity: across paces 16-24 it stays within
+  12 % of the hand-tuned optimum, where fixed counts at the same `grow` cost 134 (16 stations) and 145
+  (8 stations). A pace of 12 or faster never settles before arriving, so the rule reproduces the shipped
+  arm exactly there.
+- **What it does not tell apart:** whether a smaller jump at the settle (an accelerated finish over two
+  or three steps instead of one jump) would keep the first settle's benefit. Unmeasured.
+
+**Two further arms, same configuration (2026-10-11).**
+
+| arm | ramp ends after step | target settles at step | steps | cycles |
+|---|---|---|---|---|
+| 12 fixed stations (shipped) | 12 | 14 | 16 | 111 |
+| settle-ended, pace 24, the 21.5x walked in 3 steps (`PITZ_RAMP_FINISH=3`, 2.78x each) | 11 | 14 | 16 | **114** |
+| settle-ended, pace 24, one jump | 9 | 14 | 16 | 118 |
+| settle-ended, pace 16, one jump | 13 | 15 | 17 | 124 |
+
+- **The 3-step finish meets the pre-registered bar (114 against 111) -- but not for the predicted reason.**
+  The smaller final steps did NOT keep the ramp's settle: steps 10-13 went back to `alpha` 0.5 and the
+  target settled again at step 14.
+- **⚠️ THE TARGET SETTLES AT STEP 14 IN THREE OF FOUR ARMS, whatever the ramp did before.** So on this
+  case the target's settle is set by the march's own transient, not by the ramp; a ramp only has to be
+  over a step or more before it, and costs when it is not (the pace-16 arm, done at 13, settles at 15).
+  The residual entering the target's first full-length step was 2.0-2.5e-3 in all four (about 7 % of
+  `|R0|`), an observation, not yet a predictor.
+
+**The full-step ratio `rho1` -- what the settle test actually reads (the prototype's trace; now every march's `rho1` column, pace 16,
+one jump; the traced march is identical to the untraced one cycle for cycle and to `|R|` 1.788e-06).**
+`rho1 = |G(phi + delta)| / |G(phi)|` of each step's FIRST inner iteration, the number the line search
+compares with one (strict descent) to accept the full step:
+
+| step | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | **13** | 14 (3.16x jump) | 15 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `rho1` | 1.65 | 4.42 | 3.61 | 3.38 | 1.89 | 1.27 | 1.23 | 1.13 | 1.04 | **0.90** | 1.77 | 0.91 |
+
+- **It approaches one smoothly over the last four floor steps** (1.23, 1.13, 1.04, 0.90: about -0.1 per
+  step), so the crossing is visible a step or two ahead -- a two-point linear extrapolation made at step
+  12 predicts it at step 13, and at step 11 predicts no crossing on the next step, both right. It is
+  not uniformly smooth: the same extrapolation made at step 9 (after the fast fall 3.38 -> 1.89 -> 1.27)
+  predicts a crossing at step 10, three steps early.
+- **A viscosity jump raises it**: 0.90 -> 1.77 for 3.16x, and the target then re-settles in one step
+  (0.91). After the 21.5x jump of the pace-24 arm the re-settle took five steps (`rho1` not traced there).
+  So `rho1` responds to the size of the last viscosity step, which is what an adaptive ramp rate needs to
+  see -- and what `alpha` (a halving ladder, so 1 or 0.5 here) cannot show.
+- **What it does not tell apart yet:** whether `rho1`'s rise after a viscosity step scales predictably
+  with the step's size (two points: 3.16x -> +0.87; the 1.33x ramp steps are entangled with the
+  transient), which a rate controller would rely on.
+
+**Built into the library, and reproduced exactly (2026-10-11).** `solve.RampSchedule(end_when=
+step_control.settled, finish=...)`, the case file's `ViscosityRamp(end: settled, finish: ...)`, and the
+step reports' `full_step_ratio` (the log's `rho1`). `PITZ_RAMP_STATIONS=24 PITZ_RAMP_END=settled
+PITZ_RAMP_FINISH=3` through `compare.py` (same configuration as above, jax 0.11.2, 4-core Linux):
+**16 steps, 114 cycles, per-step costs `3 4 5 6 7 9 7 7 6 7 8 8 7 6 12 12` and final `|R|` 2.378e-06 --
+the prototype's arm to the last printed digit**, `x_r/h` 8.0686, no retry, ramp ended after step 9 and
+the target settled at step 14. Its `rho1` column: 0.19 0.25 0.86 1.57 3.89 3.43 1.92 1.14 **0.83**
+(settle) 1.29 1.53 2.08 1.29 **0.91** (target settles) 3.15 0.34. Opt-in; pitzDaily's file keeps 12 fixed
+stations (111 < 114).
+The file as shipped (12 fixed stations), on the same code: 16 steps, 111 cycles, per-step costs and
+final `|R|` 1.979e-06 identical to the confirmation run before the change -- the fixed walk and the
+extra `full_step_ratio` carry move nothing.
