@@ -146,7 +146,8 @@ arc, 95 % UVT water inside a black wall at 100 mm. aquaflux is `solve_scene` wit
 tracer at 20,000,000 rays a lamp, 0.5 mm pixels, each point the mean over the water pixels within 1 mm.
 aquaflux follows no reflection, so it is compared with the trace that ends each ray at its first one.
 "Entered" is the tracer's share of the transmitted light at the point that passed through another
-lamp's sleeve, which aquaflux crosses straight. jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, one run,
+lamp's sleeve. In this first run aquaflux crossed a neighbour's sleeve straight (its Fresnel losses and
+absorption along the unbent line); the routes that replaced it are measured in the next section. jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, one run,
 2026-10-08; aquaflux 977 s, compile included; the traces 476 and 348 s.
 
 | point (mm) | aquaflux / transmitted | in standard errors | traced error | entered | transmitted / full | straight / full |
@@ -172,3 +173,42 @@ lamp's sleeve, which aquaflux crosses straight. jax 0.10.2, CPU, x64, Linux x86_
 - The reflections left out are worth 5.5-7.5 % here against under 0.5 % beside one lamp: with four
   lamps, light reflected off the neighbours' sleeves reaches the water. That is step 4's.
 - The straight gather with the sleeves absent reads 2.5-59 % high.
+
+### Bent routes through a neighbour's sleeve
+
+Light between a lamp and a point may now pass through one neighbouring sleeve along a path bent there
+(a route of its own: through the quartz, or through the quartz and the air gap), searched for from four
+starting points inside that sleeve, and a path meeting a sleeve it does not pass is no path. Measured on
+the branch at `535b0fa7`: `optics` mode, **64 sectors** per arc (106,496 facets; 64 against 128 sectors
+agree to 0.9998-1.0000 at every point in `invisible` mode), the stored 60M-ray traces (2 mm disc),
+`RayCastOcclusion(grid=True)`; jax 0.10.2, CPU, x64, macOS arm64, 11 cores, one run, 2026-10-10;
+aquaflux by `rerun_aquaflux.py` against `work/check_array-optics.json`.
+
+| point (mm) | traced | straight crossing (60M rays, 64 sectors) | bent routes | in standard errors |
+|---|---|---|---|---|
+| (0, 0) | 16.058 +- 0.034 | 0.9985 | 0.9985 | -0.7 |
+| (0, -25) | 16.733 +- 0.029 | 0.9903 | 0.9985 | -0.9 |
+| (45, 25) | 11.030 +- 0.078 | 0.9825 | 0.9977 | -0.3 |
+| (55, 25) | 8.331 +- 0.039 | 0.9706 | **0.9897** | **-2.2** |
+| (37, 37) | 9.508 +- 0.089 | 0.9857 | 0.9852 | -1.6 |
+| (50, 50) | 7.007 +- 0.036 | 0.9719 | 0.9947 | -1.0 |
+| (-25, 41) | 12.796 +- 0.108 | 0.9735 | 0.9927 | -0.9 |
+| (0, 75) | 5.740 +- 0.028 | 0.9853 | 0.9947 | -1.1 |
+| (-65, 0) | 7.563 +- 0.042 | 0.9971 | 1.0036 | +0.7 |
+
+- **Every point is now within 1.1 % of the transmitted trace, and only (55, 25) is beyond two standard
+  errors.** Split by route (`route_split.py`, six points), the routes through a neighbour carry
+  0.8-2.3 % of the traced value against the tracer's 0.8-2.6 % that entered another sleeve.
+- **Where the light goes at (-25, 41)**: a 2D forward trace from lamp 1's arc finds two rays reaching
+  it, both missing every arc -- one through lamp 2's air gap, turned about 45 degrees near the critical
+  angle, whose straight line passes nowhere near lamp 2; one through lamp 2's gap and then lamp 3's. The
+  first is found once the starts stand inside the sleeve; the second passes two neighbours and is not
+  carried (it bounds to about 0.08 % here). The shortest path through lamp 3 alone runs into its arc.
+- **Left open**: (55, 25) still misses about 0.6 % of light that passed a neighbour (a path round the
+  arc that is not a shortest path is the candidate, unmeasured); 0.2-0.65 % is short on light that
+  entered no other sleeve at some points (largest at (-25, 41)), not decomposed; (37, 37) is unchanged at
+  0.985 (-1.6 standard errors), with only 0.1 % of its light having passed another sleeve.
+- **Cost**: the gather took 9,456 s against 1,456 s with the first version's row cull (6.5x). No route
+  is culled: a route through a quartz sleeve can turn light by up to 120 degrees, and through its air gap
+  too by up to 217 (the sum of the largest turn at each surface, the air ones limited by the critical
+  angle), so with a facet emitting into its front half no direction can be ruled out from geometry alone.

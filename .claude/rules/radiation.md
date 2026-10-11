@@ -4848,13 +4848,29 @@ are bent too (no straight-through factor left anywhere).
   straight line never comes near lamp 2; (b) through lamp 2's gap then lamp 3's (two neighbours, outside
   the one-region design; left open). With the starts moved, `solve_paths` on the route through lamp 2's
   gap finds ray (a): departure 1.49085 rad, as the trace, T 0.391 -- so (a) is a minimum and the starts,
-  not the saddle limit, hid it. **Not yet re-measured on the whole scene.**
+  not the saddle limit, hid it. **Re-measured on the whole scene (user, `535b0fa7`, 64 sectors, the stored
+  60M-ray traces, macOS arm64, 11 cores, 2026-10-10)**: every point within 1.1 % of the transmitted trace,
+  only (55,25) beyond 2 standard errors (0.990, -2.2); (50,50) 0.995, (-25,41) 0.993, (0,-25) 0.999;
+  through-neighbour routes carry 0.8-2.3 % of the traced value against the tracer's 0.8-2.6 % entered.
+  Left open: ~0.6 % at (55,25) on through-neighbour light; 0.2-0.65 % on light that entered no other sleeve
+  (largest at (-25,41)); (37,37) unchanged at 0.985. Gather 9,456 s against 1,456 s with the row cull.
+- ⚠️ **NO SOUND GEOMETRIC CULL OF A ROUTE EXISTS HERE.** The largest turn a path can take at one surface
+  is `90 - asin(n_min / n_max)` degrees: water-quartz 23.9, quartz-air 48.3 (critical-angle limited).
+  Summed over the chain (leaving the source's own sleeve 72.2), a route through a neighbour's quartz can
+  turn light by up to 120 degrees and through its gap too by up to 216.6; a Lambertian facet emits into
+  its front 90, so every receiver direction stays reachable and a deflection bound culls nothing.
 - **Tests**: routes (`test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way`),
   the ball's axial path through its route and invalid round it, `straight_reach`, a slab in one medium
   brings a small lamp nearer by `t (1 - n_w/n_q)` (scene, paraxial, 1e-3), and an absorbing slab against a
   quadrature over directions (refracted, 2.5e-3), and a route through a region the straight line misses
   by 30 mm against Nelder-Mead in the cross-section
   (`test_a_route_through_a_region_the_straight_line_misses_is_found_and_is_the_shortest`, red on the old
-  starts: no valid path). **Not yet mutation-checked**; the rod's three paths are
-  not a test (it would fail).
+  starts: no valid path). The rod's three paths are not a test (it would fail). **Mutation pass (11, 9
+  red, 2026-10-11)**: exits not reversed, the pass at the chain's start, a base route between points in
+  one medium, crossed regions counted beside a leg, beside regions not tested, no dedupe, regions ignored
+  by `straight_reach`, the straight layer not applied in `surviving_fraction`, starts at b rather than
+  the region's middle. **Dismissed, equivalent on every fixture**: aims spread across the straight line
+  rather than across the bisector (with one path through a region, any start inside it reaches that
+  path; kept as written because the user's 535b0fa run measured it), and the first guess split at the
+  pass's start rather than its end (`onto` puts every crossing back on its face before the descent).
 
