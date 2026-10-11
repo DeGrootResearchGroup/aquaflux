@@ -648,6 +648,32 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
   room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
 
+## The aggressive Reynolds continuation does NOT need the complete LU (2026-10-11)
+
+`pitzdaily_openfoam/compare_reynolds_continuation.py` used to say its aggressive Courant control could
+reach the developed reattachment only with an exact complete-LU preconditioner, re-factored every step,
+because "a block-triangular SIMPLE preconditioner loses diagonal dominance and the step goes non-finite".
+That was the last claimed regime for the LU, so it was re-run on the field split before the LU was deleted.
+**Measured 2026-10-11** (`validation/pitzdaily_openfoam/compare_reynolds_continuation.py` at `10449ed` plus
+the harness changes of the LU-removal PR; Linux x86_64, 4 cores, jax 0.11.2, Python 3.13): the aggressive
+`DualTimeControl(beta_start=0.5, beta_min=0.005)` Reynolds continuation (Re/100, Re/10, target;
+`inner_steps=10`, `inner_tol=1e-3`, intermediate `rtol` 3e-2, target `rtol` 1e-3), preconditioned by
+`case.yaml`'s own `FieldSplit(SimpleSmoothed, JacobiSmoothed)` at `refit_beta_floor` 0.05 with
+`refresh_on_cycles=2`, built at β 0.5: **converged in 40 outer steps / 852 restart cycles, no retries and
+no non-finite step, `x_r/h` 8.069 (OpenFOAM 7.741; `compare.py`'s root 8.0686), peak `nu_t/nu` 416 (423)**.
+Rungs took 12 / 11 / 17 steps. The one hard step was rung 2's last (β 0.009): 133 cycles, inner α 0.016,
+finite, and it met the rung's tolerance. ⚠️ Wall clock (3305 s) is NOT quotable: a unit-test run shared
+the machine for the first ~10 minutes. ⚠️ A first attempt with NO `refresh_on_cycles` (split fitted once
+per rung, never refreshed) was stopped at step 8 with cycles rising 9 → 31 — that configuration is not one
+anything ships, and the LU it was compared with refactored every step, so it was not a fair arm. The LU arm
+itself was not re-run (the harness's claim was recorded without a run log in the repository).
+The harness now runs the split only. Two defects in it predated this and were fixed on the way: its
+step-control wrapper called `float()` on `DualTimeControl`'s carried state, which is a `(β, previous
+|R|)` tuple, so it crashed on its first step on `main`; it now reads the shift off the step with
+`shift_of`. And it does not put its own repository on `sys.path`, so `import aquaflux` resolves to the
+editable install — a run from a second worktree must set `PYTHONPATH` to that worktree, or it silently
+runs the other checkout's code (this happened, mid-edit, and crashed on an import the edit had removed).
+
 ## Recovering a converged state (both cases)
 
 Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through the shared

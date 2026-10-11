@@ -48,8 +48,9 @@ the FD and session tests mutation-checked).
 coupled adjoint's zero-shift operator at adjoint grade (bfs3d `state-00059`: 17 restart cycles to 6.4e-10
 true relative); a laminar flow's `SimpleSmoothed` matched the LU's trajectory (24×16 channel 17 steps / 61
 cycles vs 17 / 51; tetrahedral duct from rest 13 steps each); the LU's fill walls out in 3D. The one claim
-of a regime only it could reach — `compare_reynolds_continuation.py`'s aggressive Courant control — was
-re-run on the split before deleting; the result is recorded in `validation.md`.
+of a regime only it could reach — `compare_reynolds_continuation.py`'s "the aggressive Courant control needs
+the exact LU" — was re-run on the split before deleting and does not hold: the split converges that march
+to the same root (40 steps, `x_r/h` 8.069, no retries; full record in `validation.md`).
 
 ## ⚠️ "native" was renamed away (2026-08-20) — there is no such symbol
 

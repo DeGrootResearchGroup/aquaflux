@@ -427,13 +427,31 @@ owner's decision, as dominated rather than broken:
   (2 restart cycles against 2). It was also the GPU dead end the traced hierarchies exist to avoid, and it
   never ran in CI (no wheels), so its tests checked nothing on any required gate.
 - **UMFPACK only made a narrow tool faster.** The complete LU is exact but its fill walls out in 3D; it
-  stays, on SuperLU, which is markedly slower to factor (72.7 s at reach 5 on pitzDaily). If a fast exact
-  factorization is ever wanted again, a non-PETSc UMFPACK binding (`scikit-umfpack`) could slot into
-  `CompleteLuInverse` — untried.
+  stayed one more day, on SuperLU, which is markedly slower to factor (72.7 s at reach 5 on pitzDaily),
+  and was then deleted too (next entry).
 - **What is lost:** PETSc GAMG as an independent reference to check the traced multigrid against, and
   every PETSc-arm measurement in the rules files becomes un-re-runnable. Recover the code from git history
   before 2026-10-10. The PETSc-only harnesses (`petsc_free_march.py`, `preconditioner_sweep.py`,
   `zero_pattern_pivots.py`, `inner_iterate_probe.py`) went with it.
+
+## Complete LU (SciPy SuperLU) — DELETED as dominated (2026-10-11)
+
+`CompleteLu` / `CompleteLuPreconditioner` / `CompleteLuInverse` (`solve/lu_preconditioner.py`) factored the
+whole materialized coupled Jacobian exactly. Removed by the project owner's decision, after checking each
+place it was claimed to be needed:
+- **Forward march:** nothing shipped selected it; both flagship case files run the field split.
+- **Adjoint (zero shift):** the split reaches adjoint grade there (bfs3d `state-00059`, 17 restart cycles
+  to 6.4e-10 true relative, transpose converged too); at a cold start the LU fails as well, because the
+  Jacobian itself is nearly singular there.
+- **Laminar flow:** `SimpleSmoothed` over the whole state matched it (24×16 channel 17 steps / 61 cycles
+  vs 17 / 51; tetrahedral duct from rest 13 steps each).
+- **The aggressive Reynolds continuation** (`compare_reynolds_continuation.py`, which claimed only the
+  exact LU survived its overshoots): re-run on the split, it converges to the same root — full record in
+  `validation.md`, "The aggressive Reynolds continuation does NOT need the complete LU".
+- **3D:** its fill is the wall (out of memory at ~10⁴ cells).
+- **What is lost:** an exact reference preconditioner, i.e. "how much of a slow solve is the
+  preconditioner's fault?" in one Krylov iteration on a small case. Its integration tests' assertions
+  were ported onto the split rather than lost. Recover the code from git history before 2026-10-11.
 
 ## Local (staged) AD assembly of the coupled Jacobian, and the materialized-`J` matvec it was to enable — REFUTED / CLOSED (2026-10-07)
 
