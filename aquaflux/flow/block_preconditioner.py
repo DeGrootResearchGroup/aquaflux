@@ -37,13 +37,13 @@ from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.solve import (
     ConvectionDiffusionStencil,
     SettingsValue,
-    air_multigrid_solve,
+    air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     decouple_dof,
-    smoothed_multigrid_solve,
+    smoothed_multigrid_cycles,
 )
 from aquaflux.vectors import scale
 
@@ -326,7 +326,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
         # The reference hierarchy carries the boundary (outlet) stiffness in its diagonal, and
         # `geometry.diagonal` includes it, so the symmetric rescaling stays consistent.
         return _symmetric_rescaled(
-            lambda rp: smoothed_multigrid_solve(self.hierarchy, rp, cycles=self.v_cycles),
+            lambda rp: smoothed_multigrid_cycles(self.hierarchy, rp, cycles=self.v_cycles),
             self.hierarchy.levels[0].diagonal,
             self.geometry.diagonal(a_p),
         )
@@ -413,7 +413,7 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the smoothed-aggregation V-cycle."""
-        return smoothed_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
+        return smoothed_multigrid_cycles(self.hierarchy, b, cycles=self.v_cycles)
 
 
 def _convection_operator(
@@ -483,7 +483,7 @@ class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the two-level V-cycle."""
-        return convection_multigrid_solve(
+        return convection_multigrid_cycles(
             self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
         )
 
@@ -512,7 +512,7 @@ class AirConvectionVelocity(_RescaledAmgVelocity):
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the lAIR V-cycle."""
-        return air_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
+        return air_multigrid_cycles(self.hierarchy, b, cycles=self.v_cycles)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -620,7 +620,7 @@ class ConvectionTwoLevel(_ConvectionVelocityBlock):
     ----------
     sweeps, omega : int, float or None
         The damped-Jacobi smoother's sweeps per level and damping factor (see
-        :func:`~aquaflux.solve.convection_multigrid_solve`).
+        :func:`~aquaflux.solve.convection_multigrid_cycles`).
     """
 
     sweeps: int | None = None

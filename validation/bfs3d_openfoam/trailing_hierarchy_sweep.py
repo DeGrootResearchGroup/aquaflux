@@ -1,4 +1,4 @@
-"""Rank multigrid hierarchies on the ``[k, omega]`` block ALONE, against the PETSc V-cycle.
+"""Rank multigrid hierarchies on the ``[k, omega]`` block ALONE.
 
 The trailing block of the coupled field split holds ~11 % of the operator's nonzeros, so the leading
 saddle carries the solve and an in-situ measurement barely moves when the trailing inverse changes: a
@@ -6,13 +6,12 @@ trailing inverse that does not converge *at all* on its own block still produced
 march estimate. This measures the block by itself, which is the only way to see the quality of a
 preconditioner for it.
 
-Two things are being compared, and until recently only one of them was honest. The PETSc V-cycle
-receives an operator rescaled to a unit-magnitude diagonal; the JAX-native builder did not rescale, and
-on this block the raw diagonal spans nearly six orders of magnitude. Every step of a multigrid setup
-reads the diagonal — the smoother damping, the prolongation smoothing, and the spectral estimates that
-scale both — so the two were coarsening different matrices and no comparison between them meant
-anything. The ``equilibrate`` arms are the fix; the raw ones are kept beside them because the size of
-the difference is the finding.
+The arms were first ranked against a PETSc GAMG V-cycle (aggregation multigrid), which the library no
+longer has; those arms are removed and their recorded results remain in the project's records. On this
+block the raw diagonal spans nearly six orders of magnitude, and every step of a multigrid setup reads the
+diagonal -- the smoother damping, the prolongation smoothing, and the spectral estimates that scale both
+-- so the ``equilibrate`` arms are kept beside the raw ones, because the size of the difference is the
+finding.
 
 Reads the same rolling checkpoints as ``field_split_probe.py`` and shares its state table, shift
 pairing and refusal-on-mismatch loader, so the operating point is the one that file documents.
@@ -46,11 +45,10 @@ import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
-    build_amg_vcycle,
     build_convection_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     relative_residual_gmres,
     restart_cycles,  # noqa: E402
     solve_linear,
@@ -69,9 +67,8 @@ RTOL = 1e-8
 SOLVER = relative_residual_gmres(RTOL, restart=15, stagnation_iters=40, max_restarts=60)
 #: Fields in the trailing group.
 N_TRAILING = 2
-#: Damped-Jacobi sweeps per level for the native arms, where the arm does not say otherwise. The
-#: PETSc arms count incomplete-LU sweeps, which are a different and much stronger unit of work — the
-#: two smoother counts are NOT comparable, which is why every arm's own count is in its label.
+#: Damped-Jacobi sweeps per level for the native arms, where the arm does not say otherwise; every arm's
+#: own count is in its label.
 NATIVE_SWEEPS = 4
 
 
@@ -120,20 +117,6 @@ def _largest_singular_value(matrix: sp.spmatrix, iterations: int = 20) -> float:
     return float(sigma)
 
 
-def petsc_cycle(block: sp.csr_matrix, *, smoother: str, sweeps: int):
-    """One PETSc GAMG V-cycle over the block, at the shipped bundle's aggregation and coarse limit."""
-    vcycle = build_amg_vcycle(
-        block,
-        N_TRAILING,
-        smoother_fill_levels=compare.FILL_LEVELS,
-        smoother_sweeps=sweeps,
-        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
-        extra_options={"mg_levels_pc_type": smoother} if smoother != "ilu" else None,
-    )
-    apply = MonolithicAmgPreconditioner(vcycle).matvec()
-    return apply, vcycle, f"{vcycle.levels} levels, {vcycle.coarse_size} coarse eq"
-
-
 def smoothed_cycle(
     block: sp.csr_matrix,
     *,
@@ -165,7 +148,7 @@ def smoothed_cycle(
     coarse = hierarchy.levels[-1].n
 
     def apply(residual: jnp.ndarray) -> jnp.ndarray:
-        return convection_multigrid_solve(
+        return convection_multigrid_cycles(
             hierarchy,
             residual,
             cycles=1,
@@ -178,21 +161,20 @@ def smoothed_cycle(
 
 
 def matched(**overrides):
-    """The arm that reproduces PETSc: aggressive level, plain prolongation, undamped smoother."""
+    """The arm that reproduces PETSc GAMG's algorithm: aggressive level, plain prolongation, undamped
+    smoother."""
     base = dict(mis=True, smoothing="none", equilibrate=False, aggressive=1, undamped=True)
     return lambda b: smoothed_cycle(b, **(base | overrides))
 
 
 #: ``key -> (label, build)``.
 #:
-#: **The arm to read is the matched pair**, ``petsc-pbjacobix4`` against ``mis-aggressive-*``: same
-#: smoother class, same sweep count, same plain aggregation, and the same *aggressive* first level.
-#: Comparing our damped block Jacobi against PETSc's incomplete-LU measures the smoother instead of
-#: the coarsening, and an ILU sweep is both far stronger and the least parallel piece in the cycle.
+#: The ``mis-aggressive-*`` arms were matched to PETSc GAMG's point-block Jacobi arm (same smoother class,
+#: same sweep count, same plain aggregation, same *aggressive* first level), which reached 2 restart
+#: cycles here before it was removed with the library's PETSc support.
 #:
-#: The aggressive level is not a tuning knob here — it is what PETSc does by default and we did not.
-#: ``build_amg_vcycle`` never sets ``pc_gamg_aggressive_coarsening``, so GAMG applies its own default
-#: of one aggressive level on level 0, coarsening the SQUARED graph. Our builder defaulted to none,
+#: The aggressive level is not a tuning knob here -- it is what GAMG does by default and we did not:
+#: one aggressive level on level 0, coarsening the SQUARED graph. Our builder defaulted to none,
 #: which is why the two coarse spaces differed ~5× in size and why calling our hierarchy the same
 #: algorithm was wrong. (``use_aggressive_square_graph`` and ``aggressive_mis_k`` are *alternatives*,
 #: not a pair: with the squared graph on — the default — the coarsener is plain MIS at distance 1 and
@@ -203,13 +185,6 @@ def matched(**overrides):
 #: follows the squared-graph coarsening with a fix-up pass that re-attaches each distance-2 aggregate
 #: member to a root it is genuinely adjacent to in the *unsquared* graph. We do neither.
 ARMS = (
-    ("petsc-ilu0x1", "PETSc GAMG, ILU(0) x1", lambda b: petsc_cycle(b, smoother="ilu", sweeps=1)),
-    ("petsc-ilu0x4", "PETSc GAMG, ILU(0) x4", lambda b: petsc_cycle(b, smoother="ilu", sweeps=4)),
-    (
-        "petsc-pbjacobix4",
-        "PETSc GAMG, point-block Jacobi x4",
-        lambda b: petsc_cycle(b, smoother="pbjacobi", sweeps=4),
-    ),
     (
         "rcm-raw",
         f"ours RCM / symmetric-part x{NATIVE_SWEEPS}, raw",
@@ -389,8 +364,7 @@ def main() -> None:
     print(
         f"{'=' * 118}\ntrailing [k, omega] block ALONE over {groups.n_cells} cells, "
         f"GMRES to rtol {RTOL:.0e} on the TRUE residual (restart 15)\n"
-        f"bundle: plain aggregation, ILU({compare.FILL_LEVELS}) where the arm does not override it, "
-        f"coarse_eq_limit {compare.COARSE_EQ_LIMIT}, stencil reach 3\n"
+        "bundle: stencil reach 3; each arm's own hierarchy settings are in its label\n"
         f"state {name} -- {description}\n"
         f"operator beta {march_beta}, preconditioner beta {pc_beta}\n{'=' * 118}",
         flush=True,
@@ -402,7 +376,7 @@ def main() -> None:
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
     jacobian = materialize(coupled, state, plan, structure, n_fields)
     shift = frozen_shift_diagonal(base, pc_beta, state) if pc_beta > 0 else np.zeros(groups.n_dofs)
-    block = trailing_block(MonolithicAmgPreconditioner._shifted(jacobian, shift), groups)
+    block = trailing_block(MaterializedJacobianPreconditioner._shifted(jacobian, shift), groups)
     del jacobian
     gc.collect()
     print(

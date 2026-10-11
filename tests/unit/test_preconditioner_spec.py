@@ -9,13 +9,11 @@ import pytest
 from aquaflux.flow import BlockPreconditioner
 from aquaflux.solve import (
     CompleteLu,
+    CompleteLuPreconditioner,
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicAmgPreconditioner,
-    MonolithicLuPreconditioner,
-    MonolithicVCycle,
     SimpleSmoothed,
 )
 from aquaflux.turbulence import (
@@ -52,15 +50,9 @@ def test_the_probe_spec_names_the_probe_builders_free_settings() -> None:
     assert _fields(JacobianProbeSpec) == expected
 
 
-def test_the_monolithic_vcycle_spec_names_the_v_cycles_own_settings() -> None:
-    """The probing callables and the extra options are supplied where the V-cycle is built."""
-    supplied = {"batched_matvec", "probe_batch_size", "structure", "extra_options"}
-    expected = _parameters(MonolithicAmgPreconditioner.build, _KEYWORD_ONLY) - supplied
-    assert _fields(MonolithicVCycle) == expected
-
-
 def test_the_complete_lu_spec_names_the_factorizations_settings() -> None:
-    assert _fields(CompleteLu) == _parameters(MonolithicLuPreconditioner.build, _KEYWORD_ONLY)
+    """The factorization has no settings, so neither does its spec."""
+    assert _fields(CompleteLu) == _parameters(CompleteLuPreconditioner.build, _KEYWORD_ONLY)
 
 
 def test_an_unset_scalar_block_resolves_to_the_two_level_default() -> None:

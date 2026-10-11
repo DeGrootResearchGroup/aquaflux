@@ -313,12 +313,10 @@ A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses 
   solving at its own. It is not the march's own `beta_floor`, which bounds the shift the solve
   runs at.
 
-and its `inverse` chooses how the materialized matrix is inverted: a single
-{class}`~aquaflux.solve.MonolithicVCycle` over all six fields
-({class}`~aquaflux.solve.MonolithicAmgPreconditioner`, equilibrated and reordered cell-major
-so each cell's six unknowns are adjacent, and taking the incomplete-factorization smoother's
-fill and sweeps), a {class}`~aquaflux.solve.FieldSplit`, or a
-{class}`~aquaflux.solve.CompleteLu`. To share one preconditioner across several solves —
+and its `inverse` chooses how the materialized matrix is inverted: a
+{class}`~aquaflux.solve.FieldSplit`, or a {class}`~aquaflux.solve.CompleteLu` (SciPy's SuperLU,
+exact but practical only on small meshes, since its fill grows quickly in three dimensions).
+To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with
 {func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,
 build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it as
@@ -362,10 +360,10 @@ a field its class does not have, and a *value* the field cannot hold are each re
 path to the entry, so a misspelling is an error rather than a default in disguise:
 
 ```yaml
-inverse: {kind: CompleteLu, backend: umfpak}             # 'umfpak' at 'inverse.backend' is not
-                                                         # accepted there; CompleteLu.backend takes
-                                                         # one of 'auto', 'umfpack', 'scipy' or null
-inverse: {kind: MonolithicVCycle, smoother_sweeps: true}  # a boolean where a count belongs
+inverse: {kind: SimpleSmoothed, prolongation_smoothing: jacobi}  # 'jacobi' at
+                                  # 'inverse.prolongation_smoothing' is not accepted there; it
+                                  # takes one of 'none', 'standard', 'symmetric-part' or null
+inverse: {kind: SimpleSmoothed, sweeps: true}             # a boolean where a count belongs
 inverse: {kind: FieldSplit, leading: {kind: CompleteLu}}  # a kind that cannot go in that position
 ```
 
@@ -385,8 +383,8 @@ configuration values.
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
 single hierarchy over both has to compromise. A {class}`~aquaflux.solve.FieldSplit`
-inverse instead builds a {class}`~aquaflux.solve.FieldSplitAmgPreconditioner`, wrapping a
-{class}`~aquaflux.solve.BlockTriangularFieldSplit`: one inverse for the leading
+inverse instead builds a {class}`~aquaflux.solve.FieldSplitPreconditioner`, wrapping a
+{class}`~aquaflux.solve.FieldSplitInverse`: one inverse for the leading
 `[u, v, w, p]` group, another for the trailing `[k, ω]` group, and one retained coupling
 block between them. Each group then gets an inverse suited to it, given as the split's
 `leading` and `trailing` values:
@@ -407,7 +405,7 @@ over the whole saddle, in which a SIMPLE relaxation is the smoother at each leve
 coarse grid carries the smooth global pressure mode. That mode is the one any SIMPLE-type
 Schur approximates worst, which is why the arrangement matters.
 
-{func}`~aquaflux.solve.build_block_triangular_field_split` builds the split directly if you
+{func}`~aquaflux.solve.field_split_inverse` builds the split directly if you
 want one outside a continuation. {class}`~aquaflux.solve.FieldGroups` says where the
 partition falls — as a view over the state's own {class}`~aquaflux.solve.FieldLayout`, so
 where you hold an assembled case you can name the split against its blocks
@@ -417,13 +415,13 @@ raw field-major matrix, give the counts:
 ```python
 from aquaflux.solve import (
     FieldGroups,
-    build_block_triangular_field_split,
+    field_split_inverse,
     JacobiSmoothed,
     SimpleSmoothed,
 )
 
 groups = FieldGroups.by_counts(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
-split = build_block_triangular_field_split(
+split = field_split_inverse(
     matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,
     leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=5),
@@ -439,7 +437,7 @@ far more strongly than the reverse, so that is the direction to keep.
 ### A complete factorization
 
 A {class}`~aquaflux.solve.CompleteLu` inverse builds a
-{class}`~aquaflux.solve.MonolithicLuPreconditioner` instead — a **complete** sparse LU of
+{class}`~aquaflux.solve.CompleteLuPreconditioner` instead — a **complete** sparse LU of
 the coupled matrix. On a moderate 2D mesh this is the strongest option available and often
 the fastest overall, because it converges the linear solve in very few iterations. It does
 not scale: the factorization's fill grows quickly with mesh size, which is what the
@@ -457,9 +455,9 @@ against any `scipy` sparse matrix.
 | {func}`~aquaflux.solve.build_convection_hierarchy` | Aggregation multigrid for a nonsymmetric convection–diffusion operator. |
 | {func}`~aquaflux.solve.build_air_hierarchy` | Reduction-based lAIR, returning an {class}`~aquaflux.solve.AirHierarchy`. `block_size` runs the coarsening on the cell graph so it works on a multi-field block. |
 
-Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_solve`,
-{func}`~aquaflux.solve.convection_multigrid_solve`,
-{func}`~aquaflux.solve.air_multigrid_solve` — that runs a fixed number of V-cycles, which
+Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_cycles`,
+{func}`~aquaflux.solve.convection_multigrid_cycles`,
+{func}`~aquaflux.solve.air_multigrid_cycles` — that runs a fixed number of V-cycles, which
 is what keeps the result a fixed linear map.
 
 {class}`~aquaflux.solve.ConvectionDiffusionStencil` describes the frozen operator these
@@ -517,9 +515,8 @@ A laminar flow takes the same preconditioner. {func}`~aquaflux.flow.solve_flow_m
 {class}`~aquaflux.solve.MaterializedJacobian` as its `preconditioner` (or a session from
 {func}`~aquaflux.flow.open_flow_session`). A `(u, p)` state is a single group of fields, so the
 pressure-velocity hierarchy {class}`~aquaflux.solve.SimpleSmoothed` inverts **the whole state** directly
--- traced JAX, no optional dependency, and the same inverse a field split uses for its saddle. A
-{class}`~aquaflux.solve.CompleteLu` also works, and a {class}`~aquaflux.solve.MonolithicVCycle` if PETSc
-is installed. A {class}`~aquaflux.solve.FieldSplit` is refused there, since there is nothing to split;
+-- traced JAX, and the same inverse a field split uses for its saddle. A
+{class}`~aquaflux.solve.CompleteLu` also works. A {class}`~aquaflux.solve.FieldSplit` is refused there, since there is nothing to split;
 conversely a bare block inverse is refused for the coupled turbulence solve, which has two groups.
 
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.

@@ -5,12 +5,7 @@ factorization of the assembled coupled Jacobian (:class:`~aquaflux.turbulence.Co
 These check the two properties that make it a usable drop-in: handed to ``solve_coupled`` it converges
 the monolithic Newton to the **same** fixed point the block preconditioner reaches, and -- built once
 outside ``jax.grad`` on concrete parameters -- it yields the exact coupled adjoint matching finite
-differences. The channel setup (``_channel``) is shared with the AMG and field-split integration tests, and
-``PRECONDITIONER`` with the AMG tests.
-
-Run under the always-available SciPy (SuperLU) backend so no optional dependency is needed; the complete
-factorization is exact regardless of backend, so these correctness/adjoint properties are backend-independent
-(the UMFPACK backend only changes the factorization speed).
+differences. The channel setup (``_channel``) is shared with the field-split integration tests.
 """
 
 from __future__ import annotations
@@ -47,8 +42,6 @@ from aquaflux.turbulence import (
     solve_coupled,
     sst_initial_fields,
 )
-
-BACKEND = "scipy"  # always available; exact, so backend-independent correctness
 
 RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
 NU = 4e-4  # Re = U H / nu = 2500
@@ -125,13 +118,13 @@ def test_lu_continuation_builds_the_right_step_types(case) -> None:
     reference_state = coupled.pack_state(flow, k, omega)
 
     single = coupled_step(
-        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
+        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu())
     )
     assert isinstance(single, PseudoTransientStep)
     dual = coupled_step(
         coupled,
         reference_state,
-        preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+        preconditioner=MaterializedJacobian(CompleteLu()),
         dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
     )
     assert isinstance(dual, DualTimeStep)
@@ -144,9 +137,7 @@ def test_lu_solve_converges_and_matches_the_block_preconditioned_solve(case) -> 
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
 
-    lu = coupled_step(
-        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
-    )
+    lu = coupled_step(coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu()))
     flow_l, k_l, omega_l = solve_coupled(
         coupled, flow_ws, k_ws, omega_ws, strategy=lu, max_steps=40
     )
@@ -184,7 +175,7 @@ def test_lu_adjoint_matches_finite_difference(case) -> None:
     flow_ws, k_ws, omega_ws = case["start"]
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
     continuation = coupled_step(
-        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND))
+        coupled, reference_state, preconditioner=MaterializedJacobian(CompleteLu())
     )
 
     def objective(nu_scale):
@@ -226,9 +217,7 @@ def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> N
     flow, k, omega = case["start"]
     state = coupled.pack_state(flow, k, omega)
 
-    session = open_session(
-        MaterializedJacobian(CompleteLu(backend=BACKEND), build_beta=0.05), coupled
-    )
+    session = open_session(MaterializedJacobian(CompleteLu(), build_beta=0.05), coupled)
     dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
     # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
     active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
@@ -250,7 +239,7 @@ def test_a_complete_lu_session_makes_the_lu_exact_at_the_current_beta(case) -> N
     ).tocsr()
 
     b = np.random.default_rng(0).standard_normal(A.shape[0])
-    x = active.shift_policy.preconditioner.factors.apply(b)
+    x = active.shift_policy.preconditioner.inverse.apply(b)
     assert np.linalg.norm(A @ x - b) / np.linalg.norm(b) < 1e-10  # exact for the CURRENT beta
 
 
@@ -270,7 +259,7 @@ def test_lu_beta_tracking_forward_march_converges_to_the_same_fixed_point(case) 
         flow_ws,
         k_ws,
         omega_ws,
-        preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+        preconditioner=MaterializedJacobian(CompleteLu()),
         dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
         step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
         max_steps=60,
@@ -314,7 +303,7 @@ def test_a_solve_that_re_fits_its_lu_every_step_is_differentiable(case) -> None:
             flow_ws,
             k_ws,
             omega_ws,
-            preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
             step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
             max_steps=60,

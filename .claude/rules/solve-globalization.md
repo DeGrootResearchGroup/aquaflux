@@ -10,7 +10,7 @@ paths:
 
 # Rules — `aquaflux/solve/` globalization (Newton step, continuation, line search)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and general binding decisions this file assumes. The dated investigation behind
@@ -166,7 +166,7 @@ What to take from it, none of which is specific to that mechanism:
     cap's error budget is bounded well below that and not merely "small".
 
 - **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
-  split has one ordering, so `BlockTriangularFieldSplit.apply` has one body that branches only on
+  split has one ordering, so `FieldSplitInverse.apply` has one body that branches only on
   `transpose` (which reverses the solve order and uses `Cᵀ`).
 
 - **Forward globalization is ONE injected strategy — `strategy: NewtonStrategy`.** The forward

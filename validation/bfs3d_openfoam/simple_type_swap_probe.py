@@ -56,8 +56,8 @@ from aquaflux.flow.block_preconditioner import (  # noqa: E402
     ConvectionTwoLevel,
 )
 from aquaflux.solve import (  # noqa: E402
-    FieldSplitAmgPreconditioner,
-    build_block_triangular_field_split,
+    FieldSplitPreconditioner,
+    field_split_inverse,
 )
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 
@@ -147,10 +147,10 @@ def _split(leading_inverse, trailing_inverse):
 
     def build(shifted, groups, n_fields):
         del n_fields  # each injected inverse is handed its own group's field count
-        split = build_block_triangular_field_split(
+        split = field_split_inverse(
             shifted, groups, leading_inverse=leading_inverse, trailing_inverse=trailing_inverse
         )
-        return FieldSplitAmgPreconditioner(split, groups)
+        return FieldSplitPreconditioner(split, groups)
 
     return build
 
@@ -160,7 +160,7 @@ def main() -> None:
     state, march_beta = _load(name)
 
     print(
-        f"bundle: field_split={compare.FIELD_SPLIT}, flow_inverse={compare.FLOW_INVERSE}, "
+        f"bundle: flow_inverse={compare.FLOW_INVERSE}, "
         f"turbulence_inverse={compare.TURBULENCE_INVERSE}, column_reach={compare.COLUMN_REACH}, "
         f"GMRES restart 15, rtol {fsp.RTOL:.0e}, max_restarts {fsp.MAX_RESTARTS}",
         flush=True,
@@ -191,7 +191,7 @@ def main() -> None:
             if pc_beta > 0
             else np.zeros(groups.n_dofs)
         )
-        shifted = fsp.MonolithicAmgPreconditioner._shifted(jacobian, pc_shift)
+        shifted = fsp.MaterializedJacobianPreconditioner._shifted(jacobian, pc_shift)
         del jacobian
         gc.collect()
         print(f"  materialized in {time.time() - t0:.0f}s", flush=True)

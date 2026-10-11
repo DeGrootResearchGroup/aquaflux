@@ -14,7 +14,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.solve import BlockScaledNorm, RowScaledNorm, named_blocks
+from aquaflux.solve import BlockScaledNorm, NamedBlockMeasure, RowScaledNorm, named_blocks
 from aquaflux.solve.implicit import backtracking_line_search
 
 
@@ -220,3 +220,28 @@ def test_named_blocks_are_the_terms_the_measure_combines() -> None:
     # A measure whose blocks are unnamed, or a plain norm, has none to report.
     assert named_blocks(BlockScaledNorm((2, 2), (1.0, 1.0)), lambda s: s, residual) is None
     assert named_blocks(jnp.linalg.norm, lambda s: s, residual) is None
+
+
+class _ThirdMeasure:
+    """A block measure of no shipped class that names its blocks: the report reaches it by contract."""
+
+    names = ("k", "omega")
+
+    def per_block(self, residual):
+        return jnp.abs(residual[:2])
+
+
+class _NamesOnly:
+    """Names its blocks but cannot give their terms, so it is not a named-block measure."""
+
+    names = ("k", "omega")
+
+
+def test_the_report_reaches_any_named_block_measure_and_nothing_that_only_looks_like_one() -> None:
+    assert isinstance(BlockScaledNorm((2, 2), (1.0, 1.0)), NamedBlockMeasure)
+    assert isinstance(RowScaledNorm((2,), jnp.ones(2), jnp.ones(1)), NamedBlockMeasure)
+    assert not isinstance(jnp.linalg.norm, NamedBlockMeasure)
+    residual = jnp.array([-3.0, 4.0])
+    assert named_blocks(_ThirdMeasure(), lambda state: state, residual) == {"k": 3.0, "omega": 4.0}
+    assert not isinstance(_NamesOnly(), NamedBlockMeasure)
+    assert named_blocks(_NamesOnly(), lambda state: state, residual) is None

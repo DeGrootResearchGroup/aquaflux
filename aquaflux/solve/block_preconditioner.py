@@ -7,8 +7,7 @@ inverse over the entire materialized Jacobian. :class:`MaterializedBlockPrecondi
 the coloured-probe materialization, the shift and the in-place refresh the split shares
 (:class:`~aquaflux.solve.MaterializedJacobianPreconditioner`), around one injected block inverse.
 
-The inverse is the traced hierarchy family (:mod:`~aquaflux.solve.hierarchy_inverse`), so this needs no
-optional dependency, unlike the monolithic V-cycle, which is PETSc's multigrid.
+The inverse is the traced hierarchy family (:mod:`~aquaflux.solve.hierarchy_inverse`).
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ from collections.abc import Callable
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner
-from .host_preconditioner import HostFactors
+from .host_preconditioner import FrozenInverse
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .sparse_jacobian import ProbeGather
 
 __all__ = ["MaterializedBlockPreconditioner"]
@@ -28,10 +27,10 @@ __all__ = ["MaterializedBlockPreconditioner"]
 class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
     """One block inverse fitted to the whole materialized, shifted Jacobian.
 
-    Sibling of :class:`~aquaflux.solve.FieldSplitAmgPreconditioner` over the shared
+    Sibling of :class:`~aquaflux.solve.FieldSplitPreconditioner` over the shared
     :class:`~aquaflux.solve.MaterializedJacobianPreconditioner` base, for a state with a single group of
     fields; the materialization, the shift and the in-place refresh are all the base's. The frozen
-    inverse is the injected block inverse itself, which must be a :class:`~aquaflux.solve.HostFactors`,
+    inverse is the injected block inverse itself, which must be a :class:`~aquaflux.solve.FrozenInverse`,
     be a fixed linear map (the outer Krylov solve is not flexible) and transpose exactly (the adjoint's
     solve uses it).
 
@@ -47,7 +46,7 @@ class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
         plan,
         shift_diagonal: np.ndarray,
         *,
-        inverse: Callable[[sp.csr_matrix, int], HostFactors],
+        inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
         n_fields: int,
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
@@ -63,7 +62,7 @@ class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
         inverse : callable
             ``(matrix, n_fields) -> inverse``, for example a :class:`~aquaflux.solve.SimpleSmoothed`. An
-            injected inverse must be a :class:`~aquaflux.solve.RefactorableFactors` to survive a
+            injected inverse must be a :class:`~aquaflux.solve.RefactorableInverse` to survive a
             mid-march refresh.
         n_fields : int
             The number of fields in the flat field-major state.

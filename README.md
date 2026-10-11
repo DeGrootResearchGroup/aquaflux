@@ -47,11 +47,10 @@ applies anywhere you want gradients through a flow solve.
   a block preconditioner for the flow saddle-point, algebraic multigrid, and
   pseudo-transient continuation for high-Reynolds cases (with an optional
   dual-time / backward-Euler march for a larger, still-stable pseudo-timestep).
-  For the coupled RANS saddle, a monolithic **complete-LU** preconditioner is
-  also available — exact (a single Krylov iteration) and, with the optional
-  UMFPACK backend, fast to factor on 2D/moderate meshes (its fill makes it a
-  2D/moderate-mesh tool; large 3D stays on the algebraic-multigrid path).
-  Install the fast backend with `pip install "aquaflux[petsc]"`.
+  For the coupled RANS saddle, a monolithic **complete-LU** preconditioner
+  (SciPy's SuperLU) is also available — exact (a single Krylov iteration), but
+  its fill makes it practical only on small meshes; larger cases use the
+  field-split multigrid path.
 - **Reynolds-number continuation** — reach a stiff high-Reynolds root through a
   homotopy of easier lower-Reynolds solves, each seeded by the previous one. The
   user chooses a single integer (the number of continuation points);

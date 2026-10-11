@@ -70,7 +70,7 @@ from aquaflux.solve import (  # noqa: E402
     shifted_jacobian,
 )
 from aquaflux.turbulence import coupled_step
-from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian, MonolithicVCycle
+from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian
 
 #: Far past the march's inexact-Newton stop so arms separate rather than tie; modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -178,8 +178,7 @@ def main() -> None:
     print(
         f"{a.shape[0]} dofs, uniform reach {REACH}, nnz {a.nnz / 1e6:.2f} M; zero shift; "
         f"gmres rtol {RTOL}, restart {RESTART}; "
-        f"leading inverse {compare.FLOW_INVERSE}, trailing {compare.TURBULENCE_INVERSE}, "
-        f"smoother fill {compare.FILL_LEVELS}, sweeps {compare.SWEEPS}",
+        f"leading inverse {compare.FLOW_INVERSE}, trailing {compare.TURBULENCE_INVERSE}",
         flush=True,
     )
 
@@ -188,15 +187,7 @@ def main() -> None:
             coupled,
             state,
             preconditioner=MaterializedJacobian(
-                (
-                    FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING))
-                    if compare.FIELD_SPLIT
-                    else MonolithicVCycle(
-                        smoother_fill_levels=compare.FILL_LEVELS,
-                        smoother_sweeps=compare.SWEEPS,
-                        coarse_eq_limit=compare.COARSE_EQ_LIMIT,
-                    )
-                ),
+                FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING)),
                 probe=JacobianProbeSpec(stencil_reach=REACH),
                 build_beta=beta,
             ),
@@ -216,7 +207,7 @@ def main() -> None:
         try:
             began = time.perf_counter()
             engine = build()
-            factors = engine.shift_policy.preconditioner.factors
+            factors = engine.shift_policy.preconditioner.inverse
             print(f"{label}  (built in {time.perf_counter() - began:.1f}s)", flush=True)
             measure(label, factors, a, rhs, transpose=False)
             measure(label, factors, a, rhs, transpose=True)

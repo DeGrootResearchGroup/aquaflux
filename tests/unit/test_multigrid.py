@@ -38,13 +38,13 @@ from aquaflux.solve.multigrid import (
     _rs_split,
     _SparseLevel,
     _strength_classical,
-    air_multigrid_solve,
+    air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     refresh_air_hierarchy,
-    smoothed_multigrid_solve,
+    smoothed_multigrid_cycles,
 )
 
 
@@ -91,7 +91,7 @@ def _pinned_v_cycle_factor(owner, nb, ncell, pin, *, seed=0):
     x = jnp.zeros(ncell)
     norms = [float(jnp.linalg.norm(a @ x - b))]
     for _ in range(8):
-        x = x + smoothed_multigrid_solve(hierarchy, b - a @ x, cycles=1)
+        x = x + smoothed_multigrid_cycles(hierarchy, b - a @ x, cycles=1)
         norms.append(float(jnp.linalg.norm(a @ x - b)))
     return (norms[-1] / norms[-4]) ** (1.0 / 3.0)
 
@@ -118,7 +118,7 @@ def _smoothed_residual_factor(n):
     x = jnp.zeros(ncell)
     norms = [float(jnp.linalg.norm(matvec(x) - b))]
     for _ in range(10):
-        x = proj(x + proj(smoothed_multigrid_solve(hierarchy, b - matvec(x), cycles=1)))
+        x = proj(x + proj(smoothed_multigrid_cycles(hierarchy, b - matvec(x), cycles=1)))
         norms.append(float(jnp.linalg.norm(matvec(x) - b)))
     return (norms[-1] / norms[-4]) ** (1 / 3)
 
@@ -170,7 +170,7 @@ def test_smoothed_multigrid_is_linear_in_rhs() -> None:
     r2 = jnp.asarray(rng.standard_normal(ncell))
 
     def solve(r):
-        return smoothed_multigrid_solve(hierarchy, r, cycles=2)
+        return smoothed_multigrid_cycles(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
 
@@ -209,7 +209,7 @@ def test_strength_of_connection_aggregation_fixes_an_anisotropic_operator() -> N
     b_norm = np.linalg.norm(b)
 
     def relative_after(hierarchy, cycles):
-        x = np.asarray(smoothed_multigrid_solve(hierarchy, jnp.asarray(b), cycles=cycles))
+        x = np.asarray(smoothed_multigrid_cycles(hierarchy, jnp.asarray(b), cycles=cycles))
         return float(np.linalg.norm(a @ x - b) / b_norm)
 
     plain = build_smoothed_hierarchy(a)  # isotropic aggregation on the full graph
@@ -488,7 +488,7 @@ def test_convection_v_cycle_preconditions_gmres_at_high_peclet() -> None:
         return a @ x
 
     def preconditioner(r):
-        return convection_multigrid_solve(hierarchy, r, cycles=1)
+        return convection_multigrid_cycles(hierarchy, r, cycles=1)
 
     budget = dict(tol=0.0, atol=0.0, maxiter=1, restart=20)  # a fixed 20-vector Krylov budget
     plain, _ = jax.scipy.sparse.linalg.gmres(matvec, b, **budget)
@@ -511,7 +511,7 @@ def test_convection_multigrid_is_linear_in_rhs() -> None:
     r2 = jnp.asarray(rng.standard_normal(n))
 
     def solve(r):
-        return convection_multigrid_solve(hierarchy, r, cycles=2)
+        return convection_multigrid_cycles(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
 
@@ -556,7 +556,7 @@ def _air_contractions(restriction_theta=None) -> list[float]:
         x = jnp.zeros(ncell)
         norms = [1.0]
         for _ in range(4):
-            x = x + air_multigrid_solve(hierarchy, b - a @ x, cycles=1)
+            x = x + air_multigrid_cycles(hierarchy, b - a @ x, cycles=1)
             norms.append(float(jnp.linalg.norm(a @ x - b)) / float(jnp.linalg.norm(b)))
         # geometric-mean per-cycle contraction over the cycles above the machine floor
         ratios = [norms[k + 1] / norms[k] for k in range(len(norms) - 1) if norms[k] > 1e-11]
@@ -622,7 +622,7 @@ def test_air_multigrid_is_linear_and_transposable() -> None:
     r2 = jnp.asarray(rng.standard_normal(n))
 
     def solve(r):
-        return air_multigrid_solve(hierarchy, r, cycles=2)
+        return air_multigrid_cycles(hierarchy, r, cycles=2)
 
     assert jnp.allclose(solve(1.5 * r1 - 0.5 * r2), 1.5 * solve(r1) - 0.5 * solve(r2), atol=1e-10)
 
@@ -708,7 +708,7 @@ def test_air_build_stops_when_the_split_cannot_coarsen() -> None:
     level = hierarchy.levels[0]
     assert level.r_row is None and level.p_row is None  # coarsest: a direct solve, no transfers
     b = np.random.default_rng(0).standard_normal(n)
-    x = air_multigrid_solve(hierarchy, jnp.asarray(b), cycles=1)
+    x = air_multigrid_cycles(hierarchy, jnp.asarray(b), cycles=1)
     assert np.allclose(np.asarray(x), b / diagonal)
 
 
@@ -970,7 +970,7 @@ def test_refreshing_a_hierarchy_is_a_compilation_cache_hit() -> None:
     @jax.jit
     def apply(hierarchy, b):
         traces.append(1)  # appended once per trace, not per call
-        return convection_multigrid_solve(hierarchy, b, cycles=1)
+        return convection_multigrid_cycles(hierarchy, b, cycles=1)
 
     b = jnp.asarray(np.random.default_rng(0).normal(size=n))
     x_cold = apply(cold, b)
@@ -1037,7 +1037,7 @@ def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
     @jax.jit
     def apply(hierarchy, b):
         traces.append(1)
-        return air_multigrid_solve(hierarchy, b, cycles=1)
+        return air_multigrid_cycles(hierarchy, b, cycles=1)
 
     b = jnp.asarray(np.random.default_rng(0).normal(size=n))
     apply(cold, b).block_until_ready()
@@ -1065,7 +1065,7 @@ def test_refreshed_air_hierarchy_preconditions_the_new_operator() -> None:
     a_dev = jnp.asarray(developed_operator.toarray())
 
     def residual(hierarchy):
-        x = air_multigrid_solve(hierarchy, b, cycles=1)
+        x = air_multigrid_cycles(hierarchy, b, cycles=1)
         return float(jnp.linalg.norm(a_dev @ x - b) / jnp.linalg.norm(b))
 
     stale_residual, fresh_residual = residual(cold), residual(refreshed)
@@ -1223,7 +1223,7 @@ def test_equilibration_solves_the_original_operator() -> None:
     def residual(equilibrate):
         hierarchy = build_convection_hierarchy(a, equilibrate=equilibrate, max_coarse=n)
         assert len(hierarchy.levels) == 1  # a single direct level, so the cycle is an exact solve
-        x = np.asarray(convection_multigrid_solve(hierarchy, b, cycles=1))
+        x = np.asarray(convection_multigrid_cycles(hierarchy, b, cycles=1))
         return np.linalg.norm(a @ x - np.asarray(b)) / np.linalg.norm(np.asarray(b))
 
     raw, scaled = residual(False), residual(True)
@@ -1242,7 +1242,7 @@ def test_an_equilibrated_cycle_is_a_fixed_linear_operator_and_transposes() -> No
     hierarchy = build_convection_hierarchy(_badly_scaled_chain(n), equilibrate=True)
 
     def cycle(b):
-        return convection_multigrid_solve(hierarchy, b, cycles=2)
+        return convection_multigrid_cycles(hierarchy, b, cycles=2)
 
     rng = np.random.default_rng(0)
     u, v = (jnp.asarray(rng.normal(size=n)) for _ in range(2))
@@ -1257,7 +1257,7 @@ def test_an_equilibrated_cycle_is_a_fixed_linear_operator_and_transposes() -> No
 def test_plain_prolongation_keeps_the_tentative_injection() -> None:
     """``prolongation_smoothing="none"`` freezes the piecewise-constant prolongation unsmoothed.
 
-    Plain aggregation is a real choice, not a degenerate one — it is what the shipped PETSc bundle runs
+    Plain aggregation is a real choice, not a degenerate one — it was measured the better coarse correction
     on this saddle — so the unsmoothed branch is pinned by the property that identifies it: every
     prolongation entry is exactly one, where a smoothed operator spreads them.
     """
@@ -1293,15 +1293,15 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
     assert float(hierarchy.levels[0].lam_max) >= 1.0
 
     b = jnp.asarray(np.random.default_rng(0).normal(size=n))
-    damped = convection_multigrid_solve(hierarchy, b, cycles=1, sweeps=4)
-    undamped = convection_multigrid_solve(
+    damped = convection_multigrid_cycles(hierarchy, b, cycles=1, sweeps=4)
+    undamped = convection_multigrid_cycles(
         hierarchy, b, cycles=1, sweeps=4, omega=1.0, spectral_damping=False
     )
     assert not np.allclose(np.asarray(damped), np.asarray(undamped))
 
     # The default is recovered exactly by asking for the same factor the other way round, which is
     # what makes `spectral_damping` a change of units rather than a change of smoother.
-    restated = convection_multigrid_solve(
+    restated = convection_multigrid_cycles(
         hierarchy,
         b,
         cycles=1,
@@ -1607,7 +1607,7 @@ def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -
     @jax.jit
     def apply(hierarchy, b):
         traces.append(1)  # appended once per trace, not per call
-        return convection_multigrid_solve(hierarchy, b, cycles=1)
+        return convection_multigrid_cycles(hierarchy, b, cycles=1)
 
     b = jnp.asarray(np.random.default_rng(0).normal(size=strong_y.shape[0]))
     apply(built[0], b).block_until_ready()
@@ -1633,10 +1633,10 @@ def test_budget_padding_leaves_the_preconditioner_unchanged() -> None:
     assert padded.levels[-1].n > unpadded.levels[-1].n  # padding really happened
 
     b = jnp.asarray(np.random.default_rng(1).normal(size=strong_x.shape[0]))
-    reference = convection_multigrid_solve(unpadded, b, cycles=2)
+    reference = convection_multigrid_cycles(unpadded, b, cycles=2)
     assert np.allclose(
         np.asarray(reference),
-        np.asarray(convection_multigrid_solve(padded, b, cycles=2)),
+        np.asarray(convection_multigrid_cycles(padded, b, cycles=2)),
         rtol=1e-10,
     )
 
@@ -1687,7 +1687,7 @@ def test_budget_padding_does_not_compound_down_the_hierarchy() -> None:
     # And the coarse operators stay sparse: a level of isolated padded cells would show up as a
     # diagonal-heavy operator with an aggregate count near its cell count.
     b = jnp.asarray(np.random.default_rng(0).normal(size=strong_x.shape[0]))
-    assert np.all(np.isfinite(np.asarray(convection_multigrid_solve(hierarchy, b, cycles=2))))
+    assert np.all(np.isfinite(np.asarray(convection_multigrid_cycles(hierarchy, b, cycles=2))))
 
 
 def test_the_zero_guess_peel_matches_the_general_jacobi_sweep_exactly() -> None:
@@ -1831,7 +1831,7 @@ def test_block_air_v_cycle_contracts_where_a_point_smoother_cannot() -> None:
 
     x = jnp.zeros(a.shape[0])
     for _ in range(4):
-        x = x + air_multigrid_solve(hierarchy, b - dense @ x, cycles=1)
+        x = x + air_multigrid_cycles(hierarchy, b - dense @ x, cycles=1)
     residual = float(jnp.linalg.norm(dense @ x - b)) / float(jnp.linalg.norm(b))
     assert residual < 1e-3, f"the block V-cycle did not contract: {residual:.2e}"
 
@@ -1844,7 +1844,7 @@ def test_block_air_v_cycle_contracts_where_a_point_smoother_cannot() -> None:
     )
     y = jnp.zeros(a.shape[0])
     for _ in range(4):
-        y = y + air_multigrid_solve(pointwise, b - dense @ y, cycles=1)
+        y = y + air_multigrid_cycles(pointwise, b - dense @ y, cycles=1)
     point_residual = float(jnp.linalg.norm(dense @ y - b)) / float(jnp.linalg.norm(b))
     assert point_residual > 10 * residual, (
         f"the point smoother did as well ({point_residual:.2e} vs {residual:.2e}), so this fixture "

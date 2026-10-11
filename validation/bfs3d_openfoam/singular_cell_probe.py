@@ -48,7 +48,7 @@ import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicAmgPreconditioner,
+    MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
 )
 from aquaflux.turbulence import ScalarTwoLevel, positive_k_limit  # noqa: E402
@@ -183,7 +183,7 @@ def main() -> None:
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
     base = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v), plan, None, None, structure
     )
     # SWEEP the shift rather than probing one value. The block is `J + beta d`, so beta props up the
@@ -199,7 +199,7 @@ def main() -> None:
     counts = {}
     for beta in betas:
         probe = sp.csr_matrix(
-            MonolithicAmgPreconditioner._shifted(
+            MaterializedJacobianPreconditioner._shifted(
                 jacobian,
                 frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs),
             )[groups.trailing, :][:, groups.trailing]
@@ -221,7 +221,7 @@ def main() -> None:
     # Study the smallest shift that actually shows the failure, which is the configuration the march met.
     beta_used = next((bt for bt in betas if counts[bt][0] > 0), pc_beta)
     print(f"\n  studying beta {beta_used:.4g}\n")
-    shifted = MonolithicAmgPreconditioner._shifted(
+    shifted = MaterializedJacobianPreconditioner._shifted(
         jacobian,
         frozen_shift_diagonal(base, beta_used, state)
         if beta_used > 0

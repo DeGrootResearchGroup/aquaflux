@@ -44,17 +44,18 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DualTimeLoop,
     Euclidean,
+    FieldSplit,
     Globalization,
-    JacobianProbe,
+    JacobiSmoothed,
     LinearSolveSettings,
     MaterializedJacobian,
-    MonolithicVCycle,
     PseudoTransientStep,
     RefreshPolicy,
     Resumption,
     RowScaledNorm,
     SessionSource,
     ShiftTerm,
+    SimpleSmoothed,
 )
 from aquaflux.solve import driver as driver_module
 from aquaflux.turbulence import (
@@ -262,9 +263,7 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    lu_step = coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-    )
+    lu_step = coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
     block_step = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )
@@ -277,7 +276,7 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
         coupled_step(
             coupled,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             linear_solve=LinearSolveSettings(restart=120),
         ).krylov_solver.restart
         == 120
@@ -308,9 +307,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
-        "lu": coupled_step(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-        ),
+        "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
         "block dual-time": coupled_step(
             coupled,
             state,
@@ -378,9 +375,7 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
-        "lu": coupled_step(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-        ),
+        "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
         "mass flow": mass_flow_coupled_continuation(
             mass_flow_coupled,
             mass_flow_state,
@@ -427,7 +422,7 @@ def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None
     state = _healthy_state(mesh, coupled)
     with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
         mass_flow_coupled_continuation(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+            coupled, state, preconditioner=MaterializedJacobian(CompleteLu())
         )
 
 
@@ -499,16 +494,14 @@ def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None
     step = coupled_step(
         coupled,
         state,
-        preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+        preconditioner=MaterializedJacobian(CompleteLu()),
         shift=CoupledShiftSettings(velocity_parts=live),
     )
     assert step.shift_policy.base.velocity_shift_parts is live
     # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it
     # produces differs from the frozen one, which is the whole reason the source is injected. At the
     # freeze state the two coincide by construction, so a check there would pass on a dead wire.
-    frozen = coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-    )
+    frozen = coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
     flow_p, k_p, omega_p = coupled.layout.unpack(state)
     developed = coupled.layout.pack(flow_p, k_p * 4.0, omega_p)
     assert not np.allclose(
@@ -624,7 +617,7 @@ def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     flow, k, omega = coupled.physical_fields(state)
-    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
     with pytest.raises(TypeError, match="belongs to the preconditioner session"):
         solve_coupled(
             coupled, flow, k, omega, preconditioner=session, jacobian_production_viscosity=True
@@ -1723,29 +1716,28 @@ def _block_step(coupled, state, **march):
 
 
 def _lu_step(coupled, state, **march):
-    return coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")), **march
-    )
+    return coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()), **march)
 
 
-def _vcycle_step(coupled, state, **march):
+def _split_step(coupled, state, **march):
     return coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(MonolithicVCycle()), **march
+        coupled,
+        state,
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
+        **march,
     )
 
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, _vcycle_step, mass_flow_coupled_continuation],
-    ids=["block", "lu", "vcycle", "mass flow"],
+    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
+    ids=["block", "lu", "split", "mass flow"],
 )
 def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
     """Every preconditioner family routes through :func:`_k_positivity_guards`, and it is checked first.
 
     First specifically so a real caller's mistake -- and this test -- never pays for building the
-    preconditioner the raise makes moot. That matters beyond cost for the multigrid V-cycle: it needs
-    ``petsc4py`` (not installed by CI, see ``tests/unit/test_optional_dependency_skips.py``), so checking
-    the raise here would break under that dependency's absence if the guard ran any later than it does.
+    preconditioner the raise makes moot.
     """
     mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
@@ -1757,16 +1749,11 @@ def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(b
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, mass_flow_coupled_continuation],
-    ids=["block", "lu", "mass flow"],
+    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
+    ids=["block", "lu", "split", "mass flow"],
 )
 def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
-    """Every other pairing of the two settings still builds -- including a floor that now matters.
-
-    The multigrid V-cycle is excluded here (unlike the raise check above): building its real
-    preconditioner needs ``petsc4py``, which this file does not gate on, so only the checks that
-    never reach it may run unconditionally.
-    """
+    """Every other pairing of the two settings still builds -- including a floor that now matters."""
     mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
     builder(coupled, state, positivity_floor=1e-6, positivity_projection=False)
@@ -1792,107 +1779,6 @@ def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
     assert probe.plan.n_fields == scaled.plan.n_fields
     assert np.array_equal(probe.structure.indptr, scaled.structure.indptr)
     assert np.array_equal(probe.structure.indices, scaled.structure.indices)
-
-
-class _ScalarRans(eqx.Module):
-    """A one-line stand-in assembler whose Jacobian is a scalar, so a rebind is visible in one apply."""
-
-    gain: jnp.ndarray
-
-    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
-        return self.gain * state
-
-
-class _RecordingPreconditioner:
-    """A frozen inverse that records what each refresh was asked to build, and builds nothing.
-
-    It builds nothing, so what is under test is only when the hook asks for a rebuild, and of what.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def refresh_in_place(self, matvec, plan, shift_diagonal, **_kwargs):
-        self.calls.append({"matvec": matvec, "shift": shift_diagonal})
-        return ()
-
-
-def _stub_step(preconditioner, beta, diagonal):
-    """The smallest Newton step the refresh hook reads: a shift strength, a policy and its diagonal."""
-    from types import SimpleNamespace
-
-    from aquaflux.solve import ShiftTerm
-
-    # Accepts the optional residual even though the refresh hook does not pass one: a stand-in that
-    # is narrower than the protocol breaks silently the day a caller starts supplying it.
-    base = SimpleNamespace(
-        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _relaxation: None)
-    )
-    return SimpleNamespace(
-        relaxation_schedule=SimpleNamespace(beta=beta),
-        shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),
-    )
-
-
-def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> None:
-    """One refresh hook can serve a whole Reynolds ramp, which is what lets the ramp share one V-cycle.
-
-    Nothing else in the hook watches for a rung boundary, so a hook that had stopped rebuilding would leave the next rung
-    solving against a V-cycle fitted to the previous rung's viscosity. ``rebind`` therefore does two
-    things, and both are asserted: the Jacobian probe starts reporting the NEW companion's derivative,
-    and the next refresh is a full re-materialize.
-    """
-
-    import numpy as np
-    from aquaflux.solve import beta_tracking_refresh
-
-    state = jnp.linspace(1.0, 2.0, 5)
-    diagonal = jnp.full(5, 2.0)
-    tangent = jnp.ones(5)
-    # The real probe (its plan and gather map are unused here), not a lookalike: `beta_tracking_refresh`
-    # asks it which assembler to differentiate, which only the class itself can answer.
-    probe = JacobianProbe(plan=object(), structure=object())
-
-    pc = _RecordingPreconditioner()
-    step = _stub_step(pc, beta=0.5, diagonal=diagonal)
-    # The multigrid cadence: a full rebuild on the first call and after a rebind, none otherwise --
-    # between those only the dual-time loop's cost trigger rebuilds the V-cycle.
-    refresh = beta_tracking_refresh(_ScalarRans(gain=jnp.asarray(3.0)), probe, every_step=False)
-
-    refresh(step, state)  # the initializing call
-    assert len(pc.calls) == 1
-    assert np.allclose(pc.calls[0]["shift"], 0.5 * np.asarray(diagonal))
-    assert np.allclose(pc.calls[0]["matvec"](tangent), 3.0 * tangent)
-
-    refresh(step, state)  # no rebuild between rebinds, as for the rest of a rung
-    assert len(pc.calls) == 1
-
-    refresh.rebind(_ScalarRans(gain=jnp.asarray(7.0)))
-    refresh(step, state)
-    assert len(pc.calls) == 2  # forced by the rebind
-    assert np.allclose(pc.calls[1]["matvec"](tangent), 7.0 * tangent)  # ...at the new companion
-
-    refresh(step, state)  # and the force is spent: one rebuild per rebind, not a stuck flag
-    assert len(pc.calls) == 2
-
-
-def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
-    """``every_step=True`` is the complete-LU cadence: an exact factorization is cheap, and exact only
-    at the shift it was built at, so it is re-factored before every step rather than on a rebind."""
-    from aquaflux.solve import beta_tracking_refresh
-
-    state = jnp.linspace(1.0, 2.0, 5)
-    diagonal = jnp.full(5, 2.0)
-    pc = _RecordingPreconditioner()
-    refresh = beta_tracking_refresh(
-        _ScalarRans(gain=jnp.asarray(3.0)),
-        JacobianProbe(plan=object(), structure=object()),
-        every_step=True,
-    )
-
-    for beta in (0.5, 0.25, 0.125):
-        refresh(_stub_step(pc, beta=beta, diagonal=diagonal), state)
-    assert [float(call["shift"][0]) for call in pc.calls] == [1.0, 0.5, 0.25]
 
 
 def test_the_default_refresh_policy_is_the_inert_one() -> None:

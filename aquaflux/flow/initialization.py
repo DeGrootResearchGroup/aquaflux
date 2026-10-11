@@ -32,7 +32,7 @@ from aquaflux.solve import (
     build_smoothed_hierarchy,
     decouple_dof,
     newton_step,
-    smoothed_multigrid_solve,
+    smoothed_multigrid_cycles,
 )
 from aquaflux.vectors import dot
 
@@ -92,7 +92,7 @@ def _laplace_preconditioner(
     hierarchy = build_smoothed_hierarchy(a)
 
     def factory(_: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        return lambda residual: smoothed_multigrid_solve(hierarchy, residual)
+        return lambda residual: smoothed_multigrid_cycles(hierarchy, residual)
 
     return factory
 

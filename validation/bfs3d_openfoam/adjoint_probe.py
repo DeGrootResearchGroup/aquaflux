@@ -160,7 +160,7 @@ class TransposeApplyCounter:
     The transpose solve's cost is what a preconditioner comparison at zero shift turns on, and nothing
     reports it: the restart-cycle count the linear solver returns is discarded inside the reverse rule,
     which has no observer. What *is* reachable is the preconditioner itself. It is a host object whose
-    ``matvec`` reads ``self.factors`` at callback time, so replacing that attribute with a delegating
+    ``matvec`` reads ``self.inverse`` at callback time, so replacing that attribute with a delegating
     proxy counts every application without touching the compiled solve.
 
     Counting the **transposed** applications is what makes the split exact and free. Forward and adjoint
@@ -248,8 +248,8 @@ def count_adjoint_applies(continuation, heartbeat: int = 0) -> TransposeApplyCou
     it.
     """
     preconditioner = continuation.adjoint_preconditioner_factory.factory.preconditioner
-    counter = TransposeApplyCounter(preconditioner.factors, heartbeat=heartbeat)
-    preconditioner.factors = counter
+    counter = TransposeApplyCounter(preconditioner.inverse, heartbeat=heartbeat)
+    preconditioner.inverse = counter
     return counter
 
 

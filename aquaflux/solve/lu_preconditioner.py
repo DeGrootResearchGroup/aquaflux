@@ -1,9 +1,7 @@
 """A monolithic *complete* sparse-LU preconditioner for the coupled saddle-point Newton solve.
 
 This factors the assembled coupled Jacobian *completely*, so the preconditioner is the operator's exact
-inverse and a Krylov solve converges in a single iteration. On a moderate two-dimensional mesh a good
-multifrontal LU (UMFPACK) factors the coupled Jacobian quickly, using a fill-reducing ordering
-and a dense-block (BLAS-3) numeric kernel.
+inverse and a Krylov solve converges in a single iteration.
 
 The complete factorization needs **no equilibration and no cell-major reordering**: the
 solver's own pivoting and fill-reducing ordering handle the indefinite saddle directly on the raw
@@ -13,22 +11,14 @@ transpose solve reuses the same factorization with a transposed solve.
 **Scope — a two-dimensional / moderate-mesh tool.** A complete LU's fill grows as ``O(n log n)`` in 2D
 but ``O(n^{4/3})`` in 3D, so its memory becomes the wall on large three-dimensional meshes (a few times
 ``10^4`` cells in 3D on a workstation). There it must give way to the multigrid-smoothed path (or a
-rank-structured direct solver); this class is the fast, exact preconditioner where the mesh
-is two-dimensional or moderate.
+rank-structured direct solver); this class is the exact preconditioner where the mesh is
+two-dimensional or moderate.
 
-**Factorization backend (host, off the jit path).** The factorization is a host object, built once at a
-reference state and applied inside the jitted Krylov solve through ``jax.pure_callback``. Two backends
-implement the same small interface:
-
-* ``"umfpack"`` — UMFPACK (SuiteSparse) via ``petsc4py``, the fast path. A mid-march refresh rebuilds the
-  factorization from scratch (the coupled Jacobian's sparsity grows as the flow develops, so a
-  fixed-pattern numeric-only refactor would be wrong) -- cheap because the full factorization is fast.
-  Requires the optional ``petsc`` dependency.
-* ``"scipy"`` — ``scipy.sparse.linalg.splu`` (SuperLU), always available. Exact and correct but without a
-  fill-reducing nested-dissection ordering it is slower to factor than UMFPACK; it is the fallback
-  so the class works with no optional dependency, and it is what the tests run under.
-
-``"auto"`` (the default) uses UMFPACK when ``petsc4py`` with a working UMFPACK is importable, else SciPy.
+**Factorization (host, off the jit path).** The factorization is SciPy's SuperLU
+(``scipy.sparse.linalg.splu``), built once at a reference state and applied inside the jitted Krylov
+solve through ``jax.pure_callback``. A mid-march refresh factors afresh, because SuperLU exposes no
+separate symbolic and numeric phases -- and because the coupled Jacobian's sparsity grows as the flow
+develops, so a fixed-pattern numeric-only refactor would be wrong in any case.
 """
 
 from __future__ import annotations
@@ -44,32 +34,21 @@ from .host_preconditioner import HostPreconditioner
 from .refresh_timing import PhaseTimer
 
 
-class _LuBackend:
-    """A host complete-LU backend: factor a matrix, solve with it (or its transpose), refactor in place.
+class CompleteLuInverse:
+    """A frozen complete-LU factorization of the coupled Jacobian and its forward/transpose apply.
 
-    Concrete backends (:class:`_ScipyLuBackend`, :class:`_PetscUmfpackBackend`) implement the same three
-    operations so :class:`LuFactors` is backend-agnostic. All operate on the **raw field-major** matrix —
-    no equilibration or reordering.
+    A pure host object (no JAX). It applies ``M = A^{-1}`` (or ``M^T``) by a triangular solve on the raw
+    field-major vector -- no equilibration or reordering, because the complete factorization handles the
+    saddle directly.
+
+    Parameters
+    ----------
+    matrix : scipy.sparse matrix
+        The assembled field-major matrix to factor, square, shape ``(n_dofs, n_dofs)``.
     """
 
-    n_dofs: int
-
-    def solve(self, rhs: np.ndarray, *, transpose: bool) -> np.ndarray:
-        raise NotImplementedError
-
-    def refactor(self, matrix: sp.spmatrix) -> None:
-        """Refactor at the given matrix (a fresh factorization; the coupled Jacobian's pattern may grow)."""
-        raise NotImplementedError
-
-    def destroy(self) -> None:
-        """Release any host solver handles this backend holds; nothing by default."""
-
-
-class _ScipyLuBackend(_LuBackend):
-    """SuperLU complete LU via ``scipy.sparse.linalg.splu`` — always available, no symbolic reuse."""
-
     def __init__(self, matrix: sp.spmatrix) -> None:
-        self.n_dofs = matrix.shape[0]
+        self._n_dofs = matrix.shape[0]
         self._factor(matrix)
 
     def _factor(self, matrix: sp.spmatrix) -> None:
@@ -77,137 +56,10 @@ class _ScipyLuBackend(_LuBackend):
         # without full partial pivoting.
         self._lu = spla.splu(matrix.tocsc(), diag_pivot_thresh=0.1)
 
-    def solve(self, rhs: np.ndarray, *, transpose: bool) -> np.ndarray:
-        return self._lu.solve(np.asarray(rhs, dtype=np.float64), trans="T" if transpose else "N")
-
-    def refactor(self, matrix: sp.spmatrix) -> None:
-        # SuperLU via scipy exposes no symbolic/numeric split, so a refactor is a fresh factorization.
-        self._factor(matrix)
-
-
-class _PetscUmfpackBackend(_LuBackend):
-    """UMFPACK (SuiteSparse) complete LU via ``petsc4py`` — the fast path.
-
-    Holds a PETSc ``Mat`` and a ``KSP`` configured as a direct solve (``preonly`` + ``lu`` +
-    ``umfpack``). :meth:`refactor` rebuilds them at the new matrix and re-runs the analysis + numeric
-    factorization; :meth:`solve` runs the (transpose) triangular solve.
-
-    A refresh rebuilds from scratch rather than reusing UMFPACK's symbolic analysis on a frozen pattern:
-    the coupled Jacobian's sparsity **grows as the flow develops** (cross-coupling entries that are
-    exactly zero at the cold reference become nonzero), so a fixed-pattern numeric refactor would be both
-    wrong (missing the new entries) and a shape error. The full factorization is fast enough (~1 s at
-    moderate 2D size) that re-analysing each refresh is cheap; symbolic reuse would save only a small
-    fraction of that and is not worth the fixed-pattern assumption.
-    """
-
-    def __init__(self, matrix: sp.spmatrix) -> None:
-        from petsc4py import PETSc
-
-        self._PETSc = PETSc
-        self.n_dofs = matrix.shape[0]
-        self._factor(matrix)
-
-    def _factor(self, matrix: sp.spmatrix) -> None:
-        PETSc = self._PETSc
-        matrix = matrix.tocsr()
-        matrix.sort_indices()
-        self._mat = PETSc.Mat().createAIJ(
-            size=matrix.shape,
-            csr=(
-                matrix.indptr.astype(np.int32),
-                matrix.indices.astype(np.int32),
-                matrix.data.copy(),
-            ),
-        )
-        self._mat.assemble()
-        self._ksp = PETSc.KSP().create()
-        self._ksp.setType("preonly")
-        self._ksp.setOperators(self._mat)
-        pc = self._ksp.getPC()
-        pc.setType("lu")
-        pc.setFactorSolverType("umfpack")
-        pc.setUp()  # symbolic analysis + numeric factorization
-        self._x = self._mat.createVecLeft()
-        self._b = self._mat.createVecRight()
-
-    def solve(self, rhs: np.ndarray, *, transpose: bool) -> np.ndarray:
-        self._b.setArray(np.asarray(rhs, dtype=np.float64))
-        if transpose:
-            self._ksp.solveTranspose(self._b, self._x)
-        else:
-            self._ksp.solve(self._b, self._x)
-        return self._x.getArray().copy()
-
-    def refactor(self, matrix: sp.spmatrix) -> None:
-        # Rebuild at the new matrix (the pattern may have grown as the flow developed), destroying the old
-        # objects so their PETSc memory is released rather than leaked across a long refreshing march.
-        self.destroy()
-        self._factor(matrix)
-
-    def destroy(self) -> None:
-        self._ksp.destroy()
-        self._mat.destroy()
-
-
-def _umfpack_available() -> bool:
-    """Whether ``petsc4py`` with a working UMFPACK factor solver can be imported."""
-    try:
-        from petsc4py import PETSc
-    except Exception:
-        return False
-    try:
-        m = PETSc.Mat().createAIJ(
-            [1, 1], csr=(np.array([0, 1], np.int32), np.array([0], np.int32), np.array([1.0]))
-        )
-        m.assemble()
-        ksp = PETSc.KSP().create()
-        ksp.setOperators(m)
-        pc = ksp.getPC()
-        pc.setType("lu")
-        pc.setFactorSolverType("umfpack")
-        pc.setUp()
-        return True
-    except Exception:
-        return False
-
-
-#: The factorization backends `factorize_lu` accepts. `CompleteLu.backend` spells the same three in a
-#: ``Literal``, so a spec file's value is checked where it is read; a test pins the two lists equal.
-LU_BACKENDS = ("auto", "umfpack", "scipy")
-
-
-def _make_backend(matrix: sp.spmatrix, backend: str) -> _LuBackend:
-    if backend == "scipy":
-        return _ScipyLuBackend(matrix)
-    if backend == "umfpack":
-        return _PetscUmfpackBackend(matrix)
-    if backend == "auto":
-        return _PetscUmfpackBackend(matrix) if _umfpack_available() else _ScipyLuBackend(matrix)
-    raise ValueError(
-        f"factorize_lu: unknown backend {backend!r} (want {', '.join(map(repr, LU_BACKENDS))})."
-    )
-
-
-class LuFactors:
-    """A frozen complete-LU factorization of the coupled Jacobian and its forward/transpose apply.
-
-    A pure host object (no JAX). It applies ``M = A^{-1}`` (or ``M^T``) by a
-    triangular solve on the raw field-major vector — no equilibration or reordering, because the complete
-    factorization handles the saddle directly. Wraps a pluggable :class:`_LuBackend`.
-
-    Attributes
-    ----------
-    backend : _LuBackend
-        The complete-LU backend (UMFPACK or SciPy SuperLU) doing the factor/solve.
-    """
-
-    def __init__(self, backend: _LuBackend) -> None:
-        self.backend = backend
-
     @property
     def n_dofs(self) -> int:
         """Number of degrees of freedom the factorization acts on."""
-        return self.backend.n_dofs
+        return self._n_dofs
 
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         """Apply ``M = A^{-1}`` (or ``M^T``) to a field-major residual vector.
@@ -224,7 +76,9 @@ class LuFactors:
         np.ndarray
             The preconditioned vector, shape ``(n_dofs,)``.
         """
-        return self.backend.solve(residual, transpose=transpose)
+        return self._lu.solve(
+            np.asarray(residual, dtype=np.float64), trans="T" if transpose else "N"
+        )
 
     def refactor_block(self, block: sp.spmatrix) -> None:
         """Factor ``block`` afresh, IN PLACE, keeping this object's identity.
@@ -234,46 +88,39 @@ class LuFactors:
         block : scipy.sparse matrix
             The new assembled field-major matrix, already shifted, shape ``(n_dofs, n_dofs)``.
         """
-        self.backend.refactor(block)
-
-    def destroy(self) -> None:
-        """Release the backend's host solver handles, if it holds any."""
-        self.backend.destroy()
+        self._factor(block)
 
 
-def factorize_lu(matrix: sp.spmatrix, *, backend: str = "auto") -> LuFactors:
-    """Completely LU-factor an assembled coupled block matrix.
+def complete_lu_inverse(matrix: sp.spmatrix) -> CompleteLuInverse:
+    """Completely LU-factor an assembled coupled block matrix, with SciPy's SuperLU.
 
     Parameters
     ----------
     matrix : scipy.sparse matrix
         The assembled field-major coupled Jacobian (already shifted for the pseudo-transient step),
         shape ``(n_fields * n_cells, n_fields * n_cells)``.
-    backend : {'auto', 'umfpack', 'scipy'}
-        The factorization backend. ``'auto'`` uses UMFPACK (via ``petsc4py``) when available and falls
-        back to ``scipy.sparse.linalg.splu`` (SuperLU) otherwise.
 
     Returns
     -------
-    LuFactors
+    CompleteLuInverse
         The frozen factorization.
 
     Raises
     ------
     ValueError
-        If ``matrix`` is not square, or ``backend`` is unknown.
+        If ``matrix`` is not square.
     """
     if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"factorize_lu: matrix must be square, got {matrix.shape}.")
-    return LuFactors(_make_backend(matrix, backend))
+        raise ValueError(f"complete_lu_inverse: matrix must be square, got {matrix.shape}.")
+    return CompleteLuInverse(matrix)
 
 
-class MonolithicLuPreconditioner(HostPreconditioner):
-    """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`LuFactors`.
+class CompleteLuPreconditioner(HostPreconditioner):
+    """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`CompleteLuInverse`.
 
-    Shares its interface (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) with
-    :class:`~aquaflux.solve.amg_preconditioner.MonolithicAmgPreconditioner`, so it is a drop-in for the
-    coupled continuation. Not an :class:`equinox.Module`: the factorization is a host object, held by a caller and
+    Shares its interface (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) with the
+    materialized-Jacobian preconditioners (:class:`~aquaflux.solve.MaterializedJacobianPreconditioner`),
+    so it is a drop-in for the coupled continuation. Not an :class:`equinox.Module`: the factorization is a host object, held by a caller and
     captured in the ``jax.pure_callback`` closure rather than threaded through the jit as a traced
     argument. Because the factors are frozen (their coefficients ``stop_gradient``-ed by the solver), the
     callback is never differentiated: the forward solve calls ``M`` and the adjoint's transpose solve
@@ -300,9 +147,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
         plan,
         shift_diagonal: np.ndarray,
-        *,
-        backend: str = "auto",
-    ) -> MonolithicLuPreconditioner:
+    ) -> CompleteLuPreconditioner:
         """Materialize the shifted coupled Jacobian and completely factor it, off the jit path.
 
         Parameters
@@ -315,16 +160,14 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         shift_diagonal : np.ndarray
             The pseudo-transient shift added to the Jacobian's diagonal, shape ``(n_fields * n,)`` — the
             same block-diagonal shift the step solves against (velocity/scalar shifts, pressure zero).
-        backend : {'auto', 'umfpack', 'scipy'}
-            The factorization backend (see :func:`factorize_lu`).
 
         Returns
         -------
-        MonolithicLuPreconditioner
+        CompleteLuPreconditioner
             The built preconditioner.
         """
         matrix = cls._shifted(cls._materialize(matvec, plan), shift_diagonal)
-        return cls(factorize_lu(matrix, backend=backend))
+        return cls(complete_lu_inverse(matrix))
 
     def refresh_in_place(
         self,
@@ -334,11 +177,11 @@ class MonolithicLuPreconditioner(HostPreconditioner):
     ) -> tuple[tuple[str, float], ...]:
         """Re-factor at a developed state and swap the factorization IN PLACE (no new object).
 
-        The arguments are :meth:`build`'s, evaluated at the developed state. The backend re-factors at the
-        new matrix (a fresh factorization -- the coupled Jacobian's sparsity grows as the flow develops,
-        so the pattern is not fixed; the full factorization is fast enough that this is cheap). Because
+        The arguments are :meth:`build`'s, evaluated at the developed state. The matrix is factored
+        afresh (the coupled Jacobian's sparsity grows as the flow develops, so the pattern is not
+        fixed). Because
         this preconditioner is held as a **static field** of the shift policy and :meth:`matvec` reads
-        ``self.factors`` at call time, mutating the factorization here re-preconditions the **same
+        ``self.inverse`` at call time, mutating the factorization here re-preconditions the **same
         compiled** Krylov solve (a compilation cache hit -- no recompile).
 
         **Forward-march use ONLY — the mutation is impure and must never touch a differentiated path.**
@@ -358,6 +201,6 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         timer.lap("probe")
         matrix = self._shifted(jacobian, shift_diagonal)
         timer.lap("assemble")
-        self.factors.refactor_block(matrix)
+        self.inverse.refactor_block(matrix)
         timer.lap("refactor")
         return timer.phases()

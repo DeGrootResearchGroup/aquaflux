@@ -14,9 +14,8 @@ from collections.abc import Callable
 import equinox as eqx
 import jax.numpy as jnp
 
-from .amg_preconditioner import MonolithicAmgPreconditioner
 from .continuation import ShiftPolicy, ShiftTerm
-from .lu_preconditioner import MonolithicLuPreconditioner
+from .host_preconditioner import HostPreconditioner
 from .root_adjoint import TransposedPreconditioner
 
 __all__ = ["FrozenTransposeFactory", "MonolithicFactorShiftPolicy"]
@@ -29,33 +28,31 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     Reuses a base policy's pseudo-transient shift diagonal -- the physics, whatever rows and scales it
     chose -- but replaces its preconditioner with a single monolithic inverse of the assembled Jacobian,
     which forms the true pressure Schur coupling rather than approximating it. That inverse is a complete LU
-    (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one cycle), or a multigrid V-cycle
-    (:class:`~aquaflux.solve.MonolithicAmgPreconditioner`, bounded memory on a large three-dimensional
-    mesh) -- this policy is agnostic to which, needing only the shared callback-matvec interface. On a
-    convection-dominated collocated Rhie--Chow RANS saddle either reaches the forward tolerance
-    where the block-triangular preconditioner needs hundreds of cycles.
+    (:class:`~aquaflux.solve.CompleteLuPreconditioner`, exact, one cycle), a field split of multigrid
+    V-cycles (:class:`~aquaflux.solve.FieldSplitPreconditioner`, bounded memory on a large
+    three-dimensional mesh), or one block inverse over the whole state
+    (:class:`~aquaflux.solve.MaterializedBlockPreconditioner`) -- this policy is agnostic to which, needing
+    only the shared callback-matvec interface.
 
     The inverse is frozen at a reference state and shift (built off the jit path by a
     :class:`~aquaflux.solve.MaterializedJacobian` session). Unlike the block
     preconditioner's live ``a_P`` rescaling it does not track the developing state; being a far stronger
     preconditioner it tolerates that freezing at a cost of a few extra cycles, and the shift vanishes at
     the root so the frozen inverse never changes the converged solution or its adjoint. Because it
-    is a host object (``scipy`` / UMFPACK / PETSc) it rides as a **static** field rather than a traced
+    is a host object it rides as a **static** field rather than a traced
     pytree leaf, and is applied inside the jitted Krylov solve through the callback matvec.
 
     Attributes
     ----------
     base : ShiftPolicy
         The policy supplying the pseudo-transient shift diagonal (and its per-row relaxation).
-    preconditioner : MonolithicLuPreconditioner or MonolithicAmgPreconditioner
-        The frozen coupled inverse (a static field). Any object exposing the ``matvec`` /
-        ``matvec(transpose=True)`` callback interface works.
+    preconditioner : HostPreconditioner
+        The frozen coupled inverse (a static field), applied through its ``matvec`` /
+        ``matvec(transpose=True)`` callbacks.
     """
 
     base: ShiftPolicy
-    preconditioner: MonolithicLuPreconditioner | MonolithicAmgPreconditioner = eqx.field(
-        static=True
-    )
+    preconditioner: HostPreconditioner = eqx.field(static=True)
 
     def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
         """The block policy's shift diagonal, glued to the frozen factorization preconditioner.

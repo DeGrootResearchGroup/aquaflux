@@ -48,7 +48,7 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 from aquaflux.solve import (  # noqa: E402
     ColumnProbePlan,
-    MonolithicAmgPreconditioner,  # noqa: E402
+    MaterializedJacobianPreconditioner,  # noqa: E402
     block_stencil_colouring,
     block_stencil_gather_map,
 )
@@ -200,7 +200,7 @@ def main():
     colouring = block_stencil_colouring(owner, nb, n, 3)
     structure = block_stencil_gather_map(ColumnProbePlan.uniform(colouring, n_fields))
     started = time.time()
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         ColumnProbePlan.uniform(colouring, n_fields),
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),

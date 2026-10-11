@@ -94,7 +94,6 @@ from aquaflux.solve import (
     FieldSplit,
     InnerIterateCheckpointer,
     MarchLogger,
-    MonolithicVCycle,
     StateCheckpointer,
     combine_observers,
     residual_stop_gmres,
@@ -135,9 +134,6 @@ CASE = read_case(CASE_FILE)
 U_IN = float(CASE.spec.boundaries["inlet"].velocity[0])
 NU = CASE.spec.fluid.kinematic_viscosity
 
-#: The monolithic V-cycle's smoother, read only by the `PITZ_FIELD_SPLIT=0` arm; the record of how these
-#: were chosen is beside `PC_BETA_FLOOR` below.
-FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT = 1, 4, 2000
 _RAMP_SCALINGS = {"both": scale_both_blocks, "flow": scale_momentum_only}
 
 
@@ -196,15 +192,6 @@ def _solver_with_overrides(solver):
     if probe:
         preconditioner = dataclasses.replace(
             preconditioner, probe=dataclasses.replace(preconditioner.probe, **probe)
-        )
-    if _environment("FIELD_SPLIT", str) == "0":
-        preconditioner = dataclasses.replace(
-            preconditioner,
-            inverse=MonolithicVCycle(
-                smoother_fill_levels=FILL_LEVELS,
-                smoother_sweeps=SWEEPS,
-                coarse_eq_limit=COARSE_EQ_LIMIT,
-            ),
         )
     edits["preconditioner"] = preconditioner
     damping = _environment("TURB_DAMPING", float)
@@ -590,42 +577,9 @@ INNER_STEPS, INNER_TOL = SOLVER.dual_time.inner_steps, SOLVER.dual_time.inner_to
 FORWARD_RTOL, FORWARD_RESTART = SOLVER.linear_solve.rtol, SOLVER.linear_solve.restart
 FORWARD_MAX_RESTARTS = SOLVER.linear_solve.max_restarts
 
-#: ⚠️ **THIS WHOLE BUNDLE IS UNREACHABLE AT THE CURRENT DEFAULTS — see `_ILU_SMOOTHER_LIVE` below.**
-#: Every measurement in it was taken when the leading `[u, v, p]` block was inverted by the incomplete-LU
-#: -smoothed hierarchy these settings configure. Under the field split (the default) both blocks are
-#: fitted by injected inverses, so nothing here is constructed; the settings configure only the
-#: monolithic V-cycle, `PITZ_FIELD_SPLIT=0`. The bullets below are kept because they are the record of a
-#: real measurement -- but they are **not** a description of how a march at the defaults is
-#: preconditioned, and a run banner quoting them is not evidence about that march.
-#:
-#: ⚠️ THE VALIDATED SMOOTHER BUNDLE, AND NONE OF IT IS OPTIONAL. These are the library defaults'
-#: opposites, and each was measured on the sibling case at adjoint-grade tolerance:
-#:   * ⚠️ `FILL_LEVELS` **1** HERE, WHERE THE SIBLING CASE USES 0 -- THE TWO RANK THIS OPPOSITELY, AND
-#:     copying the sibling's value is what kept this case from taking a single step. At zero fill the
-#:     level sweep is not a contraction on this leading block: it AMPLIFIES, and the four sweeps below
-#:     compound it (one apply of the split reads 9.88e+05 at one sweep and 1.56e+31 at four). With fill
-#:     1 the same operator takes ONE matvec to the march's stop.
-#:     The discriminator is a pivot census, and it inverts between the cases: this block's ILU(0) has
-#:     NEGATIVE pivots at every shift (27/25/9 of 36675) with min |pivot| some twenty times smaller
-#:     than the sibling's, whose ILU(0) has none at any shift. There the fill produces the negative
-#:     pivots and dropping it is the fix; here dropping it produces them and the fill is the fix.
-#:     ⚠️ **EVERY NUMBER IN THIS BULLET WAS TAKEN UNDER THE MESH'S OWN CELL ORDER, AND THAT IS THE
-#:     VARIABLE THAT ACTUALLY DECIDES IT.** Re-measured on this case's `[u, v, p]` block at reach 5,
-#:     changing nothing but the order the same matrix is eliminated in: at zero fill the shipped order
-#:     amplifies a stationary sweep 5.5x in one application and stalls the Krylov solve, while a
-#:     reverse-Cuthill-McKee or ascending-row-length CELL order contracts it and converges in ~113-140
-#:     applications. So "zero fill amplifies on this block" is true of this ordering, not of zero fill;
-#:     `FILL_LEVELS = 1` remains right for the PETSc path, whose ordering is its own separate option,
-#:     but it is no longer evidence that the block needs fill.
-#:   * `SWEEPS` 4 -- zero-fill is the weaker smoother, so extra sweeps pay more than they did for
-#:     ILU(1) (390 -> 69 iterations at beta 0.01). The library default of 2 was tuned against ILU(1)
-#:     and does not carry over.
-#:   * `COARSE_EQ_LIMIT` 2000 -- the default coarsens to ~50 equations, whose direct solve captures
-#:     only the crudest global mode, and the indefinite saddle's wall is exactly that global pressure
-#:     coupling. `None` stalls at every low shift. Not optional.
-#:   * `PC_BETA_FLOOR` 0.05 -- the V-cycle is built at `max(beta, floor)` while the march still solves
-#:     at its own shift. The OPERATOR is untouched, so the converged root and the adjoint are
-#:     unchanged, and the mismatch saturates instead of growing as the shift falls.
+#: The inverse is fitted at `max(beta, floor)` while the march still solves at its own shift. The
+#: OPERATOR is untouched, so the converged root and the adjoint are unchanged, and the mismatch saturates
+#: instead of growing as the shift falls.
 PC_BETA_FLOOR = SOLVER.preconditioner.refit_beta_floor
 
 #: The field split: the `[u, v, p]` saddle and the `[k, omega]` transported pair get their own
@@ -717,21 +671,11 @@ if os.environ.get("PITZ_FLOW_ORDER"):
 #: reach quite differently, and why neither the fill nor the elimination order that decide the ILU
 #: arms applies to it at all.
 #:
-#: ⚠️ The settings are the sibling's and are NOT established here. That case ranks a smoother knob
-#: oppositely (see `FILL_LEVELS`) and coarsens about three times per level where this one manages
+#: ⚠️ The settings are the sibling's and are NOT established here. That case coarsens about three times per level where this one manages
 #: seven, so `strength_threshold` and `sweeps` in particular are open questions on this mesh rather
 #: than values to trust. `PITZ_FLOW_SWEEPS` is exposed for that reason.
 LEADING_INVERSE = SOLVER.preconditioner.inverse.leading if FIELD_SPLIT else None
 SIMPLE_FLOW = LEADING_INVERSE.settings() if FIELD_SPLIT else {}
-
-#: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
-#:
-#: ⚠️ They configure the monolithic V-cycle, built only with `PITZ_FIELD_SPLIT=0`. Under the field split
-#: -- the default -- both blocks are fitted by injected inverses, and these three settings are dead.
-#: The banner used to print them regardless, which is how a reader (and a solver study) comes to
-#: believe a march was preconditioned by a smoother that was never constructed. A banner is the primary
-#: record of what a measurement was taken under, so it must separate a live setting from a carried one.
-_ILU_SMOOTHER_LIVE = not FIELD_SPLIT
 
 #: The trailing `[k, omega]` block's inverse: the differentiable-framework nodal hierarchy, which the
 #: sibling case defaults to after a controlled pair measured it ahead of the host V-cycle (67 steps and
@@ -1253,11 +1197,6 @@ def solve_aquaflux(
             ),
         ),
         ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
-        (
-            "smoother fill / sweeps / coarse limit",
-            f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"
-            + ("" if _ILU_SMOOTHER_LIVE else "  (INERT: both blocks supply their own inverse)"),
-        ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("field split", FIELD_SPLIT),
         (

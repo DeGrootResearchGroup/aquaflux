@@ -711,12 +711,12 @@ been able to fail.
   and was in fact **1.12x of receiver composition times 1.22x of everything else** — two effects whose
   product looked like one clean corroboration.
 
-**⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, which does
-**not** include the optional `petsc` extra, so every module guarded by `pytest.importorskip("petsc4py")`
-— `tests/integration/test_coupled_amg.py` and `test_coupled_field_split.py` — is **skipped there and runs
-only on a machine that has PETSc**. A green CI slow tier therefore says nothing about them, and their
-failures surface only locally, which reads as "broken on my machine" when it is the opposite: local is
-the only place they are checked at all. This is the same shape as a check that has stopped seeing
+**⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, so any
+module guarded by `pytest.importorskip` on a dependency outside that extra is **skipped there and runs
+only on a machine that has it**. A green CI tier then says nothing about it, and its failures surface only
+locally, which reads as "broken on my machine" when it is the opposite: local is the only place it is
+checked at all. (This happened: PETSc-gated modules, since removed with the PETSc dependency on
+2026-10-10, failed on `main` for four days with CI green throughout.) This is the same shape as a check that has stopped seeing
 anything (`tools/check_hooks.sh`, `tools/sibling_builders.py`) — a skip and a pass are indistinguishable
 from the exit status. **When a test fails locally and passes in CI, check the skip counts before assuming
 the difference is your machine**: 2026-08-21 the CI slow tier reported `4 skipped` per shard against zero
@@ -834,10 +834,10 @@ not one to arrive at by importing something.
 
 Two consequences worth having in mind rather than rediscovering:
 
-- **`petsc4py` is not installed in CI**, so the three modules gated on it — two of them in the *fast*
-  tier, i.e. inside the required check — have never run there. It has no wheels (it builds PETSc from
-  source), which is why the `petsc` extra is kept out of `test`; that is a cost decision, and the
-  census is where its price is written down.
+- **A dependency kept out of the `test` extra is a cost decision, and the census is where its price
+  is written down.** Today that is only `scotchpy` (one partitioner test). PETSc (`petsc4py`, no wheels,
+  built from source) was the large case — three modules, two in the fast tier, that had never run in CI
+  — until the dependency was removed on 2026-10-10.
 - **The workflow runs every tier with `-rs`**, so a skipped test is named with its reason in the job
   log rather than collapsing into a count nobody reads.
 
@@ -1533,7 +1533,7 @@ After **every code change**, before considering the task complete, review and ac
      returned *as it stands* — the whole return value, an arm of a conditional, an operand of `and`/`or` —
      credits that call. Methods are keyed `Class.method`, so one class's `_build` is never another's.
      **Unioning every definition of the name was rejected** — it would credit `coupled_step` with what
-     `AmgVCycle._build` constructs — and a receiver whose producer returns no package class **falls back to
+     `MonolithicVCycleInverse._build` constructs — and a receiver whose producer returns no package class **falls back to
      the bare name**, because the first version lost `_coupled_step`'s `globalization.step(...)` (a rebound
      parameter) and silently re-hid the pair it was written to find. The one new pair is `coupled_step` /
      `mass_flow_coupled_continuation`; every other pair is main's, unchanged. Its two carve-outs have

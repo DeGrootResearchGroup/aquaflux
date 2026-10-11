@@ -79,8 +79,7 @@ test = [
     "pytest-split>=0.9",
     "pytest-timeout>=2.3",
     # The CAD reader's tests need its kernel. It has wheels for every interpreter CI runs, so it is
-    # carried here and those tests run there -- unlike `petsc`, whose absence from CI is a recorded
-    # cost (tests/unit/test_optional_dependency_skips.py).
+    # carried here and those tests run there.
     "aquaflux[cad]",
     # The browser interface's own tests (tests/ui/) read and pipe real VTK data, so they need it installed.
     "aquaflux[ui]",
@@ -110,15 +109,6 @@ docs = [
 # installed beside `cadquery`, which brings the VTK build of the same module. Wheels exist for
 # CPython 3.11-3.14 on Linux, macOS and Windows, and none for 3.10, which is why the floor is 3.11.
 cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
-# `petsc` (petsc4py) backs two coupled preconditioners. For the complete-LU
-# (`coupled_lu_continuation`) it is the optional fast backend — UMFPACK (SuiteSparse) factors the coupled
-# Jacobian roughly an order of magnitude faster than the threshold-ILU on a moderate 2D mesh; without it
-# that preconditioner falls back to scipy's SuperLU (exact but not faster to factor). For the algebraic
-# multigrid (`coupled_amg_continuation`, the large-3D coupled preconditioner) it is **required** — the
-# V-cycle is built with PETSc's `PCGAMG` and there is no pure-SciPy AMG fallback. The ILUT / block
-# preconditioners are unaffected. petsc4py builds PETSc from source; a SuiteSparse-enabled build needs
-# CMake (`PETSC_CONFIGURE_OPTIONS="--download-suitesparse"`).
-petsc = ["petsc4py>=3.20"]
 # `ui` is the browser interface, `aquaflux-ui` (the `aquaflux_ui` package): VTK through PyVista renders
 # here, trame serves the page and sends it images rather than meshes, plotly draws the convergence
 # history. All have wheels for Linux, macOS and Windows, so it needs no compiler and no JavaScript

@@ -42,10 +42,10 @@ from aquaflux.solve import (
     ConvectionDiffusionStencil,
     SettingsValue,
     SmoothedHierarchy,
-    air_multigrid_solve,
+    air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     refresh_air_hierarchy,
 )
 
@@ -121,7 +121,7 @@ class ConvectionAmgPreconditioner(ScalarTransportPreconditioner):
     v_cycles: int = 1
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
-        return convection_multigrid_solve(self.hierarchy, residual, cycles=self.v_cycles)
+        return convection_multigrid_cycles(self.hierarchy, residual, cycles=self.v_cycles)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -140,7 +140,7 @@ class AirAmgPreconditioner(ScalarTransportPreconditioner):
     v_cycles: int = 1
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
-        return air_multigrid_solve(self.hierarchy, residual, cycles=self.v_cycles)
+        return air_multigrid_cycles(self.hierarchy, residual, cycles=self.v_cycles)
 
 
 @dataclasses.dataclass(frozen=True)

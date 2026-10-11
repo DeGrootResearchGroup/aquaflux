@@ -1,6 +1,6 @@
 # Refuted / closed directions — `aquaflux/solve/`
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18). **Lives in `.claude/notes/`, outside the auto-loaded
 > `.claude/rules/` tree, so it never auto-loads.** It is tracked so a refuted idea can be
@@ -41,7 +41,7 @@
     is the control that decides what a *smoother* plateau means: if degrading the coarse solve barely
     moves the cycle count then the coarse correction is not load-bearing, and a smoother plateau
     cannot be attributed to the coarse space at all. Always print the coarse grid's equation count
-    (`AmgVCycle.coarse_size`) beside the level count, so an arm that changed nothing is
+    (`MonolithicVCycleInverse.coarse_size`) beside the level count, so an arm that changed nothing is
     distinguishable from a setting that made no difference.
   - **Additive Vanka + Richardson — invalid by construction** (Richardson on an indefinite saddle).
     **⚠️ THE COARSE-SPACE READING THAT SAT HERE IS DELETED — the two entries conflicted and the configured
@@ -244,7 +244,7 @@
       *failed* at an easy state — a positive result needs a hard state, a failure does not.) The fix
       is `DualTimeStep.inner_observer`, which now also carries the **iterate**.
       **⚠️ But a march step CANNOT be reconstructed from a checkpoint — its configuration is
-      path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` tried, driving one step from
+      path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` (deleted 2026-10-10 with PETSc; in git history) tried, driving one step from
       the checkpoint, and both plausible arrangements bracket the march without reaching it. At
       `state-00049`, β = 0.0293, where the march's first inner solve costs **1 cycle at α = 0.500**:
 
@@ -379,7 +379,7 @@
       any future march-reproduction harness to the same gate.
 
     **How to re-run it — the smoother and the harness are BUILT (`aquaflux/solve/vanka.py`,
-    `validation/bfs3d_openfoam/preconditioner_sweep.py`); what is missing is the measurement.** The
+    `validation/bfs3d_openfoam/preconditioner_sweep.py`, deleted 2026-10-10 with PETSc; in git history); what is missing is the measurement.** The
     discriminating question is narrow: **with plain aggregation, does a Vanka smoother still stall?**
     If yes, the coarse space really is the wall and the inf-sup / block-Schur direction is justified.
     If no, the original verdict was an artifact of the aggregation default and the smoother direction
@@ -415,6 +415,25 @@ measurements. What was closed then was either of them as a default, and the bise
 reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
 merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
 § "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
+
+## PETSc (monolithic GAMG V-cycle, UMFPACK complete LU) — DELETED as dominated (2026-10-10)
+
+The `petsc` extra (`petsc4py`) backed two things: `MonolithicVCycle` (`MonolithicVCyclePreconditioner`,
+PETSc `PCGAMG` over all six fields) and `CompleteLu(backend="umfpack")`. Both were removed, by the project
+owner's decision, as dominated rather than broken:
+- **The V-cycle had no selector.** No case file, default or shipped harness chose it; both flagship cases
+  run `FieldSplit(SimpleSmoothed, JacobiSmoothed)`, which marched `bfs3d` 31 % faster than the monolithic
+  V-cycle at the identical configuration, and the traced nodal hierarchy matches GAMG on the `[k, ω]` block
+  (2 restart cycles against 2). It was also the GPU dead end the traced hierarchies exist to avoid, and it
+  never ran in CI (no wheels), so its tests checked nothing on any required gate.
+- **UMFPACK only made a narrow tool faster.** The complete LU is exact but its fill walls out in 3D; it
+  stays, on SuperLU, which is markedly slower to factor (72.7 s at reach 5 on pitzDaily). If a fast exact
+  factorization is ever wanted again, a non-PETSc UMFPACK binding (`scikit-umfpack`) could slot into
+  `CompleteLuInverse` — untried.
+- **What is lost:** PETSc GAMG as an independent reference to check the traced multigrid against, and
+  every PETSc-arm measurement in the rules files becomes un-re-runnable. Recover the code from git history
+  before 2026-10-10. The PETSc-only harnesses (`petsc_free_march.py`, `preconditioner_sweep.py`,
+  `zero_pattern_pivots.py`, `inner_iterate_probe.py`) went with it.
 
 ## Local (staged) AD assembly of the coupled Jacobian, and the materialized-`J` matvec it was to enable — REFUTED / CLOSED (2026-10-07)
 
@@ -767,7 +786,7 @@ data model. Each had nothing in `validation/` or any test selecting it.
   a per-matvec callback: 1 host iteration against ~90 on the identical system (no configuration
   recorded), but it marched slower per step and refused `field_split`, which both flagship cases run.
   The reason recorded for the slower march (the default path over-solving to machine zero) was stale.
-  With it went `AmgVCycle.solve_exact`, `MonolithicAmgPreconditioner.exact_solve`, and every
+  With it went `MonolithicVCycleInverse.solve_exact`, `MonolithicVCyclePreconditioner.exact_solve`, and every
   `has_exact_solve` / `solves_exactly_on_host` branch.
 
 - **The scheduled refresh cadence on `amg_beta_tracking_refresh` — DELETED, dominated by the cost
@@ -785,13 +804,13 @@ data model. Each had nothing in `validation/` or any test selecting it.
   β = 0.9364; every escalated step whose V-cycle *was* rebuilt came back with α ≥ 0.595. So "the retry
   ladder is futile" and "the ladder was never given a matched preconditioner" were never separated.
 - **The field split's PETSc blocks — DELETED, and with them `leading_options` / `trailing_options` /
-  `trailing_smoother_sweeps` and the `build_amg_vcycle` fallback.** A split now requires both
+  `trailing_smoother_sweeps` and the `monolithic_vcycle_inverse` fallback.** A split now requires both
   `leading_inverse` and `trailing_inverse`. Neither flagship case selected a PETSc split block. On the
   trailing half the traced `jacobi` inverse beat the host GAMG V-cycle in a controlled `bfs3d` pair,
   2124 s / 67 steps against 2893 s / 72 to the same `x_r/h` 8.36 (`zerogradient` k wall, 1e-08
   positivity floor; `solve-field-split.md`). On the leading half `petsc` stopped marching pitzDaily
   (§ "Incomplete-LU preconditioning of the pitzDaily flow block") and sat at parity with `hostilu` on
-  `bfs3d`; both cases ship `simplesmooth`. The monolithic `AmgVCycle` is unaffected.
+  `bfs3d`; both cases ship `simplesmooth`. The monolithic `MonolithicVCycleInverse` is unaffected.
 - **`flow_first=False` (the turbulence-first split, `_TrailingFirstFieldSplit`) — DELETED, never
   selected.** It tied flow-first on the forward operator (4 cycles each) and lost at the converged
   zero-shift operator, 13 against 11 (PETSc ILU(0) blocks on both halves, `bfs3d`;

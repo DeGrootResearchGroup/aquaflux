@@ -1,9 +1,9 @@
 """A block-triangular field-split preconditioner for the coupled flow-plus-transport Newton solve.
 
-The monolithic preconditioners in this package (:mod:`~aquaflux.solve.amg_preconditioner`,
-:mod:`~aquaflux.solve.lu_preconditioner`) treat the coupled
-Jacobian as one undifferentiated block. That is the right default, but it forces every field to share a
-single multigrid hierarchy and a single level smoother — and the six fields of a Reynolds-averaged solve
+A monolithic preconditioner (the complete LU, :mod:`~aquaflux.solve.lu_preconditioner`, or one block
+inverse over the whole state) treats the coupled Jacobian as one undifferentiated block. That forces
+every field to share one inverse -- for a multigrid inverse, a single hierarchy and a single level
+smoother — and the six fields of a Reynolds-averaged solve
 are not one kind of equation. Four of them, ``[u, v, w, p]``, form a pressure-velocity saddle; the other
 two, ``k`` and ``omega``, are advection-dominated transported scalars, one of them customarily solved in
 a logarithmic variable. A method tuned for the saddle is not thereby tuned for the scalars.
@@ -22,7 +22,7 @@ modelled. Two properties make this usable where a general composite precondition
   flexible.
 * **It is transposable in closed form**, which the implicitly-differentiated adjoint requires. The
   transpose of a block-lower-triangular inverse is the block-upper-triangular one built from the
-  transposed blocks, so :meth:`BlockTriangularFieldSplit.apply` serves the adjoint's transpose solve by
+  transposed blocks, so :meth:`FieldSplitInverse.apply` serves the adjoint's transpose solve by
   reversing the order of the two block solves and using ``C^T``.
 
 Dropping ``C`` entirely — a block-*diagonal* split — is a different and weaker object: it discards the
@@ -49,26 +49,26 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner
 from .hierarchy_inverse import HierarchyBlockInverse
-from .host_preconditioner import HostFactors, release, require_refactorable
+from .host_preconditioner import FrozenInverse, release, require_refactorable
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
-    air_multigrid_solve,
+    air_multigrid_cycles,
     build_air_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     refresh_air_hierarchy,
 )
 from .state import FieldLayout
 from .traced_cycle import TracedCycle
 
 __all__ = [
-    "BlockTriangularFieldSplit",
     "FieldGroups",
-    "FieldSplitAmgPreconditioner",
+    "FieldSplitInverse",
+    "FieldSplitPreconditioner",
     "JacobiSmoothedInverse",
-    "build_block_triangular_field_split",
+    "field_split_inverse",
 ]
 
 
@@ -243,7 +243,7 @@ class FieldGroups:
     def active_rows(self) -> np.ndarray:
         """Which field-pair blocks a block-triangular split over this partition ever applies.
 
-        A block-triangular inverse (:class:`BlockTriangularFieldSplit`) fits one inverse per diagonal
+        A block-triangular inverse (:class:`FieldSplitInverse`) fits one inverse per diagonal
         block plus **one** off-diagonal triangle -- the other is never read, whatever the operator or the
         state. This is that fact as the ``(n_fields, n_fields)`` boolean table
         :class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`'s ``active_rows`` wants, so a caller
@@ -262,12 +262,12 @@ class FieldGroups:
         return active
 
 
-class BlockTriangularFieldSplit:
+class FieldSplitInverse:
     """A block-triangular approximate inverse over a two-group field partition.
 
     A pure host object (numpy/scipy plus whatever the block inverses are), with the same
-    ``apply(residual, transpose=...)`` interface as :class:`~aquaflux.solve.AmgVCycle`, so it is a drop-in
-    wherever a frozen approximate inverse of the coupled operator is wanted.
+    ``apply(residual, transpose=...)`` interface as any frozen block inverse
+    (:class:`~aquaflux.solve.FrozenInverse`), so it is a drop-in wherever a frozen approximate inverse of the coupled operator is wanted.
 
     One application solves the leading group, corrects the trailing group's right-hand side by the
     retained coupling, and solves the trailing group::
@@ -286,10 +286,10 @@ class BlockTriangularFieldSplit:
 
     Parameters
     ----------
-    leading, trailing : HostFactors
+    leading, trailing : FrozenInverse
         The two block inverses, each over its own group's degrees of freedom. A refresh additionally needs
-        each to be a :class:`~aquaflux.solve.RefactorableFactors`, which
-        :class:`~aquaflux.solve.HierarchyBlockInverse` and :class:`AirBlockInverse` are.
+        each to be a :class:`~aquaflux.solve.RefactorableInverse`, which
+        :class:`~aquaflux.solve.HierarchyBlockInverse` and :class:`AirReductionInverse` are.
     coupling : scipy.sparse matrix
         The retained off-diagonal block, mapping the **leading** group's degrees of freedom to the
         **trailing** group's equations, shape ``(n_trailing_dofs, n_leading_dofs)``. Taken from the
@@ -300,20 +300,20 @@ class BlockTriangularFieldSplit:
     Raises
     ------
     TypeError
-        If either block inverse is not a :class:`~aquaflux.solve.HostFactors`.
+        If either block inverse is not a :class:`~aquaflux.solve.FrozenInverse`.
     ValueError
         If ``coupling`` does not have the shape the partition implies.
     """
 
     def __init__(
         self,
-        leading: HostFactors,
-        trailing: HostFactors,
+        leading: FrozenInverse,
+        trailing: FrozenInverse,
         coupling: sp.spmatrix,
         groups: FieldGroups,
     ) -> None:
         for name, inverse in (("leading", leading), ("trailing", trailing)):
-            if not isinstance(inverse, HostFactors):
+            if not isinstance(inverse, FrozenInverse):
                 raise TypeError(
                     f"the {name} block inverse {type(inverse).__name__} is not a frozen inverse: it must "
                     "offer `n_dofs` and `apply(residual, *, transpose=...)`."
@@ -397,7 +397,7 @@ class BlockTriangularFieldSplit:
         operator's values.
 
         This is the same capability, under the same name, that each block inverse offers, so a split is
-        itself a :class:`~aquaflux.solve.RefactorableFactors` and refreshes through the same path as a
+        itself a :class:`~aquaflux.solve.RefactorableInverse` and refreshes through the same path as a
         single block inverse.
 
         Parameters
@@ -428,13 +428,13 @@ class BlockTriangularFieldSplit:
         release(self._trailing)
 
 
-def build_block_triangular_field_split(
+def field_split_inverse(
     matrix: sp.spmatrix,
     groups: FieldGroups,
     *,
-    leading_inverse: Callable[[sp.csr_matrix, int], HostFactors],
-    trailing_inverse: Callable[[sp.csr_matrix, int], HostFactors],
-) -> BlockTriangularFieldSplit:
+    leading_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+    trailing_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+) -> FieldSplitInverse:
     """Build a block-triangular field split, fitting each diagonal block with its own injected inverse.
 
     Each factory is handed its own group's diagonal block and field count, so each block is fitted within
@@ -453,16 +453,16 @@ def build_block_triangular_field_split(
         ``(sub_matrix, n_fields_in_group) -> inverse`` for that block -- for example
         :class:`~aquaflux.solve.SimpleSmoothed` on a pressure-velocity saddle and
         :class:`~aquaflux.solve.JacobiSmoothed` on a pair of transported scalars. The returned
-        object must be a :class:`~aquaflux.solve.HostFactors`, be a fixed linear map (the outer Krylov
+        object must be a :class:`~aquaflux.solve.FrozenInverse`, be a fixed linear map (the outer Krylov
         solve is not flexible) and transpose exactly (the adjoint's solve uses it).
 
     Returns
     -------
-    BlockTriangularFieldSplit
+    FieldSplitInverse
         The frozen preconditioner.
     """
     leading_block, _, trailing_by_leading, trailing_block = groups.blocks(matrix)
-    return BlockTriangularFieldSplit(
+    return FieldSplitInverse(
         leading_inverse(leading_block, groups.n_leading_fields),
         trailing_inverse(trailing_block, groups.n_trailing_fields),
         trailing_by_leading,
@@ -470,33 +470,26 @@ def build_block_triangular_field_split(
     )
 
 
-class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
-    """The field split as JAX matvecs, sharing the materialized-Jacobian machinery with the monolithic PC.
+class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
+    """The field split as JAX matvecs, over the shared materialized-Jacobian machinery.
 
-    A sibling of :class:`~aquaflux.solve.amg_preconditioner.MonolithicAmgPreconditioner` over the shared
-    :class:`~aquaflux.solve.amg_preconditioner.MaterializedJacobianPreconditioner` base (#287), rather than
-    a subclass of the monolithic class itself: only the coloured jvp probe that materializes the coupled
-    Jacobian, the shift-diagonal add, the ``jax.pure_callback`` matvec (which reads ``self.factors`` at
-    call time, so an in-place refresh re-preconditions the same compiled solve) and the teardown are
-    genuinely shared — those live on the base. Everything the monolithic class builds *from* one
-    :class:`~aquaflux.solve.AmgVCycle` (the fixed-pattern cell-major assembler) is monolithic-only, and
-    inheriting it forced this class to declare two smoother parameters on its own refresh that a split's
-    construction never reads.
-
-    The monolithic path equilibrates and reorders the **whole** matrix to cell-major before handing it to
-    one V-cycle; a split leaves any such preparation to each block's own injected inverse, because the two
-    groups have different field counts and different scales. That is why the shift/equilibrate/reorder
-    assembler the monolithic refresh precomputes has no counterpart here.
+    Built on :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which holds the coloured jvp
+    probe that materializes the coupled Jacobian, the shift-diagonal add and the in-place refresh; the
+    ``jax.pure_callback`` matvec (which reads ``self.inverse`` at call time, so an in-place refresh
+    re-preconditions the same compiled solve) and the teardown come from
+    :class:`~aquaflux.solve.HostPreconditioner`. Any preparation of a block -- equilibration, reordering
+    -- is left to that block's own injected inverse, because the two groups have different field counts
+    and different scales.
 
     .. warning::
-       ``refresh_in_place`` is forward-march only, for the same reason as the monolithic class's: the
+       ``refresh_in_place`` is forward-march only: the
        mutation is impure and would corrupt an adjoint transpose solve that read the inverse between its
        own calls.
     """
 
     def __init__(
         self,
-        split: BlockTriangularFieldSplit,
+        split: FieldSplitInverse,
         groups: FieldGroups,
     ) -> None:
         super().__init__(split)
@@ -515,12 +508,12 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
         shift_diagonal: np.ndarray,
         groups: FieldGroups,
         *,
-        leading_inverse: Callable[[sp.csr_matrix, int], HostFactors],
-        trailing_inverse: Callable[[sp.csr_matrix, int], HostFactors],
+        leading_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+        trailing_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
-    ) -> FieldSplitAmgPreconditioner:
+    ) -> FieldSplitPreconditioner:
         """Materialize the coupled Jacobian, shift it, and fit a split to it.
 
         Parameters
@@ -533,18 +526,18 @@ class FieldSplitAmgPreconditioner(MaterializedJacobianPreconditioner):
             The partition to split on.
         leading_inverse, trailing_inverse : callable
             ``(sub_matrix, n_fields_in_group) -> inverse`` for that block, exactly as
-            :func:`build_block_triangular_field_split` takes them. An injected inverse must be a
-            :class:`~aquaflux.solve.RefactorableFactors` to survive a mid-march refresh.
+            :func:`field_split_inverse` takes them. An injected inverse must be a
+            :class:`~aquaflux.solve.RefactorableInverse` to survive a mid-march refresh.
 
         Returns
         -------
-        FieldSplitAmgPreconditioner
+        FieldSplitPreconditioner
             The frozen preconditioner.
         """
         jacobian = cls._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
-        split = build_block_triangular_field_split(
+        split = field_split_inverse(
             cls._shifted(jacobian, shift_diagonal),
             groups,
             leading_inverse=leading_inverse,
@@ -581,7 +574,7 @@ def _jacobi_smoothed_cycle(
     :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` passes through; this family reads the
     levels alone, so it is always ``None`` and is accepted only to keep the two cycles one shape.
     """
-    return convection_multigrid_solve(
+    return convection_multigrid_cycles(
         hierarchy,
         residual,
         cycles=smoother.cycles,
@@ -716,7 +709,7 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
 def _air_cycle(hierarchy: AirHierarchy, b: jnp.ndarray, settings: _AirStep) -> jnp.ndarray:
     """A fixed number of lAIR V-cycles. Module-level, with the hierarchy an argument, so it is compiled
     once per shape and settings and a refresh that holds the shapes reuses it."""
-    return air_multigrid_solve(
+    return air_multigrid_cycles(
         hierarchy,
         b,
         cycles=settings.cycles,
@@ -743,7 +736,7 @@ class _AirStep:
         return _air_cycle(hierarchy, b, self)
 
 
-class AirBlockInverse:
+class AirReductionInverse:
     """A block inverse from a **reduction-based** (lAIR) hierarchy over the whole group.
 
     The alternative to :class:`JacobiSmoothedInverse` for a transported-scalar block. Both coarsen cells

@@ -39,7 +39,20 @@ import lineax as lx
 
 
 def default_linear_solver() -> lx.AbstractLinearSolver:
-    """A general-purpose matrix-free solver (restarted GMRES) with tight tolerances."""
+    """A general-purpose matrix-free solver (restarted GMRES) with tight tolerances.
+
+    It keeps ``lineax``'s own restart length (20) and stagnation budget (20 cycles). It is the fallback
+    for every adjoint transpose solve, and no single restart length is cheaper across the operators
+    those solves meet: ``lineax`` always completes a restart cycle before testing convergence, and needs
+    one further cycle to see the solution stop moving, so a longer restart is a higher floor on an easy
+    solve and pays only on a hard one. Measured with ``validation/adjoint_gmres_restart.py`` (restart 10,
+    20, 40, 80): on a skewed lid-driven cavity of 432 to 3072 unknowns, restart 20 was the cheapest at
+    every size, and 80 cost 1.3 to 2.1 times as long; on a 2800-unknown turbulent
+    channel, 40 and 80 were about 10 % and 30 % faster than 20, and 10 stagnated. Every converged arm
+    gave the same gradient. An operator that needs a far larger budget (a three-dimensional coupled
+    saddle) passes its own ``adjoint_solver``; raising this default would not reach it and would slow
+    every easy solve.
+    """
     return lx.GMRES(rtol=1e-10, atol=1e-10)
 
 

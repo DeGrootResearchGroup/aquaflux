@@ -36,9 +36,9 @@ def test_the_multigrid_surface_is_complete() -> None:
         "build_smoothed_hierarchy",
         "build_convection_hierarchy",
         "build_air_hierarchy",
-        "smoothed_multigrid_solve",
-        "convection_multigrid_solve",
-        "air_multigrid_solve",
+        "smoothed_multigrid_cycles",
+        "convection_multigrid_cycles",
+        "air_multigrid_cycles",
         "SmoothedHierarchy",
         "AirHierarchy",
     }
@@ -53,15 +53,10 @@ def test_the_multigrid_surface_is_complete() -> None:
 #: reviewable instead of invisible. Adding a row is cheap and deliberate; the guard below is what stops
 #: the list growing by accident.
 VALIDATION_INTERNAL_REACHES = {
-    # The fixed-pattern shift/equilibrate/reorder assembler. It holds no PETSc, no V-cycle and no jax,
-    # so it is not really the AMG's -- but it has no better home yet, so it is not exported either.
-    "ShiftedCellMajorOperator",
     # The march's lock-up predicate, replayed over archived march logs to check a candidate rule fires
     # on the runs that stalled and on nothing that recovered. Replaying a private predicate is the
     # whole point of that harness, so this one is unlikely ever to become public.
     "_limit_collapsing",
-    # The square-root-diagonal scale alone, without the reorder `equilibrate_cell_major` pairs it with.
-    "equilibration_scale",
     # The aggregation's internals, reached by the harness that measured whether equilibration changes
     # the graph the coarsening sees (it does not -- 0.03% of edges). Running the real `_cell_graph` /
     # `_aggregation_edges` / `_mis_aggregate` is the point: a re-implementation would have measured a
@@ -110,7 +105,7 @@ def test_the_study_harnesses_take_exported_names_from_the_package_surface() -> N
     """The boundary guard above scans ``aquaflux/`` only, and the boundary eroded where it does not look.
 
     ``validation/`` held 12 deep imports of names ``__all__` already advertises -- ``restart_cycles``,
-    ``MonolithicAmgPreconditioner``, ``symmetrically_equilibrate`` -- so the design record's claim that
+    ``MonolithicVCyclePreconditioner``, ``symmetrically_equilibrate`` -- so the design record's claim that
     the boundary "cannot erode silently" was true only of the directory under guard. These harnesses are
     the project's re-adjudication instruments, so a rename inside a preconditioner breaks a study rather
     than a test, which is the more expensive failure and the later-discovered one.

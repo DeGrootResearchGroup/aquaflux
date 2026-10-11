@@ -411,8 +411,8 @@ def decouple_dof(a: sp.csr_matrix, index: int) -> sp.csr_matrix:
 # consumer applies the two together -- a factorization or a coarsening wants the matrix both
 # unit-diagonal and grouped by cell, and `equilibrate_cell_major` below is exactly that pair.
 #
-# Consumed by the monolithic multigrid V-cycle (`amg_preconditioner.py`); the complete LU needs neither
-# (its own fill-reducing pivoting and ordering already handle the indefinite saddle).
+# The complete LU needs neither (its own fill-reducing pivoting and ordering already handle the
+# indefinite saddle).
 
 
 def cell_major_permutation(n_cells: int, n_fields: int) -> np.ndarray:
@@ -504,11 +504,10 @@ def equilibrate_cell_major(
     perm = cell_major_permutation(n_dofs // n_fields, n_fields)
     reordered = equilibrated[perm][:, perm].tocsr()
     # Canonical form, because the permutation above leaves each row's column indices OUT OF ORDER and a
-    # consumer that assumes ascending indices then reads the wrong entries. PETSc's AIJ format is exactly
-    # such a consumer: handed this matrix unsorted, a point-block-Jacobi preconditioner returns NaN in
-    # most entries while a point-Jacobi one is unaffected -- a diagonal scan does not care about column
-    # order, a block extraction does. That asymmetry looks precisely like a broken block method and is
-    # not, so the ordering is established here rather than left to each caller to remember. `sort_indices`
+    # consumer that assumes ascending indices then reads the wrong entries. A block extraction is such a
+    # consumer where a diagonal scan is not, so an unsorted matrix makes a point-block method fail while
+    # a point method works -- which looks precisely like a broken block method and is not. The ordering
+    # is therefore established here rather than left to each caller to remember. `sort_indices`
     # is a no-op on an already-canonical matrix, so callers that sort defensively cost nothing.
     reordered.sort_indices()
     return reordered, scale, perm
