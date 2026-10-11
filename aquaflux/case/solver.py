@@ -39,6 +39,7 @@ from aquaflux.solve import (
     LinearSolverSpec,
     LinearSolveSettings,
     MarchLogger,
+    MarchRecorder,
     MaterializedJacobian,
     Resumption,
     RetryPolicy,
@@ -87,19 +88,19 @@ class SolverSpec(abc.ABC):
     :class:`RadiationSolve`."""
 
     @abc.abstractmethod
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """The observer keywords that attach ``logger`` and ``recorder`` to this solve.
 
         Parameters
         ----------
         logger : MarchLogger
             Writes one row per outer step.
-        recorder : object or None
-            Records each step for a program to read: anything with the march hooks
-            ``on_checkpoint(report, state)``, ``on_retry(reason, attempt, beta)`` and
-            ``on_refresh(timing)``, and an ``on_residuals`` that is ``{equation: term} -> None``, or
-            ``None`` when nothing wants the per-equation residuals (each costs a residual evaluation
-            per step). ``None`` for no recorder.
+        recorder : MarchRecorder or None
+            Records each step for a program to read; its ``on_residuals`` is ``None`` when nothing wants
+            the per-equation residuals (each costs a residual evaluation per step). ``None`` for no
+            recorder.
 
         Returns
         -------
@@ -272,14 +273,18 @@ class _March(SolverSpec):
                 f"{type(self).__name__}.max_steps must be >= 1, got {self.max_steps!r}."
             )
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """Each step and retry to the log and the recorder, inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
         observers = {
-            "on_checkpoint": _both(logger.on_checkpoint, recorder, "on_checkpoint"),
-            "on_retry": _both(logger.on_retry, recorder, "on_retry"),
+            "on_checkpoint": _both(
+                logger.on_checkpoint, None if recorder is None else recorder.on_checkpoint
+            ),
+            "on_retry": _both(logger.on_retry, None if recorder is None else recorder.on_retry),
         }
-        if (on_residuals := getattr(recorder, "on_residuals", None)) is not None:
-            observers["on_residuals"] = on_residuals
+        if recorder is not None and recorder.on_residuals is not None:
+            observers["on_residuals"] = recorder.on_residuals
         # The inner-loop observer exists only with an inner loop to observe; the step refuses it otherwise.
         if self.dual_time is not None:
             observers["inner_observer"] = logger.on_inner
@@ -292,9 +297,9 @@ class _March(SolverSpec):
         )
 
 
-def _both(log: Callable, recorder: object | None, hook: str) -> Callable:
-    """The march hook ``hook`` as the log's ``log`` and then, when there is one, the recorder's."""
-    return log if recorder is None else combine_observers(log, getattr(recorder, hook))
+def _both(log: Callable, recorded: Callable | None) -> Callable:
+    """One march hook as the log's ``log`` and then, when there is a recorder, its ``recorded``."""
+    return log if recorded is None else combine_observers(log, recorded)
 
 
 #: The viscosity a ramp station scales, by the name a file gives it; unset leaves the ramp's own.
@@ -474,12 +479,16 @@ class CoupledMarch(_March):
         if self.continuation is not None:
             raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """The march's, the preconditioner's refreshes and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
         observers = super().observers_for(logger, recorder)
         if isinstance(self.preconditioner, MaterializedJacobian):
             observers["session_options"] = {
-                "observer": _both(logger.on_refresh, recorder, "on_refresh")
+                "observer": _both(
+                    logger.on_refresh, None if recorder is None else recorder.on_refresh
+                )
             }
         if self.continuation is not None:
             observers["point_setup"] = lambda companion, seed_state, point: logger.note(
@@ -763,7 +772,9 @@ class Segregated(SolverSpec):
             if value is not None and not isinstance(value, family):
                 raise TypeError(f"Segregated.{name} got {value!r}.")
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """None: the segregated loop takes no observer -- see :meth:`SolverSpec.observers_for`."""
         del logger, recorder
         return {}
@@ -875,7 +886,9 @@ class RadiationSolve(SolverSpec):
         if self.rtol is not None and not 0.0 < self.rtol < 1.0:
             raise ValueError(f"RadiationSolve.rtol must lie in (0, 1), got {self.rtol!r}.")
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """The log's notes, one line as each stage starts; there are no steps to record."""
         del recorder
         return {"report": logger.note}

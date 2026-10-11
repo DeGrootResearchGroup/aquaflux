@@ -16,11 +16,17 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 from aquaflux.solve import (
     DEFAULT_SHIFT_BASIS,
+    Convergence,
+    DualTimeLoop,
     FieldSplit,
+    Globalization,
     JacobiSmoothed,
+    LinearSolveSettings,
     LocalCourantBasis,
     MaterializedJacobian,
+    MergeableSettings,
     SimpleSmoothed,
+    filled_from,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -111,6 +117,42 @@ def test_a_point_s_shift_value_is_merged_field_by_field_over_the_shared_one() ->
     assert merged["shift"].turbulence_damping == 2.0  # the point's own wins where it sets one
     assert merged["rtol"] == 1e-8  # a loose keyword is a plain override
     assert merged_march_options(base, {})["shift"] is base["shift"]
+
+
+@dataclasses.dataclass(frozen=True)
+class _OtherSettings:
+    """A partial configuration of no shipped family, which merges by declaring ``filled_from``."""
+
+    first: int | None = None
+    second: int | None = None
+
+    def filled_from(self, base):
+        return filled_from(self, base)
+
+
+@dataclasses.dataclass(frozen=True)
+class _PlainValue:
+    """A value with unset-looking fields that does not declare a merge, so it replaces."""
+
+    first: int | None = None
+    second: int | None = None
+
+
+def test_the_options_merge_whatever_declares_it_merges_and_replace_everything_else() -> None:
+    for value in (
+        CoupledShiftSettings(),
+        LinearSolveSettings(),
+        Convergence(),
+        DualTimeLoop(),
+        Globalization(),
+    ):
+        assert isinstance(value, MergeableSettings), type(value).__name__
+    merged = merged_march_options(
+        {"other": _OtherSettings(first=1), "plain": _PlainValue(first=1)},
+        {"other": _OtherSettings(second=2), "plain": _PlainValue(second=2)},
+    )
+    assert merged["other"] == _OtherSettings(first=1, second=2)
+    assert merged["plain"] == _PlainValue(second=2)
 
 
 def test_the_reynolds_continuation_merges_a_point_s_shift_over_the_shared_one(monkeypatch) -> None:

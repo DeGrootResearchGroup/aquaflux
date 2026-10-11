@@ -7,6 +7,10 @@ following a run that has not finished. One row per observed step, holding every 
 that the report does not carry -- the preconditioner refits it paid for, why it was redone, and its
 residual split by equation -- flushed as it is written, so the file is a complete record of the march
 up to its last line however the run ends.
+
+:class:`MarchRecorder` declares what such a recorder offers -- every march hook it can be handed -- so
+a runner fanning the hooks out to several recorders asks for the capability with ``isinstance`` rather
+than looking each hook up by name, which would skip a misspelled one without a word.
 """
 
 from __future__ import annotations
@@ -16,12 +20,38 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from .refresh_timing import RefreshTiming
 from .strategy import StepReport
 
-__all__ = ["StepHistory"]
+__all__ = ["MarchRecorder", "StepHistory"]
+
+
+@runtime_checkable
+class MarchRecorder(Protocol):
+    """A recorder of a whole march: every step, every retry, every preconditioner refit and, when it
+    wants them, the per-equation residuals.
+
+    A recorder offering only some of these -- a checkpointer, which keeps states and nothing else -- is
+    handed ``on_checkpoint`` alone. ``on_residuals`` may be ``None``: each per-equation report costs a
+    residual evaluation per step, so a recorder that does not want them says so rather than being asked.
+    """
+
+    on_residuals: Callable[[Mapping[str, float]], None] | None
+
+    def on_checkpoint(self, report: StepReport, state: Any) -> None:
+        """Record one accepted step and the state it reached."""
+        ...
+
+    def on_retry(self, reason: str, attempt: int, beta: float) -> None:
+        """Record that the step under way is being redone, why, and at what shift."""
+        ...
+
+    def on_refresh(self, timing: RefreshTiming) -> None:
+        """Record a preconditioner refit and what it cost."""
+        ...
+
 
 #: The prefix of a per-equation residual column: ``residual_of_u``, ``residual_of_omega``, ...
 EQUATION_PREFIX = "residual_of_"
@@ -191,7 +221,9 @@ class StepHistory:
 
 def _cell(value: object) -> str:
     """One value as CSV text: a boolean as ``0``/``1``, a float by its shortest exact repr."""
-    # A report's numbers may be NumPy or JAX scalars, whose own repr names their type.
+    # A report's numbers may be NumPy or JAX scalars, whose own repr names their type. Asked by the
+    # one method both share rather than by type, so this module needs neither library: it is how an
+    # array scalar is recognized, not a capability any class of this package declares.
     if hasattr(value, "item"):
         value = value.item()
     if isinstance(value, bool):

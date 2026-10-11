@@ -4407,6 +4407,32 @@ stages); losing the Morton order fails `test_clusters_are_compact_rather_than_ar
 every unusable member also has a cone cosine at or below the floor, so its own half-angle already pushes
 the enclosing cap to a right angle and flags the cluster — and the guard stays as the explicit rule.
 
+### MEASURED AND DECIDED (#474): merging coplanar triangles into convex patches is NOT built
+
+The idea: clip each source against a flat wall's convex patch instead of each of its triangles.
+`validation/silhouette_patch_saving.py` records the exact (receiver, source, blocker) triples a real
+build hands the clip, regroups them by patch (coplanar, edge-connected, same facing, a convex tiling),
+and times the build's stages. Configuration: `7972225`, jax 0.11.2, numba 0.68.0, CPU, x64, Linux
+x86_64, 4 cores, 15 GB, nothing else running, one run each, 2026-10-10; default `SilhouetteOcclusion()`
+(4 threads) for the counts, `silhouette_stages` at 1 thread; receivers at facet centroids.
+
+- **The clip is only 12.0% of a 3,184-facet build** (19.6 / 15.6 / 12.5% at 832 / 1,532 / 2,448), after
+  #527's second stage passes 4.3% of the culled pairs; the cull (device 23.5% + host 23.5%) and the
+  reject (20.7%) dominate. Deleting the clip outright would buy at most ~1.14x.
+- **Box reactor: 2.5-2.75x fewer clip items, but only 1.3-1.9x fewer edge-plane stages** — a patch of
+  `k` corners is `k` stages against a triangle's 3, and the sleeve's caps become 16-28-gons. Realistic
+  saving **~3-7% of the build**. The merged counts are a LOWER bound on a merged build's items (a
+  patch's cone and second-stage tests are looser than its members'), so this is the best case.
+- **Icosphere vessel (no coplanar facets): 1.02-1.06x**, as expected; finding patches costs <= 0.06 s.
+  ⚠️ **A faceted tube (a CAD cylinder in full-length flat strips) merges like the box: 2.9-3.2x items** —
+  "curved" geometry from a CAD reader is not curved to this test.
+- **`overlapping` barely sharpens**: at 3,184 facets 1.67M of 1.83M covered pairs flagged by triangles,
+  1.25M by patches — most flagged pairs have several genuinely distinct blockers, so this is no
+  substitute for #477's precise detector.
+- **Not measured**: patches as blockers in the CULL and REJECT (~68% of the build). From inside the
+  box a whole wall subtends most of a hemisphere, so the cone cull would discard far less; settling it
+  needs building the merge, which the clip numbers do not justify.
+
 
 ## THE SCENE: LAMPS KEPT OUT OF THE TRANSFER, AS A LIBRARY FUNCTION (2026-10-05)
 
