@@ -63,7 +63,6 @@ from aquaflux.turbulence import (
     CoupledShiftSettings,
     DirectScalars,
     LogScalars,
-    ScalarAir,
     ScalarTwoLevel,
     SSTModel,
     SSTTurbulence,
@@ -87,9 +86,7 @@ from aquaflux.turbulence.coupled import (
     coupled_jacobian_probe,
     coupled_rans_layout,
     frozen_production_viscosity,
-    mass_flow_coupled_continuation,
     solve_coupled,
-    solve_coupled_mass_flow,
     wall_consistent_state,
 )
 from aquaflux.turbulence.measures import coupled_scaled_norm
@@ -164,9 +161,18 @@ def _mass_flow_cavity(n=6):
     return _cavity(n, drive=MassFlow(target=U_LID))
 
 
+def _mass_flow_step(coupled, reference_state, **settings):
+    """:func:`coupled_step` on a ``MassFlow``-driven case: the step its drive borders.
+
+    The same builder as every other family -- a held bulk velocity is a property of the problem, not of
+    the step -- named apart only so :func:`_case_for` hands it the case it needs.
+    """
+    return coupled_step(coupled, reference_state, **settings)
+
+
 def _case_for(builder, n=4):
     """The cavity a builder can be handed: the bordered one needs a ``MassFlow``-driven assembler."""
-    return _mass_flow_cavity(n) if builder is mass_flow_coupled_continuation else _cavity(n)
+    return _mass_flow_cavity(n) if builder is _mass_flow_step else _cavity(n)
 
 
 def _healthy_state(mesh, coupled, seed=0):
@@ -343,9 +349,9 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "positivity_floor",
         "positivity_projection",
     }
-    # One builder for every preconditioner family now, plus the bordered mass-flow sibling -- so the
-    # surfaces that used to drift across four builders are one signature and one sibling.
-    builders = (coupled_step, mass_flow_coupled_continuation)
+    # One builder for every preconditioner family and for a held bulk velocity alike -- so the surfaces
+    # that used to drift across five builders are one signature.
+    builders = (coupled_step,)
     for builder in builders:
         missing = shared - set(inspect.signature(builder).parameters)
         assert not missing, f"{builder.__name__} cannot be given {sorted(missing)}"
@@ -376,7 +382,7 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
         "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
-        "mass flow": mass_flow_coupled_continuation(
+        "mass flow": coupled_step(
             mass_flow_coupled,
             mass_flow_state,
             preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
@@ -387,10 +393,12 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
 
 
 def test_each_solve_measures_the_residual_it_can_measure() -> None:
-    """The coupled residual supports every measure; the bordered mass-flow residual has no row-scaled one.
+    """The coupled residual supports every measure, and so does it bordered by a held bulk velocity.
 
-    Its border row holds the constraint, which has no diagonal to equilibrate by, so a row-scaled
-    measure there would misreport it. Refused by name rather than computed wrongly.
+    The bordered measures are the coupled ones plus one block: the constraint row, which the row-scaled
+    measure reads as the fraction by which the bulk velocity misses its target (it has no diagonal to
+    equilibrate by, so it is scaled by the speed held instead), and the block-scaled one gives the flow
+    block's scale.
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
@@ -403,78 +411,81 @@ def test_each_solve_measures_the_residual_it_can_measure() -> None:
 
     mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity()
     mass_flow_state = _healthy_state(mass_flow_mesh, mass_flow_coupled)
-    drive = mass_flow_coupled.momentum.drive
-    bordered = drive.join(mass_flow_coupled.layout, mass_flow_state, jnp.asarray(0.0))
-    mass_flow = coupled_module._MassFlowMeasures(mass_flow_coupled)
-    with pytest.raises(TypeError, match=r"RowScaled.*border row"):
-        mass_flow.row_scaled(step, bordered)
-    # The multiplier shares the flow block's scale, so the bordered measure has one more block.
-    assert mass_flow.block_scaled(bordered).sizes == (*mass_flow_coupled.layout.sizes, 1)
-
-
-def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None:
-    """The bordered solve eliminates ``beta`` around a block-diagonal preconditioner, and only that.
-
-    A materialized Jacobian has no constraint row, so its inverse would precondition a system other than
-    the one solved. Refused before anything is built, so this needs no factorization.
-    """
-    mesh, coupled = _mass_flow_cavity(4)
-    state = _healthy_state(mesh, coupled)
-    with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
-        mass_flow_coupled_continuation(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu())
-        )
-
-
-@pytest.mark.parametrize(
-    "configuration",
-    [
-        {"preconditioner": BlockDiagonal(scalar=ScalarAir())},
-        {"reference_state": "state"},
-        {"dual_time": DualTimeLoop(inner_steps=3)},
-    ],
-    ids=["preconditioner", "reference_state", "march setting"],
-)
-def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuation(
-    configuration: dict,
-) -> None:
-    """Configuration for a step the solve is not building is refused, not dropped.
-
-    A finished ``strategy`` already carries its preconditioner, reference and march settings, so
-    passing any of them beside it used to reach nothing: an lAIR scalar block beside a two-level step
-    ran two-level, with no error. The refusal comes before the initial condition is built.
-    """
-    mesh, coupled = _mass_flow_cavity(4)
-    state = _healthy_state(mesh, coupled)
-    continuation = mass_flow_coupled_continuation(
-        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    border = coupled_module.coupled_border(mass_flow_coupled)
+    bordered_step = coupled_step(
+        mass_flow_coupled,
+        mass_flow_state,
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
     )
-    given = {name: state if value == "state" else value for name, value in configuration.items()}
-    with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
-        solve_coupled_mass_flow(coupled, strategy=continuation, **given)
+    augmented = border.attach(mass_flow_state)
+    bordered = border.measures(coupled_module._CoupledMeasures(mass_flow_coupled))
+    unbordered_step = eqx.tree_at(
+        lambda s: s.shift_policy, bordered_step, bordered_step.shift_policy.inner
+    )
+    unbordered = coupled_module._CoupledMeasures(mass_flow_coupled).row_scaled(
+        unbordered_step, mass_flow_state
+    )
+    row = bordered.row_scaled(bordered_step, augmented)
+    assert row.sizes == (*unbordered.sizes, 1)
+    assert row.names == (*unbordered.names, "bulk_velocity")
+    # The field rows are measured exactly as the unbordered residual's are...
+    residual = jax.random.normal(jax.random.PRNGKey(3), (augmented.size,))
+    assert jnp.allclose(row.per_block(residual)[:-1], unbordered.per_block(residual[:-1]))
+    # ...and the constraint row as a miss of the bulk velocity relative to the target.
+    miss = jnp.zeros(augmented.size).at[-1].set(0.3 * U_LID)
+    assert float(row.per_block(miss)[-1]) == pytest.approx(0.3)
+    block = bordered.block_scaled(augmented)
+    assert block.sizes == (*mass_flow_coupled.layout.sizes, 1)
+    assert float(block.scales[-1]) == float(block.scales[0])
 
 
-def test_the_constrained_solve_hands_a_resumption_to_its_root_solve(monkeypatch) -> None:
-    """``resume`` is the interrupted march's history, and it must reach the march that uses it."""
-    from aquaflux.solve import RootSolver
+def test_a_bulk_velocity_refuses_a_materialized_preconditioner() -> None:
+    """The force is eliminated around a block-diagonal preconditioner, and only that.
 
+    A materialized Jacobian has no row or column for the force, so its inverse would precondition a
+    system other than the one solved. Refused before anything is built, so this needs no factorization.
+    """
+    mesh, coupled = _mass_flow_cavity(4)
+    state = _healthy_state(mesh, coupled)
+    with pytest.raises(TypeError, match="holds a bulk velocity"):
+        coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
+
+
+def test_a_bulk_velocity_solve_marches_the_augmented_state_and_hands_on_its_resumption(
+    monkeypatch,
+) -> None:
+    """A held bulk velocity reaches the staged march as one more unknown, with everything else unchanged.
+
+    The march is handed the fields with the drive's force appended, a residual of that augmented state,
+    and the solve's own ``resume`` -- the same driver an unconstrained solve runs on, which is what makes
+    every setting of the march reachable from a held bulk velocity.
+    """
     mesh, coupled = _mass_flow_cavity(4)
     state = _healthy_state(mesh, coupled)
     seen = []
 
-    def stop_at_the_call(self, residual_fn, phi0, theta, **kwargs):
-        seen.append(kwargs)
+    def stop_at_the_call(residual_fn, phi0, **kwargs):
+        seen.append((residual_fn, phi0, kwargs))
         raise StopIteration
 
-    monkeypatch.setattr(RootSolver, "solve", stop_at_the_call)
-    continuation = mass_flow_coupled_continuation(
-        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
-    )
+    monkeypatch.setattr(coupled_module, "staged_march", stop_at_the_call)
     history = Resumption(reference_residual=0.25, damping_reference=0.5)
-    for given in ({}, {"resume": history}):
-        with pytest.raises(StopIteration):
-            solve_coupled_mass_flow(coupled, strategy=continuation, **given)
-    assert seen == [{"resume": None}, {"resume": history}]
+    flow, k, omega = coupled.physical_fields(state)
+    with pytest.raises(StopIteration):
+        solve_coupled(
+            coupled,
+            flow,
+            k,
+            omega,
+            preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+            resume=history,
+        )
+    ((residual_fn, phi0, kwargs),) = seen
+    drive = coupled.momentum.drive
+    assert phi0.shape == (coupled.layout.size + 1,)
+    assert float(phi0[-1]) == float(drive.force)
+    assert residual_fn(phi0).shape == phi0.shape
+    assert kwargs["resume"] is history
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
@@ -1730,7 +1741,7 @@ def _split_step(coupled, state, **march):
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
+    [_block_step, _lu_step, _split_step, _mass_flow_step],
     ids=["block", "lu", "split", "mass flow"],
 )
 def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
@@ -1749,7 +1760,7 @@ def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(b
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
+    [_block_step, _lu_step, _split_step, _mass_flow_step],
     ids=["block", "lu", "split", "mass flow"],
 )
 def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
@@ -1941,7 +1952,7 @@ def test_every_continuation_builder_defaults_to_the_per_entry_positivity_project
     Pinned on every builder together: a default that reverts on one of them reverts silently, and
     the failure it re-arms shows up as a step length rather than as an error.
     """
-    for builder in (coupled_step, mass_flow_coupled_continuation):
+    for builder in (coupled_step,):
         got = inspect.signature(builder).parameters["positivity_projection"].default
         assert got is True, f"{builder.__name__} defaults positivity_projection to {got!r}"
 

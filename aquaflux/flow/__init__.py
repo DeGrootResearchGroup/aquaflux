@@ -43,6 +43,15 @@ from .continuation import (
 from .march import flow_march_step, open_flow_session, solve_flow_march
 from .measures import FlowMeasures, flow_equation_names, flow_row_scales
 from .initialization import bernoulli_pressure, laplace_field, potential_flow
+from .bordered import (
+    BorderedFlowResidual,
+    BorderedMeasures,
+    BorderedResidual,
+    BorderedShiftPolicy,
+    MassFlowBorder,
+    bordered_preconditioner,
+    mass_flow_border,
+)
 from .mean_velocity import bulk_velocity_flow_solve
 from .scales import body_force_velocity, characteristic_velocity, reference_speed, wetted_length
 from .momentum import FlowFields, MomentumContinuity, PressureForce, VelocityFields
@@ -52,6 +61,10 @@ from .rhie_chow import interior_mass_flux, momentum_diagonal, volume_flux
 
 __all__ = [
     "BlockPreconditioner",
+    "BorderedFlowResidual",
+    "BorderedMeasures",
+    "BorderedResidual",
+    "BorderedShiftPolicy",
     "BoundaryDriven",
     "ConvectionAir",
     "ConvectionTwoLevel",
@@ -61,6 +74,7 @@ __all__ = [
     "FlowMeasures",
     "FrozenViscosityVelocityParts",
     "MassFlow",
+    "MassFlowBorder",
     "MomentumContinuity",
     "MomentumShiftPolicy",
     "MomentumSource",
@@ -77,6 +91,7 @@ __all__ = [
     "ViscousMultilevel",
     "bernoulli_pressure",
     "body_force_velocity",
+    "bordered_preconditioner",
     "bulk_velocity_flow_solve",
     "characteristic_velocity",
     "damped_jacobi_solve",
@@ -86,6 +101,7 @@ __all__ = [
     "frozen_momentum_diagonal_parts",
     "interior_mass_flux",
     "laplace_field",
+    "mass_flow_border",
     "mass_flow_drive",
     "momentum_continuation",
     "momentum_diagonal",

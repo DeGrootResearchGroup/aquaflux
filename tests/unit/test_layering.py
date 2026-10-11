@@ -46,10 +46,11 @@ BUDGETS = {
     # solve drivers. Everything residual-agnostic has moved out: the staged driver and step tail, the
     # materialized-Jacobian session, the coloured probe and the monolithic shift policy to ``solve/``;
     # the mass-flow border -- layout, seed, constraint vectors and bulk-velocity average -- to
-    # ``flow/drive.py``; the row-scaled measure with its equation names to ``turbulence/measures.py``.
+    # ``flow/drive.py``, and its bordered residual, shift policy and measures to ``flow/bordered.py``
+    # (which also let the separate mass-flow solve and builder go); the row-scaled measure with its equation names to ``turbulence/measures.py``.
     # What stays of the session and the probe are their RANS adapters (``_CoupledProblem``,
     # ``_CoupledNarrowing``) and the block-diagonal session, a preconditioner family of its own.
-    "turbulence/coupled.py": 3196,
+    "turbulence/coupled.py": 2933,
 }
 
 

@@ -173,6 +173,8 @@ def body_force_speed(
 def body_force_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     """The uniform plug a body force sustains, shape ``(dim,)`` — :func:`body_force_speed` directed.
 
+    A drive holding a bulk velocity (:class:`~aquaflux.flow.MassFlow`) states the plug exactly, and that
+    is returned instead: its force is a solve unknown whose starting value says nothing of the speed.
     Zero when the domain carries no body force (or has no wetted wall to balance one against), so a
     caller can use a non-zero result as the test for "this domain is body-force-driven".
 
@@ -186,6 +188,11 @@ def body_force_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     jnp.ndarray
         The plug velocity vector, shape ``(dim,)``.
     """
+    # A drive holding a bulk velocity states the plug exactly; the force it carries is only where the
+    # solve for the force starts, and may be zero.
+    held = assembler.drive.held_velocity(assembler.mesh.dim)
+    if held is not None:
+        return held
     force = assembler.uniform_body_force()
     magnitude = jnp.linalg.norm(force)
     if float(magnitude) == 0.0:

@@ -110,7 +110,8 @@ inside `J` decides only how fast the inexact-Newton iteration reaches whichever 
 is the same latitude the `0.3` already takes. **`R` determines the answer; `J` determines only the rate.**
 
 **BUILT: `jacobian_gradient_sweeps` on all four coupled builders** (`coupled_continuation`,
-`coupled_lu_continuation`, `coupled_amg_continuation`, `mass_flow_coupled_continuation`) →
+`coupled_lu_continuation`, `coupled_amg_continuation`, `mass_flow_coupled_continuation` — all four since
+folded into `coupled_step`, the last in #541, which borders the stand-in for a held bulk velocity) →
 `_coupled_step` → `ShiftedStep.jacobian_residual` → `_shifted_solve(jacobian_fn=…)`. It narrows the
 gradient's sweeps in the copy of the residual the Krylov **operator** is differentiated from, via the
 same `narrow_gradient_sweeps` the probe already uses. `None` everywhere is byte-identical. It is a

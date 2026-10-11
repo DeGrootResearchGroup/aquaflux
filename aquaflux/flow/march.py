@@ -59,8 +59,8 @@ from aquaflux.solve import (
     stop_array_gradients,
 )
 
+from .bordered import BorderedFlowResidual, mass_flow_border
 from .continuation import momentum_shift_only_policy, momentum_shift_policy
-from .drive import refuse_a_constraint_this_solve_cannot_hold
 from .initialization import potential_flow
 from .measures import FlowMeasures
 from .momentum import MomentumContinuity
@@ -140,10 +140,17 @@ def flow_march_step(
         reference_state=reference_state,
         **dict(preconditioner_options or {}),
     )
+    adjoint_factory = policy.preconditioner.factory()
+    # A held bulk velocity appends the force to the state: the policy and its adjoint preconditioner are
+    # bordered around the block-SIMPLE one, which is what eliminates the force in each linear solve.
+    border = mass_flow_border(momentum, momentum.layout)
+    if border is not None:
+        policy = border.policy(policy)
+        adjoint_factory = policy.adjoint_factory()
     return _flow_shifted_step(
         momentum,
         policy,
-        policy.preconditioner.factory(),
+        adjoint_factory,
         base_regime=_FLOW_LINEAR_SOLVE,
         globalization=globalization,
         dual_time=dual_time,
@@ -183,12 +190,22 @@ def _flow_shifted_step(
         adjoint_preconditioner_factory=adjoint_preconditioner_factory,
         inner_observer=inner_observer,
         inner_refresh=inner_refresh,
-        jacobian_residual=(
-            None
-            if jacobian_gradient_sweeps is None
-            else narrow_gradient_sweeps(momentum, jacobian_gradient_sweeps).residual
-        ),
+        jacobian_residual=_jacobian_residual(momentum, jacobian_gradient_sweeps),
     )
+
+
+def _jacobian_residual(
+    momentum: MomentumContinuity, jacobian_gradient_sweeps: int | None
+) -> Callable[[jnp.ndarray], jnp.ndarray] | None:
+    """The residual the forward Jacobian is differentiated from, or ``None`` for the march's own.
+
+    Bordered like the march's residual when the drive holds a bulk velocity, so the two apply to one state.
+    """
+    if jacobian_gradient_sweeps is None:
+        return None
+    residual = narrow_gradient_sweeps(momentum, jacobian_gradient_sweeps).residual
+    border = mass_flow_border(momentum, momentum.layout)
+    return residual if border is None else border.residual(residual)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -336,6 +353,13 @@ def open_flow_session(
             "a flow session is opened for a MaterializedJacobian(...); the block-SIMPLE "
             "preconditioner is built by the march itself. Got "
             f"{type(preconditioner).__name__}."
+        )
+    if mass_flow_border(momentum, momentum.layout) is not None:
+        raise TypeError(
+            "this flow holds a bulk velocity, whose solved body force borders the state with a dense row "
+            "and column a materialized Jacobian does not have, so no materialized inverse can be fitted "
+            "to it yet. Use the block-SIMPLE preconditioner (preconditioner=None), which the border is "
+            "eliminated around."
         )
     return MaterializedSession(
         preconditioner,
@@ -512,7 +536,6 @@ def solve_flow_march(
         If a step-configuring setting is passed where the step is not built here.
     """
     refuse_a_transform_the_march_cannot_run_in((momentum, state), caller="solve_flow_march")
-    refuse_a_constraint_this_solve_cannot_hold(momentum, "solve_flow_march")
     frozen = stop_array_gradients(momentum)
     given = dict(march)
     if preconditioner_options is not None:
@@ -532,8 +555,19 @@ def solve_flow_march(
             march,
         )
     state = potential_flow(frozen) if state is None else stop_array_gradients(state)
+    # A held bulk velocity appends the force to the state and borders the residual, its measures and
+    # every homotopy station; the step is bordered where it is built, from the fields alone.
+    border = mass_flow_border(frozen, frozen.layout)
+    residual, measures = frozen.residual, FlowMeasures(frozen)
+    if border is not None:
+        state, source = border.attach(state), border.source(source)
+        residual, measures = border.residual(residual), border.measures(measures)
+        homotopy = border.homotopy(homotopy)
+        if on_checkpoint is not None:
+            observe = on_checkpoint
+            on_checkpoint = lambda report, augmented: observe(report, border.detach(augmented))  # noqa: E731
     staged = staged_march(
-        frozen.residual,
+        residual,
         state,
         strategy=strategy,
         source=source,
@@ -541,7 +575,7 @@ def solve_flow_march(
         convergence=(
             _FLOW_CONVERGENCE if convergence is None else convergence.filled_from(_FLOW_CONVERGENCE)
         ),
-        measures=FlowMeasures(frozen),
+        measures=measures,
         max_steps=max_steps,
         step_control=step_control,
         on_step=on_step,
@@ -554,10 +588,11 @@ def solve_flow_march(
         on_residuals=on_residuals,
         caller="solve_flow_march",
     )
-    return root_adjoint(
-        assembler_residual,
+    root = root_adjoint(
+        assembler_residual if border is None else BorderedFlowResidual(),
         staged.state,
         momentum,
         adjoint_solver=adjoint_solver,
         adjoint_preconditioner=staged.strategy.adjoint_preconditioner(),
     )
+    return root if border is None else border.detach(root)

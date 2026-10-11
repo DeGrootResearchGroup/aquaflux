@@ -198,14 +198,10 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 ## What a file cannot describe yet — and where each goes
 
 - **A starting state on a mesh that is not an OpenFOAM one** — `Fields` is the cells of an OpenFOAM case in its own numbering, so it refuses any other `MeshSource`; the only cross-check is the cell count.
-- **A laminar case holding a bulk velocity (#541)** — `FlowMarch` refuses one (`solve_flow_march` refuses a
-  `MassFlow` drive) and there is no laminar segregated solve; `bulk_velocity_flow_solve` exists but is a
-  bordered Newton, not a march.
-- **A coupled march holding a bulk velocity (#541)** — `CoupledMarch` refuses one and points at `Segregated`.
-  `solve_coupled_mass_flow` exists, but it is the older `RootSolver` path: `BlockDiagonal` only, no dual
-  time, no retry, no step control, no ramp. Routing a file there would publish a surface that silently
-  cannot take half the section's settings; the gap is the library's (#277/#448 made the march generic but
-  not the bordered constraint).
+- **A held bulk velocity beside a `MaterializedJacobian` preconditioner (#541)** — `FlowMarch` and
+  `CoupledMarch` hold a `BulkVelocity` since #541 (the library marches border themselves; see `flow.md`,
+  "A held bulk velocity on every march"), but only with the block preconditioners; a materialized one is
+  refused when the file is read (`_March._refuse_a_border_the_preconditioner_lacks`, from `refuse_for`).
 - **A graded or periodic 3D structured grid** — `structured_grid_3d` has neither, so a 3D `StructuredGrid`
   (three counts, three lengths; patches `left/right/bottom/top/back/front`) is uniform and refuses both.
   It was 2D only until a radiation case needed a small box (2026-10-05).
@@ -289,8 +285,9 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   `solve_reynolds_ramp` when `continuation` is set; `FlowMarch` → `solve_flow_march`; `Segregated` →
   `solve_segregated` (flow solve `bulk_velocity_flow_solve` under a `MassFlow` drive, else
   `reused_flow_solve`; scalar solve `scalar_pseudo_transient_solve`; start `sst_initial_fields`). Each
-  refuses the physics it does not solve (`refuse_for(physics, drive)`, run in `CaseSpec.__post_init__`) and
-  the two marches refuse a `BulkVelocity` drive, which they would hold at its starting force.
+  refuses the physics it does not solve (`refuse_for(physics, drive)`, run in `CaseSpec.__post_init__`).
+  All three hold a `BulkVelocity` drive (the two marches since #541, by bordering their state); a march
+  refuses one only beside a `MaterializedJacobian` preconditioner.
 - **The shared march settings are ONE dataclass, `_March`, that both marches derive from** — `max_steps`,
   `convergence`, `preconditioner`, `dual_time`, `linear_solve`, `step_control`, `retry` — so a setting added
   there reaches both (Principle 2's sibling rule, at the file surface). `CoupledMarch` adds the closure's:
@@ -338,7 +335,7 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   before `run()` starts, so an error from inside a solve still surfaces as a traceback rather than as a
   one-line "refused file".
 - **`prepare_run` is the cheap stop**: read, refuse an occupied output directory (or an existing
-  `OpenFOAMTime` target), resolve the solver (a bulk-velocity case with no solver is refused HERE), check
+  `OpenFOAMTime` target), resolve the solver, check
   the mesh, and read the `initial` state against it — all before any geometry. **What counts as occupied
   has one home, `run._plan`**, shared with **`plan_run(path) -> RunPlan(directory, log, history,
   occupied)`** (2026-10-07), which answers the same question without checking the mesh; `aquaflux plan
@@ -522,8 +519,8 @@ by construction), and not passing `drive` (the only nameable drive is the builde
     march from the fields. `run.yaml`'s `initial.resumption` holds the three numbers (null when not
     carried). ⚠️ A `dual_time` loop is not part of the digest, so a checkpoint written without one and
     resumed with one carries a shift of `None` (the record's `0.0`), and the control opens at its own start.
-  - **Library seam: `resume=` on `solve_flow_march`, `solve_coupled`, `staged_march`, `RootSolver.solve`
-    and `solve_coupled_mass_flow`.** `staged_march` applies the reference as the stopping scale, the anchor
+  - **Library seam: `resume=` on `solve_flow_march`, `solve_coupled`, `staged_march` and
+    `RootSolver.solve`.** `staged_march` applies the reference as the stopping scale, the anchor
     as the **first segment's** damping reference (a later segment follows a refresh and re-bases as in any
     march) and the shift through the control's `resumed_at(shift)` when the control has one — a march with
     no control, or a control without the hook, has no shift to seed and starts afresh. `RootSolver.solve`
@@ -533,10 +530,11 @@ by construction), and not passing `drive` (the only nameable drive is the builde
     shift — there is no previous report to adapt it from, the treatment a refresh boundary gets.
     ⚠️ **Still not carried:** a march resumed is a new march for the refresh BUDGET (`refresh.limit` starts
     over) and for a retry's escalated β beyond the shift it ended on.
-  - ⚠️ **Nothing produces a `Resumption` for `RootSolver` or `solve_coupled_mass_flow` but a script:** a
-    `RootSolver` march exposes no observer, so no checkpoint of one exists to read it from, and a
-    case file reaches neither (`CoupledMarch` refuses a bulk velocity; `Segregated` resumes nothing). The seam
-    is there so the capability is reachable from every residual, not because a case file uses it.
+  - ⚠️ **Nothing produces a `Resumption` for `RootSolver` but a script:** a `RootSolver` march exposes no
+    observer, so no checkpoint of one exists to read it from, and a case file never reaches one. A march
+    holding a bulk velocity checkpoints its *fields* (the force is not part of the record) and a restart
+    re-solves the force from the drive's seed; its reference residual, measured in the bordered measure,
+    is carried like any other.
   - Pinned by `tests/integration/test_flow_march.py` (a resume with the reference reproduces the steps
     that followed it, residual and ratio to 1e-8 and the root to 1e-9, against a control that does not;
     the reference moves the stopping target; the anchor reaches the first segment and the reports say so;

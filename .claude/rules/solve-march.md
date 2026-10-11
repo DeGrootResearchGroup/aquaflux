@@ -276,7 +276,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     remaining home for. What it costs is `jit`/`vmap`: a Python loop cannot run under either, so every
     entry point refuses them up front through
     `refuse_a_transform_the_march_cannot_run_in(pytree, caller=…)`, which lives **here** in `march.py`
-    and is called by `RootSolver.solve`, `solve_coupled` and `solve_coupled_mass_flow`. That
+    and is called by `RootSolver.solve`, `solve_coupled` and `solve_flow_march`. That
     was decided, not discovered: nothing in the repository `vmap`s a solve, and the four library builders
     that jitted one did so for compile-cache reuse, which the `filter_jit`-compiled `_march_step` gives
     them anyway (see `solve.md`'s `implicit.py` entry for the residual-identity condition that keeps).
@@ -319,7 +319,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
     - **Resuming a march (2026-10-07; shift and anchor 2026-10-08): `resume=Resumption(...)` on `staged_march`,
-      `solve_flow_march`, `solve_coupled`, `RootSolver.solve` and `solve_coupled_mass_flow`, built on
+      `solve_flow_march`, `solve_coupled` and `RootSolver.solve`, built on
       `newton_march(reference_norm=, damping_reference=)`.** A march resumed at a state re-measures
       `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta reopens at `beta0` — the reason a
       resumed default march did not continue the interrupted one (the memoryless SER schedule holds no other

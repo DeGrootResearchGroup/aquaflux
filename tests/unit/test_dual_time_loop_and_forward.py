@@ -15,6 +15,7 @@ import inspect
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
 from aquaflux.solve import (
+    FACTORIZATION_LINEAR_SOLVE,
     CompleteLu,
     DualTimeLoop,
     DualTimeStep,
@@ -25,11 +26,7 @@ from aquaflux.solve import (
     resolve_linear_solve,
 )
 from aquaflux.turbulence import BlockDiagonal, UnpreconditionedScalars, coupled_step, open_session
-from aquaflux.turbulence.coupled import (
-    _BLOCK_LINEAR_SOLVE,
-    _CONSTRAINED_LINEAR_SOLVE,
-    mass_flow_coupled_continuation,
-)
+from aquaflux.turbulence.coupled import _BLOCK_LINEAR_SOLVE
 from aquaflux.turbulence.march_settings import merged_march_options
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state, _mass_flow_cavity
@@ -52,7 +49,7 @@ def case():
 
 
 def test_every_coupled_builder_takes_the_values_and_none_of_the_keywords_they_replaced() -> None:
-    for builder in (coupled_step, mass_flow_coupled_continuation):
+    for builder in (coupled_step,):
         parameters = set(inspect.signature(builder).parameters)
         assert {"dual_time", "linear_solve"} <= parameters, builder.__name__
         assert not parameters & set(_RETIRED), builder.__name__
@@ -76,7 +73,7 @@ def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_singl
 
 
 @pytest.mark.parametrize(
-    "base", [_BLOCK_LINEAR_SOLVE, _CONSTRAINED_LINEAR_SOLVE], ids=["block", "constrained"]
+    "base", [_BLOCK_LINEAR_SOLVE, FACTORIZATION_LINEAR_SOLVE], ids=["block", "factorization"]
 )
 @pytest.mark.parametrize(
     "fields",
@@ -135,7 +132,7 @@ def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:
     assert dual.krylov_solver.restart == 30
     assert type(coupled_step(coupled, state, preconditioner=spec)) is PseudoTransientStep
     mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity(4)
-    mass_flow = mass_flow_coupled_continuation(
+    mass_flow = coupled_step(
         mass_flow_coupled,
         _healthy_state(mass_flow_mesh, mass_flow_coupled),
         preconditioner=spec,

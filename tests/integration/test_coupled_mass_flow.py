@@ -36,11 +36,16 @@ from aquaflux.mesh import graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import relative_residual_gmres
-from aquaflux.turbulence import BlockDiagonal, ScalarAir, ScalarTwoLevel, SSTModel, SSTTurbulence
-from aquaflux.turbulence.coupled import (
+from aquaflux.turbulence import (
+    BlockDiagonal,
     CoupledRANS,
-    mass_flow_coupled_continuation,
-    solve_coupled_mass_flow,
+    ScalarAir,
+    ScalarTwoLevel,
+    SSTModel,
+    SSTTurbulence,
+    coupled_step,
+    held_force,
+    solve_coupled,
 )
 
 RHO, U_B, H = 1.0, 1.0, 2.0  # target bulk velocity U_B along x
@@ -97,11 +102,12 @@ def case():
     coupled = CoupledRANS.build(momentum, turbulence)
     # No initial state: the constrained solve self-starts from the exactly-symmetric uniform plug
     # (u_y == 0), so this exercises the guarded-sqrt strain fix directly.
-    flow, k, omega, beta = solve_coupled_mass_flow(
+    flow, k, omega = solve_coupled(
         coupled,
         preconditioner=BlockDiagonal(scalar=ScalarAir(), **FLOW_BLOCK),
         max_steps=MAX_STEPS,
     )
+    beta = held_force(coupled, flow, k, omega)
     return {
         "mesh": mesh,
         "momentum": momentum,
@@ -153,11 +159,12 @@ def test_constrained_fixed_point_is_amg_method_independent(case) -> None:
     coupled = case["coupled"]
     flow_air, k_air, omega_air, beta_air = case["solution"]
 
-    flow_tl, k_tl, omega_tl, beta_tl = solve_coupled_mass_flow(
+    flow_tl, k_tl, omega_tl = solve_coupled(
         coupled,
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **FLOW_BLOCK),
         max_steps=400,
     )
+    beta_tl = held_force(coupled, flow_tl, k_tl, omega_tl)
 
     assert float(jnp.linalg.norm(flow_tl - flow_air) / jnp.linalg.norm(flow_air)) < 1e-6
     assert float(jnp.linalg.norm(k_tl - k_air) / jnp.linalg.norm(k_air)) < 1e-6
@@ -187,10 +194,11 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
     # implicit-function-theorem one, so it is given a solve strong enough to actually report that.
     adjoint_solver = relative_residual_gmres(1e-8, restart=120, stagnation_iters=200)
 
-    # Build the continuation once, outside jax.grad, on concrete parameters (the block preconditioner
-    # and the constraint border must not be traced); differentiate only the converged solve.
+    # Build the step once, outside jax.grad, on concrete parameters (the block preconditioner and the
+    # constraint border must not be traced); differentiate only the converged solve. The problem's own
+    # drive borders the step.
     reference_state = coupled.pack_state(flow_ws, k_ws, omega_ws)
-    continuation = mass_flow_coupled_continuation(
+    continuation = coupled_step(
         coupled,
         reference_state,
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **FLOW_BLOCK),
@@ -202,11 +210,11 @@ def test_constrained_coupled_adjoint_matches_finite_difference(case) -> None:
             coupled,
             coupled.turbulence.molecular_viscosity * nu_scale,
         )
-        _, k, _, _ = solve_coupled_mass_flow(
+        _, k, _ = solve_coupled(
             scaled,
-            flow=flow_ws,
-            k=k_ws,
-            omega=omega_ws,
+            flow_ws,
+            k_ws,
+            omega_ws,
             strategy=continuation,
             max_steps=40,
             adjoint_solver=adjoint_solver,

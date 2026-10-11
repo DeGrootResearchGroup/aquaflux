@@ -41,6 +41,7 @@ from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MassFlow, PinnedPoint
 from aquaflux.solve import (
     CflResidualDualTimeControl,
+    CompleteLu,
     Convergence,
     DirectSolve,
     DualTimeLoop,
@@ -359,33 +360,50 @@ def test_a_solver_that_cannot_solve_the_case_is_refused_when_the_file_is_read(
         case_spec_from_mapping(sections)
 
 
+def _bulk_velocity_case(physics, march) -> CaseSpec:
+    """The periodic channel held at its bulk velocity, under ``physics`` and solved by ``march``."""
+    return dataclasses.replace(
+        _periodic_rans(),
+        physics=physics,
+        boundaries={"bottom": Wall(), "top": Wall()},
+        # The numerics this physics reads: no turbulence scheme for a laminar case.
+        numerics=Numerics(
+            momentum_advection=FirstOrderUpwind(),
+            turbulence_advection=FirstOrderUpwind() if isinstance(physics, RANS) else None,
+        ),
+        solver=march,
+    )
+
+
 @pytest.mark.parametrize(
     ("physics", "march"),
     [(RANS(), CoupledMarch()), (Laminar(), FlowMarch())],
     ids=["coupled", "flow"],
 )
-def test_a_march_is_refused_a_bulk_velocity_it_would_leave_at_its_starting_force(
+def test_a_march_holds_a_bulk_velocity(physics, march) -> None:
+    """Both marches border their state with the solved force, so a held bulk velocity is accepted."""
+    assert _bulk_velocity_case(physics, march).solver == march
+
+
+@pytest.mark.parametrize(
+    ("physics", "march"),
+    [
+        (RANS(), CoupledMarch(preconditioner=MaterializedJacobian(CompleteLu()))),
+        (Laminar(), FlowMarch(preconditioner=MaterializedJacobian(CompleteLu()))),
+    ],
+    ids=["coupled", "flow"],
+)
+def test_a_march_holding_a_bulk_velocity_refuses_a_materialized_preconditioner(
     physics, march
 ) -> None:
-    with pytest.raises(
-        ValueError, match=r"cannot hold the bulk velocity the case's BulkVelocity drive"
-    ):
-        dataclasses.replace(
-            _periodic_rans(),
-            physics=physics,
-            boundaries={"bottom": Wall(), "top": Wall()},
-            # The numerics this physics reads: no turbulence scheme for a laminar case.
-            numerics=Numerics(
-                momentum_advection=FirstOrderUpwind(),
-                turbulence_advection=FirstOrderUpwind() if isinstance(physics, RANS) else None,
-            ),
-            solver=march,
-        )
-
-
-def test_a_coupled_march_refused_a_bulk_velocity_names_the_solve_that_holds_one() -> None:
-    with pytest.raises(ValueError, match=r"Solve it with a Segregated solver, which holds it"):
-        _periodic_rans(solver=CoupledMarch())
+    """The force's dense row and column have no place in a materialized Jacobian: said when read."""
+    with pytest.raises(ValueError, match=r"MaterializedJacobian preconditioner cannot be fitted"):
+        _bulk_velocity_case(physics, march)
+    # The same preconditioner beside no drive is accepted, so it is the drive being refused.
+    assert (
+        dataclasses.replace(_bulk_velocity_case(physics, None), drive=None, solver=march).solver
+        == march
+    )
 
 
 # --- the default solver --------------------------------------------------------------------------
@@ -408,11 +426,8 @@ def test_a_case_that_states_no_solver_runs_its_physics_march_with_the_librarys_s
     )
 
 
-def test_a_case_holding_a_bulk_velocity_must_name_its_solver() -> None:
-    with pytest.raises(
-        ValueError, match=r"the case states no solver, and its default cannot solve it"
-    ):
-        solver_for(_periodic_rans())
+def test_a_case_holding_a_bulk_velocity_runs_its_physics_march_by_default() -> None:
+    assert solver_for(_periodic_rans()) == CoupledMarch()
 
 
 # --- what a solve is handed ----------------------------------------------------------------------

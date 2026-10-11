@@ -764,10 +764,11 @@ def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -
     made a report into a gate — which is wrong twice over: whether a pair is one builder or two
     genuinely different methods is a judgement no script can make, and a green gate here was
     indistinguishable from a check that had stopped seeing anything at all. What is worth pinning is
-    that the coupled march's builders are still *visible* to it. There are two: ``coupled_step``, which
-    reaches its step through a preconditioner session's ``_build`` -- a method several classes define --
-    and the bordered mass-flow builder, which shares nearly all of its surface. The tool was once blind
-    to the first, and the family dropped out of the report entirely.
+    that the coupled march's builder is still *visible* to it: ``coupled_step`` reaches its step through a
+    preconditioner session's ``_build`` -- a method several classes define -- and pairs with the flow
+    march's own step builder, which shares its march surface. The tool was once blind to it, and the
+    family dropped out of the report entirely. (A bordered mass-flow builder was its pair until a held bulk
+    velocity became a property of the problem that ``coupled_step`` borders itself.)
     """
     result = subprocess.run(
         [sys.executable, str(TOOL)],
@@ -781,9 +782,7 @@ def test_the_package_report_still_reaches_the_coupled_builders(tmp_path: Path) -
         f"the report found no pairs at all, which is a check that has stopped seeing:\n{result.stdout}"
     )
     pairs = result.stdout.split("\n\n")
-    assert any(
-        " coupled_step\n" in pair and " mass_flow_coupled_continuation\n" in pair for pair in pairs
-    ), (
-        "the coupled march's two builders are not reported as a pair, so the tool has stopped seeing "
+    assert any(" coupled_step\n" in pair and " flow_march_step\n" in pair for pair in pairs), (
+        "the coupled and flow march builders are not reported as a pair, so the tool has stopped seeing "
         f"the family it exists for:\n{result.stdout}"
     )

@@ -250,9 +250,12 @@ its own viscosity the march integrates a long transient before the flow develops
 sweep at which it stops), `flow_solve` and `scalar_solve` ({class}`~aquaflux.case.RootSolve`:
 each Newton solve's `max_steps`, `convergence` and `linear_solver`, a
 {class}`~aquaflux.solve.GmresSolve` or a {class}`~aquaflux.solve.DirectSolve`), and
-`scalar_preconditioner`. It is the solve that holds a `BulkVelocity`: the two marches solve the
-fields with the force fixed, so they refuse one rather than converge at the force's starting
-guess.
+`scalar_preconditioner`.
+
+All three hold a `BulkVelocity`: the force is solved with the fields, so the bulk velocity is the
+target at the converged state. A march holding one is preconditioned by the block preconditioners
+(the default, or `BlockDiagonal` for `CoupledMarch`); a `MaterializedJacobian` has no row or column
+for the force and is refused when the file is read.
 
 ```yaml
 solver:
@@ -535,8 +538,6 @@ same rule a run refuses on, without checking the mesh.
 - **A starting state on a mesh that is not an OpenFOAM one** — `Fields` reads an OpenFOAM time
   directory onto that case's own mesh; there is no way yet to start from another program's fields on
   a generated grid.
-- **A laminar case holding a bulk velocity** — the flow march solves with the force fixed, and
-  no laminar solve holds the constraint from a file.
 
 ## Writing a case
 

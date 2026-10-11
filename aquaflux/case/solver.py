@@ -7,10 +7,12 @@ A case file's ``solver`` section names one of four solves, each the library solv
   (:class:`ViscosityRamp`, by :func:`~aquaflux.turbulence.solve_reynolds_ramp`);
 * :class:`FlowMarch` -- a laminar case marched as the flow system (:func:`~aquaflux.flow.solve_flow_march`);
 * :class:`Segregated` -- a Reynolds-averaged case solved by alternating the flow and the closure
-  (:func:`~aquaflux.turbulence.solve_segregated`), which is also the solve that holds a
-  :class:`~aquaflux.case.BulkVelocity` drive;
+  (:func:`~aquaflux.turbulence.solve_segregated`);
 * :class:`RadiationSolve` -- a radiation case's lamps and reflecting walls, the reflections closed by
   one linear solve (:func:`~aquaflux.radiation.solve_scene`).
+
+All three flow solves hold a :class:`~aquaflux.case.BulkVelocity` drive: the force is solved with the
+fields, so the bulk velocity is the target at the converged state.
 
 Every setting is optional unless its solve cannot run without it, and an unset one leaves the library
 solve's own default in force. What a solver section holds is settings, never a built solve: a march
@@ -206,16 +208,6 @@ def _refuse_physics(owner: str, physics: Physics, wanted: type, other: str) -> N
         )
 
 
-def _refuse_a_held_bulk_velocity(owner: str, drive: DriveSpec | None, other: str) -> None:
-    """Refuse a drive the march cannot hold: it marches the fields alone, so the force would stay fixed."""
-    if drive is not None:
-        raise ValueError(
-            f"solver: {owner} marches the fields alone, so it cannot hold the bulk velocity the "
-            f"case's {type(drive).__name__} drive asks for -- the force would stay at its starting "
-            f"guess. {other}"
-        )
-
-
 @dataclasses.dataclass(frozen=True)
 class _March(SolverSpec):
     """The settings every observed march takes, whatever residual it marches.
@@ -289,6 +281,19 @@ class _March(SolverSpec):
         if self.dual_time is not None:
             observers["inner_observer"] = logger.on_inner
         return observers
+
+    def _refuse_a_border_the_preconditioner_lacks(self, drive: DriveSpec | None) -> None:
+        """Refuse a materialized-Jacobian preconditioner beside a held bulk velocity.
+
+        The solved force borders the state with a dense row and column the materialized Jacobian has
+        no place for, so the march could not build its first step; said when the file is read instead.
+        """
+        if drive is not None and isinstance(self.preconditioner, MaterializedJacobian):
+            raise ValueError(
+                f"solver: {type(self).__name__} holds the case's bulk velocity by a solved force, which "
+                "a MaterializedJacobian preconditioner cannot be fitted around yet. Leave the "
+                "preconditioner unset (or, for a Reynolds-averaged case, use BlockDiagonal)."
+            )
 
     def _march_settings(self) -> dict[str, object]:
         """The set march settings, by the library solve's keyword -- each field's own name."""
@@ -435,7 +440,8 @@ class CoupledMarch(_March):
     Raises
     ------
     ValueError
-        If the case is not Reynolds-averaged, or holds a bulk velocity (see :class:`Segregated`).
+        If the case is not Reynolds-averaged, or holds a bulk velocity beside a materialized-Jacobian
+        preconditioner.
     """
 
     turbulence_damping: float | None = None
@@ -462,11 +468,12 @@ class CoupledMarch(_March):
         return super()._owned() | {"positivity_floor", "positivity_projection", "shift"}
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
-        """Refuse a laminar case, or one holding a bulk velocity -- see :meth:`SolverSpec.refuse_for`."""
+        """Refuse a laminar case, or a held bulk velocity beside a materialized-Jacobian preconditioner.
+
+        See :meth:`SolverSpec.refuse_for`.
+        """
         _refuse_physics("CoupledMarch", physics, RANS, "FlowMarch")
-        _refuse_a_held_bulk_velocity(
-            "CoupledMarch", drive, "Solve it with a Segregated solver, which holds it."
-        )
+        self._refuse_a_border_the_preconditioner_lacks(drive)
 
     def refuse_initial(self, initial: InitialState) -> None:
         """Refuse a starting state when the march is a ramp -- see :meth:`SolverSpec.refuse_initial`.
@@ -596,7 +603,8 @@ class FlowMarch(_March):
     Raises
     ------
     ValueError
-        If the case is Reynolds-averaged, or holds a bulk velocity.
+        If the case is Reynolds-averaged, or holds a bulk velocity beside a materialized-Jacobian
+        preconditioner.
     TypeError
         If the preconditioner is block-diagonal.
     """
@@ -618,11 +626,12 @@ class FlowMarch(_March):
             )
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
-        """Refuse a Reynolds-averaged case, or one holding a bulk velocity -- see :meth:`SolverSpec.refuse_for`."""
+        """Refuse a Reynolds-averaged case, or a held bulk velocity beside a materialized-Jacobian preconditioner.
+
+        See :meth:`SolverSpec.refuse_for`.
+        """
         _refuse_physics("FlowMarch", physics, Laminar, "CoupledMarch or Segregated")
-        _refuse_a_held_bulk_velocity(
-            "FlowMarch", drive, "A laminar case cannot hold one from a case file yet."
-        )
+        self._refuse_a_border_the_preconditioner_lacks(drive)
 
     def settings(self) -> dict[str, object]:
         """The keywords of :func:`~aquaflux.flow.solve_flow_march` this march sets.
@@ -957,22 +966,9 @@ def solver_for(spec: object) -> SolverSpec:
         :attr:`~aquaflux.case.CaseSpec.solver`, or unset, :class:`CoupledMarch` for a
         Reynolds-averaged case, :class:`FlowMarch` for a laminar one and :class:`RadiationSolve` for a
         radiation one.
-
-    Raises
-    ------
-    ValueError
-        If the case states no solver and that default cannot solve it -- a case holding a bulk
-        velocity must name its solve.
     """
     if spec.solver is not None:
         return spec.solver
     if isinstance(spec.physics, Radiation):
         return RadiationSolve()
-    solver = CoupledMarch() if isinstance(spec.physics, RANS) else FlowMarch()
-    try:
-        solver.refuse_for(spec.physics, spec.drive)
-    except ValueError as error:
-        raise ValueError(
-            f"the case states no solver, and its default cannot solve it: {error}"
-        ) from error
-    return solver
+    return CoupledMarch() if isinstance(spec.physics, RANS) else FlowMarch()

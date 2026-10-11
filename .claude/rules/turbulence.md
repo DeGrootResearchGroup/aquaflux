@@ -117,7 +117,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | `_SessionContinuation` | `solve.SessionSource` | shared with the flow march |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
 
-**Still here**: `open_session` and `_BlockSession` (the block-diagonal family is turbulence's own) and the mass-flow border. The materialized-Jacobian session, the probe, the monolithic shift policy and the specs have moved to `solve/`, and `solve_flow_march` uses them (`MaterializedJacobian` with `CompleteLu` or a bare `BlockInverse`). The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
+**Still here**: `open_session` and `_BlockSession` (the block-diagonal family is turbulence's own). The mass-flow border moved to `flow/bordered.py` (#541): `coupled_border` and `_BorderedCoupledResidual` are its coupled adapters. The materialized-Jacobian session, the probe, the monolithic shift policy and the specs have moved to `solve/`, and `solve_flow_march` uses them (`MaterializedJacobian` with `CompleteLu` or a bare `BlockInverse`). The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
 ⚠️ **Do not add a capability to the march here without checking `solve_flow_march` can reach it** — that is
 the drift this section exists to prevent (root `CLAUDE.md`, Principle 3.6).
 
@@ -137,7 +137,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `coupled_step(block_scaled_norm=True)` / `(residual_norm=m)`, the same on `mass_flow_coupled_continuation` | nothing on the builder: `solve_coupled(convergence=Convergence(measure=BlockScaled()))` (#370) |
 | `solve_reynolds_continuation(intermediate_rtol=…, intermediate_atol=…)` | `intermediate=Convergence(rtol=…, atol=…)`, unset fields from the target's `convergence`; `None` = no loosening (#370) |
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(scalar=S, velocity=…))` |
-| `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(scalar=S, **flow_opts)`; a `MaterializedJacobian` is refused there |
+| `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | both **deleted (#541)**: `coupled_step(coupled, state, preconditioner=BlockDiagonal(...))` and `solve_coupled(coupled, ...)` border themselves when `coupled.momentum.drive` is a `MassFlow`; the held force is `held_force(coupled, flow, k, omega)` |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default). `merged_march_options` merges any value that is a `solve.MergeableSettings` (`isinstance`, #669), not anything with a `filled_from` attribute |
 | `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
@@ -447,15 +447,10 @@ Many entries below are dated history written against the old API. Read them thro
       and `bfs3d` now exposes its preconditioner as `compare.PRECONDITIONER`. The array-identity tests
       that pinned the new path to the old builders were deleted with the builders. `CallerBuiltSource`
       stays: a `RefreshPolicy(builder=...)` is still a supported way to rebuild a caller's own step.
-    - **The mass-flow sibling takes a spec too.** `mass_flow_coupled_continuation` and
-      `solve_coupled_mass_flow` take `preconditioner: BlockDiagonal | None` in place of `method` +
-      `**preconditioner_kwargs`; a `MaterializedJacobian` is refused, because the bordered policy wraps a
-      block-diagonal composition and a materialized Jacobian has no constraint row. The bordered measure
-      and `_CONSTRAINED_LINEAR_SOLVE` stay local. **D10 is fixed:** `solve_coupled_mass_flow` refuses
-      `preconditioner` / `reference_state` / march keywords beside a finished `strategy` (through the
-      same `_refuse` as `solve_coupled`), where `method="air"` beside a twolevel step used to run twolevel
-      in silence. `_refuse_unknown_flow_block_options` is **deleted**: every flow-block option now
-      arrives from a spec whose fields are pinned to `BlockPreconditioner.build`, so it could not fire.
+    - **The mass-flow sibling is gone (#541): a held bulk velocity is `coupled_step` / `solve_coupled` on a
+      `MassFlow`-driven problem** (see the bulk-velocity entry under "The coupled solve"). A
+      `MaterializedJacobian` beside one is refused by `open_session`. `_refuse_unknown_flow_block_options`
+      is **deleted**: every flow-block option arrives from a spec pinned to `BlockPreconditioner.build`.
     - **Both flagship drivers were dry-run to their first step against the pre-migration drivers
       (2026-09-14), and match line for line.** Control: this branch's own commit `4eea966` (S3b), whose
       drivers still called the deleted builders — not an archived log, which is another branch's run.
@@ -482,16 +477,11 @@ Many entries below are dated history written against the old API. Read them thro
       Byte-identical wherever `jacobian_production_viscosity=False`.
     - **`_BlockSession.rebind` is a no-op** — target-viscosity behaviour on the ramp stays as it was
       (Q2, #386).
-    - **`tools/sibling_builders.py` reports `coupled_step` beside `mass_flow_coupled_continuation`
-      (fixed 2026-09-14, #392).** It was blind to `coupled_step` for the life of #371 — the call
+    - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
+      `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled
       family was absent from the report, which reads as clean. It now resolves the method on the classes
-      `open_session` returns. Both `only here` lists are now **empty**: `residual_norm` left
-      `coupled_step` with the measure's move to the solve (#370), and `flow_direction` left the
-      mass-flow builder when what is constrained became a property of the assembler's drive rather than
-      a keyword on the step (#375) — it is read from `coupled.momentum.drive`, so the two builders'
-      surfaces are identical. `test_sibling_builders.py` pins the pair, and
-      `test_every_continuation_builder_installs_the_same_globalization` still pins the two surfaces.
+      `open_session` returns. `test_sibling_builders.py` pins that it still sees `coupled_step`.
       It is the only pair the fix added; the mechanism, and the six invented pairs its first version
       reported before review, are in `CLAUDE.md`'s sibling-builder item.
   - **`solve_coupled(refresh=RefreshPolicy(trigger=…))` segments the march to re-freeze the preconditioner — and a refresh
@@ -563,13 +553,10 @@ Many entries below are dated history written against the old API. Read them thro
     meets head-on: the constrained adjoint is a transpose solve at β = 0 against `BlockPreconditioner`,
     the regime it is weakest in. The test now passes an explicit
     `relative_residual_gmres(1e-8, restart=120, stagnation_iters=200)`, so it reports the gradient it
-    claims to. **`solve_coupled_mass_flow` gained `adjoint_solver` to make that possible** — it was the
-    only coupled driver without it, the same capability drift as the four continuation builders.
+    claims to (through `solve_coupled(adjoint_solver=...)`, since #541 the one coupled driver).
     **Consequence for anyone measuring here: a mass-flow adjoint result is not a stable gate.** Any
     change that perturbs the warm state in its last bits — a preconditioner tweak, a library version,
     a different accelerator — can flip it, and the flip says nothing about the change.
-    (`mass_flow_coupled_continuation` / `solve_coupled_mass_flow`) has **no** staged refresh — thread
-    `reuse` through if that driver is added.
     - **The refresh, the per-step re-fit, controls and retries all work under `jax.grad` (2026-09-15,
       phase 2 of unifying the two Newton loops; this reverses a binding "raises under `jax.grad`").**
       `solve_coupled` runs its one march on `stop_array_gradients` copies of the assembler and the initial
@@ -584,7 +571,7 @@ Many entries below are dated history written against the old API. Read them thro
       `jax.vmap`, or a traced loop such as `lax.scan` -- where a
       stopped copy is still abstract — `refuse_a_transform_the_march_cannot_run_in` refuses that before
       any work (it moved to `solve/march.py` and took a `caller=` argument in phase 3, since
-      `RootSolver.solve` and `solve_coupled_mass_flow` now refuse on the same terms). A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
+      `RootSolver.solve` now refuses on the same terms). A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
       `jax.grad`) still refuses to build, since the session holds that assembler itself.
   - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
     receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
@@ -1438,10 +1425,9 @@ Many entries below are dated history written against the old API. Read them thro
       re-measured on those two families.** It is documented as such. The tolerance costs ~1.5× the
       plain-2-norm cycle count where it was measured; neither flagship case runs those builders (both
       build `coupled_amg_continuation` explicitly), so nothing on record was taken under it.
-    - **`mass_flow_coupled_continuation` is the one genuine exception and stays Euclidean at `1e-2`**,
-      because the row-equilibrated measure has no constraint-aware form — it would scale the border row
-      by a diagonal the constraint does not have. Its tolerance differs *because its measure does*; the
-      reason is recorded at `_CONSTRAINED_LINEAR_SOLVE` itself so it reads as a decision, not an omission.
+    - **The bordered (held bulk velocity) step takes the block regime too since #541** — its Euclidean
+      `1e-2` exception (`_CONSTRAINED_LINEAR_SOLVE`, deleted) existed only because there was no bordered
+      row-scaled measure; there is now (`flow.BorderedMeasures`).
     **`log(k+1)` does not fix this**: `k = e^w − 1` bounds `k > −1`, not `k > 0`, so the failure above is
     still reachable. It is regular at the wall (unlike `log k`) but that solves the other problem, not
     this one.
@@ -1489,8 +1475,8 @@ Many entries below are dated history written against the old API. Read them thro
     step, and the step's default linear solve stops in it (`relative_residual_gmres(norm=None)`). The builders
     take no measure keyword. **The frozen-at-build-state form, the old default, is deleted** — measured cheap to
     rebuild and needed by nothing; the evidence is in `solve.md`'s `convergence.py` entry.
-    (`solve_coupled_mass_flow` defaults to `Euclidean()`; its bordered `[flow, k, ω, β]` state has no
-    row-scaled form, which `_MassFlowMeasures` refuses by name.) **This does not *fix* the forward stall** —
+    (A held bulk velocity's bordered `[flow, k, ω, β]` state takes the same default since #541: the
+    constraint row is scaled by the held speed, `flow.BorderedMeasures`.) **This does not *fix* the forward stall** —
     the pitzDaily march is globalization-bound and plateaus under any measure (the row-scaled measure is the
     honest signal of that, where the Euclidean fall was a `β×travel` + `ω`-magnitude artifact). It makes the
     measure honest, and it is REQUIRED for the case to be judged correctly.
@@ -1921,40 +1907,42 @@ Many entries below are dated history written against the old API. Read them thro
     *reconstruction*, not to limiting. (Two genuine limiter defects were found in that audit and filed —
     a periodic-image inconsistency (#143) and the dimensionally inconsistent `eps²` softening (#144),
     both since fixed — but neither caused this, and neither was a convergence fix.)
-  - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
-    and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
-    and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too
-    (identity for `DirectScalars`, which is all the mass-flow tests exercise). Do not reintroduce a bare
+  - **The per-scalar transform is layout-consistent through the coupled solve (binding).** `solve_coupled`
+    maps the physical IC into the solved space with `state_from_physical` (before attaching a held force)
+    and returns `physical_fields` — so `LogScalars` is correct through a held bulk velocity too (identity
+    for `DirectScalars`, which is all the mass-flow tests exercise). Do not reintroduce a bare
     `pack_state`/`layout.unpack` at a solve boundary: it packs physical values as if they were the solved
     unknown, silently wrong under any non-identity transform.
-  - **`solve_coupled_mass_flow` — the coupled solve with the bulk velocity held by a Lagrange
-    multiplier (#128).** A streamwise-periodic channel is driven to a target bulk velocity `U_bar`, so
-    the body force `β` along the flow direction is itself a **coupled unknown** appended to the state
-    and the coupled residual bordered with the constraint row `⟨U_dir⟩ − U_bar = 0`: one honest
-    augmented residual `R_aug([flow…, k, ω, β]) = [R_coupled(state; β); ⟨U_dir⟩ − U_bar]`, driven by a
-    single `RootSolver` — which since 2026-09-15 (phase 3) marches eagerly like every other
-    solve, so this path too **refuses `jax.jit`/`jax.vmap`** and could be given the march's hooks
-    (observer, refresh, retries) that only `solve_coupled` passes today. Its bordered residual is
-    `_MassFlowConstrainedResidual`, a module rather than the closure it was, so a solver reused across
-    calls keeps one compiled step. The border column/row `(a, c)` and the Schur (constraint)
-    preconditioner are the flow block's own primitives (`MassFlow.constraint_vectors` / `join` /
-    `split` / `forced` in `flow/drive.py`, and `_bordered_preconditioner` in `flow/mean_velocity.py`)
-    reused in the coupled `[flow…, k, ω]` layout by `MassFlow.constraint_vectors_in` — the same Schur
-    elimination one careful place keeps consistent, not re-derived. What is being held, and along which
-    axis, is read off `coupled.momentum.drive`, so the constraint the step enforces and the force the
-    residual writes cannot name different targets; an assembler with no `MassFlow` drive is refused by
-    name (`_mass_flow_drive`) before anything is built. Globalized by `mass_flow_coupled_continuation`, which
-    borders the **same** `_coupled_shift_policy` the block-diagonal session builds (from a
-    `BlockDiagonal` spec, the only family it accepts) with a `_MassFlowBorderedPolicy`: the shift diagonal gains a **zero** for `β` (the linear
-    constraint row needs no pseudo-time damping) and the block preconditioner is wrapped by the
-    constraint preconditioner. Because the constraint lives *inside* the coupled residual, the coupled
-    IFT adjoint **carries it** — `jax.grad` through the converged constrained solve is the sensitivity
-    of the turbulent field *at fixed bulk velocity* (FD-verified). This is the monolithic counterpart of
-    the segregated bordered flow solve (`flow.bulk_velocity_flow_solve`): the segregated loop does **not**
-    converge on this body-force channel, so the constrained fixed point is cross-validated by two
-    independent AMG coarsenings (`air` ≡ `twolevel`, same `β`) — the periodic analogue of the inlet
-    coupled-vs-segregated cross-check. Pinned by `test_coupled_mass_flow.py` (constraint met + turbulent
-    + floors inactive; method-independence; the adjoint FD gate).
+  - **A held bulk velocity is `solve_coupled` on a `MassFlow`-driven problem (#128; one march since
+    #541).** A streamwise-periodic channel is driven to a target bulk velocity by a body force `β` that is
+    a **coupled unknown**: appended to the state, the residual bordered with `⟨U_dir⟩ − U_bar`. Until #541
+    this was a separate `RootSolver` path (`solve_coupled_mass_flow` over
+    `mass_flow_coupled_continuation`, **both deleted**) that reached none of the staged march's step
+    control, retry, refresh, homotopy or observers, and a case file could solve it only with `Segregated`.
+    Now `solve_coupled` asks `coupled_border(coupled)` (`flow.mass_flow_border` in the coupled layout) and,
+    given one, attaches the seed force, borders the residual / measures / drift measure / homotopy and
+    wraps the source so sessions build from the fields; `_BlockSession._step` borders its policy (and
+    unwraps it at a refresh, so the reuse path is the unbordered one); `_coupled_step` borders a
+    Jacobian stand-in. The root's adjoint is `_BorderedCoupledResidual` (theta-read border), so `jax.grad`
+    is the sensitivity *at fixed bulk velocity* (FD-verified in `test_coupled_mass_flow.py`). It returns
+    the fields; `held_force(coupled, flow, k, omega)` reads the force back as
+    `β₀ − a·R(fields; β₀)/a·a`, exact at a root because the force enters linearly. A
+    `MaterializedJacobian` beside one is refused (`open_session`). The design pieces are flow's — see
+    `.claude/rules/flow.md`, "A held bulk velocity on every march".
+    ⚠️ **"The segregated loop does not converge on this body-force channel"**, said here before, is a
+    property of `test_coupled_mass_flow.py`'s 48-cell fixture: on the law-of-the-wall case files the
+    file's `Segregated` solve converges (re20000: 47 sweeps), and the coupled march reaches the same root.
+    ⚠️ **Measured on the law-of-the-wall files (2026-10-11, #541; table and configuration in
+    `validation/turbulent_channel/README.md`, harness `mass_flow_march.py`): re20000 converges on the
+    staged march, and re240000 is converged by no coupled arm, before or after the move.** The staged march
+    reaches the segregated root to the printed digits. Under `Euclidean()` it costs about what the old
+    `RootSolver` path did (33 steps against 23). **Under the default `RowScaled()` it is 101 steps
+    single-step and 271 dual-time**, against the old path's 23 and 13 under its Euclidean test. The per-block
+    line shows the constraint row at machine zero and `k` as the slow block, so the shift schedule relaxes
+    slowly. The default measure costs time here; the border does not. At re240000 the default single step
+    falls slowly (ratio 0.14 after 200 steps), `Euclidean()` freezes as the old path did, and a viscosity
+    ramp (100x, 16 stations of one step) diverges. So the coupled march does **not** yet dominate
+    `Segregated` for a held bulk velocity, and `Segregated` stays.
 
 ## Initialization, diagnostics, Reynolds continuation
 
@@ -2610,7 +2598,7 @@ tuning follow-up noted above.
     `solve_coupled(` sites cleared this change and missed this one entirely, because the offending call
     is spelled `solve_reynolds_continuation(...)` and the keywords travel through `**solve_kwargs`.
     When you change a contract on `solve_coupled`, scan its wrappers too — `solve_reynolds_continuation`
-    and `solve_coupled_mass_flow` are the ones that exist.
+    and `solve_reynolds_ramp` are the ones that exist.
   - **HOW MANY rungs: `bfs3d` keeps TWO, but the Re/100 anchor is a closer call than it looks
     (measured 2026-08-09).** Configuration for both numbers: field-split AMG preconditioner,
     `refresh_on_cycles=3`, `retry.on_alpha` 0.01, ILU(0)×4, plain aggregation, `coarse_eq_limit` 2000,
