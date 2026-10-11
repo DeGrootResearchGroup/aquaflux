@@ -334,6 +334,17 @@ TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", FILE_SOLVER.turbulence
 #: residual keeps degrading, so 12 is the coarse end of a plateau rather than a peak.
 RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", _FILE_RAMP.stations))
 RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", _FILE_RAMP.steps_per_station))
+#: End the ramp once the march has settled at the shift floor (`BFS3D_RAMP_END=settled`), walking the
+#: viscosity left in `BFS3D_RAMP_FINISH` steps; `BFS3D_RAMP_STATIONS` is then the pace, not the length.
+#: Unset keeps the file's (every station walked). On pitzDaily it cost 114 cycles at a 24-station pace and
+#: a 3-step finish against the hand-tuned 12 stations' 111 -- insensitive to the pace where a fixed count
+#: is not; not yet run here.
+RAMP_END = os.environ.get("BFS3D_RAMP_END", _FILE_RAMP.end)
+RAMP_FINISH = (
+    int(os.environ["BFS3D_RAMP_FINISH"])
+    if os.environ.get("BFS3D_RAMP_FINISH")
+    else _FILE_RAMP.finish
+)
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
 #: a fitted exponent, and exactly 1.0 at one step per station, where re-damping every step would make
 #: the shift run away rather than damp).
@@ -511,9 +522,7 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
 #: these settings reproduced the shipped bundle's exact root (`x_r/h` 8.3611) in 59 steps. `max_coarse`
 #: here is deliberately small, since the point is bounding the dense coarse solve at a much larger
 #: mesh.
-_FILE_TRAILING = (
-    _FILE_INVERSE.trailing
-)
+_FILE_TRAILING = _FILE_INVERSE.trailing
 
 
 def _environment_flag(name, file_value):
@@ -1042,17 +1051,21 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
-#: Release the shift below `beta_min` once the target station has settled (`BFS3D_RELEASE_FLOOR`, the
-#: shift it drops to; unset keeps the file's, which never releases): after the first full-length step at
-#: the floor on the target, the next step runs at this shift, so the station's linear tail becomes
-#: inexact Newton steps. Measured on pitzDaily first (`pitzdaily_openfoam/endgame_shift_probe.py`); not
-#: yet run on this case.
-CONTROL = (
-    dataclasses.replace(
-        FILE_SOLVER.step_control, release_floor=float(os.environ["BFS3D_RELEASE_FLOOR"])
-    )
-    if os.environ.get("BFS3D_RELEASE_FLOOR")
-    else FILE_SOLVER.step_control
+#: Two study overrides of the file's step control, unset keeping the file's, neither yet run on this
+#: case. `BFS3D_RELEASE_FLOOR` releases the shift below `beta_min` once the target station has settled:
+#: after the first full-length step at the floor on the target, the next step runs at this shift, so the
+#: station's linear tail becomes inexact Newton steps (measured on pitzDaily first,
+#: `pitzdaily_openfoam/endgame_shift_probe.py`). `BFS3D_GROW` is the factor beta is divided by on a
+#: comfortable step: on pitzDaily the ramp's best length was the shift's descent to the floor plus the
+#: steps the state then needed there, so 3 with 12 stations beat the class default 1.5 with 16 (111
+#: against 141 cycles with the release on) -- change the two together.
+CONTROL = dataclasses.replace(
+    FILE_SOLVER.step_control,
+    **{
+        name: float(os.environ[variable])
+        for name, variable in (("release_floor", "BFS3D_RELEASE_FLOOR"), ("grow", "BFS3D_GROW"))
+        if os.environ.get(variable)
+    },
 )
 
 #: The march this run takes: the case file's solver with the environment's overrides applied, as the
@@ -1091,6 +1104,8 @@ SOLVER = CoupledMarch(
         steps_per_station=RAMP_STEPS_PER_STATION,
         scale=RAMP_SCALE,
         redamping=RAMP_REDAMPING,
+        end=RAMP_END,
+        finish=RAMP_FINISH,
     ),
 )
 if not any(name.startswith("BFS3D_") for name in os.environ) and SOLVER != FILE_SOLVER:
@@ -1413,7 +1428,13 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("Reynolds continuation points", N_POINTS),
         (
             "Reynolds span walked as",
-            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps, redamping "
+            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps"
+            + (
+                ""
+                if RAMP_END is None
+                else f" at most (ends when {RAMP_END}, finished in {RAMP_FINISH or 1} step(s))"
+            )
+            + ", redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
             f", scaling {RAMP_SCALE}"
             if RAMP == "continuous"
@@ -1432,7 +1453,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         (
             "step control",
             f"{type(CONTROL).__name__} (beta_start {CONTROL.beta_start}, beta_min "
-            f"{CONTROL.beta_min}, release "
+            f"{CONTROL.beta_min}, grow {CONTROL.grow}, release "
             f"{'off' if CONTROL.release_floor is None else f'to {CONTROL.release_floor:g}'})",
         ),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
