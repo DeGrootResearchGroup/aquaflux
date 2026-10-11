@@ -345,12 +345,17 @@ What to take from it, none of which is specific to that mechanism:
     opt-in, `None` by default).** A dual-time step at a fixed shift contracts each error mode by
     `beta / (lambda + beta)`, so a march parked at `beta_min` near its root converges linearly at a rate
     the FLOOR sets: on pitzDaily the target station's 15 steps all ran at 0.005 against a slowest mode at
-    0.5-0.8 of it. A field pair on the `ShiftStrengthControl` base (`release_floor`, `release_alpha`
+    0.5-0.8 of it. A field pair on the `ShiftStrengthControl` base (`release_floor`, `settle_alpha`
     default 1.0), so all three controls reach it and a case file writes it on any `step_control`. The rule
     lives in one method, `_floored`, applied after every `_adapt`: **released** iff the previous step
-    `arrived`, the rule did not raise beta, and either it ran at or below `beta_min` with
-    `alpha >= release_alpha` (then beta = `release_floor`) or it already ran below `beta_min` (then the
-    rule's own beta). Anything else -- a clipped released step, a rising residual for a rule that reads one
+    `arrived`, the rule did not raise beta, and either it was `settled(report)` -- ran at or below
+    `beta_min` with `alpha >= settle_alpha` -- (then beta = `release_floor`) or it already ran below
+    `beta_min` (then the rule's own beta).
+    - **`ShiftStrengthControl.settled(report)` is THE definition of settled (2026-10-11), read by the
+      release AND by a ramp that ends on it** (`RampSchedule(end_when=control.settled)`, see
+      `solve.md`). ⚠️ There is no `release_alpha`: it was renamed `settle_alpha` the same day, before
+      the release ever merged, because it now defines settled for both readers. `settled` deliberately
+      ignores `arrived` -- that is the release's own further condition, not part of being settled. Anything else -- a clipped released step, a rising residual for a rule that reads one
     -- puts `beta_min` back in one step, not by doubling up from the released shift. `_clamp`'s lower bound
     is `release_floor` when set, so the rules may go below `beta_min` and `_floored` is the one place that
     decides whether they may. The state is unchanged `(beta, memo)`: "released" is read off the previous

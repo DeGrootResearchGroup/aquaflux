@@ -70,6 +70,7 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residu
         jnp.asarray(reached),
         jnp.maximum(cycles - 2, 0),
         jnp.asarray(binding),
+        jnp.asarray(jnp.nan),
     )
 
 
@@ -543,6 +544,29 @@ def test_march_reports_the_injected_drift_measure() -> None:
     )
     # The measure is zero only at the state it was based on, and the march has moved away from it.
     assert seen[-1] > 0.0
+
+
+def test_each_report_carries_its_steps_full_step_ratio() -> None:
+    """The report's ``full_step_ratio`` is the step's own full-length trial, the one it REJECTED here.
+
+    From ``phi = 0.5`` on ``R = phi**3 - 1`` the Newton correction ``-R / (3 phi**2) = 7/6`` overshoots to
+    ``phi = 5/3``, where ``|R| = 98/27`` against ``|R(0.5)| = 7/8``: a ratio of ``112/27 > 1``, so the
+    search halves the step. The kept rung's ratio is below one, so a march reporting that instead -- or
+    dropping the field -- fails here.
+    """
+    residual = _Cubic(theta=jnp.asarray(1.0))
+    result = newton_march(
+        DampedNewtonStep(line_search=10),
+        residual.__call__,
+        jnp.asarray(0.5),
+        max_steps=1,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+    (report,) = result.reports
+    assert report.full_step_ratio == pytest.approx(112.0 / 27.0, rel=1e-12)
+    assert report.alpha < 1.0
 
 
 def test_the_march_rebuilds_the_measure_each_outer_iteration_and_holds_it_within_one():
@@ -1518,6 +1542,9 @@ class _CubicRamp:
         # could not tell which one moved beta.
         self.redamping = redamping
         self.entered: list[int] = []  # one entry per `enter` call: the station it was asked for
+        self.previous: list[
+            int | None
+        ] = []  # one per `enter` call: the step of the report handed in
         self.changes: list[float] = []  # one entry per station CHANGE: the theta it moved to
         self._station = -1
         self._residual = _Cubic(target)
@@ -1525,9 +1552,10 @@ class _CubicRamp:
     def station(self, step: int) -> int:
         return min(step // self.steps_per_station, self.stations)
 
-    def enter(self, step: int):
+    def enter(self, step: int, previous):
         station = self.station(step)
         self.entered.append(station)
+        self.previous.append(None if previous is None else previous.step)
         if station != self._station:
             self._station = station
             frac = 1.0 - station / self.stations
@@ -1792,6 +1820,30 @@ def test_the_homotopy_is_entered_once_per_step_and_changes_once_per_station() ->
     assert homotopy.entered == [0] + [homotopy.station(i) for i in range(steps)]
     # Four steps per station over 12 steps: stations 0, 1, 2 -- three changes, not twelve.
     assert len(homotopy.changes) == 3
+
+
+def test_each_station_is_entered_with_the_report_of_the_step_before_it() -> None:
+    """A homotopy may choose where a step runs from how the march went, so it is told -- in order.
+
+    The first step is entered twice (once for the damping anchor, once to take it), with no report;
+    every later step is handed the report of the step just before it, never an older one.
+    """
+    target = jnp.array([8.0, 27.0, 64.0])
+    homotopy = _CubicRamp(target, start=target * 100.0, stations=3, steps_per_station=2)
+
+    result = newton_march(
+        DampedNewtonStep(line_search=10),
+        _Cubic(target),
+        jnp.ones_like(target),
+        max_steps=10,
+        rtol=1e-10,
+        atol=1e-12,
+        homotopy=homotopy,
+    )
+
+    steps = len(result.reports)
+    assert steps > 3
+    assert homotopy.previous == [None, None, *range(steps - 1)]
 
 
 def test_each_report_says_which_station_its_step_drove_and_whether_that_was_the_target() -> None:

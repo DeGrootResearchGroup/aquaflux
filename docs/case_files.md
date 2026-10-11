@@ -248,6 +248,14 @@ for `steps_per_station` outer steps, keeping the state and the preconditioner th
 closure's (`both`, the default). A high-Reynolds-number case needs one: from a cold start at
 its own viscosity the march integrates a long transient before the flow develops.
 
+A ramp may also end before its last station: with `end: settled`, it ends after the first
+outer step taken at full length at the step control's smallest shift (`beta_min`), and the
+viscosity left is walked down in `finish` equal geometric steps (one, straight to the case's,
+when unset). `stations` then sets the pace rather than the length, which makes the ramp much
+less sensitive to it: walking down too slowly no longer costs steps spent on stations the
+march no longer needs. It needs the march's `step_control`, whose `beta_min` and
+`settle_alpha` say what settled means, and one step per station.
+
 `Segregated` takes `sweeps` (required: the most it may take), `relaxation` and
 `relaxation_max` (the closure update's under-relaxation), `increment_tol` (the change over a
 sweep at which it stops), `flow_solve` and `scalar_solve` ({class}`~aquaflux.case.RootSolve`:

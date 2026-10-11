@@ -23,7 +23,7 @@ from aquaflux.initialization import hybrid_initialize
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import BlockScaled, Convergence, DualTimeLoop
+from aquaflux.solve import BlockScaled, Convergence, DualTimeLoop, RampSchedule, StepReport
 from aquaflux.turbulence import (
     AdaptiveReynoldsSchedule,
     CoupledRANS,
@@ -679,8 +679,8 @@ def test_the_ramp_walks_the_viscosity_geometrically_down_to_exactly_the_target()
     Reynolds number, so equal *ratios* are equal difficulty; and exactly ``1.0`` at the end because a
     ramp that stopped near the target would leave the march solving a slightly wrong problem.
     """
-    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3)
-    scales = [ramp.scale(s) for s in range(5)]
+    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, ramp=RampSchedule(4, 3))
+    scales = [ramp.scale(s / 4) for s in range(5)]
 
     assert scales[0] == 100.0
     assert scales[-1] == 1.0
@@ -691,11 +691,13 @@ def test_the_ramp_walks_the_viscosity_geometrically_down_to_exactly_the_target()
 
 def test_the_ramp_holds_each_station_for_its_step_budget_and_then_arrives() -> None:
     """The step-to-station map, and that arrival is exactly where the ramp's budget ends."""
-    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=3, steps_per_station=2)
+    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, ramp=RampSchedule(3, 2))
+    for step in range(8):
+        ramp.enter(step, None)
 
     assert [ramp.station(i) for i in range(8)] == [0, 0, 1, 1, 2, 2, 3, 3]
     assert [ramp.arrived(i) for i in range(8)] == [False] * 6 + [True, True]
-    assert ramp.ramp_steps == 6
+    assert ramp.ramp.ramp_steps == 6
 
 
 def test_the_ramp_rebinds_once_per_station_change_not_once_per_step() -> None:
@@ -709,15 +711,14 @@ def test_the_ramp_rebinds_once_per_station_change_not_once_per_step() -> None:
     ramp = ViscosityRampHomotopy(
         coupled,
         anchor=100.0,
-        stations=3,
-        steps_per_station=4,
+        ramp=RampSchedule(3, 4),
         rebind=lambda assembler: seen.append(
             float(jnp.asarray(assembler.turbulence.molecular_viscosity).ravel()[0])
         ),
     )
 
     for step in range(12):
-        ramp.enter(step)
+        ramp.enter(step, None)
 
     assert len(seen) == 3  # twelve steps, three stations
     assert math.isclose(seen[0], NU * 100.0, rel_tol=1e-12)
@@ -732,10 +733,11 @@ def test_the_ramp_hands_back_the_CASES_OWN_assembler_at_the_target() -> None:
     case.
     """
     coupled = _tiny_coupled()
-    ramp = ViscosityRampHomotopy(coupled, anchor=100.0, stations=2, steps_per_station=1)
+    ramp = ViscosityRampHomotopy(coupled, anchor=100.0, ramp=RampSchedule(2, 1))
 
-    assert ramp.enter(0).__self__ is not coupled  # a ramp station is a rescaled companion
-    assert ramp.enter(2).__self__ is coupled  # the target station is the case itself
+    assert ramp.enter(0, None).__self__ is not coupled  # a ramp station is a rescaled companion
+    ramp.enter(1, None)
+    assert ramp.enter(2, None).__self__ is coupled  # the target station is the case itself
 
 
 def test_each_station_is_the_assembler_at_that_stations_own_scale() -> None:
@@ -746,25 +748,45 @@ def test_each_station_is_the_assembler_at_that_stations_own_scale() -> None:
     it :meth:`scale` and hands the result on, rather than that the rescale works.
     """
     coupled = _tiny_coupled()
-    ramp = ViscosityRampHomotopy(coupled, anchor=100.0, stations=2, steps_per_station=1)
+    ramp = ViscosityRampHomotopy(coupled, anchor=100.0, ramp=RampSchedule(2, 1))
 
     for step in (0, 1):
-        station = ramp.enter(step).__self__
-        assert _dynamic_viscosity(station) == pytest.approx(ramp.scale(step) * RHO * NU)
+        station = ramp.enter(step, None).__self__
+        assert _dynamic_viscosity(station) == pytest.approx(ramp.scale(step / 2) * RHO * NU)
 
 
-@pytest.mark.parametrize(
-    "kwargs, message",
-    [
-        (dict(anchor=0.5, stations=2, steps_per_station=1), "anchor must be >= 1"),
-        (dict(anchor=10.0, stations=0, steps_per_station=1), "stations must be >= 1"),
-        (dict(anchor=10.0, stations=2, steps_per_station=0), "steps_per_station must be >= 1"),
-    ],
-)
-def test_the_ramp_refuses_a_configuration_that_cannot_walk_down_to_the_target(kwargs, message):
-    """An anchor below one ramps the wrong way, and a zero budget is a ramp that never runs."""
-    with pytest.raises(ValueError, match=message):
-        ViscosityRampHomotopy(_tiny_coupled(), **kwargs)
+def test_a_ramp_ended_early_walks_its_finish_and_then_hands_back_the_case() -> None:
+    """The viscosity follows the schedule's progress, ended early by a report, not by the step count.
+
+    Four stations from 100, ended on step 1's report and finished in two steps: step 2 runs halfway
+    from station 1 (progress 1/4) to the target, i.e. ``100 ** (1 - 5/8)``, and step 3 the case itself.
+    A ramp that ignored the end would run station 2 (``100 ** (1/2)``) and then station 3.
+    """
+    coupled = _tiny_coupled()
+    ramp = ViscosityRampHomotopy(
+        coupled,
+        anchor=100.0,
+        ramp=RampSchedule(4, end_when=lambda report: report.step == 1, finish=2),
+    )
+
+    def report(step: int) -> StepReport:
+        return StepReport(
+            step=step, cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, arrived=False
+        )
+
+    ramp.enter(0, None)
+    ramp.enter(1, report(0))
+    finishing = ramp.enter(2, report(1)).__self__
+    assert _dynamic_viscosity(finishing) == pytest.approx(100.0 ** (1.0 - 5.0 / 8.0) * RHO * NU)
+    assert not ramp.arrived(2)
+    assert ramp.enter(3, report(2)).__self__ is coupled
+    assert ramp.arrived(3)
+
+
+def test_the_ramp_refuses_an_anchor_that_would_walk_up_to_the_target() -> None:
+    """An anchor below one ramps the wrong way. (A zero station budget is the schedule's to refuse.)"""
+    with pytest.raises(ValueError, match="anchor must be >= 1"):
+        ViscosityRampHomotopy(_tiny_coupled(), anchor=0.5, ramp=RampSchedule(2))
 
 
 def test_the_ramp_derives_its_re_damping_from_the_stations_own_ratio() -> None:
@@ -774,8 +796,8 @@ def test_the_ramp_derives_its_re_damping_from_the_stations_own_ratio() -> None:
     value that was calibrated by measurement, and the fine one must come out near unity, because the
     same constant serving both is exactly what the derivation replaces.
     """
-    coarse = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3)
-    fine = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=24, steps_per_station=3)
+    coarse = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, ramp=RampSchedule(4, 3))
+    fine = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, ramp=RampSchedule(24, 3))
 
     assert coarse.redamping == pytest.approx(2.0, rel=1e-2)  # the measured-good four-station value
     assert fine.redamping == pytest.approx(1.12, rel=1e-2)
@@ -789,19 +811,19 @@ def test_one_step_per_station_forces_re_damping_off() -> None:
     a damping. The default must therefore be exactly 1.0 there whatever the ratio rule would give, and
     an explicit value must be refused rather than silently corrected.
     """
-    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, stations=24, steps_per_station=1)
+    ramp = ViscosityRampHomotopy(_tiny_coupled(), anchor=100.0, ramp=RampSchedule(24, 1))
     assert ramp.redamping == 1.0
 
     with pytest.raises(ValueError, match=r"must be exactly 1\.0 when steps_per_station == 1"):
         ViscosityRampHomotopy(
-            _tiny_coupled(), anchor=100.0, stations=24, steps_per_station=1, redamping=2.0
+            _tiny_coupled(), anchor=100.0, ramp=RampSchedule(24, 1), redamping=2.0
         )
 
 
 def test_an_explicit_re_damping_still_overrides_the_derived_one() -> None:
     """The derivation is a default, not a policy -- a caller who measured a value keeps it."""
     ramp = ViscosityRampHomotopy(
-        _tiny_coupled(), anchor=100.0, stations=4, steps_per_station=3, redamping=3.0
+        _tiny_coupled(), anchor=100.0, ramp=RampSchedule(4, 3), redamping=3.0
     )
     assert ramp.redamping == 3.0
 
@@ -1306,11 +1328,12 @@ def test_the_ramp_still_ends_on_the_callers_own_assembler_under_either_scaling()
 
     for companion in (scale_both_blocks, scale_momentum_only):
         ramp = ViscosityRampHomotopy(
-            _tiny_coupled(), anchor=100.0, stations=4, steps_per_station=1, companion=companion
+            _tiny_coupled(), anchor=100.0, ramp=RampSchedule(4, 1), companion=companion
         )
-        ramp.enter(0)
+        ramp.enter(0, None)
         assert ramp._assembler is not ramp.coupled
-        ramp.enter(4)
+        for step in range(1, 5):
+            ramp.enter(step, None)
         assert ramp._assembler is ramp.coupled
 
 
@@ -1356,8 +1379,7 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
     solve_reynolds_ramp(
         coupled,
         anchor=100.0,
-        stations=24,
-        steps_per_station=1,
+        ramp=RampSchedule(24, 1),
         point_setup=lambda companion, state, point: {},
         convergence=Convergence(rtol=1e-10),
     )
@@ -1369,7 +1391,11 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
     assert calls[0]["seed_is_none"] is False
     homotopy = calls[0]["kwargs"]["homotopy"]
     assert isinstance(homotopy, ViscosityRampHomotopy)
-    assert (homotopy.anchor, homotopy.stations, homotopy.steps_per_station) == (100.0, 24, 1)
+    assert (homotopy.anchor, homotopy.ramp.stations, homotopy.ramp.steps_per_station) == (
+        100.0,
+        24,
+        1,
+    )
     assert calls[0]["kwargs"]["convergence"] == Convergence(rtol=1e-10)
 
 
@@ -1390,8 +1416,7 @@ def test_the_ramp_arm_merges_a_point_s_settings_value_field_by_field_over_the_sh
     solve_reynolds_ramp(
         coupled,
         anchor=100.0,
-        stations=4,
-        steps_per_station=1,
+        ramp=RampSchedule(4, 1),
         shift=CoupledShiftSettings(basis=basis),
         globalization=Globalization(beta0=2.0),
         point_setup=lambda companion, state, point: {
@@ -1438,8 +1463,7 @@ def test_the_ramp_arm_seeds_the_hybrid_start_from_the_anchor_not_from_the_target
     solve_reynolds_ramp(
         coupled,
         anchor=100.0,
-        stations=24,
-        steps_per_station=1,
+        ramp=RampSchedule(24, 1),
         point_setup=lambda companion, state, point: {},
     )
 
@@ -1464,9 +1488,7 @@ def test_the_ramp_arm_configures_its_anchor_station_through_the_ladders_own_poin
         seen.append((scale, point.index, point.total, point.viscosity_scale))
         return {"tag": scale}
 
-    solve_reynolds_ramp(
-        coupled, anchor=100.0, stations=4, steps_per_station=3, point_setup=point_setup
-    )
+    solve_reynolds_ramp(coupled, anchor=100.0, ramp=RampSchedule(4, 3), point_setup=point_setup)
 
     assert seen == [(100.0, 1, 1, 100.0)]
     assert calls[0]["kwargs"]["tag"] == 100.0
@@ -1493,7 +1515,7 @@ def test_the_ramp_arm_drops_exactly_the_keywords_the_ladder_owns(monkeypatch) ->
         convergence=Convergence(rtol=1e-10, atol=1e-5),
         max_steps=7,
     )
-    solve_reynolds_ramp(coupled, anchor=100.0, stations=4, steps_per_station=3, **ladder_options)
+    solve_reynolds_ramp(coupled, anchor=100.0, ramp=RampSchedule(4, 3), **ladder_options)
 
     passed = calls[0]["kwargs"]
     assert not (_LADDER_ONLY & set(passed))
@@ -1529,8 +1551,7 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
     solve_reynolds_ramp(
         coupled,
         anchor=100.0,
-        stations=2,
-        steps_per_station=1,
+        ramp=RampSchedule(2, 1),
         point_setup=lambda companion, state, point: {},
         preconditioner=MaterializedJacobian(CompleteLu()),
     )
@@ -1539,7 +1560,8 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
     assert homotopy.rebind == session.rebind
     bound = session.problem.coupled.momentum.properties.properties["viscosity"].value
     assert float(bound / (RHO * NU)) == pytest.approx(100.0)
-    homotopy.enter(2)  # the target station
+    for step in range(3):  # stations are entered in order; the third step is the target's
+        homotopy.enter(step, None)
     assert session.problem.coupled is coupled
 
 
@@ -1556,8 +1578,7 @@ def test_no_refresh_at_all_is_not_an_error(monkeypatch) -> None:
     solve_reynolds_ramp(
         coupled,
         anchor=100.0,
-        stations=2,
-        steps_per_station=1,
+        ramp=RampSchedule(2, 1),
         point_setup=lambda companion, state, point: {},
     )
 

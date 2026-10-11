@@ -169,6 +169,9 @@ def _solver_with_overrides(solver):
                 ("stations", _environment("RAMP_STATIONS", int)),
                 ("steps_per_station", _environment("RAMP_STEPS", int)),
                 ("redamping", _environment("RAMP_REDAMPING", float)),
+                # End the ramp on the march's settle (`settled`), walking the rest in RAMP_FINISH steps.
+                ("end", _environment("RAMP_END", str)),
+                ("finish", _environment("RAMP_FINISH", int)),
             )
             if value is not None
         },
@@ -1209,7 +1212,14 @@ def solve_aquaflux(
             # not start at its OWN DEFAULT: every arm of the schedule sweep set the variable explicitly,
             # so the one configuration nobody passed was the one nobody ran.
             f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps "
-            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps), anchor "
+            f"({RAMP_STATIONS * RAMP_STEPS_PER_STATION} ramp steps"
+            + (
+                ""
+                if solver.continuation.end is None
+                else f" at most: ends when {solver.continuation.end}, finished in "
+                f"{solver.continuation.finish or 1} step(s)"
+            )
+            + "), anchor "
             f"{solver.continuation.anchor:g}, redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
             f", scaling {RAMP_SCALE}"
@@ -1412,8 +1422,7 @@ def _solve_study_arm(coupled, solver, logger, jacobian_gradient_sweeps, observer
         return solve_reynolds_ramp(
             coupled,
             anchor=ramp.anchor,
-            stations=ramp.stations,
-            steps_per_station=ramp.steps_per_station,
+            ramp=ramp.schedule(options.get("step_control")),
             redamping=ramp.redamping,
             companion=RAMP_COMPANION,
             **options,

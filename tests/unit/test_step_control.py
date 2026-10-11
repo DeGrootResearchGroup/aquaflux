@@ -564,12 +564,35 @@ def test_without_a_release_the_rule_never_runs_below_its_floor() -> None:
 
 
 @pytest.mark.parametrize(
+    ("shift", "alpha", "settle_alpha", "expected"),
+    [
+        pytest.param(_FLOOR, 1.0, 1.0, True, id="full length at the floor"),
+        pytest.param(_FLOOR * 0.5, 1.0, 1.0, True, id="full length below the floor"),
+        pytest.param(_FLOOR * 1.01, 1.0, 1.0, False, id="full length just above the floor"),
+        pytest.param(_FLOOR, 0.5, 1.0, False, id="clipped at the floor"),
+        pytest.param(_FLOOR, 0.5, 0.5, True, id="clipped to the settle alpha"),
+    ],
+)
+def test_settled_is_a_step_at_the_floor_that_reached_the_settle_alpha(
+    shift, alpha, settle_alpha, expected
+) -> None:
+    """One definition, read by the release on the target and by a ramp that ends on it.
+
+    It looks at the step's shift and line-search factor only -- not at whether the step was on the
+    target, which is the release's own further condition and not part of being settled.
+    """
+    control = _releasing(DualTimeControl, settle_alpha=settle_alpha)
+    assert control.settled(_settled(shift, alpha, arrived=False)) is expected
+    assert control.settled(_settled(shift, alpha, arrived=True)) is expected
+
+
+@pytest.mark.parametrize(
     ("settings", "names"),
     [
         (dict(release_floor=0.0), "release_floor"),
         (dict(release_floor=_FLOOR), "release_floor"),
-        (dict(release_alpha=0.0), "release_alpha"),
-        (dict(release_alpha=1.5), "release_alpha"),
+        (dict(settle_alpha=0.0), "settle_alpha"),
+        (dict(settle_alpha=1.5), "settle_alpha"),
     ],
 )
 def test_a_release_outside_its_range_is_refused(settings, names) -> None:

@@ -300,9 +300,14 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   `Euclidean`), `DualTimeLoop`, `LinearSolveSettings`, the three dual-time controls (equinox modules are
   dataclasses; their float fields read), `RetryPolicy`, and every coupled-preconditioner kind via
   `turbulence.PRECONDITIONER_SPEC_MAPPING.kinds` (made public for this, so a kind added there reaches a
-  case file). Case-side values exist only where no library value fits: `ViscosityRamp` (the ramp's
-  arguments are loose keywords, and its `companion` is a function — `scale: flow|both` names
-  `scale_momentum_only` / `scale_both_blocks`), and `RootSolve` (`RootSolveSettings` holds `lineax`
+  case file). Case-side values exist only where no library value fits: `ViscosityRamp` (its
+  `companion` is a function — `scale: flow|both` names `scale_momentum_only` / `scale_both_blocks` —
+  and its end test is the march's own `step_control.settled`, which a file cannot state but can name:
+  `end: settled` with an optional `finish`, turned into a `solve.RampSchedule` by
+  `ViscosityRamp.schedule(step_control)`, the one place the file's ramp becomes the library's; the
+  pitzDaily harness's study path calls it too. `end` without a `step_control` is refused at read by
+  `CoupledMarch`, `finish` without `end` and `end` at more than one step per station by the schedule's
+  own checks, re-raised with the `ViscosityRamp:` prefix; added 2026-10-11, mutation-checked), and `RootSolve` (`RootSolveSettings` holds `lineax`
   solvers; `test_a_root_solve_states_every_setting_of_the_librarys_root_solve` pins the two field lists
   equal, so they cannot drift). `RetryPolicy.solver` became a `LinearSolverSpec` so that no case value was
   needed there (see `solve-globalization.md`).

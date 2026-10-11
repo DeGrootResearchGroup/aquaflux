@@ -2097,7 +2097,14 @@ tuning follow-up noted above.
 - **`ViscosityRampHomotopy` — the SAME Reynolds span walked inside ONE march (`reynolds.py`, BUILT
   2026-09-09).** The `ResidualHomotopy` alternative to the rung ladder below: `stations` geometric
   viscosity stations from `anchor` down to exactly `1.0`, each held for `steps_per_station` outer steps,
-  handed to `solve_coupled(homotopy=…)`. What it removes is measured in
+  handed to `solve_coupled(homotopy=…)`. ⚠️ **Since 2026-10-11 the stations come from a
+  `solve.RampSchedule` (`ViscosityRampHomotopy(coupled, anchor=, ramp=RampSchedule(stations,
+  steps_per_station, end_when=, finish=))`, the same `ramp=` on `solve_reynolds_ramp`)**: there are no
+  `stations`/`steps_per_station` keywords and no `ramp_steps` property on the homotopy any more (the
+  latter is `RampSchedule.ramp_steps`), `scale(progress)` takes the schedule's progress rather than a
+  station index, and steps must be entered in order (`enter(step, previous)`). The schedule may END the
+  ramp on the march's settle (`solve-march.md`, `RampSchedule`); a fixed schedule walks exactly the
+  stations it always did. What it removes is measured in
   `.claude/rules/solve-march.md`'s `ResidualHomotopy` bullet — read the numbers there rather than
   restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
   viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
