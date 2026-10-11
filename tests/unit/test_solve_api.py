@@ -3,14 +3,15 @@
 `solve/__init__` re-exports what the rest of the library (and a user) may consume. That curation is
 only meaningful if consumers actually go through it. That library modules do is pinned for every
 package at once in ``test_layering.py``; this file pins what is particular to ``solve``: the surface
-resolves, the multigrid toolkit is exported whole, and the study harnesses in ``validation/`` keep to
-the surface too.
+resolves, it holds only what a user needs, the multigrid toolkit is exported whole, and the study
+harnesses in ``validation/`` keep to the surface too.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 from aquaflux import solve
 
@@ -22,6 +23,110 @@ def test_every_exported_name_resolves() -> None:
     """`__all__` is honest: every advertised name is actually present on the package."""
     missing = [name for name in solve.__all__ if not hasattr(solve, name)]
     assert missing == [], f"__all__ advertises names the package does not define: {missing}"
+
+
+#: Exports that no other package imports and no user documentation names, each kept because a user
+#: writes against it. Anything else that nothing outside ``solve`` uses is plumbing that leaked onto the
+#: surface: it belongs in its submodule, where tests and study harnesses can still reach it.
+USER_IMPLEMENTS = frozenset(
+    {
+        # Protocols and family bases a user writes a new member of.
+        "AbortsInnerLoop",
+        "BlockInverse",
+        "CarriesRelaxationSchedule",
+        "FrozenInverse",
+        "HierarchyBlockInverse",
+        "LineSearchGrowth",
+        "MaterializedJacobianPreconditioner",
+        "MeasureBuilder",
+        "NamedBlockMeasure",
+        "ReadableShift",
+        "RefactorableInverse",
+        "RefreshTrigger",
+        "RelaxationSchedule",
+        "ReleasableInverse",
+        "ResidualMeasure",
+        "ResidualMeasures",
+        "ResidualNorm",
+        "ScalarBorder",
+        "ShiftCarryingControl",
+        "ShiftedNewtonStrategy",
+        "StateBlock",
+        "StepAcceptance",
+    }
+)
+USER_CONFIGURES = frozenset(
+    {
+        # Values a solve is configured with: a trigger, a shift rule or basis, an acceptance or
+        # line-search policy, a strategy.
+        "CoefficientDriftTrigger",
+        "ConstantRelaxation",
+        "DivergenceGuard",
+        "DualTimeStep",
+        "LocalCourantBasis",
+        "MonotoneLineSearch",
+        "RelaxedFarFromRoot",
+        "SwitchedEvolutionRelaxation",
+    }
+)
+USER_CALLS = frozenset(
+    {
+        # Functions a user calls, and what public drivers hand back.
+        "MarchResult",
+        "StagedResult",
+        "StepOutcome",
+        "default_linear_solver",
+        "field_change_metrics",
+        "filled_from",
+        "materialize_block_jacobian",
+        "materialized_spec_from_mapping",
+        "materialized_spec_to_mapping",
+        "newton_march",
+    }
+)
+USER_FACING = USER_IMPLEMENTS | USER_CONFIGURES | USER_CALLS
+
+
+def _imported_by_other_packages() -> set[str]:
+    """Every name a module outside ``solve/`` imports from ``aquaflux.solve``."""
+    names = set()
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if SOLVE_ROOT in path.parents:
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module == "aquaflux.solve":
+                names.update(alias.name for alias in node.names)
+    return names
+
+
+def _named_in_user_documentation() -> set[str]:
+    """Every export the hand-written documentation names (the generated API page aside)."""
+    root = PACKAGE_ROOT.parent
+    pages = [root / "README.md", *(root / "docs").glob("*.md")]
+    text = "\n".join(
+        page.read_text()
+        for page in pages
+        if page.is_file() and page.name not in ("api.md", "package_structure.md")
+    )
+    return {name for name in solve.__all__ if re.search(rf"\b{re.escape(name)}\b", text)}
+
+
+def test_every_export_is_used_elsewhere_or_declared_user_facing() -> None:
+    """An export nothing else uses must say why a user needs it, and a stated reason must still hold.
+
+    A name reaches ``__all__`` because some other module wanted it; once nothing does, it stays on the
+    surface, on the documentation site and in every future compatibility promise unless something asks.
+    The declared lists are that question, in both directions: an unlisted unused export fails, and so
+    does a listed one that another package now imports or the documentation now names.
+    """
+    justified = _imported_by_other_packages() | _named_in_user_documentation()
+    unexplained = sorted(set(solve.__all__) - justified - USER_FACING)
+    assert unexplained == [], (
+        "these exports have no importer outside solve/ and no user documentation; say in "
+        f"USER_FACING why a user needs each, or leave it in its submodule: {unexplained}"
+    )
+    stale = sorted(name for name in USER_FACING if name not in solve.__all__ or name in justified)
+    assert stale == [], f"USER_FACING lists names that are not exported or need no reason: {stale}"
 
 
 def test_the_multigrid_surface_is_complete() -> None:

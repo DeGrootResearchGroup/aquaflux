@@ -217,7 +217,12 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > and its two refinements, the four capability protocols, `NamedBlockMeasure`, `MeasureBuilder`), the
 > `Globalization` values (`DivergenceGuard`, `MonotoneLineSearch`, `RelaxedFarFromRoot`), the results
 > of public drivers (`MarchResult`, `StagedResult`) and the materialized spec's mapping reader/writer.
-> Nothing pins this split mechanically; a name added to `__all__` should pass the same test.
+> **Pinned by `test_solve_api.py::test_every_export_is_used_elsewhere_or_declared_user_facing`**: an
+> export must be imported by another package, named in the hand-written docs (`README.md`, `docs/*.md`
+> bar the generated `api.md` and `package_structure.md`), or listed in `USER_IMPLEMENTS` /
+> `USER_CONFIGURES` / `USER_CALLS` — and a listed name that no longer needs its reason fails too.
+> Mutation-checked six ways. Adding to a list is a decision a reviewer sees; the list is the place to
+> ask whether a user writes against the name or it merely leaked.
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
 
