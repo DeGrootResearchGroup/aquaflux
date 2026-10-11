@@ -381,7 +381,10 @@ What to take from it, none of which is specific to that mechanism:
       arm's own last-two-step drift of 5.7e-4). The march is bit-identical up to the release, which fires
       the step after the first full-length step at the floor; the two released steps cost 12 and 15
       cycles against 4-5 at the floor, so the saving is steps, not cycles. **pitzDaily's pairing with
-      `grow` 3 does NOT transfer**: on bfs3d it costs 214 accepted / 459 all cycles with nine steps redone.
+      `grow` 3 transfers only with pitzDaily's inner stop**: under bfs3d's lineax stop it costs 214
+      accepted / 459 all cycles with nine steps redone; under `stop: residual` it is 25 steps / 195 all
+      cycles with three redone, beating the shipped schedule under that stop (35 / 294) and fastest of
+      every arm (792 s against 1191, indicative).
       Whether bfs3d's file should release is the owner's call; a library default still waits on the three
       slow tests #645 names (a loose terminal step is what they measure). Tables in
       `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").

@@ -334,8 +334,10 @@ solver steps", "174 solver steps"); those were seconds, and the log entry carrie
 1-8 cycles per released step by the probe (most of the released steps' extra cost -- on bfs3d the two
 released steps cost 12 and 15 cycles against 4-5 at the floor); (b) whether bfs3d's `case.yaml` should
 release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
-173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss (log, "bfs3d:
-the release, `grow` 3 and the settle-ended ramp") -- the owner's call; (c) whether the library default
+173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss under bfs3d's
+lineax stop but a win under pitzDaily's `stop: residual` (25 steps / 195 cycles / 792 s, the best arm;
+log, "bfs3d: the release, `grow` 3 and the settle-ended ramp") -- the owner's call, and it is a choice of
+the stop as much as of the release; (c) whether the library default
 should release, after the three slow tests #645 names (a loose terminal step is what they measure).
 pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 
@@ -350,7 +352,8 @@ measured (up to 21.5x) but undoes the settle, so the target settles a second tim
 four arms the target settled at step 14 whatever the ramp did. The rule is far less pace-sensitive than
 a fixed count. **bfs3d (2026-10-11, #678):** at `grow` 3 the rule ended the ramp itself after step 9 and
 cost 187 accepted / 267 all-attempt cycles, against 214 / 459 for a fixed 12 at `grow` 3 and 174 / 193 for
-the shipped `grow` 1.5 x 12 -- so it does not replace bfs3d's hand-tuned count, and its loss is `grow` 3's.
+the shipped `grow` 1.5 x 12, all under the lineax stop -- so it does not replace bfs3d's hand-tuned count
+there. Not run under `stop: residual`, where the fixed `grow` 3 x 12 wins.
 **Still open, and weaker:** a predictive rate controller keyed on the logged `rho1` trend. On bfs3d it
 gave no lead on the settle at either `grow`: at `grow` 3 it stayed above one (to 2.9) through the floor
 steps and fell only on a step whose shift had just been raised; at the shipped `grow` 1.5 it was below

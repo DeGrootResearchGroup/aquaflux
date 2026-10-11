@@ -1060,8 +1060,9 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: steps the state then needed there, so 3 with 12 stations beat the class default 1.5 with 16 (111
 #: against 141 cycles with the release on). On this case (2026-10-11, one run per arm) the release
 #: alone at 1e-4 took 24 steps / 173 cycles against the file's 28 / 174 at the same root, while `grow`
-#: 3 with it cost 214 cycles and redid nine steps: the pitzDaily pairing did not carry over, under this
-#: file's inner stop (lineax; pitzDaily's is `residual`) and its turbulence damping (5; pitzDaily's 3).
+#: 3 with it cost 214 cycles and redid nine steps under this file's inner stop (lineax). Under
+#: pitzDaily's `residual` stop the same pairing took 25 steps and redid three, beating the file's own
+#: schedule under that stop: on this case the pairing goes with the stop.
 CONTROL = dataclasses.replace(
     FILE_SOLVER.step_control,
     **{

@@ -1512,3 +1512,49 @@ two steps -- one root, the shipped arm merely stopping at the looser residual.
   stop rule** (lineax here, `residual` on the case the pairing was tuned on; five of arm 3's twelve extra
   attempts were cycle-triggered), and the harder 3D transient. `grow` 2 moves the floor's arrival (partly
   separating rate from case), `BFS3D_TURB_DAMPING=3` the damping, `BFS3D_FORWARD_STOP=residual` the stop.
+
+**Follow-up arms, same machine and day (#685 review).** At `98aab02` (`probe/ramp-anchor-sweep`), whose
+only change on the bfs3d path is the `BFS3D_FORWARD_STOP` override (unset keeps the file's lineax stop;
+no library change against `61a14308`), so arm 1 above is still the reference. `refresh_on_cycles` stays at
+the file's 3 under both stops. Cycles under the `residual` stop are counted as cycles RUN, one more per
+inner solve than lineax for the same work, so set its cycle columns beside the inner solves.
+
+| arm | edit of the file | steps | cycles accepted | cycles all | inner solves | steps redone | final `\|R\|` | wall (s) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | (shipped, from above) | 28 | 174 | 193 | 82 | 1 | 9.06e-6 | 1191 |
+| 5 | `FORWARD_STOP=residual` | 35 | 210 | 294 | 150 | 5 | 6.45e-6 | 1005 |
+| 6 | `FORWARD_STOP=residual GROW=3 RELEASE_FLOOR=1e-4` | **25** | 180 | **195** | 110 | 3 | 4.66e-7 | **792** |
+| 7 | `GROW=3 RELEASE_FLOOR=1e-4 TURB_DAMPING=3` | 21 | 243 | 347 | 79 | 5 | 8.25e-6 | 1664 |
+| 8 | `GROW=2 RELEASE_FLOOR=1e-4` | 21 | 184 | 222 | 71 | 2 | 3.77e-7 | 1217 |
+| 9 | `N_POINTS=1` (anchor 10) | 27 | 219 | 239 | 80 | 2 | 9.51e-6 | 1378 |
+| 10 | `N_POINTS=3` (anchor 1000) | **92** | 329 | 329 | 213 | 0 | 9.33e-6 | 2054 |
+
+`x_r/h` 8.361 in every arm. Converged states against arm 1: relative L2 0.8-2.1e-4 for arms 5-9 (inside
+arm 1's own last-two-step drift, 5.7e-4); **1.6e-3 for arm 10**, which stopped at the bar on a slow linear
+tail (below) -- the same `x_r/h`, but not as near the root as the others.
+
+- **The stop rule is most of arm 3's loss.** Under `residual`, pitzDaily's `grow` 3 + release (arm 6)
+  redoes 3 steps, not 9, and costs 195 all-attempt cycles against arm 3's 459. **Against its own stop's
+  shipped schedule (arm 5) it passes the pre-registered bar outright**: 25 against 35 steps, 180 / 195
+  against 210 / 294 cycles, fewer steps redone (3 against 5), same root. Against the file as shipped
+  (arm 1, lineax) it is 3 fewer steps and 2 more all-attempt cycles, but about 30 more inner solves (120 against 86, all attempts),
+  each counted one cycle higher -- so on the same work it is cheaper, and it is the fastest arm here
+  (792 s against 1191, indicative; machine otherwise idle, one run each).
+- **The `residual` stop alone on the shipped schedule (arm 5) is not a win in counts** -- 35 steps, five
+  redone (16, 18-21, on the target, by cycles at an unchanged beta and then `alpha`) -- although its wall
+  clock fell to 1005 s. pitzDaily's halving of the wall time is not reproduced on this schedule, and
+  `refresh_on_cycles` was left at 3 where pitzDaily pairs `residual` with 2.
+- **Damping 3 (arm 7) recovers part of the loss (459 -> 347) under lineax but still loses to arm 1**, and
+  the rate (arm 8, `grow` 2) loses less (222) than `grow` 3 under the same stop. So under lineax the order
+  is `grow` 1.5 < 2 < 3 in cost; under `residual`, `grow` 3 beats 1.5. **The stop and the rate interact**,
+  and the four-candidate attribution above collapses mostly onto the stop.
+- **Where the ramp starts, on bfs3d too: anchor 100 (shipped) is cheapest of 10, 100 and 1000.** Anchor 10
+  costs 219 / 239. Anchor 1000 reaches the target at step 14 with no step redone, but its full-length
+  trials at steps 12-13 read `rho1` ~1e22 and 4e26 (line search to `alpha` 0.125 / 0.062), and it then
+  needs **64 steps at the floor** to meet the bar: from step 28 the residual falls by only ~0.91-0.95 per
+  step (release off, as shipped). Not "a deeper start is cheaper" here -- the shipped anchor is the
+  optimum of the three, the same place pitzDaily's sweep had its optimum until 300 / 1000 report.
+  ⚠️ `compare.py`'s comment that "a direct solve (0) does NOT converge here" was NOT re-checked: arm 9 is
+  anchor 10, not a direct solve.
+- **What it does not separate yet:** `residual` with `refresh_on_cycles` 2 (pitzDaily's pairing of the
+  two), and `residual` with the release alone on `grow` 1.5.
