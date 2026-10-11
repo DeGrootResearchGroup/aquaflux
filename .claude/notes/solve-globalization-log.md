@@ -1343,7 +1343,9 @@ arrives about where the state settles at the floor.
   the previous report (`ResidualHomotopy.enter(step)` is keyed on the step index alone today).
 
 **pitzDaily's default since 2026-10-11 (project owner's decision, pitzDaily only):** its `case.yaml`
-ships `grow` 3, 12 stations and `release_floor` 1e-4. The class defaults (`grow` 1.5, no release) and
+ships `grow` 3, 12 stations and `release_floor` 1e-4. Confirmed by a run of the file as shipped,
+no `PITZ_*` overrides: 16 steps, 111 cycles (ramp 76 / target 35), shift at the floor from step 7,
+released at step 15, final `|R|` 1.98e-6, `x_r/h` 8.0686, no retry -- the sweep's arm exactly. The class defaults (`grow` 1.5, no release) and
 bfs3d's case are unchanged; bfs3d is #678. ⚠️ **"The shipped `case.yaml`" in any pitzDaily entry dated
 before 2026-10-11 means `grow` 1.5 x 16 stations with no release** (31 steps / 161 cycles at its last
 measurement).

@@ -1263,6 +1263,9 @@ def solve_aquaflux(
         if INNER_DUMP_ABOVE and checkpoint_dir is not None
         else None
     )
+    # A caller's own `on_checkpoint` joins the log's and the checkpointer's rather than replacing them:
+    # a probe that listens to each step must not silence the record of the run it is listening to.
+    extra_checkpoint = observers.pop("on_checkpoint", None)
     observers = (
         dict(
             inner_observer=combine_observers(
@@ -1270,10 +1273,10 @@ def solve_aquaflux(
                 KRYLOV_WORK.on_inner,
                 *([] if inner_dump is None else [inner_dump.on_inner]),
             ),
-            on_checkpoint=(
-                logger.on_checkpoint
-                if checkpoints is None
-                else combine_observers(logger.on_checkpoint, checkpoints.on_checkpoint)
+            on_checkpoint=combine_observers(
+                logger.on_checkpoint,
+                *([] if checkpoints is None else [checkpoints.on_checkpoint]),
+                *([] if extra_checkpoint is None else [extra_checkpoint]),
             ),
             on_retry=logger.on_retry,
         )
