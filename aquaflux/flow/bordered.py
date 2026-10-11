@@ -20,13 +20,11 @@ gives the identical function: the carried force cancels exactly, so neither the 
 derivatives depend on it.
 
 **Preconditioning the augmented system.** ``beta`` is a multiplier, not a function of ``w``, so it is
-eliminated one layer down, in the preconditioner: given ``M ~ J^{-1}`` for the unbordered block,
-
-    y = M r_w,   dbeta = (c . y - r_beta) / (c . M a),   dw = y - dbeta (M a),
-
-one application of ``M`` and a few dot products per Krylov iteration, exact when ``M = J^{-1}``. Building
-``a`` and ``c`` by hand here is legitimate: a preconditioner is an approximate inverse that changes only
-how fast the Krylov solve converges, never the solution or its adjoint.
+eliminated one layer down, in the preconditioner: :func:`~aquaflux.solve.bordered_preconditioner`
+extends ``M ~ J^{-1}`` for the unbordered block through the 1x1 Schur complement ``c . M a``, with the
+drive saying where ``beta`` sits. Building ``a`` and ``c`` by hand here is legitimate: a preconditioner
+is an approximate inverse that changes only how fast the Krylov solve converges, never the solution or
+its adjoint.
 
 **Measuring the augmented residual.** The constraint row is a velocity, so the row-scaled measure divides
 it by the speed the drive holds -- the fraction by which the bulk velocity misses its target -- beside the
@@ -50,6 +48,7 @@ from aquaflux.solve import (
     RowScaledNorm,
     ShiftPolicy,
     ShiftTerm,
+    bordered_preconditioner,
 )
 
 from .drive import MassFlow
@@ -66,12 +65,10 @@ __all__ = [
     "BorderedResidual",
     "BorderedShiftPolicy",
     "MassFlowBorder",
-    "bordered_preconditioner",
     "mass_flow_border",
 ]
 
 _Matvec = Callable[[jnp.ndarray], jnp.ndarray]
-_Preconditioner = Callable[[jnp.ndarray], _Matvec]
 
 #: The name the constraint row is reported under beside a residual's own equations.
 BULK_VELOCITY = "bulk_velocity"
@@ -128,55 +125,10 @@ class BorderedFlowResidual(eqx.Module):
         return mass_flow_border(theta, theta.layout).residual(theta.residual)(augmented)
 
 
-def bordered_preconditioner(
-    preconditioner: _Preconditioner,
-    drive: MassFlow,
-    fields: FieldLayout,
-    force: jnp.ndarray,
-    average: jnp.ndarray,
-) -> _Preconditioner:
-    """Wrap a preconditioner ``M ~ J^{-1}`` of the unbordered block into one for the bordered system.
-
-    Eliminates the scalar ``beta`` through the 1x1 Schur complement ``c . M a`` (see the module
-    docstring); exact when ``M = J^{-1}``.
-
-    Parameters
-    ----------
-    preconditioner : callable
-        Factory ``w -> (matvec ~ J^{-1})`` for the unbordered block.
-    drive : MassFlow
-        The drive whose layout says where the border entry sits -- the same one the residual borders by.
-    fields : FieldLayout
-        The layout of the block ``M`` inverts.
-    force, average : jnp.ndarray
-        The border column ``a`` and row ``c``, shape ``(fields.size,)``.
-
-    Returns
-    -------
-    callable
-        Factory ``augmented -> (matvec ~ J_aug^{-1})``.
-    """
-
-    def factory(augmented: jnp.ndarray) -> _Matvec:
-        matvec = preconditioner(drive.fields_state(fields, augmented))
-        m_force = matvec(force)  # M a
-        schur = jnp.dot(average, m_force)  # c . M a, approximating c . J^{-1} a
-
-        def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            block, border = drive.split(fields, residual)
-            y = matvec(block)
-            d_beta = (jnp.dot(average, y) - border) / schur
-            return drive.join(fields, y - d_beta * m_force, d_beta)
-
-        return apply
-
-    return factory
-
-
 class BorderedShiftPolicy(eqx.Module):
     """A shift policy for the unbordered block, bordered for the augmented state.
 
-    The inner preconditioner is wrapped by :func:`bordered_preconditioner`, and the shift diagonal gains
+    The inner preconditioner is wrapped by :func:`~aquaflux.solve.bordered_preconditioner`, and the shift diagonal gains
     a zero entry for ``beta``: the constraint row is never shifted.
 
     **An unshifted constraint row, not a damped one.** The constraint is linear in the fields and holds

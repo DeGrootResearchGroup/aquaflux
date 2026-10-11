@@ -14,7 +14,6 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
-    CompleteLuPreconditioner,
     FieldSplitPreconditioner,
     FrozenInverse,
     HostPreconditioner,
@@ -25,7 +24,6 @@ from aquaflux.solve import (
 )
 
 FAMILY = (
-    CompleteLuPreconditioner,
     MaterializedJacobianPreconditioner,
     FieldSplitPreconditioner,
     MaterializedBlockPreconditioner,
@@ -107,8 +105,8 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     ``field_split_inverse``, which would build real hierarchies. What is under test is the
     split's own contract, and that does not depend on what inverts its blocks.
     """
+    from aquaflux.solve import JacobiSmoothed
     from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
-    from aquaflux.solve.lu_preconditioner import complete_lu_inverse
 
     n = 12
     operator = (sp.random(n, n, density=0.4, random_state=0, format="csr") + sp.eye(n) * 5).tocsr()
@@ -121,10 +119,8 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
         groups,
     )
 
-    for factors in (
-        complete_lu_inverse(operator),
-        split,
-    ):
+    hierarchy = JacobiSmoothed(max_coarse=4)(operator, 2)
+    for factors in (hierarchy, split):
         assert isinstance(factors, FrozenInverse), f"{type(factors).__name__} is not FrozenInverse"
         assert factors.n_dofs == n
 
@@ -151,10 +147,11 @@ def test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract() ->
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Attribute)
-        and node.value.attr == "factors"
+        and node.value.attr == "inverse"
     }
+    assert "apply" in reached, "the scan found no read off the inverse, so it can see nothing"
     assert reached <= {"n_dofs", "apply"}, (
-        f"the base reaches for {sorted(reached - {'n_dofs', 'apply'})} on its factors, which is not "
+        f"the base reaches for {sorted(reached - {'n_dofs', 'apply'})} on its inverse, which is not "
         "part of FrozenInverse -- either add it to the contract or answer it on the subclass"
     )
 
@@ -171,7 +168,6 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     """
     from aquaflux.solve import AirReduction, JacobiSmoothed
     from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
-    from aquaflux.solve.lu_preconditioner import complete_lu_inverse
     from aquaflux.solve.traced_cycle import OffersTracedCycle
 
     n_cells = 40
@@ -181,12 +177,11 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     block = sp.block_diag([chain, chain], format="csr")
     hierarchy = JacobiSmoothed(max_coarse=8)(block, 2)
     reduction = AirReduction(max_coarse=8)(block, 2)
-    lu = complete_lu_inverse(block)
     groups = FieldGroups.by_counts(n_cells=n_cells, n_leading_fields=1, n_trailing_fields=1)
     leading, _, coupling, trailing = groups.blocks(block)
     split = FieldSplitInverse(
-        complete_lu_inverse(leading),
-        complete_lu_inverse(trailing),
+        _ExactInverse(leading.toarray()),
+        _ExactInverse(trailing.toarray()),
         coupling,
         groups,
     )
@@ -194,7 +189,6 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     expected = {
         hierarchy: (RefactorableInverse, ReleasableInverse, OffersTracedCycle),
         reduction: (RefactorableInverse, ReleasableInverse, OffersTracedCycle),
-        lu: (RefactorableInverse,),
         split: (RefactorableInverse, ReleasableInverse),
         _Doubling(): (),
     }

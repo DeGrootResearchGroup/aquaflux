@@ -45,6 +45,7 @@ __all__ = [
     "BOUNDARY_DRIVEN",
     "BoundaryDriven",
     "Drive",
+    "FlowSolve",
     "MassFlow",
     "mass_flow_drive",
     "refuse_a_constraint_this_solve_cannot_hold",

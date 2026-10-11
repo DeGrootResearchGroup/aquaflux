@@ -41,8 +41,8 @@ error.
 multiplier, not a function of ``w``, so -- unlike a nested gradient sub-solve -- it cannot be absorbed
 inside the residual; the border is eliminated one layer down, in the **preconditioner**. Given a flow-
 block preconditioner ``M ~ J^{-1}`` (the block-SIMPLE algebraic multigrid, AMG),
-:func:`~aquaflux.flow.bordered.bordered_preconditioner` wraps it into a preconditioner for the ``(dim+1) n_cells + 1``
-augmented system by Schur-eliminating the scalar ``beta``:
+:func:`~aquaflux.solve.bordered_preconditioner` wraps it into a preconditioner for the
+``(dim+1) n_cells + 1`` augmented system by Schur-eliminating the scalar ``beta``:
 
     y   = M r_flow
     dbeta = (c^T y - r_beta) / (c^T M a)      # the 1x1 Schur complement c^T J^{-1} a, approximated
@@ -76,9 +76,10 @@ from aquaflux.solve import (
     DEFAULT_ROOT_SOLVE,
     DampedNewtonStep,
     RootSolveSettings,
+    bordered_preconditioner,
 )
 
-from .bordered import BorderedFlowResidual, bordered_preconditioner
+from .bordered import BorderedFlowResidual
 from .drive import FlowSolve, mass_flow_drive
 
 if TYPE_CHECKING:
@@ -132,7 +133,7 @@ def bulk_velocity_flow_solve(
     preconditioner : callable or None
         Factory ``w -> (matvec ~ J^{-1})`` for the **un-augmented flow block** (e.g. a frozen
         :meth:`aquaflux.flow.BlockPreconditioner.factory`, built off-jit from a reference). When given,
-        it is wrapped by :func:`~aquaflux.flow.bordered.bordered_preconditioner` into a constraint preconditioner for the
+        it is wrapped by :func:`~aquaflux.solve.bordered_preconditioner` into a constraint preconditioner for the
         augmented Krylov solve -- the mesh-independent path for a large iterative solve. ``None`` solves
         unpreconditioned (a direct or small solve needs nothing).
 

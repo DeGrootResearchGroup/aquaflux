@@ -44,6 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.mesh import (
+    PADDING_PATCH,
     CellGeometry,
     CellZones,
     FaceCellConnectivity,
@@ -54,7 +55,6 @@ from aquaflux.mesh import (
     MeshGeometry,
     interior_mask,
 )
-from aquaflux.mesh.groups import PADDING_PATCH
 
 from .partition import PartitionedMesh, scatter_owned_partitions
 

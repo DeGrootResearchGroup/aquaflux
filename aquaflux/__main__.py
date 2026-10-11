@@ -53,10 +53,10 @@ from aquaflux.case import (
     prepare_run,
     read_case,
     read_case_document,
+    relocated,
     solver_for,
     write_case,
 )
-from aquaflux.case.paths import relocated
 from aquaflux.io import write_patches, write_vtu
 
 __all__ = ["main"]

@@ -16,12 +16,12 @@ import lineax as lx
 import pytest
 from aquaflux.flow import bulk_velocity_flow_solve, mass_flow_border, solve_flow_march
 from aquaflux.solve import (
-    CompleteLu,
     Convergence,
     DualTimeLoop,
     Globalization,
     MaterializedJacobian,
     RootSolveSettings,
+    SimpleSmoothed,
     relative_residual_gmres,
 )
 
@@ -119,4 +119,4 @@ def test_the_gradient_through_the_march_is_the_sensitivity_at_fixed_bulk_velocit
 
 def test_a_materialized_preconditioner_is_refused_beside_a_held_bulk_velocity(channel) -> None:
     with pytest.raises(TypeError, match="holds a bulk velocity"):
-        solve_flow_march(channel, preconditioner=MaterializedJacobian(CompleteLu()))
+        solve_flow_march(channel, preconditioner=MaterializedJacobian(SimpleSmoothed()))

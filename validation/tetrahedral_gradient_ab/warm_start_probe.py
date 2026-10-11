@@ -26,7 +26,14 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import CompleteLu, DualTimeLoop, MaterializedJacobian
+from aquaflux.solve import (
+    Convergence,
+    DualTimeLoop,
+    FieldSplit,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    SimpleSmoothed,
+)
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
@@ -46,8 +53,8 @@ from compare import (
 
 STEPS = int(os.environ.get("TET_STEPS", "25"))
 SEED_STEPS = 25
-#: Re-fit the complete LU mid-step once an inner solve takes this many restart cycles (0: never, the
-#: first factorization is kept for the whole march -- exact only at the state and shift it was built at).
+#: Re-fit the preconditioner mid-step once an inner solve takes this many restart cycles (0: never, the
+#: first fit is kept for the whole march, refitted only on the session's own schedule).
 REFRESH_ON_CYCLES = int(os.environ.get("TET_REFRESH_ON_CYCLES", "0")) or None
 ARMS = os.environ.get("TET_ARMS", "owner,repaired").split(",")
 RATIO = 10.0
@@ -70,13 +77,12 @@ def march(label, coupled, flow, k, omega, rtol, max_steps=STEPS):
             flow,
             k,
             omega,
-            preconditioner=MaterializedJacobian(CompleteLu()),
+            preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
             dual_time=DualTimeLoop(
                 inner_steps=INNER_STEPS, inner_tol=INNER_TOL, refresh_on_cycles=REFRESH_ON_CYCLES
             ),
             max_steps=max_steps,
-            rtol=rtol,
-            atol=0.0,
+            convergence=Convergence(rtol=rtol, atol=0.0),
             positivity_projection=True,
             retry=RETRY,
             on_step=on_step,

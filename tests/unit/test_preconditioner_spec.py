@@ -8,8 +8,6 @@ import inspect
 import pytest
 from aquaflux.flow import BlockPreconditioner
 from aquaflux.solve import (
-    CompleteLu,
-    CompleteLuPreconditioner,
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,
@@ -48,11 +46,6 @@ def test_the_probe_spec_names_the_probe_builders_free_settings() -> None:
         "coupled"
     }
     assert _fields(JacobianProbeSpec) == expected
-
-
-def test_the_complete_lu_spec_names_the_factorizations_settings() -> None:
-    """The factorization has no settings, so neither does its spec."""
-    assert _fields(CompleteLu) == _parameters(CompleteLuPreconditioner.build, _KEYWORD_ONLY)
 
 
 def test_an_unset_scalar_block_resolves_to_the_two_level_default() -> None:
@@ -115,4 +108,4 @@ def test_the_block_diagonal_family_is_not_a_materialized_inverse() -> None:
 
 def test_a_probe_must_be_a_probe_spec() -> None:
     with pytest.raises(TypeError, match=r"MaterializedJacobian\.probe must be a JacobianProbeSpec"):
-        MaterializedJacobian(CompleteLu(), probe={"stencil_reach": 3})
+        MaterializedJacobian(SimpleSmoothed(), probe={"stencil_reach": 3})

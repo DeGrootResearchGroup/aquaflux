@@ -9,8 +9,8 @@ Reynolds number, whose developed profile is a parabola.
 This runs the flow residual alone -- no turbulence fields, wall model or production terms -- through
 ``solve_flow_march``, the same staged march ``compare.py`` runs the turbulent case on, and configured the
 same way: the wall-tapered seed of ``compare._hybrid_start`` (potential flow's Laplace solve is unusable
-on these meshes), a two-point ramp (anchor at ``mu * RATIO``, then the target), a complete-LU
-materialized preconditioner, the same dual-time loop and retry policy, one line per step. The
+on these meshes), a two-point ramp (anchor at ``mu * RATIO``, then the target), a ``SimpleSmoothed``
+materialized preconditioner over the whole flow state, the same dual-time loop and retry policy, one line per step. The
 difference from the turbulent march is only the residual and its measure (``FlowMeasures``); the
 convergence test here is ``Convergence(rtol=TET_LAMINAR_RTOL, atol=0)`` on the row-scaled measure.
 
@@ -61,7 +61,7 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import CompleteLu, Convergence, DualTimeLoop, MaterializedJacobian
+from aquaflux.solve import Convergence, DualTimeLoop, MaterializedJacobian, SimpleSmoothed
 from compare import INNER_STEPS, INNER_TOL, POLYMESH, RATIO, RETRY
 from diffusion_operator_probe import (
     CorrectionCapped,
@@ -267,7 +267,7 @@ def seed(momentum: MomentumContinuity) -> jnp.ndarray:
 
 def main() -> None:
     print(f"=== laminar duct, Re_Dh {RE:g} (mu {MU:.2e}), flow residual only ===", flush=True)
-    preconditioner = MaterializedJacobian(CompleteLu())
+    preconditioner = MaterializedJacobian(SimpleSmoothed())
     dual_time = DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL)
     for label, path in meshes().items():
         mesh = read_openfoam(path)

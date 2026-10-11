@@ -22,7 +22,6 @@ from aquaflux.solve import (
     MATERIALIZED_MAPPING,
     AirReduction,
     BlockInverse,
-    CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,
@@ -56,9 +55,9 @@ _SPECS = [
         mass_scale=2.0,
         strength_threshold=0.25,
     ),
-    MaterializedJacobian(CompleteLu()),
-    MaterializedJacobian(CompleteLu(), build_beta=0.5),
-    MaterializedJacobian(CompleteLu(), refit_beta_floor=0.05),
+    MaterializedJacobian(SimpleSmoothed()),
+    MaterializedJacobian(SimpleSmoothed(), build_beta=0.5),
+    MaterializedJacobian(SimpleSmoothed(), refit_beta_floor=0.05),
     MaterializedJacobian(
         FieldSplit(
             SimpleSmoothed(sweeps=2, strength_threshold=0.25, frozen_coarsening=True),
@@ -111,7 +110,7 @@ def _public_value_classes() -> set[type]:
         and cls not in (VelocityBlock, ScalarBlock, BlockInverse)
         and not inspect.isabstract(cls)
     }
-    spec_classes = {BlockDiagonal, MaterializedJacobian, CompleteLu, FieldSplit}
+    spec_classes = {BlockDiagonal, MaterializedJacobian, FieldSplit}
     return nested | spec_classes | {JacobianProbeSpec}
 
 
@@ -144,7 +143,7 @@ def test_a_column_reach_read_from_a_file_is_the_same_value_as_one_given_in_code(
     read = preconditioner_spec_from_mapping(
         {
             "kind": "MaterializedJacobian",
-            "inverse": {"kind": "CompleteLu"},
+            "inverse": {"kind": "SimpleSmoothed"},
             "probe": {"kind": "JacobianProbeSpec", "column_reach": [3.0, 3.0, 2.0]},
         }
     )
@@ -155,7 +154,7 @@ def test_a_column_reach_read_from_a_file_is_the_same_value_as_one_given_in_code(
 def test_a_numpy_scalar_setting_is_refused_on_writing_naming_the_setting() -> None:
     with pytest.raises(TypeError, match="float32 at 'build_beta' is not plain data"):
         preconditioner_spec_to_mapping(
-            MaterializedJacobian(CompleteLu(), build_beta=np.float32(0.5))
+            MaterializedJacobian(SimpleSmoothed(), build_beta=np.float32(0.5))
         )
 
 
@@ -179,12 +178,12 @@ def test_the_file_form_of_a_field_split_spec() -> None:
 
 
 def test_the_default_probe_is_omitted_and_an_omitted_probe_reads_back_as_the_default() -> None:
-    assert preconditioner_spec_to_mapping(MaterializedJacobian(CompleteLu())) == {
+    assert preconditioner_spec_to_mapping(MaterializedJacobian(SimpleSmoothed())) == {
         "kind": "MaterializedJacobian",
-        "inverse": {"kind": "CompleteLu"},
+        "inverse": {"kind": "SimpleSmoothed"},
     }
     read = preconditioner_spec_from_mapping(
-        {"kind": "MaterializedJacobian", "inverse": {"kind": "CompleteLu"}}
+        {"kind": "MaterializedJacobian", "inverse": {"kind": "SimpleSmoothed"}}
     )
     assert read.probe == JacobianProbeSpec()
 
@@ -223,7 +222,7 @@ def test_unpreconditioned_scalar_blocks_are_a_kind_and_a_null_scalar_is_the_defa
             {"kind": "BlockDiagonal", "velocity": "convection"},
             "'convection' at 'velocity' is not accepted there",
         ),
-        ({"inverse": {"kind": "CompleteLu"}}, "names no 'kind'"),
+        ({"inverse": {"kind": "SimpleSmoothed"}}, "names no 'kind'"),
     ],
     ids=[
         "unknown-kind",
@@ -263,7 +262,7 @@ def test_a_nested_value_of_the_wrong_kind_is_refused_where_it_appears() -> None:
 
 @pytest.mark.parametrize(
     "mapping",
-    [{"kind": "CompleteLu"}, {"kind": "SimpleSmoothed"}, {"kind": "JacobianProbeSpec"}],
+    [{"kind": "JacobiSmoothed"}, {"kind": "SimpleSmoothed"}, {"kind": "JacobianProbeSpec"}],
     ids=lambda m: m["kind"],
 )
 def test_the_outermost_kind_must_be_one_of_the_two_families(mapping) -> None:
@@ -273,7 +272,7 @@ def test_the_outermost_kind_must_be_one_of_the_two_families(mapping) -> None:
 
 def test_only_a_spec_family_is_written() -> None:
     with pytest.raises(TypeError, match="BlockDiagonal or MaterializedJacobian"):
-        preconditioner_spec_to_mapping(CompleteLu())  # type: ignore[arg-type]
+        preconditioner_spec_to_mapping(SimpleSmoothed())  # type: ignore[arg-type]
 
 
 def test_the_solve_registry_round_trips_a_materialized_spec_without_the_turbulence_package() -> (
@@ -348,7 +347,9 @@ def _split(leading: dict) -> dict:
             r"'jacobi' at 'inverse.leading.prolongation_smoothing' is not accepted there",
         ),
         (
-            _split({"kind": "SimpleSmoothed", "prolongation_smoothing": {"kind": "CompleteLu"}}),
+            _split(
+                {"kind": "SimpleSmoothed", "prolongation_smoothing": {"kind": "JacobianProbeSpec"}}
+            ),
             r"at 'inverse.leading.prolongation_smoothing' is not accepted there",
         ),
         (

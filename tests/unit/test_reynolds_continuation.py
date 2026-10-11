@@ -394,14 +394,14 @@ def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monk
     now owns, so it no longer travels beside it -- and each point is handed that session, re-pointed at
     its own companion.
     """
-    from aquaflux.solve import CompleteLu, MaterializedJacobian
+    from aquaflux.solve import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 
     calls = _record_solves(monkeypatch)
     solve_reynolds_continuation(
         _tiny_coupled(),
         n_points=1,
         convergence=Convergence(rtol=1e-10),
-        preconditioner=MaterializedJacobian(CompleteLu()),
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
         jacobian_production_viscosity=True,
     )
     ramp, target = calls
@@ -1522,7 +1522,7 @@ def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
 
 def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(monkeypatch) -> None:
     """The first step is fitted to the anchor it solves, and every station change re-points the session."""
-    from aquaflux.solve import CompleteLu, MaterializedJacobian
+    from aquaflux.solve import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
     from aquaflux.turbulence import solve_reynolds_ramp
 
     coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
@@ -1532,7 +1532,7 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
         stations=2,
         steps_per_station=1,
         point_setup=lambda companion, state, point: {},
-        preconditioner=MaterializedJacobian(CompleteLu()),
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
     )
     session = calls[0]["kwargs"]["preconditioner"]
     homotopy = calls[0]["kwargs"]["homotopy"]

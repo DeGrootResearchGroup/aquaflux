@@ -16,6 +16,8 @@ from .conditions import (
     DirichletField,
     Neumann,
     ZeroGradient,
+    as_float_leaf,
+    as_position_function,
 )
 
 __all__ = [
@@ -27,5 +29,7 @@ __all__ = [
     "DirichletField",
     "Neumann",
     "ZeroGradient",
+    "as_float_leaf",
+    "as_position_function",
     "refuse_a_closure_that_closes_other_fields",
 ]

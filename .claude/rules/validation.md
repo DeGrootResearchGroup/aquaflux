@@ -5,7 +5,7 @@ paths:
 
 # Rules — `validation/` (the scientific cases and the study harnesses)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > **Provenance boundary (binding).** As with every rule file: what you read here informs your
 > understanding, and none of it may reach the shipped surface. See the root `CLAUDE.md`
@@ -216,8 +216,9 @@ cannot be written. The guard is what catches the next module that does branch.
   comparisons return False and so *look* exactly like a threshold rejecting every edge.
   **Gate it: assert the starting residual is finite before measuring anything.**
 - **Do not copy a wiring idiom from a test without checking the case matches.** The `pack_state` error
-  above came from `tests/integration/test_coupled_lu.py`, where it is correct — that fixture builds
-  `CoupledRANS` with no transform.
+  above came from `tests/integration/test_coupled_lu.py` (deleted 2026-10-11; its channel fixture lives in
+  `test_coupled_field_split.py` now), where it is correct — that fixture builds `CoupledRANS` with no
+  transform.
 - **⚠️ A PIVOT CENSUS MUST READ THE FACTOR, NOT THE OPERATOR HANDED TO IT.** Every consumer here
   symmetrically equilibrates before factorizing, which forces the *operator's* diagonal to magnitude
   exactly 1 — so a census written as `matrix.diagonal()` reports "zero negative pivots, min |pivot|
@@ -647,6 +648,32 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
   room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
 
+## The aggressive Reynolds continuation does NOT need the complete LU (2026-10-11)
+
+`pitzdaily_openfoam/compare_reynolds_continuation.py` used to say its aggressive Courant control could
+reach the developed reattachment only with an exact complete-LU preconditioner, re-factored every step,
+because "a block-triangular SIMPLE preconditioner loses diagonal dominance and the step goes non-finite".
+That was the last claimed regime for the LU, so it was re-run on the field split before the LU was deleted.
+**Measured 2026-10-11** (`validation/pitzdaily_openfoam/compare_reynolds_continuation.py` at `10449ed` plus
+the harness changes of the LU-removal PR; Linux x86_64, 4 cores, jax 0.11.2, Python 3.13): the aggressive
+`DualTimeControl(beta_start=0.5, beta_min=0.005)` Reynolds continuation (Re/100, Re/10, target;
+`inner_steps=10`, `inner_tol=1e-3`, intermediate `rtol` 3e-2, target `rtol` 1e-3), preconditioned by
+`case.yaml`'s own `FieldSplit(SimpleSmoothed, JacobiSmoothed)` at `refit_beta_floor` 0.05 with
+`refresh_on_cycles=2`, built at β 0.5: **converged in 40 outer steps / 852 restart cycles, no retries and
+no non-finite step, `x_r/h` 8.069 (OpenFOAM 7.741; `compare.py`'s root 8.0686), peak `nu_t/nu` 416 (423)**.
+Rungs took 12 / 11 / 17 steps. The one hard step was rung 2's last (β 0.009): 133 cycles, inner α 0.016,
+finite, and it met the rung's tolerance. ⚠️ Wall clock (3305 s) is NOT quotable: a unit-test run shared
+the machine for the first ~10 minutes. ⚠️ A first attempt with NO `refresh_on_cycles` (split fitted once
+per rung, never refreshed) was stopped at step 8 with cycles rising 9 → 31 — that configuration is not one
+anything ships, and the LU it was compared with refactored every step, so it was not a fair arm. The LU arm
+itself was not re-run (the harness's claim was recorded without a run log in the repository).
+The harness now runs the split only. Two defects in it predated this and were fixed on the way: its
+step-control wrapper called `float()` on `DualTimeControl`'s carried state, which is a `(β, previous
+|R|)` tuple, so it crashed on its first step on `main`; it now reads the shift off the step with
+`shift_of`. And it does not put its own repository on `sys.path`, so `import aquaflux` resolves to the
+editable install — a run from a second worktree must set `PYTHONPATH` to that worktree, or it silently
+runs the other checkout's code (this happened, mid-edit, and crashed on an import the edit had removed).
+
 ## Recovering a converged state (both cases)
 
 Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through the shared
@@ -664,6 +691,7 @@ and this section once explained it as a platform difference (arm64/Python 3.13 v
 `max_steps` hypothesis. **The real cause was simpler: all three were `pytest.importorskip("petsc4py")`-gated,
 CI did not install PETSc, so CI never ran them** (root `CLAUDE.md`, "CI is not a superset of a local run").
 Two of them (`test_coupled_amg.py`) were deleted with PETSc on 2026-10-10; the third, now
-`test_the_split_continuation_converges_to_the_complete_lu_fixed_point`, is PETSc-free and runs in CI.
+`test_the_split_continuation_reaches_the_block_preconditioned_root` (renamed when the complete LU it
+compared against was deleted, 2026-10-11), is PETSc-free and runs in CI.
 **The trap that survives: before attributing a local-only failure to your platform, check the CI skip
 counts** — a guard was once reverted on the strength of the platform story.

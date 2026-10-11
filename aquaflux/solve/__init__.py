@@ -68,7 +68,10 @@ unit tests. The surface is five groups:
   square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
   matching fixed-cycle applies. Callers assemble an operator, build a hierarchy once off the jit
-  path, and apply it as a frozen matrix-free V-cycle preconditioner.
+  path, and apply it as a frozen matrix-free V-cycle preconditioner. `bordered_preconditioner`
+  extends any preconditioner to the same system bordered by one scalar unknown (a Lagrange
+  multiplier), eliminating it through its 1x1 Schur complement; where the scalar sits is a
+  `ScalarBorder`'s to say.
 """
 
 from __future__ import annotations
@@ -99,6 +102,7 @@ from .field_split import (
     FieldSplitPreconditioner,
     field_split_inverse,
 )
+from .bordered import ScalarBorder, bordered_preconditioner
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
 from .settings_value import MergeableSettings, SettingsValue, filled_from
@@ -111,7 +115,6 @@ from .host_preconditioner import (
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
-from .lu_preconditioner import CompleteLuPreconditioner
 from .strategy import (
     AbortsInnerLoop,
     CarriesRelaxationSchedule,
@@ -220,7 +223,6 @@ from .jacobian_probe import JacobianProbe, jacobian_probe_plan
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .materialized_session import (
     BUILD_BETA,
-    FACTORIZATION_LINEAR_SOLVE,
     PROBE_BATCH_SIZE,
     VCYCLE_LINEAR_SOLVE,
     BetaTrackingRefresh,
@@ -232,7 +234,6 @@ from .materialized_session import (
     jacobian_matvec,
 )
 from .materialized_spec import (
-    CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
@@ -276,7 +277,6 @@ __all__ = [
     "DEFAULT_ROOT_SOLVE",
     "DEFAULT_SHIFT_BASIS",
     "ESCALATING_REASONS",
-    "FACTORIZATION_LINEAR_SOLVE",
     "MATERIALIZED_MAPPING",
     "NO_REFRESH",
     "NO_RETRIES",
@@ -297,8 +297,6 @@ __all__ = [
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ColumnProbePlan",
-    "CompleteLu",
-    "CompleteLuPreconditioner",
     "ConstantRelaxation",
     "ContinuationSource",
     "ConvectionDiffusionStencil",
@@ -373,6 +371,7 @@ __all__ = [
     "RootSolver",
     "RowScaled",
     "RowScaledNorm",
+    "ScalarBorder",
     "SessionSource",
     "SettingsMapping",
     "SettingsValue",
@@ -406,6 +405,7 @@ __all__ = [
     "block_reference_scales",
     "block_stencil_colouring",
     "block_stencil_gather_map",
+    "bordered_preconditioner",
     "build_air_hierarchy",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",

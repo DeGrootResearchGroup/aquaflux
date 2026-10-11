@@ -68,8 +68,7 @@ from .preconditioner import ScalarBlock, UnpreconditionedScalars
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from aquaflux.flow import MomentumContinuity
-    from aquaflux.flow.drive import FlowSolve
+    from aquaflux.flow import FlowSolve, MomentumContinuity
 
     from .preconditioner import ScalarTransportPreconditioner
     from .transport import SSTClosureFields, SSTTurbulence

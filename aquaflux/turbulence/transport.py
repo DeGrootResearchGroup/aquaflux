@@ -42,8 +42,7 @@ from aquaflux.discretization import (
     FixedValueCells,
     ResidualAssembler,
 )
-from aquaflux.flow import volume_flux, wetted_length
-from aquaflux.flow.boundary import sheared_patches
+from aquaflux.flow import sheared_patches, volume_flux, wetted_length
 from aquaflux.mesh import distance_to_patches
 from aquaflux.properties import FieldProperty, PropertyModel
 from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, ImposedGradient

@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 import jax.numpy as jnp
 
 from aquaflux.discretization import flux_continuous_conductance
-from aquaflux.schemes.interpolation import interpolate_owner_neighbour, interpolate_to_face
+from aquaflux.schemes import interpolate_owner_neighbour, interpolate_to_face
 from aquaflux.vectors import dot, scale
 
 if TYPE_CHECKING:

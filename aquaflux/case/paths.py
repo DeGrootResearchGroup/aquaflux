@@ -109,6 +109,7 @@ def relocated(value: object, source: Path, target: Path) -> object:
     Returns
     -------
     object
+        ``value`` with each relative path it names re-based onto ``target``.
     """
 
     def rebased(path: str) -> str:

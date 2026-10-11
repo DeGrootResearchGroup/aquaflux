@@ -41,7 +41,6 @@ from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MassFlow, PinnedPoint
 from aquaflux.solve import (
     CflResidualDualTimeControl,
-    CompleteLu,
     Convergence,
     DirectSolve,
     DualTimeLoop,
@@ -388,8 +387,13 @@ def test_a_march_holds_a_bulk_velocity(physics, march) -> None:
 @pytest.mark.parametrize(
     ("physics", "march"),
     [
-        (RANS(), CoupledMarch(preconditioner=MaterializedJacobian(CompleteLu()))),
-        (Laminar(), FlowMarch(preconditioner=MaterializedJacobian(CompleteLu()))),
+        (
+            RANS(),
+            CoupledMarch(
+                preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+            ),
+        ),
+        (Laminar(), FlowMarch(preconditioner=MaterializedJacobian(SimpleSmoothed()))),
     ],
     ids=["coupled", "flow"],
 )

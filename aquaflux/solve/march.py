@@ -629,9 +629,9 @@ def newton_march(
         strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
         state and shift. It runs in this eager loop -- a host operation outside the jitted ``_march_step``
         -- and mutates the step's *static* preconditioner in place, so ``_march_step`` stays a
-        compilation-cache hit. The use case is a **complete-LU preconditioner re-factored at the current
-        ``(state, β)``** so it is the exact inverse of the operator actually solved (a frozen factorization
-        mis-preconditions the shifted operator once the march's β leaves the value it was built at). Like
+        compilation-cache hit. The use case is a **materialized-Jacobian preconditioner re-fitted at the
+        current ``(state, β)``**, since a frozen inverse mis-preconditions the shifted operator once the
+        march's β leaves the value it was built at. Like
         the trigger and the control it is **forward-only** -- an impure mutation that must never be on a
         differentiated path. ``None`` (the default) leaves the preconditioner untouched, byte-identical to
         before.
@@ -866,8 +866,8 @@ def newton_march(
             retry.require_shifted(active_step)
         if refresh_preconditioner is not None:
             # Refresh the step's (frozen, host) preconditioner from the state and shift strength this
-            # step is about to run at -- e.g. re-factoring a complete LU at the current (state, β) so it
-            # is the exact inverse of the operator actually solved. Runs HERE, in the eager loop (a host
+            # step is about to run at -- e.g. re-fitting a materialized-Jacobian inverse at the current
+            # (state, β), so it preconditions the operator actually solved. Runs HERE, in the eager loop (a host
             # op outside the jitted `_march_step`), after the control has set β on `active_step`. It
             # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
             # cache hit. Forward-only, like the trigger and the control.
@@ -955,7 +955,7 @@ def newton_march(
         # unavailable (no threshold set, or no β leaf) -- redoing the SAME step from the SAME pre-step
         # state with the tighter solver `retry.solver` names.
         # One retry; a still-diverged step breaks below as it would without a retry. A policy with no
-        # `solver` (the default) is byte-identical, and the exact-LU path never triggers this.
+        # `solver` (the default) is byte-identical.
         diverged_retry = retry.solver is not None and retry.has_diverged(residual_norm, reference)
         if diverged_retry:
             if on_retry is not None:

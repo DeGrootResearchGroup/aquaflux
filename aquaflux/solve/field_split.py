@@ -1,7 +1,6 @@
 """A block-triangular field-split preconditioner for the coupled flow-plus-transport Newton solve.
 
-A monolithic preconditioner (the complete LU, :mod:`~aquaflux.solve.lu_preconditioner`, or one block
-inverse over the whole state) treats the coupled Jacobian as one undifferentiated block. That forces
+A monolithic preconditioner (one block inverse over the whole state) treats the coupled Jacobian as one undifferentiated block. That forces
 every field to share one inverse -- for a multigrid inverse, a single hierarchy and a single level
 smoother — and the six fields of a Reynolds-averaged solve
 are not one kind of equation. Four of them, ``[u, v, w, p]``, form a pressure-velocity saddle; the other

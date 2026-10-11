@@ -49,7 +49,7 @@ PUBLIC_SUBPACKAGES = [
 # reaches the page either way — this table decides only the order and the headings.
 SUBPACKAGE_GROUPS = {
     "case": [
-        ("Reading, writing and checking a case file", ["case_file", "spec"]),
+        ("Reading, writing and checking a case file", ["case_file", "spec", "paths"]),
         (
             "The sections of a case",
             [
@@ -101,13 +101,13 @@ SUBPACKAGE_GROUPS = {
             [
                 "host_preconditioner",
                 "materialized_preconditioner",
-                "lu_preconditioner",
                 "monolithic_policy",
                 "materialized_spec",
                 "materialized_session",
                 "field_split",
                 "block_inverse",
                 "block_preconditioner",
+                "bordered",
                 "settings_value",
                 "settings_mapping",
                 "hierarchy_inverse",

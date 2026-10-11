@@ -28,6 +28,7 @@ from .datum import PinnedPoint, PressureDatum, refuse_an_unsuitable_pressure_dat
 from .drive import (
     BoundaryDriven,
     Drive,
+    FlowSolve,
     MassFlow,
     mass_flow_drive,
     refuse_a_constraint_this_solve_cannot_hold,
@@ -49,11 +50,17 @@ from .bordered import (
     BorderedResidual,
     BorderedShiftPolicy,
     MassFlowBorder,
-    bordered_preconditioner,
     mass_flow_border,
 )
 from .mean_velocity import bulk_velocity_flow_solve
-from .scales import body_force_velocity, characteristic_velocity, reference_speed, wetted_length
+from .scales import (
+    body_force_velocity,
+    characteristic_velocity,
+    friction_velocity,
+    hydraulic_length,
+    reference_speed,
+    wetted_length,
+)
 from .momentum import FlowFields, MomentumContinuity, PressureForce, VelocityFields
 from .source import MomentumSource, UniformBodyForce
 from .preconditioner import damped_jacobi_solve, pressure_schur_laplacian
@@ -72,6 +79,7 @@ __all__ = [
     "FlowBoundary",
     "FlowFields",
     "FlowMeasures",
+    "FlowSolve",
     "FrozenViscosityVelocityParts",
     "MassFlow",
     "MassFlowBorder",
@@ -91,14 +99,15 @@ __all__ = [
     "ViscousMultilevel",
     "bernoulli_pressure",
     "body_force_velocity",
-    "bordered_preconditioner",
     "bulk_velocity_flow_solve",
     "characteristic_velocity",
     "damped_jacobi_solve",
     "flow_equation_names",
     "flow_march_step",
     "flow_row_scales",
+    "friction_velocity",
     "frozen_momentum_diagonal_parts",
+    "hydraulic_length",
     "interior_mass_flux",
     "laplace_field",
     "mass_flow_border",

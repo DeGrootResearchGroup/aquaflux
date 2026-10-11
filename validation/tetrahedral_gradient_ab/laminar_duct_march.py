@@ -1,4 +1,4 @@
-"""The laminar tetrahedral duct, marched four ways: is the failure the flow-only path's, or the case's?
+"""The laminar tetrahedral duct, marched three ways: is the failure the flow-only path's, or the case's?
 
 Issue #448 found that a hand-rolled ``newton_march`` over ``momentum_continuation`` did not converge a
 resolved, near-quadratic laminar duct (Re_Dh 50) on the tetrahedral mesh of this directory, even with
@@ -10,7 +10,6 @@ so the same case can be marched by the same machinery, and this script does that
 
 * ``bare``   -- ``newton_march`` over ``momentum_continuation``, the configuration the issue reported;
 * ``staged`` -- ``solve_flow_march``, single shifted step, row-scaled measure, default globalization;
-* ``lu``     -- ``solve_flow_march`` with a dual-time loop and a complete-LU ``MaterializedJacobian``;
 * ``simple`` -- the same with ``SimpleSmoothed`` (the traced saddle hierarchy, no PETSc).
 
 **Operating point.** The duct of ``make_mesh.py`` (0.25 x 0.025 x 0.025 m, 2462 tetrahedra), unit density,
@@ -40,7 +39,7 @@ Settings (environment):
   Hessian boundary closure) or ``projected`` (``ProjectedStencilGradient``: per-cell weights on the
   two-hop stencil, exact for quadratics and nearest to ``LAM_BLEND`` (default 0.75) times its
   reference reconstruction -- ``LAM_BLEND=0`` is the minimum-norm, least-squares end of that family);
-* ``LAM_ARMS`` = a comma list of ``bare,staged,lu,simple``;
+* ``LAM_ARMS`` = a comma list of ``bare,staged,simple``;
 * ``LAM_MAX_STEPS`` (default 60).
 """
 
@@ -81,7 +80,6 @@ from aquaflux.schemes import (
     SkewCorrectedGradient,
 )
 from aquaflux.solve import (
-    CompleteLu,
     Convergence,
     DualTimeLoop,
     Euclidean,
@@ -106,7 +104,7 @@ HESSIAN_CLOSURE = os.environ.get("LAM_HESSIAN_CLOSURE", "owner")
 BLEND = float(os.environ.get("LAM_BLEND", "0.75"))
 START = os.environ.get("LAM_START", "plug")
 MEASURE = os.environ.get("LAM_MEASURE", "rowscaled")
-ARMS = os.environ.get("LAM_ARMS", "bare,staged,lu,simple").split(",")
+ARMS = os.environ.get("LAM_ARMS", "bare,staged,simple").split(",")
 ATOL = 1e-8  # the staged arms' stop, in the chosen measure
 BARE_TARGET = 1.7e-10  # the Euclidean target the issue quoted for the bare arm
 
@@ -219,13 +217,6 @@ def main() -> None:
     runners = {
         "bare": lambda: run_bare(momentum, state),
         "staged": lambda: run_staged("staged", momentum, state),
-        "lu": lambda: run_staged(
-            "lu",
-            momentum,
-            state,
-            preconditioner=MaterializedJacobian(CompleteLu()),
-            dual_time=DualTimeLoop(inner_steps=3),
-        ),
         "simple": lambda: run_staged(
             "simple",
             momentum,

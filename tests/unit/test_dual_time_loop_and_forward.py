@@ -15,13 +15,15 @@ import inspect
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
 from aquaflux.solve import (
-    FACTORIZATION_LINEAR_SOLVE,
-    CompleteLu,
+    VCYCLE_LINEAR_SOLVE,
     DualTimeLoop,
     DualTimeStep,
+    FieldSplit,
+    JacobiSmoothed,
     LinearSolveSettings,
     MaterializedJacobian,
     PseudoTransientStep,
+    SimpleSmoothed,
     relative_residual_gmres,
     resolve_linear_solve,
 )
@@ -73,7 +75,7 @@ def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_singl
 
 
 @pytest.mark.parametrize(
-    "base", [_BLOCK_LINEAR_SOLVE, FACTORIZATION_LINEAR_SOLVE], ids=["block", "factorization"]
+    "base", [_BLOCK_LINEAR_SOLVE, VCYCLE_LINEAR_SOLVE], ids=["block", "vcycle"]
 )
 @pytest.mark.parametrize(
     "fields",
@@ -165,7 +167,7 @@ def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_sess
         open_session(BlockDiagonal(scalar=UnpreconditionedScalars()), coupled).build(
             state, dual_time=loop
         )
-    spec = MaterializedJacobian(CompleteLu())
+    spec = MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
     with pytest.raises(TypeError, match="refresh_on_cycles"):  # nor does a frozen step
         coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
     session = open_session(spec, coupled)

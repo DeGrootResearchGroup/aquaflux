@@ -2,7 +2,7 @@
 
 :class:`~aquaflux.solve.FieldSplitInverse` composes its two block inverses in ``numpy`` on the
 host, and is reached from the jitted Krylov solve through a :func:`jax.pure_callback`. That is the right
-shape when a block inverse is a host factorization (an incomplete or complete LU), because the work
+shape when a block inverse is a host computation, because the work
 itself is on the host and the vector has to travel anyway.
 
 It is the wrong shape when **both** blocks are traced multigrid cycles, which is what the shipped

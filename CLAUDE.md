@@ -234,8 +234,9 @@ Rules, with FVM-specific teeth:
   time scale — sitting on a builder that names a *strategy* (a preconditioner). If the reason for a
   parameter can be stated without naming the strategy the builder constructs, it belongs on the shared
   tail, not on that builder. Where a sibling genuinely must differ, say so *at the difference*: the
-  mass-flow builder's Euclidean forward tolerance carries the reason (its bordered measure has no
-  row-scaled form) at the constant itself, so the next reader sees a decision rather than an omission.
+  mass-flow builder's Euclidean forward tolerance carried the reason (its bordered measure had no
+  row-scaled form) at the constant itself, so the next reader saw a decision rather than an omission
+  (both went in #541, when the bordered row-scaled measure was built and the builder deleted).
   **⚠️ AND A SHARED TAIL IS NOT THE ONLY REPAIR — for a shared *surface*, the durable one is a shared
   OBJECT, and it is the sixth instance (#372, 2026-09-13).** Six builders configured one shifted-march
   engine, and each listed its share of that engine's settings as its own keywords: eight apiece on the
@@ -314,6 +315,16 @@ found and fixed**; treat them as binding, not aspirational.
   pattern, mirroring the operator/scheme/BC strategies). Inline flat-vector index arithmetic for a
   state layout is a missing value object (`solve/state.py::FieldLayout`).
 
+- **A package's `__all__` is its whole surface to other packages (binding, #284).** Another package
+  imports from `aquaflux.<package>` (or a nested package such as `aquaflux.io.cad`), never from one of
+  its submodules, and only names that package's `__init__` lists in `__all__`.
+  `tests/unit/test_layering.py::test_one_package_reaches_another_only_through_its_public_surface`
+  enforces it over every module in `aquaflux/`, the top-level ones included. When it fires, the remedy is
+  to export the name, or — when the name is private and generic — to move it to the package it belongs
+  in (`_bordered_preconditioner` was pure Schur elimination living in `flow/mean_velocity.py`; it is now
+  `solve.bordered_preconditioner`). Tests and `validation/` harnesses are exempt and may reach internals
+  from the submodule. Exporting a name from a documented subpackage publishes it, so a name that is
+  plumbing rather than something a user configures or implements belongs in the package that uses it.
 - **Concrete trigger:** *if you are about to pass an object's raw arrays to a function, thread a loose
   per-cell/per-face array a second time, add a forwarding property, duck-type a lookalike of an
   existing class, or write a one-line formula that already exists — stop and reach for the
@@ -384,7 +395,8 @@ lines by the time anything moved out of it, and nothing measured that it was gro
 - **Two mechanical guards, both in `tests/unit/test_layering.py`, both in the always-on gate.** `solve/`
   imports nothing outside itself (it holds no mesh, field or physics import — that is what lets every
   residual run on it); and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500
-  lines needs a ratchet entry that only ever goes down. **Tripping the size guard is a prompt to sort the
+  lines needs a ratchet entry that only ever goes down. (A third guard in the same file is about the
+  *surface* rather than the direction — see Principle 3's `__all__` bullet.) **Tripping the size guard is a prompt to sort the
   file's contents into generic and physics — not to split it by topic**, which moves the problem into
   smaller files without moving it to the right package.
 - **Concrete trigger:** *if the docstring of what you are about to add to a physics package cannot be
