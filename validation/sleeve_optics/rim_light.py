@@ -10,7 +10,8 @@ through a wall alone, both for each lamp emitting 1 W per metre.
 
 ``SLEEVE_SECTORS`` around each arc (default 32); ``SLEEVE_SLICES`` splits each arc triangle into
 that many squared (default 1); ``SLEEVE_BACKWARD`` the backward gather's azimuths
-(default 2^17, with 160 axial cosines).
+(default 2^17, with 160 axial cosines); ``SLEEVE_SHOT_GRID`` the shooting grid's
+rows and columns, to see whether it misses paths (default the module's).
 """
 
 import os
@@ -24,7 +25,7 @@ sys.path.insert(0, str(HERE))
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import numpy as np
-from aquaflux.radiation import Surfaces, UniformAbsorption, refracted
+from aquaflux.radiation import Surfaces, UniformAbsorption, refracted, shooting
 from aquaflux.radiation.refraction import Media, Transparent, _shot
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT
 from aquaflux.solids import Cylinder
@@ -36,6 +37,7 @@ from tracer import Scene as Traced
 SECTORS = int(os.environ.get("SLEEVE_SECTORS", 32))
 SLICES = int(os.environ.get("SLEEVE_SLICES", 1))
 BACKWARD = int(os.environ.get("SLEEVE_BACKWARD", 2**17))
+GRID = os.environ.get("SLEEVE_SHOT_GRID")
 POINTS_MM = [[55.0, 25.0], [50.0, 50.0], [37.0, 37.0], [-25.0, 41.0]]
 
 
@@ -74,7 +76,13 @@ sleeves = tuple(
 )
 media = Media(WATER, sleeves, UniformAbsorption(absorption))
 points = np.array([[*p, 0.0] for p in POINTS_MM]) / 1e3
-print(f"{SECTORS} sectors x {SLICES} slices, {lamps.n_facets} facets", flush=True)
+if GRID:
+    shooting._ROWS = shooting._COLUMNS = int(GRID)
+print(
+    f"{SECTORS} sectors x {SLICES} slices, {lamps.n_facets} facets, shooting grid "
+    f"{shooting._ROWS} x {shooting._COLUMNS}",
+    flush=True,
+)
 
 started = time.perf_counter()
 plan = [
