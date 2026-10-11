@@ -1272,7 +1272,7 @@ steps completed, so state 20 is where step 21 starts.
   file-loop steps cost about the same. Inexact Newton at forcing 0.3 converges linearly per inner solve,
   so what matters is the number of inner solves, not how they are grouped into outer steps.
 
-**The march** (`PITZ_RELEASE_FLOOR=1e-4`, `release_alpha` 1.0, everything else as above). Steps 1-20 are
+**The march** (`PITZ_RELEASE_FLOOR=1e-4`, `release_alpha` 1.0 -- since renamed `settle_alpha`, everything else as above). Steps 1-20 are
 identical to the capture in `|R|`, inner count and cycles; step 20 is the first at the floor with
 `alpha` 1.000, step 21 runs released.
 
@@ -1340,7 +1340,7 @@ arrives about where the state settles at the floor.
 - **What an adaptive ramp therefore keys on:** not `alpha` per station, but the settle signal -- the
   first full-length step at the floor, the same gate the release uses. Pace is a secondary knob (2x per
   step cost nothing in `alpha`); the end is the sensitive part. Expressing it needs the homotopy to see
-  the previous report (`ResidualHomotopy.enter(step)` is keyed on the step index alone today).
+  the previous report (built 2026-10-11: `ResidualHomotopy.enter(step, previous)`, `solve.RampSchedule`).
 
 **pitzDaily's default since 2026-10-11 (project owner's decision, pitzDaily only):** its `case.yaml`
 ships `grow` 3, 12 stations and `release_floor` 1e-4. Confirmed by a run of the file as shipped,
@@ -1354,7 +1354,9 @@ measurement).
 
 **Configuration.** pitzDaily, `case.yaml` as shipped that day (`grow` 3, `release_floor` 1e-4, ramp anchor
 100, momentum-only, one step per station, everything else as in the sweep above), with
-`validation/pitzdaily_openfoam/settle_ramp_probe.py` standing in for `ViscosityRampHomotopy`: station `s`
+a prototype standing in for `ViscosityRampHomotopy` (`settle_ramp_probe.py`, deleted once the library
+reproduced it -- the arms are now `PITZ_RAMP_END=settled`, `PITZ_RAMP_FINISH`, `PITZ_RAMP_STATIONS`, see
+"Built" below): station `s`
 at step `s` until the first step that ran off the target at `shift <= beta_min` with `alpha >= 1` (the
 release's gate), then the target from the next step. `PITZ_RAMP_STATIONS` is then only the pace. jax
 0.11.2, CPU, 4-core Linux, one run per arm, run back to back; restart cycles as the log counts them.
@@ -1388,7 +1390,7 @@ Every arm `x_r/h` 8.0686, no retry.
 | arm | ramp ends after step | target settles at step | steps | cycles |
 |---|---|---|---|---|
 | 12 fixed stations (shipped) | 12 | 14 | 16 | 111 |
-| settle-ended, pace 24, the 21.5x walked in 3 steps (`PITZ_SETTLE_FINISH=3`, 2.78x each) | 11 | 14 | 16 | **114** |
+| settle-ended, pace 24, the 21.5x walked in 3 steps (`PITZ_RAMP_FINISH=3`, 2.78x each) | 11 | 14 | 16 | **114** |
 | settle-ended, pace 24, one jump | 9 | 14 | 16 | 118 |
 | settle-ended, pace 16, one jump | 13 | 15 | 17 | 124 |
 
@@ -1401,7 +1403,7 @@ Every arm `x_r/h` 8.0686, no retry.
   The residual entering the target's first full-length step was 2.0-2.5e-3 in all four (about 7 % of
   `|R0|`), an observation, not yet a predictor.
 
-**The full-step ratio `rho1` -- what the settle test actually reads (`PITZ_FULL_STEP_TRACE=1`, pace 16,
+**The full-step ratio `rho1` -- what the settle test actually reads (the prototype's trace; now every march's `rho1` column, pace 16,
 one jump; the traced march is identical to the untraced one cycle for cycle and to `|R|` 1.788e-06).**
 `rho1 = |G(phi + delta)| / |G(phi)|` of each step's FIRST inner iteration, the number the line search
 compares with one (strict descent) to accept the full step:
@@ -1422,3 +1424,13 @@ compares with one (strict descent) to accept the full step:
 - **What it does not tell apart yet:** whether `rho1`'s rise after a viscosity step scales predictably
   with the step's size (two points: 3.16x -> +0.87; the 1.33x ramp steps are entangled with the
   transient), which a rate controller would rely on.
+
+**Built into the library, and reproduced exactly (2026-10-11).** `solve.RampSchedule(end_when=
+step_control.settled, finish=...)`, the case file's `ViscosityRamp(end: settled, finish: ...)`, and the
+step reports' `full_step_ratio` (the log's `rho1`). `PITZ_RAMP_STATIONS=24 PITZ_RAMP_END=settled
+PITZ_RAMP_FINISH=3` through `compare.py` (same configuration as above, jax 0.11.2, 4-core Linux):
+**16 steps, 114 cycles, per-step costs `3 4 5 6 7 9 7 7 6 7 8 8 7 6 12 12` and final `|R|` 2.378e-06 --
+the prototype's arm to the last printed digit**, `x_r/h` 8.0686, no retry, ramp ended after step 9 and
+the target settled at step 14. Its `rho1` column: 0.19 0.25 0.86 1.57 3.89 3.43 1.92 1.14 **0.83**
+(settle) 1.29 1.53 2.08 1.29 **0.91** (target settles) 3.15 0.34. Opt-in; pitzDaily's file keeps 12 fixed
+stations (111 < 114).

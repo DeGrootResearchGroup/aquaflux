@@ -338,12 +338,16 @@ measure). pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 1
 
 ## 12. End the viscosity ramp on the settle signal, not on a station count
 
-**PROTOTYPED 2026-10-11, pre-registered bar not met** (`settle_ramp_probe.py`; table in
+**BUILT 2026-10-11, opt-in** (`solve.RampSchedule`, case file `end: settled`; the prototype it was
+measured with, `settle_ramp_probe.py`, is deleted). **Pre-registered bar not met by a single jump** (table in
 `solve-globalization-log.md`, "Ending the ramp on the settle signal"): paces 16 and 24 cost 124 and 118
 cycles against the shipped 111, no retry, same `x_r/h`. The jump at the settle is tolerated at any size
-measured (up to 21.5x) but undoes the settle, so the target settles a second time. The rule is far less
-pace-sensitive than a fixed count; whether an accelerated finish instead of one jump closes the gap is
-open. The text below is the proposal as written before the measurement.
+measured (up to 21.5x) but undoes the settle, so the target settles a second time. A 3-step finish
+(`finish: 3`) at pace 24 met the bar -- 114 against 111 -- though not by keeping the settle: in three of
+four arms the target settled at step 14 whatever the ramp did. The rule is far less pace-sensitive than
+a fixed count. **Still open:** a predictive rate controller keyed on the logged `rho1` trend (arrive a
+step before the settle), worth building only if bfs3d (#678) shows the simple rule leaving cost on the
+table. The text below is the proposal as written before the measurement.
 
 **What.** Replace `stations` with a rule: ramp the viscosity down at a fixed pace (2x per step cost
 nothing in `alpha`), and move to the target on the first full-length step at the floor -- the same gate
