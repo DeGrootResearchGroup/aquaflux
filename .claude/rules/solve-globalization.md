@@ -374,9 +374,17 @@ What to take from it, none of which is specific to that mechanism:
       released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
     - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
       stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
-      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's**, which is
-      unmeasured (`BFS3D_RELEASE_FLOOR`, #678); a loose terminal step is exactly what the three slow
-      tests #645 names measure, so a library default waits on both.
+      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's file**.
+    - **bfs3d, measured 2026-10-11 (#678, `61a14308`, M3 Pro, jax 0.10.2):** the release alone at 1e-4 on
+      the shipped `grow` 1.5 x 12 stations passes -- 28 -> 24 steps, 174 -> 173 cycles (193 -> 192
+      counting rejected attempts), the same one retry, the same root (rel L2 1.8e-4, inside the shipped
+      arm's own last-two-step drift of 5.7e-4). The march is bit-identical up to the release, which fires
+      the step after the first full-length step at the floor; the two released steps cost 12 and 15
+      cycles against 4-5 at the floor, so the saving is steps, not cycles. **pitzDaily's pairing with
+      `grow` 3 does NOT transfer**: on bfs3d it costs 214 accepted / 459 all cycles with nine steps redone.
+      Whether bfs3d's file should release is the owner's call; a library default still waits on the three
+      slow tests #645 names (a loose terminal step is what they measure). Tables in
+      `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").
     - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
       rule turns a test red) and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the

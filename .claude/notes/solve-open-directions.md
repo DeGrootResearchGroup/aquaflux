@@ -331,10 +331,13 @@ and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 
 ⚠️ An earlier version of this entry quoted the march log's wall-clock column as solver work ("1036 raw
 solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
 **Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
-1-8 cycles per released step by the probe (most of the released steps' extra cost); (b) bfs3d
-(`BFS3D_RELEASE_FLOOR`, its mesh is not in this container, #678); (c) whether the library default should
-release, after (b) and after the three slow tests #645 names (a loose terminal step is what they
-measure). pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
+1-8 cycles per released step by the probe (most of the released steps' extra cost -- on bfs3d the two
+released steps cost 12 and 15 cycles against 4-5 at the floor); (b) whether bfs3d's `case.yaml` should
+release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
+173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss (log, "bfs3d:
+the release, `grow` 3 and the settle-ended ramp") -- the owner's call; (c) whether the library default
+should release, after the three slow tests #645 names (a loose terminal step is what they measure).
+pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 
 ## 12. End the viscosity ramp on the settle signal, not on a station count
 
@@ -345,9 +348,12 @@ cycles against the shipped 111, no retry, same `x_r/h`. The jump at the settle i
 measured (up to 21.5x) but undoes the settle, so the target settles a second time. A 3-step finish
 (`finish: 3`) at pace 24 met the bar -- 114 against 111 -- though not by keeping the settle: in three of
 four arms the target settled at step 14 whatever the ramp did. The rule is far less pace-sensitive than
-a fixed count. **Still open:** a predictive rate controller keyed on the logged `rho1` trend (arrive a
-step before the settle), worth building only if bfs3d (#678) shows the simple rule leaving cost on the
-table. The text below is the proposal as written before the measurement.
+a fixed count. **bfs3d (2026-10-11, #678):** at `grow` 3 the rule ended the ramp itself after step 9 and
+cost 187 accepted / 267 all-attempt cycles, against 214 / 459 for a fixed 12 at `grow` 3 and 174 / 193 for
+the shipped `grow` 1.5 x 12 -- so it does not replace bfs3d's hand-tuned count, and its loss is `grow` 3's.
+**Still open, and weaker:** a predictive rate controller keyed on the logged `rho1` trend. On bfs3d
+`rho1` stayed above one (to 2.9) through the floor steps before each settle and fell only on a step whose
+shift had just been raised, so it gave no lead there; the pitzDaily trend is one case's. The text below is the proposal as written before the measurement.
 
 **What.** Replace `stations` with a rule: ramp the viscosity down at a fixed pace (2x per step cost
 nothing in `alpha`), and move to the target on the first full-length step at the floor -- the same gate
@@ -363,7 +369,7 @@ to the shift, not to the viscosity), and not a viscosity keyed to `beta` (refute
 
 **Pre-registered measurement.** pitzDaily at `grow` 3 with the rule against the 12-station arm its
 `case.yaml` ships (111 / 16): a pass is the same cycles within a few at the same `x_r/h`, with the ramp ending by itself. Then
-bfs3d, where neither `grow` 3 nor the ramp's end has been measured.
+bfs3d (since measured, #678: see the top of this entry).
 
 ---
 

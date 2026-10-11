@@ -1437,3 +1437,65 @@ stations (111 < 114).
 The file as shipped (12 fixed stations), on the same code: 16 steps, 111 cycles, per-step costs and
 final `|R|` 1.979e-06 identical to the confirmation run before the change -- the fixed walk and the
 extra `full_step_ratio` carry move nothing.
+
+## bfs3d: the release, `grow` 3 and the settle-ended ramp (#678), 2026-10-11
+
+**Configuration.** `validation/bfs3d_openfoam/compare.py` at `61a14308` (#677 merged), `case.yaml` as
+shipped (12 stations x 1 step, `turbulence_damping` 5, `CflResidualDualTimeControl` `beta_start` 0.5,
+`beta_min` 0.005, `grow` 1.5; field split `simplesmooth` + Jacobi, `refit_beta_floor` 0.05, refresh on 3
+cycles, retry on 10 cycles / `alpha` 0.01, cycle budget 42, inner 5 / 0.01, forward rtol 0.3, stop `atol`
+1e-5), each arm one `BFS3D_*` edit of it and its banner checked. Apple M3 Pro, 11 cores, 18 GB, macOS,
+jax 0.10.2; one run per arm, back to back through `run_case.sh`, nothing else running. Wall clock
+indicative. **Cycles are counted two ways**: "accepted" is the log's `cum` (the accepted attempt of each
+step only), "all" adds every rejected attempt's inner cycles from the step blocks -- `cum` hides a retry's
+cost entirely, and it is most of arm 3's.
+
+| arm | steps (ramp + target) | cycles accepted (ramp / target) | cycles all | inner solves | steps redone | final `\|R\|` | wall (s) |
+|---|---|---|---|---|---|---|---|
+| 1 shipped | 28 (13 + 15) | 174 (62 / 112) | 193 | 82 | 1 | 9.06e-6 | 1191 |
+| 2 `RELEASE_FLOOR=1e-4` | **24** (13 + 11) | **173** (62 / 111) | **192** | 75 | 1 | 2.22e-7 | 1126 |
+| 3 + `GROW=3` | 19 (13 + 6) | 214 (125 / 89) | **459** | 70 | **9** | 3.46e-7 | 2011 |
+| 4 + `RAMP_END=settled FINISH=3 STATIONS=24` | 19 (9 + 10) | 187 (64 / 123) | 267 | 67 | 5 | 3.00e-7 | 1315 |
+
+Mid-span `x_r/h` 8.361 in all four. Converged states against arm 1: relative L2 1.78e-4 (arms 2, 3 and 4;
+arms 3 and 4 agree with each other to 1.1e-6), against 5.67e-4 that arm 1's own state moved over its last
+two steps -- one root, the shipped arm merely stopping at the looser residual.
+
+| arm | shift reaches the floor | first full-length step at the floor (settle) | release fires | `rho1` from the floor to the settle |
+|---|---|---|---|---|
+| 1 | 19 (target) | 22 (target) | -- | 0.92, 0.29 (e1), 0.36, 0.29 |
+| 2 | 19 (target) | 22 (target) | 23 | as arm 1 |
+| 3 | 12 (ramp) | 17 (target) | 18 | 1.68, 1.15 (e1), 2.23 (e1), 1.80, 0.29 (e1), 0.50 |
+| 4 | 6 (ramp, at full length -- the ramp ends) | 6, then 17 on the target | 18 | after the ramp's end: 0.27, 0.82, 1.27, 2.90, 2.22, 0.39 (e1), 0.26 (e1), 0.44 |
+
+- **Arm 2 passes the pre-registered bar, narrowly**: 4 fewer steps, 1 fewer cycle, the same single retry
+  (step 20, `alpha`, beta 0.005 -> 0.01), same state. It is bit-for-bit arm 1 through step 22; the release
+  fires at 23 and the march ends in two released steps of 12 and 15 cycles (a floor step costs 4-5 here),
+  so the saving is in steps, not cycles. No released step crossed `abort_above_cycles` or retried.
+- **Arm 3 fails, and the cost is the ramp.** At `grow` 3 the shift reaches 0.006 at step 5, mid-ramp,
+  and nine steps between 5 and 16 are redone, twelve attempts in all (five triggered by cycles at an
+  unchanged beta, seven by `alpha`): the ramp
+  costs 125 accepted / 321 all cycles against arm 1's 62 / 62, and in-step preconditioner refits rise
+  from 14 to 25 (rebuild seconds 440 against 315). pitzDaily's `3 x 12` does not transfer to this
+  12-station ramp at `turbulence_damping` 5.
+- **Arm 4 fails against arm 1 but recovers most of arm 3's loss.** The ramp settles at step 6 (the floor
+  reached at full length on the ramp), ends itself after a 3-step finish (9 station changes against 13),
+  then the target re-settles at step 17 and releases at 18: 187 / 267 cycles against arm 3's 214 / 459,
+  five steps redone (7, 8, 9 in the finish; 15, 16 on the target). The arm-4-vs-arm-3 bar ("within a few
+  percent of arm 3") assumed arm 3 passed; it did not, so the question it was meant to answer -- can a
+  settle-ended ramp replace a hand-tuned station count here -- is answered by arm 4 against arm 1: no, not
+  at `grow` 3.
+- **The settle here moves with the ramp** (22 at `grow` 1.5, 17 in both `grow` 3 arms), unlike pitzDaily's
+  fixed step 14 -- but both `grow` 3 arms settle at 17 although their ramps ended at 13 and 9.
+- **`rho1` gives no lead here.** It sits above one through the floor steps of arms 3 and 4 (up to 2.9) and
+  drops below 0.5 only on a step whose shift a retry or the control has just raised; there is no
+  pitzDaily-like smooth approach to one over the steps before the settle. This is evidence against
+  building the predictive ramp controller on `rho1` for this case.
+- **The positivity limit bounded the step (`L`)** at 8 steps in arms 1 and 2, 5 in arm 3, 4 in arm 4; the
+  production cap (`cap%`) was 0 throughout.
+- **Not run:** the optional `STATIONS` 8 / 16 at `grow` 3 and `RELEASE_FLOOR=1e-3`. No released step
+  retried, so the second has no trigger; arm 3's failure is in the ramp, which a station count at `grow` 3
+  might move, but pitzDaily's sweep put the optimum one step after the settle and arm 4 already ends there.
+- **What it does not tell apart:** whether arm 3's retries are `grow` 3 against this damping (`turbulence
+  damping` 5 redamps each station) or against bfs3d's harder transient; `grow` 2 would separate the
+  rate from the case. Unmeasured.
