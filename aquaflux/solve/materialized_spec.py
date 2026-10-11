@@ -1,13 +1,11 @@
 """The materialized-Jacobian preconditioner as a value.
 
-A coupled march can be preconditioned by a Jacobian materialized by coloured probing and inverted by one
-of a complete LU (:class:`CompleteLu`), a block-triangular field split with a separate inverse for the
-leading and the trailing fields (:class:`FieldSplit`), or a single block inverse over every field
-(a :class:`~aquaflux.solve.BlockInverse`). These are one family with a nested choice
-(:class:`MaterializedJacobian`) rather than three, because they share everything but the inverse: how the
-Jacobian is probed, the shift the first build is fitted at, and the floor its refresh is held above. That
-is also what keeps a setting from being accepted by one inverse and silently ignored by another -- a
-block inverse's setting cannot be written beside a complete LU, because there is nowhere to write it.
+A coupled march can be preconditioned by a Jacobian materialized by coloured probing and inverted by
+either a block-triangular field split with a separate inverse for the leading and the trailing fields
+(:class:`FieldSplit`) or a single block inverse over every field (a :class:`~aquaflux.solve.BlockInverse`).
+These are one family with a nested choice (:class:`MaterializedJacobian`) rather than two, because they
+share everything but the inverse: how the Jacobian is probed, the shift the first build is fitted at, and
+the floor its refresh is held above.
 
 Nothing here names a residual. Every field defaults to ``None``, meaning "not set here" (see
 :class:`~aquaflux.solve.SettingsValue`), so a spec changes the settings it names and leaves every other one
@@ -26,7 +24,6 @@ from .settings_value import SettingsValue
 
 __all__ = [
     "MATERIALIZED_MAPPING",
-    "CompleteLu",
     "FieldSplit",
     "JacobianProbeSpec",
     "MaterializedJacobian",
@@ -70,16 +67,6 @@ class JacobianProbeSpec(SettingsValue):
     def __post_init__(self) -> None:
         if self.column_reach is not None:
             object.__setattr__(self, "column_reach", tuple(int(r) for r in self.column_reach))
-
-
-@dataclasses.dataclass(frozen=True)
-class CompleteLu(SettingsValue):
-    """A complete LU factorization of the materialized Jacobian.
-
-    Exact, so each shifted solve converges in one Krylov iteration, and refactored at the march's own
-    shift on every step. It is SciPy's SuperLU (:meth:`~aquaflux.solve.CompleteLuPreconditioner.build`),
-    and it has no settings. Its fill is the limit: it suits two-dimensional or moderate meshes.
-    """
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,16 +115,11 @@ class MaterializedJacobian:
 
     Attributes
     ----------
-    inverse : CompleteLu, FieldSplit or BlockInverse
-        How the materialized, shifted Jacobian is inverted. A bare block inverse such as
-        :class:`~aquaflux.solve.SimpleSmoothed` suits a laminar flow, and a turbulent flow takes a
-        :class:`FieldSplit`.
-
-        The inverse's type also decides how often it is refitted during a march and which Krylov
-        restart regime the forward solve defaults to. A bare :class:`~aquaflux.solve.BlockInverse`
-        inverts the **whole** state, so it is for a problem whose fields form a single group, such
-        as a laminar flow, and it needs no optional dependency. A problem with two groups takes a
-        :class:`FieldSplit` instead.
+    inverse : FieldSplit or BlockInverse
+        How the materialized, shifted Jacobian is inverted. A bare
+        :class:`~aquaflux.solve.BlockInverse` such as :class:`~aquaflux.solve.SimpleSmoothed` inverts
+        the **whole** state, so it is for a problem whose fields form a single group, such as a laminar
+        flow. A problem with two groups, such as a turbulent flow, takes a :class:`FieldSplit`.
     probe : JacobianProbeSpec
         How the Jacobian is probed. The default probes every column at the builder's own reach.
     build_beta : float or None
@@ -157,15 +139,15 @@ class MaterializedJacobian:
         If ``inverse`` or ``probe`` is not one of the accepted values.
     """
 
-    inverse: CompleteLu | FieldSplit | BlockInverse
+    inverse: FieldSplit | BlockInverse
     probe: JacobianProbeSpec = JacobianProbeSpec()
     build_beta: float | None = None
     refit_beta_floor: float | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.inverse, CompleteLu | FieldSplit | BlockInverse):
+        if not isinstance(self.inverse, FieldSplit | BlockInverse):
             raise TypeError(
-                "MaterializedJacobian.inverse must be CompleteLu(), FieldSplit(...) "
+                "MaterializedJacobian.inverse must be FieldSplit(...) "
                 f"or a block inverse such as SimpleSmoothed(), got {type(self.inverse).__name__}."
             )
         if not isinstance(self.probe, JacobianProbeSpec):
@@ -181,7 +163,6 @@ class MaterializedJacobian:
 MATERIALIZED_MAPPING = SettingsMapping(
     [
         MaterializedJacobian,
-        CompleteLu,
         FieldSplit,
         JacobianProbeSpec,
         SimpleSmoothed,
@@ -198,7 +179,7 @@ def materialized_spec_from_mapping(mapping: Mapping[str, object]) -> Materialize
     sets; a key left out leaves that field at its default. A list is read as a tuple. For example::
 
         kind: MaterializedJacobian
-        inverse: {kind: CompleteLu}
+        inverse: {kind: FieldSplit, leading: {kind: SimpleSmoothed}, trailing: {kind: JacobiSmoothed}}
         probe: {kind: JacobianProbeSpec, stencil_reach: 2}
         refit_beta_floor: 0.05
 

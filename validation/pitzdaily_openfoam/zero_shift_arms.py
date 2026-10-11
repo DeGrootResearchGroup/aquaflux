@@ -1,15 +1,13 @@
-"""Does anything but a monolithic factorization solve this case at ZERO shift?
+"""Does the field split solve this case at ZERO shift?
 
-The question this settles is whether the complete LU still has a regime. It is dominated on the
-forward march -- the field-split multigrid marches this case faster -- so the only place a monolithic
-factorization can still earn its keep is the **adjoint**, which is the one solve that meets the
-Jacobian with no pseudo-transient shift to make it diagonally dominant. If the field split handles
-zero shift, nothing selects the complete LU and it can go; if it does not, whichever survives here is
-what every ``jax.grad`` on this case depends on.
+Zero shift is the **adjoint's** operating point: the one solve that meets the Jacobian with no
+pseudo-transient shift to make it diagonally dominant. Whatever preconditions it is what every
+``jax.grad`` on this case depends on, so this measures the field split there, built both at zero shift
+and at its shipped refit floor.
 
-(A threshold-incomplete-LU arm used to run alongside the complete LU here; it was removed once the
-family verdict settled that it was dominated by both the complete LU at 2D and the field-split
-multigrid at 3D, with no case selecting it.)
+(A complete-LU arm and, before it, a threshold-incomplete-LU arm ran alongside the split here. Both were
+removed with the methods themselves once the split was measured to reach adjoint grade at zero shift,
+which left neither a regime.)
 
 **Why zero shift is the whole question.** A march never visits it: the shift is what the continuation
 ramps, and the preconditioner is additionally floored (``compare.PC_BETA_FLOOR``) so it is never even
@@ -59,12 +57,10 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
-from aquaflux.turbulence import sst_initial_fields
-from aquaflux.solve import (DualTimeLoop, JacobiSmoothed, materialize_block_jacobian,)
+from aquaflux.solve import (DualTimeLoop, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, materialize_block_jacobian,)
 from aquaflux.solve.materialized_session import (jacobian_matvec,)
 from aquaflux.solve.sparse_jacobian import (shifted_jacobian,)
-from aquaflux.turbulence import coupled_step
-from aquaflux.solve import CompleteLu, FieldSplit, JacobianProbeSpec, MaterializedJacobian
+from aquaflux.turbulence import coupled_step, sst_initial_fields
 
 #: Far past the march's inexact-Newton stop, so arms separate rather than tie, and modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -198,25 +194,8 @@ def main() -> None:
             f"field split @ floor {compare.PC_BETA_FLOOR}",
             lambda: field_split_arm(coupled, state, compare.PC_BETA_FLOOR),
         ),
-        "lu": (
-            "complete LU @ beta=0",
-            lambda: coupled_step(
-                coupled,
-                state,
-                preconditioner=MaterializedJacobian(
-                    CompleteLu(),
-                    probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
-                    build_beta=0.0,
-                ),
-                dual_time=DualTimeLoop(
-                    inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL
-                ),
-            ),
-        ),
     }
-    # Selectable because the arms are NOT equally expensive: a complete LU of this operator carries a
-    # 174 M-nonzero factor, and on a machine that cannot hold it the cheap field-split arms still answer
-    # the question the study is for. `PITZ_ARMS=split0,splitfloor` runs those alone.
+    # `PITZ_ARMS=split0` (or `splitfloor`) runs one arm alone.
     wanted = [k for k in os.environ.get("PITZ_ARMS", "").split(",") if k] or list(arms)
     unknown = [k for k in wanted if k not in arms]
     if unknown:

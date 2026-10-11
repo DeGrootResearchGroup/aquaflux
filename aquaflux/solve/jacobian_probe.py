@@ -1,6 +1,6 @@
 """How a coupled Jacobian is materialized: the colouring plan and its fixed de-compression map.
 
-A preconditioner built from the assembled Jacobian (a complete LU, a multigrid V-cycle, a field split)
+A preconditioner built from the assembled Jacobian (a field split, or one block inverse over the whole state)
 recovers that matrix by coloured directional-derivative probing. Both the colouring and the map that
 de-compresses the probe responses are functions of the cell graph and the stencil / per-column reaches
 alone -- never of the state and never of a coefficient -- so **one probe is valid for a whole

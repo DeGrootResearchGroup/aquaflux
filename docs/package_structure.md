@@ -160,7 +160,6 @@ cfd/                                  # repo root
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
 │   │   ├── frozen_operator.py        #   ConvectionDiffusionStencil / decouple_dof: the one description of the frozen operator every AMG consumer coarsens
 │   │   ├── materialized_preconditioner.py #   MaterializedJacobianPreconditioner: the probe, shift and refresh every materialized-Jacobian preconditioner shares
-│   │   ├── lu_preconditioner.py      #   CompleteLuPreconditioner (complete sparse LU, SciPy SuperLU)
 │   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + FieldSplitInverse: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation

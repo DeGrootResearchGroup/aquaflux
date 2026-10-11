@@ -16,14 +16,16 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 from aquaflux.solve import (
     DEFAULT_SHIFT_BASIS,
-    CompleteLu,
     Convergence,
     DualTimeLoop,
+    FieldSplit,
     Globalization,
+    JacobiSmoothed,
     LinearSolveSettings,
     LocalCourantBasis,
     MaterializedJacobian,
     MergeableSettings,
+    SimpleSmoothed,
     filled_from,
 )
 from aquaflux.turbulence import (
@@ -91,7 +93,9 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
     assert float(block.shift_policy.turbulence_damping.factor(relaxation, None)) == 2.0
     assert block.shift_policy.shift_basis is _BASIS
 
-    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
+    session = open_session(
+        MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())), coupled
+    )
     lu = session.build(state, shift=shift)
     assert float(lu.shift_policy.base.turbulence_damping.factor(relaxation, None)) == 2.0
 

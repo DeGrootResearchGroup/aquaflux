@@ -71,7 +71,15 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import CompleteLu, Convergence, DualTimeLoop, MaterializedJacobian, RetryPolicy
+from aquaflux.solve import (
+    Convergence,
+    DualTimeLoop,
+    FieldSplit,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    RetryPolicy,
+    SimpleSmoothed,
+)
 from aquaflux.turbulence import (
     CoupledRANS,
     SSTModel,
@@ -298,7 +306,7 @@ def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
         )
 
     started = time.perf_counter()
-    preconditioner = MaterializedJacobian(CompleteLu())
+    preconditioner = MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
     dual_time = DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL)
     try:
         # A manual two-point ramp (anchor at Re/RATIO, then the target) rather than

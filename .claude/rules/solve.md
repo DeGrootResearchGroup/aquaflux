@@ -21,13 +21,36 @@ The optional `petsc` extra (`petsc4py`) was removed, and with it everything only
 `solve/amg_preconditioner.py` (`MonolithicVCyclePreconditioner`, `MonolithicVCycleInverse`, `monolithic_vcycle_inverse`,
 `ShiftedCellMajorOperator`), the `MonolithicVCycle` spec, and `CompleteLu`'s UMFPACK backend
 (`CompleteLu.backend`, `LU_BACKENDS`, `complete_lu_inverse(backend=)`, `CompleteLuPreconditioner.build(backend=)`).
-**The complete LU is SciPy's SuperLU only, and `CompleteLu` has no fields.** The shared base
+(The complete LU itself went the next day — see the section below.) The shared base
 `MaterializedJacobianPreconditioner` moved to `solve/materialized_preconditioner.py` unchanged. Why it was
 dominated: no shipped case or default selected the monolithic V-cycle (both flagship cases run
 `FieldSplit(SimpleSmoothed, JacobiSmoothed)`), and the traced hierarchy was measured to match GAMG on the
 `[k, ω]` block (2 restart cycles each). Every entry in these files that measures a PETSc arm, a GAMG
 option, `MonolithicVCycleInverse._live`, or UMFPACK factor speed is dated history and **cannot be re-run from this tree**;
 `MonolithicFactorShiftPolicy.preconditioner` is now typed `HostPreconditioner`.
+
+## ⚠️ The complete LU is GONE (2026-10-11) — the field split is the only materialized coupled inverse
+
+Deleted as dominated: `solve/lu_preconditioner.py` (`CompleteLuPreconditioner`, `CompleteLuInverse`,
+`complete_lu_inverse`), the `CompleteLu` spec (a case file naming `kind: CompleteLu` now reads as an
+unknown kind), `FACTORIZATION_LINEAR_SOLVE` / `_FACTORIZATION_LINEAR_SOLVE`, and the every-step refit
+cadence it alone used (`BetaTrackingRefresh(every_step=)` — the hook now always refits on its first call,
+after a `rebind`, and through the cost trigger's `refresh_at`). `MaterializedJacobian.inverse` is
+`FieldSplit | BlockInverse`; a coupled problem takes the split, a laminar one a bare block inverse.
+`tests/integration/test_coupled_lu.py` and `tests/unit/test_lu_preconditioner.py` went with it; the LU
+tests' assertions were ported onto the split in `tests/integration/test_coupled_field_split.py` first
+(same channel, same tolerances: root vs block-SIMPLE, `jax.grad` vs central FD to `1e-5`, a session
+refitting at the CURRENT β, the β-tracking march, and a differentiable re-fitting march — all pass,
+the FD and session tests mutation-checked).
+**Why it was dominated, and what it was measured against** (see `solve-direct-preconditioners.md` and
+`.claude/notes/solve-refuted-directions.md` for the trail): both flagship case files ship
+`FieldSplit(SimpleSmoothed, JacobiSmoothed)` and nothing shipped selected the LU; the split reaches the
+coupled adjoint's zero-shift operator at adjoint grade (bfs3d `state-00059`: 17 restart cycles to 6.4e-10
+true relative); a laminar flow's `SimpleSmoothed` matched the LU's trajectory (24×16 channel 17 steps / 61
+cycles vs 17 / 51; tetrahedral duct from rest 13 steps each); the LU's fill walls out in 3D. The one claim
+of a regime only it could reach — `compare_reynolds_continuation.py`'s "the aggressive Courant control needs
+the exact LU" — was re-run on the split before deleting and does not hold: the split converges that march
+to the same root (40 steps, `x_r/h` 8.069, no retries; full record in `validation.md`).
 
 ## ⚠️ "native" was renamed away (2026-08-20) — there is no such symbol
 
@@ -239,11 +262,11 @@ gone from the tree — no aliases.
 |---|---|
 | `HostFactors` / `RefactorableFactors` / `ReleasableFactors` | `FrozenInverse` / `RefactorableInverse` / `ReleasableInverse` |
 | `HostPreconditioner.factors` | `HostPreconditioner.inverse` |
-| `LuFactors` / `factorize_lu` | `CompleteLuInverse` / `complete_lu_inverse` |
+| `LuFactors` / `factorize_lu` | **deleted with the complete LU (2026-10-11)** — briefly `CompleteLuInverse` / `complete_lu_inverse` |
 | `AmgVCycle` / `build_amg_vcycle` | **deleted with PETSc (2026-10-10)** — briefly `MonolithicVCycleInverse` / `monolithic_vcycle_inverse` |
 | `BlockTriangularFieldSplit` / `build_block_triangular_field_split` | `FieldSplitInverse` / `field_split_inverse` |
 | `AirBlockInverse` | `AirReductionInverse` (built by `AirReduction`) |
-| `MonolithicLuPreconditioner` | `CompleteLuPreconditioner` (built by `CompleteLu`) |
+| `MonolithicLuPreconditioner` | **deleted with the complete LU (2026-10-11)** — briefly `CompleteLuPreconditioner` (built by `CompleteLu`, also deleted) |
 | `MonolithicAmgPreconditioner` | **deleted with PETSc (2026-10-10)** — briefly `MonolithicVCyclePreconditioner` (built by `MonolithicVCycle`, also deleted) |
 | `FieldSplitAmgPreconditioner` | `FieldSplitPreconditioner` (built by `FieldSplit`; its blocks are any `FrozenInverse`, so "Amg" was false) |
 | `smoothed_multigrid_solve` / `convection_multigrid_solve` / `air_multigrid_solve`, private `_fixed_cycle_solve` | `smoothed_multigrid_cycles` / `convection_multigrid_cycles` / `air_multigrid_cycles`, `_fixed_cycles` — a FIXED cycle count with no convergence test, which "solve" contradicted |
@@ -252,8 +275,8 @@ gone from the tree — no aliases.
 (`flow.BlockPreconditioner`, the `turbulence.ScalarTransportPreconditioner` family,
 `schemes.GradientPreconditioner`) — a different contract, accurately called a preconditioner, so the word
 alone does not say host vs traced; the `HostPreconditioner` base does. `TracedFieldSplit` is a traced
-cycle (`OffersTracedCycle`), not a `FrozenInverse`, so it takes no `Inverse` suffix. The module files
-(`lu_preconditioner.py`, …) keep their names; `amg_preconditioner.py` is deleted, and `MaterializedJacobianPreconditioner` now lives in `materialized_preconditioner.py`. Measurements in these files that
+cycle (`OffersTracedCycle`), not a `FrozenInverse`, so it takes no `Inverse` suffix. The surviving
+module files keep their names; `lu_preconditioner.py` and `amg_preconditioner.py` are deleted, and `MaterializedJacobianPreconditioner` now lives in `materialized_preconditioner.py`. Measurements in these files that
 name an old class were taken with the same class under its old name; the rename changed no behaviour.
 
 ## ⚠️ RENAMED 2026-09-15 — grep this table before believing an old name is missing
@@ -306,7 +329,7 @@ testability seam. Everything subsystem-specific moved out:
 
 | File | `paths:` | Covers |
 |---|---|---|
-| `solve-direct-preconditioners.md` | `lu_preconditioner.py`, `sparse_jacobian.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The monolithic complete-LU preconditioner (and the now-deleted ILUT it once shared a family with), and the shared frozen-host contract |
+| `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; the dated record of the deleted complete-LU preconditioner (and the ILUT it once shared a family with), and the shared frozen-host contract |
 | `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py` | The traced multigrid, faithful smoothed aggregation, `multigrid.py`'s own binding decisions, and the dated record of the (deleted) monolithic PETSc AMG |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle — current status only |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | The full dated investigation behind the flow block, including qualified/retracted findings |
@@ -421,7 +444,6 @@ halves of the decision are now separated:
 | regime | preconditioner (`coupled_step` / a session) | rtol | restart | max_restarts |
 |---|---|---|---|---|
 | `_BLOCK_LINEAR_SOLVE` | `BlockDiagonal` (block-SIMPLE) | 0.3 | 120 | 15 |
-| `_FACTORIZATION_LINEAR_SOLVE` | `MaterializedJacobian(CompleteLu)` | 0.3 | 10 | 40 |
 | `_VCYCLE_LINEAR_SOLVE` | `MaterializedJacobian(FieldSplit \| BlockInverse)` (3D `bfs3d`) | 0.3 | 15 | 60 |
 | `_CONSTRAINED_LINEAR_SOLVE` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
 
@@ -433,12 +455,11 @@ max_restarts=…)` (#388 — there are no `forward_*` keywords any more). ⚠️
 restart with that value, never by passing a whole solver as `linear_solve`** — a solver also replaces the
 stopping measure, which is a far larger change than the one intended.
 
-⚠️ **`0.3` on the block and complete-LU families is the multigrid family's CALIBRATION, carried across
-because it is a property of the measure, not of multigrid — it has not been re-measured there.** Those
-two ran `1e-2` in a plain 2-norm before #282, so any recorded cost measured on them predates the change;
-the earlier arrangement is the drift the issue documents, not a calibration.
-(`_FACTORIZATION_LINEAR_SOLVE` was `_COUPLED_ILUT_FORWARD_SOLVER` while the now-deleted monolithic ILUT was
-its other consumer, then `_COUPLED_FACTORIZATION_FORWARD_SOLVER` — see `solve-direct-preconditioners.md`.)
+⚠️ **`0.3` on the block family is the multigrid family's CALIBRATION, carried across because it is a
+property of the measure, not of multigrid — it has not been re-measured there.** It ran `1e-2` in a plain
+2-norm before #282, so any recorded cost measured on it predates the change; the earlier arrangement is
+the drift the issue documents, not a calibration. (There is no `_FACTORIZATION_LINEAR_SOLVE`: it was the
+complete LU's restart-10 regime and went with it, 2026-10-11.)
 
 **Preconditioning side: RIGHT** (`solve_linear`'s default, taken by `_shifted_solve`), so the Krylov
 residual is the **true** residual `b − Ax`. No solution-accuracy bound follows from the stop. `left` is
@@ -657,7 +678,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 - **`jacobian_probe.py` + `monolithic_policy.py` — MOVED HERE 2026-09-19 (#450 stage 1).** `JacobianProbe(plan, structure, narrowing)` and `jacobian_probe_plan(face_cells, n_cells, n_fields, …)` are the coloured-probe plan and de-compression map, which depend on the cell graph and reaches alone; `narrowing` (`assembler -> assembler`, compared by value) is the one residual-specific part — a stand-in whose Jacobian is materialized. `MonolithicFactorShiftPolicy(base, preconditioner)` pairs any base `ShiftPolicy`'s shift diagonal with a frozen monolithic inverse, and `FrozenTransposeFactory` is its value-equal transposed apply (equality is what keeps a rung's engine rebuild a compile-cache hit). Their coupled-RANS builders are `turbulence.coupled_jacobian_probe` and `_CoupledNarrowing`.
 
-- **`materialized_session.py` + `materialized_spec.py` — MOVED HERE 2026-09-19 (#450 stage 2).** `MaterializedSession(spec, problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse and one refresh hook, each created at most once, so every step built from it carries the identical static objects. It is written against **`MaterializedProblem`**, an ABC that is everything the lifecycle needs from a residual: `assembler`, `layout`, `with_assembler`, `probe(settings, active_rows)`, `groups()` (`None` ⇒ nothing to split), `bind_march`, `shift_source`, `build_step`. `bind_march`'s result **must** carry `dual_time` and `inner_refresh`, which the session reads and may set; it is also where a residual validates early (coupled RANS raises its `k`-positivity refusals there, before any inverse is fitted). Implementations: `turbulence._CoupledProblem`, `flow._FlowProblem`. A `FieldSplit` inverse is refused at construction for a problem whose `groups()` is `None`. `BetaTrackingRefresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` — a plain mutable class (called per step; `refresh_at(iterate)` mid-step; `rebind(companion)`), **deliberately not an `equinox.Module`**: it re-fits a host inverse in place and rides in a static field compared by identity, which is what makes one hook shared across rungs a compile-cache hit. ⚠️ **There is no `beta_tracking_refresh` function any more (#661, 2026-10-10)**: it was a closure over mutable dicts with `refresh_at`/`rebind` assigned onto it as attributes while its annotation said `Callable`; its tests moved from `test_coupled_rans.py` to `tests/unit/test_beta_tracking_refresh.py` (mutation-checked eight ways). `jacobian_matvec` / `batched_jacobian_matvec` (module-level `filter_jit`, assembler an ARGUMENT so a rung is a cache hit), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE` and the two family regimes (`FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE`) came with it. The specs (`MaterializedJacobian`, `CompleteLu`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` / `materialized_spec_from_mapping` / `materialized_spec_to_mapping` are here too; a solve with more kinds extends `MATERIALIZED_MAPPING.kinds` rather than restating them. `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
+- **`materialized_session.py` + `materialized_spec.py` — MOVED HERE 2026-09-19 (#450 stage 2).** `MaterializedSession(spec, problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse and one refresh hook, each created at most once, so every step built from it carries the identical static objects. It is written against **`MaterializedProblem`**, an ABC that is everything the lifecycle needs from a residual: `assembler`, `layout`, `with_assembler`, `probe(settings, active_rows)`, `groups()` (`None` ⇒ nothing to split), `bind_march`, `shift_source`, `build_step`. `bind_march`'s result **must** carry `dual_time` and `inner_refresh`, which the session reads and may set; it is also where a residual validates early (coupled RANS raises its `k`-positivity refusals there, before any inverse is fitted). Implementations: `turbulence._CoupledProblem`, `flow._FlowProblem`. A `FieldSplit` inverse is refused at construction for a problem whose `groups()` is `None`. `BetaTrackingRefresh(assembler, probe, refit_beta_floor=, observer=)` — a plain mutable class (called per step; `refresh_at(iterate)` mid-step; `rebind(companion)`), **deliberately not an `equinox.Module`**: it re-fits a host inverse in place and rides in a static field compared by identity, which is what makes one hook shared across rungs a compile-cache hit. ⚠️ **There is no `beta_tracking_refresh` function any more (#661, 2026-10-10)**: it was a closure over mutable dicts with `refresh_at`/`rebind` assigned onto it as attributes while its annotation said `Callable`; its tests moved from `test_coupled_rans.py` to `tests/unit/test_beta_tracking_refresh.py` (mutation-checked eight ways). `jacobian_matvec` / `batched_jacobian_matvec` (module-level `filter_jit`, assembler an ARGUMENT so a rung is a cache hit), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE` and the family regime (`VCYCLE_LINEAR_SOLVE`) came with it. The specs (`MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` / `materialized_spec_from_mapping` / `materialized_spec_to_mapping` are here too; a solve with more kinds extends `MATERIALIZED_MAPPING.kinds` rather than restating them. `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
 
 - **`block_preconditioner.py` — BUILT 2026-09-19.** `MaterializedBlockPreconditioner`: one `BlockInverse` (e.g. `SimpleSmoothed`) fitted to the whole materialized, shifted Jacobian, sharing the probe/shift/in-place-refresh of `MaterializedJacobianPreconditioner` with the field split. It is the inverse of a problem whose fields form a **single group** (`MaterializedProblem.groups()` is `None`), and the session enforces the mirror pair: `FieldSplit` refused for one group, a bare `BlockInverse` refused for two. `MaterializedJacobian.inverse` accepts a bare `BlockInverse`. The hierarchy is traced JAX. Tested for exact transposition and for being an approximate inverse of the SHIFTED operator (mutating the shift away fails it).
 

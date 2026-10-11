@@ -208,6 +208,9 @@ VALIDATION_INTERNAL_REACHES = {
     "InnerIterateCheckpointer",
     "combine_metrics",
     "in_progress_measure",
+    # The shift a step will run at, read by the aggressive-continuation harness to log the shift each
+    # rung starts from; the step control's carried state is not the bare shift, so it asks the step.
+    "shift_of",
 }
 
 

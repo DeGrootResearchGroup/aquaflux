@@ -63,8 +63,9 @@ unit tests. The surface is five groups:
   escalation limit, and the optional tighter linear solver that is the fallback for a step more
   damping cannot fix. The default policy retries nothing.
 * **Frozen algebraic multigrid** — the operator description `ConvectionDiffusionStencil`, which
-  assembles itself and reports its diagonal (plus `decouple_dof` for a closed-domain pressure pin),
-  the hierarchy builders
+  assembles itself and reports its diagonal (plus
+  `decouple_dof` for a closed-domain pressure pin and `symmetrically_equilibrate` for the
+  square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
   matching fixed-cycle applies. Callers assemble an operator, build a hierarchy once off the jit
   path, and apply it as a frozen matrix-free V-cycle preconditioner. `bordered_preconditioner`
@@ -113,7 +114,6 @@ from .refresh_timing import (
     RefreshTiming,
 )
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
-from .lu_preconditioner import CompleteLuPreconditioner
 from .strategy import (
     AbortsInnerLoop,
     CarriesRelaxationSchedule,
@@ -216,7 +216,6 @@ from .materialized_session import (
     PreconditionerSession,
 )
 from .materialized_spec import (
-    CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
@@ -267,8 +266,6 @@ __all__ = [
     "CellFields",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
-    "CompleteLu",
-    "CompleteLuPreconditioner",
     "ConstantRelaxation",
     "ContinuationSource",
     "ConvectionDiffusionStencil",

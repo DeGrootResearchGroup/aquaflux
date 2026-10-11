@@ -38,7 +38,6 @@ from aquaflux.solve import (
     NO_REFRESH,
     BlockScaled,
     BlockScaledNorm,
-    CompleteLu,
     Convergence,
     CycleGrowthTrigger,
     DualTimeLoop,
@@ -58,7 +57,7 @@ from aquaflux.solve import (
 )
 from aquaflux.solve import driver as driver_module
 from aquaflux.solve.materialized_session import (
-    FACTORIZATION_LINEAR_SOLVE,
+    VCYCLE_LINEAR_SOLVE,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -101,6 +100,9 @@ from tests.unit.test_gradient import _cell_graph_distance
 
 RHO, NU, U_LID = 1.0, 1e-2, 1.0
 WALLS = ("top", "bottom", "left", "right")
+#: A materialized-Jacobian preconditioner, for tests that need one but not any particular inverse: the
+#: field split the flagship cases ship.
+_SPLIT = MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
 
 
 def test_layout_round_trips_and_sizes() -> None:
@@ -252,33 +254,32 @@ def test_coupled_build_rejects_a_turbulence_viscosity_that_disagrees_with_the_fl
         _build_across_two_fluids(2.0 * RHO * NU, RHO)
 
 
-def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:
-    """The complete-LU continuation defaults to a small-restart GMRES; the block one keeps the large one.
+def test_split_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None:
+    """The field-split continuation defaults to a small-restart GMRES; the block one keeps the large one.
 
     A restarted GMRES tests its stop only at each restart boundary, so the restart size should match how
-    many vectors the preconditioner actually needs. The monolithic complete LU is the operator's exact
-    inverse, so the 1% stop is reached within a handful of vectors and it uses a small restart; the
-    block-triangular preconditioner needs a large subspace per cycle. The two must not share a default.
+    many vectors the preconditioner actually needs. One V-cycle per application reaches the stop within
+    a short subspace, so the materialized family uses a small restart; the block-triangular
+    preconditioner needs a large subspace per cycle. The two must not share a default.
     """
-    assert FACTORIZATION_LINEAR_SOLVE.restart == 10
+    assert VCYCLE_LINEAR_SOLVE.restart == 15
     assert _BLOCK_LINEAR_SOLVE.restart == 120
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    lu_step = coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
+    split_step = coupled_step(coupled, state, preconditioner=_SPLIT)
     block_step = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )
-    # Each built step carries the solver it will run; the LU's is the small-restart one by default.
-    assert lu_step.krylov_solver.restart == 10
+    # Each built step carries the solver it will run; the split's is the small-restart one by default.
+    assert split_step.krylov_solver.restart == 15
     assert block_step.krylov_solver.restart == 120
-    # An explicit krylov_solver still overrides the LU default.
-    # ...and the restart alone can be moved without also replacing the stopping measure.
+    # The restart alone can be moved without also replacing the stopping measure.
     assert (
         coupled_step(
             coupled,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu()),
+            preconditioner=_SPLIT,
             linear_solve=LinearSolveSettings(restart=120),
         ).krylov_solver.restart
         == 120
@@ -309,7 +310,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
-        "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
+        "split": coupled_step(coupled, state, preconditioner=_SPLIT),
         "block dual-time": coupled_step(
             coupled,
             state,
@@ -377,7 +378,7 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
-        "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
+        "split": coupled_step(coupled, state, preconditioner=_SPLIT),
         "mass flow": mass_flow_coupled_continuation(
             mass_flow_coupled,
             mass_flow_state,
@@ -423,9 +424,7 @@ def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None
     mesh, coupled = _mass_flow_cavity(4)
     state = _healthy_state(mesh, coupled)
     with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
-        mass_flow_coupled_continuation(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu())
-        )
+        mass_flow_coupled_continuation(coupled, state, preconditioner=_SPLIT)
 
 
 @pytest.mark.parametrize(
@@ -496,14 +495,14 @@ def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None
     step = coupled_step(
         coupled,
         state,
-        preconditioner=MaterializedJacobian(CompleteLu()),
+        preconditioner=_SPLIT,
         shift=CoupledShiftSettings(velocity_parts=live),
     )
     assert step.shift_policy.base.velocity_shift_parts is live
     # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it
     # produces differs from the frozen one, which is the whole reason the source is injected. At the
     # freeze state the two coincide by construction, so a check there would pass on a dead wire.
-    frozen = coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
+    frozen = coupled_step(coupled, state, preconditioner=_SPLIT)
     flow_p, k_p, omega_p = coupled.layout.unpack(state)
     developed = coupled.layout.pack(flow_p, k_p * 4.0, omega_p)
     assert not np.allclose(
@@ -619,7 +618,7 @@ def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     flow, k, omega = coupled.physical_fields(state)
-    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
+    session = open_session(_SPLIT, coupled)
     with pytest.raises(TypeError, match="belongs to the preconditioner session"):
         solve_coupled(
             coupled, flow, k, omega, preconditioner=session, jacobian_production_viscosity=True
@@ -630,7 +629,7 @@ def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None
             flow,
             k,
             omega,
-            preconditioner=MaterializedJacobian(CompleteLu()),
+            preconditioner=_SPLIT,
             refresh=RefreshPolicy(refresh_preconditioner=lambda step, s: None),
         )
     with pytest.raises(TypeError, match="belongs on the spec"):
@@ -991,7 +990,7 @@ def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejecte
     rejected and the error names the supported alternatives. The guard is on the argument combination
     and fires before the continuation is ever stepped, so a trivial step object is sufficient here --
     no preconditioner needs to be built. (Supplying ``refresh_builder`` lifts the restriction, since the
-    builder is how the refresh rebuilds -- exercised by the complete-LU refresh integration tests.)
+    builder is how the refresh rebuilds -- exercised by the field-split refresh integration tests.)
     """
     mesh, coupled = _cavity()
     flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
@@ -1739,23 +1738,14 @@ def _block_step(coupled, state, **march):
     return coupled_step(coupled, state, **march)
 
 
-def _lu_step(coupled, state, **march):
-    return coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()), **march)
-
-
 def _split_step(coupled, state, **march):
-    return coupled_step(
-        coupled,
-        state,
-        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
-        **march,
-    )
+    return coupled_step(coupled, state, preconditioner=_SPLIT, **march)
 
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
-    ids=["block", "lu", "split", "mass flow"],
+    [_block_step, _split_step, mass_flow_coupled_continuation],
+    ids=["block", "split", "mass flow"],
 )
 def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
     """Every preconditioner family routes through :func:`_k_positivity_guards`, and it is checked first.
@@ -1773,8 +1763,8 @@ def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(b
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
-    ids=["block", "lu", "split", "mass flow"],
+    [_block_step, _split_step, mass_flow_coupled_continuation],
+    ids=["block", "split", "mass flow"],
 )
 def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
     """Every other pairing of the two settings still builds -- including a floor that now matters."""
