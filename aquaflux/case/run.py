@@ -39,6 +39,7 @@ import yaml
 import aquaflux
 from aquaflux.solve import (
     MarchLogger,
+    MarchRecorder,
     RefreshTiming,
     StateCheckpointer,
     StepHistory,
@@ -416,9 +417,9 @@ class _Tee:
 class _StepCount:
     """Counts the march's steps and keeps its last residual, forwarding each march hook to its recorders.
 
-    A recorder is anything with ``on_checkpoint(report, state)`` -- the history, the checkpoints -- and
-    optionally ``on_retry``, ``on_refresh`` and ``on_residuals``, which reach the recorders that have
-    them.
+    Every recorder has ``on_checkpoint(report, state)`` -- the history, the checkpoints -- and the rest
+    of the march's hooks reach the recorders that are a :class:`~aquaflux.solve.MarchRecorder`, which
+    offers them all.
     """
 
     def __init__(self, recorders: Sequence[StepHistory | StateCheckpointer]) -> None:
@@ -433,23 +434,28 @@ class _StepCount:
             recorder.on_checkpoint(report, state)
 
     def on_retry(self, reason: str, attempt: int, beta: float) -> None:
-        for hook in self._hooks("on_retry"):
-            hook(reason, attempt, beta)
+        for recorder in self._whole_march():
+            recorder.on_retry(reason, attempt, beta)
 
     def on_refresh(self, timing: RefreshTiming) -> None:
-        for hook in self._hooks("on_refresh"):
-            hook(timing)
+        for recorder in self._whole_march():
+            recorder.on_refresh(timing)
 
     @property
     def on_residuals(self) -> Callable[[Mapping[str, float]], None] | None:
         """The per-equation hook, or ``None`` when no recorder keeps them, so the march skips their cost."""
-        hooks = self._hooks("on_residuals")
+        hooks = [
+            recorder.on_residuals
+            for recorder in self._whole_march()
+            if recorder.on_residuals is not None
+        ]
         if not hooks:
             return None
         return combine_observers(*hooks)
 
-    def _hooks(self, name: str) -> list[Callable]:
-        return [getattr(recorder, name) for recorder in self._recorders if hasattr(recorder, name)]
+    def _whole_march(self) -> list[MarchRecorder]:
+        """The recorders that take every march hook, not only ``on_checkpoint``."""
+        return [recorder for recorder in self._recorders if isinstance(recorder, MarchRecorder)]
 
 
 def _checkout_state() -> tuple[str | None, bool | None]:

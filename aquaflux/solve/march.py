@@ -197,12 +197,17 @@ class ResidualHomotopy(Protocol):
     than the steps it saves.
     """
 
-    def enter(self, step: int) -> Callable[[jnp.ndarray], jnp.ndarray]:
+    def enter(self, step: int, previous: StepReport | None) -> Callable[[jnp.ndarray], jnp.ndarray]:
         """Make the station outer step ``step`` runs current, and return its residual ``phi -> R(phi)``.
 
-        Called once per outer step, before the step is taken. **May have side effects** -- that is what
-        "enter" names: an implementation that must re-point a preconditioner refresh at the new station
-        does it here, so the operator the step solves against and the residual it drives agree.
+        Called once per outer step, before the step is taken, with the report of the step before it
+        (``None`` for the first) -- so a homotopy may decide its next station from how the march is
+        going, rather than from the step index alone (ending a ramp once the march has settled, say).
+        Steps are entered in order, and the first may be entered more than once (the march measures its
+        damping anchor at the first station before taking the step); an implementation answers a
+        repeated step as it did the first time. **May have side effects** -- that is what "enter" names:
+        an implementation that must re-point a preconditioner refresh at the new station does it here,
+        so the operator the step solves against and the residual it drives agree.
 
         Return a **bound method of a module** rather than a freshly-built closure, for the same reason
         :func:`newton_march`'s own ``residual_fn`` must be one: its arrays then ride as dynamic leaves
@@ -210,7 +215,10 @@ class ResidualHomotopy(Protocol):
         """
 
     def arrived(self, step: int) -> bool:
-        """Whether outer step ``step`` runs the **target** problem, so the march may stop on tolerance."""
+        """Whether outer step ``step`` runs the **target** problem, so the march may stop on tolerance.
+
+        Asked of a step after it has been entered, as are :meth:`station` and :meth:`shift_factor`.
+        """
 
     def shift_factor(self, step: int) -> float:
         """What to multiply the pseudo-transient shift by when outer step ``step`` **enters** a station.
@@ -238,7 +246,9 @@ class ResidualHomotopy(Protocol):
 
         Only equality between adjacent steps is read, never the value or the spacing, so an
         implementation may number stations however it likes as long as consecutive steps within one
-        station compare equal.
+        station compare equal. The march asks it of the step just entered and records the answer on that
+        step's report (:attr:`~aquaflux.solve.StepReport.station`), and compares a step with the ones
+        before it through those reports -- so an implementation need not remember past steps.
         """
 
 
@@ -629,15 +639,15 @@ def newton_march(
         strength on ``active_step``) to refresh that step's frozen host preconditioner from the current
         state and shift. It runs in this eager loop -- a host operation outside the jitted ``_march_step``
         -- and mutates the step's *static* preconditioner in place, so ``_march_step`` stays a
-        compilation-cache hit. The use case is a **complete-LU preconditioner re-factored at the current
-        ``(state, β)``** so it is the exact inverse of the operator actually solved (a frozen factorization
-        mis-preconditions the shifted operator once the march's β leaves the value it was built at). Like
+        compilation-cache hit. The use case is a **materialized-Jacobian preconditioner re-fitted at the
+        current ``(state, β)``**, since a frozen inverse mis-preconditions the shifted operator once the
+        march's β leaves the value it was built at. Like
         the trigger and the control it is **forward-only** -- an impure mutation that must never be on a
         differentiated path. ``None`` (the default) leaves the preconditioner untouched, byte-identical to
         before.
     homotopy : ResidualHomotopy, optional
         Walk a sequence of related problems within this one march, ending at the target. When given,
-        each outer step drives ``homotopy.enter(step)`` instead of ``residual_fn``, and the march may
+        each outer step drives ``homotopy.enter(step, previous)`` instead of ``residual_fn``, and the march may
         **not** stop on its residual tolerance until ``homotopy.arrived(step)`` -- a converged
         intermediate station is not a converged answer. ``residual_fn`` stays the **target** residual
         and is what ``reference_norm`` defaults to, so the stopping bar is the target problem's
@@ -708,7 +718,7 @@ def newton_march(
         with each equation's term of the measure the step was judged in -- the numbers whose Euclidean
         combination is the report's ``residual_norm`` -- so a record of the march can say which
         equation is holding it up. Called only when that measure names its blocks
-        (:func:`~aquaflux.solve.named_blocks`); a plain Euclidean measure has nothing to split.
+        (:func:`~aquaflux.solve.norm.named_blocks`); a plain Euclidean measure has nothing to split.
         Costs one residual evaluation per step, at the station the step drove; ``None`` (default)
         costs nothing.
 
@@ -730,7 +740,7 @@ def newton_march(
     # The anchor is the scale the FIRST step's inner loop is judged against, so it is taken at the
     # station that step actually runs. With no homotopy that is `residual_fn` and this is unchanged.
     measured_norm_0 = jnp.asarray(
-        norm(residual_fn(phi0) if homotopy is None else homotopy.enter(0)(phi0))
+        norm(residual_fn(phi0) if homotopy is None else homotopy.enter(0, None)(phi0))
     )
     residual_norm_0 = (
         measured_norm_0 if damping_reference is None else jnp.asarray(float(damping_reference))
@@ -786,7 +796,7 @@ def newton_march(
         # parameter (a preconditioner refresh), so it runs before the control and the refresh below.
         step_residual = residual_fn
         if homotopy is not None:
-            step_residual = homotopy.enter(len(reports))
+            step_residual = homotopy.enter(len(reports), reports[-1] if reports else None)
             arrived = homotopy.arrived(len(reports))
         # A step control reshapes the base step from the previous report (None runs it unchanged, so
         # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
@@ -820,7 +830,7 @@ def newton_march(
         entering = (
             homotopy is not None
             and reports
-            and homotopy.station(len(reports)) != homotopy.station(len(reports) - 1)
+            and homotopy.station(len(reports)) != reports[-1].station
         )
         previous_report = reports[-1] if reports else None
         if entering and isinstance(step_control, ShiftCarryingControl):
@@ -841,7 +851,7 @@ def newton_march(
             if (
                 homotopy is not None
                 and len(reports) >= 2
-                and homotopy.station(len(reports) - 1) != homotopy.station(len(reports) - 2)
+                and reports[-1].station != reports[-2].station
                 and isinstance(step_control, ShiftCarryingControl)
             ):
                 control_state = step_control.rebase(control_state)
@@ -866,8 +876,8 @@ def newton_march(
             retry.require_shifted(active_step)
         if refresh_preconditioner is not None:
             # Refresh the step's (frozen, host) preconditioner from the state and shift strength this
-            # step is about to run at -- e.g. re-factoring a complete LU at the current (state, β) so it
-            # is the exact inverse of the operator actually solved. Runs HERE, in the eager loop (a host
+            # step is about to run at -- e.g. re-fitting a materialized-Jacobian inverse at the current
+            # (state, β), so it preconditions the operator actually solved. Runs HERE, in the eager loop (a host
             # op outside the jitted `_march_step`), after the control has set β on `active_step`. It
             # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
             # cache hit. Forward-only, like the trigger and the control.
@@ -955,7 +965,7 @@ def newton_march(
         # unavailable (no threshold set, or no β leaf) -- redoing the SAME step from the SAME pre-step
         # state with the tighter solver `retry.solver` names.
         # One retry; a still-diverged step breaks below as it would without a retry. A policy with no
-        # `solver` (the default) is byte-identical, and the exact-LU path never triggers this.
+        # `solver` (the default) is byte-identical.
         diverged_retry = retry.solver is not None and retry.has_diverged(residual_norm, reference)
         if diverged_retry:
             if on_retry is not None:
@@ -1003,6 +1013,7 @@ def newton_march(
             damping_reference=float(residual_norm_0),
             station=0 if homotopy is None else int(homotopy.station(len(reports))),
             arrived=bool(arrived),
+            full_step_ratio=float(outcome.full_step_ratio),
         )
         stalled = stalled + 1 if _limit_collapsing(reports[-1] if reports else None, report) else 0
         reports.append(report)

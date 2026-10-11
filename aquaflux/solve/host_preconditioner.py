@@ -1,17 +1,14 @@
 """The contract every frozen host preconditioner satisfies, and the JAX wrapper it shares.
 
-Two preconditioners in this package hand a jitted Krylov solve an approximate ``A^-1`` computed on the
-**host**: the complete LU (:mod:`~aquaflux.solve.lu_preconditioner`) and the algebraic-multigrid V-cycle
-(:mod:`~aquaflux.solve.amg_preconditioner`). They differ entirely in how the inverse is *fitted* to the
-matrix and not at all in how it is *applied*: each holds a frozen factorization, exposes it as a
+The materialized-Jacobian preconditioners (:mod:`~aquaflux.solve.materialized_preconditioner`) hand a
+jitted Krylov solve an approximate ``A^-1`` computed on the **host**. They differ entirely in how the
+inverse is *fitted* to the matrix and not at all in how it is *applied*: each holds a frozen inverse, exposes it as a
 ``residual -> M residual`` callable through :func:`jax.pure_callback`, and reads that factorization at
 call time so an in-place refresh re-preconditions the already-compiled solve.
 
 **The contract is real and named.** ``matvec`` needs exactly two things of whatever it wraps -- how
-many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and five
-classes in this package already provide precisely that pair: the two frozen inverses above (the
-complete-LU factors and the V-cycle), the traced hierarchy inverse, and both block-triangular
-field splits. :class:`FrozenInverse` is that pair, written down, rather than each wrapper re-deriving
+many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and the
+traced hierarchy inverses and the block-triangular field split already provide precisely that pair. :class:`FrozenInverse` is that pair, written down, rather than each wrapper re-deriving
 ``matvec`` on its own.
 
 **Naming it also closes a class of silent failure.** A base that reads anything off ``self.inverse``
@@ -143,7 +140,7 @@ def require_refactorable(inverse: object, owner: str) -> RefactorableInverse:
 class HostPreconditioner:
     """A frozen host inverse exposed to a jitted Krylov solve, shared by the whole family.
 
-    Not an :class:`equinox.Module`: the factorization is a host ``scipy``/PETSc object, so an instance is
+    Not an :class:`equinox.Module`: the inverse is a host object, so an instance is
     held by the caller and captured in the :func:`jax.pure_callback` closure rather than threaded through
     the jit as a traced argument. It rides as a **static** field of the shift policy, which is what makes
     an in-place refresh a compilation-cache hit rather than a recompile.

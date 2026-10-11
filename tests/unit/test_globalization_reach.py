@@ -21,9 +21,8 @@ defaults are pinned as **literal numbers**, so a moved default fails here instea
 every case. And one **override changes one setting** on every builder, with each refusal the object
 makes where it would otherwise drop a setting without a word.
 
-``coupled_step`` is built here with the block-diagonal and complete-LU preconditioners. A multigrid
-V-cycle needs ``petsc4py``, which CI does not install, and it shares ``_monolithic_factor_step`` with the
-complete LU, so its forwarding is the same code path.
+``coupled_step`` is built here with the block-diagonal and complete-LU preconditioners. A field split
+shares ``_monolithic_factor_step`` with the complete LU, so its forwarding is the same code path.
 """
 
 from __future__ import annotations
@@ -38,16 +37,18 @@ from aquaflux.flow import flow_march_step, momentum_continuation, reused_flow_so
 from aquaflux.flow.block_preconditioner import BlockPreconditioner
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
-    CompleteLu,
     DivergenceGuard,
     DualTimeLoop,
     DualTimeStep,
+    FieldSplit,
     Globalization,
+    JacobiSmoothed,
     MaterializedJacobian,
     MonotoneLineSearch,
     PseudoTransientStep,
     RelaxedFarFromRoot,
     RootSolveSettings,
+    SimpleSmoothed,
     SwitchedEvolutionRelaxation,
 )
 from aquaflux.turbulence import (
@@ -334,10 +335,10 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
             globalization=asked,
             **extra,
         ),
-        "lu": coupled_step(
+        "split": coupled_step(
             coupled,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
             globalization=asked,
             **extra,
         ),

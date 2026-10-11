@@ -39,7 +39,9 @@ from aquaflux.solve import (
     LinearSolverSpec,
     LinearSolveSettings,
     MarchLogger,
+    MarchRecorder,
     MaterializedJacobian,
+    RampSchedule,
     Resumption,
     RetryPolicy,
     RootSolveSettings,
@@ -87,19 +89,19 @@ class SolverSpec(abc.ABC):
     :class:`RadiationSolve`."""
 
     @abc.abstractmethod
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """The observer keywords that attach ``logger`` and ``recorder`` to this solve.
 
         Parameters
         ----------
         logger : MarchLogger
             Writes one row per outer step.
-        recorder : object or None
-            Records each step for a program to read: anything with the march hooks
-            ``on_checkpoint(report, state)``, ``on_retry(reason, attempt, beta)`` and
-            ``on_refresh(timing)``, and an ``on_residuals`` that is ``{equation: term} -> None``, or
-            ``None`` when nothing wants the per-equation residuals (each costs a residual evaluation
-            per step). ``None`` for no recorder.
+        recorder : MarchRecorder or None
+            Records each step for a program to read; its ``on_residuals`` is ``None`` when nothing wants
+            the per-equation residuals (each costs a residual evaluation per step). ``None`` for no
+            recorder.
 
         Returns
         -------
@@ -272,14 +274,18 @@ class _March(SolverSpec):
                 f"{type(self).__name__}.max_steps must be >= 1, got {self.max_steps!r}."
             )
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """Each step and retry to the log and the recorder, inner iterations to the log -- see :meth:`SolverSpec.observers_for`."""
         observers = {
-            "on_checkpoint": _both(logger.on_checkpoint, recorder, "on_checkpoint"),
-            "on_retry": _both(logger.on_retry, recorder, "on_retry"),
+            "on_checkpoint": _both(
+                logger.on_checkpoint, None if recorder is None else recorder.on_checkpoint
+            ),
+            "on_retry": _both(logger.on_retry, None if recorder is None else recorder.on_retry),
         }
-        if (on_residuals := getattr(recorder, "on_residuals", None)) is not None:
-            observers["on_residuals"] = on_residuals
+        if recorder is not None and recorder.on_residuals is not None:
+            observers["on_residuals"] = recorder.on_residuals
         # The inner-loop observer exists only with an inner loop to observe; the step refuses it otherwise.
         if self.dual_time is not None:
             observers["inner_observer"] = logger.on_inner
@@ -292,9 +298,23 @@ class _March(SolverSpec):
         )
 
 
-def _both(log: Callable, recorder: object | None, hook: str) -> Callable:
-    """The march hook ``hook`` as the log's ``log`` and then, when there is one, the recorder's."""
-    return log if recorder is None else combine_observers(log, getattr(recorder, hook))
+def _both(log: Callable, recorded: Callable | None) -> Callable:
+    """One march hook as the log's ``log`` and then, when there is a recorder, its ``recorded``."""
+    return log if recorded is None else combine_observers(log, recorded)
+
+
+#: Why a ramp ending on the settle is refused without a step control, said where the file is read and
+#: where a script builds the schedule.
+_SETTLED_NEEDS_A_CONTROL = (
+    "a ramp that ends when the march has settled needs a step_control: its beta_min and settle_alpha "
+    "say what settled is."
+)
+
+
+def _never_settled(report: object) -> bool:
+    """A stand-in end test, so a ramp's settings are checked before there is a control to supply one."""
+    del report
+    return False
 
 
 #: The viscosity a ramp station scales, by the name a file gives it; unset leaves the ramp's own.
@@ -315,19 +335,29 @@ class ViscosityRamp:
     anchor : float
         The factor the viscosity starts at, ``> 1``.
     stations : int
-        How many geometric steps the viscosity is walked down in, ``>= 1``.
+        How many geometric steps the viscosity is walked down in, ``>= 1``. With :attr:`end` set, the
+        pace: the number it would be walked in if the march never settled first.
     steps_per_station : int
-        Outer steps held at each station, ``>= 1``.
+        Outer steps held at each station, ``>= 1``; ``1`` when :attr:`end` is set.
     scale : {"flow", "both"} or None
         Which viscosity a station scales: the flow's only, leaving the closure at the case's own
         (``flow``), or both (``both``, a genuine lower-Reynolds problem at each station); unset, both.
     redamping : float or None
         How much the shift is raised on entering each station; unset, the ramp's own derived value.
+    end : {"settled"} or None
+        What ends the ramp before its last station. ``settled``: the first step taken at full length at
+        the step control's smallest shift (``ShiftStrengthControl.settled``), the same evidence its
+        release waits for on the case's own viscosity; the march then walks the rest of the way in
+        :attr:`finish` steps. Needs the march's ``step_control``. Unset, every station is walked.
+    finish : int or None
+        How many equal geometric steps the viscosity left when :attr:`end` fires is walked down in, the
+        last being the case's own, ``>= 1``; unset, one -- straight to the case's viscosity.
 
     Raises
     ------
     ValueError
-        If a count is not ``>= 1`` or the anchor is not above one.
+        If a count is not ``>= 1``, the anchor is not above one, ``finish`` is set without ``end``, or
+        ``end`` is set with more than one step per station.
     """
 
     anchor: float
@@ -335,6 +365,8 @@ class ViscosityRamp:
     steps_per_station: int
     scale: Literal["flow", "both"] | None = None
     redamping: float | None = None
+    end: Literal["settled"] | None = None
+    finish: int | None = None
 
     def __post_init__(self) -> None:
         if self.scale not in _RAMP_SCALINGS:
@@ -344,9 +376,44 @@ class ViscosityRamp:
             )
         if not self.anchor > 1.0:
             raise ValueError(f"ViscosityRamp.anchor must be above 1, got {self.anchor!r}.")
-        for name in ("stations", "steps_per_station"):
-            if getattr(self, name) < 1:
-                raise ValueError(f"ViscosityRamp.{name} must be >= 1, got {getattr(self, name)!r}.")
+        try:
+            # The schedule's own checks, with a stand-in for the test a step control supplies at solve.
+            self._schedule(None if self.end is None else _never_settled)
+        except ValueError as error:
+            raise ValueError(f"ViscosityRamp: {error}") from None
+
+    def _schedule(self, end_when: Callable | None) -> RampSchedule:
+        return RampSchedule(
+            self.stations,
+            self.steps_per_station,
+            end_when=end_when,
+            **_set(finish=self.finish),
+        )
+
+    def schedule(self, step_control: ShiftStrengthControl | None) -> RampSchedule:
+        """The ramp as a :class:`~aquaflux.solve.RampSchedule`, ending on ``step_control``'s settle if asked.
+
+        Parameters
+        ----------
+        step_control : ShiftStrengthControl or None
+            The march's control, whose :meth:`~aquaflux.solve.ShiftStrengthControl.settled` ends the
+            ramp when :attr:`end` is ``settled`` -- one definition of settled for the ramp and the
+            release.
+
+        Returns
+        -------
+        RampSchedule
+
+        Raises
+        ------
+        ValueError
+            If :attr:`end` is set and there is no ``step_control`` to say what settled is.
+        """
+        if self.end is None:
+            return self._schedule(None)
+        if step_control is None:
+            raise ValueError(_SETTLED_NEEDS_A_CONTROL)
+        return self._schedule(step_control.settled)
 
     def solve(self, coupled: object, options: dict[str, object], point_setup: Callable) -> object:
         """March ``coupled`` along this ramp, by :func:`~aquaflux.turbulence.solve_reynolds_ramp`.
@@ -369,8 +436,7 @@ class ViscosityRamp:
         return solve_reynolds_ramp(
             coupled,
             anchor=self.anchor,
-            stations=self.stations,
-            steps_per_station=self.steps_per_station,
+            ramp=self.schedule(options.get("step_control")),
             point_setup=point_setup,
             **_set(redamping=self.redamping, companion=companion),
             **options,
@@ -451,6 +517,9 @@ class CoupledMarch(_March):
         super().__post_init__()
         if self.continuation is not None and not isinstance(self.continuation, ViscosityRamp):
             raise TypeError(f"CoupledMarch.continuation got {self.continuation!r}.")
+        if self.continuation is not None and self.continuation.end is not None:
+            if self.step_control is None:
+                raise ValueError(f"CoupledMarch.continuation: {_SETTLED_NEEDS_A_CONTROL}")
 
     def _owned(self) -> frozenset[str]:
         """The march's keywords and the closure's -- see :meth:`_March._owned`."""
@@ -474,12 +543,16 @@ class CoupledMarch(_March):
         if self.continuation is not None:
             raise ValueError(_RAMP_TAKES_NO_STARTING_STATE)
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """The march's, the preconditioner's refreshes and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
         observers = super().observers_for(logger, recorder)
         if isinstance(self.preconditioner, MaterializedJacobian):
             observers["session_options"] = {
-                "observer": _both(logger.on_refresh, recorder, "on_refresh")
+                "observer": _both(
+                    logger.on_refresh, None if recorder is None else recorder.on_refresh
+                )
             }
         if self.continuation is not None:
             observers["point_setup"] = lambda companion, seed_state, point: logger.note(
@@ -763,7 +836,9 @@ class Segregated(SolverSpec):
             if value is not None and not isinstance(value, family):
                 raise TypeError(f"Segregated.{name} got {value!r}.")
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """None: the segregated loop takes no observer -- see :meth:`SolverSpec.observers_for`."""
         del logger, recorder
         return {}
@@ -875,7 +950,9 @@ class RadiationSolve(SolverSpec):
         if self.rtol is not None and not 0.0 < self.rtol < 1.0:
             raise ValueError(f"RadiationSolve.rtol must lie in (0, 1), got {self.rtol!r}.")
 
-    def observers_for(self, logger: MarchLogger, recorder: object | None) -> dict[str, object]:
+    def observers_for(
+        self, logger: MarchLogger, recorder: MarchRecorder | None
+    ) -> dict[str, object]:
         """The log's notes, one line as each stage starts; there are no steps to record."""
         del recorder
         return {"report": logger.note}

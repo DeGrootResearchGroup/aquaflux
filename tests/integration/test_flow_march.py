@@ -24,7 +24,6 @@ from aquaflux.flow import (
 from aquaflux.flow import march as flow_march_module
 from aquaflux.solve import (
     BlockScaled,
-    CompleteLu,
     Convergence,
     DualTimeLoop,
     DualTimeStep,
@@ -33,7 +32,6 @@ from aquaflux.solve import (
     Globalization,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicFactorShiftPolicy,
     PseudoTransientStep,
     RefreshPolicy,
     Resumption,
@@ -324,32 +322,6 @@ def test_the_jacobian_gradient_sweeps_reach_the_step_and_only_the_step() -> None
     assert jnp.allclose(narrowed(state + 0.1), assembler.residual(state + 0.1), rtol=1e-12)
 
 
-def test_a_complete_lu_march_reaches_the_root_the_block_simple_march_reaches(channel) -> None:
-    """A laminar flow accepts the materialized-Jacobian preconditioner and lands on the same root.
-
-    The complete LU is exact at the state and shift it was factored at, so this exercises the whole
-    session -- probe, factorization, per-step re-fit under a dual-time march -- against the block-SIMPLE
-    path's root, not against a transcription of it.
-    """
-    assembler, root = channel
-    built = []
-    session = open_flow_session(
-        MaterializedJacobian(CompleteLu(backend="scipy")),
-        assembler,
-        on_build=lambda step: built.append(step) or step,
-    )
-    state = solve_flow_march(
-        assembler,
-        preconditioner=session,
-        convergence=TIGHT,
-        max_steps=150,
-        dual_time=DualTimeLoop(inner_steps=3),
-    )
-    # The march ran on the materialized inverse, not on a block-SIMPLE step that happened to converge.
-    assert built and isinstance(built[0].shift_policy, MonolithicFactorShiftPolicy)
-    assert float(jnp.linalg.norm(state - root) / jnp.linalg.norm(root)) < 1e-6
-
-
 def test_a_field_split_is_refused_for_a_flow_with_nothing_to_split(channel) -> None:
     assembler, _ = channel
     split = MaterializedJacobian(FieldSplit(leading=SimpleSmoothed(), trailing=JacobiSmoothed()))
@@ -362,7 +334,7 @@ def test_block_simple_settings_are_refused_beside_a_materialized_preconditioner(
     with pytest.raises(TypeError, match="no such settings"):
         solve_flow_march(
             assembler,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(SimpleSmoothed()),
             preconditioner_options={"schur_scaling": "msimple"},
         )
 
@@ -374,7 +346,7 @@ def test_a_preconditioner_is_refused_beside_a_finished_step(channel) -> None:
         solve_flow_march(
             assembler,
             strategy=finished,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(SimpleSmoothed()),
         )
 
 
@@ -417,14 +389,15 @@ def test_the_coupled_shift_settings_are_the_flow_ones_plus_the_closures_damping(
     }
 
 
-def test_a_simple_smoothed_march_needs_no_petsc_and_reaches_the_same_root(channel) -> None:
+def test_a_simple_smoothed_march_reaches_the_same_root(channel) -> None:
     """A laminar flow takes the traced ``SimpleSmoothed`` hierarchy over its whole ``(u, p)`` saddle.
 
-    This is the inverse the field split uses for the saddle, with no optional dependency, so it runs in
-    CI. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
+    This is the inverse the field split uses for the saddle. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
     converge on the state it was first fitted at), and the isinstance check that the march ran on it.
     """
-    from aquaflux.solve import MaterializedBlockPreconditioner
+    from aquaflux.solve.block_preconditioner import (
+        MaterializedBlockPreconditioner,
+    )
 
     assembler, root = channel
     built, timings = [], []
@@ -460,9 +433,13 @@ def test_the_block_preconditioner_is_an_approximate_inverse_and_transposes_exact
     """
     import numpy as np
     from aquaflux.solve import (
-        MaterializedBlockPreconditioner,
-        jacobian_matvec,
         jacobian_probe_plan,
+    )
+    from aquaflux.solve.block_preconditioner import (
+        MaterializedBlockPreconditioner,
+    )
+    from aquaflux.solve.materialized_session import (
+        jacobian_matvec,
     )
 
     assembler = _channel(8, 6, MU)

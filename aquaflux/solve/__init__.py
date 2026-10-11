@@ -68,7 +68,10 @@ unit tests. The surface is five groups:
   square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
   `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
   matching fixed-cycle applies. Callers assemble an operator, build a hierarchy once off the jit
-  path, and apply it as a frozen matrix-free V-cycle preconditioner.
+  path, and apply it as a frozen matrix-free V-cycle preconditioner. `bordered_preconditioner`
+  extends any preconditioner to the same system bordered by one scalar unknown (a Lagrange
+  multiplier), eliminating it through its 1x1 Schur complement; where the scalar sits is a
+  `ScalarBorder`'s to say.
 """
 
 from __future__ import annotations
@@ -86,17 +89,9 @@ from .continuation import (
 )
 from .frozen_operator import (
     ConvectionDiffusionStencil,
-    cell_major_permutation,
-    equilibrate_cell_major,
     decouple_dof,
-    symmetrically_equilibrate,
 )
-from .amg_preconditioner import (
-    MonolithicVCycleInverse,
-    MaterializedJacobianPreconditioner,
-    MonolithicVCyclePreconditioner,
-    monolithic_vcycle_inverse,
-)
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .field_split import (
     JacobiSmoothedInverse,
     FieldSplitInverse,
@@ -104,9 +99,10 @@ from .field_split import (
     FieldSplitPreconditioner,
     field_split_inverse,
 )
+from .bordered import ScalarBorder, bordered_preconditioner
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
-from .settings_value import SettingsValue, filled_from
+from .settings_value import MergeableSettings, SettingsValue, filled_from
 from .host_preconditioner import (
     FrozenInverse,
     HostPreconditioner,
@@ -114,9 +110,10 @@ from .host_preconditioner import (
     ReleasableInverse,
 )
 from .hierarchy_inverse import HierarchyBlockInverse
-from .refresh_timing import PhaseTimer, RefreshTiming
+from .refresh_timing import (
+    RefreshTiming,
+)
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
-from .lu_preconditioner import CompleteLuPreconditioner
 from .strategy import (
     AbortsInnerLoop,
     CarriesRelaxationSchedule,
@@ -127,7 +124,6 @@ from .strategy import (
     StepControl,
     StepOutcome,
     StepReport,
-    shift_of,
 )
 from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
 from .implicit import (
@@ -135,8 +131,6 @@ from .implicit import (
     DampedNewtonStep,
     RootSolveSettings,
     RootSolver,
-    PositiveBlockLimit,
-    PositiveBlockProjection,
     assembler_residual,
     positive_block_limit,
     positive_block_projection,
@@ -148,16 +142,13 @@ from .line_search_growth import (
 )
 from .linear import (
     default_linear_solver,
-    in_progress_measure,
     relative_residual_gmres,
     residual_stop_gmres,
     restart_cycles,
     solve_linear,
 )
 from .checkpoint import (
-    InnerIterateCheckpointer,
     StateCheckpointer,
-    checkpoint_name,
     find_checkpoint,
     report_record,
 )
@@ -171,15 +162,16 @@ from .march import (
     newton_march,
     refuse_a_transform_the_march_cannot_run_in,
 )
-from .march_history import StepHistory
-from .march_log import MarchLogger, combine_metrics, field_change_metrics
+from .march_history import MarchRecorder, StepHistory
+from .march_log import (
+    MarchLogger,
+    field_change_metrics,
+)
 from .saddle_multigrid import (
     SimpleSmoothedInverse,
-    block_approximate_inverse,
 )
 from .multigrid import (
     AirHierarchy,
-    ShapeBudget,
     SmoothedHierarchy,
     air_multigrid_cycles,
     build_air_hierarchy,
@@ -193,12 +185,11 @@ from .newton import newton_step
 from .norm import (
     BlockScaledNorm,
     ResidualNorm,
+    NamedBlockMeasure,
     RowScaledNorm,
     block_reference_scales,
-    named_blocks,
 )
 from .convergence import (
-    PLAIN_RESIDUAL,
     BlockScaled,
     Convergence,
     Euclidean,
@@ -211,9 +202,7 @@ from .relaxation import ConstantRelaxation, RelaxationSchedule, SwitchedEvolutio
 from .refresh import NO_REFRESH, RefreshPolicy
 from .resumption import Resumption
 from .driver import (
-    CallerBuiltSource,
     ContinuationSource,
-    FinishedSource,
     SessionSource,
     StagedResult,
     explicit_source,
@@ -221,34 +210,26 @@ from .driver import (
     staged_march,
 )
 from .jacobian_probe import JacobianProbe, jacobian_probe_plan
-from .block_preconditioner import MaterializedBlockPreconditioner
 from .materialized_session import (
-    BUILD_BETA,
-    FACTORIZATION_LINEAR_SOLVE,
-    PROBE_BATCH_SIZE,
-    VCYCLE_LINEAR_SOLVE,
-    BetaTrackingRefresh,
     MaterializedProblem,
     MaterializedSession,
     PreconditionerSession,
-    batched_jacobian_matvec,
-    frozen_shift_diagonal,
-    jacobian_matvec,
 )
 from .materialized_spec import (
-    CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
-    MonolithicVCycle,
     materialized_spec_from_mapping,
     materialized_spec_to_mapping,
     MATERIALIZED_MAPPING,
 )
-from .monolithic_policy import FrozenTransposeFactory, MonolithicFactorShiftPolicy
+from .monolithic_policy import (
+    MonolithicFactorShiftPolicy,
+)
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
-from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
+from .ramp_schedule import RampPosition, RampSchedule, RampWalk
+from .retry import NO_RETRIES, RetryPolicy
 from .shift_basis import (
     DEFAULT_SHIFT_BASIS,
     LocalCourantBasis,
@@ -257,53 +238,32 @@ from .shift_basis import (
     VelocityShiftParts,
 )
 from .sparse_jacobian import (
-    BlockColouring,
-    ColumnProbePlan,
-    ProbeGather,
-    block_stencil_colouring,
-    block_stencil_gather_map,
-    column_probe_plan,
-    shifted_jacobian,
-    jacobian_relative_error,
     materialize_block_jacobian,
 )
 from .step_control import (
     CflResidualDualTimeControl,
-    default_dual_time_control,
     DualTimeControl,
     ResidualRatioDualTimeControl,
     ShiftStrengthControl,
 )
 
 __all__ = [
-    "BUILD_BETA",
     "DEFAULT_GLOBALIZATION",
     "DEFAULT_ROOT_SOLVE",
     "DEFAULT_SHIFT_BASIS",
-    "ESCALATING_REASONS",
-    "FACTORIZATION_LINEAR_SOLVE",
     "MATERIALIZED_MAPPING",
     "NO_REFRESH",
     "NO_RETRIES",
-    "PLAIN_RESIDUAL",
-    "PROBE_BATCH_SIZE",
-    "VCYCLE_LINEAR_SOLVE",
     "AbortsInnerLoop",
     "AirHierarchy",
     "AirReduction",
-    "BetaTrackingRefresh",
-    "BlockColouring",
     "BlockInverse",
     "BlockScaled",
     "BlockScaledNorm",
-    "CallerBuiltSource",
     "CarriesRelaxationSchedule",
     "CellFields",
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
-    "ColumnProbePlan",
-    "CompleteLu",
-    "CompleteLuPreconditioner",
     "ConstantRelaxation",
     "ContinuationSource",
     "ConvectionDiffusionStencil",
@@ -321,15 +281,12 @@ __all__ = [
     "FieldSplit",
     "FieldSplitInverse",
     "FieldSplitPreconditioner",
-    "FinishedSource",
     "FrozenInverse",
-    "FrozenTransposeFactory",
     "GlobalDofs",
     "Globalization",
     "GmresSolve",
     "HierarchyBlockInverse",
     "HostPreconditioner",
-    "InnerIterateCheckpointer",
     "JacobiSmoothed",
     "JacobiSmoothedInverse",
     "JacobianProbe",
@@ -340,25 +297,23 @@ __all__ = [
     "LinearSolverSpec",
     "LocalCourantBasis",
     "MarchLogger",
+    "MarchRecorder",
     "MarchResult",
-    "MaterializedBlockPreconditioner",
     "MaterializedJacobian",
     "MaterializedJacobianPreconditioner",
     "MaterializedProblem",
     "MaterializedSession",
     "MeasureBuilder",
+    "MergeableSettings",
     "MonolithicFactorShiftPolicy",
-    "MonolithicVCycle",
-    "MonolithicVCycleInverse",
-    "MonolithicVCyclePreconditioner",
     "MonotoneLineSearch",
+    "NamedBlockMeasure",
     "NewtonStrategy",
-    "PhaseTimer",
-    "PositiveBlockLimit",
-    "PositiveBlockProjection",
     "PreconditionerSession",
-    "ProbeGather",
     "PseudoTransientStep",
+    "RampPosition",
+    "RampSchedule",
+    "RampWalk",
     "ReadableShift",
     "RefactorableInverse",
     "RefreshPolicy",
@@ -378,10 +333,10 @@ __all__ = [
     "RootSolver",
     "RowScaled",
     "RowScaledNorm",
+    "ScalarBorder",
     "SessionSource",
     "SettingsMapping",
     "SettingsValue",
-    "ShapeBudget",
     "ShiftBasis",
     "ShiftCarryingControl",
     "ShiftPolicy",
@@ -406,39 +361,24 @@ __all__ = [
     "VelocityShiftParts",
     "air_multigrid_cycles",
     "assembler_residual",
-    "batched_jacobian_matvec",
-    "block_approximate_inverse",
     "block_reference_scales",
-    "block_stencil_colouring",
-    "block_stencil_gather_map",
+    "bordered_preconditioner",
     "build_air_hierarchy",
     "build_convection_hierarchy",
     "build_smoothed_hierarchy",
-    "cell_major_permutation",
-    "checkpoint_name",
-    "column_probe_plan",
-    "combine_metrics",
     "combine_observers",
     "convection_multigrid_cycles",
     "decouple_dof",
-    "default_dual_time_control",
     "default_linear_solver",
-    "equilibrate_cell_major",
     "explicit_source",
     "field_change_metrics",
     "field_split_inverse",
     "filled_from",
     "find_checkpoint",
-    "frozen_shift_diagonal",
-    "in_progress_measure",
-    "jacobian_matvec",
     "jacobian_probe_plan",
-    "jacobian_relative_error",
     "materialize_block_jacobian",
     "materialized_spec_from_mapping",
     "materialized_spec_to_mapping",
-    "monolithic_vcycle_inverse",
-    "named_blocks",
     "newton_march",
     "newton_step",
     "positive_block_limit",
@@ -452,12 +392,9 @@ __all__ = [
     "resolve_linear_solve",
     "restart_cycles",
     "root_adjoint",
-    "shift_of",
-    "shifted_jacobian",
     "shifted_step",
     "smoothed_multigrid_cycles",
     "solve_linear",
     "staged_march",
     "stop_array_gradients",
-    "symmetrically_equilibrate",
 ]

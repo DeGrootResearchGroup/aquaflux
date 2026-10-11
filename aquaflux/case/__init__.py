@@ -74,6 +74,7 @@ from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState, StartingFields
 from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
+from .paths import relocated
 from .physics import RANS, Laminar, Physics, Radiation
 from .radiation import (
     CadFluid,
@@ -189,6 +190,7 @@ __all__ = [
     "prepare_run",
     "read_case",
     "read_case_document",
+    "relocated",
     "solver_for",
     "write_case",
 ]

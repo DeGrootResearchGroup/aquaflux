@@ -5,11 +5,12 @@ paths:
   - "aquaflux/solve/march_history.py"
   - "aquaflux/solve/checkpoint.py"
   - "aquaflux/solve/step_control.py"
+  - "aquaflux/solve/ramp_schedule.py"
 ---
 
 # Rules — `aquaflux/solve/` the observed march (`newton_march`, triggers, controls, logging)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and binding decisions this file assumes.
@@ -25,7 +26,14 @@ paths:
 `march_history.py::StepHistory(path, clock=)` is a host-side observer with the march hooks'
 names — `on_checkpoint(report, state)` writes a row; `on_refresh(timing)`, `on_retry(reason, attempt,
 beta)` and `on_residuals(terms)`, called while the step is under way, fill in the row it then writes
-and are reset after it. Columns: `step` (1-based, counting on across continuation segments), `seconds`
+and are reset after it. **What it offers is declared: `MarchRecorder` (same module, exported, `runtime_checkable`,
+#669)** — `on_checkpoint`, `on_retry`, `on_refresh` and an `on_residuals` that may be `None` (no taker,
+so the march skips their cost). A `StateCheckpointer` is not one (it records steps only). The case
+runner fans the hooks out by `isinstance(recorder, MarchRecorder)` and the solver specs type their
+recorder as one, so no hook is looked up by name; a recorder offering only some hooks gets none of the
+extras (pinned per missing hook in `test_case_run.py`). The one remaining attribute probe here,
+`hasattr(value, "item")` in `_cell`, deliberately recognizes NumPy/JAX array scalars without importing
+either; it is not a project contract. Columns: `step` (1-based, counting on across continuation segments), `seconds`
 (since construction, injected clock), every `StepReport` field under its own name with the report's own
 `step` renamed `segment_step` (it restarts per segment), `restart_cycles`, then (2026-10-07, for the
 browser interface's Run section) `refits` / `refit_seconds` (refreshes of kind `full` or `inner`; a
@@ -59,8 +67,10 @@ Pinned by `tests/unit/test_march_history.py`.
   station residual the step drove — the numbers whose Euclidean combination IS the report's
   `residual_norm` (pinned to `rel=1e-12` on a real flow march,
   `test_each_steps_residual_is_reported_by_equation_and_the_terms_make_up_its_norm`). It comes from
-  `solve.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
-  (`_block_terms`, `filter_jit`), and is skipped for a measure with unnamed blocks: `RowScaledNorm` /
+  `solve.norm.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
+  (`_block_terms`, `filter_jit`), and is skipped for a measure that is not a `NamedBlockMeasure` (`norm.py`, exported, `runtime_checkable`:
+`names` + `per_block`, #669 — `named_blocks` asks with `isinstance`, not `getattr(measure, "names", ())`)
+or whose blocks are unnamed: `RowScaledNorm` /
   `BlockScaledNorm` gained a static `names` (empty by default, refused unless it names each block once),
   and only the two row-scaled builders set it — `coupled_scaled_norm` (`coupled_equation_names`; both in
   `turbulence/measures.py`) and `FlowMeasures.row_scaled` (`flow.flow_equation_names`). The block-scaled
@@ -77,9 +87,43 @@ Pinned by `tests/unit/test_march_history.py`.
 ## The observed march — newton_march, triggers, controls, logging
 
 - **`ResidualHomotopy` — a continuation walked INSIDE one march, not as a ladder of marches (BUILT
-  2026-09-09).** A `Protocol` on `newton_march(homotopy=…)` with two methods: `enter(step)` makes the
-  station that step solves current and returns its residual, and `arrived(step)` says whether that
-  station is the **target**. `None` (the default) is byte-identical and is pinned by a test, since an
+  2026-09-09).** A `Protocol` on `newton_march(homotopy=…)` with two methods: `enter(step, previous)`
+  makes the station that step solves current and returns its residual, and `arrived(step)` says whether
+  that station is the **target**.
+  - **`RampSchedule` / `RampWalk` (`solve/ramp_schedule.py`, BUILT 2026-10-11) — where each step of a
+    geometric ramp runs, and what may END it early.** The settings (`stations`, `steps_per_station`,
+    `end_when: StepReport -> bool`, `finish`) are one frozen value; `schedule.walk()` hands each march a
+    mutable `RampWalk` that records a `RampPosition(station, progress)` per entered step (`progress` 0 at
+    the anchor, 1 at the target; a homotopy turns it into its parameter, `anchor ** (1 - progress)`).
+    Generic, so it lives in `solve/` (Principle 3.6): `ViscosityRampHomotopy` takes `ramp=RampSchedule`,
+    and so do `solve_reynolds_ramp` and the case file's `ViscosityRamp.schedule(step_control)` -- one
+    configuration object instead of `stations`/`steps_per_station` keywords copied onto each builder.
+    - **The early end:** the first report OFF the target for which `end_when` is true ends the walk; the
+      rest of the span is walked in `finish` equal steps of progress (equal geometric steps of the
+      parameter), the last being the target. Read once; a report from the target never ends anything
+      (a ramp that arrived first just arrives). Refused: `finish` without `end_when`, and `end_when`
+      with `steps_per_station != 1` (measured only at one; it would cut a station short).
+    - **`end_when` is the march's own `step_control.settled`** (`solve-globalization.md`), so the ramp
+      ends on the same evidence the release waits for. Why it exists and what it buys -- the ramp's best
+      length is the shift's descent plus the settle, not the viscosity step; ending on the settle made
+      paces 16 and 24 cost 124 and 118 cycles against the hand-tuned 111, and a 3-step finish 114 -- is
+      in `.claude/notes/solve-globalization-log.md` ("Ending the ramp on the settle signal"). **Opt-in;
+      pitzDaily's file still ships 12 fixed stations** (111 < 114).
+    - Station ids: the fixed walk numbers stations `0..stations` exactly as before (byte-identical
+      reports); finishing steps continue from the station the end fired at, so the target's id is not
+      `stations` on an ended walk -- only equality between adjacent steps means anything.
+    - Pinned by `tests/unit/test_ramp_schedule.py`; six mutations of the walk (the arrived guard, the
+      finish's start, the new-station-per-finish-step, an off-by-one finish, firing twice, the order
+      check) each fail at least one test.
+  - **`enter` is handed the PREVIOUS STEP'S REPORT (2026-10-11), so a homotopy may decide where a step
+    runs from how the march went** -- the seam a ramp ending on the settle needed
+    (`solve.RampSchedule`, `solve.md`). The first step is entered twice with `None` (once for the
+    damping anchor, once to take it). ⚠️ The march's look-backs ("did the previous step enter a
+    station?", the `rebase` test) now read `reports[-1].station` / `reports[-2].station` rather than
+    asking the homotopy about past steps, so `station(step)` is asked only of the step just entered and
+    an implementation need not remember history. Pinned by
+    `test_each_station_is_entered_with_the_report_of_the_step_before_it` (mutation: handing an older
+    report fails it). `None` (the default) is byte-identical and is pinned by a test, since an
   added seam that moves the incumbent path is a defect rather than a feature.
   - **What it is for, quantified on pitzDaily's shipped Reynolds ladder (2026-09-09, `simplesmooth`
     flow inverse, `N_POINTS=2`, `RATIO=10`, `BETA_START=0.5`, `beta_min=0.005`, `grow=1.5`,
@@ -199,6 +243,14 @@ Pinned by `tests/unit/test_march_history.py`.
       which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
       value chosen against no recorded evidence on this case. Whether 0.05 is right, and whether the
       floor should track the ramp rather than sit still, is open and unmeasured.
+      ⚠️ **"Fine" means stable, not fast (measured 2026-10-10).** `beta_min = 0.005` is reached at ramp
+      step 13 and then sets the whole target station's rate: a dual-time step at a fixed shift contracts
+      each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the
+      floor, so the station converges linearly at 0.55-0.84 per step for 15 steps. From a settled target
+      state (steps 21 and 27) ONE zero-shift step reaches the stopping bar; from the arrival state it does
+      not descend at all. `ShiftStrengthControl.release_floor` (opt-in) releases it after the first
+      full-length step at the floor on the target: 31 -> 22 steps, 161 -> 141 cycles at the same
+      `x_r/h`. See `solve-globalization.md` and `.claude/notes/solve-globalization-log.md`.
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
   - **`station_step(step, station, arrived) -> step` — reshape the STEP for the station, the counterpart
@@ -786,9 +838,9 @@ Pinned by `tests/unit/test_march_history.py`.
     find any one of them.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
-  - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to eight
+  - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to nine
     values (`phi, residual_norm, cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
-    binding_limit`), which is the missing-object smell: a positional tuple is where a consumer silently
+    binding_limit, full_step_ratio`), which is the missing-object smell: a positional tuple is where a consumer silently
     mis-unpacks one field for another, and every growth broke all five test doubles separately — which
     is why they are built by a single `_outcome` helper now. **The growth to eight demonstrated exactly
     that failure:** `residual_norm` was inserted *second*, and the one test still unpacking positionally
@@ -842,6 +894,20 @@ Pinned by `tests/unit/test_march_history.py`.
     - **`binding_limit`** — the step cap where it was the *binding* constraint, else 1. A small `alpha`
       has two opposite causes (the direction overshot; a constraint stopped it being followed further),
       so `alpha` alone cannot be acted on or reported honestly.
+    - **`full_step_ratio` (2026-10-11)** — the step's first full-length trial over the state it started
+      from, `norm(G(phi + delta)) / norm(G(phi))`: what the line search compares with one to accept the
+      full step, and used to discard when it rejected it. The DUAL-TIME step reports its FIRST inner
+      iteration's (whose `G` at the anchor is the steady `R`, so it compares step to step); the two
+      single-step strategies the accepted attempt's. It comes from `LineSearchStep.full_step_norm`,
+      which the ladder records at rung 0 whatever the test decided -- `nan` when a growth rung was
+      accepted first and the full step never evaluated. On the report and in `StepHistory`, and the
+      march log's `rho1` column. **Why:** `alpha` is a halving ladder (1 or 0.5 at the floor), so it
+      says only WHETHER the full step was taken; on pitzDaily this ratio walked 1.23, 1.13, 1.04, 0.90
+      over the four steps before the settle, so the settle is visible a step or two ahead
+      (`.claude/notes/solve-globalization-log.md`, "Ending the ramp on the settle signal"). Pinned
+      against closed forms (a diagonal shifted Jacobian on `phi**3 - theta`) for the dual-time step
+      (accepted AND rejected first steps), the pseudo-transient step and the damped Newton step through
+      the march; mutation-checked (wrong inner, the kept rung reported instead, the march dropping it).
   - **Positivity is NOT carried by the shift and the divergence guard (binding — a stated invariant that
     was wrong).** The direct-scalar path documented positivity as following from the pseudo-transient
     shift plus the guard. It does not: the guard fires on a *non-finite residual*, and by the time
@@ -933,7 +999,9 @@ Pinned by `tests/unit/test_march_history.py`.
     outer-iteration boundary** and never print them adjacent — the march log deliberately dropped a
     "from |R|=…" field from its inner-block title for exactly this reason.
   - **The step grid stays NARROW; only scan-down quantities get columns (binding).** The step table is
-    `step, t(s), beta, in, cyc, R, a_min, flg` — fixed, ~61 characters, comparable to the nested inner
+    `step, t(s), beta, in, cyc, R, a_min, rho1, flg` — fixed, 70 characters (pinned at `<= 70` by
+    `test_the_grid_stays_narrow_whatever_is_switched_on`; `rho1` was added 2026-10-11 at width 4,
+    `.2f`, to stay inside it, and the per-equation grid widened to match), comparable to the nested inner
     table so the two read as one document. Everything else — the case metrics, the preconditioner
     branch, the cumulative cycles, the per-field changes — rides in **spanning rows beneath the row it
     belongs to**. The first version put them all in columns and reached 112 characters with
@@ -1021,7 +1089,7 @@ Pinned by `tests/unit/test_march_history.py`.
     **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
     outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
     compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
-    `_beta_tracking_refresh` skeleton (now `solve.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
+    `_beta_tracking_refresh` skeleton (now `solve.materialized_session.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
     `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
     `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
     because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the

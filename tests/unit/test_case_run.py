@@ -9,6 +9,7 @@ import inspect
 import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import warnings
 from pathlib import Path
@@ -311,13 +312,14 @@ def test_a_march_logs_each_step_retry_and_inner_iteration_it_has() -> None:
 
 def _hooks(seen: list, who: str, **extra: object) -> types.SimpleNamespace:
     """A log or a recorder whose every march hook records who heard what."""
-    return types.SimpleNamespace(
-        on_checkpoint=lambda report, state: seen.append((who, "step", state)),
-        on_retry=lambda reason, attempt, beta: seen.append((who, "retry", reason)),
-        on_refresh=lambda timing: seen.append((who, "refresh", timing)),
-        on_inner=None,
-        **extra,
-    )
+    hooks = {
+        "on_checkpoint": lambda report, state: seen.append((who, "step", state)),
+        "on_retry": lambda reason, attempt, beta: seen.append((who, "retry", reason)),
+        "on_refresh": lambda timing: seen.append((who, "refresh", timing)),
+        "on_residuals": None,
+        "on_inner": None,
+    }
+    return types.SimpleNamespace(**(hooks | extra))
 
 
 def test_a_march_hands_each_step_and_retry_to_the_log_and_to_the_recorder() -> None:
@@ -555,3 +557,35 @@ def test_the_run_hands_each_march_hook_to_every_recorder_that_has_it() -> None:
     assert (steps.count, steps.residual) == (1, 0.25)
     # With no recorder keeping them, the per-equation residuals are not asked for at all.
     assert _StepCount([checkpoints]).on_residuals is None
+
+
+@pytest.mark.parametrize("missing", ["on_checkpoint", "on_retry", "on_refresh", "on_residuals"])
+def test_the_run_hands_the_rest_of_the_march_only_to_a_recorder_of_the_whole_march(missing) -> None:
+    from aquaflux.case.run import _StepCount
+    from aquaflux.solve import MarchRecorder, StateCheckpointer, StepHistory
+
+    assert isinstance(StepHistory(Path(tempfile.mkdtemp()) / "history.csv"), MarchRecorder)
+    assert not isinstance(StateCheckpointer(tempfile.mkdtemp()), MarchRecorder)
+    seen = []
+    hooks = {
+        "on_checkpoint": lambda report, state: seen.append("step"),
+        "on_retry": lambda reason, attempt, beta: seen.append(reason),
+        "on_refresh": lambda timing: seen.append(timing),
+        "on_residuals": lambda terms: seen.append(terms),
+    }
+    whole = types.SimpleNamespace(**hooks)
+    del hooks[missing]
+    partial = types.SimpleNamespace(**hooks)
+    assert isinstance(whole, MarchRecorder)
+    assert not isinstance(partial, MarchRecorder)
+    # Offering some of the hooks does not make a recorder of the whole march, so it is handed none.
+    steps = _StepCount([partial])
+    steps.on_retry("alpha", 1, 0.5)
+    steps.on_refresh("timing")
+    assert seen == []
+    assert steps.on_residuals is None
+    # A whole-march recorder that wants no per-equation residuals does not cost the march them either.
+    assert (
+        _StepCount([types.SimpleNamespace(**(vars(whole) | {"on_residuals": None}))]).on_residuals
+        is None
+    )

@@ -368,6 +368,37 @@ def test_injected_acceptance_policy_is_honoured() -> None:
     assert jnp.allclose(phi, jnp.cbrt(theta), atol=1e-6)
 
 
+def test_the_pseudo_transient_step_reports_its_full_step_ratio() -> None:
+    """The single-step strategy reports its full-length trial against ``|R(phi)|``, from the closed form.
+
+    A uniform shift makes the shifted Jacobian diagonal, so the correction is
+    ``delta = -R / (3 phi**2 + beta * strength)`` exactly; this step's line search judges the STEADY
+    residual, so the ratio is ``|R(phi + delta)| / |R(phi)|``.
+    """
+    theta = jnp.array([8.0, 27.0])
+    phi = jnp.ones_like(theta)
+    beta, strength = 2.0, 1.0
+    # With the line search on, the overshooting full step is rejected and a shorter rung kept -- which
+    # is what makes the full trial's ratio a different number from the kept one.
+    step = PseudoTransientStep(
+        UniformShiftPolicy(strength=strength),
+        relaxation_schedule=ConstantRelaxation(beta=beta),
+        line_search=10,
+    )
+
+    def residual(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    reference = jnp.linalg.norm(residual(phi))
+    outcome = step.stepper()(residual, phi, reference, step.linear_solver())
+
+    delta = -residual(phi) / (3.0 * phi**2 + beta * strength)
+    expected = float(jnp.linalg.norm(residual(phi + delta)) / reference)
+    assert float(outcome.full_step_ratio) == pytest.approx(expected, rel=1e-8)
+    assert expected > 1.0  # the trial it reports is one the search did not take
+    assert float(outcome.alpha) < 1.0
+
+
 def test_backtracking_line_search_picks_largest_descending_rung() -> None:
     """The shared backtracking helper keeps the largest step length that reduces the residual, and
     falls back to the smallest rung when none does. Physics-free: ``R(x) = x`` so ``||R|| = |x|``."""
@@ -377,12 +408,15 @@ def test_backtracking_line_search_picks_largest_descending_rung() -> None:
 
     # delta = -4: full step x = -3 (|R| = 3, overshoot); alpha = 1/2 -> x = -1 (|R| = 1, not < 1);
     # alpha = 1/4 -> x = 0 (|R| = 0 < 1). Largest descending rung is 1/4.
-    out, alpha, _ = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
-    assert jnp.allclose(out, 0.0)
-    assert jnp.allclose(alpha, 0.25)  # the kept fraction is reported
+    searched = backtracking_line_search(residual, phi, jnp.array([-4.0]), reference, steps=4)
+    assert jnp.allclose(searched.phi, 0.0)
+    assert jnp.allclose(searched.alpha, 0.25)  # the kept fraction is reported
+    # ...and the REJECTED full step's own measure, which the ladder evaluated first and the search
+    # used to discard: |R(-3)| = 3 -- not the kept rung's 0, nor the reference's 1.
+    assert jnp.allclose(searched.full_step_norm, 3.0)
 
     # steps = 0 takes the full (overshooting) step unchanged, and reports alpha = 1.
-    full, full_alpha, _ = backtracking_line_search(
+    full, full_alpha, *_ = backtracking_line_search(
         residual, phi, jnp.array([-4.0]), reference, steps=0
     )
     assert jnp.allclose(full, -3.0)
@@ -391,7 +425,7 @@ def test_backtracking_line_search_picks_largest_descending_rung() -> None:
     # delta = +4: every rung increases the residual, so none is admissible and the search falls back
     # to the LONGEST finite rung -- the full step. Falling back to the shortest instead would return a
     # near-null step that changes nothing, which is a guaranteed stall rather than a slow step.
-    fallback, fb_alpha, _ = backtracking_line_search(
+    fallback, fb_alpha, *_ = backtracking_line_search(
         residual, phi, jnp.array([4.0]), reference, steps=4
     )
     assert jnp.allclose(fallback, 1.0 + 1.0 * 4.0)

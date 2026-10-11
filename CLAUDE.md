@@ -314,6 +314,16 @@ found and fixed**; treat them as binding, not aspirational.
   pattern, mirroring the operator/scheme/BC strategies). Inline flat-vector index arithmetic for a
   state layout is a missing value object (`solve/state.py::FieldLayout`).
 
+- **A package's `__all__` is its whole surface to other packages (binding, #284).** Another package
+  imports from `aquaflux.<package>` (or a nested package such as `aquaflux.io.cad`), never from one of
+  its submodules, and only names that package's `__init__` lists in `__all__`.
+  `tests/unit/test_layering.py::test_one_package_reaches_another_only_through_its_public_surface`
+  enforces it over every module in `aquaflux/`, the top-level ones included. When it fires, the remedy is
+  to export the name, or — when the name is private and generic — to move it to the package it belongs
+  in (`_bordered_preconditioner` was pure Schur elimination living in `flow/mean_velocity.py`; it is now
+  `solve.bordered_preconditioner`). Tests and `validation/` harnesses are exempt and may reach internals
+  from the submodule. Exporting a name from a documented subpackage publishes it, so a name that is
+  plumbing rather than something a user configures or implements belongs in the package that uses it.
 - **Concrete trigger:** *if you are about to pass an object's raw arrays to a function, thread a loose
   per-cell/per-face array a second time, add a forwarding property, duck-type a lookalike of an
   existing class, or write a one-line formula that already exists — stop and reach for the
@@ -384,7 +394,8 @@ lines by the time anything moved out of it, and nothing measured that it was gro
 - **Two mechanical guards, both in `tests/unit/test_layering.py`, both in the always-on gate.** `solve/`
   imports nothing outside itself (it holds no mesh, field or physics import — that is what lets every
   residual run on it); and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500
-  lines needs a ratchet entry that only ever goes down. **Tripping the size guard is a prompt to sort the
+  lines needs a ratchet entry that only ever goes down. (A third guard in the same file is about the
+  *surface* rather than the direction — see Principle 3's `__all__` bullet.) **Tripping the size guard is a prompt to sort the
   file's contents into generic and physics — not to split it by topic**, which moves the problem into
   smaller files without moving it to the right package.
 - **Concrete trigger:** *if the docstring of what you are about to add to a physics package cannot be
@@ -700,12 +711,12 @@ been able to fail.
   and was in fact **1.12x of receiver composition times 1.22x of everything else** — two effects whose
   product looked like one clean corroboration.
 
-**⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, which does
-**not** include the optional `petsc` extra, so every module guarded by `pytest.importorskip("petsc4py")`
-— `tests/integration/test_coupled_amg.py` and `test_coupled_field_split.py` — is **skipped there and runs
-only on a machine that has PETSc**. A green CI slow tier therefore says nothing about them, and their
-failures surface only locally, which reads as "broken on my machine" when it is the opposite: local is
-the only place they are checked at all. This is the same shape as a check that has stopped seeing
+**⚠️ CI IS NOT A SUPERSET OF A LOCAL RUN, AND `importorskip` IS WHY.** CI installs `.[test]`, so any
+module guarded by `pytest.importorskip` on a dependency outside that extra is **skipped there and runs
+only on a machine that has it**. A green CI tier then says nothing about it, and its failures surface only
+locally, which reads as "broken on my machine" when it is the opposite: local is the only place it is
+checked at all. (This happened: PETSc-gated modules, since removed with the PETSc dependency on
+2026-10-10, failed on `main` for four days with CI green throughout.) This is the same shape as a check that has stopped seeing
 anything (`tools/check_hooks.sh`, `tools/sibling_builders.py`) — a skip and a pass are indistinguishable
 from the exit status. **When a test fails locally and passes in CI, check the skip counts before assuming
 the difference is your machine**: 2026-08-21 the CI slow tier reported `4 skipped` per shard against zero
@@ -823,10 +834,10 @@ not one to arrive at by importing something.
 
 Two consequences worth having in mind rather than rediscovering:
 
-- **`petsc4py` is not installed in CI**, so the three modules gated on it — two of them in the *fast*
-  tier, i.e. inside the required check — have never run there. It has no wheels (it builds PETSc from
-  source), which is why the `petsc` extra is kept out of `test`; that is a cost decision, and the
-  census is where its price is written down.
+- **A dependency kept out of the `test` extra is a cost decision, and the census is where its price
+  is written down.** Today that is only `scotchpy` (one partitioner test). PETSc (`petsc4py`, no wheels,
+  built from source) was the large case — three modules, two in the fast tier, that had never run in CI
+  — until the dependency was removed on 2026-10-10.
 - **The workflow runs every tier with `-rs`**, so a skipped test is named with its reason in the job
   log rather than collapsing into a count nobody reads.
 

@@ -56,6 +56,7 @@ from .multiple_correction import (
 from .interpolation import (
     blend_owner_neighbour,
     interpolate_owner_neighbour,
+    interpolate_to_face,
     interpolation_factor,
     non_orthogonal_correction,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "contraction_rate",
     "fastest_boundary_closure",
     "interpolate_owner_neighbour",
+    "interpolate_to_face",
     "interpolation_factor",
     "narrow_gradient_sweeps",
     "non_orthogonal_correction",

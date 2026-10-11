@@ -1,6 +1,6 @@
 # Refuted / closed directions — `aquaflux/solve/`
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18). **Lives in `.claude/notes/`, outside the auto-loaded
 > `.claude/rules/` tree, so it never auto-loads.** It is tracked so a refuted idea can be
@@ -244,7 +244,7 @@
       *failed* at an easy state — a positive result needs a hard state, a failure does not.) The fix
       is `DualTimeStep.inner_observer`, which now also carries the **iterate**.
       **⚠️ But a march step CANNOT be reconstructed from a checkpoint — its configuration is
-      path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` tried, driving one step from
+      path-dependent.** `validation/bfs3d_openfoam/inner_iterate_probe.py` (deleted 2026-10-10 with PETSc; in git history) tried, driving one step from
       the checkpoint, and both plausible arrangements bracket the march without reaching it. At
       `state-00049`, β = 0.0293, where the march's first inner solve costs **1 cycle at α = 0.500**:
 
@@ -379,7 +379,7 @@
       any future march-reproduction harness to the same gate.
 
     **How to re-run it — the smoother and the harness are BUILT (`aquaflux/solve/vanka.py`,
-    `validation/bfs3d_openfoam/preconditioner_sweep.py`); what is missing is the measurement.** The
+    `validation/bfs3d_openfoam/preconditioner_sweep.py`, deleted 2026-10-10 with PETSc; in git history); what is missing is the measurement.** The
     discriminating question is narrow: **with plain aggregation, does a Vanka smoother still stall?**
     If yes, the coarse space really is the wall and the inf-sup / block-Schur direction is justified.
     If no, the original verdict was an artifact of the aggregation default and the smoother direction
@@ -415,6 +415,43 @@ measurements. What was closed then was either of them as a default, and the bise
 reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
 merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
 § "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
+
+## PETSc (monolithic GAMG V-cycle, UMFPACK complete LU) — DELETED as dominated (2026-10-10)
+
+The `petsc` extra (`petsc4py`) backed two things: `MonolithicVCycle` (`MonolithicVCyclePreconditioner`,
+PETSc `PCGAMG` over all six fields) and `CompleteLu(backend="umfpack")`. Both were removed, by the project
+owner's decision, as dominated rather than broken:
+- **The V-cycle had no selector.** No case file, default or shipped harness chose it; both flagship cases
+  run `FieldSplit(SimpleSmoothed, JacobiSmoothed)`, which marched `bfs3d` 31 % faster than the monolithic
+  V-cycle at the identical configuration, and the traced nodal hierarchy matches GAMG on the `[k, ω]` block
+  (2 restart cycles against 2). It was also the GPU dead end the traced hierarchies exist to avoid, and it
+  never ran in CI (no wheels), so its tests checked nothing on any required gate.
+- **UMFPACK only made a narrow tool faster.** The complete LU is exact but its fill walls out in 3D; it
+  stayed one more day, on SuperLU, which is markedly slower to factor (72.7 s at reach 5 on pitzDaily),
+  and was then deleted too (next entry).
+- **What is lost:** PETSc GAMG as an independent reference to check the traced multigrid against, and
+  every PETSc-arm measurement in the rules files becomes un-re-runnable. Recover the code from git history
+  before 2026-10-10. The PETSc-only harnesses (`petsc_free_march.py`, `preconditioner_sweep.py`,
+  `zero_pattern_pivots.py`, `inner_iterate_probe.py`) went with it.
+
+## Complete LU (SciPy SuperLU) — DELETED as dominated (2026-10-11)
+
+`CompleteLu` / `CompleteLuPreconditioner` / `CompleteLuInverse` (`solve/lu_preconditioner.py`) factored the
+whole materialized coupled Jacobian exactly. Removed by the project owner's decision, after checking each
+place it was claimed to be needed:
+- **Forward march:** nothing shipped selected it; both flagship case files run the field split.
+- **Adjoint (zero shift):** the split reaches adjoint grade there (bfs3d `state-00059`, 17 restart cycles
+  to 6.4e-10 true relative, transpose converged too); at a cold start the LU fails as well, because the
+  Jacobian itself is nearly singular there.
+- **Laminar flow:** `SimpleSmoothed` over the whole state matched it (24×16 channel 17 steps / 61 cycles
+  vs 17 / 51; tetrahedral duct from rest 13 steps each).
+- **The aggressive Reynolds continuation** (`compare_reynolds_continuation.py`, which claimed only the
+  exact LU survived its overshoots): re-run on the split, it converges to the same root — full record in
+  `validation.md`, "The aggressive Reynolds continuation does NOT need the complete LU".
+- **3D:** its fill is the wall (out of memory at ~10⁴ cells).
+- **What is lost:** an exact reference preconditioner, i.e. "how much of a slow solve is the
+  preconditioner's fault?" in one Krylov iteration on a small case. Its integration tests' assertions
+  were ported onto the split rather than lost. Recover the code from git history before 2026-10-11.
 
 ## Local (staged) AD assembly of the coupled Jacobian, and the materialized-`J` matvec it was to enable — REFUTED / CLOSED (2026-10-07)
 
@@ -839,3 +876,18 @@ and binding defaults are in `solve-globalization.md`.
   which is the larger and more load-bearing finding here.** See `solve-globalization-log.md` §
   "THE EQUILIBRATED MEASURE BARELY FALLS ON A MARCH THE EUCLIDEAN NORM LOVES" and the "EUCLIDEAN ‖R‖
   MIS-RANKS STATES" entry immediately after it.
+
+## A viscosity ramp keyed to the shift (`nu` as a function of `beta`) — CLOSED BEFORE BUILDING (2026-10-11)
+
+**What was proposed:** replace the ramp's `stations` knob by making the station a function of the
+control's shift, the anchor viscosity at `beta_start` and the target at `beta_min`, so one `alpha`
+feedback drives both and the ramp ends when `beta` floors.
+
+**Why it loses, measured on pitzDaily with the shift released** (`solve-globalization-log.md`, "The
+ramp's length is the shift's descent"): that pairing is exactly the `grow` 3 x 8-station arm, whose ramp
+ends as `beta` floors at step 8 -- 145 cycles, against 134 for the same `grow` with 16 stations and 111
+with 12. Floor steps at a still-raised viscosity take their full timestep and settle the state in six
+steps; floor steps at the target from an unsettled state are clipped to half and cap-limited. The
+viscosity has to keep descending AFTER `beta` floors, so the ramp must not be a function of `beta`. What
+the data support instead is ending the ramp on the settle signal (the first full-length step at the
+floor), which is a different seam and is open.

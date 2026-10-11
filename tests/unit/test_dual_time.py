@@ -551,15 +551,56 @@ def test_a_floored_limiter_is_still_a_compilation_cache_hit() -> None:
     assert positive_block_limit(0, 3, floor=0.0) == positive_block_limit(0, 3)
 
 
+@pytest.mark.parametrize(
+    ("strength", "first_full_step_taken"), [(10.0, False), (100.0, True)], ids=["rejected", "taken"]
+)
+def test_the_step_reports_its_first_inner_iterations_full_step_ratio(
+    strength: float, first_full_step_taken: bool
+) -> None:
+    """``full_step_ratio`` is the FIRST inner iteration's full-length trial against the anchor, whether
+    or not the line search took it -- checked against the closed form, not against the code.
+
+    With ``R(p) = p**3 - theta`` and a uniform shift the shifted Jacobian is diagonal, so the first inner
+    correction is ``delta = -R / (3 p**2 + beta * strength)`` exactly and the full trial is
+    ``G(p + delta) = R(p + delta) + beta * strength * delta``. At ``strength = 10`` that trial overshoots
+    and the search halves it, so the ratio exceeds one while every inner rung actually kept descends;
+    at ``100`` the full step is taken, and the ratio is that iteration's own contraction.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    phi0 = jnp.ones_like(theta)
+
+    def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    r0 = jnp.linalg.norm(residual_theta(phi0))
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=strength),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),  # beta = 1 at the anchor
+        inner_steps=4,
+        inner_tol=1e-8,
+    )
+    outcome = step.stepper()(residual_theta, phi0, r0, step.linear_solver())
+
+    shifted = strength * 1.0
+    delta = -residual_theta(phi0) / (3.0 * phi0**2 + shifted)
+    expected = float(jnp.linalg.norm(residual_theta(phi0 + delta) + shifted * delta) / r0)
+    assert float(outcome.full_step_ratio) == pytest.approx(expected, rel=1e-8)
+    assert (expected < 1.0) is first_full_step_taken
+    assert (float(outcome.alpha) == 1.0) is first_full_step_taken
+
+
 def test_a_capped_line_search_never_exceeds_the_cap() -> None:
     """The cap applies to every rung, including the growth rungs above one."""
     phi, delta = jnp.array([1.0]), jnp.array([-1.0])
-    stepped, alpha, _ = backtracking_line_search(
+    searched = backtracking_line_search(
         lambda p: p * 0.0, phi, delta, jnp.asarray(1.0), steps=4, grow=2, max_alpha=0.1
     )
 
-    assert float(alpha) <= 0.1
-    assert float(stepped[0]) >= 0.9  # phi - alpha, with alpha capped
+    assert float(searched.alpha) <= 0.1
+    assert float(searched.phi[0]) >= 0.9  # phi - alpha, with alpha capped
+    # The first (growth) rung was accepted, so the ladder never reached the full step: its measure was
+    # not taken, and is reported as such rather than as a value it never had.
+    assert jnp.isnan(searched.full_step_norm)
 
 
 def test_the_inner_line_search_honours_an_injected_step_limit() -> None:

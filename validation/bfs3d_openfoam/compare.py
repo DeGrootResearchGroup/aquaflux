@@ -36,8 +36,8 @@ that scaling path.
 The V-cycle is **field-split** (``field_split=True``): the ``[u, v, w, p]`` saddle and the ``[k, omega]``
 transported scalars get their own hierarchies, with one triangle of the coupling between them retained
 exactly from the assembled Jacobian rather than dropped. Measured 31% faster end to end here, to the same
-reattachment length -- see :data:`FIELD_SPLIT`, which also records why the *cycle* count moves the other
-way.
+reattachment length -- see the comment above the case's field-split check, which also records why the
+*cycle* count moves the other way.
 
 **Reference caveat (binding -- do not skip):** the OpenFOAM *steady* (SIMPLE) run does **not** fully
 converge this case -- it limit-cycles at ~1e-3 residual on the separated 3D flow (though, unlike the 2D
@@ -80,24 +80,9 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.solve import (
-    AirReduction,
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    InnerIterateCheckpointer,
-    JacobianProbeSpec,
-    JacobiSmoothed,
-    LinearSolveSettings,
-    MarchLogger,
-    MaterializedJacobian,
-    MonolithicVCycle,
-    RetryPolicy,
-    SimpleSmoothed,
-    StateCheckpointer,
-    combine_metrics,
-    combine_observers,
-)
+from aquaflux.solve import (AirReduction, Convergence, DualTimeLoop, FieldSplit, JacobianProbeSpec, JacobiSmoothed, LinearSolveSettings, MarchLogger, MaterializedJacobian, RetryPolicy, SimpleSmoothed, StateCheckpointer, combine_observers,)
+from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
+from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
     CoupledRANS,
     GeometricReynoldsSchedule,
@@ -335,6 +320,17 @@ TURB_DAMPING = float(os.environ.get("BFS3D_TURB_DAMPING", FILE_SOLVER.turbulence
 #: residual keeps degrading, so 12 is the coarse end of a plateau rather than a peak.
 RAMP_STATIONS = int(os.environ.get("BFS3D_RAMP_STATIONS", _FILE_RAMP.stations))
 RAMP_STEPS_PER_STATION = int(os.environ.get("BFS3D_RAMP_STEPS", _FILE_RAMP.steps_per_station))
+#: End the ramp once the march has settled at the shift floor (`BFS3D_RAMP_END=settled`), walking the
+#: viscosity left in `BFS3D_RAMP_FINISH` steps; `BFS3D_RAMP_STATIONS` is then the pace, not the length.
+#: Unset keeps the file's (every station walked). On pitzDaily it cost 114 cycles at a 24-station pace and
+#: a 3-step finish against the hand-tuned 12 stations' 111 -- insensitive to the pace where a fixed count
+#: is not; not yet run here.
+RAMP_END = os.environ.get("BFS3D_RAMP_END", _FILE_RAMP.end)
+RAMP_FINISH = (
+    int(os.environ["BFS3D_RAMP_FINISH"])
+    if os.environ.get("BFS3D_RAMP_FINISH")
+    else _FILE_RAMP.finish
+)
 #: `None` takes `ViscosityRampHomotopy`'s derived default (the station's own viscosity ratio raised to
 #: a fitted exponent, and exactly 1.0 at one step per station, where re-damping every step would make
 #: the shift run away rather than damp).
@@ -376,12 +372,8 @@ INNER_STEPS = int(os.environ.get("BFS3D_INNER_STEPS", FILE_SOLVER.dual_time.inne
 # fewer than two inner steps, because the single step is a different step, with its own escalation ladder.
 DUAL_TIME = INNER_STEPS > 1
 INNER_TOL = float(os.environ.get("BFS3D_INNER_TOL", FILE_SOLVER.dual_time.inner_tol))
-# Preconditioner bundle. ILU(1) DIVERGES at the low shifts this march's tail runs at (ground truth: 303
-# negative pivots at beta = 0.02, zero for ILU(0)); zero fill converges at every shift tested and builds
-# 3-4x faster. ILU(0) is the weaker smoother, so the extra sweeps pay more than they did for ILU(1).
-# coarse=None stalls at every low shift. The beta floor is PRECONDITIONER-ONLY: the V-cycle is built at
-# max(beta, floor) while the march solves at its own beta, so the root and the adjoint are unchanged.
-FILL_LEVELS, SWEEPS, COARSE_EQ_LIMIT = 0, 4, 2000
+# The beta floor is PRECONDITIONER-ONLY: the inverse is fitted at max(beta, floor) while the march solves
+# at its own beta, so the root and the adjoint are unchanged.
 PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # How far each COLUMN of the Jacobian is probed. The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
@@ -485,11 +477,12 @@ else:
 # far faster, because two smaller V-cycles plus one sparse coupling product apply much more cheaply than
 # one six-field V-cycle. Its mean cycles per inner solve is actually lower (1.49 vs 1.68) -- the higher
 # total comes from more, cheaper steps. It also triggers ~4 more cost-driven refreshes (9.7% of inner
-# solves cross the threshold against 9.0%), which hands back ~42 s of the ~980 s saved.
-# `BFS3D_FIELD_SPLIT=0` restores the monolithic V-cycle for an A/B.
-FIELD_SPLIT = os.environ.get(
-    "BFS3D_FIELD_SPLIT", "1" if isinstance(_FILE_INVERSE, FieldSplit) else "0"
-) not in ("", "0")
+# solves cross the threshold against 9.0%), which hands back ~42 s of the ~980 s saved. The monolithic
+# arm of that comparison was PETSc's multigrid, which the library no longer has.
+if not isinstance(_FILE_INVERSE, FieldSplit):
+    raise SystemExit(
+        f"this case runs a field split, and case.yaml's inverse is {type(_FILE_INVERSE).__name__}"
+    )
 # Which inverse the trailing [k, omega] block gets: "jacobi" (default), the traced nodal hierarchy with a
 # Jacobi-class level smoother, or "air", the reduction-based (lAIR) hierarchy. The host GAMG V-cycle this
 # case originally ran here lost a controlled pair to "jacobi" -- 2893 s / 72 steps against 2124 s / 67, to
@@ -513,12 +506,9 @@ if TURBULENCE_INVERSE not in _TURBULENCE_INVERSES:
 #: 50+ restart cycles UNLESS the strength threshold is on) reached rtol 1e-8 in 11 cycles once depth,
 #: plain (non-aggressive) coarsening and a strength threshold were combined -- and a full 3-rung march at
 #: these settings reproduced the shipped bundle's exact root (`x_r/h` 8.3611) in 59 steps. `max_coarse`
-#: here is deliberately independent of `COARSE_EQ_LIMIT` (which also sizes the flow block's own coarse
-#: grid): this arm wants a SMALL coarse grid, since the point is bounding the dense coarse solve at a
-#: much larger mesh, not matching the host V-cycle's global-coupling capacity.
-_FILE_TRAILING = (
-    _FILE_INVERSE.trailing if isinstance(_FILE_INVERSE, FieldSplit) else JacobiSmoothed()
-)
+#: here is deliberately small, since the point is bounding the dense coarse solve at a much larger
+#: mesh.
+_FILE_TRAILING = _FILE_INVERSE.trailing
 
 
 def _environment_flag(name, file_value):
@@ -711,7 +701,7 @@ if FLOW_INVERSE != "simplesmooth":
 #: own build cost -- an isolated single build of the same recipe took ~1 s); frozen, it stayed at
 #: ~4 s across every refresh in a full 3-rung march. `BFS3D_FLOW_FROZEN_COARSENING=0` restores the
 #: class default (re-coarsen every refresh) for re-adjudicating the trade against coarse-space quality.
-_FILE_LEADING = _FILE_INVERSE.leading if isinstance(_FILE_INVERSE, FieldSplit) else SimpleSmoothed()
+_FILE_LEADING = _FILE_INVERSE.leading
 LEADING_SETTINGS = dict(
     _FILE_LEADING.settings(),
     sweeps=int(os.environ.get("BFS3D_FLOW_SWEEPS", _FILE_LEADING.sweeps)),
@@ -727,29 +717,10 @@ LEADING_SETTINGS = dict(
 
 LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS)
 
-#: Whether `FILL_LEVELS` / `SWEEPS` / `COARSE_EQ_LIMIT` reach the preconditioner at all.
-#:
-#: ⚠️ They configure the monolithic V-cycle, built only with `BFS3D_FIELD_SPLIT=0`. Under the field split
-#: -- this file's default, a SIMPLE-smoothed flow block and a Jacobi-smoothed k/omega block, each fitted
-#: by its injected inverse -- these three settings are dead. The banner said them anyway, which is
-#: how a reader (and a solver study) comes to believe a march was preconditioned by a smoother that was
-#: never constructed. A banner is the primary record of what a measurement was taken under, so it has
-#: to distinguish a live setting from a carried one.
-_ILU_SMOOTHER_LIVE = not FIELD_SPLIT
-
 #: What preconditions this case's march, as one value, which every harness in this directory reads rather
-#: than re-assembling. Under the field split -- the default -- the monolithic smoother settings above have
-#: nowhere to be written, which is what `_ILU_SMOOTHER_LIVE` reports on the banner.
+#: than re-assembling.
 PRECONDITIONER = MaterializedJacobian(
-    (
-        FieldSplit(LEADING_INVERSE, TRAILING_INVERSE)
-        if FIELD_SPLIT
-        else MonolithicVCycle(
-            smoother_fill_levels=FILL_LEVELS,
-            smoother_sweeps=SWEEPS,
-            coarse_eq_limit=COARSE_EQ_LIMIT,
-        )
-    ),
+    FieldSplit(LEADING_INVERSE, TRAILING_INVERSE),
     probe=JacobianProbeSpec(column_reach=COLUMN_REACH),
     refit_beta_floor=PC_BETA_FLOOR,
 )
@@ -757,10 +728,10 @@ PRECONDITIONER = MaterializedJacobian(
 #: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --
 #: under `BFS3D_DUMP_TRAILING_BLOCK` -- every block the trailing inverse is about to consume.
 SESSION_OPTIONS = dict(
-    reports={"leading": _flush_print} if FIELD_SPLIT else None,
+    reports={"leading": _flush_print},
     inverse_wrapper=(
         (lambda role, factory: _dumping(factory) if role == "trailing" else factory)
-        if FIELD_SPLIT and DUMP_TRAILING_BLOCK
+        if DUMP_TRAILING_BLOCK
         else None
     ),
 )
@@ -1066,7 +1037,22 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
-CONTROL = FILE_SOLVER.step_control
+#: Two study overrides of the file's step control, unset keeping the file's, neither yet run on this
+#: case. `BFS3D_RELEASE_FLOOR` releases the shift below `beta_min` once the target station has settled:
+#: after the first full-length step at the floor on the target, the next step runs at this shift, so the
+#: station's linear tail becomes inexact Newton steps (measured on pitzDaily first,
+#: `pitzdaily_openfoam/endgame_shift_probe.py`). `BFS3D_GROW` is the factor beta is divided by on a
+#: comfortable step: on pitzDaily the ramp's best length was the shift's descent to the floor plus the
+#: steps the state then needed there, so 3 with 12 stations beat the class default 1.5 with 16 (111
+#: against 141 cycles with the release on) -- change the two together.
+CONTROL = dataclasses.replace(
+    FILE_SOLVER.step_control,
+    **{
+        name: float(os.environ[variable])
+        for name, variable in (("release_floor", "BFS3D_RELEASE_FLOOR"), ("grow", "BFS3D_GROW"))
+        if os.environ.get(variable)
+    },
+)
 
 #: The march this run takes: the case file's solver with the environment's overrides applied, as the
 #: one value the solve is handed. With no `BFS3D_*` variable set it must be exactly the file's -- which
@@ -1104,6 +1090,8 @@ SOLVER = CoupledMarch(
         steps_per_station=RAMP_STEPS_PER_STATION,
         scale=RAMP_SCALE,
         redamping=RAMP_REDAMPING,
+        end=RAMP_END,
+        finish=RAMP_FINISH,
     ),
 )
 if not any(name.startswith("BFS3D_") for name in os.environ) and SOLVER != FILE_SOLVER:
@@ -1401,7 +1389,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if SOLVER == FILE_SOLVER
             else "case.yaml's, edited by BFS3D_* overrides (the values below)",
         ),
-        ("field split", FIELD_SPLIT),
         # WHICH INVERSE the trailing block gets, before how it is smoothed -- a setting that once cost
         # a finding. Two runs differing only in this wrote banners identical to the character, so
         # afterwards the only way to tell them apart was the launch order and the text of the exception
@@ -1427,7 +1414,13 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("Reynolds continuation points", N_POINTS),
         (
             "Reynolds span walked as",
-            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps, redamping "
+            f"{RAMP_STATIONS} stations x {RAMP_STEPS_PER_STATION} steps"
+            + (
+                ""
+                if RAMP_END is None
+                else f" at most (ends when {RAMP_END}, finished in {RAMP_FINISH or 1} step(s))"
+            )
+            + ", redamping "
             f"{'derived' if RAMP_REDAMPING is None else format(RAMP_REDAMPING, 'g')}"
             f", scaling {RAMP_SCALE}"
             if RAMP == "continuous"
@@ -1442,12 +1435,13 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("forward restart", FORWARD_RESTART),
         ("retry on cycles / alpha", f"{RETRY_ON_CYCLES} / {RETRY_ON_ALPHA}"),
         ("cycle budget", CYCLE_BUDGET),
-        (
-            "smoother fill / sweeps / coarse limit",
-            f"{FILL_LEVELS} / {SWEEPS} / {COARSE_EQ_LIMIT}"
-            + ("" if _ILU_SMOOTHER_LIVE else "  (INERT: both blocks supply their own inverse)"),
-        ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
+        (
+            "step control",
+            f"{type(CONTROL).__name__} (beta_start {CONTROL.beta_start}, beta_min "
+            f"{CONTROL.beta_min}, grow {CONTROL.grow}, release "
+            f"{'off' if CONTROL.release_floor is None else f'to {CONTROL.release_floor:g}'})",
+        ),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("k wall BC", K_WALL),
         ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),

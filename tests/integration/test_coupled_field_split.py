@@ -11,38 +11,117 @@ drive the split against the assembled coupled Jacobian on a small turbulent chan
 converges it on the true residual, its transpose satisfies the adjoint identity that the
 implicitly-differentiated gradient depends on, and it reaches a solve through the existing callback
 wrapper without one of its own. The split's blocks are fitted by the traced inverses the flagship cases
-ship; the monolithic V-cycle it is compared against needs PETSc, so the module is skipped where
-``petsc4py`` is unavailable.
+ship.
 """
 
 from __future__ import annotations
 
 import aquaflux  # noqa: F401  (enables x64)
+import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-pytest.importorskip("petsc4py")
-
+from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
+from aquaflux.discretization import FirstOrderUpwind
+from aquaflux.flow import (
+    ConvectionTwoLevel,
+    MomentumContinuity,
+    NoSlipWall,
+    PressureOutlet,
+    VelocityInlet,
+)
+from aquaflux.mesh import graded_nodes, structured_grid_2d
+from aquaflux.properties import Constant, PropertyModel
+from aquaflux.schemes import CompactGreenGauss
 from aquaflux.solve import (
+    DualTimeLoop,
     FieldGroups,
     FieldSplit,
+    HostPreconditioner,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicVCycle,
-    MonolithicVCyclePreconditioner,
+    MaterializedJacobianPreconditioner,
     SimpleSmoothed,
     field_split_inverse,
-    jacobian_matvec,
-    monolithic_vcycle_inverse,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
 )
-from aquaflux.turbulence import CoupledRANS, coupled_step, sst_initial_fields
+from aquaflux.solve.materialized_session import (
+    jacobian_matvec,
+)
+from aquaflux.turbulence import (
+    BlockDiagonal,
+    CoupledRANS,
+    ScalarTwoLevel,
+    SSTModel,
+    SSTTurbulence,
+    UnpreconditionedScalars,
+    coupled_step,
+    inlet_k,
+    inlet_omega,
+    open_session,
+    solve_coupled,
+    sst_initial_fields,
+)
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan
 
-from tests.integration.test_coupled_lu import _channel
+RHO, U_IN, H, L = 1.0, 1.0, 1.0, 4.0
+NU = 4e-4  # Re = U H / nu = 2500
+INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
+PRECONDITIONER = {"velocity": ConvectionTwoLevel()}
+
+
+def _channel(nx=20, ny=14, growth=1.2):
+    y_nodes = graded_nodes(ny, H, growth)
+    mesh = structured_grid_2d(nx, ny, lx=L, ly=H, named_boundaries=True, y_nodes=y_nodes)
+    geometry = mesh.geometry()
+    model = SSTModel()
+    k_in = float(inlet_k(jnp.array(U_IN), INTENSITY))
+    omega_in = float(inlet_omega(jnp.array(k_in), LENGTH_SCALE, model))
+    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
+    momentum = MomentumContinuity.build(
+        mesh,
+        geometry,
+        properties,
+        BoundaryConditions(
+            {
+                "left": VelocityInlet(velocity=(U_IN, 0.0)),
+                "right": PressureOutlet(pressure=0.0),
+                "bottom": NoSlipWall(),
+                "top": NoSlipWall(),
+            }
+        ),
+        gradient_scheme=CompactGreenGauss(),
+        advection_scheme=FirstOrderUpwind(),
+    )
+    turbulence = SSTTurbulence.build(
+        model,
+        mesh,
+        geometry,
+        FirstOrderUpwind(),
+        properties,
+        gradient_scheme=CompactGreenGauss(),
+        wall_patches=["bottom", "top"],
+        k_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(k_in),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+        omega_boundary=BoundaryConditions(
+            {
+                "left": Dirichlet(omega_in),
+                "right": ZeroGradient(),
+                "bottom": ZeroGradient(),
+                "top": ZeroGradient(),
+            }
+        ),
+    )
+    return momentum, turbulence
 
 
 @pytest.fixture(scope="module")
@@ -53,13 +132,13 @@ def case():
     flow, k, omega = sst_initial_fields(momentum, turbulence)
     state = coupled.pack_state(flow, k, omega)
     n_fields = coupled.layout.n_fields
-    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         _coupled_jacobian_plan(coupled, 3),
     )
     groups = FieldGroups.split_before(coupled.layout, "k")
     # A shift keeps the cold operator away from the singular limit, as the march's own step does.
-    shifted = MonolithicVCyclePreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
+    shifted = MaterializedJacobianPreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
     return {
         "coupled": coupled,
         "state": state,
@@ -110,7 +189,7 @@ def _gmres_matvecs(shifted, preconditioner, b, *, rtol=1e-8):
         lambda v: operator @ v,
         jnp.asarray(b),
         relative_residual_gmres(rtol, restart=30, stagnation_iters=40, max_restarts=40),
-        preconditioner=MonolithicVCyclePreconditioner(preconditioner).matvec(),
+        preconditioner=HostPreconditioner(preconditioner).matvec(),
         throw=False,
     )
     true = float(jnp.linalg.norm(operator @ solution - jnp.asarray(b)) / jnp.linalg.norm(b))
@@ -148,63 +227,245 @@ def test_the_transpose_serves_the_adjoint_on_the_real_operator(case):
 
 
 def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
-    """The split satisfies the same frozen-inverse interface the monolithic V-cycle does.
+    """The split satisfies the frozen-inverse interface the JAX callback wrapper reads.
 
-    The JAX-side wrapper reads only ``n_dofs`` and ``apply(residual, transpose=...)``, so a field split
-    needs no wrapper of its own -- which is what lets it reach a solve through the existing callback path.
+    The wrapper reads only ``n_dofs`` and ``apply(residual, transpose=...)``, so a field split needs no
+    wrapper of its own -- which is what lets it reach a solve through the existing callback path. The
+    wrapped apply must be the split's own, forward and transposed.
     """
-    groups, shifted, n_fields = case["groups"], case["shifted"], case["n_fields"]
+    groups, shifted = case["groups"], case["shifted"]
     split = _split(shifted, groups)
-    monolithic = monolithic_vcycle_inverse(shifted, n_fields, coarse_eq_limit=200)
     rng = np.random.default_rng(3)
-    b = jnp.asarray(rng.standard_normal(groups.n_dofs))
-    for inverse in (split, monolithic):
-        applied = MonolithicVCyclePreconditioner(inverse).matvec()(b)
-        assert applied.shape == b.shape
-        assert bool(jnp.all(jnp.isfinite(applied)))
+    b = rng.standard_normal(groups.n_dofs)
+    wrapper = HostPreconditioner(split)
+    for transpose in (False, True):
+        applied = wrapper.matvec(transpose=transpose)(jnp.asarray(b))
+        np.testing.assert_allclose(
+            np.asarray(applied), split.apply(b, transpose=transpose), rtol=1e-12, atol=1e-14
+        )
     split.destroy()
-    monolithic.destroy()
+
+
+def _shipped_split() -> MaterializedJacobian:
+    """The coupled preconditioner both flagship cases ship: a field split of traced inverses."""
+    return MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+
+
+def _with_scaled_viscosity(coupled, nu_scale):
+    """``coupled`` with its molecular viscosity scaled, the parameter the adjoint tests differentiate."""
+    return eqx.tree_at(
+        lambda c: c.turbulence.molecular_viscosity,
+        coupled,
+        coupled.turbulence.molecular_viscosity * nu_scale,
+    )
+
+
+@pytest.fixture(scope="module")
+def channel():
+    """The channel's coupled assembler and its cold start, for the marches below."""
+    momentum, turbulence = _channel()
+    coupled = CoupledRANS.build(momentum, turbulence)
+    return {"coupled": coupled, "start": sst_initial_fields(momentum, turbulence)}
+
+
+@pytest.fixture(scope="module")
+def block_root(channel):
+    """The root the block-triangular SIMPLE preconditioner reaches: an independent reference.
+
+    The fixed point is a property of the residual, not of the preconditioner, so a split that has
+    quietly diverged from the shared step tail would land somewhere else.
+    """
+    flow, k, omega = channel["start"]
+    return solve_coupled(
+        channel["coupled"],
+        flow,
+        k,
+        omega,
+        max_steps=40,
+        preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
+    )
+
+
+def _assert_same_root(reached, reference) -> None:
+    flow, k, omega = reached
+    flow_r, k_r, omega_r = reference
+    assert float(jnp.linalg.norm(flow - flow_r) / jnp.linalg.norm(flow_r)) < 1e-4
+    assert float(jnp.linalg.norm(k - k_r) / jnp.linalg.norm(k_r)) < 1e-3
+    assert float(jnp.linalg.norm(omega - omega_r) / jnp.linalg.norm(omega_r)) < 1e-4
 
 
 @pytest.mark.slow
-def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
-    """`field_split=True` is a drop-in: same solver, same root, only the frozen inverse differs.
+def test_a_split_builds_the_right_step_types(channel) -> None:
+    """A dual-time loop builds a split-preconditioned dual-time step; none, a single step."""
+    from aquaflux.solve import DualTimeStep, PseudoTransientStep
+
+    coupled = channel["coupled"]
+    reference = coupled.pack_state(*channel["start"])
+    single = coupled_step(coupled, reference, preconditioner=_shipped_split())
+    assert isinstance(single, PseudoTransientStep)
+    dual = coupled_step(
+        coupled,
+        reference,
+        preconditioner=_shipped_split(),
+        dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
+    )
+    assert isinstance(dual, DualTimeStep)
+    assert dual.inner_steps == 5
+
+
+@pytest.mark.slow
+def test_the_split_continuation_reaches_the_block_preconditioned_root(channel, block_root) -> None:
+    """A field split is a drop-in: same solver, same root, only the frozen inverse differs.
 
     The point of routing it through `coupled_step` rather than a parallel builder is that the
     shift policy, forward solver, step tail and refresh hooks stay shared -- so this asserts the thing that
-    would break if they had quietly diverged: both reach the same converged state.
+    would break if they had quietly diverged: the split reaches the root the block-triangular SIMPLE
+    preconditioner reaches, and a genuinely turbulent one.
     """
-    from aquaflux.turbulence import solve_coupled
-
-    from tests.integration.test_coupled_amg import SMOOTHER_FILL
-    from tests.integration.test_coupled_lu import _channel
-
-    momentum, turbulence = _channel()
-    coupled = CoupledRANS.build(momentum, turbulence)
-    flow, k, omega = sst_initial_fields(momentum, turbulence)
-    reference = coupled.pack_state(flow, k, omega)
-
-    # The monolithic arm takes the fixture's extra level of smoother fill, for the reason recorded at
-    # `SMOOTHER_FILL`: at this initial condition the operator's degenerate couplings are exactly zero,
-    # so the pruned ILU(1) pattern loses the fill the V-cycle depends on. The split's blocks are fitted
-    # by their own injected inverses, which read no smoother fill.
+    coupled = channel["coupled"]
+    flow, k, omega = channel["start"]
     split = coupled_step(
-        coupled,
-        reference,
-        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
+        coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split()
     )
-    flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, strategy=split, max_steps=40)
-    assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
+    reached = solve_coupled(coupled, flow, k, omega, strategy=split, max_steps=40)
+    _, k_s, omega_s = reached
+    assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(*reached)))) < 1e-8
+    assert float(jnp.min(k_s)) >= 0.0
+    assert float(jnp.min(omega_s)) > 0.0
+    assert float(jnp.max(k_s)) > 10.0 * float(jnp.min(jnp.abs(k_s)) + 1e-30)  # genuinely turbulent
+    _assert_same_root(reached, block_root)
 
-    mono = coupled_step(
-        coupled,
-        reference,
-        preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
+
+@pytest.mark.slow
+def test_the_split_adjoint_matches_finite_difference(channel) -> None:
+    """The coupled implicit-function-theorem adjoint is exact through the split-preconditioned solve.
+
+    The split only accelerates the Krylov solves and is ``stop_gradient``-ed, so the gradient is the one
+    transpose solve on the unfrozen coupled residual -- preconditioned by the split's transpose -- and
+    must match a finite difference. Built once outside ``jax.grad`` on concrete parameters.
+    """
+    coupled = channel["coupled"]
+    flow, k, omega = channel["start"]
+    step = coupled_step(
+        coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split()
     )
-    flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, strategy=mono, max_steps=40)
-    assert float(jnp.linalg.norm(flow_s - flow_m) / jnp.linalg.norm(flow_m)) < 1e-4
-    assert float(jnp.linalg.norm(k_s - k_m) / jnp.linalg.norm(k_m)) < 1e-3
-    assert float(jnp.linalg.norm(omega_s - omega_m) / jnp.linalg.norm(omega_m)) < 1e-4
+
+    def objective(nu_scale):
+        scaled = _with_scaled_viscosity(coupled, nu_scale)
+        _, k_out, _ = solve_coupled(scaled, flow, k, omega, strategy=step, max_steps=40)
+        return jnp.sum(k_out**2)
+
+    analytic = float(jax.grad(objective)(1.0))
+    eps = 1e-4
+    finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
+    assert analytic != 0.0
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
+
+
+@pytest.mark.slow
+def test_a_split_session_re_fits_at_the_current_beta(channel) -> None:
+    """A session's refresh hook re-fits the split at the step's CURRENT shift, not the one it was built at.
+
+    The control sets the step's shift strength; the hook must read it. A split is not exact, so this
+    compares the refreshed inverse with one fitted from scratch to the operator at that shift: they must
+    apply identically, and differ from the inverse fitted at the build shift.
+    """
+    from aquaflux.solve import DualTimeControl
+    from aquaflux.turbulence.coupled import _coupled_shift_policy
+
+    coupled = channel["coupled"]
+    state = coupled.pack_state(*channel["start"])
+    session = open_session(
+        MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()), build_beta=0.05),
+        coupled,
+    )
+    dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
+    preconditioner = dual.shift_policy.preconditioner
+    rng = np.random.default_rng(5)
+    b = rng.standard_normal(preconditioner.inverse.n_dofs)
+    at_build = preconditioner.inverse.apply(b).copy()
+
+    # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
+    active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
+    session.refresh_preconditioner(active, state)
+    refreshed = active.shift_policy.preconditioner
+    assert refreshed is preconditioner, (
+        "the refresh replaced the preconditioner instead of re-fitting it"
+    )
+
+    # the same probe and the same shift diagonal, fitted from scratch at beta = 0.7
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
+        lambda v: jacobian_matvec(coupled, state, v), _coupled_jacobian_plan(coupled, 3)
+    )
+    d = np.asarray(
+        _coupled_shift_policy(coupled, state, UnpreconditionedScalars()).shift_term(state).diagonal
+    )
+    fresh = _split(
+        MaterializedJacobianPreconditioner._shifted(jacobian, 0.7 * d),
+        FieldGroups.split_before(coupled.layout, "k"),
+    )
+    try:
+        np.testing.assert_allclose(
+            refreshed.inverse.apply(b), fresh.apply(b), rtol=1e-10, atol=1e-12
+        )
+        assert not np.allclose(refreshed.inverse.apply(b), at_build)
+    finally:
+        fresh.destroy()
+
+
+@pytest.mark.slow
+def test_a_beta_tracking_split_march_reaches_the_block_preconditioned_root(
+    channel, block_root
+) -> None:
+    """``solve_coupled`` with a split and a ``DualTimeControl`` reaches the block preconditioner's root.
+
+    The spec opens a session whose per-step hook re-fits the split at each step's own shift.
+    """
+    from aquaflux.solve import DualTimeControl
+
+    reached = solve_coupled(
+        channel["coupled"],
+        *channel["start"],
+        preconditioner=_shipped_split(),
+        dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
+        step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
+        max_steps=60,
+    )
+    _assert_same_root(reached, block_root)
+
+
+@pytest.mark.slow
+def test_a_solve_that_re_fits_its_split_every_step_is_differentiable(channel) -> None:
+    """A materialized preconditioner re-fits before every step, and ``jax.grad`` still runs through it.
+
+    It used to raise: the re-fit ran on the path being differentiated and would have captured the
+    tracer. The march now runs on stopped copies and the adjoint is attached at the root it reaches, so
+    no re-fit ever sees a tracer, and the gradient must match finite differences like the frozen step's
+    does above. The re-fit reads the step's shift strength, so the march carries a ``DualTimeControl``.
+    """
+    from aquaflux.solve import DualTimeControl
+
+    coupled = channel["coupled"]
+    flow, k, omega = channel["start"]
+
+    def objective(nu_scale):
+        _, k_out, _ = solve_coupled(
+            _with_scaled_viscosity(coupled, nu_scale),
+            flow,
+            k,
+            omega,
+            preconditioner=_shipped_split(),
+            dual_time=DualTimeLoop(inner_steps=5, inner_tol=1e-3),
+            step_control=DualTimeControl(beta_start=0.5, beta_min=0.02),
+            max_steps=60,
+        )
+        return jnp.sum(k_out**2)
+
+    analytic = float(jax.grad(objective)(1.0))
+    eps = 1e-4
+    finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
+    assert analytic != 0.0
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
 
 
 def test_the_split_refreshes_in_place_onto_the_same_object(case):
@@ -254,8 +515,7 @@ def test_the_jacobi_smoothed_inverse_is_a_fixed_linear_map_that_transposes(case)
     preconditioner that is not a fixed *linear* map makes the non-flexible outer GMRES invalid, and one
     whose transpose is not exact corrupts every gradient taken through a converged solve while the
     forward march looks perfectly healthy. This runs on the real ``[k, omega]`` block because that is
-    what it will precondition, and its aggregation and smoother settings are chosen to reproduce a host
-    GAMG V-cycle rather than to be conservative.
+    what it will precondition, with the inverse's own default aggregation and smoother settings.
     """
     import numpy as np
     import scipy.sparse as sp

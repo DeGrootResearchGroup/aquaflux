@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from aquaflux.mesh.face import face_geometry_scheme
+from aquaflux.mesh import face_geometry_scheme
 from aquaflux.vectors import dot, scale
 
 from .interpolation import (

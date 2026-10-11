@@ -11,16 +11,33 @@ The two module-private helpers here are the other half of that: turning such a v
 fields the caller supplies alongside it, into the constructor arguments of the class being built --
 checking every name against that class and refusing a field given both ways, rather than dropping
 either in silence.
+
+Whether a value combines with another of its kind field by field is a declared capability,
+:class:`MergeableSettings`: a :class:`SettingsValue` has it, and so do the settings objects that are
+``equinox`` modules. A caller deciding whether to merge two values asks for it with ``isinstance``.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import TypeVar
+from typing import Protocol, TypeVar, runtime_checkable
 
-__all__ = ["SettingsValue", "filled_from"]
+__all__ = ["MergeableSettings", "SettingsValue", "filled_from"]
 
 _Value = TypeVar("_Value")
+
+
+@runtime_checkable
+class MergeableSettings(Protocol):
+    """A partial configuration that combines with another of its kind, field by field.
+
+    Its unset (``None``) fields take the other value's, its set fields stay its own -- how a builder's
+    default sits beneath a caller's setting, or a continuation's shared settings beneath one point's.
+    """
+
+    def filled_from(self, base: _Value) -> _Value:
+        """This value, with each field it leaves unset taken from ``base``, a value of the same kind."""
+        ...
 
 
 @dataclasses.dataclass(frozen=True)

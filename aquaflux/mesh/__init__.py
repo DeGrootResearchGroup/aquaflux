@@ -25,7 +25,7 @@ from .face import (
 )
 from .geometry import MeshGeometry
 from .graph import cell_adjacency_coo, cell_adjacency_csr
-from .groups import CellZones, FacePatches, LabelledGroups
+from .groups import PADDING_PATCH, RESERVED_PATCH_NAMES, CellZones, FacePatches, LabelledGroups
 from .mesh import Mesh
 from .quality import centroid_iteration_shift, closed_cell_residual, face_planarity
 from .reorder import (
@@ -39,6 +39,8 @@ from .structured import graded_nodes, structured_grid_2d, structured_grid_3d
 from .surface import PatchTriangles, patch_triangles
 
 __all__ = [
+    "PADDING_PATCH",
+    "RESERVED_PATCH_NAMES",
     "CellGeometry",
     "CellReordering",
     "CellZones",

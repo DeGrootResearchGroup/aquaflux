@@ -46,13 +46,9 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
-    ColumnProbePlan,
-    MonolithicVCyclePreconditioner,  # noqa: E402
-    block_stencil_colouring,
-    block_stencil_gather_map,
-)
-from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
+from aquaflux.solve import (MaterializedJacobianPreconditioner,)
+from aquaflux.solve.sparse_jacobian import (ColumnProbePlan, block_stencil_colouring, block_stencil_gather_map,)
+from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 
 #: Field order of the coupled state, and the two groups a block-triangular split cuts it into.
 FIELDS = ("u", "v", "w", "p", "k", "omega")
@@ -200,7 +196,7 @@ def main():
     colouring = block_stencil_colouring(owner, nb, n, 3)
     structure = block_stencil_gather_map(ColumnProbePlan.uniform(colouring, n_fields))
     started = time.time()
-    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         ColumnProbePlan.uniform(colouring, n_fields),
         lambda seeds: batched_jacobian_matvec(coupled, state, seeds),

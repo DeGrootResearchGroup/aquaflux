@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.schemes.interpolation import non_orthogonal_correction
+from aquaflux.schemes import non_orthogonal_correction
 from aquaflux.vectors import dot
 
 from .face_flux import FaceFluxOperator

@@ -14,23 +14,26 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.solve import (
-    CompleteLuPreconditioner,
+    FieldSplitPreconditioner,
     FrozenInverse,
     HostPreconditioner,
     MaterializedJacobianPreconditioner,
-    MonolithicVCyclePreconditioner,
     RefactorableInverse,
     ReleasableInverse,
 )
+from aquaflux.solve.block_preconditioner import (
+    MaterializedBlockPreconditioner,
+)
 
 FAMILY = (
-    CompleteLuPreconditioner,
-    MonolithicVCyclePreconditioner,
+    MaterializedJacobianPreconditioner,
+    FieldSplitPreconditioner,
+    MaterializedBlockPreconditioner,
 )
 
 
 class _ExactInverse:
-    """An exact block inverse, standing in for a multigrid V-cycle so no PETSc build is needed."""
+    """An exact block inverse, standing in for a multigrid V-cycle so no hierarchy is built."""
 
     def __init__(self, block: np.ndarray) -> None:
         self._inverse = np.linalg.inv(np.asarray(block, dtype=np.float64))
@@ -104,8 +107,8 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     ``field_split_inverse``, which would build real hierarchies. What is under test is the
     split's own contract, and that does not depend on what inverts its blocks.
     """
+    from aquaflux.solve import JacobiSmoothed
     from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
-    from aquaflux.solve.lu_preconditioner import complete_lu_inverse
 
     n = 12
     operator = (sp.random(n, n, density=0.4, random_state=0, format="csr") + sp.eye(n) * 5).tocsr()
@@ -118,10 +121,8 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
         groups,
     )
 
-    for factors in (
-        complete_lu_inverse(operator, backend="scipy"),
-        split,
-    ):
+    hierarchy = JacobiSmoothed(max_coarse=4)(operator, 2)
+    for factors in (hierarchy, split):
         assert isinstance(factors, FrozenInverse), f"{type(factors).__name__} is not FrozenInverse"
         assert factors.n_dofs == n
 
@@ -148,10 +149,11 @@ def test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract() ->
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Attribute)
-        and node.value.attr == "factors"
+        and node.value.attr == "inverse"
     }
+    assert "apply" in reached, "the scan found no read off the inverse, so it can see nothing"
     assert reached <= {"n_dofs", "apply"}, (
-        f"the base reaches for {sorted(reached - {'n_dofs', 'apply'})} on its factors, which is not "
+        f"the base reaches for {sorted(reached - {'n_dofs', 'apply'})} on its inverse, which is not "
         "part of FrozenInverse -- either add it to the contract or answer it on the subclass"
     )
 
@@ -168,7 +170,6 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     """
     from aquaflux.solve import AirReduction, JacobiSmoothed
     from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
-    from aquaflux.solve.lu_preconditioner import complete_lu_inverse
     from aquaflux.solve.traced_cycle import OffersTracedCycle
 
     n_cells = 40
@@ -178,12 +179,11 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     block = sp.block_diag([chain, chain], format="csr")
     hierarchy = JacobiSmoothed(max_coarse=8)(block, 2)
     reduction = AirReduction(max_coarse=8)(block, 2)
-    lu = complete_lu_inverse(block, backend="scipy")
     groups = FieldGroups.by_counts(n_cells=n_cells, n_leading_fields=1, n_trailing_fields=1)
     leading, _, coupling, trailing = groups.blocks(block)
     split = FieldSplitInverse(
-        complete_lu_inverse(leading, backend="scipy"),
-        complete_lu_inverse(trailing, backend="scipy"),
+        _ExactInverse(leading.toarray()),
+        _ExactInverse(trailing.toarray()),
         coupling,
         groups,
     )
@@ -191,7 +191,6 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     expected = {
         hierarchy: (RefactorableInverse, ReleasableInverse, OffersTracedCycle),
         reduction: (RefactorableInverse, ReleasableInverse, OffersTracedCycle),
-        lu: (RefactorableInverse, ReleasableInverse),
         split: (RefactorableInverse, ReleasableInverse),
         _Doubling(): (),
     }
@@ -206,9 +205,9 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
 def test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything() -> None:
     """Every family member's ``destroy`` releases the frozen inverse -- and tolerates one with nothing.
 
-    The materialized-Jacobian base once carried a ``destroy`` with no body, so destroying a monolithic
-    V-cycle or a field-split preconditioner released nothing: the PETSc hierarchy a caller destroys
-    precisely to bound its memory stayed live until the collector found it.
+    The materialized-Jacobian base once carried a ``destroy`` with no body, so destroying a field-split
+    preconditioner released nothing: the hierarchies a caller destroys precisely to bound its memory
+    stayed live until the collector found it.
     """
     released = []
 

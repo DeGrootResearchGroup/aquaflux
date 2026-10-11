@@ -1,35 +1,22 @@
 """The `aquaflux.solve` package boundary: `__init__` is the real API surface.
 
 `solve/__init__` re-exports what the rest of the library (and a user) may consume. That curation is
-only meaningful if consumers actually go through it, so these tests pin both halves: the surface
-resolves, and no library module reaches past it into a submodule. Without the second check the
-boundary erodes silently — a deep import works fine at runtime, so nothing else would catch it.
+only meaningful if consumers actually go through it. That library modules do is pinned for every
+package at once in ``test_layering.py``; this file pins what is particular to ``solve``: the surface
+resolves, it holds only what a user needs, the multigrid toolkit is exported whole, and the study
+harnesses in ``validation/`` keep to the surface too.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 from aquaflux import solve
 
 PACKAGE_ROOT = pathlib.Path(solve.__file__).resolve().parent.parent
 SOLVE_ROOT = PACKAGE_ROOT / "solve"
-
-
-def _library_modules() -> list[pathlib.Path]:
-    """Every shipped module outside `solve/` itself (which imports its own siblings relatively)."""
-    return [p for p in PACKAGE_ROOT.rglob("*.py") if SOLVE_ROOT not in p.parents]
-
-
-def _absolute_imports(source: str) -> list[str]:
-    """Every ``from <module> import ...`` target in ``source`` (absolute imports only)."""
-    tree = ast.parse(source)
-    return [
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module
-    ]
 
 
 def test_every_exported_name_resolves() -> None:
@@ -38,24 +25,110 @@ def test_every_exported_name_resolves() -> None:
     assert missing == [], f"__all__ advertises names the package does not define: {missing}"
 
 
-def test_no_library_module_imports_past_the_boundary() -> None:
-    """Library code imports from ``aquaflux.solve``, never from ``aquaflux.solve.<submodule>``.
+#: Exports that no other package imports and no user documentation names, each kept because a user
+#: writes against it. Anything else that nothing outside ``solve`` uses is plumbing that leaked onto the
+#: surface: it belongs in its submodule, where tests and study harnesses can still reach it.
+USER_IMPLEMENTS = frozenset(
+    {
+        # Protocols and family bases a user writes a new member of.
+        "AbortsInnerLoop",
+        "BlockInverse",
+        "CarriesRelaxationSchedule",
+        "FrozenInverse",
+        "HierarchyBlockInverse",
+        "LineSearchGrowth",
+        "MaterializedJacobianPreconditioner",
+        "MeasureBuilder",
+        "NamedBlockMeasure",
+        "ReadableShift",
+        "RefactorableInverse",
+        "RefreshTrigger",
+        "RelaxationSchedule",
+        "ReleasableInverse",
+        "ResidualMeasure",
+        "ResidualMeasures",
+        "ResidualNorm",
+        "ScalarBorder",
+        "ShiftCarryingControl",
+        "ShiftedNewtonStrategy",
+        "StateBlock",
+        "StepAcceptance",
+    }
+)
+USER_CONFIGURES = frozenset(
+    {
+        # Values a solve is configured with: a trigger, a shift rule or basis, an acceptance or
+        # line-search policy, a strategy.
+        "CoefficientDriftTrigger",
+        "ConstantRelaxation",
+        "DivergenceGuard",
+        "DualTimeStep",
+        "LocalCourantBasis",
+        "MonotoneLineSearch",
+        "RelaxedFarFromRoot",
+        "SwitchedEvolutionRelaxation",
+    }
+)
+USER_CALLS = frozenset(
+    {
+        # Functions a user calls, and what public drivers hand back.
+        "MarchResult",
+        "RampPosition",
+        "RampWalk",
+        "StagedResult",
+        "StepOutcome",
+        "default_linear_solver",
+        "field_change_metrics",
+        "filled_from",
+        "materialize_block_jacobian",
+        "materialized_spec_from_mapping",
+        "materialized_spec_to_mapping",
+        "newton_march",
+    }
+)
+USER_FACING = USER_IMPLEMENTS | USER_CONFIGURES | USER_CALLS
 
-    Deep-importing a submodule bypasses the curated surface, so `__init__` stops describing what the
-    package offers — the state this guard exists to prevent (a consumer once pulled nine names
-    straight out of ``solve.multigrid``). Tests are exempt: a unit test of a submodule's internals
-    legitimately reaches for its private helpers.
-    """
-    offenders = [
-        f"{path.relative_to(PACKAGE_ROOT)}: {module}"
-        for path in _library_modules()
-        for module in _absolute_imports(path.read_text())
-        if module.startswith("aquaflux.solve.")
-    ]
-    assert offenders == [], (
-        "library modules must import from the aquaflux.solve package surface, not its submodules; "
-        f"offenders: {offenders}"
+
+def _imported_by_other_packages() -> set[str]:
+    """Every name a module outside ``solve/`` imports from ``aquaflux.solve``."""
+    names = set()
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if SOLVE_ROOT in path.parents:
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module == "aquaflux.solve":
+                names.update(alias.name for alias in node.names)
+    return names
+
+
+def _named_in_user_documentation() -> set[str]:
+    """Every export the hand-written documentation names (the generated API page aside)."""
+    root = PACKAGE_ROOT.parent
+    pages = [root / "README.md", *(root / "docs").glob("*.md")]
+    text = "\n".join(
+        page.read_text()
+        for page in pages
+        if page.is_file() and page.name not in ("api.md", "package_structure.md")
     )
+    return {name for name in solve.__all__ if re.search(rf"\b{re.escape(name)}\b", text)}
+
+
+def test_every_export_is_used_elsewhere_or_declared_user_facing() -> None:
+    """An export nothing else uses must say why a user needs it, and a stated reason must still hold.
+
+    A name reaches ``__all__`` because some other module wanted it; once nothing does, it stays on the
+    surface, on the documentation site and in every future compatibility promise unless something asks.
+    The declared lists are that question, in both directions: an unlisted unused export fails, and so
+    does a listed one that another package now imports or the documentation now names.
+    """
+    justified = _imported_by_other_packages() | _named_in_user_documentation()
+    unexplained = sorted(set(solve.__all__) - justified - USER_FACING)
+    assert unexplained == [], (
+        "these exports have no importer outside solve/ and no user documentation; say in "
+        f"USER_FACING why a user needs each, or leave it in its submodule: {unexplained}"
+    )
+    stale = sorted(name for name in USER_FACING if name not in solve.__all__ or name in justified)
+    assert stale == [], f"USER_FACING lists names that are not exported or need no reason: {stale}"
 
 
 def test_the_multigrid_surface_is_complete() -> None:
@@ -87,15 +160,10 @@ def test_the_multigrid_surface_is_complete() -> None:
 #: reviewable instead of invisible. Adding a row is cheap and deliberate; the guard below is what stops
 #: the list growing by accident.
 VALIDATION_INTERNAL_REACHES = {
-    # The fixed-pattern shift/equilibrate/reorder assembler. It holds no PETSc, no V-cycle and no jax,
-    # so it is not really the AMG's -- but it has no better home yet, so it is not exported either.
-    "ShiftedCellMajorOperator",
     # The march's lock-up predicate, replayed over archived march logs to check a candidate rule fires
     # on the runs that stalled and on nothing that recovered. Replaying a private predicate is the
     # whole point of that harness, so this one is unlikely ever to become public.
     "_limit_collapsing",
-    # The square-root-diagonal scale alone, without the reorder `equilibrate_cell_major` pairs it with.
-    "equilibration_scale",
     # The aggregation's internals, reached by the harness that measured whether equilibration changes
     # the graph the coarsening sees (it does not -- 0.03% of edges). Running the real `_cell_graph` /
     # `_aggregation_edges` / `_mis_aggregate` is the point: a re-implementation would have measured a
@@ -118,6 +186,33 @@ VALIDATION_INTERNAL_REACHES = {
     # about the wrong ladder -- which rung is kept depends on the fallback rule and the growth cap,
     # neither of which is obvious from the outside.
     "backtracking_line_search",
+    # The coloured probe's own plan, gather and matvecs, and the shift and comparison applied to its
+    # output. The bfs3d and pitzDaily probe studies measure what a reach or a batch size costs and how
+    # accurate the materialized Jacobian is; running the materialize the solve runs is the point. None of
+    # these is something a case configures or a user implements, which is why they are not exported.
+    "PROBE_BATCH_SIZE",
+    "ColumnProbePlan",
+    "ProbeGather",
+    "batched_jacobian_matvec",
+    "block_stencil_colouring",
+    "block_stencil_gather_map",
+    "column_probe_plan",
+    "jacobian_matvec",
+    "jacobian_relative_error",
+    "frozen_shift_diagonal",
+    "shifted_jacobian",
+    # The equilibration and reordering the field split applies before it coarsens, reached by the
+    # conditioning studies to look at the operator the hierarchy is actually built on.
+    "equilibrate_cell_major",
+    "symmetrically_equilibrate",
+    # Instruments of a march a study attaches beside the case's own: the expensive-inner-solve
+    # checkpointer, the metrics merger and the measure a configured solver stops in.
+    "InnerIterateCheckpointer",
+    "combine_metrics",
+    "in_progress_measure",
+    # The shift a step will run at, read by the aggressive-continuation harness to log the shift each
+    # rung starts from; the step control's carried state is not the bare shift, so it asks the step.
+    "shift_of",
 }
 
 

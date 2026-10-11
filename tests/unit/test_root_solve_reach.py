@@ -38,12 +38,14 @@ import pytest
 from aquaflux.flow import bulk_velocity_flow_solve, reused_flow_solve
 from aquaflux.solve import (
     DEFAULT_ROOT_SOLVE,
-    PLAIN_RESIDUAL,
     Convergence,
     DampedNewtonStep,
     Euclidean,
     RootSolver,
     RootSolveSettings,
+)
+from aquaflux.solve.convergence import (
+    PLAIN_RESIDUAL,
 )
 from aquaflux.turbulence import ScalarShiftPolicy, scalar_pseudo_transient_solve
 

@@ -1,5 +1,11 @@
 # tetrahedral_gradient_ab — a real mesh with corner tetrahedra
 
+> **Preconditioner change, 2026-10-11.** Every march below that names a "complete LU" was run with one.
+> The complete LU has since been removed from aquaflux, and these scripts now precondition the turbulent
+> duct with the field split `FieldSplit(SimpleSmoothed(), JacobiSmoothed())` and the laminar duct with
+> `SimpleSmoothed()` over the whole flow state (which matched the LU step for step on the laminar duct,
+> below). The recorded numbers have not been re-run under the new preconditioners.
+
 ## Why
 
 Issue #432: `MultipleCorrectionGradient`'s default (`boundary_closure=OwnerGradient()`,
@@ -89,7 +95,7 @@ unless a row says otherwise, 60-step cap. Steps to convergence, or `failed` with
 - From a plug every arm converges, so the mesh, the case and the gradient reconstruction can be marched;
   the reported failure was the single-step pseudo-transient march from rest, which fails with or without
   the staged driver. Dual time plus a materialized-Jacobian inverse converges it from rest in 13 steps,
-  and `SimpleSmoothed` does so without PETSc.
+  and `SimpleSmoothed` does so too.
 - The row-scaled measure divides by the mean speed and the mass throughput, both zero at rest, so it is
   NaN there (issue #459). Use `LAM_MEASURE=euclid` from rest.
 - With `LAM_SCHEME=multiple` (`MultipleCorrectionGradient` with the corner-cell fallback), the `lu` arm

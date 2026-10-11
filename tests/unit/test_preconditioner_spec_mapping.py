@@ -22,16 +22,13 @@ from aquaflux.solve import (
     MATERIALIZED_MAPPING,
     AirReduction,
     BlockInverse,
-    CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicVCycle,
     SettingsMapping,
     SimpleSmoothed,
 )
-from aquaflux.solve.lu_preconditioner import LU_BACKENDS
 from aquaflux.solve.multigrid import _PROLONGATION_SMOOTHING
 from aquaflux.turbulence import (
     PRECONDITIONER_SPEC_MAPPING,
@@ -58,12 +55,9 @@ _SPECS = [
         mass_scale=2.0,
         strength_threshold=0.25,
     ),
-    MaterializedJacobian(CompleteLu()),
-    MaterializedJacobian(CompleteLu(backend="scipy"), build_beta=0.5),
-    MaterializedJacobian(
-        MonolithicVCycle(smoother_fill_levels=0, smoother_sweeps=4, coarse_eq_limit=2000),
-        refit_beta_floor=0.05,
-    ),
+    MaterializedJacobian(SimpleSmoothed()),
+    MaterializedJacobian(SimpleSmoothed(), build_beta=0.5),
+    MaterializedJacobian(SimpleSmoothed(), refit_beta_floor=0.05),
     MaterializedJacobian(
         FieldSplit(
             SimpleSmoothed(sweeps=2, strength_threshold=0.25, frozen_coarsening=True),
@@ -116,7 +110,7 @@ def _public_value_classes() -> set[type]:
         and cls not in (VelocityBlock, ScalarBlock, BlockInverse)
         and not inspect.isabstract(cls)
     }
-    spec_classes = {BlockDiagonal, MaterializedJacobian, CompleteLu, MonolithicVCycle, FieldSplit}
+    spec_classes = {BlockDiagonal, MaterializedJacobian, FieldSplit}
     return nested | spec_classes | {JacobianProbeSpec}
 
 
@@ -149,7 +143,7 @@ def test_a_column_reach_read_from_a_file_is_the_same_value_as_one_given_in_code(
     read = preconditioner_spec_from_mapping(
         {
             "kind": "MaterializedJacobian",
-            "inverse": {"kind": "CompleteLu"},
+            "inverse": {"kind": "SimpleSmoothed"},
             "probe": {"kind": "JacobianProbeSpec", "column_reach": [3.0, 3.0, 2.0]},
         }
     )
@@ -160,7 +154,7 @@ def test_a_column_reach_read_from_a_file_is_the_same_value_as_one_given_in_code(
 def test_a_numpy_scalar_setting_is_refused_on_writing_naming_the_setting() -> None:
     with pytest.raises(TypeError, match="float32 at 'build_beta' is not plain data"):
         preconditioner_spec_to_mapping(
-            MaterializedJacobian(CompleteLu(), build_beta=np.float32(0.5))
+            MaterializedJacobian(SimpleSmoothed(), build_beta=np.float32(0.5))
         )
 
 
@@ -184,12 +178,12 @@ def test_the_file_form_of_a_field_split_spec() -> None:
 
 
 def test_the_default_probe_is_omitted_and_an_omitted_probe_reads_back_as_the_default() -> None:
-    assert preconditioner_spec_to_mapping(MaterializedJacobian(CompleteLu())) == {
+    assert preconditioner_spec_to_mapping(MaterializedJacobian(SimpleSmoothed())) == {
         "kind": "MaterializedJacobian",
-        "inverse": {"kind": "CompleteLu"},
+        "inverse": {"kind": "SimpleSmoothed"},
     }
     read = preconditioner_spec_from_mapping(
-        {"kind": "MaterializedJacobian", "inverse": {"kind": "CompleteLu"}}
+        {"kind": "MaterializedJacobian", "inverse": {"kind": "SimpleSmoothed"}}
     )
     assert read.probe == JacobianProbeSpec()
 
@@ -228,7 +222,7 @@ def test_unpreconditioned_scalar_blocks_are_a_kind_and_a_null_scalar_is_the_defa
             {"kind": "BlockDiagonal", "velocity": "convection"},
             "'convection' at 'velocity' is not accepted there",
         ),
-        ({"inverse": {"kind": "CompleteLu"}}, "names no 'kind'"),
+        ({"inverse": {"kind": "SimpleSmoothed"}}, "names no 'kind'"),
     ],
     ids=[
         "unknown-kind",
@@ -268,7 +262,7 @@ def test_a_nested_value_of_the_wrong_kind_is_refused_where_it_appears() -> None:
 
 @pytest.mark.parametrize(
     "mapping",
-    [{"kind": "CompleteLu"}, {"kind": "SimpleSmoothed"}, {"kind": "JacobianProbeSpec"}],
+    [{"kind": "JacobiSmoothed"}, {"kind": "SimpleSmoothed"}, {"kind": "JacobianProbeSpec"}],
     ids=lambda m: m["kind"],
 )
 def test_the_outermost_kind_must_be_one_of_the_two_families(mapping) -> None:
@@ -278,7 +272,7 @@ def test_the_outermost_kind_must_be_one_of_the_two_families(mapping) -> None:
 
 def test_only_a_spec_family_is_written() -> None:
     with pytest.raises(TypeError, match="BlockDiagonal or MaterializedJacobian"):
-        preconditioner_spec_to_mapping(CompleteLu())  # type: ignore[arg-type]
+        preconditioner_spec_to_mapping(SimpleSmoothed())  # type: ignore[arg-type]
 
 
 def test_the_solve_registry_round_trips_a_materialized_spec_without_the_turbulence_package() -> (
@@ -333,38 +327,44 @@ def test_a_bare_block_inverse_spec_round_trips_through_the_solve_registry() -> N
 # --- the values a spec file may give, per position ---------------------------------------------
 
 
+def _split(leading: dict) -> dict:
+    """A field split whose leading inverse is ``leading``, its trailing one left at defaults."""
+    return {
+        "kind": "MaterializedJacobian",
+        "inverse": {
+            "kind": "FieldSplit",
+            "leading": leading,
+            "trailing": {"kind": "JacobiSmoothed"},
+        },
+    }
+
+
 @pytest.mark.parametrize(
     ("spec", "match"),
     [
         (
-            {
-                "kind": "MaterializedJacobian",
-                "inverse": {"kind": "CompleteLu", "backend": "umfpak"},
-            },
-            r"'umfpak' at 'inverse.backend' is not accepted there",
+            _split({"kind": "SimpleSmoothed", "prolongation_smoothing": "jacobi"}),
+            r"'jacobi' at 'inverse.leading.prolongation_smoothing' is not accepted there",
         ),
         (
-            {
-                "kind": "MaterializedJacobian",
-                "inverse": {"kind": "CompleteLu", "backend": {"kind": "CompleteLu"}},
-            },
-            r"at 'inverse.backend' is not accepted there",
+            _split(
+                {"kind": "SimpleSmoothed", "prolongation_smoothing": {"kind": "JacobianProbeSpec"}}
+            ),
+            r"at 'inverse.leading.prolongation_smoothing' is not accepted there",
         ),
         (
-            {
-                "kind": "MaterializedJacobian",
-                "inverse": {"kind": "MonolithicVCycle", "smoother_sweeps": True},
-            },
-            r"True at 'inverse.smoother_sweeps' is not accepted there",
+            _split({"kind": "SimpleSmoothed", "sweeps": True}),
+            r"True at 'inverse.leading.sweeps' is not accepted there",
         ),
     ],
     ids=["misspelt-choice", "value-where-a-string-belongs", "boolean-where-a-count-belongs"],
 )
-def test_the_three_spec_files_that_used_to_load_silently_are_refused(spec, match) -> None:
-    """Issue #424's own examples.
+def test_the_three_kinds_of_bad_value_are_refused_where_they_appear(spec, match) -> None:
+    """The three shapes of issue #424: a misspelt choice, a value where a string belongs, a boolean
+    where a count belongs.
 
-    Each of these loaded without complaint and failed where the setting is consumed -- or never, since
-    an ignored setting is indistinguishable from an absent one. A case file's whole point is that it is
+    Each used to load without complaint and fail where the setting is consumed -- or never, since an
+    ignored setting is indistinguishable from an absent one. A case file's whole point is that it is
     checked before a solve runs.
     """
     with pytest.raises(ValueError, match=match):
@@ -380,7 +380,6 @@ def test_every_choice_a_spec_offers_is_one_its_consumer_accepts() -> None:
     file can reach.
     """
     choices = {
-        (CompleteLu, "backend"): set(LU_BACKENDS),
         (BlockDiagonal, "schur_scaling"): set(SCHUR_SCALINGS),
         (BlockDiagonal, "composition"): set(_COMPOSITIONS),
         (SimpleSmoothed, "prolongation_smoothing"): set(_PROLONGATION_SMOOTHING),

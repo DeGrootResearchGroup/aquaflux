@@ -35,13 +35,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from aquaflux.mesh import CellGeometry, FaceGeometry, Mesh, MeshGeometry
-from aquaflux.mesh.connectivity import (
+from aquaflux.mesh import (
+    CellGeometry,
+    CellZones,
     FaceCellConnectivity,
+    FaceGeometry,
     FaceNodeConnectivity,
+    Mesh,
+    MeshGeometry,
     interior_mask,
 )
-from aquaflux.mesh.groups import CellZones
 
 
 def scatter_owned_partitions(

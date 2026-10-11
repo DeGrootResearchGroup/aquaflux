@@ -33,7 +33,7 @@ def main() -> None:
         raise SystemExit(f"mesh not found in {compare.RUNS}; run of_case/run_of.sh first.")
     print(
         f"flow-block inverse: {compare.FLOW_INVERSE}  |  turbulence: {compare.TURBULENCE_INVERSE}  |  "
-        f"field split: {compare.FIELD_SPLIT}  |  refresh at {compare.REFRESH_ON_CYCLES} cycles",
+        f"refresh at {compare.REFRESH_ON_CYCLES} cycles",
         flush=True,
     )
     # The selected arm's own settings, every one of them, because two runs that differ only in a sweep

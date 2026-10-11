@@ -111,13 +111,13 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | the tail of `_coupled_step` (dual-time vs single step, the hook and refresh refusals, the default `relative_residual_gmres(norm=None)`) | `solve.shifted_step` (`solve/shifted_step.py`) | `_coupled_step` keeps only the coupled operator stand-in and passes `line_search=_COUPLED_LINE_SEARCH` |
 | `_LinearSolveRegime`, `_resolved_regime`, `_resolved_linear_solve`, and `LinearSolveSettings` from `march_settings.py` | `solve.LinearSolveRegime`, `solve.resolve_linear_solve`, `solve.LinearSolveSettings` | `aquaflux.turbulence.LinearSolveSettings` no longer exists; the per-family regime constants (`_BLOCK_LINEAR_SOLVE`, …) stay here because they are calibrations of *these* preconditioners |
 | `CoupledJacobianProbe` (plan + gather map), `_coupled_jacobian_plan`'s graph logic | `solve.JacobianProbe`, `solve.jacobian_probe_plan` (`solve/jacobian_probe.py`) | the probe holds a `narrowing` callable for the assembler stand-in; `coupled_jacobian_probe(coupled, …)` builds one with `_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen)`. `probe.gradient_sweeps` is now `probe.narrowing.gradient_sweeps`. `_coupled_jacobian_plan` stays as the coupled adapter (mesh graph + layout) |
-| `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `solve.MonolithicFactorShiftPolicy`, `solve.FrozenTransposeFactory` (`solve/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
-| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `BetaTrackingRefresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now the class `BetaTrackingRefresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` (a function `beta_tracking_refresh` until #661) |
-| `MaterializedJacobian`, `CompleteLu`, `MonolithicVCycle`, `FieldSplit`, `JacobianProbeSpec` | the same names in `aquaflux.solve` (`solve/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `solve.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `solve.materialized_spec_from_mapping` |
+| `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `solve.MonolithicFactorShiftPolicy`, `solve.monolithic_policy.FrozenTransposeFactory` (`solve/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
+| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `BetaTrackingRefresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`; `FACTORIZATION_LINEAR_SOLVE` was deleted with the complete LU, 2026-10-11) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now the class `BetaTrackingRefresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` (a function `beta_tracking_refresh` until #661) |
+| `MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec` (and `MonolithicVCycle`, deleted with PETSc 2026-10-10, and `CompleteLu`, deleted 2026-10-11) | the same names in `aquaflux.solve` (`solve/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `solve.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `solve.materialized_spec_from_mapping` |
 | `_SessionContinuation` | `solve.SessionSource` | shared with the flow march |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
 
-**Still here**: `open_session` and `_BlockSession` (the block-diagonal family is turbulence's own) and the mass-flow border. The materialized-Jacobian session, the probe, the monolithic shift policy and the specs have moved to `solve/`, and `solve_flow_march` uses them (`MaterializedJacobian` with `CompleteLu` or `MonolithicVCycle`). The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
+**Still here**: `open_session` and `_BlockSession` (the block-diagonal family is turbulence's own) and the mass-flow border. The materialized-Jacobian session, the probe, the monolithic shift policy and the specs have moved to `solve/`, and `solve_flow_march` uses them (`MaterializedJacobian` with a bare `BlockInverse`). The size ratchet in `tests/unit/test_layering.py` is what to lower as they move.
 ⚠️ **Do not add a capability to the march here without checking `solve_flow_march` can reach it** — that is
 the drift this section exists to prevent (root `CLAUDE.md`, Principle 3.6).
 
@@ -128,8 +128,8 @@ Many entries below are dated history written against the old API. Read them thro
 | was | is |
 |---|---|
 | `coupled_continuation(coupled, state, method=M, **flow_opts, **march)` | `coupled_step(coupled, state, preconditioner=BlockDiagonal(scalar=S, **flow_opts), **march)` |
-| `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | `coupled_step(..., preconditioner=MaterializedJacobian(CompleteLu(backend=B), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r)))` |
-| `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | `MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=…), build_beta=b)` |
+| `coupled_lu_continuation(..., lu_beta=b, backend=B, stencil_reach=r, ...)` | *nothing* — the complete LU was deleted 2026-10-11 (its `backend` the day before, with PETSc); use `MaterializedJacobian(FieldSplit(L, T), build_beta=b, probe=JacobianProbeSpec(stencil_reach=r))` |
+| `coupled_amg_continuation(..., smoother_fill_levels=…, amg_beta=b)` | *nothing* — the monolithic PETSc V-cycle (`MonolithicVCycle`) was deleted 2026-10-10; use `MaterializedJacobian(FieldSplit(L, T), build_beta=b)` |
 | `coupled_amg_continuation(..., field_split=True, leading_inverse=L, trailing_inverse=T)` | `MaterializedJacobian(FieldSplit(L, T))` — `L`/`T` are `solve.BlockInverse` values |
 | `probe=` / `preconditioner=` shared across rungs, `amg_beta_tracking_refresh(..., beta_floor=f, observer=o)`, `lu_beta_tracking_refresh` | one session: `open_session(MaterializedJacobian(..., refit_beta_floor=f), coupled, observer=o)`, passed as `solve_coupled(preconditioner=session)`; its `refresh_preconditioner` / `rebind` replace the hooks' |
 | `reuse=previous.shift_policy, residual_norm=m` | `session.refresh(state, previous, **march)` — since #370 the measure is not passed; the march hands every step its own |
@@ -139,7 +139,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `solve_coupled(method=M, velocity=…)` | `solve_coupled(preconditioner=BlockDiagonal(scalar=S, velocity=…))` |
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | the same keyword, `preconditioner=BlockDiagonal(scalar=S, **flow_opts)`; a `MaterializedJacobian` is refused there |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
-| `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default) |
+| `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default). `merged_march_options` merges any value that is a `solve.MergeableSettings` (`isinstance`, #669), not anything with a `filled_from` attribute |
 | `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
@@ -349,9 +349,9 @@ Many entries below are dated history written against the old API. Read them thro
       here as on every other settings field.
   - **✅ `preconditioner_spec.py`, the preconditioner as a value (#371, 2026-09-14) — consumed by every
     session, and readable from a case file (#391).** `BlockDiagonal` | `MaterializedJacobian(inverse=
-    CompleteLu | MonolithicVCycle | FieldSplit(leading, trailing), probe=JacobianProbeSpec, build_beta,
-    refit_beta_floor)`. `BlockDiagonal`, `CompleteLu`, `MonolithicVCycle` and `JacobianProbeSpec` are
-    `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
+    FieldSplit(leading, trailing) | BlockInverse, probe=JacobianProbeSpec, build_beta,
+    refit_beta_floor)` (a `MonolithicVCycle` inverse existed until PETSc was removed, 2026-10-10, and a
+    `CompleteLu` one until 2026-10-11). `BlockDiagonal` and `JacobianProbeSpec` are `SettingsValue`s with `None`-unset fields; **`FieldSplit` and `MaterializedJacobian` are not** — both
     have required fields (`leading`/`trailing`, `inverse`) and `probe` defaults to `JacobianProbeSpec()`.
     `solve_coupled`, `coupled_step`, `open_session` and both Reynolds drivers take them.
     - **Their registry is PUBLIC, `PRECONDITIONER_SPEC_MAPPING` (was the private `_SPEC_MAPPING`, renamed
@@ -370,7 +370,7 @@ Many entries below are dated history written against the old API. Read them thro
       `ScalarBlock` / `BlockInverse` subclass from the exports of **every** `aquaflux` subpackage and fails if the mapping
       does not accept it, so a new value class cannot be silently unwritable.
     - **✅ FIELD VALUES are checked per position too (#424, 2026-09-23).** `backend: umfpak`,
-      `backend: {kind: CompleteLu}` and `smoother_sweeps: true` — the three that used to load and fail
+      `backend: {kind: CompleteLu}` (both fields since deleted with the LU) and `smoother_sweeps: true` — the three that used to load and fail
       at build, or be ignored — are refused where they appear, with the path and what that field takes.
       The rules are read off the fields' **own annotations**, so there is no second table to drift from
       the dataclass; the four choice sets that lived only in docstrings (`backend`, `schur_scaling`,
@@ -418,8 +418,7 @@ Many entries below are dated history written against the old API. Read them thro
     - **Each spec's field set is pinned to the constructor it feeds** (`test_preconditioner_spec.py`):
       `BlockDiagonal` to `BlockPreconditioner.build` minus `reference_state`, `JacobianProbeSpec` to
       `coupled_jacobian_probe`'s free settings (not `active_rows`, which follows from the inverse, nor
-      `production_viscosity_frozen`, which follows from the operator), `MonolithicVCycle` and `CompleteLu`
-      to their `build`. `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
+      `production_viscosity_frozen`, which follows from the operator). `FieldSplit` requires `solve.BlockInverse` values, never a factory closure, so a
       build-record sink is attached where the session is opened rather than bound into the inverse.
   - **✅ `open_session` / `PreconditionerSession` / `coupled_step` — the ONE coupled builder, and what
     `solve_coupled`, both Reynolds drivers and both flagship cases run on (#371, 2026-09-14).**
@@ -576,7 +575,7 @@ Many entries below are dated history written against the old API. Read them thro
       attaches the adjoint at the root reached. The old refusal existed because the mid-march state was a
       tracer and a refreshed preconditioner would capture it; with stopped copies there is no tracer to
       capture. Pinned by `test_a_refreshed_solve_is_differentiable_and_gives_the_unrefreshed_gradient`
-      and, for the materialized re-fit, `test_a_solve_that_re_fits_its_lu_every_step_is_differentiable`.
+      and, for the materialized re-fit, `test_a_solve_that_re_fits_its_split_every_step_is_differentiable` (on the complete LU until it was deleted, 2026-10-11; ported onto the split in `test_coupled_field_split.py`).
       ⚠️ **Two traps survive.** Anything a hook caches must be built from those stopped copies: an array
       built from un-stopped values does not fail during `jax.grad`, only later, as
       `UnexpectedTracerError`. And the solve **cannot** run inside a traced program -- `jax.jit`,
@@ -1406,7 +1405,7 @@ Many entries below are dated history written against the old API. Read them thro
       `# the cap now finds nothing binding`) — nobody had connected it to what a nonzero
       `positivity_floor` does under the shipped default. `_k_positivity_guards` (the single tail all
       four builders now call, checked **before** any preconditioner is built — including
-      `coupled_amg_continuation`'s, so the raise needs no `petsc4py`) raises `ValueError` naming both
+      the V-cycle's, so the raise needed no `petsc4py` while that existed) raises `ValueError` naming both
       keywords when `floor != 0` and the transform-appropriate limiter is real (i.e. `k` is
       `DirectScalars`) and `positivity_projection` is true. `positive_k_projection`'s own `floor=0.0`
       default is untouched and still deliberately not fed from `positivity_floor` — a projection has
@@ -1532,7 +1531,7 @@ Many entries below are dated history written against the old API. Read them thro
     policy with `build_flow_block=False`, so no `BlockPreconditioner` — hence no `schur_scaling` — is ever
     built, regardless of `FIELD_SPLIT`/`FLOW_INVERSE`; this policy is only reached by `solve_coupled`'s
     zero-config fallback and by small (hundreds-of-cells) unit/integration fixtures. (2) On EVERY one of
-    those small fixtures (`test_coupled_rans.py`, `test_coupled_mass_flow.py`, `test_coupled_lu.py`,
+    those small fixtures (`test_coupled_rans.py`, `test_coupled_mass_flow.py`, `test_coupled_lu.py` (since deleted),
     `test_coupled_periodic_channel.py`, `test_periodic_channel.py`, `production_cap_activity.py` — Re up
     to 20000), dropping `schur_scaling="msimple"` in favour of `BlockPreconditioner`'s own default reaches
     the identical converged fixed point (fields and residual agree to the arms' own tight tolerances; the
@@ -1554,7 +1553,7 @@ Many entries below are dated history written against the old API. Read them thro
     `tests/integration/test_channel_high_reynolds.py::test_mass_scaled_schur_reaches_beyond_the_a_p_schur`,
     where plain SIMPLE's inner GMRES genuinely stalls and MSIMPLE converges — just not for a coupled RANS
     solve at any scale this project has measured.
-  - **`coupled_lu_continuation` — the COMPLETE-LU coupled PC, the
+  - **⚠️ DELETED 2026-10-11 with the complete LU — dated record follows.** **`coupled_lu_continuation` — the COMPLETE-LU coupled PC, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(strategy=…)`
     that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian
     *completely* (`CompleteLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
@@ -1584,11 +1583,9 @@ Many entries below are dated history written against the old API. Read them thro
     exact factorization needs a small one. That **restart** difference is real; the stopping *measure* is
     not a per-family choice and is `_coupled_step`'s (#282). Verified: `solve_coupled(strategy=coupled_lu_continuation(...))`
     converges to the **same fixed point** as the block PC and passes the **coupled-adjoint FD gate**
-    (`tests/integration/test_coupled_lu.py`, run under the `scipy` backend so CI needs no optional dep —
-    the complete factorization is exact regardless of backend). With the UMFPACK backend
-    (optional `petsc4py` dep, `backend="auto"|"umfpack"|"scipy"`) it factors the developed pitzDaily
-    coupled Jacobian quickly, exact (1 GMRES iter), verified on the real forward operator
-    and the β=0 adjoint. For a differentiable solve the factorization is frozen at the reference state
+    (`tests/integration/test_coupled_lu.py`). It is SciPy's SuperLU only since PETSc was removed
+    (2026-10-10); the UMFPACK backend it once had factored the developed pitzDaily coupled Jacobian much
+    faster, exact (1 GMRES iter), verified on the real forward operator and the β=0 adjoint. For a differentiable solve the factorization is frozen at the reference state
     (state drift costs only a few cycles, and freezing keeps the adjoint valid). **A long developing march
     refreshes it with `lu_beta_tracking_refresh` (below)**, which re-factors in place at the step's own
     `(state, β)`. ⚠️ There is no `coupled_lu_refreshing_continuation` — that `RefreshPolicy(builder=...)`
@@ -1601,11 +1598,11 @@ Many entries below are dated history written against the old API. Read them thro
     reachability crawl (a per-step-cost + adjoint-correctness lever, not a globalization one). NOTE: it is
     not yet `solve_coupled`'s default — the two continuations have different parameter surfaces, so making
     it the default needs a selector seam, not a swap (tracked).
-  - **SCOPE: a 2D / moderate-mesh tool** — the
+  - **⚠️ DELETED 2026-10-11 with the complete LU — dated record follows.** **SCOPE: a 2D / moderate-mesh tool** — the
     complete LU's fill (`O(n^{4/3})` in 3D) is a memory wall past ~10⁴ 3D cells (measured), so large 3D
     stays on the algebraic-multigrid path (`.claude/rules/solve-direct-preconditioners.md`).
-  - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
-    (BUILT).** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
+  - **⚠️ DELETED 2026-10-10 with PETSc — dated record follows.** **`coupled_amg_continuation` — the
+    ALGEBRAIC-MULTIGRID counterpart, once the coupled PC for large 3D.** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
     multigrid V-cycle (`MonolithicVCyclePreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
     ~seconds with bounded memory where the complete LU hits the 3D wall (its fill OOMs; a monolithic
@@ -1851,7 +1848,7 @@ Many entries below are dated history written against the old API. Read them thro
     large cut in the outer cycle count on the hard `bfs3d` state — for the figure with its β and bundle
     use the `coarse_eq_limit` bullet in `.claude/rules/solve-amg-multigrid.md` rather than repeating an unanchored
     number here. The FGMRES-forward optimization remains a follow-up (`.claude/rules/solve-amg-multigrid.md`).
-  - **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
+  - **⚠️ DELETED 2026-10-11 with the complete LU — dated record follows.** **`lu_beta_tracking_refresh` — re-factor the LU at the current β EVERY step (the correct LU treatment
     for a dual-time march; BUILT).** A frozen LU is exact only for the β it was factored at; a dual-time
     march's β ramps (0.5 → 0.005), so a factorization frozen at `lu_beta` mis-preconditions the operator
     actually solved — measured: frozen@0.05 needs 25/111/217/**474** GMRES iters at β=0.1/0.5/1/2 (vs
@@ -1939,7 +1936,8 @@ Many entries below are dated history written against the old API. Read them thro
     `_MassFlowConstrainedResidual`, a module rather than the closure it was, so a solver reused across
     calls keeps one compiled step. The border column/row `(a, c)` and the Schur (constraint)
     preconditioner are the flow block's own primitives (`MassFlow.constraint_vectors` / `join` /
-    `split` / `forced` in `flow/drive.py`, and `_bordered_preconditioner` in `flow/mean_velocity.py`)
+    `split` / `forced` in `flow/drive.py`, and `solve.bordered_preconditioner`, given the drive as its
+    `ScalarBorder`)
     reused in the coupled `[flow…, k, ω]` layout by `MassFlow.constraint_vectors_in` — the same Schur
     elimination one careful place keeps consistent, not re-derived. What is being held, and along which
     axis, is read off `coupled.momentum.drive`, so the constraint the step enforces and the force the
@@ -2098,7 +2096,14 @@ tuning follow-up noted above.
 - **`ViscosityRampHomotopy` — the SAME Reynolds span walked inside ONE march (`reynolds.py`, BUILT
   2026-09-09).** The `ResidualHomotopy` alternative to the rung ladder below: `stations` geometric
   viscosity stations from `anchor` down to exactly `1.0`, each held for `steps_per_station` outer steps,
-  handed to `solve_coupled(homotopy=…)`. What it removes is measured in
+  handed to `solve_coupled(homotopy=…)`. ⚠️ **Since 2026-10-11 the stations come from a
+  `solve.RampSchedule` (`ViscosityRampHomotopy(coupled, anchor=, ramp=RampSchedule(stations,
+  steps_per_station, end_when=, finish=))`, the same `ramp=` on `solve_reynolds_ramp`)**: there are no
+  `stations`/`steps_per_station` keywords and no `ramp_steps` property on the homotopy any more (the
+  latter is `RampSchedule.ramp_steps`), `scale(progress)` takes the schedule's progress rather than a
+  station index, and steps must be entered in order (`enter(step, previous)`). The schedule may END the
+  ramp on the march's settle (`solve-march.md`, `RampSchedule`); a fixed schedule walks exactly the
+  stations it always did. What it removes is measured in
   `.claude/rules/solve-march.md`'s `ResidualHomotopy` bullet — read the numbers there rather than
   restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
   viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
@@ -2148,6 +2153,15 @@ tuning follow-up noted above.
       the outer-step index and is never handed the state, the residual or a `StepReport`. Widening it is
       a design change, and the fine-ramp result says the answer is small stations rather than a clever
       rule for leaving one.
+    - **⚠️ THE OPTIMUM ABOVE WAS MEASURED AT `grow` 1.5, AND THE STATION COUNT IS THE SHIFT'S DESCENT IN
+      DISGUISE (measured 2026-10-11, with the shift released).** `beta` takes 12 steps to reach the floor
+      at `grow` 1.5, which is where the optimum sits; at `grow` 3 it takes 7, and `3 x 12` costs **111**
+      cycles in 16 steps against `1.5 x 16`'s 141 in 22. The viscosity step size does not move `alpha`
+      (identical histories at 1.33x and 2x per step); what is conserved is 6-9 steps AT the floor before
+      the state settles (at those paces: at 1.21x per step it settled at the 4th), and the cheapest ramp ends one step after that. Table and the design it closes
+      in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
+      **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11**; bfs3d keeps its own
+      schedule (#678).
   - **⚠️ THE PRECONDITIONER IS REFRESHED PER STATION CHANGE, AND THAT IS CORRECT — but "a full rebuild is
     the most expensive operation in the march" is REFUTED on this case.** Measured, a full
     re-materialize is **1.2-1.6 s** against a **~9 s** outer step. A control arm isolates it: `4 x 3` with
@@ -2482,7 +2496,10 @@ tuning follow-up noted above.
                 calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
                 calibrated at one station count does not transfer to another.
               - **⚠️ THE TWO CASES WANT OPPOSITE SCHEDULES, AND THE DISCRIMINATOR IS THE REBUILD COST.**
-                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily **16 at `gamma = 3`**. Swept on
+                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily shipped **16 at `gamma = 3`** at the
+                control's `grow` 1.5 (since 2026-10-11 it ships 12 at `gamma = 3` with `grow` 3 and the
+                release, which is a different optimum for a different reason: the "station count is the
+                shift's descent" entry under the ramp). Swept on
                 pitzDaily under momentum-only scaling, one run per arm, all reaching `x_r/h` 8.0686:
 
                 | stations | gamma | steps | cycles | ramp | target | pc | march |
@@ -2578,7 +2595,7 @@ tuning follow-up noted above.
     rung structure was originally calibrated — and it does not: the ramp is 31 % cheaper there
     (240 against 349 cycles at both-blocks scaling, 190 at momentum-only, 148 with that case's damping
     optimum). **Still one run per arm on each case.** `bfs3d` additionally defaults to
-    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily still defaults to `both`. The
+    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily does too (`scale: flow` in its `case.yaml`). The
     defaults are configured with
     `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
     ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it

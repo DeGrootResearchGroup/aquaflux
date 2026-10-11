@@ -5,7 +5,7 @@ paths:
 
 # Rules — `aquaflux/flow/` (coupled pressure–velocity)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > ⚠️ **`BlockPreconditioner.build(velocity=…)` takes a value, not a string (2026-09-14, #390).** `"smoothed"` → `ViscousMultilevel()`, `"convection"` → `ConvectionTwoLevel()`, `"convection-air"` → `ConvectionAir()`; a string is refused. `SmoothedAmgConvectionVelocity` is split into `TwoLevelConvectionVelocity` / `AirConvectionVelocity`, and `_build_velocity_block` is gone (each value has a private `_build`). `VelocityBlock` and `_ConvectionVelocityBlock` are **abstract** (`abc`), and `SettingsValue.__new__` refuses them at construction naming the three values — an `isinstance` check alone let a bare base through to a late, empty `NotImplementedError` after the pressure Schur was built (review of PR #398). Entries below quoting the strings are dated history.
 
@@ -498,7 +498,8 @@ Engineering Principles.
   state)`, written once (#158).** `bulk_velocity_flow_solve` and `reused_flow_solve` both return one,
   so either is handed to `solve_segregated` as it stands; `reused_flow_solve` returned the state alone
   until 2026-10-10, which broke the case runner's `Segregated` path (see `turbulence.md`'s seam entry).
-  Not exported: it is an annotation, imported from `aquaflux.flow.drive`.
+  Exported from `aquaflux.flow` (#284): it is the seam a caller's own flow solve implements, and
+  `turbulence/driver.py` names it in an annotation.
 - **Bulk-velocity constraint — BUILT (`flow/mean_velocity.py`, `bulk_velocity_flow_solve`).** A
   streamwise-periodic channel is driven to a target **bulk velocity** `U_bar` by making the body force
   `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with
@@ -521,11 +522,13 @@ Engineering Principles.
   with no controller. The **proportional mass-flow controller in `solve_segregated` was DELETED** (its
   `bulk_velocity_target`/`bulk_velocity_gain`/`flow_direction` args gone); the driver's flow-solve seam
   is now `solve_flow(momentum, state) → (momentum, state)`.
-  - **Preconditioning the augmented system — constraint preconditioning (`_bordered_preconditioner`).**
+  - **Preconditioning the augmented system — constraint preconditioning (`solve.bordered_preconditioner`;
+    it was the private `mean_velocity._bordered_preconditioner` until #284 moved it to `solve/bordered.py`,
+    since it is Schur elimination over a factory and two vectors and names no flow quantity).**
     β is a multiplier, not a function of `w`, so — unlike a nested gradient sub-solve, which AD absorbs
     into the outer Jacobian — the border cannot be absorbed inside the residual; it is eliminated one
     layer down, **in the preconditioner**. Given the flow block preconditioner `M ≈ J⁻¹` (the block-
-    SIMPLE AMG `BlockPreconditioner.factory()`), `_bordered_preconditioner(M, a, c)` returns a
+    SIMPLE AMG `BlockPreconditioner.factory()`), `bordered_preconditioner(M, drive, fields, a, c)` returns a
     preconditioner for the `(dim+1)·n_cells + 1` augmented system that Schur-eliminates the scalar β:
     `y = M·r_flow`, `dβ = (cᵀy − r_β)/(cᵀMa)`, `dw = y − dβ·(Ma)` — one flow-preconditioner apply plus
     O(n) dots per augmented Krylov iteration, exact when `M = J⁻¹` (converges in one step), inheriting
@@ -538,7 +541,8 @@ Engineering Principles.
     called with — a tracer captured into the (non-differentiated) preconditioner breaks `jax.grad`
     ("no constant handler" / closed-over-value). Pinned by `test_mean_velocity.py`: with an exact `M` the
     bordered preconditioner is exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the
-    block-preconditioned GMRES augmented solve lands on the direct solve's answer.
+    block-preconditioned GMRES augmented solve lands on the direct solve's answer. The elimination itself
+    is pinned mesh-free in `test_bordered_preconditioner.py`, with the border at either end.
   - **The solve is reverse-differentiable in `momentum` (#127).** The assembler is threaded as the Newton
     **`theta`** (not captured in the residual closure), so the IFT adjoint returns its cotangent —
     `jax.grad` of an objective through the solve gives e.g. `d/dμ` (verified vs finite differences and the
@@ -553,7 +557,7 @@ Engineering Principles.
   recovered; initial-force-independent; the preconditioner and gradient tests above).
   - **The same primitives border the monolithic coupled RANS solve (#128).** `MassFlow`'s own
     `constraint_vectors` / `join` / `split` / `forced` / `bulk_velocity`, plus
-    `mean_velocity._bordered_preconditioner`, are what `turbulence/coupled.py::solve_coupled_mass_flow`
+    `solve.bordered_preconditioner` (given the drive as its `ScalarBorder`), are what `turbulence/coupled.py::solve_coupled_mass_flow`
     uses to append `β` to the *coupled* `[flow…, k, ω]` state and Schur-eliminate it in the coupled
     preconditioner — so the bulk-velocity constraint is enforced by the same one place whether the
     forward solve is segregated (this flow-block solve) or monolithic. Do not re-derive the border
@@ -818,7 +822,7 @@ a control for a solver question: the control had to run on a weaker driver.
   continuity block starts ~0 and every later step reads as an enormous relative increase. Measured
   2026-09-19 on the 24 x 16 channel at Re 200 (`FirstOrderUpwind`, `CompactGreenGauss`, block-SIMPLE
   defaults): from rest it converges in 10 steps. The default `RowScaled()` has no such sensitivity.
-- **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2), with a PETSc-free inverse (stage 4).** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed() | CompleteLu() | MonolithicVCycle()))`, or a session from `open_flow_session`. **Use `SimpleSmoothed`**: the traced JAX pressure-velocity hierarchy over the whole `(u, p)` state (`solve.MaterializedBlockPreconditioner`, `solve/block_preconditioner.py`), which needs no optional dependency — `MonolithicVCycle` is PETSc GAMG and needs `petsc4py`, which is what the traced hierarchies exist to avoid (GPU). `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused and a bare block inverse is allowed — the mirror of the coupled problem, which refuses the bare block), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` takes the assembler first and an optional block preconditioner. **Measured 2026-09-19** on the 24 x 16 plane channel, Re 200 (`mu` 5e-3, `FirstOrderUpwind`, `CompactGreenGauss`), dual-time `inner_steps=3`, `RowScaled`, `rtol=0, atol=1e-9`, CPU, default `SimpleSmoothed()` settings, one run each: block-SIMPLE 17 steps / 51 restart cycles / 11.1 s; `CompleteLu(scipy)` 17 / 51 / 5.6 s; `SimpleSmoothed` **17 / 61 / 6.1 s** — the same trajectory, ~20 % more cycles than an exact factorization, on a 384-cell mesh where the wall clock says little. **Not measured**: a larger or 3D laminar case, or a low-shift state; `MonolithicVCycle` is untested (CI has no `petsc4py`). `solve_flow_march` still has no `mass_flow` (bulk-velocity) form.
+- **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2), with a traced inverse (stage 4).** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed()))`, or a session from `open_flow_session` (a `CompleteLu()` inverse existed until 2026-10-11; the measurements below that name it were taken while it did). **Use `SimpleSmoothed`**: the traced JAX pressure-velocity hierarchy over the whole `(u, p)` state (`solve.block_preconditioner.MaterializedBlockPreconditioner`, `solve/block_preconditioner.py`), the traced kind the hierarchies exist to provide (GPU). (A PETSc `MonolithicVCycle` arm existed beside it until PETSc was removed, 2026-10-10.) `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused and a bare block inverse is allowed — the mirror of the coupled problem, which refuses the bare block), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` takes the assembler first and an optional block preconditioner. **Measured 2026-09-19** on the 24 x 16 plane channel, Re 200 (`mu` 5e-3, `FirstOrderUpwind`, `CompactGreenGauss`), dual-time `inner_steps=3`, `RowScaled`, `rtol=0, atol=1e-9`, CPU, default `SimpleSmoothed()` settings, one run each: block-SIMPLE 17 steps / 51 restart cycles / 11.1 s; `CompleteLu(scipy)` 17 / 51 / 5.6 s; `SimpleSmoothed` **17 / 61 / 6.1 s** — the same trajectory, ~20 % more cycles than an exact factorization, on a 384-cell mesh where the wall clock says little. **Not measured**: a larger or 3D laminar case, or a low-shift state. `solve_flow_march` still has no `mass_flow` (bulk-velocity) form.
 - **The issue's motivating case (the Re_Dh 50 tetrahedral duct), re-run 2026-09-20 on this march**
   (`validation/tetrahedral_gradient_ab/laminar_duct_march.py`; 2462 tetrahedra, unit density and inlet
   speed, mu 5e-4, `FirstOrderUpwind`, `CorrectedGreenGauss` at its default sweeps, one run per arm, 60-step

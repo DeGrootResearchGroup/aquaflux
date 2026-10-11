@@ -43,15 +43,11 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
-    FieldGroups,
-    MonolithicVCyclePreconditioner,
-    block_stencil_gather_map,
-    build_convection_hierarchy,
-)
+from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy,)
+from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
-from aquaflux.solve import frozen_shift_diagonal
+from aquaflux.solve.materialized_session import (frozen_shift_diagonal,)
 from field_split_probe import FLOOR, STATES, load_state, materialize  # noqa: E402
 
 #: Below this the 2x2 is called singular. The blocks are compared on their own scale (the determinant
@@ -146,7 +142,7 @@ def main() -> None:
         ("preconditioner floor -- the shipped build", max(march_beta, FLOOR)),
     ):
         shift = frozen_shift_diagonal(base, beta, state) if beta > 0 else np.zeros(groups.n_dofs)
-        shifted = MonolithicVCyclePreconditioner._shifted(jacobian, shift)
+        shifted = MaterializedJacobianPreconditioner._shifted(jacobian, shift)
         trailing = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])
         report(cell_blocks(trailing, n_cells), f"[k, omega] slice, {label} (beta {beta:g})")
         # The decisive question is not what the diagonal looks like but whether the builder ACCEPTS it:

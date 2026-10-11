@@ -71,7 +71,15 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import CompleteLu, Convergence, DualTimeLoop, MaterializedJacobian, RetryPolicy
+from aquaflux.solve import (
+    Convergence,
+    DualTimeLoop,
+    FieldSplit,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    RetryPolicy,
+    SimpleSmoothed,
+)
 from aquaflux.turbulence import (
     CoupledRANS,
     SSTModel,
@@ -101,7 +109,6 @@ ANCHOR_RTOL = 0.01  # the anchor rung only needs to be a good enough seed for th
 RATIO = 10.0  # anchor viscosity = target x RATIO (Reynolds number / RATIO)
 INNER_STEPS, INNER_TOL = 5, 1e-2
 
-BACKEND = "scipy"  # always available (no petsc4py needed); exact regardless of backend
 
 #: Escalate the pseudo-time shift when a step's line search collapses (alpha < 0.01) -- the default
 #: RetryPolicy has `on_alpha=None`, i.e. NO escalation trigger at all, and a step stalled at alpha=0
@@ -299,7 +306,7 @@ def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
         )
 
     started = time.perf_counter()
-    preconditioner = MaterializedJacobian(CompleteLu(backend=BACKEND))
+    preconditioner = MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
     dual_time = DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL)
     try:
         # A manual two-point ramp (anchor at Re/RATIO, then the target) rather than

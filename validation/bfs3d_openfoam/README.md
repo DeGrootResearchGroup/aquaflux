@@ -61,8 +61,8 @@ Measured on this case against the otherwise-identical monolithic V-cycle:
 **Note the cycle count moves the wrong way and the solve is still much faster.** Two smaller V-cycles
 plus one sparse coupling product apply far more cheaply than one six-field V-cycle, so the split buys
 more cycles at a lower price per cycle. A cycle count is only a fair proxy for cost between candidates
-that share a per-application cost; once the preconditioner's shape changes it stops being one. Set
-`BFS3D_FIELD_SPLIT=0` to run the monolithic arm.
+that share a per-application cost; once the preconditioner's shape changes it stops being one. The
+monolithic arm was PETSc's multigrid, which the library no longer has, so it cannot be re-run.
 
 ### …and the two halves are smoothed differently
 
@@ -141,9 +141,11 @@ each other's residuals for the first few steps, because the operator is identica
 step one, which was visible in the logs the whole time. `march_log_compare.py` reports exactly this —
 per-rung counts for one run, and for two runs the first step at which their residuals part.
 
-The 2D cases run on a factorization of the coupled Jacobian; in 3D that factorization is the wall. On this
-mesh the assembled coupled Jacobian has ≈ 38.7 million nonzeros (≈ 280 per row), and a single incomplete-LU
-factorization at the usual fill runs for many minutes. The **algebraic-multigrid V-cycle** instead keeps the
+The 2D cases can run on a factorization of the coupled Jacobian; in 3D that factorization is the wall. On
+this mesh the assembled coupled Jacobian has ≈ 38.7 million nonzeros (≈ 280 per row), and a single
+incomplete-LU factorization at the usual fill runs for many minutes. **What follows describes the monolithic
+PETSc V-cycle this case first ran on, which was removed with the PETSc dependency; the case now runs the
+traced field split above.** The **algebraic-multigrid V-cycle** instead kept the
 heavy fill on only the small coarsest grid — a **direct-LU coarse solve** — so its memory stays bounded and
 its setup is a matter of seconds. It is one V-cycle (a fixed linear operator), applied inside the coupled
 Newton's Krylov solve; a stationary **zero-fill** incomplete-LU level smoother reaches the solve
@@ -151,8 +153,7 @@ tolerance on the indefinite saddle, where adding fill is what fails — a level-
 negative pivots as the pseudo-transient shift falls and diverges at the low shifts this march's tail
 runs at. Because it is a fixed linear operator it is also
 transposable, so the exact coupled adjoint (the point of a differentiable solver) reuses its transpose
-V-cycle — verified against finite differences on a channel case
-(`tests/integration/test_coupled_amg.py`). It needs the optional `petsc` dependency (`pip install aquaflux[petsc]`).
+V-cycle — verified against finite differences on a channel case at the time.
 
 ## The k-positivity cap is doing globalization work here, and the per-cell clip removes it
 
@@ -253,18 +254,6 @@ closure.
   residuals part. That last number is the check that a pair of arms differs in one thing only; runs that
   should share an operator and separate at step one are not a controlled comparison, however well their
   totals line up.
-- `zero_pattern_pivots.py` — what the preconditioner's sparsity pattern actually contains at **zero
-  pseudo-transient shift**, and the incomplete-LU pivots it produces. Zero shift is the operator the
-  adjoint solves, so every gradient goes through it, and no Newton step ever visits it (the march floors
-  its preconditioner at a positive shift) — which is why it needs a harness of its own rather than a march.
-  It sweeps the probing reach against how the shift and the equilibration are written, since both decide
-  whether the assembler's stored *exactly-zero* positions survive into the factorization, and reports the
-  pattern per `(row field, column field)` block, the pivot census, the hierarchy shape, and the true
-  residual through GMRES. Both spellings are implemented in the harness rather than imported, so an arm
-  describes the spelling and not whichever version of the library is checked out, and the arms are
-  fingerprinted over their nonzero entries so a comparison whose arms differ in their *values* cannot be
-  mistaken for one that differs only in pattern. `BFS3D_CENSUS_ONLY=1` skips the solves when the pattern
-  and the factorization answer the question on their own.
 - `step_policy_replay.py` — pre-screens candidate step-control policies against those same archived logs,
   in milliseconds rather than in 35–50-minute marches. The rule that sets the shift strength β is
   arithmetic over three recorded numbers per step (the accepted step length, the steady residual, and the
@@ -338,7 +327,7 @@ cd validation/bfs3d_openfoam
 docker run --rm -v "$PWD":/work -w /work/of_case openfoam13:latest bash run_of.sh
 docker run --rm -v "$PWD":/work -w /work/of_transient openfoam13:latest bash run_transient.sh
 
-# 2. aquaflux coupled solve + comparison (from the repo root; needs the `petsc` extra)
+# 2. aquaflux coupled solve + comparison (from the repo root)
 cd ../..
 python3 validation/bfs3d_openfoam/compare.py
 ```

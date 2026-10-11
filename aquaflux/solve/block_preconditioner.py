@@ -7,8 +7,7 @@ inverse over the entire materialized Jacobian. :class:`MaterializedBlockPrecondi
 the coloured-probe materialization, the shift and the in-place refresh the split shares
 (:class:`~aquaflux.solve.MaterializedJacobianPreconditioner`), around one injected block inverse.
 
-The inverse is the traced hierarchy family (:mod:`~aquaflux.solve.hierarchy_inverse`), so this needs no
-optional dependency, unlike the monolithic V-cycle, which is PETSc's multigrid.
+The inverse is the traced hierarchy family (:mod:`~aquaflux.solve.hierarchy_inverse`).
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ from collections.abc import Callable
 import numpy as np
 import scipy.sparse as sp
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner
 from .host_preconditioner import FrozenInverse
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .sparse_jacobian import ProbeGather
 
 __all__ = ["MaterializedBlockPreconditioner"]

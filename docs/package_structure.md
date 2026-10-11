@@ -13,7 +13,7 @@ excluded from the built site (`conf.py` `exclude_patterns`).
 cfd/                                  # repo root
 ├── README.md                         # public overview, install, examples
 ├── CLAUDE.md                         # contributor briefing + engineering principles
-├── pyproject.toml                    # build, deps, extras (lint/test/docs/petsc), ruff + pytest config
+├── pyproject.toml                    # build, deps, extras (lint/test/docs/cad/ui), ruff + pytest config
 ├── .readthedocs.yaml                 # Read the Docs build (fail_on_warning: any warning fails)
 ├── .github/workflows/ci.yml          # ruff + codespell gate, sharded unit/integration tiers
 ├── .githooks/pre-push                # local ruff + spelling gate (enable: git config core.hooksPath .githooks)
@@ -143,6 +143,7 @@ cfd/                                  # repo root
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
 │   │   ├── implicit.py               #   RootSolver: Newton to convergence on stopped inputs (marching with newton_march), differentiable through the root it reaches; assembler_residual
 │   │   ├── root_adjoint.py           #   root_adjoint: the implicit-function-theorem adjoint (one transpose solve) attached to a root found by any means
+│   │   ├── bordered.py               #   bordered_preconditioner + ScalarBorder: a preconditioner extended to the system bordered by one scalar unknown (Schur elimination)
 │   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres, residual_stop_gmres
 │   │   ├── norm.py                   #   ResidualNorm → BlockScaledNorm / RowScaledNorm: the convergence and globalization measures
 │   │   ├── march.py                  #   newton_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
@@ -158,8 +159,7 @@ cfd/                                  # repo root
 │   │   ├── line_search_growth.py     #   LineSearchGrowth: how much the residual may grow and still be accepted
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
 │   │   ├── frozen_operator.py        #   ConvectionDiffusionStencil / decouple_dof: the one description of the frozen operator every AMG consumer coarsens
-│   │   ├── amg_preconditioner.py     #   MonolithicVCyclePreconditioner for the coupled saddle-point solve
-│   │   ├── lu_preconditioner.py      #   CompleteLuPreconditioner (complete sparse LU)
+│   │   ├── materialized_preconditioner.py #   MaterializedJacobianPreconditioner: the probe, shift and refresh every materialized-Jacobian preconditioner shares
 │   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + FieldSplitInverse: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation

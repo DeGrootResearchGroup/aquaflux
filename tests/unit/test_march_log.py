@@ -20,8 +20,10 @@ from aquaflux.solve import (
     MarchLogger,
     RefreshTiming,
     StepReport,
-    combine_metrics,
     field_change_metrics,
+)
+from aquaflux.solve.march_log import (
+    combine_metrics,
 )
 
 
@@ -409,6 +411,22 @@ def test_a_field_that_was_identically_zero_reports_nan_rather_than_dividing() ->
     metric([0.0, 0.0])
 
     assert math.isnan(metric([1.0, 1.0])["k"])
+
+
+def test_each_step_row_shows_how_far_its_full_step_was_from_being_taken() -> None:
+    """``rho1`` is the report's own full-step ratio, and a step that measured none says ``nan``.
+
+    Next to ``a_min``, which reads 0.500 for both of these steps, it is what tells a full step that
+    missed by 4 % from one that missed by a factor of two.
+    """
+    logger, buffer = _log()
+    logger.on_step(_report(alpha=0.5, full_step_ratio=1.04))
+    logger.on_step(_report(alpha=0.5, full_step_ratio=2.0))
+    logger.on_step(_report())
+
+    rows = _step_rows(buffer)
+    assert [row["rho1"] for row in rows] == ["1.04", "2.00", "nan"]
+    assert [row["a_min"] for row in rows] == ["0.500", "0.500", "1.000"]
 
 
 def test_the_grid_stays_narrow_whatever_is_switched_on() -> None:

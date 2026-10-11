@@ -7,15 +7,12 @@ from:
   for each of ``k`` and ``omega``, assembled from the transport operators without materializing a
   Jacobian;
 * :class:`MaterializedJacobian` -- the coupled Jacobian materialized by coloured probing, and inverted
-  by one of a complete LU (:class:`CompleteLu`), a single multigrid V-cycle over all fields
-  (:class:`MonolithicVCycle`), or a block-triangular field split with a separate inverse for the
-  velocity-pressure saddle and for the transported scalars (:class:`FieldSplit`).
+  by a block-triangular field split with a separate inverse for the velocity-pressure saddle and for the
+  transported scalars (:class:`FieldSplit`).
 
-The three materialized inverses share everything but the inverse: how the Jacobian is probed, the shift
-the first build is fitted at, and the floor its refresh is held above. So they are one family with a
-nested choice rather than three families that each restate those settings, which is also what keeps a
-setting from being accepted by one inverse and silently ignored by another -- a monolithic smoother
-setting cannot be written beside a field split, because there is nowhere to write it.
+The materialized family keeps the inverse as a nested choice, beside the settings every inverse shares:
+how the Jacobian is probed, the shift the first build is fitted at, and the floor its refresh is held
+above.
 
 Every field defaults to ``None``, meaning "not set here" (see :class:`~aquaflux.solve.SettingsValue`),
 so a spec changes the settings it names and leaves every other one at the default of the class that

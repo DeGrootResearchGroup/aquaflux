@@ -50,6 +50,7 @@ from aquaflux.solve import (
     JacobiSmoothed,
     LinearSolveSettings,
     MaterializedJacobian,
+    RampSchedule,
     Resumption,
     RetryPolicy,
     RootSolveSettings,
@@ -258,7 +259,7 @@ def test_a_solver_section_is_written_as_plain_data_and_read_back_equal() -> None
                 }
             ),
             ValueError,
-            r"ViscosityRamp.stations must be >= 1, got 0",
+            r"ViscosityRamp: stations must be >= 1, got 0",
         ),
         (
             _sections(
@@ -273,7 +274,7 @@ def test_a_solver_section_is_written_as_plain_data_and_read_back_equal() -> None
                 }
             ),
             ValueError,
-            r"ViscosityRamp.steps_per_station must be >= 1, got 0",
+            r"ViscosityRamp: steps_per_station must be >= 1, got 0",
         ),
         (
             _sections(
@@ -334,6 +335,56 @@ def test_a_solver_section_is_written_as_plain_data_and_read_back_equal() -> None
             ValueError,
             r"unknown kind 'CflControl' at 'solver.step_control'",
         ),
+        (
+            _sections(
+                solver={
+                    "kind": "CoupledMarch",
+                    "continuation": {
+                        "kind": "ViscosityRamp",
+                        "anchor": 10.0,
+                        "stations": 4,
+                        "steps_per_station": 1,
+                        "end": "settled",
+                    },
+                }
+            ),
+            ValueError,
+            r"ends when the march has settled needs a step_control",
+        ),
+        (
+            _sections(
+                solver={
+                    "kind": "CoupledMarch",
+                    "step_control": {"kind": "CflResidualDualTimeControl"},
+                    "continuation": {
+                        "kind": "ViscosityRamp",
+                        "anchor": 10.0,
+                        "stations": 4,
+                        "steps_per_station": 1,
+                        "finish": 3,
+                    },
+                }
+            ),
+            ValueError,
+            r"ViscosityRamp: finish .* has nothing to end it",
+        ),
+        (
+            _sections(
+                solver={
+                    "kind": "CoupledMarch",
+                    "step_control": {"kind": "CflResidualDualTimeControl"},
+                    "continuation": {
+                        "kind": "ViscosityRamp",
+                        "anchor": 10.0,
+                        "stations": 4,
+                        "steps_per_station": 2,
+                        "end": "settled",
+                    },
+                }
+            ),
+            ValueError,
+            r"ViscosityRamp: .* would cut a station short",
+        ),
     ],
     ids=[
         "coupled-march-for-a-laminar-case",
@@ -350,6 +401,9 @@ def test_a_solver_section_is_written_as_plain_data_and_read_back_equal() -> None
         "retry-solver-with-no-tolerance",
         "retry-solver-with-no-restart",
         "step-control-misspelt",
+        "ramp-ending-on-the-settle-with-no-step-control",
+        "ramp-finish-with-nothing-to-end-it",
+        "ramp-ending-on-the-settle-at-two-steps-per-station",
     ],
 )
 def test_a_solver_that_cannot_solve_the_case_is_refused_when_the_file_is_read(
@@ -473,6 +527,23 @@ def test_a_coupled_march_hands_solve_coupled_its_settings_and_nothing_it_leaves_
     assert recorded.solve_reynolds_ramp.calls == []
 
 
+def test_a_ramp_ending_on_the_settle_ends_on_the_marchs_own_controls_settle(recorded) -> None:
+    """The schedule the ramp is handed ends on the very control the march runs -- one "settled".
+
+    A ramp reading another control's test, or one the file's ``finish`` did not reach, would end at a
+    different step from the one the release keys on.
+    """
+    control = CflResidualDualTimeControl(beta_start=0.5, beta_min=0.005, grow=3.0)
+    ramp = ViscosityRamp(anchor=50.0, stations=6, steps_per_station=1, end="settled", finish=3)
+
+    CoupledMarch(step_control=control, continuation=ramp).solve("problem")
+
+    ((_args, kwargs),) = recorded.solve_reynolds_ramp.calls
+    schedule = kwargs["ramp"]
+    assert schedule == RampSchedule(6, 1, end_when=control.settled, finish=3)
+    assert schedule.end_when.__self__ is kwargs["step_control"]
+
+
 def test_a_continuation_runs_the_ramp_with_its_own_settings_beside_the_marchs(recorded) -> None:
     ramp = ViscosityRamp(anchor=50.0, stations=6, steps_per_station=2, scale="flow", redamping=1.5)
     CoupledMarch(max_steps=9, continuation=ramp).solve("problem")
@@ -482,8 +553,7 @@ def test_a_continuation_runs_the_ramp_with_its_own_settings_beside_the_marchs(re
     assert point_setup("companion", "state", "point") == {}
     assert kwargs == {
         "anchor": 50.0,
-        "stations": 6,
-        "steps_per_station": 2,
+        "ramp": RampSchedule(6, 2),
         "redamping": 1.5,
         "companion": scale_momentum_only,
         "max_steps": 9,
@@ -691,13 +761,16 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 0.0,
         "positivity_projection": True,
+        # The faster shift descent and its release once the target has settled, the case's own since
+        # the script stopped building its march.
         "step_control": CflResidualDualTimeControl(
             beta_start=0.5,
             beta_min=0.005,
-            grow=1.5,
+            grow=3.0,
             backoff=2.0,
             grow_above=0.5,
             backoff_below=0.25,
+            release_floor=1e-4,
         ),
         "retry": RetryPolicy(
             solver=GmresSolve(1e-4, restart=40),
@@ -709,8 +782,7 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
     }
     ramp = {
         "anchor": 10.0**2,
-        "stations": 16,
-        "steps_per_station": 1,
+        "ramp": RampSchedule(12, 1),
         "companion": scale_momentum_only,
     }
     return settings, ramp
@@ -772,8 +844,7 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
     }
     ramp = {
         "anchor": 10.0**2,
-        "stations": 12,
-        "steps_per_station": 1,
+        "ramp": RampSchedule(12, 1),
         "companion": scale_momentum_only,
     }
     return settings, ramp

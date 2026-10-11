@@ -67,7 +67,7 @@ F frozen solver → G drive.
 | `restart_file.py` | the checkpoint file a case writes and reads: `RestartHeader` (physics, `n_cells`, `dim`, mesh digest, case digest, problem digest), `mesh_digest`, `checkpoint_writer`, `read_restart` → `RestartFile` (with `resumption`), `refuse_non_finite` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` |
 | `radiation.py` | the radiation vocabulary: `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`, `CadPlacement`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers`; the internal `PatchSurface`, `_Drawings`, `_facing` |
-| `paths.py` | `named_paths` / `with_paths` / `relocated`: every value naming a file declares `path_fields` (a `ClassVar`), found at any depth for the existence check; `relocated(value, source, target)` is THE re-basing rule (relative → re-based, absolute kept, `outputs.directory` never — it names no file), used by the `case.yaml` run record and `aquaflux write --relative-to` |
+| `paths.py` | `named_paths` / `with_paths` / `relocated`: every value naming a file declares `path_fields` (a `ClassVar`), found at any depth for the existence check; `relocated(value, source, target)` is THE re-basing rule (relative → re-based, absolute kept, `outputs.directory` never — it names no file), used by the `case.yaml` run record and `aquaflux write --relative-to`; `relocated` alone is exported from `aquaflux.case` (#284), since `__main__` reaches it across a package boundary |
 | `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, recorder)`, `refuse_initial(initial)` and `solve(problem, initial=..., resume=...)` |
 | `outputs.py` | `Outputs(directory, fields, log, history, checkpoints)`; `RunFields(cells, patches)`; `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`; `Checkpoints` |
 | `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord` |
@@ -300,9 +300,14 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   `Euclidean`), `DualTimeLoop`, `LinearSolveSettings`, the three dual-time controls (equinox modules are
   dataclasses; their float fields read), `RetryPolicy`, and every coupled-preconditioner kind via
   `turbulence.PRECONDITIONER_SPEC_MAPPING.kinds` (made public for this, so a kind added there reaches a
-  case file). Case-side values exist only where no library value fits: `ViscosityRamp` (the ramp's
-  arguments are loose keywords, and its `companion` is a function — `scale: flow|both` names
-  `scale_momentum_only` / `scale_both_blocks`), and `RootSolve` (`RootSolveSettings` holds `lineax`
+  case file). Case-side values exist only where no library value fits: `ViscosityRamp` (its
+  `companion` is a function — `scale: flow|both` names `scale_momentum_only` / `scale_both_blocks` —
+  and its end test is the march's own `step_control.settled`, which a file cannot state but can name:
+  `end: settled` with an optional `finish`, turned into a `solve.RampSchedule` by
+  `ViscosityRamp.schedule(step_control)`, the one place the file's ramp becomes the library's; the
+  pitzDaily harness's study path calls it too. `end` without a `step_control` is refused at read by
+  `CoupledMarch`, `finish` without `end` and `end` at more than one step per station by the schedule's
+  own checks, re-raised with the `ViscosityRamp:` prefix; added 2026-10-11, mutation-checked), and `RootSolve` (`RootSolveSettings` holds `lineax`
   solvers; `test_a_root_solve_states_every_setting_of_the_librarys_root_solve` pins the two field lists
   equal, so they cannot drift). `RetryPolicy.solver` became a `LinearSolverSpec` so that no case value was
   needed there (see `solve-globalization.md`).
@@ -385,9 +390,11 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   `results/history.csv`** (project owner, 2026-09-25; `history` added 2026-10-05 for the browser viewer's
   convergence plot). `history` is `solve.StepHistory` — one CSV row per step, every `StepReport` field
   at full precision, flushed per row, plus refits, retry reasons and the per-equation residuals (see
-  `solve-march.md`); the runner's `_StepCount` forwards each march hook to every recorder that has it
-  (`on_checkpoint` to the history and the checkpointer; `on_retry`, `on_refresh` and `on_residuals` to
-  the history). Its header is written with the first row, so under `Segregated` (no steps) it stays
+  `solve-march.md`); the runner's `_StepCount` forwards `on_checkpoint` to every recorder and the
+  other hooks to each that is a `solve.MarchRecorder` (`isinstance`, #669; the history is one, the
+  checkpointer is not). `SolverSpec.observers_for(logger, recorder)` types `recorder` as a
+  `MarchRecorder` and reads its hooks as attributes — no `getattr(recorder, name)`; a recorder missing
+  one now fails loudly rather than being skipped. Its header is written with the first row, so under `Segregated` (no steps) it stays
   empty. `log` and `history` may not name
   the same file. `Outputs` is a `default_factory` field, so a file stating none round-trips with no section.
   Like `fluid`/`numerics`, the section may omit its `kind`; nested values (`Checkpoints`, writers) may not.

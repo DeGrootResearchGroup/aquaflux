@@ -85,7 +85,6 @@ inside.
 | A scalar transport or diffusion equation | {func}`~aquaflux.turbulence.scalar_transport_preconditioner` | [Scalar transport](#scalar-transport) |
 | Pressure–velocity flow, on its own | {class}`~aquaflux.flow.BlockPreconditioner` | [Pressure–velocity flow](#pressurevelocity-flow) |
 | Coupled flow and turbulence (`u, v, w, p, k, ω`) | {class}`~aquaflux.solve.MaterializedJacobian` with a {class}`~aquaflux.solve.FieldSplit` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
-| The same coupled system, on a moderate 2D mesh | {class}`~aquaflux.solve.MaterializedJacobian` with a {class}`~aquaflux.solve.CompleteLu` | [A complete factorization](#a-complete-factorization) |
 | Your own linear system | {func}`~aquaflux.solve.solve_linear` | [Using one directly](#using-one-directly) |
 
 ## Scalar transport
@@ -313,12 +312,10 @@ A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses 
   solving at its own. It is not the march's own `beta_floor`, which bounds the shift the solve
   runs at.
 
-and its `inverse` chooses how the materialized matrix is inverted: a single
-{class}`~aquaflux.solve.MonolithicVCycle` over all six fields
-({class}`~aquaflux.solve.MonolithicVCyclePreconditioner`, equilibrated and reordered cell-major
-so each cell's six unknowns are adjacent, and taking the incomplete-factorization smoother's
-fill and sweeps), a {class}`~aquaflux.solve.FieldSplit`, or a
-{class}`~aquaflux.solve.CompleteLu`. To share one preconditioner across several solves —
+and its `inverse` chooses how the materialized matrix is inverted: a
+{class}`~aquaflux.solve.FieldSplit` for a problem with two groups of fields, such as coupled flow and
+turbulence, or one block inverse over the whole state for a problem with one.
+To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with
 {func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,
 build a frozen step with {func}`~aquaflux.turbulence.coupled_step` and pass it as
@@ -362,11 +359,11 @@ a field its class does not have, and a *value* the field cannot hold are each re
 path to the entry, so a misspelling is an error rather than a default in disguise:
 
 ```yaml
-inverse: {kind: CompleteLu, backend: umfpak}             # 'umfpak' at 'inverse.backend' is not
-                                                         # accepted there; CompleteLu.backend takes
-                                                         # one of 'auto', 'umfpack', 'scipy' or null
-inverse: {kind: MonolithicVCycle, smoother_sweeps: true}  # a boolean where a count belongs
-inverse: {kind: FieldSplit, leading: {kind: CompleteLu}}  # a kind that cannot go in that position
+inverse: {kind: SimpleSmoothed, prolongation_smoothing: jacobi}  # 'jacobi' at
+                                  # 'inverse.prolongation_smoothing' is not accepted there; it
+                                  # takes one of 'none', 'standard', 'symmetric-part' or null
+inverse: {kind: SimpleSmoothed, sweeps: true}             # a boolean where a count belongs
+inverse: {kind: FieldSplit, leading: {kind: JacobianProbeSpec}}  # a kind that cannot go there
 ```
 
 What each field accepts comes from its own declared type, so the reference page for a value is
@@ -436,19 +433,9 @@ and discards the other corner. Which corner is discarded is a real choice rather
 symmetry: on a coupled flow–turbulence system the turbulence equations depend on the flow
 far more strongly than the reverse, so that is the direction to keep.
 
-### A complete factorization
-
-A {class}`~aquaflux.solve.CompleteLu` inverse builds a
-{class}`~aquaflux.solve.CompleteLuPreconditioner` instead — a **complete** sparse LU of
-the coupled matrix. On a moderate 2D mesh this is the strongest option available and often
-the fastest overall, because it converges the linear solve in very few iterations. It does
-not scale: the factorization's fill grows quickly with mesh size, which is what the
-multigrid path exists to avoid. Use it where the mesh is small enough to afford it, and as
-a reference when you want to know how much of a slow solve is the preconditioner's fault.
-
 ## The pieces underneath
 
-The hierarchies and factorizations above are public in their own right, and can be built
+The hierarchies above are public in their own right, and can be built
 against any `scipy` sparse matrix.
 
 | Builder | Hierarchy |
@@ -496,8 +483,7 @@ shift falls, and that rise is not staleness.
 A {class}`~aquaflux.solve.MaterializedJacobian` preconditioner keeps itself current
 without a policy. Its session re-preconditions **in place**, so the compiled solve is reused
 rather than retraced: before the first step, after being pointed at a new case with `rebind`,
-before every step for a complete LU, and — once a single inner solve costs `refresh_on_cycles`
-restart cycles — mid-step. Open the session yourself to hear what each rebuild cost, through
+and — once a single inner solve costs `refresh_on_cycles` restart cycles — mid-step. Open the session yourself to hear what each rebuild cost, through
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts:
 
 ```python
@@ -517,9 +503,8 @@ A laminar flow takes the same preconditioner. {func}`~aquaflux.flow.solve_flow_m
 {class}`~aquaflux.solve.MaterializedJacobian` as its `preconditioner` (or a session from
 {func}`~aquaflux.flow.open_flow_session`). A `(u, p)` state is a single group of fields, so the
 pressure-velocity hierarchy {class}`~aquaflux.solve.SimpleSmoothed` inverts **the whole state** directly
--- traced JAX, no optional dependency, and the same inverse a field split uses for its saddle. A
-{class}`~aquaflux.solve.CompleteLu` also works, and a {class}`~aquaflux.solve.MonolithicVCycle` if PETSc
-is installed. A {class}`~aquaflux.solve.FieldSplit` is refused there, since there is nothing to split;
+-- traced JAX, and the same inverse a field split uses for its saddle. A
+{class}`~aquaflux.solve.FieldSplit` is refused there, since there is nothing to split;
 conversely a bare block inverse is refused for the coupled turbulence solve, which has two groups.
 
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.

@@ -407,8 +407,8 @@ def test_both_hierarchy_inverses_share_one_refresh_implementation() -> None:
 
 def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_parameters(groups) -> None:
     """#287: the split used to declare ``smoother_fill_levels``/``smoother_sweeps`` on its refresh and
-    immediately ``del`` them, purely because it shared a base with :class:`MonolithicVCyclePreconditioner`
-    (whose ``build`` genuinely reads them) and the two refresh signatures were forced to agree. Now that
+    immediately ``del`` them, purely because it shared a base with a monolithic multigrid preconditioner
+    (since deleted, whose ``build`` genuinely read them) and the two refresh signatures were forced to agree. Now that
     the shared base is :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which knows nothing
     about a smoother, the split's refresh does not take them -- passing either is a ``TypeError`` rather
     than a silent no-op. (Its ``build`` no longer takes them either: each block is fitted by an injected
@@ -437,7 +437,7 @@ def _two_field_transport(n_cells: int = 40, coupling: float = 30.0) -> sp.csr_ma
     return sp.bmat([[upwind, cross], [cross, upwind]], format="csr")
 
 
-def test_air_reduction_inverse_applies_transposes_and_refreshes_in_place() -> None:
+def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
     """The lAIR trailing inverse against the three things the field split requires of one.
 
     ``refactor_block`` is the one a single-state probe never reaches and a march depends on:

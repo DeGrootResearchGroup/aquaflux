@@ -773,11 +773,9 @@ def materialize_block_jacobian(
         **A stored exactly-zero entry is a fill slot for any incomplete factorization, so it must not reach
         one.** On this path the stored zeros are a large share of the pattern (8.0M of 47.2M on a 23k-cell
         three-dimensional coupled mesh), and handing them to the multigrid's incomplete-LU level smoother
-        stops the zero-shift operator converging. They are pruned at the boundary where the operator
-        reaches the factorization
-        (:meth:`~aquaflux.solve.amg_preconditioner.MonolithicVCycleInverse._live`) rather than here, so this path stays
-        fixed-pattern; a consumer that factors the matrix *without* going through that boundary must prune
-        it first.
+        stops the zero-shift operator converging. They are left in place here, so this path stays
+        fixed-pattern; a consumer that hands the matrix to an incomplete factorization must prune them
+        first.
 
     Returns
     -------

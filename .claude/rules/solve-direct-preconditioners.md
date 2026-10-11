@@ -1,13 +1,28 @@
 ---
 paths:
-  - "aquaflux/solve/lu_preconditioner.py"
   - "aquaflux/solve/sparse_jacobian.py"
   - "aquaflux/solve/host_preconditioner.py"
+  - "aquaflux/solve/materialized_preconditioner.py"
 ---
 
-# Rules — `aquaflux/solve/` direct preconditioners (complete-LU) and Jacobian materialization
+# Rules — `aquaflux/solve/` the frozen-host contract and Jacobian materialization (and the record of the deleted direct preconditioners)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **THE COMPLETE LU IS DELETED (2026-10-11), one day after PETSc took its UMFPACK backend and the
+> monolithic AMG (2026-10-10).** There is no `lu_preconditioner.py`, `CompleteLu`, `CompleteLuPreconditioner`,
+> `CompleteLuInverse`, `complete_lu_inverse`, `FACTORIZATION_LINEAR_SOLVE`, `BetaTrackingRefresh(every_step=)`,
+> `LU_BACKENDS` or `backend` anywhere; nor `amg_preconditioner.py`, `MonolithicVCyclePreconditioner`,
+> `MonolithicVCycleInverse`, `monolithic_vcycle_inverse` or `ShiftedCellMajorOperator`. What this file
+> still governs is live: the frozen-host contract (`host_preconditioner.py`: `FrozenInverse`,
+> `RefactorableInverse`, `ReleasableInverse`, `HostPreconditioner`), the shared materialized base
+> (`materialized_preconditioner.py`: `MaterializedJacobianPreconditioner`, whose subclasses are
+> `FieldSplitPreconditioner` and `MaterializedBlockPreconditioner`) and the coloured-probe Jacobian
+> (`sparse_jacobian.py`). **Every entry below that measures the complete LU, UMFPACK, a PETSc V-cycle or
+> the ILUT is dated history and cannot be re-run from this tree.** Why the LU was dominated, and the
+> evidence, is in `solve.md`'s "complete LU is GONE" section and in
+> `.claude/notes/solve-refuted-directions.md`; the LU tests' assertions live on in
+> `tests/integration/test_coupled_field_split.py`, ported onto the split.
+
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the
 > full complete-LU and coupled-Jacobian-materialization investigation narrative. See `solve.md` for
@@ -19,8 +34,8 @@ paths:
 > `solve-amg-multigrid.md`, and selected by no shipped case bundle.** `MonolithicIlutPreconditioner`,
 > `IlutFactors`, `factorize_ilut` and the coupled builders `coupled_ilut_continuation` /
 > `coupled_ilut_refreshing_continuation` / `ilut_beta_tracking_refresh` no longer exist; the shared
-> `_beta_tracking_refresh` skeleton (now the class `solve.BetaTrackingRefresh`) and `MonolithicFactorShiftPolicy` they used
-> serve only the complete LU and the algebraic multigrid. If you are looking for any of those symbols,
+> `_beta_tracking_refresh` skeleton (now the class `solve.materialized_session.BetaTrackingRefresh`) and `MonolithicFactorShiftPolicy` they used
+> now serve only the materialized-Jacobian multigrid inverses. If you are looking for any of those symbols,
 > they are gone rather than renamed — the code is in git history.
 >
 > **This file has no `-log.md` sibling yet — current facts and dated investigation entries sit
@@ -40,9 +55,9 @@ paths:
   They are the reorder half of one transform whose rescale half
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
-  the matrix both unit-diagonal and grouped by cell. Consumed by the multigrid V-cycle
-  (`amg_preconditioner.py`); the complete
-  LU needs neither (its own fill-reducing pivoting and ordering already handle the indefinite saddle).
+  the matrix both unit-diagonal and grouped by cell. Its library consumer was the deleted PETSc V-cycle;
+  it stays exported for the study harnesses (`cell_block_conditioning.py`, `column_reach_zero_pruning.py`,
+  `host_ilu_levels.py`) and its unit test, and is a deletion candidate if those go.
   - **Both are exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
     by study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
     take them from the package surface. The permutation's unit test moved with the function, into
@@ -50,20 +65,20 @@ paths:
 
 
 - **The host preconditioners share ONE application path and ONE declared contract —
-  `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The complete LU and the AMG V-cycle
+  `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The (since deleted) complete LU and the AMG V-cycle
   differ entirely in how the inverse is *fitted* and not at all in how it is *applied*, so
   `HostPreconditioner` owns `__init__` and `matvec()` and each subclass supplies only `build` /
   `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
   deliberately **not** unified behind a signature that would be the union of both.
   - **`FrozenInverse` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
-    That pair is a real structural contract satisfied by **five** classes — the complete-LU factors,
-    `MonolithicVCycleInverse`, `HierarchyBlockInverse` and both `FieldSplitInverse`s (two further members, the
-    monolithic ILUT and the Vanka smoother, have since been deleted, both dominated on every arm
-    measured) — and declared by none of them individually, so `matvec` would otherwise be written out
+    That pair is a real structural contract satisfied by `HierarchyBlockInverse` and both
+    `FieldSplitInverse`s (four further members — the complete-LU factors, the PETSc
+    `MonolithicVCycleInverse`, the monolithic ILUT and the Vanka smoother — have since been deleted) — and declared by none of them individually, so `matvec` would otherwise be written out
     once per class. `FieldSplitPreconditioner` used to obtain it by subclassing a *concrete sibling*,
     `MonolithicVCyclePreconditioner` — which is what let the `has_exact_solve` hazard below happen at all.
     **⚠️ That is fixed structurally (2026-09-11, #287): `MaterializedJacobianPreconditioner`
-    (`amg_preconditioner.py`) is now the shared base both preconditioners subclass**, holding only what
+    (now `materialized_preconditioner.py`; it was in the deleted `amg_preconditioner.py`) is the shared
+    base**, holding only what
     is genuinely common to fitting *any* inverse to the coloured-probe materialized coupled Jacobian
     (the probe itself, the shift-diagonal add, teardown) —
     `MonolithicVCyclePreconditioner` is no longer `FieldSplitPreconditioner`'s base, so it no longer
@@ -85,22 +100,20 @@ paths:
       field-major operator of the built shape. **One spelling across the family**: the split's
       `FieldSplitInverse.refactor` is renamed `refactor_block` (there is no `split.refactor`), so a
       split is itself refactorable and refreshes through the same path as a single block inverse.
-      `CompleteLuInverse` gained one too (it delegates to its backend), so the LU refresh no longer reaches
-      through `factors.backend.refactor`. `MonolithicVCycleInverse.refactor(cell_major, scale, perm)` is a DIFFERENT
-      signature (an equilibrated, reordered matrix) and is deliberately not this protocol;
-      `MonolithicVCyclePreconditioner` overrides the refresh for exactly that reason.
-    - **`ReleasableInverse`**: `destroy()`, with `release(inverse)` the one place that asks.
+      (The deleted `CompleteLuInverse` had one too, re-factoring its SuperLU factor afresh; the deleted PETSc
+      `MonolithicVCycleInverse.refactor(cell_major, scale, perm)` had a different signature and was deliberately not
+      this protocol.)
+    - **`ReleasableInverse`**: `destroy()`, with `release(factors)` the one place that asks.
       `HostPreconditioner.destroy()` calls it, so every family member releases its inverse. ⚠️ **Before
       this, `MaterializedJacobianPreconditioner.destroy` had an EMPTY body**, so destroying a
       `MonolithicVCyclePreconditioner` or a `FieldSplitPreconditioner` released nothing — only
       `MaterializedBlockPreconditioner` overrode it with a `getattr` probe. Every validation harness that
       calls `pc.destroy()` "to keep one preconditioner in memory at a time" was relying on a no-op.
-      `CompleteLuInverse` and its backends gained `destroy` (the PETSc backend frees its `KSP`/`Mat`).
     - **The traced capability is NOT here**: it is `OffersTracedCycle` / `TracedCycle` in
       `traced_cycle.py` (#665), which holds the hierarchy as array leaves. A `TracedFactors` /
       `apply_traced` protocol briefly existed on this PR's branch and was dropped in its merge with
       main; neither name exists.
-    - `require_refactorable(inverse, owner)` raises a `TypeError` naming the inverse; the split checks
+    - `require_refactorable(factors, owner)` raises a `TypeError` naming the inverse; the split checks
       BOTH blocks before re-fitting either, so a refusal never leaves it half re-fitted. A split also
       refuses a non-`FrozenInverse` block at construction (`TypeError`) rather than at first apply.
     - **The factory types say so**: `leading_inverse` / `trailing_inverse` / `inverse` are
@@ -110,14 +123,11 @@ paths:
     types), `test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything`, and the
     split's refit/atomicity tests in `test_field_split.py`; each was mutation-checked.
   - **`refresh_in_place` has ONE return type across the family (#281):** the `("probe", s),
-    ("assemble", s), ("refactor", s)` tuple. The LU refresh returned `None` and its one caller papered
-    over it with `... or ()`; it now times its own phases. **The SIGNATURE stays two shapes, by decision
-    (project owner, 2026-10-10, #281)** — LU takes `(matvec, plan, shift_diagonal)` and the materialized
-    family adds `batched_matvec`, `probe_batch_size`, `structure` — and the session picks the keywords by
-    `isinstance(pc, MaterializedJacobianPreconditioner)`, a declared class rather than a feature probe.
-    Do not unify it behind a union signature (LU accepting and ignoring the probe keywords): the split
-    follows the real difference in how each is materialized, which `HostPreconditioner`'s docstring
-    records.
+    ("assemble", s), ("refactor", s)` tuple. Its signature had two shapes while the complete LU existed
+    (the LU took no probe keywords, so the session chose them by
+    `isinstance(pc, MaterializedJacobianPreconditioner)`); with the LU deleted (2026-10-11) every refreshed
+    preconditioner is a `MaterializedJacobianPreconditioner` and the session passes `batched_matvec`,
+    `probe_batch_size` and `structure` unconditionally.
   - **The pseudo-transient shift has one home: `sparse_jacobian.shifted_jacobian`.** Every host
     preconditioner adds `β d` before factoring, and two spellings once disagreed: a pattern-preserving
     `setdiag` against `a + sp.diags(shift)` — the latter is wrong, since a sparse *addition* stores only
@@ -125,20 +135,20 @@ paths:
     kept. **Measured:** the two spellings are identical in values *and* pattern on a full
     diagonal and on a matrix with diagonal entries missing (both create them), and differ only where
     explicit zeros are stored — so adopting `setdiag` everywhere is a correctness fix in general. The
-    whole refactor is **bit-identical** end to end: a complete LU built and refreshed under both
-    implementations returns byte-equal `matvec` and transpose output.
+    whole refactor was **bit-identical** end to end, measured at the time on a complete LU (since deleted)
+    built and refreshed under both implementations: byte-equal `matvec` and transpose output.
 
 ## Materializing the coupled Jacobian (`sparse_jacobian.py`)
 
 **This section documents `sparse_jacobian.py`'s coloured-probe materialization of the coupled Jacobian —
-shared infrastructure consumed today by the complete LU and (mostly) by the monolithic algebraic
-multigrid.** It originally grew up beside the now-deleted monolithic ILUT (the alternative to the
+shared infrastructure consumed today by the materialized-Jacobian multigrid inverses (the field split
+and a bare block inverse).** It originally grew up beside the now-deleted monolithic ILUT (the alternative to the
 block-triangular SIMPLE preconditioner for the coupled saddle, which formed the true Schur coupling
 `B F⁻¹ G` through its incomplete-LU fill rather than approximating it); that preconditioner is gone
 (dominated by the complete LU at 2D and by the algebraic multigrid at 3D, per its own docstring and per
 the "nothing selects the monolithic ILUT or complete LU for the adjoint" finding in
 `solve-amg-multigrid.md`), but the Jacobian-materialization machinery below did not go with it — the
-complete LU and the AMG's coloured probe both still depend on it.
+coloured probe still depends on it (as the complete LU did until it was deleted, 2026-10-11).
 
 - **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
     (no re-derived assembly): `block_stencil_colouring(owner, nb, n, reach)` (pure NumPy — the cell-block
@@ -1156,7 +1166,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       there — are not.
     - **Materialize efficiency — two shipped speedups, both AMG-path-only, bit-identical (BUILT).** The
       probe dominates a refresh, so `materialize_block_jacobian` takes two optional accelerators the AMG
-      preconditioner passes (the complete LU keeps the plain loop, which any NumPy matvec supports). **(1) Batched
+      preconditioner passes (the deleted complete LU kept the plain loop). **(1) Batched
       probing** — `batched_matvec` (a `jax.vmap` of the jvp, **built once and reused** so it compiles a
       single time; `probe_batch_size` chunks it for memory) runs the coloured probes as a few fused passes
       instead of a Python loop of separate calls. Measured 22.4→14.0 s (~1.6×) on `bfs3d` — modest because
@@ -1214,7 +1224,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       loop); full build (materialize + GAMG) only 56.0→54.2 s (**1.03×** — GAMG-dominated), so the gather's
       real value is the fixed-structure invariant, not the wall-clock.
     - **⚠️⚠️ STORED EXACTLY-ZERO POSITIONS BREAK THE ZERO-SHIFT V-CYCLE, and BOTH obvious mechanisms are
-      REFUTED (measured 2026-08-12, harness `validation/bfs3d_openfoam/zero_pattern_pivots.py`).** The
+      REFUTED (measured 2026-08-12, harness `validation/bfs3d_openfoam/zero_pattern_pivots.py`, deleted 2026-10-10 with PETSc).** The
       coloured probe stores the full block-stencil pattern, of which **8.03M of 47.21M positions are exactly
       zero**; whether they survive into the preconditioner depends only on how the shift and the
       equilibration are *spelled*. A sparse product or addition stores only nonzero results and deletes them;
@@ -1302,10 +1312,10 @@ complete LU and the AMG's coloured probe both still depend on it.
       nnz decay" in the pattern was a conflation of a *pattern* count with a *live* count — the live
       Jacobian holds ~38.7–39.0M nnz throughout, roughly constant. The reach-3 requirement above rests on
       the padding experiment, which is sound; it does not rest on any decay.
-## Preconditioner — monolithic complete-LU
+## Preconditioner — monolithic complete-LU (DELETED 2026-10-11; dated record)
 
-- **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
-  coupled preconditioner.** It factors the assembled coupled Jacobian
+- **Monolithic COMPLETE-LU preconditioner — DELETED 2026-10-11 as dominated (see the banner above); what
+  follows is the record of what it was and measured.** It factors the assembled coupled Jacobian
   *completely* (`CompleteLuPreconditioner`), so it is the operator's **exact** inverse and a Krylov
   solve converges in **one** iteration. Verified on the real forward operator and the β=0 adjoint
   (true-residual checked). Because the fill is pattern-determined it is also **state-robust**
@@ -1314,23 +1324,22 @@ complete LU and the AMG's coloured probe both still depend on it.
   the adjoint reuses the factorization's transpose. **No equilibration / cell-major reordering** — the
   complete factorization's own pivoting + fill-reducing ordering handle the indefinite saddle on the raw
   field-major matrix; equilibrating + cell-major actually *hurt* it, measured.
-  - **Pluggable backend (`complete_lu_inverse(backend=…)`):** `"umfpack"` (SuiteSparse via the optional
-    `petsc4py` dep) is the fast path — a fill-reducing (nested-dissection/AMD) ordering + a multifrontal
-    BLAS-3 numeric kernel. A refresh **re-factors from scratch** (NOT a fixed-pattern numeric-only
-    refactor): the coupled Jacobian's sparsity *grows* as the flow develops — cross-coupling entries that
-    are exactly zero at the cold reference become nonzero — so a frozen-pattern refactor is both wrong and
-    a shape error; the full factor is fast enough (~1 s at 2D/moderate) that re-analysing each refresh is
-    cheap. `"scipy"` (`scipy.sparse.linalg.splu`, SuperLU) is the always-available fallback: exact and
-    correct (what the tests run under) but, lacking nested dissection, slower to factor than UMFPACK.
-    `"auto"` (default) picks UMFPACK when importable, else SciPy. So the module imports with no optional
-    dependency; the faster factorization is opt-in via `pip install aquaflux[petsc]`.
+  - **One backend: SciPy's SuperLU (`scipy.sparse.linalg.splu`, `diag_pivot_thresh=0.1`).** The optional
+    UMFPACK backend (through `petsc4py`, a fill-reducing nested-dissection ordering + a multifrontal BLAS-3
+    kernel, ~1 s per factor at 2D/moderate) was removed with PETSc on 2026-10-10. A refresh **re-factors
+    from scratch** (NOT a fixed-pattern numeric-only refactor): the coupled Jacobian's sparsity *grows* as
+    the flow develops — cross-coupling entries that are exactly zero at the cold reference become nonzero —
+    so a frozen-pattern refactor would be both wrong and a shape error; SuperLU has no symbolic/numeric
+    split anyway. Pinned by `test_refactor_handles_a_GROWN_sparsity_pattern`. ⚠️ **SuperLU lacks nested
+    dissection and is slower to factor** — measured 72.7 s at reach 5 on pitzDaily (see
+    `solve-amg-multigrid.md`); every factor-cost figure in this file taken with UMFPACK is not a SuperLU
+    figure.
   - **SCOPE — a 2D / moderate-mesh tool (binding).** A complete LU's fill is `O(n log n)` in 2D but
     `O(n^{4/3})` in 3D, so **memory is the wall in 3D** — measured (synthetic block grids): 2D factor time
     ~`dof^1.37` (comfortable to ~10⁵ cells, seconds, <10 GB), but 3D hit **out-of-memory at ~10⁴ cells**.
-    So this preconditioner is the fast, exact choice for 2D / moderate meshes; large 3D needs the
-    algebraic multigrid path (`amg_preconditioner.py`, below), or a **rank-structured direct solver**
-    (MUMPS-BLR / STRUMPACK — the fill-taming way to keep this exact-factor paradigm in 3D, reachable via
-    the same PETSc dep).
+    So this preconditioner is the exact choice for 2D / moderate meshes (and, on SuperLU, a slow one); large
+    3D needs the field-split multigrid path, or a **rank-structured direct solver** (MUMPS-BLR / STRUMPACK —
+    the fill-taming way to keep this exact-factor paradigm in 3D; none is a dependency).
   - **A level-based ILU(k) via PETSc, tried as a cheaper alternative, was a MEASUREMENT ARTIFACT.** It
     looked faster but was a **preconditioned-norm artifact** (PETSc's KSP converges on ‖Mr‖, not the true
     ‖Ax−b‖); it is weaker, not stronger — always verify the TRUE residual.

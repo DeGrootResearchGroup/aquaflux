@@ -14,11 +14,16 @@ test and the globalization then judge only one field.
 
 :class:`BlockScaledNorm` is the fix: it scales each contiguous block by its own reference magnitude
 before combining, so every block contributes comparably and the measure judges the whole system.
+
+A measure whose blocks each hold one equation can say so: :class:`NamedBlockMeasure` is that capability,
+declared, and :func:`named_blocks` asks for it with ``isinstance`` rather than looking for an attribute
+by name, so a measure offering its block names in another shape is reported as offering none.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Protocol, runtime_checkable
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -236,6 +241,22 @@ class RowScaledNorm(eqx.Module):
         )
 
 
+@runtime_checkable
+class NamedBlockMeasure(Protocol):
+    """A block-structured residual measure that names the equation each block holds.
+
+    What a march needs to report its residual equation by equation: the names, one per block, and each
+    block's term of the measure. :class:`BlockScaledNorm` and :class:`RowScaledNorm` offer both; a plain
+    Euclidean norm offers neither.
+    """
+
+    names: tuple[str, ...]
+
+    def per_block(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Each block's term of the measure, shape ``(len(names),)``."""
+        ...
+
+
 def named_blocks(
     measure: object, residual_fn: Callable[[jnp.ndarray], jnp.ndarray], state: jnp.ndarray
 ) -> dict[str, float] | None:
@@ -252,7 +273,8 @@ def named_blocks(
     Parameters
     ----------
     measure : ResidualNorm
-        The measure, as a march holds it.
+        The measure, as a march holds it; reported only when it is a :class:`NamedBlockMeasure` whose
+        blocks are named.
     residual_fn : callable
         ``state -> R(state)``, shape ``(n,)``; a bound method of a module, so its arrays are traced
         rather than compiled in.
@@ -264,11 +286,10 @@ def named_blocks(
     dict of {str: float} or None
         By equation name, in block order.
     """
-    names = getattr(measure, "names", ())
-    if not names:
+    if not isinstance(measure, NamedBlockMeasure) or not measure.names:
         return None
     terms = _block_terms(measure, residual_fn, state)
-    return dict(zip(names, (float(value) for value in terms), strict=True))
+    return dict(zip(measure.names, (float(value) for value in terms), strict=True))
 
 
 @eqx.filter_jit

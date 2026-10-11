@@ -215,10 +215,10 @@ class MarchLogger:
     #: stack as one framed block -- pinned by a test, since a mismatch renders as a broken frame.
     _FIELD_TABLE = TextTable(
         [
-            Column("field", 11, "", "<"),
-            Column("rel. change", 13),
-            Column("resid", 13),
-            Column("rate", 13),
+            Column("field", 12, "", "<"),
+            Column("rel. change", 15),
+            Column("resid", 15),
+            Column("rate", 15),
         ]
     )
 
@@ -536,6 +536,10 @@ class MarchLogger:
             Column("cyc", 3, "d"),
             Column("R", 9, ".3e"),
             Column("a_min", 5, ".3f"),
+            # How far the step's first full-length trial was from acceptance (below one, it was):
+            # `a_min` says only whether the full step was taken, this says by how much it missed, so
+            # a run of it shows the full step becoming acceptable a step or two before it is.
+            Column("rho1", 4, ".2f"),
             Column("flg", 3, "", "<"),
         ]
 
@@ -619,6 +623,7 @@ class MarchLogger:
                     cycles,
                     report.residual_norm,
                     report.alpha,
+                    report.full_step_ratio,
                     marks,
                 ]
             )
