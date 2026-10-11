@@ -30,6 +30,8 @@ from aquaflux.solve import (
     ShiftCarryingControl,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
+)
+from aquaflux.solve.strategy import (
     shift_of,
 )
 

@@ -17,10 +17,12 @@ from aquaflux.solve import (
     FieldSplitPreconditioner,
     FrozenInverse,
     HostPreconditioner,
-    MaterializedBlockPreconditioner,
     MaterializedJacobianPreconditioner,
     RefactorableInverse,
     ReleasableInverse,
+)
+from aquaflux.solve.block_preconditioner import (
+    MaterializedBlockPreconditioner,
 )
 
 FAMILY = (

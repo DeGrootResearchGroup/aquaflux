@@ -94,14 +94,15 @@ def main() -> None:
     compare = importlib.import_module("compare")
 
     import jax.numpy as jnp
-    from aquaflux.solve import MaterializedJacobianPreconditioner, block_stencil_gather_map
+    from aquaflux.solve import (MaterializedJacobianPreconditioner,)
+    from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
     from aquaflux.initialization import hybrid_initialize
     from aquaflux.turbulence.coupled import (
         _coupled_jacobian_plan,
         _coupled_shift_policy,
         coupled_scaled_norm,
     )
-    from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
+    from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 
     coupled = compare.build_case()["coupled"].with_scaled_molecular_viscosity(scale)
     flow, k, omega = hybrid_initialize(coupled)

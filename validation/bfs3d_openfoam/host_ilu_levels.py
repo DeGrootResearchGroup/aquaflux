@@ -35,10 +35,8 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
-    build_convection_hierarchy,
-    equilibrate_cell_major,
-)
+from aquaflux.solve import (build_convection_hierarchy,)
+from aquaflux.solve.frozen_operator import (equilibrate_cell_major,)
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 
 #: The flow block's own coarsening, matching what the host V-cycle asks for.
@@ -73,7 +71,8 @@ def main() -> None:
     state = load_state(name)
     print(f"\n{'=' * 78}\nhost-ILU level survey on {name}\n{'=' * 78}", flush=True)
 
-    from aquaflux.solve import FieldGroups, block_stencil_gather_map
+    from aquaflux.solve import (FieldGroups,)
+    from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
     from aquaflux.turbulence.coupled import _coupled_jacobian_plan
 
     n_fields = coupled.layout.n_fields

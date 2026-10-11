@@ -45,7 +45,7 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve import block_stencil_gather_map  # noqa: E402
+from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan  # noqa: E402
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 

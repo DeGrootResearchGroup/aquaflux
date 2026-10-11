@@ -80,23 +80,9 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.solve import (
-    AirReduction,
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    InnerIterateCheckpointer,
-    JacobianProbeSpec,
-    JacobiSmoothed,
-    LinearSolveSettings,
-    MarchLogger,
-    MaterializedJacobian,
-    RetryPolicy,
-    SimpleSmoothed,
-    StateCheckpointer,
-    combine_metrics,
-    combine_observers,
-)
+from aquaflux.solve import (AirReduction, Convergence, DualTimeLoop, FieldSplit, JacobianProbeSpec, JacobiSmoothed, LinearSolveSettings, MarchLogger, MaterializedJacobian, RetryPolicy, SimpleSmoothed, StateCheckpointer, combine_observers,)
+from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
+from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
     CoupledRANS,
     GeometricReynoldsSchedule,
