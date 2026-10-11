@@ -206,7 +206,6 @@ from .driver import (
     SessionSource,
     StagedResult,
     explicit_source,
-    refuse_unforwardable_settings,
     staged_march,
 )
 from .jacobian_probe import JacobianProbe, jacobian_probe_plan
@@ -385,7 +384,6 @@ __all__ = [
     "positive_block_projection",
     "refresh_air_hierarchy",
     "refuse_a_transform_the_march_cannot_run_in",
-    "refuse_unforwardable_settings",
     "relative_residual_gmres",
     "report_record",
     "residual_stop_gmres",

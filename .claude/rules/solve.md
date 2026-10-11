@@ -227,7 +227,7 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > (#284), which replaced a `solve`-only copy of that check.
 > **What belongs in `__all__` is what a user CONFIGURES, IMPLEMENTS or RECEIVES — not everything
 > another module happens to need (#284 part 2, 2026-10-11).** 37 names left the surface that day
-> (185 → 148): regime and batch constants, the coloured probe's plan/gather/matvecs, equilibration and
+> (185 → 148 that day; `refuse_unforwardable_settings` followed once #541 left `solve/` its only caller): regime and batch constants, the coloured probe's plan/gather/matvecs, equilibration and
 > reordering helpers, `PositiveBlockLimit`/`PositiveBlockProjection` (users call
 > `positive_block_limit`/`positive_block_projection`), `CallerBuiltSource`/`FinishedSource` (what
 > `explicit_source` picks), `BetaTrackingRefresh`, `FrozenTransposeFactory`,
