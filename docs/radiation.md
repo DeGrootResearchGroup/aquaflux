@@ -296,6 +296,67 @@ bodies in the same call, so a body that shadows a wall also shadows the cells be
 `receiver_occlusion` in the settings chooses a different strategy for the receivers alone, for
 example the ray test for a mesh's cells beside the silhouette clip between facets.
 
+### Transparent solids
+
+A lamp's quartz sleeve, a quartz window or the wall of a flow cell is a solid the light passes
+**through**: at each of its surfaces the light is bent by Snell's law, and a share of it is turned
+back (Fresnel reflection, all of it past the critical angle). A straight line from a point to a lamp's
+arc is then the wrong path, and in water at high transmittance the difference is tens of percent. A
+{class}`~aquaflux.radiation.Scene` takes such solids as {class}`~aquaflux.radiation.Media`: the
+surrounding medium's refractive index and absorption, and each transparent region as a
+{class}`~aquaflux.radiation.Transparent` — a convex solid, its index, its own absorption, and any
+regions inside it. A sleeve is quartz holding an air gap:
+
+```python
+import numpy as np
+from aquaflux.radiation import Scene, Surfaces, UniformAbsorption, VolumeReceivers, solve_scene
+from aquaflux.radiation.refraction import Media, Transparent
+from aquaflux.solids import Cylinder
+
+# a lamp's arc, radius 7.5 mm and 0.2 m long, as an open tube of triangles facing out
+angle = np.linspace(0.0, 2 * np.pi, 33)
+z = np.linspace(-0.1, 0.1, 11)
+ring = 0.0075 * np.stack([np.cos(angle), np.sin(angle)], axis=1)
+triangles = []
+for (x0, y0), (x1, y1) in zip(ring[:-1], ring[1:]):
+    for z0, z1 in zip(z[:-1], z[1:]):
+        triangles += [[[x0, y0, z0], [x1, y1, z0], [x1, y1, z1]],
+                      [[x0, y0, z0], [x1, y1, z1], [x0, y0, z1]]]
+arc = Surfaces.from_triangles(np.asarray(triangles), emission=100.0)
+
+axis = [0.0, 0.0, 1.0]
+air = Transparent(Cylinder([0, 0, 0], axis, 0.01025, 0.15), 1.0003)       # the air gap
+sleeve = Transparent(Cylinder([0, 0, 0], axis, 0.0115, 0.15), 1.5048,     # quartz around it
+                     inside=(air,))
+media = Media(1.376, (sleeve,), absorption=UniformAbsorption(5.129))       # water, 95% UVT
+
+points = np.array([[0.02, 0.0, 0.0], [0.05, 0.0, 0.0]])
+solution = solve_scene(Scene(arc, media=media, volume=VolumeReceivers(points)))
+```
+
+Every facet and every point lies in one medium. A point is lit by the sources in its **own** medium
+along straight lines, absorbed by that medium; and by the sources in **other** media along the
+refracted path between them — found for each source corner by Fermat's principle, the path of least
+optical length crossing each surface once — with the Fresnel transmittance at each crossing and each
+medium's absorption along its own leg. Three things are approximated, and each is worth knowing:
+
+- **Light reflected on the way is lost.** A share reflected inside a sleeve that leaves it anyway is
+  not followed. Against a forward ray tracer of one sleeved lamp in 95% UVT water, the transmitted
+  light agrees within its statistical error at every radius from 12.5 to 60 mm, and the reflected
+  paths left out are worth under half a percent; the straight-line gather, for comparison, reads 12
+  to 25% high.
+- **A path passes through at most one region holding neither of its ends** — a neighbouring lamp's
+  sleeve, say — and is bent there as anywhere else. The path is found by shortening its optical
+  length, so only the shortest path through that region is found: behind a sleeve acting as a lens,
+  past where its rays cross, further paths exist and are left out.
+- **Each source triangle is seen through its corners**: the solid angle it fills is the closed form
+  on the directions its three corners' paths arrive from, which is exact as the triangles become
+  small, the limit the refinement criterion already drives an emitter towards.
+
+A point source in another medium than a point it lights is refused (it has no area to spread over a
+curved surface), and a scene with transparent solids may not yet hold anything that reflects: the
+light exchanged between surfaces is not carried through them.
+
 ## Reflection and the surface solve
 
 A wall lit by a lamp re-emits, and what it re-emits lights every other wall. With `F_ij` the
@@ -581,12 +642,13 @@ attaches to a scalar carried by the converged flow.
 
 ## What the model does not include
 
-- **Refraction and reflection at a quartz sleeve.** In water, Bolton (2000) puts the error of
-  neglecting them at a 6.5% reflection correction below 70% UVT, and up to 25% above it. For water
-  the model is therefore best suited to lower transmittances — wastewater, or the 70% water of the
-  Sozzi & Taghipour (2006) benchmark — and carries a systematic error of that size at
-  drinking-water transmittances. A sleeved lamp in air is subject to the same neglect, though its
-  size there is not quantified here; a bare lamp has no sleeve to refract through.
+- **Refraction at a quartz sleeve, in the model and with reflecting surfaces.** In water, Bolton
+  (2000) puts the error of neglecting refraction and reflection at a sleeve at a 6.5% reflection
+  correction below 70% UVT, and up to 25% above it. A scene's lamps' direct light is gathered
+  through transparent solids (see [Transparent solids](#transparent-solids)), but the model and
+  light exchanged between surfaces are not yet: there the model is best suited to lower
+  transmittances — wastewater, or the 70% water of the Sozzi & Taghipour (2006) benchmark — and
+  carries a systematic error of that size at drinking-water transmittances.
 - **Specular reflection beyond one flat bounce.** Mirror-like walls are carried for one bounce off
   flat bodies (see [Mirror-like walls](#mirror-like-walls)).
 - **Scattering by the medium, and more than one waveband.** The medium absorbs but does not

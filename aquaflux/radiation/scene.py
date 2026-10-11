@@ -37,15 +37,21 @@ the surface does (:class:`SurfaceReceivers`). :func:`solve_scene` returns the fl
 first and the irradiance at the others, split into the direct and the reflected parts
 (:class:`SceneSolution`), together with what the medium and the lamps absorb.
 
-A point on a surface that exchanges light lies on one of that surface's facets. That facet's own
-light needs no exclusion -- a facet lights nothing in its own plane, a point a rounding in front of
-it is behind its receiving half-space and a point a rounding behind it is behind the facet -- but its
-triangle does, from any test of what shadows the point: a ray from another facet ends in it, and
-would read it as a blocker. Each set of points on such a surface therefore names the surface's body,
-and every facet of that body the point lies on -- the nearest, and any as near, since a point on a
-shared edge or vertex lies on several -- is left out of the shadow test at the point's end of every
-ray; the points the lamps' light is averaged over on a reflecting or a lamp facet leave that facet
-out the same way.
+A point on a surface that exchanges light lies on that surface's facets, and each of them is left
+out twice. As a source: a facet lights nothing in its own plane, but off an axis-aligned plane the
+point's height above it rounds either way, and the clip can then return the whole hemisphere. And from
+any test of what shadows the point: a ray from another facet ends in it, and would read it as a
+blocker. Each set of points on such a surface therefore names the surface's body, and every facet of
+that body the point lies on -- the nearest, and any as near, since a point on a shared edge or vertex
+lies on several -- is left out of both; the points the lamps' light is averaged over on a reflecting or
+a lamp facet leave that facet out the same way.
+
+**Transparent solids.** A scene may hold quartz sleeves, windows and the like as
+:class:`~aquaflux.radiation.refraction.Media`. Each point is then lit by the sources in its own medium
+along straight lines, in that medium's absorption, where the line meets no transparent region; along
+paths bent through one region, where it does; and by the sources in other media along refracted paths
+(:mod:`~aquaflux.radiation.refracted`). Light exchanged between surfaces is not yet carried through
+them, so such a scene has nothing that reflects.
 """
 
 from __future__ import annotations
@@ -65,6 +71,12 @@ from aquaflux.radiation.coarsen import _point_triangle_distance
 from aquaflux.radiation.gather import direct_irradiance, streamed_fluence_rate, summed_fluence_rate
 from aquaflux.radiation.model import RadiationSettings, build_radiation_model, surface_irradiance
 from aquaflux.radiation.profiles import Lambertian
+from aquaflux.radiation.refracted import (
+    build_refracted_visibility,
+    refracted_fluence_rate,
+    refracted_irradiance,
+)
+from aquaflux.radiation.refraction import Media
 from aquaflux.radiation.self_occlusion import NoOcclusion
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.visibility import build_visibility
@@ -200,7 +212,18 @@ class Scene:
     occluders : tuple of aquaflux.solids.Body
         Bodies that shadow the light from every source, lamps and reflectors alike.
     absorption : Absorption or None
-        The medium between them; unset, it absorbs nothing.
+        The medium between them; unset, it absorbs nothing. With :attr:`media` set it is that
+        object's own ``absorption`` instead, and this is left unset.
+    media : Media or None
+        The transparent solids standing in the medium -- a lamp's quartz sleeve and the air inside
+        it, say -- with the medium's own index and absorption. Light between a source and a point in
+        different media is gathered along its refracted path
+        (:mod:`~aquaflux.radiation.refracted`); light between two in the same medium is gathered
+        along the straight line in that medium's own absorption where the line meets no region
+        (:attr:`~aquaflux.radiation.visibility.Visibility.straight`), and along a path bent through
+        the region otherwise. Every facet and
+        every point must lie in one medium. Not yet carried between surfaces: a scene with media
+        must have nothing to exchange -- no reflectors, and no lamp that reflects.
     volume : VolumeReceivers or None
         Points in the medium where the fluence rate is wanted.
     surfaces : mapping of {str: SurfaceReceivers}
@@ -222,13 +245,18 @@ class Scene:
         If a reflector emits; if a lamp or a reflector reflects specularly, which the scene does not
         carry; if the lamps and the reflectors share a body name, which would leave a set of surface
         points unable to say which it lies on; if a set of surface points names a body neither has;
-        if the settings name a body neither has; or if ``lamp_samples`` is less than one.
+        if the settings name a body neither has; if ``lamp_samples`` is less than one; or if both
+        :attr:`absorption` and :attr:`media` are set, which would give the medium two absorptions.
+    NotImplementedError
+        If :attr:`media` is set and anything exchanges light, which the surface solve does not yet
+        carry through a transparent surface.
     """
 
     lamps: Surfaces
     reflectors: Surfaces | None = None
     occluders: tuple = ()
     absorption: Absorption | None = None
+    media: Media | None = None
     volume: VolumeReceivers | None = None
     surfaces: Mapping[str, SurfaceReceivers] = dataclasses.field(
         default_factory=lambda: types.MappingProxyType({})
@@ -276,6 +304,24 @@ class Scene:
                 f"Scene.surfaces: {', '.join(unknown)}, which is not a body of the lamps or the "
                 f"reflectors; their bodies are {list(names)}."
             )
+
+        if self.media is not None:
+            if self.absorption is not None:
+                raise ValueError(
+                    "Scene: both absorption and media are set; with media, the surrounding "
+                    "medium's absorption is Media.absorption, and Scene.absorption is left unset."
+                )
+            if _Exchange.of(self) is not None:
+                raise NotImplementedError(
+                    "Scene: light exchanged between surfaces is not yet carried through "
+                    "transparent solids, so a scene with media may have no reflectors and no lamp "
+                    "that reflects."
+                )
+
+    @property
+    def medium(self) -> Absorption | None:
+        """The surrounding medium's absorption: :attr:`absorption`, or that of :attr:`media`."""
+        return self.absorption if self.media is None else self.media.absorption
 
     def settings_for(self, sources: Surfaces) -> RadiationSettings:
         """:attr:`settings` as they apply to a mask whose sources are ``sources``.
@@ -453,11 +499,7 @@ def solve_scene(
             reflected_g = _fluence(scene, bounced, points)
         if scene.volume.volumes is not None:
             total = direct_g if reflected_g is None else direct_g + reflected_g
-            coefficient = (
-                np.zeros(len(points))
-                if scene.absorption is None
-                else np.asarray(scene.absorption.sample(jnp.asarray(points)))
-            )
+            coefficient = _coefficients(scene, points)
             medium = float(np.sum(coefficient * total * scene.volume.volumes))
 
     direct_e, reflected_e = {}, None if bounced is None else {}
@@ -679,7 +721,7 @@ def _solve_exchange(scene: Scene, direct: _Direct, exchange: _Exchange, solver, 
     landing, solved_cycles = surface_irradiance(
         model,
         surfaces,
-        absorption=scene.absorption,
+        absorption=scene.medium,
         external_irradiance=jnp.asarray(external.mean(axis=1)),
         solver=solver,
     )
@@ -721,16 +763,74 @@ def _casts_shadows(scene: Scene) -> bool:
     return bool(scene.occluders) or _shadows_itself(scene)
 
 
+def _coefficients(scene: Scene, points: np.ndarray) -> np.ndarray:
+    """The absorption coefficient at each point, in whichever medium it lies in."""
+    coefficient = np.zeros(len(points))
+    media = _regions(scene)
+    region = np.full(len(points), -1) if media is None else media.region_of(points, "volume point")
+    for medium in np.unique(region):
+        rows = np.flatnonzero(region == medium)
+        absorption = scene.medium if media is None else media.absorption_of(int(medium))
+        if absorption is not None:
+            coefficient[rows] = np.asarray(absorption.sample(jnp.asarray(points[rows])))
+    return coefficient
+
+
+def _regions(scene: Scene) -> Media | None:
+    """The scene's media when there are transparent regions in them, else ``None``.
+
+    Media with no regions are one medium, gathered as a scene without media is, in its absorption.
+    """
+    media = scene.media
+    return media if media is not None and media.regions else None
+
+
+def _by_medium(scene: Scene, points: np.ndarray, gather) -> np.ndarray:
+    """``gather(rows, absorption, media)`` for the points of each medium, put back in order.
+
+    Without transparent regions, once over every point in the scene's medium.
+    """
+    media = _regions(scene)
+    if media is None:
+        return gather(np.arange(len(points)), scene.medium, None)
+    region = media.region_of(points, "receiver")
+    field = np.zeros(len(points))
+    for medium in np.unique(region):
+        rows = np.flatnonzero(region == medium)
+        field[rows] = gather(rows, media.absorption_of(int(medium)), media)
+    return field
+
+
 def _fluence(scene: Scene, sources: Surfaces, points: np.ndarray) -> np.ndarray:
-    """Fluence rate from ``sources`` at ``points``, through the scene's shadows, mask streamed."""
+    """Fluence rate from ``sources`` at ``points``, through the scene's shadows, mask streamed.
+
+    Where the scene has transparent regions, each point is lit by the sources in its own medium
+    along straight lines in that medium, and by the others along refracted paths.
+    """
+    field = _by_medium(
+        scene,
+        points,
+        lambda rows, absorption, media: _straight_fluence(
+            scene, sources, points[rows], absorption, media
+        ),
+    )
+    if _regions(scene) is not None:
+        field = field + _refracted(scene, sources, points, None, None)
+    return field
+
+
+def _straight_fluence(scene, sources, points, absorption, media) -> np.ndarray:
+    """The light along straight lines, in one absorbing medium."""
     pair_limit = _pair_limit(scene.settings)
-    if not _casts_shadows(scene):
+    if not _casts_shadows(scene) and media is None:
         field = summed_fluence_rate(
-            (sources,), jnp.asarray(points), absorption=scene.absorption, pair_limit=pair_limit
+            (sources,), jnp.asarray(points), absorption=absorption, pair_limit=pair_limit
         )
         return np.asarray(field)
     options = dict(scene.settings_for(sources).receiver_visibility_options())
     self_occlusion = options.pop("self_occlusion", None)
+    if media is not None:
+        options["media"] = media
     field = streamed_fluence_rate(
         (sources,),
         jnp.asarray(points),
@@ -739,7 +839,7 @@ def _fluence(scene: Scene, sources: Surfaces, points: np.ndarray) -> np.ndarray:
         occluders=scene.occluders,
         self_occlusion=self_occlusion,
         visibility_options=options,
-        absorption=scene.absorption,
+        absorption=absorption,
         pair_limit=pair_limit,
     )
     return np.asarray(field)
@@ -756,16 +856,37 @@ def _irradiance(
     and the gather leaves them out as sources, since a facet lights nothing in its own plane. The mask
     is told which way every point faces whether or not it lies on one of them -- the lamps' light on a
     reflecting wall lies on no lamp facet -- so a share of a partly hidden source is a share of the
-    measure an irradiance weights by.
+    measure an irradiance weights by. Where the scene has transparent regions the light is split by
+    medium as :func:`_fluence` splits it.
     """
+    field = _by_medium(
+        scene,
+        points,
+        lambda rows, absorption, media: _straight_irradiance(
+            scene,
+            sources,
+            points[rows],
+            normals[rows],
+            None if own is None else own[rows],
+            absorption,
+            media,
+        ),
+    )
+    if _regions(scene) is not None:
+        field = field + _refracted(scene, sources, points, normals, own)
+    return field
+
+
+def _straight_irradiance(scene, sources, points, normals, own, absorption, media) -> np.ndarray:
+    """The irradiance along straight lines, in one absorbing medium."""
     pair_limit = _pair_limit(scene.settings)
-    if not _casts_shadows(scene):
+    if not _casts_shadows(scene) and media is None:
         return np.asarray(
             direct_irradiance(
                 sources,
                 jnp.asarray(points),
                 jnp.asarray(normals),
-                absorption=scene.absorption,
+                absorption=absorption,
                 pair_limit=pair_limit,
                 receiver_facet=own,
             )
@@ -784,6 +905,7 @@ def _irradiance(
             receiver_facet=facet,
             receiver_normal=normals[start:stop],
             pair_limit=pair_limit,
+            media=media,
             **options,
         )
         out[start:stop] = np.asarray(
@@ -791,12 +913,51 @@ def _irradiance(
                 sources,
                 jnp.asarray(chunk),
                 jnp.asarray(normals[start:stop]),
-                absorption=scene.absorption,
+                absorption=absorption,
                 visibility=visibility,
                 pair_limit=pair_limit,
                 receiver_facet=facet,
             )
         )
+    return out
+
+
+def _refracted(scene: Scene, sources: Surfaces, points, normals, own) -> np.ndarray:
+    """The light from sources in other media than the points, along refracted paths, by passes.
+
+    ``normals`` given, the irradiance on surfaces facing that way; ``None``, the fluence rate.
+    Each pass builds its own mask of the paths' legs and drops it.
+    """
+    pair_limit = _pair_limit(scene.settings)
+    options = scene.settings_for(sources).receiver_visibility_options()
+    per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
+    out = np.empty(len(points))
+    for start in range(0, len(points), per_pass):
+        stop = min(start + per_pass, len(points))
+        chunk = points[start:stop]
+        visibility = build_refracted_visibility(
+            scene.occluders,
+            sources,
+            scene.media,
+            chunk,
+            receiver_facet=None if own is None else own[start:stop],
+            self_occlusion=options.get("self_occlusion"),
+            pair_limit=pair_limit,
+        )
+        if normals is None:
+            field = refracted_fluence_rate(
+                sources, scene.media, chunk, visibility=visibility, pair_limit=pair_limit
+            )
+        else:
+            field = refracted_irradiance(
+                sources,
+                scene.media,
+                chunk,
+                normals[start:stop],
+                visibility=visibility,
+                pair_limit=pair_limit,
+            )
+        out[start:stop] = np.asarray(field)
     return out
 
 

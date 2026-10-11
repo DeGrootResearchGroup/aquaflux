@@ -44,8 +44,8 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
-| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08) | **BUILT** |
-| `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path) (#604 step 2a) | **BUILT** (exported; not yet in the model, scene or transfer) |
+| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested; `Media.region_of_facets`), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08); `Chain.routes` and `straight_reach` (#604 step 2b-i) | **BUILT** |
+| `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path; `receiver_facet` excluded on the last leg since 2b-i) (#604 step 2a) | **BUILT** (in the scene's direct light since 2b-i; not yet in the model or the transfer — 2b-ii) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 | `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07); every triangle of the scene shadows the direct AND the reflected light (`_Direct`, #622, 2026-10-10); reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of the lamps or the reflectors (checked once against both, cut per build by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
 
@@ -4743,4 +4743,134 @@ split by me into 2a (this: regions, Fresnel, the path solve, the refracted gathe
   instead of all (`test_a_triangle_with_a_corner_that_has_no_path_carries_nothing`). **Dismissed**: the
   crossing-direction check -- the descent finds the shortest path, which never turns back at a surface,
   so no reachable input fails it; kept as a guard on what the solve returns.
+
+### #604 STEP 2b-i: TRANSPARENT SOLIDS IN THE SCENE'S DIRECT LIGHT (2026-10-08)
+
+**Agreed with the user** (2026-10-08, after 2a merged as #638): 2b in two PRs — **2b-i** (this: media in
+the `Scene`, the lamps' direct light routed by medium, the straight-through factor, the four-lamp
+black-wall tracer check) and **2b-ii** (the refracted facet-to-facet transfer, the model's `media=`, the
+reflecting-wall tracer check, cost at Sozzi scale). For 2b-ii, decided: refracted transfer pairs keep the
+**surrounding absorption live** (per corner, the water leg's length stored sparsely beside the frozen
+solid angle, Fresnel and in-region absorption; indices and region absorptions frozen, a traced `Media`
+refused by the model), and use the transfer's **own receiver quadrature** (six points), cost measured
+before anything coarser is considered. ⚠️ **Deviation, said here so it is not mistaken for scope**: the
+2b-i option text read "media in Scene and the model's direct and volume gathers"; the model's gathers
+went to 2b-ii with its transfer, because a model with media but a straight transfer would carry lamp
+light refracted and the walls' light not.
+
+- **`Scene.media`** (`Media | None`). With it, `Scene.absorption` must be unset (refused: the medium
+  would have two absorptions) and `Scene.medium` reads `media.absorption`. **Refused, `NotImplementedError`,
+  when anything exchanges** (`_Exchange.of(scene) is not None`: reflectors, or a lamp that reflects) —
+  the transfer has no refraction until 2b-ii.
+- **Routing** (`scene._by_medium`): each point is lit by the sources in **its own** medium along straight
+  lines, in `media.absorption_of(its medium)` (not the scene's — a point in a sleeve's air gap is lit
+  through air), and by the sources in **other** media along refracted paths (`scene._refracted`, a mask
+  per pass from `build_refracted_visibility`, then `refracted_fluence_rate` / `refracted_irradiance`).
+  With media, the straight half always builds masks (streamed for the volume, per pass for oriented
+  points), because the mask is what removes the cross-medium pairs.
+- ⚠️ **There is no `Visibility.through` and no `refraction.straight_through` any more** (replaced by the
+  neighbour pass-through routes, next subsection): the straight-through factor was a first cut that read
+  2.8-3.5 % low behind a neighbour's sleeve. **The gathers read a mask's layers by name**
+  (`Visibility.layers()` -> `(kinds, (array, axis) pairs)`, `surviving_from_layers`; `gather._Layers`
+  carries the kinds), not by position, which is what let a third layer in.
+- **`build_refracted_visibility(..., receiver_facet=)`**: the last leg of a refracted path ends in the facet
+  a point lies on, and the ray test read that facet as a blocker — so points on one lamp lit by another
+  were dark. Excluded on the last leg as `build_visibility` excludes it on the one leg.
+- `Media.region_of_facets(surfaces)` is the one home of "a facet lies in one medium" (moved from
+  `refracted._facet_regions`; there is no such function any more).
+- **Tests** (`test_radiation_scene_media.py`): equal indices and no absorption = the scene with no media,
+  to 1e-10, fluence and irradiance, points in the water and in a gap, two lamps; a gap point takes its own
+  lamp through the air's absorption, and the medium's absorbed power uses each point's own coefficient;
+  points on a lamp named by its body = points 1e-7 in front of it (RayCast); the refusals. The 2b-i
+  mutation pass (14 of 14 red) was on the straight-through version; the tests that pinned that factor have
+  since been replaced (next subsection) and are not re-mutated.
+- **Four-lamp tracer check** (`validation/sleeve_optics/check_array.py`, table in its README; 50 mm square,
+  95 % UVT, black wall, 212,992 facets, 20M rays a lamp, one run, Linux 4 cores, 2026-10-08): within the
+  tracer's error where no light passed another sleeve; **2.8-3.5 % low (2.3-3.3 standard errors) where it
+  did** — larger than the share that entered a sleeve (1.0-2.4 %), so not decomposed (straight lines
+  meeting a neighbour's arc where bent paths miss is a candidate, unmeasured). Reflections left out:
+  5.5-7.5 % with four lamps (under 0.5 % with one). aquaflux 977 s, compile included.
+  ⚠️ **Re-run at 60M rays a lamp and a 2 mm disc (2026-10-09)**: sleeves left out of the neighbours'
+  light, aquaflux/tracer 0.995-1.003; sleeves in, (55,25) 0.971, (50,50) 0.972, (-25,41) 0.980, (45,25)
+  0.984 — at (55,25) and (50,50) the tracer GAINS 3.3 / 3.0 % when the sleeves are put in, aquaflux does
+  not. Diagnosed as the neighbour sleeve lensing light round its arc, which a straight crossing cannot do.
+
+### #604 STEP 2b-i, CONTINUED: BENT ROUTES THROUGH A NEIGHBOUR — BUILT, NOT YET MEASURED (2026-10-09)
+
+**Agreed with the user**: fix the shortfall now; **one** pass-through region per path; same-medium pairs
+are bent too (no straight-through factor left anywhere).
+
+- **Routes.** `Chain.between(parents, source, receiver, through=node)` inserts, at the leg whose medium is
+  the parent of the topmost region holding `node`, entries into every region from that one down to `node`
+  and exits in reverse (`passing`, `pass_at`); it refuses a `through` holding an end, or one no leg's
+  medium holds. `Chain.routes` = the base route (only if the ends are in different media) + one per
+  passable node, so a sleeve gives one route through its quartz and one across its gap too. `beside` per
+  leg is every node not crossed and not in the leg's lineage: **a path meeting a region it does not pass
+  through is invalid** (`_meets_any` in `_one_path`) — that light belongs to the route through it.
+- **Starts.** A passing route is solved from `n_starts = 4` aims (`_starts`), deduplicated (`_distinct`,
+  `_SAME_PATH = 1e-6` of the separation); `Paths` carry a leading starts axis only on a passing route.
+  The aims stand about the region's **middle** -- the midpoint of d's chord along N's outer normal at b
+  (b the straight chord's midpoint in N, or the line's nearest point to it) -- moved across the
+  bisector of in-from-source and out-to-receiver, `_START_REACH = 0.6` of the way to d's edge (halfway to
+  d's children's edge if it has any). ⚠️ **The first version put them at b itself**, which for a region
+  the straight line MISSES lies outside it: the polyline then never crossed its surfaces, every crossing
+  ended ~30 mm off them, and the route always read zero (see the probe below).
+- **Masks.** `Visibility.straight` (bool, `straight_reach`): same medium and the centroid segment meets no
+  region. Refracted masks are per route, `(n_starts, n_occ, n_rows, n_facets)`; a passing route's rows
+  are **not culled** (2026-10-10): every route is taken for every receiver. The first version kept only
+  rows whose straight segment from some facet met N, which dropped exactly the light below. A sound cull
+  needs a bound on how far a region can turn light; none is designed (the user's uncut run cost 6,278 s
+  against 1,456 s at 64 sectors, `optics`).
+- ⚠️ **THE DESCENT FINDS ONLY MINIMA, AND THE PATHS A LENS ADDS ARE SADDLES.** Glass rod radius 10 mm,
+  n 1.5 in n 1.0, source 30 mm from its axis: a 2D Snell trace finds the axial path plus a symmetric pair
+  (±0.27 / ±0.22 / ±0.15 rad departure) at receivers 18 / 22 / 26 mm beyond the axis; aquaflux finds the
+  axial one only. The off-axis paths' optical-length Hessian (entry and exit angle) has one negative
+  eigenvalue (-0.0025 against +0.011) — saddles, which no descent on the length reaches; four starts only
+  find several *minima*. Likely the very light the four-lamp check misses at (55,25) — on the line through
+  the neighbour's centre — **not measured**. A fix would solve for stationarity, not a minimum.
+- ⚠️ **COST, MEASURED BEFORE ANY TUNING** (24-sector arcs, 39,936 facets, 3 points, warm, jax 0.10.2, CPU,
+  Linux x86_64, 4 cores, 16 GB, 2026-10-09): per path solve ~155-173 µs on the base route (2 crossings),
+  **940-1,080 µs through a neighbour's quartz (4), 1,600-1,670 µs across its gap too (6)**, times 4 starts;
+  the scene's refracted mask 355 s and gather 200 s. The full four-lamp check (212,992 facets, 9 points)
+  **could not be run**: first a 20.6 GB allocation in one path solve (fixed: `_centroid_paths` now solves a
+  `receivers_per_step` at a time), then an out-of-memory kill (16 GB); a quarter-size run peaked at 6 GB
+  and was unfinished after 30 min. Unverified causes: a passing route keeps every facet of the source lamp
+  (rows are culled, not pairs), and a vmapped batch iterates until its slowest path ends. The user is
+  moving it to a larger machine; `validation/sleeve_optics/rerun_aquaflux.py` reruns aquaflux's side
+  against `work/check_array-<mode>.json` (temporary, to be deleted once measured).
+- **THE USER'S RUN AND THE PROBE THAT FOLLOWED (2026-10-09/10, PR #643 comments).** At 64 sectors (64 vs 128
+  agree to 0.9998-1.0000) the routes left (55,25) / (50,50) 2.9 / 2.8 % low, and a per-route split showed
+  the through-neighbour routes carrying <= 0.07 % of the traced value. Single pair, lamp 1 (25,-25) to
+  (-25,41): the shortest path through lamp 3's gap passes 5.9-6.9 mm from its axis -- into its arc,
+  correctly shadowed. A 2D forward trace (Snell at every surface of all four sleeves, arcs absorbing,
+  400,001 directions from each of 7 arc points) finds **two real rays**, both missing every arc: (a)
+  through **lamp 2's** gap, 9.5-9.8 mm from its axis, turned ~45 deg near the critical angle -- the
+  straight line never comes near lamp 2; (b) through lamp 2's gap then lamp 3's (two neighbours, outside
+  the one-region design; left open). With the starts moved, `solve_paths` on the route through lamp 2's
+  gap finds ray (a): departure 1.49085 rad, as the trace, T 0.391 -- so (a) is a minimum and the starts,
+  not the saddle limit, hid it. **Re-measured on the whole scene (user, `535b0fa7`, 64 sectors, the stored
+  60M-ray traces, macOS arm64, 11 cores, 2026-10-10)**: every point within 1.1 % of the transmitted trace,
+  only (55,25) beyond 2 standard errors (0.990, -2.2); (50,50) 0.995, (-25,41) 0.993, (0,-25) 0.999;
+  through-neighbour routes carry 0.8-2.3 % of the traced value against the tracer's 0.8-2.6 % entered.
+  Left open: ~0.6 % at (55,25) on through-neighbour light; 0.2-0.65 % on light that entered no other sleeve
+  (largest at (-25,41)); (37,37) unchanged at 0.985. Gather 9,456 s against 1,456 s with the row cull.
+- ⚠️ **NO SOUND GEOMETRIC CULL OF A ROUTE EXISTS HERE.** The largest turn a path can take at one surface
+  is `90 - asin(n_min / n_max)` degrees: water-quartz 23.9, quartz-air 48.3 (critical-angle limited).
+  Summed over the chain (leaving the source's own sleeve 72.2), a route through a neighbour's quartz can
+  turn light by up to 120 degrees and through its gap too by up to 216.6; a Lambertian facet emits into
+  its front 90, so every receiver direction stays reachable and a deflection bound culls nothing.
+- **Tests**: routes (`test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way`),
+  the ball's axial path through its route and invalid round it, `straight_reach`, a slab in one medium
+  brings a small lamp nearer by `t (1 - n_w/n_q)` (scene, paraxial, 1e-3), and an absorbing slab against a
+  quadrature over directions (refracted, 2.5e-3), and a route through a region the straight line misses
+  by 30 mm against Nelder-Mead in the cross-section
+  (`test_a_route_through_a_region_the_straight_line_misses_is_found_and_is_the_shortest`, red on the old
+  starts: no valid path). The rod's three paths are not a test (it would fail). **Mutation pass (11, 9
+  red, 2026-10-11)**: exits not reversed, the pass at the chain's start, a base route between points in
+  one medium, crossed regions counted beside a leg, beside regions not tested, no dedupe, regions ignored
+  by `straight_reach`, the straight layer not applied in `surviving_fraction`, starts at b rather than
+  the region's middle. **Dismissed, equivalent on every fixture**: aims spread across the straight line
+  rather than across the bisector (with one path through a region, any start inside it reaches that
+  path; kept as written because the user's 535b0fa run measured it), and the first guess split at the
+  pass's start rather than its end (`onto` puts every crossing back on its face before the descent).
 

@@ -44,7 +44,7 @@ from aquaflux.radiation.visibility import (
     Visibility,
     _unchecked_visibility,
     refuse_points_inside,
-    surviving_fraction,
+    surviving_from_layers,
 )
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes, receivers_per_pass
 from aquaflux.vectors import dot
@@ -112,7 +112,7 @@ def _shadow_rows(visibility, transmittance, points, sets) -> tuple:
         if transmittance is not None:
             msg = "transmittance was given without a visibility mask to apply it to"
             raise ValueError(msg)
-        return (), None
+        return _Layers(()), None
     if not isinstance(visibility, Visibility):
         msg = f"visibility must be a Visibility; got {type(visibility).__name__}"
         raise TypeError(msg)
@@ -121,10 +121,21 @@ def _shadow_rows(visibility, transmittance, points, sets) -> tuple:
         _refuse_light_from_behind(sets)
     if transmittance is None:
         transmittance = jnp.zeros(visibility.n_occluders)
-    layers = [(visibility.blocked, 1)]
-    if visibility.hidden_by_geometry is not None:
-        layers.append((visibility.hidden_by_geometry, 0))
-    return tuple(layers), transmittance
+    kinds, layers = visibility.layers()
+    return _Layers(layers, kinds), transmittance
+
+
+class _Layers(tuple):
+    """A mask's ``(array, axis)`` layers, with what each is, for :func:`_surviving`.
+
+    A tuple, so it is cut into chunks, spread and tested for emptiness as the layers themselves
+    are; the names ride along on the host.
+    """
+
+    def __new__(cls, layers, kinds=()):
+        made = super().__new__(cls, layers)
+        made.kinds = tuple(kinds)
+        return made
 
 
 def _refuse_light_from_behind(sets) -> None:
@@ -146,15 +157,15 @@ def _refuse_light_from_behind(sets) -> None:
             raise ValueError(msg)
 
 
-def _surviving(layers, transmittance):
+def _surviving(kinds, layers, transmittance):
     """A chunk's surviving fraction from its mask layers, or ``None`` where nothing occludes.
 
-    The layers are the bodies' and, unless the surface hides nothing, its own.
+    The layers are named by ``kinds``, as :meth:`~aquaflux.radiation.visibility.Visibility.layers`
+    names them.
     """
     if not layers:
         return None
-    blocked, *hidden = layers
-    return surviving_fraction(blocked, hidden[0] if hidden else None, transmittance)
+    return surviving_from_layers(kinds, layers, transmittance)
 
 
 def _masked(surviving, facets):
@@ -736,7 +747,7 @@ def _point_fluence(sets, points, layers, absorption, transmittance, pair_limit):
     def at(receivers, *chunk_layers):
         direction, distance_squared = _emitter_direction(centroid[None], receivers[:, None])
         surviving = _transmittance(absorption, centroid[None], receivers[:, None, :])
-        shadows = _surviving(chunk_layers, transmittance)
+        shadows = _surviving(layers.kinds, chunk_layers, transmittance)
         if shadows is not None:
             surviving = surviving * shadows
         total = jnp.zeros(receivers.shape[0])
@@ -780,9 +791,11 @@ def _segment_fluence(sets, group, points, layers, absorption, transmittance, seg
         weight = solid_angle(receivers, vertices) * _transmittance(absorption, centroid, receivers)
         if layers:
             pair = (row[:, :, None], block_facets[:, None, :])
-            blocked, *hidden = (array for array, _ in layers)
-            weight = weight * surviving_fraction(
-                blocked[:, pair[0], pair[1]], hidden[0][pair] if hidden else None, transmittance
+            blocked, *pairs = (array for array, _ in layers)
+            weight = weight * surviving_from_layers(
+                layers.kinds,
+                (blocked[:, pair[0], pair[1]], *(array[pair] for array in pairs)),
+                transmittance,
             )
         weight = jnp.where(block_valid[:, None, :], weight, 0.0)
         total = jnp.zeros(block_rows.shape)
@@ -928,7 +941,7 @@ def direct_irradiance(
         own_facets, chunk_layers = (
             (chunk_layers[0], chunk_layers[1:]) if named else (None, chunk_layers)
         )
-        surviving_all = _surviving(chunk_layers, transmittance)
+        surviving_all = _surviving(layers.kinds, chunk_layers, transmittance)
         total = jnp.zeros(receivers.shape[0])
         for profile, areal, point in partition:
             if len(areal) and not point_sources_only:

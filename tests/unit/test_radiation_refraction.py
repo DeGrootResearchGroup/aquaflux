@@ -12,13 +12,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation import UniformAbsorption
+from aquaflux.radiation import Surfaces, UniformAbsorption
 from aquaflux.radiation.refraction import (
     Chain,
     Media,
     Transparent,
     fresnel_transmittance,
     solve_paths,
+    straight_reach,
 )
 from aquaflux.solids import Cylinder, HalfSpace, Sphere, Union
 from scipy import optimize
@@ -133,6 +134,48 @@ def test_a_chain_leaves_every_region_round_the_source_and_enters_every_one_round
     assert across.beside == ((), (), ())
 
 
+def test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way():
+    """Two sleeves side by side: from one's air gap to the water, and from the water to the water.
+
+    Regions 0 and 2 are the quartz of each, 1 and 3 their gaps. Out of the first gap the path may
+    pass through nothing, through the second sleeve's quartz, or through its quartz and gap; each
+    pass sits on the water leg, entered outermost first and left in the reverse. A region holding an
+    end is never passed, and between two points in one medium there is no route through nothing --
+    that is the straight line.
+    """
+    parents = np.array([-1, 0, -1, 2])
+    routes = Chain.routes(parents, 1, -1)
+    assert [chain.passing for chain in routes] == [(), (2,), (2, 3)]
+    assert routes[0].crossings == ((1, True), (0, True))
+    assert routes[1].crossings == ((1, True), (0, True), (2, False), (2, True))
+    assert routes[1].legs == (1, 0, -1, 2, -1)
+    assert routes[2].crossings == (
+        (1, True),
+        (0, True),
+        (2, False),
+        (3, False),
+        (3, True),
+        (2, True),
+    )
+    assert routes[2].legs == (1, 0, -1, 2, 3, 2, -1)
+    assert routes[1].pass_at == routes[2].pass_at == 2
+    # The route through nothing must miss the second sleeve; the one through its quartz alone must
+    # miss its gap, in the quartz too; the one across the gap misses nothing.
+    assert routes[0].beside[-1] == (2, 3)
+    assert routes[1].beside[3] == routes[1].beside[-1] == (3,)
+    assert routes[2].beside[-1] == ()
+    assert [chain.n_starts for chain in routes] == [1, 4, 4]
+    in_water = Chain.routes(parents, -1, -1)
+    assert [chain.passing for chain in in_water] == [(0,), (0, 1), (2,), (2, 3)]
+    assert in_water[0].crossings == ((0, False), (0, True))
+    # From the first gap to the first gap nothing can be passed without leaving it.
+    assert Chain.routes(parents, 1, 1) == ()
+    with pytest.raises(ValueError, match="holds an end of the path"):
+        Chain.between(parents, 1, -1, through=0)
+    with pytest.raises(ValueError, match="no leg of the path runs in a medium holding region 3"):
+        Chain.between(parents, 1, 1, through=3)
+
+
 # ---------------------------------------------------------------------------------------------
 # The path
 # ---------------------------------------------------------------------------------------------
@@ -222,6 +265,58 @@ def test_out_of_a_sleeve_the_path_is_the_shortest_optical_one_off_the_cross_sect
     )
 
 
+def test_a_route_through_a_region_the_straight_line_misses_is_found_and_is_the_shortest():
+    """Light from one sleeved lamp turned round a second lamp's air gap, near the critical angle.
+
+    Two sleeves 50 mm apart; the source on the first lamp's arc faces a point beyond and beside the
+    second, which the straight line from it misses by more than a sleeve's radius. The light still
+    gets there through the second lamp's gap, entering it near grazing and turned by tens of
+    degrees, passing between where the arc would be (7.5 mm) and the gap's wall (10.25 mm). The
+    search must start inside the region it passes, not on the straight line, to find it; the path it
+    finds is checked against a general-purpose optimizer on the optical length, in the cross-section.
+    """
+    axis = [0.0, 0.0, 1.0]
+    centres = np.array([[0.025, -0.025], [0.025, 0.025]])
+
+    def lamp(x, y):
+        gap = Transparent(Cylinder([x, y, 0.0], axis, 0.01025, 1.0), AIR)
+        return Transparent(Cylinder([x, y, 0.0], axis, 0.0115, 1.0), QUARTZ, inside=(gap,))
+
+    media = Media(WATER, tuple(lamp(x, y) for x, y in centres))
+    receiver = np.array([-0.025, 0.041, 0.0])
+    toward = receiver[:2] - centres[0]
+    source = np.array([*(centres[0] + 0.0075 * 0.999 * toward / np.linalg.norm(toward)), 0.0])
+    line = receiver[:2] - source[:2]
+    to_second = centres[1] - source[:2]
+    offset = (line[0] * to_second[1] - line[1] * to_second[0]) / np.linalg.norm(line)
+    assert abs(offset) > 0.03  # The straight line passes nowhere near the second sleeve.
+    chain = Chain.between(media.parents, 1, -1, through=3)
+    paths = solve_paths(media, chain, jnp.asarray(source), jnp.asarray(receiver))
+    assert int(np.sum(np.asarray(paths.valid))) == 1
+    found = np.asarray(paths.points)[np.argmax(np.asarray(paths.valid))]
+    radius = np.linalg.norm(found[3:5, :2] - centres[1], axis=1)
+    np.testing.assert_allclose(radius, 0.01025, rtol=1e-9)
+    chord = found[4, :2] - found[3, :2]
+    to_axis = centres[1] - found[3, :2]
+    closest = abs(chord[0] * to_axis[1] - chord[1] * to_axis[0]) / np.linalg.norm(chord)
+    assert 0.0075 < closest < 0.01025
+
+    radii = (0.01025, 0.0115, 0.0115, 0.01025, 0.01025, 0.0115)
+    around = (0, 0, 1, 1, 1, 1)
+
+    def in_the_plane(angles):
+        return [
+            np.array([*(centres[c] + r * np.array([np.cos(a), np.sin(a)])), 0.0])
+            for a, r, c in zip(angles, radii, around, strict=True)
+        ]
+
+    angles = [np.arctan2(*(found[k, :2] - centres[around[k]])[::-1]) for k in range(6)]
+    guess = np.asarray(angles) + 0.02 * np.array([1, -1, 1, -1, 1, -1])
+    indices = (AIR, QUARTZ, WATER, QUARTZ, AIR, QUARTZ, WATER)
+    best = _optical_length_minimum(media, indices, in_the_plane, source, receiver, guess)
+    np.testing.assert_allclose(found, best, atol=1e-7 * np.linalg.norm(receiver - source))
+
+
 def test_a_crossing_off_the_end_of_its_face_is_no_crossing_and_carries_nothing():
     """A short air cylinder in glass, left by the side on the straight line and above it on the path.
 
@@ -267,11 +362,14 @@ def test_the_path_s_derivative_with_respect_to_an_index_is_the_finite_difference
     assert derivative == pytest.approx(finite, rel=1e-6)
 
 
-def test_a_region_beside_the_path_is_crossed_straight_with_its_fresnel_losses_and_absorption():
-    """A sphere centred on a leg's straight line is crossed at normal incidence both ways.
+def test_a_region_holding_neither_end_is_passed_through_bent_and_a_path_meeting_it_otherwise_is_none():
+    """A sphere centred on the line between two points, both outside it, is a route of its own.
 
-    So what gets past it is ``(1 - R)^2`` at normal incidence times its own absorption along the
-    diameter, less what the water would have absorbed there.
+    On that route the axial path crosses it at normal incidence both ways, so what gets past is
+    ``(1 - R)^2`` times the sphere's own absorption along the diameter, less what the water would have
+    absorbed there; its several starting points find that one path once. On the route that goes
+    round the sphere the only stationary path is the same straight line, which meets the sphere and
+    so belongs to the other route: there it is no path at all.
     """
     absorbing, water = 7.0, 2.0
     lens = Transparent(Sphere([0.0, 0.0, 0.05], 0.01), QUARTZ, UniformAbsorption(absorbing))
@@ -279,10 +377,50 @@ def test_a_region_beside_the_path_is_crossed_straight_with_its_fresnel_losses_an
     source, receiver = jnp.array([0.0, 0.0, 0.0002]), jnp.array([0.0, 0.0, 0.1])
     with_lens = Media(WATER, (box, lens), UniformAbsorption(water))
     without = Media(WATER, (box,), UniformAbsorption(water))
-    chain = Chain.between(with_lens.parents, 0, -1)
-    assert chain.beside[-1] == (1,)
-    ratio = float(solve_paths(with_lens, chain, source, receiver).transmittance) / float(
-        solve_paths(without, Chain.between(without.parents, 0, -1), source, receiver).transmittance
-    )
+    routes = Chain.routes(with_lens.parents, 0, -1)
+    assert [chain.passing for chain in routes] == [(), (1,)]
+    assert routes[0].beside[-1] == (1,)
+    around = solve_paths(with_lens, routes[0], source, receiver)
+    assert not bool(around.valid)
+    assert float(around.transmittance) == 0.0
+    through = solve_paths(with_lens, routes[1], source, receiver)
+    assert through.valid.shape == (routes[1].n_starts,)
+    assert int(np.sum(np.asarray(through.valid))) == 1
+    plain = solve_paths(without, Chain.between(without.parents, 0, -1), source, receiver)
+    ratio = float(jnp.sum(through.transmittance)) / float(plain.transmittance)
     normal = 1.0 - ((WATER - QUARTZ) / (WATER + QUARTZ)) ** 2
     assert ratio == pytest.approx(normal**2 * np.exp(-(absorbing - water) * 0.02), rel=1e-12)
+
+
+def _tiny_facets(centroids) -> Surfaces:
+    """One small triangle about each centroid, in the plane normal to x."""
+    corners = np.array([[0.0, -1.0, -1.0], [0.0, 2.0, -1.0], [0.0, -1.0, 2.0]]) * 1e-4 / 3
+    return Surfaces.from_triangles(np.asarray(centroids)[:, None, :] + corners[None])
+
+
+def test_a_straight_segment_carries_light_only_in_one_medium_and_clear_of_every_region():
+    """Which centroid-to-point segments the straight gather takes, across a sleeve and beside it.
+
+    A line through the sleeve's axis passes the quartz and the air gap, so its light goes by a route
+    through them, bent, and not straight; one that misses the sleeve goes straight; a pair whose two
+    ends lie in different media is the refracted gather's; and two ends in the air gap with nothing
+    inside it are joined straight.
+    """
+    axis = [0.0, 0.0, 1.0]
+    gap = Transparent(Cylinder([0, 0, 0], axis, 0.01025, 0.5), AIR)
+    sleeve = Transparent(Cylinder([0, 0, 0], axis, 0.0115, 0.5), QUARTZ, inside=(gap,))
+    media = Media(WATER, (sleeve,))
+    facets = _tiny_facets([[-0.05, 0.0, 0.0], [0.0, 0.0, 0.002], [-0.05, 0.08, 0.0]])
+    points = np.array([[0.05, 0.0, 0.0], [0.05, 0.08, 0.0], [0.0, 0.005, 0.0]])
+    reach = straight_reach(media, facets, points)
+    assert reach.dtype == bool
+    expected = np.array(
+        [
+            [False, False, True],  # Through the sleeve's axis; another medium; misses it.
+            [True, False, True],  # Both lines from the water miss the sleeve.
+            [False, True, False],  # From the gap to the water is refracted; in the gap, straight.
+        ]
+    )
+    np.testing.assert_array_equal(reach, expected)
+    # However the pairs are cut into passes.
+    np.testing.assert_array_equal(straight_reach(media, facets, points, pair_limit=2), reach)
