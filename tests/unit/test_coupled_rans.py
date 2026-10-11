@@ -36,7 +36,6 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
     NO_REFRESH,
-    VCYCLE_LINEAR_SOLVE,
     BlockScaled,
     BlockScaledNorm,
     Convergence,
@@ -57,6 +56,9 @@ from aquaflux.solve import (
     SimpleSmoothed,
 )
 from aquaflux.solve import driver as driver_module
+from aquaflux.solve.materialized_session import (
+    VCYCLE_LINEAR_SOLVE,
+)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledShiftSettings,
@@ -1353,7 +1355,12 @@ def _single_step():
 
 def test_a_dual_time_march_given_no_control_defaults_to_the_courant_step_control() -> None:
     """A dual-time march given no control defaults to ``DualTimeControl``, observed or not."""
-    from aquaflux.solve import DualTimeControl, default_dual_time_control
+    from aquaflux.solve import (
+        DualTimeControl,
+    )
+    from aquaflux.solve.step_control import (
+        default_dual_time_control,
+    )
 
     control = default_dual_time_control(None, strategy=_dual_time_step())
     assert isinstance(control, DualTimeControl)
@@ -1361,14 +1368,21 @@ def test_a_dual_time_march_given_no_control_defaults_to_the_courant_step_control
 
 def test_a_single_step_march_gets_no_default_control() -> None:
     """A single-step (pseudo-transient) march is not a dual-time step, so no control is injected."""
-    from aquaflux.solve import default_dual_time_control
+    from aquaflux.solve.step_control import (
+        default_dual_time_control,
+    )
 
     assert default_dual_time_control(None, strategy=_single_step()) is None
 
 
 def test_a_caller_supplied_control_is_never_overridden() -> None:
     """An explicit control on a dual-time march is returned unchanged (the override path)."""
-    from aquaflux.solve import ResidualRatioDualTimeControl, default_dual_time_control
+    from aquaflux.solve import (
+        ResidualRatioDualTimeControl,
+    )
+    from aquaflux.solve.step_control import (
+        default_dual_time_control,
+    )
 
     explicit = ResidualRatioDualTimeControl(beta_start=0.5)
     assert default_dual_time_control(explicit, strategy=_dual_time_step()) is explicit
@@ -1560,7 +1574,10 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
     assembler as an argument instead. A rung differs only in leaf values (pinned by the test above), so
     a probe that takes the assembler as an argument is a hit.
     """
-    from aquaflux.solve import batched_jacobian_matvec, jacobian_matvec
+    from aquaflux.solve.materialized_session import (
+        batched_jacobian_matvec,
+        jacobian_matvec,
+    )
 
     state = jnp.linspace(1.0, 2.0, 29)  # a unique size; the compilation cache is process-global
     tangent = jnp.ones_like(state)
@@ -1589,7 +1606,12 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
     rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
     preconditioner -- defeating the point of reusing it.
     """
-    from aquaflux.solve import FrozenTransposeFactory, TransposedPreconditioner
+    from aquaflux.solve import (
+        TransposedPreconditioner,
+    )
+    from aquaflux.solve.monolithic_policy import (
+        FrozenTransposeFactory,
+    )
 
     class _Pc:
         def matvec(self, *, transpose: bool = False):
@@ -1610,7 +1632,9 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
 def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
     """The factorization is frozen, so the same transpose serves every state -- which is what lets this
     be a value object at all."""
-    from aquaflux.solve import FrozenTransposeFactory
+    from aquaflux.solve.monolithic_policy import (
+        FrozenTransposeFactory,
+    )
 
     class _Pc:
         def __init__(self):

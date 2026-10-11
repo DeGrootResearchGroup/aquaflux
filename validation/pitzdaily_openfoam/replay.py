@@ -36,7 +36,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import ConstantRelaxation, in_progress_measure, jacobian_matvec, solve_linear
+from aquaflux.solve import (ConstantRelaxation, solve_linear,)
+from aquaflux.solve.linear import (in_progress_measure,)
+from aquaflux.solve.materialized_session import (jacobian_matvec,)
 from aquaflux.turbulence import coupled_step, open_session, scale_both_blocks, scale_momentum_only
 from aquaflux.turbulence.coupled import coupled_scaled_norm
 

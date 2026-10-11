@@ -52,14 +52,12 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
-    MaterializedJacobianPreconditioner,
-    block_stencil_gather_map,
-    equilibrate_cell_major,
-)
+from aquaflux.solve import (MaterializedJacobianPreconditioner,)
+from aquaflux.solve.frozen_operator import (equilibrate_cell_major,)
+from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
-from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec
+from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec,)
 
 #: Field order of the coupled state, for labelling the null direction.
 FIELDS = ("u", "v", "w", "p", "k", "omega")

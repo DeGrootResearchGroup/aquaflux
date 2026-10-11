@@ -40,20 +40,15 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import (  # noqa: E402
-    ColumnProbePlan,
-    FieldGroups,
-    MaterializedJacobianPreconditioner,  # noqa: E402
-    block_stencil_colouring,
-    block_stencil_gather_map,
-    symmetrically_equilibrate,  # noqa: E402
-)
+from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner,)
+from aquaflux.solve.frozen_operator import (symmetrically_equilibrate,)
+from aquaflux.solve.sparse_jacobian import (ColumnProbePlan, block_stencil_colouring, block_stencil_gather_map,)
 from aquaflux.solve.multigrid import (  # noqa: E402
     _aggregation_edges,
     _cell_graph,
     _mis_aggregate,
 )
-from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
+from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 
 REACH = 3
 #: The aggregation's default: keep the full graph, so a weight-zero edge counts as a connection.

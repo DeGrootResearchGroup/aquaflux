@@ -14,8 +14,15 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.solve import BlockScaledNorm, NamedBlockMeasure, RowScaledNorm, named_blocks
+from aquaflux.solve import (
+    BlockScaledNorm,
+    NamedBlockMeasure,
+    RowScaledNorm,
+)
 from aquaflux.solve.implicit import backtracking_line_search
+from aquaflux.solve.norm import (
+    named_blocks,
+)
 
 
 def test_block_scaled_norm_is_the_l2_of_per_block_relative_norms():

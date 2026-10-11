@@ -225,6 +225,27 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > toolkit is whole; that library code keeps to the surface is pinned for EVERY package at once by
 > `tests/unit/test_layering.py::test_one_package_reaches_another_only_through_its_public_surface`
 > (#284), which replaced a `solve`-only copy of that check.
+> **What belongs in `__all__` is what a user CONFIGURES, IMPLEMENTS or RECEIVES — not everything
+> another module happens to need (#284 part 2, 2026-10-11).** 37 names left the surface that day
+> (185 → 148): regime and batch constants, the coloured probe's plan/gather/matvecs, equilibration and
+> reordering helpers, `PositiveBlockLimit`/`PositiveBlockProjection` (users call
+> `positive_block_limit`/`positive_block_projection`), `CallerBuiltSource`/`FinishedSource` (what
+> `explicit_source` picks), `BetaTrackingRefresh`, `FrozenTransposeFactory`,
+> `MaterializedBlockPreconditioner`, `PhaseTimer`, `ShapeBudget`, `PLAIN_RESIDUAL`, `named_blocks`,
+> `shift_of`, `default_dual_time_control`, `checkpoint_name`, `combine_metrics`, `in_progress_measure`,
+> `InnerIterateCheckpointer`. Each still lives in its submodule; tests import it from there, and the
+> harnesses that need one are listed in `VALIDATION_INTERNAL_REACHES`. **Kept although nothing outside
+> `solve/` imports them**, because a user implements or chooses them: the protocols and family bases
+> (`StepAcceptance`, `RefreshTrigger`, `ResidualMeasure`, `BlockInverse`, `StateBlock`, `FrozenInverse`
+> and its two refinements, the four capability protocols, `NamedBlockMeasure`, `MeasureBuilder`), the
+> `Globalization` values (`DivergenceGuard`, `MonotoneLineSearch`, `RelaxedFarFromRoot`), the results
+> of public drivers (`MarchResult`, `StagedResult`) and the materialized spec's mapping reader/writer.
+> **Pinned by `test_solve_api.py::test_every_export_is_used_elsewhere_or_declared_user_facing`**: an
+> export must be imported by another package, named in the hand-written docs (`README.md`, `docs/*.md`
+> bar the generated `api.md` and `package_structure.md`), or listed in `USER_IMPLEMENTS` /
+> `USER_CONFIGURES` / `USER_CALLS` — and a listed name that no longer needs its reason fails too.
+> Mutation-checked six ways. Adding to a list is a decision a reviewer sees; the list is the place to
+> ask whether a user writes against the name or it merely leaked.
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
 
@@ -636,7 +657,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     built from — one home for what `_coupled_block_scales` and the flow measure both need.
   - **Both block measures carry a static `names` (2026-10-07)** — the equation each block holds, empty by
     default and refused unless it names every block once; `BlockScaledNorm` gained `per_block` to match
-    `RowScaledNorm`'s. `named_blocks(measure, residual_fn, state)` (exported) reads the per-block terms
+    `RowScaledNorm`'s. `norm.named_blocks(measure, residual_fn, state)` (internal since #284; the march is its one caller) reads the per-block terms
     under those names, which is what `newton_march(on_residuals=)` reports (see `solve-march.md`). Only the
     row-scaled flow and coupled builders name their blocks.
   - **`BlockScaledNorm.scales` is an ordinary array leaf, not static (#368, 2026-09-29)** — only `sizes`

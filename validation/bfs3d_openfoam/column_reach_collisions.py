@@ -17,7 +17,7 @@ measurement of magnitude, because the two possible answers point in opposite dir
   whole column stacks every row field, and on this system the omega rows exceed the k rows by orders
   of magnitude, so they set any such ratio on their own).
 
-The plan is built through the shipped :func:`~aquaflux.solve.column_probe_plan`, so this exercises the
+The plan is built through the shipped :func:`~aquaflux.solve.sparse_jacobian.column_probe_plan`, so this exercises the
 real reach bookkeeping rather than a restatement of it.
 
 Three counts per shortened column field, over the assembled pattern:
@@ -49,7 +49,7 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.solve import column_probe_plan  # noqa: E402
+from aquaflux.solve.sparse_jacobian import (column_probe_plan,)  # noqa: E402
 
 #: Field order of the coupled state, for labelling only.
 FIELDS = ("u", "v", "w", "p", "k", "omega")

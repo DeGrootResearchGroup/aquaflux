@@ -46,14 +46,11 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
-    FieldGroups,
-    MaterializedJacobianPreconditioner,
-    block_stencil_gather_map,
-)
+from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner,)
+from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence import ScalarTwoLevel, positive_k_limit  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
-from aquaflux.solve import frozen_shift_diagonal, jacobian_matvec
+from aquaflux.solve.materialized_session import (frozen_shift_diagonal, jacobian_matvec,)
 from cell_block_scaling import block_diagnostics, cell_blocks  # noqa: E402
 
 N_TRAILING = 2

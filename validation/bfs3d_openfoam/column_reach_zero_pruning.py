@@ -39,16 +39,10 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import (  # noqa: E402
-    ColumnProbePlan,
-    FieldGroups,
-    MaterializedJacobianPreconditioner,  # noqa: E402
-    block_stencil_colouring,
-    block_stencil_gather_map,
-    column_probe_plan,
-    equilibrate_cell_major,  # noqa: E402
-)
-from aquaflux.solve import PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec
+from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner,)
+from aquaflux.solve.frozen_operator import (equilibrate_cell_major,)
+from aquaflux.solve.sparse_jacobian import (ColumnProbePlan, block_stencil_colouring, block_stencil_gather_map, column_probe_plan,)
+from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 
 REACH = 3
 #: The arm under test against the uniform control.

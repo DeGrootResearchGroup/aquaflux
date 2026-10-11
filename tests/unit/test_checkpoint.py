@@ -12,9 +12,11 @@ import pytest
 from aquaflux.solve import (
     StateCheckpointer,
     StepReport,
-    checkpoint_name,
     combine_observers,
     find_checkpoint,
+)
+from aquaflux.solve.checkpoint import (
+    checkpoint_name,
 )
 
 
@@ -129,7 +131,9 @@ def test_logging_and_checkpointing_share_the_one_callback(tmp_path) -> None:
 
 def test_inner_iterate_checkpointer_keeps_only_the_expensive_iterations(tmp_path):
     """A march that behaves should cost nothing; only the solves worth probing get written."""
-    from aquaflux.solve import InnerIterateCheckpointer
+    from aquaflux.solve.checkpoint import (
+        InnerIterateCheckpointer,
+    )
 
     keeper = InnerIterateCheckpointer(tmp_path, above=5)
     # restart_cycles strips a +2 offset per solve, so raw 3 is one cycle and raw 17 is fifteen.
@@ -144,7 +148,9 @@ def test_inner_iterate_checkpointer_keeps_only_the_expensive_iterations(tmp_path
 
 def test_inner_iterate_checkpointer_numbers_retry_attempts_apart(tmp_path):
     """A redone step restarts its inner loop, and the REJECTED attempt is usually the hard one."""
-    from aquaflux.solve import InnerIterateCheckpointer
+    from aquaflux.solve.checkpoint import (
+        InnerIterateCheckpointer,
+    )
 
     keeper = InnerIterateCheckpointer(tmp_path, above=1)
     keeper.on_inner(0, 1.0, 1.0, 17, 0.0, np.array([1.0]))  # attempt 1, then the step is redone
@@ -155,7 +161,9 @@ def test_inner_iterate_checkpointer_numbers_retry_attempts_apart(tmp_path):
 
 
 def test_inner_iterate_checkpointer_rejects_a_meaningless_threshold(tmp_path):
-    from aquaflux.solve import InnerIterateCheckpointer
+    from aquaflux.solve.checkpoint import (
+        InnerIterateCheckpointer,
+    )
 
     with pytest.raises(ValueError, match="above"):
         InnerIterateCheckpointer(tmp_path, above=0)

@@ -44,10 +44,12 @@ from aquaflux.solve import (
     MaterializedJacobianPreconditioner,
     SimpleSmoothed,
     field_split_inverse,
-    jacobian_matvec,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
+)
+from aquaflux.solve.materialized_session import (
+    jacobian_matvec,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
