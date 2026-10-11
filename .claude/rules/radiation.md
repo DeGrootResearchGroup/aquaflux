@@ -4925,7 +4925,10 @@ are bent too (no straight-through factor left anywhere).
   paths between the last existing sample and the edge -- at 16 sectors (`rim_light.py`, 26,624 facets,
   Linux 4 cores) shot / backward gather 0.720 / 0.544 at (55,25) / (50,50) uniform 32 x 32, 0.769 /
   0.629 uniform 96 x 96 (1,114 s), **0.761 / 0.631 with the ends (874 s)**. The rest is the corner rule
-  (a facet needs all three corners' paths), shrinking with the facets (prototype 0.925 / 0.836 at 64). The crossings go to **`_Stationary`** -- the descent's
+  (a facet needs all three corners' paths), shrinking with the facets (prototype 0.925 / 0.836 at 64).
+  Pinned by `test_no_path_a_fine_grid_finds_is_missed_by_the_shipped_one` (96 x 96 as the reference;
+  red with the run's ends not found). Fast gate on this tree: 2366 passed, 16 skipped, one worker lost
+  to memory in `test_flow_march.py` (passes alone; two workers, 15 GB Linux container). The crossings go to **`_Stationary`** -- the descent's
   stationarity conditions, factored out of `_one_path` with what a path carries (`carried`) and the
   `custom_root` wrapper (`solved`), so a shot path is differentiated by the same implicit derivative
   and judged by the same validity tail; the descent's numbers are unchanged (all 27 earlier refraction
