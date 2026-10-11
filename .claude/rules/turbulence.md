@@ -2152,7 +2152,7 @@ tuning follow-up noted above.
       at `grow` 1.5, which is where the optimum sits; at `grow` 3 it takes 7, and `3 x 12` costs **111**
       cycles in 16 steps against `1.5 x 16`'s 141 in 22. The viscosity step size does not move `alpha`
       (identical histories at 1.33x and 2x per step); what is conserved is 6-9 steps AT the floor before
-      the state settles, and the cheapest ramp ends one step after that. Table and the design it closes
+      the state settles (at those paces: at 1.21x per step it settled at the 4th), and the cheapest ramp ends one step after that. Table and the design it closes
       in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
       **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11**; bfs3d keeps its own
       schedule (#678).

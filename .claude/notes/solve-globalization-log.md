@@ -1320,7 +1320,7 @@ The last arm was run after the first four, as the prediction the pattern below m
 arrives about where the state settles at the floor.
 
 - **The step count is nearly invariant, and what is conserved is steps AT THE FLOOR before the state
-  settles**: 6-9 in every arm (the first full-length step at the floor is the 7th, 8th, 6th, 8th and
+  settles** (⚠️ at these paces only: a slower ramp settles sooner, see the prototype entry below): 6-9 in every arm (the first full-length step at the floor is the 7th, 8th, 6th, 8th and
   7th floor step). That is the recorded "insufficient elapsed pseudo-time" finding in a new form: the
   transient needs a fixed amount of pseudo-time at the largest timestep, and no schedule removes it.
 - **The viscosity step does not move `alpha`; the shift does.** The two `grow` 3 arms have identical
@@ -1349,3 +1349,36 @@ released at step 15, final `|R|` 1.98e-6, `x_r/h` 8.0686, no retry -- the sweep'
 bfs3d's case are unchanged; bfs3d is #678. ⚠️ **"The shipped `case.yaml`" in any pitzDaily entry dated
 before 2026-10-11 means `grow` 1.5 x 16 stations with no release** (31 steps / 161 cycles at its last
 measurement).
+
+## Ending the ramp on the settle signal: a prototype, 2026-10-11
+
+**Configuration.** pitzDaily, `case.yaml` as shipped that day (`grow` 3, `release_floor` 1e-4, ramp anchor
+100, momentum-only, one step per station, everything else as in the sweep above), with
+`validation/pitzdaily_openfoam/settle_ramp_probe.py` standing in for `ViscosityRampHomotopy`: station `s`
+at step `s` until the first step that ran off the target at `shift <= beta_min` with `alpha >= 1` (the
+release's gate), then the target from the next step. `PITZ_RAMP_STATIONS` is then only the pace. jax
+0.11.2, CPU, 4-core Linux, one run per arm, run back to back; restart cycles as the log counts them.
+Every arm `x_r/h` 8.0686, no retry.
+
+| arm | pace (per step) | settle after step | jump at the settle | steps | cycles (ramp / target) |
+|---|---|---|---|---|---|
+| 12 fixed stations (shipped) | 1.47x | -- (arrives at 13, settles on the target at 14) | -- | 16 | 111 (76 / 35) |
+| settle-ended, pace 16 | 1.33x | 13 (station 12 of 16) | 3.16x | 17 | 124 (83 / 41) |
+| settle-ended, pace 24 | 1.21x | **9** (station 8 of 24) | **21.5x** | 16 | 118 (54 / 64) |
+
+- **The jump is tolerated, whatever its size.** A 21.5x viscosity change in one step at the floor
+  shift cost no retry and no escalation; the first target step ran at `alpha` 0.5 and 12 cycles.
+- **But the jump undoes the settle, and the target has to settle again**: 2 steps after a 3.16x jump, 5
+  after a 21.5x one, before the first full-length step there and the release. The shipped 12-station
+  ramp avoids this by arriving one step BEFORE its settle, so the one settle it pays is on the target.
+- **⚠️ "6-9 floor steps before the settle" (the sweep above) is NOT conserved -- it depends on the pace.**
+  At 1.21x per step the state settled at the 4th floor step; at 1.33x and 1.47x, the 7th and 8th. A
+  slower-moving problem settles sooner. What WAS roughly conserved across all three: 16-17 steps and
+  111-124 cycles in total.
+- **Verdict against the pre-registered bar ("the same cycles within a few"): not met.** 118 and 124
+  against 111, +6 % and +12 %. What the rule does buy is insensitivity: across paces 16-24 it stays within
+  12 % of the hand-tuned optimum, where fixed counts at the same `grow` cost 134 (16 stations) and 145
+  (8 stations). A pace of 12 or faster never settles before arriving, so the rule reproduces the shipped
+  arm exactly there.
+- **What it does not tell apart:** whether a smaller jump at the settle (an accelerated finish over two
+  or three steps instead of one jump) would keep the first settle's benefit. Unmeasured.

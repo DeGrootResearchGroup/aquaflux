@@ -338,6 +338,13 @@ measure). pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 1
 
 ## 12. End the viscosity ramp on the settle signal, not on a station count
 
+**PROTOTYPED 2026-10-11, pre-registered bar not met** (`settle_ramp_probe.py`; table in
+`solve-globalization-log.md`, "Ending the ramp on the settle signal"): paces 16 and 24 cost 124 and 118
+cycles against the shipped 111, no retry, same `x_r/h`. The jump at the settle is tolerated at any size
+measured (up to 21.5x) but undoes the settle, so the target settles a second time. The rule is far less
+pace-sensitive than a fixed count; whether an accelerated finish instead of one jump closes the gap is
+open. The text below is the proposal as written before the measurement.
+
 **What.** Replace `stations` with a rule: ramp the viscosity down at a fixed pace (2x per step cost
 nothing in `alpha`), and move to the target on the first full-length step at the floor -- the same gate
 `release_floor` uses. Needs `ResidualHomotopy` to see the previous `StepReport`, which it does not today.
