@@ -231,7 +231,7 @@ def main() -> None:
         try:
             began = time.perf_counter()
             engine = build()
-            factors = engine.shift_policy.preconditioner.factors
+            factors = engine.shift_policy.preconditioner.inverse
             print(f"{label}  (built in {time.perf_counter() - began:.1f}s)", flush=True)
             measure(label, factors, a, rhs, transpose=False)
             measure(label, factors, a, rhs, transpose=True)

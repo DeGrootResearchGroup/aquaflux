@@ -56,8 +56,8 @@ from aquaflux.flow.block_preconditioner import (  # noqa: E402
     ConvectionTwoLevel,
 )
 from aquaflux.solve import (  # noqa: E402
-    FieldSplitAmgPreconditioner,
-    build_block_triangular_field_split,
+    FieldSplitPreconditioner,
+    field_split_inverse,
 )
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 
@@ -147,10 +147,10 @@ def _split(leading_inverse, trailing_inverse):
 
     def build(shifted, groups, n_fields):
         del n_fields  # each injected inverse is handed its own group's field count
-        split = build_block_triangular_field_split(
+        split = field_split_inverse(
             shifted, groups, leading_inverse=leading_inverse, trailing_inverse=trailing_inverse
         )
-        return FieldSplitAmgPreconditioner(split, groups)
+        return FieldSplitPreconditioner(split, groups)
 
     return build
 

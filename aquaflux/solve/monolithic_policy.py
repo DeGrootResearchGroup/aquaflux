@@ -28,8 +28,8 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     Reuses a base policy's pseudo-transient shift diagonal -- the physics, whatever rows and scales it
     chose -- but replaces its preconditioner with a single monolithic inverse of the assembled Jacobian,
     which forms the true pressure Schur coupling rather than approximating it. That inverse is a complete LU
-    (:class:`~aquaflux.solve.MonolithicLuPreconditioner`, exact, one cycle), a field split of multigrid
-    V-cycles (:class:`~aquaflux.solve.FieldSplitAmgPreconditioner`, bounded memory on a large
+    (:class:`~aquaflux.solve.CompleteLuPreconditioner`, exact, one cycle), a field split of multigrid
+    V-cycles (:class:`~aquaflux.solve.FieldSplitPreconditioner`, bounded memory on a large
     three-dimensional mesh), or one block inverse over the whole state
     (:class:`~aquaflux.solve.MaterializedBlockPreconditioner`) -- this policy is agnostic to which, needing
     only the shared callback-matvec interface.

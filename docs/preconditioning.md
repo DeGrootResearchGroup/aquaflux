@@ -383,8 +383,8 @@ configuration values.
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
 single hierarchy over both has to compromise. A {class}`~aquaflux.solve.FieldSplit`
-inverse instead builds a {class}`~aquaflux.solve.FieldSplitAmgPreconditioner`, wrapping a
-{class}`~aquaflux.solve.BlockTriangularFieldSplit`: one inverse for the leading
+inverse instead builds a {class}`~aquaflux.solve.FieldSplitPreconditioner`, wrapping a
+{class}`~aquaflux.solve.FieldSplitInverse`: one inverse for the leading
 `[u, v, w, p]` group, another for the trailing `[k, ω]` group, and one retained coupling
 block between them. Each group then gets an inverse suited to it, given as the split's
 `leading` and `trailing` values:
@@ -405,7 +405,7 @@ over the whole saddle, in which a SIMPLE relaxation is the smoother at each leve
 coarse grid carries the smooth global pressure mode. That mode is the one any SIMPLE-type
 Schur approximates worst, which is why the arrangement matters.
 
-{func}`~aquaflux.solve.build_block_triangular_field_split` builds the split directly if you
+{func}`~aquaflux.solve.field_split_inverse` builds the split directly if you
 want one outside a continuation. {class}`~aquaflux.solve.FieldGroups` says where the
 partition falls — as a view over the state's own {class}`~aquaflux.solve.FieldLayout`, so
 where you hold an assembled case you can name the split against its blocks
@@ -415,13 +415,13 @@ raw field-major matrix, give the counts:
 ```python
 from aquaflux.solve import (
     FieldGroups,
-    build_block_triangular_field_split,
+    field_split_inverse,
     JacobiSmoothed,
     SimpleSmoothed,
 )
 
 groups = FieldGroups.by_counts(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
-split = build_block_triangular_field_split(
+split = field_split_inverse(
     matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,
     leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=5),
@@ -437,7 +437,7 @@ far more strongly than the reverse, so that is the direction to keep.
 ### A complete factorization
 
 A {class}`~aquaflux.solve.CompleteLu` inverse builds a
-{class}`~aquaflux.solve.MonolithicLuPreconditioner` instead — a **complete** sparse LU of
+{class}`~aquaflux.solve.CompleteLuPreconditioner` instead — a **complete** sparse LU of
 the coupled matrix. On a moderate 2D mesh this is the strongest option available and often
 the fastest overall, because it converges the linear solve in very few iterations. It does
 not scale: the factorization's fill grows quickly with mesh size, which is what the
@@ -455,9 +455,9 @@ against any `scipy` sparse matrix.
 | {func}`~aquaflux.solve.build_convection_hierarchy` | Aggregation multigrid for a nonsymmetric convection–diffusion operator. |
 | {func}`~aquaflux.solve.build_air_hierarchy` | Reduction-based lAIR, returning an {class}`~aquaflux.solve.AirHierarchy`. `block_size` runs the coarsening on the cell graph so it works on a multi-field block. |
 
-Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_solve`,
-{func}`~aquaflux.solve.convection_multigrid_solve`,
-{func}`~aquaflux.solve.air_multigrid_solve` — that runs a fixed number of V-cycles, which
+Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_cycles`,
+{func}`~aquaflux.solve.convection_multigrid_cycles`,
+{func}`~aquaflux.solve.air_multigrid_cycles` — that runs a fixed number of V-cycles, which
 is what keeps the result a fixed linear map.
 
 {class}`~aquaflux.solve.ConvectionDiffusionStencil` describes the frozen operator these

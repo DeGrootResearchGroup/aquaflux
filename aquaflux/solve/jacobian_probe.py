@@ -150,7 +150,7 @@ class JacobianProbe:
         active_rows : np.ndarray, optional
             Exclude field-pair blocks from the materialized pattern entirely -- for a probe built
             specifically to feed one consumer that is known never to read some sub-block of the
-            Jacobian, such as a :class:`~aquaflux.solve.BlockTriangularFieldSplit`'s dropped triangle
+            Jacobian, such as a :class:`~aquaflux.solve.FieldSplitInverse`'s dropped triangle
             (:meth:`~aquaflux.solve.FieldGroups.active_rows`). ``None`` (default, and the only sound
             choice for a probe that might be shared with a monolithic consumer) wants every block.
         narrowing : callable, optional

@@ -55,7 +55,7 @@ from aquaflux.solve import (  # noqa: E402
     MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
     build_convection_hierarchy,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -103,7 +103,7 @@ def smoothed_cycle(
     coarse = hierarchy.levels[-1].n
 
     def apply(residual: jnp.ndarray) -> jnp.ndarray:
-        return convection_multigrid_solve(
+        return convection_multigrid_cycles(
             hierarchy,
             residual,
             cycles=1,

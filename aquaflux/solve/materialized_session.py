@@ -28,9 +28,9 @@ import numpy as np
 
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
-from .field_split import FieldGroups, FieldSplitAmgPreconditioner
+from .field_split import FieldGroups, FieldSplitPreconditioner
 from .jacobian_probe import JacobianProbe
-from .lu_preconditioner import MonolithicLuPreconditioner
+from .lu_preconditioner import CompleteLuPreconditioner
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian
 from .refresh_timing import RefreshTiming
@@ -649,7 +649,7 @@ class MaterializedSession:
         shift = frozen_shift_diagonal(base, build_beta, state)
         inverse = self._spec.inverse
         if isinstance(inverse, CompleteLu):
-            return MonolithicLuPreconditioner.build(matvec, probe.plan, shift)
+            return CompleteLuPreconditioner.build(matvec, probe.plan, shift)
 
         def batched_matvec(seeds):
             return batched_jacobian_matvec(probed, frozen, seeds)
@@ -668,7 +668,7 @@ class MaterializedSession:
                 n_fields=self._problem.layout.n_fields,
                 **probing,
             )
-        return FieldSplitAmgPreconditioner.build(
+        return FieldSplitPreconditioner.build(
             matvec,
             probe.plan,
             shift,

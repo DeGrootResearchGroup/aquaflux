@@ -34,7 +34,7 @@ from .host_preconditioner import HostPreconditioner
 from .refresh_timing import PhaseTimer
 
 
-class LuFactors:
+class CompleteLuInverse:
     """A frozen complete-LU factorization of the coupled Jacobian and its forward/transpose apply.
 
     A pure host object (no JAX). It applies ``M = A^{-1}`` (or ``M^T``) by a triangular solve on the raw
@@ -91,7 +91,7 @@ class LuFactors:
         self._factor(block)
 
 
-def factorize_lu(matrix: sp.spmatrix) -> LuFactors:
+def complete_lu_inverse(matrix: sp.spmatrix) -> CompleteLuInverse:
     """Completely LU-factor an assembled coupled block matrix, with SciPy's SuperLU.
 
     Parameters
@@ -102,7 +102,7 @@ def factorize_lu(matrix: sp.spmatrix) -> LuFactors:
 
     Returns
     -------
-    LuFactors
+    CompleteLuInverse
         The frozen factorization.
 
     Raises
@@ -111,12 +111,12 @@ def factorize_lu(matrix: sp.spmatrix) -> LuFactors:
         If ``matrix`` is not square.
     """
     if matrix.shape[0] != matrix.shape[1]:
-        raise ValueError(f"factorize_lu: matrix must be square, got {matrix.shape}.")
-    return LuFactors(matrix)
+        raise ValueError(f"complete_lu_inverse: matrix must be square, got {matrix.shape}.")
+    return CompleteLuInverse(matrix)
 
 
-class MonolithicLuPreconditioner(HostPreconditioner):
-    """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`LuFactors`.
+class CompleteLuPreconditioner(HostPreconditioner):
+    """The coupled complete-LU preconditioner as JAX matvecs, wrapping a frozen :class:`CompleteLuInverse`.
 
     Shares its interface (:meth:`build`, :meth:`refresh_in_place`, :meth:`matvec`) with the
     materialized-Jacobian preconditioners (:class:`~aquaflux.solve.MaterializedJacobianPreconditioner`),
@@ -147,7 +147,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
         plan,
         shift_diagonal: np.ndarray,
-    ) -> MonolithicLuPreconditioner:
+    ) -> CompleteLuPreconditioner:
         """Materialize the shifted coupled Jacobian and completely factor it, off the jit path.
 
         Parameters
@@ -163,11 +163,11 @@ class MonolithicLuPreconditioner(HostPreconditioner):
 
         Returns
         -------
-        MonolithicLuPreconditioner
+        CompleteLuPreconditioner
             The built preconditioner.
         """
         matrix = cls._shifted(cls._materialize(matvec, plan), shift_diagonal)
-        return cls(factorize_lu(matrix))
+        return cls(complete_lu_inverse(matrix))
 
     def refresh_in_place(
         self,
@@ -181,7 +181,7 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         afresh (the coupled Jacobian's sparsity grows as the flow develops, so the pattern is not
         fixed). Because
         this preconditioner is held as a **static field** of the shift policy and :meth:`matvec` reads
-        ``self.factors`` at call time, mutating the factorization here re-preconditions the **same
+        ``self.inverse`` at call time, mutating the factorization here re-preconditions the **same
         compiled** Krylov solve (a compilation cache hit -- no recompile).
 
         **Forward-march use ONLY — the mutation is impure and must never touch a differentiated path.**
@@ -201,6 +201,6 @@ class MonolithicLuPreconditioner(HostPreconditioner):
         timer.lap("probe")
         matrix = self._shifted(jacobian, shift_diagonal)
         timer.lap("assemble")
-        self.factors.refactor_block(matrix)
+        self.inverse.refactor_block(matrix)
         timer.lap("refactor")
         return timer.phases()

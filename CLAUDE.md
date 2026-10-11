@@ -1522,7 +1522,7 @@ After **every code change**, before considering the task complete, review and ac
      returned *as it stands* — the whole return value, an arm of a conditional, an operand of `and`/`or` —
      credits that call. Methods are keyed `Class.method`, so one class's `_build` is never another's.
      **Unioning every definition of the name was rejected** — it would credit `coupled_step` with what
-     `AmgVCycle._build` constructs — and a receiver whose producer returns no package class **falls back to
+     `MonolithicVCycleInverse._build` constructs — and a receiver whose producer returns no package class **falls back to
      the bare name**, because the first version lost `_coupled_step`'s `globalization.step(...)` (a rebound
      parameter) and silently re-hid the pair it was written to find. The one new pair is `coupled_step` /
      `mass_flow_coupled_continuation`; every other pair is main's, unchanged. Its two carve-outs have

@@ -3,7 +3,7 @@
 A materialized-Jacobian preconditioner probes the coupled Jacobian with graph-coloured
 Jacobian-vector products, adds the pseudo-transient shift to its diagonal, and fits a frozen host inverse
 to the result: the block-triangular field split
-(:class:`~aquaflux.solve.field_split.FieldSplitAmgPreconditioner`) and the single-block inverse of a state
+(:class:`~aquaflux.solve.field_split.FieldSplitPreconditioner`) and the single-block inverse of a state
 whose fields form one group (:class:`~aquaflux.solve.block_preconditioner.MaterializedBlockPreconditioner`).
 :class:`MaterializedJacobianPreconditioner` holds what they share -- the probe, the shift, and the in-place
 refresh -- on top of :class:`~aquaflux.solve.HostPreconditioner`'s apply.
@@ -31,7 +31,7 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
     What every member needs and nothing more: probing the Jacobian, adding the pseudo-transient shift,
     and the refresh, which re-fits the frozen inverse to the shifted field-major matrix as it stands.
     The inverse itself is the subclass's, built by its own ``build`` and reached through
-    :attr:`~aquaflux.solve.HostPreconditioner.factors`.
+    :attr:`~aquaflux.solve.HostPreconditioner.inverse`.
     """
 
     @staticmethod
@@ -86,7 +86,7 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         The arguments are the build's materialization arguments, evaluated at the developed state. The
         inverse's own configuration is fixed when it is built and cannot be changed by a refresh.
         Because this preconditioner is held as a **static field** of the shift policy and
-        :meth:`~aquaflux.solve.HostPreconditioner.matvec` reads ``self.factors`` at call time, re-fitting
+        :meth:`~aquaflux.solve.HostPreconditioner.matvec` reads ``self.inverse`` at call time, re-fitting
         the inverse here re-preconditions the **same compiled** Krylov solve.
 
         **Forward-march use ONLY -- the mutation is impure and must never touch a differentiated path.**
@@ -103,10 +103,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         Raises
         ------
         TypeError
-            If the inverse is not a :class:`~aquaflux.solve.RefactorableFactors` (an injected inverse need
+            If the inverse is not a :class:`~aquaflux.solve.RefactorableInverse` (an injected inverse need
             not be refreshable).
         """
-        inverse = require_refactorable(self.factors, f"this {type(self).__name__}")
+        inverse = require_refactorable(self.inverse, f"this {type(self).__name__}")
         timer = PhaseTimer()
         jacobian = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure

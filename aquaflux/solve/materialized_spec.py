@@ -77,7 +77,7 @@ class CompleteLu(SettingsValue):
     """A complete LU factorization of the materialized Jacobian.
 
     Exact, so each shifted solve converges in one Krylov iteration, and refactored at the march's own
-    shift on every step. It is SciPy's SuperLU (:meth:`~aquaflux.solve.MonolithicLuPreconditioner.build`),
+    shift on every step. It is SciPy's SuperLU (:meth:`~aquaflux.solve.CompleteLuPreconditioner.build`),
     and it has no settings. Its fill is the limit: it suits two-dimensional or moderate meshes.
     """
 

@@ -9,11 +9,11 @@ import pytest
 from aquaflux.flow import BlockPreconditioner
 from aquaflux.solve import (
     CompleteLu,
+    CompleteLuPreconditioner,
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicLuPreconditioner,
     SimpleSmoothed,
 )
 from aquaflux.turbulence import (
@@ -52,7 +52,7 @@ def test_the_probe_spec_names_the_probe_builders_free_settings() -> None:
 
 def test_the_complete_lu_spec_names_the_factorizations_settings() -> None:
     """The factorization has no settings, so neither does its spec."""
-    assert _fields(CompleteLu) == _parameters(MonolithicLuPreconditioner.build, _KEYWORD_ONLY)
+    assert _fields(CompleteLu) == _parameters(CompleteLuPreconditioner.build, _KEYWORD_ONLY)
 
 
 def test_an_unset_scalar_block_resolves_to_the_two_level_default() -> None:

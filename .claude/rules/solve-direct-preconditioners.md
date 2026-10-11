@@ -10,14 +10,14 @@ paths:
 
 > ⚠️ **PETSc was removed (2026-10-10), and with it the complete LU's UMFPACK backend and the whole monolithic
 > AMG.** The complete LU is **SciPy's SuperLU only**: there is no `backend` anywhere (`CompleteLu` has no
-> fields; `factorize_lu(matrix)`, `MonolithicLuPreconditioner.build(matvec, plan, shift_diagonal)`), no
+> fields; `complete_lu_inverse(matrix)`, `CompleteLuPreconditioner.build(matvec, plan, shift_diagonal)`), no
 > `LU_BACKENDS`, `_umfpack_available`, `_PetscUmfpackBackend`, `_ScipyLuBackend`, `_LuBackend` or
-> `_make_backend` — `LuFactors(matrix)` holds the `splu` factor directly and is `RefactorableFactors` but
-> **not** `ReleasableFactors` (SuperLU holds nothing to release). There is no `amg_preconditioner.py`,
-> `MonolithicAmgPreconditioner`, `AmgVCycle`, `build_amg_vcycle` or `ShiftedCellMajorOperator`.
+> `_make_backend` — `CompleteLuInverse(matrix)` holds the `splu` factor directly and is `RefactorableInverse` but
+> **not** `ReleasableInverse` (SuperLU holds nothing to release). There is no `amg_preconditioner.py`,
+> `MonolithicVCyclePreconditioner`, `MonolithicVCycleInverse`, `monolithic_vcycle_inverse` or `ShiftedCellMajorOperator`.
 > **`MaterializedJacobianPreconditioner` now lives in `solve/materialized_preconditioner.py`** (unchanged);
-> its subclasses are `FieldSplitAmgPreconditioner` and `MaterializedBlockPreconditioner`. Entries below
-> that measure UMFPACK, a PETSc V-cycle or `AmgVCycle._live` are dated history.
+> its subclasses are `FieldSplitPreconditioner` and `MaterializedBlockPreconditioner`. Entries below
+> that measure UMFPACK, a PETSc V-cycle or `MonolithicVCycleInverse._live` are dated history.
 >
 > **Why the LU kept SuperLU rather than going too:** the project owner judged direct LU "only practical for
 > tiny cases" and kept it for now; it still has the narrow niche measured below (an exact 2D/moderate
@@ -72,46 +72,46 @@ paths:
   `HostPreconditioner` owns `__init__` and `matvec()` and each subclass supplies only `build` /
   `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
   deliberately **not** unified behind a signature that would be the union of both.
-  - **`HostFactors` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
+  - **`FrozenInverse` is the contract, and it is exactly `n_dofs` + `apply(residual, *, transpose=…)`.**
     That pair is a real structural contract satisfied by the complete-LU factors,
-    `HierarchyBlockInverse` and both `BlockTriangularFieldSplit`s (three further members — the PETSc
-    `AmgVCycle`, the monolithic ILUT and the Vanka smoother — have since been deleted) — and declared by none of them individually, so `matvec` would otherwise be written out
-    once per class. `FieldSplitAmgPreconditioner` used to obtain it by subclassing a *concrete sibling*,
-    `MonolithicAmgPreconditioner` — which is what let the `has_exact_solve` hazard below happen at all.
+    `HierarchyBlockInverse` and both `FieldSplitInverse`s (three further members — the PETSc
+    `MonolithicVCycleInverse`, the monolithic ILUT and the Vanka smoother — have since been deleted) — and declared by none of them individually, so `matvec` would otherwise be written out
+    once per class. `FieldSplitPreconditioner` used to obtain it by subclassing a *concrete sibling*,
+    `MonolithicVCyclePreconditioner` — which is what let the `has_exact_solve` hazard below happen at all.
     **⚠️ That is fixed structurally (2026-09-11, #287): `MaterializedJacobianPreconditioner`
     (now `materialized_preconditioner.py`; it was in the deleted `amg_preconditioner.py`) is the shared
     base**, holding only what
     is genuinely common to fitting *any* inverse to the coloured-probe materialized coupled Jacobian
     (the probe itself, the shift-diagonal add, teardown) —
-    `MonolithicAmgPreconditioner` is no longer `FieldSplitAmgPreconditioner`'s base, so it no longer
+    `MonolithicVCyclePreconditioner` is no longer `FieldSplitPreconditioner`'s base, so it no longer
     inherits the monolithic-only state (the fixed-pattern cell-major assembler) it never used. See `solve-amg-multigrid.md` and `solve-field-split.md`.
-  - **⚠️ Anything a base reads off `self.factors` beyond that pair is a requirement on ALL of them
+  - **⚠️ Anything a base reads off `self.inverse` beyond that pair is a requirement on ALL of them
     (binding).** This is not hypothetical: an exact-solve capability flag (`has_exact_solve`, deleted with
-    the host exact forward solve on 2026-09-13, #371) read `self.factors.has_exact_solve`, which only
-    `AmgVCycle` had, so the property **raised** on the field split — and the call sites asked through
+    the host exact forward solve on 2026-09-13, #371) read `self.inverse.has_exact_solve`, which only
+    `MonolithicVCycleInverse` had, so the property **raised** on the field split — and the call sites asked through
     `getattr(pc, ..., False)`, whose default swallows an `AttributeError` raised inside a property body
-    exactly as it swallows a missing name. If a capability is not in `HostFactors`, answer it on the
+    exactly as it swallows a missing name. If a capability is not in `FrozenInverse`, answer it on the
     subclass. Pinned by an AST check on the base's own source
     (`test_the_base_asks_its_factors_for_nothing_beyond_the_declared_contract`) — read off the source
     rather than exercised, because the failure is a lookup that is *never taken* on the paths a test
     would naturally drive, which is why the original went unseen.
   - **The capabilities only SOME inverses have are declared protocols, asked by `isinstance` (BUILT
-    2026-10-10, #281).** Beside `HostFactors`, `host_preconditioner.py` declares two, each
+    2026-10-10, #281).** Beside `FrozenInverse`, `host_preconditioner.py` declares two, each
     `runtime_checkable` and exported from `aquaflux.solve`:
-    - **`RefactorableFactors(HostFactors)`**: `refactor_block(block)`, re-fit IN PLACE to the raw
+    - **`RefactorableInverse(FrozenInverse)`**: `refactor_block(block)`, re-fit IN PLACE to the raw
       field-major operator of the built shape. **One spelling across the family**: the split's
-      `BlockTriangularFieldSplit.refactor` is renamed `refactor_block` (there is no `split.refactor`), so a
+      `FieldSplitInverse.refactor` is renamed `refactor_block` (there is no `split.refactor`), so a
       split is itself refactorable and refreshes through the same path as a single block inverse.
-      `LuFactors` has one too (it re-factors its SuperLU factor afresh). (The deleted PETSc
-      `AmgVCycle.refactor(cell_major, scale, perm)` had a different signature and was deliberately not
+      `CompleteLuInverse` has one too (it re-factors its SuperLU factor afresh). (The deleted PETSc
+      `MonolithicVCycleInverse.refactor(cell_major, scale, perm)` had a different signature and was deliberately not
       this protocol.)
-    - **`ReleasableFactors`**: `destroy()`, with `release(factors)` the one place that asks.
+    - **`ReleasableInverse`**: `destroy()`, with `release(factors)` the one place that asks.
       `HostPreconditioner.destroy()` calls it, so every family member releases its inverse. ⚠️ **Before
       this, `MaterializedJacobianPreconditioner.destroy` had an EMPTY body**, so destroying a
-      `MonolithicAmgPreconditioner` or a `FieldSplitAmgPreconditioner` released nothing — only
+      `MonolithicVCyclePreconditioner` or a `FieldSplitPreconditioner` released nothing — only
       `MaterializedBlockPreconditioner` overrode it with a `getattr` probe. Every validation harness that
       calls `pc.destroy()` "to keep one preconditioner in memory at a time" was relying on a no-op.
-      `LuFactors` is **not** releasable since PETSc went: a SuperLU factor holds nothing a `destroy` could
+      `CompleteLuInverse` is **not** releasable since PETSc went: a SuperLU factor holds nothing a `destroy` could
       free early (the PETSc backend that freed its `KSP`/`Mat` is deleted).
     - **The traced capability is NOT here**: it is `OffersTracedCycle` / `TracedCycle` in
       `traced_cycle.py` (#665), which holds the hierarchy as array leaves. A `TracedFactors` /
@@ -119,10 +119,10 @@ paths:
       main; neither name exists.
     - `require_refactorable(factors, owner)` raises a `TypeError` naming the inverse; the split checks
       BOTH blocks before re-fitting either, so a refusal never leaves it half re-fitted. A split also
-      refuses a non-`HostFactors` block at construction (`TypeError`) rather than at first apply.
+      refuses a non-`FrozenInverse` block at construction (`TypeError`) rather than at first apply.
     - **The factory types say so**: `leading_inverse` / `trailing_inverse` / `inverse` are
-      `Callable[[sp.csr_matrix, int], HostFactors]` (were `... object`), and `BlockInverse.__call__`
-      returns `RefactorableFactors`.
+      `Callable[[sp.csr_matrix, int], FrozenInverse]` (were `... object`), and `BlockInverse.__call__`
+      returns `RefactorableInverse`.
     Pinned by `test_each_inverse_declares_exactly_the_capabilities_it_has` (both directions, real
     types), `test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything`, and the
     split's refit/atomicity tests in `test_field_split.py`; each was mutation-checked.
@@ -370,7 +370,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       - `frozen_operator.apply_symmetric_scale(data, indptr, indices, scale, chunks=…)` scales the stored
         values in place (row-chunked, so the row factor's per-nonzero expansion never allocates an array
         the size of the values). `symmetrically_equilibrate` uses it in place of `diags(s) @ a @ diags(s)`.
-      - `MonolithicAmgPreconditioner._shifted` adds the shift by **diagonal assignment**, not
+      - `MonolithicVCyclePreconditioner._shifted` adds the shift by **diagonal assignment**, not
         `a + sp.diags(shift)` — a sparse **addition** drops explicit zeros just as the product does, so
         the zeros were being lost before the equilibration ever ran. Found only because the bit-identity
         test kept failing after the first fix.
@@ -453,7 +453,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       the march's reach, but do not carry "proven safe" across the β boundary.
       **⚠️ AND `(3,3,3,2,2,2)` IS ONLY SOUND IF THE FACTORIZATION KEEPS STORED ZEROS, WHICH IT MUST NOT.**
       Shortening `p` is safe only when the dropped positions are held in the pattern as stored zeros —
-      and stored zeros are exactly what `AmgVCycle._live` removes, because the incomplete factorization
+      and stored zeros are exactly what `MonolithicVCycleInverse._live` removes, because the incomplete factorization
       cannot take them. So with the operator pruned at the factorization the `p` column is back in the
       configuration that diverges the case, and the case default must stay `(3,3,3,3,2,2)`. **Predicted
       from the mechanism, not re-measured on a march** — the divergence itself is the measured #191
@@ -535,7 +535,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         4.72M nonzeros against 13.32M, and a preconditioner indifferent to the pattern.
       - **🛑🛑 SCOPE BANNER — READ BEFORE CITING ANY ZERO-FILL RESULT BELOW. THE 2026-08-16 SWEEPS ARE
         MONOLITHIC AND THE CASE IS FIELD-SPLIT, SO THEY DO NOT DESCRIBE THE SHIPPED PRECONDITIONER.**
-        The sweep harnesses built **one `AmgVCycle` over all five fields interleaved cell-major**.
+        The sweep harnesses built **one `MonolithicVCycleInverse` over all five fields interleaved cell-major**.
         ⚠️ **They are deleted (2026-10-02)** — the whole PETSc-ILU probe cluster of
         `pitzdaily_openfoam/`: `ilu0_remedy_sweep.py`, `ilu_fill_probe.py`, `order_ar_probe.py`,
         `mc64_precheck.py`, `block_probe.py`, `size_probe.py`, `localize.py` and `state_probe.py` —
@@ -684,7 +684,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         explicable: blocking buys **only** intra-block partial pivoting, not a cure for the saddle.
         Blocking *does* win for **threshold** ILU, which is a different method. Two residues worth
         knowing: BAIJ storage makes CSW's *padding* free (a block is dense by definition), which is a
-        genuinely different object from what ships, since `AmgVCycle._live` prunes stored zeros — but CSW
+        genuinely different object from what ships, since `MonolithicVCycleInverse._live` prunes stored zeros — but CSW
         measured padded vs unpadded as similar, and unpadded *better* on one case; and PETSc's
         fixed-block-size kernels carry a maintainer's own warning that the bs=5-adjacent un-permutation
         code "may also be buggy". **Shipping it is also blocked**: PCGAMG rejects a SeqBAIJ `Pmat`
@@ -1093,7 +1093,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         take those** — measured at zero shift, carrying them costs 58 restart cycles at a true relative
         residual of 2.299e-02 against 11 cycles to 8.474e-11 without (see *"stored exactly-zero positions
         break the ZERO-SHIFT V-cycle"*). They are therefore pruned at the factorization boundary
-        (`AmgVCycle._live`), which puts `p` at reach 2 back in the configuration above. **The shipped
+        (`MonolithicVCycleInverse._live`), which puts `p` at reach 2 back in the configuration above. **The shipped
         default is `(3,3,3,3,2,2)`** — 454 probes against 564, −16 % — and `p` at reach 3 IS a correctness
         constraint after all. The march numbers here stand as a measurement of the preserving arm; they are
         not a licence for the shortened default under the shipped one.
@@ -1225,7 +1225,7 @@ complete LU and the AMG's coloured probe both still depend on it.
       over-estimate**, mostly explicit zeros at every state — LIVE nnz is ~constant (**38.7M cold / 39.0M
       developed**; there is *no* cold→developed nnz collapse — an earlier "47.2M cold → 39.0M developed"
       reading conflated the fixed pattern with live nnz). **The stored zeros must be pruned before the
-      operator reaches an incomplete factorization, and `AmgVCycle._live` is where that now happens** — see
+      operator reaches an incomplete factorization, and `MonolithicVCycleInverse._live` is where that now happens** — see
       *"stored exactly-zero positions break the ZERO-SHIFT V-cycle"* below, which measures what they cost and
       corrects the two mechanisms this bullet used to assert for it. De-compression 22.4→11.2 s (2.0× vs
       loop); full build (materialize + GAMG) only 56.0→54.2 s (**1.03×** — GAMG-dominated), so the gather's
@@ -1260,7 +1260,7 @@ complete LU and the AMG's coloured probe both still depend on it.
         exactly the axis that was being changed: β = 0 is the only state on this case that separates these arms.
       - **Pruning at EITHER stage restores the good operator bit-identically** (11 cycles, 8.474e-11), so the
         fix is not "which stage prunes" but "prune before the factorization". Shipped as
-        **`AmgVCycle._live`**, at the boundary where the operator reaches PETSc, so the assemblers can stay
+        **`MonolithicVCycleInverse._live`**, at the boundary where the operator reaches PETSc, so the assemblers can stay
         pattern-preserving (which is what makes the fixed-pattern fast path and the generic sparse path agree
         entry for entry) while the factorization still gets the live pattern.
       - **⚠️ A PIVOT CENSUS CANNOT DETECT THIS — all four arms are IDENTICAL: min |pivot| 1.546e-01, zero
@@ -1323,7 +1323,7 @@ complete LU and the AMG's coloured probe both still depend on it.
 
 - **Monolithic COMPLETE-LU preconditioner — BUILT (`lu_preconditioner.py`), the preferred 2D/moderate
   coupled preconditioner.** It factors the assembled coupled Jacobian
-  *completely* (`MonolithicLuPreconditioner`), so it is the operator's **exact** inverse and a Krylov
+  *completely* (`CompleteLuPreconditioner`), so it is the operator's **exact** inverse and a Krylov
   solve converges in **one** iteration. Verified on the real forward operator and the β=0 adjoint
   (true-residual checked). Because the fill is pattern-determined it is also **state-robust**
   (no drop-tolerance tail that shifts with the flow). Built on `HostPreconditioner` (`build` /

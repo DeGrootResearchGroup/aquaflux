@@ -25,7 +25,7 @@ holds `TracedFieldSplit` + `traced_field_split(...)`; it is deliberately **not**
 `solve/__init__.__all__`, because exporting publishes to the documentation site and an unwired
 prototype should not read as a supported way to build a preconditioner.
 
-**The problem it addresses.** `BlockTriangularFieldSplit.apply` is numpy, and is reached from the
+**The problem it addresses.** `FieldSplitInverse.apply` is numpy, and is reached from the
 jitted Krylov solve through a `jax.pure_callback`. When **both** blocks are traced cycles — which the
 shipped `simplesmooth` + `jacobi` bundle is — the composition layer is the only thing on the host, and
 it forces the round trip anyway. One preconditioner application:
@@ -94,7 +94,7 @@ public method on a published class, so export them when the split is wired.
 
 **What remains before it can carry a march** (the honest boundary of the prototype):
 
-1. `FieldSplitAmgPreconditioner` still builds the host split; nothing constructs this one. The wiring
+1. `FieldSplitPreconditioner` still builds the host split; nothing constructs this one. The wiring
    target is now `MaterializedSession` (`coupled_amg_continuation` was deleted in #371).
 2. **The refresh shape is the real design question** — now a pure plumbing question, since the split can be
    rebuilt after a refresh and reuse the compiled solve soundly. `HostPreconditioner` is deliberately *not*
@@ -107,21 +107,21 @@ public method on a published class, so export them when the split is wired.
    #281 part 1 had added a `TracedFactors` protocol (`apply_traced`) in `host_preconditioner.py` for the
    same capability; it was **dropped in favour of this one** when the two met in a merge, because handing
    the split a bound `apply_traced` is exactly the stale-constant shape #665 fixed. There is no
-   `TracedFactors` and no `apply_traced`. The other two capabilities (`RefactorableFactors`,
-   `ReleasableFactors`) are in `host_preconditioner.py`; see `solve-direct-preconditioners.md`.
+   `TracedFactors` and no `apply_traced`. The other two capabilities (`RefactorableInverse`,
+   `ReleasableInverse`) are in `host_preconditioner.py`; see `solve-direct-preconditioners.md`.
 4. No GPU measurement exists.
 
 ## The field split — a saddle plus two transported scalars
 
 ⚠️ **2026-09-13 (#371): the split lost its PETSc blocks and its turbulence-first ordering.**
-`build_block_triangular_field_split`, `FieldSplitAmgPreconditioner.build` and
+`field_split_inverse`, `FieldSplitPreconditioner.build` and
 `coupled_amg_continuation(field_split=True)` now REQUIRE `leading_inverse` and `trailing_inverse`, and
 always solve the leading group first. There is no `flow_first`, `_TrailingFirstFieldSplit`,
 `trailing_smoother_sweeps`, `leading_options` or `trailing_options`, and a split never calls
-`build_amg_vcycle`. Every measurement below of a PETSc/ILU(0) split block or a turbulence-first arm is
+`monolithic_vcycle_inverse`. Every measurement below of a PETSc/ILU(0) split block or a turbulence-first arm is
 history. Its harness arms (`field_split_probe.py`'s split arms, `turbulence_smoother_sweep.py`,
 `rung_hierarchy_reuse.py`) were deleted and survive only in git history before that change. The
-monolithic `AmgVCycle` survived #371 and was **deleted with PETSc on 2026-10-10**; `field_split_probe.py`'s
+monolithic `MonolithicVCycleInverse` survived #371 and was **deleted with PETSc on 2026-10-10**; `field_split_probe.py`'s
 control arm is now the shipped split, and `tests/integration/test_coupled_field_split.py` is no longer
 PETSc-gated (its slow-tier fixed-point test compares the split against `CompleteLu` instead).
 
@@ -154,7 +154,7 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
   than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
   test needs the hard inner iterates.
   - **✅ THE SPLIT IS BUILT — `solve/field_split.py` (`FieldGroups`,
-    `BlockTriangularFieldSplit`, `build_block_triangular_field_split`).** Three facts worth keeping,
+    `FieldSplitInverse`, `field_split_inverse`).** Three facts worth keeping,
     independent of whether it ever wins:
     - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
       `(cell i, field f)` sits at `f·n_cells + i`, so a split on a *field* boundary is a split into two
@@ -175,32 +175,32 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
       `MaterializedJacobianPreconditioner`, `solve-direct-preconditioners.md`) reads only
       `factors.n_dofs` and `factors.apply(r, transpose=…)`, both of which the split has, so it rides the
       existing `pure_callback` path unchanged. Each diagonal block is fitted by its injected inverse
-      (`SimpleSmoothedInverse` / `JacobiSmoothedInverse` on both flagship cases; a PETSc `AmgVCycle`, since deleted,
+      (`SimpleSmoothedInverse` / `JacobiSmoothedInverse` on both flagship cases; a PETSc `MonolithicVCycleInverse`, since deleted,
       by default until #371), working *within its own group* — the whole point, since a four-field saddle
       and a two-field transport pair want different inverses. Each block's `apply` returns the inverse in
       the **original** field-major space, so the retained coupling block is applied raw between the two
       block solves, with no scaling bookkeeping.
       **⚠️ `factors.n_dofs` + `factors.apply` is the WHOLE of what the split satisfies.** A base reading
-      anything else off `self.factors` raises on the split, and a `getattr(pc, name, False)` call site
+      anything else off `self.inverse` raises on the split, and a `getattr(pc, name, False)` call site
       swallows that raise as a plausible `False` — an exact-solve capability flag did exactly this until the
       host exact forward solve was deleted (2026-09-13, #371). A test of such a property must read it
       **directly**, never through `getattr` with a default.
     - **The split's refresh is `refactor_block`, and the preconditioner's refresh is the base's (#281,
-      2026-10-10).** `BlockTriangularFieldSplit.refactor` is renamed `refactor_block` — the name every
-      block inverse uses — so the split is a `RefactorableFactors` itself, and
-      `FieldSplitAmgPreconditioner` and `MaterializedBlockPreconditioner` no longer carry their own
+      2026-10-10).** `FieldSplitInverse.refactor` is renamed `refactor_block` — the name every
+      block inverse uses — so the split is a `RefactorableInverse` itself, and
+      `FieldSplitPreconditioner` and `MaterializedBlockPreconditioner` no longer carry their own
       (identical) `refresh_in_place`: both inherit `MaterializedJacobianPreconditioner.refresh_in_place`
       (materialize, shift, `factors.refactor_block`). A block inverse without `refactor_block` is refused
       with a `TypeError` before either block is touched (was an `AttributeError` after a `getattr`). See
       `solve-direct-preconditioners.md`'s capability-protocol entry.
-    - **⚠️ `FieldSplitAmgPreconditioner` NO LONGER SUBCLASSES `MonolithicAmgPreconditioner` — its base is
+    - **⚠️ `FieldSplitPreconditioner` NO LONGER SUBCLASSES `MonolithicVCyclePreconditioner` — its base is
       the extracted `MaterializedJacobianPreconditioner` (#287, 2026-09-11; in
       `materialized_preconditioner.py` since the monolithic class and its `amg_preconditioner.py` were
       deleted with PETSc, 2026-10-10).**
       The underlying cause of that raise was inheriting the whole monolithic class — including the fixed-pattern cell-major
       assembler, which a split never builds or uses — for the sake
       of the genuinely shared coloured-probe materialize/shift/cache/teardown. `MaterializedJacobianPreconditioner`
-      holds exactly that shared quarter; `MonolithicAmgPreconditioner` and `FieldSplitAmgPreconditioner`
+      holds exactly that shared quarter; `MonolithicVCyclePreconditioner` and `FieldSplitPreconditioner`
       are now siblings over it. `refresh_in_place`'s `smoother_fill_levels`/`smoother_sweeps`
       parameters — declared on both classes' refresh and immediately `del`-eted on both, because the union
       signature forced them there — are deleted from both signatures; passing either is now a `TypeError`.
@@ -589,7 +589,7 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
     (`NewtonStrategy.adjoint_preconditioner()` already exists as the natural home), plus the traced k/ω
     hierarchy the damped-Jacobi result unlocks. Both are unbuilt.
   - **✅ THE MONOLITHIC MATERIALIZE NO LONGER STORES THE BLOCK IT THROWS AWAY — BUILT AND VERIFIED
-    (2026-08-18).** `FieldSplitAmgPreconditioner.build`/`refresh_in_place` still call the inherited
+    (2026-08-18).** `FieldSplitPreconditioner.build`/`refresh_in_place` still call the inherited
     `_materialize_jacobian` **once**, over all six fields — that has not changed, and could not without a
     rectangular (unequal row/column field count) Jacobian probe, which this machinery does not have. What
     changed is which *pattern* that one materialize is asked to fill.
@@ -601,7 +601,7 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
     (`aquaflux/solve/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
     `nnz`, the retained `ProbeGather`, and the gather map's own construction cost, not only in the values.
     `FieldGroups.active_rows()` (`solve/field_split.py`) derives the table straight from the
-    partition a `BlockTriangularFieldSplit` already carries: `True` everywhere except the one triangle
+    partition a `FieldSplitInverse` already carries: `True` everywhere except the one triangle
     the split's `apply()` never reads. `coupled_jacobian_probe(..., active_rows=…)` and
     `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it (`groups.active_rows()`) whenever it builds its own probe
     under `field_split=True`, and
@@ -621,7 +621,7 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
     triangle silently. With one ordering left, the dropped triangle and the retained one are one fact.
 
     **Confirmed end to end on `bfs3d`, on the real mesh, through the real production call
-    (`coupled_jacobian_probe` → `FieldSplitAmgPreconditioner.build`), not a standalone probe script:**
+    (`coupled_jacobian_probe` → `FieldSplitPreconditioner.build`), not a standalone probe script:**
     structural `nnz` fell **47.209M → 36.718M, a 22.2 % reduction**, matching the measurement below to
     three figures, and the resulting preconditioner's `apply()` — **forward and transpose** — is
     `0.000e+00` different from the unrestricted build's, on a random right-hand side. The adjoint path
@@ -755,7 +755,7 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
       entry and refuses on a mismatch (loosely, at 2 %: the table stores ~4 figures, and what this must
       catch differs by orders of magnitude). Raise the keep count for a study that needs a trajectory.
     - **⚠️ `equilibrate_cell_major` RETURNS UNSORTED COLUMN INDICES, and PETSc's AIJ format requires
-      them ascending.** `AmgVCycle._build` and `refactor` both `sort_indices()` before wrapping the
+      them ascending.** `MonolithicVCycleInverse._build` and `refactor` both `sort_indices()` before wrapping the
       matrix, and `ShiftedCellMajorOperator` genuinely produces sorted output (its
       `has_sorted_indices = True` is honest, verified), so **every shipped path is correct**. But a
       probe that calls `equilibrate_cell_major` directly and feeds `createAIJWithArrays` gets **NaN in
@@ -781,10 +781,10 @@ PETSc-gated (its slow-tier fixed-point test compares the split against `Complete
 ## ⚠️ PARTIALLY ADDRESSED: the full-Jacobian materialization is a scaling wall, one block of it now fixed
 
 **Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
-1M-cell target regardless of how deep either goes.** `FieldSplitAmgPreconditioner.build` /
+1M-cell target regardless of how deep either goes.** `FieldSplitPreconditioner.build` /
 `refresh_in_place` (`aquaflux/solve/materialized_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
 `_monolithic_shift_source` / `JacobianProbe`) materialize the coupled Jacobian with **one**
-coloured-probe pass over all `dim+3` fields at reach 3, and `build_block_triangular_field_split` slices
+coloured-probe pass over all `dim+3` fields at reach 3, and `field_split_inverse` slices
 the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's
 own coarsening depth (see the trailing hierarchy's own scalability note in `solve-amg-multigrid.md`,
 which this is deliberately separate from).

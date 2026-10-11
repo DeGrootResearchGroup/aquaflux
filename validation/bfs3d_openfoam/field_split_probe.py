@@ -89,7 +89,7 @@ from aquaflux.solve import (  # noqa: E402
     HostPreconditioner,
     MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
-    build_block_triangular_field_split,
+    field_split_inverse,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -313,7 +313,7 @@ def shipped_split(shifted, groups, n_fields):
     """The shipped arrangement: the case's own field split, each block fitted by its injected inverse."""
     del n_fields  # each block inverse is told its own field count by the split
     return HostPreconditioner(
-        build_block_triangular_field_split(
+        field_split_inverse(
             shifted,
             groups,
             leading_inverse=compare.LEADING_INVERSE,

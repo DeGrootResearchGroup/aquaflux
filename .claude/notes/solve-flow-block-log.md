@@ -518,12 +518,12 @@ Everything above is single-state probing. The preconditioner has now been run in
 continuation march, which required three things a probe never reaches, and which are the reason no earlier
 arm could have been marched at all.
 
-**The host flow inverse needed a `refactor_block`.** `BlockTriangularFieldSplit.refactor` (renamed
+**The host flow inverse needed a `refactor_block`.** `FieldSplitInverse.refactor` (renamed
 `refactor_block` in #281; it now raises `TypeError`) RAISES on an
 inverse offering neither `refactor_block` nor `refactor`, because a mid-march refresh must mutate the same
 object the compiled Krylov solve holds — replacing it would recompile. A single-state probe exits before
-that path. `leading_inverse` is now threaded through `FieldSplitAmgPreconditioner.build` and the coupled
-march builder (the underlying `build_block_triangular_field_split` already supported it), and `compare.py`
+that path. `leading_inverse` is now threaded through `FieldSplitPreconditioner.build` and the coupled
+march builder (the underlying `field_split_inverse` already supported it), and `compare.py`
 selects on `BFS3D_FLOW_INVERSE=simplesmooth`.
 
 **The result, against an archived march of the incumbent** (`zen-newton-3f1b39`, PETSc ILU(0) on the flow
@@ -661,7 +661,7 @@ the step-for-step controlled pair the frozen-coarsening comparison was; the dire
 across both early rungs independently.
 
 **✅ THE V-CYCLE MULTIPLIED THE LEVEL OPERATOR BY A VECTOR KNOWN TO BE ZERO, TWICE PER CYCLE (fixed).**
-`_fixed_cycle_solve` began each pass with `b − A x` at `x = 0`, and every level's pre-smooth ran its
+`_fixed_cycles` began each pass with `b − A x` at `x = 0`, and every level's pre-smooth ran its
 first sweep's `rhs − A g` at `g = 0`. The second is charged at **every level of every cycle**, and inside
 a `fori_loop` the body cannot be specialized away. XLA does not fold it: measured 2.88 ms against 1.33 ms
 for the peeled form on a 2.0M-nnz operator held as a jit constant.
@@ -996,7 +996,7 @@ something in `∂R_flow/∂turb` worth capturing, and there is not:
 The design was otherwise sound and is worth remembering as a *technique* rather than as a candidate here: a
 fixed number of alternations keeps `b → x` linear (which the non-flexible outer GMRES requires) and the
 transpose stays closed-form, being the reversed product of transposes that
-`BlockTriangularFieldSplit.apply(transpose=True)` already performs for one sweep. What is refuted is
+`FieldSplitInverse.apply(transpose=True)` already performs for one sweep. What is refuted is
 alternation **on this split**, not alternation.
 
 **Where that leaves the trailing block:** its quality buys nothing (the ablation), its coupling buys about
@@ -1010,7 +1010,7 @@ coarsest solve grows with the mesh and not about this case's cycle count.
 `_VCycleOps` has carried an optional `smooth_zero` since the flow block's peel, but the point smoother
 the transported scalars run had no such specialization, so the trailing V-cycle kept multiplying its
 level operator by a vector known to be zero — once per level per cycle, on the pre-smooth. `_jacobi_smooth_zero`
-supplies it and `convection_multigrid_solve` passes it, which reaches the trailing inverse and the frozen
+supplies it and `convection_multigrid_cycles` passes it, which reaches the trailing inverse and the frozen
 velocity/Schur AMGs alike.
 
 **Exact, and checked as such rather than argued.** `A x` at a zero vector is exactly zero in floating

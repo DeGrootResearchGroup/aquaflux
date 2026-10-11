@@ -23,7 +23,7 @@ from aquaflux.solve import (
     SimpleSmoothedInverse,
     SubLayout,
 )
-from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
+from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
 
 
 class ExactInverse:
@@ -55,10 +55,10 @@ def operator(groups: FieldGroups) -> np.ndarray:
     return dense + np.eye(groups.n_dofs) * groups.n_dofs
 
 
-def split_for(operator: np.ndarray, groups: FieldGroups) -> BlockTriangularFieldSplit:
+def split_for(operator: np.ndarray, groups: FieldGroups) -> FieldSplitInverse:
     """The field split over ``operator`` with exact diagonal blocks."""
     leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
-    return BlockTriangularFieldSplit(
+    return FieldSplitInverse(
         ExactInverse(leading.toarray()),
         ExactInverse(trailing.toarray()),
         trailing_by_leading,
@@ -132,7 +132,7 @@ class TestFieldGroups:
 
     def test_the_dropped_block_never_reaches_the_splits_own_apply(self, groups, operator):
         """The whole point of ``active_rows``: zeroing the block it excludes must not move the split's
-        output at all, since :class:`BlockTriangularFieldSplit` never reads it."""
+        output at all, since :class:`FieldSplitInverse` never reads it."""
         split = split_for(operator, groups)
         baseline = as_matrix(split, groups.n_dofs)
 
@@ -208,7 +208,7 @@ class TestBlockTriangularAlgebra:
         wrong triangle, so the shape check is load-bearing rather than defensive."""
         _, leading_by_trailing, _, _ = groups.blocks(sp.csr_matrix(operator))
         with pytest.raises(ValueError, match="trailing equations by leading"):
-            BlockTriangularFieldSplit(
+            FieldSplitInverse(
                 ExactInverse(np.eye(groups.n_leading_dofs)),
                 ExactInverse(np.eye(groups.n_dofs - groups.n_leading_dofs)),
                 leading_by_trailing,
@@ -228,7 +228,7 @@ class TestBlockTriangularAlgebra:
                 released.append(self._name)
 
         leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
-        split = BlockTriangularFieldSplit(
+        split = FieldSplitInverse(
             Releasable(leading.toarray(), "leading"),
             Releasable(trailing.toarray(), "trailing"),
             trailing_by_leading,
@@ -250,7 +250,7 @@ class TestBlockTriangularAlgebra:
         with pytest.raises(
             TypeError, match="trailing block inverse NoSize is not a frozen inverse"
         ):
-            BlockTriangularFieldSplit(
+            FieldSplitInverse(
                 ExactInverse(leading.toarray()), NoSize(), trailing_by_leading, groups
             )
 
@@ -266,7 +266,7 @@ class TestBlockTriangularAlgebra:
                 self._inverse = np.linalg.inv(np.asarray(block.toarray(), dtype=np.float64))
 
         leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
-        split = BlockTriangularFieldSplit(
+        split = FieldSplitInverse(
             Refittable(leading.toarray()),
             Refittable(trailing.toarray()),
             trailing_by_leading,
@@ -294,7 +294,7 @@ class TestBlockTriangularAlgebra:
                 refitted.append(block.shape)
 
         leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
-        split = BlockTriangularFieldSplit(
+        split = FieldSplitInverse(
             Refittable(leading.toarray()),
             ExactInverse(trailing.toarray()),
             trailing_by_leading,
@@ -414,12 +414,12 @@ def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_paramete
     than a silent no-op. (Its ``build`` no longer takes them either: each block is fitted by an injected
     inverse.)
     """
-    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
+    from aquaflux.solve.field_split import FieldSplitPreconditioner
 
     n = groups.n_dofs
     operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
     split = split_for(operator, groups)
-    preconditioner = FieldSplitAmgPreconditioner(split, groups)
+    preconditioner = FieldSplitPreconditioner(split, groups)
     with pytest.raises(TypeError):
         preconditioner.refresh_in_place(
             lambda v: v, None, np.zeros(n), smoother_fill_levels=0, smoother_sweeps=4
@@ -441,7 +441,7 @@ def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
     """The lAIR trailing inverse against the three things the field split requires of one.
 
     ``refactor_block`` is the one a single-state probe never reaches and a march depends on:
-    ``BlockTriangularFieldSplit.refactor`` raises on an inverse without it, because replacing the object
+    ``FieldSplitInverse.refactor`` raises on an inverse without it, because replacing the object
     would recompile the coupled solve that holds it.
     """
     block = _two_field_transport()

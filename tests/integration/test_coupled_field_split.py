@@ -29,7 +29,7 @@ from aquaflux.solve import (
     MaterializedJacobian,
     MaterializedJacobianPreconditioner,
     SimpleSmoothed,
-    build_block_triangular_field_split,
+    field_split_inverse,
     jacobian_matvec,
     relative_residual_gmres,
     restart_cycles,
@@ -82,7 +82,7 @@ def test_the_partition_matches_the_coupled_layout(case):
 
 def _split(shifted, groups):
     """The split with the traced inverses both flagship cases ship."""
-    return build_block_triangular_field_split(
+    return field_split_inverse(
         shifted,
         groups,
         leading_inverse=SimpleSmoothed(),
@@ -203,7 +203,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     returned a new object would silently keep preconditioning with the stale one -- and would still
     converge, just slower, which is exactly the kind of bug a march hides.
     """
-    from aquaflux.solve import FieldSplitAmgPreconditioner
+    from aquaflux.solve import FieldSplitPreconditioner
 
     groups = case["groups"]
     coupled, state = case["coupled"], case["state"]
@@ -213,7 +213,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         return jacobian_matvec(coupled, state, v)
 
     shift = np.full(groups.n_dofs, 0.5)
-    pc = FieldSplitAmgPreconditioner.build(
+    pc = FieldSplitPreconditioner.build(
         matvec,
         plan,
         shift,
@@ -221,16 +221,16 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
         leading_inverse=SimpleSmoothed(),
         trailing_inverse=JacobiSmoothed(),
     )
-    split_before = pc.factors
+    split_before = pc.inverse
     rng = np.random.default_rng(4)
     b = rng.standard_normal(groups.n_dofs)
-    before = pc.factors.apply(b).copy()
+    before = pc.inverse.apply(b).copy()
 
     phases = pc.refresh_in_place(matvec, plan, shift * 4.0)
 
-    assert pc.factors is split_before, "the refresh replaced the object instead of mutating it"
+    assert pc.inverse is split_before, "the refresh replaced the object instead of mutating it"
     assert [name for name, _ in phases] == ["probe", "assemble", "refactor"]
-    assert not np.allclose(before, pc.factors.apply(b)), (
+    assert not np.allclose(before, pc.inverse.apply(b)), (
         "a 4x shift change left the inverse unchanged"
     )
     pc.destroy()
