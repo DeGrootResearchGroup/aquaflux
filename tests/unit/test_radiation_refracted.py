@@ -341,8 +341,8 @@ def test_the_fluence_rate_s_derivative_with_respect_to_an_index_is_the_finite_di
     assert derivative == pytest.approx(finite, rel=1e-5)
 
 
-def test_a_route_through_a_neighbour_s_wall_alone_is_left_out_and_every_other_route_kept():
-    """With a second sleeve the arc's light reaches the water by three routes; two are solved."""
+def test_every_route_through_a_neighbour_is_kept_its_wall_alone_by_shooting():
+    """With a second sleeve the arc's light reaches the water by three routes, all solved."""
     axis = [0.0, 0.0, 1.0]
     second = Transparent(
         Cylinder([0.05, 0.0, 0.0], axis, 0.0115, 0.5),
@@ -351,7 +351,7 @@ def test_a_route_through_a_neighbour_s_wall_alone_is_left_out_and_every_other_ro
     )
     media = Media(WATER, (*_sleeve().regions, second))
     planned = refracted._plan(_arc(), media, _POINTS, pair_limit=1_000_000)
-    assert [group.chain.passing for group in planned] == [(), (2, 3)]
+    assert [group.chain.passing for group in planned] == [(), (2,), (2, 3)]
 
 
 def test_what_it_cannot_gather_is_refused():

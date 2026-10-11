@@ -39,7 +39,10 @@ followed. A route through a region can join two points by more than one path -- 
 a lamp's arc inside a sleeve -- so it is solved from several starting points across the region and
 every distinct path found is kept. A route through a sleeve's wall alone, missing its air gap, is
 the exception: its paths skim the rim and are saddles of the optical length, which a descent cannot
-find, so it is not solved and that light is not carried (:func:`_only_saddles`).
+find. Where every body the route crosses is a cylinder parallel to the sleeve and the receiver lies
+in the medium round it, those paths are found by shooting instead (:mod:`~aquaflux.radiation.shooting`),
+one past each side of the sleeve, and differentiated through the same stationarity conditions;
+anywhere else the route is not solved and its light is not carried (:func:`_only_saddles`).
 
 **What is not here.** Light that reflects on its way -- off the inside of a sleeve and out the far
 side, or back and forth inside the quartz -- is counted as lost at each reflection, not followed.
@@ -55,6 +58,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux.radiation import shooting
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.triangles import padded_length
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, PASS_PAIRS
@@ -471,11 +475,6 @@ class Chain:
         """How many surfaces the path crosses."""
         return len(self.crossings)
 
-    @property
-    def n_starts(self) -> int:
-        """How many starting points the path is solved from: four through a region, else one."""
-        return 4 if self.passing else 1
-
 
 def _lineage(parents, node) -> list[int]:
     """``node`` and every region holding it, innermost first; empty for the surroundings."""
@@ -486,50 +485,81 @@ def _lineage(parents, node) -> list[int]:
     return line
 
 
-def _only_saddles(media: Media, chain: Chain) -> bool:
-    """Whether every transmitted path on a route is a saddle of its optical length, which
-    :func:`solve_paths` cannot find.
+def _rim_route(media: Media, chain: Chain) -> bool:
+    """Whether a route goes through the wall of a cylindrical shell alone, missing what it holds.
 
-    That is a route through the wall of a lamp sleeve alone: into a cylindrical shell denser than the
-    medium round it and out again, missing the coaxial cylinder it holds. The shell bends such a path
-    as a converging lens does, so its optical length falls as the crossings move one way and rises as
-    they move the other. The descent reaches only minima, and a shell's minima are the path through
-    its middle, which meets the core, and a path pinched to a reflection off the rim, which crosses no
-    wall. So the route's light is real -- light skimming a neighbouring sleeve's rim, bent round it --
-    and is not carried.
+    That is a route through a lamp sleeve's quartz that does not enter its air gap: a single region
+    passed, a :class:`~aquaflux.solids.Cylinder`, holding regions that are all cylinders on its own
+    axis. Decided from the geometry, which must be concrete; under a trace the answer is no.
+    """
+    if len(chain.passing) != 1:
+        return False
+    shell = chain.passing[0]
+    cores = [media.nodes[node] for node, parent in enumerate(media.parents) if parent == shell]
+    bodies = [media.nodes[shell].body, *(core.body for core in cores)]
+    if not cores or _traced(bodies):
+        return False
+    return all(_coaxial(bodies[0], body) for body in bodies[1:])
+
+
+def _only_saddles(media: Media, chain: Chain) -> bool:
+    """Whether every transmitted path on a route is a saddle of its optical length, which the
+    descent in :func:`solve_paths` cannot find.
+
+    That is a :func:`_rim_route` whose shell is denser than the medium round it. The shell bends
+    such a path as a converging lens does, so its optical length falls as the crossings move one way
+    and rises as they move the other. The descent reaches only minima, and a shell's minima are the
+    path through its middle, which meets the core, and a path pinched to a reflection off the rim,
+    which crosses no wall. Such a route is found by shooting (:func:`_shot`) where it can be; where
+    it cannot, its light -- skimming a neighbouring sleeve's rim, bent round it -- is not carried.
 
     Shown on a lamp sleeve, whose core fills most of the shell. Round a thin core a path through the
     shell's middle could miss the core and be a minimum the descent finds; this test does not tell
-    the two apart, and leaves such a route out too. Anything that is not this shape -- a body that
-    is not a cylinder, a core off the shell's axis, a shell no denser than its surroundings, a value
-    under a trace -- is solved as usual.
+    the two apart. An index under a trace cannot be compared, and the answer is then no.
+    """
+    if not _rim_route(media, chain):
+        return False
+    shell = chain.passing[0]
+    inside, outside = media.index_of(shell), media.index_of(int(media.parents[shell]))
+    if _traced((inside, outside)):
+        return False
+    return float(inside) > float(outside)
 
-    Parameters
-    ----------
-    media : Media
-    chain : Chain
-        One of :meth:`Chain.routes`.
 
-    Returns
-    -------
-    bool
+def _shot(media: Media, chain: Chain) -> bool:
+    """Whether a route's paths are found by shooting (:mod:`~aquaflux.radiation.shooting`).
+
+    A :func:`_rim_route` whose receiver lies in the medium round the shell -- the path's last leg
+    leaves the shell -- and every one of whose crossings is the side of a cylinder parallel to the
+    shell: there a path is fixed by two numbers conserved along it, and is found whether it is a
+    minimum of its optical length or a saddle. Decided from the geometry alone, never the indices,
+    so a route is solved the same way whether or not an index is being differentiated.
+    """
+    if not _rim_route(media, chain) or chain.pass_at + 2 != chain.n_crossings:
+        return False
+    bodies = [media.nodes[node].body for node, _ in chain.crossings]
+    if not all(isinstance(body, Cylinder) for body in bodies) or _traced(bodies):
+        return False
+    axis = np.asarray(media.nodes[chain.passing[0]].body.axis, dtype=float)
+    return all(
+        abs(float(np.dot(axis, np.asarray(body.axis, dtype=float)))) >= 1.0 - 1e-12
+        for body in bodies
+    )
+
+
+def _path_count(media: Media, chain: Chain) -> int:
+    """How many paths a route is solved for per pair: the leading axis :func:`solve_paths` returns.
+
+    One on a route through no region; on a route through one, two when it is shot -- one past each
+    side of the shell -- and otherwise four, one per starting point of the descent.
     """
     if not chain.passing:
-        return False
-    parents = media.parents
-    deepest = chain.passing[-1]
-    cores = [node for node in range(len(parents)) if parents[node] == deepest]
-    if not cores:
-        return False
-    shell = media.nodes[deepest]
-    leaves = jax.tree.leaves(
-        (shell, media.index_of(int(parents[deepest])), [media.nodes[core] for core in cores])
-    )
-    if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
-        return False
-    if float(shell.refractive_index) <= float(media.index_of(int(parents[deepest]))):
-        return False
-    return all(_coaxial(shell.body, media.nodes[core].body) for core in cores)
+        return 1
+    return 2 if _shot(media, chain) else 4
+
+
+def _traced(tree) -> bool:
+    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(tree))
 
 
 def _coaxial(shell, core) -> bool:
@@ -590,24 +620,38 @@ def solve_paths(media: Media, chain: Chain, sources, receivers) -> Paths:
     -------
     Paths
         Shaped as the broadcast pairs; on a route through a region, with one more leading axis of
-        :attr:`Chain.n_starts`, a path per starting point, each distinct path valid once.
+        ``_path_count(media, chain)`` paths per pair, each distinct path valid once: one per side of
+        the shell for a route through a sleeve's wall alone, found by shooting
+        (:mod:`~aquaflux.radiation.shooting`), and otherwise one per starting point of the descent.
     """
     return _solve_paths(
-        media, chain, jnp.asarray(sources, dtype=float), jnp.asarray(receivers, dtype=float)
+        media,
+        chain,
+        jnp.asarray(sources, dtype=float),
+        jnp.asarray(receivers, dtype=float),
+        shot=_shot(media, chain),
     )
 
 
 @eqx.filter_jit
-def _solve_paths(media: Media, chain: Chain, sources, receivers) -> Paths:
+def _solve_paths(media: Media, chain: Chain, sources, receivers, *, shot: bool) -> Paths:
     """:func:`solve_paths`, compiled once per chain and shape.
 
     Compiled because the solve is a loop with a line search and two curvatures in it, which run
     one operation at a time cost seconds per call however few paths are asked for; inside a caller's
-    own trace it is inlined.
+    own trace it is inlined. Whether the route is shot is decided outside, from concrete geometry.
     """
     shape = jnp.broadcast_shapes(sources.shape, receivers.shape)
     flat_sources = jnp.broadcast_to(sources, shape).reshape(-1, 3)
     flat_receivers = jnp.broadcast_to(receivers, shape).reshape(-1, 3)
+    if shot:
+        sides = jnp.array([1.0, -1.0])
+        paths = jax.vmap(
+            lambda s, r: jax.vmap(lambda side: _shot_path(media, chain, s, r, side))(sides)
+        )(flat_sources, flat_receivers)
+        return jax.tree.map(
+            lambda leaf: jnp.moveaxis(leaf, 1, 0).reshape(2, *shape[:-1], *leaf.shape[2:]), paths
+        )
     if not chain.passing:
         paths = jax.vmap(lambda s, r: _one_path(media, chain, s, r, None))(
             flat_sources, flat_receivers
@@ -712,6 +756,258 @@ def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
     )
 
 
+def _shot_path(media: Media, chain: Chain, source, receiver, side) -> Paths:
+    """One pair's path past one side of a shell, found by shooting (:func:`_shot`)."""
+    shell = media.nodes[chain.passing[0]]
+    cores = [media.nodes[n] for n, parent in enumerate(media.parents) if parent == chain.passing[0]]
+    bodies = [media.nodes[node].body for node, _ in chain.crossings]
+    axis = shell.body.axis
+    helper = jnp.eye(3)[jnp.argmin(jnp.abs(axis))]
+    first = jnp.cross(axis, helper)
+    first = first / norm(first)
+    second = jnp.cross(axis, first)
+
+    def plane(point):
+        return jnp.stack([dot(point, first), dot(point, second)])
+
+    geometry = jax.lax.stop_gradient(
+        {
+            "receiver": plane(receiver),
+            "receiver_z": dot(receiver, axis),
+            "source": plane(source),
+            "source_z": dot(source, axis),
+            "centres": jnp.stack([plane(body.centre) for body in bodies]),
+            "radii": jnp.stack([body.radius for body in bodies]),
+            "indices": jnp.stack([media.index_of(leg) for leg in chain.legs]),
+            "shell": plane(shell.body.centre),
+            "shell_radius": shell.body.radius,
+            "core_radius": jnp.max(jnp.stack([core.body.radius for core in cores])),
+            "shell_index": shell.refractive_index,
+            "outside_index": media.index_of(int(media.parents[chain.passing[0]])),
+        }
+    )
+    geometry["outs"] = tuple(out for _, out in chain.crossings)
+    projected, heights, found = shooting.rim_crossings(geometry, side)
+    crossing = (
+        projected[:, :1] * jax.lax.stop_gradient(first)
+        + projected[:, 1:] * jax.lax.stop_gradient(second)
+        + heights[:, None] * jax.lax.stop_gradient(axis)
+    )
+    # A path not found is replaced by the straight line between the ends, which is finite, so the
+    # implicit derivative through it is finite too; it carries nothing.
+    straight = receiver - source
+    line = []
+    for body, (_, out) in zip(bodies, chain.crossings, strict=True):
+        enter, exit_ = body.intervals(source, straight)
+        t = exit_[0] if out else enter[0]
+        line.append(source + jnp.where(jnp.isfinite(t), t, 0.5) * straight)
+    crossing = jnp.where(found & jnp.all(jnp.isfinite(crossing)), crossing, jnp.stack(line))
+    faces = jnp.stack(
+        [jnp.argmax(body.face_distances(crossing[k])) for k, body in enumerate(bodies)]
+    )
+    path = _Stationary(media, chain, source, receiver, faces)
+    z, found = path.solved(
+        path.with_multipliers(crossing), lambda initial: (initial, found.astype(float))
+    )
+    return path.carried(z, found)
+
+
+class _Stationary:
+    """The conditions the crossings of one path meet, and what the path through them carries.
+
+    Each crossing is held to one face of its body, ``faces[k]``, and Fermat's principle makes the
+    optical length ``sum n_j |x_{j+1} - x_j|`` stationary over the crossings: the pull of the legs
+    either side of a crossing balances the face's normal. That condition holds at every transmitted
+    path, a minimum of the optical length or a saddle, whichever way the path was found, so it is
+    what the path is differentiated through.
+    """
+
+    def __init__(self, media: Media, chain: Chain, source, receiver, faces):
+        self.media, self.chain, self.source, self.receiver = media, chain, source, receiver
+        self.bodies = [media.nodes[node].body for node, _ in chain.crossings]
+        self.indices = jnp.stack([media.index_of(leg) for leg in chain.legs])
+        self.m = chain.n_crossings
+        separation = norm(receiver - source)
+        self.length_scale = jnp.where(separation > 0.0, separation, 1.0)
+        self.faces = faces
+        # Each body's faces, built once: a body builds them anew each time it is asked, and a solve
+        # asks dozens of times.
+        self.held = [body.constraints for body in self.bodies]
+
+    def face(self, k, position):
+        held = self.held[k]
+        return jnp.take(
+            jnp.stack([bound.signed_distance(position) for bound in held]), self.faces[k]
+        )
+
+    def surfaces(self, crossing):
+        """Each crossing's distance off its face, ``(m,)``, and the face's (unnormalized) normal."""
+        pairs = [jax.value_and_grad(self.face, argnums=1)(k, crossing[k]) for k in range(self.m)]
+        return jnp.stack([value for value, _ in pairs]), jnp.stack([normal for _, normal in pairs])
+
+    def legs(self, crossing):
+        """Each leg's length and unit direction, source to receiver."""
+        full = jnp.concatenate([self.source[None], crossing, self.receiver[None]])
+        steps = full[1:] - full[:-1]
+        lengths = norm(steps)
+        return lengths, steps / jnp.where(lengths > 0.0, lengths, 1.0)[:, None]
+
+    def optical_length(self, crossing):
+        lengths, _ = self.legs(crossing)
+        return jnp.sum(self.indices * lengths)
+
+    def length_gradient(self, crossing):
+        """``n_k u_k - n_{k+1} u_{k+1}`` at crossing ``k``: the pull of the legs either side of it."""
+        _, units = self.legs(crossing)
+        return self.indices[:-1, None] * units[:-1] - self.indices[1:, None] * units[1:]
+
+    def length_curvature(self, crossing):
+        """The optical length's second derivative, ``(3m, 3m)``, written out.
+
+        A leg of index ``n``, length ``l`` and direction ``u`` contributes ``n (I - u u^T) / l`` --
+        stiff across itself, free along itself -- to each end it moves and minus that between its
+        two ends; the source and receiver are fixed. Written out rather than taken by automatic
+        differentiation twice over, which made tracing the solve take seconds.
+        """
+        m = self.m
+        lengths, units = self.legs(crossing)
+        across = (
+            self.indices[:, None, None]
+            * (jnp.eye(3) - units[:, :, None] * units[:, None, :])
+            / jnp.where(lengths > 0.0, lengths, 1.0)[:, None, None]
+        )
+        curvature = jnp.zeros((m, 3, m, 3))
+        for k in range(m):
+            curvature = curvature.at[k, :, k, :].set(across[k] + across[k + 1])
+            if k + 1 < m:
+                curvature = curvature.at[k, :, k + 1, :].set(-across[k + 1])
+                curvature = curvature.at[k + 1, :, k, :].set(-across[k + 1])
+        return curvature.reshape(3 * m, 3 * m)
+
+    def residual(self, z):
+        m = self.m
+        crossing = z[: 3 * m].reshape(m, 3)
+        multiplier = z[3 * m :]
+        gradient = self.length_gradient(crossing)
+        surface, normals = self.surfaces(crossing)
+        return jnp.concatenate([(gradient + multiplier[:, None] * normals).ravel(), surface])
+
+    @staticmethod
+    def multipliers(normals, gradient):
+        """The multipliers that best balance the gradient against the normals, per crossing."""
+        return -dot(gradient, normals) / norm_squared(normals)
+
+    def onto(self, crossing):
+        """Each point moved onto its own face, along the face's normal.
+
+        Exact in one move for a plane, a ball and a tube, whose signed distance is the distance
+        with a unit gradient; the second move tightens a taper, whose distance is exact only on
+        the surface.
+        """
+        for _ in range(2):
+            surface, normals = self.surfaces(crossing)
+            crossing = crossing - (surface / norm_squared(normals))[:, None] * normals
+        return crossing
+
+    @staticmethod
+    def tangential(normals, vectors):
+        """``vectors``, one per crossing, less their part along that crossing's normal."""
+        return vectors - (dot(vectors, normals) / norm_squared(normals))[:, None] * normals
+
+    def with_multipliers(self, crossing):
+        """The crossings and their multipliers, as the unknowns of :meth:`residual`."""
+        _, normals = self.surfaces(crossing)
+        return jnp.concatenate(
+            [crossing.ravel(), self.multipliers(normals, self.length_gradient(crossing))]
+        )
+
+    def newton_step(self, crossing):
+        """The step a Newton iteration on the stationarity conditions takes from ``crossing``.
+
+        The curvature is the Lagrangian's -- the optical length's, plus each face's own times its
+        multiplier -- which is what makes it quadratic on a curved surface. Where that step does
+        not go downhill in optical length (far from the path, on a surface whose curvature has the
+        wrong sign), the tangential steepest descent is taken instead, sized to a tenth of the
+        separation of the path's ends; the line search does the rest.
+        """
+        m = self.m
+        _, normals = self.surfaces(crossing)
+        gradient = self.length_gradient(crossing)
+        weights = self.multipliers(normals, gradient)
+        curvature = self.length_curvature(crossing)
+        faces_curvature = jax.scipy.linalg.block_diag(
+            *[weights[k] * jax.hessian(self.face, argnums=1)(k, crossing[k]) for k in range(m)]
+        )
+        constraint = jax.scipy.linalg.block_diag(*[normals[k][:, None] for k in range(m)])
+        system = jnp.block(
+            [[curvature + faces_curvature, constraint], [constraint.T, jnp.zeros((m, m))]]
+        )
+        update = jnp.linalg.solve(system, jnp.concatenate([-gradient.ravel(), jnp.zeros(m)]))
+        update = update[: 3 * m].reshape(m, 3)
+        descent = -self.tangential(normals, gradient)
+        descent = descent * (0.1 * self.length_scale / jnp.maximum(jnp.max(norm(descent)), 1e-300))
+        slope = jnp.sum(update * gradient)
+        # Close to the path the slope is a rounding of zero and its sign means nothing.
+        close = jnp.max(norm(update)) <= _BASIN * self.length_scale
+        usable = jnp.all(jnp.isfinite(update)) & ((slope <= 0.0) | close)
+        return jnp.where(usable, update, descent), usable
+
+    @staticmethod
+    def tangent(g, y):
+        return jnp.linalg.solve(jax.jacfwd(g)(y), y)
+
+    def solved(self, z0, solve):
+        """The crossings ``solve`` finds from ``z0``, differentiated through :meth:`residual`.
+
+        ``solve(z0)`` returns the unknowns and a flag, as a number, for whether a path was found; a
+        path that was not is returned as anything finite. The derivative of the crossings with
+        respect to the media, the source and the receiver is the implicit function theorem's on the
+        stationarity conditions, however the forward solve got there.
+        """
+        z, found = jax.lax.custom_root(
+            self.residual, z0, lambda f, initial: solve(initial), self.tangent, has_aux=True
+        )
+        return z, jax.lax.stop_gradient(found) > 0.5
+
+    def carried(self, z, found) -> Paths:
+        """What the path through the crossings in ``z`` carries, and whether it is one."""
+        media, chain = self.media, self.chain
+        crossing = z[: 3 * self.m].reshape(self.m, 3)
+        full = jnp.concatenate([self.source[None], crossing, self.receiver[None]])
+        _, directions = self.legs(crossing)
+        valid = found
+        transmittance = jnp.asarray(1.0)
+        for k, (body, (_, out)) in enumerate(zip(self.bodies, chain.crossings, strict=True)):
+            normal = jax.grad(self.face, argnums=1)(k, crossing[k])
+            normal = normal / norm(normal)
+            before, after = dot(directions[k], normal), dot(directions[k + 1], normal)
+            # Leaving, both legs head out through the outward normal; entering, both head in. A
+            # stationary path that turns back at the surface is a reflection, not this path.
+            valid = valid & (
+                (before > 0.0) & (after > 0.0) if out else (before < 0.0) & (after < 0.0)
+            )
+            valid = valid & jnp.all(
+                body.face_distances(crossing[k]) <= _ON_BOUNDARY * self.length_scale
+            )
+            transmittance = transmittance * fresnel_transmittance(
+                before, self.indices[k], self.indices[k + 1]
+            )
+        depth = jnp.asarray(0.0)
+        for leg, (start_point, end_point) in enumerate(itertools.pairwise(full)):
+            medium = media.absorption_of(chain.legs[leg])
+            if medium is not None:
+                depth = depth + medium.optical_depth(start_point, end_point)
+            valid = valid & ~_meets_any(media, chain.beside[leg], start_point, end_point)
+        transmittance = transmittance * jnp.exp(-depth)
+        return Paths(
+            departure=directions[0],
+            arrival=-directions[-1],
+            transmittance=jnp.where(valid, transmittance, 0.0),
+            valid=valid,
+            points=crossing,
+        )
+
+
 def _one_path(media: Media, chain: Chain, source, receiver, aim) -> Paths:
     """One pair's path, its crossings found by minimizing the optical length (Fermat's principle).
 
@@ -719,12 +1015,7 @@ def _one_path(media: Media, chain: Chain, source, receiver, aim) -> Paths:
     otherwise a point inside the deepest region passed, and the search starts from the polyline
     through it.
     """
-    nodes = media.nodes
-    bodies = [nodes[node].body for node, _ in chain.crossings]
-    indices = jnp.stack([media.index_of(leg) for leg in chain.legs])
-    m = chain.n_crossings
-    separation = norm(receiver - source)
-    length_scale = jnp.where(separation > 0.0, separation, 1.0)
+    bodies = [media.nodes[node].body for node, _ in chain.crossings]
 
     # The face each crossing is held to, read off the straight line -- or, on a route through a
     # region, off the polyline through the aim: it is the face the line leaves or enters the body
@@ -748,134 +1039,10 @@ def _one_path(media: Media, chain: Chain, source, receiver, aim) -> Paths:
             point = jnp.where(jnp.isfinite(t), point, aim)
         guess.append(point)
         faces.append(jnp.argmax(body.face_distances(point)))
-    faces = jnp.stack(faces)
+    path = _Stationary(media, chain, source, receiver, jnp.stack(faces))
+    m, scale = path.m, path.length_scale
 
-    # Each body's faces, built once: a body builds them anew each time it is asked, and a solve
-    # asks dozens of times.
-    held = [body.constraints for body in bodies]
-
-    def face(k, position):
-        return jnp.take(jnp.stack([bound.signed_distance(position) for bound in held[k]]), faces[k])
-
-    def surfaces(crossing):
-        """Each crossing's distance off its face, ``(m,)``, and the face's (unnormalized) normal."""
-        pairs = [jax.value_and_grad(face, argnums=1)(k, crossing[k]) for k in range(m)]
-        return jnp.stack([value for value, _ in pairs]), jnp.stack([normal for _, normal in pairs])
-
-    def legs(crossing):
-        """Each leg's length and unit direction, source to receiver."""
-        full = jnp.concatenate([source[None], crossing, receiver[None]])
-        steps = full[1:] - full[:-1]
-        lengths = norm(steps)
-        return lengths, steps / jnp.where(lengths > 0.0, lengths, 1.0)[:, None]
-
-    def optical_length(crossing):
-        lengths, _ = legs(crossing)
-        return jnp.sum(indices * lengths)
-
-    def length_gradient(crossing):
-        """``n_k u_k - n_{k+1} u_{k+1}`` at crossing ``k``: the pull of the legs either side of it."""
-        _, units = legs(crossing)
-        return indices[:-1, None] * units[:-1] - indices[1:, None] * units[1:]
-
-    def length_curvature(crossing):
-        """The optical length's second derivative, ``(3m, 3m)``, written out.
-
-        A leg of index ``n``, length ``l`` and direction ``u`` contributes ``n (I - u u^T) / l`` --
-        stiff across itself, free along itself -- to each end it moves and minus that between its
-        two ends; the source and receiver are fixed. Written out rather than taken by automatic
-        differentiation twice over, which made tracing the solve take seconds.
-        """
-        lengths, units = legs(crossing)
-        across = (
-            indices[:, None, None]
-            * (jnp.eye(3) - units[:, :, None] * units[:, None, :])
-            / jnp.where(lengths > 0.0, lengths, 1.0)[:, None, None]
-        )
-        curvature = jnp.zeros((m, 3, m, 3))
-        for k in range(m):
-            curvature = curvature.at[k, :, k, :].set(across[k] + across[k + 1])
-            if k + 1 < m:
-                curvature = curvature.at[k, :, k + 1, :].set(-across[k + 1])
-                curvature = curvature.at[k + 1, :, k, :].set(-across[k + 1])
-        return curvature.reshape(3 * m, 3 * m)
-
-    def residual(z):
-        crossing = z[: 3 * m].reshape(m, 3)
-        multiplier = z[3 * m :]
-        gradient = length_gradient(crossing)
-        surface, normals = surfaces(crossing)
-        return jnp.concatenate([(gradient + multiplier[:, None] * normals).ravel(), surface])
-
-    def multipliers(normals, gradient):
-        """The multipliers that best balance the gradient against the normals, per crossing."""
-        return -dot(gradient, normals) / norm_squared(normals)
-
-    def onto(crossing):
-        """Each point moved onto its own face, along the face's normal.
-
-        Exact in one move for a plane, a ball and a tube, whose signed distance is the distance
-        with a unit gradient; the second move tightens a taper, whose distance is exact only on
-        the surface.
-        """
-        for _ in range(2):
-            surface, normals = surfaces(crossing)
-            crossing = crossing - (surface / norm_squared(normals))[:, None] * normals
-        return crossing
-
-    def tangential(normals, vectors):
-        """``vectors``, one per crossing, less their part along that crossing's normal."""
-        return vectors - (dot(vectors, normals) / norm_squared(normals))[:, None] * normals
-
-    def with_multipliers(crossing):
-        """The crossings and their multipliers, as the unknowns of :func:`residual`."""
-        _, normals = surfaces(crossing)
-        return jnp.concatenate([crossing.ravel(), multipliers(normals, length_gradient(crossing))])
-
-    start = jnp.stack(guess)
-    z0 = with_multipliers(start)
-
-    def newton_step(crossing):
-        """The step a Newton iteration on the stationarity conditions takes from ``crossing``.
-
-        The curvature is the Lagrangian's -- the optical length's, plus each face's own times its
-        multiplier -- which is what makes it quadratic on a curved surface. Where that step does
-        not go downhill in optical length (far from the path, on a surface whose curvature has the
-        wrong sign), the tangential steepest descent is taken instead, sized to a tenth of the
-        separation of the path's ends; the line search does the rest.
-        """
-        _, normals = surfaces(crossing)
-        gradient = length_gradient(crossing)
-        weights = multipliers(normals, gradient)
-        curvature = length_curvature(crossing)
-        faces_curvature = jax.scipy.linalg.block_diag(
-            *[weights[k] * jax.hessian(face, argnums=1)(k, crossing[k]) for k in range(m)]
-        )
-        constraint = jax.scipy.linalg.block_diag(*[normals[k][:, None] for k in range(m)])
-        system = jnp.block(
-            [[curvature + faces_curvature, constraint], [constraint.T, jnp.zeros((m, m))]]
-        )
-        update = jnp.linalg.solve(system, jnp.concatenate([-gradient.ravel(), jnp.zeros(m)]))
-        update = update[: 3 * m].reshape(m, 3)
-        descent = -tangential(normals, gradient)
-        descent = descent * (0.1 * length_scale / jnp.maximum(jnp.max(norm(descent)), 1e-300))
-        slope = jnp.sum(update * gradient)
-        # Close to the path the slope is a rounding of zero and its sign means nothing.
-        close = jnp.max(norm(update)) <= _BASIN * length_scale
-        usable = jnp.all(jnp.isfinite(update)) & ((slope <= 0.0) | close)
-        return jnp.where(usable, update, descent), usable
-
-    def arrived(crossing):
-        """Whether a Newton step from here is a rounding of the separation: the path is found.
-
-        Measured by the step rather than by the gradient, because the gradient's size at a given
-        distance from the path scales with the curvature, which a short leg makes large; the step
-        is a length, compared with the path's own.
-        """
-        update, usable = newton_step(crossing)
-        return usable & (jnp.max(norm(update)) <= _PATH_TOLERANCE * length_scale)
-
-    def descend(f, initial):
+    def descend(initial):
         """Minimize the optical length over the crossing points, each held to its face.
 
         A transmitted path is the shortest optical path among those crossing each surface once,
@@ -885,29 +1052,30 @@ def _one_path(media: Media, chain: Chain, source, receiver, aim) -> Paths:
         at grazing incidence through an interface close to the receiver -- where Newton's method
         alone, started from the straight line, runs away.
         """
-        del f
         initial_crossing = initial[: 3 * m].reshape(m, 3)
 
         def step(state):
             crossing, count, _ = state
-            update, usable = newton_step(crossing)
-            done = usable & (jnp.max(norm(update)) <= _PATH_TOLERANCE * length_scale)
-            length = optical_length(crossing)
+            update, usable = path.newton_step(crossing)
+            done = usable & (jnp.max(norm(update)) <= _PATH_TOLERANCE * scale)
+            length = path.optical_length(crossing)
 
             # The line search tries a fixed ladder of halved steps at once and keeps the longest
             # that shortens the path. Not a loop: a ``while_loop`` inside this one, under the
             # ``vmap`` over pairs, stops updating a pair whose outer loop has finished while its
             # own condition still holds, and the batch never ends.
             ladder = 2.0 ** -jnp.arange(_HALVINGS + 1.0)
-            tried = jax.vmap(lambda a: optical_length(onto(crossing + a * update)))(ladder)
+            tried = jax.vmap(lambda a: path.optical_length(path.onto(crossing + a * update)))(
+                ladder
+            )
             shortens = tried < length
-            scale = jnp.where(jnp.any(shortens), ladder[jnp.argmax(shortens)], 0.0)
+            scale_ = jnp.where(jnp.any(shortens), ladder[jnp.argmax(shortens)], 0.0)
             # Close to the path the length changes by less than its own rounding, so a Newton step
             # there is taken whole: the basin is quadratic, and the next step is smaller still.
-            close = usable & (jnp.max(norm(update)) <= _BASIN * length_scale)
-            scale = jnp.where(close, 1.0, scale)
-            moved = onto(crossing + scale * update)
-            improved = close | (optical_length(moved) < length)
+            close = usable & (jnp.max(norm(update)) <= _BASIN * scale)
+            scale_ = jnp.where(close, 1.0, scale_)
+            moved = path.onto(crossing + scale_ * update)
+            improved = close | (path.optical_length(moved) < length)
             following = jnp.where(done | ~improved, crossing, moved)
             return following, count + 1, done | ~improved
 
@@ -916,52 +1084,24 @@ def _one_path(media: Media, chain: Chain, source, receiver, aim) -> Paths:
             return (count < _NEWTON_STEPS) & ~stopped
 
         crossing, _, _ = jax.lax.while_loop(going, step, (initial_crossing, 0, False))
-        done = arrived(crossing) & jnp.all(jnp.isfinite(crossing))
-        z = with_multipliers(crossing)
+        # The path is found when a Newton step from here is a rounding of the separation: measured
+        # by the step rather than by the gradient, because the gradient's size at a given distance
+        # from the path scales with the curvature, which a short leg makes large.
+        update, usable = path.newton_step(crossing)
+        done = (
+            usable
+            & (jnp.max(norm(update)) <= _PATH_TOLERANCE * scale)
+            & jnp.all(jnp.isfinite(crossing))
+        )
+        z = path.with_multipliers(crossing)
         # A path that was not found is returned as the straight line it started from: finite, so
         # the implicit derivative through it is finite too, and carrying nothing. The flag rides
         # out as a number: an auxiliary output of a differentiated solve must have a tangent, and
         # a boolean has none.
         return jnp.where(done, z, initial), done.astype(float)
 
-    def tangent(g, y):
-        return jnp.linalg.solve(jax.jacfwd(g)(y), y)
-
-    z, found = jax.lax.custom_root(residual, z0, descend, tangent, has_aux=True)
-    found = jax.lax.stop_gradient(found) > 0.5
-    crossing = z[: 3 * m].reshape(m, 3)
-    full = jnp.concatenate([source[None], crossing, receiver[None]])
-    _, directions = legs(crossing)
-
-    valid = found
-    transmittance = jnp.asarray(1.0)
-    for k, (body, (_, out)) in enumerate(zip(bodies, chain.crossings, strict=True)):
-        normal = jax.grad(face, argnums=1)(k, crossing[k])
-        normal = normal / norm(normal)
-        before, after = dot(directions[k], normal), dot(directions[k + 1], normal)
-        # Leaving, both legs head out through the outward normal; entering, both head in. A
-        # stationary path that turns back at the surface is a reflection, not this path. The
-        # descent finds the shortest path, which never turns back, so this is a guard on what the
-        # solve returns rather than a case it reaches.
-        valid = valid & ((before > 0.0) & (after > 0.0) if out else (before < 0.0) & (after < 0.0))
-        valid = valid & jnp.all(body.face_distances(crossing[k]) <= _ON_BOUNDARY * length_scale)
-        transmittance = transmittance * fresnel_transmittance(before, indices[k], indices[k + 1])
-
-    depth = jnp.asarray(0.0)
-    for leg, (start_point, end_point) in enumerate(itertools.pairwise(full)):
-        medium = media.absorption_of(chain.legs[leg])
-        if medium is not None:
-            depth = depth + medium.optical_depth(start_point, end_point)
-        valid = valid & ~_meets_any(media, chain.beside[leg], start_point, end_point)
-    transmittance = transmittance * jnp.exp(-depth)
-
-    return Paths(
-        departure=directions[0],
-        arrival=-directions[-1],
-        transmittance=jnp.where(valid, transmittance, 0.0),
-        valid=valid,
-        points=crossing,
-    )
+    z, found = path.solved(path.with_multipliers(jnp.stack(guess)), descend)
+    return path.carried(z, found)
 
 
 def _meets_any(media: Media, regions, origin, target) -> jnp.ndarray:

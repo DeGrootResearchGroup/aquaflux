@@ -18,6 +18,9 @@ from aquaflux.radiation.refraction import (
     Media,
     Transparent,
     _only_saddles,
+    _path_count,
+    _shot,
+    _solve_paths,
     fresnel_transmittance,
     solve_paths,
     straight_reach,
@@ -165,7 +168,6 @@ def test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_th
     assert routes[0].beside[-1] == (2, 3)
     assert routes[1].beside[3] == routes[1].beside[-1] == (3,)
     assert routes[2].beside[-1] == ()
-    assert [chain.n_starts for chain in routes] == [1, 4, 4]
     in_water = Chain.routes(parents, -1, -1)
     assert [chain.passing for chain in in_water] == [(0,), (0, 1), (2,), (2, 3)]
     assert in_water[0].crossings == ((0, False), (0, True))
@@ -362,21 +364,173 @@ def test_only_a_route_through_a_sleeve_s_wall_alone_is_known_to_hold_only_saddle
     assert seen == [False]  # An index under a trace cannot be compared, so the route is solved.
 
 
-def test_the_descent_finds_no_path_through_a_sleeve_s_wall_alone():
-    """Why that route is left out: the paths that skim the second sleeve's rim are saddles.
-
-    Sources round the first lamp's arc, receivers beyond and beside the second lamp, where light
-    bent round its rim arrives; on the route through its quartz alone not one path is found.
-    """
+def _rim_paths(receiver):
+    """Paths from the first lamp's arc round the second sleeve's rim, to ``receiver``."""
     media = _two_sleeves()
     chain = Chain.between(media.parents, 1, -1, through=2)
     angles = np.linspace(0.0, 2.0 * np.pi, 24, endpoint=False)
     sources = np.stack(
-        [0.025 + 0.0074 * np.cos(angles), -0.025 + 0.0074 * np.sin(angles), 0 * angles], axis=1
+        [0.025 + 0.0074 * np.cos(angles), -0.025 + 0.0074 * np.sin(angles), 0.002 * angles], axis=1
     )
-    receivers = np.array([[0.055, 0.025, 0.0], [0.05, 0.05, 0.0], [0.04, 0.06, 0.0]])
-    paths = solve_paths(media, chain, jnp.asarray(sources)[None], jnp.asarray(receivers)[:, None])
-    assert not np.any(np.asarray(paths.valid))
+    return media, chain, sources, solve_paths(media, chain, jnp.asarray(sources), receiver)
+
+
+def _forward(media, chain, source, departure):
+    """The ray from ``source`` along ``departure`` through the chain's cylinders, by vector Snell.
+
+    Independent of the shooting: three dimensions throughout, no conserved quantities. Returns the
+    crossing points.
+    """
+    position, direction, points = np.asarray(source), np.asarray(departure), []
+    indices = [float(media.index_of(leg)) for leg in chain.legs]
+    for k, (node, out) in enumerate(chain.crossings):
+        body = media.nodes[node].body
+        centre, axis, radius = (
+            np.asarray(v, dtype=float) for v in (body.centre, body.axis, body.radius)
+        )
+        offset = position - centre
+        flat_d = direction - np.dot(direction, axis) * axis
+        flat_o = offset - np.dot(offset, axis) * axis
+        a, b, c = flat_d @ flat_d, flat_d @ flat_o, flat_o @ flat_o - radius**2
+        root = np.sqrt(b * b - a * c)
+        t = (-b + root) / a if out else (-b - root) / a
+        position = position + t * direction
+        points.append(position)
+        normal = position - centre
+        normal -= np.dot(normal, axis) * axis
+        normal /= np.linalg.norm(normal)
+        normal = -normal if np.dot(direction, normal) > 0 else normal
+        ratio, cosine = indices[k] / indices[k + 1], -np.dot(direction, normal)
+        direction = (
+            ratio * direction + (ratio * cosine - np.sqrt(1 - ratio**2 * (1 - cosine**2))) * normal
+        )
+    return np.array(points), position, direction
+
+
+def test_shooting_finds_the_paths_round_a_sleeve_s_rim_and_each_is_a_ray():
+    """Behind the second sleeve from the first lamp, light skims the sleeve's rim on both sides.
+
+    Each path found, fired forward from its source along its departure direction by an independent
+    vector-Snell trace, crosses every surface where the path says and reaches the receiver; its
+    chord through the second sleeve's quartz passes between the gap's wall and the sleeve's.
+    """
+    receiver = np.array([0.025, 0.06, 0.0])
+    media, chain, sources, paths = _rim_paths(receiver)
+    valid = np.asarray(paths.valid)
+    assert valid.shape == (2, 24)
+    assert np.sum(valid[0]) >= 10 and np.sum(valid[1]) >= 10  # Past both sides of the sleeve.
+    for side, k in zip(*np.nonzero(valid), strict=True):
+        points, end, direction = _forward(
+            media, chain, sources[k], np.asarray(paths.departure)[side, k]
+        )
+        scale = np.linalg.norm(receiver - sources[k])
+        np.testing.assert_allclose(points, np.asarray(paths.points)[side, k], atol=1e-9 * scale)
+        to_receiver = receiver - end
+        assert np.linalg.norm(np.cross(direction, to_receiver)) <= 1e-9 * scale
+        chord = points[3, :2] - points[2, :2]
+        to_axis = np.array([0.025, 0.025]) - points[2, :2]
+        closest = abs(chord[0] * to_axis[1] - chord[1] * to_axis[0]) / np.linalg.norm(chord)
+        assert 0.01025 < closest < 0.0115
+    # The two sides are different paths.
+    both = valid[0] & valid[1]
+    assert np.any(both)
+    apart = np.linalg.norm(np.asarray(paths.points)[0] - np.asarray(paths.points)[1], axis=-1)
+    assert np.all(np.max(apart, axis=-1)[both] > 1e-3)
+
+
+def test_a_path_round_a_rim_is_a_saddle_the_descent_cannot_find():
+    """The optical length over the crossings, each held to its cylinder, has one falling direction.
+
+    That is why the descent on the optical length, from its usual starts, finds none of these paths.
+    """
+    receiver = np.array([0.025, 0.06, 0.0])
+    media, chain, sources, paths = _rim_paths(receiver)
+    side, k = (int(i[0]) for i in np.nonzero(np.asarray(paths.valid)))
+    found = np.asarray(paths.points)[side, k]
+    indices = jnp.array([float(media.index_of(leg)) for leg in chain.legs])
+    centres = np.array([media.nodes[node].body.centre for node, _ in chain.crossings])[:, :2]
+    radii = np.array([float(media.nodes[node].body.radius) for node, _ in chain.crossings])
+    angles = np.arctan2(*(found[:, :2] - centres).T[::-1])
+    start = jnp.asarray(np.concatenate([angles, found[:, 2]]))
+
+    def length(unknowns):
+        m = len(radii)
+        on = jnp.stack(
+            [
+                jnp.concatenate(
+                    [
+                        centres[i]
+                        + radii[i] * jnp.array([jnp.cos(unknowns[i]), jnp.sin(unknowns[i])]),
+                        unknowns[m + i][None],
+                    ]
+                )
+                for i in range(m)
+            ]
+        )
+        full = jnp.concatenate([jnp.asarray(sources[k])[None], on, jnp.asarray(receiver)[None]])
+        return jnp.sum(indices * jnp.linalg.norm(full[1:] - full[:-1], axis=1))
+
+    assert float(jnp.max(jnp.abs(jax.grad(length)(start)))) < 1e-9
+    curvature = np.linalg.eigvalsh(np.asarray(jax.hessian(length)(start)))
+    assert np.sum(curvature < 0.0) == 1
+    descended = _solve_paths(media, chain, jnp.asarray(sources), jnp.asarray(receiver), shot=False)
+    assert not np.any(np.asarray(descended.valid))
+
+
+def test_a_shot_path_s_derivative_with_respect_to_an_index_is_the_finite_difference():
+    receiver = jnp.array([0.025, 0.06, 0.0])
+    source = jnp.array([0.025 + 0.0074 * np.cos(1.3), -0.025 + 0.0074 * np.sin(1.3), 0.002])
+
+    def departure(quartz):
+        media = _two_sleeves(quartz=quartz)
+        chain = Chain.between(media.parents, 1, -1, through=2)
+        paths = solve_paths(media, chain, source, receiver)
+        return paths.departure[0], paths.valid[0]
+
+    _, valid = departure(QUARTZ)
+    assert bool(valid)
+    exact = jax.jacfwd(lambda n: departure(n)[0])(QUARTZ)
+    step = 1e-6
+    estimate = (departure(QUARTZ + step)[0] - departure(QUARTZ - step)[0]) / (2 * step)
+    assert float(jnp.max(jnp.abs(exact))) > 1e-3
+    np.testing.assert_allclose(exact, estimate, rtol=1e-5, atol=1e-9)
+
+
+def test_a_rim_route_is_shot_only_where_two_numbers_fix_its_paths():
+    """Shot when the receiver is in the water round the shell and every body crossed is a parallel
+    cylinder; otherwise the descent, and a sleeve's wall alone is then left out of the gather."""
+    media = _two_sleeves()
+    routes = Chain.routes(media.parents, 1, -1)
+    assert [_shot(media, chain) for chain in routes] == [False, True, False]
+    assert [_path_count(media, chain) for chain in routes] == [1, 2, 4]
+    third = Transparent(Cylinder([-0.025, 0.025, 0.0], [0, 0, 1], 0.0115, 1.0), QUARTZ)
+    with_third = Media(WATER, (*media.regions, third))
+    into_third = Chain.between(with_third.parents, 1, 4, through=2)
+    assert _only_saddles(with_third, into_third) and not _shot(with_third, into_third)
+    tilted = Transparent(
+        Cylinder([0.025, -0.025, 0.0], [0.01, 0.0, 1.0], 0.0115, 1.0),
+        QUARTZ,
+        inside=(Transparent(Cylinder([0.025, -0.025, 0.0], [0.01, 0.0, 1.0], 0.01025, 1.0), AIR),),
+    )
+    leaning = Media(WATER, (tilted, media.regions[1]))
+    assert not _shot(leaning, Chain.between(leaning.parents, 1, -1, through=2))
+    seen = []
+
+    def traced(radius, holder):
+        sleeve = Transparent(
+            Cylinder([0.025, holder, 0.0], [0, 0, 1], radius, 1.0),
+            QUARTZ,
+            inside=(Transparent(Cylinder([0.025, holder, 0.0], [0, 0, 1], 0.01025, 1.0), AIR),),
+        )
+        pair = (sleeve, media.regions[1]) if holder < 0 else (media.regions[0], sleeve)
+        both = Media(WATER, pair)
+        seen.append(_shot(both, Chain.between(both.parents, 1, -1, through=2)))
+        return radius
+
+    # Geometry under a trace cannot be read, so the descent is used: the shell's, or the source's.
+    jax.jit(traced, static_argnums=1)(0.0115, 0.025)
+    jax.jit(traced, static_argnums=1)(0.0115, -0.025)
+    assert seen == [False, False]
 
 
 def test_a_crossing_off_the_end_of_its_face_is_no_crossing_and_carries_nothing():
@@ -446,7 +600,7 @@ def test_a_region_holding_neither_end_is_passed_through_bent_and_a_path_meeting_
     assert not bool(around.valid)
     assert float(around.transmittance) == 0.0
     through = solve_paths(with_lens, routes[1], source, receiver)
-    assert through.valid.shape == (routes[1].n_starts,)
+    assert through.valid.shape == (_path_count(with_lens, routes[1]),)
     assert int(np.sum(np.asarray(through.valid))) == 1
     plain = solve_paths(without, Chain.between(without.parents, 0, -1), source, receiver)
     ratio = float(jnp.sum(through.transmittance)) / float(plain.transmittance)

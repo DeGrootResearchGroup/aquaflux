@@ -72,7 +72,7 @@ def split():
         (), lamps, media, points, self_occlusion=RayCastOcclusion(grid=True)
     )
     plan = refracted._plan(lamps, media, points, DEFAULT_PAIR_LIMIT)
-    masks = refracted._route_masks(visibility, None, points, plan)
+    masks = refracted._route_masks(media, visibility, None, points, plan)
     parts = {}
     for group, mask in zip(plan, masks, strict=True):
         field = np.asarray(

@@ -46,6 +46,8 @@ from aquaflux.radiation.refraction import (
     Media,
     _only_saddles,
     _pairs_meet,
+    _path_count,
+    _shot,
     solve_paths,
 )
 from aquaflux.radiation.self_occlusion import RayCastOcclusion, SelfOcclusion
@@ -83,11 +85,11 @@ class RefractedVisibility(eqx.Module):
     receivers : jnp.ndarray, shape ``(n_receivers, 3)``
         The receivers it was built for.
     blocked : tuple of jnp.ndarray of bool
-        Per route (in the order the gather works them out), ``(n_starts, n_occluders, n_rows,
+        Per route (in the order the gather works them out), ``(n_paths, n_occluders, n_rows,
         n_facets)``: true where the body lies across any leg of the path from the facet's centroid to
-        the receiver, for each starting point of the route.
+        the receiver, for each path of the route per pair (``refraction._path_count``).
     hidden : tuple of (jnp.ndarray of bool or None)
-        Per route, ``(n_starts, n_rows, n_facets)``: where the surface's own triangles do; ``None``
+        Per route, ``(n_paths, n_rows, n_facets)``: where the surface's own triangles do; ``None``
         where they shadow nothing.
     """
 
@@ -117,8 +119,9 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int)
     Every route is taken for every receiver: a route through a region carries light to receivers
     whose straight segments miss the region altogether, because an air gap near the critical angle
     turns light by tens of degrees. No bound on that turn is used to leave any out. The one route left
-    out is one whose paths the solve cannot find (:func:`~aquaflux.radiation.refraction._only_saddles`):
-    solving it would cost as much as any other route and carry nothing.
+    out is one whose paths no solve here can find -- through a sleeve's wall alone where they cannot be
+    shot (:func:`~aquaflux.radiation.refraction._only_saddles`): solving it by descent would cost as
+    much as any other route and carry nothing.
     """
     facet_region = media.region_of_facets(surfaces)
     receiver_region = media.region_of(points, "receiver")
@@ -145,7 +148,7 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int)
             for receiver in np.unique(receiver_region):
                 rows = np.flatnonzero(receiver_region == receiver)
                 for chain in Chain.routes(parents, int(source), int(receiver)):
-                    if not _only_saddles(media, chain):
+                    if _shot(media, chain) or not _only_saddles(media, chain):
                         groups.append(_Group(chain, facets, rows, profile))
     return tuple(groups)
 
@@ -221,7 +224,7 @@ def build_refracted_visibility(
     )
     blocked_by_route, hidden_by_route = [], []
     for group in _plan(surfaces, media, host_points, pair_limit):
-        starts = group.chain.n_starts
+        starts = _path_count(media, group.chain)
         blocked = np.zeros((starts, len(occluders), len(group.rows), len(group.facets)), bool)
         hidden = None
         per_pass = receivers_per_pass(pair_limit, starts * len(group.facets))
@@ -274,7 +277,7 @@ def build_refracted_visibility(
 
 
 def _centroid_paths(media: Media, chain: Chain, sources, receivers, pair_limit) -> np.ndarray:
-    """``(n_starts, n_receivers, n_sources, n_crossings, 3)`` crossing points, on the host.
+    """``(n_paths, n_receivers, n_sources, n_crossings, 3)`` crossing points, on the host.
 
     Solved a step of receivers at a time: a path's solve holds a few kilobytes of intermediates,
     more the more surfaces it crosses, so a whole pass of paths at once would hold gigabytes. Every
@@ -282,7 +285,7 @@ def _centroid_paths(media: Media, chain: Chain, sources, receivers, pair_limit) 
     dropped -- so the solve compiles once.
     """
     sources, receivers = np.asarray(sources), np.asarray(receivers)
-    step = receivers_per_step(pair_limit, chain.n_starts * len(sources))
+    step = receivers_per_step(pair_limit, _path_count(media, chain) * len(sources))
     step = min(step, len(receivers))
     found = []
     for first in range(0, len(receivers), step):
@@ -378,7 +381,7 @@ def _refracted(surfaces, media, points, normals, visibility, transmittance, pair
     host_points = np.asarray(points, dtype=float)
     points = jnp.asarray(points, dtype=float)
     plan = _plan(surfaces, media, host_points, pair_limit)
-    masks = _route_masks(visibility, transmittance, host_points, plan)
+    masks = _route_masks(media, visibility, transmittance, host_points, plan)
     total = jnp.zeros(points.shape[0])
     for group, mask in zip(plan, masks, strict=True):
         total = total.at[group.rows].add(
@@ -387,7 +390,7 @@ def _refracted(surfaces, media, points, normals, visibility, transmittance, pair
     return total
 
 
-def _route_masks(visibility, transmittance, points, plan):
+def _route_masks(media, visibility, transmittance, points, plan):
     """Per route, its mask's arrays and the bodies' transmittance, or ``None`` with no mask."""
     if visibility is None:
         if transmittance is not None:
@@ -402,7 +405,7 @@ def _route_masks(visibility, transmittance, points, plan):
         )
         raise TypeError(msg)
     same_receivers(visibility.receivers, points, "refracted visibility mask")
-    shapes = [(g.chain.n_starts, len(g.rows), len(g.facets)) for g in plan]
+    shapes = [(_path_count(media, g.chain), len(g.rows), len(g.facets)) for g in plan]
     built = [(b.shape[0], b.shape[2], b.shape[3]) for b in visibility.blocked]
     if shapes != built:
         msg = "this refracted visibility mask was built for other sources or other media"
@@ -466,7 +469,7 @@ def _group_field(surfaces, media, group: _Group, points, normals, mask, pair_lim
             )
         return jnp.sum(weight, axis=(0, 2))
 
-    return in_passes(arrays, pair_limit, chain.n_starts * corners.shape[0], at)
+    return in_passes(arrays, pair_limit, _path_count(media, chain) * corners.shape[0], at)
 
 
 def _shared_corners(surfaces: Surfaces, facets: np.ndarray):

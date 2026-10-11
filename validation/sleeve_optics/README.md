@@ -248,11 +248,18 @@ At every point aquaflux's shortfall against this gather is the wall-alone share 
 two neighbours, to within 0.04 %: at (55, 25) the missing 0.6 % is lamp 3's light bent round lamp 2's
 rim, the candidate the section above left unmeasured. Two-neighbour light is under the 0.08 % bound.
 
-**So the route is not solved** (2026-10-11, agreed with the project owner): `refraction._only_saddles`
-names a route through a cylindrical shell denser than its surroundings that misses the coaxial cylinder
-it holds, and the gather leaves it out -- it cost 43 % of the solve and carried nothing, and the light it
-should carry (0.7 % at (55, 25), 0.3 % at (50, 50)) is missed either way. A shooting solver, which finds
-saddles as readily as minima, is being prototyped to carry it.
+**So the route is shot rather than descended** (2026-10-11, agreed with the project owner). For a
+while it was simply left out; now `aquaflux.radiation.shooting` finds its paths. Every surface such a
+path crosses is the side of a cylinder parallel to one axis, so `beta = n u_z` and, about each
+cylinder's axis, the index times the projected impact parameter are conserved: a path is fixed by
+`beta` and the impact parameter `b` of the receiver's leg about the sleeve, and `b` lies between the
+radius at which the path would just miss the gap and the sleeve's own. A ray is traced backwards from
+the receiver over a grid of the two, the cell where both misses of the source change sign starts a
+Newton iteration, and the path found is handed to the same stationarity conditions the descent's
+paths are differentiated through. One path is kept per side of the sleeve. Used when the route passes
+one sleeve's wall, the receiver lies in the water round it, and every body crossed is a parallel
+cylinder (`refraction._shot`); a wall route to a receiver inside another region is still left out.
+`rim_light.py` gathers the shot routes alone against `backward_gather.py`'s share through a wall.
 
 - **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
   (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
