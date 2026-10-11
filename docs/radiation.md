@@ -348,7 +348,12 @@ medium's absorption along its own leg. Three things are approximated, and each i
 - **A path passes through at most one region holding neither of its ends** — a neighbouring lamp's
   sleeve, say — and is bent there as anywhere else. The path is found by shortening its optical
   length, so only the shortest path through that region is found: behind a sleeve acting as a lens,
-  past where its rays cross, further paths exist and are left out.
+  past where its rays cross, further paths exist and are left out. For the same reason light that
+  passes through a neighbouring sleeve's quartz wall without entering its air gap -- a thin band
+  skimming the sleeve's rim at grazing incidence, bent round it -- is not carried: none of those paths
+  is a shortest one, so that route is not solved at all. In a square of four sleeved lamps 50 mm apart
+  in 95% UVT water it is under 1% of the fluence rate at the points measured, largest just beyond a
+  neighbour that blocks the straight line.
 - **Each source triangle is seen through its corners**: the solid angle it fills is the closed form
   on the directions its three corners' paths arrive from, which is exact as the triangles become
   small, the limit the refinement criterion already drives an emitter towards.

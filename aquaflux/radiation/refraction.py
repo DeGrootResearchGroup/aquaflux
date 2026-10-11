@@ -37,7 +37,9 @@ a route that meets a region it does not pass through carries nothing: that light
 through it. At most one such region is passed by one path; light that would have to pass two is not
 followed. A route through a region can join two points by more than one path -- past either side of
 a lamp's arc inside a sleeve -- so it is solved from several starting points across the region and
-every distinct path found is kept.
+every distinct path found is kept. A route through a sleeve's wall alone, missing its air gap, is
+the exception: its paths skim the rim and are saddles of the optical length, which a descent cannot
+find, so it is not solved and that light is not carried (:func:`_only_saddles`).
 
 **What is not here.** Light that reflects on its way -- off the inside of a sleeve and out the far
 side, or back and forth inside the quartz -- is counted as lost at each reflection, not followed.
@@ -56,7 +58,7 @@ import numpy as np
 from aquaflux.radiation.absorption import Absorption
 from aquaflux.radiation.triangles import padded_length
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, PASS_PAIRS
-from aquaflux.solids import ConvexSolid
+from aquaflux.solids import ConvexSolid, Cylinder
 from aquaflux.vectors import dot, norm, norm_squared
 
 __all__ = [
@@ -482,6 +484,63 @@ def _lineage(parents, node) -> list[int]:
         line.append(int(node))
         node = parents[node]
     return line
+
+
+def _only_saddles(media: Media, chain: Chain) -> bool:
+    """Whether every transmitted path on a route is a saddle of its optical length, which
+    :func:`solve_paths` cannot find.
+
+    That is a route through the wall of a lamp sleeve alone: into a cylindrical shell denser than the
+    medium round it and out again, missing the coaxial cylinder it holds. The shell bends such a path
+    as a converging lens does, so its optical length falls as the crossings move one way and rises as
+    they move the other. The descent reaches only minima, and a shell's minima are the path through
+    its middle, which meets the core, and a path pinched to a reflection off the rim, which crosses no
+    wall. So the route's light is real -- light skimming a neighbouring sleeve's rim, bent round it --
+    and is not carried.
+
+    Shown on a lamp sleeve, whose core fills most of the shell. Round a thin core a path through the
+    shell's middle could miss the core and be a minimum the descent finds; this test does not tell
+    the two apart, and leaves such a route out too. Anything that is not this shape -- a body that
+    is not a cylinder, a core off the shell's axis, a shell no denser than its surroundings, a value
+    under a trace -- is solved as usual.
+
+    Parameters
+    ----------
+    media : Media
+    chain : Chain
+        One of :meth:`Chain.routes`.
+
+    Returns
+    -------
+    bool
+    """
+    if not chain.passing:
+        return False
+    parents = media.parents
+    deepest = chain.passing[-1]
+    cores = [node for node in range(len(parents)) if parents[node] == deepest]
+    if not cores:
+        return False
+    shell = media.nodes[deepest]
+    leaves = jax.tree.leaves(
+        (shell, media.index_of(int(parents[deepest])), [media.nodes[core] for core in cores])
+    )
+    if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+        return False
+    if float(shell.refractive_index) <= float(media.index_of(int(parents[deepest]))):
+        return False
+    return all(_coaxial(shell.body, media.nodes[core].body) for core in cores)
+
+
+def _coaxial(shell, core) -> bool:
+    """Whether ``core`` is a cylinder on the axis of the cylinder ``shell``."""
+    if not (isinstance(shell, Cylinder) and isinstance(core, Cylinder)):
+        return False
+    axis = np.asarray(shell.axis, dtype=float)
+    offset = np.asarray(core.centre, dtype=float) - np.asarray(shell.centre, dtype=float)
+    across = offset - np.dot(offset, axis) * axis
+    parallel = abs(float(np.dot(axis, np.asarray(core.axis, dtype=float)))) >= 1.0 - 1e-12
+    return parallel and float(np.linalg.norm(across)) <= 1e-9 * float(shell.radius)
 
 
 class Paths(eqx.Module):

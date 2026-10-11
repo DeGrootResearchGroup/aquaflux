@@ -41,7 +41,13 @@ import numpy as np
 
 from aquaflux.radiation.culling import _body_blocks
 from aquaflux.radiation.gather import _groups
-from aquaflux.radiation.refraction import Chain, Media, _pairs_meet, solve_paths
+from aquaflux.radiation.refraction import (
+    Chain,
+    Media,
+    _only_saddles,
+    _pairs_meet,
+    solve_paths,
+)
 from aquaflux.radiation.self_occlusion import RayCastOcclusion, SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
@@ -110,7 +116,9 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int)
 
     Every route is taken for every receiver: a route through a region carries light to receivers
     whose straight segments miss the region altogether, because an air gap near the critical angle
-    turns light by tens of degrees. No bound on that turn is used to leave any out.
+    turns light by tens of degrees. No bound on that turn is used to leave any out. The one route left
+    out is one whose paths the solve cannot find (:func:`~aquaflux.radiation.refraction._only_saddles`):
+    solving it would cost as much as any other route and carry nothing.
     """
     facet_region = media.region_of_facets(surfaces)
     receiver_region = media.region_of(points, "receiver")
@@ -137,7 +145,8 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int)
             for receiver in np.unique(receiver_region):
                 rows = np.flatnonzero(receiver_region == receiver)
                 for chain in Chain.routes(parents, int(source), int(receiver)):
-                    groups.append(_Group(chain, facets, rows, profile))
+                    if not _only_saddles(media, chain):
+                        groups.append(_Group(chain, facets, rows, profile))
     return tuple(groups)
 
 

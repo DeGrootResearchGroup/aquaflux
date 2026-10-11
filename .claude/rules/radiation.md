@@ -44,7 +44,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `images.py` — `mirrored_fluence_rate` / `summed_mirrored_fluence_rate`: one specular bounce into the volume, each source's image seen through each mirror's aperture (#537 PR 2, 2026-10-05) | **BUILT** (exported and wired into the model by PR 3a, which adds `mirrored_irradiance` and `plane_exchange`; shadowed through `shadows=` since PR 3b) |
 | `mirrors.py` — `Mirror` (a plane, its aperture facets, reflection and the image of a surface set) and `planar_mirrors` (a body's facets grouped by plane); the reflectance split on `Surfaces` (#537 PR 1, 2026-10-05) | **BUILT** (the model carries specular bodies since PR 3a, shadowed since PR 3b) |
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
-| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested; `Media.region_of_facets`), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08); `Chain.routes` and `straight_reach` (#604 step 2b-i) | **BUILT** |
+| `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested; `Media.region_of_facets`), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08); `Chain.routes`, `straight_reach` and `_only_saddles` (the sleeve-wall route left unsolved) (#604 step 2b-i) | **BUILT** |
 | `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path; `receiver_facet` excluded on the last leg since 2b-i) (#604 step 2a) | **BUILT** (in the scene's direct light since 2b-i; not yet in the model or the transfer — 2b-ii) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 | `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07); every triangle of the scene shadows the direct AND the reflected light (`_Direct`, #622, 2026-10-10); reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of the lamps or the reflectors (checked once against both, cut per build by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
@@ -4843,10 +4843,11 @@ are bent too (no straight-through factor left anywhere).
   ended ~30 mm off them, and the route always read zero (see the probe below).
 - **Masks.** `Visibility.straight` (bool, `straight_reach`): same medium and the centroid segment meets no
   region. Refracted masks are per route, `(n_starts, n_occ, n_rows, n_facets)`; a passing route's rows
-  are **not culled** (2026-10-10): every route is taken for every receiver. The first version kept only
-  rows whose straight segment from some facet met N, which dropped exactly the light below. A sound cull
-  needs a bound on how far a region can turn light; none is designed (the user's uncut run cost 6,278 s
-  against 1,456 s at 64 sectors, `optics`).
+  are **not culled** (2026-10-10): every route is taken for every receiver, except a sleeve's wall alone
+  (`_only_saddles`, below). The first version kept only rows whose straight segment from some facet met
+  N, which dropped exactly the light below. A sound cull for coaxial cylinders exists on the cylinder
+  invariants and is not built (below) (the user's uncut run cost 6,278 s against 1,456 s at 64 sectors,
+  `optics`).
 - ⚠️ **THE DESCENT FINDS ONLY MINIMA, AND THE PATHS A LENS ADDS ARE SADDLES.** Glass rod radius 10 mm,
   n 1.5 in n 1.0, source 30 mm from its axis: a 2D Snell trace finds the axial path plus a symmetric pair
   (±0.27 / ±0.22 / ±0.15 rad departure) at receivers 18 / 22 / 26 mm beyond the axis; aquaflux finds the
@@ -4878,13 +4879,53 @@ are bent too (no straight-through factor left anywhere).
   60M-ray traces, macOS arm64, 11 cores, 2026-10-10)**: every point within 1.1 % of the transmitted trace,
   only (55,25) beyond 2 standard errors (0.990, -2.2); (50,50) 0.995, (-25,41) 0.993, (0,-25) 0.999;
   through-neighbour routes carry 0.8-2.3 % of the traced value against the tracer's 0.8-2.6 % entered.
-  Left open: ~0.6 % at (55,25) on through-neighbour light; 0.2-0.65 % on light that entered no other sleeve
-  (largest at (-25,41)); (37,37) unchanged at 0.985. Gather 9,456 s against 1,456 s with the row cull.
-- ⚠️ **NO SOUND GEOMETRIC CULL OF A ROUTE EXISTS HERE.** The largest turn a path can take at one surface
-  is `90 - asin(n_min / n_max)` degrees: water-quartz 23.9, quartz-air 48.3 (critical-angle limited).
-  Summed over the chain (leaving the source's own sleeve 72.2), a route through a neighbour's quartz can
-  turn light by up to 120 degrees and through its gap too by up to 216.6; a Lambertian facet emits into
-  its front 90, so every receiver direction stays reachable and a deflection bound culls nothing.
+  Gather 9,456 s against 1,456 s with the row cull. The ~0.6 % left at (55,25) is now identified (next
+  bullet); 0.2-0.65 % short on light that entered no other sleeve is not decomposed; (37,37)'s 0.985 is
+  most likely the trace's 2 mm disc mean (a reviewer's gather reads the disc 0.7 % above the point there,
+  1.0002 at (55,25); scratch, not committed).
+- ⚠️ **THE ROUTE THROUGH A SLEEVE'S WALL ALONE IS NOT SOLVED (`refraction._only_saddles`, 2026-10-11,
+  agreed with the user after three independent reviews).** Probe (12 sectors, 19,968 facets, (55,25) /
+  (50,50) / (-25,41), centroid paths one point a call, warm; jax 0.10.2, Linux x86_64, 4 cores): the 13
+  wall-only route groups (`passing == (k,)`, k a quartz node) cost 16-18 s each, ~43 % of 522 s, and found
+  **0 paths at every point**; ~80 % of their searches ran all 60 steps, Newton step still large, accepted
+  step ~1e-10 of the separation, state at 30 steps = at 60. **Every such path is a SADDLE** (the annulus
+  is a converging lens; Hessian in the two crossing angles (-4.8, +2.7) at b = 11.35 mm; 7/7 shot in 2D);
+  the descent's minima there are the middle path (meets the gap, invalid) and a **kink**: the quartz chord
+  pinched to ~6e-10 mm, entry = exit, legs obeying the reflection law -- optical length is V-shaped in
+  the chord, so each accepted step halves it. Gap routes are true minima (diverging lens). The light is
+  real -- in-plane impact parameter 11.21-11.5 mm about the neighbour's axis, incidence >= 77 deg, T 0.78
+  falling to 0 -- and `validation/sleeve_optics/backward_gather.py` (independent, numpy, infinite
+  sleeves, 2^18 x 160 directions) puts it at **0.71 % of G at (55,25), 0.26 % at (50,50), 0 at (-25,41)**,
+  which with two-neighbour light (0.013 / 0.0015 / 0.025 %) is aquaflux's whole shortfall against that
+  gather to 0.04 %. `_only_saddles` = a passing route whose deepest region is a `Cylinder` denser than the
+  medium round it, holding cores that are all coaxial `Cylinder`s; anything else, or a traced leaf, is
+  solved. ⚠️ **Shown on a sleeve (core 0.89 of the shell): round a THIN core the middle path could miss
+  the core and be a findable minimum, and the test would drop it** -- deliberately scoped to the shape
+  measured, said in the docstring. **Rejected on the same probe**: stopping a search when its accepted
+  step reaches the tolerance (522.0 vs 521.7 s -- a vmapped `while_loop` runs to its slowest member -- and
+  2-4 valid paths lost in three groups); a lower cap (valid paths take up to 46-56 steps); stopping
+  converged paths (batch waste ~1.1 where the cost is); seeding corners from the centroid path (agrees
+  0.977-1.000 with four starts, saves only searches that find a path). Next, being prototyped: **shooting**
+  -- solve for the departure direction with the miss at the target as residual, using the coaxial
+  invariants (impact parameter and `n u_z` conserved), which finds saddles and minima alike and decides
+  existence cheaply. Tests: `test_only_a_route_through_a_sleeve_s_wall_alone_is_known_to_hold_only_saddles`
+  (routes of two sleeves; refusals: gap off axis, gap axis turned, shell less dense, spheres, a solid rod,
+  a traced index), `test_the_descent_finds_no_path_through_a_sleeve_s_wall_alone` (24 arc points x 3
+  receivers, none found -- goes red the day a solver finds them, which is when the skip must go), and
+  `test_a_route_through_a_neighbour_s_wall_alone_is_left_out_and_every_other_route_kept`. **Mutation pass
+  (11, 10 red)**: plan not skipping, no core check (caught only by the solid rod), no index check, no
+  tracer check, coaxial always, non-cylinders allowed, parallel ignored, offset ignored, the outermost
+  passed region taken as the shell, every search reported found. **Dismissed**: paths meeting a beside
+  region counted valid -- on this route no search converges at all (they end on the kink), so validity is
+  not what removes them.
+- ⚠️ **THE "NO SOUND GEOMETRIC CULL" FINDING USED THE WRONG BOUND.** It summed the largest turn at each
+  surface (`90 - asin(n_min/n_max)`: water-quartz 23.9, quartz-air 48.3 deg) to 120 / 216.6 deg, which no
+  single path reaches. Through coaxial cylinders a ray keeps its impact parameter `b` and `n u_z`, so its
+  turn D(b, beta), axial shift and transmittance are closed forms: through a quartz wall alone it turns
+  28-47 deg in-plane, through the gap 30-90; the wall band needs `|u_z| < 0.493` in water. With that, a
+  reviewer's count found only **1-5 of the 24 passing (neighbour, route, source) groups carry light** per
+  point (scratch, not committed). **A sound cull for coaxial cylinders exists and is not built**; for any
+  other transparent body the per-surface argument still stands.
 - **Tests**: routes (`test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way`),
   the ball's axial path through its route and invalid round it, `straight_reach`, a slab in one medium
   brings a small lamp nearer by `t (1 - n_w/n_q)` (scene, paraxial, 1e-3), and an absorbing slab against a

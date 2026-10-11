@@ -204,11 +204,64 @@ aquaflux by `rerun_aquaflux.py` against `work/check_array-optics.json`.
   angle, whose straight line passes nowhere near lamp 2; one through lamp 2's gap and then lamp 3's. The
   first is found once the starts stand inside the sleeve; the second passes two neighbours and is not
   carried (it bounds to about 0.08 % here). The shortest path through lamp 3 alone runs into its arc.
-- **Left open**: (55, 25) still misses about 0.6 % of light that passed a neighbour (a path round the
-  arc that is not a shortest path is the candidate, unmeasured); 0.2-0.65 % is short on light that
-  entered no other sleeve at some points (largest at (-25, 41)), not decomposed; (37, 37) is unchanged at
-  0.985 (-1.6 standard errors), with only 0.1 % of its light having passed another sleeve.
-- **Cost**: the gather took 9,456 s against 1,456 s with the first version's row cull (6.5x). No route
-  is culled: a route through a quartz sleeve can turn light by up to 120 degrees, and through its air gap
-  too by up to 217 (the sum of the largest turn at each surface, the air ones limited by the critical
-  angle), so with a facet emitting into its front half no direction can be ruled out from geometry alone.
+- **Cost**: the gather took 9,456 s against 1,456 s with the first version's row cull (6.5x).
+
+### The light round a sleeve's rim, and the route that cannot find it
+
+**Where the time went** (measured with an instrumented copy of the solver that also counted steps, not
+kept; `route_cost.py` repeats the timing and the paths found per route): at 12 sectors (19,968 facets), (55, 25) /
+(50, 50) / (-25, 41), centroid paths, one point a call, warm; jax 0.10.2, CPU, x64, Linux x86_64, 4
+cores, 2026-10-11. The base route costs 0.5-0.7 s a lamp. A route through a neighbour's quartz wall
+alone, missing its gap, costs 16-18 s and **found no path at any point** -- 13 of the 28 route groups,
+about 43 % of the solve. A route across the gap too costs 17-30 s. On the wall-only route about 80 %
+of the searches ran the full 60 steps; their Newton step stayed large while the step the line search
+accepted was about the path tolerance, and their state at 30 steps matched that at 60 to three figures.
+Stopping a search once its accepted step falls to the tolerance saved nothing (522.0 against 521.7 s:
+a batched loop runs until its slowest search ends) and lost 2-4 valid paths in three groups; a lower
+cap would drop valid paths (some take 46-56 steps); seeding the corners' searches from the centroid's
+path agrees with four fresh starts on 0.977-1.000 of facets but only shortens searches that find a path.
+
+**Why** (three independent reviews of that evidence, each from its own calculation): every path that
+crosses a sleeve's quartz wall without entering its gap is a **saddle** of the optical length -- the
+water-quartz annulus bends it as a converging lens, so the length falls one way and rises the other
+(Hessian eigenvalues in the two crossing angles (-4.2, +3.5), (-4.8, +2.7), (-5.6, +1.5) at impact
+parameters 11.25, 11.35, 11.45 mm; seven of seven such paths found by shooting in 2D were saddles).
+The descent finds only minima: on this route those are the path through the sleeve's middle, which
+meets the gap, and a path pinched to a reflection off the rim, where the searches end (their quartz
+chord had shrunk to 6e-10 mm, entry and exit at one point, the legs obeying the law of reflection).
+Paths across the gap too are true minima (the air gap is a diverging lens; all four eigenvalues
+positive). The band exists for in-plane impact parameters between 10.25 x 1.5048/1.376 = 11.21 mm and
+11.5 mm, i.e. incidence of 77 degrees or more, Fresnel transmittance 0.78 at its inner edge falling to 0.
+
+**What that light is worth** (`backward_gather.py`: a deterministic backward gather from each point
+through infinite sleeves, transmitted branch only, split by route; 262,144 azimuths x 160 axial
+cosines, a coarse 32,768 x 40 run agreeing to 0.07 %; numpy, independent of aquaflux, 2026-10-11):
+
+| point (mm) | gather | traced | through a wall alone | through a gap | two or more | aquaflux - gather |
+|---|---|---|---|---|---|---|
+| (55, 25) | 8.307 | 8.331 +- 0.039 | **0.71 %** | 1.91 % | 0.013 % | -0.75 % |
+| (50, 50) | 6.989 | 7.007 +- 0.036 | **0.26 %** | 2.26 % | 0.0015 % | -0.27 % |
+| (-25, 41) | 12.710 | 12.796 +- 0.108 | 0 | 1.93 % | 0.025 % | -0.06 % |
+| (37, 37) | 9.370 | 9.508 +- 0.089 | 0.0016 % | 0 | 0 | about 0 |
+
+At every point aquaflux's shortfall against this gather is the wall-alone share plus the share through
+two neighbours, to within 0.04 %: at (55, 25) the missing 0.6 % is lamp 3's light bent round lamp 2's
+rim, the candidate the section above left unmeasured. Two-neighbour light is under the 0.08 % bound.
+
+**So the route is not solved** (2026-10-11, agreed with the project owner): `refraction._only_saddles`
+names a route through a cylindrical shell denser than its surroundings that misses the coaxial cylinder
+it holds, and the gather leaves it out -- it cost 43 % of the solve and carried nothing, and the light it
+should carry (0.7 % at (55, 25), 0.3 % at (50, 50)) is missed either way. A shooting solver, which finds
+saddles as readily as minima, is being prototyped to carry it.
+
+- **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
+  (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
+  over the trace's 2 mm disc reads 0.7 % above its value at the point (the field is curved beside the
+  sleeve; 1.0002 at (55, 25)), so most of that gap is likely the reference's averaging -- read off a
+  scratch calculation, not yet a committed one.
+- **The deflection argument above was the wrong bound.** It summed the largest turn at each surface,
+  which no single path can reach: a ray through coaxial cylinders keeps its impact parameter and its
+  axial direction times the index, so its turn and transmittance through a sleeve are closed forms of
+  those two numbers. Through a quartz wall alone light turns 28-47 degrees in the cross-section, not up
+  to 120, and only 1-5 of the 24 routes through a neighbour carry any light at each point. A cull on
+  these invariants would be sound for coaxial cylinders; it is not built.

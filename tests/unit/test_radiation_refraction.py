@@ -17,6 +17,7 @@ from aquaflux.radiation.refraction import (
     Chain,
     Media,
     Transparent,
+    _only_saddles,
     fresnel_transmittance,
     solve_paths,
     straight_reach,
@@ -315,6 +316,67 @@ def test_a_route_through_a_region_the_straight_line_misses_is_found_and_is_the_s
     indices = (AIR, QUARTZ, WATER, QUARTZ, AIR, QUARTZ, WATER)
     best = _optical_length_minimum(media, indices, in_the_plane, source, receiver, guess)
     np.testing.assert_allclose(found, best, atol=1e-7 * np.linalg.norm(receiver - source))
+
+
+def _two_sleeves(second=None, shift=0.0, tilt=0.0, quartz=QUARTZ) -> Media:
+    """Two sleeved lamps 50 mm apart along y; the second's gap may be moved or turned off its axis."""
+    axis = [0.0, 0.0, 1.0]
+
+    def lamp(x, y, offset, turn, wall):
+        along = [np.sin(turn), 0.0, np.cos(turn)]
+        gap = Transparent(Cylinder([x + offset, y, 0.0], along, 0.01025, 1.0), AIR)
+        return Transparent(Cylinder([x, y, 0.0], axis, 0.0115, 1.0), wall, inside=(gap,))
+
+    second = second or lamp(0.025, 0.025, shift, tilt, quartz)
+    return Media(WATER, (lamp(0.025, -0.025, 0.0, 0.0, QUARTZ), second))
+
+
+def test_only_a_route_through_a_sleeve_s_wall_alone_is_known_to_hold_only_saddles():
+    """The route through the second lamp's quartz, missing its gap, and no other route or shape."""
+    media = _two_sleeves()
+    routes = Chain.routes(media.parents, 1, -1)
+    assert [chain.passing for chain in routes] == [(), (2,), (2, 3)]
+    assert [_only_saddles(media, chain) for chain in routes] == [False, True, False]
+
+    def through_wall(media):
+        return _only_saddles(media, Chain.between(media.parents, 1, -1, through=2))
+
+    assert not through_wall(_two_sleeves(shift=0.001))  # The gap is off the sleeve's axis.
+    assert not through_wall(_two_sleeves(tilt=0.001))  # The gap's axis is turned from the sleeve's.
+    assert not through_wall(_two_sleeves(quartz=1.2))  # The shell is less dense than the water.
+    ball = Transparent(
+        Sphere([0.025, 0.025, 0.0], 0.0115),
+        QUARTZ,
+        inside=(Transparent(Sphere([0.025, 0.025, 0.0], 0.01025), AIR),),
+    )
+    assert not through_wall(_two_sleeves(second=ball))  # Not a cylinder.
+    rod = Transparent(Cylinder([0.025, 0.025, 0.0], [0.0, 0.0, 1.0], 0.0115, 1.0), QUARTZ)
+    assert not through_wall(_two_sleeves(second=rod))  # A solid rod's middle path is a minimum.
+    seen = []
+
+    def traced(index):
+        seen.append(through_wall(_two_sleeves(quartz=index)))
+        return index
+
+    jax.jit(traced)(QUARTZ)
+    assert seen == [False]  # An index under a trace cannot be compared, so the route is solved.
+
+
+def test_the_descent_finds_no_path_through_a_sleeve_s_wall_alone():
+    """Why that route is left out: the paths that skim the second sleeve's rim are saddles.
+
+    Sources round the first lamp's arc, receivers beyond and beside the second lamp, where light
+    bent round its rim arrives; on the route through its quartz alone not one path is found.
+    """
+    media = _two_sleeves()
+    chain = Chain.between(media.parents, 1, -1, through=2)
+    angles = np.linspace(0.0, 2.0 * np.pi, 24, endpoint=False)
+    sources = np.stack(
+        [0.025 + 0.0074 * np.cos(angles), -0.025 + 0.0074 * np.sin(angles), 0 * angles], axis=1
+    )
+    receivers = np.array([[0.055, 0.025, 0.0], [0.05, 0.05, 0.0], [0.04, 0.06, 0.0]])
+    paths = solve_paths(media, chain, jnp.asarray(sources)[None], jnp.asarray(receivers)[:, None])
+    assert not np.any(np.asarray(paths.valid))
 
 
 def test_a_crossing_off_the_end_of_its_face_is_no_crossing_and_carries_nothing():
