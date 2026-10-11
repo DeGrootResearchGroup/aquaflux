@@ -38,6 +38,9 @@ _ROWS = 32
 #: Values of the impact parameter scanned across that band, at each ``beta``.
 _COLUMNS = 32
 
+#: Halvings that find each end of the run of the band over which the traced ray exists.
+_EDGE_HALVINGS = 30
+
 #: Newton steps from the bracketing cell; the iteration converges quadratically in a handful.
 _POLISH = 12
 
@@ -160,14 +163,47 @@ def rim_crossings(geometry, side):
     rows = reach * ((jnp.arange(_ROWS) + 0.5) / _ROWS * 2.0 - 1.0)
 
     def row(beta):
-        """Where along a row the projected ray passes the source, and the axial miss there."""
-        values, ok = jax.vmap(lambda fraction: misses(fraction, beta))(fractions)
+        """Where along a row the projected ray passes the source, and the axial miss there.
+
+        The coarse samples find where along the band the traced ray exists at all; the ends of that
+        run are then found by bisection and the run sampled again between them, ends included. A
+        path near an end -- grazing the sleeve, or just reaching the source's own sleeve -- lies
+        between the last coarse sample that exists and the edge, where the coarse samples alone
+        cannot see the projected miss change sign.
+        """
+
+        def exists(fraction):
+            return misses(fraction, beta)[1]
+
+        coarse = jax.vmap(exists)(fractions)
+        first_ok = jnp.argmax(coarse)
+        last_ok = _COLUMNS - 1 - jnp.argmax(coarse[::-1])
+
+        def edge(good, bad):
+            """The end of the run between a fraction where the ray exists and one where it may not."""
+            good, bad = jnp.where(exists(bad), bad, good), bad
+
+            def halve(_, ends):
+                inside, outside = ends
+                middle = 0.5 * (inside + outside)
+                there = exists(middle)
+                return jnp.where(there, middle, inside), jnp.where(there, outside, middle)
+
+            return jax.lax.fori_loop(0, _EDGE_HALVINGS, halve, (good, bad))[0]
+
+        low = edge(fractions[first_ok], jnp.where(first_ok > 0, fractions[first_ok - 1], 0.0))
+        high = edge(
+            fractions[last_ok], jnp.where(last_ok < _COLUMNS - 1, fractions[last_ok + 1], 1.0)
+        )
+        samples = low + (high - low) * jnp.linspace(0.0, 1.0, _COLUMNS)
+        values, ok = jax.vmap(lambda fraction: misses(fraction, beta))(samples)
         across, miss = values[:, 0], values[:, 1]
         changes = ok[:-1] & ok[1:] & (jnp.sign(across[:-1]) != jnp.sign(across[1:]))
         first = jnp.argmax(changes)
         share = across[first] / (across[first] - across[first + 1])
-        fraction = fractions[first] + share * (fractions[first + 1] - fractions[first])
-        return jnp.any(changes), fraction, miss[first] + share * (miss[first + 1] - miss[first])
+        fraction = samples[first] + share * (samples[first + 1] - samples[first])
+        found = jnp.any(changes) & jnp.any(coarse)
+        return found, fraction, miss[first] + share * (miss[first + 1] - miss[first])
 
     # One row at a time: a whole grid per pair, over a batch of pairs, is too much to hold at once.
     has, fraction, miss = jax.lax.map(row, rows)
