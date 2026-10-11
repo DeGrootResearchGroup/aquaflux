@@ -1309,7 +1309,16 @@ def solve_aquaflux(
             flow, k, omega = solver.solve(
                 coupled,
                 session_options={"observer": logger.on_refresh},
-                point_setup=lambda companion, seed_state, point: logger.note(f"[{point.label}]"),
+                # A march with no ramp (`PITZ_RAMP_ANCHOR=1`) has no stations to announce.
+                **(
+                    {}
+                    if solver.continuation is None
+                    else {
+                        "point_setup": lambda companion, seed_state, point: logger.note(
+                            f"[{point.label}]"
+                        )
+                    }
+                ),
                 **observers,
             )
         else:
