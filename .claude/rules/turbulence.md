@@ -2147,6 +2147,13 @@ tuning follow-up noted above.
       the outer-step index and is never handed the state, the residual or a `StepReport`. Widening it is
       a design change, and the fine-ramp result says the answer is small stations rather than a clever
       rule for leaving one.
+    - **⚠️ THE OPTIMUM ABOVE WAS MEASURED AT `grow` 1.5, AND THE STATION COUNT IS THE SHIFT'S DESCENT IN
+      DISGUISE (measured 2026-10-11, with the shift released).** `beta` takes 12 steps to reach the floor
+      at `grow` 1.5, which is where the optimum sits; at `grow` 3 it takes 7, and `3 x 12` costs **111**
+      cycles in 16 steps against `1.5 x 16`'s 141 in 22. The viscosity step size does not move `alpha`
+      (identical histories at 1.33x and 2x per step); what is conserved is 6-9 steps AT the floor before
+      the state settles, and the cheapest ramp ends one step after that. Table and the design it closes
+      in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
   - **⚠️ THE PRECONDITIONER IS REFRESHED PER STATION CHANGE, AND THAT IS CORRECT — but "a full rebuild is
     the most expensive operation in the march" is REFUTED on this case.** Measured, a full
     re-materialize is **1.2-1.6 s** against a **~9 s** outer step. A control arm isolates it: `4 x 3` with

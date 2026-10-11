@@ -336,6 +336,24 @@ solver steps", "174 solver steps"); those were seconds, and the log entry carrie
 library default should release, which is the project owner's call, after (b) and after the three slow
 tests #645 names (a loose terminal step is what they measure).
 
+## 12. End the viscosity ramp on the settle signal, not on a station count
+
+**What.** Replace `stations` with a rule: ramp the viscosity down at a fixed pace (2x per step cost
+nothing in `alpha`), and move to the target on the first full-length step at the floor -- the same gate
+`release_floor` uses. Needs `ResidualHomotopy` to see the previous `StepReport`, which it does not today.
+
+**Why it should win.** The `grow` x `stations` sweep (`solve-globalization-log.md`, 2026-10-11): the
+step count is set by 6-9 floor steps before the state settles, the station size does not move `alpha`,
+and the cheapest fixed schedule (`grow` 3, 12 stations, 111 cycles / 16 steps) is the one that arrives
+one step after the settle. A rule keyed on the settle removes the knob and lands there on any case.
+
+**What it is not.** Not an `alpha`-driven station controller (closed by the same sweep: `alpha` responds
+to the shift, not to the viscosity), and not a viscosity keyed to `beta` (refuted-directions ledger).
+
+**Pre-registered measurement.** pitzDaily at `grow` 3 with the rule against the 12-station arm (111 /
+16): a pass is the same cycles within a few at the same `x_r/h`, with the ramp ending by itself. Then
+bfs3d, where neither `grow` 3 nor the ramp's end has been measured.
+
 ---
 
 ## Smaller housekeeping

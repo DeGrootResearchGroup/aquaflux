@@ -1296,3 +1296,51 @@ predicted from `lambda` at `beta` 1e-4, and each costs more cycles than a floor 
 refit floor with the shift (no seam reaches the refresh hook from the control; worth 1-8 cycles per
 released step by the table above, i.e. most of the released steps' extra cost) and tightening the inner
 loop on the released step (a static field, so a recompile, for nothing per the last bullet).
+
+## The ramp's length is the shift's descent, not the viscosity's: `grow` x `stations`, 2026-10-11
+
+**Configuration.** pitzDaily, shipped `case.yaml` plus `PITZ_RELEASE_FLOOR=1e-4` on every arm (so the
+baseline is the released march above), `PITZ_GROW` (the control's growth factor, class default 1.5,
+never varied before) and `PITZ_RAMP_STATIONS`; everything else as recorded for the capture (residual
+stop, `rtol` 0.3, `refresh_on_cycles` 2, dual time 5 / 0.01, `beta_start` 0.5, `beta_min` 0.005,
+`refit_beta_floor` 0.05, momentum-only ramp from 100, `turbulence_damping` 3, stop `atol` 1e-5).
+jax 0.11.2, CPU, 4-core Linux, one run per arm, run back to back; cycles are restart cycles as the log
+counts them; wall is the marching time after step 1 and is indicative only. Every arm reached `x_r/h`
+8.07 with no retry.
+
+| `grow` | stations | steps | cycles (ramp / target) | `beta` floors at | first `alpha` 1 at the floor | released | wall |
+|---|---|---|---|---|---|---|---|
+| 1.5 | 16 (baseline) | 22 | 141 (85 / 56) | 13 | 20 | 21 | 722 s |
+| 1.5 | 8 | 23 | 166 (33 / 133) | 13 | 21 | 22 | 735 s |
+| 3 | 16 | 19 | 134 (101 / 33) | 7 | 13 | 18 | 782 s |
+| 3 | 8 | 18 | 145 (54 / 91) | 8 | 16 | 17 | 707 s |
+| **3** | **12** | **16** | **111 (76 / 35)** | 7 | 14 | 15 | **597 s** |
+
+The last arm was run after the first four, as the prediction the pattern below makes: a ramp that
+arrives about where the state settles at the floor.
+
+- **The step count is nearly invariant, and what is conserved is steps AT THE FLOOR before the state
+  settles**: 6-9 in every arm (the first full-length step at the floor is the 7th, 8th, 6th, 8th and
+  7th floor step). That is the recorded "insufficient elapsed pseudo-time" finding in a new form: the
+  transient needs a fixed amount of pseudo-time at the largest timestep, and no schedule removes it.
+- **The viscosity step does not move `alpha`; the shift does.** The two `grow` 3 arms have identical
+  `alpha` histories through step 6 at 1.33x and 2x viscosity per step, and the two `grow` 1.5 arms through
+  step 7. The clipping during the ramp is `beta` reaching what the state can take, not the station jump
+  (consistent with the predictor probe's 5-15 % jump share). **So `alpha` cannot drive a station
+  controller: it is not responding to the ramp.**
+- **Reach the floor fast, then ramp AT the floor.** Floor steps at a higher viscosity take their full
+  timestep (`alpha` 1 from step 13 in the 16-station `grow` 3 arm, 6-7 cycles); floor steps at the target
+  from an unsettled state are clipped to half and cap-limited (`L`, 7-11 cycles, the 8-station arms).
+  Ending the ramp when `beta` floors (`grow` 3, 8 stations) is therefore the WRONG pairing, and it is
+  what a viscosity keyed to `beta` would do -- that design is closed before being built (ledger entry).
+- **The waste is the ramp outlasting the settling.** In the 16-station `grow` 3 arm steps 13-16 ran at
+  `alpha` 1 at the floor before the schedule arrived: 24 cycles. Twelve stations end the ramp one step
+  after the settle and cost 111 cycles -- **21 % fewer than the released baseline and 31 % fewer than
+  the shipped march's 161**, at 16 steps against 31.
+- **What an adaptive ramp therefore keys on:** not `alpha` per station, but the settle signal -- the
+  first full-length step at the floor, the same gate the release uses. Pace is a secondary knob (2x per
+  step cost nothing in `alpha`); the end is the sensitive part. Expressing it needs the homotopy to see
+  the previous report (`ResidualHomotopy.enter(step)` is keyed on the step index alone today).
+
+**Not a default:** pitzDaily's `case.yaml` still runs `grow` 1.5 x 16 stations; moving it is the project
+owner's call, after bfs3d (where the ramp optimum was measured once, at `grow` 1.5).

@@ -858,3 +858,18 @@ and binding defaults are in `solve-globalization.md`.
   which is the larger and more load-bearing finding here.** See `solve-globalization-log.md` §
   "THE EQUILIBRATED MEASURE BARELY FALLS ON A MARCH THE EUCLIDEAN NORM LOVES" and the "EUCLIDEAN ‖R‖
   MIS-RANKS STATES" entry immediately after it.
+
+## A viscosity ramp keyed to the shift (`nu` as a function of `beta`) — CLOSED BEFORE BUILDING (2026-10-11)
+
+**What was proposed:** replace the ramp's `stations` knob by making the station a function of the
+control's shift, the anchor viscosity at `beta_start` and the target at `beta_min`, so one `alpha`
+feedback drives both and the ramp ends when `beta` floors.
+
+**Why it loses, measured on pitzDaily with the shift released** (`solve-globalization-log.md`, "The
+ramp's length is the shift's descent"): that pairing is exactly the `grow` 3 x 8-station arm, whose ramp
+ends as `beta` floors at step 8 -- 145 cycles, against 134 for the same `grow` with 16 stations and 111
+with 12. Floor steps at a still-raised viscosity take their full timestep and settle the state in six
+steps; floor steps at the target from an unsettled state are clipped to half and cap-limited. The
+viscosity has to keep descending AFTER `beta` floors, so the ramp must not be a function of `beta`. What
+the data support instead is ending the ramp on the settle signal (the first full-length step at the
+floor), which is a different seam and is open.
