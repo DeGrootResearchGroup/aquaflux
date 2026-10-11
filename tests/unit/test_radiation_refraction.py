@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.radiation import Surfaces, UniformAbsorption
+from aquaflux.radiation import Surfaces, UniformAbsorption, shooting
 from aquaflux.radiation.refraction import (
     Chain,
     Media,
@@ -436,6 +436,27 @@ def test_shooting_finds_the_paths_round_a_sleeve_s_rim_and_each_is_a_ray():
     assert np.any(both)
     apart = np.linalg.norm(np.asarray(paths.points)[0] - np.asarray(paths.points)[1], axis=-1)
     assert np.all(np.max(apart, axis=-1)[both] > 1e-3)
+
+
+def test_no_path_a_fine_grid_finds_is_missed_by_the_shipped_one(monkeypatch):
+    """A path near the end of a row's run of existing rays is found by finding the run's ends.
+
+    Uniform samples alone miss a path lying between the last sample where the ray exists and the
+    edge of that run; on these pairs the shipped grid finds every path a grid three times finer does.
+    """
+    receiver = np.array([0.03, 0.065, 0.01])
+    media, chain, sources, shipped = _rim_paths(receiver)
+    monkeypatch.setattr(shooting, "_ROWS", 96)
+    monkeypatch.setattr(shooting, "_COLUMNS", 96)
+    jax.clear_caches()
+    fine = solve_paths(media, chain, jnp.asarray(sources), receiver)
+    jax.clear_caches()
+    found, reference = np.asarray(shipped.valid), np.asarray(fine.valid)
+    assert np.sum(reference) >= 10
+    assert np.all(found[reference])
+    np.testing.assert_allclose(
+        np.asarray(shipped.points)[reference], np.asarray(fine.points)[reference], atol=1e-10
+    )
 
 
 def test_a_path_round_a_rim_is_a_saddle_the_descent_cannot_find():

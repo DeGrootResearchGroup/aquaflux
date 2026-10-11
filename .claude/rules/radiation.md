@@ -4920,7 +4920,12 @@ are bent too (no straight-through factor left anywhere).
   the band's closing value. A 32 x 32 grid (rows scanned with `lax.map`, so a batch never holds a whole
   grid per pair) finds the first cell where the projected miss changes sign along a row and that
   crossing's axial miss changes sign across rows; 12 Newton steps with `jacfwd` polish; found when both
-  misses are under 1e-10 of the separation. The crossings go to **`_Stationary`** -- the descent's
+  misses are under 1e-10 of the separation. **Each row's run of existing rays is found by its ends**
+  (30 halvings each side of the coarse run, then 32 samples between the ends): uniform samples missed
+  paths between the last existing sample and the edge -- at 16 sectors (`rim_light.py`, 26,624 facets,
+  Linux 4 cores) shot / backward gather 0.720 / 0.544 at (55,25) / (50,50) uniform 32 x 32, 0.769 /
+  0.629 uniform 96 x 96 (1,114 s), **0.761 / 0.631 with the ends (874 s)**. The rest is the corner rule
+  (a facet needs all three corners' paths), shrinking with the facets (prototype 0.925 / 0.836 at 64). The crossings go to **`_Stationary`** -- the descent's
   stationarity conditions, factored out of `_one_path` with what a path carries (`carried`) and the
   `custom_root` wrapper (`solved`), so a shot path is differentiated by the same implicit derivative
   and judged by the same validity tail; the descent's numbers are unchanged (all 27 earlier refraction

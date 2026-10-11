@@ -259,7 +259,23 @@ Newton iteration, and the path found is handed to the same stationarity conditio
 paths are differentiated through. One path is kept per side of the sleeve. Used when the route passes
 one sleeve's wall, the receiver lies in the water round it, and every body crossed is a parallel
 cylinder (`refraction._shot`); a wall route to a receiver inside another region is still left out.
-`rim_light.py` gathers the shot routes alone against `backward_gather.py`'s share through a wall.
+`rim_light.py` gathers the shot routes alone against `backward_gather.py`'s share through a wall
+(16 sectors, 26,624 facets, no shadow mask, backward gather 2^17 x 160; jax 0.10.2, CPU, Linux x86_64,
+4 cores, 2026-10-11; shot / backward):
+
+| shooting grid | (55, 25) | (50, 50) | (37, 37) | shot routes, s |
+|---|---|---|---|---|
+| 32 x 32, uniform samples | 0.720 | 0.544 | 0.265 | 711 |
+| 96 x 96, uniform samples | 0.769 | 0.629 | 0.472 | 1,114 |
+| 32 x 32, each row's run of existing rays found by its ends (shipped) | **0.761** | **0.631** | 0.515 | 874 |
+
+(-25, 41) is zero in both. Uniform samples missed paths between the last sample where the ray exists
+and the edge of that run; finding the ends recovers what a 96 x 96 grid does. The rest of the gap is
+the gather's rule, not the solve: a facet counts only where all three corners have a path, so the
+small patch of arc that lights this route loses its boundary facets, a loss that shrinks with the
+facets (the prototype, with the same rule: 0.79 / 0.61 at 16 sectors, 0.925 / 0.836 at 64, 0.982 /
+0.964 at 256 sectors with the arc's slices split four ways). As a share of G at 16 sectors that is
+about 0.17 % at (55, 25).
 
 - **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
   (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
