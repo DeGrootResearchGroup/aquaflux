@@ -452,8 +452,8 @@ def test_a_run_refuses_to_replace_an_openfoam_time_directory(tmp_path: Path) -> 
     assert prepare_run(case, overwrite=True).solver == FlowMarch()
 
 
-def test_a_case_that_cannot_be_solved_is_refused_before_a_run_starts(tmp_path: Path) -> None:
-    """A held bulk velocity with no solver stated has no default solve: refused while reading."""
+def test_a_case_holding_a_bulk_velocity_runs_its_physics_march_by_default(tmp_path: Path) -> None:
+    """A held bulk velocity with no solver stated is marched, the force solved with the fields."""
     grid = {"kind": "StructuredGrid", "cells": [4, 4], "lengths": [1.0, 2.0], "periodic": ["x"]}
     sections = _sections(
         "RANS",
@@ -463,11 +463,7 @@ def test_a_case_that_cannot_be_solved_is_refused_before_a_run_starts(tmp_path: P
     )
     sections["boundaries"] = {"bottom": {"kind": "Wall"}, "top": {"kind": "Wall"}}
     case = _write(tmp_path / "case.yaml", sections)
-    with pytest.raises(
-        ValueError, match=r"the case states no solver, and its default cannot solve it"
-    ):
-        prepare_run(case)
-    assert not (tmp_path / "results").exists()
+    assert prepare_run(case).solver == CoupledMarch()
 
 
 def test_a_run_records_the_commit_it_ran_from() -> None:

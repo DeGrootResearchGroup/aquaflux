@@ -470,7 +470,8 @@ What to take from it, none of which is specific to that mechanism:
       see `.claude/rules/turbulence.md` under `turbulence_damping`.
     - **⚠️ A WRAPPER POLICY THAT REBUILDS A `ShiftTerm` FROM `.diagonal` ALONE DROPS THE REST IN
       SILENCE** — the march runs and the dropped behaviour simply never happens. Two shipped wrappers
-      did exactly that (`MonolithicFactorShiftPolicy`, `_MassFlowBorderedPolicy`), which is how a
+      did exactly that (`MonolithicFactorShiftPolicy`, and the mass-flow policy that is now
+      `flow.BorderedShiftPolicy`, which forwards `row_relaxation`), which is how a
       per-block damping measured as a no-op. Forward every part, and find the wrappers **structurally**
       (AST), not by grepping the callee's name.
     - **`residual` is `R(φ)` when the caller has it and `None` otherwise**, offered because both steps

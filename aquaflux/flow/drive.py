@@ -19,11 +19,11 @@ is a :class:`~aquaflux.flow.UniformBodyForce` source and needs nothing here; a f
 every evaluation and the border column ``dR/dbeta = -V`` has to come from somewhere. Keeping the two
 apart is what stops one field meaning a fixed input on one case and a live unknown on another.
 
-Everything the bordered form needs is here rather than at the two solves that run it -- the flow-only
-one (:func:`~aquaflux.flow.bulk_velocity_flow_solve`) and the coupled RANS one
-(:func:`~aquaflux.turbulence.solve_coupled_mass_flow`). They differ only in which assembler they
-border and how the velocity is read out of their state; the layout, the seed, the split, the border
-vectors, the bulk-velocity average and the stopping test are one definition used by both.
+Everything the bordered form needs of the drive is here rather than at the solves that run it -- the
+flow's own (:func:`~aquaflux.flow.solve_flow_march`, :func:`~aquaflux.flow.bulk_velocity_flow_solve`)
+and the coupled RANS one (:func:`~aquaflux.turbulence.solve_coupled`): the layout, the seed, the split,
+the border vectors and the bulk-velocity average are one definition used by all of them, and
+:mod:`aquaflux.flow.bordered` builds the bordered residual, shift policy and measures from it.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.solve import Convergence, Euclidean, FieldLayout, GlobalDofs
+from aquaflux.solve import FieldLayout, GlobalDofs
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
@@ -43,7 +43,6 @@ if TYPE_CHECKING:
 __all__ = [
     "BODY_FORCE",
     "BOUNDARY_DRIVEN",
-    "MASS_FLOW_CONVERGENCE",
     "BoundaryDriven",
     "Drive",
     "FlowSolve",
@@ -62,12 +61,6 @@ FlowSolve = Callable[["MomentumContinuity", jnp.ndarray], tuple["MomentumContinu
 
 #: The bordered state's name for the solved body force -- the block :class:`MassFlow` appends.
 BODY_FORCE = "body_force"
-
-#: The stopping test a mass-flow-constrained solve falls back on. The row-scaled measure an
-#: unconstrained coupled solve defaults to has no form here: the constraint's border row has no
-#: diagonal to equilibrate by. A caller may still ask for :class:`~aquaflux.solve.BlockScaled`, whose
-#: border block shares the flow block's scale.
-MASS_FLOW_CONVERGENCE = Convergence(measure=Euclidean(), rtol=1e-10, atol=1e-12)
 
 
 class Drive(eqx.Module):
@@ -108,6 +101,24 @@ class Drive(eqx.Module):
         -------
         float or None
             The held speed, non-negative, or ``None``.
+        """
+
+    @abc.abstractmethod
+    def held_velocity(self, dim: int) -> jnp.ndarray | None:
+        """The bulk velocity this drive holds the flow at, as a vector, or ``None`` when it holds none.
+
+        A held bulk velocity is where a uniform starting state belongs: a plug at the speed a force would
+        sustain is a guess that leaves the constraint unmet at the start, while this one meets it.
+
+        Parameters
+        ----------
+        dim : int
+            The spatial dimension.
+
+        Returns
+        -------
+        jnp.ndarray or None
+            The held velocity, shape ``(dim,)``, or ``None``.
         """
 
     @abc.abstractmethod
@@ -195,6 +206,11 @@ class BoundaryDriven(Drive):
         """``None`` -- the boundary conditions and the sources set the speed, not this drive."""
         return None
 
+    def held_velocity(self, dim: int) -> None:
+        """``None`` -- the boundary conditions and the sources set the velocity, not this drive."""
+        del dim
+        return None
+
     def layout(self, fields: FieldLayout) -> FieldLayout:
         """``fields`` unchanged -- there is no border."""
         return fields
@@ -259,6 +275,10 @@ class MassFlow(Drive):
     def held_speed(self) -> float:
         """The magnitude of :attr:`target`, the bulk velocity the solve holds."""
         return abs(float(self.target))
+
+    def held_velocity(self, dim: int) -> jnp.ndarray:
+        """:attr:`target` along ``flow_direction``, shape ``(dim,)``."""
+        return jnp.zeros(dim).at[self.flow_direction].set(self.target)
 
     def layout(self, fields: FieldLayout) -> FieldLayout:
         """``fields`` with one more block: the single global dof holding the force."""
@@ -476,7 +496,8 @@ def refuse_a_constraint_this_solve_cannot_hold(momentum: MomentumContinuity, cal
     if isinstance(momentum.drive, MassFlow):
         raise TypeError(
             f"{caller} marches the fields alone, so it cannot hold the bulk velocity this assembler's "
-            "MassFlow drive asks for -- it would solve at the seed force and report nothing. Use the "
-            "constrained solve instead, or, to solve at a force you are prescribing, build with "
+            "MassFlow drive asks for -- it would solve at the seed force and report nothing. Use a solve "
+            "that holds it (solve_flow_march, bulk_velocity_flow_solve, solve_coupled), or, to solve at "
+            "a force you are prescribing, build with "
             "sources=(UniformBodyForce(...),) and no drive."
         )
