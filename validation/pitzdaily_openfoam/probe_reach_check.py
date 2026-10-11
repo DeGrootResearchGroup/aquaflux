@@ -32,13 +32,8 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from aquaflux.solve import (  # noqa: E402
-    PROBE_BATCH_SIZE,
-    JacobianProbe,
-    batched_jacobian_matvec,
-    jacobian_matvec,
-    materialize_block_jacobian,
-)
+from aquaflux.solve import (JacobianProbe, materialize_block_jacobian,)
+from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 from local_jacobian_probe import reference_state  # noqa: E402
 
 REACHES = tuple(int(r) for r in os.environ.get("PROBE_CHECK_REACHES", "3,4").split(","))

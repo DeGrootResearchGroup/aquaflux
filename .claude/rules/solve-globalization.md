@@ -481,7 +481,8 @@ What to take from it, none of which is specific to that mechanism:
       see `.claude/rules/turbulence.md` under `turbulence_damping`.
     - **⚠️ A WRAPPER POLICY THAT REBUILDS A `ShiftTerm` FROM `.diagonal` ALONE DROPS THE REST IN
       SILENCE** — the march runs and the dropped behaviour simply never happens. Two shipped wrappers
-      did exactly that (`MonolithicFactorShiftPolicy`, `_MassFlowBorderedPolicy`), which is how a
+      did exactly that (`MonolithicFactorShiftPolicy`, and the mass-flow policy that is now
+      `flow.BorderedShiftPolicy`, which forwards `row_relaxation`), which is how a
       per-block damping measured as a no-op. Forward every part, and find the wrappers **structurally**
       (AST), not by grepping the callee's name.
     - **`residual` is `R(φ)` when the caller has it and `None` otherwise**, offered because both steps
@@ -630,7 +631,7 @@ What to take from it, none of which is specific to that mechanism:
     refreshed march, the initial-state measure carried into each refresh). Both flagship cases ran this
     way. The fix: `relative_residual_gmres(norm=None)` means "the measure of the step that runs me", and
     all three steppers (`PseudoTransientStep`, `DualTimeStep`, `DampedNewtonStep`) call
-    `solve.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
+    `solve.linear.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
     `lineax` solver is left alone, and a `norm=None` solver run outside a step raises. Pinned by
     `test_convergence.py::test_each_step_stops_a_measure_following_linear_solve_in_its_own_measure`.
   - **`RowScaledNorm` was march-only because `RootSolver` passed its measure through a

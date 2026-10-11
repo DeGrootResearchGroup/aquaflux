@@ -34,7 +34,7 @@ paths:
 > `solve-amg-multigrid.md`, and selected by no shipped case bundle.** `MonolithicIlutPreconditioner`,
 > `IlutFactors`, `factorize_ilut` and the coupled builders `coupled_ilut_continuation` /
 > `coupled_ilut_refreshing_continuation` / `ilut_beta_tracking_refresh` no longer exist; the shared
-> `_beta_tracking_refresh` skeleton (now the class `solve.BetaTrackingRefresh`) and `MonolithicFactorShiftPolicy` they used
+> `_beta_tracking_refresh` skeleton (now the class `solve.materialized_session.BetaTrackingRefresh`) and `MonolithicFactorShiftPolicy` they used
 > now serve only the materialized-Jacobian multigrid inverses. If you are looking for any of those symbols,
 > they are gone rather than renamed — the code is in git history.
 >

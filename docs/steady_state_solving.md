@@ -441,11 +441,26 @@ momentum, flow = solve(momentum, momentum.initial_state())
 beta = momentum.drive.force  # the force that holds the target, found by the solve
 ```
 
-The target is read off the assembler rather than passed to the solve, because the residual writes
-each Newton iterate into that same drive: naming it twice is how the constraint being enforced and
-the force being applied come to disagree. The coupled RANS counterpart,
-{func}`~aquaflux.turbulence.solve_coupled_mass_flow`, reads it the same way, and both refuse an
-assembler whose drive is not a `MassFlow`.
+The target is read off the assembler rather than passed to the solve: naming it twice is how the
+constraint being enforced and the force being applied come to disagree.
+
+The staged marches hold it too. Given an assembler whose drive is a `MassFlow`,
+{func}`~aquaflux.flow.solve_flow_march` and {func}`~aquaflux.turbulence.solve_coupled` append the force
+to the state, border the residual with the constraint row and eliminate the force inside each linear
+solve, so every setting of the march -- the dual-time loop, the step control, the retries, a refresh, a
+viscosity ramp -- applies unchanged. Their row-scaled measure reports the constraint row as the
+fraction by which the bulk velocity misses its target. They return the fields; the force that holds the
+target is read back from them with {func}`~aquaflux.turbulence.held_force`:
+
+```python
+from aquaflux.turbulence import held_force, solve_coupled
+
+flow, k, omega = solve_coupled(coupled)  # coupled.momentum.drive is a MassFlow
+beta = held_force(coupled, flow, k, omega)
+```
+
+A materialized-Jacobian preconditioner has no row or column for the force, so beside a held bulk
+velocity it is refused; the block preconditioners are bordered around.
 
 Because the constraint lives *inside* the residual, `<U_dir> = target` holds at the converged root by
 construction — it cannot overshoot while the eddy viscosity is still developing, as an outer
