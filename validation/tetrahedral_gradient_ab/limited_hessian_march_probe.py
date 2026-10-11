@@ -1,6 +1,6 @@
 """Issue #435: does the coupled march start once the Hessian correction is dropped on ill-conditioned cells?
 
-A uniform-plug start at the Re/10 anchor, exact complete-LU preconditioner, 10 outer steps -- the same
+A uniform-plug start at the Re/10 anchor, the shipped field-split preconditioner, 10 outer steps -- the same
 configuration under which the full multiple-correction scheme stalls and corrected Green--Gauss marches.
 The gradient is the full multiple-correction reconstruction except the first pass on cells whose
 ``max|M2^-1|`` exceeds ``TET_M2_LIMIT`` (default 10).
@@ -21,7 +21,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jax.numpy as jnp
 from aquaflux.io import read_openfoam
 from aquaflux.schemes import MultipleCorrectionGradient, OwnerGradient, SkewCorrectedGradient
-from aquaflux.solve import CompleteLu, DualTimeLoop, MaterializedJacobian
+from aquaflux.solve import (
+    Convergence,
+    DualTimeLoop,
+    FieldSplit,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    SimpleSmoothed,
+)
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
@@ -80,11 +87,10 @@ def main() -> None:
                 flow,
                 jnp.full(n, k_in),
                 jnp.full(n, omega_in),
-                preconditioner=MaterializedJacobian(CompleteLu()),
+                preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
                 dual_time=DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL),
                 max_steps=STEPS,
-                rtol=1e-3,
-                atol=0.0,
+                convergence=Convergence(rtol=1e-3, atol=0.0),
                 positivity_projection=True,
                 retry=RETRY,
                 on_step=on_step,

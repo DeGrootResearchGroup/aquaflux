@@ -1186,11 +1186,11 @@ def _reparametrized_preconditioner(
 # family: the calibration was taken on the multigrid one, that being where the measure was first built,
 # but nothing in it is about multigrid.
 #
-# ⚠️ The block and complete-LU families stopped on a plain 2-norm at `1e-2` until this was unified, so
-# their `max_restarts` caps below were sized against that arrangement and have NOT been re-measured
-# against the row-scaled stop, which costs ~1.5x the cycles where it was measured. They are left at
-# their previous values rather than adjusted to an invented number; neither flagship validation case
-# runs those builders, so nothing on record is affected, and a cap that binds shows up as a truncated
+# ⚠️ The block family stopped on a plain 2-norm at `1e-2` until this was unified, so
+# its `max_restarts` cap below was sized against that arrangement and has NOT been re-measured
+# against the row-scaled stop, which costs ~1.5x the cycles where it was measured. It is left at its
+# previous value rather than adjusted to an invented number; neither flagship validation case
+# runs that family, so nothing on record is affected, and a cap that binds shows up as a truncated
 # solve rather than as a wrong answer.
 #
 # Steering and judging by one definition is the point: the default solver takes its norm from the step at
@@ -1807,8 +1807,7 @@ def _monolithic_shift_source(
 ) -> CoupledShiftPolicy:
     """The shift policy a **monolithically** preconditioned step reads its diagonal from.
 
-    Shared by all three monolithic builders (threshold-ILU, complete-LU, algebraic multigrid), which
-    want exactly the same thing from it and had each written the call out.
+    Shared by every materialized-Jacobian build, which wants exactly the same thing from it.
 
     :class:`MonolithicFactorShiftPolicy` takes only ``base.shift_term(phi).diagonal`` -- it supplies its
     own inverse and never calls the block policy's ``make_preconditioner``. So this policy is built
@@ -2004,7 +2003,7 @@ def _monolithic_factor_step(
     """Compose a monolithic preconditioner with the block shift, then build the step.
 
     The shared seam of every materialized-Jacobian build: it glues the already-built ``preconditioner``
-    (complete LU, multigrid V-cycle or field split) to the block shift ``base`` via a
+    (a field split) to the block shift ``base`` via a
     :class:`MonolithicFactorShiftPolicy` and hands the result to :func:`_coupled_step`. The inverse
     families differ only in how they construct ``preconditioner``; everything about the march itself is
     :func:`_coupled_step`'s.
@@ -2401,8 +2400,7 @@ def coupled_step(
         block-diagonal session have none, so there it is refused.
     linear_solve : LinearSolveSettings, lineax.AbstractLinearSolver or None
         The shifted solve. A :class:`LinearSolveSettings` moves the regime -- unset, restart ``120`` for the
-        block-diagonal family, ``10`` for a complete LU and ``15`` for a multigrid V-cycle or a field
-        split, each at a relative tolerance of ``0.3`` -- and keeps the stop in the progress measure the
+        block-diagonal family and ``15`` for a field split, each at a relative tolerance of ``0.3`` -- and keeps the stop in the progress measure the
         march judges the step by (the solve's :class:`~aquaflux.solve.Convergence` measure), not the
         Euclidean norm: the coupled residual's 2-norm is ~100% ``omega``, so a 2-norm stop halts while
         the flow-dominated part of the step is still coarse. ``max_restarts`` is the only bound on a single running solve
@@ -2767,13 +2765,11 @@ def solve_coupled(
         a correction that cannot be followed at all and is invisible to the cost trigger because those
         solves are *cheap*.
 
-        ``solver`` covers what more damping cannot: with an inexact preconditioner (a threshold-ILU) the
-        loose default Krylov solve can return a non-finite correction on the stiff operator an
-        aggressive overshoot produces, where an exact complete-LU returns a finite one. The step is
-        redone from the same state at the tighter tolerance -- a β-tracked factorization is already
-        fresh, so only the Krylov solve changes -- which recovers it while keeping the accepted
-        trajectory, and pays the tighter solve on the few trouble steps rather than on every step. The
-        exact-LU path never diverges and needs none.
+        ``solver`` covers what more damping cannot: with an inexact preconditioner the loose default
+        Krylov solve can return a non-finite correction on the stiff operator an aggressive overshoot
+        produces. The step is redone from the same state at the tighter tolerance -- only the Krylov
+        solve changes -- which recovers it while keeping the accepted trajectory, and pays the tighter
+        solve on the few trouble steps rather than on every step.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, forwarded to
         :func:`~aquaflux.solve.newton_march`: called before a step is redone, with why. A log without it

@@ -307,10 +307,9 @@ def open_flow_session(
     Parameters
     ----------
     preconditioner : MaterializedJacobian
-        Which inverse and how it is probed. A :class:`~aquaflux.solve.SimpleSmoothed` (or another block
-        inverse) over the whole ``(u, p)`` saddle, which is traced and needs no optional dependency; a
-        or a :class:`~aquaflux.solve.CompleteLu`. A :class:`~aquaflux.solve.FieldSplit` is refused, because a ``(u, p)`` state is a
-        single group of fields and has nothing to split.
+        Which inverse and how it is probed: a :class:`~aquaflux.solve.SimpleSmoothed` (or another block
+        inverse) over the whole ``(u, p)`` saddle, which is traced. A :class:`~aquaflux.solve.FieldSplit`
+        is refused, because a ``(u, p)`` state is a single group of fields and has nothing to split.
     momentum : MomentumContinuity
         The assembler the session builds on until it is re-pointed with ``rebind``.
     observer : callable, optional

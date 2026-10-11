@@ -50,7 +50,14 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import CompleteLu, DualTimeLoop, MaterializedJacobian
+from aquaflux.solve import (
+    Convergence,
+    DualTimeLoop,
+    FieldSplit,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    SimpleSmoothed,
+)
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
@@ -306,13 +313,12 @@ def run_and_checkpoint(coupled, flow, k, omega, rtol, max_steps):
             flow,
             k,
             omega,
-            preconditioner=MaterializedJacobian(CompleteLu()),
+            preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
             dual_time=DualTimeLoop(
                 inner_steps=INNER_STEPS, inner_tol=INNER_TOL, refresh_on_cycles=REFRESH_ON_CYCLES
             ),
             max_steps=max_steps,
-            rtol=rtol,
-            atol=0.0,
+            convergence=Convergence(rtol=rtol, atol=0.0),
             positivity_projection=True,
             retry=RETRY,
             on_step=on_step,
