@@ -39,7 +39,7 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 from aquaflux.solve import (
-    MonolithicVCyclePreconditioner,  # noqa: E402
+    MaterializedJacobianPreconditioner,  # noqa: E402
     block_stencil_gather_map,  # noqa: E402
 )
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan
@@ -104,7 +104,7 @@ def main():
     )
 
     def materialize(batch):
-        return MonolithicVCyclePreconditioner._materialize_jacobian(
+        return MaterializedJacobianPreconditioner._materialize_jacobian(
             lambda v: jacobian_matvec(coupled, state, v),
             plan,
             lambda seeds: batched_jacobian_matvec(coupled, state, seeds),

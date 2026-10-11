@@ -1,13 +1,25 @@
 ---
 paths:
-  - "aquaflux/solve/amg_preconditioner.py"
   - "aquaflux/solve/multigrid.py"
   - "aquaflux/solve/hierarchy_inverse.py"
 ---
 
-# Rules — `aquaflux/solve/` monolithic AMG and the traced multigrid
+# Rules — `aquaflux/solve/` the traced multigrid (and the record of the deleted monolithic AMG)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | MonolithicVCycle | FieldSplit)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **THE MONOLITHIC PETSc AMG IS DELETED (2026-10-10), with the `petsc` dependency.** There is no
+> `amg_preconditioner.py`, `MonolithicVCyclePreconditioner`, `MonolithicVCycleInverse`, `monolithic_vcycle_inverse`,
+> `ShiftedCellMajorOperator` or `MonolithicVCycle`; `tests/unit/test_amg_preconditioner.py`,
+> `tests/unit/test_cell_major_operator.py` and `tests/integration/test_coupled_amg.py` went with them, as
+> did the PETSc-only harnesses (`petsc_free_march.py`, `preconditioner_sweep.py`, `zero_pattern_pivots.py`,
+> `inner_iterate_probe.py`). The shared base `MaterializedJacobianPreconditioner` lives in
+> `solve/materialized_preconditioner.py` (documented in `solve-direct-preconditioners.md`). **Everything in
+> the first section below and every PETSc/GAMG arm elsewhere in this file is dated history that cannot be
+> re-run from this tree** — kept because several of its lessons (ordering vs fill, the cost guard's split
+> from the shift escalation, measuring at hard states) are general; recover the code from git history
+> before `2026-10-10` if a question about it ever reopens. Why it went: no shipped case or default
+> selected it, and the traced nodal hierarchy matches GAMG on the `[k, ω]` block.
+
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the full
 > AMG/multigrid investigation narrative. See `solve.md` for the package-wide contracts, current
@@ -20,7 +32,7 @@ paths:
 > summary here, following the pattern in `solve-flow-block.md` / `solve-flow-block-log.md`. See
 > `solve.md`'s "Where new content goes".
 
-## Preconditioner — monolithic AMG (the coupled PC)
+## Preconditioner — monolithic AMG (DELETED 2026-10-10; dated record)
 
 - **Monolithic ALGEBRAIC-MULTIGRID preconditioner — BUILT (`amg_preconditioner.py`), the coupled PC for
   large 3D.** The sibling of the complete LU: instead of factoring the assembled coupled Jacobian it applies
@@ -2028,14 +2040,12 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
 
 
-## The coupled AMG builder
+## The coupled AMG builder (gone)
 
-- **Coupled builder `coupled_amg_continuation`** (`.claude/rules/turbulence.md`) shares
-  `MonolithicFactorShiftPolicy` + `_monolithic_factor_step` with the complete LU. Verified: converges to the
-  block PC's fixed point AND passes the **coupled-adjoint FD gate** (the transpose V-cycle serves the
-  gradient), `tests/integration/test_coupled_amg.py`; V-cycle mechanics in `tests/unit/test_amg_preconditioner.py`.
-  Follow-ups: a refreshing/β-tracking variant (the frozen build serves the forward + adjoint; a developing
-  3D march would want the refresh), and the FGMRES forward optimization.
+- **There is no coupled AMG builder** — `coupled_amg_continuation` was replaced by `coupled_step` (#371)
+  and the monolithic V-cycle it built was deleted with PETSc (2026-10-10). The multigrid path a coupled
+  march takes now is `MaterializedJacobian(FieldSplit(...))`, whose adjoint gate is
+  `tests/integration/test_coupled_field_split.py` (no longer PETSc-gated, so it runs in CI).
 
 
 ## Binding decisions — `solve/multigrid.py`

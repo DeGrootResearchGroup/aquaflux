@@ -91,12 +91,7 @@ from .frozen_operator import (
     decouple_dof,
     symmetrically_equilibrate,
 )
-from .amg_preconditioner import (
-    MonolithicVCycleInverse,
-    MaterializedJacobianPreconditioner,
-    MonolithicVCyclePreconditioner,
-    monolithic_vcycle_inverse,
-)
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .field_split import (
     JacobiSmoothedInverse,
     FieldSplitInverse,
@@ -240,7 +235,6 @@ from .materialized_spec import (
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
-    MonolithicVCycle,
     materialized_spec_from_mapping,
     materialized_spec_to_mapping,
     MATERIALIZED_MAPPING,
@@ -348,9 +342,6 @@ __all__ = [
     "MaterializedSession",
     "MeasureBuilder",
     "MonolithicFactorShiftPolicy",
-    "MonolithicVCycle",
-    "MonolithicVCycleInverse",
-    "MonolithicVCyclePreconditioner",
     "MonotoneLineSearch",
     "NewtonStrategy",
     "PhaseTimer",
@@ -437,7 +428,6 @@ __all__ = [
     "materialize_block_jacobian",
     "materialized_spec_from_mapping",
     "materialized_spec_to_mapping",
-    "monolithic_vcycle_inverse",
     "named_blocks",
     "newton_march",
     "newton_step",

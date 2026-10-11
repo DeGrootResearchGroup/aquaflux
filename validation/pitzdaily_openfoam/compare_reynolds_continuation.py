@@ -81,7 +81,6 @@ INNER_STEPS = 10  # dual-time inner Newton iterations per outer pseudo-timestep
 INNER_TOL = 1e-3  # inner loop stops at this fraction of the anchor residual
 INTERMEDIATE_RTOL = 3e-2  # lower-Re rungs are only seeds -> converge them loosely
 RTOL = 1e-3  # target-rung tolerance (the recirculation is developed here)
-LU_BACKEND = "auto"  # complete-LU backend: UMFPACK if available (fast), else SciPy SuperLU
 RESTART = (
     40  # forward-solve GMRES restart (nominal, for the matvec estimate; the exact LU needs ~1)
 )
@@ -153,7 +152,7 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
         f"[cfg] Reynolds ramp anchored at Re/{anchor:g}, ratio {schedule.ratio:g} per rung "
         f"({N_POINTS} rungs before the target); "
         f"inner_steps={INNER_STEPS} beta_start={CONTROL.beta_start} beta_min={CONTROL.beta_min} "
-        f"rtol={RTOL} preconditioner=complete-LU({LU_BACKEND}) refreshed per step",
+        f"rtol={RTOL} preconditioner=complete-LU refreshed per step",
         flush=True,
     )
 
@@ -181,7 +180,7 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
     # factorization is what lets the aggressive control's large-timestep overshoots stay finite (the
     # block preconditioner cannot).
     session = open_session(
-        MaterializedJacobian(CompleteLu(backend=LU_BACKEND), build_beta=CONTROL.beta_start), coupled
+        MaterializedJacobian(CompleteLu(), build_beta=CONTROL.beta_start), coupled
     )
 
     options = (

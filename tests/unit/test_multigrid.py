@@ -1257,7 +1257,7 @@ def test_an_equilibrated_cycle_is_a_fixed_linear_operator_and_transposes() -> No
 def test_plain_prolongation_keeps_the_tentative_injection() -> None:
     """``prolongation_smoothing="none"`` freezes the piecewise-constant prolongation unsmoothed.
 
-    Plain aggregation is a real choice, not a degenerate one — it is what the shipped PETSc bundle runs
+    Plain aggregation is a real choice, not a degenerate one — it was measured the better coarse correction
     on this saddle — so the unsmoothed branch is pinned by the property that identifies it: every
     prolongation entry is exactly one, where a smoothed operator spreads them.
     """

@@ -80,7 +80,7 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
     assert float(block.shift_policy.turbulence_damping.factor(relaxation, None)) == 2.0
     assert block.shift_policy.shift_basis is _BASIS
 
-    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
     lu = session.build(state, shift=shift)
     assert float(lu.shift_policy.base.turbulence_damping.factor(relaxation, None)) == 2.0
 

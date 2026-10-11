@@ -44,16 +44,18 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DualTimeLoop,
     Euclidean,
+    FieldSplit,
     Globalization,
+    JacobiSmoothed,
     LinearSolveSettings,
     MaterializedJacobian,
-    MonolithicVCycle,
     PseudoTransientStep,
     RefreshPolicy,
     Resumption,
     RowScaledNorm,
     SessionSource,
     ShiftTerm,
+    SimpleSmoothed,
 )
 from aquaflux.solve import driver as driver_module
 from aquaflux.turbulence import (
@@ -261,9 +263,7 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
 
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    lu_step = coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-    )
+    lu_step = coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
     block_step = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
     )
@@ -276,7 +276,7 @@ def test_lu_and_block_continuations_use_oppositely_tuned_restart_sizes() -> None
         coupled_step(
             coupled,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             linear_solve=LinearSolveSettings(restart=120),
         ).krylov_solver.restart
         == 120
@@ -307,9 +307,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
-        "lu": coupled_step(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-        ),
+        "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
         "block dual-time": coupled_step(
             coupled,
             state,
@@ -377,9 +375,7 @@ def test_every_builder_stops_its_linear_solve_in_the_measure_the_march_hands_the
         "block": coupled_step(
             coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
         ),
-        "lu": coupled_step(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-        ),
+        "lu": coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu())),
         "mass flow": mass_flow_coupled_continuation(
             mass_flow_coupled,
             mass_flow_state,
@@ -426,7 +422,7 @@ def test_the_constrained_builder_refuses_a_materialized_preconditioner() -> None
     state = _healthy_state(mesh, coupled)
     with pytest.raises(TypeError, match="must be a BlockDiagonal, not MaterializedJacobian"):
         mass_flow_coupled_continuation(
-            coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
+            coupled, state, preconditioner=MaterializedJacobian(CompleteLu())
         )
 
 
@@ -498,16 +494,14 @@ def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None
     step = coupled_step(
         coupled,
         state,
-        preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+        preconditioner=MaterializedJacobian(CompleteLu()),
         shift=CoupledShiftSettings(velocity_parts=live),
     )
     assert step.shift_policy.base.velocity_shift_parts is live
     # ...and it is genuinely live: away from the state the assembler was frozen at, the shift it
     # produces differs from the frozen one, which is the whole reason the source is injected. At the
     # freeze state the two coincide by construction, so a check there would pass on a dead wire.
-    frozen = coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy"))
-    )
+    frozen = coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()))
     flow_p, k_p, omega_p = coupled.layout.unpack(state)
     developed = coupled.layout.pack(flow_p, k_p * 4.0, omega_p)
     assert not np.allclose(
@@ -623,7 +617,7 @@ def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
     flow, k, omega = coupled.physical_fields(state)
-    session = open_session(MaterializedJacobian(CompleteLu(backend="scipy")), coupled)
+    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
     with pytest.raises(TypeError, match="belongs to the preconditioner session"):
         solve_coupled(
             coupled, flow, k, omega, preconditioner=session, jacobian_production_viscosity=True
@@ -1722,29 +1716,28 @@ def _block_step(coupled, state, **march):
 
 
 def _lu_step(coupled, state, **march):
-    return coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")), **march
-    )
+    return coupled_step(coupled, state, preconditioner=MaterializedJacobian(CompleteLu()), **march)
 
 
-def _vcycle_step(coupled, state, **march):
+def _split_step(coupled, state, **march):
     return coupled_step(
-        coupled, state, preconditioner=MaterializedJacobian(MonolithicVCycle()), **march
+        coupled,
+        state,
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
+        **march,
     )
 
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, _vcycle_step, mass_flow_coupled_continuation],
-    ids=["block", "lu", "vcycle", "mass flow"],
+    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
+    ids=["block", "lu", "split", "mass flow"],
 )
 def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
     """Every preconditioner family routes through :func:`_k_positivity_guards`, and it is checked first.
 
     First specifically so a real caller's mistake -- and this test -- never pays for building the
-    preconditioner the raise makes moot. That matters beyond cost for the multigrid V-cycle: it needs
-    ``petsc4py`` (not installed by CI, see ``tests/unit/test_optional_dependency_skips.py``), so checking
-    the raise here would break under that dependency's absence if the guard ran any later than it does.
+    preconditioner the raise makes moot.
     """
     mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
@@ -1756,16 +1749,11 @@ def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(b
 
 @pytest.mark.parametrize(
     "builder",
-    [_block_step, _lu_step, mass_flow_coupled_continuation],
-    ids=["block", "lu", "mass flow"],
+    [_block_step, _lu_step, _split_step, mass_flow_coupled_continuation],
+    ids=["block", "lu", "split", "mass flow"],
 )
 def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
-    """Every other pairing of the two settings still builds -- including a floor that now matters.
-
-    The multigrid V-cycle is excluded here (unlike the raise check above): building its real
-    preconditioner needs ``petsc4py``, which this file does not gate on, so only the checks that
-    never reach it may run unconditionally.
-    """
+    """Every other pairing of the two settings still builds -- including a floor that now matters."""
     mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
     builder(coupled, state, positivity_floor=1e-6, positivity_projection=False)

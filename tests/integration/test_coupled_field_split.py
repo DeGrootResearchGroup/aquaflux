@@ -11,8 +11,7 @@ drive the split against the assembled coupled Jacobian on a small turbulent chan
 converges it on the true residual, its transpose satisfies the adjoint identity that the
 implicitly-differentiated gradient depends on, and it reaches a solve through the existing callback
 wrapper without one of its own. The split's blocks are fitted by the traced inverses the flagship cases
-ship; the monolithic V-cycle it is compared against needs PETSc, so the module is skipped where
-``petsc4py`` is unavailable.
+ship.
 """
 
 from __future__ import annotations
@@ -21,20 +20,17 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-pytest.importorskip("petsc4py")
-
 from aquaflux.solve import (
+    CompleteLu,
     FieldGroups,
     FieldSplit,
+    HostPreconditioner,
     JacobiSmoothed,
     MaterializedJacobian,
-    MonolithicVCycle,
-    MonolithicVCyclePreconditioner,
+    MaterializedJacobianPreconditioner,
     SimpleSmoothed,
     field_split_inverse,
     jacobian_matvec,
-    monolithic_vcycle_inverse,
     relative_residual_gmres,
     restart_cycles,
     solve_linear,
@@ -53,13 +49,13 @@ def case():
     flow, k, omega = sst_initial_fields(momentum, turbulence)
     state = coupled.pack_state(flow, k, omega)
     n_fields = coupled.layout.n_fields
-    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
+    jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
         lambda v: jacobian_matvec(coupled, state, v),
         _coupled_jacobian_plan(coupled, 3),
     )
     groups = FieldGroups.split_before(coupled.layout, "k")
     # A shift keeps the cold operator away from the singular limit, as the march's own step does.
-    shifted = MonolithicVCyclePreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
+    shifted = MaterializedJacobianPreconditioner._shifted(jacobian, np.full(groups.n_dofs, 0.5))
     return {
         "coupled": coupled,
         "state": state,
@@ -110,7 +106,7 @@ def _gmres_matvecs(shifted, preconditioner, b, *, rtol=1e-8):
         lambda v: operator @ v,
         jnp.asarray(b),
         relative_residual_gmres(rtol, restart=30, stagnation_iters=40, max_restarts=40),
-        preconditioner=MonolithicVCyclePreconditioner(preconditioner).matvec(),
+        preconditioner=HostPreconditioner(preconditioner).matvec(),
         throw=False,
     )
     true = float(jnp.linalg.norm(operator @ solution - jnp.asarray(b)) / jnp.linalg.norm(b))
@@ -148,35 +144,36 @@ def test_the_transpose_serves_the_adjoint_on_the_real_operator(case):
 
 
 def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
-    """The split satisfies the same frozen-inverse interface the monolithic V-cycle does.
+    """The split satisfies the frozen-inverse interface the JAX callback wrapper reads.
 
-    The JAX-side wrapper reads only ``n_dofs`` and ``apply(residual, transpose=...)``, so a field split
-    needs no wrapper of its own -- which is what lets it reach a solve through the existing callback path.
+    The wrapper reads only ``n_dofs`` and ``apply(residual, transpose=...)``, so a field split needs no
+    wrapper of its own -- which is what lets it reach a solve through the existing callback path. The
+    wrapped apply must be the split's own, forward and transposed.
     """
-    groups, shifted, n_fields = case["groups"], case["shifted"], case["n_fields"]
+    groups, shifted = case["groups"], case["shifted"]
     split = _split(shifted, groups)
-    monolithic = monolithic_vcycle_inverse(shifted, n_fields, coarse_eq_limit=200)
     rng = np.random.default_rng(3)
-    b = jnp.asarray(rng.standard_normal(groups.n_dofs))
-    for inverse in (split, monolithic):
-        applied = MonolithicVCyclePreconditioner(inverse).matvec()(b)
-        assert applied.shape == b.shape
-        assert bool(jnp.all(jnp.isfinite(applied)))
+    b = rng.standard_normal(groups.n_dofs)
+    wrapper = HostPreconditioner(split)
+    for transpose in (False, True):
+        applied = wrapper.matvec(transpose=transpose)(jnp.asarray(b))
+        np.testing.assert_allclose(
+            np.asarray(applied), split.apply(b, transpose=transpose), rtol=1e-12, atol=1e-14
+        )
     split.destroy()
-    monolithic.destroy()
 
 
 @pytest.mark.slow
-def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
-    """`field_split=True` is a drop-in: same solver, same root, only the frozen inverse differs.
+def test_the_split_continuation_converges_to_the_complete_lu_fixed_point():
+    """A field split is a drop-in: same solver, same root, only the frozen inverse differs.
 
     The point of routing it through `coupled_step` rather than a parallel builder is that the
     shift policy, forward solver, step tail and refresh hooks stay shared -- so this asserts the thing that
-    would break if they had quietly diverged: both reach the same converged state.
+    would break if they had quietly diverged: the split and an exact complete LU reach the same converged
+    state.
     """
     from aquaflux.turbulence import solve_coupled
 
-    from tests.integration.test_coupled_amg import SMOOTHER_FILL
     from tests.integration.test_coupled_lu import _channel
 
     momentum, turbulence = _channel()
@@ -184,10 +181,6 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     flow, k, omega = sst_initial_fields(momentum, turbulence)
     reference = coupled.pack_state(flow, k, omega)
 
-    # The monolithic arm takes the fixture's extra level of smoother fill, for the reason recorded at
-    # `SMOOTHER_FILL`: at this initial condition the operator's degenerate couplings are exactly zero,
-    # so the pruned ILU(1) pattern loses the fill the V-cycle depends on. The split's blocks are fitted
-    # by their own injected inverses, which read no smoother fill.
     split = coupled_step(
         coupled,
         reference,
@@ -196,11 +189,7 @@ def test_the_split_continuation_converges_to_the_monolithic_fixed_point():
     flow_s, k_s, omega_s = solve_coupled(coupled, flow, k, omega, strategy=split, max_steps=40)
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(flow_s, k_s, omega_s)))) < 1e-8
 
-    mono = coupled_step(
-        coupled,
-        reference,
-        preconditioner=MaterializedJacobian(MonolithicVCycle(smoother_fill_levels=SMOOTHER_FILL)),
-    )
+    mono = coupled_step(coupled, reference, preconditioner=MaterializedJacobian(CompleteLu()))
     flow_m, k_m, omega_m = solve_coupled(coupled, flow, k, omega, strategy=mono, max_steps=40)
     assert float(jnp.linalg.norm(flow_s - flow_m) / jnp.linalg.norm(flow_m)) < 1e-4
     assert float(jnp.linalg.norm(k_s - k_m) / jnp.linalg.norm(k_m)) < 1e-3
@@ -254,8 +243,7 @@ def test_the_jacobi_smoothed_inverse_is_a_fixed_linear_map_that_transposes(case)
     preconditioner that is not a fixed *linear* map makes the non-flexible outer GMRES invalid, and one
     whose transpose is not exact corrupts every gradient taken through a converged solve while the
     forward march looks perfectly healthy. This runs on the real ``[k, omega]`` block because that is
-    what it will precondition, and its aggregation and smoother settings are chosen to reproduce a host
-    GAMG V-cycle rather than to be conservative.
+    what it will precondition, with the inverse's own default aggregation and smoother settings.
     """
     import numpy as np
     import scipy.sparse as sp

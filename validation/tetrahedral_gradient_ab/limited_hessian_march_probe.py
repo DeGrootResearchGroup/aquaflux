@@ -29,7 +29,6 @@ from aquaflux.turbulence import (
     solve_coupled,
 )
 from compare import (
-    BACKEND,
     INNER_STEPS,
     INNER_TOL,
     INTENSITY,
@@ -81,7 +80,7 @@ def main() -> None:
                 flow,
                 jnp.full(n, k_in),
                 jnp.full(n, omega_in),
-                preconditioner=MaterializedJacobian(CompleteLu(backend=BACKEND)),
+                preconditioner=MaterializedJacobian(CompleteLu()),
                 dual_time=DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL),
                 max_steps=STEPS,
                 rtol=1e-3,

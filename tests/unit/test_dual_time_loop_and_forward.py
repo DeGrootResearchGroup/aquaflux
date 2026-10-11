@@ -168,7 +168,7 @@ def test_a_refresh_count_with_nothing_to_fire_is_refused_but_a_materialized_sess
         open_session(BlockDiagonal(scalar=UnpreconditionedScalars()), coupled).build(
             state, dual_time=loop
         )
-    spec = MaterializedJacobian(CompleteLu(backend="scipy"))
+    spec = MaterializedJacobian(CompleteLu())
     with pytest.raises(TypeError, match="refresh_on_cycles"):  # nor does a frozen step
         coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
     session = open_session(spec, coupled)

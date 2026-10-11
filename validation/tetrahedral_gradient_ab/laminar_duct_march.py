@@ -223,7 +223,7 @@ def main() -> None:
             "lu",
             momentum,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             dual_time=DualTimeLoop(inner_steps=3),
         ),
         "simple": lambda: run_staged(

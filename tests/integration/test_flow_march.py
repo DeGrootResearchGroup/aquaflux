@@ -334,7 +334,7 @@ def test_a_complete_lu_march_reaches_the_root_the_block_simple_march_reaches(cha
     assembler, root = channel
     built = []
     session = open_flow_session(
-        MaterializedJacobian(CompleteLu(backend="scipy")),
+        MaterializedJacobian(CompleteLu()),
         assembler,
         on_build=lambda step: built.append(step) or step,
     )
@@ -362,7 +362,7 @@ def test_block_simple_settings_are_refused_beside_a_materialized_preconditioner(
     with pytest.raises(TypeError, match="no such settings"):
         solve_flow_march(
             assembler,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(CompleteLu()),
             preconditioner_options={"schur_scaling": "msimple"},
         )
 
@@ -374,7 +374,7 @@ def test_a_preconditioner_is_refused_beside_a_finished_step(channel) -> None:
         solve_flow_march(
             assembler,
             strategy=finished,
-            preconditioner=MaterializedJacobian(CompleteLu(backend="scipy")),
+            preconditioner=MaterializedJacobian(CompleteLu()),
         )
 
 
@@ -417,11 +417,10 @@ def test_the_coupled_shift_settings_are_the_flow_ones_plus_the_closures_damping(
     }
 
 
-def test_a_simple_smoothed_march_needs_no_petsc_and_reaches_the_same_root(channel) -> None:
+def test_a_simple_smoothed_march_reaches_the_same_root(channel) -> None:
     """A laminar flow takes the traced ``SimpleSmoothed`` hierarchy over its whole ``(u, p)`` saddle.
 
-    This is the inverse the field split uses for the saddle, with no optional dependency, so it runs in
-    CI. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
+    This is the inverse the field split uses for the saddle. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
     converge on the state it was first fitted at), and the isinstance check that the march ran on it.
     """
     from aquaflux.solve import MaterializedBlockPreconditioner

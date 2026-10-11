@@ -52,7 +52,7 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
     FieldGroups,
-    MonolithicVCyclePreconditioner,
+    MaterializedJacobianPreconditioner,
     block_stencil_gather_map,
     build_convection_hierarchy,
     convection_multigrid_cycles,
@@ -236,7 +236,7 @@ def main() -> None:
         # At a real checkpoint's own documented `march_beta` this branch does not fire for state-00067
         # (0.0), which is deliberately the operator's OWN unshifted, hardest form.
         shift = march_beta * np.abs(jacobian.diagonal())
-        jacobian = MonolithicVCyclePreconditioner._shifted(jacobian, shift)
+        jacobian = MaterializedJacobianPreconditioner._shifted(jacobian, shift)
     block = trailing_block(jacobian, groups)
     del jacobian
     gc.collect()

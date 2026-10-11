@@ -26,13 +26,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .amg_preconditioner import MaterializedJacobianPreconditioner, MonolithicVCyclePreconditioner
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .field_split import FieldGroups, FieldSplitPreconditioner
 from .jacobian_probe import JacobianProbe
 from .lu_preconditioner import CompleteLuPreconditioner
-from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian, MonolithicVCycle
+from .materialized_preconditioner import MaterializedJacobianPreconditioner
+from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian
 from .refresh_timing import RefreshTiming
 from .shifted_step import LinearSolveRegime
 from .state import FieldLayout
@@ -87,8 +87,8 @@ BUILD_BETA = 2.0
 #: drifted-reference) solve still completes before the next refactor.
 FACTORIZATION_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=10, max_restarts=40)
 
-#: A monolithic multigrid V-cycle. Restart 15 is the measured sweet spot for a one-V-cycle
-#: preconditioner: enough Arnoldi history for its convergence while checking the stop often enough not to
+#: A multigrid V-cycle -- a field split's blocks, or one block inverse over the whole state. Restart 15
+#: is the measured sweet spot for a one-V-cycle preconditioner: enough Arnoldi history for its convergence while checking the stop often enough not to
 #: overshoot the loose tolerance deep into the next cycle (a larger restart costs ~2x the expensive host
 #: V-cycle applies for the same trajectory).
 #:
@@ -519,14 +519,13 @@ class MaterializedSession:
             raise TypeError(
                 "a FieldSplit inverse needs a leading and a trailing group of fields, and this problem "
                 "has a single group -- there is nothing to split. Use a block inverse such as "
-                "SimpleSmoothed() over the whole state, or CompleteLu() / MonolithicVCycle()."
+                "SimpleSmoothed() over the whole state, or CompleteLu()."
             )
         if isinstance(spec.inverse, BlockInverse) and problem.groups() is not None:
             raise TypeError(
                 "a bare block inverse is fitted to the WHOLE state, which is only meaningful when the "
                 "fields form a single group (a laminar flow); this problem has a leading and a trailing "
-                "group. Wrap block inverses in FieldSplit(leading=..., trailing=...), or use CompleteLu() "
-                "/ MonolithicVCycle()."
+                "group. Wrap block inverses in FieldSplit(leading=..., trailing=...), or use CompleteLu()."
             )
         self._spec = spec
         self._problem = problem
@@ -650,7 +649,7 @@ class MaterializedSession:
         shift = frozen_shift_diagonal(base, build_beta, state)
         inverse = self._spec.inverse
         if isinstance(inverse, CompleteLu):
-            return CompleteLuPreconditioner.build(matvec, probe.plan, shift, **inverse.settings())
+            return CompleteLuPreconditioner.build(matvec, probe.plan, shift)
 
         def batched_matvec(seeds):
             return batched_jacobian_matvec(probed, frozen, seeds)
@@ -660,10 +659,6 @@ class MaterializedSession:
             "probe_batch_size": PROBE_BATCH_SIZE,
             "structure": probe.structure,
         }
-        if isinstance(inverse, MonolithicVCycle):
-            return MonolithicVCyclePreconditioner.build(
-                matvec, probe.plan, shift, **inverse.settings(), **probing
-            )
         if isinstance(inverse, BlockInverse):
             return MaterializedBlockPreconditioner.build(
                 matvec,
