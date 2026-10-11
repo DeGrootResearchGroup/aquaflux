@@ -198,8 +198,10 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > export it in the *same* change — a partial surface is what pushes consumers into deep imports and
 > makes `__init__` stop describing the package (the block preconditioner once pulled nine names
 > straight out of `solve.multigrid` while `__all__` advertised only the smoothed-aggregation third of
-> the AMG toolkit). `tests/unit/test_solve_api.py` pins both halves and fails with the offending
-> file named, so this cannot erode silently.
+> the AMG toolkit). `tests/unit/test_solve_api.py` pins that the surface resolves and the multigrid
+> toolkit is whole; that library code keeps to the surface is pinned for EVERY package at once by
+> `tests/unit/test_layering.py::test_one_package_reaches_another_only_through_its_public_surface`
+> (#284), which replaced a `solve`-only copy of that check.
 - Milestone 0: a single scalar diffusion system; the plumbing must generalize to the
   coupled p–U block later without redesign.
 
@@ -742,7 +744,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `jit` does, and a test tier found what the grep did not.** So `solve()` refuses a transform up front via
   `refuse_a_transform_the_march_cannot_run_in` (defined in `march.py` and **exported**, since
   `solve_coupled` and `solve_coupled_mass_flow` refuse on the same terms and library code may not
-  deep-import a `solve` submodule — `tests/unit/test_solve_api.py` fails the gate if it does). `jax.grad` is unaffected and is the mode the project needs — the march runs on stopped,
+  deep-import a `solve` submodule — `tests/unit/test_layering.py` fails the gate if it does). `jax.grad` is unaffected and is the mode the project needs — the march runs on stopped,
   concrete values and the derivative is attached at the root afterwards.
   - **What that cost at the four call sites, and the trap to avoid repeating.** `reused_flow_solve`,
     `bulk_velocity_flow_solve`, `scalar_pseudo_transient_solve` and `solve_coupled_mass_flow` each wrapped

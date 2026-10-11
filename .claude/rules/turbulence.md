@@ -1938,7 +1938,8 @@ Many entries below are dated history written against the old API. Read them thro
     `_MassFlowConstrainedResidual`, a module rather than the closure it was, so a solver reused across
     calls keeps one compiled step. The border column/row `(a, c)` and the Schur (constraint)
     preconditioner are the flow block's own primitives (`MassFlow.constraint_vectors` / `join` /
-    `split` / `forced` in `flow/drive.py`, and `_bordered_preconditioner` in `flow/mean_velocity.py`)
+    `split` / `forced` in `flow/drive.py`, and `solve.bordered_preconditioner`, given the drive as its
+    `ScalarBorder`)
     reused in the coupled `[flow…, k, ω]` layout by `MassFlow.constraint_vectors_in` — the same Schur
     elimination one careful place keeps consistent, not re-derived. What is being held, and along which
     axis, is read off `coupled.momentum.drive`, so the constraint the step enforces and the force the

@@ -18,7 +18,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from aquaflux.boundary import Dirichlet, DirichletField
-from aquaflux.flow.initialization import laplace_field
+from aquaflux.flow import laplace_field
 from aquaflux.initialization import hybrid_initialize
 
 from .scalar import ScalarTransport

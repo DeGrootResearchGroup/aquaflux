@@ -43,23 +43,20 @@ import lineax as lx
 import numpy as np
 
 from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
+
+# The mass-flow constraint (a body force that is a solve unknown enforcing a bulk velocity) is the flow
+# drive's: its layout, border column and row, and body-force setter are shared with the flow-block solve
+# `aquaflux.flow.bulk_velocity_flow_solve`, and the constraint preconditioner both use is
+# `aquaflux.solve.bordered_preconditioner`, so neither solve re-derives the border.
 from aquaflux.flow import (
+    MASS_FLOW_CONVERGENCE,
     BlockPreconditioner,
     ConvectionTwoLevel,
-    frozen_momentum_diagonal_parts,
-)
-
-# The mass-flow-constraint primitives (a body force that is a solve unknown enforcing a bulk velocity)
-# are shared with the flow-block solve `aquaflux.flow.bulk_velocity_flow_solve`: the border column/row,
-# the Schur (constraint) preconditioner, and the body-force setter. Reused here rather than re-deriving
-# the Schur elimination, which one careful place keeps consistent.
-from aquaflux.flow.drive import (
-    MASS_FLOW_CONVERGENCE,
     MassFlow,
+    frozen_momentum_diagonal_parts,
     mass_flow_drive,
     refuse_a_constraint_this_solve_cannot_hold,
 )
-from aquaflux.flow.mean_velocity import _bordered_preconditioner
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
@@ -105,6 +102,7 @@ from aquaflux.solve import (
     VelocityShiftParts,
     assembler_residual,
     block_reference_scales,
+    bordered_preconditioner,
     explicit_source,
     jacobian_probe_plan,
     positive_block_limit,
@@ -2902,7 +2900,7 @@ class _MassFlowBorderedPolicy(eqx.Module):
     of the pseudo-transient step for the augmented ``[flow..., k, omega, beta]`` system: the shift
     diagonal gains a **zero** for ``beta`` (the linear constraint row needs no pseudo-time damping), and
     the block-diagonal preconditioner is wrapped by the constraint (Schur) preconditioner
-    (:func:`~aquaflux.flow.mean_velocity._bordered_preconditioner`), which eliminates the scalar ``beta``
+    (:func:`~aquaflux.solve.bordered_preconditioner`), which eliminates the scalar ``beta``
     with the border column/row ``(a, c)``. The shift only adds positive diagonal to the coupled block, so
     the border ``(a, c)`` -- the ``beta`` column and the ``<U>`` row, both shift-independent -- is reused
     unchanged.
@@ -2938,7 +2936,7 @@ class _MassFlowBorderedPolicy(eqx.Module):
 
         def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             coupled_m = inner_term.make_preconditioner(relaxation)
-            return _bordered_preconditioner(
+            return bordered_preconditioner(
                 lambda _w: coupled_m, self.drive, fields, self.force, self.average
             )(phi)
 

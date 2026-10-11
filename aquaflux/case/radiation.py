@@ -37,7 +37,7 @@ from typing import ClassVar
 import numpy as np
 from scipy.spatial import cKDTree
 
-from aquaflux.io.cad.model import CadModel
+from aquaflux.io.cad import CadModel
 from aquaflux.radiation import (
     Absorption,
     CosinePower,

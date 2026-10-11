@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from aquaflux.mesh import Mesh
-from aquaflux.mesh.groups import RESERVED_PATCH_NAMES
+from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
 from .cyclic import DEFAULT_MATCH_TOLERANCE, fuse_cyclic_patches
 from .records import CellZone, FoamPatch, PolyMeshData, patch_face_range

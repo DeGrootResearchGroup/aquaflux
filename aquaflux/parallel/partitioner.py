@@ -37,8 +37,7 @@ import tempfile
 import equinox as eqx
 import numpy as np
 
-from aquaflux.mesh import Mesh, ReverseCuthillMcKee, cell_adjacency_csr
-from aquaflux.mesh.reorder import CellReordering
+from aquaflux.mesh import CellReordering, Mesh, ReverseCuthillMcKee, cell_adjacency_csr
 
 
 class Partitioner(eqx.Module):

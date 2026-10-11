@@ -498,7 +498,8 @@ Engineering Principles.
   state)`, written once (#158).** `bulk_velocity_flow_solve` and `reused_flow_solve` both return one,
   so either is handed to `solve_segregated` as it stands; `reused_flow_solve` returned the state alone
   until 2026-10-10, which broke the case runner's `Segregated` path (see `turbulence.md`'s seam entry).
-  Not exported: it is an annotation, imported from `aquaflux.flow.drive`.
+  Exported from `aquaflux.flow` (#284): it is the seam a caller's own flow solve implements, and
+  `turbulence/driver.py` names it in an annotation.
 - **Bulk-velocity constraint — BUILT (`flow/mean_velocity.py`, `bulk_velocity_flow_solve`).** A
   streamwise-periodic channel is driven to a target **bulk velocity** `U_bar` by making the body force
   `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with
@@ -521,11 +522,13 @@ Engineering Principles.
   with no controller. The **proportional mass-flow controller in `solve_segregated` was DELETED** (its
   `bulk_velocity_target`/`bulk_velocity_gain`/`flow_direction` args gone); the driver's flow-solve seam
   is now `solve_flow(momentum, state) → (momentum, state)`.
-  - **Preconditioning the augmented system — constraint preconditioning (`_bordered_preconditioner`).**
+  - **Preconditioning the augmented system — constraint preconditioning (`solve.bordered_preconditioner`;
+    it was the private `mean_velocity._bordered_preconditioner` until #284 moved it to `solve/bordered.py`,
+    since it is Schur elimination over a factory and two vectors and names no flow quantity).**
     β is a multiplier, not a function of `w`, so — unlike a nested gradient sub-solve, which AD absorbs
     into the outer Jacobian — the border cannot be absorbed inside the residual; it is eliminated one
     layer down, **in the preconditioner**. Given the flow block preconditioner `M ≈ J⁻¹` (the block-
-    SIMPLE AMG `BlockPreconditioner.factory()`), `_bordered_preconditioner(M, a, c)` returns a
+    SIMPLE AMG `BlockPreconditioner.factory()`), `bordered_preconditioner(M, drive, fields, a, c)` returns a
     preconditioner for the `(dim+1)·n_cells + 1` augmented system that Schur-eliminates the scalar β:
     `y = M·r_flow`, `dβ = (cᵀy − r_β)/(cᵀMa)`, `dw = y − dβ·(Ma)` — one flow-preconditioner apply plus
     O(n) dots per augmented Krylov iteration, exact when `M = J⁻¹` (converges in one step), inheriting
@@ -538,7 +541,8 @@ Engineering Principles.
     called with — a tracer captured into the (non-differentiated) preconditioner breaks `jax.grad`
     ("no constant handler" / closed-over-value). Pinned by `test_mean_velocity.py`: with an exact `M` the
     bordered preconditioner is exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the
-    block-preconditioned GMRES augmented solve lands on the direct solve's answer.
+    block-preconditioned GMRES augmented solve lands on the direct solve's answer. The elimination itself
+    is pinned mesh-free in `test_bordered_preconditioner.py`, with the border at either end.
   - **The solve is reverse-differentiable in `momentum` (#127).** The assembler is threaded as the Newton
     **`theta`** (not captured in the residual closure), so the IFT adjoint returns its cotangent —
     `jax.grad` of an objective through the solve gives e.g. `d/dμ` (verified vs finite differences and the
@@ -553,7 +557,7 @@ Engineering Principles.
   recovered; initial-force-independent; the preconditioner and gradient tests above).
   - **The same primitives border the monolithic coupled RANS solve (#128).** `MassFlow`'s own
     `constraint_vectors` / `join` / `split` / `forced` / `bulk_velocity`, plus
-    `mean_velocity._bordered_preconditioner`, are what `turbulence/coupled.py::solve_coupled_mass_flow`
+    `solve.bordered_preconditioner` (given the drive as its `ScalarBorder`), are what `turbulence/coupled.py::solve_coupled_mass_flow`
     uses to append `β` to the *coupled* `[flow…, k, ω]` state and Schur-eliminate it in the coupled
     preconditioner — so the bulk-velocity constraint is enforced by the same one place whether the
     forward solve is segregated (this flow-block solve) or monolithic. Do not re-derive the border
