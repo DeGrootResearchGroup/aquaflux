@@ -2147,8 +2147,13 @@ tuning follow-up noted above.
       near 40 cycles).
     - **Granularity is the lever, not ramp length** — at a fixed 24 ramp steps, `8 x 3, r=2` costs 286
       against `24 x 1, r=1`'s 191.
-    - **Anchor depth: leave it.** Re/10 271, Re/100 **261**, Re/1000 436 cycles (at `4 x 3`). Re/100 is
-      at or near the optimum and Re/10 within 4 %.
+    - **Anchor depth, at the SHIPPED march (`3 x 12`, `grow` 3, release 1e-4, momentum-only scaling;
+      measured 2026-10-11, `PITZ_RAMP_ANCHOR`): deeper is cheaper down to 100, and no ramp still
+      converges.** Anchor 100 / 10 / 3 / 1 (1 = no ramp, self-started at the case's viscosity): 16 / 17 /
+      18 / 16 steps, **111 / 178 / 217 / 246** restart cycles, 0 / 2 / 3 / 5 redone steps, all to the same
+      root. Deeper than 100 is unmeasured at these settings. (An older sweep at `grow` 1.5 and `4 x 3`
+      found Re/10 within 4 % of Re/100 and Re/1000 much worse; that schedule no longer ships.) Detail in
+      `.claude/notes/solve-globalization-log.md` ("Where the ramp starts").
     - **Adaptive `steps_per_station` is NOT expressible** — the whole `ResidualHomotopy` protocol keys on
       the outer-step index and is never handed the state, the residual or a `StepReport`. Widening it is
       a design change, and the fine-ramp result says the answer is small stations rather than a clever

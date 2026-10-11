@@ -1437,3 +1437,36 @@ stations (111 < 114).
 The file as shipped (12 fixed stations), on the same code: 16 steps, 111 cycles, per-step costs and
 final `|R|` 1.979e-06 identical to the confirmation run before the change -- the fixed walk and the
 extra `full_step_ratio` carry move nothing.
+
+## Where the ramp starts: anchor depth at the shipped march, 2026-10-11
+
+**Question (from the project owner):** can a cheap probe choose the ramp's starting multiplier -- far
+for hard problems, near (or none) for easy ones? First established whether the start still matters.
+
+**Configuration:** pitzDaily `case.yaml` as shipped at `61a1430` (`CflResidualDualTimeControl`
+`beta_start` 0.5, `beta_min` 0.005, `grow` 3, `release_floor` 1e-4; `ViscosityRamp` 12 stations x 1,
+`scale: flow`, fixed -- no settle end; field split `simplesmooth`/`jacobi`; dual time 5 / 1e-2), only the
+anchor varied by `PITZ_RAMP_ANCHOR` (harness commits `81857c7`, `8891cca`; `1` removes the ramp and the
+march self-starts by `hybrid_initialize` at the case's own viscosity). Linux x86_64, 4 cores, jax 0.11.2,
+one arm at a time, nothing else running.
+
+| anchor | steps | restart cycles | redone steps | wall |
+|---|---|---|---|---|
+| 100 | 16 | **111** | 0 | 701 s |
+| 10 | 17 | 178 | 2 | 1100 s |
+| 3 | 18 | 217 | 3 | 1348 s |
+| 1 (no ramp) | 16 | 246 | 5 | 1585 s |
+
+All four reach the same root (`Ux` in [-2.693, 10.225]; `x_r/h` 8.07 read for anchors 100 and 1). The
+anchor-100 arm reproduces the recorded 16 steps / 111 cycles exactly. ⚠️ The cycle column counts only
+ACCEPTED attempts, so the redone steps' discarded work is visible only in wall clock -- which is why the
+wall ratios (1.0 / 1.6 / 1.9 / 2.3) run ahead of the cycle ratios.
+
+- **pitzDaily does not NEED a ramp under today's march** (the old ~490-step cold crawl is gone), but the
+  ramp is worth 2.2x in cycles and 2.3x in wall. The anchor is a cost lever, not a reachability one, here.
+- **Cost falls monotonically with depth up to 100; nothing deeper was run at these settings**, so the
+  optimum may lie beyond 100.
+- **The early full-step ratio ranked the arms.** `rho1` at step 3 was 1.08 / 4.51 / 6.43 / 89.25 for
+  anchors 100 / 10 / 3 / 1, the same order as cost (first redo at step -- / 4 / 11 / 3).
+  One case and four points: a candidate signal for a start-probe, not a calibrated one.
+
