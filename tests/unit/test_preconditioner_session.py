@@ -14,7 +14,6 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.solve import (
     AirReduction,
-    CompleteLu,
     DualTimeLoop,
     FieldSplit,
     JacobianProbeSpec,
@@ -47,7 +46,7 @@ def test_a_block_session_refresh_carries_the_flow_block(case) -> None:
 def test_a_frozen_step_refuses_a_refresh_count_but_a_session_build_wires_one(case) -> None:
     """A refresh count with nothing to fire is refused; as a loose keyword it was accepted and ignored."""
     coupled, state = case
-    spec = MaterializedJacobian(CompleteLu())
+    spec = MaterializedJacobian(_SPLIT)
     loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
     with pytest.raises(TypeError, match="refresh_on_cycles"):
         coupled_step(coupled, state, preconditioner=spec, dual_time=loop)
@@ -59,7 +58,7 @@ def test_a_frozen_step_refuses_a_refresh_count_but_a_session_build_wires_one(cas
 def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) -> None:
     """A new object in a static field recompiles the coupled solve, so a session must hand back the same ones."""
     coupled, state = case
-    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
     hook = session.refresh_preconditioner
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
@@ -81,7 +80,7 @@ def test_the_session_probe_follows_the_operator_stand_in(case) -> None:
 def test_a_probe_spec_reaches_the_probe(case) -> None:
     coupled, _ = case
     session = open_session(
-        MaterializedJacobian(CompleteLu(), probe=JacobianProbeSpec(gradient_sweeps=1)), coupled
+        MaterializedJacobian(_SPLIT, probe=JacobianProbeSpec(gradient_sweeps=1)), coupled
     )
     assert session._probe_for().narrowing.gradient_sweeps == 1
 
@@ -116,9 +115,7 @@ def test_the_precondition_wrapper_wraps_the_hook_the_march_calls(case) -> None:
 
         return recorded
 
-    session = open_session(
-        MaterializedJacobian(CompleteLu()), coupled, precondition_wrapper=wrapper
-    )
+    session = open_session(MaterializedJacobian(_SPLIT), coupled, precondition_wrapper=wrapper)
     session.refresh_preconditioner("step", None)
     assert calls == ["step"]
 
@@ -131,8 +128,8 @@ def test_the_block_family_refuses_settings_it_cannot_use(case) -> None:
 
 def test_block_inverse_settings_are_refused_without_a_field_split(case) -> None:
     coupled, _ = case
-    with pytest.raises(TypeError, match="CompleteLu has none"):
-        open_session(MaterializedJacobian(CompleteLu()), coupled, reports={"leading": print})
+    with pytest.raises(TypeError, match="SimpleSmoothed has none"):
+        open_session(MaterializedJacobian(SimpleSmoothed()), coupled, reports={"leading": print})
 
 
 def test_a_report_for_an_inverse_with_no_record_is_refused_when_the_session_opens(case) -> None:
@@ -157,14 +154,14 @@ def test_a_build_refuses_keywords_the_session_owns_and_keywords_that_do_not_exis
 def test_a_session_cannot_be_re_pointed_at_a_different_case(case) -> None:
     coupled, _ = case
     _, other = _cavity(n=7)
-    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
     with pytest.raises(ValueError, match="SAME case"):
         session.rebind(other)
 
 
 def test_a_materialized_build_refuses_a_traced_state(case) -> None:
     coupled, state = case
-    session = open_session(MaterializedJacobian(CompleteLu()), coupled)
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
 
     def objective(s):
         session.build(s)

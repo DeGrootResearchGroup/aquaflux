@@ -1,5 +1,11 @@
 # tetrahedral_gradient_ab — a real mesh with corner tetrahedra
 
+> **Preconditioner change, 2026-10-11.** Every march below that names a "complete LU" was run with one.
+> The complete LU has since been removed from aquaflux, and these scripts now precondition the turbulent
+> duct with the field split `FieldSplit(SimpleSmoothed(), JacobiSmoothed())` and the laminar duct with
+> `SimpleSmoothed()` over the whole flow state (which matched the LU step for step on the laminar duct,
+> below). The recorded numbers have not been re-run under the new preconditioners.
+
 ## Why
 
 Issue #432: `MultipleCorrectionGradient`'s default (`boundary_closure=OwnerGradient()`,

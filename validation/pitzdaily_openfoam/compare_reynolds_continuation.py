@@ -64,12 +64,21 @@ from pathlib import Path
 # Reuse the benchmark definition and the reattachment metric from the base case rather than restate them.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import dataclasses
+import os
+
 import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
-from aquaflux.solve import Convergence, DualTimeControl, DualTimeLoop
+from aquaflux.solve import (
+    CompleteLu,
+    Convergence,
+    DualTimeControl,
+    DualTimeLoop,
+    MaterializedJacobian,
+    shift_of,
+)
 from aquaflux.turbulence import GeometricReynoldsSchedule, open_session, solve_reynolds_continuation
-from aquaflux.solve import CompleteLu, MaterializedJacobian
 
 # The Reynolds ramp: 2 lower-Re rungs before the target -> viscosity scales (100, 10, 1) -> Re ~ 250,
 # 2500, 25000. The rest of the march budget is the working configuration for this case.
@@ -93,13 +102,34 @@ RESTART = (
 # the bubble's transient, so it never reaches the developed root.
 CONTROL = DualTimeControl(beta_start=0.5, beta_min=0.005)
 
+#: Which inverse preconditions the march: ``lu`` (a complete LU re-factored at every step's own shift)
+#: or ``split`` (the field split ``case.yaml`` ships, at its own refit floor). The ``split`` arm asks
+#: whether the exactness this docstring credits for surviving the aggressive control is needed at all.
+INVERSE = os.environ.get("PITZ_RC_INVERSE", "lu")
+if INVERSE not in ("lu", "split"):
+    raise SystemExit(f"PITZ_RC_INVERSE must be 'lu' or 'split', not {INVERSE!r}")
+
+
+def _preconditioner() -> MaterializedJacobian:
+    """The materialized preconditioner the march is given, built at the control's starting shift."""
+    if INVERSE == "lu":
+        return MaterializedJacobian(CompleteLu(), build_beta=CONTROL.beta_start)
+    return dataclasses.replace(compare.SOLVER.preconditioner, build_beta=CONTROL.beta_start)
+
+
+#: When a mid-step refit fires. The complete LU re-factors before every step on its own; the split
+#: refits on cost, so it takes the cost trigger ``case.yaml`` ships with it. Without one it would be
+#: fitted once per rung and never again, which is not a configuration anything runs.
+REFRESH_ON_CYCLES = None if INVERSE == "lu" else compare.SOLVER.dual_time.refresh_on_cycles
+
 
 class _ShiftLoggingControl:
     """Wrap a step control to record the pseudo-transient shift (beta) it selects each outer step.
 
     A :class:`~aquaflux.solve.StepReport` carries the inner line-search factor, not the shift the control
     chose, so the streamed log cannot otherwise show the pseudo-timestep ramping. This delegates to the
-    wrapped control and stashes the shift it returns (which is the control's carried state), so the
+    wrapped control and stashes the shift of the step it returns (read with
+    :func:`~aquaflux.solve.shift_of`, since the control's carried state is not the bare shift), so the
     observer can print it. It resets to the wrapped control's ``beta_start`` at each new Reynolds rung on
     its own, because the continuation restarts the control state per rung.
 
@@ -118,9 +148,9 @@ class _ShiftLoggingControl:
         self, base_step: object, previous: object, state: object
     ) -> tuple[object, object]:
         """Delegate to the wrapped control and record the selected shift; signature per ``StepControl``."""
-        step, beta = self.inner.next_step(base_step, previous, state)
-        self.last_beta = float(beta)
-        return step, beta
+        step, carried = self.inner.next_step(base_step, previous, state)
+        self.last_beta = float(shift_of(step))
+        return step, carried
 
 
 def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
@@ -152,7 +182,7 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
         f"[cfg] Reynolds ramp anchored at Re/{anchor:g}, ratio {schedule.ratio:g} per rung "
         f"({N_POINTS} rungs before the target); "
         f"inner_steps={INNER_STEPS} beta_start={CONTROL.beta_start} beta_min={CONTROL.beta_min} "
-        f"rtol={RTOL} preconditioner=complete-LU refreshed per step",
+        f"rtol={RTOL} preconditioner={_preconditioner()!r} refresh_on_cycles={REFRESH_ON_CYCLES}",
         flush=True,
     )
 
@@ -179,14 +209,14 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
     # companion, and it re-factors the LU at the current (state, beta) before every step. The exact
     # factorization is what lets the aggressive control's large-timestep overshoots stay finite (the
     # block preconditioner cannot).
-    session = open_session(
-        MaterializedJacobian(CompleteLu(), build_beta=CONTROL.beta_start), coupled
-    )
+    session = open_session(_preconditioner(), coupled)
 
     options = (
         dict(
             preconditioner=session,
-            dual_time=DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL),
+            dual_time=DualTimeLoop(
+                inner_steps=INNER_STEPS, inner_tol=INNER_TOL, refresh_on_cycles=REFRESH_ON_CYCLES
+            ),
             intermediate=Convergence(rtol=INTERMEDIATE_RTOL),
             max_steps=MAX_STEPS,
             convergence=Convergence(rtol=RTOL),

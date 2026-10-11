@@ -101,7 +101,6 @@ SUBPACKAGE_GROUPS = {
             [
                 "host_preconditioner",
                 "materialized_preconditioner",
-                "lu_preconditioner",
                 "monolithic_policy",
                 "materialized_spec",
                 "materialized_session",

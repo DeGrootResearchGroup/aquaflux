@@ -1,10 +1,10 @@
 """A materialized-Jacobian preconditioner, kept current across every step of a march.
 
-A complete LU, a multigrid V-cycle or a field split preconditions a shifted solve by inverting the
+A field split, or one block inverse over the whole state, preconditions a shifted solve by inverting the
 **assembled** Jacobian, recovered off the jit path by coloured probing. It is built at one state and one
-shift and goes stale as the march moves both, so a march that uses one must also re-fit it -- every step
-for a cheap exact factorization, on evidence for an expensive multigrid -- and must hand the *same
-objects* to every step it builds, because the inverse and the refresh hooks ride in static fields of the
+shift and goes stale as the march moves both, so a march that uses one must also re-fit it -- on
+evidence, since a multigrid re-fit is expensive -- and must hand the *same objects* to every step it
+builds, because the inverse and the refresh hooks ride in static fields of the
 Newton step and a new object recompiles the whole solve.
 
 :class:`MaterializedSession` is that lifecycle: one probe, one inverse and one refresh hook, each created
@@ -30,9 +30,7 @@ from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .field_split import FieldGroups, FieldSplitPreconditioner
 from .jacobian_probe import JacobianProbe
-from .lu_preconditioner import CompleteLuPreconditioner
-from .materialized_preconditioner import MaterializedJacobianPreconditioner
-from .materialized_spec import CompleteLu, FieldSplit, MaterializedJacobian
+from .materialized_spec import FieldSplit, MaterializedJacobian
 from .refresh_timing import RefreshTiming
 from .shifted_step import LinearSolveRegime
 from .state import FieldLayout
@@ -40,7 +38,6 @@ from .strategy import NewtonStrategy, shift_of
 
 __all__ = [
     "BUILD_BETA",
-    "FACTORIZATION_LINEAR_SOLVE",
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
     "BetaTrackingRefresh",
@@ -78,14 +75,6 @@ PROBE_BATCH_SIZE = 8
 #: ``build_beta`` unset. A frozen coarse space is chosen at that build and reused by every later refit, so
 #: this is not only the first step's operator.
 BUILD_BETA = 2.0
-
-#: A monolithic complete-LU factorization. It factors the whole saddle exactly, so the preconditioned
-#: operator's spectrum collapses to a single point at the state and shift it was factored at -- the Krylov
-#: solve stops within a handful of vectors there, and a large subspace is pure waste: with ``restart =
-#: 120`` it would build ~120 matrix-vector products (each paying the factorization's triangular
-#: back-solve) before it could stop. ``max_restarts`` is kept generous so a transiently harder (e.g.
-#: drifted-reference) solve still completes before the next refactor.
-FACTORIZATION_LINEAR_SOLVE = LinearSolveRegime(rtol=0.3, restart=10, max_restarts=40)
 
 #: A multigrid V-cycle -- a field split's blocks, or one block inverse over the whole state. Restart 15
 #: is the measured sweet spot for a one-V-cycle preconditioner: enough Arnoldi history for its convergence while checking the stop often enough not to
@@ -149,8 +138,7 @@ def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
     """The frozen pseudo-transient shift diagonal a factorization is built against, at ``state``.
 
     ``beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen factorization
-    off the differentiation path. Shared by the initial build and every in-place refresh, for the
-    complete-LU and multigrid preconditioners alike.
+    off the differentiation path. Shared by the initial build and every in-place refresh.
 
     It asks the term for the shift at ``beta`` rather than scaling the diagonal itself, so a policy that
     runs a block at its own pseudo-timestep preconditions the operator it actually forms. Open-coding
@@ -217,10 +205,9 @@ class BetaTrackingRefresh:
     Called as ``refresh(active_step, state)`` before every step, it reads ``β`` from the step's
     :class:`~aquaflux.solve.ConstantRelaxation` schedule and re-factors the step's
     :class:`~aquaflux.solve.MonolithicFactorShiftPolicy` preconditioner in place at
-    ``J(state) + β·d(state)``. With ``every_step`` it does so on every step (the cheap exact-LU cadence);
-    without, only on its first call and after each :meth:`rebind` -- a multigrid re-materialize is too
-    expensive to pay every step, so between those the rebuild is left to the dual-time loop's cost
-    trigger, through :meth:`refresh_at`.
+    ``J(state) + β·d(state)`` on its first call and after each :meth:`rebind`. A multigrid
+    re-materialize is too expensive to pay every step, so between those the rebuild is left to the
+    dual-time loop's cost trigger, through :meth:`refresh_at`.
 
     It is a plain mutable object, deliberately not an ``equinox.Module``: it re-fits a host
     preconditioner in place, so it runs only on the eager forward march and must never be on a
@@ -233,9 +220,6 @@ class BetaTrackingRefresh:
         The residual assembler (supplies the Jacobian-vector product); a pytree with ``residual``.
     probe : JacobianProbe
         The shared colouring plan, de-compression map and assembler stand-in.
-    every_step : bool
-        Re-factor on every step (``True``), or only on the first call and after each :meth:`rebind`
-        (``False``).
     refit_beta_floor : float
         A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
         ``max(beta, refit_beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0``
@@ -256,12 +240,10 @@ class BetaTrackingRefresh:
         assembler: object,
         probe: JacobianProbe,
         *,
-        every_step: bool,
         refit_beta_floor: float = 0.0,
         observer: Callable[[RefreshTiming], None] | None = None,
     ) -> None:
         self._probe = probe
-        self._every_step = every_step
         self._refit_beta_floor = refit_beta_floor
         self._observer = observer
         # Pending on the first call -- the build froze the preconditioner at its own shift, not the
@@ -288,7 +270,7 @@ class BetaTrackingRefresh:
                 f"switched-evolution schedule ({type(active_step).__name__} has no readable β)."
             )
         started = time.perf_counter()
-        if not (self._every_step or self._full_rebuild_pending):
+        if not self._full_rebuild_pending:
             self._report("none", started)
             return
         self._full_rebuild_pending = False
@@ -361,27 +343,22 @@ class BetaTrackingRefresh:
         ``refit_beta_floor * d`` rather than growing without bound the way a stale (never-refreshed)
         preconditioner's does.
 
-        The multigrid preconditioner materializes through the coloured probe and takes its batched form;
-        the complete-LU preconditioner does not, so that is passed on the multigrid path only. Both probes
-        take the assembler as an argument to a module-level jitted function, so a :meth:`rebind` changes
-        no compilation key of theirs.
+        The preconditioner materializes through the coloured probe in its batched form. Both probes take
+        the assembler as an argument to a module-level jitted function, so a :meth:`rebind` changes no
+        compilation key of theirs.
         """
         policy = step.shift_policy
         pc = policy.preconditioner
         frozen = jax.lax.stop_gradient(jnp.asarray(state))
         shift = frozen_shift_diagonal(policy.base, max(beta, self._refit_beta_floor), frozen)
         probed = self._probed
-        extra = (
-            {
-                "batched_matvec": lambda seeds: batched_jacobian_matvec(probed, frozen, seeds),
-                "probe_batch_size": PROBE_BATCH_SIZE,
-                "structure": self._probe.structure,
-            }
-            if isinstance(pc, MaterializedJacobianPreconditioner)
-            else {}
-        )
         return pc.refresh_in_place(
-            lambda v: jacobian_matvec(probed, frozen, v), self._probe.plan, shift, **extra
+            lambda v: jacobian_matvec(probed, frozen, v),
+            self._probe.plan,
+            shift,
+            batched_matvec=lambda seeds: batched_jacobian_matvec(probed, frozen, seeds),
+            probe_batch_size=PROBE_BATCH_SIZE,
+            structure=self._probe.structure,
         )
 
     def _report(
@@ -519,13 +496,13 @@ class MaterializedSession:
             raise TypeError(
                 "a FieldSplit inverse needs a leading and a trailing group of fields, and this problem "
                 "has a single group -- there is nothing to split. Use a block inverse such as "
-                "SimpleSmoothed() over the whole state, or CompleteLu()."
+                "SimpleSmoothed() over the whole state."
             )
         if isinstance(spec.inverse, BlockInverse) and problem.groups() is not None:
             raise TypeError(
                 "a bare block inverse is fitted to the WHOLE state, which is only meaningful when the "
                 "fields form a single group (a laminar flow); this problem has a leading and a trailing "
-                "group. Wrap block inverses in FieldSplit(leading=..., trailing=...), or use CompleteLu()."
+                "group. Wrap block inverses in FieldSplit(leading=..., trailing=...)."
             )
         self._spec = spec
         self._problem = problem
@@ -608,9 +585,7 @@ class MaterializedSession:
             base,
             self._preconditioner,
             bound,
-            FACTORIZATION_LINEAR_SOLVE
-            if isinstance(self._spec.inverse, CompleteLu)
-            else VCYCLE_LINEAR_SOLVE,
+            VCYCLE_LINEAR_SOLVE,
         )
         return step if self._on_build is None else self._on_build(step)
 
@@ -631,7 +606,6 @@ class MaterializedSession:
             self._hook = BetaTrackingRefresh(
                 self._problem.assembler,
                 self._probe_for(),
-                every_step=isinstance(self._spec.inverse, CompleteLu),
                 observer=self._observer,
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
@@ -648,8 +622,6 @@ class MaterializedSession:
         build_beta = BUILD_BETA if self._spec.build_beta is None else self._spec.build_beta
         shift = frozen_shift_diagonal(base, build_beta, state)
         inverse = self._spec.inverse
-        if isinstance(inverse, CompleteLu):
-            return CompleteLuPreconditioner.build(matvec, probe.plan, shift)
 
         def batched_matvec(seeds):
             return batched_jacobian_matvec(probed, frozen, seeds)

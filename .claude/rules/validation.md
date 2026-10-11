@@ -5,7 +5,7 @@ paths:
 
 # Rules — `validation/` (the scientific cases and the study harnesses)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > **Provenance boundary (binding).** As with every rule file: what you read here informs your
 > understanding, and none of it may reach the shipped surface. See the root `CLAUDE.md`
@@ -216,8 +216,9 @@ cannot be written. The guard is what catches the next module that does branch.
   comparisons return False and so *look* exactly like a threshold rejecting every edge.
   **Gate it: assert the starting residual is finite before measuring anything.**
 - **Do not copy a wiring idiom from a test without checking the case matches.** The `pack_state` error
-  above came from `tests/integration/test_coupled_lu.py`, where it is correct — that fixture builds
-  `CoupledRANS` with no transform.
+  above came from `tests/integration/test_coupled_lu.py` (deleted 2026-10-11; its channel fixture lives in
+  `test_coupled_field_split.py` now), where it is correct — that fixture builds `CoupledRANS` with no
+  transform.
 - **⚠️ A PIVOT CENSUS MUST READ THE FACTOR, NOT THE OPERATOR HANDED TO IT.** Every consumer here
   symmetrically equilibrates before factorizing, which forces the *operator's* diagonal to magnitude
   exactly 1 — so a census written as `matrix.diagonal()` reports "zero negative pivots, min |pivot|
@@ -664,6 +665,7 @@ and this section once explained it as a platform difference (arm64/Python 3.13 v
 `max_steps` hypothesis. **The real cause was simpler: all three were `pytest.importorskip("petsc4py")`-gated,
 CI did not install PETSc, so CI never ran them** (root `CLAUDE.md`, "CI is not a superset of a local run").
 Two of them (`test_coupled_amg.py`) were deleted with PETSc on 2026-10-10; the third, now
-`test_the_split_continuation_converges_to_the_complete_lu_fixed_point`, is PETSc-free and runs in CI.
+`test_the_split_continuation_reaches_the_block_preconditioned_root` (renamed when the complete LU it
+compared against was deleted, 2026-10-11), is PETSc-free and runs in CI.
 **The trap that survives: before attributing a local-only failure to your platform, check the CI skip
 counts** — a guard was once reverted on the strength of the platform story.

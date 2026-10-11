@@ -37,16 +37,18 @@ from aquaflux.flow import flow_march_step, momentum_continuation, reused_flow_so
 from aquaflux.flow.block_preconditioner import BlockPreconditioner
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
-    CompleteLu,
     DivergenceGuard,
     DualTimeLoop,
     DualTimeStep,
+    FieldSplit,
     Globalization,
+    JacobiSmoothed,
     MaterializedJacobian,
     MonotoneLineSearch,
     PseudoTransientStep,
     RelaxedFarFromRoot,
     RootSolveSettings,
+    SimpleSmoothed,
     SwitchedEvolutionRelaxation,
 )
 from aquaflux.turbulence import (
@@ -333,10 +335,10 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
             globalization=asked,
             **extra,
         ),
-        "lu": coupled_step(
+        "split": coupled_step(
             coupled,
             state,
-            preconditioner=MaterializedJacobian(CompleteLu()),
+            preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
             globalization=asked,
             **extra,
         ),

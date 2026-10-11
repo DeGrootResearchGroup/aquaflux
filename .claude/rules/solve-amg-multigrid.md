@@ -19,7 +19,7 @@ paths:
 > before `2026-10-10` if a question about it ever reopens. Why it went: no shipped case or default
 > selected it, and the traced nodal hierarchy matches GAMG on the `[k, ω]` block.
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18) to keep routine `aquaflux/solve/` work from loading the full
 > AMG/multigrid investigation narrative. See `solve.md` for the package-wide contracts, current
@@ -338,7 +338,7 @@ paths:
     default forward solver on the complete-LU path too (`_monolithic_factor_step` fell back to it for
     both), so deleting the ILUT without renaming it would have left a solver named after a preconditioner
     that no longer exists. It became `_COUPLED_FACTORIZATION_FORWARD_SOLVER`, and since #282 it is the
-    `_FACTORIZATION_LINEAR_SOLVE` restart regime — the solver object itself is gone, `_coupled_step` builds it.
+    `_FACTORIZATION_LINEAR_SOLVE` restart regime, deleted with the complete LU on 2026-10-11.
 
 ### ⭐ Ordering, not fill, is what fails zero-fill on `pitzDaily` (2026-08-17)
 

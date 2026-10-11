@@ -111,7 +111,6 @@ from .host_preconditioner import (
 from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import PhaseTimer, RefreshTiming
 from .state import CellFields, FieldLayout, GlobalDofs, StateBlock, SubLayout
-from .lu_preconditioner import CompleteLuPreconditioner
 from .strategy import (
     AbortsInnerLoop,
     CarriesRelaxationSchedule,
@@ -219,7 +218,6 @@ from .jacobian_probe import JacobianProbe, jacobian_probe_plan
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .materialized_session import (
     BUILD_BETA,
-    FACTORIZATION_LINEAR_SOLVE,
     PROBE_BATCH_SIZE,
     VCYCLE_LINEAR_SOLVE,
     BetaTrackingRefresh,
@@ -231,7 +229,6 @@ from .materialized_session import (
     jacobian_matvec,
 )
 from .materialized_spec import (
-    CompleteLu,
     FieldSplit,
     JacobianProbeSpec,
     MaterializedJacobian,
@@ -275,7 +272,6 @@ __all__ = [
     "DEFAULT_ROOT_SOLVE",
     "DEFAULT_SHIFT_BASIS",
     "ESCALATING_REASONS",
-    "FACTORIZATION_LINEAR_SOLVE",
     "MATERIALIZED_MAPPING",
     "NO_REFRESH",
     "NO_RETRIES",
@@ -296,8 +292,6 @@ __all__ = [
     "CflResidualDualTimeControl",
     "CoefficientDriftTrigger",
     "ColumnProbePlan",
-    "CompleteLu",
-    "CompleteLuPreconditioner",
     "ConstantRelaxation",
     "ContinuationSource",
     "ConvectionDiffusionStencil",

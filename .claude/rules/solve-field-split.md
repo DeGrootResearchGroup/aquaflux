@@ -7,7 +7,7 @@ paths:
 
 # Rules — `aquaflux/solve/field_split.py` (the block-triangular field split)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(CompleteLu | FieldSplit | BlockInverse)`), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and binding decisions this file assumes.
@@ -123,7 +123,9 @@ history. Its harness arms (`field_split_probe.py`'s split arms, `turbulence_smoo
 `rung_hierarchy_reuse.py`) were deleted and survive only in git history before that change. The
 monolithic `MonolithicVCycleInverse` survived #371 and was **deleted with PETSc on 2026-10-10**; `field_split_probe.py`'s
 control arm is now the shipped split, and `tests/integration/test_coupled_field_split.py` is no longer
-PETSc-gated (its slow-tier fixed-point test compares the split against `CompleteLu` instead).
+PETSc-gated. Since the complete LU was deleted (2026-10-11) it also holds the ported LU tests: the
+split's march reaches the block-SIMPLE root, its `jax.grad` matches a central finite difference to `1e-5`,
+a session refits it at the step's CURRENT shift, and a re-fitting march is differentiable.
 
 - **⚠️ WE ARE NOT SOLVING A SADDLE-POINT PROBLEM — we are solving a saddle point PLUS two
   advection-dominated transported scalars, and that is probably why the saddle-point literature keeps

@@ -67,9 +67,9 @@ class TransposedPreconditioner:
     The generic adjoint machinery derives the transpose preconditioner from the forward one with
     :func:`jax.linear_transpose`, which works only when the forward preconditioner is a traceable
     JAX operation (an algebraic-multigrid V-cycle is). A preconditioner applied through a host
-    callback -- the monolithic incomplete-LU factorization, whose triangular solve runs in ``scipy``
-    via :func:`jax.pure_callback` -- cannot be transposed that way; instead it supplies its own
-    transpose directly (the same factorization applied with a transposed triangular solve). Wrapping
+    callback -- a materialized-Jacobian inverse applied through :func:`jax.pure_callback` -- cannot
+    be transposed that way; instead it supplies its own transpose directly (the same inverse applied
+    transposed). Wrapping
     the factory in this marker tells :func:`root_adjoint` to apply its output as-is rather than
     transpose it.
 

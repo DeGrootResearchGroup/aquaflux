@@ -72,9 +72,9 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     """
     pc = _RecordingPreconditioner()
     step = _stub_step(pc, beta=0.5, diagonal=_DIAGONAL)
-    # The multigrid cadence: a full rebuild on the first call and after a rebind, none otherwise --
-    # between those only the dual-time loop's cost trigger rebuilds the V-cycle.
-    refresh = _hook(gain=3.0, every_step=False)
+    # A full rebuild on the first call and after a rebind, none otherwise -- between those only the
+    # dual-time loop's cost trigger rebuilds the V-cycle.
+    refresh = _hook(gain=3.0)
 
     refresh(step, _STATE)  # the initializing call
     assert len(pc.calls) == 1
@@ -95,17 +95,6 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     assert len(pc.calls) == 2
 
 
-def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
-    """``every_step=True`` is the complete-LU cadence: an exact factorization is cheap, and exact only
-    at the shift it was built at, so it is re-factored before every step rather than on a rebind."""
-    pc = _RecordingPreconditioner()
-    refresh = _hook(every_step=True)
-
-    for beta in (0.5, 0.25, 0.125):
-        refresh(_stub_step(pc, beta=beta, diagonal=_DIAGONAL), _STATE)
-    assert [float(call["shift"][0]) for call in pc.calls] == [1.0, 0.5, 0.25]
-
-
 def test_the_inner_refresh_rebuilds_at_the_iterate_it_is_given_for_the_current_step() -> None:
     """``refresh_at`` re-materializes at the MID-STEP iterate, for the step the march last handed over.
 
@@ -114,14 +103,14 @@ def test_the_inner_refresh_rebuilds_at_the_iterate_it_is_given_for_the_current_s
     the current one -- the march replaces the step every iteration with one carrying a new ``β``.
     """
     pc = _RecordingPreconditioner()
-    refresh = _hook(gain=3.0, every_step=False)
+    refresh = _hook(gain=3.0)
 
     refresh.refresh_at(_STATE)  # before any step: nothing to refresh, and nothing to fail on
     assert pc.calls == []
 
     refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)
     current = _stub_step(pc, beta=0.25, diagonal=_DIAGONAL)
-    refresh(current, _STATE)  # no full rebuild on this cadence, but it is now the current step
+    refresh(current, _STATE)  # no full rebuild after the first, but it is now the current step
     assert len(pc.calls) == 1
 
     iterate = 2.0 * _STATE
@@ -138,11 +127,12 @@ def test_the_refit_floor_bounds_the_preconditioners_shift_on_both_refreshes() ->
     inverts badly, which is the regime the floor exists to keep it out of.
     """
     pc = _RecordingPreconditioner()
-    refresh = _hook(every_step=True, refit_beta_floor=0.05)
+    refresh = _hook(refit_beta_floor=0.05)
 
     refresh(_stub_step(pc, beta=0.01, diagonal=_DIAGONAL), _STATE)  # below the floor: floored
     refresh.refresh_at(_STATE)
-    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # above it: untouched
+    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # no rebuild, but now current
+    refresh.refresh_at(_STATE)  # above the floor: untouched
     assert [float(call["shift"][0]) for call in pc.calls] == [0.1, 0.1, 1.0]
 
 
@@ -150,7 +140,7 @@ def test_the_observer_is_told_which_branch_each_refresh_took() -> None:
     """A march log reads ``full`` / ``none`` / ``inner`` from here, so each must name its own branch."""
     timings: list[RefreshTiming] = []
     pc = _RecordingPreconditioner()
-    refresh = _hook(every_step=False, observer=timings.append)
+    refresh = _hook(observer=timings.append)
 
     step = _stub_step(pc, beta=0.5, diagonal=_DIAGONAL)
     refresh(step, _STATE)
@@ -162,7 +152,7 @@ def test_the_observer_is_told_which_branch_each_refresh_took() -> None:
 def test_a_schedule_with_no_readable_shift_is_refused() -> None:
     """The hook fits at the step's ``β``, so a schedule that does not expose one as a constant is refused
     by name rather than fitted at some other shift."""
-    refresh = _hook(every_step=True)
+    refresh = _hook()
     step = _stub_step(_RecordingPreconditioner(), beta=0.5, diagonal=_DIAGONAL)
     step.relaxation_schedule = SimpleNamespace()
     with pytest.raises(ValueError, match="readable constant"):

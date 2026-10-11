@@ -410,9 +410,6 @@ def decouple_dof(a: sp.csr_matrix, index: int) -> sp.csr_matrix:
 # The other half of the transform above. `symmetrically_equilibrate` rescales; this reorders, and every
 # consumer applies the two together -- a factorization or a coarsening wants the matrix both
 # unit-diagonal and grouped by cell, and `equilibrate_cell_major` below is exactly that pair.
-#
-# The complete LU needs neither (its own fill-reducing pivoting and ordering already handle the
-# indefinite saddle).
 
 
 def cell_major_permutation(n_cells: int, n_fields: int) -> np.ndarray:
