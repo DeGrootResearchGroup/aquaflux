@@ -1434,3 +1434,6 @@ the prototype's arm to the last printed digit**, `x_r/h` 8.0686, no retry, ramp 
 the target settled at step 14. Its `rho1` column: 0.19 0.25 0.86 1.57 3.89 3.43 1.92 1.14 **0.83**
 (settle) 1.29 1.53 2.08 1.29 **0.91** (target settles) 3.15 0.34. Opt-in; pitzDaily's file keeps 12 fixed
 stations (111 < 114).
+The file as shipped (12 fixed stations), on the same code: 16 steps, 111 cycles, per-step costs and
+final `|R|` 1.979e-06 identical to the confirmation run before the change -- the fixed walk and the
+extra `full_step_ratio` carry move nothing.
