@@ -450,3 +450,151 @@ def test_a_shift_control_refuses_a_step_with_no_shift_before_the_march_takes_a_s
         )
     # Only the march's own opening measurement: no step was taken before the refusal.
     assert len(calls) == 1
+
+
+# --------------------------------------------------------------------------------------------------
+# Releasing the floor once the march has settled at the target (`release_floor`).
+# --------------------------------------------------------------------------------------------------
+
+_FLOOR, _RELEASE = 0.005, 1.0e-4
+
+
+def _releasing(kind, **kwargs):
+    """Each control, at a floor of 0.005 and releasing to 1e-4 unless told otherwise."""
+    settings = dict(beta_start=0.5, beta_min=_FLOOR, release_floor=_RELEASE) | kwargs
+    return kind(**settings)
+
+
+def _settled(shift: float, alpha: float, residual: float = 0.5, arrived: bool = True) -> StepReport:
+    """A step that ran at ``shift`` with line-search factor ``alpha``, its residual half its memo's."""
+    return StepReport(
+        step=20,
+        cycles=10,
+        residual_norm=residual,
+        residual_ratio=residual,
+        alpha=alpha,
+        shift=shift,
+        arrived=arrived,
+    )
+
+
+_CONTROLS = (DualTimeControl, ResidualRatioDualTimeControl, CflResidualDualTimeControl)
+
+
+@pytest.mark.parametrize("kind", _CONTROLS)
+def test_a_full_step_at_the_floor_on_the_target_releases_the_shift_for_every_control(kind) -> None:
+    """The release is the base's, so every control reaches it -- and none does without asking for it.
+
+    Wrong answers this catches: a release written into one rule only, a release that ignores its
+    setting (the unset control must stay at the floor), and one that lowers β by a rule step instead of
+    dropping it to ``release_floor``.
+    """
+    released = _releasing(kind)
+    step, (beta, _memo) = released.next_step(_dual_step(), _settled(_FLOOR, 1.0), (_FLOOR, 1.0))
+    assert beta == _RELEASE
+    assert jnp.allclose(step.relaxation_schedule.beta, _RELEASE)
+    unset = _releasing(kind, release_floor=None)
+    _step, (beta, _memo) = unset.next_step(_dual_step(), _settled(_FLOOR, 1.0), (_FLOOR, 1.0))
+    assert beta == _FLOOR
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [
+        pytest.param(_settled(_FLOOR, 1.0, arrived=False), id="a station on the way to the target"),
+        pytest.param(_settled(_FLOOR, 0.5), id="a clipped step at the floor"),
+        pytest.param(_settled(0.01, 1.0), id="a full step above the floor"),
+    ],
+)
+def test_the_shift_is_not_released_until_the_target_step_at_the_floor_was_full_length(
+    previous,
+) -> None:
+    """Each of the three conditions is necessary on its own.
+
+    Measured on pitzDaily, a zero-shift step from the state the viscosity ramp arrived at did not
+    descend at all, and one from the state after the first full-length step at the floor reached the
+    stopping tolerance -- so neither arrival alone nor a clipped step at the floor licenses it.
+    """
+    control = _releasing(CflResidualDualTimeControl)
+    _step, (beta, _memo) = control.next_step(_dual_step(), previous, (previous.shift, 1.0))
+    assert beta >= _FLOOR
+
+
+def test_a_released_march_stays_released_while_the_rule_does_not_back_off() -> None:
+    """A released step need not be full-length to stay released: one at alpha 0.3 (the rule's dead band)
+    or 0.5 cut the pitzDaily residual 60-fold. Only a back-off sends it back to the floor.
+
+    Wrong answer caught: a release that holds for one step and then snaps back to ``beta_min``.
+    """
+    control = _releasing(CflResidualDualTimeControl)
+    for alpha in (0.3, 0.5):
+        _step, (beta, _memo) = control.next_step(
+            _dual_step(), _settled(_RELEASE, alpha), (_RELEASE, 1.0)
+        )
+        assert beta == _RELEASE
+
+
+@pytest.mark.parametrize(
+    "previous",
+    [
+        pytest.param(_settled(_RELEASE, 0.1), id="a clipped released step"),
+        pytest.param(
+            _settled(_RELEASE, 1.0, residual=2.0), id="a released step whose residual rose"
+        ),
+    ],
+)
+def test_a_released_march_returns_to_the_floor_when_the_rule_backs_off(previous) -> None:
+    """The way back is the rule's own back-off, raised to the floor rather than doubled from the release.
+
+    Wrong answers caught: a release that persists through a clipped or diverging step (the residual
+    case also has alpha 1, so it would re-enter the release were the back-off not checked first), and a
+    return that only doubles the released shift, which would take six bad steps to climb back.
+    """
+    control = _releasing(CflResidualDualTimeControl)
+    _step, (beta, _memo) = control.next_step(_dual_step(), previous, (_RELEASE, 1.0))
+    assert beta == _FLOOR
+
+
+def test_without_a_release_the_rule_never_runs_below_its_floor() -> None:
+    """The lowered clamp must not leak: before the release fires, β stops at ``beta_min`` as it always did."""
+    control = _releasing(DualTimeControl)
+    state = (0.006, None)
+    _step, (beta, _memo) = control.next_step(_dual_step(), _settled(0.006, 1.0), state)
+    assert beta == _FLOOR
+
+
+@pytest.mark.parametrize(
+    ("shift", "alpha", "settle_alpha", "expected"),
+    [
+        pytest.param(_FLOOR, 1.0, 1.0, True, id="full length at the floor"),
+        pytest.param(_FLOOR * 0.5, 1.0, 1.0, True, id="full length below the floor"),
+        pytest.param(_FLOOR * 1.01, 1.0, 1.0, False, id="full length just above the floor"),
+        pytest.param(_FLOOR, 0.5, 1.0, False, id="clipped at the floor"),
+        pytest.param(_FLOOR, 0.5, 0.5, True, id="clipped to the settle alpha"),
+    ],
+)
+def test_settled_is_a_step_at_the_floor_that_reached_the_settle_alpha(
+    shift, alpha, settle_alpha, expected
+) -> None:
+    """One definition, read by the release on the target and by a ramp that ends on it.
+
+    It looks at the step's shift and line-search factor only -- not at whether the step was on the
+    target, which is the release's own further condition and not part of being settled.
+    """
+    control = _releasing(DualTimeControl, settle_alpha=settle_alpha)
+    assert control.settled(_settled(shift, alpha, arrived=False)) is expected
+    assert control.settled(_settled(shift, alpha, arrived=True)) is expected
+
+
+@pytest.mark.parametrize(
+    ("settings", "names"),
+    [
+        (dict(release_floor=0.0), "release_floor"),
+        (dict(release_floor=_FLOOR), "release_floor"),
+        (dict(settle_alpha=0.0), "settle_alpha"),
+        (dict(settle_alpha=1.5), "settle_alpha"),
+    ],
+)
+def test_a_release_outside_its_range_is_refused(settings, names) -> None:
+    with pytest.raises(ValueError, match=names):
+        _releasing(DualTimeControl, **settings)

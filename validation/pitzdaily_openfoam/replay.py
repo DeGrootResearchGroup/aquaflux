@@ -107,6 +107,7 @@ class MarchReplay:
         }
         self.session = open_session(self.solver.settings()["preconditioner"], self.coupled)
         self.session.rebind(anchor)
+        self.march = march
         self.step = self.session.build(self.seed, **march)
         self.policy = self.step.shift_policy
         self.preconditioner = self.policy.preconditioner
@@ -157,7 +158,8 @@ class MarchReplay:
         """``(J + s) M v`` at ``system``."""
         return self._preconditioned(system.assembler, system.p, system.shift, v)
 
-    def _refit(self, assembler, beta, state):
+    def refit(self, assembler, beta, state):
+        """Re-fit the preconditioner in full at ``state`` and ``beta`` (floored as the march floors it)."""
         self.session.rebind(assembler)
         self.session.refresh_preconditioner(
             eqx.tree_at(lambda s: s.relaxation_schedule, self.step, ConstantRelaxation(beta)), state
@@ -185,7 +187,7 @@ class MarchReplay:
             measure = coupled_scaled_norm(self.coupled, self.policy, phi_n)
             # A station change re-fits in full at the step's start.
             if assembler is not previous:
-                self._refit(assembler, beta, phi_n)
+                self.refit(assembler, beta, phi_n)
             previous = assembler
             refreshed = False
             i, p = 0, phi_n
@@ -196,7 +198,7 @@ class MarchReplay:
                 yield System(k, i, assembler, p, phi_n, shift, measure, b, recorded)
                 # The march's mid-step refresh: once per step, at the iterate the expensive solve reached.
                 if self.refresh_on is not None and recorded >= self.refresh_on and not refreshed:
-                    self._refit(assembler, beta, jnp.asarray(record["state"]))
+                    self.refit(assembler, beta, jnp.asarray(record["state"]))
                     refreshed = True
                 p = jnp.asarray(record["state"])
                 i += 1

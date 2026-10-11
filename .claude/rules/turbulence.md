@@ -2096,7 +2096,14 @@ tuning follow-up noted above.
 - **`ViscosityRampHomotopy` — the SAME Reynolds span walked inside ONE march (`reynolds.py`, BUILT
   2026-09-09).** The `ResidualHomotopy` alternative to the rung ladder below: `stations` geometric
   viscosity stations from `anchor` down to exactly `1.0`, each held for `steps_per_station` outer steps,
-  handed to `solve_coupled(homotopy=…)`. What it removes is measured in
+  handed to `solve_coupled(homotopy=…)`. ⚠️ **Since 2026-10-11 the stations come from a
+  `solve.RampSchedule` (`ViscosityRampHomotopy(coupled, anchor=, ramp=RampSchedule(stations,
+  steps_per_station, end_when=, finish=))`, the same `ramp=` on `solve_reynolds_ramp`)**: there are no
+  `stations`/`steps_per_station` keywords and no `ramp_steps` property on the homotopy any more (the
+  latter is `RampSchedule.ramp_steps`), `scale(progress)` takes the schedule's progress rather than a
+  station index, and steps must be entered in order (`enter(step, previous)`). The schedule may END the
+  ramp on the march's settle (`solve-march.md`, `RampSchedule`); a fixed schedule walks exactly the
+  stations it always did. What it removes is measured in
   `.claude/rules/solve-march.md`'s `ResidualHomotopy` bullet — read the numbers there rather than
   restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
   viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
@@ -2146,6 +2153,15 @@ tuning follow-up noted above.
       the outer-step index and is never handed the state, the residual or a `StepReport`. Widening it is
       a design change, and the fine-ramp result says the answer is small stations rather than a clever
       rule for leaving one.
+    - **⚠️ THE OPTIMUM ABOVE WAS MEASURED AT `grow` 1.5, AND THE STATION COUNT IS THE SHIFT'S DESCENT IN
+      DISGUISE (measured 2026-10-11, with the shift released).** `beta` takes 12 steps to reach the floor
+      at `grow` 1.5, which is where the optimum sits; at `grow` 3 it takes 7, and `3 x 12` costs **111**
+      cycles in 16 steps against `1.5 x 16`'s 141 in 22. The viscosity step size does not move `alpha`
+      (identical histories at 1.33x and 2x per step); what is conserved is 6-9 steps AT the floor before
+      the state settles (at those paces: at 1.21x per step it settled at the 4th), and the cheapest ramp ends one step after that. Table and the design it closes
+      in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
+      **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11**; bfs3d keeps its own
+      schedule (#678).
   - **⚠️ THE PRECONDITIONER IS REFRESHED PER STATION CHANGE, AND THAT IS CORRECT — but "a full rebuild is
     the most expensive operation in the march" is REFUTED on this case.** Measured, a full
     re-materialize is **1.2-1.6 s** against a **~9 s** outer step. A control arm isolates it: `4 x 3` with
@@ -2480,7 +2496,10 @@ tuning follow-up noted above.
                 calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
                 calibrated at one station count does not transfer to another.
               - **⚠️ THE TWO CASES WANT OPPOSITE SCHEDULES, AND THE DISCRIMINATOR IS THE REBUILD COST.**
-                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily **16 at `gamma = 3`**. Swept on
+                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily shipped **16 at `gamma = 3`** at the
+                control's `grow` 1.5 (since 2026-10-11 it ships 12 at `gamma = 3` with `grow` 3 and the
+                release, which is a different optimum for a different reason: the "station count is the
+                shift's descent" entry under the ramp). Swept on
                 pitzDaily under momentum-only scaling, one run per arm, all reaching `x_r/h` 8.0686:
 
                 | stations | gamma | steps | cycles | ramp | target | pc | march |
@@ -2576,7 +2595,7 @@ tuning follow-up noted above.
     rung structure was originally calibrated — and it does not: the ramp is 31 % cheaper there
     (240 against 349 cycles at both-blocks scaling, 190 at momentum-only, 148 with that case's damping
     optimum). **Still one run per arm on each case.** `bfs3d` additionally defaults to
-    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily still defaults to `both`. The
+    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily does too (`scale: flow` in its `case.yaml`). The
     defaults are configured with
     `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
     ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it

@@ -78,18 +78,26 @@ class LineSearchStep(NamedTuple):
         The step fraction actually taken.
     residual_norm : jnp.ndarray
         ``norm(R(phi))`` at :attr:`phi`, in the measure the search was given.
+    full_step_norm : jnp.ndarray
+        The measure at the **full-length** trial, ``alpha = min(1, max_alpha)`` -- what the acceptance
+        test compared with the reference when it decided whether the full step could be taken. Kept
+        because a rejected full step is the information a step's ``alpha`` summarizes as a bare "no":
+        the ratio of this to the reference says by how much it failed, so its trend over successive
+        steps shows the full step becoming acceptable before it is. ``nan`` when the ladder accepted a
+        longer (growth) rung and never evaluated the full one.
     """
 
     phi: jnp.ndarray
     alpha: jnp.ndarray
     residual_norm: jnp.ndarray
+    full_step_norm: jnp.ndarray
 
 
 class StepOutcome(NamedTuple):
     """What one Newton step produced, what it cost, and how it ended.
 
-    A record rather than a widening tuple: these eight values travel together through every stepper and
-    both consumers, and a positional 8-tuple is where a caller silently mis-unpacks one for another.
+    A record rather than a widening tuple: these nine values travel together through every stepper and
+    both consumers, and a positional 9-tuple is where a caller silently mis-unpacks one for another.
 
     Attributes
     ----------
@@ -130,6 +138,13 @@ class StepOutcome(NamedTuple):
         constraint bound (the direction is fine, it just cannot be followed that far) -- and they call
         for opposite responses, so ``alpha`` alone cannot be acted on. Below ``1`` means an injected
         limit, not the descent test, decided the step length; the value is how tight it was.
+    full_step_ratio : jnp.ndarray
+        The step's first full-length trial measured against the state it started from,
+        ``norm(G(phi + delta)) / norm(G(phi))`` -- the number the line search compares with one to
+        accept the full step. For a dual-time step it is the **first** inner iteration's, whose
+        ``G`` at the anchor is the steady residual; for a single-step strategy it is the accepted
+        attempt's. ``nan`` when no full-length trial was evaluated (see
+        :attr:`LineSearchStep.full_step_norm`).
     """
 
     phi: jnp.ndarray
@@ -140,6 +155,7 @@ class StepOutcome(NamedTuple):
     reached_target: jnp.ndarray
     max_inner_cycles: jnp.ndarray
     binding_limit: jnp.ndarray
+    full_step_ratio: jnp.ndarray
 
 
 StepFn = Callable[
@@ -408,6 +424,11 @@ class StepReport(NamedTuple):
         Whether the step drove the **target** problem rather than a station on the way to it -- ``True``
         throughout a march without a homotopy. A residual from a step before arrival is a path value,
         not progress on the case, which is why a plot of a march marks where it arrived.
+    full_step_ratio : float
+        :attr:`StepOutcome.full_step_ratio` of the accepted attempt: how far the step's first
+        full-length trial was from being accepted (below one, it was). ``alpha`` reports only whether
+        the full step was taken; this says by how much it missed, so its trend over successive steps
+        shows a full step becoming acceptable a step or two before it is. ``nan`` is "not measured".
     """
 
     step: int
@@ -425,6 +446,7 @@ class StepReport(NamedTuple):
     damping_reference: float = 0.0
     station: int = 0
     arrived: bool = True
+    full_step_ratio: float = float("nan")
 
     @property
     def restart_cycles(self) -> int:

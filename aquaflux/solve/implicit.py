@@ -383,7 +383,8 @@ def backtracking_line_search(
     if steps == 0:
         alpha = jnp.minimum(jnp.asarray(1.0), max_alpha)
         stepped = phi + alpha * delta
-        return LineSearchStep(stepped, alpha, norm(residual_fn(stepped)))
+        measure = norm(residual_fn(stepped))
+        return LineSearchStep(stepped, alpha, measure, measure)
 
     # Walk the ladder from the LONGEST step down and keep the first admissible one -- the largest
     # step the acceptance tolerance allows, not the one that minimizes the residual.
@@ -439,7 +440,7 @@ def backtracking_line_search(
     # returned pair describes two different steps. This is what lets the caller judge the step it
     # gets without evaluating the residual again at a point the ladder already visited.
     def cond(carry):
-        index, _, _, found, _, _, _, _ = carry
+        index, _, _, found, _, _, _, _, _ = carry
         return (~found) & (index <= steps)
 
     def body(carry):
@@ -452,6 +453,7 @@ def backtracking_line_search(
             longest_norm,
             seen_eligible,
             seen_finite,
+            full_norm,
         ) = carry
         # Capped, not rejected: the cap makes an admissible step reachable by construction.
         alpha = jnp.minimum(0.5**index, max_alpha)
@@ -472,6 +474,8 @@ def backtracking_line_search(
             jnp.where(first_eligible, value, longest_norm),
             seen_eligible | eligible,
             seen_finite | finite_here,
+            # Rung 0 is the full step (capped); its measure is kept whatever the test decided of it.
+            jnp.where(index == 0, value, full_norm),
         )
 
     shortest = jnp.minimum(jnp.asarray(0.5**steps), max_alpha)
@@ -487,6 +491,7 @@ def backtracking_line_search(
         longest_norm,
         seen_eligible,
         seen_finite,
+        full_norm,
     ) = jax.lax.while_loop(
         cond,
         body,
@@ -499,6 +504,9 @@ def backtracking_line_search(
             seed_norm,
             jnp.asarray(False),
             jnp.asarray(False),
+            # Not evaluated until the ladder reaches the full step, which a growth rung accepted
+            # first prevents -- `nan`, "not measured", rather than a value it never had.
+            jnp.full_like(seed_norm, jnp.nan),
         ),
     )
     # Three outcomes, in order of preference. An admissible rung is taken as before. Failing that, the
@@ -513,7 +521,7 @@ def backtracking_line_search(
     measure = jnp.where(
         found, chosen_norm, jnp.where(stalled, jnp.asarray(reference_norm), longest_norm)
     )
-    return LineSearchStep(phi + alpha * delta, alpha, measure)
+    return LineSearchStep(phi + alpha * delta, alpha, measure, full_norm)
 
 
 def _damped_newton_step(
@@ -533,7 +541,8 @@ def _damped_newton_step(
     Returns a :class:`~aquaflux.solve.StepOutcome` carrying the stepped iterate, the measure at it,
     the raw solver count of the one linear solve behind it, the line-search factor,
     ``inner_iterations = 1`` (a single Newton step has no inner loop), ``reached_target = True``, the
-    offset-corrected cost of that one solve, and an unbinding ``binding_limit`` of ``1``. The line
+    offset-corrected cost of that one solve, an unbinding ``binding_limit`` of ``1``, and the full
+    step's measure over ``norm(R(phi))`` (the trial the search judged first, taken or not). The line
     search itself costs only residual evaluations, so the step's linear-solve cost is exactly that
     single solve's — and the measure it reports is the one the search already formed at the rung it
     kept, so the driver judging this step adds no residual evaluation of its own.
@@ -541,8 +550,9 @@ def _damped_newton_step(
     delta, r, cycles = newton_correction(
         residual_fn, phi, solver=solver, preconditioner=preconditioner
     )
+    reference = norm(r)
     searched = backtracking_line_search(
-        residual_fn, phi, delta, norm(r), line_search_steps, norm=norm
+        residual_fn, phi, delta, reference, line_search_steps, norm=norm
     )
     # No inner loop, so nothing could have been cut short and the one solve IS the most expensive one.
     return StepOutcome(
@@ -554,6 +564,7 @@ def _damped_newton_step(
         jnp.asarray(True),
         _corrected(cycles),
         jnp.asarray(1.0),
+        searched.full_step_norm / reference,
     )
 
 
