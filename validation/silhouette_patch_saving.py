@@ -24,7 +24,7 @@ meshed in strips along its length, which is how a curved vessel arrives from CAD
 flat). Each with the same lamp sleeve.
 
 Run with ``validation/run_case.sh validation/silhouette_patch_saving.py``; set
-``PATCH_SKIP_STAGES=1`` to skip the stage timing.
+``RADIATION_PATCH_SKIP_STAGES=1`` to skip the stage timing.
 """
 
 from __future__ import annotations
@@ -347,5 +347,5 @@ if __name__ == "__main__":
     for sectors, slices in ((24, 8), (32, 16)):
         report(f"tube {sectors}x{slices}", with_sleeve(faceted_tube(sectors, slices)))
 
-    if not os.environ.get("PATCH_SKIP_STAGES"):
+    if not os.environ.get("RADIATION_PATCH_SKIP_STAGES"):
         cost.silhouette_stages(ladder[2:])
