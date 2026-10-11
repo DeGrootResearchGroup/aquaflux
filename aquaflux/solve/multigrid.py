@@ -13,27 +13,28 @@ caller applies it on). Each level carries its operator in compressed-sparse-row 
 operators; the one recursion (:func:`_frozen_v_cycle`) applies the shared operator matvec
 (:func:`_operator_matvec`) and direct coarse solve, and is specialized per family by the injected
 :class:`_VCycleOps` (restriction, prolongation, smoother). The outer fixed-cycle driver every
-``*_multigrid_solve`` entry point runs is likewise one function (:func:`_fixed_cycle_solve`), so a
+``*_multigrid_cycles`` entry point runs is likewise one function (:func:`_fixed_cycles`), so a
 family contributes only its ops:
 
-* **Smoothed aggregation** (:func:`build_smoothed_hierarchy`, :func:`smoothed_multigrid_solve`): the
+* **Smoothed aggregation** (:func:`build_smoothed_hierarchy`, :func:`smoothed_multigrid_cycles`): the
   symmetric pressure Schur. The tentative piecewise-constant prolongation is smoothed
   ``P = (I - omega D^-1 A) P_tent``, restriction is ``Pᵀ``, the smoother is a Chebyshev polynomial,
   and the coarse level is a direct dense solve — ~0.25 mesh-independent contraction.
   Its two-level convection variant (:func:`build_convection_hierarchy`,
-  :func:`convection_multigrid_solve`) uses a damped-Jacobi smoother for the nonsymmetric momentum
+  :func:`convection_multigrid_cycles`) uses a damped-Jacobi smoother for the nonsymmetric momentum
   operator.
 * **Reduction — local approximate ideal restriction, lAIR** (:func:`build_air_hierarchy`,
-  :func:`air_multigrid_solve`): an **independent** restriction ``R != Pᵀ`` and an FC-Jacobi smoother
+  :func:`air_multigrid_cycles`): an **independent** restriction ``R != Pᵀ`` and an FC-Jacobi smoother
   for the strongly convection-dominated velocity block — Peclet-robust and mesh-independent to large
   meshes.
 
 Every builder takes an **assembled operator** ``a`` (a ``scipy.sparse`` matrix) and returns a frozen
 hierarchy: this module coarsens operators and knows nothing about meshes, fluxes, or which face value
-a scheme upwinds. Callers assemble with :func:`aquaflux.solve.frozen_operator.convection_diffusion_operator`
-(and regularize a closed-domain pressure system with
-:func:`aquaflux.solve.frozen_operator.decouple_dof` before building, so the AMG null space matches the
-pinned outer Jacobian; the pin only affects preconditioner quality, never the converged solution).
+a scheme upwinds. Callers assemble with
+:meth:`aquaflux.solve.frozen_operator.ConvectionDiffusionStencil.assemble` (and regularize a
+closed-domain pressure system with :func:`aquaflux.solve.frozen_operator.decouple_dof` before
+building, so the AMG null space matches the pinned outer Jacobian; the pin only affects
+preconditioner quality, never the converged solution).
 
 The coefficients are frozen at a reference field at build time (the standard "AMG setup once, reuse
 across nonlinear iterates" practice), with the per-iterate operator scale restored by a symmetric
@@ -731,10 +732,8 @@ class SmoothedHierarchy(eqx.Module):
             The approximate solution ``x``, shape ``(n,)``.
         """
         if self.equilibration is None:
-            return _fixed_cycle_solve(self.levels, b, cycles, ops)
-        return self.equilibration * _fixed_cycle_solve(
-            self.levels, self.equilibration * b, cycles, ops
-        )
+            return _fixed_cycles(self.levels, b, cycles, ops)
+        return self.equilibration * _fixed_cycles(self.levels, self.equilibration * b, cycles, ops)
 
     def shape_budget(self, headroom: float = 1.0) -> ShapeBudget:
         """This hierarchy's level sizes as a budget to rebuild into, optionally with headroom.
@@ -1322,7 +1321,7 @@ def build_smoothed_hierarchy(
     Returns
     -------
     SmoothedHierarchy
-        Frozen finest-to-coarsest general-sparse levels for :func:`smoothed_multigrid_solve`.
+        Frozen finest-to-coarsest general-sparse levels for :func:`smoothed_multigrid_cycles`.
     """
     return _build_aggregation_hierarchy(
         a.tocsr(),
@@ -1593,7 +1592,7 @@ def _frozen_v_cycle(
     return ops.smooth(level, b, x)  # post-smooth
 
 
-def _fixed_cycle_solve(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleOps) -> jnp.ndarray:
+def _fixed_cycles(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleOps) -> jnp.ndarray:
     """The outer driver shared by every frozen path: ``cycles`` V-cycles from a zero initial guess.
 
     Each pass corrects the current iterate by a V-cycle on the current residual, so with a frozen
@@ -1641,7 +1640,7 @@ def _smoothed_ops(
     )
 
 
-def smoothed_multigrid_solve(
+def smoothed_multigrid_cycles(
     hierarchy: SmoothedHierarchy,
     b: jnp.ndarray,
     *,
@@ -1803,7 +1802,7 @@ def build_convection_hierarchy(
     Returns
     -------
     SmoothedHierarchy
-        The frozen fine + direct-coarse levels for :func:`convection_multigrid_solve`.
+        The frozen fine + direct-coarse levels for :func:`convection_multigrid_cycles`.
     """
     # Nonsymmetric operator: aggregate and smooth the prolongation on the symmetric part ``(A + Aᵀ)/2``,
     # while the level stores the true operator's spectral radius for the damped-Jacobi smoother.
@@ -1918,7 +1917,7 @@ def _jacobi_smooth_zero(
     return _jacobi_smooth(level, b, x, sweeps - 1, omega, spectral_damping)
 
 
-def convection_multigrid_solve(
+def convection_multigrid_cycles(
     hierarchy: SmoothedHierarchy,
     b: jnp.ndarray,
     *,
@@ -2664,7 +2663,7 @@ def build_air_hierarchy(
     Returns
     -------
     AirHierarchy
-        Frozen finest-to-coarsest reduction-based levels for :func:`air_multigrid_solve`.
+        Frozen finest-to-coarsest reduction-based levels for :func:`air_multigrid_cycles`.
 
     Raises
     ------
@@ -2758,7 +2757,7 @@ def _air_ops(f_iters: int, c_iters: int, omega: float) -> _VCycleOps:
     )
 
 
-def air_multigrid_solve(
+def air_multigrid_cycles(
     hierarchy: AirHierarchy,
     b: jnp.ndarray,
     *,
@@ -2793,4 +2792,4 @@ def air_multigrid_solve(
     jnp.ndarray
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
-    return _fixed_cycle_solve(hierarchy.levels, b, cycles, _air_ops(f_iters, c_iters, omega))
+    return _fixed_cycles(hierarchy.levels, b, cycles, _air_ops(f_iters, c_iters, omega))

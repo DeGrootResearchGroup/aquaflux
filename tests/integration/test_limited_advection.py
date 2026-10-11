@@ -85,7 +85,7 @@ def test_limited_beats_first_order_on_smooth_profile() -> None:
     gamma = 0.2
     pe = U / gamma
     cell_geometry, _, phi_limited = _solve(
-        80, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(k=5.0))
+        80, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(scale=1.0))
     )
     _, _, phi_first = _solve(80, gamma, FirstOrderUpwind())
     x = np.asarray(cell_geometry.centroid)[:, 0]
@@ -107,8 +107,8 @@ def test_ad_linearized_limiter_converges_faster_than_lagged() -> None:
                 return step
         return 99
 
-    ad_steps = steps_to_converge(VenkatakrishnanLimiter(k=1.0))
-    lagged_steps = steps_to_converge(_LaggedLimiter(inner=VenkatakrishnanLimiter(k=1.0)))
+    ad_steps = steps_to_converge(VenkatakrishnanLimiter(scale=1.0))
+    lagged_steps = steps_to_converge(_LaggedLimiter(inner=VenkatakrishnanLimiter(scale=1.0)))
     assert ad_steps < lagged_steps
 
 
@@ -117,7 +117,7 @@ def test_limited_solve_differentiable_via_ift() -> None:
 
     def objective(gamma):
         mesh, _, assembler = _assembler(
-            40, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(k=1.0))
+            40, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(scale=1.0))
         )
         phi = RootSolver().solve(lambda p, a: a.residual(p), jnp.zeros(mesh.n_cells), assembler)
         return jnp.mean(phi)
@@ -136,7 +136,7 @@ def test_limited_scheme_is_second_order() -> None:
     errors = []
     for nx in (20, 40, 80):
         cell_geometry, _, phi = _solve(
-            nx, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(k=5.0))
+            nx, gamma, LimitedUpwind(limiter=VenkatakrishnanLimiter(scale=1.0))
         )
         x = np.asarray(cell_geometry.centroid)[:, 0]
         errors.append(float(np.sqrt(np.mean((np.asarray(phi) - _exact(x, pe)) ** 2))))
@@ -227,7 +227,7 @@ def test_limiter_reduces_overshoot_on_advected_step() -> None:
         return phi
 
     unlimited = advect_tophat(None)
-    limited = advect_tophat(VenkatakrishnanLimiter(k=0.3))
+    limited = advect_tophat(VenkatakrishnanLimiter(softening=0.01, scale=1.0))
     unlimited_overshoot = max(float(jnp.max(unlimited)) - 1.0, -float(jnp.min(unlimited)))
     limited_overshoot = max(float(jnp.max(limited)) - 1.0, -float(jnp.min(limited)))
     assert unlimited_overshoot > 0.05  # unlimited genuinely overshoots

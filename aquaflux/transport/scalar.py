@@ -32,6 +32,8 @@ import jax.numpy as jnp
 
 from aquaflux.boundary import (
     HOST_EQUATION_FIELD,
+    Dirichlet,
+    DirichletField,
     refuse_a_closure_that_closes_other_fields,
 )
 from aquaflux.discretization import (
@@ -95,6 +97,57 @@ def effective_diffusivity(
     return FieldProperty(values=molecular + eddy_viscosity / turbulent_number)
 
 
+def prescribed_range(boundary: BoundaryConditions, geometry: MeshGeometry) -> float:
+    """The magnitude of a scalar, read off the values its boundary conditions prescribe.
+
+    The range ``max - min`` of every value a :class:`~aquaflux.boundary.Dirichlet` or
+    :class:`~aquaflux.boundary.DirichletField` patch imposes -- the span a transported scalar lives
+    in, by the maximum principle, when nothing else drives it. A single prescribed level has no
+    range (an inlet at one concentration, the rest of the boundary open), and then the level itself
+    is the magnitude, since the scalar's other bound is the zero a reaction or a dilution tends to.
+    A temperature prescribed at a single level has the opposite problem -- its level says nothing
+    about its variation -- and wants a scale stated on the limiter.
+
+    Parameters
+    ----------
+    boundary : BoundaryConditions
+        The scalar's closures, bound to a mesh.
+    geometry : MeshGeometry
+        That mesh's metrics (the face centroids a :class:`DirichletField` is evaluated at).
+
+    Returns
+    -------
+    float
+        The range of the prescribed values, else the largest prescribed magnitude; ``0.0`` when no
+        patch prescribes a value.
+    """
+    values = []
+    for name, closure in boundary.conditions.items():
+        faces = boundary.faces[name]
+        if isinstance(closure, Dirichlet | DirichletField) and faces.shape[0] > 0:
+            # Neither closure reads the owner state; a prescribed value is a function of position.
+            owner = jnp.zeros(faces.shape[0])
+            centroid = geometry.face.centroid[faces]
+            values.append(jnp.ravel(closure.face_value(owner, None, None, None, None, centroid)))
+    if not values:
+        return 0.0
+    prescribed = jnp.concatenate(values)
+    spread = float(jnp.max(prescribed) - jnp.min(prescribed))
+    return spread if spread > 0.0 else float(jnp.max(jnp.abs(prescribed)))
+
+
+def _scalar_scale(boundary: BoundaryConditions, geometry: MeshGeometry) -> float:
+    """The scalar's magnitude for an advection scheme scaled by it, refused when there is none."""
+    magnitude = prescribed_range(boundary, geometry)
+    if not magnitude > 0.0:
+        raise ValueError(
+            "ScalarTransport.build: the advection's limiter is softened by a fraction of the "
+            "scalar's magnitude, taken from the values its boundary conditions prescribe, and none "
+            "prescribes a non-zero value. Give the limiter its scale."
+        )
+    return magnitude
+
+
 class ScalarTransport(eqx.Module):
     """A configured scalar transport equation, evaluated on whatever flow flux it is handed.
 
@@ -116,7 +169,8 @@ class ScalarTransport(eqx.Module):
         the face centroid -- so an injector covering part of a patch needs no separate patch, and
         therefore no change to the mesh.
     advection_scheme : AdvectionScheme
-        The face-value reconstruction for the advective flux.
+        The face-value reconstruction for the advective flux, set by :meth:`build` for the
+        scalar's magnitude (see :func:`prescribed_range`).
     gradient_scheme : GradientScheme or None
         Cell-gradient reconstruction for the non-orthogonal diffusion correction; ``None`` on
         orthogonal grids, where the correction vanishes.
@@ -159,23 +213,35 @@ class ScalarTransport(eqx.Module):
         boundary : BoundaryConditions
             The named ``{patch: closure}`` collection, bound to ``mesh.face_patches`` internally.
         advection_scheme : AdvectionScheme
-            The face-value reconstruction for advection.
+            The face-value reconstruction for advection. A scheme scaled by the field it advects (a
+            softened slope limiter) is set for the scalar's magnitude, the range of the values its
+            boundary conditions prescribe (:func:`prescribed_range`), unless it was given a scale of
+            its own.
         gradient_scheme : GradientScheme, optional
             Reconstruction for the non-orthogonal correction; omit on orthogonal grids.
         sources : tuple of VolumeSource, optional
             Volume-source terms (default none).
         transient : TransientTerm, optional
             Accumulation term; omit for a steady scalar.
+
+        Raises
+        ------
+        ValueError
+            If ``advection_scheme`` reads a scale and no boundary condition prescribes a value to
+            take one from.
         """
         refuse_a_closure_that_closes_other_fields(
             boundary, HOST_EQUATION_FIELD, "ScalarTransport.build"
         )
+        resolved = boundary.resolve(mesh.face_patches, mesh.face_cells)
         return cls(
             mesh=mesh,
             geometry=geometry,
             diffusivity=diffusivity,
-            boundary=boundary.resolve(mesh.face_patches, mesh.face_cells),
-            advection_scheme=advection_scheme,
+            boundary=resolved,
+            advection_scheme=advection_scheme.with_reference_scale(
+                lambda: _scalar_scale(resolved, geometry)
+            ),
             gradient_scheme=gradient_scheme,
             sources=sources,
             transient=transient,

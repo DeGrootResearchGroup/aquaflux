@@ -64,6 +64,12 @@ def test_every_builder_that_shifts_a_block_defaults_to_the_one_shift_basis() -> 
         return field.default
 
     defaults = {
+        "SSTTurbulence.k_shift_diagonal": inspect.signature(SSTTurbulence.k_shift_diagonal)
+        .parameters["shift_basis"]
+        .default,
+        "SSTTurbulence.omega_shift_diagonal": inspect.signature(SSTTurbulence.omega_shift_diagonal)
+        .parameters["shift_basis"]
+        .default,
         "SSTTurbulence.k_shift_policy": inspect.signature(SSTTurbulence.k_shift_policy)
         .parameters["shift_basis"]
         .default,

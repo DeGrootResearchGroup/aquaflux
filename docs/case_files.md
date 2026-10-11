@@ -163,6 +163,16 @@ laminar one) and
 meshes, and {class}`~aquaflux.schemes.ProjectedStencilGradient`, the one to use on a
 tetrahedral mesh. {doc}`gradient_reconstruction` compares them.
 
+A {class}`~aquaflux.schemes.VenkatakrishnanLimiter` states only its `softening` (default `0.05`): the
+size of a variation it leaves unlimited, as a fraction of the advected field's magnitude. The
+magnitude is not a setting -- it is taken from the case. For the momentum it is the flow's speed:
+the bulk velocity a `BulkVelocity` drive holds, else the fastest inlet or moving-wall speed, else the
+speed a body force sustains against the walls (see {func}`~aquaflux.flow.reference_speed`). For
+`k` and `omega` it is derived from that speed and the domain's volume over its wall area, rather
+than from the inlet turbulence, which is no guide to the turbulence the flow develops (see
+{func}`~aquaflux.turbulence.turbulence_scales`). So the same `softening` means the same thing in any
+units and on any mesh.
+
 **`drive`** — what sets the flow in motion when the boundary conditions do not. Unset, they
 do. A streamwise-periodic channel prescribes the velocity nowhere, and is held at a bulk
 (volume-averaged) velocity instead, by a uniform streamwise force solved for with the flow:
@@ -218,7 +228,8 @@ The two marches share their settings, each a value of the solver library written
   {class}`~aquaflux.turbulence.BlockDiagonal`, with the settings
   {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
 - `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;
-- `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`;
+- `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`:
+  its tolerance, restart length and cap, and `stop`, which rule ends a solve;
 - `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
   {class}`~aquaflux.solve.CflResidualDualTimeControl`;
@@ -253,6 +264,63 @@ solver:
   scalar_preconditioner: {kind: ScalarAir}
 ```
 
+**`initial`** — what the case starts from, when it does not start from scratch. Optional: with no
+section the solve builds its own starting state, a potential flow (and, for a `RANS` case, a
+hybrid initial condition for `k` and `omega`).
+
+```yaml
+initial:
+  kind: Checkpoint
+  path: ../first/checkpoints   # the checkpoints directory of an earlier run, relative to the case file
+  step: latest                 # or the number of a checkpoint that run kept
+```
+
+{class}`~aquaflux.case.Checkpoint` resumes a run that stopped short from the checkpoints it
+wrote. It reads the physical fields the earlier run saved, so the two cases need not solve in
+the same variables (one may solve for the logarithm of `omega` and the other for `omega`); they
+must have the same physics and the same mesh. The viscosity, the boundary values and the solver
+settings may differ. Write the new run to its own `outputs.directory`: a run replaces what it
+finds in its output directory, so one that reads from there is refused.
+
+A restart also resumes the march. The checkpoint records where the stopped march had got to: the
+residual it began at, the residual its damping was anchored at (which is a later one once it has
+refreshed its preconditioner), and the shift its step control had come down to. The new run
+measures its damping and its stopping bar against those residuals rather than against the
+residual at the state it was handed, and its step control opens at that shift rather than at the
+top of its ramp, so it takes the steps the stopped march had left. That holds when the new file
+states the same problem -- the same mesh, physics, fluid, boundaries and numerics -- and judges a
+residual in the same measure (`convergence.measure`); the step budget, the preconditioner, the
+outputs and the like may change. If the file differs in any of the first, the run starts from the
+checkpoint's fields as a new march, and its `run.yaml` records `resumption: null`. The first step
+of a resumed march with a step control holds the shift it resumes from, since there is no step
+before it to adapt from; a control that adapts by the ratio of successive residuals forms its
+first ratio one step later.
+
+```yaml
+initial:
+  kind: Fields
+  path: of_case        # an OpenFOAM case directory, relative to the case file
+  time: "1000"         # the time directory to start from; quote it
+```
+
+{class}`~aquaflux.case.Fields` starts the case from one time directory of an OpenFOAM case: another
+program's converged solution, or the output of an earlier run's
+{class}`~aquaflux.case.OpenFOAMTime`. It reads the files `U` and `p` (and under `RANS` also `k` and
+`omega`). The case's mesh must be that OpenFOAM case's own, which is what numbers the cells; only
+the number of cells can be checked against it. The pressure is read as an incompressible OpenFOAM
+solver holds it, per unit density, and multiplied by the case's fluid density; `OpenFOAMTime`
+writes it the same way, so the two are inverses and a case of density one reads it unchanged. It
+carries no march to continue, so the run begins as a new march from the state.
+
+A two-dimensional OpenFOAM mesh was extruded along one axis, and its vector fields carry a
+component along it, which must be zero. The axis is recovered from the mesh's points, which
+decide it for any real extrusion; a mesh whose extents leave it ambiguous (a slab as thick as it
+is tall) needs `extruded_axis: z` (or `x`, `y`) stated. It is refused for a three-dimensional mesh.
+
+A {class}`~aquaflux.case.ViscosityRamp` opens on a seed fitted to its own anchor station, so a
+case with a `continuation` refuses an `initial` section: drop the `continuation` to resume at
+the case's own viscosity.
+
 **`outputs`** — what a run writes, and where. Every part is optional; with no section at all a
 run writes the fields as VTK, the log and the history into `results/` beside the case file.
 
@@ -274,7 +342,10 @@ outputs:
   and boundary conditions from the file of the same name in its `template_time` directory
   (`0` unless given), so the result restarts in the solver the case is set up for. It needs an
   OpenFOAM mesh, and a template for every field it writes. Quote `time`: a bare number reads as
-  a number.
+  a number. On a two-dimensional mesh the zero component of each vector goes on the axis the mesh
+  was extruded along, recovered from its points; state `extruded_axis` (`x`, `y` or `z`) when
+  they leave it ambiguous. The pressure is written per unit density (`p / density`), as an incompressible
+  OpenFOAM solver holds it; the other writers write the pressure itself.
 - {class}`~aquaflux.case.PatchVtk` writes the boundary patches, and the fields on their faces, as
   one VTK polygonal-data file per patch (`patches/<patch>.vtp`) indexed by a multiblock file
   (`patches.vtm`), one block per patch named by it. A radiation case's irradiance is written this
@@ -291,8 +362,11 @@ outputs:
   header is written with the first row, so the file is empty until then; the segregated solve
   takes no steps, so its history stays empty.
 - {class}`~aquaflux.case.Checkpoints` writes the march's state every `every` steps into
-  `checkpoints/`, keeping the latest `keep`, so a run that stops has not lost its work. The
-  segregated solve takes no steps a checkpoint could be written at.
+  `checkpoints/`, keeping the latest `keep`, so a run that stops has not lost its work. Each
+  file holds the physical fields (`U`, `p` and, under `RANS`, `k` and `omega`) with what they
+  belong to — the physics, the number of cells and a digest of the mesh — so a later case can
+  start from one (see `initial`). The segregated solve takes no steps a checkpoint could be
+  written at.
 
 ## Editing a case file from another program
 
@@ -334,7 +408,8 @@ When the file is **read**:
   turbulence at every inlet of a `RANS` one;
 - the pressure level is fixed exactly once — by an `Outlet`, or, with none, by a
   `pressure_datum`;
-- the solver solves this physics, and can hold its drive;
+- the solver solves this physics, and can hold its drive, and can start from the `initial`
+  state given — a viscosity ramp cannot;
 - an `OpenFOAMTime` output has an OpenFOAM mesh to write for.
 
 When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.check`):
@@ -347,6 +422,13 @@ When the case is **checked** against its mesh ({meth}`~aquaflux.case.CaseFile.ch
   do the drive's direction and each source's force;
 - a pressure datum's point has one coordinate per dimension and lies within the mesh's
   bounding box.
+
+When a run is **prepared** ({func}`~aquaflux.case.prepare_run`), before anything is built, an
+`initial` state is read and checked against the case. A checkpoint must be of the same physics and
+the same mesh (the same number of cells, and the same cell numbering and node positions); an
+OpenFOAM time directory must be on the case's own OpenFOAM mesh, with the right number of cells
+and finite values. Either must lie outside the run's own output directory. A state that does not
+fit is refused before an earlier run's checkpoints are cleared.
 
 Every problem found is reported at once.
 
@@ -400,6 +482,10 @@ and returns the converged fields — `(flow, k, omega)` for a `RANS` case, the f
 preconditioner to the state it has reached, again at each continuation station and each
 refresh, and each fit is made from the file's settings.
 
+A case with an `initial` section starts from the state it names
+({meth}`~aquaflux.case.CheckedCase.starting_fields` reads it); without one, the solve starts
+from its own.
+
 A solve can be watched without being changed: keywords that only observe it — `on_step`,
 `on_checkpoint`, `on_retry`, `inner_observer` — are passed to the library solve beside the
 file's settings. A keyword that is one of the solve's settings is refused, whether the file
@@ -425,8 +511,10 @@ aquaflux run case.yaml --overwrite  # replace an earlier run's results
   default, and its relative paths re-based so the copy reads where it lies;
 - `run.yaml`, a record of the run: the aquaflux version and the commit it ran from, when it
   started and how long it took, the solver, how many steps it took, where its residual ended,
-  whether it converged, and what it wrote; and, under `results`, the scalar results the physics
-  reports (a radiation case's lamp power and where it goes).
+  whether it converged, what it wrote and, under `results`, the scalar results the physics
+  reports (a radiation case's lamp power and where it goes); for a run that started from an earlier
+  state, which one: its file, the residual the earlier run had reached and a digest of the case that
+  wrote it.
 
 `run` exits with status 0 when the solve converges. A solve that stops short of its stopping
 test — or is interrupted, with Ctrl-C or the browser interface's Stop — writes no fields (what it
@@ -444,8 +532,9 @@ same rule a run refuses on, without checking the mesh.
 
 - **A boundary profile** — an inlet velocity or value varying across the patch. Those are
   functions of position, built in code.
-- **A starting state** — every solve starts from its own initial condition; a run cannot
-  resume from its checkpoints yet.
+- **A starting state on a mesh that is not an OpenFOAM one** — `Fields` reads an OpenFOAM time
+  directory onto that case's own mesh; there is no way yet to start from another program's fields on
+  a generated grid.
 - **A laminar case holding a bulk velocity** — the flow march solves with the force fixed, and
   no laminar solve holds the constraint from a file.
 

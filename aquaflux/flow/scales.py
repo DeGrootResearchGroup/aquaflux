@@ -12,8 +12,12 @@ anywhere — the streamwise-periodic channel, where the drive is a mean pressure
 force. The second case has no velocity to read, so the speed comes from the global force balance
 against the wall drag instead.
 
-Nothing here enters the residual: these are estimates that shape the *path* a solve takes (the frozen
-preconditioner, the initial condition), never the converged answer.
+Most of what reads these estimates shapes only the *path* a solve takes (the frozen preconditioner,
+the initial condition), never the converged answer. One reader does enter the residual: a slope
+limiter's softening is a fraction of the field's magnitude (:func:`reference_speed`), so the
+discretization of a limited momentum advection depends on it. There it is a constant of the
+discretization, fixed when the equation is built, like the softening fraction itself -- it is not
+re-estimated as the flow develops, and the converged answer does not depend on the path to it.
 """
 
 from __future__ import annotations
@@ -25,6 +29,10 @@ import jax.numpy as jnp
 from .boundary import sheared_patches
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from aquaflux.mesh import Mesh, MeshGeometry
+
     from .momentum import MomentumContinuity
 
 # Bulk-to-friction velocity ratio ``U_b / u_tau`` used to size a body-force-driven flow whose laminar
@@ -51,10 +59,31 @@ def hydraulic_length(assembler: MomentumContinuity) -> float:
     float
         The hydraulic length, or ``0.0`` when the domain has no wetted wall.
     """
-    geometry = assembler.geometry
+    return wetted_length(assembler.mesh, assembler.geometry, sheared_patches(assembler.boundary))
+
+
+def wetted_length(mesh: Mesh, geometry: MeshGeometry, wall_patches: Iterable[str]) -> float:
+    """The domain volume over the area of ``wall_patches``, ``V_total / A_wall``.
+
+    The geometric half of :func:`hydraulic_length`, for a caller that names its walls itself rather
+    than reading them off a flow's boundary conditions (a turbulence closure, which lists its own).
+
+    Parameters
+    ----------
+    mesh : Mesh
+        The mesh; reads its face patches.
+    geometry : MeshGeometry
+        Its face areas and cell volumes.
+    wall_patches : iterable of str
+        The patches whose area is the wetted area.
+
+    Returns
+    -------
+    float
+        The length, or ``0.0`` when the patches hold no area.
+    """
     wall_area = sum(
-        float(jnp.sum(geometry.face.area[assembler.mesh.face_patches.indices(name)]))
-        for name in sheared_patches(assembler.boundary)
+        float(jnp.sum(geometry.face.area[mesh.face_patches.indices(name)])) for name in wall_patches
     )
     if wall_area <= 0.0:
         return 0.0
@@ -203,3 +232,28 @@ def characteristic_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     if float(jnp.linalg.norm(fastest)) > 0.0:
         return fastest
     return body_force_velocity(assembler)
+
+
+def reference_speed(assembler: MomentumContinuity) -> float:
+    """The speed this flow is driven at, as one positive number: the magnitude of its velocity field.
+
+    A drive that holds a bulk velocity (:class:`~aquaflux.flow.MassFlow`) states the speed exactly, so
+    its target is taken; otherwise the speed is that of :func:`characteristic_velocity` -- the fastest
+    prescribed boundary velocity (an inlet, a moving lid), or the force-balance estimate of a
+    body-force-driven domain. It is the magnitude a velocity-scaled numerical setting is sized by,
+    such as the softening of a slope limiter on the momentum advection.
+
+    Parameters
+    ----------
+    assembler : MomentumContinuity
+        The flow assembler; reads its drive, boundary closures, sources, properties and geometry.
+
+    Returns
+    -------
+    float
+        The speed, non-negative; zero only for a domain nothing drives.
+    """
+    held = assembler.drive.held_speed()
+    if held is not None:
+        return held
+    return float(jnp.linalg.norm(characteristic_velocity(assembler)))

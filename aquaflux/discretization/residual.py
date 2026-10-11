@@ -51,7 +51,6 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 
 from aquaflux.boundary import (
@@ -60,7 +59,9 @@ from aquaflux.boundary import (
     refuse_a_closure_that_closes_other_fields,
 )
 from aquaflux.context import FieldContext, MeshContext
-from aquaflux.schemes import BoundaryLinearization
+from aquaflux.schemes import BoundaryClosure, BoundaryLinearization
+
+from .term import declared_properties
 
 if TYPE_CHECKING:
     from aquaflux.mesh import Mesh, MeshGeometry
@@ -230,8 +231,8 @@ class ResidualAssembler(eqx.Module):
         geometry : MeshGeometry
             Geometry from ``mesh.geometry()``.
         properties : PropertyModel
-            The named per-cell physical properties. Each operator's own
-            :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires` names what it reads
+            The named per-cell physical properties. Each term's own
+            :meth:`~aquaflux.discretization.term.DeclaredInputs.requires` names what it reads
             (the diffusion term its coefficient); a flux-type boundary closure in ``boundary``
             declares it reads ``coefficient`` via :meth:`~aquaflux.boundary.conditions.
             BoundaryCondition.requires_coefficient`. Checked against the operators and closures
@@ -273,17 +274,19 @@ class ResidualAssembler(eqx.Module):
         Raises
         ------
         ValueError
-            If an operator names a property (:meth:`~aquaflux.discretization.face_flux.
-            FaceFluxOperator.requires`) that ``properties`` does not supply, if a flux-type boundary
-            closure needs ``coefficient`` (:meth:`~aquaflux.boundary.conditions.BoundaryCondition.
-            requires_coefficient`) and ``properties`` does not supply it, or if a flux operator needs
-            a reconstructed gradient (:meth:`~aquaflux.discretization.face_flux.
-            FaceFluxOperator.uses_gradient`) but ``gradient_scheme`` is ``None`` -- all three would
+            If a term -- flux operator, volume source, or the transient -- names a property
+            (:meth:`~aquaflux.discretization.term.DeclaredInputs.requires`) that ``properties`` does
+            not supply, if a flux-type boundary closure needs ``coefficient``
+            (:meth:`~aquaflux.boundary.conditions.BoundaryCondition.requires_coefficient`) and
+            ``properties`` does not supply it, or if a term needs a reconstructed gradient
+            (:meth:`~aquaflux.discretization.term.DeclaredInputs.uses_gradient`) but
+            ``gradient_scheme`` is ``None`` -- all three would
             otherwise surface only inside a jitted residual evaluation, as a bare ``KeyError``, a
             non-finite result (a divide by the coefficient's zero fallback), or a silently degraded
             (1st-order) result respectively.
         """
-        needed = {name for op in (*flux_operators, *source_operators) for name in op.requires()}
+        terms = (*flux_operators, *source_operators, *(() if transient is None else (transient,)))
+        needed = declared_properties(terms)
         if any(bc.requires_coefficient() for bc in boundary.conditions.values()):
             needed.add(coefficient)
         if needed:
@@ -292,13 +295,13 @@ class ResidualAssembler(eqx.Module):
             boundary, HOST_EQUATION_FIELD, "ResidualAssembler.build"
         )
         if gradient_scheme is None:
-            needing = [op for op in flux_operators if op.uses_gradient()]
+            needing = [term for term in terms if term.uses_gradient()]
             if needing:
-                names = ", ".join(sorted({type(op).__name__ for op in needing}))
+                names = ", ".join(sorted({type(term).__name__ for term in needing}))
                 raise ValueError(
-                    f"flux operator(s) [{names}] need a reconstructed gradient, but no "
+                    f"term(s) [{names}] need a reconstructed gradient, but no "
                     "gradient_scheme was given -- with none, context.gradient is exactly zero "
-                    "everywhere, which silently degrades such an operator rather than failing"
+                    "everywhere, which silently degrades such a term rather than failing"
                 )
         assembled = cls(
             mesh=mesh,
@@ -365,12 +368,7 @@ class ResidualAssembler(eqx.Module):
                 "`boundary_linearization=` -- a BoundaryLinearization holding "
                 "`d(boundary value)/d(phi_owner)` and `d(boundary value)/d(grad phi_owner)` per face."
             ) from error
-        zero_field = jnp.zeros(self.mesh.n_cells)
-        zero_gradient = jnp.zeros((self.mesh.n_cells, self.mesh.dim))
-        return BoundaryLinearization(
-            value_weight=self._boundary_value_weight(zero_field, zero_gradient, properties),
-            gradient_weight=self._boundary_gradient_weight(zero_field, zero_gradient, properties),
-        )
+        return self._boundary_closure(properties).linearization(self.mesh.n_cells, self.mesh.dim)
 
     def boundary_values(
         self, phi: jnp.ndarray, gradient: jnp.ndarray, properties: dict[str, jnp.ndarray]
@@ -433,6 +431,12 @@ class ResidualAssembler(eqx.Module):
             gradient=gradient,
         )
 
+    def _boundary_closure(self, properties: dict[str, jnp.ndarray]) -> BoundaryClosure:
+        """This equation's boundary closures as a function of the field and its gradient."""
+        return BoundaryClosure(
+            lambda phi, gradient: self.boundary_values(phi, gradient, properties)
+        )
+
     def _gradient(
         self,
         phi: jnp.ndarray,
@@ -442,12 +446,10 @@ class ResidualAssembler(eqx.Module):
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Cell gradients and the boundary values consistent with them.
 
-        With no gradient scheme the gradient is zero (exact on orthogonal grids, where the
-        non-orthogonal correction vanishes). Otherwise the reconstruction is fed a
-        leading-order boundary value (its own tangential correction dropped, i.e. evaluated
-        at zero gradient) to keep ``R`` a single-pass function of ``phi``; the flux then uses
-        the full boundary value evaluated at the reconstructed gradient. The two agree
-        exactly on orthogonal grids.
+        The two-pass reconstruction of :meth:`~aquaflux.schemes.BoundaryClosure.reconstruct`: with
+        no gradient scheme the gradient is zero (exact on orthogonal grids, where the non-orthogonal
+        correction vanishes); otherwise the reconstruction is fed leading-order boundary values and
+        the returned ones are re-evaluated at the reconstructed gradient.
 
         ``gradient_hook`` is the distributed ghost-cell exchange (see :meth:`residual`); it is
         threaded into an iterative reconstruction's own linear solve so a partition-coupled gradient
@@ -458,76 +460,13 @@ class ResidualAssembler(eqx.Module):
         than applied afterwards, because a scheme that consumes its own reconstructed gradient must
         impose before that consumer reads it.
         """
-        dim = self.mesh.dim
-        n_cells = self.mesh.n_cells
-        if self.gradient_scheme is None:
-            gradient = jnp.zeros((n_cells, dim), dtype=phi.dtype)
-            return gradient, self.boundary_values(phi, gradient, properties)
-        zero_grad = jnp.zeros((n_cells, dim), dtype=phi.dtype)
-        leading_bvals = self.boundary_values(phi, zero_grad, properties)
-        gradient = self.gradient_scheme.gradients(
+        return self._boundary_closure(properties).reconstruct(
+            self.gradient_scheme,
             phi,
             self.mesh,
             self.geometry,
-            leading_bvals,
             operator_hook=gradient_hook,
             imposed=self.imposed_gradient,
-            # A scheme that DIFFERENTIATES a boundary value cannot use the leading-order one: a
-            # gradient-type closure's whole content is a correction, which evaluating at zero
-            # gradient throws away. This lets such a scheme ask for the corrected values at its own
-            # reconstructed gradient; the ones passed above stay leading-order for everything else.
-            boundary_values_at=lambda g: self.boundary_values(phi, g, properties),
-            # How each boundary face value depends on its owner's gradient, read off the closures
-            # themselves rather than declared: zero where the value is prescribed, the tangential
-            # offset where a zero-gradient or Neumann condition carries its correction. It lets a
-            # scheme reconstruct against the face values the boundary conditions actually define.
-            boundary_gradient_weight=self._boundary_gradient_weight(phi, zero_grad, properties),
-        )
-        return gradient, self.boundary_values(phi, gradient, properties)
-
-    def _boundary_value_weight(
-        self,
-        phi: jnp.ndarray,
-        gradient: jnp.ndarray,
-        properties: dict[str, jnp.ndarray],
-    ) -> jnp.ndarray:
-        """``d(boundary value)/d(phi_owner)`` per face, shape ``(n_faces,)``.
-
-        Differentiated from the closures, as the gradient weight is: zero where the value is
-        prescribed, one where a normal derivative is, and between the two for a Robin condition. A
-        face value reads only its own owner, so one directional derivative seeded in every cell
-        resolves every face.
-        """
-        return jax.jvp(
-            lambda field: self.boundary_values(field, gradient, properties),
-            (phi,),
-            (jnp.ones_like(phi),),
-        )[1]
-
-    def _boundary_gradient_weight(
-        self,
-        phi: jnp.ndarray,
-        gradient: jnp.ndarray,
-        properties: dict[str, jnp.ndarray],
-    ) -> jnp.ndarray:
-        """``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)``.
-
-        Differentiated from the closures rather than declared, so it cannot disagree with them: a
-        prescribed value does not move with the gradient and returns zero, and a zero-gradient,
-        Neumann or Robin condition returns the offset its face value carries. A face value reads only
-        its own owner's gradient, so one directional derivative per gradient component, seeded in
-        every cell at once, resolves every face.
-        """
-        return jnp.stack(
-            [
-                jax.jvp(
-                    lambda g: self.boundary_values(phi, g, properties),
-                    (gradient,),
-                    (jnp.zeros_like(gradient).at[:, k].set(1.0),),
-                )[1]
-                for k in range(gradient.shape[1])
-            ],
-            axis=-1,
         )
 
     def gradient(

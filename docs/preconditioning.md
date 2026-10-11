@@ -315,7 +315,7 @@ A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses 
 
 and its `inverse` chooses how the materialized matrix is inverted: a single
 {class}`~aquaflux.solve.MonolithicVCycle` over all six fields
-({class}`~aquaflux.solve.MonolithicAmgPreconditioner`, equilibrated and reordered cell-major
+({class}`~aquaflux.solve.MonolithicVCyclePreconditioner`, equilibrated and reordered cell-major
 so each cell's six unknowns are adjacent, and taking the incomplete-factorization smoother's
 fill and sweeps), a {class}`~aquaflux.solve.FieldSplit`, or a
 {class}`~aquaflux.solve.CompleteLu`. To share one preconditioner across several solves —
@@ -385,8 +385,8 @@ configuration values.
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
 single hierarchy over both has to compromise. A {class}`~aquaflux.solve.FieldSplit`
-inverse instead builds a {class}`~aquaflux.solve.FieldSplitAmgPreconditioner`, wrapping a
-{class}`~aquaflux.solve.BlockTriangularFieldSplit`: one inverse for the leading
+inverse instead builds a {class}`~aquaflux.solve.FieldSplitPreconditioner`, wrapping a
+{class}`~aquaflux.solve.FieldSplitInverse`: one inverse for the leading
 `[u, v, w, p]` group, another for the trailing `[k, ω]` group, and one retained coupling
 block between them. Each group then gets an inverse suited to it, given as the split's
 `leading` and `trailing` values:
@@ -407,7 +407,7 @@ over the whole saddle, in which a SIMPLE relaxation is the smoother at each leve
 coarse grid carries the smooth global pressure mode. That mode is the one any SIMPLE-type
 Schur approximates worst, which is why the arrangement matters.
 
-{func}`~aquaflux.solve.build_block_triangular_field_split` builds the split directly if you
+{func}`~aquaflux.solve.field_split_inverse` builds the split directly if you
 want one outside a continuation. {class}`~aquaflux.solve.FieldGroups` says where the
 partition falls — as a view over the state's own {class}`~aquaflux.solve.FieldLayout`, so
 where you hold an assembled case you can name the split against its blocks
@@ -417,13 +417,13 @@ raw field-major matrix, give the counts:
 ```python
 from aquaflux.solve import (
     FieldGroups,
-    build_block_triangular_field_split,
+    field_split_inverse,
     JacobiSmoothed,
     SimpleSmoothed,
 )
 
 groups = FieldGroups.by_counts(n_cells=mesh.n_cells, n_leading_fields=4, n_trailing_fields=2)
-split = build_block_triangular_field_split(
+split = field_split_inverse(
     matrix,          # the assembled six-field Jacobian, as a scipy sparse matrix
     groups,
     leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=5),
@@ -439,7 +439,7 @@ far more strongly than the reverse, so that is the direction to keep.
 ### A complete factorization
 
 A {class}`~aquaflux.solve.CompleteLu` inverse builds a
-{class}`~aquaflux.solve.MonolithicLuPreconditioner` instead — a **complete** sparse LU of
+{class}`~aquaflux.solve.CompleteLuPreconditioner` instead — a **complete** sparse LU of
 the coupled matrix. On a moderate 2D mesh this is the strongest option available and often
 the fastest overall, because it converges the linear solve in very few iterations. It does
 not scale: the factorization's fill grows quickly with mesh size, which is what the
@@ -457,14 +457,16 @@ against any `scipy` sparse matrix.
 | {func}`~aquaflux.solve.build_convection_hierarchy` | Aggregation multigrid for a nonsymmetric convection–diffusion operator. |
 | {func}`~aquaflux.solve.build_air_hierarchy` | Reduction-based lAIR, returning an {class}`~aquaflux.solve.AirHierarchy`. `block_size` runs the coarsening on the cell graph so it works on a multi-field block. |
 
-Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_solve`,
-{func}`~aquaflux.solve.convection_multigrid_solve`,
-{func}`~aquaflux.solve.air_multigrid_solve` — that runs a fixed number of V-cycles, which
+Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_cycles`,
+{func}`~aquaflux.solve.convection_multigrid_cycles`,
+{func}`~aquaflux.solve.air_multigrid_cycles` — that runs a fixed number of V-cycles, which
 is what keeps the result a fixed linear map.
 
-{func}`~aquaflux.solve.convection_diffusion_operator` assembles the frozen operator these
-coarsen: a symmetric diffusive edge coupling, optionally plus first-order-upwind convection
-at a reference flux. The first-order upwinding is the *preconditioner's* choice and not the
+{class}`~aquaflux.solve.ConvectionDiffusionStencil` describes the frozen operator these
+coarsen — a symmetric diffusive edge coupling, optionally plus first-order-upwind convection
+at a reference flux — and assembles it. It also reports the operator's diagonal without
+assembling it, which is how a scalar equation's pseudo-time shift is built from the same
+operator its preconditioner coarsens. The first-order upwinding is the *preconditioner's* choice and not the
 model's — whatever advection scheme the residual uses, this operator upwinds first order,
 because that is what makes it an M-matrix an aggregation hierarchy can coarsen.
 
@@ -560,6 +562,13 @@ relative residual rather than `lineax`'s componentwise test. On a coupled system
 right-hand side has near-zero entries, the componentwise test quietly becomes an absolute
 demand and drives the solve orders of magnitude past the tolerance requested.
 
+It keeps the rest of `lineax`'s rule, though: the residual is tested only at the end of a
+restart cycle, and the solve also runs until its solution has stopped moving over a whole
+cycle, so every solve runs at least two cycles. For a loose forcing term that is most of the
+work. {func}`~aquaflux.solve.residual_stop_gmres` stops the moment the residual meets the
+tolerance, tested after every iteration; a march selects it with
+`linear_solve: {stop: residual}` ({class}`~aquaflux.solve.LinearSolveSettings`).
+
 ## Gradients
 
 The preconditioner is part of the forward solve, and the reverse-mode gradient is a single
@@ -581,8 +590,9 @@ nothing after it to correct anything.
 
 Read the **cycle count**, not the wall clock. {func}`~aquaflux.solve.restart_cycles` strips
 the fixed per-solve offset from a raw `lineax` iteration count, which is what makes small
-counts readable: an offset means a solve that converges within a single restart cycle does
-not report `1`.
+counts readable. The corrected count is one less than the restart cycles a solve actually
+ran: `lineax` stops only once the solution has stopped moving over a whole cycle, so a solve
+whose residual met its tolerance within the first cycle runs a second and is reported as `1`.
 
 From there:
 

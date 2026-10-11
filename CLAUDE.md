@@ -55,7 +55,7 @@ Checklist still governs).
 | `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour; the scene (`solve_scene`: lamps' emission kept out of the transfer, their facets reflecting and shadowing in it) a radiation case file builds; transparent solids (`refraction.py`, `refracted.py`: Fresnel, the refracted path by a descent on the optical length, the refracted direct gather, a scene's lamps' light routed by medium with `Visibility.through` for regions crossed straight) |
 | `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract (`blocks`/`contains`/`traceable`), analytic primitives, constructive solid geometry over line intervals, `Outside` (a vessel as the fluid it holds), the grazing-robust cylinder discriminant; generic geometry, held to the same import-nothing rule as `solve/` — what a CAD model is read into and what radiation shadows with |
 | `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (top-level package, `ui` extra; Setup / Run / Results sections; Setup edits case files through one long-lived `aquaflux serve` process, Run starts `aquaflux run` as its own process and follows the history it writes): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam (`RunDirectory` reads what `run.yaml` lists, `VtkFiles`), the render-free `Pipeline` and its large-mesh policy (surface/slice/threshold only, cached by dependency), and the trame page |
-| `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case described in one YAML file: the `CaseSpec` core plus the physics (laminar, RANS, or radiation — lamps, reflecting walls, surfaces from CAD/STL/mesh) and drive discriminators, one physical kind per boundary patch or patch group (closures and wall set derived, never restated), the fluid stated once with exactly one viscosity, why the YAML parse is 1.2 and refuses duplicate keys, how the build derives each equation's closures, the wall set and one property model (bit-identical to the hand-built drivers, and the float-leaf trap that almost hid a recompile), the solver section (four solves, the library's own settings values read directly, a script may observe a solve but never configure it), `aquaflux run` with its outputs section and run records, and what is not built yet |
+| `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case described in one YAML file: the `CaseSpec` core plus the physics (laminar, RANS, or radiation — lamps, reflecting walls, surfaces from CAD/STL/mesh) and drive discriminators, one physical kind per boundary patch or patch group (closures and wall set derived, never restated), the fluid stated once with exactly one viscosity, why the YAML parse is 1.2 and refuses duplicate keys, how the build derives each equation's closures, the wall set and one property model (bit-identical to the hand-built drivers, and the float-leaf trap that almost hid a recompile), the solver section (four solves, the library's own settings values read directly, a script may observe a solve but never configure it), `aquaflux run` with its outputs section and run records, the `initial` section (`Checkpoint`: a restart from an earlier run's physical-field files with a mesh-checked header, carrying the stopped march's history (`solve.Resumption`: reference residual, damping anchor, step-control shift) when the problem and measure are unchanged; `Fields`: an OpenFOAM time directory, pressure per unit density both ways; the ramp's refusal), and what is not built yet |
 
 ---
 
@@ -556,9 +556,12 @@ left more pairs undecided and slowed the transfer build (#574, `.claude/rules/ra
 **Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
 diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —
-assembled once, off the jit path, as a `scipy.sparse` matrix. `convection_diffusion_operator(...)`
-(with `decouple_dof` for the closed-domain pressure pin) is the single assembler for all four
-consumers: the pressure Schur, both velocity blocks, and the k/ω scalar transport. It sits **beside**
+assembled once, off the jit path, as a `scipy.sparse` matrix. `ConvectionDiffusionStencil` — the
+interior-face graph with its per-edge coefficients and per-cell boundary diagonal, as one value that
+`assemble()`s itself, reports its `diagonal_parts()` and `detached(cells)` a fixation — is the single
+description for all four consumers (with `decouple_dof` for the closed-domain pressure pin): the
+pressure Schur, both velocity blocks, and the k/ω scalar transport, whose pseudo-time shift reads the
+same stencil's diagonal rather than re-deriving it. It sits **beside**
 `solve/multigrid.py`, not inside it: every multigrid builder takes an assembled operator `a` and
 knows nothing about meshes or fluxes. The first-order-upwind stencil is the **preconditioner's**
 choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always
@@ -1519,7 +1522,7 @@ After **every code change**, before considering the task complete, review and ac
      returned *as it stands* — the whole return value, an arm of a conditional, an operand of `and`/`or` —
      credits that call. Methods are keyed `Class.method`, so one class's `_build` is never another's.
      **Unioning every definition of the name was rejected** — it would credit `coupled_step` with what
-     `AmgVCycle._build` constructs — and a receiver whose producer returns no package class **falls back to
+     `MonolithicVCycleInverse._build` constructs — and a receiver whose producer returns no package class **falls back to
      the bare name**, because the first version lost `_coupled_step`'s `globalization.step(...)` (a rebound
      parameter) and silently re-hid the pair it was written to find. The one new pair is `coupled_step` /
      `mass_flow_coupled_continuation`; every other pair is main's, unchanged. Its two carve-outs have

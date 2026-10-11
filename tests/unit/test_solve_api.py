@@ -65,14 +65,14 @@ def test_the_multigrid_surface_is_complete() -> None:
     consumers into deep imports in the first place; a partial surface is what re-creates the problem.
     """
     required = {
-        "convection_diffusion_operator",
+        "ConvectionDiffusionStencil",
         "decouple_dof",
         "build_smoothed_hierarchy",
         "build_convection_hierarchy",
         "build_air_hierarchy",
-        "smoothed_multigrid_solve",
-        "convection_multigrid_solve",
-        "air_multigrid_solve",
+        "smoothed_multigrid_cycles",
+        "convection_multigrid_cycles",
+        "air_multigrid_cycles",
         "SmoothedHierarchy",
         "AirHierarchy",
     }
@@ -144,7 +144,7 @@ def test_the_study_harnesses_take_exported_names_from_the_package_surface() -> N
     """The boundary guard above scans ``aquaflux/`` only, and the boundary eroded where it does not look.
 
     ``validation/`` held 12 deep imports of names ``__all__` already advertises -- ``restart_cycles``,
-    ``MonolithicAmgPreconditioner``, ``symmetrically_equilibrate`` -- so the design record's claim that
+    ``MonolithicVCyclePreconditioner``, ``symmetrically_equilibrate`` -- so the design record's claim that
     the boundary "cannot erode silently" was true only of the directory under guard. These harnesses are
     the project's re-adjudication instruments, so a rename inside a preconditioner breaks a study rather
     than a test, which is the more expensive failure and the later-discovered one.

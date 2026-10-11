@@ -43,6 +43,44 @@ orthogonal one the diffusion's non-orthogonal correction vanishes and the k equa
 gradient at all. Mutation-verified four ways.
 
 
+## The advection scheme is bound PER FIELD too, for its field's magnitude (2026-10-09, #144)
+
+`SSTTurbulence` carries `k_advection_scheme` and `omega_advection_scheme` — **there is no
+`advection_scheme` field any more**; `build` still takes one positional scheme and binds it twice
+with `with_reference_scale` (see `schemes.md`). A scheme that reads no scale (first-order upwind,
+what both step cases run) comes back unchanged in both slots; a softened Venkatakrishnan limiter gets
+`k_ref` in one and `omega_ref` in the other, because the two fields differ by units and by orders of
+magnitude. `build(velocity_scale=...)` supplies the flow's speed; the case's `RANS.build` passes
+`flow.reference_speed(momentum)`. Unset, a scaled scheme is refused at build naming the keyword; an
+unscaled one needs nothing. Pinned by substitution
+(`test_each_turbulence_equation_advects_with_its_own_scheme`) and by the case build
+(`test_a_limited_turbulence_advection_takes_k_and_omega_scales_from_the_flow_s_speed`), both
+mutation-checked.
+
+**The scales (`turbulence/scales.py`, `turbulence_scales(U, h, model)`), decided with the project
+owner, who asked for them to come from the velocity rather than the inlet turbulence** — an inlet's
+`k`/`omega` is not representative of the domain (pitzDaily's inlet k is 0.375; OpenFOAM's shear-layer
+peak is ~5.0):
+- **`k_ref = 1.5 (0.1 U)² = 0.015 U²`** (`REFERENCE_INTENSITY = 0.1`, through `inlet_k`). Peak `k`
+  in developed flows is roughly 0.01 U² (plane channel, bulk U; peak k⁺ ≈ 4.5 at u_τ ≈ 0.05 U_b) to
+  0.05 U² (mixing layer / separated shear layer); 0.015 sits at the low end, where an error makes the
+  limiter stricter, which is the safe side for `k`'s positivity. pitzDaily: `k_ref` = 1.5 against the
+  OpenFOAM peak of 5.0 (U = 10).
+- **`omega_ref = sqrt(k_ref) / (β*^¼ · 0.09 h)`**, `h = flow.wetted_length(mesh, geometry,
+  wall_patches)` = V / A_wall (the same hydraulic length `flow.hydraulic_length` and the body-force
+  initializer use), through `inlet_omega`; `OUTER_MIXING_LENGTH_FACTOR = 0.09` is now the one home of
+  the 0.09 `sst_initial_fields` defaults to. It is the **outer-flow** level on purpose: `omega`'s
+  range is set by the first cell height (`~6ν/(β₁y₁²)`, pitzDaily OF range 160–1.1e5), so a range-based
+  scale would be mesh-dependent and would turn limiting off everywhere but the near-wall cells.
+  pitzDaily estimate (h ≈ 0.02 m, not measured from the mesh): `omega_ref` ≈ 2000 /s against shear-layer
+  values ~10³ and the inlet's 440.
+- **No wall** (h = 0) or **no speed** → refused, only when a scaled scheme asks. A wall-less RANS
+  domain with a limited turbulence advection must state the scale on the limiter itself.
+- **Not measured on any case.** Both step cases run first-order turbulence advection, so nothing
+  shipped reaches these scales; the choice is argued, not calibrated. The alternative considered and
+  not built: a softening relative to the LOCAL value (`eps = K |phi_i|`), which suits ω's dynamic range
+  but collapses for `k → 0` at walls.
+
 ## How to read this file (read this before grepping it)
 
 Same three rules as `.claude/rules/solve.md`: **every entry sits under a `##` section** (scan up to the
@@ -74,7 +112,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | `_LinearSolveRegime`, `_resolved_regime`, `_resolved_linear_solve`, and `LinearSolveSettings` from `march_settings.py` | `solve.LinearSolveRegime`, `solve.resolve_linear_solve`, `solve.LinearSolveSettings` | `aquaflux.turbulence.LinearSolveSettings` no longer exists; the per-family regime constants (`_BLOCK_LINEAR_SOLVE`, …) stay here because they are calibrations of *these* preconditioners |
 | `CoupledJacobianProbe` (plan + gather map), `_coupled_jacobian_plan`'s graph logic | `solve.JacobianProbe`, `solve.jacobian_probe_plan` (`solve/jacobian_probe.py`) | the probe holds a `narrowing` callable for the assembler stand-in; `coupled_jacobian_probe(coupled, …)` builds one with `_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen)`. `probe.gradient_sweeps` is now `probe.narrowing.gradient_sweeps`. `_coupled_jacobian_plan` stays as the coupled adapter (mesh graph + layout) |
 | `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `solve.MonolithicFactorShiftPolicy`, `solve.FrozenTransposeFactory` (`solve/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
-| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `beta_tracking_refresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now `beta_tracking_refresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` |
+| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `solve.MaterializedSession`, `BetaTrackingRefresh`, `PreconditionerSession`, `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `FACTORIZATION_LINEAR_SOLVE`, `VCYCLE_LINEAR_SOLVE` (`solve/materialized_session.py`) | the session is written against `solve.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now the class `BetaTrackingRefresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` (a function `beta_tracking_refresh` until #661) |
 | `MaterializedJacobian`, `CompleteLu`, `MonolithicVCycle`, `FieldSplit`, `JacobianProbeSpec` | the same names in `aquaflux.solve` (`solve/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `solve.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `solve.materialized_spec_from_mapping` |
 | `_SessionContinuation` | `solve.SessionSource` | shared with the flow march |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
@@ -270,11 +308,13 @@ Many entries below are dated history written against the old API. Read them thro
   recomputed once per outer sweep.
 - **`preconditioner.py`** — the convection-diffusion AMG preconditioner for the stiff k/ω scalar
   Krylov solves at high Reynolds number (the scalar analogue of the velocity-block work). It assembles
-  its frozen operator with the shared `aquaflux.solve.frozen_operator.convection_diffusion_operator` and
+  its frozen operator as the shared `aquaflux.solve.ConvectionDiffusionStencil` (#89) and
   hands the **assembled matrix** to `build_convection_hierarchy` / `build_air_hierarchy` (the coarsening
   library is operator-in, #45); its reaction+boundary diagonal still comes from its own `J·1`
   derivation, which is a genuinely different source, not a copy of the interior stencil. Its interior
-  diffusion coupling (`_scalar_operator_pieces`, feeding both the AMG operator and the pseudo-time shift)
+  diffusion coupling (`_scalar_stencil`, one stencil feeding both the AMG operator — `assemble()`, with
+  the fixed cells `detached` — and the pseudo-time shift — `diagonal_parts()`; it was a six-tuple
+  `_scalar_operator_pieces` unpacked at both and the shift re-derived the diagonal with `np.add.at`)
   is `discretization.flux_continuous_conductance(Γ, geometry, face_cells)` — the scalar transport
   operator's own diagonal contribution, harmonic on a graded diffusivity `Γ = ν + σν_t`, the *same*
   conductance the k/ω residual's `DiffusionFlux` carries (binding, #154). It replaced a g-weighted
@@ -339,7 +379,9 @@ Many entries below are dated history written against the old API. Read them thro
       LOADER, not by the value's constructor** — so a refusal message moved from `TypeError` naming the
       family to `ValueError` naming the path. Constructing the same value in Python still meets the
       constructor's refusal, which is deliberately unchanged: #424 is about the file. Cross-field rules
-      (a setting that means nothing beside a given kind) remain #375's.
+      (a setting that means nothing beside a given kind — `mass_scale` beside `schur_scaling: simple`,
+      `strength_threshold` beside a `ConvectionAir` velocity block) are #663's, not yet built: both load
+      and are silently ignored.
     - **"Default omitted" is judged by EQUALITY WITH THE FIELD'S DEFAULT, not by `None`.** One field
       breaks the "`None` for unset" wording: `MaterializedJacobian.probe`, where an absent key is the
       default probe and `probe: null` is refused. (`BlockDiagonal.method` was a second, with an `_UNSET`
@@ -598,7 +640,10 @@ Many entries below are dated history written against the old API. Read them thro
   **AMG preconditioner built once and carried** (it only accelerates the Krylov iteration, and rebuilding
   it per sweep cost ~0.9 s (k) + ~1.0 s (ω) at 4k cells *and* re-compiled the whole solve every sweep).
   `SSTTurbulence` therefore splits `k_preconditioner`/`omega_preconditioner` (frozen, `scalar=`) from
-  `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`); `solve_segregated` builds the
+  `k_shift_policy`/`omega_shift_policy` (per sweep, `preconditioner=`), each policy bundling the bare
+  diagonal `k_shift_diagonal`/`omega_shift_diagonal` — which the coupled `_coupled_shift_policy` reads
+  directly (#158), rather than building a policy to discard all but its `.shift_diagonal`, so one
+  definition damps a scalar on both paths; `solve_segregated` builds the
   former on the first sweep and the latter every sweep. Measured: traces per sweep went `[5,5,5,5,5]` →
   `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
   moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing
@@ -808,7 +853,7 @@ Many entries below are dated history written against the old API. Read them thro
       not evidence about it.
     - **What was NOT refuted, and is worth re-landing on its own:** `KProduction.feedback_rate` (exact
       against AD in both cap branches under either linearization, an estimate only under the near-wall
-      blend), and returning the reaction diagonal **unclamped** from `_scalar_operator_pieces` with the
+      blend), and returning the reaction diagonal **unclamped** from `_scalar_stencil` (was `_scalar_operator_pieces`) with the
       preconditioner keeping its own `max(·, 0)` — that pair is a behaviour-preserving separation. What
       is refuted is `abs(·)` on the shift and `live_eddy_viscosity=True` on the coupled path.
     - **The untried variant is `|r| + |f|`** — add the destabilizing magnitude rather than net it, which
@@ -1235,6 +1280,14 @@ Many entries below are dated history written against the old API. Read them thro
     already spiked ~17× (β tripled while μ_t was stale) and collapsed the near-wall `k` onto its floor.
     The bordered solve makes `⟨U⟩ = U_bar` hold by construction; see `.claude/rules/flow.md`. An
     unconstrained `solve_flow` returns the assembler unchanged.
+    ⚠️ **Both library builders return this shape, typed `flow.drive.FlowSolve` (#158, 2026-10-10) —
+    and until then `reused_flow_solve` did NOT.** It returned the state alone, so the tests wrapped it
+    (`lambda m, s: (m, solve_flow(m, s))`) and the case runner, which hands it to the loop unwrapped
+    (`case/solver.py`, `Segregated` on any non-`MassFlow` drive), died on the first sweep with
+    `too many values to unpack`. Every case-runner test replaces `solve_segregated` with a recorder, so
+    nothing ran the handover. Pinned now at the builder (`test_flow_solve_seam.py`, solver stubbed,
+    mutation-checked three ways) and end to end (`test_case_solve.py`'s segregated RANS channel,
+    `slow`).
   - **The sweep body between the injected solves is jitted and assembles the flow fields once
     (binding, #106).** The pre-solve μ_t and the post-solve `(mdot, closure)` run in two module-level
     `eqx.filter_jit` prologues (`_sweep_eddy_viscosity`, `_sweep_closure`) instead of op-by-op eagerly
@@ -1504,7 +1557,7 @@ Many entries below are dated history written against the old API. Read them thro
   - **`coupled_lu_continuation` — the COMPLETE-LU coupled PC, the
     preferred coupled PC on 2D/moderate meshes (BUILT).** A drop-in for `solve_coupled(strategy=…)`
     that preconditions the whole `[flow, k, ω]` saddle by factoring the assembled coupled Jacobian
-    *completely* (`MonolithicLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
+    *completely* (`CompleteLuPreconditioner`, `.claude/rules/solve-direct-preconditioners.md`), instead of
     the block-diagonal SIMPLE composition, so the preconditioner is the operator's exact inverse and a
     Krylov solve converges in **one** iteration. It **forms the true pressure Schur through the
     factorization's fill** rather than approximating it — the block PC's measured wall is the Schur
@@ -1553,7 +1606,7 @@ Many entries below are dated history written against the old API. Read them thro
     stays on the algebraic-multigrid path (`.claude/rules/solve-direct-preconditioners.md`).
   - **`coupled_amg_continuation` — the ALGEBRAIC-MULTIGRID counterpart, the coupled PC for large 3D
     (BUILT).** Same drop-in as the LU builder but preconditions with one smoothed-aggregation
-    multigrid V-cycle (`MonolithicAmgPreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
+    multigrid V-cycle (`MonolithicVCyclePreconditioner`, `.claude/rules/solve-amg-multigrid.md`) instead of a factorization —
     a **direct-LU coarse solve** keeps the heavy fill on only the small coarsest grid, so it builds in
     ~seconds with bounded memory where the complete LU hits the 3D wall (its fill OOMs; a monolithic
     threshold-incomplete-LU factorization was tried and measured to hit the same wall from the time side
@@ -1787,7 +1840,7 @@ Many entries below are dated history written against the old API. Read them thro
       and varies only the hierarchy's provenance — and the arms agree *to the digit*, which is a stronger
       form of agreement than any operating point could manufacture. But do not quote a cycle count from
       this table for anything else, and **re-run it at reach 3 before extending it.**
-    - The rebuild REUSES the aggregation coarse space (`MonolithicAmgPreconditioner.refactor` overwrites
+    - The rebuild REUSES the aggregation coarse space (`MonolithicVCyclePreconditioner.refactor` overwrites
     the operator values in place over a persistent CSR array and re-sets-up the PC with
     `pc_gamg_reuse_interpolation`), since the graph-coloured probe's sparsity is fixed across β; only the
     Galerkin coarse operators and the incomplete-LU factor values recompute, cutting the multigrid setup
@@ -1863,11 +1916,12 @@ Many entries below are dated history written against the old API. Read them thro
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
     limiter), so it was the natural suspect for the second-order march being slower than first-order.
     Measured over an identical 14-step march: first-order rel 6.96e-2, limited `K=5` 9.39e-2, limited
-    `K=100` 9.63e-2, **unlimited (`limiter=None`, ψ≡1) 9.71e-2**. Removing the limiter entirely
+    `K=100` 9.63e-2, **unlimited (`limiter=None`, ψ≡1) 9.71e-2** — the `K`s are of the OLD
+    `eps² = vol K³` softening, deleted 2026-10-09 (#144). Removing the limiter entirely
     reproduces the limited result, so the first-vs-second-order difference is inherent to the
     *reconstruction*, not to limiting. (Two genuine limiter defects were found in that audit and filed —
-    a periodic-image inconsistency, and a dimensionally inconsistent `eps²` softening — but neither
-    causes this, and neither should be pursued as a convergence fix.)
+    a periodic-image inconsistency (#143) and the dimensionally inconsistent `eps²` softening (#144),
+    both since fixed — but neither caused this, and neither was a convergence fix.)
   - **The per-scalar transform is layout-consistent through both coupled solves (binding).** `solve_coupled`
     and `solve_coupled_mass_flow` both map the physical IC into the solved space with `state_from_physical`
     and return `physical_fields` — so `LogScalars` is correct through the mass-flow-constrained path too

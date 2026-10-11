@@ -4,6 +4,7 @@ paths:
   - "aquaflux/solve/march_log.py"
   - "aquaflux/solve/march_history.py"
   - "aquaflux/solve/checkpoint.py"
+  - "aquaflux/solve/step_control.py"
 ---
 
 # Rules — `aquaflux/solve/` the observed march (`newton_march`, triggers, controls, logging)
@@ -308,6 +309,35 @@ Pinned by `tests/unit/test_march_history.py`.
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
+    - **Resuming a march (2026-10-07; shift and anchor 2026-10-08): `resume=Resumption(...)` on `staged_march`,
+      `solve_flow_march`, `solve_coupled`, `RootSolver.solve` and `solve_coupled_mass_flow`, built on
+      `newton_march(reference_norm=, damping_reference=)`.** A march resumed at a state re-measures
+      `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta reopens at `beta0` — the reason a
+      resumed default march did not continue the interrupted one (the memoryless SER schedule holds no other
+      history; a report's `shift` reads 0.0 for it, which looked like a reset and was not). A `Resumption`
+      carries `reference_residual` (the stopping scale, `atol + rtol * reference`, and the first segment's
+      damping anchor unless `damping_reference` is given), `damping_reference` (the anchor of the segment the
+      march was in — differs from the reference once it has refreshed, since a later segment re-bases) and
+      `shift` (what a dual-time march's `ShiftStrengthControl` had walked to). The march still STARTS from
+      the residual it measures at `phi0` (`current`, the loop's own test) — only the schedule's anchor and,
+      via `reference_norm`, the stopping bar change. `StepReport.damping_reference` records the anchor each
+      step was damped against, and `report_record` writes it, so a checkpoint carries it.
+      - **The shift goes through `ShiftStrengthControl.resumed_at(shift)` → `(clamp(shift), None)`**, which
+        `staged_march` calls on the control it ends up with (the default Courant ramp for a dual-time march) when the
+        `Resumption` has a shift and the control has the hook. The first step then HOLDS the shift (there
+        is no previous report to adapt from — the refresh boundary's treatment) and the ramp continues from it;
+        the memo is dropped, so a ratio-keyed control forms its first ratio a step later. A march with no
+        control (the single-step SER march) has no shift to seed; a custom control without `resumed_at`
+        starts afresh. **Measured 2026-10-08** (24 x 16 laminar channel, `mu = 5e-3`, `DualTimeLoop(inner_steps=3)`,
+        default `DualTimeControl` — `beta_start` 2, `beta_min` 0.02, grow 1.5 —, row-scaled `atol = 1e-9`): fresh
+        17 steps, shift 2.0 → 0.02; resumed at step 3 / 6 / 10 with the reference only, 16 / 16 / 14 steps
+        (14 / 11 / 7 left), each opening at 2.0; with the shift, the first step runs at the shift the stopped
+        march's last step ran at and the next two follow its ramp.
+      - Refused beside a `homotopy` (its anchor is the first station's). Carried by `Checkpoint` from a step
+        record (`case.md`). ⚠️ **Not carried:** the refresh budget (`refresh.limit` restarts) and a retry's
+        escalation history beyond the shift the march ended on. Pinned in `tests/integration/test_flow_march.py`,
+        `test_flow_march_resume.py` (the dual-time shift),
+        `tests/unit/test_coupled_rans.py`, `test_root_solver.py` and `test_step_control.py`.
   - **Per-step jit cache hit is mandatory, not an optimization (top implementation risk).** The per-step
     call goes through the module-level `eqx.filter_jit`'d `_march_step`, taking the `NewtonStrategy` **and**
     the residual as *arguments*. Two caller obligations: pass the **same** `strategy` object across a
@@ -473,8 +503,9 @@ Pinned by `tests/unit/test_march_history.py`.
       it at a larger β. Yet the check lived only in `newton_march`, *after* the step returned — so the
       step kept running inner iterations whose results were already destined for the bin. The same
       predicate now sits in the inner loop's `cond`, and `newton_march` pushes its own `retry.abort_above_cycles`
-      down via `RetryPolicy.with_inner_abort` (using `dataclasses.replace`, not `eqx.tree_at` — the field is static,
-      so it is in the treedef, not among the leaves), so there is **one** number rather than two to keep
+      down via `RetryPolicy.with_inner_abort`, which calls the step's own `with_inner_abort` when the
+      step is an `AbortsInnerLoop` (#281; `DualTimeStep` implements it with `dataclasses.replace`, since the
+      fields are static and live in the treedef), so there is **one** number rather than two to keep
       in step.
       **It cannot bin an expensive success**, and the ordering is what guarantees that: `cond` tests the
       convergence target *before* either cost bailout, so a costly solve that brings `‖G‖` under the
@@ -577,13 +608,13 @@ Pinned by `tests/unit/test_march_history.py`.
       after an escalation `newton_march` seeds the control's carried β with the escalated value via
       `step_control.carry_beta(state, β)` — **one implementation on `ShiftStrengthControl`, over the shared
       `(beta, memo)` state, so no control can be missing it** (it once was: the deleted single-step
-      α-targeter had none, and the `hasattr` guard below meant its escalation feedback vanished in
-      silence). The memo is preserved across the seed, so a ratio-keyed control does not lose its
+      α-targeter had none, and the `hasattr` guard the march used then meant its escalation feedback
+      vanished in silence; since #281 the march asks `isinstance(control, ShiftCarryingControl)`). The memo is preserved across the seed, so a ratio-keyed control does not lose its
       reference and misread the next step as a huge reduction. The control then continues its grow/brake dynamics *from* the discovered-safe β, so
       `beta_min` can be driven toward zero and the controller — with escalation as the safety net and the
       carry as the memory — finds how large a timestep each region tolerates, rather than a global floor
-      capping it. Only fires when β was actually escalated and the control exposes `carry_beta`; no
-      escalation ⇒ byte-identical. Pinned by `test_newton_march.py`
+      capping it. Only fires when β was actually escalated and the control is a `ShiftCarryingControl`;
+      no escalation ⇒ byte-identical. Pinned by `test_newton_march.py`
       (`…carries_the_escalated_beta_into_the_control`) and `test_step_control.py`
       (`test_carry_beta_seeds_the_carried_state`).
   - **`CoefficientDriftTrigger` — the PREFERRED staleness trigger: measure the drift, don't infer it
@@ -863,7 +894,16 @@ Pinned by `tests/unit/test_march_history.py`.
     checkpointer so a driver does not hand-roll a lambda one of them can be dropped from.
     **Known defect, not yet fixed:** the checkpointer writes whatever the march reports *including the
     failed step*, so the newest file can be the poisoned state — and a driver calling it "last good
-    state" is then lying. Skip a non-finite report, or do not claim "good".
+    state" is then lying. Skip a non-finite report, or do not claim "good". (A case's `initial:
+    Checkpoint` refuses non-finite fields when it reads one, so a restart does not start from poison;
+    the writer itself is unchanged.)
+    **Finding one again (2026-10-02):** a new process has no `StateCheckpointer.latest`, so
+    `find_checkpoint(directory, step="latest", prefix=...)` looks files up by name — the highest observed
+    step (not the newest by mtime), ignoring the `.partial` staging name, matching the prefix exactly.
+    `checkpoint_name` is the one place the `<prefix>-<step:05d>.npz` pattern lives, shared by writer and
+    finder, and `report_record(report)` the one place a step's numbers are listed, shared by the default
+    serializer and the case layer's. The default serializer still writes a bare `state` array; a case's run
+    injects its own `save=` (physical fields + header, `aquaflux/case/restart_file.py`).
   - **`on_retry(reason, attempt, beta)` — say WHY a step is being redone (BUILT).** `newton_march`
   calls it immediately before a redo with `"diverged"`, `"cycles"` or `"alpha"` — the three
   `RetryPolicy.retry_reason` returns (⚠️ only `"diverged"`/`"alpha"` escalate β since 2026-08-17;
@@ -981,7 +1021,7 @@ Pinned by `tests/unit/test_march_history.py`.
     **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
     outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
     compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
-    `_beta_tracking_refresh` skeleton: `lu_beta_tracking_refresh` re-factors the complete LU at the current
+    `_beta_tracking_refresh` skeleton (now `solve.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
     `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
     `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
     because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the
@@ -1042,7 +1082,7 @@ Pinned by `tests/unit/test_march_history.py`.
       universal and `memo` is whatever the rule remembers (`None` for the memoryless Courant rule, the
       previous residual for the two ratio rules). **Why it exists:** written three times, the bookkeeping
       drifted — `carry_beta` was byte-identical in two controls and *absent* from the third, which
-      `newton_march` probes for with `hasattr`, so that control silently dropped its escalation
+      `newton_march` then probed for with `hasattr`, so that control silently dropped its escalation
       feedback; and the same class reset β at a refresh boundary where the others held it, i.e. the
       sawtooth defect fixed for `DualTimeControl` never reached it. Both were invisible because each
       class carried its own `next_step`. The refactor is verified **bit-for-bit** against the previous

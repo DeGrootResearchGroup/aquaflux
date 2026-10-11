@@ -27,15 +27,29 @@ rather than relying on the leading-block check, which a fused seam can coinciden
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 
 from aquaflux.mesh import Mesh
 
-from .foamfile import read_foam_body
-from .grammar import BOUNDARY_FIELD_RE, _check_count, list_envelope, split_boundary_blocks
+from .field_writer import infer_extruded_axis
+from .foamfile import read_foam_body, read_foam_file
+from .grammar import (
+    BOUNDARY_FIELD_RE,
+    _check_count,
+    list_envelope,
+    parse_vector_list,
+    split_boundary_blocks,
+)
 
 _UNIFORM_RE = re.compile(r"\buniform\s+(-?[\d.eE+-]+)")
+_UNIFORM_VECTOR_RE = re.compile(r"\buniform\s*\(([^()]*)\)")
+
+#: A component along the dropped axis is treated as zero if it is no larger than this fraction of the
+#: field's largest kept component (or of one, for a field that is itself zero).
+_DROPPED_COMPONENT_TOLERANCE = 1.0e-8
 
 
 def _values(body: str, count: int, what: str) -> np.ndarray:
@@ -49,7 +63,7 @@ def _values(body: str, count: int, what: str) -> np.ndarray:
         tokens = inner.split()
         _check_count(what, declared, len(tokens))
         if declared != count:
-            raise ValueError(f"{what} has {declared} values but the patch has {count} faces")
+            raise ValueError(f"{what} has {declared} values but {count} are expected")
         return np.array(tokens, dtype=np.float64)
     match = _UNIFORM_RE.search(body)
     if match is None:
@@ -218,3 +232,142 @@ def read_surface_scalar_field(path, mesh: Mesh) -> np.ndarray:
             f"field has {values.shape[0]} values but the mesh has {mesh.n_faces} faces"
         )
     return values
+
+
+def parse_vector_field(body: str, n_cells: int) -> np.ndarray:
+    """Parse a vector field's ``internalField`` into an ``(n_cells, 3)`` array. Pure: tests on a snippet.
+
+    Both spellings occur -- ``uniform (1 0 0)`` and ``nonuniform List<vector> N ( (…) … )`` -- and a
+    reader of the list form alone fails on a field a case sets up uniformly.
+
+    Parameters
+    ----------
+    body : str
+        The payload of the field file (from :func:`~aquaflux.io.openfoam.read_foam_body`).
+    n_cells : int
+        The number of cells expected.
+
+    Returns
+    -------
+    np.ndarray
+        The per-cell vectors, shape ``(n_cells, 3)``.
+
+    Raises
+    ------
+    ValueError
+        If there is no ``internalField``, it is neither spelling, or it holds the wrong number of
+        vectors or components.
+    """
+    internal_match = re.search(r"\binternalField\b", body)
+    if internal_match is None:
+        raise ValueError("field has no internalField entry")
+    boundary_match = BOUNDARY_FIELD_RE.search(body)
+    end = boundary_match.start() if boundary_match else len(body)
+    entry = body[internal_match.end() : end]
+    if "nonuniform" in entry:
+        vectors = parse_vector_list(entry)
+        if len(vectors) != n_cells:
+            raise ValueError(
+                f"internalField has {len(vectors)} values but the mesh has {n_cells} cells"
+            )
+        return vectors
+    match = _UNIFORM_VECTOR_RE.search(entry)
+    if match is None:
+        raise ValueError("internalField is neither a 'uniform' nor a 'nonuniform' vector entry")
+    components = [float(token) for token in match.group(1).split()]
+    if len(components) != 3:
+        raise ValueError(f"a uniform vector has three components, got {len(components)}")
+    return np.tile(np.asarray(components, dtype=np.float64), (n_cells, 1))
+
+
+def read_openfoam_time(
+    case,
+    time,
+    names: Sequence[str],
+    mesh: Mesh,
+    *,
+    extruded_axis: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Read cell fields from one time directory of an OpenFOAM case onto ``mesh``'s cells.
+
+    The counterpart of :func:`~aquaflux.io.write_openfoam_time`, with the same reading of a
+    two-dimensional case: a vector is stored with three components and a collapsed mesh has two, so
+    the component along the axis the collapse removed is dropped -- after checking that it is zero,
+    since a nonzero one means the wrong axis (or a flow that is not planar) and dropping it would
+    start a solve from a different field than the file holds.
+
+    A cell's index here is OpenFOAM's own, by construction (see the module docstring), so a cell
+    field needs no permutation. Only the cell **count** can be checked against the mesh: a file on a
+    different mesh of the same size would be read without complaint.
+
+    Parameters
+    ----------
+    case : str or Path
+        The OpenFOAM case directory holding the time directory, whose ``constant/polyMesh`` is where
+        the extruded axis is recovered from if it must be.
+    time : str or float
+        The time directory, used verbatim when a string.
+    names : sequence of str
+        The fields to read -- each a file of that name, a ``volScalarField`` or a ``volVectorField``.
+    mesh : Mesh
+        The mesh the fields were written on, as read from the case.
+    extruded_axis : int, optional
+        Which axis the two-dimensional collapse removed. ``None`` recovers it from the case's polyMesh
+        (:func:`~aquaflux.io.infer_extruded_axis`), and only when a vector field is read onto a
+        two-dimensional mesh.
+
+    Returns
+    -------
+    dict of {str: np.ndarray}
+        Each field by name: ``(n_cells,)`` for a scalar, ``(n_cells, mesh.dim)`` for a vector.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the time directory, or a named field in it, is missing -- listing what the directory holds.
+    ValueError
+        If a field is not a cell field, holds the wrong number of values, or has a nonzero component
+        along the axis a two-dimensional mesh dropped.
+    """
+    directory = Path(case) / str(time)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"no time directory {directory}")
+    fields: dict[str, np.ndarray] = {}
+    axis = extruded_axis
+    for name in names:
+        path = directory / name
+        if not path.is_file():
+            held = sorted(entry.name for entry in directory.iterdir() if entry.is_file())
+            raise FileNotFoundError(f"no field {name!r} in {directory}; it holds {held}")
+        foam = read_foam_file(path)
+        kind = foam.header.get("class")
+        if kind == "volScalarField":
+            fields[name] = parse_scalar_field(foam.body, mesh.n_cells, {})
+        elif kind == "volVectorField":
+            vectors = parse_vector_field(foam.body, mesh.n_cells)
+            if mesh.dim == 2:
+                if axis is None:
+                    axis = infer_extruded_axis(case, mesh)
+                vectors = _without_the_dropped_component(name, vectors, axis)
+            fields[name] = vectors
+        else:
+            raise ValueError(
+                f"{path} is a {kind!r}, not a cell field: only volScalarField and volVectorField "
+                "can start a case"
+            )
+    return fields
+
+
+def _without_the_dropped_component(name: str, vectors: np.ndarray, axis: int) -> np.ndarray:
+    """``vectors`` less their component along ``axis``, refusing a field that is not zero there."""
+    if not -3 <= axis <= 2:
+        raise ValueError(f"extruded_axis must be one of -3..2; got {axis}")
+    dropped = vectors[:, axis]
+    kept = np.delete(vectors, axis, axis=1)
+    scale = max(float(np.max(np.abs(kept), initial=0.0)), 1.0)
+    if float(np.max(np.abs(dropped), initial=0.0)) > _DROPPED_COMPONENT_TOLERANCE * scale:
+        raise ValueError(
+            f"field {name!r} has a nonzero component along axis {axis % 3}, which the "
+            "two-dimensional mesh dropped: the wrong axis was taken, or the flow is not planar"
+        )
+    return kept

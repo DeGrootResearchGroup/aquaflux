@@ -29,8 +29,9 @@ Patch-based boundary conditions as **weak face-value closures**. Governed by the
   boundary-face indices. The name→index lookup is data-dependent (dynamic `jnp.where` shapes), so it
   **must** run off the jit path — hence resolve-once-and-store rather than the jittable
   `PropertyModel.evaluate(cell_zones)`-per-call pattern. `apply(face_cells, init, closure)` is the one
-  iterate-over-patches → gather owner → `.at[faces].set(closure(bc, faces, owner))` fold, run inside
-  the residual (raises if still unbound). Owned here so **both** the scalar `ResidualAssembler` and the
+  iterate-over-patches → gather owner → `closure(bc, faces, owner)` fold, run inside the residual
+  (raises if still unbound), writing every patch's values in **one** scatter over the concatenated
+  patch indices (see "One scatter for all patches" below). Owned here so **both** the scalar `ResidualAssembler` and the
   coupled-flow `MomentumContinuity` carry a single `boundary: BoundaryConditions` field — **not** three
   parallel `names`/`conditions`/`faces` tuples — and compose `.apply` instead of re-open-coding the
   loop (the closure differs — a scalar face value vs. a flow velocity/pressure/mass-flux — the
@@ -52,8 +53,11 @@ correction `corr = grad·(d − (d·n)n)` (zero on orthogonal grids). `Convectiv
 Gate-B sensitivity target — and enforces the Robin balance `Gamma dphi/dn = h(Tinf − phi_ip)`.
 Verified (`test_boundary.py`): each closure vs its closed form on a single face, the Robin
 balance holds, and high-`h` convective → Dirichlet. The closures are consumed by
-`ResidualAssembler` both as the flux's boundary value and (leading-order) as the gradient
-reconstruction's boundary input.
+`ResidualAssembler` both as the flux's boundary value and as the gradient reconstruction's boundary
+input — the latter as the value at zero gradient plus its gradient weight, which the Green–Gauss
+schemes absorb exactly because each closure is affine in the owner gradient (see
+`schemes.boundary_gradient_block`). **A new closure must stay affine in the owner gradient** or the
+absorbed form becomes a linearization of it.
 
 - **`BoundaryCondition.closes() -> tuple[str, ...]` (binding, #355), the same self-describing shape
   as `requires_coefficient()` below.** A scalar closure returns `HOST_EQUATION_FIELD` — the empty
@@ -75,7 +79,7 @@ reconstruction's boundary input.
   - An object declaring **nothing** is refused too, not skipped: skipping is how a bare value reaches
     `apply` and gets folded into the residual as whatever it happens to be.
 - **`BoundaryCondition.requires_coefficient() -> bool` (binding, #360), the same self-describing
-  shape as `FaceFluxOperator.requires()`.** Default `False`; `Neumann` and `Convective` override to
+  shape as `DeclaredInputs.requires()`** (the term contract every flux/source/scheme/transient family inherits, #362). Default `False`; `Neumann` and `Convective` override to
   `True` because they read the assembler's diffusion coefficient as `gamma_owner` in their closed
   forms (`Dirichlet`/`DirichletField`/`ZeroGradient` never touch it). `ResidualAssembler.build`
   checks this over every closure in the `boundary` set and, if any is `True`, adds the assembler's
@@ -177,6 +181,34 @@ reconstruction's boundary input.
     group every distributed build would raise (see `.claude/rules/parallel.md`).
   The check needs concrete labels. It never runs under `jit`, because `resolve` returns early on an
   already-bound collection, the same property that keeps the `nonzero` lookup off the trace.
+
+- **One scatter for all patches (binding, #113).** `apply` evaluates each closure separately (they
+  differ) but writes them all with one `init.at[concat(faces)].set(concat(values))`, each value
+  `broadcast_to` its patch's shape first (a closure may return one value for its whole patch, which a
+  per-patch `.set` broadcast silently). Do not go back to one `.at[faces].set` per patch: each write
+  depends on the previous one's result, so P patches gave P scatters that run one after another and a
+  program that grew with P. The concatenation happens inside `apply`, not in `resolve`, so the
+  per-patch `faces` dict stays the only stored form; `parallel/distributed.py` rewrites that dict when
+  it pads, and a second stored copy would have to be kept in step with it.
+  - **Patches are disjoint (one label per face), so one write equals the sequential ones.** The one
+    exception is distributed padding: `_uniform_boundary_faces` fills every patch's padded tail with
+    the null face, so it repeats, within a patch and across patches. Which repeated write lands there
+    is unspecified and immaterial (zero area, null-cell owner). That is why `unique_indices=True` is
+    **not** passed. It would be wrong under padding.
+  - **Measured** (`validation/boundary_scatter_cost.py`, 2026-10-09, jax 0.11.2, CPU, Linux x86_64 cloud
+    container, 4 cores, persistent compilation cache off, best of 3 after `jax.clear_caches()`, one
+    run per arm, nothing else running). Scalar diffusion, 64 x 64 grid, boundary split into P patches:
+    lowered scatters in the residual went from 12 / 36 / 132 (P = 4 / 16 / 64) to **6 at every P**, and
+    in its Jacobian-vector product (jvp) from 16 / 64 / 256 to **8**. At P = 64 compile time went
+    0.435 → 0.353 s (residual) and 0.327 → 0.205 s (jvp). Trace time did not move, because every
+    closure is still traced on its own. pitzDaily coupled RANS (4 patches, `case.yaml`, hybrid initial
+    condition): lowered scatters 608 → 380 (residual) and 998 → 656 (jvp). Compile went 3.70 → 3.21 s
+    and 6.35 → 5.70 s, trace about unchanged (2.0 s and 2.9 → 2.5 s). Residual and jvp were
+    **bit-identical** to the per-patch fold's. Execution time was not measured.
+  - Pinned by `tests/unit/test_boundary_collection.py`: one `scatter` in the fold's jaxpr
+    (`test_apply_writes_every_patch_in_one_scatter`), interleaved unequal patches
+    (`..._when_patches_interleave`, the only fixture that catches faces and values concatenated in
+    different orders), a broadcast closure value, and an empty collection.
 
 ## Testability seam
 Each BC closure is unit-tested on a single boundary face with a known cell value and

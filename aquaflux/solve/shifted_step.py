@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import jax.numpy as jnp
 import lineax as lx
 
 from .continuation import DualTimeLoop, Globalization
-from .linear import relative_residual_gmres
+from .linear import relative_residual_gmres, residual_stop_gmres
 from .settings_value import SettingsValue
 from .strategy import NewtonStrategy
 
@@ -47,11 +47,28 @@ class LinearSolveRegime(NamedTuple):
     max_restarts : int
         Restart-cycle cap -- the only bound on a single running solve, since a cycle budget and the
         march's abort threshold are tested *between* inner iterations.
+    stop : {"lineax", "residual"}
+        Which stopping rule the solve runs (see :class:`LinearSolveSettings`).
     """
 
     rtol: float
     restart: int
     max_restarts: int
+    stop: Literal["lineax", "residual"] = "lineax"
+
+    def solver(self) -> lx.AbstractLinearSolver:
+        """The forward solver this regime describes, stopping in the measure of the step that runs it."""
+        if self.stop == "residual":
+            return residual_stop_gmres(
+                self.rtol, norm=None, restart=self.restart, max_restarts=self.max_restarts
+            )
+        return relative_residual_gmres(
+            self.rtol,
+            norm=None,
+            restart=self.restart,
+            stagnation_iters=40,
+            max_restarts=self.max_restarts,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,13 +91,24 @@ class LinearSolveSettings(SettingsValue):
     restart : int or None
         The Arnoldi restart length.
     max_restarts : int or None
-        The cap on a shifted solve's restart cycles, counted in raw ``lineax`` restarts. It is the
-        only bound on a single running solve.
+        The cap on a shifted solve's restart cycles. It is the only bound on a single running solve.
+        Under ``stop: lineax`` it counts raw ``lineax`` steps, two more than the corrected count a march
+        reports; under ``stop: residual`` it counts the cycles run.
+    stop : {"lineax", "residual"} or None
+        Which rule ends a solve; unset, ``lineax``. ``lineax`` is ``lineax``'s own GMRES rule: the
+        residual is tested only at a restart boundary, and the solve also runs until its solution moved
+        by less than ``rtol`` over a whole cycle, so every solve runs at least two cycles.
+        ``residual`` stops the moment the residual meets ``rtol``, tested after every iteration, which is
+        all an inexact-Newton forcing term asks for. Its reported cycle count is the cycles run, one more
+        than ``lineax``'s count means for the same work, so a cost threshold set in cycles
+        (``refresh_on_cycles``, ``abort_above_cycles``, ``cycle_budget``) fires at a different
+        difficulty under the two.
     """
 
     rtol: float | None = None
     restart: int | None = None
     max_restarts: int | None = None
+    stop: Literal["lineax", "residual"] | None = None
 
 
 def resolve_linear_solve(
@@ -111,6 +139,7 @@ def resolve_linear_solve(
                 base.max_restarts
                 if linear_solve.max_restarts is None
                 else linear_solve.max_restarts,
+                base.stop if linear_solve.stop is None else linear_solve.stop,
             ),
             None,
         )
@@ -148,7 +177,7 @@ def shifted_step(
     regime : LinearSolveRegime or None
         The Krylov tolerance and restart regime of the default forward solve, used when
         ``krylov_solver`` is ``None``. The default stops in the progress measure the march hands the step
-        at every outer iteration (``relative_residual_gmres(norm=None)``). ``None`` with no
+        at every outer iteration (:meth:`LinearSolveRegime.solver`). ``None`` with no
         ``krylov_solver`` leaves the step class's own default solve.
     krylov_solver : lineax.AbstractLinearSolver or None
         A whole forward solver, replacing the regime **and** the stopping measure.
@@ -174,13 +203,7 @@ def shifted_step(
         ``inner_refresh`` to fire.
     """
     if krylov_solver is None and regime is not None:
-        krylov_solver = relative_residual_gmres(
-            regime.rtol,
-            norm=None,
-            restart=regime.restart,
-            stagnation_iters=40,
-            max_restarts=regime.max_restarts,
-        )
+        krylov_solver = regime.solver()
     if line_search is not None:
         globalization = globalization.with_defaults(line_search=line_search)
     if dual_time is None:

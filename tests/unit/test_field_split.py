@@ -23,7 +23,7 @@ from aquaflux.solve import (
     SimpleSmoothedInverse,
     SubLayout,
 )
-from aquaflux.solve.field_split import BlockTriangularFieldSplit, FieldGroups
+from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
 
 
 class ExactInverse:
@@ -31,6 +31,10 @@ class ExactInverse:
 
     def __init__(self, block: np.ndarray) -> None:
         self._inverse = np.linalg.inv(np.asarray(block, dtype=np.float64))
+
+    @property
+    def n_dofs(self) -> int:
+        return self._inverse.shape[0]
 
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         matrix = self._inverse.T if transpose else self._inverse
@@ -51,10 +55,10 @@ def operator(groups: FieldGroups) -> np.ndarray:
     return dense + np.eye(groups.n_dofs) * groups.n_dofs
 
 
-def split_for(operator: np.ndarray, groups: FieldGroups) -> BlockTriangularFieldSplit:
+def split_for(operator: np.ndarray, groups: FieldGroups) -> FieldSplitInverse:
     """The field split over ``operator`` with exact diagonal blocks."""
     leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
-    return BlockTriangularFieldSplit(
+    return FieldSplitInverse(
         ExactInverse(leading.toarray()),
         ExactInverse(trailing.toarray()),
         trailing_by_leading,
@@ -128,7 +132,7 @@ class TestFieldGroups:
 
     def test_the_dropped_block_never_reaches_the_splits_own_apply(self, groups, operator):
         """The whole point of ``active_rows``: zeroing the block it excludes must not move the split's
-        output at all, since :class:`BlockTriangularFieldSplit` never reads it."""
+        output at all, since :class:`FieldSplitInverse` never reads it."""
         split = split_for(operator, groups)
         baseline = as_matrix(split, groups.n_dofs)
 
@@ -204,7 +208,7 @@ class TestBlockTriangularAlgebra:
         wrong triangle, so the shape check is load-bearing rather than defensive."""
         _, leading_by_trailing, _, _ = groups.blocks(sp.csr_matrix(operator))
         with pytest.raises(ValueError, match="trailing equations by leading"):
-            BlockTriangularFieldSplit(
+            FieldSplitInverse(
                 ExactInverse(np.eye(groups.n_leading_dofs)),
                 ExactInverse(np.eye(groups.n_dofs - groups.n_leading_dofs)),
                 leading_by_trailing,
@@ -224,7 +228,7 @@ class TestBlockTriangularAlgebra:
                 released.append(self._name)
 
         leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
-        split = BlockTriangularFieldSplit(
+        split = FieldSplitInverse(
             Releasable(leading.toarray(), "leading"),
             Releasable(trailing.toarray(), "trailing"),
             trailing_by_leading,
@@ -232,6 +236,75 @@ class TestBlockTriangularAlgebra:
         )
         split.destroy()
         assert sorted(released) == ["leading", "trailing"]
+
+    def test_a_block_inverse_without_the_frozen_inverse_pair_is_refused_at_construction(
+        self, groups, operator
+    ):
+        """A block lacking ``n_dofs`` would otherwise be accepted and fail only when first applied."""
+
+        class NoSize:
+            def apply(self, residual, *, transpose=False):
+                return residual
+
+        leading, _, trailing_by_leading, _ = groups.blocks(sp.csr_matrix(operator))
+        with pytest.raises(
+            TypeError, match="trailing block inverse NoSize is not a frozen inverse"
+        ):
+            FieldSplitInverse(
+                ExactInverse(leading.toarray()), NoSize(), trailing_by_leading, groups
+            )
+
+    def test_a_refit_reproduces_a_split_built_at_the_new_operator(self, groups, operator):
+        """``refactor_block`` re-fits both blocks AND the retained coupling, in place.
+
+        Compared against a split built afresh at the new operator, so a refit that skipped either block
+        or kept the stale coupling is caught: each of those leaves a different matrix.
+        """
+
+        class Refittable(ExactInverse):
+            def refactor_block(self, block):
+                self._inverse = np.linalg.inv(np.asarray(block.toarray(), dtype=np.float64))
+
+        leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
+        split = FieldSplitInverse(
+            Refittable(leading.toarray()),
+            Refittable(trailing.toarray()),
+            trailing_by_leading,
+            groups,
+        )
+        developed = operator + np.random.default_rng(7).standard_normal(operator.shape)
+        split.refactor_block(sp.csr_matrix(developed))
+        np.testing.assert_allclose(
+            as_matrix(split, groups.n_dofs),
+            as_matrix(split_for(developed, groups), groups.n_dofs),
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            as_matrix(split, groups.n_dofs, transpose=True),
+            as_matrix(split_for(developed, groups), groups.n_dofs, transpose=True),
+            atol=1e-12,
+        )
+
+    def test_a_refit_with_a_block_that_cannot_refit_changes_nothing(self, groups, operator):
+        """The refusal comes before either block is touched, so a split is never left half re-fitted."""
+        refitted = []
+
+        class Refittable(ExactInverse):
+            def refactor_block(self, block):
+                refitted.append(block.shape)
+
+        leading, _, trailing_by_leading, trailing = groups.blocks(sp.csr_matrix(operator))
+        split = FieldSplitInverse(
+            Refittable(leading.toarray()),
+            ExactInverse(trailing.toarray()),
+            trailing_by_leading,
+            groups,
+        )
+        before = as_matrix(split, groups.n_dofs)
+        with pytest.raises(TypeError, match="ExactInverse offers no refactor_block"):
+            split.refactor_block(sp.csr_matrix(operator * 3.0))
+        assert refitted == []
+        np.testing.assert_array_equal(as_matrix(split, groups.n_dofs), before)
 
 
 def _nodal_block(n_cells: int = 400, n_fields: int = 2, seed: int = 0) -> sp.csr_matrix:
@@ -334,19 +407,19 @@ def test_both_hierarchy_inverses_share_one_refresh_implementation() -> None:
 
 def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_parameters(groups) -> None:
     """#287: the split used to declare ``smoother_fill_levels``/``smoother_sweeps`` on its refresh and
-    immediately ``del`` them, purely because it shared a base with :class:`MonolithicAmgPreconditioner`
+    immediately ``del`` them, purely because it shared a base with :class:`MonolithicVCyclePreconditioner`
     (whose ``build`` genuinely reads them) and the two refresh signatures were forced to agree. Now that
     the shared base is :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which knows nothing
     about a smoother, the split's refresh does not take them -- passing either is a ``TypeError`` rather
     than a silent no-op. (Its ``build`` no longer takes them either: each block is fitted by an injected
     inverse.)
     """
-    from aquaflux.solve.field_split import FieldSplitAmgPreconditioner
+    from aquaflux.solve.field_split import FieldSplitPreconditioner
 
     n = groups.n_dofs
     operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25
     split = split_for(operator, groups)
-    preconditioner = FieldSplitAmgPreconditioner(split, groups)
+    preconditioner = FieldSplitPreconditioner(split, groups)
     with pytest.raises(TypeError):
         preconditioner.refresh_in_place(
             lambda v: v, None, np.zeros(n), smoother_fill_levels=0, smoother_sweeps=4
@@ -364,11 +437,11 @@ def _two_field_transport(n_cells: int = 40, coupling: float = 30.0) -> sp.csr_ma
     return sp.bmat([[upwind, cross], [cross, upwind]], format="csr")
 
 
-def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
+def test_air_reduction_inverse_applies_transposes_and_refreshes_in_place() -> None:
     """The lAIR trailing inverse against the three things the field split requires of one.
 
     ``refactor_block`` is the one a single-state probe never reaches and a march depends on:
-    ``BlockTriangularFieldSplit.refactor`` raises on an inverse without it, because replacing the object
+    ``FieldSplitInverse.refactor`` raises on an inverse without it, because replacing the object
     would recompile the coupled solve that holds it.
     """
     block = _two_field_transport()

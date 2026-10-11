@@ -40,12 +40,38 @@ Principles.
   self-describing about its inputs (what a declarative/DSL assembler consumes). The old fixed
   `FaceState` union-of-all-operators bundle + free `gather_face_state` are **deleted** — do not
   reintroduce a god-bundle that every operator must agree on.
-  **"Self-describing" is now checked, not only asserted (issue #280 steps 2+3).**
-  `FaceFluxOperator`/`VolumeSource` carry `requires() -> tuple[str, ...]` (named properties,
-  default `()`) and `FaceFluxOperator`/`AdvectionScheme` carry `uses_gradient() -> bool` (default
-  `False`); `ResidualAssembler.build` validates both — `properties.require(*names)` over every
-  operator's `requires()`, and refuses `gradient_scheme=None` when any flux operator's
-  `uses_gradient()` is `True`. ⚠️ **`gradient_scheme=None` means NO reconstruction here and keeps
+  **"Self-describing" is now checked, not only asserted (#280 steps 2+3; one shared contract since
+  #362, 2026-10-09).** `requires() -> tuple[str, ...]` (named properties, default `()`) and
+  `uses_gradient() -> bool` (default `False`) live **once**, on `term.py::DeclaredInputs`, which
+  **every** term family inherits: `FaceFluxOperator`, `AdvectionScheme`, `VolumeSource`,
+  `TransientTerm` and the flow's `MomentumSource`. Before #362 each family carried the subset it
+  happened to need (sources had no `uses_gradient`, schemes no `requires`, transient and momentum
+  sources neither). `AdvectionFlux` delegates **both** to its scheme. `ResidualAssembler.build`
+  validates both over **every term it holds — fluxes, sources and the transient** (it was flux-only
+  for `uses_gradient` until #362): `properties.require(*declared_properties(terms))`, and refuses
+  `gradient_scheme=None` when any term's `uses_gradient()` is `True`, naming the term class.
+  `declared_properties` is the one union helper, also called by `MomentumContinuity.build`.
+  - **What `uses_gradient()` means, precisely: on an orthogonal grid, does replacing the gradient by
+    zero change the answer?** Not "reads `context.gradient`" — `DiffusionFlux` reads it and answers
+    `False`. That definition is what makes it testable both ways.
+  - **Declarations are falsified, not trusted — `tests/unit/test_declared_inputs.py`.** It imports
+    the whole package, requires a case in `CASES` for **every concrete `DeclaredInputs` subclass**
+    (a new term without one fails the fast gate; a stale case fails too), and per term checks:
+    evaluates finitely against **exactly** its declared properties (an undeclared read is a
+    `KeyError`); each declared property **NaN-poisoned** makes the answer non-finite (a stale
+    declaration stays finite — NaN, not zero, because a silent zero is the defect being guarded);
+    and `uses_gradient()` equals "a zero gradient changes the answer on an orthogonal grid".
+    Mutation-checked 2026-10-09: emptying `DiffusionFlux.requires`, flipping `LimitedUpwind`'s or
+    `DiffusionFlux`'s `uses_gradient`, and adding a stale `requires` to `UniformBodyForce` each fail
+    it; the assembler-level sweeps (sources, transient, `AdvectionFlux`'s `requires` delegation) are
+    pinned in `test_residual_assembler_validation.py`, each mutation-checked the same way.
+  - ⚠️ **No shipped `VolumeSource` reads `context.gradient`** — the SST sources take their strain
+    rate and `grad k`/`grad ω` as frozen constructor fields — so the widened source sweep has no
+    shipped term to refuse yet. It exists so the first one that does is caught.
+  - **`TransientTerm` declares nothing because it reads nothing** — and it has no accumulation
+    coefficient at all, so `ρ c_p dT/dt` / `d(εRC)/dt` cannot be written (#655). When that lands, its
+    coefficient is a named property declared through `requires()`, and `build` already checks it.
+  ⚠️ **`gradient_scheme=None` means NO reconstruction here and keeps
   meaning that (#361, 2026-09-16)** — it is a checked state, and the right one for pure diffusion on
   an orthogonal mesh, so this builder (and `ScalarTransport.build`) deliberately did **not** take the
   library default that `MomentumContinuity.build`/`SSTTurbulence.build` now carry. One sentinel, one
@@ -164,8 +190,11 @@ Principles.
   - **Why split:** the coupled flow needs the balance but *cannot* share the context step.
     `MomentumContinuity` reconstructs one velocity-gradient **tensor** shared across its components,
     from vector-valued `FlowBoundary` closures rather than a single-field one — it arrives already
-    holding a context, having run its own copy of the leading-order two-pass (`_velocity_gradient` /
-    `_pressure_gradient`, #313). It therefore drives a `CellBalance` per component directly. That is
+    holding a context. Its two-pass reconstructions (`_velocity_gradient` / `_pressure_gradient`) are
+    **not** a copy of `_gradient`: both assemblers compose `schemes.BoundaryClosure` (#58), the one
+    home of the leading-order → reconstruct → re-evaluate passes and of the `jvp` weight probes
+    (`linearization`), so `_gradient` and `_build_time_boundary_linearization` are one-liners over it.
+    It therefore drives a `CellBalance` per component directly. That is
     what let the momentum pressure term stop being hand-added and become an ordinary operator
     (`flow.PressureForce`); see `.claude/rules/flow.md`.
   - **⚠️ The flux-operator tuple order IS the summation order, and floating-point addition is not
@@ -258,9 +287,10 @@ Principles.
   (`tests/integration/test_advection_diffusion.py`). `LimitedUpwind` reconstructs
   `phi_f = phi_C + psi_C ∇φ_C·(x_f − x_C)` from the upwind cell `C`.
 - **Slope limiter — BUILT, but lives in `schemes/` (`aquaflux/schemes/limiter.py`), not here.**
-  `Limiter` (interface) → `VenkatakrishnanLimiter(k)` is physics-free reconstruction numerics
-  (a **per-cell** slope limiter `psi ∈ [0,1]`, smooth Venkatakrishnan 1993, `eps² = vol K³`,
-  matching `coeff.F90`), so it sits beside the gradient/interpolation schemes — keeping the
+  `Limiter` (interface) → `VenkatakrishnanLimiter(softening, scale)` is physics-free reconstruction
+  numerics (a **per-cell** slope limiter `psi ∈ [0,1]`, smooth Venkatakrishnan 1993, softened by
+  `eps = softening · scale` — a fraction of the field's reference magnitude, #144; it was
+  `coeff.F90`'s dimensionally inconsistent `eps² = vol K³` until 2026-10-09, see `schemes.md`), so it sits beside the gradient/interpolation schemes — keeping the
   `discretization → schemes` dependency one-way (a `schemes/` scheme could want limiting; it must
   not import *up* into `discretization`). ⚠️ **`advection.py` imports `Limiter` at RUN TIME, not under
   `TYPE_CHECKING` (2026-09-24, #437) — do not move it back.** `LimitedUpwind.limiter` is annotated with
@@ -278,10 +308,16 @@ Principles.
   reference **lags** the limiter (freezes `psi`, adds the limited term as an explicit RHS,
   `coeff.F90` line 326) and converges only *linearly*. Writing `psi(phi)` into the residual and
   letting AD linearize it puts the limiter in the Jacobian and recovers **quadratic** Newton
-  convergence (measured: ~3 steps vs the lagged ~5), while staying differentiable (IFT) and
-  giving 2nd-order accuracy — the "after" to the reference's "before". Boundedness: the smooth
-  limiter *damps* over/undershoot (~halves it) rather than strictly eliminating it — the
-  smoothness is what makes it AD-linearizable.
+  convergence (measured: ~3 steps vs the lagged ~5 — under the old `eps² = vol K³` softening at
+  K = 1, 40 cells; the test now runs `softening` 0.05 at scale 1 and still asserts AD < lagged),
+  while staying differentiable (IFT) and giving 2nd-order accuracy — the "after" to the reference's
+  "before". Boundedness: the smooth limiter *damps* over/undershoot rather than strictly eliminating
+  it — the smoothness is what makes it AD-linearizable. (The "~halves it" once recorded here was at
+  K = 0.3 under the old form; the top-hat test now runs `softening` 0.01 and asserts < 0.7×.)
+  - **`AdvectionScheme.with_reference_scale(provider)`** (default: self; `LimitedUpwind` forwards
+    to its limiter) is how an assembler sets a scaled scheme for its field — see `schemes.md`.
+    `ResidualAssembler` does NOT call it: it knows nothing of what its field is, so a caller using
+    the generic assembler with a scale-free Venkatakrishnan limiter gets the limiter's refusal.
 - **Sign convention (binding, matches the C++ `FaceFluxAccumulator`).** Every `FaceFluxOperator`
   returns the **owner-outward flux of the conserved quantity**; the residual is the finite-volume
   balance `R = accumulation + Σ scatter(outward flux)` (owner `+`, neighbour `−`). So advection
@@ -294,16 +330,18 @@ Principles.
   `.claude/rules/solve.md`). The residual is **affine in φ** with the gradient scheme injected
   (the gradient solve and the correction are both linear in φ), which is *why* one step is
   exact.
-- **Gradient-boundary circularity (documented, still open for non-Dirichlet skewed boundaries):**
-  a non-Dirichlet boundary value depends on the owner gradient (`corr`), and the gradient
-  reconstruction depends on boundary values — circular off-orthogonal. Resolved for now by
-  feeding the gradient scheme a leading-order boundary value (its `corr` dropped, i.e. gradient
-  = 0) while the *flux* uses the full boundary value at the reconstructed gradient. **Exact when
-  boundary values are gradient-independent** — orthogonal grids (Gate A/B) and any all-Dirichlet
-  problem (Gate C uses a `DirichletField` linear manufactured solution to stay exact). The
-  fully-implicit boundary-gradient fold-in (needed for `ZeroGradient`/`Convective`/`Neumann`
-  boundaries at 2nd order on *skewed* grids) couples the gradient scheme to the boundary
-  closures and is the scoped follow-up — do not entangle scheme↔BC casually when it lands.
+- **Gradient-boundary circularity — RESOLVED for every Green–Gauss scheme but the Hessian-corrected
+  one (#648, 2026-10-09).** A non-Dirichlet boundary value depends on the owner gradient (`corr`), and
+  the reconstruction depends on boundary values. Every shipped closure is **affine** in the owner
+  gradient, `phi_f = phi_f0 + w·∇φ_P`, so the reconstruction is handed `phi_f0` (the closures at zero
+  gradient) and `w` (`BoundaryClosure.gradient_weight`), and `CompactGreenGauss`,
+  `CorrectedGreenGauss` and `MultipleCorrectionGradient` move `w·∇φ_P` to their left-hand side through
+  `schemes.boundary_gradient_block` — so their gradient satisfies the conditions exactly, and Gate C
+  (one Newton step, linear-exact) now holds with Neumann walls on a skewed grid too
+  (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`). The flux still uses the closures evaluated
+  at the reconstructed gradient. `HessianCorrectedGradient` still reconstructs against `phi_f0` alone
+  (the leading-order treatment, exact only for gradient-independent boundary values — orthogonal grids
+  and all-Dirichlet problems); that is #648's open follow-up. See `.claude/rules/schemes.md`.
 
 ## Binding decisions
 - **No hand-derived linearization. Ever.** The reference codes carry `coeff0`/`coeff1`

@@ -10,10 +10,11 @@ other transport equation uses.
 from __future__ import annotations
 
 from . import initialization as _initialization  # noqa: F401  (registers the scalar initializer)
-from .scalar import DIFFUSIVITY, ScalarTransport, effective_diffusivity
+from .scalar import DIFFUSIVITY, ScalarTransport, effective_diffusivity, prescribed_range
 
 __all__ = [
     "DIFFUSIVITY",
     "ScalarTransport",
     "effective_diffusivity",
+    "prescribed_range",
 ]

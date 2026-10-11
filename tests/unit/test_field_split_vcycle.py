@@ -20,7 +20,7 @@ from aquaflux.solve import (
     FieldGroups,
     JacobiSmoothed,
     SimpleSmoothed,
-    build_block_triangular_field_split,
+    field_split_inverse,
 )
 
 
@@ -61,7 +61,7 @@ def operator(groups: FieldGroups) -> sp.csr_matrix:
 
 def _split(operator, groups):
     """The split with the traced inverses both flagship cases ship, at small-mesh coarse sizes."""
-    return build_block_triangular_field_split(
+    return field_split_inverse(
         operator,
         groups,
         leading_inverse=SimpleSmoothed(max_coarse=200),

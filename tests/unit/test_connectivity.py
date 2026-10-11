@@ -130,6 +130,14 @@ def test_face_cells_scatter_masks_neighbour_on_boundary():
     )
 
 
+def test_face_cells_scatter_to_owner_reaches_owners_only():
+    """Every face's contribution lands on its owner, interior faces included, and nowhere else."""
+    fc = _line_face_cells()
+    contrib = jnp.array([[1.0], [2.0], [3.0], [4.0]])  # a trailing axis, as a per-face block has
+    # cell0 owns faces 0 and 2, cell1 owns face 1, cell2 owns face 3; neighbours receive nothing.
+    np.testing.assert_allclose(np.asarray(fc.scatter_to_owner(contrib)), [[4.0], [2.0], [4.0]])
+
+
 def test_face_cells_scatter_conservative_is_antisymmetric():
     """Interior contributions cancel; the cell sum equals the boundary owner-outward flux."""
     fc = _line_face_cells()

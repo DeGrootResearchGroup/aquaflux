@@ -6,7 +6,9 @@ whole reconstruction depends on a gradient silently falling back to first order 
 ``gradient_scheme`` is injected. Both are now build-time ``ValueError``s, driven by two operator
 methods -- :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires` (named properties)
 and :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.uses_gradient` -- that let an
-operator declare what it needs rather than the assembler guessing from its type.
+operator declare what it needs rather than the assembler guessing from its type. Both belong to the
+contract every term family shares (:class:`~aquaflux.discretization.DeclaredInputs`), so the build
+asks them of its volume sources and its transient term as well as its flux operators.
 """
 
 from __future__ import annotations
@@ -17,10 +19,12 @@ import pytest
 from aquaflux.boundary import BoundaryConditions, Convective, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import (
     AdvectionFlux,
+    AdvectionScheme,
     DiffusionFlux,
     FirstOrderUpwind,
     LimitedUpwind,
     ResidualAssembler,
+    TransientTerm,
     VolumeSource,
 )
 from aquaflux.mesh import structured_grid_2d
@@ -40,6 +44,33 @@ class _NamedPropertySource(VolumeSource):
         return context.properties[self.name]
 
 
+class _GradientSource(VolumeSource):
+    """A stub source whose answer is the reconstructed gradient's first component."""
+
+    def uses_gradient(self):
+        return True
+
+    def source(self, field, context):
+        return context.gradient[:, 0]
+
+
+class _HeatCapacityTransient(TransientTerm):
+    """A stub transient naming the property an accumulation coefficient would be read from."""
+
+    def requires(self):
+        return ("heat_capacity",)
+
+
+class _NamedPropertyScheme(AdvectionScheme):
+    """A stub advection scheme naming a property it reads."""
+
+    def requires(self):
+        return ("upwind_weight",)
+
+    def face_value(self, field, context, mass_flux):
+        return jnp.zeros_like(mass_flux)
+
+
 def _build(
     *,
     flux_operators,
@@ -48,6 +79,7 @@ def _build(
     source_operators=(),
     boundary=None,
     coefficient="diffusivity",
+    transient=None,
 ):
     mesh = structured_grid_2d(2, 1)
     properties = PropertyModel({}) if properties is None else properties
@@ -61,6 +93,7 @@ def _build(
         source_operators=source_operators,
         gradient_scheme=gradient_scheme,
         coefficient=coefficient,
+        transient=transient,
     )
 
 
@@ -94,6 +127,19 @@ def test_build_raises_when_a_volume_source_names_a_missing_property() -> None:
             source_operators=(_NamedPropertySource(name="reaction_rate"),),
             properties=PropertyModel({}),
         )
+
+
+def test_build_raises_when_the_transient_term_names_a_missing_property() -> None:
+    with pytest.raises(ValueError, match="heat_capacity"):
+        _build(flux_operators=(), transient=_HeatCapacityTransient(), properties=PropertyModel({}))
+
+
+def test_an_advection_flux_requires_what_its_scheme_reads() -> None:
+    """The flux operator reports its scheme's properties as its own, as it does the gradient."""
+    mesh = structured_grid_2d(2, 1)
+    flux = AdvectionFlux(mass_flux=jnp.zeros(mesh.n_faces), scheme=_NamedPropertyScheme())
+    with pytest.raises(ValueError, match="upwind_weight"):
+        _build(flux_operators=(flux,), properties=PropertyModel({}))
 
 
 def test_build_lists_every_missing_property_from_every_operator() -> None:
@@ -215,4 +261,17 @@ def test_build_does_not_require_a_gradient_scheme_for_diffusion_alone() -> None:
         flux_operators=(DiffusionFlux(),),
         properties=PropertyModel({"diffusivity": Constant(1.0)}),
         gradient_scheme=None,
+    )  # no raise
+
+
+def test_build_raises_when_a_volume_source_needs_a_gradient_and_none_is_reconstructed() -> None:
+    with pytest.raises(ValueError, match=r"_GradientSource.*gradient"):
+        _build(flux_operators=(), source_operators=(_GradientSource(),), gradient_scheme=None)
+
+
+def test_build_succeeds_when_a_gradient_source_has_a_gradient_scheme() -> None:
+    _build(
+        flux_operators=(),
+        source_operators=(_GradientSource(),),
+        gradient_scheme=CompactGreenGauss(),
     )  # no raise

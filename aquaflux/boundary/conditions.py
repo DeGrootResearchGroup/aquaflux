@@ -188,7 +188,7 @@ class BoundaryCondition(eqx.Module):
         type-testing for ``Neumann``/``Convective``: the requirement is a property of the closure,
         parameterized by a name the *assembler* owns (its ``coefficient``), not one the closure
         holds itself -- the same shape as
-        :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.requires`.
+        :meth:`~aquaflux.discretization.DeclaredInputs.requires`.
         :meth:`~aquaflux.discretization.residual.ResidualAssembler.build` checks this against every
         closure in the boundary set and adds the assembler's ``coefficient`` to what it requires the
         properties to supply, so a closure whose coefficient is unset fails at build time rather

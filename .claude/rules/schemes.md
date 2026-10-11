@@ -245,8 +245,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   field, check the convergence rate). All physics-free numerics live here — including the slope
   limiter — so the dependency stays one-way `discretization → schemes` (an operator/scheme injects
   a limiter; nothing in `schemes/` imports up into `discretization`).
-- **`limiter.py` — BUILT.** `Limiter` (interface) → `VenkatakrishnanLimiter(k)`: a per-cell slope
-  limiter `psi ∈ [0,1]` (smooth Venkatakrishnan 1993, `eps² = vol K³`), `limit(field, context)`
+- **`limiter.py` — BUILT.** `Limiter` (interface) → `VenkatakrishnanLimiter(softening, scale)`: a
+  per-cell slope limiter `psi ∈ [0,1]` (smooth Venkatakrishnan 1993), `limit(field, context)`
   taking the shared `aquaflux.context.FieldContext` (issue #280 step 4 — reads `context.gradient`
   for this field's own cell gradient and `context.mesh.face_cells` / `context.mesh.geometry` for the
   connectivity and metrics; reads no boundary value and no property, so a `MeshContext` would also
@@ -254,12 +254,54 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   holds). Physics-free (verified in `tests/unit/test_limiter.py`), injected into
   `LimitedUpwind(limiter=…)` in `discretization/advection.py`, and evaluated only when that scheme
   runs (a diffusion-only or first-order solve never forms `psi`). See `.claude/rules/discretization.md`.
-  **`k` is an ordinary pytree leaf, not a static field (#368, 2026-09-29)**, like `SSTModel`'s closure
-  constants: the limiter only does arithmetic with it, so it can be a differentiation target and moving
-  it does not change the tree's structure. Pinned (leaf membership and `eqx.filter_grad` against a
-  central difference on a step) by `test_the_softening_constant_is_a_differentiable_leaf`. Note that
-  under `filter_jit` a plain Python-float `k` is still hashed as static; pass an array to trace it.
-  #144 (what the softening *means*) is separate and still open.
+  **`softening` is an ordinary pytree leaf, not a static field (#368, 2026-09-29, when it was `k`)**:
+  pinned (leaf membership and `eqx.filter_grad` against a central difference on a step) by
+  `test_the_softening_constant_is_a_differentiable_leaf`. Under `filter_jit` a plain Python-float
+  softening is still hashed as static; pass an array to trace it.
+  - **⚠️ THE SOFTENING IS `eps = softening · scale`, NOT `eps² = vol K³` (#144, 2026-10-09). There is
+    no `k` field any more** (it was renamed `softening` with the change of meaning; default **0.05**,
+    the low end of the 0.01–0.2 range the field-range form is used with). `vol K³` added a volume to
+    a squared field increment, so `K` meant nothing portable: measured in the issue on pitzDaily
+    (`u_x` in m/s, K=5), `eps²/headroom²` had median 0.57 but was < 0.01 in 15 % of cells, and K=100
+    moved the median to 4.5e3. `scale` is the field's reference magnitude (`phi_ref`, the field's
+    units), a floating array leaf (a new value is a cache hit), **not a case-file setting**
+    (`not_settings`). The regularization of a vanishing `d-` is `1e-12 · scale`, for the same reason.
+  - **The scale is a fixed property of the PROBLEM, deliberately not the iterate's range** (the
+    Venkatakrishnan–Wang `eps = K (q_max − q_min)` proposed on the issue). Reading the range from the
+    state changes the residual as the march develops (a uniform start has range 0, so the first steps
+    run a strict limiter), and its exact derivative couples every row to the two cells holding the
+    extrema; a `stop_gradient` on it instead makes the Jacobian inexact, so Newton loses quadratic
+    convergence and the IFT adjoint drops a term wherever the limiter is active. A fixed scale also
+    needs no global reduction in the distributed residual. Decided with the project owner.
+  - **Who supplies it: `with_reference_scale(provider)` on `Limiter` and on `AdvectionScheme`**
+    (default: return self; `LimitedUpwind` forwards to its limiter; Venkatakrishnan fills an UNSET
+    scale only — a stated one wins). `provider` is a zero-argument callable so the magnitude is
+    derived only for a scheme that reads one: first-order, unlimited and Stokes builds in a problem
+    with no derivable magnitude are not refused. Each assembler binds it for its own field:
+    `MomentumContinuity.build` (the flow's `reference_speed`, `flow.md`), `SSTTurbulence.build`
+    (per field, `k_advection_scheme` / `omega_advection_scheme`, from `velocity_scale=`;
+    `turbulence.md`), `ScalarTransport.build` (`prescribed_range`, `transport.md`). The generic
+    `ResidualAssembler` binds nothing — a caller using it with this limiter states `scale` (the
+    tests do). An unset scale at `limit()` raises naming the remedy.
+  - **Invariance is pinned directly**, the test gap the issue named: the same field in units 1000×
+    smaller with its scale likewise, and the same problem on a mesh 1000× larger, give `psi` equal to
+    `1e-10` (`test_psi_does_not_depend_on_the_units_of_the_field` / `..._size_of_the_mesh`, on a
+    `tanh` step chosen so `psi` is in its softened range). Mutation-checked 2026-10-09: restoring the
+    volume form fails both; dropping `eps²` from the numerator or the denominator, or ignoring
+    `softening`, each fails the softening test.
+  - **pitzDaily under the new softening (2026-10-09, commit `f084c65`, Linux x86_64, 4 cores, jax
+    0.11.2, the case's own `case.yaml` defaults — Venkatakrishnan on momentum only, `softening` 0.05,
+    scale = inlet speed 10 m/s, so `eps` = 0.5 m/s; one run):** 31 steps, 202 restart cycles, final
+    row-scaled `|R|` 8.511e-06, `x_r/h` 8.07, peak `nu_t/nu` 418, rel. L2 against the OpenFOAM field
+    `U_x` **0.017** / `U_y` **0.009** — against the last recorded run under `vol K³` (K = 5): 31 / 202,
+    7.84e-06, 8.07, 418, **0.019 / 0.010**. As the issue predicted, at this scale the limiter is all
+    but inactive on this smooth flow, and the velocity field moves slightly toward OpenFOAM's.
+    `bfs3d` and `bfs3d_species` (which also limit) are NOT re-run: their meshes are not in the
+    repository, so their recorded numbers predate this change.
+  - **⚠️ The periodic-seam test changed fixture from a cosine to a sine.** A cosine peaks ON the seam,
+    and with a softening that no longer swamps the field a smooth extremum is limited by design (its
+    headroom is ~0): `psi` there was 0.064 whatever the seam did. With the sine (monotone across the
+    seam) the fixed code gives 0.947 and the reverted seam bug 0.11, so the test still discriminates.
   **The per-face unlimited increment gathers its neighbour-side position through
   `face_cells.neighbour_centroid`, not by indexing the cell centroid directly (issue #143, fixed
   2026-09-09).** A raw `cell_geometry.centroid[neighbour]` is the neighbour's true position, which
@@ -270,6 +312,20 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   on the neighbour side) instead of deriving it from the cell index internally, so both spend the
   same displacement the reconstruction applies. Latent until now: no shipped case pairs a periodic
   mesh with a limiter (the periodic cases run unlimited or first-order advection).
+- **`boundary_closure.py` — BUILT (2026-10-09, #58). `BoundaryClosure(values)`: one scalar field's
+  boundary face values as a function `(field, gradient) -> (n_faces,)`, and the one home of
+  everything a reconstruction needs from them** — `reconstruct(scheme, field, mesh, geometry, *,
+  operator_hook, imposed)` (the closures' constant part at a zero gradient into the scheme, plus
+  `boundary_gradient_weight` — which a Green–Gauss scheme absorbs, making that constant part exact
+  rather than leading-order — and `boundary_values_at` for a later pass that differentiates a boundary
+  value; returns the gradient and the values at it; `scheme=None` → a zero gradient), `value_weight` / `gradient_weight` (the `jvp`
+  probes), and `linearization(n_cells, dim)` (both at rest — the `BoundaryLinearization` `bind`
+  takes). `ResidualAssembler` wraps `boundary_values`; `MomentumContinuity` wraps the pressure and
+  a per-component view of each velocity component. Before it, those were written three times
+  (scalar, velocity, pressure) and the flow copies had drifted — no `operator_hook`, no `imposed`.
+  A frozen dataclass, not an `equinox.Module`: it holds a callable closing over its assembler and
+  lives for one method call, never on a pytree. **When a new caller reconstructs a gradient against
+  boundary closures, wrap them in this; do not write a fourth copy of the two passes.**
 - **`projected_stencil.py` — BUILT (2026-09-22). `ProjectedStencilGradient`: the weights are CHOSEN,
   and that is the whole point of it.** Every linear reconstruction is per-cell weights over a stencil;
   exactness for quadratics fixes only ten of the ~13 numbers per gradient component on a tetrahedron's
@@ -1976,9 +2032,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | exact Krylov solve of the same system | 7–11 | same | 1.07e-2 / 1.91e-2 / 3.02e-2 |
   | **`MultipleCorrectionGradient`** | **3** | **exactly 0.000e+00** | **7.11e-3 / 7.39e-3 / 7.77e-3** |
 
-  Two findings, and the second was not expected. A probe at reach 3 recovers the two-pass Jacobian
-  **exactly** — nothing to fold, so the "vary reach and fill together or not at all" pairing rule has
-  nothing to bite on. And the corrected-Green–Gauss system's *own exact solution* is ~4x less accurate
+  Two findings, and the second was not expected. A probe at reach 3 recovers the two-pass **scalar**
+  Jacobian **exactly** — nothing to fold, so the "vary reach and fill together or not at all" pairing rule
+  has nothing to bite on. ⚠️ **Not the coupled RANS Jacobian** — see the reach-4 entry below the march
+  table. And the corrected-Green–Gauss system's *own exact solution* is ~4x less accurate
   than the two-pass answer at high skew: **the sweeps converge faithfully to a worse answer**, and every
   sweep past ~2 buys no accuracy while pushing the stencil one more ring out. The two-pass error is also
   near skew-independent (7.11e-3 → 7.77e-3 over an 8x skew range) where corrected Green–Gauss degrades 3x.
@@ -2005,10 +2062,26 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   blockMesh, skew-free to round-off, so its sweeps are inert and it already floors at reach 3 — it sets
   no `stencil_reach` at all. What this changes is the standing warning that "`stencil_reach = 3` IS A
   PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION … the sibling gets 3 for free and that is luck,
-  not physics": with a two-pass reconstruction, reach 3 becomes a property of the **scheme**, so a case on
-  a genuinely skewed mesh gets it too. pitzDaily has since adopted it (its `case.yaml` states
+  not physics": with a two-pass reconstruction, the **gradient's** reach becomes a property of the scheme
+  on a genuinely skewed mesh too. pitzDaily has since adopted it (its `case.yaml` states
   `MultipleCorrectionGradient`, which `PITZ_GRADIENT` overrides only when set; `STENCIL_REACH` defaults to 3); `bfs3d` still builds `CorrectedGreenGauss` in its own
   `build_case`, where the choice is inert — see the library-default entry below.
+
+  **⚠️ THE COUPLED pitzDaily RESIDUAL REACHES 4, NOT 3, UNDER THIS SCHEME — so the shipped probe at reach 3
+  folds (measured 2026-10-07, `validation/pitzdaily_openfoam/probe_reach_check.py`).** The scalar figure
+  above is the gradient's own; the coupled residual feeds the reconstructed **velocity** gradient into the
+  eddy viscosity and the face viscosity, which spend one more ring. Per (row, column) block, relative error
+  of the materialized matrix against the exact jvp on a random vector supported on that column, at the
+  time-accurate OpenFOAM field mapped onto the mesh (jax 0.11.2, CPU):
+  at **reach 3 (165 probes)** the `u` and `v` columns are inexact in every row (2.2e-08 to **5.5e-06**),
+  `k` → `omega` is 5.9e-09, and the `p`, `k`-row and `omega` columns are at round-off; at **reach 4
+  (265 probes)** every block is at round-off (worst 3.7e-16). An independent reach ladder on the same
+  state agrees (165 probes 1.5e-7 global, 265 probes 3.9e-16). So "reach 3 becomes a property of the
+  scheme" holds for a scalar and **not** for coupled RANS on a skewed mesh. Orthogonal `bfs3d` is
+  unaffected (its second gradient pass vanishes). The case still ships reach 3 — whether the ~1e-6 fold
+  costs Krylov cycles has not been marched; a per-column plan `(4,4,3,4,3)` would be exact at ~225 probes
+  (`k` → `omega` makes `k` need 4; not measured as a plan). The 506 s / 417-cycle row above ran on the
+  folded matrix.
 
   **✅✅ AND IT IS NOW THE LIBRARY DEFAULT — `schemes.DEFAULT_GRADIENT_SCHEME`, 2026-09-16 (#361).**
   `MultipleCorrectionGradient()` with its own defaults (`OwnerGradient`, no fallback), as a
@@ -2566,12 +2639,57 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   wall is **one run**, and this case has no measured march-level noise floor -- read it as neutral,
   not as a cost, until a repeat says otherwise.
 
-  ⚠️ **Scope, stated because "standard treatment" over-describes what is built.** Only
-  `MultipleCorrectionGradient` acts on `boundary_gradient_weight`; `CorrectedGreenGauss` and
-  `HessianCorrectedGradient` accept and ignore it. Since pitzDaily's shipped scheme is corrected
-  Green--Gauss, **the main validation case is unaffected by this change today.** Extending it to the
-  other two means folding `B` into an iterated operator rather than a per-cell matrix — a bigger
-  change, not attempted.
+  **✅ EXTENDED TO `CompactGreenGauss` AND `CorrectedGreenGauss` (2026-10-09, #648); STILL NOT
+  `HessianCorrectedGradient`.** `B_P` has one home, `schemes.boundary_gradient_block(weight,
+  face_cells, geometry)` (`(n_cells, dim, dim)`, per volume, its docstring carrying the affine
+  contract); `_boundary_condition_first_pass` calls it, **bit-identical** to before on quad, hex and
+  tet fixtures under both closures. Compact solves `(I − B_P) g = raw/V` per cell. Corrected adds
+  `− V B` to `A_g` (`_CorrectedTerms.boundary_block`, set by `terms(mesh, geometry, weight)`; `None`
+  leaves the terms geometry-only, which is what `calibrated` and the contraction-rate tools measure),
+  and **both `CellPreconditioner`s include it**: `InverseCellVolume` builds `CellBlockJacobi((I −
+  B)⁻¹ / V)` when a block is present and plain `1/V` otherwise; `ExactCellBlock` subtracts it from the
+  probed block. Measured (`tests/unit/test_gradient_boundary_block.py`, x64 CPU): a linear field
+  satisfying zero-gradient / Neumann / Robin data on two walls of an 8×8 grid perturbed 0.3 is off by
+  **0.15–0.17** of its gradient before and roundoff after (corrected, GMRES); same on columnwise 3D
+  hexahedra, on tetrahedra with two flux faces, and for compact on a sheared parallelogram grid (0.30–
+  0.34 before). Orthogonal mesh: **bit-identical** for every scheme (`w` is exactly zero there).
+  - **The asymptotic sweep rate does not move, and that is structural**: for a cell owning one such
+    face `B_P = s wᵀ/V` with `w ⟂ s`, so `B_P² = 0` — no eigenvalue. Gelfand rate, `InverseCellVolume`,
+    before → after: quad 0.3 16² 0.1817 → 0.1816, quad 0.4 0.3699 → 0.3699, hex 0.3 6³ 0.1894 → 0.1894,
+    tet n=3 0.6773 → 0.6804; `ExactCellBlock` likewise. **So a count calibrated on the geometry alone
+    stays valid** and `calibrated` was left geometry-only.
+  - **But a FIXED sweep count sees the transient, and corner cells are not nilpotent** — which is why
+    the default preconditioner carries `B`. Sheared parallelograms (interior skew exactly zero, so
+    `A_g = V(I − B)`), 16², all four walls zero-gradient, error vs the exact solve after 2/4/8 sweeps:
+    aspect 50 (`max|B_P|` 10): plain `1/V` **3.9e-2 / 9.7e-3 / 6.0e-4**, `V(I − B)` roundoff from one
+    sweep. With only the two horizontal walls zero-gradient (single-face cells, nilpotent `B`) plain
+    `1/V` is exact in two sweeps. On randomly perturbed grids the interior skewness dominates and the two
+    preconditioners agree to two figures.
+  - **⚠️ THE FIRST VERSION COST 8–9× PER COMPACT RECONSTRUCTION ON EVERY MESH, ORTHOGONAL INCLUDED —
+    and timed out slow shard 1 (PR #652).** Assemblers always pass the weight, so the block is built and
+    inverted on every residual evaluation and every `jvp`, even where it is exactly zero. A batched
+    `jnp.linalg.solve`/`inv` of the `(n, dim, dim)` blocks is a LAPACK call XLA cannot fuse: 5.8 ms
+    against 0.43 ms for the adjugate at 13824 3×3 blocks (jax 0.10.2, x64, CPU, one core). Now
+    `_small_inverse` (closed-form 1/2/3-dim adjugate, private to `gradient.py`) and an owner-only scatter
+    (`FaceCellConnectivity.scatter_to_owner`) build it. Measured with/without the weight on orthogonal
+    meshes, min of 15, warm: compact 2D 80×40 0.158/0.141 ms, 3D 24³ ~1.1–1.6×; corrected 2D ~1.2–1.3×,
+    3D ~1.4× — noisy single runs in a shared container. **`InverseCellVolume` inverts `I − B` and then
+    divides by `V`, in that order**: inverting `V(I − B)` directly broke bit-identity on orthogonal meshes
+    (`V/(V·V)` is not `1/V` to the last bit, 1.8e-15). `_CorrectedTerms.boundary_block` therefore holds
+    `B` per volume, and the operator and `ExactCellBlock` scale it by `V`.
+  - **Gate C now holds with flux walls**: one Newton step reproduces a linear field to 1e-9 on a 25 %
+    skewed grid with Neumann top/bottom (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`); the
+    control without the block misses by 1.1e-3.
+  - ⚠️ **Every `CorrectedGreenGauss`/`CompactGreenGauss` measurement in these files that ran under
+    derivative-type conditions on a skewed mesh predates this and was not re-run** — the tetrahedral
+    duct's corrected **march** (laminar 13 steps / 5.4e-9), pitzDaily's corrected arms and its gradient
+    A/B tables (near-orthogonal walls, so `w` is small there), bfs3d (skew-free to `1.9e-12`, so
+    effectively unchanged). Measurements taken under Dirichlet values only are **unaffected** (`w = 0`):
+    the duct's "misses a quadratic by 7x" (exact Dirichlet values) and its damping-operator rows
+    (Dirichlet-zero values, eigenvalue `9.0e-4`) among them.
+  - **`HessianCorrectedGradient` still ignores the weight** — `B` would enter the gradient equation's
+    own block and must reach the bound outer preconditioner (`local_schur_block`, `bind`'s
+    `prepared_outer`). Left open on #648 as its separable follow-up.
 
   ⚠️ **It reaches the first pass and the closure, not `M2`.** The correction matrices are still probed
   against exact face values, so a quadratic keeps a second-order inconsistency — measured at 1.6 % of

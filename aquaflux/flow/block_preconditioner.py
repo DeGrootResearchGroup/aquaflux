@@ -35,15 +35,15 @@ from jax.ops import segment_sum
 
 from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.solve import (
+    ConvectionDiffusionStencil,
     SettingsValue,
-    air_multigrid_solve,
+    air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
     build_smoothed_hierarchy,
-    convection_diffusion_operator,
-    convection_multigrid_solve,
+    convection_multigrid_cycles,
     decouple_dof,
-    smoothed_multigrid_solve,
+    smoothed_multigrid_cycles,
 )
 from aquaflux.vectors import scale
 
@@ -314,9 +314,9 @@ class SmoothedAmgSchur(InnerSchurSolver):
         # A pressure-fixing outlet adds a boundary diagonal that de-singularises the Schur; freeze it
         # at the reference diagonal (all-zero for a closed all-wall domain, which the pin handles).
         reference_boundary = np.asarray(geometry.boundary_diagonal(reference_diagonal))
-        a = convection_diffusion_operator(
+        a = ConvectionDiffusionStencil(
             owner_e, nb_e, reference_coeff, n_cells, boundary_diagonal=reference_boundary
-        )
+        ).assemble()
         if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
             a = decouple_dof(a, geometry.pressure_pin)
         hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
@@ -326,7 +326,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
         # The reference hierarchy carries the boundary (outlet) stiffness in its diagonal, and
         # `geometry.diagonal` includes it, so the symmetric rescaling stays consistent.
         return _symmetric_rescaled(
-            lambda rp: smoothed_multigrid_solve(self.hierarchy, rp, cycles=self.v_cycles),
+            lambda rp: smoothed_multigrid_cycles(self.hierarchy, rp, cycles=self.v_cycles),
             self.hierarchy.levels[0].diagonal,
             self.geometry.diagonal(a_p),
         )
@@ -401,19 +401,19 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
         # cells via the connectivity's own scatter rather than a hand-rolled index add.
         boundary_owner = jnp.where(face_cells.interior, 0.0, over_distance)
         boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(over_distance))
-        a = convection_diffusion_operator(
+        a = ConvectionDiffusionStencil(
             owner_e,
             nb_e,
             np.asarray(over_distance)[interior],
             n_cells,
             boundary_diagonal=np.asarray(boundary_diagonal),
-        )
+        ).assemble()
         hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
         return cls(hierarchy, geometry.dim, v_cycles)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the smoothed-aggregation V-cycle."""
-        return smoothed_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
+        return smoothed_multigrid_cycles(self.hierarchy, b, cycles=self.v_cycles)
 
 
 def _convection_operator(
@@ -438,14 +438,14 @@ def _convection_operator(
     )
     boundary_owner = jnp.where(face_cells.interior, 0.0, viscous + jnp.maximum(reference_mdot, 0.0))
     boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(boundary_owner))
-    return convection_diffusion_operator(
+    return ConvectionDiffusionStencil(
         owner_e,
         nb_e,
         np.asarray(viscous)[interior],
         n_cells,
         flux=np.asarray(reference_mdot)[interior],
         boundary_diagonal=np.asarray(boundary_diagonal),
-    )
+    ).assemble()
 
 
 class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
@@ -483,7 +483,7 @@ class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the two-level V-cycle."""
-        return convection_multigrid_solve(
+        return convection_multigrid_cycles(
             self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
         )
 
@@ -512,7 +512,7 @@ class AirConvectionVelocity(_RescaledAmgVelocity):
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the lAIR V-cycle."""
-        return air_multigrid_solve(self.hierarchy, b, cycles=self.v_cycles)
+        return air_multigrid_cycles(self.hierarchy, b, cycles=self.v_cycles)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -620,7 +620,7 @@ class ConvectionTwoLevel(_ConvectionVelocityBlock):
     ----------
     sweeps, omega : int, float or None
         The damped-Jacobi smoother's sweeps per level and damping factor (see
-        :func:`~aquaflux.solve.convection_multigrid_solve`).
+        :func:`~aquaflux.solve.convection_multigrid_cycles`).
     """
 
     sweeps: int | None = None
@@ -688,6 +688,15 @@ class FlowBlocks(eqx.Module):
     read the response in one field. Both the assembler and the state are ``stop_gradient``-ed, so the
     resulting operators are constant — a preconditioner built from them changes only the Krylov
     iteration, never the converged solution or its adjoint.
+
+    Each application re-runs the ``jvp``, primal pass included, rather than linearizing the residual
+    once per iterate with ``jax.linearize`` and applying the stored map. That is deliberate. The state
+    is a runtime value inside the compiled march step, so the primal pass is not folded away at compile
+    time; but it is loop-invariant inside the Krylov solve that applies these blocks, and inside a
+    compiled loop a repeated ``jvp`` costs the same as applying a stored linearization. Measured on a
+    developed plane channel, the preconditioner was no faster to apply linearized, the Krylov solve took
+    the same iterations and no less time, and the memory footprint moved by a few percent
+    (``validation/flow_blocks_linearize.py`` re-measures it).
 
     The two combined methods are the primitives (each is a *single* ``jvp`` yielding both blocks of a
     column); the four named single-block accessors compose them, so a caller that needs both halves of

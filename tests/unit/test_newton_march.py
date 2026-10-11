@@ -1847,8 +1847,9 @@ class _NoRebase:
 
     Reproduces the march exactly as it ran before the rebase existed, which is what makes the
     comparison below a test of the fix rather than of the fixture. It is also a real case and not only
-    a stub: :func:`~aquaflux.solve.newton_march` reaches the rebase through ``getattr``, so a
-    third-party control that does not implement it degrades to precisely this behaviour.
+    a stub: :func:`~aquaflux.solve.newton_march` calls the rebase only on a
+    :class:`~aquaflux.solve.ShiftCarryingControl`, so a third-party control that is not one degrades to
+    precisely this behaviour.
     """
 
     def __init__(self, inner):
@@ -2066,3 +2067,112 @@ def test_re_damping_keeps_the_shift_above_a_level_the_undamped_ramp_walks_throug
     # arm that converged in 36 steps.
     assert damped > undamped
     assert damped / undamped == pytest.approx((2.0 * 1.5) ** 3, rel=1e-6)
+
+
+class _NormUnderAnotherName(eqx.Module):
+    """A conforming strategy that keeps its measure somewhere other than a ``residual_norm`` field.
+
+    It delegates to a :class:`DampedNewtonStep` held one level down, so the measure lives at
+    ``inner.residual_norm``. :meth:`with_norm` is the declared way to swap it; nothing else about the
+    step tells the march where it is.
+    """
+
+    inner: DampedNewtonStep
+
+    def stepper(self):
+        return self.inner.stepper()
+
+    def linear_solver(self):
+        return self.inner.linear_solver()
+
+    def norm(self):
+        return self.inner.norm()
+
+    def with_norm(self, norm):
+        return eqx.tree_at(lambda s: s.inner.residual_norm, self, norm)
+
+    def adjoint_preconditioner(self):
+        return None
+
+
+def test_the_rebuilt_measure_reaches_a_strategy_through_with_norm_not_a_field_name():
+    """The march swaps the per-iteration measure in through ``with_norm``, whatever the field is called.
+
+    It used to write a ``residual_norm`` field directly, so a strategy satisfying the protocol in full
+    but keeping its measure under another name failed inside ``eqx.tree_at`` with an error naming a
+    lambda rather than the contract. Here the measure triples the Euclidean norm, and the cubic is not
+    solved in one step, so the report reads three times the plain residual exactly when the swap
+    reached the step that ran.
+    """
+
+    def tripled(residual):
+        return 3.0 * jnp.linalg.norm(residual)
+
+    residual = _Cubic(jnp.array([8.0]))
+    result = newton_march(
+        _NormUnderAnotherName(DampedNewtonStep()),
+        residual,
+        jnp.array([4.0]),
+        max_steps=1,
+        rtol=1e-12,
+        atol=1e-12,
+        norm_builder=lambda step, state: tripled,
+    )
+    plain = float(jnp.linalg.norm(residual(result.state)))
+    assert plain > 1e-3  # not at the root, so the two measures are distinguishable
+    assert result.reports[0].residual_norm == pytest.approx(3.0 * plain)
+
+
+class _ForwardingControl:
+    """Delegates to a :class:`DualTimeControl`, exposing exactly the hooks it is given.
+
+    Records every hook the march calls on it, so a test can see which ones reached the control.
+    """
+
+    def __init__(self, inner, hooks):
+        self.inner = inner
+        self.called = []
+        for name in hooks:
+            setattr(self, name, self._recording(name))
+
+    def _recording(self, name):
+        def hook(*args):
+            self.called.append(name)
+            return getattr(self.inner, name)(*args)
+
+        return hook
+
+    def next_step(self, base_step, previous, state):
+        return self.inner.next_step(base_step, previous, state)
+
+
+_SHIFT_HOOKS = ("carry_beta", "resumed_at", "redamp", "rebase")
+
+
+@pytest.mark.parametrize("hooks", [_SHIFT_HOOKS, ("carry_beta",)], ids=["all four", "one of four"])
+def test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_some(hooks):
+    """The four shift hooks are one capability, so a control offering only some of them gets none.
+
+    A control answering some boundaries and not others would carry a shift that is right across one
+    kind of boundary and silently wrong across another. Here a beta escalation (1 -> 2 -> 4) is the
+    boundary: a control with all four hooks is told and carries 4.0 out; one with only ``carry_beta`` is
+    not a :class:`~aquaflux.solve.ShiftCarryingControl`, so it is not told and carries its own beta.
+    """
+    control = _ForwardingControl(DualTimeControl(beta_start=1.0, beta_min=0.01), hooks)
+    result = newton_march(
+        _AlphaFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        step_control=control,
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
+    )
+    beta, _memo = result.control_state
+    if len(hooks) == len(_SHIFT_HOOKS):
+        assert control.called == ["carry_beta"]
+        assert beta == 4.0
+    else:
+        assert control.called == []
+        assert beta == 1.0

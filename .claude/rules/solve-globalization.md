@@ -80,6 +80,34 @@ What to take from it, none of which is specific to that mechanism:
   also what pins the build: a march passing the spec itself, unbuilt, reaches the step as a non-`"tight"`
   object and the retry tests go red.
 
+- **What only SOME strategies or controls can do is a declared protocol in `strategy.py`, asked by
+  `isinstance` — never `getattr(x, name, default)` (binding, #281 part 2, 2026-10-10).** All exported:
+  - **`NewtonStrategy.with_norm(norm)`** is how the march swaps the per-iteration measure in. It used to
+    `eqx.tree_at(lambda s: s.residual_norm, …)` on the step, so a strategy conforming in full but keeping
+    its measure under another name failed inside equinox with an error naming a lambda. Implemented on
+    `DampedNewtonStep` and on the `ShiftedStep` base (the same `tree_at`, so the swap is still a data-leaf
+    change and a compilation-cache hit).
+  - **`CarriesRelaxationSchedule`** (`relaxation_schedule`) and **`ReadableShift`** (a schedule's `beta`;
+    `ConstantRelaxation` yes, `SwitchedEvolutionRelaxation` no). `ShiftedNewtonStrategy` is now
+    `NewtonStrategy + CarriesRelaxationSchedule`. **`shift_of(strategy)`** is the ONE reader of a shift —
+    `None` where there is none — used by the march's reports, the escalation's carry, the β-tracking
+    refresh and `RetryPolicy.require_shifted`. There is no `march._shift_of`.
+    `ShiftStrengthControl.next_step` refuses a step that is not a `CarriesRelaxationSchedule`.
+  - **`AbortsInnerLoop`** (`with_inner_abort(*, above_cycles, below_alpha)`, `None` = keep the step's
+    own): `RetryPolicy.with_inner_abort` calls it instead of probing two field names and rewriting them
+    with `dataclasses.replace` on a type it does not own. `DualTimeStep` implements it.
+  - **`ShiftCarryingControl(StepControl)`** declares `carry_beta`, `resumed_at`, `redamp` and `rebase`
+    **together**, and the march and `staged_march` call any of them only on a control that is one.
+    ⚠️ **All four or none, by decision (project owner, 2026-10-10):** they are one capability — keeping
+    the carried β right — so a control offering some would be right across one boundary and silently
+    wrong across another. A control implementing only some now gets **none** of them (pinned by
+    `test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_some`). Only
+    `ShiftStrengthControl` implements any, so no shipped control changed behaviour.
+  - Why: a probe answers "no" in silence when a class offers the capability under another name, and a
+    march that skips a feature looks exactly like one that never needed it. Membership is pinned both
+    ways against the real classes in `tests/unit/test_strategy_capabilities.py`; every new test was
+    mutation-checked. The remaining `getattr` sites outside this family are tracked in #669.
+
 - **`ShiftedStep` is the shared body of the two shifted Newton steps (`solve/continuation.py`, BUILT
   2026-08-15).** `PseudoTransientStep` and `DualTimeStep` differ entirely in `stepper()` — what one
   *outer step* means — and not at all in how they are configured or interrogated. The eight fields they
@@ -138,7 +166,7 @@ What to take from it, none of which is specific to that mechanism:
     cap's error budget is bounded well below that and not merely "small".
 
 - **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
-  split has one ordering, so `BlockTriangularFieldSplit.apply` has one body that branches only on
+  split has one ordering, so `FieldSplitInverse.apply` has one body that branches only on
   `transpose` (which reverses the solve order and uses `Cᵀ`).
 
 - **Forward globalization is ONE injected strategy — `strategy: NewtonStrategy`.** The forward
@@ -189,11 +217,17 @@ What to take from it, none of which is specific to that mechanism:
     every gate green. Treat "the fast gate passes" as saying nothing about whether `bfs3d` can march.
     - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
       (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
-      never touches beta, so it works on any step; its *reporting* goes through `_shift_of`, which
+      never touches beta, so it works on any step; its *reporting* goes through `shift_of`, which
       returns `None` for a step with no shift rather than inventing one. A `StepControl` is **not**
       gated either: the protocol only asks it to return a ready-to-run step, a step-agnostic one is
-      legitimate (and exercised), and a control that *does* drive beta already fails loudly from its
-      own `tree_at`. Gating those would reject what the protocol permits.
+      legitimate (and exercised), so the protocol stays typed on `NewtonStrategy`. A control that
+      *does* drive beta refuses for itself: `ShiftStrengthControl.next_step` is typed on
+      `ShiftedNewtonStrategy` and raises a `TypeError` naming the control and the step when the step
+      has no `relaxation_schedule` (#158, 2026-10-10). It used to "fail loudly" only as a bare
+      `AttributeError` from inside its `tree_at`, naming neither. The march calls it before its first
+      step, so nothing is taken first (pinned by `test_step_control.py`, all three controls,
+      mutation-checked). It tests the field's presence, not a readable beta, because it replaces the
+      schedule rather than reading it. Gating at the march would reject what the protocol permits.
     - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedNewtonStrategy)`.** The argument is
       already typed `NewtonStrategy`, so re-testing those four methods at runtime would reject a
       legitimate duck-typed step for a reason unrelated to the feature asked for — which it did, on

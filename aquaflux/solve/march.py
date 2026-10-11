@@ -53,7 +53,15 @@ from .convergence import MeasureBuilder
 from .norm import named_blocks
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
-from .strategy import NewtonStrategy, StepControl, StepOutcome, StepReport, within_tolerance
+from .strategy import (
+    NewtonStrategy,
+    ShiftCarryingControl,
+    StepControl,
+    StepOutcome,
+    StepReport,
+    shift_of,
+    within_tolerance,
+)
 
 
 def refuse_a_transform_the_march_cannot_run_in(pytree: object, *, caller: str) -> None:
@@ -406,21 +414,6 @@ class CoefficientDriftTrigger(eqx.Module):
         return history[-1].drift >= self.threshold
 
 
-def _shift_of(strategy: NewtonStrategy) -> float | None:
-    """The step's current shift strength, for **reporting**, or ``None`` if it has no shift.
-
-    Reporting must never demand a shift: a plain damped-Newton step legitimately has none, and a march
-    of one is a perfectly ordinary thing to run and to log. This is the read that belongs on every
-    reporting path -- ``StepReport.shift``, and the retry announcement, which reached for
-    ``strategy.relaxation_schedule`` unguarded and raised ``AttributeError`` on exactly such a step.
-
-    It stays on the march rather than moving to :class:`~aquaflux.solve.RetryPolicy` with the retry
-    decisions: reporting a step's shift is not a retry concern, and the step summary reads it on every
-    step whether or not any retry is configured.
-    """
-    return getattr(getattr(strategy, "relaxation_schedule", None), "beta", None)
-
-
 def _limit_collapsing(
     previous: StepReport | None, report: StepReport, progress: float = 1e-3
 ) -> bool:
@@ -524,6 +517,7 @@ def newton_march(
     rtol: float,
     atol: float,
     reference_norm: float | None = None,
+    damping_reference: float | None = None,
     trigger: RefreshTrigger | None = None,
     step_control: StepControl | None = None,
     control_state: object = None,
@@ -573,6 +567,14 @@ def newton_march(
         a staged solve. Defaults to the norm at ``phi0``, which is correct for a single segment.
         This is deliberately *not* the same quantity as the damping schedule's reference, which is
         always recomputed per segment from ``phi0`` (see the module docstring).
+    damping_reference : float, optional
+        The scale the damping schedule ramps against, in place of the norm measured at ``phi0``. It is
+        for a march **resuming** one that stopped short: the interrupted march's schedule was ramping
+        against the norm at *its* first state, and measuring afresh at the resumed state re-bases the
+        ramp there, which opens it at its starting strength again. Giving the interrupted march's own
+        reference continues the ramp where it left off. The march still starts from the residual it
+        actually measures at ``phi0`` -- only the schedule's anchor is replaced. ``None`` (the default)
+        measures at ``phi0``, byte-identical to a march that was never resumed.
     trigger : RefreshTrigger, optional
         Consulted after every step; when it fires the march stops and reports ``triggered=True``.
         ``None`` marches to convergence or ``max_steps``.
@@ -585,7 +587,9 @@ def newton_march(
         segment per refresh passes the previous segment's :attr:`MarchResult.control_state` here, so a
         stateful control continues across the refresh instead of resetting — the same discipline the
         *global* ``reference_norm`` follows, and the opposite of the deliberately segment-local damping
-        reference and ``drift_measure``. Ignored when ``step_control is None``.
+        reference and ``drift_measure``. A march resuming an interrupted one passes the control's own
+        ``resumed_at(shift)`` here (see :class:`~aquaflux.solve.Resumption`). Ignored when
+        ``step_control is None``.
     observer : callable, optional
         Called with each :class:`StepReport` as it is produced, for streaming progress out of a long
         march. The full history is also returned, so an observer is only needed for live reporting.
@@ -725,10 +729,13 @@ def newton_march(
     # starting strength and freezing the march.
     # The anchor is the scale the FIRST step's inner loop is judged against, so it is taken at the
     # station that step actually runs. With no homotopy that is `residual_fn` and this is unchanged.
-    residual_norm_0 = jnp.asarray(
+    measured_norm_0 = jnp.asarray(
         norm(residual_fn(phi0) if homotopy is None else homotopy.enter(0)(phi0))
     )
-    reference = float(residual_norm_0) if reference_norm is None else float(reference_norm)
+    residual_norm_0 = (
+        measured_norm_0 if damping_reference is None else jnp.asarray(float(damping_reference))
+    )
+    reference = float(measured_norm_0) if reference_norm is None else float(reference_norm)
 
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
     # step-length one the moment a line search collapses -- but the reaction below only runs once the
@@ -740,7 +747,7 @@ def newton_march(
     tight_solver = None if retry.solver is None else retry.solver.build()
 
     state = phi0
-    current = float(residual_norm_0)
+    current = float(measured_norm_0)
     reports: list[StepReport] = []
     triggered = False
     stalled = 0
@@ -791,9 +798,7 @@ def newton_march(
             # candidate win by shrinking its own denominator rather than its residual, so the search
             # would stop comparing like with like. The swap is a compilation-cache hit as long as the
             # measure carries its scales as data over a fixed block structure.
-            active_step = eqx.tree_at(
-                lambda s: s.residual_norm, active_step, norm_builder(strategy, state)
-            )
+            active_step = active_step.with_norm(norm_builder(strategy, state))
         if station_step is not None and homotopy is not None:
             # Let the caller reshape the step for the station it is about to run -- the seam by which
             # anything a homotopy changes about the PROBLEM can be matched by a change to how the step
@@ -818,11 +823,10 @@ def newton_march(
             and homotopy.station(len(reports)) != homotopy.station(len(reports) - 1)
         )
         previous_report = reports[-1] if reports else None
-        if entering and step_control is not None:
-            redamp = getattr(step_control, "redamp", None)
+        if entering and isinstance(step_control, ShiftCarryingControl):
             factor = float(homotopy.shift_factor(len(reports)))
-            if redamp is not None and factor != 1.0:
-                control_state = redamp(control_state, factor)
+            if factor != 1.0:
+                control_state = step_control.redamp(control_state, factor)
                 previous_report = None  # hold: the re-damping is this step's adaptation
         if step_control is not None:
             # A residual-ratio rule divides the last step's residual by the one before it, and that
@@ -838,9 +842,9 @@ def newton_march(
                 homotopy is not None
                 and len(reports) >= 2
                 and homotopy.station(len(reports) - 1) != homotopy.station(len(reports) - 2)
-                and (rebase := getattr(step_control, "rebase", None)) is not None
+                and isinstance(step_control, ShiftCarryingControl)
             ):
-                control_state = rebase(control_state)
+                control_state = step_control.rebase(control_state)
             active_step, control_state = step_control.next_step(
                 active_step, previous_report, control_state
             )
@@ -914,7 +918,7 @@ def newton_march(
             escalated = (
                 retry.escalate(active_step.relaxation_schedule.beta)
                 if escalating
-                else _shift_of(active_step)
+                else shift_of(active_step)
             )
             # Report the escalated β, and so only once it exists: `on_retry` promises the shift the
             # retried attempt will RUN at. Reporting the pre-escalation leaf here instead left the one
@@ -955,11 +959,11 @@ def newton_march(
         diverged_retry = retry.solver is not None and retry.has_diverged(residual_norm, reference)
         if diverged_retry:
             if on_retry is not None:
-                # `_shift_of`, not a direct read: the divergence retry needs no shift, so it runs on
+                # `shift_of`, not a direct read: the divergence retry needs no shift, so it runs on
                 # steps that have none, and this reported the shift by reaching straight through
                 # `relaxation_schedule` -- raising `AttributeError` on a step that satisfies
                 # `NewtonStrategy` in full. Unchanged beta here in any case; nothing escalated.
-                on_retry("solver", retries + 1, float(_shift_of(active_step) or 0.0))
+                on_retry("solver", retries + 1, float(shift_of(active_step) or 0.0))
             outcome, residual_norm = _march_step(
                 active_step, step_residual, prestep_state, residual_norm_0, tight_solver
             )
@@ -971,16 +975,18 @@ def newton_march(
         # control's carried β with the escalated value lets the control continue from the discovered-safe
         # level (and adapt on from there), so β_min can be driven toward zero and the *controller* decides how
         # large a pseudo-timestep is safe. Only when β was actually escalated, and only for a control that
-        # carries β (the dual-time family exposes `carry_beta`); no escalation ⇒ byte-identical.
-        if retries and step_control is not None and hasattr(step_control, "carry_beta"):
-            control_state = step_control.carry_beta(
-                control_state, float(active_step.relaxation_schedule.beta)
-            )
+        # carries β (a `ShiftCarryingControl`); no escalation ⇒ byte-identical.
+        if (
+            retries
+            and isinstance(step_control, ShiftCarryingControl)
+            and (carried := shift_of(active_step)) is not None
+        ):
+            control_state = step_control.carry_beta(control_state, float(carried))
         state = outcome.phi
         current = float(residual_norm)
         # Not every NewtonStrategy carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
-        step_shift = _shift_of(active_step)
+        step_shift = shift_of(active_step)
         report = StepReport(
             step=len(reports),
             cycles=int(outcome.cycles),
@@ -994,6 +1000,7 @@ def newton_march(
             shift=0.0 if step_shift is None else float(step_shift),
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),
+            damping_reference=float(residual_norm_0),
             station=0 if homotopy is None else int(homotopy.station(len(reports))),
             arrived=bool(arrived),
         )

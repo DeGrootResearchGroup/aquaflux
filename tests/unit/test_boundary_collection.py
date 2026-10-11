@@ -140,3 +140,58 @@ def test_boundary_parameter_is_a_differentiable_leaf() -> None:
         return jnp.sum(out)
 
     assert float(jax.grad(total)(3.0)) == 1.0  # 'left' has a single face
+
+
+def _interleaved() -> tuple[FaceCellConnectivity, BoundaryConditions]:
+    """A 6-face, 2-cell strip whose patches interleave: ``a`` = {1, 4}, ``b`` = {2, 5}, ``c`` = {3}.
+
+    Patches of unequal size whose faces are not contiguous, so a value written against another
+    patch's face, or against the wrong face within its own patch, lands on a row that shows it.
+    """
+    owner = jnp.array([0, 0, 1, 0, 1, 1])
+    neighbour = jnp.array([1, -1, -1, -1, -1, -1])
+    face_cells = FaceCellConnectivity(owner=owner, neighbour=neighbour, n_cells=2)
+    patches = FacePatches.from_dict(neighbour, {"a": [1, 4], "b": [2, 5], "c": [3]})
+    bcs = BoundaryConditions({"a": 100.0, "b": 200.0, "c": 300.0}).resolve(patches, face_cells)
+    return face_cells, bcs
+
+
+def test_apply_writes_each_value_at_its_own_face_when_patches_interleave() -> None:
+    """Every face gets its own patch's value for itself -- ``bc + face index`` -- and nothing else's."""
+    face_cells, bcs = _interleaved()
+    out = bcs.apply(face_cells, -jnp.ones(6), lambda bc, faces, owner: bc + faces)
+    np.testing.assert_allclose(np.asarray(out), [-1.0, 101.0, 202.0, 303.0, 104.0, 205.0])
+
+
+def test_apply_broadcasts_a_closure_value_over_its_patch() -> None:
+    """A closure may return one value for its whole patch, scalar or per-component."""
+    face_cells, bcs = _interleaved()
+    out = bcs.apply(face_cells, jnp.zeros(6), lambda bc, faces, owner: bc)
+    np.testing.assert_allclose(np.asarray(out), [0.0, 100.0, 200.0, 300.0, 100.0, 200.0])
+    out = bcs.apply(face_cells, jnp.zeros((6, 2)), lambda bc, faces, owner: jnp.array([bc, -bc]))
+    expected = np.array(
+        [[0.0, 0.0], [100, -100], [200, -200], [300, -300], [100, -100], [200, -200]]
+    )
+    np.testing.assert_allclose(np.asarray(out), expected)
+
+
+def test_apply_with_no_patches_returns_init() -> None:
+    """A mesh with no boundary faces needs no closure, and the fold leaves ``init`` as it is."""
+    neighbour = jnp.array([1])
+    face_cells = FaceCellConnectivity(owner=jnp.array([0]), neighbour=neighbour, n_cells=2)
+    bcs = BoundaryConditions({}).resolve(FacePatches.from_dict(neighbour, {}), face_cells)
+    init = jnp.array([7.0])
+    np.testing.assert_array_equal(np.asarray(bcs.apply(face_cells, init, None)), [7.0])
+
+
+def test_apply_writes_every_patch_in_one_scatter() -> None:
+    """The fold is one scatter whatever the patch count, not one per patch.
+
+    One per patch would chain the writes -- each reading the previous one's result -- so they could
+    not overlap, and the traced program would grow with every patch.
+    """
+    face_cells, bcs = _interleaved()
+    jaxpr = jax.make_jaxpr(
+        lambda init: bcs.apply(face_cells, init, lambda bc, faces, owner: bc + faces)
+    )(jnp.zeros(6))
+    assert str(jaxpr).count("= scatter[") == 1

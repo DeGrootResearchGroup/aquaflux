@@ -36,7 +36,7 @@ from aquaflux.case import (
     case_spec_to_mapping,
     read_case,
 )
-from aquaflux.case.solver import solver_for
+from aquaflux.case.solver import RadiationSolve, solver_for
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MassFlow, PinnedPoint
 from aquaflux.solve import (
@@ -50,6 +50,7 @@ from aquaflux.solve import (
     JacobiSmoothed,
     LinearSolveSettings,
     MaterializedJacobian,
+    Resumption,
     RetryPolicy,
     RootSolveSettings,
     RowScaled,
@@ -682,10 +683,12 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
             refit_beta_floor=0.05,
         ),
+        # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
+        # script stopped building its march.
         "dual_time": DualTimeLoop(
-            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
+            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=2
         ),
-        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14),
+        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 0.0,
         "positivity_projection": True,
         "step_control": CflResidualDualTimeControl(
@@ -873,3 +876,117 @@ def test_each_step_case_script_runs_its_files_solver_when_no_override_is_set(cas
         timeout=300,
     )
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner() -> None:
+    """A ``PITZ_*`` march variable must change the solver the default run hands the library.
+
+    The script edits its solver as ``SOLVER`` and prints its banner from that, so a solve that read the
+    case file's own solver instead would report every override as in force while running the file
+    unchanged. That happened: three marches at different linear tolerances came back bit-identical. The
+    solve is intercepted at the solver's ``solve``, after the case is built, so nothing is marched.
+    """
+    script = (
+        "import compare\n"
+        "seen = {}\n"
+        "def record(self, *args, **kwargs):\n"
+        "    seen['solver'] = self\n"
+        "    raise SystemExit(0)\n"
+        "type(compare.SOLVER).solve = record\n"
+        "try:\n"
+        "    compare.solve_aquaflux()\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "assert seen['solver'].linear_solve.rtol == 0.0123, seen['solver'].linear_solve\n"
+    )
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("PITZ_")
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO / "validation" / "pitzdaily_openfoam",
+        env=environment | {"PYTHONPATH": str(REPO), "PITZ_FORWARD_RTOL": "0.0123"},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
+# --- a starting state ------------------------------------------------------------------------------
+
+
+_SEED = ("flow", "k", "omega")
+
+
+def test_a_coupled_march_starts_solve_coupled_from_the_state_it_is_given(recorded) -> None:
+    CoupledMarch(max_steps=7).solve("problem", initial=_SEED)
+    ((args, kwargs),) = recorded.solve_coupled.calls
+    assert args == ("problem", "flow", "k", "omega")
+    assert kwargs == {"max_steps": 7}
+
+
+def test_a_coupled_march_given_no_state_leaves_solve_coupled_to_start_itself(recorded) -> None:
+    CoupledMarch().solve("problem")
+    ((args, _),) = recorded.solve_coupled.calls
+    assert args == ("problem",)
+
+
+def test_a_flow_march_starts_from_the_state_it_is_given_and_otherwise_passes_none(recorded) -> None:
+    FlowMarch().solve("problem")
+    FlowMarch(max_steps=4).solve("problem", initial="state")
+    (_, unset), (_, given) = recorded.solve_flow_march.calls
+    assert unset == {}
+    assert given == {"max_steps": 4, "state": "state"}
+
+
+def test_a_coupled_march_resumes_with_the_history_it_is_given(recorded) -> None:
+    history = Resumption(reference_residual=0.25, damping_reference=0.5, shift=0.1)
+    CoupledMarch(max_steps=7).solve("problem", initial=_SEED, resume=history)
+    CoupledMarch().solve("problem", initial=_SEED)
+    (_, resumed), (_, plain) = recorded.solve_coupled.calls
+    assert resumed == {"max_steps": 7, "resume": history}
+    # Left unset it is not passed at all, so the library's own default measures at the initial state.
+    assert plain == {}
+
+
+def test_a_flow_march_resumes_with_the_history_it_is_given(recorded) -> None:
+    history = Resumption(reference_residual=0.25, damping_reference=0.5, shift=0.1)
+    FlowMarch().solve("problem", initial="state", resume=history)
+    ((_, kwargs),) = recorded.solve_flow_march.calls
+    assert kwargs == {"state": "state", "resume": history}
+
+
+def test_a_solve_with_no_march_to_resume_refuses_a_history(recorded) -> None:
+    problem = types.SimpleNamespace(momentum=types.SimpleNamespace(drive=None), turbulence="t")
+    history = Resumption(reference_residual=0.25)
+    with pytest.raises(ValueError, match="no march history to resume"):
+        Segregated(sweeps=5).solve(problem, resume=history)
+    with pytest.raises(ValueError, match="marches nothing"):
+        RadiationSolve().solve("scene", resume=history)
+    assert recorded.solve_segregated.calls == []
+
+
+def test_a_ramp_cannot_be_handed_a_history_either(recorded) -> None:
+    ramp = ViscosityRamp(anchor=50.0, stations=6, steps_per_station=2)
+    with pytest.raises(ValueError, match=r"a viscosity ramp opens on a seed fitted to its anchor"):
+        CoupledMarch(continuation=ramp).solve("problem", resume=Resumption(reference_residual=0.25))
+    assert recorded.solve_reynolds_ramp.calls == []
+
+
+def test_a_segregated_solve_starts_from_the_state_it_is_given_not_its_own_initializer(
+    recorded,
+) -> None:
+    momentum = types.SimpleNamespace(drive=None)
+    problem = types.SimpleNamespace(momentum=momentum, turbulence="t")
+    Segregated(sweeps=5).solve(problem, initial=("flow1", "k1", "omega1"))
+    assert recorded.sst_initial_fields.calls == []
+    ((args, _),) = recorded.solve_segregated.calls
+    assert args[-3:] == ("flow1", "k1", "omega1")
+
+
+def test_a_ramp_cannot_be_handed_a_starting_state_by_a_script_either(recorded) -> None:
+    ramp = ViscosityRamp(anchor=50.0, stations=6, steps_per_station=2)
+    with pytest.raises(ValueError, match=r"a viscosity ramp opens on a seed fitted to its anchor"):
+        CoupledMarch(continuation=ramp).solve("problem", initial=_SEED)
+    assert recorded.solve_reynolds_ramp.calls == []

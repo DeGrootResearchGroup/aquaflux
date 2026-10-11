@@ -79,7 +79,9 @@ def test_a_loop_of_fewer_than_two_inner_steps_is_refused_and_points_at_the_singl
     "base", [_BLOCK_LINEAR_SOLVE, _CONSTRAINED_LINEAR_SOLVE], ids=["block", "constrained"]
 )
 @pytest.mark.parametrize(
-    "fields", [{}, {"restart": 15}, {"rtol": 0.1, "restart": 30, "max_restarts": 9}], ids=str
+    "fields",
+    [{}, {"restart": 15}, {"rtol": 0.1, "restart": 30, "max_restarts": 9}, {"stop": "residual"}],
+    ids=str,
 )
 def test_a_forward_value_resolves_each_unset_field_to_the_family_s_regime(base, fields) -> None:
     regime, solver = resolve_linear_solve(LinearSolveSettings(**fields), base)
@@ -91,6 +93,30 @@ def test_a_forward_value_resolves_each_unset_field_to_the_family_s_regime(base, 
 def test_a_solver_given_as_the_forward_value_replaces_the_regime() -> None:
     solver = relative_residual_gmres(1e-4)
     assert resolve_linear_solve(solver, _BLOCK_LINEAR_SOLVE) == (_BLOCK_LINEAR_SOLVE, solver)
+
+
+@pytest.mark.parametrize(
+    ("stop", "expected"),
+    [
+        (None, "_RelativeResidualGMRES"),
+        ("lineax", "_RelativeResidualGMRES"),
+        ("residual", "_ResidualStopGMRES"),
+    ],
+)
+def test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure(
+    case, stop, expected
+) -> None:
+    coupled, state = case
+    step = coupled_step(
+        coupled,
+        state,
+        preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
+        linear_solve=LinearSolveSettings(rtol=0.2, restart=9, max_restarts=7, stop=stop),
+    )
+    solver = step.linear_solver()
+    assert type(solver).__name__ == expected
+    # The regime's numbers arrive, and the measure is left for the step to bind at every iteration.
+    assert (solver.atol, solver.restart, solver.max_steps, solver.norm) == (0.2, 9, 7, None)
 
 
 def test_the_loop_selects_the_step_shape_and_reaches_its_fields(case) -> None:

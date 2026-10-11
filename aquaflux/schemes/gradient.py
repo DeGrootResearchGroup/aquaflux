@@ -89,6 +89,9 @@ class _CorrectedTerms(NamedTuple):
     skew: jnp.ndarray  # (n_faces, dim) skewness offset D_g,ip from the P–N line to the face
     area_vector: jnp.ndarray  # (n_faces, dim) owner-outward S_f = A_f n_f
     volume: jnp.ndarray  # (n_cells,) cell volumes
+    # (n_cells, dim, dim) B_P: the boundary faces' dependence on their owner's own gradient, per unit
+    # volume (see `boundary_gradient_block`); None where no condition reads it.
+    boundary_block: jnp.ndarray | None = None
 
 
 class ImposedGradient(eqx.Module):
@@ -211,6 +214,108 @@ class BoundaryLinearization(eqx.Module):
     gradient_weight: jnp.ndarray
 
 
+def boundary_gradient_block(
+    boundary_gradient_weight: jnp.ndarray,
+    face_cells: FaceCellConnectivity,
+    geometry: MeshGeometry,
+) -> jnp.ndarray:
+    """``B_P``: how a Green--Gauss sum's boundary faces read their owner's own gradient, per cell.
+
+    A boundary condition fixes each boundary face's value as a function of its owner, and every
+    condition here gives one **affine** in the owner gradient: ``phi_f = phi_f0 + w_f . grad phi_P``,
+    with ``phi_f0`` the value at zero gradient and ``w_f`` the condition's gradient weight -- zero for
+    a prescribed value, the tangential offset of the face centroid from the owner centroid for a
+    zero-gradient or Neumann condition, and that offset scaled by the value weight for a Robin one.
+    In a Green--Gauss sum each such face therefore contributes ``(w_f . grad phi_P) S_f / V_P``,
+    which is ``B_P grad phi_P`` for the per-cell matrix
+
+        B_P = (1 / V_P) sum over P's boundary faces of  S_f w_f^T .
+
+    A scheme moves that term to the left-hand side, ``(M - B) grad phi = (sum with phi_f0)``, so its
+    gradient satisfies the boundary conditions it was reconstructed against instead of contradicting
+    them on a skewed boundary cell. The block reaches only the owner's own gradient, so it adds no
+    stencil reach and costs one small per-cell solve.
+
+    **This is exact only because the conditions are affine in the owner gradient.** A condition whose
+    face value depended nonlinearly on the gradient would be *linearized* here rather than absorbed,
+    and the reconstruction would no longer satisfy it exactly. Every shipped condition is affine,
+    which is why one gradient weight, evaluated once at a zero state, describes it completely.
+
+    Using the condition's own weight -- not the owner's full displacement to the face -- is what keeps
+    ``M - B`` invertible on a tetrahedron owning two such faces: its two interior faces span only two
+    of three directions, and the condition supplies exactly the normal one they lack.
+
+    Parameters
+    ----------
+    boundary_gradient_weight : jnp.ndarray
+        ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)``. Interior entries
+        are ignored.
+    face_cells : FaceCellConnectivity
+        Which cell owns each face.
+    geometry : MeshGeometry
+        Face areas and owner-outward normals, and cell volumes.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``B_P`` per cell, shape ``(n_cells, dim, dim)``, indexed ``[cell, gradient row, gradient
+        column]``; zero on a cell with no gradient-dependent boundary face.
+    """
+    weight = jnp.where(face_cells.interior[:, None], 0.0, boundary_gradient_weight)
+    area = scale(geometry.face.normal, geometry.face.area)
+    # A boundary face contributes to its owner only, so the owner-only scatter is the whole sum; the
+    # conservative one would also reduce a neighbour side that is zero by construction.
+    block = face_cells.scatter_to_owner(weight[:, :, None] * area[:, None, :])
+    return jnp.swapaxes(block, 1, 2) / geometry.cell.volume[:, None, None]
+
+
+def _small_inverse(matrix: jnp.ndarray) -> jnp.ndarray:
+    """Per-cell inverse of a batch of 1x1, 2x2 or 3x3 matrices, by the adjugate.
+
+    Written out because these inverses run inside every reconstruction, so inside every residual
+    evaluation and every Jacobian--vector product: a batched library inverse is one call per cell
+    batch that the compiler cannot fuse with anything around it, while the adjugate is a handful of
+    elementwise products it fuses freely, an order of magnitude cheaper here. Fine for the
+    well-conditioned ``I - B`` blocks it serves; not a general-purpose inverse.
+
+    Parameters
+    ----------
+    matrix : jnp.ndarray
+        Shape ``(n, dim, dim)`` with ``dim`` 1, 2 or 3.
+
+    Returns
+    -------
+    jnp.ndarray
+        The inverses, shape ``(n, dim, dim)``.
+    """
+    dim = matrix.shape[-1]
+    if dim == 1:
+        return 1.0 / matrix
+    if dim == 2:
+        a, b = matrix[:, 0, 0], matrix[:, 0, 1]
+        c, d = matrix[:, 1, 0], matrix[:, 1, 1]
+        adjugate = jnp.stack([jnp.stack([d, -b], -1), jnp.stack([-c, a], -1)], -2)
+        return adjugate / (a * d - b * c)[:, None, None]
+    # The adjugate is the transposed cofactor matrix; cofactor (i, j) is the signed minor of the 2x2
+    # left after deleting row i and column j, read here with cyclic indices so the sign is built in.
+    cofactor = jnp.stack(
+        [
+            jnp.stack(
+                [
+                    matrix[:, (i + 1) % 3, (j + 1) % 3] * matrix[:, (i + 2) % 3, (j + 2) % 3]
+                    - matrix[:, (i + 1) % 3, (j + 2) % 3] * matrix[:, (i + 2) % 3, (j + 1) % 3]
+                    for j in range(3)
+                ],
+                -1,
+            )
+            for i in range(3)
+        ],
+        -2,
+    )
+    determinant = jnp.sum(matrix[:, 0, :] * cofactor[:, 0, :], axis=-1)
+    return jnp.swapaxes(cofactor, 1, 2) / determinant[:, None, None]
+
+
 class GradientScheme(eqx.Module):
     """Strategy interface: reconstruct cell gradients from a cell field."""
 
@@ -305,8 +410,14 @@ class GradientScheme(eqx.Module):
             Robin condition's face value otherwise. With ``boundary_values`` evaluated at zero
             gradient, ``boundary_values + w . grad phi_owner`` is exactly the face value the boundary
             condition defines, so a scheme may reconstruct against that rather than against the
-            zero-gradient values. ``None`` (the default) leaves every scheme reconstructing exactly as
-            before, and a scheme that has no use for it ignores it.
+            zero-gradient values. :class:`CompactGreenGauss`, :class:`CorrectedGreenGauss` and
+            :class:`~aquaflux.schemes.MultipleCorrectionGradient` do, by moving the dependence to the
+            left-hand side as :func:`boundary_gradient_block`; the gradient they return then satisfies
+            the conditions exactly wherever the conditions are affine in the owner gradient, which
+            every shipped one is. :class:`HessianCorrectedGradient` does not yet use it, and
+            :class:`~aquaflux.schemes.ProjectedStencilGradient` builds the conditions into its own
+            boundary rows instead. ``None`` (the default) leaves every scheme reconstructing against
+            the zero-gradient values.
 
         Returns
         -------
@@ -350,7 +461,16 @@ class GradientScheme(eqx.Module):
 
 
 class CompactGreenGauss(GradientScheme):
-    """One-shot Green–Gauss with linearly-interpolated interior face values."""
+    """One-shot Green–Gauss with linearly-interpolated interior face values.
+
+    Given ``boundary_gradient_weight`` (every residual assembler passes it), a boundary face whose
+    value follows the owner gradient -- zero-gradient, Neumann, Robin -- is summed at the value its
+    condition defines at the reconstructed gradient rather than at zero gradient. That dependence is
+    affine, so the sum becomes ``(I - B_P) grad phi_P = (1/V) sum phi_f0 S_f`` with ``B_P`` from
+    :func:`boundary_gradient_block`: one small solve per cell and no extra pass. Without it, a skewed
+    boundary cell is summed against a face value that contradicts the field, an error that does not
+    fall with refinement.
+    """
 
     def _reconstruct_gradient(
         self,
@@ -376,7 +496,12 @@ class CompactGreenGauss(GradientScheme):
 
         area_vector = scale(face_geometry.normal, face_geometry.area)  # owner-outward S_f
         grad_sum = face_cells.scatter_conservative(scale(area_vector, phi_face))
-        return scale(grad_sum, 1.0 / cell_geometry.volume)
+        gradient = scale(grad_sum, 1.0 / cell_geometry.volume)
+        if boundary_gradient_weight is None:
+            return gradient
+        block = boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
+        inverse = _small_inverse(jnp.eye(mesh.dim, dtype=gradient.dtype) - block)
+        return jnp.einsum("nij,nj->ni", inverse, gradient)
 
 
 def symmetric_components(dim: int) -> int:
@@ -738,6 +863,14 @@ class InverseCellVolume(CellPreconditioner):
     this is within the skewness of the true block and the sweep it drives converges quickly. It costs
     a reciprocal and nothing else.
 
+    Where the boundary conditions read their owner's gradient the operator also carries the
+    cell-local block ``V B`` (see :func:`boundary_gradient_block`), and this inverts ``V (I - B)``
+    instead -- still only what the operator holds per cell before its skewness coupling. On a thin
+    skewed wall cell ``B`` can be several times the identity; with one such face it is nilpotent and a
+    volume alone still converges in two sweeps, but a corner cell owning two is not, and there a
+    volume alone left ``6e-4`` of the gradient after eight sweeps where this block is exact after
+    one. Cells owning no such face keep ``1/V``.
+
     ⚠️ **It degrades exactly as the cell does.** The neglected coupling scales with face area while
     the volume does not, so as a cell flattens ``1/V`` stops approximating anything. Measured on a
     single squashed cell, the reconstruction error there grows without bound with the volume ratio:
@@ -746,7 +879,13 @@ class InverseCellVolume(CellPreconditioner):
     """
 
     def build(self, terms: _CorrectedTerms) -> GradientPreconditioner:
-        return InverseVolume(1.0 / terms.volume)
+        if terms.boundary_block is None:
+            return InverseVolume(1.0 / terms.volume)
+        # (V (I - B))^-1 = (I - B)^-1 / V, inverted in that order so that a cell with no such face
+        # gets exactly 1/V -- the same scaling as without a block, to the last bit.
+        dim = terms.area_vector.shape[-1]
+        inverse = _small_inverse(jnp.eye(dim) - terms.boundary_block)
+        return CellBlockJacobi(inverse / terms.volume[:, None, None])
 
 
 class ExactCellBlock(CellPreconditioner):
@@ -786,6 +925,8 @@ class ExactCellBlock(CellPreconditioner):
             return fc.scatter(no_face, -flux)
 
         block = cell_diagonal_block(owner_column, neighbour_column, terms.volume, n_cells, dim)
+        if terms.boundary_block is not None:
+            block = block - terms.boundary_block * terms.volume[:, None, None]
         return CellBlockJacobi(jnp.linalg.inv(block))
 
 
@@ -1821,8 +1962,12 @@ class CorrectedGreenGauss(GradientScheme):
     preconditioner: CellPreconditioner = eqx.field(default_factory=InverseCellVolume)
 
     @staticmethod
-    def terms(mesh: Mesh, geometry: MeshGeometry) -> _CorrectedTerms:
-        """Geometry-only intermediates of the corrected-gradient system (operator + RHS share them).
+    def terms(
+        mesh: Mesh,
+        geometry: MeshGeometry,
+        boundary_gradient_weight: jnp.ndarray | None = None,
+    ) -> _CorrectedTerms:
+        """Intermediates of the corrected-gradient system (operator, preconditioner and RHS share them).
 
         Parameters
         ----------
@@ -1830,11 +1975,16 @@ class CorrectedGreenGauss(GradientScheme):
             Owner/neighbour connectivity.
         geometry : MeshGeometry
             Face and cell metrics (centroids, owner-outward area vectors, volumes).
+        boundary_gradient_weight : jnp.ndarray, optional
+            ``d(boundary value)/d(grad phi_owner)`` per face, shape ``(n_faces, dim)``. With it the
+            operator carries each boundary face's dependence on its owner's gradient (see
+            :func:`boundary_gradient_block`), so the solved gradient satisfies the boundary conditions
+            it was reconstructed against. ``None`` leaves the terms geometry-only.
 
         Returns
         -------
         _CorrectedTerms
-            The bundled per-face/per-cell geometry the operator and RHS both consume.
+            The bundled per-face/per-cell terms the operator, preconditioner and RHS consume.
         """
         face_geometry, cell_geometry = geometry.face, geometry.cell
         face_cells = mesh.face_cells
@@ -1845,15 +1995,24 @@ class CorrectedGreenGauss(GradientScheme):
         g = interpolation_factor(face_cells, geometry)
         skew = face_geometry.centroid - (x_p + scale(d, g))  # D_g,ip: offset from P–N line to face
         area_vector = scale(face_geometry.normal, face_geometry.area)  # owner-outward S_f
-        return _CorrectedTerms(face_cells, g, skew, area_vector, cell_geometry.volume)
+        boundary_block = (
+            None
+            if boundary_gradient_weight is None
+            else boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
+        )
+        return _CorrectedTerms(
+            face_cells, g, skew, area_vector, cell_geometry.volume, boundary_block
+        )
 
     @classmethod
     def operator(cls, t: _CorrectedTerms) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        """The field-independent, geometry-only linear operator ``A_g`` (a matvec on the gradient).
+        """The field-independent linear operator ``A_g`` (a matvec on the gradient).
 
-        ``A_g = V ⊙ I − (correction coupling)``; it depends only on ``t``, never on the field, and is
-        volume-dominated — which is exactly what lets :class:`SweptGradientSolve` invert it by a
-        few fixed matrix-free sweeps.
+        ``A_g = V ⊙ I − (correction coupling) − V B``; it depends only on ``t``, never on the field,
+        and is volume-dominated — which is exactly what lets :class:`SweptGradientSolve` invert it by
+        a few fixed matrix-free sweeps. ``V B`` is the boundary faces' dependence on their owner's own
+        gradient, present only when ``t`` was built with a boundary gradient weight; it is block
+        diagonal, so it adds no stencil reach.
         """
         fc = t.face_cells
         owner, nb = fc.owner, fc.safe_neighbour
@@ -1864,7 +2023,10 @@ class CorrectedGreenGauss(GradientScheme):
             correction = fc.scatter_conservative(
                 fc.combine_face_values(scale(t.area_vector, w), 0.0)
             )
-            return scale(grad, t.volume) - correction
+            applied = scale(grad, t.volume) - correction
+            if t.boundary_block is None:
+                return applied
+            return applied - scale(jnp.einsum("nij,nj->ni", t.boundary_block, grad), t.volume)
 
         return matvec
 
@@ -1998,7 +2160,7 @@ class CorrectedGreenGauss(GradientScheme):
         # row is applied by `gradients` and nothing here reads the row it replaces. It never
         # differentiates a boundary value either, so the corrected ones are of no use to it.
         del imposed, boundary_values_at
-        t = self.terms(mesh, geometry)
+        t = self.terms(mesh, geometry, boundary_gradient_weight)
         system = self.system(t, self.preconditioner)
         return self.solver.solve(
             system.preconditioner,

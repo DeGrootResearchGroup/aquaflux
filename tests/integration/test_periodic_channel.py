@@ -117,7 +117,7 @@ def test_block_preconditioned_solve_converges_on_the_periodic_mesh() -> None:
     """
     _, geometry, assembler, _ = _solve(6, 32)
     solve_flow = reused_flow_solve(assembler, velocity=ConvectionTwoLevel())
-    state = solve_flow(assembler, potential_flow(assembler))
+    _, state = solve_flow(assembler, potential_flow(assembler))
 
     assert float(jnp.linalg.norm(assembler.residual(state))) < 1e-10
     velocity, _ = assembler.unpack(state)

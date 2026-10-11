@@ -26,7 +26,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from aquaflux.boundary import BoundaryConditions, DirichletField
+from aquaflux.boundary import BoundaryConditions, DirichletField, Neumann
 from aquaflux.discretization import DiffusionFlux, ResidualAssembler
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CorrectedGreenGauss, GmresGradientSolve, GradientScheme
@@ -66,6 +66,16 @@ class _LaggedGradient(GradientScheme):
                 field, mesh, geometry, boundary_values, operator_hook=operator_hook, imposed=imposed
             )
         )
+
+
+class _BlindToBoundaryWeight(GradientScheme):
+    """Wrap a scheme so it never sees how its boundary faces depend on the owner gradient."""
+
+    inner: GradientScheme
+
+    def _reconstruct_gradient(self, field, mesh, geometry, boundary_values, **kwargs):
+        kwargs["boundary_gradient_weight"] = None
+        return self.inner._reconstruct_gradient(field, mesh, geometry, boundary_values, **kwargs)
 
 
 def _skewed_laplace(gradient_scheme, n=12, perturb=0.25, seed=1):
@@ -160,3 +170,71 @@ def test_gate_c_residual_is_differentiable_on_skewed_mesh() -> None:
     grad = jax.grad(objective)(1.0)
     assert np.isfinite(float(grad))
     assert float(grad) > 0.0  # scaling the boundary data up increases the interior magnitude
+
+
+def _skewed_flux_walls(gradient_scheme, heat_flux=1.0, n=10, perturb=0.25, seed=1):
+    """Laplace with the linear field's own flux on the top and bottom walls and its value elsewhere.
+
+    The Neumann face values depend on their owners' gradients, so the reconstruction's boundary
+    conditions -- not only its interior skewness correction -- decide whether the field is exact.
+    ``heat_flux`` scales the prescribed flux, giving a parameter to differentiate the solve by.
+    """
+    mesh = perturbed_grid_2d(n, n, perturb=perturb, seed=seed, named_boundaries=True)
+    geom = mesh.geometry()
+    value = DirichletField(field_fn=_linear_field)
+
+    def wall(name):
+        normal_derivative = geom.face.normal[mesh.face_patches.indices(name)] @ jnp.array(
+            [2.0, -3.0]
+        )
+        return Neumann(flux=-heat_flux * normal_derivative)  # unit diffusivity
+
+    assembler = ResidualAssembler.build(
+        mesh,
+        geom,
+        PropertyModel({"diffusivity": Constant(1.0)}),
+        (DiffusionFlux(),),
+        BoundaryConditions(
+            {"left": value, "right": value, "bottom": wall("bottom"), "top": wall("top")}
+        ),
+        gradient_scheme=gradient_scheme,
+    )
+    return mesh, geom.cell, assembler
+
+
+def test_gate_c_holds_with_flux_walls_on_a_skewed_mesh() -> None:
+    """One Newton step reproduces the linear field to roundoff with zero-flux-type walls too.
+
+    Before the reconstruction moved its boundary faces' dependence on the owner gradient to its
+    left-hand side, the boundary cells' gradients contradicted the Neumann data, and through the
+    interior faces' non-orthogonal correction the solved field missed the linear one; the control
+    below, which withholds that dependence, still does.
+    """
+    mesh, cell_geometry, assembler = _skewed_flux_walls(
+        CorrectedGreenGauss(solver=GmresGradientSolve())
+    )
+    exact = _linear_field(cell_geometry.centroid)
+    phi = eqx.filter_jit(newton_step)(assembler.residual, jnp.zeros(mesh.n_cells))
+    assert float(jnp.max(jnp.abs(phi - exact))) < 1e-9
+
+    _, _, blind = _skewed_flux_walls(
+        _BlindToBoundaryWeight(CorrectedGreenGauss(solver=GmresGradientSolve()))
+    )
+    missed = eqx.filter_jit(newton_step)(blind.residual, jnp.zeros(mesh.n_cells))
+    assert float(jnp.max(jnp.abs(missed - exact))) > 1e-4
+
+
+def test_a_gradient_through_a_flux_wall_solve_matches_a_finite_difference() -> None:
+    """The block is a fixed linear map of the geometry, so the solve differentiates through it."""
+    mesh, _, _ = _skewed_flux_walls(CorrectedGreenGauss(), n=8)
+
+    def objective(heat_flux):
+        _, _, assembler = _skewed_flux_walls(CorrectedGreenGauss(), heat_flux=heat_flux, n=8)
+        phi = newton_step(assembler.residual, jnp.zeros(mesh.n_cells))
+        return jnp.sum(phi**2)
+
+    step = 1e-5
+    analytic = float(jax.grad(objective)(1.0))
+    finite = float((objective(1.0 + step) - objective(1.0 - step)) / (2 * step))
+    assert analytic != 0.0
+    assert abs(analytic - finite) < 1e-6 * abs(finite)

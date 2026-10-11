@@ -24,7 +24,7 @@ paths:
 
 - **Monolithic ALGEBRAIC-MULTIGRID preconditioner — BUILT (`amg_preconditioner.py`), the coupled PC for
   large 3D.** The sibling of the complete LU: instead of factoring the assembled coupled Jacobian it applies
-  **one smoothed-aggregation multigrid V-cycle** (`MonolithicAmgPreconditioner`, PETSc `PCGAMG`) whose only
+  **one smoothed-aggregation multigrid V-cycle** (`MonolithicVCyclePreconditioner`, PETSc `PCGAMG`) whose only
   exact solve is a **direct LU on the small coarsest grid**, so the heavy fill never lives on the fine grid.
   This is the answer to the complete LU's 3D wall: its fill OOMs (`O(n^{4/3})`), where the V-cycle
   **builds in ~seconds with bounded memory** and scales. (A monolithic threshold-ILU factorization was
@@ -32,16 +32,23 @@ paths:
   `spilu` on the 23k-cell `bfs3d` case's 38.7M-nnz, ~280-nnz/row Jacobian ran **>7.5 min and never
   finished** at `fill_factor=30`, RSS <2 GB — before being deleted as dominated by these two; see
   `solve-direct-preconditioners.md`.)
-  - **`MonolithicAmgPreconditioner`'s materialize/shift/cache machinery lives on a shared base,
-    `MaterializedJacobianPreconditioner` (binding, #287, 2026-09-11).** `FieldSplitAmgPreconditioner`
+  - **`MonolithicVCyclePreconditioner`'s materialize/shift/cache machinery lives on a shared base,
+    `MaterializedJacobianPreconditioner` (binding, #287, 2026-09-11).** `FieldSplitPreconditioner`
     (`solve-field-split.md`) needed the same coloured-probe-materialize + shift-diagonal + cached-Jacobian
-    machinery without the monolithic-only state built around one `AmgVCycle` — the fixed-pattern
-    cell-major assembler (`_assembler_for`/`_cell_major`), which a split never forms. Those stay on `MonolithicAmgPreconditioner`; `_materialize_jacobian`, `_shifted` and
+    machinery without the monolithic-only state built around one `MonolithicVCycleInverse` — the fixed-pattern
+    cell-major assembler (`_assembler_for`/`_cell_major`), which a split never forms. Those stay on `MonolithicVCyclePreconditioner`; `_materialize_jacobian`, `_shifted` and
     `destroy` moved to the new base (the cached unshifted Jacobian that went with them was deleted with the
     shift-only refresh, #371), which both classes
-    now subclass directly — see `solve-direct-preconditioners.md`'s `HostFactors` entry for why this
-    matters (a base reading anything off `self.factors` beyond `n_dofs`+`apply` is a requirement on every
+    now subclass directly — see `solve-direct-preconditioners.md`'s `FrozenInverse` entry for why this
+    matters (a base reading anything off `self.inverse` beyond `n_dofs`+`apply` is a requirement on every
     subclass, and the pre-extraction shape of this exact pair is the worked example).
+    **Since #281 (2026-10-10) the base also owns the refresh and the release:**
+    `MaterializedJacobianPreconditioner.refresh_in_place` is the one materialize → shift →
+    `factors.refactor_block` body (the split and the single-block preconditioner deleted their identical
+    copies), and `destroy` is inherited from `HostPreconditioner`, which releases a `ReleasableInverse`.
+    The base's old `destroy` had an empty body, so `MonolithicVCyclePreconditioner.destroy()` freed no PETSc
+    object. `MonolithicVCyclePreconditioner` overrides the refresh, since its V-cycle re-fits to the
+    equilibrated cell-major matrix through `MonolithicVCycleInverse.refactor(cell_major, scale, perm)`.
   - **The V-cycle is a fixed LINEAR operator (one `pc.apply`, not an inner Krylov solve), so it is a
     drop-in for the same callback-matvec interface as the complete LU and — being linear and transposable —
     serves the adjoint's transpose solve through the multigrid's own transpose (`pc.applyTranspose`), with
@@ -100,7 +107,7 @@ paths:
     over-solving each step to machine zero — was itself stale: that over-solve was removed 2026-07-28.
   - **`coarse_eq_limit` — grow the coarsest-grid direct LU (BUILT).** GAMG's default coarsens to a tiny
     (~50-equation) coarse grid, whose direct LU captures only the crudest global mode; the indefinite
-    saddle's wall is exactly that global pressure coupling. `build_amg_vcycle(coarse_eq_limit=K)` /
+    saddle's wall is exactly that global pressure coupling. `monolithic_vcycle_inverse(coarse_eq_limit=K)` /
     `coupled_amg_continuation(coarse_eq_limit=K)` (default `None` = PETSc's ~50, byte-identical) stops
     coarsening at `K` equations so the coarse LU inverts more of the global coupling **exactly** — a
     stronger V-cycle *and* transpose V-cycle (so the adjoint benefits). Measured on the `bfs3d` hard state
@@ -135,7 +142,7 @@ paths:
     So "zero fill is right" is a `bfs3d` result, not a general one, and the shipped builder default of
     ILU(1) is not a floor that always works.
     **What decides it is which entries are STORED, and at a degenerate state that is decided by rounding.**
-    `AmgVCycle._live` drops exactly-zero entries because an incomplete factorization takes its fill pattern
+    `MonolithicVCycleInverse._live` drops exactly-zero entries because an incomplete factorization takes its fill pattern
     from stored entries. That channel starts from `hybrid_initialize`, whose wall-normal velocity is zero
     to rounding, so the wall-normal face mass fluxes are ~0 and the **first-order upwind switch on the `ω`
     transport sits exactly on its kink**. ~24 500 block-stencil positions then carry *identically* zero
@@ -729,11 +736,11 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
       a symmetric scale into a **preallocated** buffer. Bit-identical to `equilibrate_cell_major(J +
       diags(shift))` — pinned by `tests/unit/test_cell_major_operator.py`, which runs without `petsc4py`
       because the class holds none. Two details worth keeping: the returned matrix **aliases the reused
-      buffer** (consume it immediately; `AmgVCycle._build`/`refactor` both copy), and the symmetric scale
+      buffer** (consume it immediately; `MonolithicVCycleInverse._build`/`refactor` both copy), and the symmetric scale
       is applied **chunked over rows** so it never allocates a second Jacobian-sized temporary — the
       point of the exercise being to stop allocating those. It engages only when a precomputed
       `structure` was used, which is precisely the guarantee the pattern is fixed; otherwise the generic
-      path runs unchanged. `AmgVCycle.refactor`'s pattern re-check is likewise memoized on the index
+      path runs unchanged. `MonolithicVCycleInverse.refactor`'s pattern re-check is likewise memoized on the index
       arrays' identity, since comparing tens of millions of indices twice per refresh re-confirms
       something fixed by construction.
     - **Two redundant full copies of the operator's VALUES are gone (2026-08-14).** `_build` wrote
@@ -762,7 +769,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
         aquaflux.solve.vanka.VankaPC` needs **nothing but the assembled matrix** — verified on a plain
         `createAIJWithArrays` matrix with no `DM`, and it reaches every level (block size propagates to
         the Galerkin operators, so the coarse levels are configurable too). Reached through the
-        `extra_options` seam, so no change to `AmgVCycle` was needed. Options carry the level prefix:
+        `extra_options` seam, so no change to `MonolithicVCycleInverse` was needed. Options carry the level prefix:
         `mg_levels_pc_type python`, `mg_levels_vanka_neighbours`, `vanka_neighbour_fields`
         (`before_centre`|`all`), `vanka_centre_field`, `vanka_damping`. On the shipped 2-level hierarchy
         `mg_levels_` *is* the fine level (level 0 is `mg_coarse_`), so no level-index bookkeeping.
@@ -799,7 +806,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
         extrapolated from a 5k-cell synthetic of the same density: patch selection ~0.1 s, factorization
         0.5–3 s, one apply 7–110 ms, and the stored inverses 0.1–1.1 GB depending on patch width — which
         is why the harness's widest arm is 12 velocity neighbours (~325 MB) and not 12 full cells.
-    - **`AmgVCycle.destroy()` / `.levels`.** The V-cycle owns several PETSc objects and a factored
+    - **`MonolithicVCycleInverse.destroy()` / `.levels`.** The V-cycle owns several PETSc objects and a factored
       hierarchy; `destroy()` releases them on the caller's schedule rather than the collector's, which a
       loop that builds one preconditioner per arm needs (two live copies of a 3D coupled operator plus
       factors is enough to exhaust a workstation — the standing "one heavy probe at a time" rule).
@@ -848,7 +855,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   rung 2.
 
   **Four things closed the gap, and each was found by reading the reference rather than tuning:**
-  1. **The aggressive first level.** `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`,
+  1. **The aggressive first level.** `monolithic_vcycle_inverse` never sets `pc_gamg_aggressive_coarsening`,
      so GAMG applies its default of one aggressive level over the SQUARED graph. Ours had none:
      21× coarsening against GAMG's 107×, the whole 5× coarse-space difference. (`use_aggressive_
      square_graph` and `aggressive_mis_k` are ALTERNATIVES; at the default the coarsener is plain
@@ -1276,7 +1283,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   for this failure mode before trusting any arm comparison.** It preconditioned with
   `CoupledShiftPolicy.make_preconditioner`, which is block-SIMPLE on `[u,v,w,p]` plus (with
   `method=None`, now `scalar=UnpreconditionedScalars()`) **identity on `k` and `ω`**. `equilibrate` lives only inside the engine's
-  `FieldSplitAmgPreconditioner` (via `trailing_inverse`), so **both arms ran identical code** and
+  `FieldSplitPreconditioner` (via `trailing_inverse`), so **both arms ran identical code** and
   returned identical corrections — reported as "no effect". Two ~2 GB Jacobians were built and discarded
   to produce it. The faithfulness gate could not catch it: the gate forms `operator(δ) − b`, which
   contains **no preconditioner at all**. *An A/B needs an assertion that the arms actually differ
@@ -1679,7 +1686,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **⚠️ THE EQUILIBRATION HYPOTHESIS WAS WRONG, AND MEASURING IT IS WHAT SETTLED THE COMPARISON
   (2026-08-09).** The suspicion recorded here was that ours and PETSc's were not built on the same
-  matrix — `AmgVCycle` calls `equilibrate_cell_major` before handing the operator to PETSc, so GAMG
+  matrix — `MonolithicVCycleInverse` calls `equilibrate_cell_major` before handing the operator to PETSc, so GAMG
   coarsens a **unit-diagonal** matrix, while `build_convection_hierarchy` coarsened the raw block,
   whose diagonal on `bfs3d`'s `[k, ω]` slice spans **7.96e5×** (1.26e-06 … 1.0). That description of
   the code is accurate, and the σ_max figures reproduce exactly (**4.365** raw against **2.832e3**
@@ -1762,7 +1769,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   | **ours + aggressive level + undamped ×4** | **436** | **2** |
 
   1. **The aggressive first level, which PETSc applies BY DEFAULT and we did not.**
-     `build_amg_vcycle` never sets `pc_gamg_aggressive_coarsening`, and GAMG's default is
+     `monolithic_vcycle_inverse` never sets `pc_gamg_aggressive_coarsening`, and GAMG's default is
      `aggressive_coarsening_levels 1` with `use_aggressive_square_graph` — so on level 0 it coarsens
      the **squared** graph. That is the entire 5× coarse-space difference: ours coarsened 21×, GAMG
      107×, and with `aggressive_levels=1` ours lands at 436 equations against PETSc's 432.
@@ -1774,7 +1781,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      `omega = 0.8`. That is never a *smaller* factor than 0.8 and usually much smaller: `D⁻¹A` has
      unit diagonal blocks, so its eigenvalues average one and `lam_max ≥ 1` always. Dividing by it
      under-relaxes every mode except the extreme one. Worth **10 → 2 cycles** at four sweeps.
-     Reachable as `convection_multigrid_solve(..., omega=1.0, spectral_damping=False)`; the
+     Reachable as `convection_multigrid_cycles(..., omega=1.0, spectral_damping=False)`; the
      spectral default is unchanged, because an undamped sweep is not a contraction standing alone —
      it does not need to be under a coarse correction and an outer Krylov.
 
@@ -1834,7 +1841,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   **What equilibration IS worth (keep it). ⚠️ "Default off" was a scope error — settled from source
   2026-08-10:** `build_convection_hierarchy` and `_build_aggregation_hierarchy` default `equilibrate=False`,
   so "default off" is true of the **traced builder only**; `JacobiSmoothedInverse` overrides it to `True`
-  (its per-cell block solve is not otherwise safe); and the PETSc `AmgVCycle` path equilibrates
+  (its per-cell block solve is not otherwise safe); and the PETSc `MonolithicVCycleInverse` path equilibrates
   **unconditionally** via `equilibrate_cell_major`. Three different objects, no contradiction.
 
   **⚠️ THE SECOND, COARSENING-INDEPENDENT BENEFIT RECORDED HERE WAS A PSEUDO-INVERSE ARTIFACT, AND IT IS
@@ -1892,7 +1899,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **There is no `PerFieldNativeInverse` — deleted 2026-08-15 (binding).** It had no production caller
     (only its own tests and one sweep arm), its own docstring recorded it as superseded by
     `JacobiSmoothedInverse` wherever that works, and it was never ported onto `HierarchyBlockInverse` — so
-    it had neither `refactor_block` nor `refactor` and `BlockTriangularFieldSplit.refactor` **raised**
+    it had neither `refactor_block` nor `refactor` and `FieldSplitInverse.refactor` (since #281
+    `refactor_block`; there is no `split.refactor`) **raised**
     the first time a march refreshed with it, while being exported from `__all__` as public API. It also
     re-committed two costs the shared base was written to remove (eager per-field transposes; a fresh
     closure per apply). Its measurements never transferred to the nodal inverse in any case — a
@@ -1981,7 +1989,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      ⚠️ **This shipped: `JacobiSmoothedInverse` now defaults to the whole matched bundle**
      (`aggressive_levels=1`, `prolongation_smoothing="none"`, `spectral_damping=False`,
      `equilibrate=True`) and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm. The open part is whether it
-     transfers to other consumers; the library `build_amg_vcycle` defaults are untouched. The measurement says the matched
+     transfers to other consumers; the library `monolithic_vcycle_inverse` defaults are untouched. The measurement says the matched
      bundle is 5 → 2 cycles on the turbulence block; whether that transfers to the scalar transport
      and velocity blocks is unmeasured, and flipping a default is a march-level decision, not a
      block-probe one.
@@ -2008,7 +2016,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      bundle uses the raw threshold as-is and it did not visibly misbehave at this size, which is not the
      same as having ruled the risk out at a much larger one. Re-run
      `validation/bfs3d_openfoam/trailing_depth_probe.py` on whatever bigger mesh next triggers this.
-     **A separate, likely LARGER wall this does not touch:** `FieldSplitAmgPreconditioner` materializes
+     **A separate, likely LARGER wall this does not touch:** `FieldSplitPreconditioner` materializes
      the *entire* coupled Jacobian (all fields, reach 3) to slice out this block regardless of its own
      depth — see the field-split scaling note in `solve-field-split.md`.
 
@@ -2052,13 +2060,14 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `build_convection_hierarchy(a)`, `build_air_hierarchy(a)` — and none takes a mesh, edge arrays, or
   flow quantities. Assembly lives beside it in `aquaflux/solve/frozen_operator.py`
   (numpy + scipy only — no mesh, no field, no `jax`):
-  `convection_diffusion_operator(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None)` —
+  `ConvectionDiffusionStencil(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None).assemble()` —
   symmetric graph Laplacian when `flux is None`, first-order-upwind convection-diffusion otherwise —
   plus `decouple_dof(a, index)` for the closed-domain pressure pin. It is the **one** assembler for
   all four consumers (pressure Schur, viscous velocity block, convection velocity block, k/ω scalar
   transport). Do not reintroduce a `(owner, nb, coeff, …)` signature into `multigrid.py`, and do not
-  add a second stencil assembler — the old `_laplacian_csr` was exactly `convection_diffusion_operator`
-  at `flux=None` and was deleted. `build_convection_air_hierarchy` was likewise **deleted**: once it
+  add a second stencil assembler — the old `_laplacian_csr` was exactly the stencil's assembly
+  at `flux=None` and was deleted (and the free function `convection_diffusion_operator` became the
+  stencil's `assemble`, #89). `build_convection_air_hierarchy` was likewise **deleted**: once it
   took `a` it was a pure alias for `build_air_hierarchy`.
   *Why it is a solver concern, not a flow one:* the first-order-upwind stencil is the
   **preconditioner's** choice, independent of what the residual discretizes advection with — it is
@@ -2075,7 +2084,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `HierarchyBlockInverse.refactor_block`'s `frozen_coarsening` branch calls `SmoothedHierarchy.refit`,
   which reuses the stored prolongations and aggregates **nothing new**, then still called
   `_after_coarsening()` — which read the global as if this hierarchy's aggregation had just run. With a
-  leading+trailing pair (`build_block_triangular_field_split`) the trailing block generally aggregates
+  leading+trailing pair (`field_split_inverse`) the trailing block generally aggregates
   last, so the leading block's frozen-coarsening refresh reported the **trailing block's** aggregate
   stats as its own. Diagnostic-only (never reaches the operator, the residual, or the adjoint), but
   wrong on a shipped opt-in report path, and it was the only reason `saddle_multigrid.py` reached into
@@ -2096,13 +2105,13 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `test_a_frozen_coarsening_refresh_reports_its_own_last_aggregation_not_a_strangers`
   (`tests/unit/test_saddle_multigrid.py`), which reproduces the leading+trailing ordering directly.
 - **The V-cycle recursion AND its outer fixed-cycle driver are single-homed (binding, #52).** A
-  family (`smoothed_multigrid_solve`, `convection_multigrid_solve`, `air_multigrid_solve`) contributes
+  family (`smoothed_multigrid_cycles`, `convection_multigrid_cycles`, `air_multigrid_cycles`) contributes
   **only** its `_VCycleOps` — restriction, prolongation, smoother. The recursion is `_frozen_v_cycle`
   and the outer loop (zero initial guess, `cycles` residual-correction passes,
-  `x += _frozen_v_cycle(levels, b - A x, …)`) is `_fixed_cycle_solve`; both are written once. That
+  `x += _frozen_v_cycle(levels, b - A x, …)`) is `_fixed_cycles`; both are written once. That
   outer loop is what makes `b -> x` a constant linear operator — the property the frozen-left-PC and
   the adjoint transpose depend on — so it must not be re-typed per family where one copy could drift.
-  A new family adds a `_VCycleOps` builder and a thin entry point that calls `_fixed_cycle_solve`; do
+  A new family adds a `_VCycleOps` builder and a thin entry point that calls `_fixed_cycles`; do
   **not** re-write the cycle loop in it.
 - **A level is STATIC indices + TRACED values, so a hierarchy refresh is a jit cache hit (binding).**
   `_SparseLevel` / `_AirLevel` are `equinox.Module`s in which **only `n` and `n_coarse` are static** —
@@ -2265,7 +2274,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     - **The contraction test carries its own non-vacuity check**, comparing against the *same hierarchy
       with its block inverse stripped out*. Without that a fixture whose within-cell coupling is weak
       would pass for the wrong reason and read as evidence for the block smoother.
-    - **Wired for a march as `AirBlockInverse(...)` / `AirBlockInverse` (`solve/field_split.py`)**, a
+    - **Wired for a march as `AirReductionInverse(...)` / `AirReductionInverse` (`solve/field_split.py`)**, a
       `trailing_inverse` factory satisfying the split's three-method contract (`n_dofs`, `apply`,
       `refactor_block`). It does **not** subclass `HierarchyBlockInverse`: that base owns a
       `SmoothedHierarchy` and refreshes by re-fitting the aggregation, this owns an `AirHierarchy` and
@@ -2305,7 +2314,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   hierarchies are built once off-jit and then frozen, a degenerate mesh must fail *there*, not as a
   silently stalling runtime V-cycle. Now that the builders are operator-in, the **graph** check lives
   with the assembler: `frozen_operator.require_valid_graph` (`n ≥ 1`, matched `owner`/`nb`, in-range
-  endpoints) runs inside `convection_diffusion_operator`; the two build loops
+  endpoints) runs when a `ConvectionDiffusionStencil` is constructed; the two build loops
   (`_build_aggregation_hierarchy` for smoothed/convection, `build_air_hierarchy` for lAIR) call
   `_require_positive_diagonal` on **every** level's operator diagonal before inverting/freezing it,
   so a zero diagonal (disconnected component, isolated/zero-volume cell, degenerate `R A P` row)
@@ -2335,7 +2344,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `_chebyshev_smooth`/`_jacobi_smooth`/`_jacobi_smooth_zero` read `level.inv_diagonal` instead of
   re-dividing; `_fc_jacobi` additionally hoists `omega * mask * inv_diagonal` out of its per-sweep
   loops (computed once per call instead of once per sweep) — `omega` stays a **solve-time** argument
-  rather than a build-time field, since it is chosen per `air_multigrid_solve` call and is not itself
+  rather than a build-time field, since it is chosen per `air_multigrid_cycles` call and is not itself
   a frozen property of the hierarchy; baking it into `_AirLevel` would mean a different `omega` needs
   a different hierarchy, which is a real behaviour change this fix does not make. Verified two ways
   in `test_multigrid.py`: `inv_diagonal` matches `1.0 / diagonal` exactly on both level kinds, and each
@@ -2354,7 +2363,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     cell whose own scalar diagonal entry is zero or negative — inert today only because every consumer
     of a nodal level's smoother branches on `block_inverse` before ever reading `inv_diagonal`
     (`_chebyshev_smooth`, the only unconditional reader, is reachable only through
-    `smoothed_multigrid_solve`, whose hierarchies come solely from `build_smoothed_hierarchy`, always
+    `smoothed_multigrid_cycles`, whose hierarchies come solely from `build_smoothed_hierarchy`, always
     `block_size=1`). Both bodies now call one shared `_level_inv_diagonal(diagonal, block_inverse)`, so
     the guard cannot drift off one of the two levels again. Pinned by
     `test_block_sparse_level_stores_a_finite_inv_diagonal_on_a_zero_scalar_diagonal`

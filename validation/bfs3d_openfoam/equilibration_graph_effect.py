@@ -43,7 +43,7 @@ from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import (  # noqa: E402
     ColumnProbePlan,
     FieldGroups,
-    MonolithicAmgPreconditioner,  # noqa: E402
+    MonolithicVCyclePreconditioner,  # noqa: E402
     block_stencil_colouring,
     block_stencil_gather_map,
     symmetrically_equilibrate,  # noqa: E402
@@ -145,7 +145,7 @@ def main():
     def batched(seeds):
         return batched_jacobian_matvec(coupled, state, seeds)
 
-    jacobian = MonolithicAmgPreconditioner._materialize_jacobian(
+    jacobian = MonolithicVCyclePreconditioner._materialize_jacobian(
         matvec, plan, batched, PROBE_BATCH_SIZE, structure
     )
     groups = FieldGroups.by_counts(n_cells=n, n_leading_fields=n_fields - 2, n_trailing_fields=2)

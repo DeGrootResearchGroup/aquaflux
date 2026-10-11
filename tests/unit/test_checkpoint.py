@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from aquaflux.solve import StateCheckpointer, StepReport, combine_observers
+from aquaflux.solve import (
+    StateCheckpointer,
+    StepReport,
+    checkpoint_name,
+    combine_observers,
+    find_checkpoint,
+)
 
 
 def _report(**kwargs) -> StepReport:
@@ -61,13 +67,17 @@ def test_a_checkpoint_carries_the_step_that_produced_it(tmp_path) -> None:
     Without the metadata a directory of checkpoints is unusable unless the log survived alongside it.
     """
     checkpoints = StateCheckpointer(tmp_path)
-    checkpoints.on_checkpoint(_report(step=42, residual_norm=3.5e-4, shift=0.078), np.arange(4.0))
+    checkpoints.on_checkpoint(
+        _report(step=42, residual_norm=3.5e-4, shift=0.078, damping_reference=0.125), np.arange(4.0)
+    )
 
     saved = np.load(checkpoints.latest)
     assert np.array_equal(saved["state"], np.arange(4.0))
     assert saved["step"] == 42
     assert saved["residual_norm"] == pytest.approx(3.5e-4)
     assert saved["shift"] == pytest.approx(0.078)
+    # What a march resumed from this file damps against: the step's own anchor, not its reference.
+    assert saved["damping_reference"] == pytest.approx(0.125)
 
 
 def test_no_partial_file_is_left_behind(tmp_path) -> None:
@@ -149,3 +159,55 @@ def test_inner_iterate_checkpointer_rejects_a_meaningless_threshold(tmp_path):
 
     with pytest.raises(ValueError, match="above"):
         InnerIterateCheckpointer(tmp_path, above=0)
+
+
+# --- finding a checkpoint again ------------------------------------------------------------------
+
+
+def test_a_new_process_finds_the_latest_checkpoint_by_step_not_by_when_it_was_written(
+    tmp_path,
+) -> None:
+    """A fresh process has no ``latest`` to ask; the highest step wins, even over a newer file."""
+    checkpoints = StateCheckpointer(tmp_path, keep=10)
+    for _ in range(12):
+        checkpoints.on_checkpoint(_report(), np.zeros(4))
+    # Written last, so newest by modification time, but an earlier step.
+    (tmp_path / checkpoint_name("state", 3)).touch()
+
+    assert find_checkpoint(tmp_path) == tmp_path / "state-00012.npz"
+    assert find_checkpoint(tmp_path, 3) == tmp_path / "state-00003.npz"
+
+
+def test_a_checkpoint_left_half_written_is_not_found(tmp_path) -> None:
+    """A process killed mid-write leaves a staging file, which must never read as the latest checkpoint."""
+    StateCheckpointer(tmp_path).on_checkpoint(_report(), np.zeros(4))
+    (tmp_path / "state-00007.npz.partial").write_text("truncated")
+
+    assert find_checkpoint(tmp_path).name == "state-00001.npz"
+
+
+def test_only_checkpoints_of_the_prefix_asked_for_are_found(tmp_path) -> None:
+    StateCheckpointer(tmp_path, prefix="a").on_checkpoint(_report(), np.zeros(4))
+    StateCheckpointer(tmp_path, prefix="ab").on_checkpoint(_report(), np.zeros(4))
+    (tmp_path / "state-00009.npz").touch()
+
+    assert find_checkpoint(tmp_path, prefix="a").name == "a-00001.npz"
+    assert find_checkpoint(tmp_path, prefix="ab").name == "ab-00001.npz"
+
+
+def test_a_step_that_retention_has_removed_is_refused_listing_the_steps_kept(tmp_path) -> None:
+    checkpoints = StateCheckpointer(tmp_path, keep=2)
+    for _ in range(4):
+        checkpoints.on_checkpoint(_report(), np.zeros(4))
+
+    with pytest.raises(
+        FileNotFoundError, match=r"no checkpoint of step 1; it holds steps \[3, 4\]"
+    ):
+        find_checkpoint(tmp_path, 1)
+
+
+def test_an_empty_or_missing_directory_has_no_checkpoint(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match=r"holds no checkpoint named state-<step>.npz"):
+        find_checkpoint(tmp_path)
+    with pytest.raises(FileNotFoundError, match=r"is not a directory of checkpoints"):
+        find_checkpoint(tmp_path / "absent")

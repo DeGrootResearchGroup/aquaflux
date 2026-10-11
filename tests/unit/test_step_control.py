@@ -15,6 +15,7 @@ import pytest
 from aquaflux.solve import (
     CflResidualDualTimeControl,
     ConstantRelaxation,
+    DampedNewtonStep,
     DualTimeControl,
     DualTimeStep,
     PseudoTransientStep,
@@ -22,6 +23,7 @@ from aquaflux.solve import (
     ShiftTerm,
     StepReport,
     SwitchedEvolutionRelaxation,
+    newton_march,
 )
 
 
@@ -55,6 +57,35 @@ def test_dual_time_control_first_step_uses_beta_start() -> None:
     assert (beta, memo) == (2.0, None)  # memoryless rule: alpha alone drives it
     assert isinstance(step.relaxation_schedule, ConstantRelaxation)
     assert jnp.allclose(step.relaxation_schedule.beta, 2.0)
+
+
+def test_a_control_resumed_at_a_shift_holds_it_for_the_first_step_then_adapts_from_it() -> None:
+    """The resumed march opens at the shift the interrupted one had reached, not at ``beta_start``.
+
+    Wrong answers this catches: a resume that reseeds ``beta_start`` (the ramp walked again), one that
+    adapts the shift before running a step it has no report for, and one that keeps a stale memo.
+    """
+    control = DualTimeControl(beta_start=2.0, beta_min=0.02, beta_max=4.0, grow=1.5)
+    state = control.resumed_at(0.3)
+    assert state == (0.3, None)
+    first, state = control.next_step(_dual_step(), None, state)
+    assert jnp.allclose(first.relaxation_schedule.beta, 0.3)
+    # With a step to adapt from it grows the timestep as it would have, a comfortable alpha lowering beta.
+    second, _ = control.next_step(_dual_step(), _report(alpha=1.0), state)
+    assert jnp.allclose(second.relaxation_schedule.beta, 0.3 / 1.5)
+
+
+@pytest.mark.parametrize(("shift", "held"), [(1.0e-6, 0.02), (50.0, 4.0)])
+def test_a_resumed_shift_is_held_inside_this_controls_bounds(shift, held) -> None:
+    """The resumed march's control may be bounded differently from the interrupted one's."""
+    assert DualTimeControl(beta_min=0.02, beta_max=4.0).resumed_at(shift) == (held, None)
+
+
+def test_a_residual_keyed_control_resumes_with_no_remembered_residual() -> None:
+    """The residual its ratio is formed against belongs to the interrupted march; alpha alone drives
+    the first adaptation, the path a rule with no reference already takes."""
+    control = ResidualRatioDualTimeControl()
+    assert control.resumed_at(0.3) == (0.3, None)
 
 
 def test_dual_time_control_grows_the_timestep_when_comfortable() -> None:
@@ -387,3 +418,35 @@ def test_a_refresh_boundary_holds_beta_for_every_control() -> None:
         _, (beta, memo) = ctrl.next_step(_dual_step(), None, (0.12, 0.3))
         assert beta == 0.12, f"{type(ctrl).__name__} reset β at a refresh boundary"
         assert memo == 0.3, f"{type(ctrl).__name__} dropped its memo at a refresh boundary"
+
+
+@pytest.mark.parametrize(
+    "control", [DualTimeControl(), ResidualRatioDualTimeControl(), CflResidualDualTimeControl()]
+)
+def test_a_shift_control_refuses_a_step_with_no_shift_before_the_march_takes_a_step(
+    control,
+) -> None:
+    """A damped-Newton step has no shift to drive, so the control says so rather than failing inside.
+
+    The march calls the control before its first step, so the refusal arrives there. Until the control
+    checked, the swap reached for a field the step does not have and the march died on an
+    ``AttributeError`` naming neither the control nor what it needs.
+    """
+    calls = []
+
+    def residual(phi):
+        calls.append(phi)
+        return phi**3 - 1.0
+
+    with pytest.raises(TypeError, match=r"DampedNewtonStep has none"):
+        newton_march(
+            DampedNewtonStep(),
+            residual,
+            jnp.array([2.0]),
+            max_steps=3,
+            rtol=0.0,
+            atol=1e-12,
+            step_control=control,
+        )
+    # Only the march's own opening measurement: no step was taken before the refusal.
+    assert len(calls) == 1

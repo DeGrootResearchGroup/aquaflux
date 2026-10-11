@@ -92,10 +92,12 @@ from aquaflux.solve import (
     CflResidualDualTimeControl,
     Convergence,
     FieldSplit,
+    InnerIterateCheckpointer,
     MarchLogger,
     MonolithicVCycle,
     StateCheckpointer,
     combine_observers,
+    residual_stop_gmres,
 )
 from aquaflux.turbulence import (
     BetaTaperedDamping,
@@ -225,6 +227,18 @@ def _solver_with_overrides(solver):
     retry = _environment("RETRY_ON_CYCLES", int)
     if retry is not None:
         edits["retry"] = dataclasses.replace(solver.retry, abort_above_cycles=retry)
+    # The inexact-Newton forcing term of every inner linear solve, in the row-scaled measure. Swept to
+    # bound what an adaptive (Eisenstat--Walker) forcing term could buy over the file's fixed value.
+    forward_rtol = _environment("FORWARD_RTOL", float)
+    # And which rule ends it (`LinearSolveSettings.stop`): `residual` stops the moment the residual
+    # meets the tolerance, `lineax` also waits for the solution to stop moving.
+    forward_stop = _environment("FORWARD_STOP", str)
+    if forward_rtol is not None or forward_stop is not None:
+        edits["linear_solve"] = dataclasses.replace(
+            solver.linear_solve,
+            **({} if forward_rtol is None else {"rtol": forward_rtol}),
+            **({} if forward_stop is None else {"stop": forward_stop}),
+        )
     return dataclasses.replace(solver, **edits)
 
 
@@ -481,6 +495,43 @@ _TURB_DAMPING_SHAPE = (
 )
 RAMP_SCALE = SOLVER.continuation.scale
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
+
+#: The instrument that COUNTS operator applications under each Krylov stop, kept because a cycle does
+#: not mean the same work under the two. To RUN a stop, set `PITZ_FORWARD_STOP` (an edit of the file's
+#: `linear_solve.stop`); this study arm exists only to count. Unset: off. ``shipped``: the file's solver
+#: through the study path, counted from its cycles. ``residual``: ``residual_stop_gmres`` at the file's
+#: tolerance, restart and cap, counting its own applications.
+KRYLOV_STOP = os.environ.get("PITZ_KRYLOV_STOP") or None
+if KRYLOV_STOP not in (None, "shipped", "residual"):
+    raise SystemExit(f"PITZ_KRYLOV_STOP is 'shipped' or 'residual', got {KRYLOV_STOP!r}")
+#: The stop the march actually runs. Only ``lineax``'s work follows from its cycle count; the residual
+#: stop's is counted only when it reports it (``PITZ_KRYLOV_STOP=residual``).
+RUNNING_STOP = "residual" if KRYLOV_STOP == "residual" else (SOLVER.linear_solve.stop or "lineax")
+
+
+class _KrylovWork:
+    """Applications of the preconditioned operator over a march, counted per inner solve.
+
+    ``lineax``'s count follows from its cycles (one start-up application, then ``restart + 1`` per
+    cycle); the residual stop reports its own, since it may stop part way through a cycle, and it
+    includes the one application per cycle that recomputes the true residual.
+    """
+
+    def __init__(self):
+        self.applications = 0
+        self.solves = 0
+
+    def on_inner(self, index, g_before, g_after, cycles, alpha, iterate):
+        if RUNNING_STOP == "lineax":
+            self.applications += 1 + (FORWARD_RESTART + 1) * (int(cycles) - 1)
+            self.solves += 1
+
+    def on_solve(self, applications, cycles):
+        self.applications += int(applications)
+        self.solves += 1
+
+
+KRYLOV_WORK = _KrylovWork()
 #: How many geometric viscosity stations the ramp walks (`PITZ_RAMP_STATIONS`), one outer step each.
 #:
 #: ⚠️ 16, and it was swept JOINTLY with `TURB_DAMPING` because the two interact -- a coarser ramp is a
@@ -709,10 +760,11 @@ JACOBI_TRAILING = SOLVER.preconditioner.inverse.trailing.settings() if FIELD_SPL
 #: gets 3 for free and that is luck, not physics.
 #:
 #: ⚠️ **EVERYTHING ABOVE IS ABOUT THE SWEPT RECONSTRUCTION, AND THE DEFAULT NO LONGER USES ONE.** The
-#: shipped `GRADIENT` is the two-face-pass `MultipleCorrectionGradient`, whose residual carries
-#: **exactly zero** Jacobian mass beyond distance 3 at every skewness measured -- so a probe at reach 3
-#: recovers it exactly, and 3 is the default. Reach is a property of that scheme rather than of this
-#: mesh; `validation/gradient_stencil_reach.py` re-measures it in about a minute.
+#: shipped `GRADIENT` is the two-face-pass `MultipleCorrectionGradient`, whose SCALAR residual carries
+#: **exactly zero** Jacobian mass beyond distance 3 at every skewness measured
+#: (`validation/gradient_stencil_reach.py`). ⚠️ The COUPLED residual does not: the velocity gradient feeds
+#: the eddy viscosity, which spends one more ring, so the u and v columns reach 4 and a probe at the
+#: default reach 3 folds ~1e-6 relative onto near entries (`probe_reach_check.py`; reach 4 is exact).
 #:
 #: ⚠️⚠️ **SET IT BACK TO 5 IF YOU SET `PITZ_GRADIENT=swept`, AND READ THIS BEFORE VARYING EITHER.** The
 #: swept scheme's residual reaches `sweeps + 1`, and reach 5 is then NECESSARY AND NOT SUFFICIENT --
@@ -764,10 +816,10 @@ GRADIENT_SWEEPS = int(os.environ.get("PITZ_GRADIENT_SWEEPS", "4"))
 #: ⚠️ **The choice is coupled to `PITZ_STENCIL_REACH`, and that is the point of having it.** Each
 #: Richardson sweep couples a cell one further ring, so the swept residual reaches `sweeps + 1` -- on
 #: a randomly perturbed grid, measured reach 5 at the shipped four sweeps, against **3 with exactly
-#: zero mass beyond distance 3** for `multcorr`, at every skewness tested. A probe at reach 3
-#: therefore recovers the two-pass Jacobian exactly, where against the swept one it would fold far
-#: couplings onto near entries. Vary the two together; `validation/gradient_stencil_reach.py`
-#: re-measures both halves in about a minute.
+#: zero mass beyond distance 3** for `multcorr`, at every skewness tested -- on a SCALAR residual. The
+#: coupled residual adds a ring through the eddy viscosity (reach 4 for `multcorr` on this mesh,
+#: `probe_reach_check.py`), so add it to either scheme's figure. Vary the two together;
+#: `validation/gradient_stencil_reach.py` re-measures the scalar halves in about a minute.
 GRADIENT = os.environ.get("PITZ_GRADIENT")
 GRADIENT_BLEND = float(os.environ.get("PITZ_GRADIENT_BLEND", "0.75"))
 _GRADIENTS = {
@@ -885,6 +937,13 @@ REFRESH_ON_CYCLES = SOLVER.dual_time.refresh_on_cycles or 0
 #: study needs the march's own intermediate states rather than its endpoint.
 CHECKPOINT_KEEP = int(os.environ.get("PITZ_CHECKPOINT_KEEP", "3"))
 
+#: Save the INNER iterates whose linear solve reached this many restart cycles (beside the step
+#: checkpoints, so it needs a `checkpoint_dir`). Off by default (0), and the march is unchanged with it
+#: on: the hook only observes. A step checkpoint holds the state a step STARTS from, so only a step's
+#: first linear system can be rebuilt from it; `1` keeps every inner iterate, which is what a replay of
+#: the march's whole sequence of linear solves needs (`krylov_recycling_probe.py`).
+INNER_DUMP_ABOVE = int(os.environ.get("PITZ_INNER_DUMP_ABOVE", "0"))
+
 #: Redo a step whose solve was expensive, whose line search collapsed, or that diverged -- escalating
 #: the shift first, and falling back to a tighter Krylov solve only for a divergence damping cannot fix.
 #:
@@ -967,9 +1026,10 @@ def case_spec(model=None, gradient_scheme=None):
         exact case rather than on a second copy of it. ⚠️ A scheme whose residual reaches further
         across the cell graph than ``stencil_reach`` needs that raised to match: the coloured probe
         folds coupling beyond its reach onto near entries instead of dropping it, so an under-reaching
-        probe corrupts the preconditioner rather than approximating it. The default reconstruction
-        carries *exactly zero* mass beyond reach 3 and ``CorrectedGreenGauss`` beyond ``sweeps + 1``,
-        which is what makes each of those pairings exact;
+        probe corrupts the preconditioner rather than approximating it. On a scalar residual the
+        default reconstruction carries *exactly zero* mass beyond reach 3 and ``CorrectedGreenGauss``
+        beyond ``sweeps + 1``; the coupled residual here adds one ring through the eddy viscosity, so
+        the shipped reach 3 is one short (``probe_reach_check.py``);
         :class:`~aquaflux.schemes.HessianCorrectedGradient` does not have that cut-off at any sweep
         setting, so a study that swaps it in needs a preconditioner that is not built by probing --
         which is why that comparison lives in the sibling ``pitzdaily_gradient_ab`` case rather than
@@ -1056,6 +1116,7 @@ def _study_arms(jacobian_gradient_sweeps):
             ("a tapered closure damping (PITZ_TURB_TAPER)", bool(TURB_TAPER)),
             ("a target-station damping (PITZ_TURB_DAMPING_TARGET)", bool(TURB_DAMPING_TARGET)),
             ("capped Jacobian gradient sweeps", jacobian_gradient_sweeps is not None),
+            (f"the Krylov stop (PITZ_KRYLOV_STOP={KRYLOV_STOP})", KRYLOV_STOP is not None),
         )
         if active
     ]
@@ -1112,7 +1173,10 @@ def solve_aquaflux(
         case["turbulence"],
         case["geom"],
     )
-    solver = case["spec"].solver
+    # ⚠️ `SOLVER`, NOT `case["spec"].solver`: the spec is the file's, and every `PITZ_*` march override is
+    # an edit of `SOLVER` alone. Reading the spec's solver here silently dropped all of them on every
+    # path while the banner, which reads `SOLVER`, reported them as in force.
+    solver = SOLVER
     if stencil_reach is not None:
         preconditioner = solver.preconditioner
         solver = dataclasses.replace(
@@ -1212,6 +1276,7 @@ def solve_aquaflux(
         ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
         ("k positivity projection", POSITIVITY_PROJECTION),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+        ("inner dump above", INNER_DUMP_ABOVE or "off"),
     ):
         logger.note(f"  {_name}: {_value}")
 
@@ -1220,9 +1285,18 @@ def solve_aquaflux(
         if checkpoint_dir is not None
         else None
     )
+    inner_dump = (
+        InnerIterateCheckpointer(checkpoint_dir, above=INNER_DUMP_ABOVE)
+        if INNER_DUMP_ABOVE and checkpoint_dir is not None
+        else None
+    )
     observers = (
         dict(
-            inner_observer=logger.on_inner,
+            inner_observer=combine_observers(
+                logger.on_inner,
+                KRYLOV_WORK.on_inner,
+                *([] if inner_dump is None else [inner_dump.on_inner]),
+            ),
             on_checkpoint=(
                 logger.on_checkpoint
                 if checkpoints is None
@@ -1269,6 +1343,14 @@ def _solve_study_arm(coupled, solver, logger, jacobian_gradient_sweeps, observer
     per-rung closure damping, a per-station one, or a capped Jacobian.
     """
     settings = solver.settings()
+    if KRYLOV_STOP == "residual":
+        regime = solver.linear_solve
+        settings["linear_solve"] = residual_stop_gmres(
+            regime.rtol,
+            restart=regime.restart,
+            max_restarts=regime.max_restarts,
+            on_solve=KRYLOV_WORK.on_solve,
+        )
     # One session for the whole march: it builds the probe once, and every rung glues in the same
     # inverse and refresh hook, re-pointed at the rung's own companion -- FITTED per rung, not a fresh
     # object.
@@ -1400,6 +1482,18 @@ def main():
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",
         flush=True,
     )
+    if KRYLOV_WORK.solves:
+        print(
+            f"Krylov work: {KRYLOV_WORK.applications} applications of the preconditioned operator "
+            f"over {KRYLOV_WORK.solves} inner solves",
+            flush=True,
+        )
+    else:
+        print(
+            "Krylov work: not counted -- the residual stop reports its own work only under "
+            "PITZ_KRYLOV_STOP=residual",
+            flush=True,
+        )
 
     from scipy.spatial import cKDTree
 

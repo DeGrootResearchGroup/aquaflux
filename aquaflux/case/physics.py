@@ -23,10 +23,16 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.boundary import BoundaryConditions
-from aquaflux.flow import MomentumContinuity, refuse_an_unsuitable_pressure_datum, sheared_patches
+from aquaflux.flow import (
+    MomentumContinuity,
+    reference_speed,
+    refuse_an_unsuitable_pressure_datum,
+    sheared_patches,
+)
 from aquaflux.mesh import patch_triangles
 from aquaflux.radiation import (
     RadiationSettings,
@@ -67,9 +73,14 @@ class Physics(abc.ABC):
     reads_scopes : tuple of str
         A class attribute: the scopes of setting this physics reads (see :mod:`.scopes`). A setting
         of any other scope is refused wherever a case states it.
+    state_fields : tuple of str
+        A class attribute: the physical fields a solve of this physics starts from -- what
+        :meth:`initial_fields` needs and :meth:`restart_fields` gives. Empty for a physics that
+        marches nothing.
     """
 
     reads_scopes: ClassVar[tuple[str, ...]] = ()
+    state_fields: ClassVar[tuple[str, ...]] = ()
 
     @abc.abstractmethod
     def refuse_sections(self, spec: CaseSpec) -> None:
@@ -200,6 +211,60 @@ class Physics(abc.ABC):
         del problem, solution
         return {}
 
+    def restart_fields(self, problem: object, state: object) -> dict[str, np.ndarray]:
+        """The physical fields of a march state, by name: what a checkpoint holds.
+
+        A physics with no march to checkpoint refuses; the flow physics override this.
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned.
+        state : object
+            A state of the march, as its ``on_checkpoint`` observer is handed it -- the march's
+            solved variables, which need not be the physical ones.
+
+        Returns
+        -------
+        dict of {str: np.ndarray}
+            The fields a solve of this physics can start from -- ``U`` and ``p``, and under RANS ``k``
+            and ``omega`` -- in the form :meth:`initial_fields` takes back. The pressure is the solved
+            one.
+
+        Raises
+        ------
+        ValueError
+            If this physics marches nothing.
+        """
+        raise ValueError(f"a {type(self).__name__} case has no march state to save.")
+
+    def initial_fields(self, problem: object, fields: Mapping[str, np.ndarray]) -> object:
+        """The starting state a solve takes, from physical fields: the inverse of :meth:`restart_fields`.
+
+        A physics with nothing to start from refuses; the flow physics override this.
+
+        Parameters
+        ----------
+        problem : object
+            What :meth:`build` returned.
+        fields : mapping of {str: np.ndarray}
+            Physical fields by name -- ``U`` ``(n_cells, dim)``, ``p`` ``(n_cells,)``, and under RANS
+            ``k`` and ``omega`` ``(n_cells,)`` -- on the problem's mesh.
+
+        Returns
+        -------
+        object
+            What the case's solve takes as its starting state: the flow state for a laminar case, the
+            tuple ``(flow, k, omega)`` for a Reynolds-averaged one.
+
+        Raises
+        ------
+        ValueError
+            If a field this physics needs is missing, naming it and the fields given; or if this
+            physics has no state to start from.
+        """
+        raise ValueError(f"a {type(self).__name__} case has no state to start from.")
+
     @abc.abstractmethod
     def progress_fields(self, problem: object) -> Callable[[object], Mapping[str, object]] | None:
         """What a march's log reports the change of at each step, or ``None`` for nothing.
@@ -299,6 +364,7 @@ class Laminar(_Flow):
 
     #: The settings this physics reads, by scope (see :mod:`.scopes`).
     reads_scopes: ClassVar[tuple[str, ...]] = (FLOW,)
+    state_fields: ClassVar[tuple[str, ...]] = ("U", "p")
 
     def refuse_boundaries(self, boundaries: Mapping[str, PatchCondition]) -> None:
         """Refuse any turbulence setting on a patch -- nothing in a laminar case would read it -- and any
@@ -322,6 +388,17 @@ class Laminar(_Flow):
         """``U`` and ``p`` -- see :meth:`Physics.output_fields`."""
         velocity, pressure = problem.unpack(solution)
         return {"U": np.asarray(velocity), "p": np.asarray(pressure)}
+
+    def restart_fields(self, problem: MomentumContinuity, state: object) -> dict[str, np.ndarray]:
+        """``U`` and ``p`` -- see :meth:`Physics.restart_fields`. A laminar march's state is the flow's own."""
+        return self.output_fields(problem, state)
+
+    def initial_fields(
+        self, problem: MomentumContinuity, fields: Mapping[str, np.ndarray]
+    ) -> jnp.ndarray:
+        """The flow state of ``U`` and ``p`` -- see :meth:`Physics.initial_fields`."""
+        velocity, pressure = _required(fields, self.state_fields)
+        return problem.pack(jnp.asarray(velocity), jnp.asarray(pressure))
 
     def progress_fields(self, problem: MomentumContinuity) -> None:
         """None: the log reports the residual alone -- see :meth:`Physics.progress_fields`."""
@@ -363,6 +440,7 @@ class RANS(_Flow):
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (SSTTurbulence.build,)
     #: The settings this physics reads, by scope (see :mod:`.scopes`).
     reads_scopes: ClassVar[tuple[str, ...]] = (FLOW, TURBULENCE)
+    state_fields: ClassVar[tuple[str, ...]] = ("U", "p", "k", "omega")
 
     def __post_init__(self) -> None:
         for name, family in (
@@ -396,7 +474,8 @@ class RANS(_Flow):
 
         The closure's walls are the patches whose flow closure is a wall, and its ``k`` and ``omega``
         closures are each patch's own, so neither is stated a second time. Both equations read the one
-        property model the fluid gives, and the same gradient reconstruction.
+        property model the fluid gives, and the same gradient reconstruction; a limited turbulence
+        advection takes its ``k`` and ``omega`` scales from the flow's speed.
         """
         del directory
         momentum = _momentum(spec, mesh, geometry)
@@ -421,6 +500,8 @@ class RANS(_Flow):
             omega_boundary=BoundaryConditions(
                 {name: omega for name, (_, omega) in closures.items()}
             ),
+            # The flow's speed, from which a scaled turbulence advection takes its k and omega scales.
+            velocity_scale=reference_speed(momentum),
             **options,
         )
         return CoupledRANS.build(
@@ -431,14 +512,35 @@ class RANS(_Flow):
         """``U``, ``p``, ``k``, ``omega`` and the eddy viscosity ``nut`` -- see :meth:`Physics.output_fields`."""
         flow, k, omega = solution
         momentum = problem.momentum
-        velocity, pressure = momentum.unpack(flow)
         nut = problem.turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
+        return {**self._solved_fields(problem, solution), "nut": np.asarray(nut)}
+
+    def restart_fields(self, problem: CoupledRANS, state: object) -> dict[str, np.ndarray]:
+        """``U``, ``p``, ``k`` and ``omega`` -- see :meth:`Physics.restart_fields`.
+
+        The march's state holds the solved variables, so ``omega`` is mapped back out of its logarithm
+        when the case solves for that.
+        """
+        return self._solved_fields(problem, problem.physical_fields(state))
+
+    def initial_fields(
+        self, problem: CoupledRANS, fields: Mapping[str, np.ndarray]
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """``(flow, k, omega)`` from the physical fields -- see :meth:`Physics.initial_fields`."""
+        velocity, pressure, k, omega = _required(fields, self.state_fields)
+        flow = problem.momentum.pack(jnp.asarray(velocity), jnp.asarray(pressure))
+        return flow, jnp.asarray(k), jnp.asarray(omega)
+
+    @staticmethod
+    def _solved_fields(problem: CoupledRANS, solution: object) -> dict[str, np.ndarray]:
+        """The fields the closure is solved for, from ``(flow, k, omega)``: everything but ``nut``."""
+        flow, k, omega = solution
+        velocity, pressure = problem.momentum.unpack(flow)
         return {
             "U": np.asarray(velocity),
             "p": np.asarray(pressure),
             "k": np.asarray(k),
             "omega": np.asarray(omega),
-            "nut": np.asarray(nut),
         }
 
     def progress_fields(self, problem: CoupledRANS) -> Callable[[object], Mapping[str, object]]:
@@ -545,10 +647,10 @@ class Radiation(Physics):
             )
 
     def refuse_sections(self, spec: CaseSpec) -> None:
-        """Refuse a fluid, numerics, a drive, sources or a pressure datum: nothing here reads them."""
+        """Refuse a fluid, numerics, a drive, sources, a pressure datum or a starting state: nothing here reads them."""
         stray = [
             name
-            for name in ("fluid", "numerics", "drive", "pressure_datum")
+            for name in ("fluid", "numerics", "drive", "pressure_datum", "initial")
             if getattr(spec, name) is not None
         ] + (["sources"] if spec.sources else [])
         if stray:
@@ -745,9 +847,9 @@ class Radiation(Physics):
         """Per receiving patch: the irradiance ``E``, what the wall absorbs of it, ``E_absorbed``, and
         the parts ``E_direct`` and ``E_reflected`` when something reflects."""
         out = {}
-        for name, receivers in problem.surfaces.items():
+        for name in problem.surfaces:
             total = solution.irradiance(name)
-            fields = {"E": total, "E_absorbed": (1.0 - receivers.reflectance) * total}
+            fields = {"E": total, "E_absorbed": solution.irradiance_absorbed[name]}
             if solution.irradiance_reflected is not None:
                 fields["E_direct"] = solution.irradiance_direct[name]
                 fields["E_reflected"] = solution.irradiance_reflected[name]
@@ -773,7 +875,7 @@ class Radiation(Physics):
                 "area": float(np.sum(receivers.areas)),
                 "incident_power": float(np.sum(total * receivers.areas)),
                 "absorbed_power": float(
-                    np.sum((1.0 - receivers.reflectance) * total * receivers.areas)
+                    np.sum(solution.irradiance_absorbed[name] * receivers.areas)
                 ),
             }
         medium = 0.0 if problem.absorption is None else solution.medium_absorbed_power
@@ -832,6 +934,17 @@ def _lamps(lamps: Mapping[str, Lamp], triangles_of, directory: Path) -> Surfaces
         profile_index=solid_id,
     )
     return surfaces.with_optics(emission=lamp_exitance(surfaces, powers))
+
+
+def _required(fields: Mapping[str, np.ndarray], names: tuple[str, ...]) -> list[np.ndarray]:
+    """The named fields, in order, refusing a mapping that lacks one."""
+    missing = [name for name in names if name not in fields]
+    if missing:
+        raise ValueError(
+            f"a starting state needs the fields {list(names)}, but {missing} "
+            f"{'is' if len(missing) == 1 else 'are'} missing from {sorted(fields)}."
+        )
+    return [fields[name] for name in names]
 
 
 def _set(**settings: object) -> dict[str, object]:

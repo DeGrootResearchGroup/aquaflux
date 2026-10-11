@@ -59,6 +59,7 @@ from .driver import bulk_velocity, solve_segregated
 from . import coupled_initialization as _coupled_initialization  # noqa: F401  (registers CoupledRANS)
 from .initialization import sst_initial_fields, wall_consistent_omega
 from .march_settings import CoupledShiftSettings
+from .scales import TurbulenceScales, turbulence_scales
 from .preconditioner import (
     AirAmgPreconditioner,
     ConvectionAmgPreconditioner,
@@ -136,6 +137,7 @@ __all__ = [
     "ScalarVariableTransform",
     "ScaledScalarPreconditioner",
     "TurbulenceDamping",
+    "TurbulenceScales",
     "UnpreconditionedScalars",
     "ViscosityRampHomotopy",
     "WallFixedResidual",
@@ -175,6 +177,7 @@ __all__ = [
     "sst_initial_fields",
     "strain_rate_magnitude",
     "turbulence_residual_norm",
+    "turbulence_scales",
     "wall_consistent_omega",
     "wall_consistent_state",
     "wall_function_weight",

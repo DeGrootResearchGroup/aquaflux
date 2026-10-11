@@ -45,12 +45,12 @@ from aquaflux.solve import (
     DualTimeLoop,
     Euclidean,
     Globalization,
-    JacobianProbe,
     LinearSolveSettings,
     MaterializedJacobian,
     MonolithicVCycle,
     PseudoTransientStep,
     RefreshPolicy,
+    Resumption,
     RowScaledNorm,
     SessionSource,
     ShiftTerm,
@@ -456,6 +456,29 @@ def test_the_constrained_solve_refuses_configuration_beside_a_finished_continuat
     given = {name: state if value == "state" else value for name, value in configuration.items()}
     with pytest.raises(TypeError, match=r"configure the continuation `solve_coupled_mass_flow`"):
         solve_coupled_mass_flow(coupled, strategy=continuation, **given)
+
+
+def test_the_constrained_solve_hands_a_resumption_to_its_root_solve(monkeypatch) -> None:
+    """``resume`` is the interrupted march's history, and it must reach the march that uses it."""
+    from aquaflux.solve import RootSolver
+
+    mesh, coupled = _mass_flow_cavity(4)
+    state = _healthy_state(mesh, coupled)
+    seen = []
+
+    def stop_at_the_call(self, residual_fn, phi0, theta, **kwargs):
+        seen.append(kwargs)
+        raise StopIteration
+
+    monkeypatch.setattr(RootSolver, "solve", stop_at_the_call)
+    continuation = mass_flow_coupled_continuation(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    history = Resumption(reference_residual=0.25, damping_reference=0.5)
+    for given in ({}, {"resume": history}):
+        with pytest.raises(StopIteration):
+            solve_coupled_mass_flow(coupled, strategy=continuation, **given)
+    assert seen == [{"resume": None}, {"resume": history}]
 
 
 def test_a_monolithic_builder_takes_the_injected_velocity_shift_source() -> None:
@@ -1028,6 +1051,39 @@ def test_refreshing_the_policy_rebuilds_transport_and_carries_the_coordinate_fac
     assert refreshed.flow_preconditioner is base.flow_preconditioner
 
 
+def test_the_coupled_and_segregated_scalar_shifts_are_one_definition() -> None:
+    """The coupled policy's k and omega transport shifts are the closure's own shift diagonals.
+
+    The segregated loop damps each scalar solve by the policy ``k_shift_policy`` bundles; the coupled
+    solve folds the same diagonal into the shift of the whole state. Both now read it from
+    ``k_shift_diagonal`` / ``omega_shift_diagonal``, so the two paths cannot damp a scalar differently.
+    """
+    from aquaflux.turbulence.coupled import _coupled_shift_policy
+
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    policy = _coupled_shift_policy(
+        coupled, state, UnpreconditionedScalars(), velocity=ViscousMultilevel()
+    )
+
+    flow, k, omega = coupled.physical_fields(state)
+    turbulence = coupled.turbulence
+    closure = turbulence.closure_fields(coupled.momentum.velocity_fields(flow), k, omega)
+    mdot = coupled.momentum.with_eddy_viscosity(closure.nu_t).mass_flux(flow)
+
+    k_shift = turbulence.k_shift_diagonal(mdot, closure, k)
+    omega_shift = turbulence.omega_shift_diagonal(mdot, closure, omega)
+    assert jnp.array_equal(policy.k_shift_transport, k_shift)
+    assert jnp.array_equal(policy.omega_shift_transport, omega_shift)
+    assert jnp.array_equal(turbulence.k_shift_policy(mdot, closure, k).shift_diagonal, k_shift)
+    assert jnp.array_equal(
+        turbulence.omega_shift_policy(mdot, closure, omega).shift_diagonal, omega_shift
+    )
+    # The two equations' diagonals differ (their diffusivities do, and omega's wall cells are zeroed),
+    # so the comparisons above could not pass with one swapped for the other.
+    assert not jnp.allclose(k_shift, omega_shift)
+
+
 class _Recorded(Exception):
     """Raised by a recording march to end a solve once its arguments are captured."""
 
@@ -1071,6 +1127,45 @@ def _recorded_measure_builders(
     else:
         call()
     return builders
+
+
+def test_a_resumed_solve_anchors_its_first_segment_to_the_reference_and_every_segment_stops_by_it(
+    monkeypatch,
+) -> None:
+    """The reference residual of a march being resumed sets the stopping target throughout and the
+    damping anchor on the first segment only.
+
+    A later segment follows a refresh, which re-bases the damping at its own starting state, so
+    anchoring it to the interrupted march's residual would hand it a ramp measured against a different
+    state; and a stopping target taken from the reference in only some segments would put the bar in
+    different places across refreshes.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    calls: list[dict] = []
+
+    def recording_march(step, residual_fn, at, **kwargs):
+        from aquaflux.solve import MarchResult
+
+        calls.append(kwargs)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
+    step = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    solve_coupled(
+        coupled,
+        *coupled.physical_fields(state),
+        convergence=Convergence(rtol=1.0, atol=1e30),
+        strategy=step,
+        refresh=RefreshPolicy(trigger=object(), limit=1, builder=lambda s: step),
+        resume=Resumption(reference_residual=0.25, damping_reference=0.125),
+    )
+    first, second = calls
+    # The first segment's anchor is the interrupted march's own segment's, not the global reference.
+    assert first["damping_reference"] == 0.125 and second["damping_reference"] is None
+    assert first["reference_norm"] == 0.25 and second["reference_norm"] == 0.25
 
 
 def test_a_coupled_solve_rebuilds_its_row_scaled_measure_at_the_state_each_iteration_starts(
@@ -1696,107 +1791,6 @@ def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
     assert probe.plan.n_fields == scaled.plan.n_fields
     assert np.array_equal(probe.structure.indptr, scaled.structure.indptr)
     assert np.array_equal(probe.structure.indices, scaled.structure.indices)
-
-
-class _ScalarRans(eqx.Module):
-    """A one-line stand-in assembler whose Jacobian is a scalar, so a rebind is visible in one apply."""
-
-    gain: jnp.ndarray
-
-    def residual(self, state: jnp.ndarray) -> jnp.ndarray:
-        return self.gain * state
-
-
-class _RecordingPreconditioner:
-    """A frozen inverse that records what each refresh was asked to build, and builds nothing.
-
-    It builds nothing, so what is under test is only when the hook asks for a rebuild, and of what.
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def refresh_in_place(self, matvec, plan, shift_diagonal, **_kwargs):
-        self.calls.append({"matvec": matvec, "shift": shift_diagonal})
-        return ()
-
-
-def _stub_step(preconditioner, beta, diagonal):
-    """The smallest Newton step the refresh hook reads: a shift strength, a policy and its diagonal."""
-    from types import SimpleNamespace
-
-    from aquaflux.solve import ShiftTerm
-
-    # Accepts the optional residual even though the refresh hook does not pass one: a stand-in that
-    # is narrower than the protocol breaks silently the day a caller starts supplying it.
-    base = SimpleNamespace(
-        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _relaxation: None)
-    )
-    return SimpleNamespace(
-        relaxation_schedule=SimpleNamespace(beta=beta),
-        shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),
-    )
-
-
-def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> None:
-    """One refresh hook can serve a whole Reynolds ramp, which is what lets the ramp share one V-cycle.
-
-    Nothing else in the hook watches for a rung boundary, so a hook that had stopped rebuilding would leave the next rung
-    solving against a V-cycle fitted to the previous rung's viscosity. ``rebind`` therefore does two
-    things, and both are asserted: the Jacobian probe starts reporting the NEW companion's derivative,
-    and the next refresh is a full re-materialize.
-    """
-
-    import numpy as np
-    from aquaflux.solve import beta_tracking_refresh
-
-    state = jnp.linspace(1.0, 2.0, 5)
-    diagonal = jnp.full(5, 2.0)
-    tangent = jnp.ones(5)
-    # The real probe (its plan and gather map are unused here), not a lookalike: `beta_tracking_refresh`
-    # asks it which assembler to differentiate, which only the class itself can answer.
-    probe = JacobianProbe(plan=object(), structure=object())
-
-    pc = _RecordingPreconditioner()
-    step = _stub_step(pc, beta=0.5, diagonal=diagonal)
-    # The multigrid cadence: a full rebuild on the first call and after a rebind, none otherwise --
-    # between those only the dual-time loop's cost trigger rebuilds the V-cycle.
-    refresh = beta_tracking_refresh(_ScalarRans(gain=jnp.asarray(3.0)), probe, every_step=False)
-
-    refresh(step, state)  # the initializing call
-    assert len(pc.calls) == 1
-    assert np.allclose(pc.calls[0]["shift"], 0.5 * np.asarray(diagonal))
-    assert np.allclose(pc.calls[0]["matvec"](tangent), 3.0 * tangent)
-
-    refresh(step, state)  # no rebuild between rebinds, as for the rest of a rung
-    assert len(pc.calls) == 1
-
-    refresh.rebind(_ScalarRans(gain=jnp.asarray(7.0)))
-    refresh(step, state)
-    assert len(pc.calls) == 2  # forced by the rebind
-    assert np.allclose(pc.calls[1]["matvec"](tangent), 7.0 * tangent)  # ...at the new companion
-
-    refresh(step, state)  # and the force is spent: one rebuild per rebind, not a stuck flag
-    assert len(pc.calls) == 2
-
-
-def test_the_factorization_cadence_rebuilds_on_every_step() -> None:
-    """``every_step=True`` is the complete-LU cadence: an exact factorization is cheap, and exact only
-    at the shift it was built at, so it is re-factored before every step rather than on a rebind."""
-    from aquaflux.solve import beta_tracking_refresh
-
-    state = jnp.linspace(1.0, 2.0, 5)
-    diagonal = jnp.full(5, 2.0)
-    pc = _RecordingPreconditioner()
-    refresh = beta_tracking_refresh(
-        _ScalarRans(gain=jnp.asarray(3.0)),
-        JacobianProbe(plan=object(), structure=object()),
-        every_step=True,
-    )
-
-    for beta in (0.5, 0.25, 0.125):
-        refresh(_stub_step(pc, beta=beta, diagonal=diagonal), state)
-    assert [float(call["shift"][0]) for call in pc.calls] == [1.0, 0.5, 0.25]
 
 
 def test_the_default_refresh_policy_is_the_inert_one() -> None:

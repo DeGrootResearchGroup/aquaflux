@@ -1,7 +1,7 @@
 """Would probing ``[k, omega]`` on its own, instead of slicing it out of the full coupled Jacobian,
 save anything?
 
-``FieldSplitAmgPreconditioner`` materializes the WHOLE six-field coupled Jacobian with one coloured jvp
+``FieldSplitPreconditioner`` materializes the WHOLE six-field coupled Jacobian with one coloured jvp
 probe and only then slices out the leading ``[u,v,w,p]`` block, the trailing ``[k,omega]`` block, and the
 one retained coupling triangle between them (the field-major layout makes a field-boundary split a cheap
 contiguous-range slice, not a gather). The colouring itself already gives ``k`` and ``omega`` their own

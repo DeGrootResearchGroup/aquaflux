@@ -29,7 +29,7 @@ must run from its file alone.** Consequences, each already decided:
   the harness **checks** the file against the reference rather than filling it in.
 - **The solver section (BUILT 2026-09-24) and `aquaflux run case.yaml` with an outputs section (BUILT
   2026-09-25) were the critical path**: a case now runs from its file alone. Every validation harness
-  takes its solve from its file. What still needs code is a starting state (#544).
+  takes its solve from its file. A starting state (`initial`, #544) is BUILT: `Checkpoint` (an earlier run's) and `Fields` (an OpenFOAM time directory).
 - Do not call the harnesses "drivers" to the project owner — it collides with the *drive* (`MassFlow`).
 
 ## Status — phases A–D, the solver section and `run` with outputs BUILT (2026-09-24/25)
@@ -37,7 +37,7 @@ must run from its file alone.** Consequences, each already decided:
 The construction order #374 records is A spec → B topology → C geometry → D equations → E state →
 F frozen solver → G drive.
 - **A–B, the cheap "check the file" stop:** `read_case(path)` → `CaseFile(spec, directory)`, then
-  `CaseFile.check()` → `CheckedCase(spec, mesh)` (the mesh read and `validate()`d, the spec checked
+  `CaseFile.check()` → `CheckedCase(spec, mesh, directory)` (the mesh read and `validate()`d, the spec checked
   against its topology, **no geometry**). ~1 s on pitzDaily (12225 cells, ASCII read; one run,
   2026-09-24, macOS arm64).
 - **C–D:** `CheckedCase.build()` computes the geometry once and hands it to `spec.physics.build(spec,
@@ -46,7 +46,7 @@ F frozen solver → G drive.
   never a built step (#374: the step is rebuilt from mid-march states at every Reynolds rung and refresh).
   ~8 s on pitzDaily including the wall distance (same run).
 - **E–F:** `CheckedCase.solve(problem, **observers)` runs `solver_for(spec)` — the file's `solver`, or the
-  physics' march with every setting unset. #374's "`state -> step` builder" needed no new builder: the
+  physics' march with every setting unset — from the state the file's `initial` names, if it has one. #374's "`state -> step` builder" needed no new builder: the
   library solves already rebuild the step from **specs** at every rung and refresh, so the solver section
   turns into the solve's keyword arguments and never into a built step. See "The solver section" below.
 
@@ -55,16 +55,20 @@ F frozen solver → G drive.
 | module | holds |
 |---|---|
 | `scopes.py` | `FLOW` / `TURBULENCE` / `RADIATION`, `SCOPES`, the `Scoped` mixin (`setting_scopes`, `required_in_scope`, `settings_in`, `missing_in`) |
-| `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics — the physics decides —, drive, pressure datum, sources, solver, outputs), `Numerics` (momentum and turbulence advection, gradient), the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
+| `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics — the physics decides —, drive, pressure datum, sources, solver, initial, outputs), `Numerics` (momentum and turbulence advection, gradient), the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `write_case`, `CaseFile`, `CheckedCase` |
 | `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` (read) / `StructuredGrid` + `AxisGrading` → `GeometricGrading` (generated) |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
-| `physics.py` | `Physics` → `_Flow` → `Laminar` / `RANS`, and `Radiation` |
+| `physics.py` | `Physics` → `_Flow` → `Laminar` / `RANS`, and `Radiation`; the flow physics also map a march state to named physical fields (`restart_fields`) and back to a solve's starting state (`initial_fields`), which a physics with no march (radiation) refuses |
+| `initial.py` | `InitialState` → `Checkpoint` / `Fields` (a case's `initial` section: where a starting state is read from, `read(case_directory, spec, mesh)` → `StartingFields`, and `starting_arguments`; `path_fields = ("path",)` so the path rules re-base it) |
+| `axes.py` | `AXES`, `AxisName` (the `x`/`y`/`z` a file names; `BulkVelocity.direction`, `Fields.extruded_axis` and `OpenFOAMTime.extruded_axis` all use it) and the one refusal of an extruded axis stated for a three-dimensional mesh |
+| `kinematic.py` | `kinematic_pressure` / `pressure_from_kinematic`: the one home of OpenFOAM's pressure-per-unit-density factor, used by `OpenFOAMTime` going out and `Fields` coming in |
+| `restart_file.py` | the checkpoint file a case writes and reads: `RestartHeader` (physics, `n_cells`, `dim`, mesh digest, case digest, problem digest), `mesh_digest`, `checkpoint_writer`, `read_restart` → `RestartFile` (with `resumption`), `refuse_non_finite` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` |
 | `radiation.py` | the radiation vocabulary: `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`, `CadPlacement`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers`; the internal `PatchSurface`, `_Drawings`, `_facing` |
 | `paths.py` | `named_paths` / `with_paths` / `relocated`: every value naming a file declares `path_fields` (a `ClassVar`), found at any depth for the existence check; `relocated(value, source, target)` is THE re-basing rule (relative → re-based, absolute kept, `outputs.directory` never — it names no file), used by the `case.yaml` run record and `aquaflux write --relative-to` |
-| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, recorder)` |
+| `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (both on the private `_March`, their shared settings) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for(spec)`; `NotConverged`; each kind's `observers_for(logger, recorder)`, `refuse_initial(initial)` and `solve(problem, initial=..., resume=...)` |
 | `outputs.py` | `Outputs(directory, fields, log, history, checkpoints)`; `RunFields(cells, patches)`; `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`; `Checkpoints` |
 | `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord` |
 | `aquaflux/__main__.py` | the `aquaflux check` / `aquaflux run` command (console script `aquaflux`) — the ONE module outside `case/` allowed to import it |
@@ -193,7 +197,7 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
 
 ## What a file cannot describe yet — and where each goes
 
-- **A starting state** (#544) — no `initial` section, no checkpoint loader, and the ramp takes no seed.
+- **A starting state on a mesh that is not an OpenFOAM one** — `Fields` is the cells of an OpenFOAM case in its own numbering, so it refuses any other `MeshSource`; the only cross-check is the cell count.
 - **A laminar case holding a bulk velocity (#541)** — `FlowMarch` refuses one (`solve_flow_march` refuses a
   `MassFlow` drive) and there is no laminar segregated solve; `bulk_velocity_flow_solve` exists but is a
   bordered Newton, not a march.
@@ -207,8 +211,8 @@ constructor refusal re-raised with the path prepended** (so `Inlet`'s bad veloci
   It was 2D only until a radiation case needed a small box (2026-10-05).
 - **Other source kinds** — a `sources:` section beyond `BodyForce` waits on #362 (sources declaring their
   inputs); `BodyForce` reads no field and no gradient, so it needs nothing #362 would add.
-- **A passive-scalar case referring to another case's converged flow** (#375; `bfs3d_species` imports the
-  flow driver by path today) — a dependency edge between cases, not a field on one.
+- **A passive-scalar case referring to another case's converged flow** (#662, split from #375; `bfs3d_species`
+  imports the flow driver by path today) — a dependency edge between cases, not a field on one.
 - **Profiles** (`DirichletField`, a callable) — not plain data; a named-profile kind if ever needed.
 
 ## How the build derives what the drivers used to restate (binding)
@@ -334,14 +338,15 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   before `run()` starts, so an error from inside a solve still surfaces as a traceback rather than as a
   one-line "refused file".
 - **`prepare_run` is the cheap stop**: read, refuse an occupied output directory (or an existing
-  `OpenFOAMTime` target), resolve the solver (a bulk-velocity case with no solver is refused HERE), and
-  check the mesh — all before any geometry. **What counts as occupied has one home, `run._plan`**, shared
-  with **`plan_run(path) -> RunPlan(directory, log, history, occupied)`** (2026-10-07), which answers the
-  same question without checking the mesh; `aquaflux plan case.yaml` prints it as
-  `{"error", "directory", "log", "history", "occupied"}` and `serve` answers it. The browser interface's
-  Run section asks it before offering to replace results (project owner, 2026-10-07: "only overwrite
-  with permission"). `--overwrite` replaces the files the run writes and clears
-  `checkpoints/` (whose names collide across runs); anything else in the directory is left alone.
+  `OpenFOAMTime` target), resolve the solver (a bulk-velocity case with no solver is refused HERE), check
+  the mesh, and read the `initial` state against it — all before any geometry. **What counts as occupied
+  has one home, `run._plan`**, shared with **`plan_run(path) -> RunPlan(directory, log, history,
+  occupied)`** (2026-10-07), which answers the same question without checking the mesh; `aquaflux plan
+  case.yaml` prints it as `{"error", "directory", "log", "history", "occupied"}` and `serve` answers it. The
+  browser interface's Run section asks it before offering to replace results (project owner, 2026-10-07:
+  "only overwrite with permission"). `--overwrite` replaces the files the run writes and clears
+  `checkpoints/` (whose names collide across runs) **after** the starting state has been read; anything
+  else in the directory is left alone. See "A starting state" below.
 - **Editing commands for a program (2026-10-05, for the browser interface's Setup section)** — `aquaflux
   schema` prints `case_schema()` (root `CaseSpec`, `one_form_sections`, and `_CASE_MAPPING.schema()`);
   `aquaflux show case.yaml` prints `{"error", "case"}` — the document by `read_case_document` (the SAME
@@ -418,11 +423,199 @@ by construction), and not passing `drive` (the only nameable drive is the builde
 - **Tests**: `tests/unit/test_case_run.py` (section reading/refusals, writer selection, both physics'
   output fields, observer wiring per kind, the segregated refusal, `prepare_run`'s refusals and overwrite,
   the command's exit statuses, `python -m aquaflux --help`); `tests/integration/test_case_run.py` (a
-  laminar channel run: files, the checkpoint equal to the direct `solve_flow_march` root bit for bit, the
+  laminar channel run: files, the checkpoint's `U` and `p` equal to the direct `solve_flow_march` root bit for bit, the
   records; a run that stops short; an `OpenFOAMTime` directory on the slab fixture read back against the
   direct solve's pressure, and the re-based record re-checked). ⚠️ The two-cell slab leaves the default
   `MultipleCorrectionGradient` underdetermined and the potential-flow initializer's Laplace operator
   NaN — that test states `CompactGreenGauss`.
+
+## A starting state (2026-10-02, #544) — binding decisions
+
+- **One optional top-level `initial` section, one kind so far: `Checkpoint {path, step: latest | <int>}`.**
+  `path` is the earlier run's `checkpoints` directory, relative to the case file. Unset is today's
+  self-start. `Checkpoint` is singular and `Checkpoints` (the `outputs` writer) plural: one reads, one writes.
+- **A checkpoint written by a case holds PHYSICAL fields plus a header, not the march's solved state
+  (project owner, 2026-10-02).** The solved state holds `log(omega)` under `LogScalars`; a file of it read
+  by a direct-`omega` case has the right length and so passes every size check, and loads as garbage.
+  `Physics.restart_fields(problem, state)` maps a march state to `U`, `p` (the solved, real pressure) and
+  under RANS `k`, `omega`; `Physics.initial_fields(problem, fields)` is its inverse (`state_from_physical`
+  for RANS). Written by `checkpoint_writer`, injected as the `save=` of the run's `StateCheckpointer`, so
+  `solve/` stays mesh-free. A library `StateCheckpointer` with its default serializer still writes a bare
+  `state` array — the validation harnesses (`pitzdaily_openfoam`, `bfs3d_openfoam`) use that and are
+  unchanged; `read_restart` refuses such a file with a message saying why.
+- **The header is the physics kind, `n_cells`, `dim`, a mesh digest, and the writing case's two digests.**
+  The case digest (`CaseSpec.digest()`, the whole file) is provenance and is never compared (a restart is
+  usually a case with something changed); the PROBLEM digest (`CaseSpec.problem_digest()`) is compared, for
+  one purpose only — see the reference residual below. A file written before the problem digest was added
+  is refused as "not a case checkpoint" (pre-release: no shim). `mesh_digest` hashes the face-to-cell connectivity and the node coordinates **binned to a
+  millionth of the mesh's largest extent**, so the same mesh read on another machine (last-bit
+  differences) agrees while a stretched or renumbered one does not — a cell count alone would load a
+  renumbered mesh's field without complaint. It needs no geometry, so the check runs in `prepare_run`.
+  The digest is reported only when count and dimension agree (it differs whenever they do not).
+- **`read` and `starting_arguments` are split.** `InitialState.read(case_directory, spec, mesh)` finds the
+  file and checks it against the mesh and the case (no geometry, no equations) → `StartingFields`;
+  `starting_arguments(starting, physics, problem)` maps those onto the built problem as the solve's
+  keywords (`initial=`, `resume=`). `prepare_run` reads, so a
+  state that does not fit is refused before the 8 s build; `PreparedRun.starting` carries it.
+  `CheckedCase` gained `directory` (a relative path needs it) and `starting_fields()`, and
+  `CheckedCase.solve` honours the file's `initial` so a script cannot silently drop it.
+- **Every solve takes `initial=` and `resume=`, on the ABC.** `CoupledMarch` →
+  `solve_coupled(problem, *initial, resume=)`, `FlowMarch` → `solve_flow_march(...,
+  state=initial, resume=)` (each passed only when set, so the parity recorders are
+  unchanged), `Segregated` replaces `sst_initial_fields` and refuses a `resume` (its loop stops on the
+  sweep-to-sweep change and has no residual history). Neither is one of `_owned()`'s settings: they are
+  the case's starting state, not march settings. `RadiationSolve.solve` takes both and refuses a non-`None`
+  one; a radiation CASE refuses an `initial` section when read, through
+  `Radiation.refuse_sections` beside its fluid/numerics/drive refusals (`restart_fields` / `initial_fields`
+  on a physics with no march raise).
+- **A `CoupledMarch` with a `continuation` REFUSES `initial` when the file is read (project owner,
+  2026-10-02), and again at `solve`.** `solve_reynolds_ramp` seeds from `hybrid_initialize(companion(coupled,
+  anchor))` because the seed must match the anchor's viscosity (a seed at the target's put `omega` 90x off at
+  the near wall on `bfs3d`). The refusal is `SolverSpec.refuse_initial`, run in `CaseSpec.__post_init__`
+  beside `refuse_for`; the one message is shared by both sites. Resuming mid-ramp (at the station a
+  checkpoint came from) needs the checkpoint to record its station — **not built**; the message says to drop
+  `continuation`, which restarts at the case's own viscosity.
+- **A restart writes to its own output directory (project owner, 2026-10-02).** `--overwrite` clears
+  `<output>/checkpoints`, and without it an occupied directory is refused, so a case could never read its
+  own checkpoints. `_refuse_a_start_from_the_output` refuses an `initial` whose resolved location is inside
+  the output directory, **whether or not overwrite is set** and before anything else. In `prepare_run` the
+  checkpoints are cleared only **after** the state has been read and checked — a refused restart must not
+  have cost an earlier run its checkpoints (`test_a_restart_that_does_not_fit_leaves_the_checkpoints_it_was_told_to_overwrite`).
+- **A checkpoint with non-finite fields is refused (`RestartFile.refuse_if_not_finite`).** The
+  checkpointer writes the failed step too (the "known defect" in `solve-march.md`), so the newest file can
+  be the state the march died in. The message says to name an earlier `step`.
+- **A restart carries the stopped march's HISTORY — three numbers, one value `solve.Resumption` (built
+  2026-10-07; the shift and the anchor 2026-10-08).** ⚠️ **An earlier entry said the *shift*
+  (`ShiftStrengthControl`, `beta_start`) of a default flow march restarted, and that was a misdiagnosis —
+  kept as a trap.** The default flow march's damping is the memoryless switched-evolution schedule
+  `beta = max(floor, beta0 (|R|/|R0|)^p)`, which reads its anchor `|R0|` from the state the march is
+  *handed* and holds nothing between steps (a report's `shift` reads `0.0` for it because it is not a
+  readable beta, which looked like a reset). Resumed at the fresh march's step-3 state, `|R0|` is
+  re-measured there, so the ratio is ~1 and beta opens at `beta0` again. Verified by giving the resumed
+  march `beta0 = 2 |R0_resumed| / |R0_fresh|`: its first iterate equalled the fresh march's fourth (diff
+  0.0), all later ones to 7.8e-16, 9 steps as the fresh march had left (8x4 laminar channel, `FlowMarch`
+  defaults, `FirstOrderUpwind`, Re ~ 50; one run, 2026-10-07). A **dual-time** march, by contrast, does
+  hold a shift between steps — the Courant control's `(beta, memo)` — and that one was not carried until
+  2026-10-08. Measured then (24 x 16 laminar channel, `mu = 5e-3`, `DualTimeLoop(inner_steps=3)`, the
+  default `DualTimeControl`, row-scaled `atol = 1e-9`): the fresh march takes 17 steps, its shift walking
+  2.0 → 0.02; resumed at its step 3, 6 or 10 with only the reference it took 16, 16 and 14 steps (against
+  14, 11 and 7 left) and opened at shift 2.0 each time.
+  - **What is carried, and where each number comes from.** The step record a checkpoint stores holds
+    `residual_norm`, `residual_ratio = residual_norm / reference_norm`, `shift` and
+    `damping_reference` (a `StepReport` field: the `|R0|` the step's damping was anchored at). `Resumption`
+    is `(reference_residual, damping_reference, shift)`: the reference is the quotient (the original
+    `|R0|` in the measure it was taken in, and the scale of the stopping bar `atol + rtol * reference`);
+    the anchor is the record's own (it differs from the reference once the march has refreshed its
+    preconditioner, since a later segment re-bases its damping at the refresh); the shift is the last step's, a `0.0` ("no step control") read as none.
+    `RestartFile.resumption` builds it (`None` for a record with no usable ratio) and each number a record
+    does not hold reads as unset.
+  - **Carried only when the case states the SAME PROBLEM in the SAME MEASURE.** The numbers are for the
+    problem and the measure they were taken in. `CaseSpec.problem_digest()` is the digest of
+    the case with `outputs` and `initial` dropped and the solver reduced to its kind and its
+    `convergence.measure` (the solver is the one `solver_for` resolves, so a file stating its default
+    solver and one leaving it out are the same problem); it is stored in the checkpoint header beside the
+    whole-file `case_digest` (provenance, still never compared), and `Checkpoint.read` hands the history
+    on only when the two agree. So a restart with a larger `max_steps`, another preconditioner or another
+    output directory continues the march; one with another fluid, inlet or residual measure starts a new
+    march from the fields. `run.yaml`'s `initial.resumption` holds the three numbers (null when not
+    carried). ⚠️ A `dual_time` loop is not part of the digest, so a checkpoint written without one and
+    resumed with one carries a shift of `None` (the record's `0.0`), and the control opens at its own start.
+  - **Library seam: `resume=` on `solve_flow_march`, `solve_coupled`, `staged_march`, `RootSolver.solve`
+    and `solve_coupled_mass_flow`.** `staged_march` applies the reference as the stopping scale, the anchor
+    as the **first segment's** damping reference (a later segment follows a refresh and re-bases as in any
+    march) and the shift through the control's `resumed_at(shift)` when the control has one — a march with
+    no control, or a control without the hook, has no shift to seed and starts afresh. `RootSolver.solve`
+    uses the first two (a root solve has no control). Refused beside a `homotopy` (its anchor is the first
+    station's). `ShiftStrengthControl.resumed_at` returns `(clamp(shift), None)`: no memo, so a ratio rule
+    forms its first ratio a step later (the path `rebase` already takes), and the first step **holds** the
+    shift — there is no previous report to adapt it from, the treatment a refresh boundary gets.
+    ⚠️ **Still not carried:** a march resumed is a new march for the refresh BUDGET (`refresh.limit` starts
+    over) and for a retry's escalated β beyond the shift it ended on.
+  - ⚠️ **Nothing produces a `Resumption` for `RootSolver` or `solve_coupled_mass_flow` but a script:** a
+    `RootSolver` march exposes no observer, so no checkpoint of one exists to read it from, and a
+    case file reaches neither (`CoupledMarch` refuses a bulk velocity; `Segregated` resumes nothing). The seam
+    is there so the capability is reachable from every residual, not because a case file uses it.
+  - Pinned by `tests/integration/test_flow_march.py` (a resume with the reference reproduces the steps
+    that followed it, residual and ratio to 1e-8 and the root to 1e-9, against a control that does not;
+    the reference moves the stopping target; the anchor reaches the first segment and the reports say so;
+    no shift reaches a march with no control; the homotopy refusal), `test_flow_march_resume.py` (a dual-time
+    march resumed with its shift opens at it and continues the ramp, against a control that reopens at the
+    start — its own module, because that compile aborted the process when it ran after thirty others in one
+    worker, and the suite clears compiled programs only between modules),
+    `tests/unit/test_resumption.py`, `test_step_control.py` (`resumed_at`: held, clamped, no memo),
+    `test_root_solver.py`, `test_coupled_rans.py` (the anchor reaches only the first segment; the
+    mass-flow solve hands its root solve the resumption), `tests/unit/test_case_initial.py` (the quotient
+    not the residual; the record's own anchor and shift; an unusable ratio; what does and does not change
+    the problem digest) and `tests/integration/test_case_run.py` (a stopped run resumed takes exactly the
+    steps the uninterrupted run had left, against the same logged reference; a dual-time run's resumed
+    first shift is the stopped run's last; a changed fluid carries none).
+  - **Mutation-checked 2026-10-08 (26 single-line mutations across the seam, the control's resume, the
+    record, the restart file, the case solvers and the extruded-axis setting): all caught.** The wiring
+    mutations that drop `resume` at each hand-off (flow march, coupled solve, mass-flow solve, each case
+    solver) and the ones that swap the anchor for the reference, drop the shift, skip the clamp, read a
+    recorded zero as a number, or carry the history across another problem each turn at least one test
+    red; so do the axis ones (letters misordered, a stated axis ignored by the reader or the writer, the
+    dimension refusal disabled, inverted, or left out of `check_against`). No mutation survived and none
+    was dismissed.
+
+- **`Fields` — an OpenFOAM time directory as the starting state (built 2026-10-07, #544's second change).**
+  `Fields(path, time)`: `path` the OpenFOAM case directory (re-based by `path_fields` like every path),
+  `time` a string (a bare number is refused by the settings mapping, which is the "quote it" prompt).
+  - **The file names come from the physics**: `Physics.state_fields` (`("U","p")` laminar, plus `k`,
+    `omega` under RANS) is the one list `initial_fields` requires and `Fields.read` reads, so the two
+    cannot disagree.
+  - **Pressure is OpenFOAM's kinematic pressure, both ways, in ONE module** (`kinematic.py`): the reader
+    multiplies by `spec.fluid.density`, and `OpenFOAMTime.write` divides by it. The writer used to write the
+    solved (real) pressure unscaled into a file whose template dimensions say `[0 2 -2 ...]`, invisible at
+    `density: 1` — **a behaviour change for any run at another density that writes an OpenFOAM time**
+    (decided with the project owner, 2026-10-02: "Option 1", shipped together with the reader so the two
+    stay symmetric). `RunFields.density` carries the factor to the writer (`None` for a radiation case,
+    which has no pressure); the other writers still write the pressure itself, and checkpoints hold the
+    real pressure.
+  - **The mesh must be an `OpenFOAMMesh`** — a generated grid is numbered differently, and the cell count is
+    the only cross-check the file allows (a different mesh with as many cells is read without complaint;
+    documented on the class). A 2D case drops the extruded axis' component, whose axis is `Fields.extruded_axis`
+    (`x`/`y`/`z`, via `case/axes.py`) when the file states it and otherwise recovered from the **case's mesh
+    path** (`case_directory / spec.mesh.path`, not the fields' directory, which need not hold the
+    polyMesh); `read_openfoam_time` refuses a field with a nonzero component there (the wrong axis, or a
+    flow that is not planar) rather than discard it. **`OpenFOAMTime.extruded_axis` is the same setting for
+    the writer** (where the padded zero goes), and a stated axis on a three-dimensional mesh is refused by
+    `refuse_an_extruded_axis_of_a_three_dimensional_mesh` through `FieldWriter.refuse_for_dimension` /
+    `InitialState.refuse_for_dimension`, which `CaseSpec.check_against` runs with the other dimension
+    checks. Added 2026-10-08 because the committed 2 x 1 x 1 slab leaves the axis ambiguous and the error
+    asked for an argument a file could not give; a real extrusion is unambiguous and needs neither.
+  - **No march history is carried** (`resumption` is `None`): another program's solution has no
+    reference of ours, so the march begins as a new one from the state.
+  - Pinned by `tests/unit/test_case_initial_fields.py` (cells, components, the pressure at density 2, RANS
+    fields, each refusal), `tests/unit/test_openfoam_fields.py` (`parse_vector_field`,
+    `read_openfoam_time`, a writer round trip) and `tests/integration/test_case_run.py` (a run writes an
+    OpenFOAM time at density 2, another starts from it and takes ≤ 2 steps, its checkpoint equal to the
+    first run's solution).
+  - **Mutation-checked 2026-10-07 (35 single-line mutations across the reference carry, `Fields`, the
+    problem digest, the io reader, the solver seams and the pressure factor): all caught, after three
+    survived and were fixed.** Each survivor was a test that could not tell the right answer from the wrong:
+    the extruded axis taken from the fields' directory rather than the case's mesh path (the fixture put
+    both in one directory — now a test with them apart); the stopping-scale test also moved the damping
+    anchor, so it passed with the reference ignored in the stopping bar (now a reference large enough
+    that the march takes no step, which isolates it); and the `Fields` round trip reached the root anyway
+    from a pressure off by the density (now asserts the second run takes no step). Not mutation-checked:
+    the section's YAML round trip.
+
+- **Provenance.** `run.yaml` gains `initial:` (a checkpoint's `kind`, `file`, the residual the earlier run
+  had reached, its case digest and the `resumption` carried; a `Fields`' `kind`, `file` and
+  `density`; `null` when none). `InitialState` declares `path_fields = ("path",)`, so `relocated` re-bases
+  it on the output directory with every other path and `case.yaml` reads where it lies (there is no
+  initial-specific re-basing code).
+- **Tests.** `tests/unit/test_case_initial.py` (digest, header refusals each with a unique match, the
+  file round trip under `LogScalars`, the section, the ramp refusal, the run-order guards),
+  `test_checkpoint.py` (`find_checkpoint`: highest by step not mtime, `.partial` ignored, prefix),
+  `test_case_solver.py` (what each solve is handed), and `tests/integration/test_case_run.py` (a stopped
+  run resumed to the same root; a converged checkpoint needs no steps). Mutation-checked 2026-10-02, each
+  turning at least one test red: the digest's node binning and its connectivity, the step lookup and its
+  `.partial`/prefix rules, the `omega` transform, the physics/count/mesh header refusals, the bare-file
+  refusal, the ramp refusal, the three solves' seams, the output-directory guard, clearing after the read,
+  the finiteness guard, a run's use of its seed (both integration tests) and the `case.yaml` re-base.
+  Not mutation-checked: the section's YAML round trip.
 
 ## The case files in the repository
 
@@ -506,8 +699,11 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   refused. **A file surface given under a patch-GROUP key is refused** in `mesh_misfits` (each member
   would take the whole surface); `MeshPatch` under a group is fine.
 - **Occluders** (`physics.occluders`): `CadSolid` / `CadFluid` (exact bodies from `CadModel.solid` /
-  `fluid`), `StlBody` and `PatchBody` (`TriangleBody`s). ⚠️ **The domain's own walls shadow nothing unless
-  listed** — exact in a convex room, wrong in an L-shaped one; documented on the docs page.
+  `fluid`), `StlBody` and `PatchBody` (`TriangleBody`s). ⚠️ **A black wall (no `reflectance`) shadows nothing
+  unless listed** — it is not in the scene at all; exact in a convex room, wrong in an L-shaped one;
+  documented on the docs page. A REFLECTING wall shadows the lamps' direct light and the reflected light
+  through the scene's own triangles whenever self-occlusion is on (#622, 2026-10-10;
+  `.claude/rules/radiation.md` → THE SCENE).
   `PatchBody` builds with `patch_triangles(..., allow_folded=True)` (`mesh.md`): the snapped bunny has
   **291 faces not star-shaped from their vertex mean**, which the first at-scale run refused.
 - **Receivers** (`Receivers(cells=True, patches=None)`): unset patches = every `Wall` not in a
@@ -534,7 +730,7 @@ whose runs write what every run writes. Decisions taken with the owner before bu
 - **Outputs (agreed with the owner; the `aquaflux_viz` viewer reads them):** cell fields in `fields.vtu`
   (`G`, plus `G_direct`/`G_reflected` when anything reflects); **`PatchVtk` → `patches.vtm` indexing
   `patches/<patch>.vtp`, one block per boundary patch named by it, EVERY boundary patch written**, face
-  fields `E`, `E_absorbed` = (1−ρ)E, plus `E_direct`/`E_reflected`. Writers now take `RunFields(cells,
+  fields `E`, `E_absorbed` = (1−ρ)E (read from `SceneSolution.irradiance_absorbed` since #622), plus `E_direct`/`E_reflected`. Writers now take `RunFields(cells,
   patches)`; `Physics.output_patch_fields` and `Physics.results` default to empty for flow. `run.yaml`
   gains `results:` (lamp power and facets, reflector facets, radiosity cycles, `volume_integral_G`,
   `medium_absorbed_power`, `lamp_absorbed_power` when anything reflects, per patch

@@ -38,6 +38,14 @@ outside the residual, and a default answer would let a new source inherit a wron
   -- the damping is differentiated and solution-affecting, so the converged answer and its adjoint are
   wrong too. Pin any non-trivial implementation against automatic differentiation of the source's own
   :meth:`~MomentumSource.source`, so the two cannot drift.
+
+A source also declares what it reads beyond the velocity through
+:class:`~aquaflux.discretization.DeclaredInputs`, the contract every residual term shares: the
+properties it reads by name (``requires``), which the assembler checks against its property model when
+it is built, and whether it needs the velocity-gradient tensor (``uses_gradient``). Those two do have a
+default -- nothing -- because leaving one out costs only where an error surfaces, not the answer. The
+flow assembler always reconstructs the velocity gradient, so it has no case to refuse on the second;
+the declaration is there so that a source states it, as a term of any other family does.
 """
 
 from __future__ import annotations
@@ -45,9 +53,9 @@ from __future__ import annotations
 import abc
 from typing import TYPE_CHECKING
 
-import equinox as eqx
 import jax.numpy as jnp
 
+from aquaflux.discretization import DeclaredInputs
 from aquaflux.vectors import scale
 
 if TYPE_CHECKING:
@@ -59,7 +67,7 @@ if TYPE_CHECKING:
     from .momentum import VelocityFields
 
 
-class MomentumSource(eqx.Module):
+class MomentumSource(DeclaredInputs):
     """Strategy interface: a force per unit volume acting on the momentum equation.
 
     A concrete source returns one vector per cell -- the force integrated over the cell volume,

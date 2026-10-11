@@ -142,6 +142,14 @@ class BoundaryConditions(eqx.Module):
         padding faces. A boundary face cannot be among them -- :meth:`resolve` refuses a collection
         that leaves one uncovered.
 
+        The closures differ, so each is evaluated on its own, but every patch's values are written in
+        one scatter over the concatenated face indices. A scatter per patch would make each write
+        depend on the previous one's result, so the writes would run one after another and the
+        program would grow with every patch. One write gives the same result because the patches are
+        disjoint (each face has one patch label). The one place an index can repeat is a distributed
+        partition's padding entries (see ``_uniform_boundary_faces``), which all name the zero-area
+        null face, so which repeated write lands there is immaterial.
+
         Parameters
         ----------
         face_cells : FaceCellConnectivity
@@ -166,12 +174,18 @@ class BoundaryConditions(eqx.Module):
                 "BoundaryConditions must be bound to a mesh via resolve(face_patches, face_cells) "
                 "before apply()"
             )
-        result = init
+        if not self.conditions:
+            return init
+        faces, values = [], []
         for name, bc in self.conditions.items():
-            faces = self.faces[name]
-            owner = face_cells.owner[faces]
-            result = result.at[faces].set(closure(bc, faces, owner))
-        return result
+            patch = self.faces[name]
+            faces.append(patch)
+            values.append(
+                jnp.broadcast_to(
+                    closure(bc, patch, face_cells.owner[patch]), patch.shape + init.shape[1:]
+                )
+            )
+        return init.at[jnp.concatenate(faces)].set(jnp.concatenate(values))
 
 
 def _named(fields: tuple[str, ...]) -> str:

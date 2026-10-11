@@ -732,9 +732,10 @@ def test_the_boundary_linearization_does_not_depend_on_the_state() -> None:
     )
     properties = assembler.properties.evaluate(mesh.cell_zones, {})
     key = jax.random.PRNGKey(3)
-    at_rest = (jnp.zeros(mesh.n_cells), jnp.zeros((mesh.n_cells, mesh.dim)), properties)
-    reference = assembler._boundary_gradient_weight(*at_rest)
-    reference_value = assembler._boundary_value_weight(*at_rest)
+    closure = assembler._boundary_closure(properties)
+    at_rest = (jnp.zeros(mesh.n_cells), jnp.zeros((mesh.n_cells, mesh.dim)))
+    reference = closure.gradient_weight(*at_rest)
+    reference_value = closure.value_weight(*at_rest)
     assert float(jnp.max(jnp.abs(reference))) > 1e-6  # not trivially zero everywhere
     # ...and the value weight takes all three regimes: prescribed, followed, and in between (Robin).
     assert {0.0, 1.0} <= set(
@@ -751,9 +752,9 @@ def test_the_boundary_linearization_does_not_depend_on_the_state() -> None:
             jnp.zeros((mesh.n_cells, mesh.dim)),
             jax.random.normal(key, (mesh.n_cells, mesh.dim)),
         ):
-            moved = assembler._boundary_gradient_weight(field, gradient, properties)
+            moved = closure.gradient_weight(field, gradient)
             assert np.array_equal(np.asarray(moved), np.asarray(reference))
-            moved = assembler._boundary_value_weight(field, gradient, properties)
+            moved = closure.value_weight(field, gradient)
             assert np.array_equal(np.asarray(moved), np.asarray(reference_value))
 
 
@@ -923,28 +924,17 @@ def test_the_flow_boundary_linearizations_do_not_depend_on_the_state() -> None:
         grad_velocity = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim, mesh.dim))
         grad_pressure = scale_of * jax.random.normal(key, (mesh.n_cells, mesh.dim))
         for component in range(mesh.dim):
+            closure = assembler._velocity_closure(velocity, component)
+            at = (velocity[:, component], grad_velocity[:, component])
             for moved, held in (
-                (
-                    assembler._velocity_boundary_gradient_weight(
-                        velocity, component, grad_velocity
-                    ),
-                    reference_velocity[component].gradient_weight,
-                ),
-                (
-                    assembler._velocity_boundary_value_weight(velocity, component, grad_velocity),
-                    reference_velocity[component].value_weight,
-                ),
+                (closure.gradient_weight(*at), reference_velocity[component].gradient_weight),
+                (closure.value_weight(*at), reference_velocity[component].value_weight),
             ):
                 assert np.array_equal(np.asarray(moved), np.asarray(held))
+        closure = assembler._pressure_closure()
         for moved, held in (
-            (
-                assembler._pressure_boundary_gradient_weight(pressure, grad_pressure),
-                reference_pressure.gradient_weight,
-            ),
-            (
-                assembler._pressure_boundary_value_weight(pressure, grad_pressure),
-                reference_pressure.value_weight,
-            ),
+            (closure.gradient_weight(pressure, grad_pressure), reference_pressure.gradient_weight),
+            (closure.value_weight(pressure, grad_pressure), reference_pressure.value_weight),
         ):
             assert np.array_equal(np.asarray(moved), np.asarray(held))
 

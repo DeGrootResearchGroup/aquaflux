@@ -26,7 +26,6 @@ from __future__ import annotations
 import abc
 from typing import TYPE_CHECKING, ClassVar
 
-import equinox as eqx
 import jax.numpy as jnp
 
 # Imported at run time rather than for type checking alone: `LimitedUpwind.limiter` is annotated with
@@ -35,8 +34,11 @@ from aquaflux.schemes import Limiter
 from aquaflux.vectors import dot
 
 from .face_flux import FaceFluxOperator
+from .term import DeclaredInputs
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from aquaflux.context import FieldContext
     from aquaflux.mesh import FaceCellConnectivity
 
@@ -69,13 +71,15 @@ def _upwind_value(
     return jnp.where(mask, cell_field[face_cells.owner], cell_field[face_cells.safe_neighbour])
 
 
-class AdvectionScheme(eqx.Module):
+class AdvectionScheme(DeclaredInputs):
     """Strategy interface: reconstruct the advected face value ``phi_f`` from cell state.
 
     A concrete scheme returns one value per face given the transported cell field, the shared
     :class:`~aquaflux.discretization.face_flux.FieldContext`, and the owner-outward face mass flux
     (whose sign is the upwind direction). It gathers whatever owner/neighbour fields it needs from
-    the context.
+    the context, and declares what it reads beyond the field through
+    :class:`~aquaflux.discretization.term.DeclaredInputs`; :class:`AdvectionFlux` reports both
+    declarations as its own.
     """
 
     @abc.abstractmethod
@@ -98,13 +102,25 @@ class AdvectionScheme(eqx.Module):
             upwind side.
         """
 
-    def uses_gradient(self) -> bool:
-        """Whether this scheme reads a non-zero ``context.gradient`` (default: ``False``).
+    def with_reference_scale(self, scale: Callable[[], float]) -> AdvectionScheme:
+        """This scheme for a field of reference magnitude ``scale()``; unchanged if it reads none.
 
-        See :meth:`~aquaflux.discretization.face_flux.FaceFluxOperator.uses_gradient` — the same
-        distinction applies here between a graceful degradation and a silent one.
+        An equation's assembler calls this with the magnitude of the field it solves for, so a
+        scheme whose numerics are scaled by it (a softened slope limiter) is set for that field.
+        ``scale`` is called only by a scheme that needs it.
+
+        Parameters
+        ----------
+        scale : callable
+            Returns the field's reference magnitude (see
+            :meth:`~aquaflux.schemes.Limiter.with_reference_scale`).
+
+        Returns
+        -------
+        AdvectionScheme
+            This scheme, by default.
         """
-        return False
+        return self
 
 
 class FirstOrderUpwind(AdvectionScheme):
@@ -153,6 +169,12 @@ class LimitedUpwind(AdvectionScheme):
         not a limiter is set (an unlimited ``LimitedUpwind`` is still linear upwind, not upwind).
         """
         return True
+
+    def with_reference_scale(self, scale: Callable[[], float]) -> LimitedUpwind:
+        """This scheme with its limiter set for a field of magnitude ``scale()`` (see the base)."""
+        if self.limiter is None:
+            return self
+        return LimitedUpwind(limiter=self.limiter.with_reference_scale(scale))
 
     def face_value(self, field, context, mass_flux):
         fc = context.mesh.face_cells
@@ -205,6 +227,10 @@ class AdvectionFlux(FaceFluxOperator):
     def face_flux(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
         phi_face = self.scheme.face_value(field, context, self.mass_flux)
         return self.mass_flux * phi_face
+
+    def requires(self) -> tuple[str, ...]:
+        """Delegates to the injected :attr:`scheme` -- the operator itself reads no property."""
+        return self.scheme.requires()
 
     def uses_gradient(self) -> bool:
         """Delegates to the injected :attr:`scheme` -- the operator itself reads no gradient."""

@@ -18,7 +18,7 @@ from aquaflux.solve import (
     SimpleSmoothedInverse,
     build_air_hierarchy,
 )
-from aquaflux.solve.field_split import AirBlockInverse
+from aquaflux.solve.field_split import AirReductionInverse
 
 
 def _keywords(function, *, drop: set[str]) -> set[str]:
@@ -44,7 +44,7 @@ _HIERARCHY = _keywords(HierarchyBlockInverse.__init__, drop={"report"})
         (JacobiSmoothed, _keywords(JacobiSmoothedInverse.__init__, drop=set()) | _HIERARCHY),
         (
             AirReduction,
-            _keywords(AirBlockInverse.__init__, drop=set())
+            _keywords(AirReductionInverse.__init__, drop=set())
             | _keywords(build_air_hierarchy, drop={"block_size"}),
         ),
     ],

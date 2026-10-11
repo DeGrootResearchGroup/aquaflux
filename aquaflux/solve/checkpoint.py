@@ -22,17 +22,26 @@ Two deliberate safety properties, both of which matter more than they look for a
 from __future__ import annotations
 
 import os
+import re
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 from .linear import restart_cycles
 from .strategy import StepReport
 
-__all__ = ["InnerIterateCheckpointer", "StateCheckpointer"]
+__all__ = [
+    "InnerIterateCheckpointer",
+    "StateCheckpointer",
+    "checkpoint_name",
+    "find_checkpoint",
+    "report_record",
+]
+
+_STEP_DIGITS = 5
 
 
 def _atomically(path: Path, write: Callable[[Path], None]) -> None:
@@ -54,8 +63,78 @@ def _atomically(path: Path, write: Callable[[Path], None]) -> None:
     os.replace(staging, path)
 
 
-def _save_array(path: Path, state: Any, report: StepReport) -> None:
-    """Default serializer: the state as one array, with the step's own numbers beside it.
+def checkpoint_name(prefix: str, step: int) -> str:
+    """The file name of the checkpoint a :class:`StateCheckpointer` writes for observed step ``step``.
+
+    Parameters
+    ----------
+    prefix : str
+        The checkpointer's filename stem.
+    step : int
+        How many steps the checkpointer had observed when it wrote the file (not the march's own
+        step index, which a retried step does not advance in the same way).
+
+    Returns
+    -------
+    str
+        ``<prefix>-<step>.npz``, with the step zero-padded so the names sort in step order.
+    """
+    return f"{prefix}-{step:0{_STEP_DIGITS}d}.npz"
+
+
+def find_checkpoint(
+    directory: str | os.PathLike[str],
+    step: int | Literal["latest"] = "latest",
+    *,
+    prefix: str = "state",
+) -> Path:
+    """The checkpoint a :class:`StateCheckpointer` left in ``directory``, by observed step or the latest.
+
+    A new process has no :attr:`StateCheckpointer.latest` to ask, so it looks the files up by their
+    names. Only complete files count: a checkpoint is written under a staging name and renamed, so a
+    process killed mid-write leaves a ``.partial`` file that this does not match.
+
+    Parameters
+    ----------
+    directory : path-like
+        Where the checkpoints were written.
+    step : int or "latest"
+        The observed step of the file wanted, or ``"latest"`` for the highest one present.
+    prefix : str
+        The filename stem the checkpointer was given. Default ``"state"``.
+
+    Returns
+    -------
+    pathlib.Path
+        The checkpoint file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``directory`` does not exist, holds no checkpoint with this prefix, or none of that step
+        (the message lists the steps present, since retention keeps only the most recent few).
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"{directory} is not a directory of checkpoints.")
+    pattern = re.compile(rf"{re.escape(prefix)}-(\d+)\.npz")
+    present = {
+        int(match.group(1)): path
+        for path in directory.iterdir()
+        if (match := pattern.fullmatch(path.name))
+    }
+    if not present:
+        raise FileNotFoundError(f"{directory} holds no checkpoint named {prefix}-<step>.npz.")
+    chosen = max(present) if step == "latest" else step
+    if chosen not in present:
+        raise FileNotFoundError(
+            f"{directory} holds no checkpoint of step {step}; it holds steps {sorted(present)}."
+        )
+    return present[chosen]
+
+
+def report_record(report: StepReport) -> dict[str, Any]:
+    """A step's own numbers, by name, as a checkpoint stores them beside the state.
 
     The metadata is what makes a checkpoint self-describing -- a bare array file cannot say which step
     it came from or how converged it was, so a directory of them is unusable without the log.
@@ -67,23 +146,39 @@ def _save_array(path: Path, state: Any, report: StepReport) -> None:
     solves outranks a step with one hard one on the first and not on the second -- so a study looking
     for a discriminating operating point wants the second, and reading the first instead selects
     benign states that make every preconditioner look alike.
+
+    Parameters
+    ----------
+    report : StepReport
+        The step the state ends.
+
+    Returns
+    -------
+    dict
+        ``step``, ``residual_norm``, ``residual_ratio``, ``shift``, ``alpha``, ``cycles``,
+        ``max_inner_cycles``, ``inner_iterations`` and ``damping_reference``, ready to hand to
+        ``numpy.savez``.
     """
+    return {
+        "step": report.step,
+        "residual_norm": report.residual_norm,
+        "residual_ratio": report.residual_ratio,
+        "shift": report.shift,
+        "alpha": report.alpha,
+        "cycles": report.cycles,
+        "max_inner_cycles": report.max_inner_cycles,
+        "inner_iterations": report.inner_iterations,
+        "damping_reference": report.damping_reference,
+    }
+
+
+def _save_array(path: Path, state: Any, report: StepReport) -> None:
+    """Default serializer: the state as one array, with the step's own numbers beside it."""
     # A file object, not the path: `np.savez` APPENDS ".npz" to any path that lacks it, which would
     # silently write somewhere other than where it was asked to -- and the staging name below does not
     # end in ".npz". The serializer contract is "write exactly to this path".
     with open(path, "wb") as handle:
-        np.savez(
-            handle,
-            state=np.asarray(state),
-            step=report.step,
-            residual_norm=report.residual_norm,
-            residual_ratio=report.residual_ratio,
-            shift=report.shift,
-            alpha=report.alpha,
-            cycles=report.cycles,
-            max_inner_cycles=report.max_inner_cycles,
-            inner_iterations=report.inner_iterations,
-        )
+        np.savez(handle, state=np.asarray(state), **report_record(report))
 
 
 class StateCheckpointer:
@@ -162,7 +257,7 @@ class StateCheckpointer:
         self._steps += 1
         if self._steps % self._every:
             return
-        path = self._directory / f"{self._prefix}-{self._steps:05d}.npz"
+        path = self._directory / checkpoint_name(self._prefix, self._steps)
         _atomically(path, lambda staging: self._save(staging, state, report))
         evicted = self._written[0] if len(self._written) == self._written.maxlen else None
         self._written.append(path)

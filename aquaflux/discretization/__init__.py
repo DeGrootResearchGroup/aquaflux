@@ -22,12 +22,14 @@ from .face_flux import FaceFluxOperator
 from .fixed_value import DifferenceRow, FixationRow, FixedValueCells, LogRatioRow
 from .residual import CellBalance, ResidualAssembler
 from .source import VolumeSource
+from .term import DeclaredInputs, declared_properties
 from .transient import TransientTerm
 
 __all__ = [
     "AdvectionFlux",
     "AdvectionScheme",
     "CellBalance",
+    "DeclaredInputs",
     "DifferenceRow",
     "DiffusionFlux",
     "FaceFluxOperator",
@@ -39,6 +41,7 @@ __all__ = [
     "ResidualAssembler",
     "TransientTerm",
     "VolumeSource",
+    "declared_properties",
     "flux_continuous_conductance",
     "flux_continuous_denominator",
 ]

@@ -68,6 +68,36 @@ restores consistency on irregular grids. It remains capped near first order ther
 fields, because a Green–Gauss sum reproduces the mean of the face value, not its value at the
 centroid, and that distinction survives the linear correction. This is the default scheme.
 
+### Boundary conditions that follow the gradient
+
+A zero-gradient, Neumann or Robin condition does not fix a boundary face's value outright: it
+builds it from the owner cell, and on a skewed boundary cell that includes the owner's gradient
+carried along the face, `phi_f = phi_f0 + w . grad(phi)_P`. The gradient being reconstructed
+therefore appears on both sides. Both schemes above move the `w` term to the left-hand side,
+which costs one small per-cell solve and adds no stencil reach:
+
+```text
+compact:     (I - B_P) grad(phi)_P = (1 / V_P) * sum_faces phi_f0 * S_f
+corrected:   (A_g - V B) G = B phi
+```
+
+with `B_P = (1 / V_P) * sum over P's boundary faces of S_f w_f^T`
+({func}`~aquaflux.schemes.boundary_gradient_block`). The gradient then satisfies the boundary
+conditions it was reconstructed against, rather than being summed against face values that
+contradict the field. On an 8x8 grid perturbed by 0.3 of a cell, a linear field satisfying
+zero-gradient, Neumann or Robin conditions on two of its walls comes back wrong by 15--17 % of
+its gradient without this and to roundoff with it. On an orthogonal mesh `w` is zero and nothing
+changes.
+
+The assemblers supply `w`, read off the boundary conditions by differentiating them, so there is
+nothing to configure. It is exact because every boundary condition here is affine in its owner's
+gradient. The corrected scheme's default preconditioner inverts `V (I - B)` in each cell, not
+`V` alone: at a corner cell owning two such faces on a thin, skewed mesh, `1/V` still leaves
+`6e-4` of the gradient after eight sweeps, where the block is exact after one.
+
+The Hessian-corrected scheme below does not do this yet: on a skewed mesh with such conditions,
+its boundary cells are reconstructed against `phi_f0` alone.
+
 ### Hessian-corrected (Betchen)
 
 {class}`~aquaflux.schemes.HessianCorrectedGradient` implements the coupled gradient-and-Hessian

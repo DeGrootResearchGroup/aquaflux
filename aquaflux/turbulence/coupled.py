@@ -69,6 +69,7 @@ from aquaflux.solve import (
     NO_RETRIES,
     BlockScaledNorm,
     CellFields,
+    CompleteLuPreconditioner,
     ContinuationSource,
     Convergence,
     DualTimeLoop,
@@ -82,15 +83,15 @@ from aquaflux.solve import (
     MaterializedJacobian,
     MaterializedProblem,
     MaterializedSession,
-    MonolithicAmgPreconditioner,
     MonolithicFactorShiftPolicy,
-    MonolithicLuPreconditioner,
+    MonolithicVCyclePreconditioner,
     NewtonStrategy,
     PreconditionerSession,
     PseudoTransientStep,
     RefreshPolicy,
     RefreshTiming,
     ResidualHomotopy,
+    Resumption,
     RetryPolicy,
     RootSolver,
     RowScaled,
@@ -813,9 +814,10 @@ class CoupledShiftPolicy(eqx.Module):
 
     Composes the three subsystems' pseudo-transient choices block-diagonally: the momentum block's
     ``a_P`` velocity shift + block-SIMPLE preconditioner (:class:`~aquaflux.flow.MomentumShiftPolicy`),
-    and the k and omega transport-operator shift diagonals + convection-diffusion algebraic-multigrid
-    (AMG) preconditioners
-    (:class:`~aquaflux.turbulence.continuation.ScalarShiftPolicy`). The full-state shift diagonal is
+    and the k and omega transport-operator shift diagonals
+    (:meth:`~aquaflux.turbulence.SSTTurbulence.k_shift_diagonal`,
+    :meth:`~aquaflux.turbulence.SSTTurbulence.omega_shift_diagonal`) + convection-diffusion
+    algebraic-multigrid (AMG) preconditioners. The full-state shift diagonal is
     ``[a_P on u, 0 on p, d_k on k, d_omega on omega]`` and the preconditioner is the block-diagonal
     matvec gluing the flow preconditioner to the two scalar AMGs.
 
@@ -1528,15 +1530,15 @@ def _coupled_shift_policy(
     # diagonal and supplies its own inverse, so the block built here would never be applied.
     #
     # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
-    # mass-matrix scaling this used to hardcode. That scaling was chosen believing it necessary for a
-    # convection-dominated coupled solve; it is not, at the scale this block-diagonal preconditioner is
-    # actually used at -- swapping it for the default reaches the identical converged fixed point on
-    # every fixture this path is exercised by (residual and fields agree to machine precision). Where a
-    # Schur choice genuinely matters (a real, large, separated case), this whole block-diagonal
-    # preconditioner is dominated by the field-split / monolithic-AMG preconditioners the flagship
-    # validation cases use instead (`MaterializedJacobian`), so tuning the Schur here buys nothing
-    # a real case would ever see. It remains available (`BlockDiagonal(schur_scaling="msimple")`, or
-    # directly through `BlockPreconditioner`) for the one regime it is not
+    # mass-matrix scaling this used to hardcode, which is not needed at the scale this preconditioner is
+    # used at: the default reaches the identical fixed point on every fixture that exercises this path.
+    # Where a Schur choice matters (a large, separated case) this block-diagonal preconditioner is
+    # dominated by the `MaterializedJacobian` ones the flagship validation cases use. Nor is the mass-
+    # matrix family a stronger option set aside: as the field-split leading inverse on a flagship-scale
+    # coupled Jacobian, even its best pairing (MSIMPLER: `schur_scaling="msimple", composition=
+    # "simpler"`) took more outer Krylov cycles than the shipped SIMPLE-smoothed hierarchical inverse,
+    # at a higher cost per cycle (two Schur solves per application against one). It remains available
+    # (`BlockDiagonal(schur_scaling="msimple")`, or `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
     block = (
@@ -1602,12 +1604,10 @@ def _coupled_shift_policy(
     # factor below, which a refresh carries frozen, so the temporal ratio transport(state)/transport(ref)
     # has the range cancel and the shift does not inherit omega's growth (the freeze the old carried
     # product suffered -- see the docstring).
-    k_transport = coupled.turbulence.k_shift_policy(
-        mdot, closure, k_ref, shift_basis=basis
-    ).shift_diagonal
-    omega_transport = coupled.turbulence.omega_shift_policy(
+    k_transport = coupled.turbulence.k_shift_diagonal(mdot, closure, k_ref, shift_basis=basis)
+    omega_transport = coupled.turbulence.omega_shift_diagonal(
         mdot, closure, omega_ref, shift_basis=basis
-    ).shift_diagonal
+    )
 
     # The coordinate factor d(phi)/d(w) is the transform between the physical field and the solved
     # variable, not physics: a refresh carries it frozen (the preconditioner's copy, `k_scale`/
@@ -1991,7 +1991,7 @@ def _monolithic_factor_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
     base: CoupledShiftPolicy,
-    preconditioner: MonolithicLuPreconditioner | MonolithicAmgPreconditioner,
+    preconditioner: CompleteLuPreconditioner | MonolithicVCyclePreconditioner,
     *,
     globalization: Globalization,
     dual_time: DualTimeLoop | None,
@@ -2615,6 +2615,7 @@ def solve_coupled(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     **strategy_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -2781,9 +2782,8 @@ def solve_coupled(
         :func:`~aquaflux.solve.newton_march`: called before a step is redone, with why. A log without it
         shows a step's work twice and never says what triggered the redo.
     homotopy : ResidualHomotopy, optional
-        Walk a sequence of related problems within this one march, ending at the target (see
-        :func:`~aquaflux.solve.newton_march`). The solve converges only once the homotopy has arrived:
-        a converged intermediate station is not an answer.
+        Walk related problems within this one march, ending at the target (see
+        :func:`~aquaflux.solve.newton_march`); it converges only once the homotopy has arrived.
     station_step : callable, optional
         ``(step, station, arrived) -> step``, forwarded to
         :func:`~aquaflux.solve.newton_march`: reshape the Newton step for the continuation station it
@@ -2793,6 +2793,8 @@ def solve_coupled(
         reached, and no signal a shift policy can read for itself distinguishes those. It reshapes the
         path, not the root, and ``None`` (the default) is byte-identical.
         ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
+    resume : Resumption or None
+        The interrupted march this one resumes; see :func:`~aquaflux.solve.staged_march`.
     on_residuals : callable, optional
         Forwarded to :func:`~aquaflux.solve.newton_march`; named by :func:`coupled_equation_names`
         under the default row-scaled measure, and not called under the block-scaled one.
@@ -2879,6 +2881,7 @@ def solve_coupled(
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,
+        resume=resume,
         on_residuals=on_residuals,
         caller="solve_coupled",
     )
@@ -3010,14 +3013,11 @@ def mass_flow_coupled_continuation(
             f"must be a BlockDiagonal, not {type(preconditioner).__name__}: a materialized Jacobian "
             "has no constraint row for the bordered solve to eliminate."
         )
-    # Checked before any preconditioner is fitted: a misconfigured floor is a caller mistake, not a
-    # reason to pay for a build that the raise below would then discard.
+    # Checked before a preconditioner is fitted: a misconfigured floor should not cost a build.
     step_limit, step_projection = _k_positivity_guards(
         coupled, positivity_floor, positivity_projection
     )
-    # No `reuse` here: the mass-flow-constrained path has no staged-refresh driver (there is no
-    # a refresh on `solve_coupled_mass_flow`), so a policy is always built from scratch. Thread
-    # `reuse` through if that driver is ever added -- the bordered policy wraps this one unchanged.
+    # No `reuse`: this path has no staged-refresh driver, so the policy is always built from scratch.
     policy = _coupled_shift_policy(
         coupled,
         reference_state,
@@ -3093,6 +3093,7 @@ def solve_coupled_mass_flow(
     max_steps: int = 60,
     convergence: Convergence | None = None,
     adjoint_solver: lx.AbstractLinearSolver | None = None,
+    resume: Resumption | None = None,
     **strategy_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Solve the coupled RANS system holding the bulk velocity at ``target``, in one monolithic Newton.
@@ -3108,8 +3109,7 @@ def solve_coupled_mass_flow(
     construction**, and (the point of putting the constraint *in* the coupled residual) the coupled
     implicit-function-theorem adjoint carries it: ``jax.grad`` through the converged constrained solve is
     the exact sensitivity of the whole turbulent flow at fixed bulk velocity. The forward solve is
-    monolithic here, but the same bordered residual is what a *segregated* forward loop would need its
-    coupled adjoint to transpose (segregated forward, coupled adjoint).
+    monolithic here; a segregated forward loop would need this bordered residual for its adjoint.
 
     What is held, along which axis, and the ``beta`` the march starts from are ``coupled.momentum``'s
     own :class:`~aquaflux.flow.MassFlow` drive -- the same value the residual writes each iterate into,
@@ -3128,6 +3128,8 @@ def solve_coupled_mass_flow(
     preconditioner : BlockDiagonal or None
         The block-diagonal preconditioner the constrained step is built with; ``None`` takes
         ``BlockDiagonal()``. See :func:`mass_flow_coupled_continuation` for why no other family applies.
+    resume : Resumption or None
+        The interrupted march this one resumes; see :meth:`~aquaflux.solve.RootSolver.solve`.
 
     Returns
     -------
@@ -3182,15 +3184,12 @@ def solve_coupled_mass_flow(
         measures=_MassFlowMeasures(stop_array_gradients(coupled)),
         max_steps=max_steps,
         strategy=strategy,
-        # Exposed for the same reason `solve_coupled` exposes it, and this path needs it more: the
-        # transpose solve here runs at zero shift against a block-diagonal preconditioner, which is
-        # where that preconditioner is weakest, and the default solver's stagnation detector sits close
-        # enough to the edge that a perturbation of the warm state in the last few bits decides whether
-        # it fires. `None` keeps `RootSolver`'s own default.
+        # Exposed as `solve_coupled` exposes it, and this path needs it more: the zero-shift transpose
+        # solve is where the block-diagonal preconditioner is weakest. `None` keeps the default.
         **({} if adjoint_solver is None else {"adjoint_solver": adjoint_solver}),
     )
 
-    solved = solver.solve(_MassFlowConstrainedResidual(drive), augmented0, coupled)
+    solved = solver.solve(_MassFlowConstrainedResidual(drive), augmented0, coupled, resume=resume)
     fields, beta = drive.split(coupled.layout, solved)
     flow_s, k_s, omega_s = coupled.physical_fields(fields)
     return flow_s, k_s, omega_s, beta

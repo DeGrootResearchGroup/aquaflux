@@ -20,9 +20,9 @@ import dataclasses
 from collections.abc import Callable, Mapping
 from typing import ClassVar, Literal
 
-from .amg_preconditioner import MonolithicAmgPreconditioner
+from .amg_preconditioner import MonolithicVCyclePreconditioner
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
-from .lu_preconditioner import MonolithicLuPreconditioner
+from .lu_preconditioner import CompleteLuPreconditioner
 from .settings_mapping import SettingsMapping
 from .settings_value import SettingsValue
 
@@ -88,13 +88,13 @@ class CompleteLu(SettingsValue):
         The factorization backend. ``"auto"`` uses UMFPACK (through ``petsc4py``) when it is
         available and falls back to SciPy's SuperLU otherwise. Unset, ``"auto"``.
 
-        See :meth:`~aquaflux.solve.MonolithicLuPreconditioner.build`.
+        See :meth:`~aquaflux.solve.CompleteLuPreconditioner.build`.
     """
 
     backend: Literal["auto", "umfpack", "scipy"] | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
-    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (MonolithicLuPreconditioner.build,)
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CompleteLuPreconditioner.build,)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -102,7 +102,7 @@ class MonolithicVCycle(SettingsValue):
     """One algebraic-multigrid V-cycle over every field of the materialized Jacobian.
 
     Each field is the keyword of the same name on
-    :meth:`~aquaflux.solve.MonolithicAmgPreconditioner.build`.
+    :meth:`~aquaflux.solve.MonolithicVCyclePreconditioner.build`.
 
     Attributes
     ----------
@@ -115,7 +115,7 @@ class MonolithicVCycle(SettingsValue):
     coarse_eq_limit: int | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
-    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (MonolithicAmgPreconditioner.build,)
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (MonolithicVCyclePreconditioner.build,)
 
 
 @dataclasses.dataclass(frozen=True)

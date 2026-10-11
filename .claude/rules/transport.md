@@ -26,6 +26,16 @@ contaminant does in a reactor — solved on the flow the coupled block produces.
   `ResidualAssembler` — it adds no numerics of its own, only the composition and the two
   conventions below.
 
+- **`prescribed_range(boundary, geometry)` sizes a scaled advection (2026-10-09, #144).**
+  `ScalarTransport.build` sets `advection_scheme.with_reference_scale(...)` from the range
+  `max − min` of every value a `Dirichlet` / `DirichletField` patch prescribes (a `DirichletField`
+  read at the face centroids — the `bfs3d_species` injector gives `[0, INJECTED_VALUE]`), falling back to
+  the largest prescribed magnitude when there is a single level (one inlet concentration). Nothing
+  prescribed → a scaled scheme is refused, others build. ⚠️ **A temperature prescribed at one level
+  only** gets its absolute level (e.g. 300 K) as the scale, which is wrong for the variation; such a
+  case should state the limiter's scale. Range, not level, is why 290/300 K gives 10 K
+  (`test_a_scalar_s_scale_is_the_range_its_boundaries_prescribe`).
+
 ## Binding decisions
 
 - **The scalar advects on the flow's OWN Rhie–Chow flux, never on a rebuilt one.** `residual(flux)`
