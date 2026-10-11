@@ -385,9 +385,11 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   `results/history.csv`** (project owner, 2026-09-25; `history` added 2026-10-05 for the browser viewer's
   convergence plot). `history` is `solve.StepHistory` — one CSV row per step, every `StepReport` field
   at full precision, flushed per row, plus refits, retry reasons and the per-equation residuals (see
-  `solve-march.md`); the runner's `_StepCount` forwards each march hook to every recorder that has it
-  (`on_checkpoint` to the history and the checkpointer; `on_retry`, `on_refresh` and `on_residuals` to
-  the history). Its header is written with the first row, so under `Segregated` (no steps) it stays
+  `solve-march.md`); the runner's `_StepCount` forwards `on_checkpoint` to every recorder and the
+  other hooks to each that is a `solve.MarchRecorder` (`isinstance`, #669; the history is one, the
+  checkpointer is not). `SolverSpec.observers_for(logger, recorder)` types `recorder` as a
+  `MarchRecorder` and reads its hooks as attributes — no `getattr(recorder, name)`; a recorder missing
+  one now fails loudly rather than being skipped. Its header is written with the first row, so under `Segregated` (no steps) it stays
   empty. `log` and `history` may not name
   the same file. `Outputs` is a `default_factory` field, so a file stating none round-trips with no section.
   Like `fluid`/`numerics`, the section may omit its `kind`; nested values (`Checkpoints`, writers) may not.

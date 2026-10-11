@@ -79,8 +79,12 @@ direction the import already runs).** Each `None` field of `value` takes `base`'
 so do the settings objects that are `equinox` modules (`Globalization.filled_from` and `with_defaults`,
 `turbulence.CoupledShiftSettings.filled_from`); before, `CoupledShiftSettings`, `LinearSolveSettings` and `DualTimeLoop` each
 carried an identical body and `Globalization.with_defaults` a fourth, and because the Reynolds merge
-(`merged_march_options`) recognizes a mergeable value by its `filled_from`, `Globalization` alone was
-still replaced whole per point. ⚠️ **`None` cannot reset a shared field to its default** — it means "take
+(`merged_march_options`) merges a value only when it is a `MergeableSettings`, `Globalization` alone was
+still replaced whole per point. **`MergeableSettings` (`settings_value.py`, exported, `runtime_checkable`,
+#669) is that capability declared** — `filled_from(base)` — and `merged_march_options` asks
+`isinstance(value, MergeableSettings)` (same type on both sides) rather than `hasattr(value,
+"filled_from")`; every `SettingsValue` and the equinox settings objects (`Globalization`,
+`ShiftSettings`/`CoupledShiftSettings`) are members. ⚠️ **`None` cannot reset a shared field to its default** — it means "take
 the base's"; write a numeric default out, and keep a setting whose default is `None` itself
 (`CoupledShiftSettings.velocity_parts`) out of the shared options if a point needs it back.
 
