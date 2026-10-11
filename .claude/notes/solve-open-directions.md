@@ -332,9 +332,9 @@ and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 
 solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
 **Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
 1-8 cycles per released step by the probe (most of the released steps' extra cost); (b) bfs3d
-(`BFS3D_RELEASE_FLOOR`, its mesh is not in this container); (c) whether pitzDaily's `case.yaml` and the
-library default should release, which is the project owner's call, after (b) and after the three slow
-tests #645 names (a loose terminal step is what they measure).
+(`BFS3D_RELEASE_FLOOR`, its mesh is not in this container, #678); (c) whether the library default should
+release, after (b) and after the three slow tests #645 names (a loose terminal step is what they
+measure). pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 
 ## 12. End the viscosity ramp on the settle signal, not on a station count
 
@@ -350,8 +350,8 @@ one step after the settle. A rule keyed on the settle removes the knob and lands
 **What it is not.** Not an `alpha`-driven station controller (closed by the same sweep: `alpha` responds
 to the shift, not to the viscosity), and not a viscosity keyed to `beta` (refuted-directions ledger).
 
-**Pre-registered measurement.** pitzDaily at `grow` 3 with the rule against the 12-station arm (111 /
-16): a pass is the same cycles within a few at the same `x_r/h`, with the ramp ending by itself. Then
+**Pre-registered measurement.** pitzDaily at `grow` 3 with the rule against the 12-station arm its
+`case.yaml` ships (111 / 16): a pass is the same cycles within a few at the same `x_r/h`, with the ramp ending by itself. Then
 bfs3d, where neither `grow` 3 nor the ramp's end has been measured.
 
 ---

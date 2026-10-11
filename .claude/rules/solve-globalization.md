@@ -367,8 +367,11 @@ What to take from it, none of which is specific to that mechanism:
       each released step's solves cost 2-3x a floor step's: the inverse is still re-fitted at
       `refit_beta_floor` (0.05), and re-fitting at the released shift is the open half (worth 1-8 cycles per
       released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
-    - **Not yet a default anywhere, by decision pending:** bfs3d is unmeasured (`BFS3D_RELEASE_FLOOR`),
-      and a loose terminal step is exactly what the three slow tests #645 names measure.
+    - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
+      stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
+      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's**, which is
+      unmeasured (`BFS3D_RELEASE_FLOOR`, #678); a loose terminal step is exactly what the three slow
+      tests #645 names measure, so a library default waits on both.
     - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
       rule turns a test red) and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the

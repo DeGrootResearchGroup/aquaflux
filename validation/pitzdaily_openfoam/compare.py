@@ -376,7 +376,8 @@ BETA_MIN = SOLVER.step_control.beta_min
 #: ⚠️ The step control still adapts ONE `beta` against a global line search, so it cannot see which
 #: block is asking for the caution -- which is why the ratio is a strategy the caller picks rather than
 #: something the control adapts. A per-block adaptive shift would need a per-block signal first.
-#: ⚠️ SWEPT on momentum-only scaling at 16 x 1 -- the arm now shipped -- one run per arm, all reaching
+#: ⚠️ SWEPT on momentum-only scaling at 16 x 1 -- the arm shipped until 2026-10-11, at the control's
+#: `grow` of 1.5 and no release; the file now ships 12 x 1 at `grow` 3 -- one run per arm, all reaching
 #: `x_r/h` 8.0686. `1` is a control and reproduced the recorded 27 steps / 227 cycles exactly.
 #:
 #:     gamma    1      2      3      5     10
@@ -529,7 +530,15 @@ class _KrylovWork:
 KRYLOV_WORK = _KrylovWork()
 #: How many geometric viscosity stations the ramp walks (`PITZ_RAMP_STATIONS`), one outer step each.
 #:
-#: ⚠️ 16, and it was swept JOINTLY with `TURB_DAMPING` because the two interact -- a coarser ramp is a
+#: ⚠️ 12 SINCE 2026-10-11, AND ONLY TOGETHER WITH THE CONTROL'S `grow` 3 AND ITS RELEASE (`GROW`,
+#: `RELEASE_FLOOR` below). The ramp's best length is how long the shift takes to walk down to `beta_min`
+#: plus the few steps the state needs there to settle, not a property of the viscosity step: at `grow` 3
+#: (seven steps to the floor) 12 stations arrive one step after the settle and cost 111 cycles in 16
+#: steps, against 161 in 31 for the 16 stations, `grow` 1.5 and no release shipped before. The table
+#: below is that older control's, where the shift took twelve steps to floor and 16 stations won;
+#: change `GROW` and this count stops being the optimum.
+#:
+#: At `grow` 1.5 it was swept JOINTLY with `TURB_DAMPING` because the two interact -- a coarser ramp is a
 #: larger disturbance per station for the closure to absorb. Momentum-only scaling throughout, one run
 #: per arm, all reaching `x_r/h` 8.0686; `march` is the march's own monotonic clock:
 #:
@@ -546,8 +555,9 @@ KRYLOV_WORK = _KrylovWork()
 #: three-dimensional case, where it is 24-34% of the march and buying fewer of them pays for a worse
 #: handover. Here the whole march spends 44-47 s on rebuilds -- 13% -- so there is nothing to buy, and
 #: the worse handover simply costs: 12 stations cuts the ramp 112 -> 62 and explodes the target
-#: 84 -> 192. The sibling ships 12 stations at gamma 5; this case ships 16 at gamma 3. **Neither
-#: schedule transfers.**
+#: 84 -> 192. The sibling ships 12 stations at gamma 5; this case shipped 16 at gamma 3. **Neither
+#: schedule transfers.** (That 12-station arm was at `grow` 1.5, where the shift had not yet floored when
+#: the ramp arrived; the 12 shipped now are at `grow` 3, where it had.)
 #:
 #: The gain decomposes cleanly against this case's own history, each step measured:
 #:     both-blocks, 24 stations, gamma 1   297 cycles  (the default before 2026-09-11)
@@ -868,17 +878,18 @@ def dual_time_control(beta_start: float) -> CflResidualDualTimeControl:
 
 CONTROL = SOLVER.step_control
 #: Release the shift below `beta_min` once the target station has settled (`PITZ_RELEASE_FLOOR`, the
-#: shift it drops to; unset keeps the file's, which never releases). After the first full-length step at
+#: shift it drops to; unset keeps the file's 1e-4, shipped since 2026-10-11). After the first full-length step at
 #: the floor on the target, the next step runs at this shift and the station's linear tail becomes
 #: inexact Newton steps. A one-step probe from this march's own states (`endgame_shift_probe.py`): from
 #: the state after that first full step, one zero-shift step reached the stopping tolerance; from the
 #: state the ramp arrived at, it did not descend.
 RELEASE_FLOOR = CONTROL.release_floor
 #: How fast the control walks the shift down on a comfortable step (`PITZ_GROW`, the factor beta is
-#: divided by; unset keeps the file's). Every recorded march ran the class default of 1.5, at which the
-#: descent from `beta_start` to `beta_min` takes twelve steps -- the length the station sweep's optimum
-#: coincides with, so this is the axis that separates "the ramp needs this many stations" from "the
-#: ramp needs this many steps for beta to come down".
+#: divided by; unset keeps the file's 3). Every march recorded before 2026-10-11 ran the class default of
+#: 1.5, at which the descent from `beta_start` to `beta_min` takes twelve steps -- the length that
+#: control's station optimum coincided with. At 3 it takes seven, and the file's 12 stations are paired
+#: with that: this is the axis that separates "the ramp needs this many stations" from "the ramp needs
+#: this many steps for beta to come down", so change the two together.
 GROW = CONTROL.grow
 
 #: ⚠️ REFRESH THE FROZEN PRECONDITIONER, ON SOLVE COST, EXACTLY AS THE THREE-DIMENSIONAL CASE DOES.

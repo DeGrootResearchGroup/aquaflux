@@ -2154,6 +2154,8 @@ tuning follow-up noted above.
       (identical histories at 1.33x and 2x per step); what is conserved is 6-9 steps AT the floor before
       the state settles, and the cheapest ramp ends one step after that. Table and the design it closes
       in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
+      **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11**; bfs3d keeps its own
+      schedule (#678).
   - **⚠️ THE PRECONDITIONER IS REFRESHED PER STATION CHANGE, AND THAT IS CORRECT — but "a full rebuild is
     the most expensive operation in the march" is REFUTED on this case.** Measured, a full
     re-materialize is **1.2-1.6 s** against a **~9 s** outer step. A control arm isolates it: `4 x 3` with
@@ -2488,7 +2490,10 @@ tuning follow-up noted above.
                 calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
                 calibrated at one station count does not transfer to another.
               - **⚠️ THE TWO CASES WANT OPPOSITE SCHEDULES, AND THE DISCRIMINATOR IS THE REBUILD COST.**
-                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily **16 at `gamma = 3`**. Swept on
+                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily shipped **16 at `gamma = 3`** at the
+                control's `grow` 1.5 (since 2026-10-11 it ships 12 at `gamma = 3` with `grow` 3 and the
+                release, which is a different optimum for a different reason: the "station count is the
+                shift's descent" entry under the ramp). Swept on
                 pitzDaily under momentum-only scaling, one run per arm, all reaching `x_r/h` 8.0686:
 
                 | stations | gamma | steps | cycles | ramp | target | pc | march |
@@ -2584,7 +2589,7 @@ tuning follow-up noted above.
     rung structure was originally calibrated — and it does not: the ramp is 31 % cheaper there
     (240 against 349 cycles at both-blocks scaling, 190 at momentum-only, 148 with that case's damping
     optimum). **Still one run per arm on each case.** `bfs3d` additionally defaults to
-    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily still defaults to `both`. The
+    `BFS3D_RAMP_SCALE=flow`, i.e. momentum-only stations; pitzDaily does too (`scale: flow` in its `case.yaml`). The
     defaults are configured with
     `PITZ_RAMP_STATIONS` / `PITZ_RAMP_STEPS`. It anchors at `RATIO ** N_POINTS`, i.e. **the same span the
     ladder walks**, so the two arms differ in how the span is traversed and not in how far — and it

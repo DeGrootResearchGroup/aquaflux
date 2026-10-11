@@ -49,8 +49,9 @@ solver:
   kind: CoupledMarch
   convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-5}
   dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01}
-  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005}
-  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 16, steps_per_station: 1, scale: flow}
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005, grow: 3.0,
+    release_floor: 1.0e-4}
+  continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 12, steps_per_station: 1, scale: flow}
 ```
 
 ```python

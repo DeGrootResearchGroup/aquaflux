@@ -691,13 +691,16 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 0.0,
         "positivity_projection": True,
+        # The faster shift descent and its release once the target has settled, the case's own since
+        # the script stopped building its march.
         "step_control": CflResidualDualTimeControl(
             beta_start=0.5,
             beta_min=0.005,
-            grow=1.5,
+            grow=3.0,
             backoff=2.0,
             grow_above=0.5,
             backoff_below=0.25,
+            release_floor=1e-4,
         ),
         "retry": RetryPolicy(
             solver=GmresSolve(1e-4, restart=40),
@@ -709,7 +712,7 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
     }
     ramp = {
         "anchor": 10.0**2,
-        "stations": 16,
+        "stations": 12,
         "steps_per_station": 1,
         "companion": scale_momentum_only,
     }

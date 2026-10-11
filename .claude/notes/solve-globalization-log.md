@@ -1342,5 +1342,8 @@ arrives about where the state settles at the floor.
   step cost nothing in `alpha`); the end is the sensitive part. Expressing it needs the homotopy to see
   the previous report (`ResidualHomotopy.enter(step)` is keyed on the step index alone today).
 
-**Not a default:** pitzDaily's `case.yaml` still runs `grow` 1.5 x 16 stations; moving it is the project
-owner's call, after bfs3d (where the ramp optimum was measured once, at `grow` 1.5).
+**pitzDaily's default since 2026-10-11 (project owner's decision, pitzDaily only):** its `case.yaml`
+ships `grow` 3, 12 stations and `release_floor` 1e-4. The class defaults (`grow` 1.5, no release) and
+bfs3d's case are unchanged; bfs3d is #678. ⚠️ **"The shipped `case.yaml`" in any pitzDaily entry dated
+before 2026-10-11 means `grow` 1.5 x 16 stations with no release** (31 steps / 161 cycles at its last
+measurement).

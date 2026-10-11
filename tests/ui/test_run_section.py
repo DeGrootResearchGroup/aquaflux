@@ -100,7 +100,7 @@ def test_the_summary_says_what_the_case_file_sets_the_run_to_do(tmp_path):
     assert summary == {
         "Physics": "RANS",
         "Solver": "CoupledMarch",
-        "Continuation": "ViscosityRamp, 16 stations",
+        "Continuation": "ViscosityRamp, 12 stations",
         "Inner loop": "Dual time, ≤ 5 iterations",
         "Max steps": "150 per segment",
         "Stops below": "1.0e-05",
