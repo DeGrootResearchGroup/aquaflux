@@ -14,11 +14,15 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import SimpleSmoothed, SimpleSmoothedInverse, block_approximate_inverse
+from aquaflux.solve import (
+    SimpleSmoothed,
+    SimpleSmoothedInverse,
+)
 from aquaflux.solve.saddle_multigrid import (
     _simple_correction,
     _simple_pieces,
     _simple_smoothed_cycle,
+    block_approximate_inverse,
 )
 
 

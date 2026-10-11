@@ -60,13 +60,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.turbulence import sst_initial_fields
-from aquaflux.solve import (  # noqa: E402
-    jacobian_matvec,
-    DualTimeLoop,
-    JacobiSmoothed,
-    materialize_block_jacobian,
-    shifted_jacobian,
-)
+from aquaflux.solve import (DualTimeLoop, JacobiSmoothed, materialize_block_jacobian,)
+from aquaflux.solve.materialized_session import (jacobian_matvec,)
+from aquaflux.solve.sparse_jacobian import (shifted_jacobian,)
 from aquaflux.turbulence import coupled_step
 from aquaflux.solve import CompleteLu, FieldSplit, JacobianProbeSpec, MaterializedJacobian
 

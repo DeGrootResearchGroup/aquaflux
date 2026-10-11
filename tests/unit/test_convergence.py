@@ -17,7 +17,6 @@ import jax.numpy as jnp
 import lineax as lx
 import pytest
 from aquaflux.solve import (
-    PLAIN_RESIDUAL,
     BlockScaled,
     BlockScaledNorm,
     ConstantRelaxation,
@@ -30,9 +29,14 @@ from aquaflux.solve import (
     RootSolver,
     RowScaled,
     ShiftTerm,
-    in_progress_measure,
     relative_residual_gmres,
     solve_linear,
+)
+from aquaflux.solve.convergence import (
+    PLAIN_RESIDUAL,
+)
+from aquaflux.solve.linear import (
+    in_progress_measure,
 )
 
 

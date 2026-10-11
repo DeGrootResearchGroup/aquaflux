@@ -5,11 +5,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.solve import (
-    in_progress_measure,
     relative_residual_gmres,
     residual_stop_gmres,
     restart_cycles,
     solve_linear,
+)
+from aquaflux.solve.linear import (
+    in_progress_measure,
 )
 
 N = 120

@@ -708,7 +708,7 @@ def newton_march(
         with each equation's term of the measure the step was judged in -- the numbers whose Euclidean
         combination is the report's ``residual_norm`` -- so a record of the march can say which
         equation is holding it up. Called only when that measure names its blocks
-        (:func:`~aquaflux.solve.named_blocks`); a plain Euclidean measure has nothing to split.
+        (:func:`~aquaflux.solve.norm.named_blocks`); a plain Euclidean measure has nothing to split.
         Costs one residual evaluation per step, at the station the step drove; ``None`` (default)
         costs nothing.
 

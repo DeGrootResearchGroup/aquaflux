@@ -581,7 +581,7 @@ What to take from it, none of which is specific to that mechanism:
     refreshed march, the initial-state measure carried into each refresh). Both flagship cases ran this
     way. The fix: `relative_residual_gmres(norm=None)` means "the measure of the step that runs me", and
     all three steppers (`PseudoTransientStep`, `DualTimeStep`, `DampedNewtonStep`) call
-    `solve.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
+    `solve.linear.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
     `lineax` solver is left alone, and a `norm=None` solver run outside a step raises. Pinned by
     `test_convergence.py::test_each_step_stops_a_measure_following_linear_solve_in_its_own_measure`.
   - **`RowScaledNorm` was march-only because `RootSolver` passed its measure through a

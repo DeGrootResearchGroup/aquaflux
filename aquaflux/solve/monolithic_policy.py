@@ -31,7 +31,7 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     (:class:`~aquaflux.solve.CompleteLuPreconditioner`, exact, one cycle), a field split of multigrid
     V-cycles (:class:`~aquaflux.solve.FieldSplitPreconditioner`, bounded memory on a large
     three-dimensional mesh), or one block inverse over the whole state
-    (:class:`~aquaflux.solve.MaterializedBlockPreconditioner`) -- this policy is agnostic to which, needing
+    (:class:`~aquaflux.solve.block_preconditioner.MaterializedBlockPreconditioner`) -- this policy is agnostic to which, needing
     only the shared callback-matvec interface.
 
     The inverse is frozen at a reference state and shift (built off the jit path by a

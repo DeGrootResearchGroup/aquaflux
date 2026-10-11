@@ -66,7 +66,7 @@ Pinned by `tests/unit/test_march_history.py`.
   station residual the step drove — the numbers whose Euclidean combination IS the report's
   `residual_norm` (pinned to `rel=1e-12` on a real flow march,
   `test_each_steps_residual_is_reported_by_equation_and_the_terms_make_up_its_norm`). It comes from
-  `solve.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
+  `solve.norm.named_blocks(measure, residual_fn, state)`, one compiled call per block structure
   (`_block_terms`, `filter_jit`), and is skipped for a measure that is not a `NamedBlockMeasure` (`norm.py`, exported, `runtime_checkable`:
 `names` + `per_block`, #669 — `named_blocks` asks with `isinstance`, not `getattr(measure, "names", ())`)
 or whose blocks are unnamed: `RowScaledNorm` /
@@ -1030,7 +1030,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
     outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
     compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
-    `_beta_tracking_refresh` skeleton (now `solve.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
+    `_beta_tracking_refresh` skeleton (now `solve.materialized_session.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
     `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
     `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
     because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the

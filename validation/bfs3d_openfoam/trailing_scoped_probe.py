@@ -56,12 +56,8 @@ sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import (  # noqa: E402
-    ColumnProbePlan,
-    block_stencil_colouring,
-    block_stencil_gather_map,
-    materialize_block_jacobian,
-)
+from aquaflux.solve import (materialize_block_jacobian,)
+from aquaflux.solve.sparse_jacobian import (ColumnProbePlan, block_stencil_colouring, block_stencil_gather_map,)
 from aquaflux.turbulence import coupled_jacobian_probe  # noqa: E402
 
 OUT = CASE / "checkpoints"

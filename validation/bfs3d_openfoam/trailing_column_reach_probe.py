@@ -50,7 +50,7 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import block_stencil_colouring  # noqa: E402
+from aquaflux.solve.sparse_jacobian import (block_stencil_colouring,)  # noqa: E402
 from column_reach_probe import graph_distance  # noqa: E402
 
 #: Field order of the coupled state.

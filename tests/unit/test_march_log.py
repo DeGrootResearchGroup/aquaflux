@@ -20,8 +20,10 @@ from aquaflux.solve import (
     MarchLogger,
     RefreshTiming,
     StepReport,
-    combine_metrics,
     field_change_metrics,
+)
+from aquaflux.solve.march_log import (
+    combine_metrics,
 )
 
 

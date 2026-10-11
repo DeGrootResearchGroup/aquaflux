@@ -79,6 +79,30 @@ VALIDATION_INTERNAL_REACHES = {
     # about the wrong ladder -- which rung is kept depends on the fallback rule and the growth cap,
     # neither of which is obvious from the outside.
     "backtracking_line_search",
+    # The coloured probe's own plan, gather and matvecs, and the shift and comparison applied to its
+    # output. The bfs3d and pitzDaily probe studies measure what a reach or a batch size costs and how
+    # accurate the materialized Jacobian is; running the materialize the solve runs is the point. None of
+    # these is something a case configures or a user implements, which is why they are not exported.
+    "PROBE_BATCH_SIZE",
+    "ColumnProbePlan",
+    "ProbeGather",
+    "batched_jacobian_matvec",
+    "block_stencil_colouring",
+    "block_stencil_gather_map",
+    "column_probe_plan",
+    "jacobian_matvec",
+    "jacobian_relative_error",
+    "frozen_shift_diagonal",
+    "shifted_jacobian",
+    # The equilibration and reordering the field split applies before it coarsens, reached by the
+    # conditioning studies to look at the operator the hierarchy is actually built on.
+    "equilibrate_cell_major",
+    "symmetrically_equilibrate",
+    # Instruments of a march a study attaches beside the case's own: the expensive-inner-solve
+    # checkpointer, the metrics merger and the measure a configured solver stops in.
+    "InnerIterateCheckpointer",
+    "combine_metrics",
+    "in_progress_measure",
 }
 
 
