@@ -29,6 +29,7 @@ from aquaflux.solve import (
     LinearSolverSpec,
     PseudoTransientStep,
     RetryPolicy,
+    ShiftControlState,
     ShiftTerm,
     StepOutcome,
     StepReport,
@@ -1031,7 +1032,7 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
         step_control=control,
         retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
     )
-    beta, _memo = result.control_state
+    beta = result.control_state.beta
     assert beta == 4.0  # the escalated β, carried; not the control's beta_start
 
 
@@ -2126,15 +2127,17 @@ def test_rebase_drops_the_remembered_residual_and_keeps_the_shift() -> None:
     """The mirror of ``carry_beta``: β survives, the reference does not."""
     control = CflResidualDualTimeControl(beta_start=0.5)
 
-    assert control.rebase((0.25, 3.5)) == (0.25, None)
-    assert control.carry_beta((0.25, 3.5), 0.5) == (0.5, 3.5)  # the sibling, unchanged
+    assert control.rebase((0.25, 3.5)) == ShiftControlState(0.25)
+    assert control.carry_beta((0.25, 3.5), 0.5) == ShiftControlState(
+        0.5, 3.5
+    )  # the sibling, unchanged
 
 
 def test_rebasing_a_memoryless_control_changes_nothing() -> None:
     """``DualTimeControl`` keys on α alone, so it carries no cross-problem reference to invalidate."""
     control = DualTimeControl(beta_start=0.5)
 
-    assert control.rebase((0.25, None)) == (0.25, None)
+    assert control.rebase((0.25, None)) == ShiftControlState(0.25)
 
 
 def test_the_march_rebases_the_control_at_a_station_change() -> None:
@@ -2405,7 +2408,7 @@ def test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_som
         step_control=control,
         retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
     )
-    beta, _memo = result.control_state
+    beta = result.control_state.beta
     if len(hooks) == len(_SHIFT_HOOKS):
         assert control.called == ["carry_beta"]
         assert beta == 4.0

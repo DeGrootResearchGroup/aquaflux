@@ -103,8 +103,12 @@ solver:
   # run at the floor at full length, the shift drops to a ten-thousandth, so the last steps are inexact
   # Newton steps rather than a linear tail at the floor. Measured: 16 steps / 111 restart cycles, against
   # 31 / 161 at the previous growth of 1.5, 16 stations and no release, to the same reattachment length.
+  # A release whose step clips is not tried again until the residual has halved from where it was tried:
+  # this march's single release holds, so it never fires here. From a deeper ramp start (anchor 1000) the
+  # release fails six times on the way down; retried on every settled step it had cost 502 cycles by step
+  # 38, and with the backoff the march converges in 82 steps / 612 cycles.
   step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005, grow: 3.0,
-    release_floor: 1.0e-4}
+    release_floor: 1.0e-4, release_backoff: 0.5}
   # Redo a step whose line search collapses at twice the shift; a step still non-finite after that is
   # redone with a tight solve.
   retry:

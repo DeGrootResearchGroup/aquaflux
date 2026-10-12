@@ -183,7 +183,9 @@ from .shift_basis import (
 from .step_control import (
     CflResidualDualTimeControl,
     DualTimeControl,
+    ReleaseMemory,
     ResidualRatioDualTimeControl,
+    ShiftControlState,
     ShiftStrengthControl,
 )
 
@@ -239,6 +241,7 @@ __all__ = [
     "RefreshTrigger",
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
+    "ReleaseMemory",
     "ResidualHomotopy",
     "ResidualMeasure",
     "ResidualMeasures",
@@ -255,6 +258,7 @@ __all__ = [
     "SettingsValue",
     "ShiftBasis",
     "ShiftCarryingControl",
+    "ShiftControlState",
     "ShiftPolicy",
     "ShiftSettings",
     "ShiftStrengthControl",

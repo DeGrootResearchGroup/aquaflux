@@ -95,6 +95,9 @@ USER_CALLS = frozenset(
         "MarchResult",
         "RampPosition",
         "RampWalk",
+        # A shift control's carried state, as `MarchResult.control_state` hands it back, and its field.
+        "ReleaseMemory",
+        "ShiftControlState",
         "StagedResult",
         "StepOutcome",
         "default_linear_solver",

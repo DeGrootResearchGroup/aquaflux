@@ -328,7 +328,9 @@ What to take from it, none of which is specific to that mechanism:
       override leaves every other setting alone; and each refusal above.
   - **Three boundary responses on `ShiftStrengthControl`, and what each keeps is the whole design
     (`carry_beta` long-standing; `rebase` and `redamp` BUILT 2026-09-09).** The carried state is
-    `(beta, memo)`; each of these is an *outside event changed the situation, keep what still applies*
+    `ShiftControlState(beta, memo, release)` (a named tuple since 2026-10-12; `(beta, memo)` before). All
+    three keep `release`, the release's memory of a failed release (below); only `resumed_at` starts a
+    state without one. Each of these is an *outside event changed the situation, keep what still applies*
     seam, and they differ only in what still applies:
     | method | called when | keeps | drops |
     |---|---|---|---|
@@ -368,8 +370,8 @@ What to take from it, none of which is specific to that mechanism:
       ignores `arrived` -- that is the release's own further condition, not part of being settled. Anything else -- a clipped released step, a rising residual for a rule that reads one
     -- puts `beta_min` back in one step, not by doubling up from the released shift. `_clamp`'s lower bound
     is `release_floor` when set, so the rules may go below `beta_min` and `_floored` is the one place that
-    decides whether they may. The state is unchanged `(beta, memo)`: "released" is read off the previous
-    report's shift, so `carry_beta` / `redamp` / `rebase` / `resumed_at` needed nothing.
+    decides whether they may. "Released" is read off the previous report's shift; what the state carries
+    for the release is only the backoff's memory (below).
     - **⚠️ The gate is the measured part, not a guess.** A zero-shift step from the state the ramp ARRIVED
       at raised the residual (line search to `alpha` 0, 42-cycle steps, the same under an inverse fitted
       at zero shift); two states later, after the first step at the floor with `alpha` 1, the same step
@@ -384,7 +386,9 @@ What to take from it, none of which is specific to that mechanism:
       released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
     - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
       stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
-      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's file**.
+      in the log), with `release_backoff: 0.5` stated beside it since 2026-10-12 (the class default,
+      written out so the file says what the shipped release does after a failure). **Not the class
+      default** (`release_floor=None`) and **not bfs3d's file**.
       ⚠️ Those counts were taken while a cost re-fit ran MID-STEP at `refresh_on_cycles` 2. Since #290 a
       re-fit ends its step, which at 2 moved the release to step 34 of 39 (the settled test needs a
       full-length step, which one-iteration steps rarely give); pitzDaily now ships 3, where it fires at
@@ -402,8 +406,31 @@ What to take from it, none of which is specific to that mechanism:
       Whether bfs3d's file should release is the owner's call; a library default still waits on the three
       slow tests #645 names (a loose terminal step is what they measure). Tables in
       `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").
+    - **A failed release is not retried until the residual falls below a bar (`release_backoff`, BUILT
+      2026-10-12, default 0.5).** Without it `_floored` kept no memory: a released step collapsed, the rule
+      backed off to `beta_min`, the next full-length floor step was `settled` again, and the release fired
+      again -- every other step from a deep ramp start (pitzDaily anchor 300: steps 19, 21, 23, 25; anchor
+      1000: eight failures in a row, stopped at step 38 and 502 cycles). Now the rule backing off from a
+      released step records `bar = release_backoff * residual the release fired from` in the state's
+      `ReleaseMemory`, and the floor is released again only from a settled step at or under it. A release
+      that holds sets no bar, so a march whose first release holds is **bit-identical** (pitzDaily anchor
+      100: the same 16-step table, 111 cycles, to every printed digit but `t(s)`). Measured on pitzDaily
+      (shipped march, `PITZ_RAMP_ANCHOR`, Linux x86_64 4 cores, jax 0.11.2, 2026-10-12): anchor 300 255 ->
+      **210** cycles (failed releases 3 -> 1, 1543 -> 1301 s); anchor 1000 converges in 82 steps / **612**
+      cycles / 3702 s to the same root, where before it was stopped at 38 / 502 / 5018 s still thrashing.
+      ⚠️ **It does NOT make a deep start competitive, and no release rule could:** from anchor 1000's state
+      SIX releases failed, from `|R|` 2.3e-3 down to 6.4e-5 (173 cycles together); only the seventh, from
+      3.1e-5, held -- while anchor 100's single release holds from 1.5e-3. The residual a release needs
+      belongs to the state the ramp leaves, and a deep anchor's cost is the floor's linear tail from it.
+      ⚠️ The bar compares residuals across steps in the row-scaled measure, which is rebuilt every step --
+      an approximate comparison, adequate for a factor-2 bar and not for a fine one. ⚠️ `rho1` on the
+      settled step does not predict which release will hold (0.35-0.97 before anchor 1000's six failures;
+      0.32 and 0.87 before the releases that held at anchors 1000 and 100), so it is not a better gate.
+      Log: `solve-globalization-log.md` ("The release backoff").
     - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
-      rule turns a test red) and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
+      rule turns a test red; the backoff by its own six tests, nine of ten mutations red -- the tenth,
+      keeping a stale `started_from` on re-release, is unreachable because a failure always clears it)
+      and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
     spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
     (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from

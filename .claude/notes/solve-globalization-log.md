@@ -1438,6 +1438,84 @@ The file as shipped (12 fixed stations), on the same code: 16 steps, 111 cycles,
 final `|R|` 1.979e-06 identical to the confirmation run before the change -- the fixed walk and the
 extra `full_step_ratio` carry move nothing.
 
+## Where the ramp starts: anchor depth at the shipped march, 2026-10-11
+
+**Question (from the project owner):** can a cheap probe choose the ramp's starting multiplier -- far
+for hard problems, near (or none) for easy ones? First established whether the start still matters.
+
+**Configuration:** pitzDaily `case.yaml` as shipped at `61a1430` (`CflResidualDualTimeControl`
+`beta_start` 0.5, `beta_min` 0.005, `grow` 3, `release_floor` 1e-4; `ViscosityRamp` 12 stations x 1,
+`scale: flow`, fixed -- no settle end; field split `simplesmooth`/`jacobi`; dual time 5 / 1e-2), only the
+anchor varied by `PITZ_RAMP_ANCHOR` (harness commits `81857c7`, `8891cca`; `1` removes the ramp and the
+march self-starts by `hybrid_initialize` at the case's own viscosity). Linux x86_64, 4 cores, jax 0.11.2,
+one arm at a time, nothing else running.
+
+| anchor | steps | restart cycles | redone steps | wall |
+|---|---|---|---|---|
+| 100 | 16 | **111** | 0 | 701 s |
+| 10 | 17 | 178 | 2 | 1100 s |
+| 3 | 18 | 217 | 3 | 1348 s |
+| 1 (no ramp) | 16 | 246 | 5 | 1585 s |
+| 300 | 26 | 255 | 3 | 1543 s |
+| 1000 | stopped at 38 | 502 by then | 10 by then | 5018 s by then |
+
+All four reach the same root (`Ux` in [-2.693, 10.225]; `x_r/h` 8.07 read for anchors 100 and 1). The
+anchor-100 arm reproduces the recorded 16 steps / 111 cycles exactly. ⚠️ The cycle column counts only
+ACCEPTED attempts, so the redone steps' discarded work is visible only in wall clock -- which is why the
+wall ratios (1.0 / 1.6 / 1.9 / 2.3) run ahead of the cycle ratios.
+
+- **pitzDaily does not NEED a ramp under today's march** (the old ~490-step cold crawl is gone), but the
+  ramp is worth 2.2x in cycles and 2.3x in wall. The anchor is a cost lever, not a reachability one, here.
+- **Cost falls with depth down to 100 and rises past it, for a different reason on each side.**
+  Shallower than 100 the cost is redone steps at a small shift early in the march (the state far from a
+  moving station's root while `beta` falls). Deeper than 100 the ramp is the cleanest of any arm
+  (anchor 300: nothing redone and `alpha` 1 or 0.5 through step 18; anchor 1000: full-length steps to
+  step 5) and the cost is all at the target, in the release (next bullet). Anchors 300 and 1000 were run
+  the same day on the same harness; 1000 was stopped at step 38 (owner's call), the fault already clear.
+- **⚠️ THE RELEASE RE-FIRES AFTER IT FAILS -- a defect in `ShiftStrengthControl._floored`, not in the
+  anchor.** Anchor 300 settled at step 18 (`alpha` 1 at the floor, `rho1` 0.96 against anchor 100's 0.87
+  on its settling step) and released at 19; the released step collapsed (`alpha` 0, redone twice, beta
+  escalated to 2e-4). The control then put beta back to 0.005, the next step was full length at the
+  floor, which IS `settled` again, so the release fired again at 21, 23 and 25 -- every other step --
+  until the residual was small enough (about 3e-4) for a released step to hold. Anchor 1000 did the same
+  from step 24 for eight cycles (each failed release ~360 s and 28 cycles), the residual creeping
+  1.6e-3 -> 7e-4 over 14 steps. Nothing in the rule remembered a failed release. Fixed by the backoff
+  the next day ("The release backoff" below), against a bar set here and restated there.
+- **The early full-step ratio ranked the four shallow arms** (`rho1` at step 3: 1.08 / 4.51 / 6.43 / 89.25
+  for anchors 100 / 10 / 3 / 1, first redo at step -- / 4 / 11 / 3) but is not a probe signal on its own:
+  the cheapest arm ran `rho1` 1.3-4.6 at the floor with no step redone, and on bfs3d it gave no lead on
+  the settle (#685).
+- **The same answer on bfs3d (#685, its shipped `grow` 1.5 x 12, lineax stop):** anchor 10 / 100 / 1000
+  cost 239 / 193 / 329 all-attempt cycles; anchor 1000 ran a clean ramp, then 64 steps at the floor with
+  the release off (shipped), contracting 0.91-0.95 per step. So anchor 100 is the cheapest start measured
+  on both cases, by different routes on each side. ⚠️ At a fixed 12 stations a deeper anchor is also a
+  larger viscosity jump per station (1000: 1.78x, 100: 1.47x), and those jumps land with `beta` already
+  at the floor (bfs3d's anchor-1000 `rho1` ~1e22 at steps 12-13); a deep anchor with stations scaled to
+  hold the per-station jump has not been run.
+- **Verdict on the probe the owner asked about:** not needed for these two cases -- one start (100) is
+  the cheapest of those measured on both. It would pay only on a case far from both in difficulty, of
+  which none is in the repository.
+
+**The inner stop rule on pitzDaily, the same day (counterpart of #685's bfs3d arms).** The shipped file
+with `PITZ_FORWARD_STOP=lineax PITZ_REFRESH_ON_CYCLES=3` (bfs3d's stop and refresh), anchor 100. Stopped
+at step 15 of an expected 16 by a waiter's time limit (signal 15); compared at step 15 against the
+shipped run (residual stop, refresh 2):
+
+| at step 15 | shipped (`residual`, refresh 2) | `lineax`, refresh 3 |
+|---|---|---|
+| `\|R\|` | 7.08e-5 | 5.41e-5 |
+| settle | step 14 | step 14 |
+| redone steps | 0 | 0 |
+| cumulative cycles | 99 | 157 |
+| wall | 626 s | 1190 s |
+
+On pitzDaily the stop moves cost (1.9x wall; the cycle gap understates it, since `lineax`'s count drops
+one cycle per solve the residual stop counts) and not the trajectory, even at `grow` 3. On bfs3d it moved
+the trajectory too (#685: under lineax `grow` 3 redid nine steps, under `residual` three). So the
+stop-and-rate interaction is bfs3d's; whether it runs through the cycle-triggered retry (the two stops
+count cycles differently) is unseparated and checkable from #685's logs by splitting each arm's redone
+steps by trigger.
+
 ## bfs3d: the release, `grow` 3 and the settle-ended ramp (#678), 2026-10-11
 
 **Configuration.** `validation/bfs3d_openfoam/compare.py` at `61a14308` (#677 merged), `case.yaml` as
@@ -1558,3 +1636,50 @@ tail (below) -- the same `x_r/h`, but not as near the root as the others.
   anchor 10, not a direct solve.
 - **What it does not separate yet:** `residual` with `refresh_on_cycles` 2 (pitzDaily's pairing of the
   two), and `residual` with the release alone on `grow` 1.5.
+
+## The release backoff, 2026-10-12
+
+**What was built:** `ShiftStrengthControl.release_backoff` (default 0.5; `step_control.py`). When the rule
+backs off from a released step, the control records `bar = release_backoff * residual the release fired
+from` in the carried state's `ReleaseMemory`, and releases again only from a settled step whose residual is
+at or under the bar. The carried state became `ShiftControlState(beta, memo, release)`.
+
+**The bar set the day before, restated honestly before measuring.** "Anchors 300 and 1000 near anchor 100's
+111 cycles" could not be met by any release rule: anchor 300 had already spent 113 cycles before its first
+release. The bar that tests this change: (a) no failed release fired again on the next settled step, and a
+deep start no longer thrashing; (b) anchor 100 unchanged at 111 (its one release holds, so no bar is ever
+set); (c) bfs3d arm 6 of #685 unchanged -- it had no failed release, so it is unchanged by construction and
+was not re-run.
+
+**Configuration:** pitzDaily `case.yaml` as shipped (the "Where the ramp starts" configuration), anchor by
+`PITZ_RAMP_ANCHOR`, branch `feat/release-backoff` at `8e4639c`; Linux x86_64, 4 cores, jax 0.11.2; one arm at
+a time through `run_case.sh`, nothing else running. Logs `run-20261012-013433` (1000), `-023633` (300),
+`-025834` (100).
+
+| anchor | before (2026-10-11) | with the backoff |
+|---|---|---|
+| 100 | 16 steps, 111 cycles, 0 failed, 701 s | **identical step table** (every printed column but `t(s)`), 111 cycles, 657 s |
+| 300 | 26 steps, 255 cycles, 3 failed, 1543 s | 26 steps, **210** cycles, 1 failed, 1301 s |
+| 1000 | stopped at 38: 502 cycles, 8+ failed, 5018 s, `|R|` 7.1e-4 | **82 steps, 612 cycles, 6 failed, 3702 s**, converged |
+
+All converged arms reach the same root (`Ux` in [-2.693/-2.694, 10.225]). Cycles count accepted attempts
+only, as before.
+
+- **(a) met.** Anchor 1000 is bit-identical to the old run through its first failed release (step 14,
+  from `|R|` 2.34e-3); afterwards the old run re-released at 16, 18, 20, 22, 24 (28 cycles and ~360 s each)
+  while this one ran floor steps at 4-6 cycles. At step 38: 271 cycles / 1867 s against 502 / 5018 s.
+  Anchor 300 also skipped two of its three retries; its second release (step 24, from 5.0e-4) clipped to
+  `alpha` 0.125 and was counted a failure, but cut the residual enough that the next floor step reached
+  5.2e-5 and the third release finished the march.
+- **What it does not do:** make a deep anchor competitive. From anchor 1000's state releases failed from
+  `|R|` 2.34e-3, 1.14e-3, 5.66e-4, 2.81e-4, 1.38e-4 and 6.39e-5 -- each bar met, each release still
+  clipped or collapsing -- and only the seventh, from 3.10e-5, held. The six failed steps are 173 cycles
+  of its 612; the rest is the floor's linear tail (0.93-0.97 per step until about 1e-4). Anchor 300's
+  release held from 5.2e-5 (after one that clipped from 5.0e-4) and anchor 100's held on its first try
+  from **1.53e-3** -- a residual from which anchor 1000's released steps collapsed. So the residual a
+  release needs is a property of where the ramp leaves the state, not a number.
+- **`rho1` is not a better gate.** On the settled step before each of anchor 1000's six failed releases
+  it was 0.97, 0.59, 0.55, 0.51, 0.44, 0.35; before the releases that held, 0.32 (anchor 1000) and 0.87
+  (anchor 100).
+- **Verdict on the anchor question: unchanged.** 100 remains the cheapest start; the backoff turns a deep
+  start from a thrash into a slow but steady march.

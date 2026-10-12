@@ -235,7 +235,9 @@ The two marches share their settings, each a value of the solver library written
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
   {class}`~aquaflux.solve.CflResidualDualTimeControl`. Any of them takes `release_floor`, a shift
   below `beta_min` that the march drops to once a step on the target problem has run at the floor
-  at full length, so its last steps are Newton steps rather than a linear tail at the floor;
+  at full length, so its last steps are Newton steps rather than a linear tail at the floor. A
+  release that fails is not tried again until the residual has fallen to `release_backoff` (default
+  0.5) times the residual it was tried from;
 - `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
 
