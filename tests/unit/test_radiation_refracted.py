@@ -21,13 +21,14 @@ from aquaflux.radiation import (
     direct_fluence_rate,
     direct_irradiance,
     refracted,
+    shooting,
 )
 from aquaflux.radiation.refracted import (
     build_refracted_visibility,
     refracted_fluence_rate,
     refracted_irradiance,
 )
-from aquaflux.radiation.refraction import Media, Paths, Transparent, fresnel_transmittance
+from aquaflux.radiation.refraction import Media, Transparent, fresnel_transmittance
 from aquaflux.radiation.visibility import build_visibility
 from aquaflux.solids import Box, Cylinder, HalfSpace, Sphere
 from scipy import integrate, optimize
@@ -531,22 +532,14 @@ def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monk
     surfaces = Surfaces.from_triangles(jnp.asarray(sheet), emission=1.0)
     receivers = np.zeros((2, 3))
 
-    def host_paths(media, chain, sources, points, pair_limit):
-        near = np.asarray(sources)[:, 0] < cut
-        shape = (2, len(points), len(sources))
+    def stepped_shots(media, chain, sources, points, side, starts, pair_limit):
         # Side 0 has paths where the near side does; side 1 nowhere.
-        valid = np.zeros(shape, bool)
-        valid[0] = near[None]
-        return None, valid
+        valid = (np.asarray(sources)[:, 0] < cut) & (np.asarray(side) == 0)
+        return np.zeros((len(sources), 1, 3)), valid, np.zeros((len(sources), 2))
 
-    def shot_paths(media, chain, sources, points, sides):
-        valid = (np.asarray(sources)[:, 0] < cut) & (np.asarray(sides) > 0)
-        return Paths(None, None, None, valid, None)
-
-    monkeypatch.setattr(refracted, "_host_paths", host_paths)
-    monkeypatch.setattr(refracted, "_shot_paths", shot_paths)
+    monkeypatch.setattr(refracted, "_stepped_shots", stepped_shots)
     facets = np.arange(surfaces.n_facets)
-    side, row, facet, vertices = refracted._reached_triangles(
+    side, row, facet, vertices, _ = refracted._reached_triangles(
         surfaces, None, None, facets, receivers, 1_000_000
     )
     assert np.all(side == 0)
@@ -557,3 +550,44 @@ def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monk
         for f in facets:
             kept = area[(row == r) & (facet == f)].sum()
             assert kept == pytest.approx(_area_below(sheet[f], cut), abs=2e-4)
+
+
+def test_paths_a_coarse_grid_misses_are_reached_from_their_neighbours(monkeypatch):
+    """Polished from a neighbouring corner's path, an 8 x 8 grid's paths spread to a 96 x 96 grid's.
+
+    The unknowns of a path round a rim range over a band fixed by the shell alone, so a neighbouring
+    corner's path is a start inside the polish's basin; from the corners the coarse grid reaches, the
+    rest of each patch is found, at the same crossings. A patch the grid misses at every corner is not
+    reached (a 4 x 4 grid misses one here), so the grid must still hit each patch once.
+    """
+    media, arc = _rim_scene(16, 8)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    group = next(
+        g for g in refracted._plan(arc, media, points, 1_000_000) if g.chain.passing == (2,)
+    )
+    corners, shared = refracted._shared_corners(arc, group.facets)
+    corners, receivers = np.asarray(corners), points[group.rows]
+    shape = (2, len(receivers), len(corners))
+    side, row, corner = (index.reshape(-1) for index in np.indices(shape))
+
+    def grid(size, continued):
+        monkeypatch.setattr(shooting, "_ROWS", size)
+        monkeypatch.setattr(shooting, "_COLUMNS", size)
+        jax.clear_caches()
+        if continued:
+            found, valid, _ = refracted._continued_paths(
+                media, group.chain, corners, receivers, refracted._corner_edges(shared), 1_000_000
+            )
+            return found, valid
+        found, valid, _ = refracted._stepped_shots(
+            media, group.chain, corners[corner], receivers[row], side, None, 1_000_000
+        )
+        return found.reshape(*shape, *found.shape[1:]), valid.reshape(shape)
+
+    _, coarse = grid(8, False)
+    continued_points, continued = grid(8, True)
+    fine_points, fine = grid(96, False)
+    jax.clear_caches()
+    assert np.sum(fine & ~coarse) >= 10
+    np.testing.assert_array_equal(continued, fine)
+    np.testing.assert_allclose(continued_points[fine], fine_points[fine], atol=1e-12)

@@ -647,7 +647,7 @@ def _solve_paths(media: Media, chain: Chain, sources, receivers, *, shot: bool) 
     if shot:
         sides = jnp.array([1.0, -1.0])
         paths = jax.vmap(
-            lambda s, r: jax.vmap(lambda side: _shot_path(media, chain, s, r, side))(sides)
+            lambda s, r: jax.vmap(lambda side: _shot_path(media, chain, s, r, side)[0])(sides)
         )(flat_sources, flat_receivers)
         return jax.tree.map(
             lambda leaf: jnp.moveaxis(leaf, 1, 0).reshape(2, *shape[:-1], *leaf.shape[2:]), paths
@@ -671,15 +671,27 @@ def _solve_paths(media: Media, chain: Chain, sources, receivers, *, shot: bool) 
 
 
 @eqx.filter_jit
-def _shot_paths(media: Media, chain: Chain, sources, receivers, sides) -> Paths:
+def _shot_paths(media: Media, chain: Chain, sources, receivers, sides, starts=None):
     """One path per pair round the side of the shell ``sides`` names, on a shot route (:func:`_shot`).
 
-    ``sources`` and ``receivers`` are ``(n, 3)`` and ``sides`` is ``(n,)`` of ``+1`` or ``-1``; the
-    result is shaped ``(n,)``. For pairs whose side is already known, which is half the work of
-    :func:`solve_paths`, which finds both.
+    ``sources`` and ``receivers`` are ``(n, 3)`` and ``sides`` is ``(n,)`` of ``+1`` or ``-1``. For
+    pairs whose side is already known, which is half the work of :func:`solve_paths`, which finds
+    both. ``starts``, ``(n, 2)``, polishes each path from a neighbouring source's unknowns instead of
+    scanning the grid (:func:`~aquaflux.radiation.shooting.rim_crossings`).
+
+    Returns
+    -------
+    Paths
+        Shaped ``(n,)``.
+    jnp.ndarray, shape ``(n, 2)``
+        Each path's unknowns, a start for a neighbouring source's.
     """
-    return jax.vmap(lambda s, r, side: _shot_path(media, chain, s, r, side))(
-        sources, receivers, sides
+    if starts is None:
+        return jax.vmap(lambda s, r, side: _shot_path(media, chain, s, r, side))(
+            sources, receivers, sides
+        )
+    return jax.vmap(lambda s, r, side, start: _shot_path(media, chain, s, r, side, start))(
+        sources, receivers, sides, starts
     )
 
 
@@ -769,8 +781,11 @@ def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
     )
 
 
-def _shot_path(media: Media, chain: Chain, source, receiver, side) -> Paths:
-    """One pair's path past one side of a shell, found by shooting (:func:`_shot`)."""
+def _shot_path(media: Media, chain: Chain, source, receiver, side, start=None):
+    """One pair's path past one side of a shell, found by shooting (:func:`_shot`), and its unknowns.
+
+    ``start`` polishes from a neighbouring source's unknowns instead of scanning the grid.
+    """
     shell = media.nodes[chain.passing[0]]
     cores = [media.nodes[n] for n, parent in enumerate(media.parents) if parent == chain.passing[0]]
     bodies = [media.nodes[node].body for node, _ in chain.crossings]
@@ -800,7 +815,9 @@ def _shot_path(media: Media, chain: Chain, source, receiver, side) -> Paths:
         }
     )
     geometry["outs"] = tuple(out for _, out in chain.crossings)
-    projected, heights, found = shooting.rim_crossings(geometry, side)
+    if start is not None:
+        start = jax.lax.stop_gradient(start)
+    projected, heights, found, unknowns = shooting.rim_crossings(geometry, side, start)
     crossing = (
         projected[:, :1] * jax.lax.stop_gradient(first)
         + projected[:, 1:] * jax.lax.stop_gradient(second)
@@ -822,7 +839,7 @@ def _shot_path(media: Media, chain: Chain, source, receiver, side) -> Paths:
     z, found = path.solved(
         path.with_multipliers(crossing), lambda initial: (initial, found.astype(float))
     )
-    return path.carried(z, found)
+    return path.carried(z, found), jax.lax.stop_gradient(unknowns)
 
 
 class _Stationary:

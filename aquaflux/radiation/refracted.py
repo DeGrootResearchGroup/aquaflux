@@ -340,11 +340,14 @@ def _from_a_reached_point(
     (:func:`_reached_triangles`), and that part need not hold the centroid; the shadow of the path
     to the centroid is then the shadow of a straight line the solve fell back to. Each such facet's
     shadow is taken along the path from its first corner with one -- as near a path of the part
-    counted as the facet offers. A facet with none keeps the centroid's, and carries nothing.
+    counted as the facet offers. Which corners have one is :func:`_continued_paths`', as for the
+    gather. A facet with none keeps the centroid's, and carries nothing.
     """
     corners, shared = _shared_corners(surfaces, facets)
     corners = np.asarray(corners, dtype=float)
-    corner_paths, corner_found = _host_paths(media, chain, corners, receivers, pair_limit)
+    corner_paths, corner_found, _ = _continued_paths(
+        media, chain, corners, receivers, _corner_edges(shared), pair_limit
+    )
     # (paths, rows, facets, 3): which of each facet's corners has a path.
     reached = corner_found[:, :, shared]
     first = np.argmax(reached, axis=-1)
@@ -557,11 +560,13 @@ def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_l
 
     Which corners have a path, and where along each edge a path stops, are found on the host from
     the geometry and indices as given (:func:`_reached_triangles`); the paths to the resulting
-    triangles' corners are then solved live, so they carry every derivative but the cut's.
+    triangles' corners are then solved live, each polished from the unknowns the host found it by
+    (:func:`~aquaflux.radiation.shooting.rim_crossings`), so they carry every derivative but the
+    cut's.
     """
     chain, facets = group.chain, group.facets
     still = jax.lax.stop_gradient(media)
-    side, row, facet, vertices = _reached_triangles(
+    side, row, facet, vertices, seeds = _reached_triangles(
         surfaces, still, chain, facets, np.asarray(points)[group.rows], pair_limit
     )
     if len(side) == 0:
@@ -573,6 +578,7 @@ def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_l
     arrays = [
         (receivers, 0),
         (jnp.asarray(vertices), 0),
+        (jnp.asarray(seeds), 0),
         (jnp.asarray(np.where(side == 0, 1.0, -1.0)), 0),
         (normal, 0),
         (emission, 0),
@@ -586,16 +592,17 @@ def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_l
         if hidden is not None:
             arrays.append((hidden[side, row, facet], 0))
 
-    def at(chunk, chunk_vertices, chunk_sides, chunk_normal, chunk_emission, *rest):
+    def at(chunk, chunk_vertices, chunk_seeds, chunk_sides, chunk_normal, chunk_emission, *rest):
         rest = list(rest)
         chunk_normals = rest.pop(0) if normals is not None else None
         n = chunk.shape[0]
-        paths = _shot_paths(
+        paths, _ = _shot_paths(
             media,
             chain,
             chunk_vertices.reshape(-1, 3),
             jnp.repeat(chunk, 3, axis=0),
             jnp.repeat(chunk_sides, 3),
+            chunk_seeds.reshape(-1, 2),
         )
         paths = jax.tree.map(lambda leaf: leaf.reshape(n, 3, *leaf.shape[1:]), paths)
         weight = _seen_weight(
@@ -623,7 +630,8 @@ def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
     For each receiver and side, a facet with a path at all three corners is itself; one with a path
     at one or two is cut along each edge from a corner with a path to one without, at the last point
     of :data:`_CUT_HALVINGS` halvings that still has one, into one triangle (one corner with a
-    path) or two (two); one with none gives nothing. All on the host, at concrete values.
+    path) or two (two); one with none gives nothing. Which corners have a path is
+    :func:`_continued_paths`'. All on the host, at concrete values.
 
     Returns
     -------
@@ -631,11 +639,15 @@ def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
         Each triangle's side (0 for ``+1``, 1 for ``-1``), receiver (an index into ``receivers``) and
         facet (an index into ``facets``).
     vertices : np.ndarray, shape ``(n, 3, 3)``
+    seeds : np.ndarray, shape ``(n, 3, 2)``
+        The unknowns each vertex's path was found by, to polish it from in the traced pass.
     """
     corners, shared = _shared_corners(surfaces, facets)
     corners = np.asarray(corners, dtype=float)
     n_rows, n_corners = len(receivers), len(corners)
-    _, reach = _host_paths(media, chain, corners, receivers, pair_limit)
+    _, reach, unknowns = _continued_paths(
+        media, chain, corners, receivers, _corner_edges(shared), pair_limit
+    )
 
     # (2, rows, facets, 3): which of each triangle's corners has a path.
     reached = reach[:, :, shared]
@@ -663,85 +675,180 @@ def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
         side_, row_, from_, to_ = (table[:, k].astype(np.int64) for k in range(4))
         return ((side_ * n_rows + row_) * n_corners + from_) * n_corners + to_
 
-    cuts = _cut_edges(media, chain, corners, receivers, keys, pair_limit)
+    cuts, cut_seeds = _cut_edges(
+        media,
+        chain,
+        corners,
+        receivers,
+        keys,
+        unknowns[keys[:, 0], keys[:, 1], keys[:, 2]],
+        pair_limit,
+    )
 
     def at_cut(index, a, b):
         """Where the path stops along each listed triangle's edge from corner ``a`` to ``b``."""
         wanted = np.stack([s[index], r[index], ends[index, a], ends[index, b]], axis=1)
-        return cuts[np.searchsorted(code(keys), code(wanted))]
+        found = np.searchsorted(code(keys), code(wanted))
+        return cuts[found], cut_seeds[found]
+
+    def corner(index, a):
+        """Each listed triangle's corner ``a``, and the unknowns its path was found by."""
+        return corners[ends[index, a]], unknowns[s[index], r[index], ends[index, a]]
 
     sides, rows_out, facet_out = [whole[:, 0]], [whole[:, 1]], [whole[:, 2]]
     vertices = [corners[shared[whole[:, 2]]]]
+    seeds = [unknowns[whole[:, :1], whole[:, 1:2], shared[whole[:, 2]]]]
     one = np.flatnonzero(lit.sum(axis=1) == 1)
     two = np.flatnonzero(lit.sum(axis=1) == 2)
+    pieces = []
     if len(one):
         a = np.argmax(lit[one], axis=1)
         b, c = (a + 1) % 3, (a + 2) % 3
-        tri = np.stack(
-            [
-                corners[ends[one, a]],
-                at_cut(one, a, b),
-                at_cut(one, a, c),
-            ],
-            axis=1,
-        )
-        sides.append(s[one])
-        rows_out.append(r[one])
-        facet_out.append(f[one])
-        vertices.append(tri)
+        pieces.append((one, [corner(one, a), at_cut(one, a, b), at_cut(one, a, c)]))
     if len(two):
         c = np.argmin(lit[two], axis=1)
         a, b = (c + 1) % 3, (c + 2) % 3
-        cut_a = at_cut(two, a, c)
-        cut_b = at_cut(two, b, c)
-        first = np.stack([corners[ends[two, a]], corners[ends[two, b]], cut_b], axis=1)
-        second = np.stack([corners[ends[two, a]], cut_b, cut_a], axis=1)
-        for tri in (first, second):
-            sides.append(s[two])
-            rows_out.append(r[two])
-            facet_out.append(f[two])
-            vertices.append(tri)
+        cut_a, cut_b = at_cut(two, a, c), at_cut(two, b, c)
+        pieces.append((two, [corner(two, a), corner(two, b), cut_b]))
+        pieces.append((two, [corner(two, a), cut_b, cut_a]))
+    for index, triangle in pieces:
+        sides.append(s[index])
+        rows_out.append(r[index])
+        facet_out.append(f[index])
+        vertices.append(np.stack([point for point, _ in triangle], axis=1))
+        seeds.append(np.stack([seed for _, seed in triangle], axis=1))
     return (
         np.concatenate(sides),
         np.concatenate(rows_out),
         np.concatenate(facet_out),
         np.concatenate(vertices).reshape(-1, 3, 3),
+        np.concatenate(seeds).reshape(-1, 3, 2),
     )
 
 
-def _cut_edges(media, chain, corners, receivers, keys, pair_limit):
-    """``(n_edges, 3)`` where along each edge the path round one side of a shell stops.
+def _corner_edges(shared):
+    """``(n_edges, 2)`` the distinct edges of the triangles ``shared`` lists, as pairs of corners."""
+    edges = np.concatenate([shared[:, [0, 1]], shared[:, [1, 2]], shared[:, [2, 0]]])
+    return np.unique(np.sort(edges, axis=1), axis=0)
+
+
+def _continued_paths(media, chain, sources, receivers, edges, pair_limit):
+    """Paths round each side of a shell between every source and receiver, on a shot route.
+
+    Each pair is first shot from the grid (:func:`~aquaflux.radiation.shooting.rim_crossings`). A
+    grid can miss a path whose run of rays is narrower than its spacing, but the unknowns of a path
+    fix it whatever its source -- the band they range over depends only on the shell, its core and
+    ``beta`` -- so a source joined by an edge to one with a path is tried again by polishing from
+    that path's unknowns. Repeated from every source that gains a path until none does: the paths
+    spread along the surface from wherever the grid found one.
+
+    Parameters
+    ----------
+    sources : np.ndarray, shape ``(n_sources, 3)``
+    receivers : np.ndarray, shape ``(n_receivers, 3)``
+    edges : np.ndarray of int, shape ``(n_edges, 2)``
+        Pairs of sources near enough for one's path to start the other's.
+
+    Returns
+    -------
+    points : np.ndarray, shape ``(2, n_receivers, n_sources, n_crossings, 3)``
+    valid : np.ndarray of bool, shape ``(2, n_receivers, n_sources)``
+    unknowns : np.ndarray, shape ``(2, n_receivers, n_sources, 2)``
+        Each side's (0 for ``+1``, 1 for ``-1``).
+    """
+    sources, receivers = np.asarray(sources, dtype=float), np.asarray(receivers, dtype=float)
+    n_sources = len(sources)
+    shape = (2, len(receivers), n_sources)
+    side, row, source = (index.reshape(-1) for index in np.indices(shape))
+    points, valid, unknowns = _stepped_shots(
+        media, chain, sources[source], receivers[row], side, None, pair_limit
+    )
+    directed = np.concatenate([edges, edges[:, ::-1]])
+    fresh = valid.reshape(-1, n_sources)
+    while True:
+        reached = valid.reshape(-1, n_sources)
+        pair, edge = np.nonzero(fresh[:, directed[:, 0]] & ~reached[:, directed[:, 1]])
+        if len(pair) == 0:
+            break
+        tried = pair * n_sources + directed[edge, 1]
+        found_points, found, found_unknowns = _stepped_shots(
+            media,
+            chain,
+            sources[source[tried]],
+            receivers[row[tried]],
+            side[tried],
+            unknowns[pair * n_sources + directed[edge, 0]],
+            pair_limit,
+        )
+        # A source reached from several neighbours keeps the first path found.
+        gained, first = np.unique(tried[found], return_index=True)
+        points[gained] = found_points[found][first]
+        unknowns[gained] = found_unknowns[found][first]
+        valid[gained] = True
+        fresh = np.zeros_like(reached)
+        fresh.reshape(-1)[gained] = True
+    return (
+        points.reshape(*shape, *points.shape[1:]),
+        valid.reshape(shape),
+        unknowns.reshape(*shape, 2),
+    )
+
+
+def _stepped_shots(media, chain, sources, receivers, side, starts, pair_limit):
+    """:func:`~aquaflux.radiation.refraction._shot_paths` on the host, a step of pairs at a time.
+
+    ``side`` is ``(n,)`` of 0 (``+1``) or 1 (``-1``) and ``starts`` ``(n, 2)`` or ``None`` (the
+    grid). A step's paths each scan a grid, so it is sized as a pass of that many pairs, and padded
+    to one shape -- repeating its last pair, whose answers are dropped -- so it compiles once.
+    Returns the crossing points, whether each path exists, and its unknowns, as numpy arrays.
+    """
+    n = len(sources)
+    signs = np.where(np.asarray(side) == 0, 1.0, -1.0)
+    step = max(1, min(receivers_per_step(pair_limit, 1), n))
+    points, valid, unknowns = [], [], []
+    for first in range(0, n, step):
+        rows = np.minimum(np.arange(first, first + step), n - 1)
+        paths, found = _shot_paths(
+            media,
+            chain,
+            jnp.asarray(sources[rows]),
+            jnp.asarray(receivers[rows]),
+            jnp.asarray(signs[rows]),
+            None if starts is None else jnp.asarray(starts[rows]),
+        )
+        keep = slice(0, n - first)
+        points.append(np.asarray(paths.points)[keep])
+        valid.append(np.asarray(paths.valid)[keep])
+        unknowns.append(np.asarray(found)[keep])
+    if n == 0:
+        return np.zeros((0, len(chain.crossings), 3)), np.zeros(0, bool), np.zeros((0, 2))
+    return np.concatenate(points), np.concatenate(valid), np.concatenate(unknowns)
+
+
+def _cut_edges(media, chain, corners, receivers, keys, inside_unknowns, pair_limit):
+    """Where along each edge the path round one side of a shell stops, and its unknowns there.
 
     Each row of ``keys`` is ``(side, receiver, from corner, to corner)``: the path exists at the
-    first corner and not at the second. The edge is halved :data:`_CUT_HALVINGS` times, keeping the
-    half across which the path stops, and the last point found to have one is returned -- so the
-    triangle cut there has a path at every corner.
+    first corner, found by ``inside_unknowns``, and not at the second. The edge is halved
+    :data:`_CUT_HALVINGS` times, each middle polished from the unknowns of the nearest point found to
+    have a path, keeping the half across which the path stops; the last point found to have one is
+    returned -- so the triangle cut there has a path at every corner. Returns ``(n_edges, 3)``
+    points and ``(n_edges, 2)`` unknowns.
     """
     if len(keys) == 0:
-        return np.zeros((0, 3))
+        return np.zeros((0, 3)), np.zeros((0, 2))
     inside, outside = corners[keys[:, 2]], corners[keys[:, 3]]
+    seeds = np.array(inside_unknowns, dtype=float)
     targets = receivers[keys[:, 1]]
-    sides = np.where(keys[:, 0] == 0, 1.0, -1.0)
-    n = len(keys)
-    # A step's paths each scan a grid, so a step is sized as a pass of that many pairs, padded to
-    # one shape so it compiles once.
-    step = min(receivers_per_step(pair_limit, 1), n)
     for _ in range(_CUT_HALVINGS):
         middle = 0.5 * (inside + outside)
-        found = np.zeros(n, dtype=bool)
-        for first in range(0, n, step):
-            rows = np.minimum(np.arange(first, first + step), n - 1)
-            paths = _shot_paths(
-                media,
-                chain,
-                jnp.asarray(middle[rows]),
-                jnp.asarray(targets[rows]),
-                jnp.asarray(sides[rows]),
-            )
-            found[first : first + step] = np.asarray(paths.valid)[: n - first]
+        _, found, unknowns = _stepped_shots(
+            media, chain, middle, targets, keys[:, 0], seeds, pair_limit
+        )
         inside = np.where(found[:, None], middle, inside)
+        seeds = np.where(found[:, None], unknowns, seeds)
         outside = np.where(found[:, None], outside, middle)
-    return inside
+    return inside, seeds
 
 
 def _shared_corners(surfaces: Surfaces, facets: np.ndarray):

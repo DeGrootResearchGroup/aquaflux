@@ -117,8 +117,14 @@ def _trace(b, beta, geometry):
     return across, miss, ok, jnp.stack(points), jnp.stack(heights)
 
 
-def rim_crossings(geometry, side):
+def rim_crossings(geometry, side, start=None):
     """Where the path round one side of the shell crosses each surface, and whether it exists.
+
+    Found from the grid of :data:`_ROWS` by :data:`_COLUMNS` and a Newton polish, or, given
+    ``start``, by the polish alone from there: the unknowns of the path between a neighbouring source
+    point and the same receiver, round the same side. Paths move smoothly with their source, so a
+    neighbour's is a start inside the polish's basin, and it finds a path whose run of rays is too
+    narrow for the grid to sample.
 
     Parameters
     ----------
@@ -131,6 +137,8 @@ def rim_crossings(geometry, side):
         ``shell_index`` and ``outside_index``. The receiver's leg must be the one leaving the shell.
     side : float
         ``+1`` or ``-1``: which side of the shell's axis the receiver's leg passes.
+    start : jnp.ndarray, shape ``(2,)``, optional
+        Unknowns to polish from instead of scanning the grid, as ``unknowns`` returns them.
 
     Returns
     -------
@@ -139,6 +147,9 @@ def rim_crossings(geometry, side):
         The crossings, projected and along the axis.
     found : jnp.ndarray
         Whether a path was found.
+    unknowns : jnp.ndarray, shape ``(2,)``
+        The path's share of the way across the band of impact parameters at its ``beta``, and its
+        ``beta``: a start for a neighbouring source's path.
     """
     shell, core = geometry["shell_radius"], geometry["core_radius"]
     inner, outer = geometry["shell_index"], geometry["outside_index"]
@@ -159,6 +170,33 @@ def rim_crossings(geometry, side):
         across, miss, ok, _, _ = _trace(impact(fraction, beta), beta, geometry)
         return jnp.stack([across, miss]) / scale, ok
 
+    def polish(_, unknowns):
+        values, _ = misses(unknowns[0], unknowns[1])
+        jacobian = jax.jacfwd(lambda u: misses(u[0], u[1])[0])(unknowns)
+        moved = unknowns - jnp.linalg.solve(jacobian, values)
+        moved = jnp.stack([jnp.clip(moved[0], 0.0, 1.0), jnp.clip(moved[1], -reach, reach)])
+        return jnp.where(jnp.all(jnp.isfinite(moved)), moved, unknowns)
+
+    if start is None:
+        start, bracketed = _scanned(misses, reach)
+    else:
+        bracketed = jnp.asarray(True)
+    unknowns = jax.lax.fori_loop(0, _POLISH, polish, start)
+    values, ok = misses(unknowns[0], unknowns[1])
+    _, _, _, points, heights = _trace(impact(unknowns[0], unknowns[1]), unknowns[1], geometry)
+    found = (
+        exists
+        & bracketed
+        & ok
+        & (unknowns[0] > 0.0)
+        & (unknowns[0] < 1.0)
+        & jnp.all(jnp.abs(values) <= _TOLERANCE)
+    )
+    return points, heights, found, unknowns
+
+
+def _scanned(misses, reach):
+    """A start for the polish from the grid, and whether the grid bracketed a path at all."""
     fractions = (jnp.arange(_COLUMNS) + 0.5) / _COLUMNS
     rows = reach * ((jnp.arange(_ROWS) + 0.5) / _ROWS * 2.0 - 1.0)
 
@@ -216,23 +254,4 @@ def rim_crossings(geometry, side):
             rows[first] + share * (rows[first + 1] - rows[first]),
         ]
     )
-
-    def polish(_, unknowns):
-        values, _ = misses(unknowns[0], unknowns[1])
-        jacobian = jax.jacfwd(lambda u: misses(u[0], u[1])[0])(unknowns)
-        moved = unknowns - jnp.linalg.solve(jacobian, values)
-        moved = jnp.stack([jnp.clip(moved[0], 0.0, 1.0), jnp.clip(moved[1], -reach, reach)])
-        return jnp.where(jnp.all(jnp.isfinite(moved)), moved, unknowns)
-
-    unknowns = jax.lax.fori_loop(0, _POLISH, polish, start)
-    values, ok = misses(unknowns[0], unknowns[1])
-    _, _, _, points, heights = _trace(impact(unknowns[0], unknowns[1]), unknowns[1], geometry)
-    found = (
-        exists
-        & jnp.any(changes)
-        & ok
-        & (unknowns[0] > 0.0)
-        & (unknowns[0] < 1.0)
-        & jnp.all(jnp.abs(values) <= _TOLERANCE)
-    )
-    return points, heights, found
+    return start, jnp.any(changes)
