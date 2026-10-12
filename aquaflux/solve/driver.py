@@ -377,6 +377,9 @@ def staged_march(
         )
         state = result.state
         control_state = result.control_state
+        # The march may have carried a re-fitted preconditioner in the step itself (a traced field
+        # split rides as data), so the step it ended on is the one to refresh from and to adjoint with.
+        strategy = result.strategy
         if not result.triggered or refresh.is_last_segment(segment):
             break
         # Re-freeze at the developed state -- how is the source's, the same choice made at the initial

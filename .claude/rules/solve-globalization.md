@@ -122,6 +122,11 @@ What to take from it, none of which is specific to that mechanism:
   field comments included. A subclass now supplies `stepper` plus the fields its own step shape needs.
   `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `linear_solver` returns a
   different constant, so folding it in would mean inventing a `relaxation_schedule` it does not possess.
+  ⚠️ **`adjoint_preconditioner_factory` is a DATA field since 2026-10-12 (#290); it was static.** A
+  traced field split rides in it as array leaves (`_TracedSplitAdjoint`), so a re-fit can replace it
+  without a recompile. Every other value it takes — a closure, a frozen dataclass such as
+  `FrozenTransposeFactory`, `None` — holds no arrays, so equinox still filters it to the static side and
+  its cache key is unchanged.
   **Verified as a pure refactor**: no field and no default changed on either class, compared field by
   field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
   **0** — it redeclares it, which is why that difference has to be checked rather than assumed).

@@ -332,8 +332,12 @@ class ShiftedStep(eqx.Module):
         for the same reason: an observed march rebuilds it each outer iteration and swaps it in with
         ``tree_at``, which is only a cache hit if it rides as data.
     adjoint_preconditioner_factory : callable or None
-        The ``state -> M`` factory for the converged transpose solve, or ``None`` (static). At the root
-        the operator is the unshifted steady Jacobian, so the adjoint needs no shift.
+        The ``state -> M`` factory for the converged transpose solve, or ``None``. At the root the
+        operator is the unshifted steady Jacobian, so the adjoint needs no shift. Data, not static, for
+        the reason ``krylov_solver`` is: a factory that is a module of arrays (a traced field split's)
+        rides as leaves, so a step re-fitted with new values of the same shapes reuses the compiled
+        step. A closure or a plain value object holds no array leaves, filters to the static side and
+        is compared exactly as a static field would be.
     jacobian_residual : callable or None
         A cheaper stand-in residual ``phi -> R~(phi)`` whose Jacobian-vector product forms this step's
         linear operator, or ``None`` (the default) to differentiate the residual the step is driving to
@@ -364,7 +368,7 @@ class ShiftedStep(eqx.Module):
     residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
     adjoint_preconditioner_factory: (
         Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None
-    ) = eqx.field(static=True, default=None)
+    ) = None
     jacobian_residual: Callable[[jnp.ndarray], jnp.ndarray] | None = None
 
     def norm(self) -> ResidualNorm:
@@ -473,7 +477,7 @@ class PseudoTransientStep(ShiftedStep):
         state and its gradient are unchanged.
     adjoint_preconditioner_factory : callable or None
         The ``state -> M`` preconditioner factory for the converged transpose (adjoint) solve, or
-        ``None`` for an unpreconditioned adjoint (static). At ``φ*`` the operator is the
+        ``None`` for an unpreconditioned adjoint. At ``φ*`` the operator is the
         well-conditioned steady Jacobian (``β → 0``), so the adjoint needs no shift — the ordinary
         (unshifted) preconditioner is the consistent choice.
     """
@@ -769,7 +773,7 @@ class DualTimeStep(ShiftedStep):
         a heterogeneous block system can pass a row-/block-scaled measure, which this strategy makes
         well-behaved (see the class summary).
     adjoint_preconditioner_factory : callable or None
-        The ``state -> M`` factory for the converged transpose (adjoint) solve, or ``None`` (static). At
+        The ``state -> M`` factory for the converged transpose (adjoint) solve, or ``None``. At
         ``φ*`` the operator is the unshifted steady Jacobian (``β → 0``), so the ordinary preconditioner
         is the consistent choice.
     inner_observer : callable or None

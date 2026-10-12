@@ -18,11 +18,15 @@ from aquaflux.solve import (
     ConstantRelaxation,
     DualTimeLoop,
     FieldSplit,
+    FieldSplitPreconditioner,
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
+    MonolithicFactorShiftPolicy,
     SimpleSmoothed,
 )
+from aquaflux.solve.monolithic_policy import TracedSplitShiftPolicy
+from aquaflux.solve.traced_field_split import contains_host_callback
 from aquaflux.turbulence import BlockDiagonal, open_session
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state
@@ -85,7 +89,7 @@ def test_an_asked_for_refit_is_built_at_the_state_the_march_hands_it(case, monke
 
     built_at: list[jnp.ndarray] = []
     monkeypatch.setattr(
-        type(active.shift_policy.preconditioner),
+        FieldSplitPreconditioner,
         "refresh_in_place",
         lambda _self, _mv, _plan, shift, **_kw: built_at.append(jnp.asarray(shift)),
     )
@@ -99,14 +103,96 @@ def test_an_asked_for_refit_is_built_at_the_state_the_march_hands_it(case, monke
 
 
 def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) -> None:
-    """A new object in a static field recompiles the coupled solve, so a session must hand back the same ones."""
+    """A second build glues in the inverse the first one fitted, and keeps the compiled step's key.
+
+    A host inverse rides in a static field compared by identity, so it must be the same object; a
+    traced split rides as data, so it must hold the same values over the same structure. Either way a
+    second build fits nothing and a march built from it is a compilation-cache hit.
+    """
     coupled, state = case
     session = open_session(MaterializedJacobian(_SPLIT), coupled)
     hook = session.refresh_preconditioner
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
-    assert first.shift_policy.preconditioner is second.shift_policy.preconditioner
+    first_leaves, first_def = jax.tree.flatten(eqx.filter(first.shift_policy.split, eqx.is_array))
+    second_leaves, second_def = jax.tree.flatten(
+        eqx.filter(second.shift_policy.split, eqx.is_array)
+    )
+    assert first_def == second_def
+    assert all(jnp.array_equal(a, b) for a, b in zip(first_leaves, second_leaves, strict=True))
     assert session.refresh_preconditioner is hook
+
+
+def test_a_split_of_two_traced_blocks_is_carried_in_the_step_and_each_refit_hands_back_a_new_one(
+    case,
+) -> None:
+    """Both blocks offer a traced cycle, so the step applies the split on device and a re-fit is a new step.
+
+    Three things a wrong wiring would get wrong, each asserted. The step must carry the traced form (no
+    host callback in a Krylov iteration). A re-fit must come back as an update -- the traced split is
+    data and cannot be mutated in place -- while an offered refresh that re-fits nothing returns none.
+    And the update must reach BOTH places the split rides, the shift policy and the adjoint factory, at
+    an unchanged structure (the compiled step's key), applying the host split's re-fitted values.
+    """
+    coupled, state = case
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    assert isinstance(step.shift_policy, TracedSplitShiftPolicy)
+    n = state.shape[0]
+    assert not contains_host_callback(step.shift_policy.split.matvec(), jnp.zeros(n))
+
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    assert session.refresh_preconditioner(active, state) is not None  # the forced first fit
+    assert session.refresh_preconditioner(active, state) is None  # offered, nothing re-fitted
+
+    update = session.refresh_preconditioner(active, state * 1.05, due=True)
+    assert update is not None
+    refitted = update(active)
+    r = jax.random.normal(jax.random.PRNGKey(0), (n,))
+    host = session.preconditioner.inverse.apply(jnp.asarray(r))
+    applied = refitted.shift_policy.split.apply(r)
+    assert jnp.allclose(applied, host, rtol=1e-12, atol=1e-14)
+    assert not jnp.allclose(applied, active.shift_policy.split.apply(r))
+    assert jnp.array_equal(refitted.adjoint_preconditioner_factory(state)(r), applied)
+    assert jax.tree.structure(eqx.filter(refitted, eqx.is_array)) == jax.tree.structure(
+        eqx.filter(active, eqx.is_array)
+    )
+
+
+class _HostOnly:
+    """A block inverse with the host interface and no traced cycle, as a factorization would be."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.n_dofs = inner.n_dofs
+
+    def apply(self, residual, *, transpose: bool = False):
+        return self._inner.apply(residual, transpose=transpose)
+
+    def refactor_block(self, block) -> None:
+        self._inner.refactor_block(block)
+
+
+def test_a_split_with_a_host_block_is_applied_through_a_callback_and_refit_in_place(case) -> None:
+    """A block with no traced cycle has no on-device form, so the split stays a host object.
+
+    The control for the test above: the traced form is chosen by what the blocks offer, so a block that
+    offers nothing must leave the session on the host path, where a re-fit happens in place and the
+    step needs no update.
+    """
+    coupled, state = case
+
+    def host_trailing(role, factory):
+        if role == "leading":
+            return factory
+        return lambda block, n_fields: _HostOnly(factory(block, n_fields))
+
+    session = open_session(MaterializedJacobian(_SPLIT), coupled, inverse_wrapper=host_trailing)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    assert isinstance(step.shift_policy, MonolithicFactorShiftPolicy)
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    assert session.refresh_preconditioner(active, state) is None
+    assert session.refresh_preconditioner(active, state * 1.05, due=True) is None
 
 
 def test_the_session_probe_follows_the_operator_stand_in(case) -> None:

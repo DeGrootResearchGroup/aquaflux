@@ -75,7 +75,7 @@ def _pair():
         leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=4, max_coarse=200),
         trailing_inverse=JacobiSmoothed(max_coarse=150),
     )
-    traced = traced_field_split(matrix, groups, host._leading, host._trailing)
+    traced = traced_field_split(host)
     return host, traced, groups
 
 
@@ -176,7 +176,7 @@ def test_a_host_only_inverse_is_refused_rather_than_silently_composed_on_the_hos
     )
 
     with pytest.raises(TypeError, match="leading inverse _HostOnlyInverse offers no traced cycle"):
-        traced_field_split(matrix, groups, host._leading, host._trailing)
+        traced_field_split(host)
 
 
 def _perturbed(matrix: sp.csr_matrix, seed: int) -> sp.csr_matrix:
@@ -221,11 +221,11 @@ def test_a_split_rebuilt_after_a_refresh_reuses_the_compiled_solve_and_applies_t
         return split.apply(residual)
 
     r = jnp.asarray(np.random.default_rng(5).normal(size=groups.n_dofs))
-    before = apply(traced_field_split(matrix, groups, host._leading, host._trailing), r)
+    before = apply(traced_field_split(host), r)
 
     refreshed = _perturbed(matrix, seed=9)
     host.refactor_block(refreshed)
-    split = traced_field_split(refreshed, groups, host._leading, host._trailing)
+    split = traced_field_split(host)
     after = apply(split, r)
     expected = split.apply(r)
 

@@ -1123,6 +1123,62 @@ def test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero
     assert np.allclose(built_zero.levels[1].operator.to_scipy().toarray(), expected)
 
 
+def _grid_with_stored_zero_edges(side: int, zeroed: bool) -> sp.csr_matrix:
+    """A five-point Laplacian on a ``side x side`` grid; with ``zeroed`` every third edge is a STORED zero.
+
+    Both forms have the same pattern, so a coarsening that reads only the pattern sees no difference.
+    """
+    a = _anisotropic_poisson(side, side, 1.0).tocsr()
+    a.sort_indices()
+    if zeroed:
+        coo = a.tocoo()
+        off = np.flatnonzero(coo.row < coo.col)[::3]
+        edges = set(zip(coo.row[off], coo.col[off], strict=True))
+        mask = np.array(
+            [(r, c) in edges or (c, r) in edges for r, c in zip(coo.row, coo.col, strict=True)]
+        )
+        data = coo.data.copy()
+        data[mask] = 0.0
+        a = sp.csr_matrix((data, (coo.row, coo.col)), shape=a.shape)
+        a.sort_indices()
+    return a
+
+
+@pytest.mark.parametrize("smoothing", ["none", "symmetric-part", "standard"])
+def test_a_threshold_free_mis_coarsening_keeps_its_shapes_when_a_coupling_becomes_exactly_zero(
+    smoothing: str,
+) -> None:
+    """With no strength threshold the maximal-independent-set aggregation must read the pattern alone.
+
+    The aggregation graph was symmetrized by a sparse add and, on an aggressive level, squared by a
+    sparse product, and both drop an entry whose value is exactly zero. A cell pair whose coupling is
+    stored but zero at one state therefore vanished from the graph there and not at another, so the
+    aggregates -- and every coarse array shape -- moved between two operators on the same mesh, which
+    retraced any compiled cycle holding the hierarchy at each refresh between them. A smoothed
+    prolongation ``P_tent - c D⁻¹ A P_tent`` moved the same way, through the product dropping zeros, so
+    each prolongation form is checked.
+    """
+    side = 24
+    zero = _grid_with_stored_zero_edges(side, zeroed=True)
+    live = _grid_with_stored_zero_edges(side, zeroed=False)
+    assert zero.nnz == live.nnz, "premise: the stored pattern is the same"
+    assert (zero.data == 0.0).sum() > 0, "premise: some couplings really are zero"
+    settings = dict(
+        mis_aggregation=True,
+        aggressive_levels=1,
+        max_coarse=20,
+        max_levels=6,
+        prolongation_smoothing=smoothing,
+    )
+
+    built_zero = build_convection_hierarchy(zero, **settings)
+    built_live = build_convection_hierarchy(live, **settings)
+    assert len(built_zero.levels) == len(built_live.levels) >= 3
+    for a, b in zip(built_zero.levels, built_live.levels, strict=True):
+        assert (a.n, a.n_coarse) == (b.n, b.n_coarse), "the aggregates moved with the values"
+        assert a.operator.data.shape == b.operator.data.shape, "a coarse shape moved"
+
+
 def test_galerkin_coarse_pattern_does_not_move_when_a_weight_becomes_zero() -> None:
     """The coarse operator's stored shape must not depend on the transfer operators' *values*.
 

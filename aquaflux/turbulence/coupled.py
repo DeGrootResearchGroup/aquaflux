@@ -71,14 +71,12 @@ from aquaflux.solve import (
     FieldLayout,
     FieldSplit,
     Globalization,
-    HostPreconditioner,
     JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
     MaterializedJacobian,
     MaterializedProblem,
     MaterializedSession,
-    MonolithicFactorShiftPolicy,
     NewtonStrategy,
     PreconditionerSession,
     RefreshPolicy,
@@ -1984,8 +1982,7 @@ def _coupled_step(
 def _monolithic_factor_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
-    base: CoupledShiftPolicy,
-    preconditioner: HostPreconditioner,
+    policy: ShiftPolicy,
     *,
     globalization: Globalization,
     dual_time: DualTimeLoop | None,
@@ -1997,18 +1994,16 @@ def _monolithic_factor_step(
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
 ) -> NewtonStrategy:
-    """Compose a monolithic preconditioner with the block shift, then build the step.
+    """Build the step around a materialized inverse already glued to the block shift.
 
-    The shared seam of every materialized-Jacobian build: it glues the already-built ``preconditioner``
-    (a field split) to the block shift ``base`` via a
-    :class:`MonolithicFactorShiftPolicy` and hands the result to :func:`_coupled_step`. The inverse
-    families differ only in how they construct ``preconditioner``; everything about the march itself is
-    :func:`_coupled_step`'s.
+    The shared seam of every materialized-Jacobian build: ``policy`` is the block shift glued to the
+    fitted inverse by the session (a :class:`MonolithicFactorShiftPolicy`, or a traced split's policy),
+    and everything about the march itself is :func:`_coupled_step`'s.
     """
     return _coupled_step(
         coupled,
         reference_state,
-        MonolithicFactorShiftPolicy(base, preconditioner),
+        policy,
         regime=regime,
         globalization=globalization,
         dual_time=dual_time,
@@ -2227,8 +2222,7 @@ class _CoupledProblem(MaterializedProblem):
     def build_step(
         self,
         state: jnp.ndarray,
-        base: CoupledShiftPolicy,
-        preconditioner: object,
+        policy: ShiftPolicy,
         march: dict,
         base_regime: LinearSolveRegime,
     ) -> NewtonStrategy:
@@ -2239,8 +2233,7 @@ class _CoupledProblem(MaterializedProblem):
         return _monolithic_factor_step(
             self.coupled,
             state,
-            base,
-            preconditioner,
+            policy,
             regime=regime,
             krylov_solver=krylov_solver,
             dual_time=dual_time,

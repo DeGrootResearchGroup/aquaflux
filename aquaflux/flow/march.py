@@ -37,7 +37,6 @@ from aquaflux.solve import (
     MaterializedJacobian,
     MaterializedProblem,
     MaterializedSession,
-    MonolithicFactorShiftPolicy,
     NewtonStrategy,
     PreconditionerSession,
     RefreshPolicy,
@@ -283,12 +282,10 @@ class _FlowProblem(MaterializedProblem):
     def build_step(
         self,
         state: jnp.ndarray,
-        base,
-        preconditioner: object,
+        policy,
         march: dict,
         base_regime: LinearSolveRegime,
     ) -> NewtonStrategy:
-        policy = MonolithicFactorShiftPolicy(base, preconditioner)
         return _flow_shifted_step(
             self.momentum,
             policy,

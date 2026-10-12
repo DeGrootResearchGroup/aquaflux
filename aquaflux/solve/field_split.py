@@ -355,6 +355,21 @@ class FieldSplitInverse:
         return self._groups
 
     @property
+    def leading(self) -> FrozenInverse:
+        """The leading group's block inverse, as it stands after the last refresh."""
+        return self._leading
+
+    @property
+    def trailing(self) -> FrozenInverse:
+        """The trailing group's block inverse, as it stands after the last refresh."""
+        return self._trailing
+
+    @property
+    def coupling(self) -> sp.csr_matrix:
+        """The retained trailing-by-leading block, shape ``(n_trailing_dofs, n_leading_dofs)``."""
+        return self._coupling
+
+    @property
     def n_dofs(self) -> int:
         """Degrees of freedom the preconditioner acts on."""
         return self._groups.n_dofs

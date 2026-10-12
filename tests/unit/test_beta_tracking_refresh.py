@@ -44,8 +44,8 @@ class _RecordingPreconditioner:
         return ()
 
 
-def _stub_step(preconditioner, beta, diagonal):
-    """The smallest Newton step the hook reads: a shift strength, a policy and its diagonal."""
+def _stub_step(beta, diagonal):
+    """The smallest Newton step the hook reads: a shift strength and its policy's base diagonal."""
     # Accepts the optional residual even though the hook does not pass one: a stand-in that is narrower
     # than the protocol breaks silently the day a caller starts supplying it.
     base = SimpleNamespace(
@@ -53,15 +53,17 @@ def _stub_step(preconditioner, beta, diagonal):
     )
     return SimpleNamespace(
         relaxation_schedule=SimpleNamespace(beta=beta),
-        shift_policy=SimpleNamespace(preconditioner=preconditioner, base=base),
+        shift_policy=SimpleNamespace(base=base),
     )
 
 
-def _hook(gain: float = 3.0, **kwargs) -> BetaTrackingRefresh:
+def _hook(preconditioner, gain: float = 3.0, **kwargs) -> BetaTrackingRefresh:
     # The real probe (its plan and gather map are unused here), not a lookalike: the hook asks it which
     # assembler to differentiate, which only the class itself can answer.
     probe = JacobianProbe(plan=object(), structure=object())
-    return BetaTrackingRefresh(_ScalarResidual(gain=jnp.asarray(gain)), probe, **kwargs)
+    return BetaTrackingRefresh(
+        _ScalarResidual(gain=jnp.asarray(gain)), probe, preconditioner, **kwargs
+    )
 
 
 _STATE = jnp.linspace(1.0, 2.0, 5)
@@ -78,10 +80,10 @@ def test_rebinding_the_refresh_swaps_the_case_and_forces_a_full_rebuild() -> Non
     companion's derivative, and the next refresh is a full re-materialize.
     """
     pc = _RecordingPreconditioner()
-    step = _stub_step(pc, beta=0.5, diagonal=_DIAGONAL)
+    step = _stub_step(beta=0.5, diagonal=_DIAGONAL)
     # A full rebuild on the first call and after a rebind, none otherwise --
     # between those only a re-fit the march asks for (``due``) rebuilds the V-cycle.
-    refresh = _hook(gain=3.0)
+    refresh = _hook(pc, gain=3.0)
 
     refresh(step, _STATE)  # the initializing call
     assert len(pc.calls) == 1
@@ -111,14 +113,14 @@ def test_an_asked_for_refit_is_built_at_the_state_and_shift_it_is_handed() -> No
     fitting at anything but the state and ``β`` it is handed.
     """
     pc = _RecordingPreconditioner()
-    refresh = _hook(gain=3.0)
+    refresh = _hook(pc, gain=3.0)
 
-    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # the initializing call
-    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # skipped on this cadence
+    refresh(_stub_step(beta=0.5, diagonal=_DIAGONAL), _STATE)  # the initializing call
+    refresh(_stub_step(beta=0.5, diagonal=_DIAGONAL), _STATE)  # skipped on this cadence
     assert len(pc.calls) == 1
 
     iterate = 2.0 * _STATE
-    refresh(_stub_step(pc, beta=0.25, diagonal=_DIAGONAL), iterate, due=True)
+    refresh(_stub_step(beta=0.25, diagonal=_DIAGONAL), iterate, due=True)
     assert len(pc.calls) == 2
     assert np.allclose(pc.calls[1]["matvec"](_TANGENT), 3.0 * iterate)
     assert np.allclose(pc.calls[1]["shift"], 0.25 * np.asarray(_DIAGONAL))
@@ -131,14 +133,12 @@ def test_the_refit_floor_bounds_the_preconditioners_shift_on_every_refresh() -> 
     badly, which is the regime the floor exists to keep it out of.
     """
     pc = _RecordingPreconditioner()
-    refresh = _hook(refit_beta_floor=0.05)
+    refresh = _hook(pc, refit_beta_floor=0.05)
 
-    refresh(_stub_step(pc, beta=0.01, diagonal=_DIAGONAL), _STATE)  # full, below the floor: floored
-    refresh(
-        _stub_step(pc, beta=0.01, diagonal=_DIAGONAL), _STATE, due=True
-    )  # asked for: floored too
+    refresh(_stub_step(beta=0.01, diagonal=_DIAGONAL), _STATE)  # full, below the floor: floored
+    refresh(_stub_step(beta=0.01, diagonal=_DIAGONAL), _STATE, due=True)  # asked for: floored too
     refresh.rebind(refresh.assembler)
-    refresh(_stub_step(pc, beta=0.5, diagonal=_DIAGONAL), _STATE)  # above it: untouched
+    refresh(_stub_step(beta=0.5, diagonal=_DIAGONAL), _STATE)  # above it: untouched
     assert [float(call["shift"][0]) for call in pc.calls] == [0.1, 0.1, 1.0]
 
 
@@ -150,20 +150,25 @@ def test_the_observer_is_told_which_branch_each_refresh_took() -> None:
     """
     timings: list[RefreshTiming] = []
     pc = _RecordingPreconditioner()
-    refresh = _hook(observer=timings.append)
+    refresh = _hook(pc, observer=timings.append)
 
-    step = _stub_step(pc, beta=0.5, diagonal=_DIAGONAL)
-    refresh(step, _STATE, due=True)
-    refresh(step, _STATE)
-    refresh(step, _STATE, due=True)
+    step = _stub_step(beta=0.5, diagonal=_DIAGONAL)
+    refitted = [
+        refresh(step, _STATE, due=True),
+        refresh(step, _STATE),
+        refresh(step, _STATE, due=True),
+    ]
     assert [timing.kind for timing in timings] == ["full", "none", "cost"]
+    # ...and the caller is told the same thing: a session carrying the inverse in the step as data
+    # hands the march a new step exactly when this says the inverse moved.
+    assert refitted == [True, False, True]
 
 
 def test_a_schedule_with_no_readable_shift_is_refused() -> None:
     """The hook fits at the step's ``β``, so a schedule that does not expose one as a constant is refused
     by name rather than fitted at some other shift."""
-    refresh = _hook()
-    step = _stub_step(_RecordingPreconditioner(), beta=0.5, diagonal=_DIAGONAL)
+    refresh = _hook(_RecordingPreconditioner())
+    step = _stub_step(beta=0.5, diagonal=_DIAGONAL)
     step.relaxation_schedule = SimpleNamespace()
     with pytest.raises(ValueError, match="readable constant"):
         refresh(step, _STATE)

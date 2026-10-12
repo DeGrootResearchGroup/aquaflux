@@ -62,13 +62,17 @@ solver:
   # The materialized coupled Jacobian, split into the [u, v, p] saddle and the [k, omega] block: a
   # SIMPLE-smoothed hierarchy for the saddle (which never eliminates the matrix, so it does not depend
   # on an elimination order) and a Jacobi-smoothed one for the closure. Refitted at a shift no lower
-  # than 0.05.
+  # than 0.05. The saddle's coarsening reads operator values (the strength threshold), so it is frozen
+  # at the first build and a refit only re-derives values: re-coarsening moved its level sizes between
+  # consecutive steps (validation/traced_split_refresh_shapes.py), which recompiles whatever compiled
+  # solve holds the hierarchy.
   preconditioner:
     kind: MaterializedJacobian
     inverse:
       kind: FieldSplit
       leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
-        avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500}
+        avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
+        frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
     # Reach 3 is NOT exact for this coupled residual: the velocity gradient feeds the eddy viscosity,
     # which spends one more ring, so the u and v columns (and, weakly, k into omega) reach 4. At reach 3

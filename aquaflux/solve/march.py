@@ -160,6 +160,10 @@ class MarchResult(NamedTuple):
         into the next segment's :func:`newton_march`, rather than each segment restarting the control
         from scratch — a stateful control (e.g. one climbing the shift strength over many steps) would
         otherwise throw its progress away at every refresh.
+    strategy : NewtonStrategy
+        The base step as of the last step: the one passed in, with every update a
+        ``refresh_preconditioner`` returned applied to it. A driver that marches again or hands the step
+        to the adjoint takes this one, which carries the re-fitted preconditioner.
     """
 
     state: jnp.ndarray
@@ -167,6 +171,7 @@ class MarchResult(NamedTuple):
     converged: bool
     triggered: bool
     control_state: object = None
+    strategy: object = None
 
 
 class ResidualHomotopy(Protocol):
@@ -636,11 +641,14 @@ def newton_march(
         step's shift; a solve builds one from its :class:`~aquaflux.solve.ResidualMeasure`.
         ``None`` (the default) uses ``strategy.norm()`` throughout.
     refresh_preconditioner : callable, optional
-        ``(active_step, state, *, due) -> None``, called before each step (after the control has set the
-        shift strength on ``active_step``) to refresh that step's frozen host preconditioner from the
-        current state and shift. It runs in this eager loop -- a host operation outside the jitted
-        ``_march_step`` -- and mutates the step's *static* preconditioner in place, so ``_march_step``
-        stays a compilation-cache hit.
+        ``(active_step, state, *, due) -> update or None``, called before each step (after the control
+        has set the shift strength on ``active_step``) to refresh that step's frozen preconditioner from
+        the current state and shift. It runs in this eager loop, outside the jitted ``_march_step``. A
+        host preconditioner rides in a *static* field and is re-fitted in place, and the hook returns
+        ``None``. A preconditioner carried as **data** cannot be mutated, so the hook returns an
+        ``update``, ``step -> step``, which the march applies to the base step and the active one alike
+        and reports on :attr:`MarchResult.strategy`. Either way the step's structure is unchanged, so
+        ``_march_step`` stays a compilation-cache hit.
 
         ``due`` is ``True`` when the march is ASKING for a re-fit rather than offering one: the previous
         step stopped for one (:attr:`~aquaflux.solve.StepOutcome.refresh_due`, the dual-time loop's
@@ -905,15 +913,19 @@ def newton_march(
         if retry.escalates and not reports:
             retry.require_shifted(active_step)
         if refresh_preconditioner is not None:
-            # Refresh the step's (frozen, host) preconditioner from the state and shift strength this
-            # step is about to run at -- e.g. re-fitting a materialized-Jacobian inverse at the current
+            # Refresh the step's frozen preconditioner from the state and shift strength this step is
+            # about to run at -- e.g. re-fitting a materialized-Jacobian inverse at the current
             # (state, β), so it preconditions the operator actually solved. Runs HERE, in the eager loop (a host
-            # op outside the jitted `_march_step`), after the control has set β on `active_step`. It
-            # mutates the step's static preconditioner in place, so `_march_step` stays a compilation
-            # cache hit. Forward-only, like the trigger and the control. `due` when the previous step
-            # stopped for exactly this: `state` is then the iterate it kept, so the re-fit is taken
-            # where that step's expensive solve left off.
-            refresh_preconditioner(active_step, state, due=refresh_due)
+            # op outside the jitted `_march_step`), after the control has set β on `active_step`. A host
+            # preconditioner is mutated in place; one carried as data comes back as a step update,
+            # applied to the base step as well so every later step starts from it. Either way the
+            # step's structure is unchanged and `_march_step` stays a compilation-cache hit.
+            # Forward-only, like the trigger and the control. `due` when the previous step stopped for
+            # exactly this: `state` is then the iterate it kept, so the re-fit is taken where that
+            # step's expensive solve left off.
+            update = refresh_preconditioner(active_step, state, due=refresh_due)
+            if update is not None:
+                strategy, active_step = update(strategy), update(active_step)
         prestep_state = state
         outcome, residual_norm = _march_step(
             active_step, step_residual, prestep_state, residual_norm_0, solver
@@ -987,11 +999,13 @@ def newton_march(
                 # established cause -- the same steps were also positivity-cap-bound, and the two
                 # explanations are not separated by that data. Whichever it is, a refresh hook used
                 # with escalation should let a doubling through: re-matching is what this call asks for.
-                refresh_preconditioner(
+                update = refresh_preconditioner(
                     active_step,
                     prestep_state,
                     due=not escalating or bool(outcome.refresh_due),
                 )
+                if update is not None:
+                    strategy, active_step = update(strategy), update(active_step)
             outcome, residual_norm = _march_step(
                 active_step, step_residual, prestep_state, residual_norm_0, solver
             )
@@ -1083,4 +1097,5 @@ def newton_march(
         converged=converged_at(current) and arrived,
         triggered=triggered,
         control_state=control_state,
+        strategy=strategy,
     )

@@ -110,6 +110,7 @@ from .host_preconditioner import (
     ReleasableInverse,
 )
 from .hierarchy_inverse import HierarchyBlockInverse
+from .traced_cycle import OffersTracedCycle, TracedCycle
 from .refresh_timing import (
     RefreshTiming,
 )
@@ -309,6 +310,7 @@ __all__ = [
     "MonotoneLineSearch",
     "NamedBlockMeasure",
     "NewtonStrategy",
+    "OffersTracedCycle",
     "PreconditionerSession",
     "PseudoTransientStep",
     "RampPosition",
@@ -358,6 +360,7 @@ __all__ = [
     "StopsForRefresh",
     "SubLayout",
     "SwitchedEvolutionRelaxation",
+    "TracedCycle",
     "TransposedPreconditioner",
     "VelocityShiftParts",
     "air_multigrid_cycles",

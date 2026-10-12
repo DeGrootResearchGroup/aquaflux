@@ -40,6 +40,8 @@ from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
     _CsrOperator,
+    _ones,
+    _onto_pattern,
     _operator_matvec,
     _smoothed_ops,
 )
@@ -195,17 +197,25 @@ def _simple_pieces(
         )
         block_inverse = _CsrOperator.from_scipy(f_inverse_matrix)
     else:
-        f_inverse_matrix = sp.diags(f_inverse)
+        # An explicit diagonal rather than `sp.diags`, whose conversion to compressed rows drops a zero
+        # entry and would make the products below value-dependent in pattern.
+        rows = np.arange(nv)
+        f_inverse_matrix = sp.csr_matrix((f_inverse, (rows, rows)), shape=(nv, nv))
         block_inverse = None
-    dg = (f_inverse_matrix @ g_block).tocsr()
-    schur = (a[nv:, nv:] - d_block @ dg).tocsr()
+    # Both stored on their structural patterns: a sparse product or difference drops entries that come
+    # out exactly zero, so stored as computed their entry counts -- array shapes in the traced pieces --
+    # would move with the operator's values, and a refit on a fixed coarsening would retrace whatever
+    # compiled program holds them.
+    dg = _onto_pattern(f_inverse_matrix @ g_block, _ones(f_inverse_matrix) @ _ones(g_block))
+    c_block = a[nv:, nv:]
+    schur = _onto_pattern(c_block - d_block @ dg, _ones(c_block) + _ones(d_block) @ _ones(dg))
     # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
     # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
     # which side carries more nonzeros. Printed rather than assumed.
     report(
         f"      Schur {schur.data.shape[0] / 1e6:.1f}M nnz formed vs "
-        f"{(a[nv:, nv:].nnz + d_block.nnz + g_block.nnz) / 1e6:.1f}M as pieces "
-        f"(C {a[nv:, nv:].nnz / 1e6:.1f}M + D {d_block.nnz / 1e6:.1f}M + G {g_block.nnz / 1e6:.1f}M)",
+        f"{(c_block.nnz + d_block.nnz + g_block.nnz) / 1e6:.1f}M as pieces "
+        f"(C {c_block.nnz / 1e6:.1f}M + D {d_block.nnz / 1e6:.1f}M + G {g_block.nnz / 1e6:.1f}M)",
     )
     schur_diagonal = schur.diagonal()
     # A zero Schur diagonal would make the pressure relaxation undefined. It does not arise on this

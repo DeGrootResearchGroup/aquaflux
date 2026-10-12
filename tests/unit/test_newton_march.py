@@ -705,6 +705,53 @@ def test_a_cost_redo_asks_the_refresh_hook_for_a_refit() -> None:
     assert asked == [False, True]
 
 
+class _CostFromData(eqx.Module):
+    """A step whose solve cost is a data leaf and that makes no progress: a stale preconditioner as data."""
+
+    cost: jnp.ndarray
+    relaxation_schedule: ConstantRelaxation
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(phi, self.cost, residual_fn=residual_fn)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def linear_solver(self):
+        return None
+
+
+def test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_step() -> None:
+    """The redo is asked a fresh preconditioner; one carried as data must reach it and outlast it.
+
+    The first attempt costs 40 cycles against a threshold of 10, so it is redone after the hook is
+    asked for a re-fit, which comes back as an update cutting the cost to 1. Applied to the redo's step
+    alone, the next step would revert to 40 and be redone again: the counts are the evidence.
+    """
+    retried: list[str] = []
+
+    def refresh(step, state, *, due):
+        return (lambda s: eqx.tree_at(lambda t: t.cost, s, jnp.asarray(1))) if due else None
+
+    result = newton_march(
+        _CostFromData(jnp.asarray(40), ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=2,
+        rtol=1e-10,
+        atol=1e-12,
+        retry=RetryPolicy(abort_above_cycles=10, cycles_limit=2),
+        on_retry=lambda reason, attempt, beta: retried.append(reason),
+        refresh_preconditioner=refresh,
+    )
+    assert retried == ["cycles"]
+    assert [int(report.cycles) for report in result.reports] == [1, 1]
+    assert int(result.strategy.cost) == 1
+
+
 class _StopsForRefit(eqx.Module):
     """A step that always ends early for a preconditioner re-fit, after an expensive solve.
 
@@ -754,6 +801,58 @@ def test_a_step_that_stopped_for_a_refit_is_kept_and_the_next_step_asks_for_it()
     assert retried == []
     assert float(result.state[0]) == 0.125
     assert asked == [(False, 1.0), (True, 0.5), (True, 0.25)]
+
+
+class _ScalesByFactor(eqx.Module):
+    """A step whose preconditioner stand-in is DATA: it multiplies the state by an array leaf.
+
+    The shape of a traced field split riding in a step: a refresh cannot mutate it, so the hook hands
+    back an update and the march has to carry it into every later step.
+    """
+
+    factor: jnp.ndarray
+    relaxation_schedule: ConstantRelaxation
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(self.factor * phi, 1, residual_fn=residual_fn)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def linear_solver(self):
+        return None
+
+
+def test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_result() -> None:
+    """A preconditioner carried as data comes back from the hook as a step update, once, at a re-fit.
+
+    The march rebuilds the active step from its base step at the top of every iteration, so an update
+    applied to the active step alone would last one step and the next would run on the stale data --
+    here, three steps at the re-fitted factor give 0.25**3 where one step of it gives 0.25 * 0.5**2.
+    The driver adjoints with the step the march reports, so that must carry the update too.
+    """
+    updates = []
+
+    def refresh(step, state, *, due):
+        if updates:
+            return None
+        updates.append(1)
+        return lambda s: eqx.tree_at(lambda t: t.factor, s, jnp.asarray(0.25))
+
+    result = newton_march(
+        _ScalesByFactor(jnp.asarray(0.5), ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=3,
+        rtol=0.0,
+        atol=0.0,
+        refresh_preconditioner=refresh,
+    )
+    assert float(result.state[0]) == 0.25**3
+    assert float(result.strategy.factor) == 0.25
 
 
 def test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it() -> None:

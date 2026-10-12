@@ -2155,7 +2155,23 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   stored zero is never strong); at threshold 0, deeper levels' aggregation now sees structural
   edges carrying zero weight, which is the value-independence the paragraph above claims. Pinned by
   `test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero` (mutation-checked
-  on the build and the refit separately). **Caveat — lAIR does NOT get this for
+  on the build and the refit separately).
+  ⚠️ **Two more zero-dropping sites moved a REBUILD's shapes, and the Galerkin fix alone did not reach
+  them (found the same day, #290).** *(i)* The aggregation graph: at threshold 0 the MIS path
+  symmetrized the cell graph by a sparse add and squared it (aggressive level) by a sparse product,
+  both of which drop an exactly-zero result, so a cell pair whose coupling was stored but zero at one
+  state lost its edge there — measured as pitzDaily's trailing coarse level moving 650 → 648 cells
+  between early-march states. `_build_aggregation_hierarchy` now hands the coarsening `_ones(graph)`
+  when `strength_threshold <= 0` (the MIS helpers read only the pattern, checked: none reads `.data`).
+  *(ii)* A smoothed prolongation `P_tent − c D⁻¹ A_agg P_tent` drops zeros the same way; both smoothed
+  branches now store it on `_smoothing_pattern` (whole cell blocks for `D⁻¹`, `A + Aᵀ` for `A_agg`).
+  After both, `validation/traced_split_refresh_shapes.py` reports **0 moved signatures and 1 trace of
+  the jitted apply across 40 builds** (pitzDaily hybrid start + ten checkpoints, both blocks). Pinned by
+  `test_a_threshold_free_mis_coarsening_keeps_its_shapes_when_a_coupling_becomes_exactly_zero`,
+  parametrized over the three prolongation forms; each fix mutation-checked on its own (no structural
+  graph fails all three, an unpatterned standard or symmetric-part branch fails its own). A nonzero
+  threshold still reads values, so a rebuild there is shape-stable only under `frozen_coarsening`.
+  **Caveat — lAIR does NOT get this for
   free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
   thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and
   the shapes: on a 600-cell chain, cold vs developed coefficients (5000× flux, 1000× viscosity ramp)

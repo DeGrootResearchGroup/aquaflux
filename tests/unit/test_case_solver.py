@@ -766,6 +766,7 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
                     max_coarse=500,
                     block_splitting=True,
                     omega=1.0,
+                    frozen_coarsening=True,
                 ),
                 JacobiSmoothed(max_coarse=2000, equilibrate=False),
             ),

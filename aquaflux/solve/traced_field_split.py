@@ -42,13 +42,12 @@ from __future__ import annotations
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import scipy.sparse as sp
 
-from .field_split import FieldGroups
+from .field_split import FieldGroups, FieldSplitInverse
 from .multigrid import _CsrOperator
 from .traced_cycle import OffersTracedCycle, TracedCycle
 
-__all__ = ["TracedFieldSplit", "traced_field_split"]
+__all__ = ["TracedFieldSplit", "offers_traced_split", "traced_field_split"]
 
 
 class TracedFieldSplit(eqx.Module):
@@ -138,29 +137,38 @@ class TracedFieldSplit(eqx.Module):
         return apply
 
 
-def traced_field_split(
-    matrix: sp.spmatrix,
-    groups: FieldGroups,
-    leading,
-    trailing,
-) -> TracedFieldSplit:
-    """Build a :class:`TracedFieldSplit` from an assembled operator and two traced block inverses.
+def offers_traced_split(inverse: object) -> bool:
+    """Whether ``inverse`` is a field split whose two blocks can both run inside an outer trace.
 
-    The split captures each inverse's hierarchy **as it is now**. After a refresh (``refactor_block``),
-    build a new split from the refreshed inverses; at unchanged shapes that is a compilation-cache hit.
+    The test a caller makes before choosing the traced composition over the host one: a split with a
+    host factorization in either block has no traced form, and is composed on the host as before.
 
     Parameters
     ----------
-    matrix : scipy.sparse matrix
-        The assembled field-major operator, shape ``(n_dofs, n_dofs)``. Only the retained off-diagonal
-        block is read here; each inverse was fitted to its own diagonal block by its own builder.
-    groups : FieldGroups
-        The partition.
-    leading, trailing : OffersTracedCycle
-        The two block inverses. Each must offer a **traced** cycle through ``traced_cycle()``, which
-        :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` and
-        :class:`~aquaflux.solve.field_split.AirReductionInverse` both do. The leading group is solved first,
-        retaining the trailing-by-leading coupling, as in the host split.
+    inverse : object
+        Any frozen inverse.
+    """
+    return (
+        isinstance(inverse, FieldSplitInverse)
+        and isinstance(inverse.leading, OffersTracedCycle)
+        and isinstance(inverse.trailing, OffersTracedCycle)
+    )
+
+
+def traced_field_split(inverse: FieldSplitInverse) -> TracedFieldSplit:
+    """The traced form of a host field split, over what its two inverses and its coupling hold now.
+
+    The split captures each inverse's hierarchy **as it is now**. After a refresh
+    (:meth:`~aquaflux.solve.FieldSplitInverse.refactor_block`), take a new one; at unchanged shapes
+    that is a compilation-cache hit.
+
+    Parameters
+    ----------
+    inverse : FieldSplitInverse
+        The host split. Each of its block inverses must offer a **traced** cycle through
+        ``traced_cycle()``, which :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` and
+        :class:`~aquaflux.solve.field_split.AirReductionInverse` both do. The leading group is solved
+        first, retaining the trailing-by-leading coupling, as in the host split.
 
     Returns
     -------
@@ -172,18 +180,17 @@ def traced_field_split(
         If either inverse offers no traced cycle -- a host factorization cannot be composed on device,
         and silently falling back to the host split would hide the round trip this exists to remove.
     """
-    for name, inverse in (("leading", leading), ("trailing", trailing)):
-        if not isinstance(inverse, OffersTracedCycle):
+    for name, block in (("leading", inverse.leading), ("trailing", inverse.trailing)):
+        if not isinstance(block, OffersTracedCycle):
             raise TypeError(
-                f"the {name} inverse {type(inverse).__name__} offers no traced cycle, so this bundle "
+                f"the {name} inverse {type(block).__name__} offers no traced cycle, so this bundle "
                 "cannot be composed on device; use FieldSplitInverse for a host inverse."
             )
-    _, _, trailing_leading, _ = groups.blocks(matrix)
     return TracedFieldSplit(
-        leading_cycle=leading.traced_cycle(),
-        trailing_cycle=trailing.traced_cycle(),
-        coupling=_CsrOperator.from_scipy(sp.csr_matrix(trailing_leading)),
-        groups=groups,
+        leading_cycle=inverse.leading.traced_cycle(),
+        trailing_cycle=inverse.trailing.traced_cycle(),
+        coupling=_CsrOperator.from_scipy(inverse.coupling),
+        groups=inverse.groups,
     )
 
 

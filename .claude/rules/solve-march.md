@@ -1125,21 +1125,27 @@ or whose blocks are unnamed: `RowScaledNorm` /
       `test_a_step_that_stopped_for_a_refit_is_kept_and_the_next_step_asks_for_it`,
       `test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it` (`test_newton_march.py`),
       and the two session tests in `test_preconditioner_session.py`.
-  - **`refresh_preconditioner` — per-step refresh of the step's frozen host preconditioner (binding,
-    forward-only).** `newton_march(refresh_preconditioner=…)` calls `refresh_preconditioner(active_step, state)`
-    before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
-    **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
-    outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
-    compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
-    `_beta_tracking_refresh` skeleton (now `solve.materialized_session.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
-    `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
-    `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
-    because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the
-    β-move trigger is what averts the α=0 /
-    no-drift stall a *drift* trigger would hit on an overshoot. Distinct from the trigger's `refresh.builder`
-    (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
-    consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`
-    gate and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
+  - **`refresh_preconditioner` — per-step re-fit of the step's frozen preconditioner (binding,
+    forward-only; contract rewritten 2026-10-12, #290).** `newton_march(refresh_preconditioner=…)` calls
+    `refresh_preconditioner(active_step, state, due=…)` in the eager loop before each `_march_step`,
+    *after* the control has set β on `active_step`, and again before a redo. It returns **`None` or an
+    update `step -> step`**:
+    - `None` — nothing to hand back: either nothing re-fitted, or the preconditioner is a host object in
+      a **static** field re-fitted in place (`MonolithicFactorShiftPolicy`), which leaves `_march_step` a
+      compile-cache hit by construction.
+    - an update — the preconditioner rides in the step as **data** (`TracedSplitShiftPolicy`) and the
+      re-fit produced new arrays; the update is `with_traced_split(step, split)`. The march applies it to
+      **both** `strategy` and `active_step` (the active step is rebuilt from `strategy` each iteration,
+      so updating only it lasts one step) and reports the last on **`MarchResult.strategy`**, which
+      `staged_march` carries into the next segment and the adjoint. At unchanged array shapes it is a
+      compile-cache hit; see `solve-field-split.md` for what keeps the shapes fixed.
+    The one consumer is `MaterializedSession.refresh_preconditioner` over `BetaTrackingRefresh`, which
+    re-fits on its first call, after a `rebind`, and when the march passes `due` (a cost-ended step, a
+    trigger). Distinct from the trigger's `refresh.builder`, which restarts a *segment* with a new step.
+    Pinned by `test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_result` and
+    `test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_step`
+    (`tests/unit/test_newton_march.py`, both mutation-checked). There is no `lu_beta_tracking_refresh` or
+    `amg_beta_tracking_refresh`; both went with #371.
   - **The forward-step CONTRACTS live in `solve/strategy.py`, not in whichever module needed them
     first (binding, 2026-08-15).** `NewtonStrategy`, `ShiftedNewtonStrategy`, `StepOutcome`, `StepReport`,
     `StepControl`, the `StepFn` callable alias and `within_tolerance` are what travel between the Newton
