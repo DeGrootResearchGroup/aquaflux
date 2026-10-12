@@ -226,11 +226,12 @@ def between_rows(geometry, side, unknowns, grid=None):
     rows_, columns = grid or (_ROWS, _COLUMNS)
     misses, _, reach, _ = _problem(geometry, side)
     rows = _rows(reach, rows_)
-    beta = unknowns[1]
-    above = jnp.clip(jnp.searchsorted(rows, beta), 1, rows_ - 1)
+    # The path's own ``beta``, the second of its unknowns.
+    axial_index = unknowns[1]
+    above = jnp.clip(jnp.searchsorted(rows, axial_index), 1, rows_ - 1)
     has_below = _row(misses, rows[above - 1], columns)[0]
     has_above = _row(misses, rows[above], columns)[0]
-    beyond = (beta < rows[0]) | (beta > rows[-1])
+    beyond = (axial_index < rows[0]) | (axial_index > rows[-1])
     return beyond | ~(has_below & has_above)
 
 
