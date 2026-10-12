@@ -64,6 +64,7 @@ Run (after ``run_of.sh``) from the repo root:
 from __future__ import annotations
 
 import dataclasses
+import functools
 import os
 import re
 import sys
@@ -97,6 +98,7 @@ from aquaflux.turbulence import (
     CoupledShiftSettings,
     GeometricReynoldsSchedule,
     ResidualTaperedDamping,
+    SSTTurbulence,
     coupled_fields,
     open_session,
     scale_both_blocks,
@@ -485,6 +487,18 @@ _TURB_DAMPING_SHAPE = (
         else " (constant)"
     )
 )
+#: Add the k-production's own feedback rate to the k pseudo-time shift (`PITZ_K_SHIFT_FEEDBACK=1`), a
+#: script-only study arm, off by default. The shift's k diagonal is taken from a k residual whose eddy
+#: viscosity is frozen, so it omits the `-dP/dk` a live eddy viscosity puts on the coupled k row's
+#: Jacobian diagonal; this adds that term's magnitude (`SSTTurbulence.k_production_feedback`) to the
+#: shift rather than netting it. It changes the path only: the shift vanishes at the root. Applied by
+#: switching the library's opt-in default for this process, since the coupled shift has no setting a
+#: case file can state for it.
+K_SHIFT_FEEDBACK = os.environ.get("PITZ_K_SHIFT_FEEDBACK", "0") not in ("", "0")
+if K_SHIFT_FEEDBACK:
+    SSTTurbulence.k_shift_diagonal = functools.partialmethod(
+        SSTTurbulence.k_shift_diagonal, production_feedback=True
+    )
 RAMP_SCALE = SOLVER.continuation.scale
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 
@@ -1221,6 +1235,7 @@ def solve_aquaflux(
             if RAMP == "continuous"
             else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
+        ("k shift production feedback", "added" if K_SHIFT_FEEDBACK else "off"),
         (
             "k wall BC",
             ", ".join(

@@ -20,6 +20,7 @@ for constant density; the variable-density (conservative) form is deferred, as i
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -1184,13 +1185,15 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         shift_basis: ShiftBasis,
         fixed_cells: jnp.ndarray | None = None,
+        added_dissipative: jnp.ndarray | float = 0.0,
     ) -> jnp.ndarray:
         """Combine the scalar shift diagonal's convective/dissipative parts through ``shift_basis``.
 
         Shared by :meth:`k_shift_policy` and :meth:`omega_shift_policy`: the default
         :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) reproduces the full operator
         diagonal (uniform under-relaxation); a convective basis (weight ``0``) gives a local convective
-        pseudo-time step on the scalar.
+        pseudo-time step on the scalar. ``added_dissipative`` (shape ``(n_cells,)``, ``>= 0``) joins the
+        dissipative part before the basis combines them.
         """
         convective, dissipative = scalar_transport_shift_diagonal_parts(
             self.mesh,
@@ -1201,7 +1204,7 @@ class SSTTurbulence(eqx.Module):
             reference,
             fixed_cells=fixed_cells,
         )
-        return shift_basis.local_diagonal(convective, dissipative)
+        return shift_basis.local_diagonal(convective, dissipative + added_dissipative)
 
     def k_shift_diagonal(
         self,
@@ -1210,6 +1213,7 @@ class SSTTurbulence(eqx.Module):
         reference: jnp.ndarray,
         *,
         shift_basis: ShiftBasis = DEFAULT_SHIFT_BASIS,
+        production_feedback: bool = False,
     ) -> jnp.ndarray:
         """The k-equation's base pseudo-time shift diagonal: its transport operator's diagonal.
 
@@ -1228,6 +1232,11 @@ class SSTTurbulence(eqx.Module):
             The field the shift diagonal linearizes at (the current ``k``), shape ``(n_cells,)``.
         shift_basis : ShiftBasis
             How the convective and dissipative parts combine (the full operator diagonal by default).
+        production_feedback : bool
+            Add :meth:`k_production_feedback` to the dissipative part. The diagonal is otherwise taken
+            from :meth:`k_residual`, whose eddy viscosity is frozen, so it omits the term by which a
+            live eddy viscosity drives a coupled k row's diagonal negative; this adds its magnitude
+            rather than netting it, so the shift only grows. ``False`` (default) leaves it out.
 
         Returns
         -------
@@ -1238,8 +1247,60 @@ class SSTTurbulence(eqx.Module):
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
         return self._scalar_shift_diagonal(
-            diffusivity.values, mdot, self.k_residual(mdot, closure), reference, shift_basis
+            diffusivity.values,
+            mdot,
+            self.k_residual(mdot, closure),
+            reference,
+            shift_basis,
+            added_dissipative=(
+                self.k_production_feedback(mdot, closure) if production_feedback else 0.0
+            ),
         )
+
+    def k_production_feedback(self, mdot: jnp.ndarray, closure: SSTClosureFields) -> jnp.ndarray:
+        """How fast the k-production grows with ``k`` through the eddy viscosity, per cell.
+
+        ``nu_t = a_1 k / max(a_1 omega, S F_2)`` is proportional to ``k``, so the production
+        ``nu_t S**2`` is too, and in a residual whose eddy viscosity is live that puts a negative term
+        ``-dP/dk`` on the k row's Jacobian diagonal. :meth:`k_residual` reads ``closure.nu_t`` as a
+        frozen array, so a diagonal taken from it holds none of that term. This returns its magnitude:
+        the k row's diagonal with the production's eddy viscosity frozen
+        (:attr:`explicit_production_viscosity`) minus the diagonal with it live, both at ``closure``.
+
+        The production at a cell reads ``k`` at that cell alone through ``nu_t``, so the difference is
+        diagonal and one Jacobian action along the ones vector reads all of it. The k diffusivity reads
+        the same live ``nu_t`` in both and cancels.
+
+        Parameters
+        ----------
+        mdot : jnp.ndarray
+            The flow's Rhie--Chow mass flux, shape ``(n_faces,)``.
+        closure : SSTClosureFields
+            The closure fields the k residual is evaluated with.
+
+        Returns
+        -------
+        jnp.ndarray
+            The production feedback, shape ``(n_cells,)``; ``>= 0`` wherever the production grows with
+            ``k``.
+        """
+        frozen = dataclasses.replace(self, explicit_production_viscosity=True)
+
+        def row(turbulence):
+            def of_k(k):
+                nu_t = self.model.eddy_viscosity(
+                    k,
+                    closure.omega,
+                    closure.strain_rate,
+                    self.molecular_viscosity,
+                    self.wall_distance,
+                )
+                live = eqx.tree_at(lambda c: c.nu_t, closure, nu_t)
+                return turbulence.k_residual(mdot, live)(closure.k)
+
+            return jax.jvp(of_k, (closure.k,), (jnp.ones_like(closure.k),))[1]
+
+        return jax.lax.stop_gradient(row(frozen) - row(self))
 
     def k_shift_policy(
         self,
