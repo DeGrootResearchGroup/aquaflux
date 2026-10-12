@@ -14,15 +14,19 @@ choices with everything else held fixed:
 
 Only the first build differs: a refresh carries the flow block over unchanged.
 
-Two cases. A **bump channel** (a Gaussian bump on the lower wall), on which the hybrid start's
-potential flow accelerates over the crest and so differs materially from a plug, and which separates
-behind the bump -- the case that can tell the arms apart. And the straight **channel** of
-`tests/integration/test_coupled_rans.py`, where potential flow is essentially the plug: a control
-that should come out (nearly) identical.
+Three cases. Two **bump channels** (a Gaussian bump on the lower wall), on which the hybrid start's
+potential flow accelerates over the crest and so differs materially from a plug: ``bump`` (0.10 H)
+and ``bump-high`` (0.30 H). And the straight **channel** of `tests/integration/test_coupled_rans.py`,
+where potential flow is the plug to round-off: a control whose arms must come out identical.
+
+On a bump the plug is far from divergence-free -- it pushes the inlet flux into a channel that
+narrows -- and from about 0.15 H the frozen upwind operator it gives loses positivity on the first
+coarse level, so the plug arm's hierarchy refuses to build. A build refusal is recorded as the arm's
+result rather than ending the run.
 
 Run with ``validation/run_case.sh validation/velocity_block_reference.py``. Environment:
-``VBR_CASES`` (comma list of ``bump``, ``channel``; default both), ``VBR_ARMS`` (default
-``plug,reference``), ``VBR_MAX_STEPS`` (default 300).
+``VBR_CASES`` (comma list of ``bump``, ``bump-high``, ``channel``; default all three), ``VBR_ARMS``
+(default ``plug,reference``), ``VBR_MAX_STEPS`` (default 300).
 """
 
 from __future__ import annotations
@@ -110,7 +114,7 @@ def _select_arm(arm: str) -> None:
 # --- the cases ----------------------------------------------------------------------------------
 
 
-def _bump_mesh(nx=72, ny=32, length=6.0, crest=1.5, height=0.3, width=0.35):
+def _bump_mesh(height, nx=72, ny=32, length=6.0, crest=1.5, width=0.35):
     """A channel whose lower wall carries a Gaussian bump; nodes sheared wall-normal onto it."""
     mesh = structured_grid_2d(
         nx, ny, lx=length, ly=H, named_boundaries=True, y_nodes=graded_nodes(ny, H, 1.15)
@@ -130,7 +134,8 @@ def _straight_mesh():
 
 CASES = {
     # name: (mesh builder, kinematic viscosity)
-    "bump": (_bump_mesh, 1e-4),  # Re_H = 1e4
+    "bump": (lambda: _bump_mesh(0.10), 1e-4),  # Re_H = 1e4
+    "bump-high": (lambda: _bump_mesh(0.30), 1e-4),
     "channel": (_straight_mesh, 4e-4),  # the integration test's Re_H = 2500
 }
 
@@ -227,9 +232,19 @@ def run(name: str, arm: str) -> dict:
             flush=True,
         )
 
-    flow, k, omega = solve_coupled(
-        coupled, preconditioner=BlockDiagonal(), max_steps=MAX_STEPS, on_step=on_step
-    )
+    try:
+        flow, k, omega = solve_coupled(
+            coupled, preconditioner=BlockDiagonal(), max_steps=MAX_STEPS, on_step=on_step
+        )
+    except Exception as error:  # a refused build or an unconverged march is this arm's result
+        print(f"  {name}/{arm} FAILED: {type(error).__name__}: {str(error)[:200]}", flush=True)
+        return {
+            "frozen at": _FROZEN.get("used"),
+            "failed": type(error).__name__,
+            "steps": len(reports),
+            "cycles": sum(int(r.restart_cycles) for r in reports),
+            "wall": time.monotonic() - started,
+        }
     wall = time.monotonic() - started
     return {
         "frozen at": _FROZEN.get("used"),
@@ -243,7 +258,7 @@ def run(name: str, arm: str) -> dict:
 
 
 def main() -> None:
-    cases = os.environ.get("VBR_CASES", "bump,channel").split(",")
+    cases = os.environ.get("VBR_CASES", "bump,bump-high,channel").split(",")
     arms = os.environ.get("VBR_ARMS", "plug,reference").split(",")
     for name in cases:
         coupled = _coupled(name)
@@ -255,13 +270,20 @@ def main() -> None:
         results = {arm: run(name, arm) for arm in arms}
         print(f"== {name} summary", flush=True)
         for arm, r in results.items():
+            if "failed" in r:
+                print(
+                    f"  {arm:10s} frozen at {r['frozen at']}  FAILED ({r['failed']}) after "
+                    f"{r['steps']} steps, {r['cycles']} cycles, {r['wall']:.1f}s",
+                    flush=True,
+                )
+                continue
             print(
                 f"  {arm:10s} frozen at {r['frozen at']:>10s}  steps {r['steps']:3d}  "
                 f"cycles {r['cycles']:4d}  wall {r['wall']:7.1f}s  final |R| {r['final |R|']:.3e}  "
                 f"separated length {r['separated length']:.4f}",
                 flush=True,
             )
-        if len(results) == 2:
+        if len(results) == 2 and all("fields" in r for r in results.values()):
             a, b = (r["fields"] for r in results.values())
             print(
                 f"  roots agree to rel {np.linalg.norm(a - b) / np.linalg.norm(a):.2e}", flush=True
