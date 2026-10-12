@@ -4997,6 +4997,19 @@ are bent too (no straight-through factor left anywhere).
   8-9 % of the route's light still missing at 16 sectors is not decomposed. Fast gate on this tree (`4bfef62`, two
   workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
   `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
+- **THE GAP ROUTES STAY DESCENDED: SHOOTING MISSES THEIR STEEP PATHS (2026-10-12).** Plan item 3 was to
+  move the routes through a neighbour's quartz AND air gap to shooting once it finds every path the
+  descent finds. `gap_shooting.py` (at `a680743`, with shooting generalized to a band from the shell's
+  axis to the core's edge -- both taken out in the next commit; the sleeve-optics README has the run)
+  found it does not: 986 of 1,672 paths at (55,25) through sleeve 1, none of 868 at (-25,41) through
+  sleeve 2, and nothing the descent misses. The missed paths start more than 0.1 m along the 3 m arc and
+  climb the air gaps nearly axially (`beta` within 3e-4 of the air's index); they carry ~10 % of the
+  route's summed transmittance (no mask). The rows were not the problem: rows even in angle (crowding
+  towards the band's ends) and rows at the ends missed 666 / 718 against 686. At such a `beta` the
+  impact parameters whose backward ray reaches the source's own gap are a sliver along each row,
+  narrower than its 32 samples. ⚠️ **The rim route has the same row sampling**: a rim path from far
+  along a lamp may be missed the same way. `rim_light.py`'s agreement (0.924 / 0.910) bounds what that
+  costs at its points, not elsewhere.
 - ⚠️ **THE "NO SOUND GEOMETRIC CULL" FINDING USED THE WRONG BOUND.** It summed the largest turn at each
   surface (`90 - asin(n_min/n_max)`: water-quartz 23.9, quartz-air 48.3 deg) to 120 / 216.6 deg, which no
   single path reaches. Through coaxial cylinders a ray keeps its impact parameter `b` and `n u_z`, so its

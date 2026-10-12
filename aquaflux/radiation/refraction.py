@@ -800,8 +800,7 @@ def _shot_path(media: Media, chain: Chain, source, receiver, side) -> Paths:
         }
     )
     geometry["outs"] = tuple(out for _, out in chain.crossings)
-    geometry["through_core"] = len(chain.passing) > 1
-    projected, heights, found = shooting.crossings(geometry, side)
+    projected, heights, found = shooting.rim_crossings(geometry, side)
     crossing = (
         projected[:, :1] * jax.lax.stop_gradient(first)
         + projected[:, 1:] * jax.lax.stop_gradient(second)

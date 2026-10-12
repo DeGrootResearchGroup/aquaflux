@@ -1,4 +1,4 @@
-"""Paths through a cylindrical shell, found by shooting rather than by descent.
+"""Paths that skim the rim of a cylindrical shell, found by shooting rather than by descent.
 
 Light from a source to a receiver can pass through the wall of a quartz sleeve without entering the
 air gap it holds: it skims the sleeve's rim, bent round it. Every such path is a saddle point of its
@@ -14,9 +14,8 @@ and, about each cylinder's own axis, the index times the impact parameter of the
 The projection onto the plane across the axis then obeys Snell's law with the effective index
 ``sqrt(n^2 - beta^2)`` in each medium, and the distance travelled along the axis follows from the
 projected length of each leg. So a path is fixed by two unknowns, ``beta`` and the impact parameter
-``b`` of the receiver's leg about the shell's axis, and both have known ranges. Round the rim -- the
-path in the shell's wall alone -- ``b`` lies between the radius at which the path inside the shell
-would just miss its core and the shell's own radius; through the core it lies below that radius.
+``b`` of the receiver's leg about the shell's axis, and both have known ranges: ``b`` lies between
+the radius at which the path inside the shell would just miss its core and the shell's own radius.
 
 **How a path is found.** Over a grid of ``beta`` and ``b`` the ray is traced and its miss of the
 source measured, across the projected ray and along the axis. Along each row of fixed ``beta`` the
@@ -118,8 +117,8 @@ def _trace(b, beta, geometry):
     return across, miss, ok, jnp.stack(points), jnp.stack(heights)
 
 
-def crossings(geometry, side):
-    """Where the path past one side of the shell's axis crosses each surface, and whether it exists.
+def rim_crossings(geometry, side):
+    """Where the path round one side of the shell crosses each surface, and whether it exists.
 
     Parameters
     ----------
@@ -129,9 +128,7 @@ def crossings(geometry, side):
         ``outs`` (a tuple of ``m`` bools, a static value) for the cylinders crossed, in the chain's
         order; ``indices`` ``(m + 1,)``, each leg's refractive index; ``shell`` ``(2,)`` the shell's
         axis, ``shell_radius``, ``core_radius`` (the largest core the path must miss),
-        ``shell_index`` and ``outside_index``; ``through_core`` (a static bool), whether the path
-        passes through the core rather than round it in the wall alone. The receiver's leg must be
-        the one leaving the shell.
+        ``shell_index`` and ``outside_index``. The receiver's leg must be the one leaving the shell.
     side : float
         ``+1`` or ``-1``: which side of the shell's axis the receiver's leg passes.
 
@@ -145,23 +142,18 @@ def crossings(geometry, side):
     """
     shell, core = geometry["shell_radius"], geometry["core_radius"]
     inner, outer = geometry["shell_index"], geometry["outside_index"]
-    through_core = geometry["through_core"]
-    # No beta can reach an index of any leg. Round the rim the band is also empty past the beta at
-    # which the core's edge, seen through the shell, reaches the shell's own radius; through the
-    # core it runs from the axis to that edge, which is never empty.
-    reach = jnp.min(geometry["indices"]) * (1.0 - 1e-9)
-    if through_core:
-        exists = jnp.asarray(True)
-    else:
-        edge = (shell**2 * outer**2 - core**2 * inner**2) / (shell**2 - core**2)
-        reach = jnp.minimum(jnp.sqrt(jnp.maximum(edge, 0.0)), reach)
-        exists = edge > 0.0
+    # The band is empty past the beta at which the core's edge, seen through the shell, reaches
+    # the shell's own radius; and no beta can reach an index of any leg.
+    edge = (shell**2 * outer**2 - core**2 * inner**2) / (shell**2 - core**2)
+    reach = jnp.minimum(
+        jnp.sqrt(jnp.maximum(edge, 0.0)), jnp.min(geometry["indices"]) * (1.0 - 1e-9)
+    )
+    exists = edge > 0.0
     scale = jnp.maximum(norm(geometry["receiver"] - geometry["source"]), 1e-300)
 
     def impact(fraction, beta):
-        edge_of_core = core * jnp.sqrt(inner**2 - beta**2) / jnp.sqrt(outer**2 - beta**2)
-        low, high = (0.0, edge_of_core) if through_core else (edge_of_core, shell)
-        return side * (low + (high - low) * fraction)
+        low = core * jnp.sqrt(inner**2 - beta**2) / jnp.sqrt(outer**2 - beta**2)
+        return side * (low + (shell - low) * fraction)
 
     def misses(fraction, beta):
         across, miss, ok, _, _ = _trace(impact(fraction, beta), beta, geometry)

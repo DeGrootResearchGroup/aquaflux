@@ -324,3 +324,31 @@ triangles reached at one or two corners. 8 sectors (13,312 facets), points (55,2
   shot route, a straddling facet is now cut where its paths stop and the part with paths counted,
   which took the route to 0.924 / 0.910 of the backward gather at 16 sectors (table above). The
   descended routes keep the all-corners rule, at most ~0.07 % of G by the estimate here.
+
+### Shooting does not find every path through a neighbour's air gap (`gap_shooting.py`, at `a680743`)
+
+The plan was to move the routes through a neighbour's quartz and air gap from the descent to
+shooting, but only once shooting finds every path the descent finds there. It does not, so they
+stay descended. The probe and the six-line generalization of shooting it needs (the receiver leg's
+impact parameter running from the shell's axis to the core's edge) are in commit `a680743` and were
+taken out in the next commit. To re-run, check out that commit and run
+`validation/sleeve_optics/gap_shooting.py`.
+
+8 sectors (13,312 facets), every distinct corner of lamp 0's arc and of lamp 1's against four
+points, no mask; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, run beside another case (timings
+contended and not quoted), 2026-10-12:
+
+- **Shooting finds no path the descent misses, and misses many it finds**: 986 of 1,672 at
+  (55, 25) through sleeve 1, 922 of 1,672 through sleeve 2; at (-25, 41) through sleeve 2, none of 868.
+- **The missed paths carry light**: on the first of those routes, 10 % of the route's summed path
+  transmittance (55.4 of 528.7). They start more than 0.1 m along the 3 m arc, and climb the air
+  gaps almost along the axis (`beta = n u_z` within 3e-4 of the air's index). At such a `beta`, the
+  receiver leg's impact parameters whose backward ray reaches the source's own gap form a sliver
+  narrower than the 32 samples along a row can find. The trace itself is right: at the descent's
+  path, both misses are ~1e-10.
+- **Rows spaced evenly in angle, so they crowd towards the band's ends, did not help**: 666 missed
+  with cell-centred rows, 718 with the band's ends as rows, against 686. What is missing is along
+  each row, not across the rows.
+- Many of these paths cross the receiver's neighbour's arc inside its gap, and the shadow mask
+  would take them out. The criterion agreed for switching was to find every path, so that was not
+  used to excuse them.
