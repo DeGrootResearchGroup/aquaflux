@@ -394,7 +394,12 @@ def test_a_materialized_preconditioner_is_one_session_shared_by_every_point(monk
     now owns, so it no longer travels beside it -- and each point is handed that session, re-pointed at
     its own companion.
     """
-    from aquaflux.solve import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+    from aquaflux.precondition import (
+        FieldSplit,
+        JacobiSmoothed,
+        MaterializedJacobian,
+        SimpleSmoothed,
+    )
 
     calls = _record_solves(monkeypatch)
     solve_reynolds_continuation(
@@ -1118,7 +1123,8 @@ def test_the_residual_taper_survives_the_MONOLITHIC_WRAPPER_the_cases_actually_r
     per-row multiplier on the way out -- in silence, so the march ran and the taper simply never
     happened. Asserting on the base policy alone cannot see that; this drives the wrapper.
     """
-    from aquaflux.solve import DEFAULT_SHIFT_BASIS, MonolithicFactorShiftPolicy
+    from aquaflux.precondition import MonolithicFactorShiftPolicy
+    from aquaflux.solve import DEFAULT_SHIFT_BASIS
     from aquaflux.turbulence import ResidualTaperedDamping, turbulence_residual_norm
     from aquaflux.turbulence.coupled import _monolithic_shift_source
 
@@ -1544,7 +1550,12 @@ def test_the_ladder_only_keywords_are_derived_from_the_two_signatures() -> None:
 
 def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(monkeypatch) -> None:
     """The first step is fitted to the anchor it solves, and every station change re-points the session."""
-    from aquaflux.solve import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+    from aquaflux.precondition import (
+        FieldSplit,
+        JacobiSmoothed,
+        MaterializedJacobian,
+        SimpleSmoothed,
+    )
     from aquaflux.turbulence import solve_reynolds_ramp
 
     coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)

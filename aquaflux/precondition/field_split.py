@@ -48,6 +48,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from ..solve import FieldLayout
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import FrozenInverse, release, require_refactorable
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
@@ -59,7 +60,6 @@ from .multigrid import (
     convection_multigrid_cycles,
     refresh_air_hierarchy,
 )
-from .state import FieldLayout
 from .traced_cycle import TracedCycle
 
 __all__ = [
@@ -245,9 +245,9 @@ class FieldGroups:
         A block-triangular inverse (:class:`FieldSplitInverse`) fits one inverse per diagonal
         block plus **one** off-diagonal triangle -- the other is never read, whatever the operator or the
         state. This is that fact as the ``(n_fields, n_fields)`` boolean table
-        :class:`~aquaflux.solve.sparse_jacobian.ColumnProbePlan`'s ``active_rows`` wants, so a caller
-        materializing a Jacobian specifically to feed a split can drop the unread triangle from the
-        pattern before it is ever built rather than slicing it away afterward.
+        :class:`~aquaflux.precondition.sparse_jacobian.ColumnProbePlan`'s ``active_rows`` wants, so a
+        caller materializing a Jacobian specifically to feed a split can drop the unread triangle from
+        the pattern before it is ever built rather than slicing it away afterward.
 
         Returns
         -------
@@ -266,7 +266,8 @@ class FieldSplitInverse:
 
     A pure host object (numpy/scipy plus whatever the block inverses are), with the same
     ``apply(residual, transpose=...)`` interface as any frozen block inverse
-    (:class:`~aquaflux.solve.FrozenInverse`), so it is a drop-in wherever a frozen approximate inverse of the coupled operator is wanted.
+    (:class:`~aquaflux.precondition.FrozenInverse`), so it is a drop-in wherever a frozen approximate
+    inverse of the coupled operator is wanted.
 
     One application solves the leading group, corrects the trailing group's right-hand side by the
     retained coupling, and solves the trailing group::
@@ -287,8 +288,8 @@ class FieldSplitInverse:
     ----------
     leading, trailing : FrozenInverse
         The two block inverses, each over its own group's degrees of freedom. A refresh additionally needs
-        each to be a :class:`~aquaflux.solve.RefactorableInverse`, which
-        :class:`~aquaflux.solve.HierarchyBlockInverse` and :class:`AirReductionInverse` are.
+        each to be a :class:`~aquaflux.precondition.RefactorableInverse`, which
+        :class:`~aquaflux.precondition.HierarchyBlockInverse` and :class:`AirReductionInverse` are.
     coupling : scipy.sparse matrix
         The retained off-diagonal block, mapping the **leading** group's degrees of freedom to the
         **trailing** group's equations, shape ``(n_trailing_dofs, n_leading_dofs)``. Taken from the
@@ -299,7 +300,7 @@ class FieldSplitInverse:
     Raises
     ------
     TypeError
-        If either block inverse is not a :class:`~aquaflux.solve.FrozenInverse`.
+        If either block inverse is not a :class:`~aquaflux.precondition.FrozenInverse`.
     ValueError
         If ``coupling`` does not have the shape the partition implies.
     """
@@ -396,8 +397,8 @@ class FieldSplitInverse:
         operator's values.
 
         This is the same capability, under the same name, that each block inverse offers, so a split is
-        itself a :class:`~aquaflux.solve.RefactorableInverse` and refreshes through the same path as a
-        single block inverse.
+        itself a :class:`~aquaflux.precondition.RefactorableInverse` and refreshes through the same path
+        as a single block inverse.
 
         Parameters
         ----------
@@ -450,10 +451,10 @@ def field_split_inverse(
         The partition. Its leading group is the one listed first in the field order, and is solved first.
     leading_inverse, trailing_inverse : callable
         ``(sub_matrix, n_fields_in_group) -> inverse`` for that block -- for example
-        :class:`~aquaflux.solve.SimpleSmoothed` on a pressure-velocity saddle and
-        :class:`~aquaflux.solve.JacobiSmoothed` on a pair of transported scalars. The returned
-        object must be a :class:`~aquaflux.solve.FrozenInverse`, be a fixed linear map (the outer Krylov
-        solve is not flexible) and transpose exactly (the adjoint's solve uses it).
+        :class:`~aquaflux.precondition.SimpleSmoothed` on a pressure-velocity saddle and
+        :class:`~aquaflux.precondition.JacobiSmoothed` on a pair of transported scalars. The returned
+        object must be a :class:`~aquaflux.precondition.FrozenInverse`, be a fixed linear map (the outer
+        Krylov solve is not flexible) and transpose exactly (the adjoint's solve uses it).
 
     Returns
     -------
@@ -472,13 +473,13 @@ def field_split_inverse(
 class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
     """The field split as JAX matvecs, over the shared materialized-Jacobian machinery.
 
-    Built on :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which holds the coloured jvp
-    probe that materializes the coupled Jacobian, the shift-diagonal add and the in-place refresh; the
-    ``jax.pure_callback`` matvec (which reads ``self.inverse`` at call time, so an in-place refresh
+    Built on :class:`~aquaflux.precondition.MaterializedJacobianPreconditioner`, which holds the coloured
+    jvp probe that materializes the coupled Jacobian, the shift-diagonal add and the in-place refresh;
+    the ``jax.pure_callback`` matvec (which reads ``self.inverse`` at call time, so an in-place refresh
     re-preconditions the same compiled solve) and the teardown come from
-    :class:`~aquaflux.solve.HostPreconditioner`. Any preparation of a block -- equilibration, reordering
-    -- is left to that block's own injected inverse, because the two groups have different field counts
-    and different scales.
+    :class:`~aquaflux.precondition.HostPreconditioner`. Any preparation of a block -- equilibration,
+    reordering -- is left to that block's own injected inverse, because the two groups have different
+    field counts and different scales.
 
     .. warning::
        ``refresh_in_place`` is forward-march only: the
@@ -526,7 +527,7 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
         leading_inverse, trailing_inverse : callable
             ``(sub_matrix, n_fields_in_group) -> inverse`` for that block, exactly as
             :func:`field_split_inverse` takes them. An injected inverse must be a
-            :class:`~aquaflux.solve.RefactorableInverse` to survive a mid-march refresh.
+            :class:`~aquaflux.precondition.RefactorableInverse` to survive a mid-march refresh.
 
         Returns
         -------
@@ -570,8 +571,9 @@ def _jacobi_smoothed_cycle(
 
     Module-level and taking the hierarchy as an ARGUMENT, so a refresh at unchanged shapes swaps its
     values into the SAME compiled cycle. ``extras`` is the smoother-specific record the shared
-    :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` passes through; this family reads the
-    levels alone, so it is always ``None`` and is accepted only to keep the two cycles one shape.
+    :class:`~aquaflux.precondition.hierarchy_inverse.HierarchyBlockInverse` passes through; this family
+    reads the levels alone, so it is always ``None`` and is accepted only to keep the two cycles one
+    shape.
     """
     return convection_multigrid_cycles(
         hierarchy,
@@ -602,8 +604,9 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
     Parameters
     ----------
     block, n_fields, strength_threshold, max_levels, max_coarse, frozen_coarsening, shape_headroom, report
-        See :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`, which owns the hierarchy,
-        the in-place refresh and the host boundary. Only the smoother below belongs to this class.
+        See :class:`~aquaflux.precondition.hierarchy_inverse.HierarchyBlockInverse`, which owns the
+        hierarchy, the in-place refresh and the host boundary. Only the smoother below belongs to this
+        class.
     cycles : int
         V-cycles per application. The count is fixed, so ``b -> x`` stays a linear map, as the
         non-flexible outer Krylov solve and the transposed adjoint solve both require.
@@ -627,7 +630,7 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
 
         ``False`` is byte-identical to the class's original behaviour. A nonzero
         ``strength_threshold`` prunes edges before aggregation and so is more prone to stranding
-        vertices this way; see :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+        vertices this way; see :func:`~aquaflux.precondition.multigrid.build_convection_hierarchy`.
 
     Notes
     -----
@@ -720,7 +723,7 @@ def _air_cycle(hierarchy: AirHierarchy, b: jnp.ndarray, settings: _AirStep) -> j
 
 @dataclasses.dataclass(frozen=True)
 class _AirStep:
-    """The static half of an lAIR inverse's :class:`~aquaflux.solve.traced_cycle.TracedCycle`.
+    """The static half of an lAIR inverse's :class:`~aquaflux.precondition.traced_cycle.TracedCycle`.
 
     Plain numbers only, so it hashes and compares by value and two inverses at the same settings share
     one compiled cycle.
@@ -745,12 +748,12 @@ class AirReductionInverse:
     eliminating the fine points nearly exact — Peclet-robust and mesh-independent where a deep Galerkin
     recursion is not (Manteuffel, Ruge & Southworth, SISC 2018).
 
-    **It does not subclass** :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`: that base
-    owns a :class:`~aquaflux.solve.multigrid.SmoothedHierarchy` and refreshes it by re-fitting the
-    aggregation, while this owns an :class:`~aquaflux.solve.multigrid.AirHierarchy` and refreshes by
-    re-solving the local restriction systems on a frozen C/F split. Widening one class to hold either
-    would make it the union of two coarsening families, needing the settings of each to sit unused on
-    the other.
+    **It does not subclass** :class:`~aquaflux.precondition.hierarchy_inverse.HierarchyBlockInverse`:
+    that base owns a :class:`~aquaflux.precondition.multigrid.SmoothedHierarchy` and refreshes it by
+    re-fitting the aggregation, while this owns an :class:`~aquaflux.precondition.multigrid.AirHierarchy`
+    and refreshes by re-solving the local restriction systems on a frozen C/F split. Widening one class
+    to hold either would make it the union of two coarsening families, needing the settings of each to
+    sit unused on the other.
 
     Parameters
     ----------
@@ -766,7 +769,7 @@ class AirReductionInverse:
     omega : float
         Smoother damping.
     **settings
-        Forwarded to :func:`~aquaflux.solve.multigrid.build_air_hierarchy` (``theta``,
+        Forwarded to :func:`~aquaflux.precondition.multigrid.build_air_hierarchy` (``theta``,
         ``restriction_theta``, ``degree``, ``max_coarse``, ``max_levels``).
     """
 
@@ -819,8 +822,8 @@ class AirReductionInverse:
 
         Reuses the C/F split, the prolongation and the restriction's F-neighbourhoods, re-solving only
         the local systems, so every shape is held and the compiled cycle above is a cache hit rather
-        than a recompile. :func:`~aquaflux.solve.multigrid.refresh_air_hierarchy` raises if any shape
-        moved, which would mean the operator did not come from the same mesh graph.
+        than a recompile. :func:`~aquaflux.precondition.multigrid.refresh_air_hierarchy` raises if any
+        shape moved, which would mean the operator did not come from the same mesh graph.
         """
         self._hierarchy = refresh_air_hierarchy(self._hierarchy, sp.csr_matrix(block))
         self._transpose_fn = None  # the transpose closes over the hierarchy it was built for

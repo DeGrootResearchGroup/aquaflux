@@ -34,6 +34,7 @@ from collections.abc import Callable, Mapping
 from typing import ClassVar, Literal
 
 from aquaflux.flow import MassFlow, bulk_velocity_flow_solve, reused_flow_solve, solve_flow_march
+from aquaflux.precondition import MaterializedJacobian
 from aquaflux.radiation import solve_scene
 from aquaflux.solve import (
     Convergence,
@@ -42,7 +43,6 @@ from aquaflux.solve import (
     LinearSolveSettings,
     MarchLogger,
     MarchRecorder,
-    MaterializedJacobian,
     RampSchedule,
     Resumption,
     RetryPolicy,
@@ -661,8 +661,8 @@ class FlowMarch(_March):
     """March a laminar case as its coupled flow system, by :func:`~aquaflux.flow.solve_flow_march`.
 
     It self-starts from a potential-flow initial condition. Its preconditioner, when set, is a
-    :class:`~aquaflux.solve.MaterializedJacobian`; the block-diagonal family is a Reynolds-averaged
-    one.
+    :class:`~aquaflux.precondition.MaterializedJacobian`; the block-diagonal family is a
+    Reynolds-averaged one.
 
     Raises
     ------

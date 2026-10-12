@@ -94,15 +94,15 @@ def main() -> None:
     compare = importlib.import_module("compare")
 
     import jax.numpy as jnp
-    from aquaflux.solve import (MaterializedJacobianPreconditioner,)
-    from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
+    from aquaflux.precondition import MaterializedJacobianPreconditioner
+    from aquaflux.precondition.sparse_jacobian import (block_stencil_gather_map,)
     from aquaflux.initialization import hybrid_initialize
     from aquaflux.turbulence.coupled import (
         _coupled_jacobian_plan,
         _coupled_shift_policy,
         coupled_scaled_norm,
     )
-    from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
+    from aquaflux.precondition.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 
     coupled = compare.build_case()["coupled"].with_scaled_molecular_viscosity(scale)
     flow, k, omega = hybrid_initialize(coupled)
@@ -161,7 +161,7 @@ def main() -> None:
     # norm), keep only strong connections, and aggregate along them -- then invert the Jacobian
     # restricted to each aggregate. Both the strength filter and the aggregation are the library's own,
     # so this is the coarsening the preconditioner already uses, repurposed as a smoother's blocks.
-    from aquaflux.solve.multigrid import _aggregate, _strength_classical
+    from aquaflux.precondition.multigrid import _aggregate, _strength_classical
 
     coo = jacobian.tocoo()
     cell_row, cell_col = coo.row // fields, coo.col // fields

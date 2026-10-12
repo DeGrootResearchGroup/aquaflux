@@ -31,7 +31,7 @@ from typing import Protocol
 
 import jax.numpy as jnp
 
-from .state import FieldLayout
+from ..solve import FieldLayout
 
 __all__ = ["ScalarBorder", "bordered_preconditioner"]
 

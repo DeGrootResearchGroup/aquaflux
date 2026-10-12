@@ -46,9 +46,9 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.solve import (MaterializedJacobianPreconditioner,)
-from aquaflux.solve.sparse_jacobian import (ColumnProbePlan, block_stencil_colouring, block_stencil_gather_map,)
-from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
+from aquaflux.precondition import MaterializedJacobianPreconditioner
+from aquaflux.precondition.sparse_jacobian import (ColumnProbePlan, block_stencil_colouring, block_stencil_gather_map,)
+from aquaflux.precondition.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
 
 #: Field order of the coupled state, and the two groups a block-triangular split cuts it into.
 FIELDS = ("u", "v", "w", "p", "k", "omega")

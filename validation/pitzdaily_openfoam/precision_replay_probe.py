@@ -49,7 +49,8 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from aquaflux.solve import HierarchyBlockInverse, residual_stop_gmres, restart_cycles  # noqa: E402
+from aquaflux.solve import residual_stop_gmres, restart_cycles  # noqa: E402
+from aquaflux.precondition import HierarchyBlockInverse  # noqa: E402
 from replay import MarchReplay  # noqa: E402
 
 #: Repeats per timed apply; the best is kept, since the slower ones measure other load on the machine.

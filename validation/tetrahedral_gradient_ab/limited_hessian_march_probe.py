@@ -21,14 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import jax.numpy as jnp
 from aquaflux.io import read_openfoam
 from aquaflux.schemes import MultipleCorrectionGradient, OwnerGradient, SkewCorrectedGradient
-from aquaflux.solve import (
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    JacobiSmoothed,
-    MaterializedJacobian,
-    SimpleSmoothed,
-)
+from aquaflux.solve import Convergence, DualTimeLoop
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
