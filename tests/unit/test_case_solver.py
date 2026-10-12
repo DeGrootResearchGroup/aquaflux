@@ -775,7 +775,7 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
         # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
         # script stopped building its march.
         "dual_time": DualTimeLoop(
-            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=2
+            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
         ),
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 0.0,

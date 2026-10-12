@@ -380,6 +380,10 @@ What to take from it, none of which is specific to that mechanism:
     - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
       stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
       in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's file**.
+      ⚠️ Those counts were taken while a cost re-fit ran MID-STEP at `refresh_on_cycles` 2. Since #290 a
+      re-fit ends its step, which at 2 moved the release to step 34 of 39 (the settled test needs a
+      full-length step, which one-iteration steps rarely give); pitzDaily now ships 3, where it fires at
+      step 18 of 20 -- `.claude/notes/solve-open-directions.md` 6b.
     - **bfs3d, measured 2026-10-11 (#678, `61a14308`, M3 Pro, jax 0.10.2):** the release alone at 1e-4 on
       the shipped `grow` 1.5 x 12 stations passes -- 28 -> 24 steps, 174 -> 173 cycles (193 -> 192
       counting rejected attempts), the same one retry, the same root (rel L2 1.8e-4, inside the shipped

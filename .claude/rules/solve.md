@@ -999,7 +999,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, bfs3d is
      unmeasured, and forced as the default it fails three slow tests (linear convergence at the end of
      the march, and one Reynolds-continuation march that goes erratic; #645). **pitzDaily's `case.yaml`
-     opts in** (`stop: residual`, `refresh_on_cycles: 2`, 2026-10-09). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
+     opts in** (`stop: residual`, 2026-10-09; `refresh_on_cycles` 2 then, 3 since a cost re-fit ends the step, #290, 2026-10-11 — see `.claude/notes/solve-open-directions.md` 6b). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks

@@ -189,6 +189,28 @@ and `refresh_on_cycles: 2`. ⚠️ So "the shipped `case.yaml`" in any pitzDaily
 2026-10-09 means the `lineax` stop at `refresh_on_cycles` 3; `PITZ_FORWARD_STOP=lineax
 PITZ_REFRESH_ON_CYCLES=3` restores it. Making `residual` the library default without breaking the
 tight-tolerance tests below is #645.
+**Re-tuned again once a cost re-fit ENDS the step (#290, 2026-10-11): pitzDaily now ships
+`refresh_on_cycles: 3`.** The 2 above was measured while the re-fit ran mid-step. Ending the step changes
+what the threshold costs: under the residual stop nearly every first solve runs 2 cycles, so at 2 almost
+every step ended after one inner iteration, and the 1-step-per-station ramp and the floor release (both
+count outer steps) moved with it. Shipped `case.yaml` of that day (`grow` 3, 12 stations, `release_floor`
+1e-4, `stop: residual`), only `PITZ_REFRESH_ON_CYCLES` overridden, one run each, Linux x86_64, 4 cores,
+jax 0.11.2, nothing else running; branch `737d297` against `main` `a2a73d3`:
+
+| | `main` @2 (mid-step) | ends step @2 | @3 | @4 |
+|---|---|---|---|---|
+| outer steps | 16 | 39 | 20 | 19 |
+| inner iterations | 76 | 64 | 77 | 78 |
+| restart cycles | 111 | 100 | 140 | 159 |
+| cost re-fits | 13 | 23 | 4 | 2 |
+| re-fit time | 290 s | 321 s | 158 s | 134 s |
+| solve wall | 902 s | 935 s | 874 s | 882 s |
+| floor released at step | 15 | 34 | 18 | 17 |
+
+All `x_r/h` 8.0686, no retries. Fewer re-fits trade against more cycles on staler inverses and the two
+cancel: every wall is within 7 %, single runs, so no arm is separable from `main` on time. 3 was chosen
+for restoring the march's shape (about 20 steps of about four inner iterations), not for speed. bfs3d,
+which ships 3 under the `lineax` stop (one fewer counted cycle per solve), is unmeasured under #290.
 **Still open before the default moves:** bfs3d (its mesh is not in this container), the cost
 thresholds' re-calibration, the end-of-march failures below, and the project owner's decision.
 
