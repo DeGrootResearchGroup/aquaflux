@@ -80,23 +80,9 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.solve import (
-    AirReduction,
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    InnerIterateCheckpointer,
-    JacobianProbeSpec,
-    JacobiSmoothed,
-    LinearSolveSettings,
-    MarchLogger,
-    MaterializedJacobian,
-    RetryPolicy,
-    SimpleSmoothed,
-    StateCheckpointer,
-    combine_metrics,
-    combine_observers,
-)
+from aquaflux.solve import (AirReduction, Convergence, DualTimeLoop, FieldSplit, JacobianProbeSpec, JacobiSmoothed, LinearSolveSettings, MarchLogger, MaterializedJacobian, RetryPolicy, SimpleSmoothed, StateCheckpointer, combine_observers,)
+from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
+from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
     CoupledRANS,
     GeometricReynoldsSchedule,
@@ -1058,14 +1044,18 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
-#: Two study overrides of the file's step control, unset keeping the file's, neither yet run on this
-#: case. `BFS3D_RELEASE_FLOOR` releases the shift below `beta_min` once the target station has settled:
-#: after the first full-length step at the floor on the target, the next step runs at this shift, so the
-#: station's linear tail becomes inexact Newton steps (measured on pitzDaily first,
+#: Two study overrides of the file's step control, unset keeping the file's. `BFS3D_RELEASE_FLOOR`
+#: releases the shift below `beta_min` once the target station has settled: after the first full-length
+#: step at the floor on the target, the next step runs at this shift, so the station's linear tail
+#: becomes inexact Newton steps (measured on pitzDaily first,
 #: `pitzdaily_openfoam/endgame_shift_probe.py`). `BFS3D_GROW` is the factor beta is divided by on a
 #: comfortable step: on pitzDaily the ramp's best length was the shift's descent to the floor plus the
 #: steps the state then needed there, so 3 with 12 stations beat the class default 1.5 with 16 (111
-#: against 141 cycles with the release on) -- change the two together.
+#: against 141 cycles with the release on). On this case (2026-10-11, one run per arm) the release
+#: alone at 1e-4 took 24 steps / 173 cycles against the file's 28 / 174 at the same root, while `grow`
+#: 3 with it cost 214 cycles and redid nine steps under this file's inner stop (lineax). Under
+#: pitzDaily's `residual` stop the same pairing took 25 steps and redid three, beating the file's own
+#: schedule under that stop: on this case the pairing goes with the stop.
 CONTROL = dataclasses.replace(
     FILE_SOLVER.step_control,
     **{

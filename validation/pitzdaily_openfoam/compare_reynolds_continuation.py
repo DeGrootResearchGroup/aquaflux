@@ -63,12 +63,8 @@ import dataclasses
 import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
-from aquaflux.solve import (
-    Convergence,
-    DualTimeControl,
-    DualTimeLoop,
-    shift_of,
-)
+from aquaflux.solve import (Convergence, DualTimeControl, DualTimeLoop,)
+from aquaflux.solve.strategy import (shift_of,)
 from aquaflux.turbulence import GeometricReynoldsSchedule, open_session, solve_reynolds_continuation
 
 # The Reynolds ramp: 2 lower-Re rungs before the target -> viscosity scales (100, 10, 1) -> Re ~ 250,
@@ -102,7 +98,7 @@ class _ShiftLoggingControl:
     A :class:`~aquaflux.solve.StepReport` carries the inner line-search factor, not the shift the control
     chose, so the streamed log cannot otherwise show the pseudo-timestep ramping. This delegates to the
     wrapped control and stashes the shift of the step it returns (read with
-    :func:`~aquaflux.solve.shift_of`, since the control's carried state is not the bare shift), so the
+    :func:`~aquaflux.solve.strategy.shift_of`, since the control's carried state is not the bare shift), so the
     observer can print it. It resets to the wrapped control's ``beta_start`` at each new Reynolds rung on
     its own, because the continuation restarts the control state per rung.
 

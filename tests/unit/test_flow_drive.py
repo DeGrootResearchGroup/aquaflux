@@ -34,6 +34,7 @@ from aquaflux.flow import (
     refuse_a_constraint_this_solve_cannot_hold,
 )
 from aquaflux.flow.drive import BODY_FORCE
+from aquaflux.flow.scales import body_force_velocity
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
@@ -296,5 +297,28 @@ def test_every_member_of_the_interface_is_abstract() -> None:
     abstract declaration fails here instead of silently acquiring whichever behaviour the base had.
     """
     assert Drive.__abstractmethods__ == frozenset(
-        {"volumetric_force", "held_speed", "layout", "driven_state", "fields_state", "settled"}
+        {
+            "volumetric_force",
+            "held_speed",
+            "held_velocity",
+            "layout",
+            "driven_state",
+            "fields_state",
+            "settled",
+        }
     )
+
+
+def test_a_held_bulk_velocity_starts_the_plug_at_the_target() -> None:
+    """The plug a held bulk velocity starts from is the target, not the speed the seed force would drive.
+
+    The seed force here is far from the one that holds the target, so a plug sized from the force would
+    open the constraint missed by a large fraction of the target.
+    """
+    held = MassFlow(target=TARGET, flow_direction=1, force=0.7).held_velocity(3)
+    assert jnp.array_equal(held, jnp.array([0.0, TARGET, 0.0]))
+    assert BoundaryDriven().held_velocity(2) is None
+    # 0.05 is a sixth of the force that holds the target here (3 mu = 0.3), so a plug sized from it
+    # would start at about a sixth of the target.
+    plug = body_force_velocity(_channel(drive=MassFlow(target=TARGET, force=0.05)))
+    assert jnp.allclose(plug, jnp.array([TARGET, 0.0]), rtol=0.0, atol=1e-15)

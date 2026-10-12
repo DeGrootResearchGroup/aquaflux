@@ -37,10 +37,7 @@ from aquaflux.turbulence import (
     open_session,
     solve_reynolds_continuation,
 )
-from aquaflux.turbulence.coupled import (
-    _resolved_shift,
-    mass_flow_coupled_continuation,
-)
+from aquaflux.turbulence.coupled import _resolved_shift
 from aquaflux.turbulence.march_settings import merged_march_options
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state, _mass_flow_cavity
@@ -57,7 +54,7 @@ def test_every_coupled_builder_takes_the_value_and_none_of_the_keywords_it_repla
         "velocity_parts",
         "turbulence_damping",
     }
-    for builder in (coupled_step, mass_flow_coupled_continuation):
+    for builder in (coupled_step,):
         parameters = set(inspect.signature(builder).parameters)
         assert "shift" in parameters, builder.__name__
         assert not parameters & set(_RETIRED), builder.__name__
@@ -81,7 +78,7 @@ def test_a_set_field_passes_through_as_the_very_object_given() -> None:
     assert resolved is damping
 
 
-def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builder() -> None:
+def test_the_damping_reaches_the_policy_of_every_family_and_a_bordered_step() -> None:
     mesh, coupled = _cavity(4)
     state = _healthy_state(mesh, coupled)
     shift = CoupledShiftSettings(basis=_BASIS, turbulence_damping=2.0)
@@ -100,7 +97,7 @@ def test_the_damping_reaches_the_policy_of_every_family_and_the_mass_flow_builde
     assert float(lu.shift_policy.base.turbulence_damping.factor(relaxation, None)) == 2.0
 
     mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity(4)
-    mass_flow = mass_flow_coupled_continuation(
+    mass_flow = coupled_step(
         mass_flow_coupled,
         _healthy_state(mass_flow_mesh, mass_flow_coupled),
         preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),

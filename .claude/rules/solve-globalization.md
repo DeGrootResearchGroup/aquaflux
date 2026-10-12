@@ -374,9 +374,20 @@ What to take from it, none of which is specific to that mechanism:
       released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
     - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
       stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
-      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's**, which is
-      unmeasured (`BFS3D_RELEASE_FLOOR`, #678); a loose terminal step is exactly what the three slow
-      tests #645 names measure, so a library default waits on both.
+      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's file**.
+    - **bfs3d, measured 2026-10-11 (#678, `61a14308`, M3 Pro, jax 0.10.2):** the release alone at 1e-4 on
+      the shipped `grow` 1.5 x 12 stations passes -- 28 -> 24 steps, 174 -> 173 cycles (193 -> 192
+      counting rejected attempts), the same one retry, the same root (rel L2 1.8e-4, inside the shipped
+      arm's own last-two-step drift of 5.7e-4). The march is bit-identical up to the release, which fires
+      the step after the first full-length step at the floor; the two released steps cost 12 and 15
+      cycles against 4-5 at the floor, so the saving is steps, not cycles. **pitzDaily's pairing with
+      `grow` 3 transfers only with pitzDaily's inner stop**: under bfs3d's lineax stop it costs 214
+      accepted / 459 all cycles with nine steps redone; under `stop: residual` it is 25 steps / 195 all
+      cycles with three redone, beating the shipped schedule under that stop (35 / 294) and fastest of
+      every arm (792 s against 1191, indicative).
+      Whether bfs3d's file should release is the owner's call; a library default still waits on the three
+      slow tests #645 names (a loose terminal step is what they measure). Tables in
+      `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").
     - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
       rule turns a test red) and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
@@ -470,7 +481,8 @@ What to take from it, none of which is specific to that mechanism:
       see `.claude/rules/turbulence.md` under `turbulence_damping`.
     - **⚠️ A WRAPPER POLICY THAT REBUILDS A `ShiftTerm` FROM `.diagonal` ALONE DROPS THE REST IN
       SILENCE** — the march runs and the dropped behaviour simply never happens. Two shipped wrappers
-      did exactly that (`MonolithicFactorShiftPolicy`, `_MassFlowBorderedPolicy`), which is how a
+      did exactly that (`MonolithicFactorShiftPolicy`, and the mass-flow policy that is now
+      `flow.BorderedShiftPolicy`, which forwards `row_relaxation`), which is how a
       per-block damping measured as a no-op. Forward every part, and find the wrappers **structurally**
       (AST), not by grepping the callee's name.
     - **`residual` is `R(φ)` when the caller has it and `None` otherwise**, offered because both steps
@@ -619,7 +631,7 @@ What to take from it, none of which is specific to that mechanism:
     refreshed march, the initial-state measure carried into each refresh). Both flagship cases ran this
     way. The fix: `relative_residual_gmres(norm=None)` means "the measure of the step that runs me", and
     all three steppers (`PseudoTransientStep`, `DualTimeStep`, `DampedNewtonStep`) call
-    `solve.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
+    `solve.linear.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
     `lineax` solver is left alone, and a `norm=None` solver run outside a step raises. Pinned by
     `test_convergence.py::test_each_step_stops_a_measure_following_linear_solve_in_its_own_measure`.
   - **`RowScaledNorm` was march-only because `RootSolver` passed its measure through a

@@ -891,3 +891,21 @@ steps; floor steps at the target from an unsettled state are clipped to half and
 viscosity has to keep descending AFTER `beta` floors, so the ramp must not be a function of `beta`. What
 the data support instead is ending the ramp on the settle signal (the first full-length step at the
 floor), which is a different seam and is open.
+
+## pitzDaily's `grow` 3 x 12 stations on bfs3d under the lineax stop — LOST (2026-10-11, #678)
+
+**What was tried:** bfs3d's shipped march (`case.yaml`, 12 stations x 1 step at `turbulence_damping` 5,
+`grow` 1.5) with pitzDaily's shipped pairing, `grow` 3 and `release_floor` 1e-4, and the same with the ramp
+ending on the settle (pace 24, `finish` 3). **Why it lost:** at `grow` 3 the shift reaches the floor at
+step 5, mid-ramp, and nine of the twelve steps 5-16 are redone (twelve extra attempts): 214 accepted / 459
+all-attempt cycles against the shipped 174 / 193, same root. Ending the ramp on the settle recovers part
+of it (187 / 267) but still loses to the shipped schedule. The release alone on bfs3d's own `grow` 1.5
+passes (24 steps / 173 cycles), so the loss is `grow` 3 against this ramp, not the release. **Not
+separated, so read "does not transfer" with them:** beta reaching the floor before the ramp arrives (no
+station change re-damps at one step per station), `turbulence_damping` 5 against pitzDaily's 3, the
+inner stop rule (lineax here, `residual` where the pairing was tuned; five of the twelve extra attempts
+were cycle-triggered), and the 3D transient. **Follow-up the same day: the stop is most of it.** Under
+`stop: residual` the same pairing takes 25 steps / 195 all-attempt cycles with 3 steps redone, beating
+the shipped schedule under that stop (35 / 294) -- so what lost is `grow` 3 under bfs3d's lineax stop,
+not `grow` 3 on bfs3d. Full tables:
+`solve-globalization-log.md`, "bfs3d: the release, `grow` 3 and the settle-ended ramp".

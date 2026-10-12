@@ -56,23 +56,25 @@ Engineering Principles.
   `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
   (#224). Two members, not three: a *prescribed* uniform force is a `UniformBodyForce` source, so it is
   not a drive at all, and the union is only "the unknowns are the fields" against "the unknowns are the
-  fields plus a multiplier". `Drive` is abstract in all six members on purpose (`held_speed`, the speed a drive holds, added 2026-10-09 for the limiter scale) — a default would let a
+  fields plus a multiplier". `Drive` is abstract in all seven members on purpose (`held_speed`, the speed a drive holds, added 2026-10-09 for the limiter scale; `held_velocity(dim)`, the plug a starting state takes, added 2026-10-11 in #541 so `body_force_velocity` starts a held bulk velocity at its target rather than at the seed force's speed) — a default would let a
   bordered drive inherit an answer that drops its multiplier.
-  `MassFlow` owns everything the bordered form needs, so the flow-only solve
-  (`mean_velocity.bulk_velocity_flow_solve`) and the coupled one
-  (`turbulence.solve_coupled_mass_flow`) share one definition of it: `layout` / `join` / `split`
-  (the border, attached through the declared layout), `driven_state` / `fields_state` / `settled`
-  (the seed and the answer), `constraint_vectors` / `constraint_vectors_in` (the border column and
-  row, padded into an outer layout), `forced` (writing an iterate into the assembler),
-  `bulk_velocity`, and `MASS_FLOW_CONVERGENCE` (the row-scaled measure has no bordered form).
+  `MassFlow` owns everything the bordered form needs of the drive, so every solve that holds it shares
+  one definition: `layout` / `join` / `split` (the border, attached through the declared layout),
+  `driven_state` / `fields_state` / `settled` (the seed and the answer), `constraint_vectors` /
+  `constraint_vectors_in` (the border column and row, padded into an outer layout), `forced` (writing a
+  force into the assembler) and `bulk_velocity`. The bordered residual, policy and measures built from
+  it are `flow/bordered.py`'s (see "A held bulk velocity on every march" below). ⚠️ There is no
+  `MASS_FLOW_CONVERGENCE` any more (#541): the bordered row-scaled measure exists, so a held bulk
+  velocity takes the same default stopping test as any other solve.
   ⚠️ **Both entry points read the drive off the ASSEMBLER rather than taking a target** — a target
   named twice is how the constraint being enforced and the force being applied come to disagree — and
   `mass_flow_drive(momentum, caller)` is the one refusal for an assembler that has none. It is worth
   raising early: the bordered residual writes each iterate into `momentum.drive.force`, so on a
   boundary-driven assembler the failure is an `equinox.tree_at` path error from inside a traced step.
   ⚠️ **The refusal runs in BOTH directions, and the second one is the dangerous case because it would
-  otherwise WORK.** `refuse_a_constraint_this_solve_cannot_hold` is called by `solve_flow_march`,
-  `reused_flow_solve` and `solve_coupled` — the solves that march the fields alone. A `MassFlow`
+  otherwise WORK.** `refuse_a_constraint_this_solve_cannot_hold` is called by a solve that marches the
+  fields alone — since #541 only `reused_flow_solve` (`solve_flow_march` and `solve_coupled` border
+  themselves instead). A `MassFlow`
   drive's force is a perfectly good force, so those would hold it fixed at the seed, converge, and
   report a bulk velocity nobody asked for, with the constraint silently dropped and nothing in the
   result saying so. A refusal that only caught the *missing* drive would leave exactly the class of
@@ -524,7 +526,7 @@ Engineering Principles.
   is now `solve_flow(momentum, state) → (momentum, state)`.
   - **Preconditioning the augmented system — constraint preconditioning (`solve.bordered_preconditioner`;
     it was the private `mean_velocity._bordered_preconditioner` until #284 moved it to `solve/bordered.py`,
-    since it is Schur elimination over a factory and two vectors and names no flow quantity).**
+    since it is Schur elimination over a factory and two vectors and names no flow quantity; since #541 `flow/bordered.py`'s `BorderedShiftPolicy` calls it with the drive as its `ScalarBorder`).**
     β is a multiplier, not a function of `w`, so — unlike a nested gradient sub-solve, which AD absorbs
     into the outer Jacobian — the border cannot be absorbed inside the residual; it is eliminated one
     layer down, **in the preconditioner**. Given the flow block preconditioner `M ≈ J⁻¹` (the block-
@@ -555,13 +557,11 @@ Engineering Principles.
     changes the sensitivity, only the adjoint Krylov iteration count).
   Pinned by `tests/unit/test_mean_velocity.py` (constraint met to machine precision; analytic β
   recovered; initial-force-independent; the preconditioner and gradient tests above).
-  - **The same primitives border the monolithic coupled RANS solve (#128).** `MassFlow`'s own
-    `constraint_vectors` / `join` / `split` / `forced` / `bulk_velocity`, plus
-    `solve.bordered_preconditioner` (given the drive as its `ScalarBorder`), are what `turbulence/coupled.py::solve_coupled_mass_flow`
-    uses to append `β` to the *coupled* `[flow…, k, ω]` state and Schur-eliminate it in the coupled
-    preconditioner — so the bulk-velocity constraint is enforced by the same one place whether the
-    forward solve is segregated (this flow-block solve) or monolithic. Do not re-derive the border
-    there.
+  - **The same primitives border the monolithic coupled RANS solve and both staged marches (#128, #541).**
+    `flow/bordered.py`'s `MassFlowBorder` is what `solve_coupled` and `solve_flow_march` use to append `β`
+    to their state and Schur-eliminate it in their preconditioner (through `solve.bordered_preconditioner`), and its `BorderedFlowResidual` is this
+    flow-block solve's residual — so the bulk-velocity constraint is enforced by one place whether the
+    forward solve is segregated or monolithic. Do not re-derive the border anywhere else.
     ⚠️ **The border is attached and detached through the DECLARED layout, never by `jnp.append` /
     `[:-1]` (2026-09-23, #375).** `MassFlow.layout(fields)` is `fields.appended(GlobalDofs("body_force",
     1))`, and `join` / `split` read the entry's position off it with `slice_of`. Before that the layout
@@ -822,7 +822,7 @@ a control for a solver question: the control had to run on a weaker driver.
   continuity block starts ~0 and every later step reads as an enormous relative increase. Measured
   2026-09-19 on the 24 x 16 channel at Re 200 (`FirstOrderUpwind`, `CompactGreenGauss`, block-SIMPLE
   defaults): from rest it converges in 10 steps. The default `RowScaled()` has no such sensitivity.
-- **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2), with a traced inverse (stage 4).** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed()))`, or a session from `open_flow_session` (a `CompleteLu()` inverse existed until 2026-10-11; the measurements below that name it were taken while it did). **Use `SimpleSmoothed`**: the traced JAX pressure-velocity hierarchy over the whole `(u, p)` state (`solve.MaterializedBlockPreconditioner`, `solve/block_preconditioner.py`), the traced kind the hierarchies exist to provide (GPU). (A PETSc `MonolithicVCycle` arm existed beside it until PETSc was removed, 2026-10-10.) `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused and a bare block inverse is allowed — the mirror of the coupled problem, which refuses the bare block), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` takes the assembler first and an optional block preconditioner. **Measured 2026-09-19** on the 24 x 16 plane channel, Re 200 (`mu` 5e-3, `FirstOrderUpwind`, `CompactGreenGauss`), dual-time `inner_steps=3`, `RowScaled`, `rtol=0, atol=1e-9`, CPU, default `SimpleSmoothed()` settings, one run each: block-SIMPLE 17 steps / 51 restart cycles / 11.1 s; `CompleteLu(scipy)` 17 / 51 / 5.6 s; `SimpleSmoothed` **17 / 61 / 6.1 s** — the same trajectory, ~20 % more cycles than an exact factorization, on a 384-cell mesh where the wall clock says little. **Not measured**: a larger or 3D laminar case, or a low-shift state. `solve_flow_march` still has no `mass_flow` (bulk-velocity) form.
+- **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2), with a traced inverse (stage 4).** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed()))`, or a session from `open_flow_session` (a `CompleteLu()` inverse existed until 2026-10-11; the measurements below that name it were taken while it did). **Use `SimpleSmoothed`**: the traced JAX pressure-velocity hierarchy over the whole `(u, p)` state (`solve.block_preconditioner.MaterializedBlockPreconditioner`, `solve/block_preconditioner.py`), the traced kind the hierarchies exist to provide (GPU). (A PETSc `MonolithicVCycle` arm existed beside it until PETSc was removed, 2026-10-10.) `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused and a bare block inverse is allowed — the mirror of the coupled problem, which refuses the bare block), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` takes the assembler first and an optional block preconditioner. **Measured 2026-09-19** on the 24 x 16 plane channel, Re 200 (`mu` 5e-3, `FirstOrderUpwind`, `CompactGreenGauss`), dual-time `inner_steps=3`, `RowScaled`, `rtol=0, atol=1e-9`, CPU, default `SimpleSmoothed()` settings, one run each: block-SIMPLE 17 steps / 51 restart cycles / 11.1 s; `CompleteLu(scipy)` 17 / 51 / 5.6 s; `SimpleSmoothed` **17 / 61 / 6.1 s** — the same trajectory, ~20 % more cycles than an exact factorization, on a 384-cell mesh where the wall clock says little. **Not measured**: a larger or 3D laminar case, or a low-shift state. `solve_flow_march` still has no `mass_flow` (bulk-velocity) form.
 - **The issue's motivating case (the Re_Dh 50 tetrahedral duct), re-run 2026-09-20 on this march**
   (`validation/tetrahedral_gradient_ab/laminar_duct_march.py`; 2462 tetrahedra, unit density and inlet
   speed, mu 5e-4, `FirstOrderUpwind`, `CorrectedGreenGauss` at its default sweeps, one run per arm, 60-step
@@ -838,6 +838,58 @@ a control for a solver question: the control had to run on a weaker driver.
   let it start there (#459, above), and the duct has not been re-run under it.) `MultipleCorrectionGradient` (with the corner-cell
   fallback) does **not** converge on this duct with the same settings — an open question of #435, not of
   the flow-only path; its record is in `validation/tetrahedral_gradient_ab/README.md`.
+
+## A held bulk velocity on every march — `flow/bordered.py` (BUILT 2026-10-11, #541)
+
+A `MassFlow` drive used to be solvable only by `bulk_velocity_flow_solve` (inside the segregated loop) and
+by a separate coupled `RootSolver` path (`solve_coupled_mass_flow` / `mass_flow_coupled_continuation`,
+**both deleted**) that reached none of `staged_march`'s step control, retry, refresh, homotopy or
+observers. Now `solve_flow_march` and `turbulence.solve_coupled` take a `MassFlow`-driven assembler and
+border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelocity`.
+- **`MassFlowBorder(drive, fields, force, average)`** — built by `mass_flow_border(momentum, layout)`
+  (`None` for a boundary-driven assembler; `layout` the flow's own or an outer one whose first block is
+  the flow). Its methods are everything a march needs: `attach` / `detach` / `force_of` (the state),
+  `residual(fn)` (a `BorderedResidual`), `policy(inner)` (a `BorderedShiftPolicy`), `measures(inner)` (a
+  `BorderedMeasures`), `homotopy(inner)` (every station bordered), `source(inner)` (a continuation source
+  handed the *fields* of each augmented state — sessions and caller builders only ever see field states),
+  `on_fields(measure)` (a drift measure read on augmented states).
+- **The border wraps ANY residual because the force enters linearly**: `R(w; β) = R(w; β₀) + (β − β₀)a`
+  with `a = −V`. `BorderedResidual` evaluates the given residual at the force the drive carries and adds
+  the difference; it never writes β into the assembler, so it borders a bare callable (a homotopy
+  station) as readily as an assembler's own. The carried force cancels exactly, values and derivatives.
+  ⚠️ **This rests on the force being uniform and state-independent** — the same assumption the analytic
+  border column always rested on; a source that is not would need its own `dR/dβ`.
+- **Measures**: `BorderedMeasures.row_scaled` appends the constraint row with row scale 1 and field scale
+  `drive.held_speed()`, so it reads as the fractional miss of the target (refused for a zero target);
+  names gain `"bulk_velocity"` (`bordered.BULK_VELOCITY`). `block_scaled` gives it the leading block's
+  scale. The inner measure is handed the step with its bordered policy replaced by the inner one.
+- **The constraint row is UNSHIFTED, and the march starts at the target (decided 2026-10-11).**
+  `BorderedShiftPolicy` gives `β` a zero shift; `bordered_preconditioner` takes no border shift. A
+  shifted step damps the fields' answer to the force while the unshifted row still asks them to reach
+  the target in one step, so the force correction grows with the damping. On the first build that froze
+  the laminar march (every step rejected, `dβ` 202 on a force of 0.3, escalating the shift made it
+  worse) — but the cause was the **start**, not the row: the plug was sized from the seed force, so the
+  constraint opened missed. `Drive.held_velocity` now starts the plug at the target, and the row opens
+  satisfied. The alternative, shifting the row by its own Schur magnitude `|c · M₀ a|` (damping the force
+  as the fields are damped), was built and measured and **rejected**: on `test_mean_velocity._channel`
+  (4 x 48 laminar periodic channel, `mu` 0.1, target 1, block-SIMPLE, default `RowScaled`) it moved but
+  crawled from the plug, and a warm start diverged under it, where the unshifted row converges the warm
+  start in one step and the cold start in 12 at `beta0 = 0.1`. At the default `beta0 = 2` the cold start
+  crawls through the viscous spin-up *with or without* the border (the same with a prescribed force) —
+  the known cold-start crawl recorded under "The periodic seam", not a border property; the integration
+  test runs at `beta0 = 0.1` for that reason.
+- **On the turbulent channels** the coupled march holds re20000 and does not converge re240000; under
+  the default row-scaled measure re20000 is 3-20x slower than under `Euclidean()`, and the slow block is
+  `k`, not the constraint row. The record is in `.claude/rules/turbulence.md` (the bulk-velocity entry)
+  and `validation/turbulent_channel/README.md`.
+- **Two-argument residuals for the adjoint**: `BorderedFlowResidual` (flow) and
+  `turbulence.coupled._BorderedCoupledResidual` read everything, border vectors included, from `theta`.
+- **Observers see fields**: `on_checkpoint` is handed the detached fields state (so the case's checkpoint
+  writer reads it unchanged); a restart re-solves the force from the drive's own seed.
+- **Not built: a materialized-Jacobian preconditioner beside a held bulk velocity** — `open_flow_session`
+  / `turbulence.open_session` refuse it (and the case's marches refuse it when the file is read). The
+  Schur elimination around a materialized inverse is mechanical (`bordered_preconditioner` takes any
+  factory); what is missing is a bordered `MaterializedProblem`.
 
 ## Binding decisions
 - **`a_P` (momentum diagonal) is DIFFERENTIATED in the residual; only the PRECONDITIONER freezes it

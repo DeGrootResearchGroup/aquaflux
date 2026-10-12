@@ -79,46 +79,11 @@ from aquaflux.solve import (
     bordered_preconditioner,
 )
 
-from .drive import FlowSolve, MassFlow, mass_flow_drive
+from .bordered import BorderedFlowResidual
+from .drive import FlowSolve, mass_flow_drive
 
 if TYPE_CHECKING:
     from .momentum import MomentumContinuity
-
-_Matvec = Callable[[jnp.ndarray], jnp.ndarray]
-_Preconditioner = Callable[[jnp.ndarray], _Matvec]
-
-
-class _BulkVelocityResidual(eqx.Module):
-    """The flow residual bordered with ``<U_dir> - target``, as a two-argument residual.
-
-    The assembler arrives as the Newton solve's differentiable parameter ``theta`` rather than being
-    captured, so the implicit-function-theorem adjoint returns its cotangent and the constrained solve
-    is reverse-differentiable in it (e.g. in its viscosity). **Everything the residual reads from the
-    assembler therefore comes from** ``theta``, including the cell volumes: a value captured from an
-    outer assembler would be a closed-over input of the adjoint's ``custom_vjp`` and differentiating it
-    raises.
-
-    A **module rather than a closure**, so that the drive below is compared by value: the march
-    compiles its step with the residual as an argument, and a closure built per solve is hashed by
-    identity, so a solver reused across a sweep would recompile every call.
-
-    Attributes
-    ----------
-    drive : MassFlow
-        The constraint being enforced, and the arithmetic of the border -- the layout the augmented
-        vector is split and reassembled by, the bulk-velocity average, and where the multiplier is
-        written into the assembler.
-    """
-
-    drive: MassFlow
-
-    def __call__(self, augmented: jnp.ndarray, theta: MomentumContinuity) -> jnp.ndarray:
-        layout = theta.layout
-        flow = self.drive.fields_state(layout, augmented)
-        forced = self.drive.forced(theta, self.drive.settled(layout, augmented).force)
-        velocity, _ = forced.unpack(flow)
-        bulk = self.drive.bulk_velocity(velocity, theta.geometry.cell.volume)
-        return self.drive.join(layout, forced.residual(flow), bulk - self.drive.target)
 
 
 #: ``bulk_velocity_flow_solve``'s own defaults, beneath whatever its caller sets. The augmented system
@@ -130,7 +95,7 @@ def bulk_velocity_flow_solve(
     reference: MomentumContinuity,
     *,
     root_solve: RootSolveSettings = DEFAULT_ROOT_SOLVE,
-    preconditioner: _Preconditioner | None = None,
+    preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = None,
 ) -> FlowSolve:
     """Build a ``solve(momentum, state) -> (momentum, state)`` that holds ``reference``'s bulk target.
 
@@ -192,7 +157,7 @@ def bulk_velocity_flow_solve(
             preconditioner, drive, fields, force, average
         )
 
-    augmented_residual = _BulkVelocityResidual(drive)
+    augmented_residual = BorderedFlowResidual()
     settings = root_solve.filled_from(_BULK_VELOCITY_FLOW_SOLVE)
 
     def solve(
