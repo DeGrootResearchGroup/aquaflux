@@ -16,12 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import (
-    FieldGroups,
-    JacobiSmoothed,
-    SimpleSmoothed,
-    field_split_inverse,
-)
+from aquaflux.precondition import FieldGroups, JacobiSmoothed, SimpleSmoothed, field_split_inverse
 
 
 def _laplacian_2d(n: int) -> sp.csr_matrix:

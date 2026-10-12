@@ -138,18 +138,18 @@ cfd/                                  # repo root
 │   │   ├── preconditioner.py         #   convection-diffusion AMG for the scalar transport solves; the coupled *_continuation builders (AMG / LU)
 │   │   └── diagnostics.py            #   named physical fields of a coupled state, for march-log reporting
 │   │
-│   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the AMG that preconditions it
+│   ├── solve/                        # Newton on the residual, the differentiated linear solve, and the march that drives it
 │   │   ├── state.py                  #   FieldLayout + CellFields / SubLayout / GlobalDofs: the flat field-major state as named, variable-length blocks (every coupled system's one layout)
 │   │   ├── newton.py                 #   newton_step: the Newton correction on the cell residual
 │   │   ├── implicit.py               #   RootSolver: Newton to convergence on stopped inputs (marching with newton_march), differentiable through the root it reaches; assembler_residual
 │   │   ├── root_adjoint.py           #   root_adjoint: the implicit-function-theorem adjoint (one transpose solve) attached to a root found by any means
-│   │   ├── bordered.py               #   bordered_preconditioner + ScalarBorder: a preconditioner extended to the system bordered by one scalar unknown (Schur elimination)
 │   │   ├── linear.py                 #   solve_linear: differentiable matrix-free linear solve, optional left/right preconditioning; relative_residual_gmres, residual_stop_gmres
 │   │   ├── norm.py                   #   ResidualNorm → BlockScaledNorm / RowScaledNorm: the convergence and globalization measures
 │   │   ├── march.py                  #   newton_march: the observed forward-only Newton march every solve runs on + the staleness trigger watching it
 │   │   ├── strategy.py               #   NewtonStrategy / ShiftedNewtonStrategy + StepOutcome / StepReport / StepControl: the contracts the march is written against
 │   │   ├── march_log.py              #   MarchLogger: the streaming per-step log (the reporting half of the on_step seam)
 │   │   ├── march_history.py          #   StepHistory: the same steps as CSV rows, for a program (a convergence plot) to read
+│   │   ├── session.py                #   PreconditionerSession: the frozen inverse and refresh hook a march keeps across its steps
 │   │   ├── checkpoint.py             #   StateCheckpointer: periodic state persistence (the on_checkpoint seam), find_checkpoint to look one up again
 │   │   ├── step_control.py           #   feedback step controls for the eager march (DualTimeControl and friends)
 │   │   ├── resumption.py             #   Resumption: an interrupted march's reference residual, damping anchor and shift, for the march resuming it
@@ -157,6 +157,10 @@ cfd/                                  # repo root
 │   │   ├── relaxation.py             #   RelaxationSchedule → SwitchedEvolutionRelaxation, ConstantRelaxation: how the shift strength beta is set each step
 │   │   ├── shift_basis.py            #   ShiftBasis: how the pseudo-transient shift's spatial distribution is built from a cell's operator parts
 │   │   ├── line_search_growth.py     #   LineSearchGrowth: how much the residual may grow and still be accepted
+│   │   └── refresh_timing.py         #   RefreshTiming: what a preconditioner refresh did, and what each part cost
+│   │
+│   ├── precondition/                 # preconditioners for the Newton step's linear solves, built off the jit path and frozen (built on solve/)
+│   │   ├── bordered.py               #   bordered_preconditioner + ScalarBorder: a preconditioner extended to the system bordered by one scalar unknown (Schur elimination)
 │   │   ├── multigrid.py              #   matrix-free algebraic multigrid for the inner solves (smoothed/plain aggregation, AIR; scipy RAP off the jit path)
 │   │   ├── frozen_operator.py        #   ConvectionDiffusionStencil / decouple_dof: the one description of the frozen operator every AMG consumer coarsens
 │   │   ├── materialized_preconditioner.py #   MaterializedJacobianPreconditioner: the probe, shift and refresh every materialized-Jacobian preconditioner shares
@@ -164,7 +168,16 @@ cfd/                                  # repo root
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
-│   │   └── refresh_timing.py         #   RefreshTiming: what a preconditioner refresh did, and what each part cost
+│   │   ├── host_preconditioner.py    #   FrozenInverse / RefactorableInverse / ReleasableInverse + HostPreconditioner: the frozen-inverse contract and its jit-callable apply
+│   │   ├── block_inverse.py          #   BlockInverse → SimpleSmoothed / JacobiSmoothed / AirReduction: the block inverses as settings values
+│   │   ├── traced_cycle.py           #   OffersTracedCycle / TracedCycle: a hierarchy held as array leaves, applied inside a traced solve
+│   │   ├── traced_field_split.py     #   TracedFieldSplit: the field split as a traced cycle
+│   │   ├── block_preconditioner.py   #   MaterializedBlockPreconditioner: one block inverse fitted to the whole materialized Jacobian
+│   │   ├── jacobian_probe.py         #   JacobianProbe / jacobian_probe_plan: the coloured-probe plan for a cell graph and its reaches
+│   │   ├── materialized_spec.py      #   MaterializedJacobian / FieldSplit / JacobianProbeSpec: a materialized preconditioner as a value (and its mapping)
+│   │   ├── materialized_session.py   #   MaterializedSession over a MaterializedProblem: one probe, one inverse and one refresh hook per march
+│   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy: a base shift policy paired with a frozen monolithic inverse
+│   │   └── phase_timer.py            #   PhaseTimer: a refresh split into named, consecutive timed phases
 │   │
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)
 │   │   ├── spec.py                   #   CaseSpec (mesh/fluid/physics/boundaries/numerics/drive) + Numerics; case_spec_from/to_mapping; check_against(mesh)

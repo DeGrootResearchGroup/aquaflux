@@ -132,9 +132,9 @@ class MomentumShiftPolicy(eqx.Module):
     preconditioner : BlockPreconditioner or None
         The block-SIMPLE preconditioner, applied at the shifted diagonal ``a_P + β d`` each step. ``None``
         makes a **shift-only** policy, for a step preconditioned by a monolithic inverse of its own
-        (:class:`~aquaflux.solve.MonolithicFactorShiftPolicy` reads only the shift diagonal); it builds no
-        multigrid hierarchy, whose value-dependent coarsening would otherwise recompile the solve at every
-        continuation rung, and refuses to supply a preconditioner.
+        (:class:`~aquaflux.precondition.MonolithicFactorShiftPolicy` reads only the shift diagonal); it
+        builds no multigrid hierarchy, whose value-dependent coarsening would otherwise recompile the
+        solve at every continuation rung, and refuses to supply a preconditioner.
     shift_basis : ShiftBasis
         How the base velocity shift diagonal ``d`` is built from the momentum diagonal's convective and
         dissipative buckets. The default :class:`~aquaflux.solve.LocalCourantBasis` (weight ``1``) is

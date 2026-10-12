@@ -7,11 +7,11 @@ about which interval lands under which name, which a wall-clock test could only 
 from __future__ import annotations
 
 import pytest
+from aquaflux.precondition.phase_timer import (
+    PhaseTimer,
+)
 from aquaflux.solve import (
     RefreshTiming,
-)
-from aquaflux.solve.refresh_timing import (
-    PhaseTimer,
 )
 
 

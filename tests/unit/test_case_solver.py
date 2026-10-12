@@ -39,23 +39,25 @@ from aquaflux.case import (
 from aquaflux.case.solver import RadiationSolve, solver_for
 from aquaflux.discretization import FirstOrderUpwind
 from aquaflux.flow import MassFlow, PinnedPoint
+from aquaflux.precondition import (
+    FieldSplit,
+    JacobianProbeSpec,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    SimpleSmoothed,
+)
 from aquaflux.solve import (
     CflResidualDualTimeControl,
     Convergence,
     DirectSolve,
     DualTimeLoop,
-    FieldSplit,
     GmresSolve,
-    JacobianProbeSpec,
-    JacobiSmoothed,
     LinearSolveSettings,
-    MaterializedJacobian,
     RampSchedule,
     Resumption,
     RetryPolicy,
     RootSolveSettings,
     RowScaled,
-    SimpleSmoothed,
     relative_residual_gmres,
 )
 from aquaflux.turbulence import (

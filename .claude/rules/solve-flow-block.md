@@ -1,10 +1,10 @@
 ---
 paths:
-  - "aquaflux/solve/saddle_multigrid.py"
+  - "aquaflux/precondition/saddle_multigrid.py"
   - "aquaflux/solve/shift_basis.py"
 ---
 
-# Rules — `aquaflux/solve/` the flow block (traced `[u, v, w, p]` saddle preconditioning)
+# Rules — `aquaflux/precondition/` the flow block (traced `[u, v, w, p]` saddle preconditioning)
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and general binding decisions this file assumes.

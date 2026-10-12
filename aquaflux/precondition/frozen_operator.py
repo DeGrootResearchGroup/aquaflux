@@ -3,17 +3,17 @@
 The preconditioners freeze an approximate linearization of a transport equation — a symmetric
 diffusive coupling on the interior faces, optionally plus first-order-upwind convection at a
 reference flux — and coarsen it once, off the jit path. It sits beside the coarsening it feeds, and
-deliberately outside :mod:`aquaflux.solve.multigrid`, which stays a pure operator-coarsening library.
-The first-order-upwind stencil is the *preconditioner's* choice, not the model's: whatever scheme the
-residual discretizes advection with, the frozen operator always upwinds first-order, because that is
-what makes it a diagonally dominant M-matrix an aggregation hierarchy can coarsen.
+deliberately outside :mod:`aquaflux.precondition.multigrid`, which stays a pure operator-coarsening
+library. The first-order-upwind stencil is the *preconditioner's* choice, not the model's: whatever
+scheme the residual discretizes advection with, the frozen operator always upwinds first-order, because
+that is what makes it a diagonally dominant M-matrix an aggregation hierarchy can coarsen.
 
 Every consumer of a frozen operator describes it as a :class:`ConvectionDiffusionStencil` -- the
 interior-face graph with its per-edge coefficients and per-cell boundary diagonal -- and assembles it
 through that object: the pressure Schur and the viscous velocity block (symmetric, ``flux=None``), the
 convection-aware velocity block, and the k/omega scalar-transport preconditioner, whose pseudo-time
-shift reads the same stencil's diagonal. The multigrid builders in :mod:`aquaflux.solve.multigrid` then
-take the assembled matrix, so they stay a pure operator-coarsening library.
+shift reads the same stencil's diagonal. The multigrid builders in :mod:`aquaflux.precondition.multigrid`
+then take the assembled matrix, so they stay a pure operator-coarsening library.
 
 It also holds the **symmetric square-root-diagonal equilibration rule**
 (:func:`equilibration_scale`), because a frozen operator is rescaled before it is factored *or*

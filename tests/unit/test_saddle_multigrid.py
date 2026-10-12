@@ -14,11 +14,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import (
-    SimpleSmoothed,
-    SimpleSmoothedInverse,
-)
-from aquaflux.solve.saddle_multigrid import (
+from aquaflux.precondition import SimpleSmoothed, SimpleSmoothedInverse
+from aquaflux.precondition.saddle_multigrid import (
     _simple_correction,
     _simple_pieces,
     _simple_smoothed_cycle,

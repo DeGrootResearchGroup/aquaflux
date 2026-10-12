@@ -2,12 +2,12 @@
 
 The field split fits a separate inverse to each of two groups of fields. A problem whose state is a
 **single** group -- a laminar flow, whose whole ``(u, p)`` state is the pressure-velocity saddle a
-:class:`~aquaflux.solve.SimpleSmoothed` hierarchy is written for -- has nothing to split, and wants that
-inverse over the entire materialized Jacobian. :class:`MaterializedBlockPreconditioner` is exactly that:
-the coloured-probe materialization, the shift and the in-place refresh the split shares
-(:class:`~aquaflux.solve.MaterializedJacobianPreconditioner`), around one injected block inverse.
+:class:`~aquaflux.precondition.SimpleSmoothed` hierarchy is written for -- has nothing to split, and
+wants that inverse over the entire materialized Jacobian. :class:`MaterializedBlockPreconditioner` is
+exactly that: the coloured-probe materialization, the shift and the in-place refresh the split shares
+(:class:`~aquaflux.precondition.MaterializedJacobianPreconditioner`), around one injected block inverse.
 
-The inverse is the traced hierarchy family (:mod:`~aquaflux.solve.hierarchy_inverse`).
+The inverse is the traced hierarchy family (:mod:`~aquaflux.precondition.hierarchy_inverse`).
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ __all__ = ["MaterializedBlockPreconditioner"]
 class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
     """One block inverse fitted to the whole materialized, shifted Jacobian.
 
-    Sibling of :class:`~aquaflux.solve.FieldSplitPreconditioner` over the shared
-    :class:`~aquaflux.solve.MaterializedJacobianPreconditioner` base, for a state with a single group of
-    fields; the materialization, the shift and the in-place refresh are all the base's. The frozen
-    inverse is the injected block inverse itself, which must be a :class:`~aquaflux.solve.FrozenInverse`,
-    be a fixed linear map (the outer Krylov solve is not flexible) and transpose exactly (the adjoint's
-    solve uses it).
+    Sibling of :class:`~aquaflux.precondition.FieldSplitPreconditioner` over the shared
+    :class:`~aquaflux.precondition.MaterializedJacobianPreconditioner` base, for a state with a single
+    group of fields; the materialization, the shift and the in-place refresh are all the base's. The
+    frozen inverse is the injected block inverse itself, which must be a
+    :class:`~aquaflux.precondition.FrozenInverse`, be a fixed linear map (the outer Krylov solve is not
+    flexible) and transpose exactly (the adjoint's solve uses it).
 
     .. warning::
        ``refresh_in_place`` is forward-march only, for the same reason as the split's: the mutation is
@@ -61,9 +61,9 @@ class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
         shift_diagonal : np.ndarray
             The pseudo-transient shift ``beta d`` added to the diagonal, shape ``(n_dofs,)``.
         inverse : callable
-            ``(matrix, n_fields) -> inverse``, for example a :class:`~aquaflux.solve.SimpleSmoothed`. An
-            injected inverse must be a :class:`~aquaflux.solve.RefactorableInverse` to survive a
-            mid-march refresh.
+            ``(matrix, n_fields) -> inverse``, for example a
+            :class:`~aquaflux.precondition.SimpleSmoothed`. An injected inverse must be a
+            :class:`~aquaflux.precondition.RefactorableInverse` to survive a mid-march refresh.
         n_fields : int
             The number of fields in the flat field-major state.
 

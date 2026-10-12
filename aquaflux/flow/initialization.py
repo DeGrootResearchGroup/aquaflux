@@ -26,14 +26,14 @@ import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, Neumann, ZeroGradient
 from aquaflux.discretization import DiffusionFlux, FixedValueCells, ResidualAssembler
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.properties import Constant, PropertyModel
-from aquaflux.solve import (
+from aquaflux.precondition import (
     ConvectionDiffusionStencil,
     build_smoothed_hierarchy,
     decouple_dof,
-    newton_step,
     smoothed_multigrid_cycles,
 )
+from aquaflux.properties import Constant, PropertyModel
+from aquaflux.solve import newton_step
 from aquaflux.vectors import dot
 
 from .boundary import PressureOutlet, VelocityInlet

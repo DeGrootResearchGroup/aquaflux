@@ -32,12 +32,8 @@ from collections.abc import Mapping
 from typing import Literal
 
 from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
-from aquaflux.solve import (
-    MATERIALIZED_MAPPING,
-    MaterializedJacobian,
-    SettingsMapping,
-    SettingsValue,
-)
+from aquaflux.precondition import MATERIALIZED_MAPPING, MaterializedJacobian
+from aquaflux.solve import SettingsMapping, SettingsValue
 
 from .preconditioner import (
     _DEFAULT_SCALAR_BLOCK,
@@ -69,9 +65,10 @@ class BlockDiagonal(SettingsValue):
     Attributes
     ----------
     scalar : ScalarBlock or None
-        How the ``k`` and ``omega`` blocks are preconditioned: :class:`~aquaflux.turbulence.ScalarTwoLevel`,
-        :class:`~aquaflux.turbulence.ScalarAir`, or :class:`~aquaflux.turbulence.UnpreconditionedScalars`
-        to leave them unpreconditioned. Unset, the two-level hierarchy.
+        How the ``k`` and ``omega`` blocks are preconditioned:
+        :class:`~aquaflux.turbulence.ScalarTwoLevel`, :class:`~aquaflux.turbulence.ScalarAir`, or
+        :class:`~aquaflux.turbulence.UnpreconditionedScalars` to leave them unpreconditioned. Unset, the
+        two-level hierarchy.
     velocity : VelocityBlock or None
         Which velocity block is fitted, and how: :class:`~aquaflux.flow.ViscousMultilevel`,
         :class:`~aquaflux.flow.ConvectionTwoLevel` or :class:`~aquaflux.flow.ConvectionAir`. Unset,
@@ -186,7 +183,8 @@ _SPEC_FAMILIES = (BlockDiagonal, MaterializedJacobian)
 
 #: Every value a spec file may name, at any level -- read by a whole case file's registry too: the two families, the materialized inverses and the
 #: probe, and the block inverses, velocity blocks and scalar blocks nested inside them. The materialized
-#: side is **derived from** :data:`~aquaflux.solve.MATERIALIZED_MAPPING` rather than listed again, so a
+#: side is **derived from** :data:`~aquaflux.precondition.MATERIALIZED_MAPPING` rather than listed again,
+#: so a
 #: kind added there reaches this registry -- and the laminar one -- the day it is added.
 PRECONDITIONER_SPEC_MAPPING = SettingsMapping(
     [
