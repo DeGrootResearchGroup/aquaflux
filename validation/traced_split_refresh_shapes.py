@@ -47,8 +47,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.solve import ConstantRelaxation  # noqa: E402
-from aquaflux.solve.multigrid import _CsrOperator  # noqa: E402
-from aquaflux.solve.traced_field_split import TracedFieldSplit  # noqa: E402
+from aquaflux.solve.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.turbulence import coupled_step, open_session  # noqa: E402
 
 BETAS = [float(b) for b in os.environ.get("TRACED_BETAS", "2.0,0.5,0.05").split(",")]
@@ -60,15 +59,6 @@ def _states(coupled):
     for path in sorted((CASES[CASE] / "checkpoints").glob("state-*.npz")):
         with np.load(path) as data:
             yield path.name, jnp.asarray(data["state"])
-
-
-def _traced_split(split) -> TracedFieldSplit:
-    return TracedFieldSplit(
-        leading_cycle=split._leading.traced_cycle(),
-        trailing_cycle=split._trailing.traced_cycle(),
-        coupling=_CsrOperator.from_scipy(split._coupling),
-        groups=split._groups,
-    )
 
 
 def _signature(tree):
@@ -92,7 +82,7 @@ def main() -> None:
     states = list(_states(coupled))
     session = open_session(spec, coupled)
     step = session.build(states[0][1], **march)
-    split = step.shift_policy.preconditioner.inverse
+    split = session.preconditioner.inverse
 
     traces = 0
 
@@ -102,16 +92,16 @@ def main() -> None:
         traces += 1
         return traced.apply(r)
 
-    first = _traced_split(split)
+    first = traced_field_split(split)
     reference = {
         "leading": _signature(first.leading_cycle),
         "trailing": _signature(first.trailing_cycle),
         "coupling": _signature(first.coupling),
     }
-    probe = jnp.ones(split._groups.n_dofs)
+    probe = jnp.ones(split.groups.n_dofs)
     jax.block_until_ready(apply(first, probe))
     print(
-        f"case {CASE}; {split._groups.n_dofs} dofs; betas {BETAS}; "
+        f"case {CASE}; {split.groups.n_dofs} dofs; betas {BETAS}; "
         f"leading levels {_levels(first.leading_cycle)}, trailing levels {_levels(first.trailing_cycle)}",
         flush=True,
     )
@@ -124,7 +114,7 @@ def main() -> None:
         for beta in BETAS:
             active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(beta))
             session.refresh_preconditioner(active, state, due=True)
-            traced = _traced_split(split)
+            traced = traced_field_split(split)
             same = {
                 "leading": _signature(traced.leading_cycle) == reference["leading"],
                 "trailing": _signature(traced.trailing_cycle) == reference["trailing"],

@@ -150,6 +150,23 @@ session uses, not something a case configures.
    repeats: one application host 209 ms / traced 203 ms (1.03x), GMRES 15 x 4 cycles 11.59 s / 11.38 s
    (1.02x), agreement 0.0, both true residuals 9.869e-06, one operator matvec 59 ms. Parity is the CPU
    answer to want; the GPU run is the open measurement.
+7. **Parity march (2026-10-12, pitzDaily, shipped `case.yaml` with the leading block frozen, Linux
+   x86_64, 4 cores, jax 0.11.2, `JAX_LOG_COMPILES=1`, one uncontended run each, back to back).** The
+   control arm is the same tree with only `offers_traced_split` forced false, so the two differ in the
+   preconditioner's form alone:
+
+   | arm | steps | restart cycles | `x_r/h` | wall | `_march_step` compiles | per-block cycle compiles |
+   |---|---|---|---|---|---|---|
+   | traced (on device) | 20 | 154 | 8.0686 | 635 s | **1** | 0 |
+   | host (callback) | 20 | 154 | 8.0686 | 601 s | **1** | 1 + 1 |
+
+   Same trajectory to the step and cycle; every refit after the first is a cache hit on both arms (the
+   shape fixes in item 4 serve the host arm's jitted block cycles too). The traced arm is **5.6 % slower
+   on CPU** — inside what one run each can resolve on a shared container, and in the direction expected:
+   it traces a larger `_march_step` (the hierarchies are its arguments), and a CPU has no transfer to save.
+   The case for it is the GPU, which remains unmeasured. Logs:
+   `validation/pitzdaily_openfoam/run-20261012-025423.log` (traced) and its host-arm sibling (worktree,
+   not kept).
 
 ## The field split — a saddle plus two transported scalars
 

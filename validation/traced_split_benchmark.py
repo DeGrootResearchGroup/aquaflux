@@ -65,10 +65,9 @@ from aquaflux.solve.materialized_session import (  # noqa: E402
     frozen_shift_diagonal,
     jacobian_matvec,
 )
-from aquaflux.solve.multigrid import _CsrOperator  # noqa: E402
 from aquaflux.solve.traced_field_split import (  # noqa: E402
-    TracedFieldSplit,
     contains_host_callback,
+    traced_field_split,
 )
 from aquaflux.turbulence import coupled_step, open_session  # noqa: E402
 
@@ -119,14 +118,9 @@ def main() -> None:
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(beta))
     session.refresh_preconditioner(active, state, due=True)
     policy = step.shift_policy
-    host_pc = policy.preconditioner
+    host_pc = session.preconditioner
     split = host_pc.inverse
-    traced = TracedFieldSplit(
-        leading_cycle=split._leading.traced_cycle(),
-        trailing_cycle=split._trailing.traced_cycle(),
-        coupling=_CsrOperator.from_scipy(split._coupling),
-        groups=split._groups,
-    )
+    traced = traced_field_split(split)
     shift = jnp.asarray(frozen_shift_diagonal(policy.base, beta, state))
     b = -residual
 
@@ -171,9 +165,9 @@ def main() -> None:
     )
     device = jax.devices()[0]
     print(
-        f"case {CASE}; state {source}; beta {beta:g}; {split._groups.n_dofs} dofs "
-        f"({split._groups.n_leading_dofs} leading, {split._groups.n_dofs - split._groups.n_leading_dofs} "
-        f"trailing); coupling nnz {split._coupling.nnz}",
+        f"case {CASE}; state {source}; beta {beta:g}; {split.groups.n_dofs} dofs "
+        f"({split.groups.n_leading_dofs} leading, {split.groups.n_dofs - split.groups.n_leading_dofs} "
+        f"trailing); coupling nnz {split.coupling.nnz}",
         flush=True,
     )
     print(
