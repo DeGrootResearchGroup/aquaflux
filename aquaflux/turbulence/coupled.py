@@ -97,6 +97,7 @@ from aquaflux.solve import (
     StepControl,
     StepReport,
     SubLayout,
+    UnshiftedPreconditioner,
     VelocityShiftParts,
     assembler_residual,
     block_reference_scales,
@@ -1049,7 +1050,7 @@ class CoupledShiftPolicy(eqx.Module):
         unshifted coupled Jacobian with the block-diagonal composition at ``a_P`` -- the same frozen
         flow and scalar preconditioners, transposed by the implicit solver.
         """
-        return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
+        return UnshiftedPreconditioner(self)
 
 
 def _effective_momentum(
@@ -1451,6 +1452,8 @@ def _coupled_shift_policy(
     velocity_shift_parts: VelocityShiftParts | None = None,
     turbulence_damping: TurbulenceDamping | float = 1.0,
     build_flow_block: bool = True,
+    *,
+    repointed: bool = False,
     **flow_block_options: object,
 ) -> CoupledShiftPolicy:
     """Build the block-diagonal :class:`CoupledShiftPolicy` frozen at ``reference_state``.
@@ -1497,6 +1500,10 @@ def _coupled_shift_policy(
     transient device that vanishes at the root, so a slightly-stale factor changes only the path, never
     the converged state or its adjoint. A non-refresh build (``reuse is None``) uses the reference-state
     factor, so the shift product is bit-identical to the pre-split form.
+
+    ``repointed`` marks a refresh onto another problem (a viscosity ramp's next station): the carried
+    flow block is applied to this problem's momentum (:meth:`~aquaflux.flow.BlockPreconditioner.on`),
+    so every array keeps its shape and the march's compiled step takes the policy as it stands.
     """
     # The reference's scalar blocks are the *solved* unknown; the frozen operators (closure, AMG, shift
     # diagonals) are all assembled in the physical fields, so recover them through the transform.
@@ -1539,6 +1546,8 @@ def _coupled_shift_policy(
     block = (
         None
         if not build_flow_block
+        else reuse.flow_preconditioner.on(momentum)
+        if reuse is not None and repointed
         else reuse.flow_preconditioner  # measured: re-freezing the flow block does not help
         if reuse is not None
         else BlockPreconditioner.build(
@@ -2104,16 +2113,25 @@ class _BlockSession(RebuildingSession):
     ) -> NewtonStrategy:
         # Re-derives the k/omega hierarchies on their reused coarsening and rebuilds the shift's
         # transport time scale, carrying the flow block and the shift's coordinate factor over.
-        reuse = previous.shift_policy
-        if isinstance(reuse, BorderedShiftPolicy):
-            reuse = reuse.inner
-        return self._finish(self._step(state, _march_keywords(march), reuse=reuse))
+        return self._finish(
+            self._step(state, _march_keywords(march), reuse=_inner_policy(previous))
+        )
 
     def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
         return self._finish(self._step(state, _march_keywords(march), reuse=None))
 
+    def _repointed(self, state: jnp.ndarray, held: NewtonStrategy, march: dict) -> NewtonStrategy:
+        return self._finish(
+            self._step(state, _march_keywords(march), reuse=_inner_policy(held), repointed=True)
+        )
+
     def _step(
-        self, state: jnp.ndarray, keywords: dict, *, reuse: CoupledShiftPolicy | None
+        self,
+        state: jnp.ndarray,
+        keywords: dict,
+        *,
+        reuse: CoupledShiftPolicy | None,
+        repointed: bool = False,
     ) -> NewtonStrategy:
         coupled = self.assembler
         step_limit, step_projection = _k_positivity_guards(
@@ -2125,6 +2143,7 @@ class _BlockSession(RebuildingSession):
             self._spec.resolved_scalar(),
             reuse,
             *_resolved_shift(keywords.pop("shift")),
+            repointed=repointed,
             **self._spec.flow_block_options(),
         )
         border = coupled_border(coupled)
@@ -2149,6 +2168,12 @@ class _BlockSession(RebuildingSession):
 
     def _finish(self, step: NewtonStrategy) -> NewtonStrategy:
         return step if self._on_build is None else self._on_build(step)
+
+
+def _inner_policy(step: NewtonStrategy) -> CoupledShiftPolicy:
+    """The block-diagonal policy of a step this session built, unwrapped from a held bulk velocity's."""
+    policy = step.shift_policy
+    return policy.inner if isinstance(policy, BorderedShiftPolicy) else policy
 
 
 @dataclasses.dataclass(frozen=True, eq=False)

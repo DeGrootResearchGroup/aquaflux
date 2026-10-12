@@ -79,6 +79,7 @@ from .continuation import (
     ShiftPolicy,
     ShiftTerm,
     StepAcceptance,
+    UnshiftedPreconditioner,
 )
 from .settings_mapping import SettingsMapping
 from .settings_value import MergeableSettings, SettingsValue, filled_from
@@ -277,6 +278,7 @@ __all__ = [
     "SubLayout",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
+    "UnshiftedPreconditioner",
     "VelocityShiftParts",
     "assembler_residual",
     "block_reference_scales",

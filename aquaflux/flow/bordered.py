@@ -49,6 +49,7 @@ from aquaflux.solve import (
     RowScaledNorm,
     ShiftPolicy,
     ShiftTerm,
+    UnshiftedPreconditioner,
 )
 
 from .drive import MassFlow
@@ -190,7 +191,7 @@ class BorderedShiftPolicy(eqx.Module):
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], _Matvec]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at no shift)."""
-        return lambda state: self.shift_term(state).make_preconditioner(jnp.asarray(0.0))
+        return UnshiftedPreconditioner(self)
 
 
 def _inner_step(step: NewtonStrategy) -> NewtonStrategy:

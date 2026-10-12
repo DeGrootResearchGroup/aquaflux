@@ -221,6 +221,26 @@ class ShiftPolicy(Protocol):
         """
 
 
+class UnshiftedPreconditioner(eqx.Module):
+    """``state -> M``: a shift policy's preconditioner at zero shift, the adjoint's at a root.
+
+    At a converged state the pseudo-transient shift vanishes, so the transpose solve is preconditioned by
+    the policy's composition at ``beta = 0``. A module rather than a closure so the policy rides in a
+    step as data: two steps whose policies differ only in their arrays then have the same compilation
+    key, which a fresh closure per build would not.
+
+    Attributes
+    ----------
+    policy : ShiftPolicy
+        The policy whose zero-shift preconditioner this is.
+    """
+
+    policy: ShiftPolicy
+
+    def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        return self.policy.shift_term(state).make_preconditioner(jnp.asarray(0.0))
+
+
 class StepAcceptance(Protocol):
     """The accept/reject decision for one shifted-step attempt (structural interface only).
 

@@ -49,6 +49,7 @@ class _Session(RebuildingSession):
     def __init__(self, assembler: float, *, step_class=PseudoTransientStep) -> None:
         super().__init__(assembler)
         self.built: list[tuple[float, float]] = []
+        self.held: list[object] = []
         self._step_class = step_class
 
     def _build(self, state, march):
@@ -60,6 +61,10 @@ class _Session(RebuildingSession):
             jacobian_residual=_ScaledFactory(scale),
             **march,
         )
+
+    def _repointed(self, state, held, march):
+        self.held.append(held)
+        return self._build(state, march)
 
     def refresh(self, state, previous, **march):
         return self._build(state, march)
@@ -86,6 +91,8 @@ def test_a_re_pointed_session_rebuilds_once_on_the_new_problem_at_the_marchs_sta
     update = session.refresh_preconditioner(step, jnp.full(3, 2.0))
     assert update is not None
     assert session.built == [(1.0, 1.0), (5.0, 2.0)]
+    # The rebuild is handed the step the march holds, to derive the new one from.
+    assert session.held == [step]
     # A second call before the next re-pointing (a retry of the same step) rebuilds nothing.
     assert session.refresh_preconditioner(step, jnp.full(3, 3.0)) is None
     assert session.built == [(1.0, 1.0), (5.0, 2.0)]

@@ -718,15 +718,24 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 - **`session.py` — `RebuildingSession` (BUILT 2026-10-12, #386).** The generic half of a session with
   nothing to re-fit: its steps are built whole from `assembler`, `rebind` re-points it and marks the steps
-  in use stale, and its `refresh_preconditioner` then builds ONE step on the new problem at the state the
-  march hands it and returns `held -> held.preconditioned_as(rebuilt)` (shift policy, adjoint factory and
-  operator stand-in swapped; the step control's shift strength kept). Unrebound it returns `None`, so a
-  march over one problem is unchanged. `build` refuses a `StopsForRefresh` step with `refresh_on_cycles`
-  (nothing would take the re-fit). A subclass supplies `_build(state, march)` (the name `coupled_step`
-  calls on either family) and `refresh`. The one subclass is `turbulence._BlockSession`. ⚠️ **Each rebuild
-  is a new static scalar-preconditioner object, so it recompiles the march step** — see the ramp entry in
-  `turbulence.md` for what that cost. Pinned mesh-free by `tests/unit/test_rebuilding_session.py`
-  (mutation-checked).
+  in use stale, and its `refresh_preconditioner` then makes ONE step on the new problem at the state the
+  march hands it, **derived from the step the march holds** (`_repointed(state, held, march)`), and
+  returns `held -> held.preconditioned_as(rebuilt)` (shift policy, adjoint factory and operator stand-in
+  swapped; the step control's shift strength kept). Unrebound it returns `None`, so a march over one
+  problem is unchanged. `build` refuses a `StopsForRefresh` step with `refresh_on_cycles` (nothing would
+  take the re-fit). A subclass supplies `_build(state, march)` (the name `coupled_step` calls on either
+  family), `_repointed` and `refresh`. The one subclass is `turbulence._BlockSession`.
+  ⚠️ **`_repointed` must keep the held step's STRUCTURE, or every re-pointing recompiles the march step.**
+  The march compiles against the whole step it holds; a step built from scratch on the new problem has
+  hierarchies whose coarse shapes follow its values (lAIR's split, the flow block's strength
+  aggregation), so its first version (a plain `build`) recompiled at every station of a viscosity ramp,
+  ~40 s against ~7 s for a step (re20000 channel, 2026-10-12). `_BlockSession._repointed` refreshes the
+  held policy instead (`_coupled_shift_policy(..., reuse=held policy, repointed=True)`): k/omega
+  hierarchies on their reused coarsening, the flow block's hierarchy carried and applied to the new
+  momentum (`flow.BlockPreconditioner.on`). That needs every preconditioner to be data, not a static
+  object (see `solve-globalization.md`, the reversed #105 note). Pinned mesh-free by
+  `tests/unit/test_rebuilding_session.py` and on the coupled cavity by
+  `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` (both mutation-checked).
 
 - **`block_preconditioner.py` — BUILT 2026-09-19.** `MaterializedBlockPreconditioner`: one `BlockInverse` (e.g. `SimpleSmoothed`) fitted to the whole materialized, shifted Jacobian, sharing the probe/shift/in-place-refresh of `MaterializedJacobianPreconditioner` with the field split. It is the inverse of a problem whose fields form a **single group** (`MaterializedProblem.groups()` is `None`), and the session enforces the mirror pair: `FieldSplit` refused for one group, a bare `BlockInverse` refused for two. `MaterializedJacobian.inverse` accepts a bare `BlockInverse`. The hierarchy is traced JAX. Tested for exact transposition and for being an approximate inverse of the SHIFTED operator (mutating the shift away fails it).
 
@@ -847,7 +856,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     (was `_BulkVelocityResidual`) or `_ParameterFreeResidual` — small `equinox.Module`s whose settings
     compare by value and whose arrays ride as dynamic leaves. `RootSolver.solve` binds `theta`
     into `_ResidualAt`, a module for the same reason. Pinned by
-    `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
+    `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt` (renamed
+    2026-10-12, #386, when the preconditioner became data and a rebuilt one stopped recompiling).
   - ⚠️ **That test measured nothing until this change fixed its fixture, and the reason generalizes.**
     Under a `lax.while_loop` the body is traced whether or not it executes, so the test's later sweeps —
     which started from the previous sweep's converged state and took **zero** steps — still reported

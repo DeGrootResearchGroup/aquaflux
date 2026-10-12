@@ -325,10 +325,10 @@ Many entries below are dated history written against the old API. Read them thro
   exactly (pinned in `test_scalar_transport_preconditioner.py`).
   `scalar_transport_preconditioner` returns a **`ScalarTransportPreconditioner`** strategy
   (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
-  These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in
-  `.claude/rules/solve-globalization.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
-  `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
-  reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
+  They are **`equinox.Module`s since 2026-10-12 (#386)**, hierarchies on the traced side — reversing
+  #105's binding "not a pytree"; see the reversed note in `.claude/rules/solve-globalization.md` for why
+  and what it costs. `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output
+  factor — the reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a module.
   - **Which continuation a solve runs is ONE injected source, not two parallel branches (binding, #278,
     2026-08-20).** `solve_coupled` needs a continuation twice — the initial build and every refresh —
     and those were written as two independent two-way branches (`refresh.builder` vs the default
@@ -653,14 +653,18 @@ Many entries below are dated history written against the old API. Read them thro
   `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
   moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing
   and every sweep pays one eager residual evaluation for the march's reference norm.** The property is
-  unchanged and still pinned by `test_a_carried_preconditioner_compiles_the_scalar_solve_once`, whose
-  fixture had to start disturbing the state to keep measuring it (see `solve.md`).
+  unchanged and pinned by
+  `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, whose fixture
+  had to start disturbing the state to keep measuring it (see `solve.md`). ⚠️ **Since the preconditioner
+  became data (#386) a REBUILT two-level preconditioner is a cache hit too** (its coarsening reads only the
+  graph, so the shapes do not move) — carrying it now saves only the ~1 s build, not a recompile; a
+  rebuilt lAIR still misses, by shape.
 - **`transport.py`'s `omega_residual` returns a `WallFixedResidual`, not a closure (binding, #105).** It is
   rebuilt every sweep and reaches the compiled march step as an argument, so as a bare closure it landed on
   `filter_jit`'s static side and identity-missed the cache every sweep. As an `equinox.Module` its arrays
   ride on the traced side and only their *values* change. (`k_residual` already returned a bound
-  `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
-  contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
+  `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) The
+  preconditioner is a pytree too since #386, for the same reason.
 
 ## Which patches are walls is stated twice, and reconciled at the coupled build (#355, 2026-09-24)
 

@@ -61,14 +61,19 @@ class RebuildingSession(abc.ABC):
     Its preconditioner is frozen when a step is built and stays frozen; a session of this kind keeps no
     inverse it could re-fit at a later state or shift. What it can follow is a **change of problem**:
     :meth:`rebind` points it at another, and the march's next call to :meth:`refresh_preconditioner`
-    builds a step on that problem at the state the march has reached and hands the march its shift,
-    preconditioner and operator stand-in (:meth:`~aquaflux.solve.ShiftedStep.preconditioned_as`). The
-    step the march holds keeps the shift strength its step control set, which rebuilding the whole step
-    would discard. Until it is re-pointed the hook hands the march nothing, so a march over one problem
-    is unchanged by having it.
+    makes a step on that problem at the state the march has reached (:meth:`_repointed`) and hands the
+    march its shift, preconditioner and operator stand-in
+    (:meth:`~aquaflux.solve.ShiftedStep.preconditioned_as`). The step the march holds keeps the shift
+    strength its step control set, which rebuilding the whole step would discard. Until it is re-pointed
+    the hook hands the march nothing, so a march over one problem is unchanged by having it.
 
-    A subclass supplies :meth:`_build` (the step a build makes from :attr:`assembler`) and
-    :meth:`refresh`.
+    The step a re-pointing makes is derived from the one the march holds, so that it differs from it in
+    array values alone. The march's step is compiled against the one it holds, so a step of the same
+    structure is a compilation-cache hit, and one built from scratch -- whose preconditioner objects or
+    coarse-grid shapes differ -- recompiles the whole solve at every re-pointing.
+
+    A subclass supplies :meth:`_build` (the step a build makes from :attr:`assembler`),
+    :meth:`_repointed` and :meth:`refresh`.
 
     Attributes
     ----------
@@ -83,7 +88,7 @@ class RebuildingSession(abc.ABC):
         self._march: dict = {}
         # Whether the problem has changed since the last build, so the steps in use were built on
         # another one.
-        self._repointed = False
+        self._repointed_since_build = False
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
         """The step at ``state`` on :attr:`assembler`, configured by the march keywords.
@@ -102,12 +107,12 @@ class RebuildingSession(abc.ABC):
                 "hard step would end early and nothing would be refreshed. Leave refresh_on_cycles "
                 "unset, or precondition with a session that re-fits (a materialized Jacobian)."
             )
-        self._march, self._repointed = march, False
+        self._march, self._repointed_since_build = march, False
         return step
 
     def rebind(self, assembler: object) -> None:
         """Point the session at ``assembler``; the next step the march takes is rebuilt on it."""
-        self.assembler, self._repointed = assembler, True
+        self.assembler, self._repointed_since_build = assembler, True
 
     def refresh_preconditioner(
         self, step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
@@ -116,15 +121,24 @@ class RebuildingSession(abc.ABC):
 
         ``due`` is not consulted: a step asking for a re-fit is refused when it is built.
         """
-        del step, due
-        if not self._repointed:
+        del due
+        if not self._repointed_since_build:
             return None
-        rebuilt = self.build(state, **self._march)
+        rebuilt = self._repointed(state, step, self._march)
+        self._repointed_since_build = False
         return lambda held: held.preconditioned_as(rebuilt)
 
     @abc.abstractmethod
     def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
         """The step a build makes at ``state`` on :attr:`assembler`."""
+
+    @abc.abstractmethod
+    def _repointed(self, state: jnp.ndarray, held: NewtonStrategy, march: dict) -> NewtonStrategy:
+        """The step on :attr:`assembler` at ``state``, made from ``held`` so it keeps ``held``'s structure.
+
+        ``held`` is the step the march holds, built on the problem the session pointed at before; the
+        result differs from it in array values alone (see the class summary).
+        """
 
     @abc.abstractmethod
     def refresh(

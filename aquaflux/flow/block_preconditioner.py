@@ -1207,6 +1207,28 @@ class BlockPreconditioner(eqx.Module):
             mass_scale=mass_scale,
         )
 
+    def on(self, assembler: MomentumContinuity) -> BlockPreconditioner:
+        """This preconditioner applied to ``assembler``'s problem, its frozen hierarchies kept.
+
+        The hierarchies are fitted to a reference operator and rescaled to the current momentum
+        diagonal on every application, so the assembler is all that ties them to one problem -- a
+        companion at another viscosity, say. Every array keeps its shape, so a compiled solve takes the
+        result without recompiling, where a :meth:`build` on the new problem would aggregate along its
+        strong connections, whose coarse-grid shapes move with the viscosity.
+
+        Parameters
+        ----------
+        assembler : MomentumContinuity
+            The problem to precondition, on the same mesh and boundary patches as the one this was
+            built on.
+
+        Returns
+        -------
+        BlockPreconditioner
+            A copy whose linearizations and momentum diagonal are ``assembler``'s.
+        """
+        return eqx.tree_at(lambda block: block.assembler, self, assembler)
+
     def frozen_momentum_diagonal(self, state: jnp.ndarray) -> jnp.ndarray:
         """The isotropic, frozen momentum diagonal ``a_P`` at ``state``, shape ``(n_cells,)``.
 

@@ -116,11 +116,11 @@ def test_layout_round_trips_and_sizes() -> None:
     assert jnp.array_equal(oo, omega)
 
 
-def _cavity(n=6, mesh=None, gradient=None, drive=None):
+def _cavity(n=6, mesh=None, gradient=None, drive=None, viscosity=RHO * NU):
     mesh = structured_grid_2d(n, n, lx=1.0, ly=1.0, named_boundaries=True) if mesh is None else mesh
     gradient = CompactGreenGauss() if gradient is None else gradient
     geometry = mesh.geometry()
-    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
+    properties = PropertyModel({"viscosity": Constant(viscosity), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
