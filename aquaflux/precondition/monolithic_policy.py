@@ -43,7 +43,7 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     Attributes
     ----------
     base : ShiftPolicy
-        The policy supplying the pseudo-transient shift diagonal (and its per-row relaxation).
+        The policy supplying the pseudo-transient shift diagonal (and its per-row shift scale).
     preconditioner : HostPreconditioner
         The frozen coupled inverse (a static field), applied through its ``matvec`` /
         ``matvec(transpose=True)`` callbacks.
@@ -71,7 +71,7 @@ class MonolithicFactorShiftPolicy(eqx.Module):
         diagonal = base.diagonal
         apply = self.preconditioner.matvec()
         # The factorization is frozen, so the preconditioner does not depend on the shift strength.
-        return ShiftTerm(diagonal, lambda relaxation: apply, base.row_relaxation)
+        return ShiftTerm(diagonal, lambda shift_strength: apply, base.row_shift_scale)
 
     def adjoint_factory(self) -> TransposedPreconditioner:
         """The ``state -> M^T`` factory for the adjoint transpose solve.

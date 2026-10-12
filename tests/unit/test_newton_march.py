@@ -333,7 +333,9 @@ class _UnitShiftPolicy(eqx.Module):
     """A trivial pseudo-transient shift policy (unit diagonal, no preconditioner) for a scalar root."""
 
     def shift_term(self, phi, residual=None):
-        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+        return ShiftTerm(
+            diagonal=jnp.ones_like(phi), make_preconditioner=lambda _shift_strength: None
+        )
 
 
 def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
@@ -673,7 +675,7 @@ def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
         on_retry=lambda reason, attempt, beta: seen.append((reason, float(beta))),
     )
     assert int(result.reports[0].cycles) == 40  # β never moved, so the count never dropped
@@ -741,7 +743,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=2),
     )
     assert len(_TRACES) == 0  # the escalation retries added no recompiles
     assert float(escalated.reports[0].alpha) == 1.0  # ...and still escalated β to recover the step
@@ -793,7 +795,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, max_retries=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -817,7 +819,7 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, max_retries=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -847,7 +849,7 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
         rtol=1e-10,
         atol=1e-12,
         step_control=control,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=3),
     )
     beta = result.control_state.beta
     assert beta == 4.0  # the escalated β, carried; not the control's beta_start
@@ -900,7 +902,7 @@ def test_march_escalates_beta_on_a_collapsed_step_length() -> None:
         rtol=1e-10,
         atol=1e-12,
         # abort_above_cycles far above the step's 3 cycles: only the α trigger can fire
-        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, beta_factor=2.0, max_retries=2),
     )
     assert int(result.reports[0].escalations) == 2
     assert float(result.reports[0].alpha) == 1.0
@@ -931,7 +933,7 @@ def test_the_alpha_trigger_reports_its_own_reason() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, max_retries=2),
         on_retry=lambda reason, attempt, beta: reasons.append(reason),
     )
     assert reasons == ["alpha", "alpha"]
@@ -955,7 +957,7 @@ def test_on_retry_reports_the_beta_the_retried_attempt_will_run_at() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=3.0, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=3.0, max_retries=2),
         on_retry=lambda reason, attempt, beta: seen.append(beta),
     )
     assert seen == pytest.approx([3.0, 9.0])
@@ -989,7 +991,7 @@ def test_the_default_retry_policy_is_the_inert_one() -> None:
     assert NO_RETRIES.abort_above_cycles is None
     assert NO_RETRIES.on_alpha is None
     assert NO_RETRIES.beta_factor == 2.0
-    assert NO_RETRIES.cycles_limit == 2
+    assert NO_RETRIES.max_retries == 2
     # The whole point of the default: nothing can fire.
     assert not NO_RETRIES.escalates
 
@@ -1345,7 +1347,7 @@ def test_the_escalation_guard_accepts_a_shift_a_step_control_installs() -> None:
         rtol=1e-10,
         atol=1e-12,
         step_control=_InstallsBeta(),
-        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
     )
     # It ran, and the escalation actually fired -- the guard let through a step that can escalate.
     assert int(result.reports[0].escalations) > 0
@@ -2223,7 +2225,7 @@ def test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_som
         rtol=1e-10,
         atol=1e-12,
         step_control=control,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=3),
     )
     beta = result.control_state.beta
     if len(hooks) == len(_SHIFT_HOOKS):

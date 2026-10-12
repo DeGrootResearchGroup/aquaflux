@@ -2359,7 +2359,7 @@ tuning follow-up noted above.
                 sweep — "27/191, 29/206, 41/305 at gamma 2/5/10, gamma=10 stalling twice and going
                 backwards" — was taken under it and is **deleted**; re-measured honestly, `gamma = 10`
                 takes **64 steps with zero stalls**, so the confound had been hiding a third of that
-                arm's length. Damping now rides on `ShiftTerm.row_relaxation`, a closure of `beta`
+                arm's length. Damping now rides on `ShiftTerm.row_shift_scale`, a closure of `beta`
                 applied in the step, and `coupled_scaled_norm` reads the undamped diagonal. Pinned both
                 ways (`test_damping_leaves_the_BASE_DIAGONAL_alone_...`).
               - **The honest sweep.** pitzDaily, momentum-only scaling at **16 x 1**, everything else

@@ -167,8 +167,8 @@ class BorderedShiftPolicy(eqx.Module):
         )
         diagonal = drive.join(fields, inner_term.diagonal, jnp.asarray(0.0))
 
-        def make_preconditioner(relaxation: jnp.ndarray) -> _Matvec:
-            inner_matvec = inner_term.make_preconditioner(relaxation)
+        def make_preconditioner(shift_strength: jnp.ndarray) -> _Matvec:
+            inner_matvec = inner_term.make_preconditioner(shift_strength)
             return bordered_preconditioner(
                 lambda _state: inner_matvec,
                 drive,
@@ -177,16 +177,16 @@ class BorderedShiftPolicy(eqx.Module):
                 self.average,
             )(phi)
 
-        # The constraint row carries a zero shift, so its relaxation entry only keeps the augmented
-        # vector's shape.
-        row_relaxation = (
+        # The constraint row carries a zero shift, so its entry in the per-row shift scale only keeps the
+        # augmented vector's shape.
+        row_shift_scale = (
             None
-            if inner_term.row_relaxation is None
-            else lambda relaxation: drive.join(
-                fields, inner_term.row_relaxation(relaxation), jnp.asarray(1.0)
+            if inner_term.row_shift_scale is None
+            else lambda shift_strength: drive.join(
+                fields, inner_term.row_shift_scale(shift_strength), jnp.asarray(1.0)
             )
         )
-        return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
+        return ShiftTerm(diagonal, make_preconditioner, row_shift_scale)
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], _Matvec]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at no shift)."""

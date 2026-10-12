@@ -620,7 +620,7 @@ class TurbulenceDamping(eqx.Module):
     :class:`ResidualTaperedDamping`). Implementations differ in what they read to decide.
     """
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """The multiplier on the closure's shift strength, ``>= 1``.
 
         ⚠️ **It multiplies the shift STRENGTH, never the diagonal.** The two differ where it matters:
@@ -632,7 +632,7 @@ class TurbulenceDamping(eqx.Module):
 
         Parameters
         ----------
-        relaxation : jnp.ndarray
+        shift_strength : jnp.ndarray
             The shift strength ``beta`` this attempt will actually use, a scalar, already clamped.
         residual : jnp.ndarray or None
             The full coupled residual at this iterate when the caller has it, else ``None`` (the first
@@ -674,9 +674,9 @@ class ConstantDamping(TurbulenceDamping):
         if float(self.ratio) < 1.0:
             raise ValueError(f"ratio must be >= 1 (damping never accelerates), got {self.ratio}")
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """``ratio``, whatever the shift or the state."""
-        del relaxation, residual
+        del shift_strength, residual
         return self.ratio
 
     def rebased(self, coupled: CoupledRANS, state: jnp.ndarray) -> TurbulenceDamping:
@@ -742,13 +742,13 @@ class ResidualTaperedDamping(TurbulenceDamping):
                 f"initial must be >= 1 (damping never accelerates), got {self.initial}"
             )
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """The tapered multiplier; ``initial`` when no residual is available yet.
 
         The march's very first shift is built before any residual exists, and that is the step the
         damping is most for -- so ``None`` opens at ``initial`` rather than at ``1``.
         """
-        del relaxation
+        del shift_strength
         if residual is None:
             return jnp.asarray(float(self.initial))
         share = jnp.clip(turbulence_residual_norm(self.layout, residual) / self.reference, 0.0, 1.0)
@@ -841,7 +841,7 @@ class BetaTaperedDamping(TurbulenceDamping):
                 f"beta_min={self.beta_min}, beta_start={self.beta_start}"
             )
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """``1 + (initial - 1) * share ** exponent``, with ``share`` the fraction of the descent left.
 
         ``share = log(beta / beta_min) / log(beta_start / beta_min)``, clipped to ``[0, 1]`` so a
@@ -850,7 +850,7 @@ class BetaTaperedDamping(TurbulenceDamping):
         """
         del residual
         span = math.log(self.beta_start / self.beta_min)
-        share = jnp.clip(jnp.log(relaxation / self.beta_min) / span, 0.0, 1.0)
+        share = jnp.clip(jnp.log(shift_strength / self.beta_min) / span, 0.0, 1.0)
         return 1.0 + (self.initial - 1.0) * share**self.exponent
 
 
@@ -998,7 +998,7 @@ class CoupledShiftPolicy(eqx.Module):
             jax.lax.stop_gradient(self.omega_shift_transport * self.omega_jacobian_scale),
         )
 
-        def row_relaxation(relaxation: jnp.ndarray) -> jnp.ndarray:
+        def row_shift_scale(shift_strength: jnp.ndarray) -> jnp.ndarray:
             """``turbulence_damping`` on the two scalar blocks, ``1`` on the flow rows.
 
             The closure's rows then run at an effective ``damping * beta`` while the velocity rows keep
@@ -1008,11 +1008,11 @@ class CoupledShiftPolicy(eqx.Module):
             factor there survives the floor the march switches damping off at; and the same diagonal is
             the row scale of the march's residual measure, which damping must not touch.
             """
-            gamma = self.turbulence_damping.factor(relaxation, residual)
+            gamma = self.turbulence_damping.factor(shift_strength, residual)
             scalar = jnp.full((n_cells,), gamma)
             return self.layout.pack(jnp.ones_like(flow_diagonal), scalar, scalar)
 
-        def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        def make_preconditioner(beta: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             block = self.flow_preconditioner
             if block is None:
                 raise ValueError(
@@ -1027,7 +1027,7 @@ class CoupledShiftPolicy(eqx.Module):
             a_p = convective_ap + dissipative_ap
             # Flow block at the shifted diagonal a_P + beta*d_vel matching the shifted Jacobian; scalar
             # blocks at their frozen AMG (beta-independent -- the shift only adds positive diagonal).
-            flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p + relaxation * d_vel))
+            flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p + beta * d_vel))
             k_m = None if self.k_preconditioner is None else self.k_preconditioner(k)
             omega_m = (
                 None if self.omega_preconditioner is None else self.omega_preconditioner(omega)
@@ -1041,7 +1041,7 @@ class CoupledShiftPolicy(eqx.Module):
 
             return precondition
 
-        return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
+        return ShiftTerm(diagonal, make_preconditioner, row_shift_scale)
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at ``beta = 0``).

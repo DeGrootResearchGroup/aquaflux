@@ -990,7 +990,9 @@ class _TrivialShiftPolicy(eqx.Module):
     """A shift policy with a unit diagonal and no preconditioner -- enough to build a step object."""
 
     def shift_term(self, phi, residual=None):
-        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+        return ShiftTerm(
+            diagonal=jnp.ones_like(phi), make_preconditioner=lambda _shift_strength: None
+        )
 
 
 def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejected() -> None:

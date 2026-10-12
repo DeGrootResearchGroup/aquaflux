@@ -46,7 +46,7 @@ def _stub_step(preconditioner, beta, diagonal):
     # Accepts the optional residual even though the hook does not pass one: a stand-in that is narrower
     # than the protocol breaks silently the day a caller starts supplying it.
     base = SimpleNamespace(
-        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _relaxation: None)
+        shift_term=lambda _phi, _residual=None: ShiftTerm(diagonal, lambda _shift_strength: None)
     )
     return SimpleNamespace(
         relaxation_schedule=SimpleNamespace(beta=beta),

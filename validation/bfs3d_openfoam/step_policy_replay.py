@@ -118,7 +118,7 @@ class ControlSettings:
         Clamps applied by the control (**not** by the ladder -- see the module docstring).
     retry_beta_factor : float
         The factor each ladder rung multiplies β by.
-    retry_cycles_limit : int
+    retry_max_retries : int
         The most rungs one step may climb.
     """
 
@@ -132,7 +132,7 @@ class ControlSettings:
     beta_min: float = 0.005
     beta_max: float = 4.0
     retry_beta_factor: float = 2.0
-    retry_cycles_limit: int = 2
+    retry_max_retries: int = 2
 
     def clamp(self, beta: float) -> float:
         """``beta`` brought inside the control's own clamps."""
@@ -285,7 +285,7 @@ class RecordedLadder:
     """
 
     def __call__(self, step: Step, previous: Step | None, settings: ControlSettings) -> int:
-        return min(step.escalations, settings.retry_cycles_limit)
+        return min(step.escalations, settings.retry_max_retries)
 
 
 @dataclass(frozen=True)
