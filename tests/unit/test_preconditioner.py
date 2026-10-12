@@ -140,7 +140,7 @@ def test_boundary_a_p_drops_wall_convection() -> None:
     """
     asm = _geometry(6)  # closed cavity: every patch is a NoSlipWall
     n_faces = asm.mesh.n_faces
-    boundary_mu = asm.viscosity[asm.mesh.face_cells.owner]  # per-face (no wall model)
+    boundary_mu = asm.effective_viscosity[asm.mesh.face_cells.owner]  # per-face (no wall model)
     viscous_only = asm.boundary_momentum_diagonal(boundary_mu, None)
     with_huge_mdot = asm.boundary_momentum_diagonal(boundary_mu, jnp.full(n_faces, 1e6))
     assert jnp.allclose(viscous_only, with_huge_mdot)  # convective dropped at every wall face
@@ -157,10 +157,12 @@ def test_boundary_a_p_drops_outlet_viscosity() -> None:
     asm = _channel(u_in=1.0)  # velocity inlet + pressure outlet + no-slip walls
     fc = asm.mesh.face_cells
     boundary_a_p = asm.boundary_momentum_diagonal(
-        asm.viscosity[fc.owner], jnp.zeros(asm.mesh.n_faces)
+        asm.effective_viscosity[fc.owner], jnp.zeros(asm.mesh.n_faces)
     )
     all_faces_viscous = jnp.where(
-        fc.interior, 0.0, asm.viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance
+        fc.interior,
+        0.0,
+        asm.effective_viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance,
     )
     assert float(jnp.sum(boundary_a_p)) < float(
         jnp.sum(all_faces_viscous)
@@ -292,7 +294,7 @@ def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> Non
         momentum_diagonal(
             asm.mesh.face_cells,
             asm.geometry,
-            asm.viscosity,
+            asm.effective_viscosity,
             mdot_lagged=reference_mdot,
         ),
         axis=1,
@@ -597,7 +599,7 @@ def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
     geometry = _VelocityGeometry(
         face_cells=face_cells,
         mesh_geometry=mesh.geometry(),
-        viscosity=jnp.ones(n_cells),
+        effective_viscosity=jnp.ones(n_cells),
         dim=mesh.dim,
     )
     owner_e, nb_e, _ = face_cells.interior_edges()

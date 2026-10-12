@@ -1,26 +1,26 @@
 """Bulk-velocity-constrained flow solve: the body force is a solve unknown, not a feedback loop.
 
 A streamwise-periodic channel prescribes velocity nowhere; it is driven to a target bulk (volume-
-averaged) velocity ``U_bar`` by a uniform body force ``beta`` along the flow direction. The naive way
-to hold ``U_bar`` is an *outer* controller that solves the flow at a fixed ``beta``, measures the bulk
-velocity it produced, and nudges ``beta`` for the next solve. That controller can overshoot badly when
+averaged) velocity ``U_bar`` by a uniform body force ``f`` along the flow direction. The naive way
+to hold ``U_bar`` is an *outer* controller that solves the flow at a fixed ``f``, measures the bulk
+velocity it produced, and nudges ``f`` for the next solve. That controller can overshoot badly when
 the momentum operator changes between solves (a segregated loop's eddy viscosity is stale by a sweep):
 the flow can converge to a physically-correct-but-absurd bulk velocity before the controller reacts.
 
-Here ``beta`` is instead a **solve unknown** -- a scalar Lagrange multiplier enforcing the constraint
+Here ``f`` is instead a **solve unknown** -- a scalar Lagrange multiplier enforcing the constraint
 ``<U_dir> - U_bar = 0``. It is appended to the flow state ``w = [u, p]`` and the flow residual is
 augmented with the constraint equation:
 
-    R_aug([w, beta]) = [ R_flow(w; beta) ; <U_dir>(w) - U_bar ] = 0.
+    R_aug([w, f]) = [ R_flow(w; f) ; <U_dir>(w) - U_bar ] = 0.
 
 This is one honest residual: automatic differentiation assembles the whole bordered Jacobian ``J_aug =
-[[J, a], [c^T, 0]]`` -- the force column ``a = dR_flow/dbeta = -V`` on the flow-direction momentum rows
-(``beta`` enters as ``R = flux - beta V``) and the averaging row ``c^T = d<U>/dw = V/sum(V)`` there --
+[[J, a], [c^T, 0]]`` -- the force column ``a = dR_flow/df = -V`` on the flow-direction momentum rows
+(``f`` enters as ``R = flux - f V``) and the averaging row ``c^T = d<U>/dw = V/sum(V)`` there --
 and the ordinary Newton solver (:class:`~aquaflux.solve.RootSolver`) drives it to a converged
 root, with no bespoke solver and no hand-derived linearization. ``<U> = U_bar`` therefore holds at the
 converged root **by construction**, so the bulk velocity can never overshoot while the eddy viscosity
 is still developing (the failure the old proportional controller had at high Reynolds number / high
-aspect ratio: it measured ``U_bulk`` at a fixed ``beta``, which spiked before the feedback could react,
+aspect ratio: it measured ``U_bulk`` at a fixed ``f``, which spiked before the feedback could react,
 collapsing the near-wall ``k`` onto its floor).
 
 The constraint itself -- what is held, along which axis, where the multiplier sits in the state, and
@@ -37,16 +37,16 @@ closure), so ``jax.grad`` of an objective through the solve returns its cotangen
 sensitivity to viscosity; a captured assembler would instead raise a ``custom_vjp`` closed-over-value
 error.
 
-**Preconditioning the augmented system (constraint preconditioning).** ``beta`` is a Lagrange
+**Preconditioning the augmented system (constraint preconditioning).** ``f`` is a Lagrange
 multiplier, not a function of ``w``, so -- unlike a nested gradient sub-solve -- it cannot be absorbed
 inside the residual; the border is eliminated one layer down, in the **preconditioner**. Given a flow-
 block preconditioner ``M ~ J^{-1}`` (the block-SIMPLE algebraic multigrid, AMG),
 :func:`~aquaflux.precondition.bordered_preconditioner` wraps it into a preconditioner for the
-``(dim+1) n_cells + 1`` augmented system by Schur-eliminating the scalar ``beta``:
+``(dim+1) n_cells + 1`` augmented system by Schur-eliminating the scalar ``f``:
 
     y   = M r_flow
-    dbeta = (c^T y - r_beta) / (c^T M a)      # the 1x1 Schur complement c^T J^{-1} a, approximated
-    dw  = y - dbeta (M a)
+    df  = (c^T y - r_f) / (c^T M a)      # the 1x1 Schur complement c^T J^{-1} a, approximated
+    dw  = y - df (M a)
 
 so one augmented Krylov iteration costs one application of the flow preconditioner plus O(n) dots, and
 the flow block is handed to the block preconditioner unchanged. It is exact when ``M = J^{-1}`` (the
@@ -95,13 +95,13 @@ def bulk_velocity_flow_solve(
 ) -> FlowSolve:
     """Build a ``solve(momentum, state) -> (momentum, state)`` that holds ``reference``'s bulk target.
 
-    Solves the flow with the body force ``beta`` treated as a Lagrange multiplier for the constraint
-    ``<U_dir> = target`` -- ``beta`` attached to the state and the flow residual augmented with the
+    Solves the flow with the body force ``f`` treated as a Lagrange multiplier for the constraint
+    ``<U_dir> = target`` -- ``f`` attached to the state and the flow residual augmented with the
     constraint equation, driven by the production :class:`~aquaflux.solve.RootSolver` (see the module
-    docstring). What is being held, along which axis, and the ``beta`` the march starts from all come
+    docstring). What is being held, along which axis, and the ``f`` the march starts from all come
     from ``reference``'s own :class:`~aquaflux.flow.MassFlow` drive, so the assembler the residual
     writes each iterate into and the constraint this builder enforces cannot name different targets.
-    The returned ``momentum`` carries the converged ``beta`` on its drive, so a segregated outer loop
+    The returned ``momentum`` carries the converged ``f`` on its drive, so a segregated outer loop
     can thread it forward.
 
     The assembler is threaded as the Newton solve's differentiable parameter, so the solve is
@@ -116,7 +116,7 @@ def bulk_velocity_flow_solve(
     reference : MomentumContinuity
         The concrete assembler this solve is built for. Its drive must be a
         :class:`~aquaflux.flow.MassFlow`: that is what makes the body force an unknown rather than a
-        prescribed source, and it supplies the target, the flow direction and the initial ``beta``. Its
+        prescribed source, and it supplies the target, the flow direction and the initial ``f``. Its
         geometry sets the border row and column of the constraint preconditioner, built **once here**
         (not inside the jitted, potentially traced solve) so the frozen preconditioner carries no
         tracer and the differentiated solve stays clean.
