@@ -26,14 +26,8 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import (
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    JacobiSmoothed,
-    MaterializedJacobian,
-    SimpleSmoothed,
-)
+from aquaflux.solve import Convergence, DualTimeLoop
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
@@ -53,8 +47,9 @@ from compare import (
 
 STEPS = int(os.environ.get("TET_STEPS", "25"))
 SEED_STEPS = 25
-#: Re-fit the preconditioner mid-step once an inner solve takes this many restart cycles (0: never, the
-#: first fit is kept for the whole march, refitted only on the session's own schedule).
+#: Re-fit the preconditioner once an inner solve takes this many restart cycles -- the step ends there and
+#: the next starts on the re-fit (0: never, the first fit is kept for the whole march, refitted only on the
+#: session's own schedule).
 REFRESH_ON_CYCLES = int(os.environ.get("TET_REFRESH_ON_CYCLES", "0")) or None
 ARMS = os.environ.get("TET_ARMS", "owner,repaired").split(",")
 RATIO = 10.0

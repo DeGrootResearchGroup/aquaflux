@@ -1,4 +1,4 @@
-"""Newton on the residual + implicitly-differentiated linear solve, and the AMG that preconditions it.
+"""Newton on the residual + implicitly-differentiated linear solve, and the march that drives it.
 
 Drives `R(state, params) = 0` and exposes an exact adjoint via two-level implicit
 differentiation (IFT on the converged state + `custom_vjp`/adjoint on each linear
@@ -8,7 +8,7 @@ functions are injected, so the driver is testable on a trivial analytic residual
 **This module is the package's API boundary: everything the rest of the library (or a user) may
 consume from `solve` is re-exported here, and consumers import from `aquaflux.solve`, not from its
 submodules.** A name absent from `__all__` is internal — reach for it only from that submodule's own
-unit tests. The surface is five groups:
+unit tests. The surface is four groups:
 
 * **The Newton driver, the single step, and the linear solve** — `RootSolver` (the
   driver: converges, globalizes, and carries the implicit-function-theorem adjoint), `root_adjoint`
@@ -62,16 +62,9 @@ unit tests. The surface is five groups:
   triggers (a costly solve, a collapsed step length, a diverged correction), the shift factor and
   escalation limit, and the optional tighter linear solver that is the fallback for a step more
   damping cannot fix. The default policy retries nothing.
-* **Frozen algebraic multigrid** — the operator description `ConvectionDiffusionStencil`, which
-  assembles itself and reports its diagonal (plus
-  `decouple_dof` for a closed-domain pressure pin and `symmetrically_equilibrate` for the
-  square-root-diagonal rescaling a factorization or a coarsening may want), the hierarchy builders
-  `build_smoothed_hierarchy` / `build_convection_hierarchy` / `build_air_hierarchy`, and their
-  matching fixed-cycle applies. Callers assemble an operator, build a hierarchy once off the jit
-  path, and apply it as a frozen matrix-free V-cycle preconditioner. `bordered_preconditioner`
-  extends any preconditioner to the same system bordered by one scalar unknown (a Lagrange
-  multiplier), eliminating it through its 1x1 Schur complement; where the scalar sits is a
-  `ScalarBorder`'s to say.
+
+The preconditioners those linear solves take live in :mod:`aquaflux.precondition`, which builds on
+this package; nothing here imports it.
 """
 
 from __future__ import annotations
@@ -87,29 +80,8 @@ from .continuation import (
     ShiftTerm,
     StepAcceptance,
 )
-from .frozen_operator import (
-    ConvectionDiffusionStencil,
-    decouple_dof,
-)
-from .materialized_preconditioner import MaterializedJacobianPreconditioner
-from .field_split import (
-    JacobiSmoothedInverse,
-    FieldSplitInverse,
-    FieldGroups,
-    FieldSplitPreconditioner,
-    field_split_inverse,
-)
-from .bordered import ScalarBorder, bordered_preconditioner
-from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .settings_mapping import SettingsMapping
 from .settings_value import MergeableSettings, SettingsValue, filled_from
-from .host_preconditioner import (
-    FrozenInverse,
-    HostPreconditioner,
-    RefactorableInverse,
-    ReleasableInverse,
-)
-from .hierarchy_inverse import HierarchyBlockInverse
 from .refresh_timing import (
     RefreshTiming,
 )
@@ -124,6 +96,8 @@ from .strategy import (
     StepControl,
     StepOutcome,
     StepReport,
+    StopsForRefresh,
+    shift_of,
 )
 from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
 from .implicit import (
@@ -167,20 +141,6 @@ from .march_log import (
     MarchLogger,
     field_change_metrics,
 )
-from .saddle_multigrid import (
-    SimpleSmoothedInverse,
-)
-from .multigrid import (
-    AirHierarchy,
-    SmoothedHierarchy,
-    air_multigrid_cycles,
-    build_air_hierarchy,
-    refresh_air_hierarchy,
-    build_convection_hierarchy,
-    build_smoothed_hierarchy,
-    convection_multigrid_cycles,
-    smoothed_multigrid_cycles,
-)
 from .newton import newton_step
 from .norm import (
     BlockScaledNorm,
@@ -208,23 +168,7 @@ from .driver import (
     explicit_source,
     staged_march,
 )
-from .jacobian_probe import JacobianProbe, jacobian_probe_plan
-from .materialized_session import (
-    MaterializedProblem,
-    MaterializedSession,
-    PreconditionerSession,
-)
-from .materialized_spec import (
-    FieldSplit,
-    JacobianProbeSpec,
-    MaterializedJacobian,
-    materialized_spec_from_mapping,
-    materialized_spec_to_mapping,
-    MATERIALIZED_MAPPING,
-)
-from .monolithic_policy import (
-    MonolithicFactorShiftPolicy,
-)
+from .session import PreconditionerSession
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .ramp_schedule import RampPosition, RampSchedule, RampWalk
@@ -236,13 +180,12 @@ from .shift_basis import (
     ShiftSettings,
     VelocityShiftParts,
 )
-from .sparse_jacobian import (
-    materialize_block_jacobian,
-)
 from .step_control import (
     CflResidualDualTimeControl,
     DualTimeControl,
+    ReleaseMemory,
     ResidualRatioDualTimeControl,
+    ShiftControlState,
     ShiftStrengthControl,
 )
 
@@ -250,13 +193,9 @@ __all__ = [
     "DEFAULT_GLOBALIZATION",
     "DEFAULT_ROOT_SOLVE",
     "DEFAULT_SHIFT_BASIS",
-    "MATERIALIZED_MAPPING",
     "NO_REFRESH",
     "NO_RETRIES",
     "AbortsInnerLoop",
-    "AirHierarchy",
-    "AirReduction",
-    "BlockInverse",
     "BlockScaled",
     "BlockScaledNorm",
     "CarriesRelaxationSchedule",
@@ -265,7 +204,6 @@ __all__ = [
     "CoefficientDriftTrigger",
     "ConstantRelaxation",
     "ContinuationSource",
-    "ConvectionDiffusionStencil",
     "Convergence",
     "CycleGrowthTrigger",
     "DampedNewtonStep",
@@ -275,21 +213,10 @@ __all__ = [
     "DualTimeLoop",
     "DualTimeStep",
     "Euclidean",
-    "FieldGroups",
     "FieldLayout",
-    "FieldSplit",
-    "FieldSplitInverse",
-    "FieldSplitPreconditioner",
-    "FrozenInverse",
     "GlobalDofs",
     "Globalization",
     "GmresSolve",
-    "HierarchyBlockInverse",
-    "HostPreconditioner",
-    "JacobiSmoothed",
-    "JacobiSmoothedInverse",
-    "JacobianProbe",
-    "JacobianProbeSpec",
     "LineSearchGrowth",
     "LinearSolveRegime",
     "LinearSolveSettings",
@@ -298,13 +225,8 @@ __all__ = [
     "MarchLogger",
     "MarchRecorder",
     "MarchResult",
-    "MaterializedJacobian",
-    "MaterializedJacobianPreconditioner",
-    "MaterializedProblem",
-    "MaterializedSession",
     "MeasureBuilder",
     "MergeableSettings",
-    "MonolithicFactorShiftPolicy",
     "MonotoneLineSearch",
     "NamedBlockMeasure",
     "NewtonStrategy",
@@ -314,13 +236,12 @@ __all__ = [
     "RampSchedule",
     "RampWalk",
     "ReadableShift",
-    "RefactorableInverse",
     "RefreshPolicy",
     "RefreshTiming",
     "RefreshTrigger",
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
-    "ReleasableInverse",
+    "ReleaseMemory",
     "ResidualHomotopy",
     "ResidualMeasure",
     "ResidualMeasures",
@@ -332,20 +253,17 @@ __all__ = [
     "RootSolver",
     "RowScaled",
     "RowScaledNorm",
-    "ScalarBorder",
     "SessionSource",
     "SettingsMapping",
     "SettingsValue",
     "ShiftBasis",
     "ShiftCarryingControl",
+    "ShiftControlState",
     "ShiftPolicy",
     "ShiftSettings",
     "ShiftStrengthControl",
     "ShiftTerm",
     "ShiftedNewtonStrategy",
-    "SimpleSmoothed",
-    "SimpleSmoothedInverse",
-    "SmoothedHierarchy",
     "StagedResult",
     "StateBlock",
     "StateCheckpointer",
@@ -354,35 +272,23 @@ __all__ = [
     "StepHistory",
     "StepOutcome",
     "StepReport",
+    "StopsForRefresh",
     "SubLayout",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
     "VelocityShiftParts",
-    "air_multigrid_cycles",
     "assembler_residual",
     "block_reference_scales",
-    "bordered_preconditioner",
-    "build_air_hierarchy",
-    "build_convection_hierarchy",
-    "build_smoothed_hierarchy",
     "combine_observers",
-    "convection_multigrid_cycles",
-    "decouple_dof",
     "default_linear_solver",
     "explicit_source",
     "field_change_metrics",
-    "field_split_inverse",
     "filled_from",
     "find_checkpoint",
-    "jacobian_probe_plan",
-    "materialize_block_jacobian",
-    "materialized_spec_from_mapping",
-    "materialized_spec_to_mapping",
     "newton_march",
     "newton_step",
     "positive_block_limit",
     "positive_block_projection",
-    "refresh_air_hierarchy",
     "refuse_a_transform_the_march_cannot_run_in",
     "relative_residual_gmres",
     "report_record",
@@ -390,8 +296,8 @@ __all__ = [
     "resolve_linear_solve",
     "restart_cycles",
     "root_adjoint",
+    "shift_of",
     "shifted_step",
-    "smoothed_multigrid_cycles",
     "solve_linear",
     "staged_march",
     "stop_array_gradients",

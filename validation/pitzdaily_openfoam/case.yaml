@@ -62,13 +62,17 @@ solver:
   # The materialized coupled Jacobian, split into the [u, v, p] saddle and the [k, omega] block: a
   # SIMPLE-smoothed hierarchy for the saddle (which never eliminates the matrix, so it does not depend
   # on an elimination order) and a Jacobi-smoothed one for the closure. Refitted at a shift no lower
-  # than 0.05.
+  # than 0.05. The saddle's coarsening reads operator values (the strength threshold), so it is frozen
+  # at the first build and a refit only re-derives values: re-coarsening moved its level sizes between
+  # consecutive steps (validation/traced_split_refresh_shapes.py), which recompiles whatever compiled
+  # solve holds the hierarchy.
   preconditioner:
     kind: MaterializedJacobian
     inverse:
       kind: FieldSplit
       leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
-        avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500}
+        avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
+        frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
     # Reach 3 is NOT exact for this coupled residual: the velocity gradient feeds the eddy viscosity,
     # which spends one more ring, so the u and v columns (and, weakly, k into omega) reach 4. At reach 3
@@ -78,9 +82,15 @@ solver:
     probe: {kind: JacobianProbeSpec, stencil_reach: 3}
     refit_beta_floor: 0.05
   # Each outer step a dual-time inner loop of up to five Newton iterations, stopping at a hundredth of
-  # the step's starting residual; the preconditioner is refitted mid-step once a solve runs 2 restart
-  # cycles (counted as cycles run, the residual stop's count; 2 measured fastest of 2-4 under it).
-  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 2}
+  # the step's starting residual; a solve that runs 3 restart cycles ends the step, and the
+  # preconditioner is refitted before the next (counted as cycles run, the residual stop's count).
+  # 3, not the 2 that measured fastest while the refit happened mid-step: under the residual stop
+  # nearly every first solve runs 2 cycles, so at 2 almost every step ended after one inner iteration
+  # (39 outer steps against 20) and the 1-step-per-station ramp and the floor release, which count
+  # outer steps, both moved. Solve wall 935 / 874 / 882 s at 2 / 3 / 4, all to x_r/h 8.0686 -- inside
+  # this machine's spread, so 3 is chosen for keeping the march's shape, not for speed (one run each,
+  # 2026-10-11, Linux x86_64, 4 cores).
+  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 3}
   # An inexact-Newton stop on each inner solve, tested every iteration on the residual alone (about half
   # the march's time against the default stop, which also demands a settled solution and tests only at
   # restarts); the restart cap sits above the retry threshold below, so a solve past it is escalated
@@ -93,8 +103,12 @@ solver:
   # run at the floor at full length, the shift drops to a ten-thousandth, so the last steps are inexact
   # Newton steps rather than a linear tail at the floor. Measured: 16 steps / 111 restart cycles, against
   # 31 / 161 at the previous growth of 1.5, 16 stations and no release, to the same reattachment length.
+  # A release whose step clips is not tried again until the residual has halved from where it was tried:
+  # this march's single release holds, so it never fires here. From a deeper ramp start (anchor 1000) the
+  # release fails six times on the way down; retried on every settled step it had cost 502 cycles by step
+  # 38, and with the backoff the march converges in 82 steps / 612 cycles.
   step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005, grow: 3.0,
-    release_floor: 1.0e-4}
+    release_floor: 1.0e-4, release_backoff: 0.5}
   # Redo a step whose line search collapses at twice the shift; a step still non-finite after that is
   # redone with a tight solve.
   retry:

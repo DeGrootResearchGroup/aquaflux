@@ -315,7 +315,7 @@ class FieldLayout(eqx.Module):
         """Whether every degree of freedom belongs to a whole per-cell field.
 
         ``False`` once the layout carries a :class:`GlobalDofs` block, which is what a partition
-        into whole fields (:class:`~aquaflux.solve.FieldGroups`) needs to know: a bordered state's
+        into whole fields (:class:`~aquaflux.precondition.FieldGroups`) needs to know: a bordered state's
         trailing multiplier belongs to no field, so it belongs to no field group either.
         """
         return self.size == self.n_fields * self.n_cells
@@ -358,7 +358,7 @@ class FieldLayout(eqx.Module):
     def field_offset(self, name: str) -> int:
         """Whole per-cell fields preceding the named block.
 
-        Where a field-boundary partition (:class:`~aquaflux.solve.FieldGroups`) splits when it is
+        Where a field-boundary partition (:class:`~aquaflux.precondition.FieldGroups`) splits when it is
         asked to split before a named block.
         """
         return sum(block.n_cell_fields for block in self.blocks[: self._index(name)])

@@ -4569,19 +4569,40 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   part only, lamp body ids not offset past the reflectors'. **Dismissed, equivalent**: joining the
   reflectors under `NoOcclusion` too (adds zeros; the lamps-alone branch is cost only); and a
   Lambertian reflector profile replaced by the lamps' first (a zero emission weighs nothing; NOT run).
-- ⚠️ **THE TRANSFER LETS A FACET SEND REFLECTED LIGHT OUT OF ITS BACK; THE GATHERS DO NOT (#667, found
-  2026-10-10, open).** `transfer._row_block`'s geometric term is the receiver's projected solid angle
-  of the sending triangle, clipped to the RECEIVER's half-space only, and a Lambertian set returns
-  `common` with no source cosine (`reflected, reflected`), so nothing gates the sender's side. The
-  gathers do (`Lambertian.radiance_per_exitance_at` is zero for `cos <= 0`). Measured (jax 0.10.2,
-  CPU, x64, Linux): a 1 m plate at z = 1 facing down, emission 1, and a 1 m plate at z = 2 facing down
-  over its back, `receiver_quadrature=1`, either occlusion: the upper plate's landing is **0.2248
-  W/m²** where it should be 0. So in a scene, light a plate reflects downward also lands on whatever
-  is above it in the solve (and is then reflected again), while `irradiance_reflected` at a point
-  above it reads 0: in the #622 fixture with the plate at rho 0.6 the ceiling's landing was 0.01153
-  against 0.00972 gathered at the same point. Invisible in every closed enclosure (no facet sees
-  another's back). Not fixed here (outside #622's scope); the #622 gate uses a black plate so as not
-  to pin it. The model-with-everything-inside reference carries the same leak, so it cannot see it.
+- **A FACET SENDS FROM ITS FRONT ONLY, IN THE TRANSFER AS IN THE GATHERS (#667, fixed 2026-10-12).**
+  `projected_solid_angle` clips the sending triangle to the RECEIVER's half-space alone, and a
+  Lambertian set's `assemble` applies no source cosine (`reflected, reflected`), so before the fix
+  nothing gated the SENDER's side: a facet sent reflected light out of its back, while every gather
+  (`Lambertian.radiance_per_exitance_at`, zero for `cos <= 0`) did not. Measured on `777156e` (jax
+  0.10.2, CPU, x64, Linux): a 1 m plate at z = 1 facing down, emission 1, under a 1 m plate at z = 2
+  facing down, `receiver_quadrature=1`, either occlusion: the upper plate landed **0.2248 W/m²**; in the
+  #622 fixture with the plate at rho 0.6, the ceiling's solved landing was 0.01153 against 0.00972
+  gathered at the same point. **The same leak was in the specular exchange** (`images._exchange_rows`,
+  found while fixing this): a plate over a floor mirror and facing AWAY from it still sent through it
+  (on `d838f90`: the mirror took 0.0946 W/m² from the plate's back, a receiver above gained 0.0337).
+  - **The fix**: `_row_block` zeroes the term at each receiving QUADRATURE POINT on or behind the
+    sending facet's plane, and `_exchange_rows` at each one on or behind the IMAGE's plane (the image
+    faces as its source does after the reflection, so behind it is "the source faces away from the
+    mirror"). Judged per point, not per receiving facet: a receiving facet can straddle the sender's
+    plane. The side test is `clipping.point_heights` (filtered, an undecidable height is exactly zero
+    and counts as not in front), now also what `back_faces._certainly_behind` uses -- one home.
+  - ⚠️ **Invisible in every closed enclosure whose facets face into it** (no facet sees another's
+    back), which is why no test saw it, and the "model with every facet in one set" reference the
+    scene tests use carried the same leak, so it could not see it either. One existing test DID rely
+    on it: `test_a_body_in_the_way_removes_the_transfer_across_it` had both "facing" plates wound +z, so
+    its only exchange was the lower plate taking light from the upper one's back (sum 0.0 after the
+    fix); its upper plate now faces down. Every other radiation fast-tier test (953) passed unchanged.
+  - ⚠️ **A zero-thickness sheet still reflects from its front face only** -- `two_sided` is about
+    blocking, not optics; both faces reflecting needs two radiosity unknowns per facet (#689).
+  - Tests: `test_a_facet_sends_nothing_out_of_its_back` (both occlusions, front-to-front control),
+    `test_a_receiver_across_the_sender_s_plane_takes_light_only_at_its_points_in_front` (a wall across a
+    small sender's plane against a hand sum over the points above it, strictly between 0 and the
+    ungated sum), `test_a_facet_facing_away_from_the_mirror_sends_nothing_through_it` (both
+    orientations), and in `test_radiation_scene.py`
+    `test_a_reflector_sends_its_light_out_of_its_front_in_the_solve_as_the_gathers_do` (the #622 fixture
+    with a reflecting plate: solved ceiling landing = gathered ceiling irradiance, 1e-11). **Mutation
+    pass (4, all red)**: no gate, the gate judged at the receiving facet's centroid (caught only by the
+    straddling wall), the gate inverted, no gate on the mirror path.
 
 ### #604 STEP 1: LAMPS REFLECT AND SHADOW IN THE EXCHANGE (2026-10-07)
 

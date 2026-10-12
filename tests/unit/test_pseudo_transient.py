@@ -42,14 +42,14 @@ class UniformShiftPolicy(eqx.Module):
     Attributes
     ----------
     strength : float
-        The per-DOF base shift magnitude ``d`` (static); the engine scales it by the relaxation ``β``.
+        The per-DOF base shift magnitude ``d`` (static); the engine scales it by the shift strength ``β``.
     """
 
     strength: float = eqx.field(static=True, default=1.0)
 
     def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         diagonal = self.strength * jnp.ones_like(phi)
-        return ShiftTerm(diagonal, lambda relaxation: None)
+        return ShiftTerm(diagonal, lambda shift_strength: None)
 
 
 def _residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
@@ -64,14 +64,14 @@ class _RecordingShiftPolicy(eqx.Module):
 
     def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         self.seen.append((phi, residual))
-        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None)
+        return ShiftTerm(jnp.ones_like(phi), lambda shift_strength: None)
 
 
 class _BlockDampedShiftPolicy(eqx.Module):
     """A uniform shift with the SECOND component damped ``ratio`` times harder.
 
     ``through_the_diagonal`` picks which route the factor takes: folded into the base diagonal, or
-    carried as a ``row_relaxation`` closure the step applies at the ``beta`` it actually uses. At a
+    carried as a ``row_shift_scale`` closure the step applies at the ``beta`` it actually uses. At a
     fixed ``beta`` the two are the same number, which is what makes them comparable.
     """
 
@@ -81,8 +81,10 @@ class _BlockDampedShiftPolicy(eqx.Module):
     def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         scale = jnp.array([1.0, self.ratio])
         if self.through_the_diagonal:
-            return ShiftTerm(scale * jnp.ones_like(phi), lambda relaxation: None)
-        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None, lambda relaxation: scale)
+            return ShiftTerm(scale * jnp.ones_like(phi), lambda shift_strength: None)
+        return ShiftTerm(
+            jnp.ones_like(phi), lambda shift_strength: None, lambda shift_strength: scale
+        )
 
 
 def test_the_step_hands_the_policy_the_residual_it_just_computed() -> None:
@@ -115,7 +117,7 @@ def test_the_step_hands_the_policy_the_residual_it_just_computed() -> None:
         assert jnp.allclose(residual, residual_theta(phi))
 
 
-def test_a_row_relaxation_reaches_the_SHIFTED_OPERATOR_not_just_the_policy() -> None:
+def test_a_row_shift_scale_reaches_the_SHIFTED_OPERATOR_not_just_the_policy() -> None:
     """The plumbing that decides whether a per-block pseudo-timestep exists at all.
 
     A wrapper policy that rebuilds a ``ShiftTerm`` from ``.diagonal`` alone drops the multiplier in

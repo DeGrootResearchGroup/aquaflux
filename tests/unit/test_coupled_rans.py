@@ -32,6 +32,10 @@ from aquaflux.flow import (
 from aquaflux.flow.state import flow_state_layout
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+from aquaflux.precondition.materialized_session import (
+    VCYCLE_LINEAR_SOLVE,
+)
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
@@ -42,23 +46,16 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DualTimeLoop,
     Euclidean,
-    FieldSplit,
     Globalization,
-    JacobiSmoothed,
     LinearSolveSettings,
-    MaterializedJacobian,
     PseudoTransientStep,
     RefreshPolicy,
     Resumption,
     RowScaledNorm,
     SessionSource,
     ShiftTerm,
-    SimpleSmoothed,
 )
 from aquaflux.solve import driver as driver_module
-from aquaflux.solve.materialized_session import (
-    VCYCLE_LINEAR_SOLVE,
-)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledShiftSettings,
@@ -348,7 +345,6 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "shift",
         # The per-step guards.
         "inner_observer",
-        "inner_refresh",
         "positivity_floor",
         "positivity_projection",
     }
@@ -884,7 +880,7 @@ def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_
 
     def recording_march(step, residual_fn, state, **kwargs):
         calls.append(kwargs)
-        return MarchResult(state, (), True, False, None)
+        return MarchResult(state, (), True, False, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     homotopy = object()
@@ -933,7 +929,9 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
     monkeypatch.setattr(
         driver_module,
         "newton_march",
-        lambda step, residual_fn, state, **kwargs: MarchResult(state, (), converged, False, None),
+        lambda step, residual_fn, state, **kwargs: MarchResult(
+            state, (), converged, False, None, step
+        ),
     )
 
     with pytest.raises(eqx.EquinoxRuntimeError, match=match):
@@ -964,7 +962,7 @@ def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> No
 
     def recording_march(step, residual_fn, state, **kwargs):
         triggers.append(kwargs["trigger"])
-        return MarchResult(state, (), True, kwargs["trigger"] is not None, None)
+        return MarchResult(state, (), True, kwargs["trigger"] is not None, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     trigger = object()
@@ -993,7 +991,9 @@ class _TrivialShiftPolicy(eqx.Module):
     """A shift policy with a unit diagonal and no preconditioner -- enough to build a step object."""
 
     def shift_term(self, phi, residual=None):
-        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+        return ShiftTerm(
+            diagonal=jnp.ones_like(phi), make_preconditioner=lambda _shift_strength: None
+        )
 
 
 def test_refresh_trigger_with_an_explicit_continuation_and_no_builder_is_rejected() -> None:
@@ -1112,7 +1112,7 @@ def _recorded_measure_builders(
         builders.append((step, kwargs["norm_builder"]))
         if stop_after_recording:
             raise _Recorded
-        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     step = coupled_step(
@@ -1156,7 +1156,7 @@ def test_a_resumed_solve_anchors_its_first_segment_to_the_reference_and_every_se
         from aquaflux.solve import MarchResult
 
         calls.append(kwargs)
-        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     step = coupled_step(
@@ -1587,7 +1587,7 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
     assembler as an argument instead. A rung differs only in leaf values (pinned by the test above), so
     a probe that takes the assembler as an argument is a hit.
     """
-    from aquaflux.solve.materialized_session import (
+    from aquaflux.precondition.materialized_session import (
         batched_jacobian_matvec,
         jacobian_matvec,
     )
@@ -1619,11 +1619,11 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
     rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
     preconditioner -- defeating the point of reusing it.
     """
+    from aquaflux.precondition.monolithic_policy import (
+        FrozenTransposeFactory,
+    )
     from aquaflux.solve import (
         TransposedPreconditioner,
-    )
-    from aquaflux.solve.monolithic_policy import (
-        FrozenTransposeFactory,
     )
 
     class _Pc:
@@ -1645,7 +1645,7 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
 def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
     """The factorization is frozen, so the same transpose serves every state -- which is what lets this
     be a value object at all."""
-    from aquaflux.solve.monolithic_policy import (
+    from aquaflux.precondition.monolithic_policy import (
         FrozenTransposeFactory,
     )
 

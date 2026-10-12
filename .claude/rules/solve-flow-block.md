@@ -1,10 +1,10 @@
 ---
 paths:
-  - "aquaflux/solve/saddle_multigrid.py"
+  - "aquaflux/precondition/saddle_multigrid.py"
   - "aquaflux/solve/shift_basis.py"
 ---
 
-# Rules — `aquaflux/solve/` the flow block (traced `[u, v, w, p]` saddle preconditioning)
+# Rules — `aquaflux/precondition/` the flow block (traced `[u, v, w, p]` saddle preconditioning)
 
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and general binding decisions this file assumes.
@@ -25,6 +25,14 @@ honest verdict on why the traced hierarchy does not win on speed end to end. The
 investigation between those two points — several rounds of "found a win", each later qualified or
 retracted by a tighter measurement — is preserved in full in `solve-flow-block-log.md`; read it before
 proposing to revisit the traced flow block, so a re-litigated idea is not mistaken for a new one.
+
+**The SIMPLE level's derived pieces are stored on their structural pattern (binding, #290,
+2026-10-12).** `saddle_multigrid.py` forms each level's `D⁻¹G` and Schur `C − D (D⁻¹G)` with
+`_onto_pattern(values, <same expression over _ones>)` (`multigrid.py`), and the non-block-splitting
+`D⁻¹` as an explicit CSR rather than a `diags` product. A plain `scipy` product or difference drops an
+entry that comes out exactly zero, so these pieces' stored counts — array shapes, leaves of the traced
+split — moved with the operator's values and recompiled the coupled step on a refit. Values are
+unchanged. Do not "simplify" either back to a bare product.
 
 **Adding new content: a dated measurement or investigation step goes in `solve-flow-block-log.md`, not
 here.** Update the current-status paragraph above only when an investigation reaches a durable verdict

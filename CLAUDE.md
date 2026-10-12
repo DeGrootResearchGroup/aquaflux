@@ -45,7 +45,7 @@ Checklist still governs).
 | `.claude/rules/schemes.md` | `aquaflux/schemes/**` | first-class swappable numerics: face interpolation, gradient reconstruction, non-orthogonal correction |
 | `.claude/rules/boundary.md` | `aquaflux/boundary/**` | weak boundary-face-value closures (BC = special face interpolator); the shared per-patch fold |
 | `.claude/rules/properties.md` | `aquaflux/properties/**` | physical property model (density/viscosity/conductivity): `Property` (constant / per-zone / calculated) collected in a `PropertyModel`, decoupled from the numerics |
-| `.claude/rules/solve.md` | `aquaflux/solve/**` | **the residual-agnostic layer every residual runs on** (Principle 3.6): the staged driver, the shifted-step assembly, measures, Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
+| `.claude/rules/solve.md` | `aquaflux/solve/**`, `aquaflux/precondition/**` | **the residual-agnostic layer every residual runs on** (Principle 3.6): the staged driver, the shifted-step assembly, measures, Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk; and **`precondition/`**, the preconditioners those linear solves take (frozen operators, multigrid, block inverses, the field split, the materialized Jacobian), a separate package since #284 that imports `solve/` and nothing else. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, differentiated `a_P` (frozen only in the preconditioner), monolithic AD-Jacobian solve |
 | `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/transport.md` | `aquaflux/transport/**` | scalar transport by a converged flow (species, temperature, tracers): why a concentration rides the *volumetric* flux, the effective-diffusivity convention, sub-patch injection without a mesh change — the aquakin reaction seam |
@@ -322,7 +322,7 @@ found and fixed**; treat them as binding, not aspirational.
   enforces it over every module in `aquaflux/`, the top-level ones included. When it fires, the remedy is
   to export the name, or — when the name is private and generic — to move it to the package it belongs
   in (`_bordered_preconditioner` was pure Schur elimination living in `flow/mean_velocity.py`; it is now
-  `solve.bordered_preconditioner`). Tests and `validation/` harnesses are exempt and may reach internals
+  `precondition.bordered_preconditioner`). Tests and `validation/` harnesses are exempt and may reach internals
   from the submodule. Exporting a name from a documented subpackage publishes it, so a name that is
   plumbing rather than something a user configures or implements belongs in the package that uses it.
 - **Concrete trigger:** *if you are about to pass an object's raw arrays to a function, thread a loose
@@ -394,7 +394,8 @@ lines by the time anything moved out of it, and nothing measured that it was gro
   configuration of it.
 - **Two mechanical guards, both in `tests/unit/test_layering.py`, both in the always-on gate.** `solve/`
   imports nothing outside itself (it holds no mesh, field or physics import — that is what lets every
-  residual run on it); and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500
+  residual run on it), and `precondition/`, which holds the preconditioners its linear solves take,
+  imports `solve/` and nothing else; and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500
   lines needs a ratchet entry that only ever goes down. (A third guard in the same file is about the
   *surface* rather than the direction — see Principle 3's `__all__` bullet.) **Tripping the size guard is a prompt to sort the
   file's contents into generic and physics — not to split it by topic**, which moves the problem into
@@ -403,6 +404,46 @@ lines by the time anything moved out of it, and nothing measured that it was gro
   written without that package's vocabulary, it is physics and stays; if it can, stop and put it in
   `solve/`. And if you are writing a second, simpler path for a residual because the robust one "needs
   turbulence", the robust one has the wrong dependency.*
+
+### 3.7 Vocabulary — one word, one meaning (binding)
+
+The observed failure (issue #373): the package grew several names per concept and several concepts
+per name, one reasonable-looking change at a time. `relaxation` named an under-relaxation factor in
+`(0, 1]`, which damps *less* as it grows, and the shift strength `β`, which damps *more*; `rtol` was a
+residual tolerance on one solve and a tolerance on the *state increment* on another, with different
+defaults; `omega` is the SST field and a smoother weight, and one case file sets both a few lines
+apart; `cycles_limit` counted redone steps, not cycles. This is not cosmetic. A settings field is read
+straight from a case file, so **its name is a user-facing key**, and a parameter name is how a reader
+tells what a recorded setting meant. No single change looked wrong, because nothing compared a new
+name with the places the word was already in use.
+
+- **Before naming a parameter, field or method, grep the package for the word.** If it already means
+  something else anywhere, pick another name, even when the new use is local and private. A word that
+  means two things in two modules means two things to the reader of either.
+- **A name must not invert under the reader.** Where two quantities move in opposite directions (a
+  relaxation factor and a shift strength; a floor on the operator and a floor on its preconditioner),
+  they get names that say which. A docstring saying "careful, this one runs the other way" is the
+  defect, not the fix.
+- **A count names its unit.** `max_restarts`, `max_retries`, `sweeps`, `cycles` (V-cycles in
+  `precondition/`, Krylov restart cycles in `solve/` — itself an open clash), never a bare `limit` or a
+  unit borrowed from a neighbouring count.
+- **One concept, one name.** Before naming something, look for the name its siblings already use
+  (`cycles` vs `v_cycles`, `sweeps` vs `f_iters`) and use that one.
+- **Rename a clash in one change, with no alias** (Principle 4), and add the old name to the guard
+  below so it cannot come back.
+
+**The guard is `tests/unit/test_vocabulary.py`, in the fast tier.** `VOCABULARY` lists each overloaded
+word with the meaning it is being converged on and every module that defines a parameter or field of
+that name, with the meaning it has there (clashes awaiting a rename say so and name the issue).
+Defining one of those words in a module not listed fails; so does a listed module that no longer
+defines it, so the table cannot go stale as renames land. `RETIRED` lists names that may not be defined
+again. **Adding a module under a word is the place to ask whether it means the same thing** — if it
+does not, the answer is another name, not a new entry. The scan parses parameters (lambdas included)
+and class-level fields; it does not see a local variable, a dictionary key or prose, so it is a floor,
+not the whole rule. When you add a word with a history of confusion, add it to `VOCABULARY` too.
+- **Deliberately kept, so do not "finish the job":** `relaxation_schedule` and the `RelaxationSchedule`
+  classes (`SwitchedEvolutionRelaxation` is the literature's name); the method that returns `β` is
+  `shift_strength`, and every parameter carrying `β` is `shift_strength` or `beta`.
 
 ### 4. No compatibility shims before release (pre-release policy — remove this principle at 1.0)
 
@@ -565,7 +606,7 @@ scaled to its own extent, deliberately**: cubic cells make groups on a long thin
 wrap them around it, so their facets stop facing one way, and measured on the whole Sozzi field they
 left more pairs undecided and slowed the transfer build (#574, `.claude/rules/radiation.md`).
 
-**Frozen preconditioner operators are assembled in one place, `aquaflux/solve/frozen_operator.py`.**
+**Frozen preconditioner operators are assembled in one place, `aquaflux/precondition/frozen_operator.py`.**
 The AMG preconditioners coarsen a *frozen* linearization of a transport equation — a symmetric
 diffusive edge coupling, optionally plus first-order-upwind convection at a reference flux —
 assembled once, off the jit path, as a `scipy.sparse` matrix. `ConvectionDiffusionStencil` — the
@@ -574,7 +615,7 @@ interior-face graph with its per-edge coefficients and per-cell boundary diagona
 description for all four consumers (with `decouple_dof` for the closed-domain pressure pin): the
 pressure Schur, both velocity blocks, and the k/ω scalar transport, whose pseudo-time shift reads the
 same stencil's diagonal rather than re-deriving it. It sits **beside**
-`solve/multigrid.py`, not inside it: every multigrid builder takes an assembled operator `a` and
+`precondition/multigrid.py`, not inside it: every multigrid builder takes an assembled operator `a` and
 knows nothing about meshes or fluxes. The first-order-upwind stencil is the **preconditioner's**
 choice, not the model's — whatever scheme the residual uses for advection, the frozen operator always
 upwinds first-order, because that is what makes it an M-matrix an aggregation hierarchy can coarsen —
@@ -1313,6 +1354,9 @@ The Engineering Principles as a checklist, plus correctness and user-facing clar
 - **Encapsulation (Principle 3):** passing an object's raw arrays instead of the object; taking a
   whole `Mesh` where `face_cells` suffices; duplicate accessors; god-methods; inlined formulas
   that have a home.
+- **Vocabulary (Principle 3.7):** a name that already means something else in the package, a
+  quantity whose name runs the opposite way to a neighbour's, a count that does not name its unit, or
+  a concept spelled differently from its siblings.
 - **Correctness & clarity:** errors/edge cases; anything a user would find hard to understand or
   misuse.
 
@@ -1426,6 +1470,10 @@ After **every code change**, before considering the task complete, review and ac
    - **Layering (Principle 3.6):** did you put code in a physics package whose one-sentence description
      needs no physics word (a driver, a step assembly, a measure, a settings value)? Move it to `solve/`
      now, and check every residual can reach the capability you added.
+   - **Vocabulary (Principle 3.7):** did you name a parameter, field or method with a word the package
+     already uses for something else, or name a concept differently from its siblings? Grep the word;
+     if `tests/unit/test_vocabulary.py` lists it, your new use must mean the listed thing. A rename adds
+     the old name to its `RETIRED` table in the same change.
    - **Maintainability (Principle 0):** if you took a quick-to-ship shortcut as an
      intermediate step, refactor it before marking the task done.
    - **Scope (Principle 3.5):** did you build what was actually agreed? If you narrowed the design,
@@ -1624,7 +1672,7 @@ After **every code change**, before considering the task complete, review and ac
      change updates only the file it edits. **Grep for the claim, not only for the symbol** —
      this class of drift renames nothing, so the Stale-Record Check's identifier grep is blind
      to it by construction. (Commit `e6bc18e` switched the linear solve from left- to
-     right-preconditioning in `solve/linear.py` *alone*. `solve/multigrid.py`,
+     right-preconditioning in `solve/linear.py` *alone*. `precondition/multigrid.py`,
      `flow/preconditioner.py`, `solve/continuation.py` and `solve/implicit.py` went on calling
      it a "left preconditioner" for two weeks — correct prose on the day it was written, false
      the day the default moved, and invisible to every check we had because "left" is an

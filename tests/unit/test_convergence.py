@@ -149,7 +149,7 @@ def test_a_root_solve_given_a_measure_stops_in_that_one_instead() -> None:
 
 class _UnitShift(eqx.Module):
     def shift_term(self, phi, residual=None):
-        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None)
+        return ShiftTerm(jnp.ones_like(phi), lambda shift_strength: None)
 
 
 class _Cube(eqx.Module):

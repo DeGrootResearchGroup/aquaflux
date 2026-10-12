@@ -33,8 +33,8 @@ the developed root. (An earlier version of this case used that conservative cont
 that was a control defect, not a property of the problem.)
 
 **The preconditioner is the case file's own field split**, built at the control's starting shift and held
-in one session that ``solve_reynolds_continuation`` re-points at every Reynolds point, refitted mid-step on
-the case file's cost trigger. The large timestep overshoots into a stiff low-shift coupled saddle; the
+in one session that ``solve_reynolds_continuation`` re-points at every Reynolds point, refitted on the case
+file's cost trigger (a step whose solve runs long ends, and the next starts on a refit). The large timestep overshoots into a stiff low-shift coupled saddle; the
 split carries the march through it, at the price of an occasional expensive step (one solve of well over a
 hundred restart cycles at the end of the middle rung, with the line search clipped hard, but finite).
 
@@ -63,8 +63,7 @@ import dataclasses
 import aquaflux  # noqa: F401  (enables x64 at import)
 import compare
 import numpy as np
-from aquaflux.solve import (Convergence, DualTimeControl, DualTimeLoop,)
-from aquaflux.solve.strategy import (shift_of,)
+from aquaflux.solve import Convergence, DualTimeControl, DualTimeLoop, shift_of
 from aquaflux.turbulence import GeometricReynoldsSchedule, open_session, solve_reynolds_continuation
 
 # The Reynolds ramp: 2 lower-Re rungs before the target -> viscosity scales (100, 10, 1) -> Re ~ 250,
@@ -87,7 +86,7 @@ CONTROL = DualTimeControl(beta_start=0.5, beta_min=0.005)
 #: The case file's field split, built at the control's starting shift.
 PRECONDITIONER = dataclasses.replace(compare.SOLVER.preconditioner, build_beta=CONTROL.beta_start)
 
-#: When a mid-step refit fires: the cost trigger ``case.yaml`` ships with the split. Without one the split
+#: When a cost refit fires: the cost trigger ``case.yaml`` ships with the split. Without one the split
 #: would be fitted once per rung and never again, which is not a configuration anything runs.
 REFRESH_ON_CYCLES = compare.SOLVER.dual_time.refresh_on_cycles
 
@@ -98,7 +97,7 @@ class _ShiftLoggingControl:
     A :class:`~aquaflux.solve.StepReport` carries the inner line-search factor, not the shift the control
     chose, so the streamed log cannot otherwise show the pseudo-timestep ramping. This delegates to the
     wrapped control and stashes the shift of the step it returns (read with
-    :func:`~aquaflux.solve.strategy.shift_of`, since the control's carried state is not the bare shift), so the
+    :func:`~aquaflux.solve.shift_of`, since the control's carried state is not the bare shift), so the
     observer can print it. It resets to the wrapped control's ``beta_start`` at each new Reynolds rung on
     its own, because the continuation restarts the control state per rung.
 

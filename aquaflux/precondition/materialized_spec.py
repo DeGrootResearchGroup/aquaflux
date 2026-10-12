@@ -2,10 +2,10 @@
 
 A coupled march can be preconditioned by a Jacobian materialized by coloured probing and inverted by
 either a block-triangular field split with a separate inverse for the leading and the trailing fields
-(:class:`FieldSplit`) or a single block inverse over every field (a :class:`~aquaflux.solve.BlockInverse`).
-These are one family with a nested choice (:class:`MaterializedJacobian`) rather than two, because they
-share everything but the inverse: how the Jacobian is probed, the shift the first build is fitted at, and
-the floor its refresh is held above.
+(:class:`FieldSplit`) or a single block inverse over every field (a
+:class:`~aquaflux.precondition.BlockInverse`). These are one family with a nested choice
+(:class:`MaterializedJacobian`) rather than two, because they share everything but the inverse: how the
+Jacobian is probed, the shift the first build is fitted at, and the floor its refresh is held above.
 
 Nothing here names a residual. Every field defaults to ``None``, meaning "not set here" (see
 :class:`~aquaflux.solve.SettingsValue`), so a spec changes the settings it names and leaves every other one
@@ -18,9 +18,8 @@ import dataclasses
 from collections.abc import Mapping
 from typing import ClassVar
 
+from ..solve import SettingsMapping, SettingsValue
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
-from .settings_mapping import SettingsMapping
-from .settings_value import SettingsValue
 
 __all__ = [
     "MATERIALIZED_MAPPING",
@@ -36,7 +35,7 @@ __all__ = [
 class JacobianProbeSpec(SettingsValue):
     """How a coupled Jacobian is materialized by coloured directional-derivative probing.
 
-    Each field is the keyword of the same name on :meth:`~aquaflux.solve.JacobianProbe.build`
+    Each field is the keyword of the same name on :meth:`~aquaflux.precondition.JacobianProbe.build`
     (see it for the meaning and default of each). Two settings of that builder are deliberately not
     here: which field-pair blocks to skip follows from the inverse (a field split never reads one
     triangle), and whether the production viscosity is frozen follows from the operator the march
@@ -77,21 +76,21 @@ class FieldSplit:
     trailing one the scalars. Each block gets its own inverse, and the coupling of the trailing fields to
     the leading ones is retained exactly between the two block solves. A problem with a single group of
     fields (a laminar flow) has nothing to split and refuses this inverse. Both inverses are required, and each is a
-    :class:`~aquaflux.solve.BlockInverse` value, so a split is a value too.
+    :class:`~aquaflux.precondition.BlockInverse` value, so a split is a value too.
 
     Attributes
     ----------
     leading : BlockInverse
         The inverse fitted to the leading fields (``[u, v, w, p]``), for example
-        :class:`~aquaflux.solve.SimpleSmoothed`.
+        :class:`~aquaflux.precondition.SimpleSmoothed`.
     trailing : BlockInverse
         The inverse fitted to the trailing fields (``[k, omega]``), for example
-        :class:`~aquaflux.solve.JacobiSmoothed`.
+        :class:`~aquaflux.precondition.JacobiSmoothed`.
 
     Raises
     ------
     TypeError
-        If either inverse is not a :class:`~aquaflux.solve.BlockInverse`.
+        If either inverse is not a :class:`~aquaflux.precondition.BlockInverse`.
     """
 
     leading: BlockInverse
@@ -117,9 +116,10 @@ class MaterializedJacobian:
     ----------
     inverse : FieldSplit or BlockInverse
         How the materialized, shifted Jacobian is inverted. A bare
-        :class:`~aquaflux.solve.BlockInverse` such as :class:`~aquaflux.solve.SimpleSmoothed` inverts
-        the **whole** state, so it is for a problem whose fields form a single group, such as a laminar
-        flow. A problem with two groups, such as a turbulent flow, takes a :class:`FieldSplit`.
+        :class:`~aquaflux.precondition.BlockInverse` such as
+        :class:`~aquaflux.precondition.SimpleSmoothed` inverts the **whole** state, so it is for a
+        problem whose fields form a single group, such as a laminar flow. A problem with two groups, such
+        as a turbulent flow, takes a :class:`FieldSplit`.
     probe : JacobianProbeSpec
         How the Jacobian is probed. The default probes every column at the builder's own reach.
     build_beta : float or None

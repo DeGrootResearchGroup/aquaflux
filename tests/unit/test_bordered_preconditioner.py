@@ -10,7 +10,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.solve import FieldLayout, bordered_preconditioner
+from aquaflux.precondition import bordered_preconditioner
+from aquaflux.solve import FieldLayout
 
 FIELDS = FieldLayout.cell_fields(3, phi=2)  # an inner block of six unknowns
 

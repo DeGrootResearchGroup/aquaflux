@@ -1,10 +1,10 @@
 """The contract every frozen host preconditioner satisfies, and the JAX wrapper it shares.
 
-The materialized-Jacobian preconditioners (:mod:`~aquaflux.solve.materialized_preconditioner`) hand a
-jitted Krylov solve an approximate ``A^-1`` computed on the **host**. They differ entirely in how the
-inverse is *fitted* to the matrix and not at all in how it is *applied*: each holds a frozen inverse, exposes it as a
-``residual -> M residual`` callable through :func:`jax.pure_callback`, and reads that factorization at
-call time so an in-place refresh re-preconditions the already-compiled solve.
+The materialized-Jacobian preconditioners (:mod:`~aquaflux.precondition.materialized_preconditioner`)
+hand a jitted Krylov solve an approximate ``A^-1`` computed on the **host**. They differ entirely in how
+the inverse is *fitted* to the matrix and not at all in how it is *applied*: each holds a frozen inverse,
+exposes it as a ``residual -> M residual`` callable through :func:`jax.pure_callback`, and reads that
+factorization at call time so an in-place refresh re-preconditions the already-compiled solve.
 
 **The contract is real and named.** ``matvec`` needs exactly two things of whatever it wraps -- how
 many degrees of freedom it spans, and how to apply it (or its transpose) to a host vector -- and the
@@ -20,10 +20,11 @@ subclass an explicit answer instead.
 **The capabilities only some inverses have are declared too, one protocol each.** Re-fitting in place to
 a new operator (:class:`RefactorableInverse`) and releasing held resources (:class:`ReleasableInverse`)
 are each offered by some members of the family and not others; running as a traced cycle inside an outer
-trace is the third, declared beside its value type in :mod:`~aquaflux.solve.traced_cycle`. A consumer asks with ``isinstance`` against the protocol,
-never with ``getattr(inverse, name, default)``: the protocol is where the capability's signature is
-written down, so an inverse that offers it under another name or another signature is reported as not
-offering it, rather than being probed for and silently answered "no".
+trace is the third, declared beside its value type in :mod:`~aquaflux.precondition.traced_cycle`. A
+consumer asks with ``isinstance`` against the protocol, never with ``getattr(inverse, name, default)``:
+the protocol is where the capability's signature is written down, so an inverse that offers it under
+another name or another signature is reported as not offering it, rather than being probed for and
+silently answered "no".
 """
 
 from __future__ import annotations

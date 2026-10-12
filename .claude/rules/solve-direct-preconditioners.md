@@ -1,11 +1,11 @@
 ---
 paths:
-  - "aquaflux/solve/sparse_jacobian.py"
-  - "aquaflux/solve/host_preconditioner.py"
-  - "aquaflux/solve/materialized_preconditioner.py"
+  - "aquaflux/precondition/sparse_jacobian.py"
+  - "aquaflux/precondition/host_preconditioner.py"
+  - "aquaflux/precondition/materialized_preconditioner.py"
 ---
 
-# Rules — `aquaflux/solve/` the frozen-host contract and Jacobian materialization (and the record of the deleted direct preconditioners)
+# Rules — `aquaflux/precondition/` the frozen-host contract and Jacobian materialization (and the record of the deleted direct preconditioners)
 
 > ⚠️ **THE COMPLETE LU IS DELETED (2026-10-11), one day after PETSc took its UMFPACK backend and the
 > monolithic AMG (2026-10-10).** There is no `lu_preconditioner.py`, `CompleteLu`, `CompleteLuPreconditioner`,
@@ -34,7 +34,7 @@ paths:
 > `solve-amg-multigrid.md`, and selected by no shipped case bundle.** `MonolithicIlutPreconditioner`,
 > `IlutFactors`, `factorize_ilut` and the coupled builders `coupled_ilut_continuation` /
 > `coupled_ilut_refreshing_continuation` / `ilut_beta_tracking_refresh` no longer exist; the shared
-> `_beta_tracking_refresh` skeleton (now the class `solve.materialized_session.BetaTrackingRefresh`) and `MonolithicFactorShiftPolicy` they used
+> `_beta_tracking_refresh` skeleton (now the class `precondition.materialized_session.BetaTrackingRefresh`) and `MonolithicFactorShiftPolicy` they used
 > now serve only the materialized-Jacobian multigrid inverses. If you are looking for any of those symbols,
 > they are gone rather than renamed — the code is in git history.
 >
@@ -56,16 +56,16 @@ paths:
   (`symmetrically_equilibrate`, `equilibration_scale`, `apply_symmetric_scale`, `row_chunks`) was
   already there, and every consumer applies the two together -- a factorization or a coarsening wants
   the matrix both unit-diagonal and grouped by cell. Its library consumer was the deleted PETSc V-cycle;
-  it stays exported for the study harnesses (`cell_block_conditioning.py`, `column_reach_zero_pruning.py`,
+  it stays for the study harnesses (`cell_block_conditioning.py`, `column_reach_zero_pruning.py`,
   `host_ilu_levels.py`) and its unit test, and is a deletion candidate if those go.
-  - **Both are exported from `aquaflux.solve`.** They were internal by `__all__` yet deep-imported
-    by study harnesses, i.e. public in practice and unguarded in principle; the harnesses now
-    take them from the package surface. The permutation's unit test moved with the function, into
+  - **Neither is exported (since #284 part 2).** The harnesses import them from
+    `precondition/frozen_operator.py`, a reach listed in `test_solve_api.py`'s
+    `VALIDATION_INTERNAL_REACHES`. The permutation's unit test moved with the function, into
     `test_frozen_operator_scaling.py` beside the rescale half it belongs with.
 
 
 - **The host preconditioners share ONE application path and ONE declared contract —
-  `solve/host_preconditioner.py` (BUILT, 2026-08-14).** The (since deleted) complete LU and the AMG V-cycle
+  `precondition/host_preconditioner.py` (BUILT, 2026-08-14).** The (since deleted) complete LU and the AMG V-cycle
   differ entirely in how the inverse is *fitted* and not at all in how it is *applied*, so
   `HostPreconditioner` owns `__init__` and `matvec()` and each subclass supplies only `build` /
   `refresh_in_place`. Those two genuinely differ (different inputs, different refresh costs) and are
@@ -95,7 +95,7 @@ paths:
     would naturally drive, which is why the original went unseen.
   - **The capabilities only SOME inverses have are declared protocols, asked by `isinstance` (BUILT
     2026-10-10, #281).** Beside `FrozenInverse`, `host_preconditioner.py` declares two, each
-    `runtime_checkable` and exported from `aquaflux.solve`:
+    `runtime_checkable` and exported from `aquaflux.precondition`:
     - **`RefactorableInverse(FrozenInverse)`**: `refactor_block(block)`, re-fit IN PLACE to the raw
       field-major operator of the built shape. **One spelling across the family**: the split's
       `FieldSplitInverse.refactor` is renamed `refactor_block` (there is no `split.refactor`), so a

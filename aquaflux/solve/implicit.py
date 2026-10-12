@@ -565,6 +565,7 @@ def _damped_newton_step(
         _corrected(cycles),
         jnp.asarray(1.0),
         searched.full_step_norm / reference,
+        jnp.asarray(False),
     )
 
 

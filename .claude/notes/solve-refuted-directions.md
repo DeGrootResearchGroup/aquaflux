@@ -292,6 +292,9 @@
       operator would refresh on every inner iteration; a new inner loop re-arms it. Off by default
       (`None`), so a march that does not opt in is byte-identical. Pinned by
       `test_inner_refresh_fires_on_an_expensive_solve_at_that_iterate_and_once_per_step`.
+      ⚠️ **That mechanism is gone (2026-10-10, #290)**: the step now ENDS at the expensive solve, keeping
+      its iterate, and the march re-fits there before the next step. No test or symbol above exists; the
+      measurement below was taken under the mid-step form and has not been re-taken.
 
       **Measured end to end on the 3D coupled backward-facing step, against the scheduled cadence:**
 
@@ -814,7 +817,9 @@ data model. Each had nothing in `validation/` or any test selecting it.
   step, monolithic V-cycle: scheduled 3632 s against 3140 s for the cost-triggered rule (−14 %) at
   unchanged Krylov cycles (290 vs 293), refresh time 758 s against 310 s; never measured under the field
   split. Both validation cases ran with every gate switched off. The hook now re-fits on its first call,
-  after `rebind`, and mid-step through `refresh_at`; the complete-LU hook still re-factors every step.
+  after `rebind`, and when the march asks (`due`, after a step that stopped at `refresh_on_cycles`).
+  (The complete-LU hook, which re-factored every step, went with the LU on 2026-10-11.) (Until 2026-10-10 the cost re-fit ran mid-step through a
+  `refresh_at` callback; #290 moved it between steps.)
   **An observation the deleted `BFS3D_REFRESH_ON_BETA` comment carried, kept here because it outlives
   the knob:** with the β gate off, a β escalation's redo is solved against a V-cycle fitted for a β up to
   4x smaller. On three converging `bfs3d` marches an escalated step at β = 0.2341 on a stale V-cycle
@@ -909,3 +914,16 @@ were cycle-triggered), and the 3D transient. **Follow-up the same day: the stop 
 the shipped schedule under that stop (35 / 294) -- so what lost is `grow` 3 under bfs3d's lineax stop,
 not `grow` 3 on bfs3d. Full tables:
 `solve-globalization-log.md`, "bfs3d: the release, `grow` 3 and the settle-ended ramp".
+
+## The k shift with the production feedback ADDED (`|r| + |f|`, #312) — INERT on the shipped case (2026-10-12)
+
+The coupled k shift is taken from a k residual whose eddy viscosity is frozen, so it omits the
+`-dP_k/dk` a live eddy viscosity puts on the k row's Jacobian diagonal. The netted form `|r - f|` was
+shipped and reverted in August (it halves the shift). The added form `d + f` was built opt-in and
+measured on pitzDaily: it repairs the k row at **`turbulence_damping` 1** (single state: `|G|/|G0|`
+0.216 / 0.593 to 0.102 / 0.103, matching the frozen-production operator), and changes **nothing** on
+the shipped case, which damps the closure rows at 3 — a full march is 16 steps / 111 cycles / `x_r/h`
+8.0686 in both arms, and the probe at damping 3 shows every arm already taking a full step to 0.034.
+Deleted rather than kept as an unused option; branch history has it (`probe-312-additive-shift`,
+dda9be7). Full numbers and configuration: `.claude/rules/turbulence.md`, the #312 entry. Re-open only on
+a case that marches undamped closure rows and shows the near-cancellation in the march.

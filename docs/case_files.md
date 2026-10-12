@@ -225,7 +225,7 @@ The two marches share their settings, each a value of the solver library written
 - `max_steps` — the outer-step cap;
 - `convergence` — the stopping test, {class}`~aquaflux.solve.Convergence`: a `measure`
   (`RowScaled`, `BlockScaled` or `Euclidean`) and its `rtol` and `atol`;
-- `preconditioner` — {class}`~aquaflux.solve.MaterializedJacobian`, or for `CoupledMarch`
+- `preconditioner` — {class}`~aquaflux.precondition.MaterializedJacobian`, or for `CoupledMarch`
   {class}`~aquaflux.turbulence.BlockDiagonal`, with the settings
   {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
 - `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;
@@ -235,7 +235,9 @@ The two marches share their settings, each a value of the solver library written
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
   {class}`~aquaflux.solve.CflResidualDualTimeControl`. Any of them takes `release_floor`, a shift
   below `beta_min` that the march drops to once a step on the target problem has run at the floor
-  at full length, so its last steps are Newton steps rather than a linear tail at the floor;
+  at full length, so its last steps are Newton steps rather than a linear tail at the floor. A
+  release that fails is not tried again until the residual has fallen to `release_backoff` (default
+  0.5) times the residual it was tried from;
 - `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
 

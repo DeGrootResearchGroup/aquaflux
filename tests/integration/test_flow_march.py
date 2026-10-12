@@ -22,23 +22,20 @@ from aquaflux.flow import (
     solve_flow_march,
 )
 from aquaflux.flow import march as flow_march_module
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve import (
     BlockScaled,
     Convergence,
     DualTimeLoop,
     DualTimeStep,
     Euclidean,
-    FieldSplit,
     Globalization,
-    JacobiSmoothed,
-    MaterializedJacobian,
     PseudoTransientStep,
     RefreshPolicy,
     Resumption,
     RetryPolicy,
     RootSolver,
     RowScaled,
-    SimpleSmoothed,
     assembler_residual,
     newton_step,
 )
@@ -395,7 +392,7 @@ def test_a_simple_smoothed_march_reaches_the_same_root(channel) -> None:
     This is the inverse the field split uses for the saddle. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
     converge on the state it was first fitted at), and the isinstance check that the march ran on it.
     """
-    from aquaflux.solve.block_preconditioner import (
+    from aquaflux.precondition.block_preconditioner import (
         MaterializedBlockPreconditioner,
     )
 
@@ -432,13 +429,11 @@ def test_the_block_preconditioner_is_an_approximate_inverse_and_transposes_exact
     which a preconditioner fitted to the wrong matrix -- unshifted, say -- would not do.
     """
     import numpy as np
-    from aquaflux.solve import (
-        jacobian_probe_plan,
-    )
-    from aquaflux.solve.block_preconditioner import (
+    from aquaflux.precondition import jacobian_probe_plan
+    from aquaflux.precondition.block_preconditioner import (
         MaterializedBlockPreconditioner,
     )
-    from aquaflux.solve.materialized_session import (
+    from aquaflux.precondition.materialized_session import (
         jacobian_matvec,
     )
 

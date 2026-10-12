@@ -32,10 +32,7 @@ from aquaflux.flow import (
     VelocityInlet,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
-from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import (
-    DualTimeLoop,
+from aquaflux.precondition import (
     FieldGroups,
     FieldSplit,
     HostPreconditioner,
@@ -44,13 +41,13 @@ from aquaflux.solve import (
     MaterializedJacobianPreconditioner,
     SimpleSmoothed,
     field_split_inverse,
-    relative_residual_gmres,
-    restart_cycles,
-    solve_linear,
 )
-from aquaflux.solve.materialized_session import (
+from aquaflux.precondition.materialized_session import (
     jacobian_matvec,
 )
+from aquaflux.properties import Constant, PropertyModel
+from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import DualTimeLoop, relative_residual_gmres, restart_cycles, solve_linear
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
@@ -58,6 +55,7 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     UnpreconditionedScalars,
+    coupled_jacobian_probe,
     coupled_step,
     inlet_k,
     inlet_omega,
@@ -380,22 +378,29 @@ def test_a_split_session_re_fits_at_the_current_beta(channel) -> None:
         coupled,
     )
     dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
-    preconditioner = dual.shift_policy.preconditioner
+    preconditioner = session.preconditioner
     rng = np.random.default_rng(5)
     b = rng.standard_normal(preconditioner.inverse.n_dofs)
     at_build = preconditioner.inverse.apply(b).copy()
 
     # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
     active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
-    session.refresh_preconditioner(active, state)
-    refreshed = active.shift_policy.preconditioner
+    update = session.refresh_preconditioner(active, state)
+    refreshed = session.preconditioner
     assert refreshed is preconditioner, (
         "the refresh replaced the preconditioner instead of re-fitting it"
     )
+    # both blocks offer a traced cycle, so the step carries the split as data and the re-fit comes back
+    # as a step update the march applies -- and that step must apply the re-fitted inverse
+    assert update is not None, "a re-fitted traced split must hand the march a new step"
+    carried = update(active).shift_policy.split.matvec()
 
-    # the same probe and the same shift diagonal, fitted from scratch at beta = 0.7
+    # the same probe and the same shift diagonal, fitted from scratch at beta = 0.7. The same stored
+    # pattern too: a threshold-free coarsening reads the pattern, stored zeros included, so a reference
+    # materialized without the probe's fixed structure (which drops them) coarsens differently
+    probe = coupled_jacobian_probe(coupled, 3)
     jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
-        lambda v: jacobian_matvec(coupled, state, v), _coupled_jacobian_plan(coupled, 3)
+        lambda v: jacobian_matvec(coupled, state, v), probe.plan, structure=probe.structure
     )
     d = np.asarray(
         _coupled_shift_policy(coupled, state, UnpreconditionedScalars()).shift_term(state).diagonal
@@ -407,6 +412,9 @@ def test_a_split_session_re_fits_at_the_current_beta(channel) -> None:
     try:
         np.testing.assert_allclose(
             refreshed.inverse.apply(b), fresh.apply(b), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            np.asarray(carried(jnp.asarray(b))), fresh.apply(b), rtol=1e-10, atol=1e-12
         )
         assert not np.allclose(refreshed.inverse.apply(b), at_build)
     finally:
@@ -475,7 +483,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     returned a new object would silently keep preconditioning with the stale one -- and would still
     converge, just slower, which is exactly the kind of bug a march hides.
     """
-    from aquaflux.solve import FieldSplitPreconditioner
+    from aquaflux.precondition import FieldSplitPreconditioner
 
     groups = case["groups"]
     coupled, state = case["coupled"], case["state"]
@@ -519,7 +527,7 @@ def test_the_jacobi_smoothed_inverse_is_a_fixed_linear_map_that_transposes(case)
     """
     import numpy as np
     import scipy.sparse as sp
-    from aquaflux.solve import JacobiSmoothedInverse
+    from aquaflux.precondition import JacobiSmoothedInverse
 
     groups, shifted = case["groups"], case["shifted"]
     block = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])

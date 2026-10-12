@@ -19,7 +19,9 @@ from aquaflux.solve import (
     DualTimeControl,
     DualTimeStep,
     PseudoTransientStep,
+    ReleaseMemory,
     ResidualRatioDualTimeControl,
+    ShiftControlState,
     ShiftTerm,
     StepReport,
     SwitchedEvolutionRelaxation,
@@ -29,7 +31,9 @@ from aquaflux.solve import (
 
 class _TrivialShiftPolicy(eqx.Module):
     def shift_term(self, phi, residual=None):
-        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+        return ShiftTerm(
+            diagonal=jnp.ones_like(phi), make_preconditioner=lambda _shift_strength: None
+        )
 
 
 def _base_step() -> PseudoTransientStep:
@@ -53,7 +57,7 @@ def _dual_step() -> DualTimeStep:
 def test_dual_time_control_first_step_uses_beta_start() -> None:
     """With no previous report, DualTimeControl sets β to beta_start and carries it as state."""
     control = DualTimeControl(beta_start=2.0)
-    step, (beta, memo) = control.next_step(_dual_step(), None, None)
+    step, (beta, memo, _release) = control.next_step(_dual_step(), None, None)
     assert (beta, memo) == (2.0, None)  # memoryless rule: alpha alone drives it
     assert isinstance(step.relaxation_schedule, ConstantRelaxation)
     assert jnp.allclose(step.relaxation_schedule.beta, 2.0)
@@ -67,7 +71,7 @@ def test_a_control_resumed_at_a_shift_holds_it_for_the_first_step_then_adapts_fr
     """
     control = DualTimeControl(beta_start=2.0, beta_min=0.02, beta_max=4.0, grow=1.5)
     state = control.resumed_at(0.3)
-    assert state == (0.3, None)
+    assert state == ShiftControlState(0.3)
     first, state = control.next_step(_dual_step(), None, state)
     assert jnp.allclose(first.relaxation_schedule.beta, 0.3)
     # With a step to adapt from it grows the timestep as it would have, a comfortable alpha lowering beta.
@@ -78,27 +82,27 @@ def test_a_control_resumed_at_a_shift_holds_it_for_the_first_step_then_adapts_fr
 @pytest.mark.parametrize(("shift", "held"), [(1.0e-6, 0.02), (50.0, 4.0)])
 def test_a_resumed_shift_is_held_inside_this_controls_bounds(shift, held) -> None:
     """The resumed march's control may be bounded differently from the interrupted one's."""
-    assert DualTimeControl(beta_min=0.02, beta_max=4.0).resumed_at(shift) == (held, None)
+    assert DualTimeControl(beta_min=0.02, beta_max=4.0).resumed_at(shift) == ShiftControlState(held)
 
 
 def test_a_residual_keyed_control_resumes_with_no_remembered_residual() -> None:
     """The residual its ratio is formed against belongs to the interrupted march; alpha alone drives
     the first adaptation, the path a rule with no reference already takes."""
     control = ResidualRatioDualTimeControl()
-    assert control.resumed_at(0.3) == (0.3, None)
+    assert control.resumed_at(0.3) == ShiftControlState(0.3)
 
 
 def test_dual_time_control_grows_the_timestep_when_comfortable() -> None:
     """α ≥ grow_above (inner loop comfortable) grows the pseudo-timestep: β ← β/grow."""
     control = DualTimeControl(grow=1.5, grow_above=0.5)
-    _, (beta, _) = control.next_step(_dual_step(), _report(alpha=1.0), (1.5, None))
+    _, (beta, _, _) = control.next_step(_dual_step(), _report(alpha=1.0), (1.5, None))
     assert jnp.isclose(beta, 1.0)  # 1.5 / 1.5
 
 
 def test_dual_time_control_backs_off_when_clipped() -> None:
     """α < backoff_below (an inner step clipped hard) shrinks the pseudo-timestep: β ← β*backoff."""
     control = DualTimeControl(backoff=2.0, backoff_below=0.25)
-    _, (beta, _) = control.next_step(_dual_step(), _report(alpha=0.1), (0.5, None))
+    _, (beta, _, _) = control.next_step(_dual_step(), _report(alpha=0.1), (0.5, None))
     assert jnp.isclose(beta, 1.0)  # 0.5 * 2.0
 
 
@@ -109,23 +113,29 @@ def test_dual_time_control_holds_beta_across_a_refresh() -> None:
     fires every few steps on a developing flow -- so the pseudo-timestep would sawtooth and never grow.
     """
     control = DualTimeControl(beta_start=2.0)
-    _, (beta, _) = control.next_step(_dual_step(), None, (0.12, None))  # carried, segment boundary
+    _, (beta, _, _) = control.next_step(
+        _dual_step(), None, (0.12, None)
+    )  # carried, segment boundary
     assert jnp.isclose(beta, 0.12)  # continues the ramp, does not reset to beta_start
 
 
 def test_dual_time_control_holds_in_the_dead_band() -> None:
     """A moderate clip (backoff_below ≤ α < grow_above) neither grows nor shrinks β."""
     control = DualTimeControl(grow_above=0.5, backoff_below=0.25)
-    _, (beta, _) = control.next_step(_dual_step(), _report(alpha=0.4), (0.8, None))
+    _, (beta, _, _) = control.next_step(_dual_step(), _report(alpha=0.4), (0.8, None))
     assert jnp.isclose(beta, 0.8)
 
 
 def test_dual_time_control_clamps_beta() -> None:
     control = DualTimeControl(beta_min=0.1, beta_max=4.0, backoff=100.0)
-    _, (high, _) = control.next_step(_dual_step(), _report(alpha=0.0), (3.0, None))  # over beta_max
+    _, (high, _, _) = control.next_step(
+        _dual_step(), _report(alpha=0.0), (3.0, None)
+    )  # over beta_max
     assert high == 4.0
     low_control = DualTimeControl(beta_min=0.5, grow=10.0)
-    _, (low, _) = low_control.next_step(_dual_step(), _report(alpha=1.0), (1.0, None))  # < beta_min
+    _, (low, _, _) = low_control.next_step(
+        _dual_step(), _report(alpha=1.0), (1.0, None)
+    )  # < beta_min
     assert low == 0.5
 
 
@@ -156,14 +166,14 @@ def test_residual_ratio_first_step_uses_beta_start() -> None:
     """With no state, β is beta_start and the carried state is (beta_start, no residual yet)."""
     control = ResidualRatioDualTimeControl(beta_start=0.5)
     step, state = control.next_step(_dual_step(), None, None)
-    assert state == (0.5, None)
+    assert state == ShiftControlState(0.5)
     assert float(step.relaxation_schedule.beta) == 0.5
 
 
 def test_residual_ratio_grows_the_timestep_when_the_residual_falls() -> None:
     """A residual drop (ratio < 1) lowers β (grows the pseudo-timestep): β ← β·ratio."""
     control = ResidualRatioDualTimeControl(beta_start=0.5, max_change=2.0, backoff_below=0.0)
-    _, (beta, prev) = control.next_step(
+    _, (beta, prev, _release) = control.next_step(
         _dual_step(), _res_report(alpha=1.0, residual=0.9), (0.5, 1.0)
     )
     assert beta == 0.45  # 0.5 * (0.9 / 1.0)
@@ -173,7 +183,7 @@ def test_residual_ratio_grows_the_timestep_when_the_residual_falls() -> None:
 def test_residual_ratio_shrinks_the_timestep_when_the_residual_rises() -> None:
     """A residual rise (ratio > 1) raises β (shrinks the pseudo-timestep) -- the anti-runaway property."""
     control = ResidualRatioDualTimeControl(beta_start=0.5, max_change=2.0, backoff_below=0.0)
-    _, (beta, _prev) = control.next_step(
+    _, (beta, _prev, _release) = control.next_step(
         _dual_step(), _res_report(alpha=1.0, residual=1.2), (0.5, 1.0)
     )
     assert beta == pytest.approx(0.6)  # 0.5 * (1.2 / 1.0)
@@ -184,7 +194,7 @@ def test_residual_ratio_change_is_clipped() -> None:
     control = ResidualRatioDualTimeControl(
         beta_start=0.5, max_change=1.3, backoff_below=0.0, beta_max=10.0
     )
-    _, (beta, _p) = control.next_step(
+    _, (beta, _p, _release) = control.next_step(
         _dual_step(), _res_report(alpha=1.0, residual=5.0), (0.5, 1.0)
     )
     assert beta == pytest.approx(0.65)  # clipped to 0.5 * 1.3, not 0.5 * 5
@@ -196,7 +206,7 @@ def test_residual_ratio_hard_inner_clip_forces_a_shrink() -> None:
         beta_start=0.5, max_change=1.3, backoff=2.0, backoff_below=0.6
     )
     # Residual flat (ratio 1) but the inner loop clipped hard -> β multiplied by backoff.
-    _, (beta, _p) = control.next_step(
+    _, (beta, _p, _release) = control.next_step(
         _dual_step(), _res_report(alpha=0.5, residual=1.0), (0.5, 1.0)
     )
     assert beta == pytest.approx(1.0)  # 0.5 * 1 (ratio) * 2 (backoff)
@@ -205,7 +215,7 @@ def test_residual_ratio_hard_inner_clip_forces_a_shrink() -> None:
 def test_residual_ratio_holds_beta_across_a_refresh() -> None:
     """The first step of a refresh segment (previous is None, state carried) holds β, not beta_start."""
     control = ResidualRatioDualTimeControl(beta_start=0.5)
-    _, (beta, prev) = control.next_step(_dual_step(), None, (0.12, 0.3))
+    _, (beta, prev, _release) = control.next_step(_dual_step(), None, (0.12, 0.3))
     assert beta == 0.12  # continues the ramp, does not reset to beta_start
     assert prev == 0.3
 
@@ -213,7 +223,9 @@ def test_residual_ratio_holds_beta_across_a_refresh() -> None:
 def test_residual_ratio_clamps_beta() -> None:
     """β is clamped to [beta_min, beta_max] after the update."""
     low = ResidualRatioDualTimeControl(beta_min=0.1, max_change=10.0, backoff_below=0.0)
-    _, (beta, _p) = low.next_step(_dual_step(), _res_report(alpha=1.0, residual=0.01), (0.2, 1.0))
+    _, (beta, _p, _release) = low.next_step(
+        _dual_step(), _res_report(alpha=1.0, residual=0.01), (0.2, 1.0)
+    )
     assert beta == 0.1  # 0.2 * 0.1 clipped-change would go below beta_min
 
 
@@ -229,7 +241,7 @@ def test_cfl_residual_first_step_uses_beta_start() -> None:
     """With no state, β is beta_start and the carried state is (beta_start, no residual yet)."""
     control = _cfl_res_control(beta_start=0.5)
     step, state = control.next_step(_dual_step(), None, None)
-    assert state == (0.5, None)
+    assert state == ShiftControlState(0.5)
     assert float(step.relaxation_schedule.beta) == 0.5
 
 
@@ -237,7 +249,7 @@ def test_cfl_residual_grows_on_alpha_when_the_residual_is_flat() -> None:
     """The point of the combination: α comfortable + a FLAT residual (ratio ≤ hold_ratio) still grows the
     step (β ← β/grow), where the residual-only rule would stall on the β×travel plateau."""
     control = _cfl_res_control(beta_start=0.5)
-    _, (beta, prev) = control.next_step(
+    _, (beta, prev, _release) = control.next_step(
         _dual_step(),
         _res_report(alpha=1.0, residual=1.0),
         (0.6, 1.0),  # ratio = 1.0, flat
@@ -250,7 +262,7 @@ def test_cfl_residual_brakes_on_a_rising_residual_even_at_full_alpha() -> None:
     """The overshoot governor α lacks: a rising residual (ratio > rise_ratio) shrinks the step even when
     the inner loop is perfectly comfortable (α = 1) -- the case that NaNs the α-only control."""
     control = _cfl_res_control(beta_start=0.5)
-    _, (beta, _prev) = control.next_step(
+    _, (beta, _prev, _release) = control.next_step(
         _dual_step(),
         _res_report(alpha=1.0, residual=1.2),
         (0.5, 1.0),  # ratio = 1.2 > rise_ratio
@@ -261,7 +273,7 @@ def test_cfl_residual_brakes_on_a_rising_residual_even_at_full_alpha() -> None:
 def test_cfl_residual_brakes_on_an_inner_clip() -> None:
     """The local wall: a hard inner clip (α < backoff_below) shrinks the step regardless of the residual."""
     control = _cfl_res_control(beta_start=0.5)
-    _, (beta, _prev) = control.next_step(
+    _, (beta, _prev, _release) = control.next_step(
         _dual_step(),
         _res_report(alpha=0.1, residual=1.0),
         (0.5, 1.0),  # α clipped, residual flat
@@ -273,7 +285,7 @@ def test_cfl_residual_holds_in_the_ratio_band() -> None:
     """Between hold_ratio and rise_ratio the step holds -- the band that keeps a noisy plateau from
     oscillating between grow and brake."""
     control = _cfl_res_control(beta_start=0.5)
-    _, (beta, _prev) = control.next_step(
+    _, (beta, _prev, _release) = control.next_step(
         _dual_step(),
         _res_report(alpha=1.0, residual=1.07),
         (0.5, 1.0),  # 1.05 < 1.07 ≤ 1.10
@@ -284,7 +296,7 @@ def test_cfl_residual_holds_in_the_ratio_band() -> None:
 def test_cfl_residual_holds_beta_across_a_refresh() -> None:
     """The first step of a refresh segment (previous is None, state carried) holds β, not beta_start."""
     control = _cfl_res_control(beta_start=2.0)
-    _, (beta, prev) = control.next_step(_dual_step(), None, (0.12, 0.3))
+    _, (beta, prev, _release) = control.next_step(_dual_step(), None, (0.12, 0.3))
     assert beta == 0.12
     assert prev == 0.3
 
@@ -292,7 +304,7 @@ def test_cfl_residual_holds_beta_across_a_refresh() -> None:
 def test_cfl_residual_clamps_beta() -> None:
     """β is clamped to [beta_min, beta_max] after the update."""
     control = _cfl_res_control(beta_start=0.5, beta_min=0.1, grow=10.0)
-    _, (beta, _p) = control.next_step(
+    _, (beta, _p, _release) = control.next_step(
         _dual_step(),
         _res_report(alpha=1.0, residual=1.0),
         (0.2, 1.0),  # grow would go below beta_min
@@ -345,8 +357,12 @@ def test_carry_beta_seeds_the_carried_state() -> None:
     # exactly what went wrong before: one control had no `carry_beta` at all, and `newton_march`
     # probes for it with `hasattr`, so its escalation feedback was dropped in silence.
     for ctrl in (DualTimeControl(), CflResidualDualTimeControl(), ResidualRatioDualTimeControl()):
-        assert ctrl.carry_beta((0.02, 3.5), 0.16) == (0.16, 3.5)  # β replaced, memo preserved
-        assert ctrl.carry_beta(None, 0.16) == (0.16, None)  # first-step state has no memo yet
+        assert ctrl.carry_beta((0.02, 3.5), 0.16) == ShiftControlState(
+            0.16, 3.5
+        )  # β replaced, memo preserved
+        assert ctrl.carry_beta(None, 0.16) == ShiftControlState(
+            0.16
+        )  # first-step state has no memo yet
 
 
 def test_the_combined_control_reduces_to_the_courant_one_at_infinite_ratio_thresholds() -> None:
@@ -415,7 +431,7 @@ def test_a_refresh_boundary_holds_beta_for_every_control() -> None:
         ResidualRatioDualTimeControl(beta_start=0.5),
         CflResidualDualTimeControl(beta_start=2.0),
     ):
-        _, (beta, memo) = ctrl.next_step(_dual_step(), None, (0.12, 0.3))
+        _, (beta, memo, _release) = ctrl.next_step(_dual_step(), None, (0.12, 0.3))
         assert beta == 0.12, f"{type(ctrl).__name__} reset β at a refresh boundary"
         assert memo == 0.3, f"{type(ctrl).__name__} dropped its memo at a refresh boundary"
 
@@ -490,11 +506,15 @@ def test_a_full_step_at_the_floor_on_the_target_releases_the_shift_for_every_con
     dropping it to ``release_floor``.
     """
     released = _releasing(kind)
-    step, (beta, _memo) = released.next_step(_dual_step(), _settled(_FLOOR, 1.0), (_FLOOR, 1.0))
+    step, (beta, _memo, _release) = released.next_step(
+        _dual_step(), _settled(_FLOOR, 1.0), (_FLOOR, 1.0)
+    )
     assert beta == _RELEASE
     assert jnp.allclose(step.relaxation_schedule.beta, _RELEASE)
     unset = _releasing(kind, release_floor=None)
-    _step, (beta, _memo) = unset.next_step(_dual_step(), _settled(_FLOOR, 1.0), (_FLOOR, 1.0))
+    _step, (beta, _memo, _release) = unset.next_step(
+        _dual_step(), _settled(_FLOOR, 1.0), (_FLOOR, 1.0)
+    )
     assert beta == _FLOOR
 
 
@@ -516,7 +536,9 @@ def test_the_shift_is_not_released_until_the_target_step_at_the_floor_was_full_l
     stopping tolerance -- so neither arrival alone nor a clipped step at the floor licenses it.
     """
     control = _releasing(CflResidualDualTimeControl)
-    _step, (beta, _memo) = control.next_step(_dual_step(), previous, (previous.shift, 1.0))
+    _step, (beta, _memo, _release) = control.next_step(
+        _dual_step(), previous, (previous.shift, 1.0)
+    )
     assert beta >= _FLOOR
 
 
@@ -528,7 +550,7 @@ def test_a_released_march_stays_released_while_the_rule_does_not_back_off() -> N
     """
     control = _releasing(CflResidualDualTimeControl)
     for alpha in (0.3, 0.5):
-        _step, (beta, _memo) = control.next_step(
+        _step, (beta, _memo, _release) = control.next_step(
             _dual_step(), _settled(_RELEASE, alpha), (_RELEASE, 1.0)
         )
         assert beta == _RELEASE
@@ -551,7 +573,7 @@ def test_a_released_march_returns_to_the_floor_when_the_rule_backs_off(previous)
     return that only doubles the released shift, which would take six bad steps to climb back.
     """
     control = _releasing(CflResidualDualTimeControl)
-    _step, (beta, _memo) = control.next_step(_dual_step(), previous, (_RELEASE, 1.0))
+    _step, (beta, _memo, _release) = control.next_step(_dual_step(), previous, (_RELEASE, 1.0))
     assert beta == _FLOOR
 
 
@@ -559,7 +581,7 @@ def test_without_a_release_the_rule_never_runs_below_its_floor() -> None:
     """The lowered clamp must not leak: before the release fires, β stops at ``beta_min`` as it always did."""
     control = _releasing(DualTimeControl)
     state = (0.006, None)
-    _step, (beta, _memo) = control.next_step(_dual_step(), _settled(0.006, 1.0), state)
+    _step, (beta, _memo, _release) = control.next_step(_dual_step(), _settled(0.006, 1.0), state)
     assert beta == _FLOOR
 
 
@@ -598,3 +620,116 @@ def test_settled_is_a_step_at_the_floor_that_reached_the_settle_alpha(
 def test_a_release_outside_its_range_is_refused(settings, names) -> None:
     with pytest.raises(ValueError, match=names):
         _releasing(DualTimeControl, **settings)
+
+
+# --------------------------------------------------------------------------------------------------
+# Not retrying a failed release at once (`release_backoff`).
+# --------------------------------------------------------------------------------------------------
+
+
+def _walk(control, reports, state):
+    """Thread ``state`` through ``control`` over ``reports``; the state after each step, in order."""
+    states = []
+    for report in reports:
+        _step, state = control.next_step(_dual_step(), report, state)
+        states.append(state)
+    return states
+
+
+@pytest.mark.parametrize("kind", _CONTROLS)
+def test_a_failed_release_is_retried_only_once_the_residual_has_fallen_below_its_bar(kind) -> None:
+    """The release fires from a settled step at residual 0.5, its released step clips, and the floor
+    comes back with a bar of half 0.5. A settled step at 0.4 is above the bar and stays at the floor;
+    one at 0.2 is under it and releases.
+
+    Wrong answers caught: a release fired again on the next settled step (the thrash this exists to
+    stop -- without the bar the 0.4 step releases), a bar that can never be met (the 0.2 step stays at
+    the floor), and a bar taken from the failing step's residual 0.6 rather than from where the release
+    fired (0.3, under which a settled step at 0.28 would release).
+    """
+    control = _releasing(kind, release_backoff=0.5)
+    released, failed, above_bar = _walk(
+        control,
+        [
+            _settled(_FLOOR, 1.0, residual=0.5),
+            _settled(_RELEASE, 0.1, residual=0.6),
+            _settled(_FLOOR, 1.0, residual=0.4),
+        ],
+        ShiftControlState(_FLOOR, 1.0),
+    )
+    assert released.beta == _RELEASE
+    assert released.release == ReleaseMemory(started_from=0.5)
+    assert failed.beta == _FLOOR
+    assert failed.release.bar == pytest.approx(0.25)
+    assert above_bar.beta == _FLOOR
+    (between,) = _walk(control, [_settled(_FLOOR, 1.0, residual=0.28)], above_bar)
+    assert between.beta == _FLOOR  # under a bar taken from the failing step's 0.6, over 0.25
+    (under_bar,) = _walk(control, [_settled(_FLOOR, 1.0, residual=0.2)], above_bar)
+    assert under_bar.beta == _RELEASE
+    assert under_bar.release.started_from == 0.2
+
+
+def test_each_failed_release_lowers_the_bar_from_where_that_release_fired() -> None:
+    """A second failure sets the bar from the second release's own start, not from the first's."""
+    control = _releasing(CflResidualDualTimeControl, release_backoff=0.5)
+    *_, second_failure = _walk(
+        control,
+        [
+            _settled(_FLOOR, 1.0, residual=0.5),
+            _settled(_RELEASE, 0.1, residual=0.6),
+            _settled(_FLOOR, 1.0, residual=0.2),
+            _settled(_RELEASE, 0.1, residual=0.3),
+        ],
+        ShiftControlState(_FLOOR, 1.0),
+    )
+    assert second_failure.beta == _FLOOR
+    assert second_failure.release.bar == pytest.approx(0.1)
+
+
+def test_a_release_that_holds_sets_no_bar() -> None:
+    """A march whose first release succeeds is unchanged by the backoff: no bar is ever set, so the
+    release behaves exactly as it did before the backoff existed.
+
+    Wrong answer caught: a bar set on every release rather than only on a failed one.
+    """
+    control = _releasing(CflResidualDualTimeControl)
+    states = _walk(
+        control,
+        [
+            _settled(_FLOOR, 1.0, residual=0.5),
+            _settled(_RELEASE, 1.0, residual=0.1),
+            _settled(_RELEASE, 0.5, residual=0.01),
+        ],
+        ShiftControlState(_FLOOR, 1.0),
+    )
+    assert [state.beta for state in states] == [_RELEASE] * 3
+    assert all(state.release.bar is None for state in states)
+
+
+def test_a_failed_release_with_no_recorded_start_sets_its_bar_from_the_failing_step() -> None:
+    """A march resumed while released has no record of where its release fired; its first failure
+    falls back to the failing step's own residual rather than raising or leaving no bar."""
+    control = _releasing(CflResidualDualTimeControl, release_backoff=0.5)
+    (failed,) = _walk(
+        control, [_settled(_RELEASE, 0.1, residual=0.6)], control.resumed_at(_RELEASE)
+    )
+    assert failed.beta == _FLOOR
+    assert failed.release.bar == pytest.approx(0.3)
+
+
+def test_the_march_hooks_keep_the_release_memory_and_a_resumption_starts_without_one() -> None:
+    """``carry_beta``, ``redamp`` and ``rebase`` move β or the memo and must not forget a failed
+    release; ``resumed_at`` starts a new march, which has none."""
+    control = _releasing(CflResidualDualTimeControl)
+    memory = ReleaseMemory(started_from=None, bar=0.25)
+    state = ShiftControlState(_FLOOR, 1.0, memory)
+    assert control.carry_beta(state, 0.02).release == memory
+    assert control.redamp(state, 2.0).release == memory
+    assert control.rebase(state).release == memory
+    assert control.resumed_at(_FLOOR).release == ReleaseMemory()
+
+
+@pytest.mark.parametrize("backoff", [0.0, 1.0, 1.5])
+def test_a_release_backoff_outside_its_range_is_refused(backoff) -> None:
+    with pytest.raises(ValueError, match="release_backoff"):
+        _releasing(DualTimeControl, release_backoff=backoff)

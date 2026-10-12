@@ -37,10 +37,9 @@ import scipy.sparse as sp
 
 from aquaflux.discretization import flux_continuous_conductance
 from aquaflux.mesh import Mesh, MeshGeometry
-from aquaflux.solve import (
+from aquaflux.precondition import (
     AirHierarchy,
     ConvectionDiffusionStencil,
-    SettingsValue,
     SmoothedHierarchy,
     air_multigrid_cycles,
     build_air_hierarchy,
@@ -48,6 +47,7 @@ from aquaflux.solve import (
     convection_multigrid_cycles,
     refresh_air_hierarchy,
 )
+from aquaflux.solve import SettingsValue
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -445,9 +445,9 @@ def scalar_transport_preconditioner(
         split reads operator values, so a plain rebuild changes every shape below the first level or
         two and the refreshed preconditioner would force a recompile of the solve it accelerates;
         reusing the frozen split keeps the compilation signature (see
-        :func:`~aquaflux.solve.refresh_air_hierarchy`). For :class:`ScalarTwoLevel` the aggregation
-        reads only the graph, so a rebuild is already structure-preserving and this argument changes
-        nothing. Must have been built with the same kind of ``scalar``. A
+        :func:`~aquaflux.precondition.refresh_air_hierarchy`). For :class:`ScalarTwoLevel` the
+        aggregation reads only the graph, so a rebuild is already structure-preserving and this argument
+        changes nothing. Must have been built with the same kind of ``scalar``. A
         :class:`ScaledScalarPreconditioner` wrapper is unwrapped, since the reparametrization scale is
         re-derived at the new state by the caller.
 

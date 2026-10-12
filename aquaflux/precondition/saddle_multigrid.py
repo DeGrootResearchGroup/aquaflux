@@ -40,6 +40,8 @@ from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
     _CsrOperator,
+    _ones,
+    _onto_pattern,
     _operator_matvec,
     _smoothed_ops,
 )
@@ -55,12 +57,12 @@ class _SimplePieces(eqx.Module):
     products and nothing else -- no factorization, no triangular solve, no sequential dependency.
 
     **An ``equinox.Module`` with only the split point static, on the same rule as
-    :class:`~aquaflux.solve.multigrid._SparseLevel`, and for the same reason.** That makes the record a
-    pytree whose every array is a traced leaf, so it can be passed as an *argument* to the jitted cycle
-    rather than captured by it. Re-deriving the pieces at a new operator on unchanged shapes then reuses
-    the compiled cycle instead of tracing a new one -- which is what makes a mid-march refresh cheap, and
-    is defeated outright by a closure, since a closed-over array is a compile-time constant and every
-    refresh mints a new one.
+    :class:`~aquaflux.precondition.multigrid._SparseLevel`, and for the same reason.** That makes the
+    record a pytree whose every array is a traced leaf, so it can be passed as an *argument* to the
+    jitted cycle rather than captured by it. Re-deriving the pieces at a new operator on unchanged shapes
+    then reuses the compiled cycle instead of tracing a new one -- which is what makes a mid-march
+    refresh cheap, and is defeated outright by a closure, since a closed-over array is a compile-time
+    constant and every refresh mints a new one.
 
     The formed Schur is deliberately **not** carried here. It has no traced form a diagnostic can
     transpose, and a host sparse matrix is neither a leaf nor a hashable static field, so
@@ -195,17 +197,25 @@ def _simple_pieces(
         )
         block_inverse = _CsrOperator.from_scipy(f_inverse_matrix)
     else:
-        f_inverse_matrix = sp.diags(f_inverse)
+        # An explicit diagonal rather than `sp.diags`, whose conversion to compressed rows drops a zero
+        # entry and would make the products below value-dependent in pattern.
+        rows = np.arange(nv)
+        f_inverse_matrix = sp.csr_matrix((f_inverse, (rows, rows)), shape=(nv, nv))
         block_inverse = None
-    dg = (f_inverse_matrix @ g_block).tocsr()
-    schur = (a[nv:, nv:] - d_block @ dg).tocsr()
+    # Both stored on their structural patterns: a sparse product or difference drops entries that come
+    # out exactly zero, so stored as computed their entry counts -- array shapes in the traced pieces --
+    # would move with the operator's values, and a refit on a fixed coarsening would retrace whatever
+    # compiled program holds them.
+    dg = _onto_pattern(f_inverse_matrix @ g_block, _ones(f_inverse_matrix) @ _ones(g_block))
+    c_block = a[nv:, nv:]
+    schur = _onto_pattern(c_block - d_block @ dg, _ones(c_block) + _ones(d_block) @ _ones(dg))
     # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
     # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
     # which side carries more nonzeros. Printed rather than assumed.
     report(
         f"      Schur {schur.data.shape[0] / 1e6:.1f}M nnz formed vs "
-        f"{(a[nv:, nv:].nnz + d_block.nnz + g_block.nnz) / 1e6:.1f}M as pieces "
-        f"(C {a[nv:, nv:].nnz / 1e6:.1f}M + D {d_block.nnz / 1e6:.1f}M + G {g_block.nnz / 1e6:.1f}M)",
+        f"{(c_block.nnz + d_block.nnz + g_block.nnz) / 1e6:.1f}M as pieces "
+        f"(C {c_block.nnz / 1e6:.1f}M + D {d_block.nnz / 1e6:.1f}M + G {g_block.nnz / 1e6:.1f}M)",
     )
     schur_diagonal = schur.diagonal()
     # A zero Schur diagonal would make the pressure relaxation undefined. It does not arise on this
@@ -314,7 +324,7 @@ def _simple_smoothed_cycle(
     so a refresh at unchanged shapes is a compilation-cache hit.** A locally-defined ``jax.jit`` closure
     is a fresh cache entry per closure, so re-deriving the preconditioner would recompile the whole
     cycle every time -- which is what the level records' static/traced split, the shape ladder and
-    :meth:`~aquaflux.solve.multigrid.SmoothedHierarchy.refit` all exist to avoid. Closing over the
+    :meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit` all exist to avoid. Closing over the
     arrays is also expensive on the *first* build: they become compile-time constants, so a hierarchy's
     worth of them is embedded in the compiled program rather than passed as buffers.
 
@@ -469,8 +479,9 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
     Parameters
     ----------
     block, n_fields, strength_threshold, max_levels, max_coarse, frozen_coarsening, shape_headroom, report
-        See :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse`, which owns the hierarchy,
-        the in-place refresh and the host boundary. Only the smoother below belongs to this class.
+        See :class:`~aquaflux.precondition.hierarchy_inverse.HierarchyBlockInverse`, which owns the
+        hierarchy, the in-place refresh and the host boundary. Only the smoother below belongs to this
+        class.
     cycles, sweeps : int
         V-cycles per application, and SIMPLE sweeps per level. Both fixed, so ``b -> x`` stays linear.
     pressure_sweeps, pressure_omega : int, float
@@ -500,7 +511,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         hundredfold jump in a single step, so one prolongation from a ~860-equation coarse space
         carries the whole error; more levels at a gentler rate ask less of each interpolation.
         Aggressive coarsening exists to bound the level count as the mesh grows, not to improve the
-        coarse space. See :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+        coarse space. See :func:`~aquaflux.precondition.multigrid.build_convection_hierarchy`.
     orthonormal : bool
         Scale each aggregate's prolongation column to unit length, by ``1 / sqrt(|aggregate|)``.
         Default ``False``.
@@ -515,7 +526,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
 
         Such singletons are an artifact of arrival order in the random sweep, not of the graph, and
         they interact badly with ``orthonormal``, which promotes a singleton several-fold against a
-        real aggregate. See :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+        real aggregate. See :func:`~aquaflux.precondition.multigrid.build_convection_hierarchy`.
     block_splitting : bool
         Replace the velocity predictor's scalar diagonal with a per-cell block inverse. Default
         ``False``. It cannot be combined with ``simplec``.
@@ -550,14 +561,14 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         and gains nothing deeper, since the interpolation error does not fall as the grids coarsen.
         Smoothing the prolongator is what makes aggregation multigrid depth-independent.
         ``"standard"`` presumes a unit-magnitude diagonal, so pair it with ``equilibrate``. Passed
-        to :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+        to :func:`~aquaflux.precondition.multigrid.build_convection_hierarchy`.
     equilibrate : bool
         Coarsen the operator rescaled to a unit-magnitude diagonal, rather than as given. The answer
         is unchanged. Default ``False``.
 
         Every step of the setup reads the diagonal, so on an operator whose diagonal spans orders of
         magnitude it is otherwise calibrated against a scale with no meaning. Passed to
-        :func:`~aquaflux.solve.multigrid.build_convection_hierarchy`.
+        :func:`~aquaflux.precondition.multigrid.build_convection_hierarchy`.
     """
 
     def __init__(

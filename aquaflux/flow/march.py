@@ -22,6 +22,13 @@ import jax.numpy as jnp
 import lineax as lx
 import numpy as np
 
+from aquaflux.precondition import (
+    FieldGroups,
+    JacobianProbe,
+    MaterializedJacobian,
+    MaterializedProblem,
+    MaterializedSession,
+)
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
@@ -29,15 +36,9 @@ from aquaflux.solve import (
     NO_RETRIES,
     Convergence,
     DualTimeLoop,
-    FieldGroups,
     Globalization,
-    JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
-    MaterializedJacobian,
-    MaterializedProblem,
-    MaterializedSession,
-    MonolithicFactorShiftPolicy,
     NewtonStrategy,
     PreconditionerSession,
     RefreshPolicy,
@@ -87,7 +88,6 @@ def flow_march_step(
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: ShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     jacobian_gradient_sweeps: int | None = None,
 ) -> NewtonStrategy:
     """The flow march's Newton step, with its preconditioner **frozen** at ``reference_state``.
@@ -118,9 +118,9 @@ def flow_march_step(
         value :func:`~aquaflux.turbulence.coupled_step` takes (as :class:`~aquaflux.turbulence.CoupledShiftSettings`,
         which adds the closure's damping). Unset fields keep the full ``a_P`` from the frozen momentum
         diagonal.
-    inner_observer, inner_refresh : callable, optional
-        The dual-time loop's per-inner-iteration hook and mid-step rebuild. Forward-only, and refused
-        without ``dual_time``.
+    inner_observer : callable, optional
+        The dual-time loop's per-inner-iteration hook. Forward-only, and refused without
+        ``dual_time``.
     jacobian_gradient_sweeps : int or None
         Cap the gradient reconstruction's sweeps in the copy of the residual the **forward Jacobian** is
         differentiated from, leaving the residual itself -- and so the root and the adjoint -- untouched.
@@ -156,7 +156,6 @@ def flow_march_step(
         dual_time=dual_time,
         linear_solve=linear_solve,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
     )
 
@@ -171,7 +170,6 @@ def _flow_shifted_step(
     dual_time: DualTimeLoop | None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None,
     inner_observer: Callable[..., None] | None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None,
     jacobian_gradient_sweeps: int | None,
 ) -> NewtonStrategy:
     """The flow's step around a composed policy: what every flow preconditioner shares.
@@ -189,7 +187,6 @@ def _flow_shifted_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=adjoint_preconditioner_factory,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         jacobian_residual=_jacobian_residual(momentum, jacobian_gradient_sweeps),
     )
 
@@ -225,7 +222,7 @@ _SESSION_NOT_MARCH = ("momentum", "reference_state", "preconditioner_options")
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class _FlowProblem(MaterializedProblem):
-    """The laminar flow residual as a :class:`~aquaflux.solve.MaterializedProblem`.
+    """The laminar flow residual as a :class:`~aquaflux.precondition.MaterializedProblem`.
 
     What a materialized-Jacobian session asks of a residual, answered for ``(u, p)``: the assembler, its
     mesh graph and layout, no field groups (a single group of fields has nothing to split), the
@@ -287,12 +284,10 @@ class _FlowProblem(MaterializedProblem):
     def build_step(
         self,
         state: jnp.ndarray,
-        base,
-        preconditioner: object,
+        policy,
         march: dict,
         base_regime: LinearSolveRegime,
     ) -> NewtonStrategy:
-        policy = MonolithicFactorShiftPolicy(base, preconditioner)
         return _flow_shifted_step(
             self.momentum,
             policy,
@@ -302,7 +297,6 @@ class _FlowProblem(MaterializedProblem):
             dual_time=march["dual_time"],
             linear_solve=march["linear_solve"],
             inner_observer=march["inner_observer"],
-            inner_refresh=march["inner_refresh"],
             jacobian_gradient_sweeps=march["jacobian_gradient_sweeps"],
         )
 
@@ -324,9 +318,10 @@ def open_flow_session(
     Parameters
     ----------
     preconditioner : MaterializedJacobian
-        Which inverse and how it is probed: a :class:`~aquaflux.solve.SimpleSmoothed` (or another block
-        inverse) over the whole ``(u, p)`` saddle, which is traced. A :class:`~aquaflux.solve.FieldSplit`
-        is refused, because a ``(u, p)`` state is a single group of fields and has nothing to split.
+        Which inverse and how it is probed: a :class:`~aquaflux.precondition.SimpleSmoothed` (or another
+        block inverse) over the whole ``(u, p)`` saddle, which is traced. A
+        :class:`~aquaflux.precondition.FieldSplit` is refused, because a ``(u, p)`` state is a single
+        group of fields and has nothing to split.
     momentum : MomentumContinuity
         The assembler the session builds on until it is re-pointed with ``rebind``.
     observer : callable, optional
@@ -344,8 +339,8 @@ def open_flow_session(
     Raises
     ------
     TypeError
-        If ``preconditioner`` is not a :class:`~aquaflux.solve.MaterializedJacobian`, or asks for a field
-        split.
+        If ``preconditioner`` is not a :class:`~aquaflux.precondition.MaterializedJacobian`, or asks for
+        a field split.
     """
     if not isinstance(preconditioner, MaterializedJacobian):
         raise TypeError(
@@ -486,11 +481,10 @@ def solve_flow_march(
     preconditioner : MaterializedJacobian, PreconditionerSession or None
         What preconditions the internally built step. ``None`` (default) is the block-SIMPLE
         preconditioner, configured by ``preconditioner_options``. A
-        :class:`~aquaflux.solve.MaterializedJacobian` spec opens a session private to this solve, inverting
-        the materialized Jacobian by a block inverse over the whole saddle (``SimpleSmoothed``) or a complete
-        LU (a field split is refused: a ``(u, p)`` state has nothing to split); pass a session from
-        :func:`open_flow_session` to share one
-        inverse across several solves. Like ``preconditioner_options`` it is refused beside a ``strategy``
+        :class:`~aquaflux.precondition.MaterializedJacobian` spec opens a session private to this solve,
+        inverting the materialized Jacobian by a block inverse over the whole saddle (``SimpleSmoothed``;
+        a field split is refused, since a ``(u, p)`` state has nothing to split); pass a session from
+        :func:`open_flow_session` to share one inverse across several solves. Like ``preconditioner_options`` it is refused beside a ``strategy``
         or a ``RefreshPolicy(builder=...)``.
     preconditioner_options : mapping, optional
         The block-SIMPLE preconditioner's settings; see :func:`flow_march_step`. Refused with a

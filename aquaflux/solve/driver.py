@@ -33,10 +33,10 @@ import jax.numpy as jnp
 
 from .convergence import Convergence, ResidualMeasures
 from .march import ResidualHomotopy, newton_march
-from .materialized_session import PreconditionerSession
 from .refresh import RefreshPolicy
 from .resumption import Resumption
 from .retry import NO_RETRIES, RetryPolicy
+from .session import PreconditionerSession
 from .step_control import default_dual_time_control
 from .strategy import NewtonStrategy, ShiftCarryingControl, StepControl, StepReport
 
@@ -65,7 +65,7 @@ class ContinuationSource(Protocol):
         The per-step refresh hook this source brings with it, or ``None``.
     """
 
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
+    refresh_preconditioner: Callable[..., None] | None
 
     def build(self, state: jnp.ndarray) -> NewtonStrategy:
         """The strategy to start the march with, frozen at ``state``."""
@@ -118,7 +118,7 @@ class SessionSource:
     march: dict
 
     @property
-    def refresh_preconditioner(self) -> Callable[[NewtonStrategy, jnp.ndarray], None] | None:
+    def refresh_preconditioner(self) -> Callable[..., None] | None:
         return self.session.refresh_preconditioner
 
     def build(self, state: jnp.ndarray) -> NewtonStrategy:
@@ -377,6 +377,9 @@ def staged_march(
         )
         state = result.state
         control_state = result.control_state
+        # The march may have carried a re-fitted preconditioner in the step itself (a traced field
+        # split rides as data), so the step it ended on is the one to refresh from and to adjoint with.
+        strategy = result.strategy
         if not result.triggered or refresh.is_last_segment(segment):
             break
         # Re-freeze at the developed state -- how is the source's, the same choice made at the initial

@@ -896,7 +896,7 @@ def shifted_jacobian(jacobian: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.
     "the shifted Jacobian" is.
 
     Written as a **diagonal assignment** rather than ``jacobian + sp.diags(shift)``, for the same reason
-    the equilibration is (:func:`~aquaflux.solve.frozen_operator.apply_symmetric_scale`): a sparse
+    the equilibration is (:func:`~aquaflux.precondition.frozen_operator.apply_symmetric_scale`): a sparse
     *addition* stores only entries whose result is nonzero, so it silently drops every explicit zero the
     coloured probe deliberately kept when it assembled against a fixed pattern. Those stored zeros are
     the pattern, and a zero-fill incomplete factorization takes its own pattern from exactly that.

@@ -56,6 +56,15 @@ from aquaflux.flow import (
     mass_flow_border,
 )
 from aquaflux.initialization import hybrid_initialize
+from aquaflux.precondition import (
+    FieldGroups,
+    FieldSplit,
+    JacobianProbe,
+    MaterializedJacobian,
+    MaterializedProblem,
+    MaterializedSession,
+    jacobian_probe_plan,
+)
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
@@ -67,18 +76,10 @@ from aquaflux.solve import (
     ContinuationSource,
     Convergence,
     DualTimeLoop,
-    FieldGroups,
     FieldLayout,
-    FieldSplit,
     Globalization,
-    HostPreconditioner,
-    JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
-    MaterializedJacobian,
-    MaterializedProblem,
-    MaterializedSession,
-    MonolithicFactorShiftPolicy,
     NewtonStrategy,
     PreconditionerSession,
     RefreshPolicy,
@@ -99,7 +100,6 @@ from aquaflux.solve import (
     assembler_residual,
     block_reference_scales,
     explicit_source,
-    jacobian_probe_plan,
     positive_block_limit,
     positive_block_projection,
     refuse_a_transform_the_march_cannot_run_in,
@@ -618,7 +618,7 @@ class TurbulenceDamping(eqx.Module):
     :class:`ResidualTaperedDamping`). Implementations differ in what they read to decide.
     """
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """The multiplier on the closure's shift strength, ``>= 1``.
 
         ⚠️ **It multiplies the shift STRENGTH, never the diagonal.** The two differ where it matters:
@@ -630,7 +630,7 @@ class TurbulenceDamping(eqx.Module):
 
         Parameters
         ----------
-        relaxation : jnp.ndarray
+        shift_strength : jnp.ndarray
             The shift strength ``beta`` this attempt will actually use, a scalar, already clamped.
         residual : jnp.ndarray or None
             The full coupled residual at this iterate when the caller has it, else ``None`` (the first
@@ -672,9 +672,9 @@ class ConstantDamping(TurbulenceDamping):
         if float(self.ratio) < 1.0:
             raise ValueError(f"ratio must be >= 1 (damping never accelerates), got {self.ratio}")
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """``ratio``, whatever the shift or the state."""
-        del relaxation, residual
+        del shift_strength, residual
         return self.ratio
 
     def rebased(self, coupled: CoupledRANS, state: jnp.ndarray) -> TurbulenceDamping:
@@ -740,13 +740,13 @@ class ResidualTaperedDamping(TurbulenceDamping):
                 f"initial must be >= 1 (damping never accelerates), got {self.initial}"
             )
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """The tapered multiplier; ``initial`` when no residual is available yet.
 
         The march's very first shift is built before any residual exists, and that is the step the
         damping is most for -- so ``None`` opens at ``initial`` rather than at ``1``.
         """
-        del relaxation
+        del shift_strength
         if residual is None:
             return jnp.asarray(float(self.initial))
         share = jnp.clip(turbulence_residual_norm(self.layout, residual) / self.reference, 0.0, 1.0)
@@ -839,7 +839,7 @@ class BetaTaperedDamping(TurbulenceDamping):
                 f"beta_min={self.beta_min}, beta_start={self.beta_start}"
             )
 
-    def factor(self, relaxation: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
+    def factor(self, shift_strength: jnp.ndarray, residual: jnp.ndarray | None) -> jnp.ndarray:
         """``1 + (initial - 1) * share ** exponent``, with ``share`` the fraction of the descent left.
 
         ``share = log(beta / beta_min) / log(beta_start / beta_min)``, clipped to ``[0, 1]`` so a
@@ -848,7 +848,7 @@ class BetaTaperedDamping(TurbulenceDamping):
         """
         del residual
         span = math.log(self.beta_start / self.beta_min)
-        share = jnp.clip(jnp.log(relaxation / self.beta_min) / span, 0.0, 1.0)
+        share = jnp.clip(jnp.log(shift_strength / self.beta_min) / span, 0.0, 1.0)
         return 1.0 + (self.initial - 1.0) * share**self.exponent
 
 
@@ -996,7 +996,7 @@ class CoupledShiftPolicy(eqx.Module):
             jax.lax.stop_gradient(self.omega_shift_transport * self.omega_jacobian_scale),
         )
 
-        def row_relaxation(relaxation: jnp.ndarray) -> jnp.ndarray:
+        def row_shift_scale(shift_strength: jnp.ndarray) -> jnp.ndarray:
             """``turbulence_damping`` on the two scalar blocks, ``1`` on the flow rows.
 
             The closure's rows then run at an effective ``damping * beta`` while the velocity rows keep
@@ -1006,11 +1006,11 @@ class CoupledShiftPolicy(eqx.Module):
             factor there survives the floor the march switches damping off at; and the same diagonal is
             the row scale of the march's residual measure, which damping must not touch.
             """
-            gamma = self.turbulence_damping.factor(relaxation, residual)
+            gamma = self.turbulence_damping.factor(shift_strength, residual)
             scalar = jnp.full((n_cells,), gamma)
             return self.layout.pack(jnp.ones_like(flow_diagonal), scalar, scalar)
 
-        def make_preconditioner(relaxation: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        def make_preconditioner(beta: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
             block = self.flow_preconditioner
             if block is None:
                 raise ValueError(
@@ -1025,7 +1025,7 @@ class CoupledShiftPolicy(eqx.Module):
             a_p = convective_ap + dissipative_ap
             # Flow block at the shifted diagonal a_P + beta*d_vel matching the shifted Jacobian; scalar
             # blocks at their frozen AMG (beta-independent -- the shift only adds positive diagonal).
-            flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p + relaxation * d_vel))
+            flow_m = block.apply_at(flow, jax.lax.stop_gradient(a_p + beta * d_vel))
             k_m = None if self.k_preconditioner is None else self.k_preconditioner(k)
             omega_m = (
                 None if self.omega_preconditioner is None else self.omega_preconditioner(omega)
@@ -1039,7 +1039,7 @@ class CoupledShiftPolicy(eqx.Module):
 
             return precondition
 
-        return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
+        return ShiftTerm(diagonal, make_preconditioner, row_shift_scale)
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at ``beta = 0``).
@@ -1647,11 +1647,8 @@ def _coupled_jacobian_plan(
     column_reach: Sequence[int] | None = None,
     active_rows: np.ndarray | None = None,
 ):
-    """The probing plan for ``coupled``: its mesh graph and layout handed to the generic plan.
-
-    The one place the coupled residual's cell graph and field count meet
-    :func:`~aquaflux.solve.jacobian_probe_plan`; the probe and the factorization builders both read it.
-    """
+    """:func:`~aquaflux.precondition.jacobian_probe_plan` on the coupled residual's cell graph and field
+    count, for the tests and study harnesses that materialize its Jacobian."""
     return jacobian_probe_plan(
         coupled.momentum.mesh.face_cells,
         coupled.momentum.mesh.n_cells,
@@ -1724,13 +1721,13 @@ def coupled_jacobian_probe(
         The cell-graph distance the assembled sparsity covers (coupled RANS reaches distance ``3``).
     column_reach : sequence of int, optional
         A shorter reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``.
-        See :meth:`~aquaflux.solve.JacobianProbe.build`.
+        See :meth:`~aquaflux.precondition.JacobianProbe.build`.
     gradient_sweeps : int, optional
         Probe a copy of the residual whose corrected-gradient solve is capped at this many Richardson
         sweeps, rather than the residual itself. ``None`` (default) probes the residual as it stands.
     active_rows : np.ndarray, optional
         Exclude field-pair blocks from the materialized pattern; see
-        :meth:`~aquaflux.solve.JacobianProbe.build`.
+        :meth:`~aquaflux.precondition.JacobianProbe.build`.
     production_viscosity_frozen : bool
         Materialize the Jacobian of the **frozen-production** copy
         (:func:`frozen_production_viscosity`) rather than of ``coupled`` itself. Set it whenever the
@@ -1852,7 +1849,6 @@ def _coupled_step(
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
@@ -1903,7 +1899,7 @@ def _coupled_step(
         The dual-time inner loop, or ``None`` for the single shifted step. Unlike the settings above
         this is not shared: the flow-only and scalar marches have no dual-time form, so the loop is a
         coupled choice and stays on the coupled builders.
-    krylov_solver, inner_observer, inner_refresh, step_limit, step_projection
+    krylov_solver, inner_observer, step_limit, step_projection
         The linear solve and the per-step guards. See the two step classes.
     jacobian_production_viscosity : bool
         Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
@@ -1975,7 +1971,6 @@ def _coupled_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_residual=jacobian_residual,
@@ -1986,38 +1981,33 @@ def _coupled_step(
 def _monolithic_factor_step(
     coupled: CoupledRANS,
     reference_state: jnp.ndarray,
-    base: CoupledShiftPolicy,
-    preconditioner: HostPreconditioner,
+    policy: ShiftPolicy,
     *,
     globalization: Globalization,
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
     regime: LinearSolveRegime,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
 ) -> NewtonStrategy:
-    """Compose a monolithic preconditioner with the block shift, then build the step.
+    """Build the step around a materialized inverse already glued to the block shift.
 
-    The shared seam of every materialized-Jacobian build: it glues the already-built ``preconditioner``
-    (a field split) to the block shift ``base`` via a
-    :class:`MonolithicFactorShiftPolicy` and hands the result to :func:`_coupled_step`. The inverse
-    families differ only in how they construct ``preconditioner``; everything about the march itself is
-    :func:`_coupled_step`'s.
+    The shared seam of every materialized-Jacobian build: ``policy`` is the block shift glued to the
+    fitted inverse by the session (a :class:`MonolithicFactorShiftPolicy`, or a traced split's policy),
+    and everything about the march itself is :func:`_coupled_step`'s.
     """
     return _coupled_step(
         coupled,
         reference_state,
-        MonolithicFactorShiftPolicy(base, preconditioner),
+        policy,
         regime=regime,
         globalization=globalization,
         dual_time=dual_time,
         krylov_solver=krylov_solver,
         inner_observer=inner_observer,
-        inner_refresh=inner_refresh,
         step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
@@ -2112,7 +2102,7 @@ class _BlockSession:
         self._on_build = on_build
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        return self._build(state, march, track=True)
+        return self._build(state, march)
 
     def refresh(
         self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
@@ -2127,8 +2117,7 @@ class _BlockSession:
     def rebind(self, coupled: CoupledRANS) -> None:
         del coupled
 
-    def _build(self, state: jnp.ndarray, march: dict, *, track: bool) -> NewtonStrategy:
-        del track  # there is no hook to wire
+    def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
         return self._finish(self._step(state, _march_keywords(march), reuse=None))
 
     def _step(
@@ -2172,7 +2161,7 @@ class _BlockSession:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class _CoupledProblem(MaterializedProblem):
-    """The coupled RANS residual as a :class:`~aquaflux.solve.MaterializedProblem`.
+    """The coupled RANS residual as a :class:`~aquaflux.precondition.MaterializedProblem`.
 
     What a materialized-Jacobian session asks of a residual, answered for ``[flow, k, omega]``: the
     assembler, its mesh graph and layout, the leading ``[u, v, w, p]`` / trailing ``[k, omega]`` cut a
@@ -2232,8 +2221,7 @@ class _CoupledProblem(MaterializedProblem):
     def build_step(
         self,
         state: jnp.ndarray,
-        base: CoupledShiftPolicy,
-        preconditioner: object,
+        policy: ShiftPolicy,
         march: dict,
         base_regime: LinearSolveRegime,
     ) -> NewtonStrategy:
@@ -2244,8 +2232,7 @@ class _CoupledProblem(MaterializedProblem):
         return _monolithic_factor_step(
             self.coupled,
             state,
-            base,
-            preconditioner,
+            policy,
             regime=regime,
             krylov_solver=krylov_solver,
             dual_time=dual_time,
@@ -2287,8 +2274,8 @@ def open_session(
     on_build : callable, optional
         ``step -> step``, applied to every step the session builds, for instrumenting a driver.
     precondition_wrapper : callable, optional
-        ``hook -> hook``, wrapping the per-step :attr:`~PreconditionerSession.refresh_preconditioner` once, so
-        a driver can observe each call. The session's ``rebind`` is unaffected by it.
+        ``hook -> hook``, wrapping the per-step :attr:`~PreconditionerSession.refresh_preconditioner`
+        once, so a driver can observe each call. The session's ``rebind`` is unaffected by it.
     inverse_wrapper : callable, optional
         ``(role, factory) -> factory``, wrapping a field-split block-inverse factory before it is used,
         for a driver that must see the block an inverse is fitted to.
@@ -2371,7 +2358,6 @@ def coupled_step(
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: CoupledShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
-    inner_refresh: Callable[[jnp.ndarray], None] | None = None,
     positivity_floor: float = 0.0,
     positivity_projection: bool = True,
     jacobian_gradient_sweeps: int | None = None,
@@ -2391,7 +2377,8 @@ def coupled_step(
     reference_state : jnp.ndarray
         The coupled state the preconditioner and the shift diagonal are frozen at.
     preconditioner : BlockDiagonal or MaterializedJacobian, optional
-        What preconditions the shifted solve. ``None`` is :class:`BlockDiagonal` with every setting unset.
+        What preconditions the shifted solve. ``None`` is :class:`BlockDiagonal` with every setting
+        unset.
     jacobian_production_viscosity : bool
         Differentiate the frozen-production stand-in of the residual in the Krylov operator, and
         materialize the preconditioner from the same stand-in.
@@ -2407,10 +2394,10 @@ def coupled_step(
         outer timestep runs an inner Newton loop on the transient residual ``R + beta d (phi - phi_ref)``,
         so the measured steady residual is the honest discrete time derivative rather than
         ``beta x travel`` and a larger pseudo-timestep can be taken stably. ``None`` (default) is the
-        single shifted step, which has no inner loop, so neither ``inner_observer`` nor
-        ``inner_refresh`` can be given with it. The loop's ``refresh_on_cycles`` needs a refresh to fire:
-        a materialized-Jacobian preconditioner's session supplies one, while a frozen step and a
-        block-diagonal session have none, so there it is refused.
+        single shifted step, which has no inner loop, so ``inner_observer`` cannot be given with it. The
+        loop's ``refresh_on_cycles`` ends a step for a preconditioner re-fit, which the march must then
+        take: a materialized-Jacobian preconditioner's session supplies the hook, while a frozen step and
+        a block-diagonal session have none, so there the march refuses it.
     linear_solve : LinearSolveSettings, lineax.AbstractLinearSolver or None
         The shifted solve. A :class:`LinearSolveSettings` moves the regime -- unset, restart ``120`` for the
         block-diagonal family and ``15`` for a field split, each at a relative tolerance of ``0.3`` -- and keeps the stop in the progress measure the
@@ -2428,9 +2415,6 @@ def coupled_step(
         the path: the shift vanishes at the root.
     inner_observer : callable or None
         A per-inner-iteration hook forwarded to the dual-time step. Forward-only.
-    inner_refresh : callable or None
-        ``(iterate) -> None``, the mid-step rebuild the loop's ``refresh_on_cycles`` fires. A session
-        build wires its own when this is unset. Forward-only.
     positivity_floor : float
         Absolute room in ``k`` the step limiter gives every cell, so a numerically dead cell cannot set
         the step length for all of them. ``0.0`` (default) is the plain fraction-to-the-boundary rule. A
@@ -2464,12 +2448,10 @@ def coupled_step(
             "linear_solve": linear_solve,
             "shift": shift,
             "inner_observer": inner_observer,
-            "inner_refresh": inner_refresh,
             "positivity_floor": positivity_floor,
             "positivity_projection": positivity_projection,
             "jacobian_gradient_sweeps": jacobian_gradient_sweeps,
         },
-        track=False,
     )
 
 

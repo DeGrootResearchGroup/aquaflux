@@ -80,7 +80,8 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.solve import (AirReduction, Convergence, DualTimeLoop, FieldSplit, JacobianProbeSpec, JacobiSmoothed, LinearSolveSettings, MarchLogger, MaterializedJacobian, RetryPolicy, SimpleSmoothed, StateCheckpointer, combine_observers,)
+from aquaflux.solve import Convergence, DualTimeLoop, LinearSolveSettings, MarchLogger, RetryPolicy, StateCheckpointer, combine_observers
+from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
@@ -561,9 +562,9 @@ JACOBI_TRAILING = {
     ),
 }
 #: Write every trailing sub-block to disk just BEFORE its inverse is built, keeping only the last.
-#: The build refuses a singular cell block, and that refusal fires from a mid-step refresh whose
-#: iterate no observer records -- the inner-iterate dump happens after an iteration succeeds, so the
-#: one that fails is precisely the one never written. Dumping before the build inverts that: whatever
+#: The build refuses a singular cell block, and that refusal fires from a cost-triggered refresh whose
+#: operator no observer records -- it is built before the step that would have written anything, so
+#: the one that fails is precisely the one never written. Dumping before the build inverts that: whatever
 #: happens, the last file on disk is the operator that failed, with no state to reload and no shift to
 #: pair correctly. Off by default; it costs a ~35 MB write per refresh.
 DUMP_TRAILING_BLOCK = os.environ.get("BFS3D_DUMP_TRAILING_BLOCK", "") not in ("", "0")
@@ -743,7 +744,7 @@ def _jacobi_trailing_description() -> str:
     Reads them off the class signature rather than restating them, so a changed default cannot make the
     banner lie -- which is the one failure a configuration banner must not have.
     """
-    from aquaflux.solve import JacobiSmoothedInverse
+    from aquaflux.precondition import JacobiSmoothedInverse
 
     settings = {
         name: parameter.default
@@ -868,6 +869,13 @@ K_POSITIVITY_PROJECTION = _environment_flag(
 # that a norm-based tolerance does not control. Tightening it trades cycles per step for a correction
 # that is closer to the true shifted-Newton direction.
 FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", FILE_SOLVER.linear_solve.rtol))
+#: Which rule ends each inner solve (`LinearSolveSettings.stop`; `BFS3D_FORWARD_STOP`, unset keeping
+#: the file's): `residual` stops the moment the residual meets the tolerance, tested every iteration;
+#: `lineax` also waits for the solution to stop moving and tests only at a restart boundary. pitzDaily
+#: ships `residual`; this file does not set it. ⚠️ The two count cycles differently (`residual` reports
+#: cycles RUN, one more than `lineax` for the same work), so `refresh_on_cycles` and the cycle retry fire
+#: at a different difficulty under each -- an arm that changes the stop changes those triggers too.
+FORWARD_STOP = os.environ.get("BFS3D_FORWARD_STOP") or FILE_SOLVER.linear_solve.stop
 
 
 CYCLE_BUDGET = (
@@ -953,16 +961,16 @@ INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # buffer would keep only that tail and throw away the step that started it.
 DUMP_STEP_LIMIT = float(os.environ.get("BFS3D_DUMP_STEP_LIMIT", "0") or 0.0)
 DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
-# Refresh the preconditioner MID-STEP as soon as one solve reaches this many restart cycles, and switch
-# the scheduled refreshes off. `0` selects the scheduled cadence instead.
+# Refresh the preconditioner as soon as one solve reaches this many restart cycles -- the step ends there,
+# keeping its iterate, and the next starts on the re-fit -- and switch the scheduled refreshes off. `0` selects the scheduled cadence instead.
 #
 # The point is the swap, not the addition. Measured on the 3501 s march: the scheduled refreshes cost
 # 742 s -- 21 % of the wall -- while 193 of 232 solves already took a single cycle, so most of that is
 # maintaining a freshness nothing consumes. And no fixed cadence can be right, because the interval that
 # matters is regime-dependent: one step of staleness is free at beta 0.333 and triples the cost at 0.029.
-# Reacting to the cost itself adapts; a schedule cannot. Refreshing mid-step (rather than at the next
-# step boundary) also keeps the inner loop's progress, where the current reaction -- abort and escalate
-# beta -- throws away the work and the pseudo-timestep together.
+# Reacting to the cost itself adapts; a schedule cannot. Ending the step there (rather than aborting it)
+# also keeps the inner loop's progress, where the old reaction -- abort and escalate beta -- threw away
+# the work and the pseudo-timestep together. (Until #290 the re-fit happened mid-step instead.)
 #
 # ⚠️ THE DEFAULT IS 3, AND IT USED TO BE 0. Every recorded measurement on this case was taken
 # cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
@@ -1076,7 +1084,10 @@ SOLVER = CoupledMarch(
         else None
     ),
     linear_solve=LinearSolveSettings(
-        rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
+        rtol=FORWARD_RTOL,
+        restart=FORWARD_RESTART,
+        max_restarts=FORWARD_MAX_RESTARTS,
+        stop=FORWARD_STOP,
     ),
     step_control=CONTROL,
     retry=RetryPolicy(
@@ -1116,16 +1127,16 @@ _STEP_BETA, _STEP_ANCHOR = float("nan"), None
 def _recording_precondition(refresh):
     """Wrap the preconditioner refresh so each attempt's shift and anchor are recorded for the dumps.
 
-    The march calls ``refresh_preconditioner(step, state)`` once per attempt, after the control has set beta
-    and before the step runs -- so it is the one place where both are in hand together. Delegates
+    The march calls ``refresh_preconditioner(step, state, due=...)`` once per attempt, after the control has
+    set beta and before the step runs -- so it is the one place where both are in hand together. Delegates
     unchanged; only used when the step-limit dump is switched on.
     """
 
-    def precondition(step, state):
+    def precondition(step, state, *, due=False):
         global _STEP_BETA, _STEP_ANCHOR
         _STEP_BETA = float(getattr(step.relaxation_schedule, "beta", float("nan")))
         _STEP_ANCHOR = np.asarray(state)
-        return refresh(step, state)
+        return refresh(step, state, due=due)
 
     return precondition
 
@@ -1460,6 +1471,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "per-cell clip" if K_POSITIVITY_PROJECTION else "off (cap only)",
         ),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
+        ("inner forward stop", FORWARD_STOP or "lineax (unset)"),
         # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
         # changes what is retained appears in it. These three were read and never shown, so two runs
         # could differ in them and produce banners identical to the character.

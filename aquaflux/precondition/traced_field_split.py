@@ -1,6 +1,6 @@
 """The block-triangular field split as a **traced** map, so a bundle of traced blocks stays on device.
 
-:class:`~aquaflux.solve.FieldSplitInverse` composes its two block inverses in ``numpy`` on the
+:class:`~aquaflux.precondition.FieldSplitInverse` composes its two block inverses in ``numpy`` on the
 host, and is reached from the jitted Krylov solve through a :func:`jax.pure_callback`. That is the right
 shape when a block inverse is a host computation, because the work
 itself is on the host and the vector has to travel anyway.
@@ -20,17 +20,18 @@ that drains the device pipeline -- on an accelerator that cost is paid against a
 so it grows as a share of the solve rather than shrinking.
 
 This module removes it. The algebra is identical to the host split's; what changes is that the vector is
-a traced array throughout, the coupling is a :class:`~aquaflux.solve.multigrid._CsrOperator` rather than
-a ``scipy`` matrix, and the two inverses are entered through their traced cycle rather than through
-their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
+a traced array throughout, the coupling is a :class:`~aquaflux.precondition.multigrid._CsrOperator`
+rather than a ``scipy`` matrix, and the two inverses are entered through their traced cycle rather than
+through their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
 preconditioned vector it gets back.
 
 **Each inverse's hierarchy is held as array leaves, never reached through a bound method.** A method
 such as ``inverse._solve`` reads the hierarchy when the outer solve is traced, which closes over its
 arrays as compile-time constants. After an in-place refresh the compiled solve would then still hit its
 cache and apply the hierarchy it was traced with -- silently, since nothing retraces. Holding each cycle
-as a :class:`~aquaflux.solve.traced_cycle.TracedCycle` passes the hierarchy in as an argument, so a split
-re-derived after a refresh at unchanged shapes is a cache hit that applies the refreshed hierarchy.
+as a :class:`~aquaflux.precondition.traced_cycle.TracedCycle` passes the hierarchy in as an argument, so
+a split re-derived after a refresh at unchanged shapes is a cache hit that applies the refreshed
+hierarchy.
 
 **Both blocks must be traced.** A host factorization -- a sequential triangular solve -- has no traced
 cycle to offer; a bundle including one keeps the host split, which is correct rather than a limitation --
@@ -42,19 +43,18 @@ from __future__ import annotations
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import scipy.sparse as sp
 
-from .field_split import FieldGroups
+from .field_split import FieldGroups, FieldSplitInverse
 from .multigrid import _CsrOperator
 from .traced_cycle import OffersTracedCycle, TracedCycle
 
-__all__ = ["TracedFieldSplit", "traced_field_split"]
+__all__ = ["TracedFieldSplit", "offers_traced_split", "traced_field_split"]
 
 
 class TracedFieldSplit(eqx.Module):
     """A block-triangular approximate inverse over a two-group field partition, applied on device.
 
-    The traced counterpart of :class:`~aquaflux.solve.FieldSplitInverse`, with the same
+    The traced counterpart of :class:`~aquaflux.precondition.FieldSplitInverse`, with the same
     approximation and the same ordering convention: one group is solved first, its effect on the other
     group's equations is subtracted through the retained coupling block, and the other group is solved
     against that corrected right-hand side. The discarded triangle is the same one.
@@ -63,8 +63,8 @@ class TracedFieldSplit(eqx.Module):
     coupling and both hierarchies -- is a traced leaf, so the whole split rides into a jitted solve as an
     argument. Re-deriving it after a refresh on unchanged shapes is then a compilation-cache hit that
     applies the new values, rather than a retrace -- the same property, and for the same reason, that
-    :class:`~aquaflux.solve.multigrid._CsrOperator` has. Only each cycle's code and settings, and the
-    partition's sizes, are static.
+    :class:`~aquaflux.precondition.multigrid._CsrOperator` has. Only each cycle's code and settings, and
+    the partition's sizes, are static.
 
     Attributes
     ----------
@@ -103,16 +103,16 @@ class TracedFieldSplit(eqx.Module):
         Notes
         -----
         There is deliberately **no** ``transpose`` argument, unlike
-        :meth:`~aquaflux.solve.FieldSplitInverse.apply`. That one needs it because it is
+        :meth:`~aquaflux.precondition.FieldSplitInverse.apply`. That one needs it because it is
         ``numpy``: transposing a block-triangular inverse means reversing the solve order, transposing
         the coupling, *and* transposing each block inverse, and on the host each of those has to be
         arranged by hand. This map is traced and linear, so :func:`jax.linear_transpose` produces
         ``M^T`` from this code exactly -- which is how the adjoint already obtains it
         (:func:`aquaflux.solve.implicit._adjoint_preconditioner`), and how
-        :class:`~aquaflux.solve.HierarchyBlockInverse` obtains its own.
+        :class:`~aquaflux.precondition.HierarchyBlockInverse` obtains its own.
 
         The two groups are **contiguous** ranges of a field-major vector (see
-        :class:`~aquaflux.solve.FieldGroups`), so this slices rather than gathers.
+        :class:`~aquaflux.precondition.FieldGroups`), so this slices rather than gathers.
         """
         split = self.groups.n_leading_dofs
         lead, trail = residual[:split], residual[split:]
@@ -122,10 +122,10 @@ class TracedFieldSplit(eqx.Module):
     def matvec(self):
         """The preconditioner matvec, as the ``residual -> M residual`` callable a Krylov solve takes.
 
-        The traced counterpart of :meth:`~aquaflux.solve.HostPreconditioner.matvec`, and deliberately
-        the same shape -- so a caller selects between a host bundle and a traced one by construction
-        rather than by branching. Where that one returns a :func:`jax.pure_callback`, this returns the
-        cycle itself, so the Krylov solve calls straight into it.
+        The traced counterpart of :meth:`~aquaflux.precondition.HostPreconditioner.matvec`, and
+        deliberately the same shape -- so a caller selects between a host bundle and a traced one by
+        construction rather than by branching. Where that one returns a :func:`jax.pure_callback`, this
+        returns the cycle itself, so the Krylov solve calls straight into it.
 
         Returned as a plain closure rather than as the bound :meth:`apply`. ``jax.jit`` keys its cache
         on the callable, and a bound method of an ``equinox.Module`` carries the module into that key --
@@ -138,29 +138,38 @@ class TracedFieldSplit(eqx.Module):
         return apply
 
 
-def traced_field_split(
-    matrix: sp.spmatrix,
-    groups: FieldGroups,
-    leading,
-    trailing,
-) -> TracedFieldSplit:
-    """Build a :class:`TracedFieldSplit` from an assembled operator and two traced block inverses.
+def offers_traced_split(inverse: object) -> bool:
+    """Whether ``inverse`` is a field split whose two blocks can both run inside an outer trace.
 
-    The split captures each inverse's hierarchy **as it is now**. After a refresh (``refactor_block``),
-    build a new split from the refreshed inverses; at unchanged shapes that is a compilation-cache hit.
+    The test a caller makes before choosing the traced composition over the host one: a split with a
+    host factorization in either block has no traced form, and is composed on the host as before.
 
     Parameters
     ----------
-    matrix : scipy.sparse matrix
-        The assembled field-major operator, shape ``(n_dofs, n_dofs)``. Only the retained off-diagonal
-        block is read here; each inverse was fitted to its own diagonal block by its own builder.
-    groups : FieldGroups
-        The partition.
-    leading, trailing : OffersTracedCycle
-        The two block inverses. Each must offer a **traced** cycle through ``traced_cycle()``, which
-        :class:`~aquaflux.solve.hierarchy_inverse.HierarchyBlockInverse` and
-        :class:`~aquaflux.solve.field_split.AirReductionInverse` both do. The leading group is solved first,
-        retaining the trailing-by-leading coupling, as in the host split.
+    inverse : object
+        Any frozen inverse.
+    """
+    return (
+        isinstance(inverse, FieldSplitInverse)
+        and isinstance(inverse.leading, OffersTracedCycle)
+        and isinstance(inverse.trailing, OffersTracedCycle)
+    )
+
+
+def traced_field_split(inverse: FieldSplitInverse) -> TracedFieldSplit:
+    """The traced form of a host field split, over what its two inverses and its coupling hold now.
+
+    The split captures each inverse's hierarchy **as it is now**. After a refresh
+    (:meth:`~aquaflux.precondition.FieldSplitInverse.refactor_block`), take a new one; at unchanged shapes
+    that is a compilation-cache hit.
+
+    Parameters
+    ----------
+    inverse : FieldSplitInverse
+        The host split. Each of its block inverses must offer a **traced** cycle through
+        ``traced_cycle()``, which :class:`~aquaflux.precondition.hierarchy_inverse.HierarchyBlockInverse` and
+        :class:`~aquaflux.precondition.field_split.AirReductionInverse` both do. The leading group is solved
+        first, retaining the trailing-by-leading coupling, as in the host split.
 
     Returns
     -------
@@ -172,18 +181,17 @@ def traced_field_split(
         If either inverse offers no traced cycle -- a host factorization cannot be composed on device,
         and silently falling back to the host split would hide the round trip this exists to remove.
     """
-    for name, inverse in (("leading", leading), ("trailing", trailing)):
-        if not isinstance(inverse, OffersTracedCycle):
+    for name, block in (("leading", inverse.leading), ("trailing", inverse.trailing)):
+        if not isinstance(block, OffersTracedCycle):
             raise TypeError(
-                f"the {name} inverse {type(inverse).__name__} offers no traced cycle, so this bundle "
+                f"the {name} inverse {type(block).__name__} offers no traced cycle, so this bundle "
                 "cannot be composed on device; use FieldSplitInverse for a host inverse."
             )
-    _, _, trailing_leading, _ = groups.blocks(matrix)
     return TracedFieldSplit(
-        leading_cycle=leading.traced_cycle(),
-        trailing_cycle=trailing.traced_cycle(),
-        coupling=_CsrOperator.from_scipy(sp.csr_matrix(trailing_leading)),
-        groups=groups,
+        leading_cycle=inverse.leading.traced_cycle(),
+        trailing_cycle=inverse.trailing.traced_cycle(),
+        coupling=_CsrOperator.from_scipy(inverse.coupling),
+        groups=inverse.groups,
     )
 
 

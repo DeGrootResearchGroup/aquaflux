@@ -26,7 +26,8 @@ step's outcome. All three members here drive the pseudo-transient shift strength
 
 Any of them can also **release the shift below its floor once the march has settled at the target**
 (:attr:`ShiftStrengthControl.release_floor`), so the last steps are Newton steps rather than fixed-shift
-pseudo-timesteps converging at a linear rate the floor sets.
+pseudo-timesteps converging at a linear rate the floor sets. A release that fails is not retried until
+the residual has fallen below a bar it sets (:attr:`ShiftStrengthControl.release_backoff`).
 
 All three are accelerators on the eager march — they read the previous step's concrete report between
 steps, which a traced loop cannot do — so they live here rather than on the traced Newton path. They
@@ -35,6 +36,8 @@ root it reaches.
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -48,6 +51,52 @@ from .strategy import (
     StepControl,
     StepReport,
 )
+
+
+class ReleaseMemory(NamedTuple):
+    """What a :class:`ShiftStrengthControl` remembers of its releases of the shift floor.
+
+    Attributes
+    ----------
+    started_from : float or None
+        The residual norm of the settled step the release in progress fired after -- the state the
+        first released step was taken from. ``None`` while the march is not released.
+    bar : float or None
+        A residual norm a settled step must come in at or under before the floor is released again, set
+        when a release fails. ``None`` until one does.
+    """
+
+    started_from: float | None = None
+    bar: float | None = None
+
+
+class ShiftControlState(NamedTuple):
+    """The state a :class:`ShiftStrengthControl` carries from one step to the next.
+
+    Attributes
+    ----------
+    beta : float
+        The shift strength the step ran at.
+    memo : object
+        Whatever the control's rule remembers between steps (``None`` for a memoryless rule, the previous
+        residual for a rule keyed on a reduction ratio).
+    release : ReleaseMemory
+        The release's own memory, kept by the base for every rule.
+    """
+
+    beta: float
+    memo: object = None
+    release: ReleaseMemory = ReleaseMemory()
+
+
+def _as_state(state: object) -> ShiftControlState | None:
+    """``state`` as a :class:`ShiftControlState`: ``None`` stays ``None``, a bare shift becomes a state
+    carrying it, and a ``(beta, memo)`` pair gains an empty release memory."""
+    if state is None or isinstance(state, ShiftControlState):
+        return state
+    if isinstance(state, tuple):
+        return ShiftControlState(*state)
+    return ShiftControlState(float(state))
 
 
 class ShiftStrengthControl(eqx.Module):
@@ -65,9 +114,10 @@ class ShiftStrengthControl(eqx.Module):
     the sawtooth defect recorded and fixed for the dual-time controls; it never got the fix, because the
     fix landed on the other side of a duplicated seam.
 
-    **The carried state is ``(beta, memo)``.** β is universal — every control adapts it and the march
-    escalates it — and ``memo`` is whatever else the rule needs to remember between steps: ``None`` for a
-    memoryless rule, the previous residual measure for the two that key on a reduction ratio. Keeping one
+    **The carried state is a :class:`ShiftControlState` ``(beta, memo, release)``.** β is universal —
+    every control adapts it and the march escalates it — ``memo`` is whatever else the rule needs to
+    remember between steps (``None`` for a memoryless rule, the previous residual measure for the two that
+    key on a reduction ratio), and ``release`` is the base's own memory of the floor's release. Keeping one
     shape is what lets :meth:`next_step` and :meth:`carry_beta` be written once; a subclass never touches
     the state directly, only its own ``memo``.
 
@@ -86,6 +136,18 @@ class ShiftStrengthControl(eqx.Module):
     the ramp arrived at it did not descend at all -- the shift a state can take belongs to the state, so
     the release is gated on the march's own evidence rather than on arrival alone.
 
+    **A release that fails is not retried at once.** The settle is evidence, not proof: from a state still
+    too far from the root the released step collapses, the rule backs off, the next step at the floor is
+    full-length and so settled again, and without a memory the release would fire again on the very next
+    step -- measured on pitzDaily from a deep viscosity-ramp start, it did so every other step, failing
+    three times in a row from one start and eight from a deeper one, each failure a step redone at a
+    collapsed line search. So a release whose step the rule backs off from records a **bar**,
+    :attr:`release_backoff` times the residual the release fired from, and the floor is released again
+    only from a settled step whose residual is at or under it. The fixed-shift steps at the floor keep
+    contracting the residual meanwhile, so the bar is reached; each further failure lowers it again from
+    the residual that release fired from. A release that holds never sets a bar, so a march whose first
+    release succeeds is unchanged by it.
+
     Attributes
     ----------
     beta_start : float
@@ -101,6 +163,10 @@ class ShiftStrengthControl(eqx.Module):
         The line-search factor, in ``(0, 1]``, a step at the floor must reach to count as
         :meth:`settled` (static): the gate of the release, and what a ramp ending on the settle reads
         (:class:`~aquaflux.solve.RampSchedule`).
+    release_backoff : float
+        After a release fails, the fraction of the residual it fired from that a settled step's residual
+        must come in at or under before the floor is released again, in ``(0, 1)`` (static). It does
+        nothing without :attr:`release_floor`, nor before a release has failed.
     """
 
     beta_start: float = eqx.field(static=True, default=2.0)
@@ -108,6 +174,7 @@ class ShiftStrengthControl(eqx.Module):
     beta_max: float = eqx.field(static=True, default=4.0)
     release_floor: float | None = eqx.field(static=True, default=None)
     settle_alpha: float = eqx.field(static=True, default=1.0)
+    release_backoff: float = eqx.field(static=True, default=0.5)
 
     def __check_init__(self) -> None:
         if self.release_floor is not None and not 0.0 < self.release_floor < self.beta_min:
@@ -118,6 +185,11 @@ class ShiftStrengthControl(eqx.Module):
             )
         if not 0.0 < self.settle_alpha <= 1.0:
             raise ValueError(f"settle_alpha must lie in (0, 1]; got {self.settle_alpha:g}.")
+        if not 0.0 < self.release_backoff < 1.0:
+            raise ValueError(
+                f"release_backoff must lie in (0, 1); got {self.release_backoff:g}. At 1 or above a "
+                "failed release would fire again on the next settled step, which is what it prevents."
+            )
 
     def settled(self, report: StepReport) -> bool:
         """Whether ``report``'s step was a full-length one at this control's floor.
@@ -175,14 +247,18 @@ class ShiftStrengthControl(eqx.Module):
         lowest = self.beta_min if self.release_floor is None else self.release_floor
         return float(min(max(beta, lowest), self.beta_max))
 
-    def _floored(self, carried: float, adapted: float, previous: StepReport) -> float:
-        """The rule's adapted β with the floor applied: :attr:`beta_min`, unless the march is released.
+    def _floored(
+        self, carried: float, adapted: float, previous: StepReport, release: ReleaseMemory
+    ) -> tuple[float, ReleaseMemory]:
+        """The rule's adapted β with the floor applied, and the release memory to carry on.
 
-        Released means :attr:`release_floor` is set, the previous step drove the target problem, the
-        rule did not raise β (no back-off: neither a clipped step nor a rising residual), and either the
-        step :meth:`settled` (enter, or stay, at :attr:`release_floor`) or it already ran below
-        :attr:`beta_min` (stay, at the rule's own β).
-        Anything else -- the rule backing off from a released step included -- puts the floor back.
+        The floor is :attr:`beta_min` unless the march is released. Released means :attr:`release_floor`
+        is set, the previous step drove the target problem, the rule did not raise β (no back-off: neither
+        a clipped step nor a rising residual), and either the step :meth:`settled` (enter, or stay, at
+        :attr:`release_floor`) or it already ran below :attr:`beta_min` (stay, at the rule's own β).
+        Entering from the floor also needs the step's residual at or under the bar a failed release left,
+        if one has. The rule backing off from a released step is a failed release: the floor goes back
+        and the bar is set to :attr:`release_backoff` times the residual that release fired from.
 
         Parameters
         ----------
@@ -192,18 +268,37 @@ class ShiftStrengthControl(eqx.Module):
             The β the rule chose for the next step, already within :meth:`_clamp`'s bounds.
         previous : StepReport
             The step just taken.
+        release : ReleaseMemory
+            The release memory carried into this step.
+
+        Returns
+        -------
+        tuple
+            ``(beta, release)``: the next step's β and the release memory after it.
         """
-        if self.release_floor is not None and previous.arrived and adapted <= carried:
-            if self.settled(previous):
-                return self.release_floor
-            if previous.shift < self.beta_min:
-                return adapted
-        return max(adapted, self.beta_min)
+        floored = max(adapted, self.beta_min)
+        if self.release_floor is None or not previous.arrived:
+            return floored, release
+        ran_released = previous.shift < self.beta_min
+        if adapted > carried:
+            if not ran_released:
+                return floored, release
+            started_from = (
+                previous.residual_norm if release.started_from is None else release.started_from
+            )
+            return floored, ReleaseMemory(bar=self.release_backoff * float(started_from))
+        if ran_released:
+            return (self.release_floor if self.settled(previous) else adapted), release
+        if self.settled(previous) and (
+            release.bar is None or previous.residual_norm <= release.bar
+        ):
+            return self.release_floor, release._replace(started_from=float(previous.residual_norm))
+        return floored, release
 
     def next_step(
         self, base_step: ShiftedNewtonStrategy, previous: StepReport | None, state: object
-    ) -> tuple[ShiftedNewtonStrategy, tuple[float, object]]:
-        """The base step carrying a constant β, and the ``(beta, memo)`` state to carry forward.
+    ) -> tuple[ShiftedNewtonStrategy, ShiftControlState]:
+        """The base step carrying a constant β, and the :class:`ShiftControlState` to carry forward.
 
         ``state`` is ``None`` only on the very first step of the whole march; β is :attr:`beta_start`
         there. The **first step of a refresh segment** (``previous is None`` with a carried ``state``)
@@ -234,37 +329,39 @@ class ShiftStrengthControl(eqx.Module):
                 f"controls must carry a `relaxation_schedule` (a PseudoTransientStep or DualTimeStep); "
                 f"{type(base_step).__name__} has none."
             )
-        if state is None:  # the very first step of the whole march
-            beta, memo = self.beta_start, None
+        carried = _as_state(state)
+        if carried is None:  # the very first step of the whole march
+            beta, memo, release = self.beta_start, None, ReleaseMemory()
         else:
-            beta, memo = state
+            beta, memo, release = carried
             if previous is not None:  # within a segment; a refresh boundary holds instead
                 adapted, memo = self._adapt(beta, previous, memo)
-                beta = self._floored(beta, adapted, previous)
+                beta, release = self._floored(beta, adapted, previous, release)
         controlled = eqx.tree_at(
             lambda s: s.relaxation_schedule, base_step, ConstantRelaxation(jnp.asarray(beta))
         )
-        return controlled, (beta, memo)
+        return controlled, ShiftControlState(beta, memo, release)
 
-    def carry_beta(self, state: object, beta: float) -> tuple[float, object]:
-        """Seed the carried β with an externally-chosen value, keeping the memo.
+    def carry_beta(self, state: object, beta: float) -> ShiftControlState:
+        """Seed the carried β with an externally-chosen value, keeping the memo and the release memory.
 
         Called by :func:`~aquaflux.solve.newton_march` after a β-escalation retry, so the ramp continues
         from the escalation's discovered-safe β instead of the control's own last β. The memo is
         preserved so a rule keying on a residual ratio does not lose its reference and mis-read the next
-        step as a huge reduction.
+        step as a huge reduction, and the release memory so an escalated released step that then fails
+        is still known to have been a release.
         """
-        memo = state[1] if isinstance(state, tuple) else None
-        return (float(beta), memo)
+        carried = _as_state(state)
+        return (carried or ShiftControlState(0.0))._replace(beta=float(beta))
 
-    def resumed_at(self, shift: float) -> tuple[float, None]:
+    def resumed_at(self, shift: float) -> ShiftControlState:
         """The carried state of a march resumed from one whose last step ran at ``shift``.
 
         The march starts from the shift the interrupted one had walked to rather than from
         :attr:`beta_start`, so a ramp that took many steps to come down is not walked again. The state
         has no memo, which is the path a residual-ratio rule already takes for a step with no reference
-        (alpha alone drives it), and the first step **holds** the shift as the first step after a
-        preconditioner refresh does, since there is no previous step to adapt it from.
+        (alpha alone drives it), nor any release memory, and the first step **holds** the shift as the
+        first step after a preconditioner refresh does, since there is no previous step to adapt it from.
 
         Parameters
         ----------
@@ -273,13 +370,13 @@ class ShiftStrengthControl(eqx.Module):
 
         Returns
         -------
-        tuple
-            The ``(beta, memo)`` state to hand :func:`~aquaflux.solve.newton_march` as ``control_state``,
+        ShiftControlState
+            The state to hand :func:`~aquaflux.solve.newton_march` as ``control_state``,
             with ``beta`` held inside ``[beta_min, beta_max]`` (``[release_floor, beta_max]`` when this
             control releases, so a march stopped while released resumes released) in case this
             control's bounds differ from the interrupted march's.
         """
-        return (self._clamp(shift), None)
+        return ShiftControlState(self._clamp(shift))
 
     def redamp(self, state: object, factor: float) -> object:
         """The carried state with β multiplied by ``factor``, memo untouched.
@@ -358,9 +455,8 @@ class ShiftStrengthControl(eqx.Module):
         fatal mid-ramp. Which is the ``(state, β)`` point once more, and the reason a floor under either
         quantity is the wrong repair.
         """
-        beta = state[0] if isinstance(state, tuple) else state
-        memo = state[1] if isinstance(state, tuple) else None
-        return (float(beta) * float(factor), memo)
+        carried = _as_state(state)
+        return carried._replace(beta=float(carried.beta) * float(factor))
 
     def rebase(self, state: object) -> object:
         """The carried state with the remembered residual DROPPED, keeping β -- the mirror of
@@ -409,8 +505,8 @@ class ShiftStrengthControl(eqx.Module):
         field, and quietly stops supplying a reference; going through the class keeps the shape the
         control's own business.
         """
-        beta = state[0] if isinstance(state, tuple) else state
-        return (float(beta), None)
+        carried = _as_state(state)
+        return carried._replace(beta=float(carried.beta), memo=None)
 
 
 class DualTimeControl(ShiftStrengthControl):

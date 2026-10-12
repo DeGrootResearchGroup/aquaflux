@@ -60,6 +60,7 @@ from aquaflux.vectors import dot, norm_squared
 __all__ = [
     "clip_to_halfspace",
     "decidable_heights",
+    "point_heights",
     "spanning_plane",
 ]
 
@@ -147,6 +148,28 @@ def decidable_heights(loop, plane_normal, through=None):
     height = dot(offset, spread)
     bound = _SLACK * dot(jnp.abs(offset), jnp.abs(spread))
     return jnp.where(jnp.abs(height) <= bound, 0.0, height)
+
+
+def point_heights(points, plane_normal, through):
+    """Signed height of each point above a plane, an undecidable sign resolved to exact zero.
+
+    :func:`decidable_heights` for single points rather than loops: positive on the side the
+    normal points into, negative behind, and zero in the plane or within rounding of it. It is
+    how a receiver is placed on one side of a facet -- in front, where a facet dark behind itself
+    can light it, or not -- and the zero is what keeps a point lying in the facet's own plane from
+    being placed on either side by its rounding.
+
+    Parameters
+    ----------
+    points : jnp.ndarray, shape ``(..., 3)``
+    plane_normal, through : jnp.ndarray, shape ``(..., 3)``
+        Each plane's normal and a point it passes through. All three broadcast together.
+
+    Returns
+    -------
+    jnp.ndarray, shape ``(...)``
+    """
+    return decidable_heights(points[..., None, :], plane_normal, through=through)[..., 0]
 
 
 def _candidates(loop, height):

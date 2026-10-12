@@ -1086,7 +1086,7 @@ is not available from this pair.
 ### ONE AGGREGATION, TWO APPLIES — and why the CPU half cannot use `scipy` (2026-08-15)
 
 **The two multigrids over this operator were never two methods, only two *applies* of one method.** The
-coarsening in `solve/multigrid.py` is already a host computation in `scipy`; only the apply is traced. So
+coarsening in `precondition/multigrid.py` is already a host computation in `scipy`; only the apply is traced. So
 a host apply over the *same* hierarchy gives a CPU path relaxed by an incomplete factorization beside the
 traced path relaxed by SIMPLE or Jacobi — one aggregation, one refresh path, one coarse space, and only
 the smoother differing by machine. Built as `solve/ilu_inverse.py` (`IluSmoothedInverse`,

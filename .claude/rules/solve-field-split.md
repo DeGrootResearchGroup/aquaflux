@@ -1,11 +1,11 @@
 ---
 paths:
-  - "aquaflux/solve/field_split.py"
-  - "aquaflux/solve/traced_field_split.py"
-  - "aquaflux/solve/traced_cycle.py"
+  - "aquaflux/precondition/field_split.py"
+  - "aquaflux/precondition/traced_field_split.py"
+  - "aquaflux/precondition/traced_cycle.py"
 ---
 
-# Rules — `aquaflux/solve/field_split.py` (the block-triangular field split)
+# Rules — `aquaflux/precondition/field_split.py` (the block-triangular field split)
 
 > ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
@@ -18,12 +18,15 @@ paths:
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
 
-## 🔬 PROTOTYPE — `TracedFieldSplit`: the composition on device (2026-08-20)
+## `TracedFieldSplit`: the composition on device — WIRED into the march (2026-10-12, #290)
 
-**Built, tested, bit-identical to the host split, and wired into nothing.** `traced_field_split.py`
-holds `TracedFieldSplit` + `traced_field_split(...)`; it is deliberately **not** in
-`solve/__init__.__all__`, because exporting publishes to the documentation site and an unwired
-prototype should not read as a supported way to build a preconditioner.
+`traced_field_split.py` holds `TracedFieldSplit`, `traced_field_split(inverse)` and
+`offers_traced_split(inverse)`. **A `MaterializedSession` whose split has two blocks offering a traced
+cycle applies it on device automatically** — there is no setting; see "How it is wired" below. Every
+shipped block inverse offers one (`SimpleSmoothed`, `JacobiSmoothed`, `AirReduction`), so every
+spec-built `FieldSplit` is traced; the host form survives for a block with no traced cycle (only an
+`inverse_wrapper` can make one now) and for a bare `BlockInverse` (the flow-only march), which is not
+a field split.
 
 **The problem it addresses.** `FieldSplitInverse.apply` is numpy, and is reached from the
 jitted Krylov solve through a `jax.pure_callback`. When **both** blocks are traced cycles — which the
@@ -77,7 +80,7 @@ This was not a property of one refresh option: **rebuilding the split after a re
 the cache and was just as stale** — measured on `main` at `abdda0d` (jax 0.10.2 CPU, the unit fixture,
 same-pattern operator with values scaled by U(0.5, 1.5)): one trace, and the jitted answer 1.94 (norm)
 away from the refreshed split's own eager answer. Now each inverse offers
-**`traced_cycle() -> TracedCycle`** (`solve/traced_cycle.py`): an `equinox.Module` whose `state` (the
+**`traced_cycle() -> TracedCycle`** (`precondition/traced_cycle.py`): an `equinox.Module` whose `state` (the
 hierarchy, plus `extras` on `HierarchyBlockInverse`) is array leaves and whose `step` is static and
 compares by value (`_HierarchyStep(cycle, smoother)`, `_AirStep(cycles, f_iters, c_iters, omega)` over a
 module-level `_air_cycle`). The inverses' own eager `_solve` routes through the same object, so there is
@@ -88,28 +91,82 @@ Pinned by `test_a_split_rebuilt_after_a_refresh_reuses_the_compiled_solve_and_ap
 and the host split — on a grid operator, because lAIR refuses the random fixture as densifying) and
 `test_both_hierarchies_ride_as_leaves_not_as_constants` (no array-sized jaxpr constants). Mutation-checked:
 re-introducing a value-equal step that reaches the hierarchy at trace time fails both; making `_HierarchyStep`
-compare by identity fails the trace count. ⚠️ `TracedCycle` / `OffersTracedCycle` are deliberately **not**
-in `solve.__all__`, like the rest of this unwired prototype — but `HierarchyBlockInverse.traced_cycle` is a
-public method on a published class, so export them when the split is wired.
+compare by identity fails the trace count. `TracedCycle` / `OffersTracedCycle` are exported from
+`solve.__all__` (2026-10-12): a user's own block inverse implements them to get the on-device path.
+`TracedFieldSplit`, `traced_field_split` and `offers_traced_split` stay in their submodule — plumbing the
+session uses, not something a case configures.
 
-**What remains before it can carry a march** (the honest boundary of the prototype):
+**How it is wired (2026-10-12, #290).**
 
-1. `FieldSplitPreconditioner` still builds the host split; nothing constructs this one. The wiring
-   target is now `MaterializedSession` (`coupled_amg_continuation` was deleted in #371).
-2. **The refresh shape is the real design question** — now a pure plumbing question, since the split can be
-   rebuilt after a refresh and reuse the compiled solve soundly. `HostPreconditioner` is deliberately *not*
-   an `equinox.Module` so it can be mutated in place while riding as a **static** field of the shift policy.
-   `TracedFieldSplit` must ride as a jit **argument** instead. ⚠️ **`matvec()` returns a closure over the
-   split, and a jit over that closure captures the split's arrays as constants again** — a new closure per
-   split is a new cache key, so that is a recompile per refresh rather than a stale answer, but it is the
-   shape option 1 must replace, not reuse.
-3. **Settled (#281, 2026-10-10): `OffersTracedCycle` stays in `traced_cycle.py`, beside its value type.**
+1. **The session chooses the form, at the fit.** `MaterializedSession._build` fits the host
+   `FieldSplitPreconditioner` as before, then asks `offers_traced_split(preconditioner.inverse)`. If
+   true, the step's policy is `TracedSplitShiftPolicy(base, traced_field_split(inverse))`
+   (`precondition/monolithic_policy.py`), an `equinox.Module` holding the split as **data**; otherwise
+   `MonolithicFactorShiftPolicy` as before. The problem's `build_step` now receives the glued policy
+   (`MaterializedProblem.build_step(state, policy, march, base_regime)`), so neither problem chooses.
+   `session.preconditioner` is the host object either way.
+2. **A re-fit is a new step, not a mutation.** `BetaTrackingRefresh` re-fits the host split in place
+   (it now holds that preconditioner itself rather than reading it off the step, which a traced policy
+   cannot supply) and **returns whether it re-fitted**. The session's `refresh_preconditioner` then
+   returns `None` (nothing re-fitted, or a host form) or an update `step -> with_traced_split(step,
+   split)`. `newton_march` applies an update to **both** `strategy` and `active_step` — the active step
+   is rebuilt from `strategy` every iteration, so updating it alone lasts one step — at the pre-step
+   refresh and before a redo, and reports the result on `MarchResult.strategy`, which `staged_march`
+   carries into the next segment and the adjoint.
+3. **The split rides in two places, both data.** The policy and the step's adjoint factory
+   (`_TracedSplitAdjoint`, transposed by `jax.linear_transpose` in `root_adjoint`). The step's
+   `adjoint_preconditioner_factory` became a **data** field for this (it was static); every existing
+   value is a closure or a plain dataclass, which equinox still filters to the static side, so nothing
+   else moved. `with_traced_split` replaces both with one `tree_at`. ⚠️ An update reaching only the
+   policy would leave the adjoint preconditioned by the split the march started from — mutation-checked.
+4. **A re-fit is a cache hit only at unchanged array shapes, so a block whose coarsening reads values
+   must freeze it.** Measured 2026-10-12 with `validation/traced_split_refresh_shapes.py` (hybrid start
+   plus ten march checkpoints × β 2 / 0.5 / 0.05): pitzDaily's leading `SimpleSmoothed` at
+   `strength_threshold` 0.25 without `frozen_coarsening` re-coarsened from (36675, 9453, 2166, 498) to
+   (36675, 9579, 2223, 534, 141), a level more, moving between consecutive checkpoints early in the march;
+   on the traced path each such re-fit would recompile the coupled step. **pitzDaily's `case.yaml` now
+   sets `frozen_coarsening: true` on its leading block (the user's choice, 2026-10-12), as bfs3d already
+   did on both.** The trailing block (threshold 0, not frozen) also moved, by defects rather than by
+   design: sparse arithmetic dropping exact zeros, in the Galerkin product, in the aggregation graph's
+   symmetrization and squaring, and in a smoothed prolongation, and in the SIMPLE level's `D⁻¹G` and
+   Schur pieces. All are fixed by storing each on its structural pattern (`multigrid.py`,
+   `saddle_multigrid.py`; see `solve-amg-multigrid.md`). After them the probe reports **0 moved
+   signatures and 1 trace of the jitted apply across 40 builds**. Freezing alone, on the host split (march
+   2026-10-12, Linux x86_64, 4 cores, one run): 20 steps / **154** restart cycles / `x_r/h` 8.0686,
+   against the unfrozen 20 / 140 / 8.0686 — 10 % more cycles; its wall clock overlapped unit-test runs
+   and is not quotable.
+5. **Settled (#281, 2026-10-10): `OffersTracedCycle` stays in `traced_cycle.py`, beside its value type.**
    #281 part 1 had added a `TracedFactors` protocol (`apply_traced`) in `host_preconditioner.py` for the
    same capability; it was **dropped in favour of this one** when the two met in a merge, because handing
    the split a bound `apply_traced` is exactly the stale-constant shape #665 fixed. There is no
    `TracedFactors` and no `apply_traced`. The other two capabilities (`RefactorableInverse`,
    `ReleasableInverse`) are in `host_preconditioner.py`; see `solve-direct-preconditioners.md`.
-4. No GPU measurement exists.
+6. No GPU measurement exists. **The harness for it is `validation/traced_split_benchmark.py`
+   (2026-10-12)**: it builds both arms from ONE fitted session at a case checkpoint (`TRACED_CASE`
+   pitzdaily | bfs3d), refuses to time them unless one application agrees to 1e-10, and times one
+   application and a fixed-work GMRES (no stopping test, so both arms do identical work) against the
+   march's own matrix-free `J + beta d`. CPU baseline, pitzDaily `state-00043` (converged, `refresh_on_cycles`
+   3 march, leading block NOT frozen), beta 0.05, 61125 dofs, jax 0.11.2, Linux x86_64, 4 cores, 20
+   repeats: one application host 209 ms / traced 203 ms (1.03x), GMRES 15 x 4 cycles 11.59 s / 11.38 s
+   (1.02x), agreement 0.0, both true residuals 9.869e-06, one operator matvec 59 ms. Parity is the CPU
+   answer to want; the GPU run is the open measurement.
+7. **Parity march (2026-10-12, pitzDaily, shipped `case.yaml` with the leading block frozen, Linux
+   x86_64, 4 cores, jax 0.11.2, `JAX_LOG_COMPILES=1`, one uncontended run each, back to back).** The
+   control arm is the same tree with only `offers_traced_split` forced false, so the two differ in the
+   preconditioner's form alone:
+
+   | arm | steps | restart cycles | `x_r/h` | wall | `_march_step` compiles | per-block cycle compiles |
+   |---|---|---|---|---|---|---|
+   | traced (on device) | 20 | 154 | 8.0686 | 635 s | **1** | 0 |
+   | host (callback) | 20 | 154 | 8.0686 | 601 s | **1** | 1 + 1 |
+
+   Same trajectory to the step and cycle; every refit after the first is a cache hit on both arms (the
+   shape fixes in item 4 serve the host arm's jitted block cycles too). The traced arm is **5.6 % slower
+   on CPU** — inside what one run each can resolve on a shared container, and in the direction expected:
+   it traces a larger `_march_step` (the hierarchies are its arguments), and a CPU has no transfer to save.
+   The case for it is the GPU, which remains unmeasured. Logs:
+   `validation/pitzdaily_openfoam/run-20261012-025423.log` (traced) and its host-arm sibling (worktree,
+   not kept).
 
 ## The field split — a saddle plus two transported scalars
 
@@ -155,7 +212,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
   march's cost is no longer preconditioner-bound (~65 % Krylov, largely fixed per-step matvec rather
   than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
   test needs the hard inner iterates.
-  - **✅ THE SPLIT IS BUILT — `solve/field_split.py` (`FieldGroups`,
+  - **✅ THE SPLIT IS BUILT — `precondition/field_split.py` (`FieldGroups`,
     `FieldSplitInverse`, `field_split_inverse`).** Three facts worth keeping,
     independent of whether it ever wins:
     - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
@@ -290,7 +347,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
       achieved residual without asserting it. Every arm sees the identical right-hand side, so the
       between-arm comparison is unaffected — but do not compare an absolute residual across the two.
   - **✅ THE INCOMPLETE-LU SWEEP CAN BE CONFINED TO THE SADDLE — the reachable half of the GPU prize.**
-    Every smoother `solve/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
+    Every smoother `precondition/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
     not is the incomplete-LU sweep, which is also the least parallelizable piece (a sequential triangular
     solve). Two claims must be separated, because they have opposite answers:
     - **Remove it everywhere — REFUTED.** A Jacobi-class smoother on the four-field `[u,v,w,p]` block
@@ -379,7 +436,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
       shift. That keeps the full stencil fill and the true source linearizations, and needs **no**
       reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
       chain factor and its wall-fixation trap simply do not arise. Built as
-      `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse` (**both DELETED 2026-08-15**
+      `precondition/field_split.PerFieldNativeInverse` / `native_per_field_inverse` (**both DELETED 2026-08-15**
       — see the deletion note in the field-split section; the surviving inverse is `JacobiSmoothedInverse`),
       with the two fields
       composed block-triangularly (k leading).
@@ -506,7 +563,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
 
     **The reaction to a collapsed cap is quantified, and the RETURN is the waste — not the ladder.** A
     capped step trips `retry.on_alpha` and the ladder escalates β (×2 per retry, to
-    `retry.cycles_limit`); β then has to be walked back at `/grow` per step, and that unwind is
+    `retry.max_retries`); β then has to be walked back at `/grow` per step, and that unwind is
     arithmetic: **walk-back steps = log(β_peak / β_resume) / log(grow)** — predicted 2.4 / 6.0 / 10.0
     across the three marches above, observed ~2 / 6 / 10. Replaying `CflResidualDualTimeControl` over
     each logged (α, ‖R‖) sequence reproduces every logged β to four decimals on **all 22 archived
@@ -595,14 +652,14 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
     `_materialize_jacobian` **once**, over all six fields — that has not changed, and could not without a
     rectangular (unequal row/column field count) Jacobian probe, which this machinery does not have. What
     changed is which *pattern* that one materialize is asked to fill.
-    `ColumnProbePlan`/`column_probe_plan` (`solve/sparse_jacobian.py`) gained `active_rows`, a static
+    `ColumnProbePlan`/`column_probe_plan` (`precondition/sparse_jacobian.py`) gained `active_rows`, a static
     `(n_fields, n_fields)` table `[row_field, column_field]` a caller supplies when it already knows some
     field-pair block will never be read, whatever the mesh or the state — unlike `in_reach` (a per-entry,
     reach-based question), which is why the two are separate mechanisms and stay so. Excluded pairs are
     filtered out of the pattern **before** `block_stencil_gather_map` builds the CSR structure
-    (`aquaflux/solve/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
+    (`aquaflux/precondition/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
     `nnz`, the retained `ProbeGather`, and the gather map's own construction cost, not only in the values.
-    `FieldGroups.active_rows()` (`solve/field_split.py`) derives the table straight from the
+    `FieldGroups.active_rows()` (`precondition/field_split.py`) derives the table straight from the
     partition a `FieldSplitInverse` already carries: `True` everywhere except the one triangle
     the split's `apply()` never reads. `coupled_jacobian_probe(..., active_rows=…)` and
     `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it (`groups.active_rows()`) whenever it builds its own probe
@@ -784,7 +841,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
 
 **Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
 1M-cell target regardless of how deep either goes.** `FieldSplitPreconditioner.build` /
-`refresh_in_place` (`aquaflux/solve/materialized_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
+`refresh_in_place` (`aquaflux/precondition/materialized_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
 `_monolithic_shift_source` / `JacobianProbe`) materialize the coupled Jacobian with **one**
 coloured-probe pass over all `dim+3` fields at reach 3, and `field_split_inverse` slices
 the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's

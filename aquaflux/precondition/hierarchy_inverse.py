@@ -1,12 +1,12 @@
 """The shared body of a traced block inverse: one frozen hierarchy, refreshed in place.
 
 Two preconditioners in this package wrap a coarsened hierarchy and hand a Krylov solve an approximate
-``A^-1``: :class:`~aquaflux.solve.field_split.JacobiSmoothedInverse` over a transported-scalar group, and
-:class:`~aquaflux.solve.saddle_multigrid.SimpleSmoothedInverse` over the velocity--pressure saddle. They
-differ **only** in their level smoother -- a damped/block Jacobi sweep against a SIMPLE relaxation --
-and everything around that smoother is the same problem solved twice: build the hierarchy, re-derive it
-when the march refreshes, keep the jitted cycle a compilation-cache hit across that refresh, marshal a
-host vector in and out, and produce a transpose for the adjoint.
+``A^-1``: :class:`~aquaflux.precondition.field_split.JacobiSmoothedInverse` over a transported-scalar
+group, and :class:`~aquaflux.precondition.saddle_multigrid.SimpleSmoothedInverse` over the
+velocity--pressure saddle. They differ **only** in their level smoother -- a damped/block Jacobi sweep
+against a SIMPLE relaxation -- and everything around that smoother is the same problem solved twice:
+build the hierarchy, re-derive it when the march refreshes, keep the jitted cycle a compilation-cache hit
+across that refresh, marshal a host vector in and out, and produce a transpose for the adjoint.
 
 Solving it twice is what let the two drift. The saddle inverse grew a strength threshold, a level cap,
 a fixed shape ladder and a refit path; the nodal one grew none of them, so the trailing block was
@@ -44,7 +44,7 @@ from .traced_cycle import TracedCycle
 
 @dataclasses.dataclass(frozen=True)
 class _HierarchyStep:
-    """The static half of a hierarchy inverse's :class:`~aquaflux.solve.traced_cycle.TracedCycle`.
+    """The static half of a hierarchy inverse's :class:`~aquaflux.precondition.traced_cycle.TracedCycle`.
 
     Holds the module-level jitted cycle and the smoother's hashable settings, and takes the
     ``(hierarchy, extras)`` state as an argument, so it compares by value and closes over no array.
@@ -75,8 +75,8 @@ class HierarchyBlockInverse:
         Fields per cell, the aggregation's block size.
     strength_threshold : float
         Aggregate only along connections at least this fraction of the row's strongest
-        (:func:`~aquaflux.solve.multigrid._aggregation_edges`). ``0`` (default) is isotropic aggregation
-        on the full graph, which reads no operator values at all.
+        (:func:`~aquaflux.precondition.multigrid._aggregation_edges`). ``0`` (default) is isotropic
+        aggregation on the full graph, which reads no operator values at all.
 
         **Above zero the coarsening reads ``|A_ij|``, and that forfeits the refresh guarantee below
         unless it is paired with ``frozen_coarsening`` or ``shape_headroom``.** At zero, a hierarchy
@@ -92,8 +92,8 @@ class HierarchyBlockInverse:
         limit bounds a dense inverse whose cost is cubic in the dof count.
     frozen_coarsening : bool
         Refresh by refitting values onto the coarsening derived at the first build
-        (:meth:`~aquaflux.solve.multigrid.SmoothedHierarchy.refit`) rather than coarsening again. The
-        shapes then cannot move at all; what it trades is coarse-space quality, since the partition
+        (:meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit`) rather than coarsening again.
+        The shapes then cannot move at all; what it trades is coarse-space quality, since the partition
         describes the operator at the state it was first built at.
     shape_headroom : float, optional
         Coarsen into a fixed ladder of array sizes, discovered on the first build and padded by this

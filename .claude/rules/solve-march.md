@@ -171,7 +171,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
   - **⚠️ "A STATION SPANS SEVERAL STEPS ON PURPOSE" IS RETRACTED (2026-09-10). Per-step viscosity is the
     CHEAPEST schedule measured, on both cases that have run it.** The claim here was that a station
     change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`), whose
-    `forced_full["pending"]` overrides **both** gates and forces a FULL coloured-probe re-materialize —
+    `BetaTrackingRefresh._full_rebuild_pending` (`forced_full["pending"]` before #661) overrides **both** gates and forces a FULL coloured-probe re-materialize —
     "the most expensive single operation in the march" — so moving the parameter every step would pay a
     rebuild per step for a handful of saved steps. The mechanism is real; **every quantitative half of
     the argument is wrong.**
@@ -338,8 +338,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
     `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt `refresh_preconditioner` hook (`amg_beta_tracking_refresh`, which since 2026-09-13
     (#371) re-fits only on its first call and after `rebind` — its scheduled gates were deleted).
     **Neither reads `alpha` or `binding_limit`**, so a collapsed line search can only ever escalate β — it
-    can never buy a rebuild — and the **only** live cost trigger is the reactive mid-step "one solve
-    reached `refresh_on_cycles` restart cycles". Two consequences worth holding: (a) an α-triggered
+    can never buy a rebuild — and the **only** live cost trigger is the reactive "one solve
+    reached `refresh_on_cycles` restart cycles" (since 2026-10-10 that ENDS the step and the march re-fits
+    before the next one, passing `due=True`; it used to re-fit mid-step). Two consequences worth holding: (a) an α-triggered
     refresh needs **no new trigger** — `refresh_preconditioner` is already called once per *attempt*, after the
     control has set β, so a rebuild on escalation would be a condition inside that hook (the deleted
     `beta_rel_change` gate was one, never measured in that role); (b) that would **not** address
@@ -430,9 +431,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
       ran an observed pre-march; that solve now has one march, so nothing selects between marches.
   - **The six retry settings are ONE injected object — `RetryPolicy` (`solve/retry.py`), exported from
     `aquaflux.solve` (BUILT).** `solver` / `divergence_cap` / `on_cycles` / `on_alpha` / `beta_factor` /
-    `cycles_limit` used to be six parallel keyword arguments on **both** `newton_march` and
+    `max_retries` used to be six parallel keyword arguments on **both** `newton_march` and
     `solve_coupled`, and they are meaningless apart: a `beta_factor` with no threshold escalates nothing,
-    a `cycles_limit` bounds a loop that never runs. The three decisions taken from them read three or
+    a `max_retries` bounds a loop that never runs. The three decisions taken from them read three or
     four each, so they are **methods on the policy** rather than free functions taking a subset —
     `retry_reason` (named `escalation_reason` until the 2026-08-17 split; before that
     `_escalation_reason`), `has_diverged` (was `_has_diverged`),
@@ -484,10 +485,10 @@ or whose blocks are unnamed: `RowScaledNorm` /
     larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
     shift makes the same frozen preconditioner more diagonally dominant), and it is far cheaper than the
     tight-Krylov divergence retry. So `newton_march(retry=RetryPolicy(on_cycles=N, beta_factor=2.0,
-    cycles_limit=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
+    max_retries=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
     `retry.divergence_cap`) **from the same pre-step state** with β escalated (`×retry.beta_factor`,
     re-applying `refresh_preconditioner` at the new β so a β-tracking refresh re-shifts), up to
-    `retry.cycles_limit` times or until it converges/drops below `N`. It reads β off
+    `retry.max_retries` times or until it converges/drops below `N`. It reads β off
     `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
     readable β and is inert on the default switched-evolution schedule. an unset threshold (the default) is
     **byte-identical** (and a diverged step then falls straight to `retry.solver`, the pre-reorder
@@ -648,9 +649,12 @@ or whose blocks are unnamed: `RowScaledNorm` /
       went below `a_min` 0.191, all four dead ones reported 0.000 (inner collapses at 0.001 and 0.003),
       so 0.01 sits an order of magnitude clear of both. Recalibrate on another case rather than porting
       the number.
-      **Known waste left on the table (deliberate, not yet fixed):** the mid-step cost refresh fires in
-      the *same* body call as the collapse, so a doomed attempt still pays it (~14.7 s) and the escalated
-      retry then re-matches the preconditioner anyway. Suppressing it would need to distinguish a
+      **Known waste left on the table, as measured under the old mid-step refresh:** the mid-step cost
+      refresh fired in the *same* body call as the collapse, so a doomed attempt paid it (~14.7 s) and the
+      escalated retry then re-matched the preconditioner anyway. ⚠️ **Since 2026-10-10 the shape is
+      different and unmeasured:** an attempt that asks for a re-fit stops there, and the escalated redo
+      takes the re-fit (`due=True`) at the pre-step state and the escalated β — one re-fit, at the operator
+      the redo solves, rather than one mid-attempt plus a gated re-match. Suppressing it would need to distinguish a
       constraint-bound step (`binding_limit < 1`, where no preconditioner can help) from a non-descending
       one (where a refresh might be exactly the cure) — `binding_limit` exists for precisely that
       distinction. Measured evidence that the refresh cannot rescue a constraint-bound step: at baseline
@@ -665,7 +669,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
       escalation every step** — the observed low-β tail (β pinned at the floor, each step re-escalating). So
       after an escalation `newton_march` seeds the control's carried β with the escalated value via
       `step_control.carry_beta(state, β)` — **one implementation on `ShiftStrengthControl`, over the shared
-      `(beta, memo)` state, so no control can be missing it** (it once was: the deleted single-step
+      `ShiftControlState(beta, memo, release)` state, so no control can be missing it** (it once was: the deleted single-step
       α-targeter had none, and the `hasattr` guard the march used then meant its escalation feedback
       vanished in silence; since #281 the march asks `isinstance(control, ShiftCarryingControl)`). The memo is preserved across the seed, so a ratio-keyed control does not lose its
       reference and misread the next step as a huge reduction. The control then continues its grow/brake dynamics *from* the discovered-safe β, so
@@ -846,7 +850,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     number. Pinned by `tests/unit/test_text_table.py`.
   - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to nine
     values (`phi, residual_norm, cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
-    binding_limit, full_step_ratio`), which is the missing-object smell: a positional tuple is where a consumer silently
+    binding_limit, full_step_ratio`; a tenth, `refresh_due`, joined 2026-10-11 with `StopsForRefresh`, #290), which is the missing-object smell: a positional tuple is where a consumer silently
     mis-unpacks one field for another, and every growth broke all five test doubles separately — which
     is why they are built by a single `_outcome` helper now. **The growth to eight demonstrated exactly
     that failure:** `residual_norm` was inserted *second*, and the one test still unpacking positionally
@@ -1089,21 +1093,59 @@ or whose blocks are unnamed: `RowScaledNorm` /
     Pinned by `tests/unit/test_march_log.py`, whose assertions read **cells** rather than substrings, so
     a column reordering is not a false failure while a wrong value still is.
 
-  - **`refresh_preconditioner` — per-step refresh of the step's frozen host preconditioner (binding,
-    forward-only).** `newton_march(refresh_preconditioner=…)` calls `refresh_preconditioner(active_step, state)`
-    before each `_march_step`, *after* the control has set β on `active_step`, to re-derive the step's
-    **static** host preconditioner from the current `(state, β)`. It runs in the eager loop (a host op
-    outside the jitted step) and mutates the preconditioner in place, so `_march_step` stays a
-    compilation-cache hit. Two consumers (`.claude/rules/turbulence.md`), sharing one
-    `_beta_tracking_refresh` skeleton (now `solve.materialized_session.BetaTrackingRefresh`): `lu_beta_tracking_refresh` re-factors the complete LU at the current
-    `(state, β)` **every step** (cheap + exact → 1 Krylov iter), the fix for the frozen-LU β-mismatch above;
-    `amg_beta_tracking_refresh` re-materializes the V-cycle **gated** (β-move OR staleness cap) instead,
-    because rebuilding it is far more expensive and only an approximate preconditioner to begin with — the
-    β-move trigger is what averts the α=0 /
-    no-drift stall a *drift* trigger would hit on an overshoot. Distinct from the trigger's `refresh.builder`
-    (which fires occasionally, restarts a *segment*, and returns a *new* step): this fires every step (the
-    consumer may itself no-op) and mutates in place. Forward-only (impure), folded into the same `observing`
-    gate and `jax.grad` guard as the trigger/control; `None` is byte-identical to before.
+  - **A cost re-fit ENDS the step; the march takes it before the next one (binding, 2026-10-10, #290).**
+    `DualTimeStep(refresh_on_cycles=N)` stops its inner loop after the solve that reached `N` restart
+    cycles, **keeping** that iterate, and reports `StepOutcome.refresh_due`. The march then calls
+    `refresh_preconditioner(active_step, state, due=True)` before the next step, at the kept iterate and
+    the next step's shift. Before, the loop fired a `jax.debug.callback` (`inner_refresh` → the session's
+    `refresh_at`) and carried on inside the same step; that hook, its `since_refresh`/`spent` carry and the
+    `MaterializedProblem.bind_march` "must carry `inner_refresh`" contract are deleted.
+    - **Why:** the callback was an ordered host synchronization inside the compiled step on every inner
+      iteration whenever `refresh_on_cycles` was set, and an on-device (traced) preconditioner cannot be
+      swapped mid-step at all — its arrays are inputs to the running step. One mechanism now serves both;
+      the traced field split (#290) needs exactly this shape.
+    - **`due`** is keyword-only on every hook (session, `RefreshPolicy`, wrappers): `False` = offered (the
+      hook gates its own cadence — the multigrid session reports `"none"`), `True` = asked (it must
+      re-fit; the session reports kind **`"cost"`**, which replaces the old `"inner"`). The march passes
+      `due=True` before the step after a `refresh_due` step, before a **cost redo** (`"cycles"`, so the
+      redo is no longer on the same inverse — it repeated the first attempt exactly for any gated hook),
+      and before an escalated redo of an attempt that itself asked.
+    - **A `refresh_due` step is never a cost redo** (`RetryPolicy.retry_reason` skips `"cycles"` for it):
+      redoing it would discard the iterate the re-fit exists to keep. Divergence and step-length collapse
+      still redo it.
+    - **Refused, not ignored:** a strategy that `StopsForRefresh` with `refresh_on_cycles` set and no
+      `refresh_preconditioner` raises `ValueError` before the first step (`newton_march`) — the build-time
+      refusal in `shifted_step` went with `inner_refresh`, since a builder cannot know what the march holds.
+    - **What it changes in a march:** the rest of a step that used to continue after the mid-step re-fit
+      becomes the next outer step — re-anchored pseudo-time, the step control adapting the shift, the
+      measure rebuilt — so trajectories move and every recorded march under `refresh_on_cycles` predates
+      it. Pinned by `test_refresh_on_cycles_ends_the_step_keeping_the_iterate_it_reached`,
+      `test_a_step_only_asks_for_a_refit_once_a_solve_reaches_the_threshold` (`test_dual_time.py`),
+      `test_a_cost_redo_asks_the_refresh_hook_for_a_refit`,
+      `test_a_step_that_stopped_for_a_refit_is_kept_and_the_next_step_asks_for_it`,
+      `test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it` (`test_newton_march.py`),
+      and the two session tests in `test_preconditioner_session.py`.
+  - **`refresh_preconditioner` — per-step re-fit of the step's frozen preconditioner (binding,
+    forward-only; contract rewritten 2026-10-12, #290).** `newton_march(refresh_preconditioner=…)` calls
+    `refresh_preconditioner(active_step, state, due=…)` in the eager loop before each `_march_step`,
+    *after* the control has set β on `active_step`, and again before a redo. It returns **`None` or an
+    update `step -> step`**:
+    - `None` — nothing to hand back: either nothing re-fitted, or the preconditioner is a host object in
+      a **static** field re-fitted in place (`MonolithicFactorShiftPolicy`), which leaves `_march_step` a
+      compile-cache hit by construction.
+    - an update — the preconditioner rides in the step as **data** (`TracedSplitShiftPolicy`) and the
+      re-fit produced new arrays; the update is `with_traced_split(step, split)`. The march applies it to
+      **both** `strategy` and `active_step` (the active step is rebuilt from `strategy` each iteration,
+      so updating only it lasts one step) and reports the last on **`MarchResult.strategy`**, which
+      `staged_march` carries into the next segment and the adjoint. At unchanged array shapes it is a
+      compile-cache hit; see `solve-field-split.md` for what keeps the shapes fixed.
+    The one consumer is `MaterializedSession.refresh_preconditioner` over `BetaTrackingRefresh`, which
+    re-fits on its first call, after a `rebind`, and when the march passes `due` (a cost-ended step, a
+    trigger). Distinct from the trigger's `refresh.builder`, which restarts a *segment* with a new step.
+    Pinned by `test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_result` and
+    `test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_step`
+    (`tests/unit/test_newton_march.py`, both mutation-checked). There is no `lu_beta_tracking_refresh` or
+    `amg_beta_tracking_refresh`; both went with #371.
   - **The forward-step CONTRACTS live in `solve/strategy.py`, not in whichever module needed them
     first (binding, 2026-08-15).** `NewtonStrategy`, `ShiftedNewtonStrategy`, `StepOutcome`, `StepReport`,
     `StepControl`, the `StepFn` callable alias and `within_tolerance` are what travel between the Newton
@@ -1152,9 +1194,10 @@ or whose blocks are unnamed: `RowScaledNorm` /
     - **`ShiftStrengthControl` is the shared base, and a subclass supplies ONLY `_adapt` (binding).** It
       owns the first-step seed, the hold-across-a-refresh rule, the `[beta_min, beta_max]` clamp, the
       `tree_at` swap of a `ConstantRelaxation` onto a **dynamic** β leaf (the compilation-cache-hit
-      property), and `carry_beta`. The carried state is **`(beta, memo)`** for every control — β is
-      universal and `memo` is whatever the rule remembers (`None` for the memoryless Courant rule, the
-      previous residual for the two ratio rules). **Why it exists:** written three times, the bookkeeping
+      property), and `carry_beta`. The carried state is **`ShiftControlState(beta, memo, release)`** for every
+      control — β is universal, `memo` is whatever the rule remembers (`None` for the memoryless Courant
+      rule, the previous residual for the two ratio rules), and `release` is the base's own memory of a
+      failed release of the shift floor. **Why it exists:** written three times, the bookkeeping
       drifted — `carry_beta` was byte-identical in two controls and *absent* from the third, which
       `newton_march` then probed for with `hasattr`, so that control silently dropped its escalation
       feedback; and the same class reset β at a refresh boundary where the others held it, i.e. the
@@ -1179,7 +1222,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     through the flat-residual development (the residual-only rule's stall) yet the residual-rise term brakes
     the overshoot the α-only rule is blind to. This is the "pair α with a step-productivity signal" lever the
     single-step α-targeter's non-convergence ceiling flagged, applied to the dual-time controls. State is
-    `(β, previous residual)` — the shared `(beta, memo)` carry — across refreshes like
+    `(β, previous residual)` — the `beta` and `memo` of the shared `ShiftControlState` carry — across refreshes like
     `ResidualRatioDualTimeControl`; opt-in via
     `solve_coupled(step_control=…)`. Unit-tested in `test_step_control.py` (grows on α at a flat residual,
     brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio

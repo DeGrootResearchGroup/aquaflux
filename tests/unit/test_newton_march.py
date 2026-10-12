@@ -29,6 +29,7 @@ from aquaflux.solve import (
     LinearSolverSpec,
     PseudoTransientStep,
     RetryPolicy,
+    ShiftControlState,
     ShiftTerm,
     StepOutcome,
     StepReport,
@@ -43,7 +44,9 @@ from aquaflux.solve.march import _march_step
 _TRACES: list[int] = []
 
 
-def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residual_fn=None):
+def _outcome(
+    phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residual_fn=None, refresh_due=False
+):
     """A `StepOutcome` for a test double, so a fake step matches the real protocol in one place.
 
     The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
@@ -71,6 +74,7 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, binding=1.0, residu
         jnp.maximum(cycles - 2, 0),
         jnp.asarray(binding),
         jnp.asarray(jnp.nan),
+        jnp.asarray(refresh_due),
     )
 
 
@@ -332,7 +336,9 @@ class _UnitShiftPolicy(eqx.Module):
     """A trivial pseudo-transient shift policy (unit diagonal, no preconditioner) for a scalar root."""
 
     def shift_term(self, phi, residual=None):
-        return ShiftTerm(diagonal=jnp.ones_like(phi), make_preconditioner=lambda _relaxation: None)
+        return ShiftTerm(
+            diagonal=jnp.ones_like(phi), make_preconditioner=lambda _shift_strength: None
+        )
 
 
 def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
@@ -649,8 +655,8 @@ class _CyclesFromBeta(eqx.Module):
 def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
     """A costly solve is a statement about the PRECONDITIONER, so the step is redone at the SAME β.
 
-    The cure for an expensive solve is a fresh factorization -- which the dual-time loop's mid-step
-    refresh has already built by the time the step returns -- not a stiffer operator. Escalating here
+    The cure for an expensive solve is a fresh factorization -- which the march asks its refresh hook
+    for before the redo -- not a stiffer operator. Escalating here
     additionally assumes a larger shift makes the block easier, which is false on at least one case,
     where it closed a loop that ran the wrong way and drove a working march to a non-finite residual.
 
@@ -672,11 +678,191 @@ def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
         on_retry=lambda reason, attempt, beta: seen.append((reason, float(beta))),
     )
     assert int(result.reports[0].cycles) == 40  # β never moved, so the count never dropped
     assert seen == [("cycles", 1.0)]  # one redo, at the shift it already had
+
+
+def test_a_cost_redo_asks_the_refresh_hook_for_a_refit() -> None:
+    """The redo exists to run on a FRESH preconditioner, so the march must ask for one, not offer.
+
+    A hook gating its own cadence (a multigrid session re-fits only when asked) would otherwise reuse
+    the standing inverse, and the redo would repeat the first attempt exactly. Before the first step the
+    refresh is only offered (``due`` false); before the redo it is asked for.
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    asked: list[bool] = []
+    newton_march(
+        _CyclesFromBeta(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0))),
+        residual,
+        phi0,
+        max_steps=1,
+        rtol=1e-10,
+        atol=1e-12,
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
+        refresh_preconditioner=lambda step, state, *, due: asked.append(due),
+    )
+    assert asked == [False, True]
+
+
+class _CostFromData(eqx.Module):
+    """A step whose solve cost is a data leaf and that makes no progress: a stale preconditioner as data."""
+
+    cost: jnp.ndarray
+    relaxation_schedule: ConstantRelaxation
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(phi, self.cost, residual_fn=residual_fn)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def linear_solver(self):
+        return None
+
+
+def test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_step() -> None:
+    """The redo is asked a fresh preconditioner; one carried as data must reach it and outlast it.
+
+    The first attempt costs 40 cycles against a threshold of 10, so it is redone after the hook is
+    asked for a re-fit, which comes back as an update cutting the cost to 1. Applied to the redo's step
+    alone, the next step would revert to 40 and be redone again: the counts are the evidence.
+    """
+    retried: list[str] = []
+
+    def refresh(step, state, *, due):
+        return (lambda s: eqx.tree_at(lambda t: t.cost, s, jnp.asarray(1))) if due else None
+
+    result = newton_march(
+        _CostFromData(jnp.asarray(40), ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=2,
+        rtol=1e-10,
+        atol=1e-12,
+        retry=RetryPolicy(abort_above_cycles=10, max_retries=2),
+        on_retry=lambda reason, attempt, beta: retried.append(reason),
+        refresh_preconditioner=refresh,
+    )
+    assert retried == ["cycles"]
+    assert [int(report.cycles) for report in result.reports] == [1, 1]
+    assert int(result.strategy.cost) == 1
+
+
+class _StopsForRefit(eqx.Module):
+    """A step that always ends early for a preconditioner re-fit, after an expensive solve.
+
+    It halves the state each step, so progress is visible, and reports a solve far over any cost
+    threshold -- which, on a step that did NOT stop for a re-fit, the march would redo.
+    """
+
+    relaxation_schedule: ConstantRelaxation
+    refresh_on_cycles: int = eqx.field(static=True, default=3)
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(0.5 * phi, 40, residual_fn=residual_fn, refresh_due=True)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def linear_solver(self):
+        return None
+
+
+def test_a_step_that_stopped_for_a_refit_is_kept_and_the_next_step_asks_for_it() -> None:
+    """Stopping for a re-fit keeps the step's work; the re-fit is taken before the next step.
+
+    The step's solve cost (38 corrected cycles) is far over ``abort_above_cycles``, so without the
+    exemption the march would redo it at the same shift -- discarding the iterate the refresh exists to
+    keep. Instead nothing is retried, each step's halving survives, and the hook is asked (``due``) before
+    every step after the first, at the state the previous one kept.
+    """
+    residual = _Cubic(jnp.zeros((1,)))
+    phi0 = jnp.ones((1,))
+    asked: list[tuple[bool, float]] = []
+    retried: list[str] = []
+    result = newton_march(
+        _StopsForRefit(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0))),
+        residual,
+        phi0,
+        max_steps=3,
+        rtol=0.0,
+        atol=0.0,
+        retry=RetryPolicy(abort_above_cycles=10),
+        on_retry=lambda reason, attempt, beta: retried.append(reason),
+        refresh_preconditioner=lambda step, state, *, due: asked.append((due, float(state[0]))),
+    )
+    assert retried == []
+    assert float(result.state[0]) == 0.125
+    assert asked == [(False, 1.0), (True, 0.5), (True, 0.25)]
+
+
+class _ScalesByFactor(eqx.Module):
+    """A step whose preconditioner stand-in is DATA: it multiplies the state by an array leaf.
+
+    The shape of a traced field split riding in a step: a refresh cannot mutate it, so the hook hands
+    back an update and the march has to carry it into every later step.
+    """
+
+    factor: jnp.ndarray
+    relaxation_schedule: ConstantRelaxation
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            return _outcome(self.factor * phi, 1, residual_fn=residual_fn)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def linear_solver(self):
+        return None
+
+
+def test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_result() -> None:
+    """A preconditioner carried as data comes back from the hook as a step update, once, at a re-fit.
+
+    The march rebuilds the active step from its base step at the top of every iteration, so an update
+    applied to the active step alone would last one step and the next would run on the stale data --
+    here, three steps at the re-fitted factor give 0.25**3 where one step of it gives 0.25 * 0.5**2.
+    The driver adjoints with the step the march reports, so that must carry the update too.
+    """
+    updates = []
+
+    def refresh(step, state, *, due):
+        if updates:
+            return None
+        updates.append(1)
+        return lambda s: eqx.tree_at(lambda t: t.factor, s, jnp.asarray(0.25))
+
+    result = newton_march(
+        _ScalesByFactor(jnp.asarray(0.5), ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=3,
+        rtol=0.0,
+        atol=0.0,
+        refresh_preconditioner=refresh,
+    )
+    assert float(result.state[0]) == 0.25**3
+    assert float(result.strategy.factor) == 0.25
+
+
+def test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it() -> None:
+    """Every hard step would end early and the preconditioner would never be refreshed: refuse it."""
+    step = _StopsForRefit(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
+    with pytest.raises(ValueError, match="refresh_on_cycles=3"):
+        newton_march(step, _Cubic(jnp.zeros((1,))), jnp.ones((1,)), max_steps=1, rtol=0.0, atol=0.0)
 
 
 def test_march_does_not_escalate_below_the_cycle_cap() -> None:
@@ -740,7 +926,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=2),
     )
     assert len(_TRACES) == 0  # the escalation retries added no recompiles
     assert float(escalated.reports[0].alpha) == 1.0  # ...and still escalated β to recover the step
@@ -792,7 +978,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, max_retries=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -816,7 +1002,7 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(solver=_TIGHT, on_alpha=0.5, beta_factor=2.0, max_retries=2),
     )
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
@@ -846,9 +1032,9 @@ def test_march_carries_the_escalated_beta_into_the_control() -> None:
         rtol=1e-10,
         atol=1e-12,
         step_control=control,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=3),
     )
-    beta, _memo = result.control_state
+    beta = result.control_state.beta
     assert beta == 4.0  # the escalated β, carried; not the control's beta_start
 
 
@@ -899,7 +1085,7 @@ def test_march_escalates_beta_on_a_collapsed_step_length() -> None:
         rtol=1e-10,
         atol=1e-12,
         # abort_above_cycles far above the step's 3 cycles: only the α trigger can fire
-        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, beta_factor=2.0, max_retries=2),
     )
     assert int(result.reports[0].escalations) == 2
     assert float(result.reports[0].alpha) == 1.0
@@ -930,7 +1116,7 @@ def test_the_alpha_trigger_reports_its_own_reason() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.0, abort_above_cycles=1000, max_retries=2),
         on_retry=lambda reason, attempt, beta: reasons.append(reason),
     )
     assert reasons == ["alpha", "alpha"]
@@ -954,7 +1140,7 @@ def test_on_retry_reports_the_beta_the_retried_attempt_will_run_at() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=3.0, cycles_limit=2),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=3.0, max_retries=2),
         on_retry=lambda reason, attempt, beta: seen.append(beta),
     )
     assert seen == pytest.approx([3.0, 9.0])
@@ -988,7 +1174,7 @@ def test_the_default_retry_policy_is_the_inert_one() -> None:
     assert NO_RETRIES.abort_above_cycles is None
     assert NO_RETRIES.on_alpha is None
     assert NO_RETRIES.beta_factor == 2.0
-    assert NO_RETRIES.cycles_limit == 2
+    assert NO_RETRIES.max_retries == 2
     # The whole point of the default: nothing can fire.
     assert not NO_RETRIES.escalates
 
@@ -1344,7 +1530,7 @@ def test_the_escalation_guard_accepts_a_shift_a_step_control_installs() -> None:
         rtol=1e-10,
         atol=1e-12,
         step_control=_InstallsBeta(),
-        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
     )
     # It ran, and the escalation actually fired -- the guard let through a step that can escalate.
     assert int(result.reports[0].escalations) > 0
@@ -1943,15 +2129,17 @@ def test_rebase_drops_the_remembered_residual_and_keeps_the_shift() -> None:
     """The mirror of ``carry_beta``: β survives, the reference does not."""
     control = CflResidualDualTimeControl(beta_start=0.5)
 
-    assert control.rebase((0.25, 3.5)) == (0.25, None)
-    assert control.carry_beta((0.25, 3.5), 0.5) == (0.5, 3.5)  # the sibling, unchanged
+    assert control.rebase((0.25, 3.5)) == ShiftControlState(0.25)
+    assert control.carry_beta((0.25, 3.5), 0.5) == ShiftControlState(
+        0.5, 3.5
+    )  # the sibling, unchanged
 
 
 def test_rebasing_a_memoryless_control_changes_nothing() -> None:
     """``DualTimeControl`` keys on α alone, so it carries no cross-problem reference to invalidate."""
     control = DualTimeControl(beta_start=0.5)
 
-    assert control.rebase((0.25, None)) == (0.25, None)
+    assert control.rebase((0.25, None)) == ShiftControlState(0.25)
 
 
 def test_the_march_rebases_the_control_at_a_station_change() -> None:
@@ -2220,9 +2408,9 @@ def test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_som
         rtol=1e-10,
         atol=1e-12,
         step_control=control,
-        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, cycles_limit=3),
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=3),
     )
-    beta, _memo = result.control_state
+    beta = result.control_state.beta
     if len(hooks) == len(_SHIFT_HOOKS):
         assert control.called == ["carry_beta"]
         assert beta == 4.0

@@ -34,9 +34,8 @@ import numpy as np
 from jax.ops import segment_sum
 
 from aquaflux.discretization import flux_continuous_conductance
-from aquaflux.solve import (
+from aquaflux.precondition import (
     ConvectionDiffusionStencil,
-    SettingsValue,
     air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
@@ -45,6 +44,7 @@ from aquaflux.solve import (
     decouple_dof,
     smoothed_multigrid_cycles,
 )
+from aquaflux.solve import SettingsValue
 from aquaflux.vectors import scale
 
 from .preconditioner import schur_face_coefficient
@@ -53,7 +53,7 @@ from .scales import characteristic_velocity
 
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, MeshGeometry
-    from aquaflux.solve import AirHierarchy, SmoothedHierarchy
+    from aquaflux.precondition import AirHierarchy, SmoothedHierarchy
 
     from .momentum import MomentumContinuity
 
@@ -620,7 +620,7 @@ class ConvectionTwoLevel(_ConvectionVelocityBlock):
     ----------
     sweeps, omega : int, float or None
         The damped-Jacobi smoother's sweeps per level and damping factor (see
-        :func:`~aquaflux.solve.convection_multigrid_cycles`).
+        :func:`~aquaflux.precondition.convection_multigrid_cycles`).
     """
 
     sweeps: int | None = None
@@ -1145,7 +1145,7 @@ class BlockPreconditioner(eqx.Module):
             on a low-aspect-ratio mesh and does not apply to the reduction-based
             :class:`ConvectionAir` block (whose coarsening is already strength-based). It makes the coarsening
             **value-dependent**, so use it where the hierarchy is frozen (as the coupled flow block is)
-            rather than refreshed — see :func:`~aquaflux.solve.build_smoothed_hierarchy`.
+            rather than refreshed — see :func:`~aquaflux.precondition.build_smoothed_hierarchy`.
         """
         if velocity is None:
             velocity = ViscousMultilevel()

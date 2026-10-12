@@ -20,7 +20,7 @@ gives the identical function: the carried force cancels exactly, so neither the 
 derivatives depend on it.
 
 **Preconditioning the augmented system.** ``beta`` is a multiplier, not a function of ``w``, so it is
-eliminated one layer down, in the preconditioner: :func:`~aquaflux.solve.bordered_preconditioner`
+eliminated one layer down, in the preconditioner: :func:`~aquaflux.precondition.bordered_preconditioner`
 extends ``M ~ J^{-1}`` for the unbordered block through the 1x1 Schur complement ``c . M a``, with the
 drive saying where ``beta`` sits. Building ``a`` and ``c`` by hand here is legitimate: a preconditioner
 is an approximate inverse that changes only how fast the Krylov solve converges, never the solution or
@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
+from aquaflux.precondition import bordered_preconditioner
 from aquaflux.solve import (
     BlockScaledNorm,
     ContinuationSource,
@@ -48,7 +49,6 @@ from aquaflux.solve import (
     RowScaledNorm,
     ShiftPolicy,
     ShiftTerm,
-    bordered_preconditioner,
 )
 
 from .drive import MassFlow
@@ -128,8 +128,8 @@ class BorderedFlowResidual(eqx.Module):
 class BorderedShiftPolicy(eqx.Module):
     """A shift policy for the unbordered block, bordered for the augmented state.
 
-    The inner preconditioner is wrapped by :func:`~aquaflux.solve.bordered_preconditioner`, and the shift diagonal gains
-    a zero entry for ``beta``: the constraint row is never shifted.
+    The inner preconditioner is wrapped by :func:`~aquaflux.precondition.bordered_preconditioner`, and
+    the shift diagonal gains a zero entry for ``beta``: the constraint row is never shifted.
 
     **An unshifted constraint row, not a damped one.** The constraint is linear in the fields and holds
     no time derivative, so a shifted step asks the damped fields to reach the target bulk velocity in one
@@ -167,8 +167,8 @@ class BorderedShiftPolicy(eqx.Module):
         )
         diagonal = drive.join(fields, inner_term.diagonal, jnp.asarray(0.0))
 
-        def make_preconditioner(relaxation: jnp.ndarray) -> _Matvec:
-            inner_matvec = inner_term.make_preconditioner(relaxation)
+        def make_preconditioner(shift_strength: jnp.ndarray) -> _Matvec:
+            inner_matvec = inner_term.make_preconditioner(shift_strength)
             return bordered_preconditioner(
                 lambda _state: inner_matvec,
                 drive,
@@ -177,16 +177,16 @@ class BorderedShiftPolicy(eqx.Module):
                 self.average,
             )(phi)
 
-        # The constraint row carries a zero shift, so its relaxation entry only keeps the augmented
-        # vector's shape.
-        row_relaxation = (
+        # The constraint row carries a zero shift, so its entry in the per-row shift scale only keeps the
+        # augmented vector's shape.
+        row_shift_scale = (
             None
-            if inner_term.row_relaxation is None
-            else lambda relaxation: drive.join(
-                fields, inner_term.row_relaxation(relaxation), jnp.asarray(1.0)
+            if inner_term.row_shift_scale is None
+            else lambda shift_strength: drive.join(
+                fields, inner_term.row_shift_scale(shift_strength), jnp.asarray(1.0)
             )
         )
-        return ShiftTerm(diagonal, make_preconditioner, row_relaxation)
+        return ShiftTerm(diagonal, make_preconditioner, row_shift_scale)
 
     def adjoint_factory(self) -> Callable[[jnp.ndarray], _Matvec]:
         """The ``state -> M`` factory for the adjoint transpose solve (the composition at no shift)."""
