@@ -9,7 +9,11 @@ point each was found from. Two questions, per route and point:
   start can find one path at one corner and another path, or none, at the next. Re-pairing each
   corner's path with its nearest path (by crossing points) at the other corners, a triangle attributed
   to the first corner it is found at, gives what matching by path would count; the difference is what
-  pairing by start index miscounts.
+  pairing by start index miscounts. The nearest path is taken with no tolerance, so where a corner's
+  own path is missing it is paired with a path on another branch -- a triangle spanning both sides of
+  a sleeve, a solid angle far too large. That is why a shot route, whose two paths are already paired
+  by the side of the shell they pass, is not re-paired here; on a descended route read a large
+  difference as such a pairing before reading it as a miscount.
 - **Triangles with some corners unreached.** What a triangle reached at one or two corners would add
   if counted in proportion to its reached corners -- the arrival directions at its unreached corners
   are unknown, so its solid angle is taken along straight lines from the receiver. An estimate of the
@@ -159,7 +163,7 @@ for group in plan:
             ).sum()
             for s in range(n_starts)
         )
-        if n_starts > 1:
+        if n_starts > 1 and not _shot(media, chain):
             by_path = sum(
                 weights(at, shared, receiver, normal, emission, ratio, group.profile, slots).sum()
                 for slots in matched_slots(at, shared)

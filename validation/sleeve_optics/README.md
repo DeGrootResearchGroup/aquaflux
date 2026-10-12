@@ -288,3 +288,28 @@ about 0.17 % at (55, 25).
   those two numbers. Through a quartz wall alone light turns 28-47 degrees in the cross-section, not up
   to 120, and only 1-5 of the 24 routes through a neighbour carry any light at each point. A cull on
   these invariants would be sound for coaxial cylinders; it is not built.
+
+### What the corner rule costs, route by route (`corner_rule.py`)
+
+The refracted gather counts a source triangle only where the paths to all three of its corners
+exist, and on a route searched from several starts it pairs the corners' paths by start index. Two
+questions, per route and point: does pairing by start index miscount, and how much light sits in
+triangles reached at one or two corners. 8 sectors (13,312 facets), points (55,25), (50,50),
+(-25,41), (0,-25) mm, no shadow mask, each lamp 1 W per metre; jax 0.10.2, CPU, x64, Linux x86_64,
+4 cores, one run, 1,522 s, 2026-10-12.
+
+- **Pairing by start index miscounts nothing that matters.** On every descended route through a
+  neighbour's gap, re-pairing each corner with its nearest path changes the route's light by
+  0.01-0.03 % where the route carries more than 1e-3 of the point's G. The changes are 1.2-1.8 % on
+  routes carrying under 1e-4 of G, which is under 0.001 % of any point's total. The shot route is
+  already paired by side.
+- ⚠️ **Nearest-path pairing without a tolerance is wrong, and the first run showed by how much.** It
+  re-paired the shot route too. Where a corner's own side had no path, it took the other side's,
+  forming triangles that span the sleeve: 69x and 199x the shot route's light, 31 % and 21 % of G
+  against the backward gather's 0.71 % and 0.26 %. The probe no longer re-pairs shot routes.
+- **Triangles reached at only some corners**, counted in proportion with straight-line solid angles:
+  at most 0.07 % of G on a descended route (gap of sleeve 1 at (55,25)), 0.0002-0.0006 % on the base
+  routes. On the shot route the same estimate reads 1.9-2.2 % of G, which cannot be right: the backward
+  gather puts all of that route's light at 0.71 % and 0.26 %. The rim is a strong lens, so a straight
+  solid angle overstates the image of a facet seen through it. The measured loss on that route is
+  `rim_light.py`'s: 0.761 / 0.631 of the backward gather at 16 sectors, about 0.17 % of G at (55,25).
