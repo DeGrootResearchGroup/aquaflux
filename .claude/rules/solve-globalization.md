@@ -376,7 +376,9 @@ What to take from it, none of which is specific to that mechanism:
       released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
     - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
       stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
-      in the log). **Not the class default** (`release_floor=None`) and **not bfs3d's file**.
+      in the log), with `release_backoff: 0.5` stated beside it since 2026-10-12 (the class default,
+      written out so the file says what the shipped release does after a failure). **Not the class
+      default** (`release_floor=None`) and **not bfs3d's file**.
     - **bfs3d, measured 2026-10-11 (#678, `61a14308`, M3 Pro, jax 0.10.2):** the release alone at 1e-4 on
       the shipped `grow` 1.5 x 12 stations passes -- 28 -> 24 steps, 174 -> 173 cycles (193 -> 192
       counting rejected attempts), the same one retry, the same root (rel L2 1.8e-4, inside the shipped

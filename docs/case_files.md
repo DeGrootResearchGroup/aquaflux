@@ -225,7 +225,7 @@ The two marches share their settings, each a value of the solver library written
 - `max_steps` — the outer-step cap;
 - `convergence` — the stopping test, {class}`~aquaflux.solve.Convergence`: a `measure`
   (`RowScaled`, `BlockScaled` or `Euclidean`) and its `rtol` and `atol`;
-- `preconditioner` — {class}`~aquaflux.solve.MaterializedJacobian`, or for `CoupledMarch`
+- `preconditioner` — {class}`~aquaflux.precondition.MaterializedJacobian`, or for `CoupledMarch`
   {class}`~aquaflux.turbulence.BlockDiagonal`, with the settings
   {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
 - `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;

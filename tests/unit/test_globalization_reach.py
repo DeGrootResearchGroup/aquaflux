@@ -35,20 +35,17 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.flow import flow_march_step, momentum_continuation, reused_flow_solve
 from aquaflux.flow.block_preconditioner import BlockPreconditioner
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
     DivergenceGuard,
     DualTimeLoop,
     DualTimeStep,
-    FieldSplit,
     Globalization,
-    JacobiSmoothed,
-    MaterializedJacobian,
     MonotoneLineSearch,
     PseudoTransientStep,
     RelaxedFarFromRoot,
     RootSolveSettings,
-    SimpleSmoothed,
     SwitchedEvolutionRelaxation,
 )
 from aquaflux.turbulence import (

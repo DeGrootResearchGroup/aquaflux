@@ -1,8 +1,8 @@
 """Unit tests for the symmetric equilibration's **pattern preservation**.
 
-:func:`~aquaflux.solve.frozen_operator.symmetrically_equilibrate` is applied to every operator that
-reaches a factorization or a coarsening. Written as the sparse product ``diags(s) @ a @ diags(s)`` it
-silently drops every explicit zero, because a sparse product stores only entries whose result is
+:func:`~aquaflux.precondition.frozen_operator.symmetrically_equilibrate` is applied to every operator
+that reaches a factorization or a coarsening. Written as the sparse product ``diags(s) @ a @ diags(s)``
+it silently drops every explicit zero, because a sparse product stores only entries whose result is
 nonzero. That is invisible in the values and decisive for a consumer that reads the structure: an
 incomplete factorization with zero fill takes its pattern from the stored entries, so it would receive a
 structurally weaker factorization of a numerically identical matrix.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve.frozen_operator import (
+from aquaflux.precondition.frozen_operator import (
     apply_symmetric_scale,
     cell_major_permutation,
     equilibration_scale,
@@ -145,7 +145,7 @@ def test_a_partition_that_does_not_divide_the_operator_raises(shape, n_fields, m
     Silently producing one would reorder the matrix into a different operator that coarsens perfectly
     well and preconditions nothing.
     """
-    from aquaflux.solve.frozen_operator import equilibrate_cell_major
+    from aquaflux.precondition.frozen_operator import equilibrate_cell_major
 
     with pytest.raises(ValueError, match=message):
         equilibrate_cell_major(sp.eye(shape[0], shape[1], format="csr"), n_fields)

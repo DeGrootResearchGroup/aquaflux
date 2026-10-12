@@ -80,7 +80,8 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     VenkatakrishnanLimiter,
 )
-from aquaflux.solve import (AirReduction, Convergence, DualTimeLoop, FieldSplit, JacobianProbeSpec, JacobiSmoothed, LinearSolveSettings, MarchLogger, MaterializedJacobian, RetryPolicy, SimpleSmoothed, StateCheckpointer, combine_observers,)
+from aquaflux.solve import Convergence, DualTimeLoop, LinearSolveSettings, MarchLogger, RetryPolicy, StateCheckpointer, combine_observers
+from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
@@ -743,7 +744,7 @@ def _jacobi_trailing_description() -> str:
     Reads them off the class signature rather than restating them, so a changed default cannot make the
     banner lie -- which is the one failure a configuration banner must not have.
     """
-    from aquaflux.solve import JacobiSmoothedInverse
+    from aquaflux.precondition import JacobiSmoothedInverse
 
     settings = {
         name: parameter.default

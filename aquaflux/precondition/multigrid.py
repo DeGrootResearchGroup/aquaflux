@@ -31,8 +31,8 @@ family contributes only its ops:
 Every builder takes an **assembled operator** ``a`` (a ``scipy.sparse`` matrix) and returns a frozen
 hierarchy: this module coarsens operators and knows nothing about meshes, fluxes, or which face value
 a scheme upwinds. Callers assemble with
-:meth:`aquaflux.solve.frozen_operator.ConvectionDiffusionStencil.assemble` (and regularize a
-closed-domain pressure system with :func:`aquaflux.solve.frozen_operator.decouple_dof` before
+:meth:`aquaflux.precondition.frozen_operator.ConvectionDiffusionStencil.assemble` (and regularize a
+closed-domain pressure system with :func:`aquaflux.precondition.frozen_operator.decouple_dof` before
 building, so the AMG null space matches the pinned outer Jacobian; the pin only affects
 preconditioner quality, never the converged solution).
 
@@ -698,7 +698,7 @@ class SmoothedHierarchy(eqx.Module):
     """A built smoothed-aggregation hierarchy: general-sparse levels, finest to coarsest.
 
     The levels may have been coarsened on a **rescaled** operator ``D A D`` rather than on ``A``
-    itself (:func:`~aquaflux.solve.frozen_operator.symmetrically_equilibrate`), in which case
+    itself (:func:`~aquaflux.precondition.frozen_operator.symmetrically_equilibrate`), in which case
     ``equilibration`` holds ``diag(D)`` and :meth:`fixed_cycle_solve` moves the right-hand side into
     that scale and the answer back out. Keeping the factor **on the hierarchy** rather than asking
     each caller to remember it is what makes the two spellings interchangeable at every call site;

@@ -38,10 +38,10 @@ CASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
-from aquaflux.solve import (MaterializedJacobianPreconditioner,)
-from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
+from aquaflux.precondition import MaterializedJacobianPreconditioner
+from aquaflux.precondition.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan
-from aquaflux.solve.materialized_session import (batched_jacobian_matvec, jacobian_matvec,)
+from aquaflux.precondition.materialized_session import (batched_jacobian_matvec, jacobian_matvec,)
 
 #: Chunk sizes to sweep. Kept modest at the top end deliberately: a materialize of a three-dimensional
 #: coupled Jacobian is already the largest allocation in the process, and the point of the sweep is to

@@ -14,18 +14,15 @@ import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve import (
     DEFAULT_SHIFT_BASIS,
     Convergence,
     DualTimeLoop,
-    FieldSplit,
     Globalization,
-    JacobiSmoothed,
     LinearSolveSettings,
     LocalCourantBasis,
-    MaterializedJacobian,
     MergeableSettings,
-    SimpleSmoothed,
     filled_from,
 )
 from aquaflux.turbulence import (

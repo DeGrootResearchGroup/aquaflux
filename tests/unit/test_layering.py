@@ -8,10 +8,12 @@ asked whether a solver behaviour needs turbulence had nothing to run. The file r
 before anyone moved a line of it out, because no check looked at how large a physics module had become.
 
 * :func:`test_a_generic_package_imports_nothing_outside_itself` -- ``solve/`` is the residual-agnostic
-  layer. It holds no mesh, field or physics import, which is what lets every residual run on it. The
-  same holds for ``solids/``: its bodies were written for the radiation model's shadows and lived
-  inside it, and a solid body names no physics, so a computer-aided design (CAD) reader or any other
-  consumer can use them only while they import nothing from a physics package.
+  layer. It holds no mesh, field or physics import, which is what lets every residual run on it.
+  ``precondition/`` sits directly on it and may import ``solve/`` and nothing else, so the march never
+  depends on a concrete preconditioner. The same holds for ``solids/``: its bodies were written for the
+  radiation model's shadows and lived inside it, and a solid body names no physics, so a computer-aided
+  design (CAD) reader or any other consumer can use them only while they import nothing from a physics
+  package.
 * :func:`test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_in_it` -- a size
   ratchet on the physics packages, with each over-size module's current size as its budget.
 * :func:`test_nothing_below_the_case_layer_imports_it` -- ``case/`` is the opposite end: it composes
@@ -47,11 +49,12 @@ LINE_LIMIT = 1500
 #: is lowered as code moves out, never raised to make a change fit. Add an entry only with the reason.
 BUDGETS = {
     # Holds the k--omega residual, its shift policy and damping, the k-positivity guards and the coupled
-    # solve drivers. Everything residual-agnostic has moved out: the staged driver and step tail, the
-    # materialized-Jacobian session, the coloured probe and the monolithic shift policy to ``solve/``;
-    # the mass-flow border -- layout, seed, constraint vectors and bulk-velocity average -- to
-    # ``flow/drive.py``, and its bordered residual, shift policy and measures to ``flow/bordered.py``
-    # (which also let the separate mass-flow solve and builder go); the row-scaled measure with its equation names to ``turbulence/measures.py``.
+    # solve drivers. Everything residual-agnostic has moved out: the staged driver and step tail to
+    # ``solve/``; the materialized-Jacobian session, the coloured probe and the monolithic shift policy
+    # to ``precondition/``; the mass-flow border -- layout, seed, constraint vectors and bulk-velocity
+    # average -- to ``flow/drive.py``, and its bordered residual, shift policy and measures to
+    # ``flow/bordered.py`` (which also let the separate mass-flow solve and builder go); the row-scaled
+    # measure with its equation names to ``turbulence/measures.py``.
     # What stays of the session and the probe are their RANS adapters (``_CoupledProblem``,
     # ``_CoupledNarrowing``) and the block-diagonal session, a preconditioner family of its own.
     "turbulence/coupled.py": 2927,
@@ -96,14 +99,22 @@ def test_nothing_below_the_case_layer_imports_it() -> None:
     )
 
 
-#: Packages that must import nothing of aquaflux but themselves and the neutral leaves, each with
-#: what it is. A generic package that names a physics one has stopped being generic.
+#: Packages that must import nothing of aquaflux but themselves, the neutral leaves and the generic
+#: packages they are listed as built on, each with what it is. A generic package that names a physics
+#: one has stopped being generic.
 GENERIC_PACKAGES = {
     "solve": "the residual-agnostic layer, and a residual-agnostic solver that names one is not "
     "residual-agnostic",
+    "precondition": "the residual-agnostic preconditioners the solve layer's linear solves take, and "
+    "one that needs a physics package to be built is not residual-agnostic",
     "solids": "plain geometry, and a solid body that needs a physics package to be described is in "
     "the wrong package",
 }
+
+#: The generic packages each generic package is built on. ``solve`` is on nothing, so the march can be
+#: driven with any preconditioner or none; ``precondition`` takes its state layout, settings values and
+#: shift-policy contract from ``solve``.
+BUILT_ON = {"precondition": ("solve",)}
 
 
 @pytest.mark.parametrize("package", sorted(GENERIC_PACKAGES))
@@ -119,11 +130,11 @@ def test_a_generic_package_imports_nothing_outside_itself(package: str) -> None:
                 target = [*module.split("."), ""][1]
             else:
                 continue
-            if target not in (package, *NEUTRAL_LEAVES):
+            if target not in (package, *BUILT_ON.get(package, ()), *NEUTRAL_LEAVES):
                 offenders.append(f"{path.name}:{line} imports {'.' * level}{module}")
     assert not offenders, (
-        f"{package}/ is {GENERIC_PACKAGES[package]}, so it must not import a physics or "
-        "discretization package:\n" + "\n".join(offenders)
+        f"{package}/ is {GENERIC_PACKAGES[package]}, so it may import only "
+        f"{sorted(BUILT_ON.get(package, ()))} of the other packages:\n" + "\n".join(offenders)
     )
 
 

@@ -14,9 +14,8 @@ from collections.abc import Callable
 import equinox as eqx
 import jax.numpy as jnp
 
-from .continuation import ShiftPolicy, ShiftTerm
+from ..solve import ShiftPolicy, ShiftTerm, TransposedPreconditioner
 from .host_preconditioner import HostPreconditioner
-from .root_adjoint import TransposedPreconditioner
 
 __all__ = ["FrozenTransposeFactory", "MonolithicFactorShiftPolicy"]
 
@@ -28,13 +27,13 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     Reuses a base policy's pseudo-transient shift diagonal -- the physics, whatever rows and scales it
     chose -- but replaces its preconditioner with a single monolithic inverse of the assembled Jacobian,
     which forms the true pressure Schur coupling rather than approximating it. That inverse is a field
-    split of multigrid V-cycles (:class:`~aquaflux.solve.FieldSplitPreconditioner`, bounded memory on a large
-    three-dimensional mesh), or one block inverse over the whole state
-    (:class:`~aquaflux.solve.block_preconditioner.MaterializedBlockPreconditioner`) -- this policy is agnostic to which, needing
-    only the shared callback-matvec interface.
+    split of multigrid V-cycles (:class:`~aquaflux.precondition.FieldSplitPreconditioner`, bounded memory
+    on a large three-dimensional mesh), or one block inverse over the whole state
+    (:class:`~aquaflux.precondition.block_preconditioner.MaterializedBlockPreconditioner`) -- this policy
+    is agnostic to which, needing only the shared callback-matvec interface.
 
     The inverse is frozen at a reference state and shift (built off the jit path by a
-    :class:`~aquaflux.solve.MaterializedJacobian` session). Unlike the block
+    :class:`~aquaflux.precondition.MaterializedJacobian` session). Unlike the block
     preconditioner's live ``a_P`` rescaling it does not track the developing state; being a far stronger
     preconditioner it tolerates that freezing at a cost of a few extra cycles, and the shift vanishes at
     the root so the frozen inverse never changes the converged solution or its adjoint. Because it

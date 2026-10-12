@@ -88,7 +88,8 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     SweptGradientSolve,
 )
-from aquaflux.solve import (CflResidualDualTimeControl, Convergence, FieldSplit, MarchLogger, StateCheckpointer, combine_observers, residual_stop_gmres,)
+from aquaflux.solve import CflResidualDualTimeControl, Convergence, MarchLogger, StateCheckpointer, combine_observers, residual_stop_gmres
+from aquaflux.precondition import FieldSplit
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.turbulence import (
     BetaTaperedDamping,
