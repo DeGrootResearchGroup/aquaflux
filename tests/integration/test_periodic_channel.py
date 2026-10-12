@@ -1,10 +1,10 @@
 """Integration: a streamwise-periodic channel driven by a body force is fully-developed Poiseuille.
 
-Two no-slip walls, streamwise-periodic in x, driven by a uniform body force ``beta`` per unit
-volume (the mean pressure gradient, ``G = -beta``, carried as a force rather than a boundary
+Two no-slip walls, streamwise-periodic in x, driven by a uniform body force ``f`` per unit
+volume (the mean pressure gradient, ``G = -f``, carried as a force rather than a boundary
 pressure drop). The exact fully-developed laminar solution is
 
-    u(y) = (beta / 2 mu) y (H - y),   u_max = beta H^2 / (8 mu),   v = 0,
+    u(y) = (f / 2 mu) y (H - y),   u_max = f H^2 / (8 mu),   v = 0,
 
 with the flow **independent of x** and the periodic pressure ``p_tilde`` streamwise-homogeneous
 (the entire drop lives in the body force). Fully-developed flow has no convection, so the system is
@@ -68,7 +68,7 @@ def test_periodic_channel_is_fully_developed_poiseuille() -> None:
 
     u_exact = (BETA / (2.0 * MU)) * y * (H - y)
     assert np.max(np.abs(u - u_exact)) < 1e-3  # second-order accurate parabola
-    assert np.isclose(float(u.max()), U_MAX, atol=2e-3)  # analytic peak beta H^2 / 8 mu
+    assert np.isclose(float(u.max()), U_MAX, atol=2e-3)  # analytic peak f H^2 / 8 mu
     assert np.max(np.abs(v)) < 1e-10  # no cross-flow
 
     # Fully developed: u and the periodic pressure are x-homogeneous (the drop is in the body force,
@@ -97,7 +97,7 @@ def test_potential_flow_starts_a_body_force_channel_at_the_bulk_velocity() -> No
 
     There is no inflow to build a potential from, so the initializer falls back to the plug the force
     sustains against the wall drag. In the laminar regime that balance is exact, so the plug is the
-    closed-form bulk velocity ``beta H^2 / (12 mu)`` — a start already at the right speed, rather than
+    closed-form bulk velocity ``f H^2 / (12 mu)`` — a start already at the right speed, rather than
     rest, which leaves the whole viscous spin-up to the solve.
     """
     _, _, assembler, _ = _solve(6, 32)

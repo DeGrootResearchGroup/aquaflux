@@ -235,14 +235,14 @@ def test_without_a_closure_the_viscosity_is_the_molecular_value() -> None:
     """No eddy viscosity supplied -- the flow is laminar and sees only the fluid's own ``mu``."""
     _, asm = _turbulent_assembler()
     assert asm.eddy_viscosity is None
-    assert jnp.allclose(asm.viscosity, MU_T)
+    assert jnp.allclose(asm.effective_viscosity, MU_T)
 
 
 def test_eddy_viscosity_forms_the_effective_diffusion_coefficient() -> None:
     """``viscosity`` is ``mu + rho nu_t`` -- the closure supplies kinematic ``nu_t``, not ``mu_t``."""
     mesh, asm = _turbulent_assembler()
     nu_t = jnp.linspace(0.0, 5.0, mesh.n_cells)
-    assert jnp.allclose(asm.with_eddy_viscosity(nu_t).viscosity, MU_T + RHO_T * nu_t)
+    assert jnp.allclose(asm.with_eddy_viscosity(nu_t).effective_viscosity, MU_T + RHO_T * nu_t)
 
 
 def test_eddy_viscosity_is_idempotent_and_keeps_the_molecular_value() -> None:
@@ -255,15 +255,15 @@ def test_eddy_viscosity_is_idempotent_and_keeps_the_molecular_value() -> None:
     nu_t = jnp.full(mesh.n_cells, 4.0)
     once = asm.with_eddy_viscosity(nu_t)
     twice = once.with_eddy_viscosity(nu_t)
-    assert jnp.allclose(twice.viscosity, once.viscosity)
+    assert jnp.allclose(twice.effective_viscosity, once.effective_viscosity)
     assert jnp.allclose(once.properties.evaluate(mesh.cell_zones)["viscosity"], MU_T)
-    assert jnp.allclose(asm.viscosity, MU_T)  # the original assembler is unchanged
+    assert jnp.allclose(asm.effective_viscosity, MU_T)  # the original assembler is unchanged
 
 
 def test_eddy_viscosity_is_a_differentiable_leaf() -> None:
     """A coupled residual computes ``nu_t`` from ``(k, omega)``, so gradients must flow through it."""
     mesh, asm = _turbulent_assembler()
-    grad = jax.grad(lambda nu_t: jnp.sum(asm.with_eddy_viscosity(nu_t).viscosity))(
+    grad = jax.grad(lambda nu_t: jnp.sum(asm.with_eddy_viscosity(nu_t).effective_viscosity))(
         jnp.full(mesh.n_cells, 1.0)
     )
     assert jnp.allclose(grad, RHO_T)  # d(mu + rho nu_t)/d(nu_t) = rho

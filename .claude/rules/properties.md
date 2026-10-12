@@ -84,7 +84,7 @@ module owns them. Governed by the root `CLAUDE.md` Engineering Principles.
 per-coefficient field, so it never grows with more properties). `DiffusionFlux(coefficient=…)` names the property it
 reads. `ResidualAssembler` takes a `PropertyModel` (+ a `coefficient` name for the Robin/Neumann BC
 `Gamma`) and evaluates it each residual. `MomentumContinuity` takes a `PropertyModel` and exposes
-`.viscosity` / `.density` (per-cell); **`rho` is now per-cell**. Retired review findings D1/F1/F5.
+`.effective_viscosity` (molecular `μ` plus `ρν_t`, #373) / `.density` (per-cell); **`rho` is now per-cell**. Retired review findings D1/F1/F5.
 **Density interpolation (binding):** the Rhie–Chow mass flux is `ρu`, so density interpolates *with*
 the velocity as the momentum `interp(ρu)·n` (not `interp(ρ)·interp(u)`); the pressure-correction /
 Schur term uses the face density `interp(ρ)`. Constant-density is bit-for-bit unchanged; genuine

@@ -438,9 +438,9 @@ that name, with the meaning it has there (clashes awaiting a rename say so and n
 Defining one of those words in a module not listed fails; so does a listed module that no longer
 defines it, so the table cannot go stale as renames land. `RETIRED` lists names that may not be defined
 again. **Adding a module under a word is the place to ask whether it means the same thing** — if it
-does not, the answer is another name, not a new entry. The scan parses parameters (lambdas included)
-and class-level fields; it does not see a local variable, a dictionary key or prose, so it is a floor,
-not the whole rule. When you add a word with a history of confusion, add it to `VOCABULARY` too.
+does not, the answer is another name, not a new entry. The scan parses function, method and property
+names, their parameters (lambdas included) and class-level fields; it does not see a local variable, a
+dictionary key or prose, so it is a floor, not the whole rule. When you add a word with a history of confusion, add it to `VOCABULARY` too.
 - **Deliberately kept, so do not "finish the job":** `relaxation_schedule` and the `RelaxationSchedule`
   classes (`SwitchedEvolutionRelaxation` is the literature's name); the method that returns `β` is
   `shift_strength`, and every parameter carrying `β` is `shift_strength` or `beta`.
