@@ -46,7 +46,6 @@ USER_IMPLEMENTS = frozenset(
         "RelaxationSchedule",
         "ReleasableInverse",
         "ResidualMeasure",
-        "ResidualMeasures",
         "ResidualNorm",
         "ScalarBorder",
         "ShiftCarryingControl",

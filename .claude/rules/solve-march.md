@@ -109,6 +109,12 @@ or whose blocks are unnamed: `RowScaledNorm` /
       paces 16 and 24 cost 124 and 118 cycles against the hand-tuned 111, and a 3-step finish 114 -- is
       in `.claude/notes/solve-globalization-log.md` ("Ending the ramp on the settle signal"). **Opt-in;
       pitzDaily's file still ships 12 fixed stations** (111 < 114).
+    - **On bfs3d it does not replace the station count (2026-10-11, #678).** At `grow` 3, release 1e-4,
+      pace 24, `finish` 3 the ramp ended itself after step 9 (settled at step 6, 9 station changes
+      against 13) and cost 187 accepted / 267 all-attempt cycles in 19 steps with five steps redone,
+      against the shipped fixed `grow` 1.5 x 12's 174 / 193 in 28 with one -- better than a fixed 12 at
+      `grow` 3 (214 / 459), worse than the shipped schedule. `rho1` gave no lead on the settle there at
+      either `grow` (above one at `grow` 3, below one from the first floor step at the shipped 1.5). Same log, "bfs3d: the release, `grow` 3 and the settle-ended ramp".
     - Station ids: the fixed walk numbers stations `0..stations` exactly as before (byte-identical
       reports); finishing steps continue from the station the end fired at, so the target's id is not
       `stations` on an ended walk -- only equality between adjacent steps means anything.
@@ -319,7 +325,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     remaining home for. What it costs is `jit`/`vmap`: a Python loop cannot run under either, so every
     entry point refuses them up front through
     `refuse_a_transform_the_march_cannot_run_in(pytree, caller=…)`, which lives **here** in `march.py`
-    and is called by `RootSolver.solve`, `solve_coupled` and `solve_coupled_mass_flow`. That
+    and is called by `RootSolver.solve`, `solve_coupled` and `solve_flow_march`. That
     was decided, not discovered: nothing in the repository `vmap`s a solve, and the four library builders
     that jitted one did so for compile-cache reuse, which the `filter_jit`-compiled `_march_step` gives
     them anyway (see `solve.md`'s `implicit.py` entry for the residual-identity condition that keeps).
@@ -362,7 +368,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     ratio). Substituting the second for the first pairs a refreshed, larger shift diagonal with the small
     β belonging to the pre-refresh residual — the over-damping freeze documented in `turbulence.md`.
     - **Resuming a march (2026-10-07; shift and anchor 2026-10-08): `resume=Resumption(...)` on `staged_march`,
-      `solve_flow_march`, `solve_coupled`, `RootSolver.solve` and `solve_coupled_mass_flow`, built on
+      `solve_flow_march`, `solve_coupled` and `RootSolver.solve`, built on
       `newton_march(reference_norm=, damping_reference=)`.** A march resumed at a state re-measures
       `residual_norm_0` there, so the ratio `‖R‖/‖R₀‖` is ~1 and beta reopens at `beta0` — the reason a
       resumed default march did not continue the interrupted one (the memoryless SER schedule holds no other

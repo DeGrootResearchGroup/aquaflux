@@ -53,6 +53,8 @@ from .coupled import (
     open_session,
     wall_consistent_state,
     eddy_viscosity_drift,
+    coupled_border,
+    held_force,
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
@@ -142,6 +144,7 @@ __all__ = [
     "ViscosityRampHomotopy",
     "WallFixedResidual",
     "bulk_velocity",
+    "coupled_border",
     "coupled_equation_names",
     "coupled_fields",
     "coupled_jacobian_probe",
@@ -150,6 +153,7 @@ __all__ = [
     "coupled_step",
     "eddy_viscosity_drift",
     "equilibrium_k",
+    "held_force",
     "inlet_k",
     "inlet_omega",
     "k_wall_production",

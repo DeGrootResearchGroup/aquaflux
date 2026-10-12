@@ -1437,3 +1437,124 @@ stations (111 < 114).
 The file as shipped (12 fixed stations), on the same code: 16 steps, 111 cycles, per-step costs and
 final `|R|` 1.979e-06 identical to the confirmation run before the change -- the fixed walk and the
 extra `full_step_ratio` carry move nothing.
+
+## bfs3d: the release, `grow` 3 and the settle-ended ramp (#678), 2026-10-11
+
+**Configuration.** `validation/bfs3d_openfoam/compare.py` at `61a14308` (#677 merged), `case.yaml` as
+shipped (12 stations x 1 step, `turbulence_damping` 5, `CflResidualDualTimeControl` `beta_start` 0.5,
+`beta_min` 0.005, `grow` 1.5; field split `simplesmooth` + Jacobi, `refit_beta_floor` 0.05, refresh on 3
+cycles, retry on 10 cycles / `alpha` 0.01, cycle budget 42, inner 5 / 0.01, forward rtol 0.3, stop `atol`
+1e-5; the inner solve stops by lineax's default rule -- the file sets no `stop`, where pitzDaily's ships
+`stop: residual` with `refresh_on_cycles` 2, which counts cycles RUN, one more than lineax for the same
+work, so the cycle-triggered refresh and retry fire at a different difficulty), each arm one `BFS3D_*`
+edit of it and its banner checked. Apple M3 Pro, 11 cores, 18 GB, macOS,
+jax 0.10.2; one run per arm, back to back through `run_case.sh`, nothing else running. Wall clock
+indicative. **Cycles are counted two ways**: "accepted" is the log's `cum` (the accepted attempt of each
+step only), "all" adds every rejected attempt's inner cycles from the step blocks -- `cum` hides a retry's
+cost entirely, and it is most of arm 3's.
+
+| arm | steps (ramp + target) | cycles accepted (ramp / target) | cycles all | inner solves | steps redone | final `\|R\|` | wall (s) |
+|---|---|---|---|---|---|---|---|
+| 1 shipped | 28 (13 + 15) | 174 (62 / 112) | 193 | 82 | 1 | 9.06e-6 | 1191 |
+| 2 `RELEASE_FLOOR=1e-4` | **24** (13 + 11) | **173** (62 / 111) | **192** | 75 | 1 | 2.22e-7 | 1126 |
+| 3 + `GROW=3` | 19 (13 + 6) | 214 (125 / 89) | **459** | 70 | **9** | 3.46e-7 | 2011 |
+| 4 + `RAMP_END=settled FINISH=3 STATIONS=24` | 19 (9 + 10) | 187 (64 / 123) | 267 | 67 | 5 | 3.00e-7 | 1315 |
+
+Mid-span `x_r/h` 8.361 in all four. Converged states against arm 1: relative L2 1.78e-4 (arms 2, 3 and 4;
+arms 3 and 4 agree with each other to 1.1e-6), against 5.67e-4 that arm 1's own state moved over its last
+two steps -- one root, the shipped arm merely stopping at the looser residual.
+
+| arm | shift reaches the floor | first full-length step at the floor (settle) | release fires | `rho1` from the floor to the settle |
+|---|---|---|---|---|
+| 1 | 19 (target) | 22 (target) | -- | 0.92, 0.29 (e1), 0.36, 0.29 |
+| 2 | 19 (target) | 22 (target) | 23 | as arm 1 |
+| 3 | 12 (ramp) | 17 (target) | 18 | 1.68, 1.15 (e1), 2.23 (e1), 1.80, 0.29 (e1), 0.50 |
+| 4 | 6 (ramp, at full length -- the ramp ends) | 6, then 17 on the target | 18 | after the ramp's end: 0.27, 0.82, 1.27, 2.90, 2.22, 0.39 (e1), 0.26 (e1), 0.44 |
+
+- **Arm 2 passes the pre-registered bar, narrowly**: 4 fewer steps, 1 fewer cycle, the same single retry
+  (step 20, `alpha`, beta 0.005 -> 0.01), same state. It is bit-for-bit arm 1 through step 22; the release
+  fires at 23 and the march ends in two released steps of 12 and 15 cycles (a floor step costs 4-5 here),
+  so the saving is in steps, not cycles. No released step crossed `abort_above_cycles` or retried.
+- **Arm 3 fails, and the cost is the ramp.** At `grow` 3 the shift reaches 0.006 at step 5, mid-ramp,
+  and nine steps between 5 and 16 are redone, twelve attempts in all (five triggered by cycles at an
+  unchanged beta, seven by `alpha`): the ramp
+  costs 125 accepted / 321 all cycles against arm 1's 62 / 62, and in-step preconditioner refits rise
+  from 14 to 25 (rebuild seconds 440 against 315). pitzDaily's `3 x 12` does not transfer to this
+  12-station ramp at `turbulence_damping` 5.
+- **Arm 4 fails against arm 1 but recovers most of arm 3's loss.** The ramp settles at step 6 (the floor
+  reached at full length on the ramp), ends itself after a 3-step finish (9 station changes against 13),
+  then the target re-settles at step 17 and releases at 18: 187 / 267 cycles against arm 3's 214 / 459,
+  five steps redone (7, 8, 9 in the finish; 15, 16 on the target). The arm-4-vs-arm-3 bar ("within a few
+  percent of arm 3") assumed arm 3 passed; it did not, so the question it was meant to answer -- can a
+  settle-ended ramp replace a hand-tuned station count here -- is answered by arm 4 against arm 1: no, not
+  at `grow` 3.
+- **The settle here moves with the ramp** (22 at `grow` 1.5, 17 in both `grow` 3 arms), unlike pitzDaily's
+  fixed step 14 -- but both `grow` 3 arms settle at 17 although their ramps ended at 13 and 9.
+- **`rho1` gives no lead on the settle here, at either `grow`.** At `grow` 3 (arms 3, 4) it sits above one
+  through the floor steps (up to 2.9) and drops below 0.5 only on a step whose shift a retry or the
+  control has just raised; at the shipped `grow` 1.5 (arms 1, 2) it is below one from the first floor
+  step (0.92, 0.29, 0.36, 0.29). Neither shows pitzDaily's smooth approach to one ahead of the settle.
+  What it does track: **below one on the schedule that worked, above one on the two that redid steps** --
+  a "the shift outran the state" signal rather than a settle predictor. Necessary, not sufficient: on
+  pitzDaily's anchor sweep the cheapest arm ran `rho1` 1.3-4.6 at the floor with no step redone.
+- **The positivity limit bounded the step (`L`)** at 8 steps in arms 1 and 2, 5 in arm 3, 4 in arm 4; the
+  production cap (`cap%`) was 0 throughout.
+- **Not run:** the optional `STATIONS` 8 / 16 at `grow` 3 and `RELEASE_FLOOR=1e-3`. No released step
+  retried, so the second has no trigger; arm 3's failure is in the ramp, which a station count at `grow` 3
+  might move, but pitzDaily's sweep put the optimum one step after the settle and arm 4 already ends there.
+- **What it does not tell apart.** No station change re-damps the shift on either shipped ramp:
+  `turbulence_damping` is the closure block's constant shift weight on every step, and at one step per
+  station `ViscosityRampHomotopy` forces `redamping` to exactly 1.0. So at `grow` 3 beta reaches 0.006 at
+  step 5 with 7 of 12 stations to go, unguarded, and that is where the redone steps sit (5-16); arm 4's
+  redone ramp steps (7-9) are its finish, the viscosity jumping at the floor again. pitzDaily tolerated
+  viscosity moving at the floor; bfs3d did not. Four candidates are not separated: **beta reaching the
+  floor before the ramp arrives**, bfs3d's `turbulence_damping` 5 against pitzDaily's 3, **the inner
+  stop rule** (lineax here, `residual` on the case the pairing was tuned on; five of arm 3's twelve extra
+  attempts were cycle-triggered), and the harder 3D transient. `grow` 2 moves the floor's arrival (partly
+  separating rate from case), `BFS3D_TURB_DAMPING=3` the damping, `BFS3D_FORWARD_STOP=residual` the stop.
+
+**Follow-up arms, same machine and day (#685 review).** At `98aab02` (`probe/ramp-anchor-sweep`), whose
+only change on the bfs3d path is the `BFS3D_FORWARD_STOP` override (unset keeps the file's lineax stop;
+no library change against `61a14308`), so arm 1 above is still the reference. `refresh_on_cycles` stays at
+the file's 3 under both stops. Cycles under the `residual` stop are counted as cycles RUN, one more per
+inner solve than lineax for the same work, so set its cycle columns beside the inner solves.
+
+| arm | edit of the file | steps | cycles accepted | cycles all | inner solves | steps redone | final `\|R\|` | wall (s) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | (shipped, from above) | 28 | 174 | 193 | 82 | 1 | 9.06e-6 | 1191 |
+| 5 | `FORWARD_STOP=residual` | 35 | 210 | 294 | 150 | 5 | 6.45e-6 | 1005 |
+| 6 | `FORWARD_STOP=residual GROW=3 RELEASE_FLOOR=1e-4` | **25** | 180 | **195** | 110 | 3 | 4.66e-7 | **792** |
+| 7 | `GROW=3 RELEASE_FLOOR=1e-4 TURB_DAMPING=3` | 21 | 243 | 347 | 79 | 5 | 8.25e-6 | 1664 |
+| 8 | `GROW=2 RELEASE_FLOOR=1e-4` | 21 | 184 | 222 | 71 | 2 | 3.77e-7 | 1217 |
+| 9 | `N_POINTS=1` (anchor 10) | 27 | 219 | 239 | 80 | 2 | 9.51e-6 | 1378 |
+| 10 | `N_POINTS=3` (anchor 1000) | **92** | 329 | 329 | 213 | 0 | 9.33e-6 | 2054 |
+
+`x_r/h` 8.361 in every arm. Converged states against arm 1: relative L2 0.8-2.1e-4 for arms 5-9 (inside
+arm 1's own last-two-step drift, 5.7e-4); **1.6e-3 for arm 10**, which stopped at the bar on a slow linear
+tail (below) -- the same `x_r/h`, but not as near the root as the others.
+
+- **The stop rule is most of arm 3's loss.** Under `residual`, pitzDaily's `grow` 3 + release (arm 6)
+  redoes 3 steps, not 9, and costs 195 all-attempt cycles against arm 3's 459. **Against its own stop's
+  shipped schedule (arm 5) it passes the pre-registered bar outright**: 25 against 35 steps, 180 / 195
+  against 210 / 294 cycles, fewer steps redone (3 against 5), same root. Against the file as shipped
+  (arm 1, lineax) it is 3 fewer steps and 2 more all-attempt cycles, but about 30 more inner solves (120 against 86, all attempts),
+  each counted one cycle higher -- so on the same work it is cheaper, and it is the fastest arm here
+  (792 s against 1191, indicative; machine otherwise idle, one run each).
+- **The `residual` stop alone on the shipped schedule (arm 5) is not a win in counts** -- 35 steps, five
+  redone (16, 18-21, on the target, by cycles at an unchanged beta and then `alpha`) -- although its wall
+  clock fell to 1005 s. pitzDaily's halving of the wall time is not reproduced on this schedule, and
+  `refresh_on_cycles` was left at 3 where pitzDaily pairs `residual` with 2.
+- **Damping 3 (arm 7) recovers part of the loss (459 -> 347) under lineax but still loses to arm 1**, and
+  the rate (arm 8, `grow` 2) loses less (222) than `grow` 3 under the same stop. So under lineax the order
+  is `grow` 1.5 < 2 < 3 in cost; under `residual`, `grow` 3 beats 1.5. **The stop and the rate interact**,
+  and the four-candidate attribution above collapses mostly onto the stop.
+- **Where the ramp starts, on bfs3d too: anchor 100 (shipped) is cheapest of 10, 100 and 1000.** Anchor 10
+  costs 219 / 239. Anchor 1000 reaches the target at step 14 with no step redone, but its full-length
+  trials at steps 12-13 read `rho1` ~1e22 and 4e26 (line search to `alpha` 0.125 / 0.062), and it then
+  needs **64 steps at the floor** to meet the bar: from step 28 the residual falls by only ~0.91-0.95 per
+  step (release off, as shipped). Not "a deeper start is cheaper" here -- the shipped anchor is the
+  optimum of the three, the same place pitzDaily's sweep had its optimum until 300 / 1000 report.
+  ⚠️ `compare.py`'s comment that "a direct solve (0) does NOT converge here" was NOT re-checked: arm 9 is
+  anchor 10, not a direct solve.
+- **What it does not separate yet:** `residual` with `refresh_on_cycles` 2 (pitzDaily's pairing of the
+  two), and `residual` with the release alone on `grow` 1.5.

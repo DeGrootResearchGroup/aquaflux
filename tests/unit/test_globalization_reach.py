@@ -59,7 +59,6 @@ from aquaflux.turbulence import (
     open_session,
     scalar_pseudo_transient_solve,
 )
-from aquaflux.turbulence.coupled import mass_flow_coupled_continuation
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state, _mass_flow_cavity
 
@@ -102,7 +101,6 @@ BUILDERS = (
     reused_flow_solve,
     scalar_pseudo_transient_solve,
     coupled_step,
-    mass_flow_coupled_continuation,
 )
 
 
@@ -342,7 +340,7 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
             globalization=asked,
             **extra,
         ),
-        "mass flow": mass_flow_coupled_continuation(
+        "mass flow": coupled_step(
             mass_flow_coupled,
             mass_flow_state,
             preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),

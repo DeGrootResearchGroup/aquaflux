@@ -64,22 +64,36 @@ def dean_u_tau(Re_b: float, u_b: float) -> float:
 
 def solve_case(case):
     case_file = read_case(HERE / case)
-    spec = case_file.spec
     checked = case_file.check()
     coupled = checked.build()
-    momentum = coupled.momentum
+    # The file's segregated solve: the body force is a solve unknown enforcing <U_x> = U_b (a
+    # bordered Newton with the force as a scalar Lagrange multiplier), so the bulk velocity is held
+    # exactly at every sweep, and it starts from the hybrid initial condition.
+    t0 = time.time()
+    flow, _, _ = checked.solve(coupled)
+    return reduce_to_wall_units(case_file.spec, coupled.momentum, flow, time.time() - t0)
+
+
+def reduce_to_wall_units(spec, momentum, flow, dt):
+    """A converged channel flow in wall units: u_tau, Re_tau and the log-law indicator's plateau.
+
+    Parameters
+    ----------
+    spec : CaseSpec
+        The case the flow solves; its bulk velocity, channel height, viscosity and column stride.
+    momentum : MomentumContinuity
+        The flow assembler, for the mesh, the geometry and the state layout.
+    flow : jnp.ndarray
+        The converged flow state.
+    dt : float
+        The solve's wall time, carried into the result.
+    """
     mesh, geom = momentum.mesh, momentum.geometry
     # The bulk velocity, the channel height (full height H, half-height h = H / 2, which Re_tau is
     # based on) and the viscosity are the case file's; Re_b = U_b H / nu follows from them.
     u_b, H = spec.drive.target, spec.mesh.lengths[1]
     nu = spec.fluid.kinematic_viscosity
     Re_b = u_b * H / nu
-    # The file's segregated solve: the body force is a solve unknown enforcing <U_x> = U_b (a
-    # bordered Newton with the force as a scalar Lagrange multiplier), so the bulk velocity is held
-    # exactly at every sweep, and it starts from the hybrid initial condition.
-    t0 = time.time()
-    flow, _, _ = checked.solve(coupled)
-    dt = time.time() - t0
 
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)

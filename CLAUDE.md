@@ -234,8 +234,9 @@ Rules, with FVM-specific teeth:
   time scale — sitting on a builder that names a *strategy* (a preconditioner). If the reason for a
   parameter can be stated without naming the strategy the builder constructs, it belongs on the shared
   tail, not on that builder. Where a sibling genuinely must differ, say so *at the difference*: the
-  mass-flow builder's Euclidean forward tolerance carries the reason (its bordered measure has no
-  row-scaled form) at the constant itself, so the next reader sees a decision rather than an omission.
+  mass-flow builder's Euclidean forward tolerance carried the reason (its bordered measure had no
+  row-scaled form) at the constant itself, so the next reader saw a decision rather than an omission
+  (both went in #541, when the bordered row-scaled measure was built and the builder deleted).
   **⚠️ AND A SHARED TAIL IS NOT THE ONLY REPAIR — for a shared *surface*, the durable one is a shared
   OBJECT, and it is the sixth instance (#372, 2026-09-13).** Six builders configured one shifted-march
   engine, and each listed its share of that engine's settings as its own keywords: eight apiece on the
@@ -1539,7 +1540,9 @@ After **every code change**, before considering the task complete, review and ac
      `mass_flow_coupled_continuation`; every other pair is main's, unchanged. Its two carve-outs have
      since both gone — `residual_norm` with the measure's move onto the solve (#370), `flow_direction`
      with the drive's (#375, 2026-09-23) — so the pair now reports **13 shared and `only here: []` on
-     both sides**: two identical surfaces over one tail, which is what this rule is for.
+     both sides**: two identical surfaces over one tail, which is what this rule is for. (#541 then
+     deleted the mass-flow builder outright — a held bulk velocity is a property of the problem, which
+     `coupled_step` borders itself — so `coupled_step` now pairs with `flow_march_step`.)
      ⚠️ **Its first version INVENTED six pairs, caught by an independent review of PR #397 — two
      over-broad rules, and the lesson is that "more reach" is only a fix if it does not also add noise.**
      *(a)* It credited a returned local wherever the return *mentioned* it, so `return cls(sweeps=
@@ -1556,8 +1559,7 @@ After **every code change**, before considering the task complete, review and ac
      read-not-returned locals (`test_a_local_the_return_only_reads_is_not_credited`), the qualified-label
      wrapper exclusion (`test_a_wrapper_reached_through_a_typed_receiver_is_not_paired_with_its_callee`), the
      no-union decoy (`test_it_follows_a_method_through_a_receiver_whose_class_is_knowable`), and the
-     bare-name fallback (the package test, which asserts `coupled_step` pairs with
-     `mass_flow_coupled_continuation`).
+     bare-name fallback (the package test, which asserts `coupled_step` pairs with `flow_march_step`).
      ⚠️ **Still blind, and recorded so its silence is not read as clean:** a builder that returns a
      *closure* it defines rather than a call — `scalar_pseudo_transient_solve` returns `solve_scalar` — is
      credited with building nothing and never enters the report.

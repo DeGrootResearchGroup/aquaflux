@@ -227,7 +227,7 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > (#284), which replaced a `solve`-only copy of that check.
 > **What belongs in `__all__` is what a user CONFIGURES, IMPLEMENTS or RECEIVES — not everything
 > another module happens to need (#284 part 2, 2026-10-11).** 37 names left the surface that day
-> (185 → 148): regime and batch constants, the coloured probe's plan/gather/matvecs, equilibration and
+> (185 → 148 that day; `refuse_unforwardable_settings` followed once #541 left `solve/` its only caller): regime and batch constants, the coloured probe's plan/gather/matvecs, equilibration and
 > reordering helpers, `PositiveBlockLimit`/`PositiveBlockProjection` (users call
 > `positive_block_limit`/`positive_block_projection`), `CallerBuiltSource`/`FinishedSource` (what
 > `explicit_source` picks), `BetaTrackingRefresh`, `FrozenTransposeFactory`,
@@ -316,8 +316,9 @@ archived march logs and any private notes still use the left column).
 - **`DampedNewtonStep`, `PseudoTransientStep`, `DualTimeStep`, `StepOutcome`, `StepReport`,
   `StepControl`** keep "Step". Across all of them "step" means one outer iteration, consistently; the
   full `Iteration` vocabulary was considered and rejected as churn without a gain in clarity.
-- **`momentum_continuation`, `mass_flow_coupled_continuation`, `coupled_step`** keep their names: they
-  build genuine pseudo-transient continuations, which is the word used correctly.
+- **`momentum_continuation`, `coupled_step`** keep their names: they build genuine pseudo-transient
+  continuations, which is the word used correctly. (`mass_flow_coupled_continuation` was a third until
+  #541 deleted it: `coupled_step` borders a held bulk velocity itself.)
 
 ## Index — where the detail lives
 
@@ -432,8 +433,8 @@ halves of the decision are now separated:
 
 * **The stop is the march's own progress measure**, whatever the solve's `Convergence` names — the
   row-equilibrated `coupled_scaled_norm` (`RowScaled()`, rebuilt every outer iteration) by default,
-  `BlockScaledNorm` under `BlockScaled()`, the plain Euclidean norm by default on the bordered
-  mass-flow path. The default solver is `relative_residual_gmres(norm=None)`, which each step binds to
+  `BlockScaledNorm` under `BlockScaled()`, and on a held bulk velocity's bordered state the same
+  row-scaled default with the constraint row appended (`flow.BorderedMeasures`, since #541). The default solver is `relative_residual_gmres(norm=None)`, which each step binds to
   the measure it is being judged by at that moment (see `solve-globalization.md`'s `norm_builder`
   entry), so steering and judging come from one definition even as the measure is rebuilt. ⚠️ **A
   tolerance is therefore only meaningful beside its measure** — `0.3` row-scaled and `1e-2` Euclidean
@@ -445,7 +446,10 @@ halves of the decision are now separated:
 |---|---|---|---|---|
 | `_BLOCK_LINEAR_SOLVE` | `BlockDiagonal` (block-SIMPLE) | 0.3 | 120 | 15 |
 | `_VCYCLE_LINEAR_SOLVE` | `MaterializedJacobian(FieldSplit \| BlockInverse)` (3D `bfs3d`) | 0.3 | 15 | 60 |
-| `_CONSTRAINED_LINEAR_SOLVE` | `mass_flow_coupled_continuation` | **1e-2, Euclidean** | 120 | 15 |
+
+A held bulk velocity (a `MassFlow`-driven problem, bordered by `flow.MassFlowBorder`) runs on its block
+family's regime: its Euclidean `_CONSTRAINED_LINEAR_SOLVE` (1e-2) existed only for want of a bordered
+row-scaled measure and was deleted with `mass_flow_coupled_continuation` in #541.
 
 Every regime also carries `stop` (`"lineax"` unset), the rule a solve ends by — see measurement
 discipline item 5 for what `lineax`'s costs and `residual_stop_gmres` for the alternative.
@@ -564,8 +568,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     makes a transpose solve on a hard case raise an error naming a remedy the entry point cannot reach.
     The scalar builder's `rtol=1e-10, atol=1e-12` were a second copy of `_ROOT_CONVERGENCE`'s and are gone
     rather than moved, so the default is declared once.
-  - **The drivers `solve_coupled` and `solve_coupled_mass_flow` still spell these as keywords** — they run
-    a solve rather than returning one, their surface is what a case file will describe (#375), and their
+  - **The driver `solve_coupled` still spells these as keywords** — it runs a solve rather than
+    returning one, its surface is what a case file describes (#375), and its
     forward linear solve is reached through `linear_solve=LinearSolveSettings(...)` on the step instead.
   - **⚠️ `tools/sibling_builders.py` reports nothing for these three and cannot**: each returns a closure
     it defines, which the tool credits with constructing nothing, and their public surfaces share fewer
@@ -585,14 +589,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   - **Why one value:** `rtol` meant a row-scaled tolerance on one path and a Euclidean one on another,
     and the measure was chosen by three settings in two places (`block_scaled_norm` / `residual_norm`
     on the step builders, `scaled_norm` on `solve_coupled` for *when* the scales were rebuilt). There is
-    no step-level measure choice any more: `coupled_step` and `mass_flow_coupled_continuation` take
+    no step-level measure choice any more: `coupled_step` takes
     neither keyword, and the march hands the step its measure every outer iteration. A case file can
     therefore write `convergence: {measure: {kind: RowScaled}, rtol: 0.0, atol: 1.0e-5}` with one meaning.
   - **`RootSolver`:** unset measure → the strategy's own `residual_norm` (no builder, byte-identical to
     before); a set one is built against `RootSolver.measures` (default `PLAIN_RESIDUAL`).
-    `solve_coupled` defaults to `RowScaled()` against `_CoupledMeasures`; `solve_coupled_mass_flow` to
-    `Euclidean()` against `_MassFlowMeasures` (block-scaled allowed, row-scaled refused — the border row
-    has no diagonal).
+    `solve_coupled` defaults to `RowScaled()` against `_CoupledMeasures` — bordered by
+    `flow.BorderedMeasures` for a held bulk velocity, whose constraint row is scaled by the held speed
+    (#541; until then that path defaulted to `Euclidean()` and refused `RowScaled`).
   - **⚠️ THE FROZEN ROW-SCALED MEASURE WAS DELETED, AND THIS IS WHAT DECIDED IT (measured 2026-09-16).**
     The default used to freeze the row scales at the step's build state; `scaled_norm=True` rebuilt them.
     *Cost:* on pitzDaily (12225 cells) at a converged checkpoint (step 31 of a shipped run), commit
@@ -785,18 +789,18 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   break" is not answered by grepping for the transforms' names — `lax.scan` traces its body just as
   `jit` does, and a test tier found what the grep did not.** So `solve()` refuses a transform up front via
   `refuse_a_transform_the_march_cannot_run_in` (defined in `march.py` and **exported**, since
-  `solve_coupled` and `solve_coupled_mass_flow` refuse on the same terms and library code may not
+  `solve_coupled` refuses on the same terms and library code may not
   deep-import a `solve` submodule — `tests/unit/test_layering.py` fails the gate if it does). `jax.grad` is unaffected and is the mode the project needs — the march runs on stopped,
   concrete values and the derivative is attached at the root afterwards.
   - **What that cost at the four call sites, and the trap to avoid repeating.** `reused_flow_solve`,
-    `bulk_velocity_flow_solve`, `scalar_pseudo_transient_solve` and `solve_coupled_mass_flow` each wrapped
+    `bulk_velocity_flow_solve`, `scalar_pseudo_transient_solve` and `solve_coupled_mass_flow` (since deleted) each wrapped
     their solve in `eqx.filter_jit` for compile-cache reuse across sweeps; those wrappers are **removed**
     (they would now hit the refusal). The reuse is preserved one level down, because `_march_step` is
     itself `filter_jit`-compiled — **but only if the residual handed to the solve has a stable identity**.
     Each of those call sites passed a freshly built `lambda`, which is a new static cache key per call and
     would have recompiled the whole march every sweep. They now pass `assembler_residual` (the shared
-    module-level `(state, assembler) -> assembler.residual(state)`), `_BulkVelocityResidual`,
-    `_ParameterFreeResidual` or `_MassFlowConstrainedResidual` — small `equinox.Module`s whose settings
+    module-level `(state, assembler) -> assembler.residual(state)`), `flow.BorderedFlowResidual`
+    (was `_BulkVelocityResidual`) or `_ParameterFreeResidual` — small `equinox.Module`s whose settings
     compare by value and whose arrays ride as dynamic leaves. `RootSolver.solve` binds `theta`
     into `_ResidualAt`, a module for the same reason. Pinned by
     `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
