@@ -189,7 +189,7 @@ print("point | route | by start | by path | path/start | partial estimate | part
 for point in POINTS_MM:
     total = sum(v[0] for (p, _), v in rows_out.items() if p == tuple(point))
     for (p, name), (start, path, partial) in sorted(rows_out.items()):
-        if p != tuple(point) or start == 0.0 and partial == 0.0:
+        if p != tuple(point) or (start == 0.0 and partial == 0.0):
             continue
         print(
             f"{point} | {name} | {start:.6g} | {path:.6g} | "
