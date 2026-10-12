@@ -407,9 +407,9 @@ bfs3d (since measured, #678: see the top of this entry).
   operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
   identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
   `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d still ships
-  `CorrectedGreenGauss` and is unmeasured. ⚠️ `jacobian_gradient_sweeps` is not a case-file setting
-  (`case.md`: a script-only study arm), so a case cannot reach the measured gain — decide whether it
-  belongs in the solver section before measuring bfs3d.
+  `CorrectedGreenGauss` and is unmeasured. `jacobian_gradient_sweeps` stays a script-only study arm and
+  is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better
+  for this solver, so the direction is to move cases off swept gradients rather than to tune their sweeps.
 
 ## Where this file does not go
 
