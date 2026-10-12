@@ -40,11 +40,10 @@ POINTS_MM = [[55.0, 25.0], [50.0, 50.0], [37.0, 37.0], [-25.0, 41.0]]
 
 lamps, media = scene(SECTORS, SLICES)
 points = np.array([[*p, 0.0] for p in POINTS_MM]) / 1e3
-if GRID:
-    shooting._ROWS = shooting._COLUMNS = int(GRID)
+grid = shooting.checked_grid((int(GRID), int(GRID)) if GRID else None)
 print(
     f"{SECTORS} sectors x {SLICES} slices, {lamps.n_facets} facets, shooting grid "
-    f"{shooting._ROWS} x {shooting._COLUMNS}",
+    f"{grid[0]} x {grid[1]}",
     flush=True,
 )
 
@@ -54,9 +53,10 @@ plan = [
 ]
 shot = np.zeros(len(points))
 for group in plan:
+    reach = refracted._route_reach(lamps, media, group, points, DEFAULT_PAIR_LIMIT, grid)
     shot[group.rows] += np.asarray(
         refracted._group_field(
-            lamps, media, group, jnp.asarray(points), None, None, DEFAULT_PAIR_LIMIT
+            lamps, media, group, jnp.asarray(points), None, None, reach, DEFAULT_PAIR_LIMIT
         )
     )
 print(f"shot routes ({len(plan)} groups): {time.perf_counter() - started:.0f} s", flush=True)

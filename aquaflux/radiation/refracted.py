@@ -48,6 +48,7 @@ gather's; this sums only the others.
 from __future__ import annotations
 
 import dataclasses
+import warnings
 
 import equinox as eqx
 import jax
@@ -114,16 +115,121 @@ class RefractedVisibility(eqx.Module):
     hidden : tuple of (jnp.ndarray of bool or None)
         Per route, ``(n_paths, n_rows, n_facets)``: where the surface's own triangles do; ``None``
         where they shadow nothing.
+    reach : tuple
+        Per route, on a route round a sleeve's rim, which of the source facets' corners have a path
+        round each side to each receiver and the unknowns each was found by, worked out once for the
+        mask and read again by the gathers; ``None`` on every other route. Host arrays, frozen with
+        the rest of the mask.
     """
 
     receivers: jnp.ndarray
     blocked: tuple
     hidden: tuple
+    reach: tuple = eqx.field(static=True, default=())
 
     @property
     def n_occluders(self) -> int:
         """How many bodies the mask covers."""
         return int(self.blocked[0].shape[1]) if self.blocked else 0
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class _Reach:
+    """Which source corners have a path round each side of a shell's rim, for each receiver.
+
+    Found once, on the host, by the shooting grid and the continuation of :func:`_continued_paths`,
+    and read by both the mask (which shadows a straddling facet along a corner's path) and the
+    gathers (which cut each straddling triangle where its paths stop), so the two agree about which
+    corners have one. A record of host arrays, carried untouched through a pytree.
+
+    Attributes
+    ----------
+    valid : np.ndarray of bool, shape ``(2, n_rows, n_corners)``
+        Per side (0 for ``+1``, 1 for ``-1``), receiver and distinct corner, whether a path exists.
+    unknowns : np.ndarray, shape ``(n_found, 2)``
+        Each path's unknowns, in the order ``np.nonzero(valid)`` lists the paths.
+    by_grid : np.ndarray of bool, shape ``(n_found,)``
+        Which of them the grid found itself rather than a neighbour's path.
+    grid : tuple of int
+        The shooting grid's rows and columns.
+    patches : int
+        Connected patches of corners with a path, joined by facet edges, per side and receiver.
+    sparse : int
+        Those of them the grid reached at one corner only.
+    """
+
+    valid: np.ndarray
+    unknowns: np.ndarray
+    by_grid: np.ndarray
+    grid: tuple[int, int]
+    patches: int
+    sparse: int
+
+    @classmethod
+    def of(cls, valid, unknowns, by_grid, edges, grid) -> _Reach:
+        """From :func:`_continued_paths`' dense ``valid``, ``unknowns`` and ``by_grid``; ``edges`` as
+        it takes them."""
+        labels = _patches(valid, edges)
+        hits = np.bincount(labels[by_grid], minlength=labels.size)
+        found = np.unique(labels[valid])
+        return cls(
+            valid=valid,
+            unknowns=unknowns[valid],
+            by_grid=by_grid[valid],
+            grid=grid,
+            patches=len(found),
+            sparse=int(np.sum(hits[found] <= 1)),
+        )
+
+    @classmethod
+    def joined(cls, parts) -> _Reach:
+        """One record from ``parts`` worked out for consecutive runs of receivers."""
+        keys, offset = [], 0
+        for part in parts:
+            side, row, corner = np.nonzero(part.valid)
+            keys.append(np.stack([side, row + offset, corner], axis=1))
+            offset += part.valid.shape[1]
+        keys = np.concatenate(keys)
+        order = np.lexsort((keys[:, 2], keys[:, 1], keys[:, 0]))
+        return cls(
+            valid=np.concatenate([part.valid for part in parts], axis=1),
+            unknowns=np.concatenate([part.unknowns for part in parts])[order],
+            by_grid=np.concatenate([part.by_grid for part in parts])[order],
+            grid=parts[0].grid,
+            patches=sum(part.patches for part in parts),
+            sparse=sum(part.sparse for part in parts),
+        )
+
+    def dense_unknowns(self) -> np.ndarray:
+        """``(2, n_rows, n_corners, 2)`` the unknowns, zero where there is no path."""
+        dense = np.zeros((*self.valid.shape, 2))
+        dense[self.valid] = self.unknowns
+        return dense
+
+
+def _warn_if_sparse(reaches) -> None:
+    """Warn, once for all of ``reaches``, where the grid reached a patch of paths at one corner only.
+
+    The grid need only land in each patch of corners with a path once -- the rest of it is reached
+    from there -- so a patch it misses at every corner is lost with no trace. One it found at a
+    single corner is the visible sign of that: a patch a little smaller would have been missed.
+    """
+    reaches = [reach for reach in reaches if reach is not None]
+    sparse = sum(reach.sparse for reach in reaches)
+    if not sparse:
+        return
+    patches = sum(reach.patches for reach in reaches)
+    grids = " and ".join(
+        sorted({f"{rows} x {columns}" for rows, columns in (r.grid for r in reaches)})
+    )
+    msg = (
+        f"round the rims of the transparent solids, the shooting grid ({grids}) found {sparse} of "
+        f"{patches} patches of source corners with a path at one corner only; a patch a little "
+        "smaller would have been missed, and its light lost with no sign. Raise the shooting grid "
+        "(RadiationSettings.shooting_grid, or the shooting_grid argument), and see "
+        "check_shooting_grid for whether its rows or its columns are short."
+    )
+    warnings.warn(msg, stacklevel=3)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -192,6 +298,7 @@ def build_refracted_visibility(
     self_occlusion: SelfOcclusion | None = None,
     offset_scale: float = 1e-6,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    shooting_grid: tuple[int, int] | None = None,
 ) -> RefractedVisibility:
     """Work out, once, what stands across the refracted path from each facet to each receiver.
 
@@ -223,6 +330,11 @@ def build_refracted_visibility(
         facet's square-root area, as in :func:`~aquaflux.radiation.visibility.build_visibility`.
     pair_limit : int, optional
         Receiver-by-facet pairs whose paths are solved at once.
+    shooting_grid : tuple of int, optional
+        Rows and columns of the grid that finds the paths round a sleeve's rim
+        (:func:`~aquaflux.radiation.shooting.rim_crossings`); unset, 32 by 32. The gathers given this
+        mask read which source corners those paths reach from it, so they must be called with the
+        same grid. A warning names it when the grid found a patch of such paths at one corner only.
 
     Returns
     -------
@@ -245,23 +357,37 @@ def build_refracted_visibility(
         if receiver_facet is None
         else np.asarray(receiver_facet, dtype=int).reshape(n_points, -1)
     )
-    blocked_by_route, hidden_by_route = [], []
+    grid = shooting.checked_grid(shooting_grid)
+    blocked_by_route, hidden_by_route, reach_by_route = [], [], []
     for group in _plan(surfaces, media, host_points, pair_limit):
         starts = _path_count(media, group.chain)
         blocked = np.zeros((starts, len(occluders), len(group.rows), len(group.facets)), bool)
         hidden = None
+        shot = _shot(media, group.chain)
+        reaches = []
         per_pass = receivers_per_pass(pair_limit, starts * len(group.facets))
         for first in range(0, len(group.rows), per_pass):
             part = slice(first, first + per_pass)
             rows = group.rows[part]
             # (starts, rows, facets, crossings, 3)
-            paths, found = _host_paths(
-                media, group.chain, centroid[group.facets], host_points[rows], pair_limit
-            )
+            if shot:
+                paths, found, _, _ = _continued_paths(
+                    media,
+                    group.chain,
+                    centroid[group.facets],
+                    host_points[rows],
+                    np.zeros((0, 2), dtype=int),
+                    pair_limit,
+                    grid,
+                )
+            else:
+                paths, found = _host_paths(
+                    media, group.chain, centroid[group.facets], host_points[rows], pair_limit
+                )
             shape = paths.shape[:3]
             sources = np.broadcast_to(centroid[group.facets][None, None], (*shape, 3))
-            if _shot(media, group.chain):
-                sources, paths = _from_a_reached_point(
+            if shot:
+                sources, paths, reach = _from_a_reached_point(
                     media,
                     group.chain,
                     surfaces,
@@ -271,7 +397,9 @@ def build_refracted_visibility(
                     paths,
                     found,
                     pair_limit,
+                    grid,
                 )
+                reaches.append(reach)
             corners = np.concatenate(
                 [
                     sources[:, :, :, None],
@@ -305,10 +433,13 @@ def build_refracted_visibility(
                 hidden[:, part] = np.any(np.asarray(cut).reshape(*shape, n_legs), axis=3)
         blocked_by_route.append(jnp.asarray(blocked))
         hidden_by_route.append(None if hidden is None else jnp.asarray(hidden))
+        reach_by_route.append(_Reach.joined(reaches) if reaches else None)
+    _warn_if_sparse(reach_by_route)
     return RefractedVisibility(
         receivers=jnp.asarray(host_points),
         blocked=tuple(blocked_by_route),
         hidden=tuple(hidden_by_route),
+        reach=tuple(reach_by_route),
     )
 
 
@@ -338,7 +469,7 @@ def _host_paths(media: Media, chain: Chain, sources, receivers, pair_limit):
 
 
 def _from_a_reached_point(
-    media, chain, surfaces, facets, receivers, sources, paths, found, pair_limit
+    media, chain, surfaces, facets, receivers, sources, paths, found, pair_limit, grid
 ):
     """Where a facet's centroid has no path round a rim, the path from a corner that has one instead.
 
@@ -348,11 +479,14 @@ def _from_a_reached_point(
     shadow is taken along the path from its first corner with one -- as near a path of the part
     counted as the facet offers. Which corners have one is :func:`_continued_paths`', as for the
     gather. A facet with none keeps the centroid's, and carries nothing.
+
+    Returns the sources and paths, and the :class:`_Reach` the gather reads again.
     """
     corners, shared = _shared_corners(surfaces, facets)
     corners = np.asarray(corners, dtype=float)
-    corner_paths, corner_found, _, _ = _continued_paths(
-        media, chain, corners, receivers, _corner_edges(shared), pair_limit
+    edges = _corner_edges(shared)
+    corner_paths, corner_found, unknowns, by_grid = _continued_paths(
+        media, chain, corners, receivers, edges, pair_limit, grid
     )
     # (paths, rows, facets, 3): which of each facet's corners has a path.
     reached = corner_found[:, :, shared]
@@ -362,7 +496,7 @@ def _from_a_reached_point(
     taken = np.take_along_axis(corner_paths, which[..., None, None], axis=2)
     sources = np.where(swap[..., None], corners[which], sources)
     paths = np.where(swap[..., None, None], taken, paths)
-    return sources, paths
+    return sources, paths, _Reach.of(corner_found, unknowns, by_grid, edges, grid)
 
 
 def refracted_fluence_rate(
@@ -373,6 +507,7 @@ def refracted_fluence_rate(
     visibility: RefractedVisibility | None = None,
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    shooting_grid: tuple[int, int] | None = None,
 ) -> jnp.ndarray:
     """Fluence rate at each point from every source in another medium, along refracted paths.
 
@@ -395,6 +530,12 @@ def refracted_fluence_rate(
         What each body in the mask lets through. Defaults to opaque; refused without a mask.
     pair_limit : int, optional
         Receiver-by-vertex pairs one pass solves paths for.
+    shooting_grid : tuple of int, optional
+        Rows and columns of the grid that finds the paths round a sleeve's rim; unset, 32 by 32. With
+        a mask it must be the grid the mask was built with, whose record of which corners have such
+        paths is read rather than found again. A warning names it when the grid found a patch of
+        paths at one corner only, a sign that a smaller patch could be missed; see
+        :func:`check_shooting_grid`.
 
     Returns
     -------
@@ -405,9 +546,11 @@ def refracted_fluence_rate(
     ------
     ValueError
         If a point source is in another medium than a receiver, a facet straddles a region's
-        surface, or a point's medium is not defined.
+        surface, a point's medium is not defined, or the mask was built with another shooting grid.
     """
-    return _refracted(surfaces, media, points, None, visibility, transmittance, pair_limit)
+    return _refracted(
+        surfaces, media, points, None, visibility, transmittance, pair_limit, shooting_grid
+    )
 
 
 def refracted_irradiance(
@@ -419,6 +562,7 @@ def refracted_irradiance(
     visibility: RefractedVisibility | None = None,
     transmittance=None,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    shooting_grid: tuple[int, int] | None = None,
 ) -> jnp.ndarray:
     """Irradiance on surfaces at each point from every source in another medium.
 
@@ -430,7 +574,7 @@ def refracted_irradiance(
         As for :func:`refracted_fluence_rate`.
     normals : array_like, shape ``(n_points, 3)``
         Unit normals of the receiving surfaces, pointing the way the light arrives from.
-    visibility, transmittance, pair_limit
+    visibility, transmittance, pair_limit, shooting_grid
         As for :func:`refracted_fluence_rate`.
 
     Returns
@@ -439,21 +583,76 @@ def refracted_irradiance(
         Irradiance in W/m².
     """
     normals = jnp.asarray(normals, dtype=float)
-    return _refracted(surfaces, media, points, normals, visibility, transmittance, pair_limit)
+    return _refracted(
+        surfaces, media, points, normals, visibility, transmittance, pair_limit, shooting_grid
+    )
 
 
-def _refracted(surfaces, media, points, normals, visibility, transmittance, pair_limit):
-    """The sum over every route of every group of pairs; the kernel by whether there are normals."""
+def _refracted(
+    surfaces, media, points, normals, visibility, transmittance, pair_limit, shooting_grid
+):
+    """The sum over every route of every group of pairs; the kernel by whether there are normals.
+
+    A route round a sleeve's rim is cut where its paths stop when the receivers, the source geometry
+    and the media are all concrete; which corners have a path is then read from the mask, or found
+    here without one.
+    """
+    grid = shooting.checked_grid(shooting_grid)
     host_points = np.asarray(points, dtype=float)
-    points = jnp.asarray(points, dtype=float)
     plan = _plan(surfaces, media, host_points, pair_limit)
     masks = _route_masks(media, visibility, transmittance, host_points, plan)
+    given = (visibility.reach if visibility is not None else ()) or (None,) * len(plan)
+    concrete = not _traced((points, surfaces.vertices, jax.lax.stop_gradient(media)))
+    points = jnp.asarray(points, dtype=float)
+    for group, reach in zip(plan, given, strict=True):
+        if reach is not None:
+            _check_reach(surfaces, group, reach, grid)
+    reaches, found = [], []
+    for group, reach in zip(plan, given, strict=True):
+        if not (concrete and _shot(media, group.chain)):
+            reach = None
+        elif reach is None:
+            reach = _route_reach(surfaces, media, group, host_points, pair_limit, grid)
+            found.append(reach)
+        reaches.append(reach)
+    _warn_if_sparse(found)
     total = jnp.zeros(points.shape[0])
-    for group, mask in zip(plan, masks, strict=True):
+    for group, mask, reach in zip(plan, masks, reaches, strict=True):
         total = total.at[group.rows].add(
-            _group_field(surfaces, media, group, points, normals, mask, pair_limit)
+            _group_field(surfaces, media, group, points, normals, mask, reach, pair_limit)
         )
     return total
+
+
+def _route_reach(surfaces, media, group: _Group, points, pair_limit, grid) -> _Reach:
+    """Which of ``group``'s corners have a path round each side to each of its receivers."""
+    corners, shared = _shared_corners(surfaces, group.facets)
+    edges = _corner_edges(shared)
+    _, valid, unknowns, by_grid = _continued_paths(
+        jax.lax.stop_gradient(media),
+        group.chain,
+        np.asarray(corners, dtype=float),
+        points[group.rows],
+        edges,
+        pair_limit,
+        grid,
+    )
+    return _Reach.of(valid, unknowns, by_grid, edges, grid)
+
+
+def _check_reach(surfaces, group: _Group, reach: _Reach, grid) -> None:
+    """Refuse a mask's record of a route's paths that was made for other corners or another grid."""
+    corners, _ = _shared_corners(surfaces, group.facets)
+    if reach.valid.shape != (2, len(group.rows), corners.shape[0]):
+        msg = "this refracted visibility mask was built for other sources or other media"
+        raise ValueError(msg)
+    if reach.grid != grid:
+        msg = (
+            f"this refracted visibility mask was built with a shooting grid of {reach.grid}, and "
+            f"the gather was asked for {grid}: which corners have a path round a rim depends on "
+            "the grid, so the two must be the same"
+        )
+        raise ValueError(msg)
 
 
 def _route_masks(media, visibility, transmittance, points, plan):
@@ -507,16 +706,15 @@ def _seen_weight(receiver, receiver_normal, paths, facet_normal, emission, ratio
     return jnp.where(seen, emission * ratio * carried * omega, 0.0)
 
 
-def _group_field(surfaces, media, group: _Group, points, normals, mask, pair_limit):
+def _group_field(surfaces, media, group: _Group, points, normals, mask, reach, pair_limit):
     """What one group's receivers get from its facets along one route, ``(n_rows,)``.
 
     On a route through a region every starting point's path is a path of its own -- they are
-    distinct where they are valid -- and each source triangle is seen once along each.
+    distinct where they are valid -- and each source triangle is seen once along each. With a
+    ``reach``, the route is round a sleeve's rim and each triangle is cut where its paths stop.
     """
-    if _shot(media, group.chain) and not _traced(
-        (points, surfaces.vertices, jax.lax.stop_gradient(media))
-    ):
-        return _clipped_field(surfaces, media, group, points, normals, mask, pair_limit)
+    if reach is not None:
+        return _clipped_field(surfaces, media, group, points, normals, mask, reach, pair_limit)
     facets = group.facets
     chain = group.chain
     corners, shared = _shared_corners(surfaces, facets)
@@ -561,11 +759,11 @@ def _group_field(surfaces, media, group: _Group, points, normals, mask, pair_lim
     return in_passes(arrays, pair_limit, _path_count(media, chain) * corners.shape[0], at)
 
 
-def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_limit):
+def _clipped_field(surfaces, media, group: _Group, points, normals, mask, reach, pair_limit):
     """:func:`_group_field` on a shot route, each straddling triangle cut to the part with a path.
 
-    Which corners have a path, and where along each edge a path stops, are found on the host from
-    the geometry and indices as given (:func:`_reached_triangles`); the paths to the resulting
+    Which corners have a path is ``reach``'s, and where along each edge a path stops is found on the
+    host from the geometry and indices as given (:func:`_reached_triangles`); the paths to the resulting
     triangles' corners are then solved live, each polished from the unknowns the host found it by
     (:func:`~aquaflux.radiation.shooting.rim_crossings`), so they carry every derivative but the
     cut's.
@@ -573,7 +771,7 @@ def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_l
     chain, facets = group.chain, group.facets
     still = jax.lax.stop_gradient(media)
     side, row, facet, vertices, seeds = _reached_triangles(
-        surfaces, still, chain, facets, np.asarray(points)[group.rows], pair_limit
+        surfaces, still, chain, facets, np.asarray(points)[group.rows], reach, pair_limit
     )
     if len(side) == 0:
         return jnp.zeros(len(group.rows))
@@ -630,14 +828,14 @@ def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_l
     return jax.ops.segment_sum(weight, jnp.asarray(row), num_segments=len(group.rows))
 
 
-def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
+def _reached_triangles(surfaces, media, chain, facets, receivers, reach, pair_limit):
     """The triangles of ``facets`` with a path at every corner, round each side of a shell.
 
     For each receiver and side, a facet with a path at all three corners is itself; one with a path
     at one or two is cut along each edge from a corner with a path to one without, at the last point
     of :data:`_CUT_HALVINGS` halvings that still has one, into one triangle (one corner with a
-    path) or two (two); one with none gives nothing. Which corners have a path is
-    :func:`_continued_paths`'. All on the host, at concrete values.
+    path) or two (two); one with none gives nothing. Which corners have a path is ``reach``'s
+    (:func:`_route_reach`). All on the host, at concrete values.
 
     Returns
     -------
@@ -651,12 +849,10 @@ def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
     corners, shared = _shared_corners(surfaces, facets)
     corners = np.asarray(corners, dtype=float)
     n_rows, n_corners = len(receivers), len(corners)
-    _, reach, unknowns, _ = _continued_paths(
-        media, chain, corners, receivers, _corner_edges(shared), pair_limit
-    )
+    unknowns = reach.dense_unknowns()
 
     # (2, rows, facets, 3): which of each triangle's corners has a path.
-    reached = reach[:, :, shared]
+    reached = reach.valid[:, :, shared]
     count = reached.sum(axis=-1)
     whole = np.argwhere(count == 3)
     mixed = np.argwhere((count == 1) | (count == 2))
@@ -940,7 +1136,7 @@ def check_shooting_grid(
     media: Media,
     points,
     *,
-    grid: tuple[int, int] | None = None,
+    shooting_grid: tuple[int, int] | None = None,
     backstop: bool = True,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
 ) -> ShootingGridCheck:
@@ -960,8 +1156,8 @@ def check_shooting_grid(
     media : Media
     points : array_like, shape ``(n_points, 3)``
         Receivers, concrete.
-    grid : tuple of int, optional
-        Rows and columns to check; the default grid when ``None``.
+    shooting_grid : tuple of int, optional
+        Rows and columns to check; unset, the gathers' default, 32 by 32.
     backstop : bool
         Whether to solve again with ``refine``'s count doubled, when there is a direction to refine.
     pair_limit : int
@@ -971,46 +1167,37 @@ def check_shooting_grid(
     -------
     ShootingGridCheck
     """
-    grid = tuple(grid or (shooting._ROWS, shooting._COLUMNS))
+    grid = shooting.checked_grid(shooting_grid)
     points = np.asarray(points, dtype=float)
-    routes = []
-    for group in _plan(surfaces, media, points, pair_limit):
-        if not _shot(media, group.chain):
-            continue
-        corners, shared = _shared_corners(surfaces, group.facets)
-        corners = np.asarray(corners, dtype=float)
-        routes.append((group.chain, corners, _corner_edges(shared), points[group.rows]))
+    groups = [g for g in _plan(surfaces, media, points, pair_limit) if _shot(media, g.chain)]
 
     totals = dict(paths=0, by_grid=0, between_rows=0, along_rows=0, patches=0, sparse_patches=0)
-    found_at_grid = []
-    for chain, corners, edges, receivers in routes:
-        _, valid, unknowns, by_grid = _continued_paths(
-            media, chain, corners, receivers, edges, pair_limit, grid
-        )
-        found_at_grid.append(valid)
-        side, row, corner = np.nonzero(valid & ~by_grid)
+    reaches = []
+    for group in groups:
+        reach = _route_reach(surfaces, media, group, points, pair_limit, grid)
+        reaches.append(reach)
+        side, row, corner = np.nonzero(reach.valid)
+        side, row, corner = side[~reach.by_grid], row[~reach.by_grid], corner[~reach.by_grid]
         rows_short = np.zeros(len(side), dtype=bool)
         if len(side):
+            corners, _ = _shared_corners(surfaces, group.facets)
             rows_short = np.asarray(
                 _between_rows(
                     media,
-                    chain,
-                    jnp.asarray(corners[corner]),
-                    jnp.asarray(receivers[row]),
+                    group.chain,
+                    jnp.take(corners, corner, axis=0),
+                    jnp.asarray(points[group.rows][row]),
                     jnp.asarray(np.where(side == 0, 1.0, -1.0)),
-                    jnp.asarray(unknowns[side, row, corner]),
+                    jnp.asarray(reach.unknowns[~reach.by_grid]),
                     grid,
                 )
             )
-        labels = _patches(valid, edges)
-        hits = np.bincount(labels[by_grid], minlength=labels.max() + 1)
-        patch_ids = np.unique(labels[valid])
-        totals["paths"] += int(valid.sum())
-        totals["by_grid"] += int(by_grid.sum())
+        totals["paths"] += len(reach.unknowns)
+        totals["by_grid"] += int(reach.by_grid.sum())
         totals["between_rows"] += int(rows_short.sum())
         totals["along_rows"] += int((~rows_short).sum())
-        totals["patches"] += len(patch_ids)
-        totals["sparse_patches"] += int(np.sum(hits[patch_ids] <= 1))
+        totals["patches"] += reach.patches
+        totals["sparse_patches"] += reach.sparse
 
     missed = totals["between_rows"] + totals["along_rows"]
     refine = None
@@ -1020,12 +1207,11 @@ def check_shooting_grid(
     if backstop and refine is not None:
         refined = (2 * grid[0], grid[1]) if refine == "rows" else (grid[0], 2 * grid[1])
         new_patches = 0
-        for (chain, corners, edges, receivers), before in zip(routes, found_at_grid, strict=True):
-            _, valid, _, _ = _continued_paths(
-                media, chain, corners, receivers, edges, pair_limit, refined
-            )
-            labels = _patches(valid, edges)
-            fresh = np.setdiff1d(np.unique(labels[valid]), np.unique(labels[valid & before]))
+        for group, before in zip(groups, reaches, strict=True):
+            valid = _route_reach(surfaces, media, group, points, pair_limit, refined).valid
+            _, shared = _shared_corners(surfaces, group.facets)
+            labels = _patches(valid, _corner_edges(shared))
+            fresh = np.setdiff1d(np.unique(labels[valid]), np.unique(labels[valid & before.valid]))
             new_patches += len(fresh)
     return ShootingGridCheck(
         grid=grid, refine=refine, refined=refined, new_patches=new_patches, **totals

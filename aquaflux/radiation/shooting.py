@@ -27,6 +27,8 @@ is at most one such path between two points in every case measured, and the firs
 
 from __future__ import annotations
 
+import numbers
+
 import jax
 import jax.numpy as jnp
 
@@ -46,6 +48,30 @@ _POLISH = 12
 
 #: A path is found when both misses are below this share of the separation of its ends.
 _TOLERANCE = 1e-10
+
+
+def checked_grid(grid) -> tuple[int, int]:
+    """``grid`` as a ``(rows, columns)`` tuple, the default when ``None``; refused unless two counts.
+
+    A grid is a static value -- it shapes the compiled scan -- so it must be hashable, and a list read
+    from a case file is turned into a tuple here. A row needs a neighbour to bracket a path, and a
+    column one to bracket the run of rays along the row, so each count is at least two.
+
+    Raises
+    ------
+    ValueError
+        If ``grid`` is not two integers of at least two.
+    """
+    if grid is None:
+        return (_ROWS, _COLUMNS)
+    counts = tuple(grid)
+    if len(counts) != 2 or not all(
+        isinstance(count, numbers.Integral) and not isinstance(count, bool) and count >= 2
+        for count in counts
+    ):
+        msg = f"a shooting grid is two whole numbers of at least two, (rows, columns); got {grid!r}"
+        raise ValueError(msg)
+    return (int(counts[0]), int(counts[1]))
 
 
 def _across(vector):
@@ -191,7 +217,7 @@ def rim_crossings(geometry, side, start=None, grid=None):
         return jnp.where(jnp.all(jnp.isfinite(moved)), moved, unknowns)
 
     if start is None:
-        start, bracketed = _scanned(misses, reach, *(grid or (_ROWS, _COLUMNS)))
+        start, bracketed = _scanned(misses, reach, *checked_grid(grid))
     else:
         bracketed = jnp.asarray(True)
     unknowns = jax.lax.fori_loop(0, _POLISH, polish, start)
@@ -223,7 +249,7 @@ def between_rows(geometry, side, unknowns, grid=None):
     the rows bracket it and a miss lies along them (too few columns, or a bracket elsewhere taken
     first). Arguments as for :func:`rim_crossings`.
     """
-    rows_, columns = grid or (_ROWS, _COLUMNS)
+    rows_, columns = checked_grid(grid)
     misses, _, reach, _ = _problem(geometry, side)
     rows = _rows(reach, rows_)
     axial_index = unknowns[1]

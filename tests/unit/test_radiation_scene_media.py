@@ -214,3 +214,32 @@ def test_a_scene_with_media_refuses_a_second_absorption_and_anything_to_exchange
     reflecting = lamps.with_optics(diffuse_reflectance=jnp.full(lamps.n_facets, 0.1))
     with pytest.raises(NotImplementedError, match="not yet carried through"):
         Scene(reflecting, media=media)
+
+
+def test_the_shooting_grid_setting_reaches_every_path_found_round_a_rim(monkeypatch):
+    """The settings' grid finds the paths to the facets' centroids and corners in the mask, and the
+    gather is given it too: given another grid it would refuse the mask's record."""
+    from aquaflux.radiation import refracted
+
+    calls = []
+    found = refracted._continued_paths
+
+    def recorded(*args, **kwargs):
+        calls.append((len(args[2]), args[6] if len(args) > 6 else kwargs.get("grid")))
+        return found(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", recorded)
+    lamps = _lamps((0.0, 0.0), (0.0, 0.04))
+    solve_scene(
+        Scene(
+            lamps,
+            media=_sleeves((0.0, 0.0), (0.0, 0.04)),
+            volume=VolumeReceivers(np.array([[0.0, 0.07, 0.0]])),
+            settings=RadiationSettings(self_occlusion=NoOcclusion(), shooting_grid=[8, 6]),
+        )
+    )
+    # One lamp's facets (their centroids) and its distinct corners, each on the settings' grid.
+    facets = lamps.n_facets // 2
+    assert {size for size, _ in calls} >= {facets}
+    assert any(size < facets for size, _ in calls)
+    assert {grid for _, grid in calls} == {(8, 6)}

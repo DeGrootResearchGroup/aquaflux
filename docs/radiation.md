@@ -371,6 +371,14 @@ medium's absorption along its own leg. Three things are approximated, and each i
   were found only from a neighbour and why the grid missed each -- its rows too far apart in the
   direction's axial component, or its columns too few along a row -- and solves again with that count
   doubled: a patch the finer grid finds and the given one did not reach is light the given grid lost.
+  The grid is 32 rows by 32 columns unless `RadiationSettings(shooting_grid=(rows, columns))` says
+  otherwise (or the `shooting_grid` argument of the refracted gathers and their mask). Which corners
+  have a path is found once, by the mask, and read again by the gathers given it, so a gather must be
+  given the grid its mask was built with and refuses another. Where the grid found a patch at one
+  corner only -- a sign that a patch a little smaller would have been missed -- a warning names the
+  setting to raise. It is a cheap sign, not a proof: a patch missed at every corner leaves none, which
+  is what the check's doubled grid is for. On a coarse emitter a patch spans few corners, so the
+  warning can come at the default grid.
 
 A point source in another medium than a point it lights is refused (it has no area to spread over a
 curved surface), and a scene with transparent solids may not yet hold anything that reflects: the

@@ -10,6 +10,8 @@ absorption together.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -423,9 +425,12 @@ def _rim_light(media, arc, points, masks=None, *, whole_facets_only=False, monke
     total = np.zeros(len(points))
     for group, mask in zip(plan, masks, strict=True):
         if group.chain.passing == (2,):
+            reach = None
+            if refracted._shot(media, group.chain):
+                reach = refracted._route_reach(arc, media, group, points, 1_000_000, (32, 32))
             total[group.rows] += np.asarray(
                 refracted._group_field(
-                    arc, media, group, jnp.asarray(points), None, mask, 1_000_000
+                    arc, media, group, jnp.asarray(points), None, mask, reach, 1_000_000
                 )
             )
     if whole_facets_only:
@@ -541,8 +546,14 @@ def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monk
 
     monkeypatch.setattr(refracted, "_stepped_shots", stepped_shots)
     facets = np.arange(surfaces.n_facets)
+    corners, shared = refracted._shared_corners(surfaces, facets)
+    edges = refracted._corner_edges(shared)
+    _, valid, unknowns, by_grid = refracted._continued_paths(
+        None, None, np.asarray(corners), receivers, edges, 1_000_000
+    )
+    reach = refracted._Reach.of(valid, unknowns, by_grid, edges, (32, 32))
     side, row, facet, vertices, _ = refracted._reached_triangles(
-        surfaces, None, None, facets, receivers, 1_000_000
+        surfaces, None, None, facets, receivers, reach, 1_000_000
     )
     assert np.all(side == 0)
     area = 0.5 * np.linalg.norm(
@@ -602,12 +613,12 @@ def test_the_grid_check_says_which_way_a_grid_is_short_and_finds_the_patch_it_lo
     it lost entirely. Columns too few: misses along the rows, and columns are what to refine."""
     media, arc = _rim_scene(16, 8)
     points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
-    short_rows = check_shooting_grid(arc, media, points, grid=(4, 32))
+    short_rows = check_shooting_grid(arc, media, points, shooting_grid=(4, 32))
     assert short_rows.along_rows == 0 and short_rows.between_rows >= 10
     assert short_rows.refine == "rows" and short_rows.refined == (8, 32)
     assert short_rows.new_patches == 1
     assert short_rows.patches + short_rows.new_patches == 4
-    short_columns = check_shooting_grid(arc, media, points, grid=(32, 4), backstop=False)
+    short_columns = check_shooting_grid(arc, media, points, shooting_grid=(32, 4), backstop=False)
     assert short_columns.along_rows > short_columns.between_rows
     assert short_columns.refine == "columns" and short_columns.refined is None
     assert short_columns.paths == 348 and short_columns.patches == 4
@@ -689,3 +700,89 @@ def test_a_path_is_between_rows_unless_both_rows_beside_its_beta_reach_the_sourc
     reached = has[np.arange(len(side)), nearest - 1] & has[np.arange(len(side)), nearest]
     outer = (found[:, 1] < axial_indices[:, 0]) | (found[:, 1] > axial_indices[:, -1])
     assert np.any(outer & reached)
+
+
+def _shot_reach(visibility):
+    """The mask's record of each route round a rim, the others left out."""
+    return [reach for reach in visibility.reach if reach is not None]
+
+
+def test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_find_them_again_without_one(
+    monkeypatch,
+):
+    """The mask finds, once, which corners have a path round a rim; a gather given it reads that.
+
+    Built a receiver at a time, the record is the one built for all of them at once. Given it, a
+    gather finds no path again and gives the field it gives when it finds every one itself.
+    """
+    media, arc = _rim_scene(16, 8)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    whole = refracted.build_refracted_visibility((), arc, media, points)
+    # Two paths a pair on a shot route, so this is a receiver a pass.
+    apart = refracted.build_refracted_visibility(
+        (), arc, media, points, pair_limit=2 * arc.n_facets
+    )
+    (one,), (other,) = _shot_reach(whole), _shot_reach(apart)
+    np.testing.assert_array_equal(one.valid, other.valid)
+    np.testing.assert_array_equal(one.by_grid, other.by_grid)
+    np.testing.assert_allclose(one.unknowns, other.unknowns, rtol=0.0, atol=1e-12)
+    assert one.valid.any() and (one.patches, one.sparse) == (other.patches, other.sparse)
+
+    calls = []
+    found_again = refracted._continued_paths
+
+    def counted(*args, **kwargs):
+        calls.append(args[3].shape[0])
+        return found_again(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", counted)
+    read = np.asarray(refracted_fluence_rate(arc, media, points, visibility=apart))
+    assert calls == []
+    forgotten = refracted.RefractedVisibility(apart.receivers, apart.blocked, apart.hidden)
+    found = np.asarray(refracted_fluence_rate(arc, media, points, visibility=forgotten))
+    assert calls != []
+    np.testing.assert_allclose(read, found, rtol=1e-12)
+    assert np.all(read > 0.0)
+
+
+def test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_another(
+    monkeypatch,
+):
+    """Which corners have a path depends on the grid, so a gather asked for another one refuses."""
+    media, arc = _rim_scene(8, 4)
+    points = np.array([[0.025, 0.06, 0.0]])
+    grids = []
+    found = refracted._continued_paths
+
+    def recorded(*args, **kwargs):
+        grids.append(args[6])
+        return found(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", recorded)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        refracted_fluence_rate(arc, media, points, shooting_grid=(8, 8))
+    assert grids == [(8, 8)]
+    mask = refracted.build_refracted_visibility((), arc, media, points, shooting_grid=(8, 8))
+    with pytest.raises(ValueError, match=r"shooting grid of \(8, 8\)"):
+        refracted_fluence_rate(arc, media, points, visibility=mask)
+    with pytest.raises(ValueError, match="two whole numbers of at least two"):
+        refracted_fluence_rate(arc, media, points, shooting_grid=(1, 8))
+
+
+def test_a_grid_that_found_a_patch_at_one_corner_only_says_so_and_names_the_setting():
+    """Two columns find one of this arc's four patches at a single corner. The warning comes where the
+    corners are found -- the mask, or a gather without one -- and names the setting to raise."""
+    media, arc = _rim_scene(8, 4)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    coarse = (32, 2)
+    told = check_shooting_grid(arc, media, points, shooting_grid=coarse, backstop=False)
+    assert told.sparse_patches == 1
+    pattern = rf"1 of {told.patches} patches .*RadiationSettings\.shooting_grid"
+    with pytest.warns(UserWarning, match=pattern):
+        refracted_fluence_rate(arc, media, points, shooting_grid=coarse)
+    with pytest.warns(UserWarning, match=pattern):
+        mask = refracted.build_refracted_visibility((), arc, media, points, shooting_grid=coarse)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        refracted_fluence_rate(arc, media, points, visibility=mask, shooting_grid=coarse)

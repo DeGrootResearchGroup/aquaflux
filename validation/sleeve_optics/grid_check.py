@@ -29,7 +29,7 @@ points = np.array([[*p, 0.0] for p in POINTS_MM]) / 1e3
 grid = tuple(int(n) for n in GRID.split(",")) if GRID else None
 print(f"{SECTORS} sectors, {lamps.n_facets} facets, points {POINTS_MM} mm", flush=True)
 started = time.perf_counter()
-check = check_shooting_grid(lamps, media, points, grid=grid)
+check = check_shooting_grid(lamps, media, points, shooting_grid=grid)
 print(f"checked in {time.perf_counter() - started:.0f} s", flush=True)
 for name, value in vars(check).items():
     print(f"{name}: {value}", flush=True)

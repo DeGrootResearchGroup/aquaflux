@@ -74,10 +74,10 @@ def split():
     plan = refracted._plan(lamps, media, points, DEFAULT_PAIR_LIMIT)
     masks = refracted._route_masks(media, visibility, None, points, plan)
     parts = {}
-    for group, mask in zip(plan, masks, strict=True):
+    for group, mask, reach in zip(plan, masks, visibility.reach, strict=True):
         field = np.asarray(
             refracted._group_field(
-                lamps, media, group, jnp.asarray(points), None, mask, DEFAULT_PAIR_LIMIT
+                lamps, media, group, jnp.asarray(points), None, mask, reach, DEFAULT_PAIR_LIMIT
             )
         )
         lamp = int(lamp_of_facet[group.facets[0]])

@@ -5040,8 +5040,35 @@ are bent too (no straight-through factor left anywhere).
   components over facet edges between corners with paths, per side and receiver); backstop re-solves
   with the majority direction doubled and counts patches the base grid never reached. The grid is a
   static `grid=(rows, cols)` on `rim_crossings` / `_shot_path` / `_shot_paths` / `_stepped_shots` /
-  `_continued_paths` (module constants `_ROWS`/`_COLUMNS` remain the default). ⚠️ **NOT yet a setting
-  of the gathers or the mask** -- they always use the default. Fixture: 4 x 32 -> 29 between rows, 0
+  `_continued_paths` (module constants `_ROWS`/`_COLUMNS` remain the default). **It is a setting since
+  2026-10-12 (option C, agreed with the user)**: `RadiationSettings.shooting_grid` (converted by
+  `shooting.checked_grid` -- two integers >= 2, a case file's list becomes a tuple), read by the scene
+  through `refraction_options()`, and a `shooting_grid=` keyword on `build_refracted_visibility`,
+  `refracted_fluence_rate`, `refracted_irradiance` and `check_shooting_grid` (its old `grid=` keyword is
+  gone). **The mask and the gathers share one reach**: `_Reach` (frozen `eq=False` host record: dense
+  `valid (2, rows, corners)`, `unknowns`/`by_grid` only where valid in `np.nonzero` order, `grid`,
+  `patches`, `sparse`) is built by the mask from `_from_a_reached_point`'s `_continued_paths` per pass
+  of rows (`_Reach.joined`, lexsorted back into one order) and stored in `RefractedVisibility.reach`
+  (static, per route, `None` off shot routes); `_refracted` reads it (`_check_reach`: refuses other
+  corners or another grid, before any field is computed) or finds it itself (`_route_reach`), and
+  `_reached_triangles` takes it. The mask's centroid paths on a shot route use the grid too
+  (`_continued_paths` with no edges, not `_host_paths`). **Warning** (`_warn_if_sparse`, once per call,
+  only where a reach is found, not where it is read): patches the grid hit at exactly one corner. On
+  the two-sleeve fixture's 8 x 4 arc it fires at (32, 2) AND at the default 32 x 32 (a coarse emitter's
+  patches span few corners); never at 16 x 8 over 4..32 rows/columns; the whole refracted / media /
+  case suite runs with `-W error::UserWarning` clean. Not a proof: a patch missed at every corner gives
+  no sign (16 x 8 at 4 x 4 lost one, sparse 0). ⚠️ **A case file cannot declare media yet**, so the
+  setting is read by case files but changes nothing there until it can. Tests:
+  `test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_find_them_again_without_one`
+  (a receiver a pass = all at once; given the mask the gather calls `_continued_paths` 0 times and
+  matches finding them again to 1e-12), `test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_another`,
+  `test_a_grid_that_found_a_patch_at_one_corner_only_says_so_and_names_the_setting`,
+  `test_the_shooting_grid_setting_reaches_every_path_found_round_a_rim` (scene: centroid and corner
+  calls all on the settings' grid), `test_a_shooting_grid_is_read_as_two_whole_numbers`. **Mutation
+  pass 13, all red**: gather ignoring the mask's reach, `joined` unordered, grid check dropped, never
+  warning, sparse `< 1`, hits from `valid`, `_route_reach` on the default grid, centroids on
+  `_host_paths`, corners on the default grid, the scene's mask or gather without the grid, empty
+  `refraction_options`, no converter. Fixture: 4 x 32 -> 29 between rows, 0
   along, new patch 1; 32 x 4 -> columns. Four-lamp scene (`grid_check.py`, 16 sectors, 4 points,
   32 x 32, alone, 1,168 s): 4,195 paths, 3,758 by grid, 437 between rows, 0 along, 6 patches, none
   sparse, 64 x 32 finds 0 new patches. Tests: `test_the_grid_check_says_which_way_a_grid_is_short_and_finds_the_patch_it_lost`,

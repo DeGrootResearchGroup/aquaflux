@@ -930,6 +930,7 @@ def _refracted(scene: Scene, sources: Surfaces, points, normals, own) -> np.ndar
     """
     pair_limit = _pair_limit(scene.settings)
     options = scene.settings_for(sources).receiver_visibility_options()
+    rim = scene.settings.refraction_options()
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
     out = np.empty(len(points))
     for start in range(0, len(points), per_pass):
@@ -943,10 +944,16 @@ def _refracted(scene: Scene, sources: Surfaces, points, normals, own) -> np.ndar
             receiver_facet=None if own is None else own[start:stop],
             self_occlusion=options.get("self_occlusion"),
             pair_limit=pair_limit,
+            **rim,
         )
         if normals is None:
             field = refracted_fluence_rate(
-                sources, scene.media, chunk, visibility=visibility, pair_limit=pair_limit
+                sources,
+                scene.media,
+                chunk,
+                visibility=visibility,
+                pair_limit=pair_limit,
+                **rim,
             )
         else:
             field = refracted_irradiance(
@@ -956,6 +963,7 @@ def _refracted(scene: Scene, sources: Surfaces, points, normals, own) -> np.ndar
                 normals[start:stop],
                 visibility=visibility,
                 pair_limit=pair_limit,
+                **rim,
             )
         out[start:stop] = np.asarray(field)
     return out
