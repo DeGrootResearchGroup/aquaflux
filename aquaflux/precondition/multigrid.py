@@ -819,7 +819,7 @@ class SmoothedHierarchy(eqx.Module):
                     _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
                 )
                 csr = prolongation.tocsr()
-                a = (csr.T @ a @ csr).tocsr()
+                a = _galerkin_coarse(csr.T.tocsr(), a, csr)
             else:
                 levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, level.block_size))
         return SmoothedHierarchy(
@@ -1156,6 +1156,13 @@ def _build_aggregation_hierarchy(
         padded_cells = graph.shape[0] - live_cells
         if padded_cells:
             graph = graph[:live_cells, :live_cells]
+        if strength_threshold <= 0.0:
+            # With no strength threshold the coarsening reads the pattern alone -- which is what makes a
+            # rebuild at a new operator reproduce the same aggregates -- so hand it the pattern. Left as
+            # values, a cell pair whose coupling happens to be exactly zero at this state drops out of the
+            # symmetrization and the squaring below (sparse arithmetic stores no zero result), and the
+            # aggregates, hence every coarse shape, move with the operator's values.
+            graph = _ones(graph)
         if mis_aggregation:
             connectivity = sp.csr_matrix(abs(_aggregation_edges(graph, strength_threshold)))
             connectivity = (connectivity + connectivity.T).tocsr()
@@ -1228,18 +1235,20 @@ def _build_aggregation_hierarchy(
             # spans orders of magnitude measures the spread of the diagonal rather than
             # anything about the coupling, so the resulting smoothing is arbitrary.
             scalar_d_inv = sp.diags(1.0 / a.diagonal())
-            prolongation = (
+            prolongation = _onto_pattern(
                 tentative
                 - (1.4 / _largest_singular_value(scalar_d_inv @ a))
-                * (scalar_d_inv @ (a @ tentative))
-            ).tocsr()
+                * (scalar_d_inv @ (a @ tentative)),
+                _smoothing_pattern(tentative, a, block_size),
+            )
         else:
             # The symmetric-part variant: damp by an EIGENVALUE of the aggregation operator's
             # `D^-1 A_agg`, and use the block diagonal on a nodal level. On the symmetric path
             # `A_agg is A` and the two forms coincide up to the damping constant.
-            prolongation = (
-                tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative))
-            ).tocsr()
+            prolongation = _onto_pattern(
+                tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative)),
+                _smoothing_pattern(tentative, a, block_size),
+            )
         levels.append(
             _sparse_level(
                 a,
@@ -1253,7 +1262,10 @@ def _build_aggregation_hierarchy(
                 else shape_budget.operator_nnz[len(levels) - 1],
             )
         )
-        a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
+        # The Galerkin coarse operator from the true A, stored on its structural pattern (see
+        # `_galerkin_coarse`): a plain product drops entries that come out exactly zero, so the stored
+        # count -- an array shape -- would move with the operator's values on a refresh.
+        a = _galerkin_coarse(prolongation.T.tocsr(), a, prolongation.tocsr())
         live_cells = occupied
         if budgeted is not None and occupied < n_coarse_cells:
             # An empty aggregate leaves a structurally zero row and column, which no diagonal-based
@@ -1268,7 +1280,16 @@ def _build_aggregation_hierarchy(
             # Only the genuinely structurally-empty ones: the reserved slot already carries a diagonal
             # summed from the padded cells it absorbed, and adding to that would be arbitrary.
             empty = slots[a.diagonal()[slots] == 0.0]
-            a = (a + sp.coo_matrix((np.ones(empty.size), (empty, empty)), shape=a.shape)).tocsr()
+            # Appended through COO rather than added: a sparse sum drops entries that are exactly
+            # zero, which would undo the structural pattern the Galerkin product just stored.
+            entries = a.tocoo()
+            a = sp.coo_matrix(
+                (
+                    np.concatenate([entries.data, np.ones(empty.size)]),
+                    (np.concatenate([entries.row, empty]), np.concatenate([entries.col, empty])),
+                ),
+                shape=a.shape,
+            ).tocsr()
     return SmoothedHierarchy(
         tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
     )
@@ -2220,23 +2241,110 @@ def _require_bounded_coarsening(
         )
 
 
+def _ones(matrix: sp.spmatrix) -> sp.csr_matrix:
+    """``matrix``'s stored pattern with every value one: a product of these cannot cancel to zero."""
+    skeleton = sp.csr_matrix(matrix, copy=True)
+    skeleton.data = np.ones_like(skeleton.data)
+    return skeleton
+
+
+def _smoothing_pattern(tentative: sp.spmatrix, a: sp.spmatrix, block_size: int) -> sp.csr_matrix:
+    """The structural pattern of a smoothed prolongation ``P_tent - c D⁻¹ A_agg P_tent``.
+
+    Taken over :func:`_ones` so no entry can cancel: ``D⁻¹`` is covered by every cell's whole block
+    (field-major, so cell ``c``'s fields sit ``n_cells`` apart), and ``A_agg`` -- the operator or its
+    symmetric part -- by the pattern of ``A + Aᵀ``. A smoothed prolongation stored on it has a stored
+    count fixed by the aggregates and the fine pattern, so a rebuild at new values keeps every coarse
+    shape.
+
+    Parameters
+    ----------
+    tentative : scipy.sparse matrix
+        The tentative prolongation, shape ``(n, n_coarse)``.
+    a : scipy.sparse matrix
+        The level operator, shape ``(n, n)``.
+    block_size : int
+        Degrees of freedom per cell.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The pattern, shape ``(n, n_coarse)``, every stored value one.
+    """
+    cell_blocks = sp.kron(
+        np.ones((block_size, block_size)), sp.identity(a.shape[0] // block_size), format="csr"
+    )
+    coupling = _ones(a) + _ones(a).T
+    return (_ones(tentative) + cell_blocks @ (coupling @ _ones(tentative))).tocsr()
+
+
+def _onto_pattern(values: sp.spmatrix, pattern: sp.spmatrix) -> sp.csr_matrix:
+    """``values`` stored on ``pattern``: every entry of the pattern kept, those ``values`` lacks as zeros.
+
+    ``scipy`` drops a product or sum entry that comes out exactly zero, so the stored count of a
+    computed sparse operator moves with its operands' values -- an array shape, so a different jit
+    signature whenever an operator built that way rides into a compiled program. Taking the pattern from
+    the same computation over :func:`_ones` (where no cancellation is possible) and scattering the real
+    values into it keeps the stored count a function of the operands' patterns alone.
+
+    Parameters
+    ----------
+    values : scipy.sparse matrix
+        The computed operator.
+    pattern : scipy.sparse matrix
+        Its structural pattern, a superset of ``values``'s stored entries, same shape.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        ``values`` on ``pattern``'s indices.
+
+    Raises
+    ------
+    AssertionError
+        If ``values`` stores an entry ``pattern`` does not -- impossible for a pattern computed from the
+        same expression over :func:`_ones`.
+    """
+    values = sp.csr_matrix(values)
+    pattern = sp.csr_matrix(pattern)
+    values.sort_indices()
+    pattern.sort_indices()
+    columns = pattern.shape[1]
+
+    # One ascending key per stored entry on each side, so the (subset) real pattern locates into the
+    # structural one with a single search rather than a per-row merge.
+    def keys(matrix: sp.csr_matrix) -> np.ndarray:
+        rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
+        return rows.astype(np.int64) * columns + matrix.indices
+
+    pattern_keys, value_keys = keys(pattern), keys(values)
+    # Clipped before the lookup: a key past the end of `pattern_keys` would index out of range, and the
+    # comparison below is what turns "not found" into the stated invariant rather than an IndexError.
+    position = np.searchsorted(pattern_keys, value_keys).clip(max=max(pattern.nnz - 1, 0))
+    if value_keys.size and not np.array_equal(pattern_keys[position], value_keys):
+        raise AssertionError(
+            "_onto_pattern: the operator holds an entry its structural pattern does not, which cannot "
+            "happen for a pattern computed from the same expression."
+        )
+    data = np.zeros(pattern.nnz, dtype=values.data.dtype)
+    data[position] = values.data
+    return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+
+
 def _galerkin_coarse(
     restriction: sp.csr_matrix, a: sp.csr_matrix, prolongation: sp.csr_matrix
 ) -> sp.csr_matrix:
     """``R A P``, stored on a pattern that depends on the three *patterns* and not on their values.
 
-    ``scipy`` drops a product entry that comes out exactly zero, and a reduction hierarchy produces
-    those **structurally**: a degree-``d`` neighbourhood can contain an F-point that row ``g`` does not
-    couple to at all, and the local solve then returns exactly zero for it. Which entries that hits
-    moves with the operator's values, so the same mesh at a developed state yields a coarse operator
-    storing a slightly different number of entries — a different jit signature, on the one path whose
-    entire purpose is to keep the signature fixed (:func:`refresh_air_hierarchy`). Measured on a
-    46080-row convection-dominated operator, 14 exactly-zero restriction weights moved the level-1
-    entry count by 160, which is enough to make a legitimate refresh fail its own structure check.
-
-    The pattern is therefore taken from the same triple product over matrices of **ones**, where no
-    cancellation is possible, and the real values are scattered into it. Entries the real product
-    leaves empty stay as stored zeros, which is what keeps the shape stable.
+    ``scipy`` drops a product entry that comes out exactly zero (:func:`_onto_pattern`), and a reduction
+    hierarchy produces those **structurally**: a degree-``d`` neighbourhood can contain an F-point that
+    row ``g`` does not couple to at all, and the local solve then returns exactly zero for it. Which
+    entries that hits moves with the operator's values, so the same mesh at a developed state yields a
+    coarse operator storing a slightly different number of entries — a different jit signature, on the
+    one path whose entire purpose is to keep the signature fixed (:func:`refresh_air_hierarchy`).
+    Measured on a 46080-row convection-dominated operator, 14 exactly-zero restriction weights moved the
+    level-1 entry count by 160, which is enough to make a legitimate refresh fail its own structure check.
+    An aggregation hierarchy meets the same thing whenever the operator stores exact zeros.
 
     Parameters
     ----------
@@ -2248,36 +2356,9 @@ def _galerkin_coarse(
     scipy.sparse.csr_matrix
         The coarse operator, shape ``(R.shape[0], P.shape[1])``.
     """
-
-    def ones_like(matrix: sp.csr_matrix) -> sp.csr_matrix:
-        skeleton = matrix.tocsr(copy=True)
-        skeleton.data = np.ones_like(skeleton.data)
-        return skeleton
-
-    coarse = (restriction @ a @ prolongation).tocsr()
-    pattern = (ones_like(restriction) @ ones_like(a) @ ones_like(prolongation)).tocsr()
-    coarse.sort_indices()
-    pattern.sort_indices()
-    columns = pattern.shape[1]
-
-    # One ascending key per stored entry on each side, so the (subset) real pattern locates into the
-    # structural one with a single search rather than a per-row merge.
-    def keys(matrix: sp.csr_matrix) -> np.ndarray:
-        rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
-        return rows.astype(np.int64) * columns + matrix.indices
-
-    pattern_keys, coarse_keys = keys(pattern), keys(coarse)
-    # Clipped before the lookup: a key past the end of `pattern_keys` would index out of range, and the
-    # comparison below is what turns "not found" into the stated invariant rather than an IndexError.
-    position = np.searchsorted(pattern_keys, coarse_keys).clip(max=max(pattern.nnz - 1, 0))
-    if coarse_keys.size and not np.array_equal(pattern_keys[position], coarse_keys):
-        raise AssertionError(
-            "_galerkin_coarse: the coarse operator holds an entry the structural product does not, "
-            "which cannot happen for a product of the same three patterns."
-        )
-    data = np.zeros(pattern.nnz, dtype=coarse.data.dtype)
-    data[position] = coarse.data
-    return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+    return _onto_pattern(
+        restriction @ a @ prolongation, _ones(restriction) @ _ones(a) @ _ones(prolongation)
+    )
 
 
 def _restriction_neighbourhoods(

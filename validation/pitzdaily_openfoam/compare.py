@@ -1243,7 +1243,10 @@ def solve_aquaflux(
                 )
             ),
         ),
-        ("preconditioner refresh", f"on {REFRESH_ON_CYCLES} restart cycles (mid-step)"),
+        (
+            "preconditioner refresh",
+            f"on {REFRESH_ON_CYCLES} restart cycles (re-fit before the next step)",
+        ),
         ("preconditioner beta floor", PC_BETA_FLOOR),
         ("field split", FIELD_SPLIT),
         (

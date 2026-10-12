@@ -481,9 +481,21 @@ gates on the residual as well, because the cycle count also rises as the pseudo-
 shift falls, and that rise is not staleness.
 
 A {class}`~aquaflux.precondition.MaterializedJacobian` preconditioner keeps itself current
-without a policy. Its session re-preconditions **in place**, so the compiled solve is reused
-rather than retraced: before the first step, after being pointed at a new case with `rebind`,
-and — once a single inner solve costs `refresh_on_cycles` restart cycles — mid-step. Open the session yourself to hear what each rebuild cost, through
+without a policy. Its session re-fits the inverse before the first step, after being pointed at a
+new case with `rebind`, and before the step after one whose inner solve cost `refresh_on_cycles`
+restart cycles; such a step ends there, keeping the iterate it reached, and the next step starts
+from it on the re-fitted preconditioner. The compiled solve is reused rather than retraced.
+
+When both blocks of a {class}`~aquaflux.precondition.FieldSplit` are traced multigrid cycles (every
+shipped block inverse is), the split is applied on device inside the Krylov solve, with no round
+trip of the state vector through the host on each application. It then rides in the compiled step
+as data, so a re-fit hands the march a step carrying the new values — reused without a retrace as
+long as the hierarchies keep their array shapes. A coarsening with no strength threshold reads only
+the sparsity pattern and keeps them; one with a `strength_threshold` reads the operator's values,
+so set `frozen_coarsening=True` on that block to re-fit the values on the coarsening it was first
+built with. A block without a traced cycle falls back to applying the whole split on the host.
+
+Open the session yourself to hear what each rebuild cost, through
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts:
 
 ```python

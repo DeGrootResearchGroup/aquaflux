@@ -81,10 +81,10 @@ class TransposedPreconditioner:
     Notes
     -----
     A **frozen dataclass**, so two wrappers around the same factory compare equal. This rides in a
-    strategy's ``adjoint_preconditioner_factory``, a *static* field and therefore part of the
-    compiled step's cache key; identity comparison there means every rebuild recompiles the whole
-    coupled solve. Equality is only as good as the wrapped factory's -- pass a value object, not a
-    lambda (see :class:`~aquaflux.turbulence.coupled.FrozenTransposeFactory`).
+    strategy's ``adjoint_preconditioner_factory``; holding no arrays, it filters to the static side and
+    is therefore part of the compiled step's cache key, where identity comparison would mean every
+    rebuild recompiles the whole coupled solve. Equality is only as good as the wrapped factory's --
+    pass a value object, not a lambda (see :class:`~aquaflux.precondition.monolithic_policy.FrozenTransposeFactory`).
     """
 
     factory: Callable[[Any], Callable[[Any], Any]]

@@ -49,10 +49,13 @@ USER_IMPLEMENTS = frozenset(
         "CarriesRelaxationSchedule",
         "FrozenInverse",
         "HierarchyBlockInverse",
+        # The base of a preconditioner applied through a host callback, for an inverse with no traced form.
+        "HostPreconditioner",
         "LineSearchGrowth",
         "MaterializedJacobianPreconditioner",
         "MeasureBuilder",
         "NamedBlockMeasure",
+        "OffersTracedCycle",
         "ReadableShift",
         "RefactorableInverse",
         "RefreshTrigger",
@@ -65,6 +68,9 @@ USER_IMPLEMENTS = frozenset(
         "ShiftedNewtonStrategy",
         "StateBlock",
         "StepAcceptance",
+        "StopsForRefresh",
+        # The value an `OffersTracedCycle` returns, built by the block inverse that implements it.
+        "TracedCycle",
     }
 )
 USER_CONFIGURES = frozenset(
@@ -76,6 +82,8 @@ USER_CONFIGURES = frozenset(
         "DivergenceGuard",
         "DualTimeStep",
         "LocalCourantBasis",
+        # The policy a step is built around when it is preconditioned by a host materialized inverse.
+        "MonolithicFactorShiftPolicy",
         "MonotoneLineSearch",
         "RelaxedFarFromRoot",
         "SwitchedEvolutionRelaxation",
@@ -243,6 +251,12 @@ VALIDATION_INTERNAL_REACHES = {
     "InnerIterateCheckpointer",
     "combine_metrics",
     "in_progress_measure",
+    # The traced form of a fitted host split and the host-callback detector, reached by the two
+    # traced-split harnesses: one times the traced split against the host one, the other checks a
+    # refit keeps its array shapes. Both measure the object the session itself builds, so they take it
+    # from the same function rather than assembling a lookalike.
+    "contains_host_callback",
+    "traced_field_split",
 }
 
 

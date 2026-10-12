@@ -76,6 +76,7 @@ from .multigrid import (
 )
 from .saddle_multigrid import SimpleSmoothedInverse
 from .sparse_jacobian import materialize_block_jacobian
+from .traced_cycle import OffersTracedCycle, TracedCycle
 
 __all__ = [
     "MATERIALIZED_MAPPING",
@@ -99,12 +100,14 @@ __all__ = [
     "MaterializedProblem",
     "MaterializedSession",
     "MonolithicFactorShiftPolicy",
+    "OffersTracedCycle",
     "RefactorableInverse",
     "ReleasableInverse",
     "ScalarBorder",
     "SimpleSmoothed",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
+    "TracedCycle",
     "air_multigrid_cycles",
     "bordered_preconditioner",
     "build_air_hierarchy",

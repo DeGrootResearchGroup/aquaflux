@@ -569,11 +569,12 @@ doing two jobs: it stopped the dual-time inner loop *and* escalated β. It is no
 **`abort_above_cycles`**, a cost guard only. `retry_reason` returns `"diverged" | "alpha" | "cycles"`,
 and `ESCALATING_REASONS = {"diverged", "alpha"}` — one home, read by both the march and the log — says
 which of them raise the shift. A `"cycles"` retry **redoes the step at the shift it already had**, on
-the factorization the dual-time loop's mid-step refresh has by then rebuilt.
+a re-fitted factorization (the dual-time loop's mid-step refresh until 2026-10-10; now the march's
+`due=True` re-fit before the redo, #290).
 
 - **Why cost must not escalate.** A cycle count says the frozen preconditioner is struggling with this
   operator, not that the step is stiff. The march already has the right response — `refresh_on_cycles`
-  rebuilds it mid-step — and escalating on the same observation additionally assumes a stiffer operator
+  rebuilds it (mid-step when this was written; since #290 the step ends and the re-fit precedes the next) — and escalating on the same observation additionally assumes a stiffer operator
   is an easier one, which is false on this case (140 applications at β 0.5 against 32 at 0.05).
   **Stiffness is what `on_alpha` measures, and a step length is dimensionless**, so it needs no per-arm
   calibration. The abort threshold remains a number, but it is now a *resource* decision rather than a
@@ -1374,7 +1375,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   used to read but never print, so two differently-configured runs could produce identical banners.**
 
   **⚠️ FOUR METHODOLOGICAL TRAPS, each of which produced a wrong write-up today:**
-  1. **Probe the state the failure happens at.** The refusal fires from a *mid-step* refresh; step
+  1. **Probe the state the failure happens at.** The refusal fired from a *mid-step* refresh (before #290; it now fires from the re-fit before a step); step
      checkpoints and the inner-iterate dump both miss it (the inner observer writes only after an
      iteration succeeds). Three capture runs were wasted before dumping the operator *before* the
      build, which needs no state and no shift pairing — and even that missed twice, first by
@@ -2139,7 +2140,38 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   — the flow block is frozen, so it can afford the value-dependent SoC below; the scalars cannot without
   a value-refresh). Both properties are pinned in `tests/unit/test_multigrid.py`
   (`test_aggregation_hierarchy_structure_is_value_independent`,
-  `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat — lAIR does NOT get this for
+  `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`).
+  ⚠️ **The shape half of that claim was FALSE on a real operator until 2026-10-12 (#290), and the
+  chain fixtures could not show it.** The Galerkin `Pᵀ A P` was a plain `scipy` product, which drops
+  an entry summing to exactly zero, so on a block whose stored entries are sometimes exactly zero (a
+  coupled `[k, ω]` Jacobian, where closure switches zero a derivative) the coarse operator's stored
+  count moved with the values even at threshold 0. Measured on pitzDaily's trailing block (`JacobiSmoothed`,
+  `max_coarse` 2000, threshold 0, two levels) across its hybrid start and ten march checkpoints:
+  level-1 entries 9360 → 9535 → 9515, so the jitted trailing cycle on the shipped host split
+  retraced on refresh. Both the build and `SmoothedHierarchy.refit` now use `_galerkin_coarse`
+  (`Pᵀ` as the restriction), whose stored pattern is the structural one; afterwards the same probe
+  (`validation/traced_split_refresh_shapes.py`) finds the trailing signature unchanged at every
+  state and shift. Values are bit-identical, and so is the strength graph at a nonzero threshold (a
+  stored zero is never strong); at threshold 0, deeper levels' aggregation now sees structural
+  edges carrying zero weight, which is the value-independence the paragraph above claims. Pinned by
+  `test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero` (mutation-checked
+  on the build and the refit separately).
+  ⚠️ **Two more zero-dropping sites moved a REBUILD's shapes, and the Galerkin fix alone did not reach
+  them (found the same day, #290).** *(i)* The aggregation graph: at threshold 0 the MIS path
+  symmetrized the cell graph by a sparse add and squared it (aggressive level) by a sparse product,
+  both of which drop an exactly-zero result, so a cell pair whose coupling was stored but zero at one
+  state lost its edge there — measured as pitzDaily's trailing coarse level moving 650 → 648 cells
+  between early-march states. `_build_aggregation_hierarchy` now hands the coarsening `_ones(graph)`
+  when `strength_threshold <= 0` (the MIS helpers read only the pattern, checked: none reads `.data`).
+  *(ii)* A smoothed prolongation `P_tent − c D⁻¹ A_agg P_tent` drops zeros the same way; both smoothed
+  branches now store it on `_smoothing_pattern` (whole cell blocks for `D⁻¹`, `A + Aᵀ` for `A_agg`).
+  After both, `validation/traced_split_refresh_shapes.py` reports **0 moved signatures and 1 trace of
+  the jitted apply across 40 builds** (pitzDaily hybrid start + ten checkpoints, both blocks). Pinned by
+  `test_a_threshold_free_mis_coarsening_keeps_its_shapes_when_a_coupling_becomes_exactly_zero`,
+  parametrized over the three prolongation forms; each fix mutation-checked on its own (no structural
+  graph fails all three, an unpatterned standard or symmetric-part branch fails its own). A nonzero
+  threshold still reads values, so a rebuild there is shape-stable only under `frozen_coarsening`.
+  **Caveat — lAIR does NOT get this for
   free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
   thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and
   the shapes: on a 600-cell chain, cold vs developed coefficients (5000× flux, 1000× viscosity ramp)

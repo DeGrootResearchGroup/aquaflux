@@ -112,7 +112,7 @@ those moves is un-adjudicable — treat it as a lead, not a fact.
 | `_LinearSolveRegime`, `_resolved_regime`, `_resolved_linear_solve`, and `LinearSolveSettings` from `march_settings.py` | `solve.LinearSolveRegime`, `solve.resolve_linear_solve`, `solve.LinearSolveSettings` | `aquaflux.turbulence.LinearSolveSettings` no longer exists; the per-family regime constants (`_BLOCK_LINEAR_SOLVE`, …) stay here because they are calibrations of *these* preconditioners |
 | `CoupledJacobianProbe` (plan + gather map), `_coupled_jacobian_plan`'s graph logic | `precondition.JacobianProbe`, `precondition.jacobian_probe_plan` (`precondition/jacobian_probe.py`) | the probe holds a `narrowing` callable for the assembler stand-in; `coupled_jacobian_probe(coupled, …)` builds one with `_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen)`. `probe.gradient_sweeps` is now `probe.narrowing.gradient_sweeps`. `_coupled_jacobian_plan` stays as the coupled adapter (mesh graph + layout) |
 | `MonolithicFactorShiftPolicy`, `FrozenTransposeFactory` | `precondition.MonolithicFactorShiftPolicy`, `precondition.monolithic_policy.FrozenTransposeFactory` (`precondition/monolithic_policy.py`) | `base` is any `ShiftPolicy`; no longer exported from `aquaflux.turbulence` |
-| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `precondition.MaterializedSession`, `BetaTrackingRefresh`, `solve.PreconditionerSession` (`solve/session.py`), `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `VCYCLE_LINEAR_SOLVE` (`precondition/materialized_session.py`; `FACTORIZATION_LINEAR_SOLVE` was deleted with the complete LU, 2026-10-11) | the session is written against `precondition.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now the class `BetaTrackingRefresh(assembler, probe, every_step=, refit_beta_floor=, observer=)` (a function `beta_tracking_refresh` until #661) |
+| `_MaterializedSession`, `_beta_tracking_refresh`, `PreconditionerSession`, `_jacobian_matvec`, `_batched_jacobian_matvec`, `_frozen_shift_diagonal`, `_PROBE_BATCH_SIZE`, `_BUILD_BETA`, `_FACTORIZATION_LINEAR_SOLVE`, `_VCYCLE_LINEAR_SOLVE`, `_is_traced` | `precondition.MaterializedSession`, `BetaTrackingRefresh`, `solve.PreconditionerSession` (`solve/session.py`), `jacobian_matvec`, `batched_jacobian_matvec`, `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `BUILD_BETA`, `VCYCLE_LINEAR_SOLVE` (`precondition/materialized_session.py`; `FACTORIZATION_LINEAR_SOLVE` was deleted with the complete LU, 2026-10-11) | the session is written against `precondition.MaterializedProblem`; coupled RANS supplies `_CoupledProblem` (assembler, probe, `[flow] / [k, omega]` groups, `_monolithic_shift_source`, `_monolithic_factor_step` with the `k` positivity guards). `_beta_tracking_refresh(coupled, stencil_reach, …, probe=)` is now the class `BetaTrackingRefresh(assembler, probe, preconditioner, refit_beta_floor=, observer=)` (a function `beta_tracking_refresh` until #661; `every_step=` went with the complete LU, 2026-10-11). Since #290 `_monolithic_factor_step(coupled, reference_state, policy, …)` takes the shift policy the session glued (traced split or host factor) rather than building one |
 | `MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec` (and `MonolithicVCycle`, deleted with PETSc 2026-10-10, and `CompleteLu`, deleted 2026-10-11) | the same names in `aquaflux.precondition` (`precondition/materialized_spec.py`) | no longer exported from `aquaflux.turbulence`; `BlockDiagonal` stays here. The registry `_SPEC_MAPPING` **extends** `precondition.MATERIALIZED_MAPPING` rather than restating its kinds; a laminar spec file loads with `precondition.materialized_spec_from_mapping` |
 | `_SessionContinuation` | `solve.SessionSource` | shared with the flow march |
 | the flow rows of `coupled_scaled_norm`, and the per-block reference scales | `flow.flow_row_scales`, `solve.block_reference_scales` | `coupled_scaled_norm` appends its `k`/`ω` rows to the flow's |
@@ -140,7 +140,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | both **deleted (#541)**: `coupled_step(coupled, state, preconditioner=BlockDiagonal(...))` and `solve_coupled(coupled, ...)` border themselves when `coupled.momentum.drive` is a `MassFlow`; the held force is `held_force(coupled, flow, k, omega)` |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default). `merged_march_options` merges any value that is a `solve.MergeableSettings` (`isinstance`, #669), not anything with a `filled_from` attribute |
-| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` / `inner_refresh` without a loop, and a `refresh_on_cycles` with no refresh to fire (a frozen step or a block-diagonal session), are refused where they used to be dropped |
+| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` without a loop is refused where it used to be dropped, and a `refresh_on_cycles` with no refresh hook to take its re-fit (a frozen step or a block-diagonal session) is refused by `newton_march` before the first step. There is no `inner_refresh` (removed 2026-10-10, #290): the step ENDS for the re-fit and the march takes it |
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
 | `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
@@ -206,7 +206,9 @@ Many entries below are dated history written against the old API. Read them thro
     the variable puts a **negative** term on that row's diagonal. Measured at a wall cell of the
     pitzDaily target rung: `J_kk` between **-1.22e-03 and -1.95e-03** against a shift `beta d_k` of
     **+2.31e-03** at the case's `beta_start = 0.5` — so the effective diagonal keeps only **16-47 %**
-    of the shift, and is a difference of two similar numbers.
+    of the shift, and is a difference of two similar numbers. ⚠️ **That was at `turbulence_damping` 1;
+    the shipped case runs 3, which triples the shift on this row and removes the near-cancellation**
+    (measured 2026-10-12, the #312 entry below) — the numbers in this entry describe an undamped march.
     - **The consequence is an amplifier on everything upstream.** Four gradient reconstructions at that
       one cell differ by **12 %** in `|grad u|` and in `P_k`, and by **30×** in the `k` correction the
       Newton step asks for, purely because a 12 % move in `J_kk` is a 3× move in the near-cancelling
@@ -465,10 +467,10 @@ Many entries below are dated history written against the old API. Read them thro
       that signature (`_march_keywords`), so an unknown keyword is a `TypeError` and no default is
       restated. `preconditioner` and `jacobian_production_viscosity` are refused there: the session owns
       them (user decision Q1).
-    - **A frozen `coupled_step` never wires the refresh hook; a session `build` does**, and only when
-      `refresh_on_cycles` is set and no caller `inner_refresh` was given. The hook, `refresh_preconditioner`
-      and the mid-step refresh are created once per session, so every build carries the same objects
-      (the static-field identity that keeps the coupled solve a compilation-cache hit).
+    - **A frozen `coupled_step` has no refresh hook; a session has `refresh_preconditioner`**, created
+      once per session so every march it serves calls the same object. There is no mid-step hook any more
+      (2026-10-10, #290): a loop's `refresh_on_cycles` ends the step and the march calls the session's hook
+      with `due=True` before the next one (see `solve-march.md`).
     - **Two latent defects are fixed on the session path only, until S3c removes the other:** the probe
       follows `jacobian_production_viscosity` for every family (D2, and D7 for the complete LU, whose
       builder materializes the un-frozen assembler), and one probe serves the build and the hook (D3/D5).
@@ -842,12 +844,35 @@ Many entries below are dated history written against the old API. Read them thro
       blend), and returning the reaction diagonal **unclamped** from `_scalar_stencil` (was `_scalar_operator_pieces`) with the
       preconditioner keeping its own `max(·, 0)` — that pair is a behaviour-preserving separation. What
       is refuted is `abs(·)` on the shift and `live_eddy_viscosity=True` on the coupled path.
-    - **The untried variant is `|r| + |f|`** — add the destabilizing magnitude rather than net it, which
-      at this cell predicts `J_kk + βd` = **+3.65e-03**. Arithmetic only; **unmeasured**, and it must be
-      measured on the probe, not on the tiers.
-    - **`explicit_production_viscosity` already addresses #312** and is the reason the revert costs
-      nothing: at this same cell and iterate its `frozen` rows give `J_kk` **+4.78e-03**, α **1**, and
-      `|G|/|G0|` **0.103**, against the exact operator's stalled 0.975.
+    - **`|r| + |f|` — add the magnitude rather than net it — was MEASURED 2026-10-12 and is INERT on the
+      shipped case. #312 is closed on it.** Built opt-in (an `SSTTurbulence.k_production_feedback`
+      method, exact against the coupled-level difference to 2.6e-16), measured, and **deleted**; it is in
+      branch history (`probe-312-additive-shift`, dda9be7) if a case ever needs it. The decisive fact is
+      that **the shipped pitzDaily case damps the k and omega rows at `turbulence_damping: 3`**, which
+      already keeps the k row's effective diagonal well clear of zero. Every #312 number above was taken
+      at damping 1, because `closure_stall_probe.py` built its engine without the case's shift settings
+      (fixed in the same change; see `validation.md`).
+      - **March A/B, the shipped case as shipped against the same with `d + f` on the k shift** (both
+        2026-10-12, Linux x86_64, 4 cores, jax 0.11.2, `case.yaml` at `8d65a8d`: field split
+        `SimpleSmoothed`/`JacobiSmoothed`, residual stop, `grow` 3, release 1e-4, 12 x 1 momentum-only
+        ramp from anchor 100, damping 3): **16 steps / 111 restart cycles in BOTH arms**, the same
+        per-step minimum inner alpha throughout (0.5 from step 3, 0.25 at step 5), per-step `|R|` to
+        three figures, final `|R|` 1.979e-06 / 1.965e-06, `x_r/h` 8.0686 both. Walls 751 / 666 s differ
+        by the second run's warm compilation cache (step 1 alone: 144 / 80 s), not by the change.
+      - **The probe, at the regenerated target-station iterate (`stall-iterate-skew.npz`, captured and
+        marched WITHOUT damping, so the state is the damping-1 trajectory's), beta 0.5.** At damping 1
+        `d + f` was a real local repair — hotspot cell 10823, `J_kk + beta d` +8.2e-04 / +6.7e-04
+        (owner/skew) to +3.6e-03 / +3.5e-03, `max |dk/k|` at the wall 2168 / 4346 to 32 / 37, kept
+        alpha 1 / 0.5 to 1 / 1, `|G|/|G0|` 0.216 / 0.593 to 0.102 / 0.103 — matching the frozen
+        production operator (0.103). **At the case's own damping 3 there is nothing to repair:** the
+        hotspot moves off the wall-fixed band (cells 504/36/18, `J_kk` already **+5.9e-03**),
+        `max |d log omega|` is 0.11, every arm keeps alpha 1 and reaches `|G|/|G0|` **0.034**; `d + f`
+        moves that to 0.0335 and `max |dk/k|` 6 to 1.2.
+      - **What would re-open it:** a case that runs undamped closure rows (`turbulence_damping` 1) and
+        shows the k-row near-cancellation in the march. The opt-in is then one revert away.
+    - **`explicit_production_viscosity` still addresses the same row at damping 1** (its `frozen` rows
+      gave `J_kk` **+4.78e-03**, alpha **1**, `|G|/|G0|` **0.103** against the exact operator's 0.975 at
+      the August iterate); at damping 3 it is as inert as `d + f` (0.035 against 0.034).
 
   - **⚠️ THE ω SHIFT DIAGONAL INHERITS ω's DYNAMIC RANGE — the root of the "never rebuild the shift"
     rule, and (measured) a ~11–37× step-productivity penalty (2026-07-25, #33).** The coupled shift for
@@ -1627,8 +1652,9 @@ Many entries below are dated history written against the old API. Read them thro
     `solve_coupled(refresh=RefreshPolicy(refresh_preconditioner=…))` (or a `solve_reynolds_continuation` `point_setup`) with a
     `coupled_amg_continuation` step and a `DualTimeControl`.
     - **The refresh cadence is COST-TRIGGERED; the scheduled gates are DELETED (2026-09-13, #371).** The
-      hook re-fits on its first call, after `rebind`, and mid-step through `refresh_at` when an inner
-      solve reaches `refresh_on_cycles`. A fixed step-count cadence failed at the low-β tail (stale
+      hook re-fits on its first call, after `rebind`, and when the march passes `due` -- before the step
+      after one that stopped because an inner solve reached `refresh_on_cycles` (it re-fitted mid-step,
+      through a `refresh_at` callback, until 2026-10-10, #290). A fixed step-count cadence failed at the low-β tail (stale
       mid-interval); the β-mismatch and drift gates that replaced it measured 14 % slower than the cost
       trigger on `bfs3d` (3632 s against 3140 s at unchanged cycles, monolithic; see
       `.claude/notes/solve-refuted-directions.md`) and were switched off by both cases before being

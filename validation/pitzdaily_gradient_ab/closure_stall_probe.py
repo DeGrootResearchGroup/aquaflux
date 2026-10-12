@@ -96,15 +96,17 @@ from aquaflux.schemes import (  # noqa: E402
     SkewCorrectedGradient,
 )
 from aquaflux.schemes.interpolation import non_orthogonal_correction  # noqa: E402
-from aquaflux.solve import (
-    LinearSolveSettings,
+from aquaflux.solve import (  # noqa: E402
     Convergence,
     DualTimeLoop,
+    LinearSolveSettings,
     MarchLogger,
     solve_linear,
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
-from aquaflux.turbulence import (
+from aquaflux.solve.linear import in_progress_measure  # noqa: E402
+from aquaflux.turbulence import (  # noqa: E402
+    CoupledShiftSettings,
     coupled_fields,
     coupled_step,
     omega_wall,
@@ -114,7 +116,10 @@ from aquaflux.turbulence import (
     solve_reynolds_continuation,
     strain_rate_magnitude,
 )
-from aquaflux.turbulence.coupled import positive_k_limit  # noqa: E402
+from aquaflux.turbulence.coupled import (  # noqa: E402
+    frozen_production_viscosity,
+    positive_k_limit,
+)
 from aquaflux.turbulence.measures import coupled_scaled_norm  # noqa: E402
 from aquaflux.vectors import dot  # noqa: E402
 
@@ -161,6 +166,12 @@ STATE = HERE / os.environ.get("PITZ_STALL_STATE", SEED.name)
 BETA_LADDER = tuple(
     float(v) for v in os.environ.get("PITZ_STALL_BETAS", "0.5,2.0,8.0,16.0").split(",")
 )
+
+
+#: The case's own shift settings. The case damps the k and omega rows at `turbulence_damping` times the
+#: flow's shift strength; a probe built without it measures the k row at a shift a third of the one
+#: the march applies, which is where the row's near-cancellation lives.
+SHIFT = CoupledShiftSettings(turbulence_damping=compare.TURB_DAMPING)
 
 
 class _Captured(Exception):
@@ -218,6 +229,7 @@ def capture() -> None:
             ),
             positivity_floor=compare.K_POSITIVITY_FLOOR,
             positivity_projection=compare.POSITIVITY_PROJECTION,
+            shift=SHIFT,
             preconditioner=session,
             inner_observer=logger.on_inner,
             max_steps=compare.MAX_STEPS,
@@ -259,6 +271,7 @@ def _engine_at(coupled, state):
         ),
         positivity_floor=compare.K_POSITIVITY_FLOOR,
         positivity_projection=compare.POSITIVITY_PROJECTION,
+        shift=SHIFT,
     )
 
 
@@ -551,6 +564,13 @@ def analyze() -> None:
     print("\n=== exact operator against a frozen-production operator ===", flush=True)
     _frozen_production_test(built, engines, state, steps, measures, BETA_LADDER[0])
 
+    # --- 9. or does ADDING the production feedback to the k shift (|r| + |f|) fix it? -----------
+    print(
+        "\n=== exact operator, k shift d + f (the production feedback added, not netted) ===",
+        flush=True,
+    )
+    _additive_shift_test(built, engines, state, steps, measures, BETA_LADDER[0])
+
 
 def _report_step(name, coupled, state, engine, measure) -> None:
     """One arm's shifted correction: did the LINEAR solve converge, and does the direction descend?
@@ -574,7 +594,7 @@ def _report_step(name, coupled, state, engine, measure) -> None:
 def _report_step_at(coupled, state, engine, measure, residual, reference, beta) -> None:
     """One arm at one shift: the correction, its true linear residual, and its ladder."""
     term = engine.shift_policy.shift_term(state)
-    shift = beta * term.diagonal
+    shift = term.shift(jnp.asarray(beta))
     preconditioner = term.make_preconditioner(jnp.asarray(beta))
 
     def operator(tangent):
@@ -583,7 +603,7 @@ def _report_step_at(coupled, state, engine, measure, residual, reference, beta) 
     delta, cycles = solve_linear(
         operator,
         -residual,
-        solver=engine.linear_solver(),
+        solver=in_progress_measure(engine.linear_solver(), measure),
         preconditioner=preconditioner,
         throw=False,
     )
@@ -735,7 +755,7 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
         residual = coupled.residual(state)
         reference = float(measure(residual))
         term = engine.shift_policy.shift_term(state)
-        shift = beta * term.diagonal
+        shift = term.shift(jnp.asarray(beta))
         preconditioner = term.make_preconditioner(jnp.asarray(beta))
         wall = np.asarray(coupled.turbulence.wall_cells)
         k_wall = np.asarray(coupled.physical_fields(state)[1])[wall]
@@ -759,7 +779,7 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
             delta, _ = solve_linear(
                 operator,
                 -residual,
-                solver=engine.linear_solver(),
+                solver=in_progress_measure(engine.linear_solver(), measure),
                 preconditioner=preconditioner,
                 throw=False,
             )
@@ -782,6 +802,131 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
             print(
                 f"  {name:<9} {label:<10} {cell:>6} {reference:>12.4e} {j_kk:>12.4e} {damped:>13.4e} "
                 f"{np.abs(d_k / k_wall).max():>12.4e} {np.abs(d_omega).max():>14.4e} "
+                f"{float(searched.alpha):>11.4g} "
+                f"{float(searched.residual_norm) / reference:>10.6f}",
+                flush=True,
+            )
+
+
+class _AddedKShift(eqx.Module):
+    """A shift policy whose base diagonal is ``base``'s plus ``extra`` -- nothing else changes.
+
+    Forwards every part of the base term (the preconditioner factory and the per-row relaxation), so
+    the only difference from the shipped policy is the diagonal. Used both as the shift and as the
+    source of the row-scaled measure's row scales, which is what a shipped change to the k shift
+    diagonal would move too.
+    """
+
+    base: object
+    extra: jnp.ndarray
+
+    def shift_term(self, phi, residual=None):
+        term = self.base.shift_term(phi, residual)
+        return term._replace(diagonal=term.diagonal + self.extra)
+
+
+def _production_feedback(coupled, state) -> jnp.ndarray:
+    """The k-production's own feedback rate on each k row, over the full state, ``>= 0``.
+
+    The exact k-row Jacobian diagonal minus the one with ``k`` frozen in the production's eddy
+    viscosity (:func:`~aquaflux.turbulence.frozen_production_viscosity`, which freezes that derivative
+    and nothing else). Production at a cell reads ``k`` at that cell alone through ``nu_t``, so the
+    difference is diagonal and one Jacobian action along the k-block ones vector reads all of it.
+    Zero on every non-k row. This is the ``f`` of ``|r| + |f|``: the magnitude the segregated
+    operator the shift is built from cannot see.
+    """
+    k_rows = coupled.layout.slice_of("k")
+    ones = jnp.zeros_like(state).at[k_rows].set(1.0)
+    exact = jax.jvp(coupled.residual, (state,), (ones,))[1]
+    frozen = jax.jvp(frozen_production_viscosity(coupled).residual, (state,), (ones,))[1]
+    return jnp.zeros_like(state).at[k_rows].set((frozen - exact)[k_rows])
+
+
+def _additive_shift_test(built, engines, state, steps, measures, beta) -> None:
+    """The k shift with the production feedback ADDED, ``d_k + f``, under the exact operator.
+
+    The refuted fix netted the two (``|r - f|``), which shrinks the shift whenever ``f < 2r``; this is
+    the untried variant that adds the magnitude instead. Three rows per arm: the shipped shift (the
+    baseline, same numbers as section 8's ``exact`` row), ``d + f`` with the measure rebuilt from that
+    diagonal (what shipping it would do, since the measure's k row scale IS the shift diagonal), and
+    ``d + f`` under the shipped measure (the shift's effect alone). The residual is identical in every
+    row; only the shift, and in the middle row the measure, differ.
+
+    ⚠️ The preconditioner is the shipped frozen inverse in every row -- it was fitted at the shipped
+    diagonal and is not re-fitted at ``d + f``. The ``linear rel`` column says whether each solve still
+    converged under that mismatch.
+    """
+    print(
+        f"  {'arm':<9} {'shift':<16} {'cell':>6} {'f at cell':>11} {'f check':>11} {'J_kk':>12} "
+        f"{'beta d_k':>11} {'J_kk+beta d':>13} {'linear rel':>11} {'max |dk/k|':>12} "
+        f"{'max |d log w|':>14} {'kept alpha':>11} {'|G|/|G0|':>10}",
+        flush=True,
+    )
+    for name, coupled in built.items():
+        engine = engines[name]
+        residual = coupled.residual(state)
+        feedback = _production_feedback(coupled, state)
+        policy = _AddedKShift(engine.shift_policy, feedback)
+        wall = np.asarray(coupled.turbulence.wall_cells)
+        k_wall = np.asarray(coupled.physical_fields(state)[1])[wall]
+        cell = int(np.argmax(np.abs(np.asarray(_blocks(coupled, steps[BASELINE][beta])[-1]))))
+        k_row = coupled.layout.slice_of("k").start + cell
+        unit = jnp.zeros_like(state).at[k_row].set(1.0)
+        j_kk = float(jax.jvp(coupled.residual, (state,), (unit,))[1][k_row])
+        # The single-cell check that the ones-vector difference is the diagonal: one column each.
+        j_frozen = float(
+            jax.jvp(frozen_production_viscosity(coupled).residual, (state,), (unit,))[1][k_row]
+        )
+        k_feedback = np.asarray(feedback[coupled.layout.slice_of("k")])
+        print(
+            f"  [{name}] f over the k rows: median {np.median(k_feedback):.3e}, max "
+            f"{k_feedback.max():.3e}, min {k_feedback.min():.3e}; "
+            f"{int((k_feedback > 0).sum())} of {k_feedback.size} positive",
+            flush=True,
+        )
+        arms = (
+            ("shipped", engine.shift_policy, measures[name]),
+            ("d+f, own measure", policy, coupled_scaled_norm(coupled, policy, state)),
+            ("d+f, old measure", policy, measures[name]),
+        )
+        for label, shift_policy, measure in arms:
+            reference = float(measure(residual))
+            term = shift_policy.shift_term(state)
+            shift = term.shift(jnp.asarray(beta))
+            preconditioner = term.make_preconditioner(jnp.asarray(beta))
+
+            def operator(tangent, coupled=coupled, shift=shift):
+                return jax.jvp(coupled.residual, (state,), (tangent,))[1] + shift * tangent
+
+            delta, _ = solve_linear(
+                operator,
+                -residual,
+                solver=in_progress_measure(engine.linear_solver(), measure),
+                preconditioner=preconditioner,
+                throw=False,
+            )
+            linear = float(jnp.linalg.norm(operator(delta) + residual) / jnp.linalg.norm(residual))
+
+            def transient(p, coupled=coupled, shift=shift):
+                return coupled.residual(p) + shift * (p - state)
+
+            limit = positive_k_limit(coupled, floor=compare.K_POSITIVITY_FLOOR)
+            searched = backtracking_line_search(
+                transient,
+                state,
+                delta,
+                jnp.asarray(reference),
+                engine.line_search,
+                norm=measure,
+                max_alpha=1.0 if limit is None else limit(state, delta),
+            )
+            d_k = np.asarray(_blocks(coupled, delta)[-2])[wall]
+            d_omega = np.asarray(_blocks(coupled, delta)[-1])[wall]
+            shifted = float(shift[k_row])
+            print(
+                f"  {name:<9} {label:<16} {cell:>6} {float(feedback[k_row]):>11.4e} "
+                f"{j_frozen - j_kk:>11.4e} {j_kk:>12.4e} {shifted:>11.4e} {j_kk + shifted:>13.4e} "
+                f"{linear:>11.3e} {np.abs(d_k / k_wall).max():>12.4e} {np.abs(d_omega).max():>14.4e} "
                 f"{float(searched.alpha):>11.4g} "
                 f"{float(searched.residual_norm) / reference:>10.6f}",
                 flush=True,
@@ -833,8 +978,10 @@ def _k_row_anatomy(built, engines, state, steps, beta) -> None:
         residual_k = np.asarray(_blocks(coupled, coupled.residual(state))[-2])
         # The engine is the one already built for this arm -- rebuilding it here would re-pay the
         # coloured probe, which is the single largest allocation this case makes.
-        shift = beta * np.asarray(
-            _blocks(coupled, engines[name].shift_policy.shift_term(state).diagonal)[-2]
+        shift = np.asarray(
+            _blocks(coupled, engines[name].shift_policy.shift_term(state).shift(jnp.asarray(beta)))[
+                -2
+            ]
         )
         delta_k = np.asarray(_blocks(coupled, steps[name][beta])[-2])
         for cell in hotspots:
@@ -1079,6 +1226,7 @@ def march_from_seed() -> None:
                 ),
                 positivity_floor=compare.K_POSITIVITY_FLOOR,
                 positivity_projection=compare.POSITIVITY_PROJECTION,
+                shift=SHIFT,
                 inner_observer=on_inner,
                 max_steps=MARCH_STEPS,
                 convergence=Convergence(rtol=compare.RTOL, atol=compare.ATOL),
