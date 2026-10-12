@@ -477,18 +477,25 @@ Many entries below are dated history written against the old API. Read them thro
       Byte-identical wherever `jacobian_production_viscosity=False`.
     - **`_BlockSession` follows a re-pointing (2026-10-12, #386; it was a no-op until then).** It is a
       `solve.RebuildingSession`: `rebind` stores the companion, and the march's next call to the session's
-      `refresh_preconditioner` builds a step on it at the march's state and grafts its shift policy,
-      adjoint factory and operator stand-in into the held step (`ShiftedStep.preconditioned_as`), keeping
-      the step control's shift strength. Unrebound, the hook returns `None` (and the default-family test
-      pins that). A segment `refresh` keeps carrying the flow block — a station change is a full build,
-      because the flow block is what depends on the viscosity. Before this, `solve_reynolds_ramp` left a
+      `refresh_preconditioner` derives a step on it at the march's state from the held one (`_repointed`:
+      the held policy refreshed with `repointed=True` — k/omega hierarchies on their reused coarsening, the
+      flow block's anchor hierarchy applied to the station's momentum by `flow.BlockPreconditioner.on`)
+      and grafts its shift policy, adjoint factory and operator stand-in into the held step
+      (`ShiftedStep.preconditioned_as`), keeping the step control's shift strength. Unrebound, the hook
+      returns `None` (and the default-family test pins that). A segment `refresh` keeps carrying the flow
+      block with its build-state assembler, as before. Before this, `solve_reynolds_ramp` left a
       block spec to the solve, which built it on the TARGET, so every station ran the target's
       preconditioner and shift. **Measured on the re20000 law-of-the-wall channel ramp (2026-10-12, table
       in `validation/turbulent_channel/README.md`):** before, the march diverged at station 5 of 16;
       after, stations 0-10 take full steps at 4-17 restart cycles and the march diverges on arriving at
-      the target with the shift at its floor (0.02). ⚠️ **Each station change recompiles the march step**
-      (~40 s against ~7 s for a step that rebuilds nothing): the rebuilt scalar preconditioners are new
-      static objects. ⚠️ **The materialized family is NOT station-following either, in the opposite
+      the target with the shift at its floor (0.02). ⚠️ **That "after" arm was the first version, which
+      rebuilt each station from scratch and recompiled the march step at every station** (~40 s against
+      ~7 s per step): the rebuilt preconditioners were new static objects. The station step now keeps the
+      held step's structure and is a cache hit (`test_a_re_pointed_block_session_step_is_a_compilation_cache_hit`),
+      which needed the scalar preconditioners to become data (the reversed #105 note in
+      `solve-globalization.md`). ⚠️ **NOT re-measured since**, and the change is numerical too (the flow
+      block is no longer re-aggregated per station), so the 4-17 cycles above describe the first version.
+      ⚠️ **The materialized family is NOT station-following either, in the opposite
       direction**: `BetaTrackingRefresh` re-fits the inverse per station but with the step's anchor-built
       `shift_policy.base`, and the step's shift (hence the row-scaled measure's row scales) is never
       rebuilt on a re-pointing — probed on the test cavity (both blocks scaled, anchor 100) the held

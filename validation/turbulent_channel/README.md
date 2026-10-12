@@ -107,9 +107,14 @@ without which the arm raised before step 1). Restart cycles per station, alpha b
   arriving** at the target with the shift at the control's floor (0.02): `|R|` 9.1e-3 at step 14, then
   5.2e-2, 0.17, 32, and 1e11 by step 32; stopped at step 33. So following the stations moves the failure
   from mid-ramp to the target station; it does not make the ramp converge on this case.
-- **Each station costs ~40 s against ~7 s for a step that rebuilds nothing** (steps after arrival): a
-  station change builds new scalar-preconditioner objects, which ride in static fields compared by
-  identity, so the march step recompiles at every station.
+- **In that "after" arm each station cost ~40 s against ~7 s for a step that rebuilds nothing** (steps
+  after arrival): a station change built new scalar-preconditioner objects, which rode in static fields
+  compared by identity, so the march step recompiled at every station. **Since fixed, and NOT
+  re-measured:** a station step is now derived from the one the march holds (the scalar preconditioners
+  are data, the flow block keeps its anchor hierarchy and is applied to the station's momentum), and a
+  unit test pins that a station change is a compilation-cache hit. That also changes the numerics — the
+  flow block is no longer re-aggregated per station — so the "after" cycles above describe the previous
+  version.
 Every converged coupled arm reaches the segregated root to the printed digits (Re_tau 537.5, kappa
 0.340, force 2.889499e-03). What this shows:
 
