@@ -19,22 +19,18 @@ from __future__ import annotations
 import abc
 import time
 from collections.abc import Callable
-from typing import Protocol
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..solve import FieldLayout, LinearSolveRegime, NewtonStrategy, RefreshTiming, shift_of
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .field_split import FieldGroups, FieldSplitPreconditioner
 from .jacobian_probe import JacobianProbe
 from .materialized_spec import FieldSplit, MaterializedJacobian
-from .refresh_timing import RefreshTiming
-from .shifted_step import LinearSolveRegime
-from .state import FieldLayout
-from .strategy import NewtonStrategy, shift_of
 
 __all__ = [
     "BUILD_BETA",
@@ -43,7 +39,6 @@ __all__ = [
     "BetaTrackingRefresh",
     "MaterializedProblem",
     "MaterializedSession",
-    "PreconditionerSession",
     "batched_jacobian_matvec",
     "frozen_shift_diagonal",
     "jacobian_matvec",
@@ -166,45 +161,12 @@ def _is_traced(pytree: object) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
 
 
-class PreconditionerSession(Protocol):
-    """One preconditioner, kept current across every step it serves.
-
-    A session is what a march holds on to between its steps: the frozen inverse, the colouring probe it was
-    materialized with, and the per-step refresh hook. Those must outlive a single Newton step -- a
-    continuation builds a step per rung, a refresh builds one per segment -- and must be the *same
-    objects* each time, because the inverse and the hooks ride in static fields of the step and a new
-    object recompiles the whole solve.
-
-    Attributes
-    ----------
-    refresh_preconditioner : callable or None
-        ``(step, state) -> None``, called by the march before every step to re-fit the inverse at that
-        step's shift; ``None`` for a family with nothing to re-fit.
-    """
-
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
-
-    def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        """The Newton step at ``state``, configured by the march keywords."""
-        ...
-
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
-    ) -> NewtonStrategy:
-        """Re-freeze at the developed ``state``; ``previous`` is the step it replaces."""
-        ...
-
-    def rebind(self, assembler: object) -> None:
-        """Point the session at another companion of the same case, such as the next continuation rung."""
-        ...
-
-
 class BetaTrackingRefresh:
     """The ``refresh_preconditioner`` hook that re-fits a monolithic inverse as the shift strength moves.
 
     Called as ``refresh(active_step, state)`` before every step, it reads ``β`` from the step's
     :class:`~aquaflux.solve.ConstantRelaxation` schedule and re-factors the step's
-    :class:`~aquaflux.solve.MonolithicFactorShiftPolicy` preconditioner in place at
+    :class:`~aquaflux.precondition.MonolithicFactorShiftPolicy` preconditioner in place at
     ``J(state) + β·d(state)`` on its first call and after each :meth:`rebind`. A multigrid
     re-materialize is too expensive to pay every step, so between those the rebuild is left to the
     dual-time loop's cost trigger, through :meth:`refresh_at`.
@@ -416,7 +378,7 @@ class MaterializedProblem(abc.ABC):
         """How the state's fields are cut into a leading and a trailing group, or ``None``.
 
         ``None`` means there is nothing to split (a single group of fields), and a
-        :class:`~aquaflux.solve.FieldSplit` inverse is refused for the problem.
+        :class:`~aquaflux.precondition.FieldSplit` inverse is refused for the problem.
         """
 
     @abc.abstractmethod

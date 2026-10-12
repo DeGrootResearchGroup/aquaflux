@@ -2,7 +2,7 @@
 
 The traced multigrid builders refuse the coupled Jacobian's trailing slice outright: they form
 ``D^-1`` twice -- once for the Jacobi-class smoother, once for the prolongation-smoothing damping -- so
-``aquaflux.solve.multigrid`` rejects any operator with a non-positive diagonal rather than bake ``1/0``
+``aquaflux.precondition.multigrid`` rejects any operator with a non-positive diagonal rather than bake ``1/0``
 into a frozen preconditioner or silently invert the sign of a correction. The slice violates that (a
 recorded minimum diagonal of −2.1e+06 from the live source-term linearizations), which is why the native
 path is built on each field's **transport operator** instead -- a 13x-sparser, source-clamped, per-field
@@ -43,11 +43,11 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy,)
-from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
+from aquaflux.precondition import FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy
+from aquaflux.precondition.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
-from aquaflux.solve.materialized_session import (frozen_shift_diagonal,)
+from aquaflux.precondition.materialized_session import (frozen_shift_diagonal,)
 from field_split_probe import FLOOR, STATES, load_state, materialize  # noqa: E402
 
 #: Below this the 2x2 is called singular. The blocks are compared on their own scale (the determinant

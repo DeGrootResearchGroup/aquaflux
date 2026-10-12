@@ -55,10 +55,7 @@ from aquaflux.flow.block_preconditioner import (  # noqa: E402
     BlockPreconditioner,
     ConvectionTwoLevel,
 )
-from aquaflux.solve import (  # noqa: E402
-    FieldSplitPreconditioner,
-    field_split_inverse,
-)
+from aquaflux.precondition import FieldSplitPreconditioner, field_split_inverse  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 
 compare = fsp.compare

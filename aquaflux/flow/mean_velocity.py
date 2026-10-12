@@ -41,7 +41,7 @@ error.
 multiplier, not a function of ``w``, so -- unlike a nested gradient sub-solve -- it cannot be absorbed
 inside the residual; the border is eliminated one layer down, in the **preconditioner**. Given a flow-
 block preconditioner ``M ~ J^{-1}`` (the block-SIMPLE algebraic multigrid, AMG),
-:func:`~aquaflux.solve.bordered_preconditioner` wraps it into a preconditioner for the
+:func:`~aquaflux.precondition.bordered_preconditioner` wraps it into a preconditioner for the
 ``(dim+1) n_cells + 1`` augmented system by Schur-eliminating the scalar ``beta``:
 
     y   = M r_flow
@@ -72,12 +72,8 @@ from typing import TYPE_CHECKING
 import equinox as eqx
 import jax.numpy as jnp
 
-from aquaflux.solve import (
-    DEFAULT_ROOT_SOLVE,
-    DampedNewtonStep,
-    RootSolveSettings,
-    bordered_preconditioner,
-)
+from aquaflux.precondition import bordered_preconditioner
+from aquaflux.solve import DEFAULT_ROOT_SOLVE, DampedNewtonStep, RootSolveSettings
 
 from .bordered import BorderedFlowResidual
 from .drive import FlowSolve, mass_flow_drive
@@ -133,9 +129,9 @@ def bulk_velocity_flow_solve(
     preconditioner : callable or None
         Factory ``w -> (matvec ~ J^{-1})`` for the **un-augmented flow block** (e.g. a frozen
         :meth:`aquaflux.flow.BlockPreconditioner.factory`, built off-jit from a reference). When given,
-        it is wrapped by :func:`~aquaflux.solve.bordered_preconditioner` into a constraint preconditioner for the
-        augmented Krylov solve -- the mesh-independent path for a large iterative solve. ``None`` solves
-        unpreconditioned (a direct or small solve needs nothing).
+        it is wrapped by :func:`~aquaflux.precondition.bordered_preconditioner` into a constraint
+        preconditioner for the augmented Krylov solve -- the mesh-independent path for a large iterative
+        solve. ``None`` solves unpreconditioned (a direct or small solve needs nothing).
 
     Returns
     -------

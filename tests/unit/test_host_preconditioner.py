@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import (
+from aquaflux.precondition import (
     FieldSplitPreconditioner,
     FrozenInverse,
     HostPreconditioner,
@@ -21,7 +21,7 @@ from aquaflux.solve import (
     RefactorableInverse,
     ReleasableInverse,
 )
-from aquaflux.solve.block_preconditioner import (
+from aquaflux.precondition.block_preconditioner import (
     MaterializedBlockPreconditioner,
 )
 
@@ -107,8 +107,8 @@ def test_the_real_factor_types_satisfy_the_declared_contract() -> None:
     ``field_split_inverse``, which would build real hierarchies. What is under test is the
     split's own contract, and that does not depend on what inverts its blocks.
     """
-    from aquaflux.solve import JacobiSmoothed
-    from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
+    from aquaflux.precondition import JacobiSmoothed
+    from aquaflux.precondition.field_split import FieldGroups, FieldSplitInverse
 
     n = 12
     operator = (sp.random(n, n, density=0.4, random_state=0, format="csr") + sp.eye(n) * 5).tocsr()
@@ -168,9 +168,9 @@ def test_each_inverse_declares_exactly_the_capabilities_it_has() -> None:
     a capability under another name answered "no" silently. Checked in both directions, so an inverse
     claiming a capability it lacks fails as surely as one that stopped declaring a capability it has.
     """
-    from aquaflux.solve import AirReduction, JacobiSmoothed
-    from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
-    from aquaflux.solve.traced_cycle import OffersTracedCycle
+    from aquaflux.precondition import AirReduction, JacobiSmoothed
+    from aquaflux.precondition.field_split import FieldGroups, FieldSplitInverse
+    from aquaflux.precondition.traced_cycle import OffersTracedCycle
 
     n_cells = 40
     chain = sp.diags(

@@ -70,16 +70,10 @@ from aquaflux.schemes import (  # noqa: E402
     SkewCorrectedGradient,
     SweptGradientSolve,
 )
-from aquaflux.solve import (
-    LinearSolveSettings,
-    Convergence,
-    DualTimeLoop,
-    JacobiSmoothed,
-    MarchLogger,
-    SimpleSmoothed,
-)
+from aquaflux.solve import LinearSolveSettings, Convergence, DualTimeLoop, MarchLogger
+from aquaflux.precondition import JacobiSmoothed, SimpleSmoothed
 from aquaflux.turbulence import coupled_jacobian_probe, coupled_fields, open_session, solve_reynolds_continuation
-from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian
+from aquaflux.precondition import FieldSplit, JacobianProbeSpec, MaterializedJacobian
 
 #: Both arms probe at the same reach. Raising it for one arm alone would compare two preconditioners.
 #:

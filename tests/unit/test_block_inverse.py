@@ -8,7 +8,7 @@ import inspect
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import (
+from aquaflux.precondition import (
     AirReduction,
     BlockInverse,
     HierarchyBlockInverse,
@@ -18,7 +18,7 @@ from aquaflux.solve import (
     SimpleSmoothedInverse,
     build_air_hierarchy,
 )
-from aquaflux.solve.field_split import AirReductionInverse
+from aquaflux.precondition.field_split import AirReductionInverse
 
 
 def _keywords(function, *, drop: set[str]) -> set[str]:

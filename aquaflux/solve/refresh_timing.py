@@ -6,14 +6,13 @@ went inside it are load-bearing facts, not decoration. Reported as one aggregate
 a refresh that is dominated by the graph-coloured Jacobian probe and one dominated by the multigrid setup
 cost the same on the clock and call for opposite fixes.
 
-:class:`RefreshTiming` is the record an observer receives, and :class:`PhaseTimer` is how a refresh
-accumulates it without threading start times through its own body.
+:class:`RefreshTiming` is the record an observer receives; the preconditioner that refreshes fills it
+in.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import time
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,35 +40,3 @@ class RefreshTiming:
     def unattributed(self) -> float:
         """Wall time not covered by any phase — nonzero means the breakdown is missing something."""
         return self.seconds - sum(seconds for _, seconds in self.phases)
-
-
-class PhaseTimer:
-    """Accumulate ``(name, seconds)`` for the successive parts of one refresh.
-
-    Each :meth:`lap` closes the part that started when the timer was created or the previous ``lap``
-    returned, so a refresh names its phases inline rather than carrying start times around. Phases are
-    consecutive and non-overlapping by construction, which is what makes them add up to the total.
-
-    Examples
-    --------
-    >>> timer = PhaseTimer()
-    >>> timer.lap("probe")          # doctest: +SKIP
-    >>> timer.lap("factor")         # doctest: +SKIP
-    >>> timer.phases()              # doctest: +SKIP
-    (('probe', 12.4), ('factor', 6.1))
-    """
-
-    def __init__(self, clock: object = None) -> None:
-        self._clock = time.perf_counter if clock is None else clock
-        self._phases: list[tuple[str, float]] = []
-        self._mark = self._clock()
-
-    def lap(self, name: str) -> None:
-        """Close the current phase under ``name`` and start the next."""
-        now = self._clock()
-        self._phases.append((str(name), now - self._mark))
-        self._mark = now
-
-    def phases(self) -> tuple[tuple[str, float], ...]:
-        """The phases closed so far, in order."""
-        return tuple(self._phases)

@@ -13,17 +13,14 @@ import jax
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import (
+from aquaflux.precondition import (
     AirReduction,
-    CellFields,
-    FieldLayout,
-    GlobalDofs,
     HierarchyBlockInverse,
     JacobiSmoothedInverse,
     SimpleSmoothedInverse,
-    SubLayout,
 )
-from aquaflux.solve.field_split import FieldGroups, FieldSplitInverse
+from aquaflux.precondition.field_split import FieldGroups, FieldSplitInverse
+from aquaflux.solve import CellFields, FieldLayout, GlobalDofs, SubLayout
 
 
 class ExactInverse:
@@ -409,12 +406,12 @@ def test_field_split_refresh_in_place_no_longer_takes_the_dead_smoother_paramete
     """#287: the split used to declare ``smoother_fill_levels``/``smoother_sweeps`` on its refresh and
     immediately ``del`` them, purely because it shared a base with a monolithic multigrid preconditioner
     (since deleted, whose ``build`` genuinely read them) and the two refresh signatures were forced to agree. Now that
-    the shared base is :class:`~aquaflux.solve.MaterializedJacobianPreconditioner`, which knows nothing
-    about a smoother, the split's refresh does not take them -- passing either is a ``TypeError`` rather
-    than a silent no-op. (Its ``build`` no longer takes them either: each block is fitted by an injected
-    inverse.)
+    the shared base is :class:`~aquaflux.precondition.MaterializedJacobianPreconditioner`, which knows
+    nothing about a smoother, the split's refresh does not take them -- passing either is a ``TypeError``
+    rather than a silent no-op. (Its ``build`` no longer takes them either: each block is fitted by an
+    injected inverse.)
     """
-    from aquaflux.solve.field_split import FieldSplitPreconditioner
+    from aquaflux.precondition.field_split import FieldSplitPreconditioner
 
     n = groups.n_dofs
     operator = np.eye(n) * 2.0 + np.eye(n, k=1) * 0.25

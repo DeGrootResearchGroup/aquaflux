@@ -12,15 +12,15 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.solve import (
+from aquaflux.precondition import (
     AirReduction,
-    DualTimeLoop,
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
     SimpleSmoothed,
 )
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import BlockDiagonal, coupled_step, open_session
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state

@@ -33,13 +33,8 @@ from aquaflux.case import (
     prepare_run,
 )
 from aquaflux.case.run import _checkout_state
-from aquaflux.solve import (
-    DualTimeLoop,
-    FieldSplit,
-    JacobiSmoothed,
-    MaterializedJacobian,
-    SimpleSmoothed,
-)
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import BlockDiagonal, solve_segregated
 
 REPO = Path(__file__).resolve().parents[2]

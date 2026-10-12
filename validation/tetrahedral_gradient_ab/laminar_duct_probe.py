@@ -61,7 +61,8 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import Convergence, DualTimeLoop, MaterializedJacobian, SimpleSmoothed
+from aquaflux.solve import Convergence, DualTimeLoop
+from aquaflux.precondition import MaterializedJacobian, SimpleSmoothed
 from compare import INNER_STEPS, INNER_TOL, POLYMESH, RATIO, RETRY
 from diffusion_operator_probe import (
     CorrectionCapped,

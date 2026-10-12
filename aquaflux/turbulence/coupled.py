@@ -56,6 +56,17 @@ from aquaflux.flow import (
     mass_flow_border,
 )
 from aquaflux.initialization import hybrid_initialize
+from aquaflux.precondition import (
+    FieldGroups,
+    FieldSplit,
+    HostPreconditioner,
+    JacobianProbe,
+    MaterializedJacobian,
+    MaterializedProblem,
+    MaterializedSession,
+    MonolithicFactorShiftPolicy,
+    jacobian_probe_plan,
+)
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
@@ -67,18 +78,10 @@ from aquaflux.solve import (
     ContinuationSource,
     Convergence,
     DualTimeLoop,
-    FieldGroups,
     FieldLayout,
-    FieldSplit,
     Globalization,
-    HostPreconditioner,
-    JacobianProbe,
     LinearSolveRegime,
     LinearSolveSettings,
-    MaterializedJacobian,
-    MaterializedProblem,
-    MaterializedSession,
-    MonolithicFactorShiftPolicy,
     NewtonStrategy,
     PreconditionerSession,
     RefreshPolicy,
@@ -99,7 +102,6 @@ from aquaflux.solve import (
     assembler_residual,
     block_reference_scales,
     explicit_source,
-    jacobian_probe_plan,
     positive_block_limit,
     positive_block_projection,
     refuse_a_transform_the_march_cannot_run_in,
@@ -1647,11 +1649,8 @@ def _coupled_jacobian_plan(
     column_reach: Sequence[int] | None = None,
     active_rows: np.ndarray | None = None,
 ):
-    """The probing plan for ``coupled``: its mesh graph and layout handed to the generic plan.
-
-    The one place the coupled residual's cell graph and field count meet
-    :func:`~aquaflux.solve.jacobian_probe_plan`; the probe and the factorization builders both read it.
-    """
+    """:func:`~aquaflux.precondition.jacobian_probe_plan` on the coupled residual's cell graph and field
+    count, for the tests and study harnesses that materialize its Jacobian."""
     return jacobian_probe_plan(
         coupled.momentum.mesh.face_cells,
         coupled.momentum.mesh.n_cells,
@@ -1724,13 +1723,13 @@ def coupled_jacobian_probe(
         The cell-graph distance the assembled sparsity covers (coupled RANS reaches distance ``3``).
     column_reach : sequence of int, optional
         A shorter reach per **column field**, in the flat layout's order ``[u, ..., p, k, omega]``.
-        See :meth:`~aquaflux.solve.JacobianProbe.build`.
+        See :meth:`~aquaflux.precondition.JacobianProbe.build`.
     gradient_sweeps : int, optional
         Probe a copy of the residual whose corrected-gradient solve is capped at this many Richardson
         sweeps, rather than the residual itself. ``None`` (default) probes the residual as it stands.
     active_rows : np.ndarray, optional
         Exclude field-pair blocks from the materialized pattern; see
-        :meth:`~aquaflux.solve.JacobianProbe.build`.
+        :meth:`~aquaflux.precondition.JacobianProbe.build`.
     production_viscosity_frozen : bool
         Materialize the Jacobian of the **frozen-production** copy
         (:func:`frozen_production_viscosity`) rather than of ``coupled`` itself. Set it whenever the
@@ -2172,7 +2171,7 @@ class _BlockSession:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class _CoupledProblem(MaterializedProblem):
-    """The coupled RANS residual as a :class:`~aquaflux.solve.MaterializedProblem`.
+    """The coupled RANS residual as a :class:`~aquaflux.precondition.MaterializedProblem`.
 
     What a materialized-Jacobian session asks of a residual, answered for ``[flow, k, omega]``: the
     assembler, its mesh graph and layout, the leading ``[u, v, w, p]`` / trailing ``[k, omega]`` cut a
@@ -2287,8 +2286,8 @@ def open_session(
     on_build : callable, optional
         ``step -> step``, applied to every step the session builds, for instrumenting a driver.
     precondition_wrapper : callable, optional
-        ``hook -> hook``, wrapping the per-step :attr:`~PreconditionerSession.refresh_preconditioner` once, so
-        a driver can observe each call. The session's ``rebind`` is unaffected by it.
+        ``hook -> hook``, wrapping the per-step :attr:`~PreconditionerSession.refresh_preconditioner`
+        once, so a driver can observe each call. The session's ``rebind`` is unaffected by it.
     inverse_wrapper : callable, optional
         ``(role, factory) -> factory``, wrapping a field-split block-inverse factory before it is used,
         for a driver that must see the block an inverse is fitted to.
@@ -2391,7 +2390,8 @@ def coupled_step(
     reference_state : jnp.ndarray
         The coupled state the preconditioner and the shift diagonal are frozen at.
     preconditioner : BlockDiagonal or MaterializedJacobian, optional
-        What preconditions the shifted solve. ``None`` is :class:`BlockDiagonal` with every setting unset.
+        What preconditions the shifted solve. ``None`` is :class:`BlockDiagonal` with every setting
+        unset.
     jacobian_production_viscosity : bool
         Differentiate the frozen-production stand-in of the residual in the Krylov operator, and
         materialize the preconditioner from the same stand-in.

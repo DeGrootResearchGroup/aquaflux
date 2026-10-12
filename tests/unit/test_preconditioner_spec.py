@@ -7,7 +7,7 @@ import inspect
 
 import pytest
 from aquaflux.flow import BlockPreconditioner
-from aquaflux.solve import (
+from aquaflux.precondition import (
     FieldSplit,
     JacobianProbeSpec,
     JacobiSmoothed,

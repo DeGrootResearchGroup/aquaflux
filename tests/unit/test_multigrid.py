@@ -19,8 +19,8 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
-from aquaflux.solve.frozen_operator import ConvectionDiffusionStencil, decouple_dof
-from aquaflux.solve.multigrid import (
+from aquaflux.precondition.frozen_operator import ConvectionDiffusionStencil, decouple_dof
+from aquaflux.precondition.multigrid import (
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
@@ -1395,7 +1395,7 @@ def test_a_degenerate_cell_block_is_refused_by_name() -> None:
     truncates the null direction is a plausible alternative and is deliberately NOT the behaviour here;
     if it is ever adopted it needs its own opt-in and its own evidence.
     """
-    from aquaflux.solve.multigrid import _cell_block_inverse
+    from aquaflux.precondition.multigrid import _cell_block_inverse
 
     # Two cells, two fields, field-major. Cell 0 is ordinary; cell 1's block [[1,1],[1,1]] is singular.
     dense = np.zeros((4, 4))
@@ -1435,7 +1435,7 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
     this guard's job is invertibility, not conditioning, and conflating the two is what produced a
     false refusal.
     """
-    from aquaflux.solve.multigrid import _cell_block_inverse
+    from aquaflux.precondition.multigrid import _cell_block_inverse
 
     dense = np.zeros((4, 4))
     dense[0, 0], dense[2, 2] = 1.0, 1.0  # cell 0: an ordinary, well-scaled block

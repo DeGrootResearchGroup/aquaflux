@@ -6,7 +6,7 @@ converge, how to choose between the options, and how to keep one healthy over a 
 
 If you only want the short answer: build
 {class}`~aquaflux.flow.BlockPreconditioner` for a pressure–velocity solve, pass
-{class}`~aquaflux.solve.MaterializedJacobian` as the `preconditioner` of a coupled
+{class}`~aquaflux.precondition.MaterializedJacobian` as the `preconditioner` of a coupled
 flow-plus-turbulence solve, and read the rest of this page when one of them stops converging.
 
 ```{note}
@@ -84,7 +84,7 @@ inside.
 | --- | --- | --- |
 | A scalar transport or diffusion equation | {func}`~aquaflux.turbulence.scalar_transport_preconditioner` | [Scalar transport](#scalar-transport) |
 | Pressure–velocity flow, on its own | {class}`~aquaflux.flow.BlockPreconditioner` | [Pressure–velocity flow](#pressurevelocity-flow) |
-| Coupled flow and turbulence (`u, v, w, p, k, ω`) | {class}`~aquaflux.solve.MaterializedJacobian` with a {class}`~aquaflux.solve.FieldSplit` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
+| Coupled flow and turbulence (`u, v, w, p, k, ω`) | {class}`~aquaflux.precondition.MaterializedJacobian` with a {class}`~aquaflux.precondition.FieldSplit` | [Coupled flow and turbulence](#coupled-flow-and-turbulence) |
 | Your own linear system | {func}`~aquaflux.solve.solve_linear` | [Using one directly](#using-one-directly) |
 
 ## Scalar transport
@@ -278,14 +278,14 @@ The preconditioner is described by a value and handed to the solve, which builds
 with the pseudo-transient march that uses it and keeps it current as the march moves:
 
 ```python
-from aquaflux.solve import (
-    DualTimeLoop,
+from aquaflux.precondition import (
     FieldSplit,
     JacobiSmoothed,
     JacobianProbeSpec,
     MaterializedJacobian,
     SimpleSmoothed,
 )
+from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import solve_coupled
 
 preconditioner = MaterializedJacobian(
@@ -297,10 +297,10 @@ flow, k, omega = solve_coupled(
 )
 ```
 
-A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses share:
+A {class}`~aquaflux.precondition.MaterializedJacobian` settles everything the inverses share:
 
 - `probe` — how far the probing recovers the Jacobian across the cell graph
-  ({class}`~aquaflux.solve.JacobianProbeSpec`). The coupled flow Jacobian is intrinsically
+  ({class}`~aquaflux.precondition.JacobianProbeSpec`). The coupled flow Jacobian is intrinsically
   distance-2, because Rhie–Chow damping couples pressure to the neighbour-of-a-neighbour
   ring, so a reach of 3 is the working value. Shortening it does not merely drop small terms: a
   colouring is collision-free only for the pattern it was built at, so an under-reaching probe
@@ -313,7 +313,7 @@ A {class}`~aquaflux.solve.MaterializedJacobian` settles everything the inverses 
   runs at.
 
 and its `inverse` chooses how the materialized matrix is inverted: a
-{class}`~aquaflux.solve.FieldSplit` for a problem with two groups of fields, such as coupled flow and
+{class}`~aquaflux.precondition.FieldSplit` for a problem with two groups of fields, such as coupled flow and
 turbulence, or one block inverse over the whole state for a problem with one.
 To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with
@@ -381,38 +381,38 @@ configuration values.
 ### Splitting the fields
 
 The flow saddle and the transported turbulence pair are different kinds of operator, and a
-single hierarchy over both has to compromise. A {class}`~aquaflux.solve.FieldSplit`
-inverse instead builds a {class}`~aquaflux.solve.FieldSplitPreconditioner`, wrapping a
-{class}`~aquaflux.solve.FieldSplitInverse`: one inverse for the leading
+single hierarchy over both has to compromise. A {class}`~aquaflux.precondition.FieldSplit`
+inverse instead builds a {class}`~aquaflux.precondition.FieldSplitPreconditioner`, wrapping a
+{class}`~aquaflux.precondition.FieldSplitInverse`: one inverse for the leading
 `[u, v, w, p]` group, another for the trailing `[k, ω]` group, and one retained coupling
 block between them. Each group then gets an inverse suited to it, given as the split's
 `leading` and `trailing` values:
 
 | Factory | Builds | Suited to |
 | --- | --- | --- |
-| {class}`~aquaflux.solve.SimpleSmoothed` | {class}`~aquaflux.solve.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
-| {class}`~aquaflux.solve.JacobiSmoothed` | {class}`~aquaflux.solve.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
-| {class}`~aquaflux.solve.AirReduction` | a reduction-based (lAIR) hierarchy | the trailing transported group |
+| {class}`~aquaflux.precondition.SimpleSmoothed` | {class}`~aquaflux.precondition.SimpleSmoothedInverse` — a multigrid over the saddle whose *level smoother* is a SIMPLE relaxation | the leading flow group |
+| {class}`~aquaflux.precondition.JacobiSmoothed` | {class}`~aquaflux.precondition.JacobiSmoothedInverse` — one hierarchy over the whole group, coarsening cells | either group |
+| {class}`~aquaflux.precondition.AirReduction` | a reduction-based (lAIR) hierarchy | the trailing transported group |
 
 Note the relationship between the first of these and
 {class}`~aquaflux.flow.BlockPreconditioner`, because it is easy to misread. Both are
 SIMPLE-type. But `BlockPreconditioner` is **flat**: one application solves the velocity
 block and the Schur and combines them, with no hierarchy over the saddle at all — the
 multigrid lives *inside* it, on each sub-block.
-{class}`~aquaflux.solve.SimpleSmoothedInverse` is the other arrangement: a genuine hierarchy
+{class}`~aquaflux.precondition.SimpleSmoothedInverse` is the other arrangement: a genuine hierarchy
 over the whole saddle, in which a SIMPLE relaxation is the smoother at each level and the
 coarse grid carries the smooth global pressure mode. That mode is the one any SIMPLE-type
 Schur approximates worst, which is why the arrangement matters.
 
-{func}`~aquaflux.solve.field_split_inverse` builds the split directly if you
-want one outside a continuation. {class}`~aquaflux.solve.FieldGroups` says where the
+{func}`~aquaflux.precondition.field_split_inverse` builds the split directly if you
+want one outside a continuation. {class}`~aquaflux.precondition.FieldGroups` says where the
 partition falls — as a view over the state's own {class}`~aquaflux.solve.FieldLayout`, so
 where you hold an assembled case you can name the split against its blocks
 (`FieldGroups.split_before(coupled.layout, "k")`) instead of counting fields. Given only a
 raw field-major matrix, give the counts:
 
 ```python
-from aquaflux.solve import (
+from aquaflux.precondition import (
     FieldGroups,
     field_split_inverse,
     JacobiSmoothed,
@@ -440,16 +440,16 @@ against any `scipy` sparse matrix.
 
 | Builder | Hierarchy |
 | --- | --- |
-| {func}`~aquaflux.solve.build_smoothed_hierarchy` | Smoothed-aggregation AMG for a symmetric operator, returning a {class}`~aquaflux.solve.SmoothedHierarchy`. |
-| {func}`~aquaflux.solve.build_convection_hierarchy` | Aggregation multigrid for a nonsymmetric convection–diffusion operator. |
-| {func}`~aquaflux.solve.build_air_hierarchy` | Reduction-based lAIR, returning an {class}`~aquaflux.solve.AirHierarchy`. `block_size` runs the coarsening on the cell graph so it works on a multi-field block. |
+| {func}`~aquaflux.precondition.build_smoothed_hierarchy` | Smoothed-aggregation AMG for a symmetric operator, returning a {class}`~aquaflux.precondition.SmoothedHierarchy`. |
+| {func}`~aquaflux.precondition.build_convection_hierarchy` | Aggregation multigrid for a nonsymmetric convection–diffusion operator. |
+| {func}`~aquaflux.precondition.build_air_hierarchy` | Reduction-based lAIR, returning an {class}`~aquaflux.precondition.AirHierarchy`. `block_size` runs the coarsening on the cell graph so it works on a multi-field block. |
 
-Each has a matching apply — {func}`~aquaflux.solve.smoothed_multigrid_cycles`,
-{func}`~aquaflux.solve.convection_multigrid_cycles`,
-{func}`~aquaflux.solve.air_multigrid_cycles` — that runs a fixed number of V-cycles, which
+Each has a matching apply — {func}`~aquaflux.precondition.smoothed_multigrid_cycles`,
+{func}`~aquaflux.precondition.convection_multigrid_cycles`,
+{func}`~aquaflux.precondition.air_multigrid_cycles` — that runs a fixed number of V-cycles, which
 is what keeps the result a fixed linear map.
 
-{class}`~aquaflux.solve.ConvectionDiffusionStencil` describes the frozen operator these
+{class}`~aquaflux.precondition.ConvectionDiffusionStencil` describes the frozen operator these
 coarsen — a symmetric diffusive edge coupling, optionally plus first-order-upwind convection
 at a reference flux — and assembles it. It also reports the operator's diagonal without
 assembling it, which is how a scalar equation's pseudo-time shift is built from the same
@@ -480,7 +480,7 @@ past a multiple of its early baseline — the direct symptom of a stale precondi
 gates on the residual as well, because the cycle count also rises as the pseudo-transient
 shift falls, and that rise is not staleness.
 
-A {class}`~aquaflux.solve.MaterializedJacobian` preconditioner keeps itself current
+A {class}`~aquaflux.precondition.MaterializedJacobian` preconditioner keeps itself current
 without a policy. Its session re-preconditions **in place**, so the compiled solve is reused
 rather than retraced: before the first step, after being pointed at a new case with `rebind`,
 and — once a single inner solve costs `refresh_on_cycles` restart cycles — mid-step. Open the session yourself to hear what each rebuild cost, through
@@ -500,11 +500,11 @@ flow, k, omega = solve_coupled(
 
 
 A laminar flow takes the same preconditioner. {func}`~aquaflux.flow.solve_flow_march` accepts a
-{class}`~aquaflux.solve.MaterializedJacobian` as its `preconditioner` (or a session from
+{class}`~aquaflux.precondition.MaterializedJacobian` as its `preconditioner` (or a session from
 {func}`~aquaflux.flow.open_flow_session`). A `(u, p)` state is a single group of fields, so the
-pressure-velocity hierarchy {class}`~aquaflux.solve.SimpleSmoothed` inverts **the whole state** directly
+pressure-velocity hierarchy {class}`~aquaflux.precondition.SimpleSmoothed` inverts **the whole state** directly
 -- traced JAX, and the same inverse a field split uses for its saddle. A
-{class}`~aquaflux.solve.FieldSplit` is refused there, since there is nothing to split;
+{class}`~aquaflux.precondition.FieldSplit` is refused there, since there is nothing to split;
 conversely a bare block inverse is refused for the coupled turbulence solve, which has two groups.
 
 {data}`~aquaflux.solve.NO_REFRESH` is the do-nothing policy, and the default.

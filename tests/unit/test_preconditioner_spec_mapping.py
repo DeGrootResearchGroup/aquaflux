@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from aquaflux.flow import ConvectionAir, ConvectionTwoLevel, VelocityBlock, ViscousMultilevel
 from aquaflux.flow.block_preconditioner import _COMPOSITIONS, SCHUR_SCALINGS
-from aquaflux.solve import (
+from aquaflux.precondition import (
     MATERIALIZED_MAPPING,
     AirReduction,
     BlockInverse,
@@ -26,10 +26,10 @@ from aquaflux.solve import (
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
-    SettingsMapping,
     SimpleSmoothed,
 )
-from aquaflux.solve.multigrid import _PROLONGATION_SMOOTHING
+from aquaflux.precondition.multigrid import _PROLONGATION_SMOOTHING
+from aquaflux.solve import SettingsMapping
 from aquaflux.turbulence import (
     PRECONDITIONER_SPEC_MAPPING,
     BlockDiagonal,
@@ -279,7 +279,7 @@ def test_the_solve_registry_round_trips_a_materialized_spec_without_the_turbulen
     None
 ):
     """A laminar case file loads its spec from ``aquaflux.solve`` alone, and the schema is unchanged."""
-    from aquaflux.solve import (
+    from aquaflux.precondition import (
         FieldSplit,
         JacobiSmoothed,
         MaterializedJacobian,
@@ -300,7 +300,7 @@ def test_the_solve_registry_round_trips_a_materialized_spec_without_the_turbulen
 
 def test_the_solve_registry_does_not_know_the_turbulence_only_kinds() -> None:
     """``BlockDiagonal`` is a coupled-RANS family: naming it in a laminar spec file is an unknown kind."""
-    from aquaflux.solve import materialized_spec_from_mapping
+    from aquaflux.precondition import materialized_spec_from_mapping
 
     with pytest.raises(ValueError, match="BlockDiagonal"):
         materialized_spec_from_mapping({"kind": "BlockDiagonal"})
@@ -311,7 +311,7 @@ def test_the_coupled_registry_extends_the_solve_one_rather_than_restating_it() -
 
 
 def test_a_bare_block_inverse_spec_round_trips_through_the_solve_registry() -> None:
-    from aquaflux.solve import (
+    from aquaflux.precondition import (
         MaterializedJacobian,
         SimpleSmoothed,
         materialized_spec_from_mapping,

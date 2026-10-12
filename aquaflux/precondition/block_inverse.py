@@ -1,6 +1,6 @@
 """Block inverses for a field split, described as values.
 
-A block-triangular field split (:func:`~aquaflux.solve.field_split_inverse`) fits one
+A block-triangular field split (:func:`~aquaflux.precondition.field_split_inverse`) fits one
 inverse to each of its diagonal blocks through a factory ``(block, n_fields) -> inverse``. The classes
 here are those factories written as **frozen value objects**: each names the settings of one inverse
 family, compares by value, and builds the inverse when called with a block. That makes a preconditioner
@@ -25,12 +25,12 @@ from typing import ClassVar, Literal
 
 import scipy.sparse as sp
 
+from ..solve import SettingsValue
 from .field_split import AirReductionInverse, JacobiSmoothedInverse
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import RefactorableInverse
 from .multigrid import build_air_hierarchy
 from .saddle_multigrid import SimpleSmoothedInverse
-from .settings_value import SettingsValue
 
 __all__ = ["AirReduction", "BlockInverse", "JacobiSmoothed", "SimpleSmoothed"]
 
@@ -118,10 +118,10 @@ class BlockInverse(SettingsValue, abc.ABC):
 
 @dataclasses.dataclass(frozen=True)
 class SimpleSmoothed(BlockInverse):
-    """A :class:`~aquaflux.solve.SimpleSmoothedInverse`: a hierarchy over a pressure-velocity saddle.
+    """A :class:`~aquaflux.precondition.SimpleSmoothedInverse`: multigrid over a pressure-velocity saddle.
 
     Each field is the class keyword of the same name (see the class for its meaning and default); the
-    last five are the coarsening settings of :class:`~aquaflux.solve.HierarchyBlockInverse`.
+    last five are the coarsening settings of :class:`~aquaflux.precondition.HierarchyBlockInverse`.
     """
 
     cycles: int | None = None
@@ -157,10 +157,10 @@ class SimpleSmoothed(BlockInverse):
 
 @dataclasses.dataclass(frozen=True)
 class JacobiSmoothed(BlockInverse):
-    """A :class:`~aquaflux.solve.JacobiSmoothedInverse`: one cell-coarsening hierarchy over the group.
+    """A :class:`~aquaflux.precondition.JacobiSmoothedInverse`: one cell-coarsening hierarchy for a group.
 
     Each field is the class keyword of the same name (see the class for its meaning and default); the
-    last four are the coarsening settings of :class:`~aquaflux.solve.HierarchyBlockInverse`.
+    last four are the coarsening settings of :class:`~aquaflux.precondition.HierarchyBlockInverse`.
     """
 
     cycles: int | None = None
@@ -187,12 +187,12 @@ class JacobiSmoothed(BlockInverse):
 
 @dataclasses.dataclass(frozen=True)
 class AirReduction(BlockInverse):
-    """An :class:`~aquaflux.solve.field_split.AirReductionInverse`: a reduction-based (lAIR) hierarchy.
+    """An :class:`~aquaflux.precondition.field_split.AirReductionInverse`: a reduction (lAIR) hierarchy.
 
     ``cycles``, ``f_iters``, ``c_iters`` and ``omega`` are the class's own keywords; the rest are the
-    settings it forwards to :func:`~aquaflux.solve.build_air_hierarchy`. The block size is not a setting:
-    it is the group's field count, supplied when the inverse is built. This family keeps no build
-    record, so :meth:`bound` refuses a ``report``.
+    settings it forwards to :func:`~aquaflux.precondition.build_air_hierarchy`. The block size is not a
+    setting: it is the group's field count, supplied when the inverse is built. This family keeps no
+    build record, so :meth:`bound` refuses a ``report``.
     """
 
     _reports = False

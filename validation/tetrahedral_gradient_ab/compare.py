@@ -71,15 +71,8 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import (
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    JacobiSmoothed,
-    MaterializedJacobian,
-    RetryPolicy,
-    SimpleSmoothed,
-)
+from aquaflux.solve import Convergence, DualTimeLoop, RetryPolicy
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.turbulence import (
     CoupledRANS,
     SSTModel,

@@ -14,19 +14,16 @@ import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import pytest
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+from aquaflux.precondition.materialized_session import VCYCLE_LINEAR_SOLVE
 from aquaflux.solve import (
     DualTimeLoop,
     DualTimeStep,
-    FieldSplit,
-    JacobiSmoothed,
     LinearSolveSettings,
-    MaterializedJacobian,
     PseudoTransientStep,
-    SimpleSmoothed,
     relative_residual_gmres,
     resolve_linear_solve,
 )
-from aquaflux.solve.materialized_session import VCYCLE_LINEAR_SOLVE
 from aquaflux.turbulence import BlockDiagonal, UnpreconditionedScalars, coupled_step, open_session
 from aquaflux.turbulence.coupled import _BLOCK_LINEAR_SOLVE
 from aquaflux.turbulence.march_settings import merged_march_options

@@ -1,10 +1,10 @@
 ---
 paths:
-  - "aquaflux/solve/multigrid.py"
-  - "aquaflux/solve/hierarchy_inverse.py"
+  - "aquaflux/precondition/multigrid.py"
+  - "aquaflux/precondition/hierarchy_inverse.py"
 ---
 
-# Rules — `aquaflux/solve/` the traced multigrid (and the record of the deleted monolithic AMG)
+# Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
 
 > ⚠️ **THE MONOLITHIC PETSc AMG IS DELETED (2026-10-10), with the `petsc` dependency.** There is no
 > `amg_preconditioner.py`, `MonolithicVCyclePreconditioner`, `MonolithicVCycleInverse`, `monolithic_vcycle_inverse`,
@@ -12,7 +12,7 @@ paths:
 > `tests/unit/test_cell_major_operator.py` and `tests/integration/test_coupled_amg.py` went with them, as
 > did the PETSc-only harnesses (`petsc_free_march.py`, `preconditioner_sweep.py`, `zero_pattern_pivots.py`,
 > `inner_iterate_probe.py`). The shared base `MaterializedJacobianPreconditioner` lives in
-> `solve/materialized_preconditioner.py` (documented in `solve-direct-preconditioners.md`). **Everything in
+> `precondition/materialized_preconditioner.py` (documented in `solve-direct-preconditioners.md`). **Everything in
 > the first section below and every PETSc/GAMG arm elsewhere in this file is dated history that cannot be
 > re-run from this tree** — kept because several of its lessons (ordering vs fill, the cost guard's split
 > from the shift escalation, measuring at hard states) are general; recover the code from git history
@@ -1694,7 +1694,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
 - **⚠️ (2026-08-09): making the traced multigrid a FAITHFUL smoothed aggregation, so a
   comparison against PETSc GAMG means something. Uncommitted work sits on `claude/block-aware-aggregation`.**
-  Read this before touching `solve/multigrid.py`'s aggregation path.
+  Read this before touching `precondition/multigrid.py`'s aggregation path.
 
   **⚠️ THE EQUILIBRATION HYPOTHESIS WAS WRONG, AND MEASURING IT IS WHAT SETTLED THE COMPARISON
   (2026-08-09).** The suspicion recorded here was that ours and PETSc's were not built on the same
@@ -1919,8 +1919,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     per-field pair is a weaker object than one block-aware hierarchy — so the `nativeN` arm in
     `turbulence_smoother_sweep.py` went with it, leaving `nodal[N][cM]` (the whole harness was deleted
     2026-09-13, #371).
-  - `JacobiSmoothedInverse` (`solve/field_split.py`, over the shared
-    `solve/hierarchy_inverse.HierarchyBlockInverse` base), both transposable in
+  - `JacobiSmoothedInverse` (`precondition/field_split.py`, over the shared
+    `precondition/hierarchy_inverse.HierarchyBlockInverse` base), both transposable in
     closed form and fixed linear operators, so adjoint-legal. **⚠️ "Neither is wired into production" was
     wrong — settled from source 2026-08-10.** The nodal inverse is reachable through
     `JacobiSmoothedInverse` and is the `BFS3D_TURBULENCE_INVERSE=jacobi` arm; what is true is that it is not a
@@ -2048,7 +2048,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `tests/integration/test_coupled_field_split.py` (no longer PETSc-gated, so it runs in CI).
 
 
-## Binding decisions — `solve/multigrid.py`
+## Binding decisions — `precondition/multigrid.py`
 
 > The rest of `solve.md`'s "Binding decisions" carries the general Newton/adjoint decisions and a
 > short pointer to this section; these are the `multigrid.py`-specific ones, moved here in full.
@@ -2065,10 +2065,10 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `_AirLevel` stores an independent CSR-shaped one (`p_row`/`p_col`/`p_val`, restriction and
   prolongation kept apart) — so there is no single shared method across the two classes, only one per
   class. No behaviour change; each call site is a byte-identical reconstruction of what it built inline.
-- **`solve/multigrid.py` is a pure operator-coarsening library — operator-in, uniformly (binding).**
+- **`precondition/multigrid.py` is a pure operator-coarsening library — operator-in, uniformly (binding).**
   **Every** builder takes an assembled `a: sp.csr_matrix` — `build_smoothed_hierarchy(a)`,
   `build_convection_hierarchy(a)`, `build_air_hierarchy(a)` — and none takes a mesh, edge arrays, or
-  flow quantities. Assembly lives beside it in `aquaflux/solve/frozen_operator.py`
+  flow quantities. Assembly lives beside it in `aquaflux/precondition/frozen_operator.py`
   (numpy + scipy only — no mesh, no field, no `jax`):
   `ConvectionDiffusionStencil(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None).assemble()` —
   symmetric graph Laplacian when `flux is None`, first-order-upwind convection-diffusion otherwise —
@@ -2083,7 +2083,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   **preconditioner's** choice, independent of what the residual discretizes advection with — it is
   chosen to give a diagonally dominant M-matrix an aggregation hierarchy can coarsen. Its parameters
   are a weighted graph (`coefficient`, `flux`), not flow quantities. Keeping it in `solve/` also adds
-  no new dependency edge: every consumer already imports `solve.multigrid`.
+  no new dependency edge: every consumer already imports `precondition.multigrid`.
 - **Aggregate-size diagnostics are an EXPLICIT OUTPUT PARAMETER, not a module-level accumulator
   (binding, #287, 2026-09-12) — `_AGGREGATE_STATS` is DELETED.** `_build_aggregation_hierarchy` (and
   both public wrappers, `build_smoothed_hierarchy` / `build_convection_hierarchy`) take an optional
@@ -2284,7 +2284,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     - **The contraction test carries its own non-vacuity check**, comparing against the *same hierarchy
       with its block inverse stripped out*. Without that a fixture whose within-cell coupling is weak
       would pass for the wrong reason and read as evidence for the block smoother.
-    - **Wired for a march as `AirReductionInverse(...)` / `AirReductionInverse` (`solve/field_split.py`)**, a
+    - **Wired for a march as `AirReductionInverse(...)` / `AirReductionInverse` (`precondition/field_split.py`)**, a
       `trailing_inverse` factory satisfying the split's three-method contract (`n_dofs`, `apply`,
       `refactor_block`). It does **not** subclass `HierarchyBlockInverse`: that base owns a
       `SmoothedHierarchy` and refreshes by re-fitting the aggregation, this owns an `AirHierarchy` and

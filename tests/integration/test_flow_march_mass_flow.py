@@ -15,13 +15,12 @@ import jax.numpy as jnp
 import lineax as lx
 import pytest
 from aquaflux.flow import bulk_velocity_flow_solve, mass_flow_border, solve_flow_march
+from aquaflux.precondition import MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve import (
     Convergence,
     DualTimeLoop,
     Globalization,
-    MaterializedJacobian,
     RootSolveSettings,
-    SimpleSmoothed,
     relative_residual_gmres,
 )
 

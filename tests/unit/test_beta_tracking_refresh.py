@@ -14,14 +14,11 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from aquaflux.solve import (
-    JacobianProbe,
-    RefreshTiming,
-    ShiftTerm,
-)
-from aquaflux.solve.materialized_session import (
+from aquaflux.precondition import JacobianProbe
+from aquaflux.precondition.materialized_session import (
     BetaTrackingRefresh,
 )
+from aquaflux.solve import RefreshTiming, ShiftTerm
 
 
 class _ScalarResidual(eqx.Module):
