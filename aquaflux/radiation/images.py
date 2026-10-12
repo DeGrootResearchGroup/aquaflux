@@ -44,7 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.absorption import Absorption
-from aquaflux.radiation.clipping import decidable_heights, spanning_plane
+from aquaflux.radiation.clipping import decidable_heights, point_heights, spanning_plane
 from aquaflux.radiation.gather import (
     _areal_groups,
     _emitter_direction,
@@ -1051,7 +1051,9 @@ class PlaneExchange(eqx.Module):
     geometric : jnp.ndarray, shape ``(n_facets, n_facets)``
         Row ``i``, column ``j``: the projected solid angle of ``j``'s image seen through the
         mirror from ``i``, over ``pi``, averaged over ``i``'s quadrature points. Zero where either
-        facet is a point source or wholly on or behind the plane.
+        facet is a point source or wholly on or behind the plane, and at every quadrature point on
+        or behind ``j``'s image's plane -- where ``j`` faces away from the mirror and sends it
+        nothing, as the gathers' dark-behind profiles say.
     separation : jnp.ndarray, shape ``(n_facets, n_facets)``
         Distance from ``i``'s centroid to ``j``'s image's centroid: the length of the unfolded
         path, which a uniform medium attenuates over.
@@ -1119,6 +1121,8 @@ def plane_exchange(
         block = _exchange_rows(
             path,
             image_vertices,
+            image_centroid,
+            image_normal,
             jnp.take(jnp.asarray(sample), row_index, axis=0),
             jnp.take(geometry.normal, row_index, axis=0),
             weight,
@@ -1136,17 +1140,25 @@ def plane_exchange(
 
 
 @eqx.filter_jit
-def _exchange_rows(path, image_vertices, sample, normals, weight, *, pair_limit):
+def _exchange_rows(
+    path, image_vertices, image_centroid, image_normal, sample, normals, weight, *, pair_limit
+):
     """The projected solid angle of each image through the aperture, over ``pi``, per row.
 
     Module level and compiled, so the planes of one build -- and of the next -- that share their
     shapes share one program rather than each being traced afresh.
+
+    A receiving point on or behind an image's plane takes nothing from it: the image faces the
+    way its source does after the reflection, so such a point is one the source would light only
+    out of its back, by facing away from the mirror.
 
     Parameters
     ----------
     path : _Path
         The mirror and its aperture, with every facet weighted one.
     image_vertices : jnp.ndarray, shape ``(s, 3, 3)``
+    image_centroid, image_normal : jnp.ndarray, shape ``(s, 3)``
+        Each image's plane.
     sample : jnp.ndarray, shape ``(r, q, 3)``
         Quadrature points on the receiving facets.
     normals : jnp.ndarray, shape ``(r, 3)``
@@ -1163,7 +1175,10 @@ def _exchange_rows(path, image_vertices, sample, normals, weight, *, pair_limit)
         def accumulate(total, sampled):
             weight_k, points_k = sampled
             seen = _seen_through_aperture(path, points_k, chunk_normals, image_vertices, cull=True)
-            return total + weight_k * seen, None
+            in_front = (
+                point_heights(points_k[:, None, :], image_normal[None], image_centroid[None]) > 0.0
+            )
+            return total + weight_k * jnp.where(in_front, seen, 0.0), None
 
         total, _ = jax.lax.scan(
             accumulate,

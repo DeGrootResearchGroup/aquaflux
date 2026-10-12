@@ -516,6 +516,32 @@ def test_the_exchange_s_path_lengths_and_cosines_are_the_unfolded_ones():
     )
 
 
+def test_a_facet_facing_away_from_the_mirror_sends_nothing_through_it():
+    """A plate over a floor mirror and a receiver over the plate, facing down at it. Turned to face
+    the mirror, the plate's image is seen through the mirror; turned away, it sends the mirror
+    nothing, and so nothing through it -- as the gathers have it, whose profiles are dark behind.
+    Seen through the aperture alone, the turned-away plate's image would still be counted."""
+    x, y = np.eye(3)[:2]
+    floor = rectangle_triangles([0.0, 0.0, 0.0], 4.0 * x, 4.0 * y)
+    receiver = rectangle_triangles([0.0, 0.0, 2.0], 0.5 * y, 0.5 * x)
+    rule = triangle_quadrature(6)
+    for edges, carried in (((y, x), True), ((x, y), False)):
+        plate = rectangle_triangles([0.0, 0.0, 1.0], 0.5 * edges[0], 0.5 * edges[1])
+        surfaces = Surfaces.from_triangles(
+            np.concatenate([floor, plate, receiver]),
+            solid_id=[0, 0, 1, 1, 2, 2],
+            solid_names=("mirror", "plate", "receiver"),
+        )
+        assert np.asarray(surfaces.normal)[2, 2] == (-1.0 if carried else 1.0)
+        (mirror,) = planar_mirrors(surfaces, ["mirror"])
+        exchange = plane_exchange(mirror, surfaces, rule.points(surfaces.vertices), rule.weight)
+        through = np.asarray(exchange.geometric)[4:, 2:4]
+        if carried:
+            assert np.all(through.sum(axis=1) > 0.01)
+        else:
+            np.testing.assert_array_equal(through, 0.0)
+
+
 # ---------------------------------------------------------------------------------------
 # Shadows on the reflected paths
 # ---------------------------------------------------------------------------------------

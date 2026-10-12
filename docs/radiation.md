@@ -770,13 +770,20 @@ $\mathbf{p}_{iq}$ with weights $w_q$ summing to one (six points by default,
 `receiver_quadrature`):
 
 $$
-F^\text{geo}_{ij} = \frac{1}{\pi} \sum_{q=1}^{Q} w_q\; \Omega^\perp_j(\mathbf{p}_{iq}, \mathbf{n}_i),
-\qquad F^\text{geo}_{ii} = 0 .
+F^\text{geo}_{ij} = \frac{1}{\pi} \sum_{q=1}^{Q} w_q\; \big[(\mathbf{p}_{iq} - \mathbf{c}_j)\cdot\mathbf{n}_j > 0\big]\;
+\Omega^\perp_j(\mathbf{p}_{iq}, \mathbf{n}_i),
+\qquad F^\text{geo}_{ii} = 0 ,
 $$
 
-Because the sending side is exact, in a **closed** enclosure each quadrature point sees
-surroundings whose fractions sum to one, so every row of $F^\text{geo}$ sums to one exactly at any
-quadrature rule. Where the surface set is open — a duct with its ends left off — the light leaving
+where the bracket is one at a point in front of the sending facet's plane ($\mathbf{c}_j$ its
+centroid, $\mathbf{n}_j$ its outward normal) and zero on or behind it. The projected solid angle
+is taken over the receiver's own front half-space, which does not stop a facet sending out of its
+back; the bracket does, so the transfer sends light only where the gathers do, $g$ being zero
+behind a facet.
+
+Because the sending side is exact, in a **closed** enclosure whose facets all face into it each
+quadrature point sees surroundings whose fractions sum to one, so every row of $F^\text{geo}$ sums
+to one exactly at any quadrature rule. Where the surface set is open — a duct with its ends left off — the light leaving
 through the openings is lost and a row sums to less than one. Either way no row exceeds one, which
 is the property that bounds the system below. Reciprocity, $A_i F_{ij} = A_j F_{ji}$, holds only to the
 accuracy of the receiving quadrature, and

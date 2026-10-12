@@ -434,12 +434,11 @@ def test_a_lamp_shadows_the_light_the_walls_reflect_past_it() -> None:
 
 
 def _lamp_under_a_plate_under_a_ceiling():
-    """A lamp facing up, a black plate over it facing down, and a reflecting ceiling over both.
+    """A lamp facing up, a plate over it facing down, and a reflecting ceiling over both.
 
     The plate hides the lamp from the middle of the ceiling and from the points above it, and leaves
-    the outer ceiling tiles and the points beside it partly or wholly lit. It is black, so that no
-    light it might send back from behind itself reaches the ceiling: what is compared below is the
-    shadow it casts and nothing else.
+    the outer ceiling tiles and the points beside it partly or wholly lit. The ceiling sees only the
+    plate's back, so whatever the plate reflects goes down, never up to it.
     """
     x, y = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
     lamp = rectangle_triangles([0.0, 0.0, 0.0], 0.1 * x, 0.1 * y)
@@ -508,6 +507,37 @@ def test_a_reflector_between_a_lamp_and_a_point_shadows_the_lamp_s_direct_light(
     assert np.sum(direct == 0.0) >= 5 and np.sum(np.isclose(direct, unshadowed, rtol=1e-12)) >= 5
     on_ceiling = solution.irradiance_direct["ceiling"]
     assert np.sum(on_ceiling == 0.0) >= 3 and np.sum(on_ceiling > 0.0) >= 3
+
+
+def test_a_reflector_sends_its_light_out_of_its_front_in_the_solve_as_the_gathers_do() -> None:
+    # The plate now reflects, downward. The ceiling sees only its back, so the light the solve lands
+    # on each ceiling tile must be what is gathered at the tile's centre, where the plate is dark --
+    # one point per facet and one lamp sample, so both evaluate the same projected solid angles.
+    # A transfer that let the plate send from its back landed 0.0115 W/m^2 on a tile where 0.0097
+    # was gathered.
+    lamp, plate, ceiling, _ = _lamp_under_a_plate_under_a_ceiling()
+    reflectors = Surfaces.from_triangles(
+        np.concatenate([plate, ceiling]),
+        solid_id=np.r_[np.zeros(len(plate), int), np.ones(len(ceiling), int)],
+        solid_names=("plate", "ceiling"),
+        diffuse_reflectance=REFLECTANCE,
+    )
+    centres = np.asarray(reflectors.centroid)[len(plate) :]
+    down = np.tile([0.0, 0.0, -1.0], (len(centres), 1))
+    solution = solve_scene(
+        Scene(
+            lamps=Surfaces.from_triangles(lamp, solid_names=("lamp",), emission=LAMP_EXITANCE),
+            reflectors=reflectors,
+            surfaces={"ceiling": SurfaceReceivers(centres, down, reflector="ceiling")},
+            lamp_samples=1,
+            settings=RadiationSettings(receiver_quadrature=1, self_occlusion=RayCastOcclusion()),
+        )
+    )
+    assert np.all(solution.radiosity[: len(plate)] > 0.01)
+    landed = solution.reflector_irradiance[len(plate) :]
+    np.testing.assert_allclose(
+        solution.irradiance("ceiling"), landed, rtol=1e-11, atol=1e-14 * landed.max()
+    )
 
 
 def test_a_point_source_under_a_reflector_is_shadowed_by_it_and_lights_the_rest_as_a_point() -> (
