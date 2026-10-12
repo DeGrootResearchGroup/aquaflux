@@ -162,10 +162,11 @@ def test_a_body_in_the_way_removes_the_transfer_across_it():
     facing = np.concatenate(
         [
             rectangle_triangles([0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
-            rectangle_triangles([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            rectangle_triangles([0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
         ]
     )
     surfaces = Surfaces.from_triangles(facing, emission=1.0, diffuse_reflectance=0.5)
+    np.testing.assert_array_equal(np.asarray(surfaces.normal)[:, 2], [1.0, 1.0, -1.0, -1.0])
     clear = surface_model(surfaces)
     blocked = surface_model(
         surfaces,
