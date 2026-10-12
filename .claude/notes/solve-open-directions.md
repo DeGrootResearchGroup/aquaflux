@@ -314,21 +314,12 @@ sequential global sweep that does not parallelize.
 the first GPU march's step/cycle counts against the CPU march's — counts should match; clocks are the
 result.
 
-## 9. Batch the parameter sweep with `vmap` over the whole Newton step
+## 9. CLOSED ON CPU — batching a parameter sweep with `vmap`; reopen with entry 8
 
-**What.** For calibration and gradient sweeps (`uvreactor_openfoam/gradient_sweep_calibration.py`,
-Reynolds sweeps), `jax.vmap` the compiled Newton step over 4–8 parameter values and march them in
-lock-step, with per-member convergence masks.
-
-**Why it should win.** The ledger already measured per-call overhead amortizing under `vmap`
-(9.08 → 3.22 ms per matvec in 2D, 33 → 17 ms in 3D). On GPU the amortization is far larger because
-each member is too small to fill the device alone. Independent solves at nearby parameters also share
-their compile.
-
-**Caveats.** `RootSolver` reads residual norms back as Python numbers and refuses to run under
-`vmap`/`jit` by design (`steady_state_solving.md`); this needs a batched march driver with traced
-convergence masks — a new driver, not a wrapper. Members converging at different step counts waste
-work on the finished ones; members starting closer together would help (entry 3, a predictor, is closed).
+Bounded on pitzDaily (2026-10-10, `batch_bound_probe.py`) at **at most 1.10x on the Krylov work at 8
+members**, because the preconditioner is ~80 % of each application and does not batch. Recorded in
+`solve-refuted-directions.md` ("Batching a parameter sweep with `vmap`"). It is a GPU question, where
+the preconditioner would be traced and a member too small to fill the device; reopen it there.
 
 ## 10. Nonlinear elimination of the ω stiffness
 
@@ -406,16 +397,19 @@ bfs3d (since measured, #678: see the top of this entry).
 
 ## Smaller housekeeping
 
-- **Compile on the critical path.** 396 s of XLA compilation before step 1 on pitzDaily. Ahead-of-time
-  lower-and-compile the *next* station's program (new viscosity leaf, new measure) in a background
-  thread while the current station marches; the persistent cache already makes repeat runs cheap, so
-  this is for first runs and parameter changes.
-- **First-order seed for the second-order residual.** March the `FirstOrderUpwind` residual to a loose
-  tolerance and hand the state to the second-order residual as a seed (defect-correction seeding). Not
-  recorded as tried; cheap to measure on pitzDaily's opening residual.
-- **Gradient reconstruction `sweeps`.** `schemes.md` is explicit that `sweeps=4` must not be lowered
-  globally; the open question is whether the *tangent* reconstruction inside the JVP needs the same
-  count as the primal (still open: entry 2, which would have made this moot, is closed).
+- **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
+  ledger ("Compiling the next station ahead of time"). The 396 s quoted here first is gone: a cold
+  pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
+- **First-order seed for the second-order residual — CLOSED (2026-10-10), even at best.** See the
+  ledger ("Seeding the second-order march from a first-order solve").
+- **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry
+  was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
+  operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
+  identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
+  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d still ships
+  `CorrectedGreenGauss` and is unmeasured. `jacobian_gradient_sweeps` stays a script-only study arm and
+  is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better
+  for this solver, so the direction is to move cases off swept gradients rather than to tune their sweeps.
 
 ## Where this file does not go
 
