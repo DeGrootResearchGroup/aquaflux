@@ -909,3 +909,16 @@ were cycle-triggered), and the 3D transient. **Follow-up the same day: the stop 
 the shipped schedule under that stop (35 / 294) -- so what lost is `grow` 3 under bfs3d's lineax stop,
 not `grow` 3 on bfs3d. Full tables:
 `solve-globalization-log.md`, "bfs3d: the release, `grow` 3 and the settle-ended ramp".
+
+## The k shift with the production feedback ADDED (`|r| + |f|`, #312) — INERT on the shipped case (2026-10-12)
+
+The coupled k shift is taken from a k residual whose eddy viscosity is frozen, so it omits the
+`-dP_k/dk` a live eddy viscosity puts on the k row's Jacobian diagonal. The netted form `|r - f|` was
+shipped and reverted in August (it halves the shift). The added form `d + f` was built opt-in and
+measured on pitzDaily: it repairs the k row at **`turbulence_damping` 1** (single state: `|G|/|G0|`
+0.216 / 0.593 to 0.102 / 0.103, matching the frozen-production operator), and changes **nothing** on
+the shipped case, which damps the closure rows at 3 — a full march is 16 steps / 111 cycles / `x_r/h`
+8.0686 in both arms, and the probe at damping 3 shows every arm already taking a full step to 0.034.
+Deleted rather than kept as an unused option; branch history has it (`probe-312-additive-shift`,
+dda9be7). Full numbers and configuration: `.claude/rules/turbulence.md`, the #312 entry. Re-open only on
+a case that marches undamped closure rows and shows the near-cancellation in the march.

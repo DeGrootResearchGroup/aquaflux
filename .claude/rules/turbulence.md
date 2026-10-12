@@ -206,7 +206,9 @@ Many entries below are dated history written against the old API. Read them thro
     the variable puts a **negative** term on that row's diagonal. Measured at a wall cell of the
     pitzDaily target rung: `J_kk` between **-1.22e-03 and -1.95e-03** against a shift `beta d_k` of
     **+2.31e-03** at the case's `beta_start = 0.5` — so the effective diagonal keeps only **16-47 %**
-    of the shift, and is a difference of two similar numbers.
+    of the shift, and is a difference of two similar numbers. ⚠️ **That was at `turbulence_damping` 1;
+    the shipped case runs 3, which triples the shift on this row and removes the near-cancellation**
+    (measured 2026-10-12, the #312 entry below) — the numbers in this entry describe an undamped march.
     - **The consequence is an amplifier on everything upstream.** Four gradient reconstructions at that
       one cell differ by **12 %** in `|grad u|` and in `P_k`, and by **30×** in the `k` correction the
       Newton step asks for, purely because a 12 % move in `J_kk` is a 3× move in the near-cancelling
@@ -842,12 +844,35 @@ Many entries below are dated history written against the old API. Read them thro
       blend), and returning the reaction diagonal **unclamped** from `_scalar_stencil` (was `_scalar_operator_pieces`) with the
       preconditioner keeping its own `max(·, 0)` — that pair is a behaviour-preserving separation. What
       is refuted is `abs(·)` on the shift and `live_eddy_viscosity=True` on the coupled path.
-    - **The untried variant is `|r| + |f|`** — add the destabilizing magnitude rather than net it, which
-      at this cell predicts `J_kk + βd` = **+3.65e-03**. Arithmetic only; **unmeasured**, and it must be
-      measured on the probe, not on the tiers.
-    - **`explicit_production_viscosity` already addresses #312** and is the reason the revert costs
-      nothing: at this same cell and iterate its `frozen` rows give `J_kk` **+4.78e-03**, α **1**, and
-      `|G|/|G0|` **0.103**, against the exact operator's stalled 0.975.
+    - **`|r| + |f|` — add the magnitude rather than net it — was MEASURED 2026-10-12 and is INERT on the
+      shipped case. #312 is closed on it.** Built opt-in (an `SSTTurbulence.k_production_feedback`
+      method, exact against the coupled-level difference to 2.6e-16), measured, and **deleted**; it is in
+      branch history (`probe-312-additive-shift`, dda9be7) if a case ever needs it. The decisive fact is
+      that **the shipped pitzDaily case damps the k and omega rows at `turbulence_damping: 3`**, which
+      already keeps the k row's effective diagonal well clear of zero. Every #312 number above was taken
+      at damping 1, because `closure_stall_probe.py` built its engine without the case's shift settings
+      (fixed in the same change; see `validation.md`).
+      - **March A/B, the shipped case as shipped against the same with `d + f` on the k shift** (both
+        2026-10-12, Linux x86_64, 4 cores, jax 0.11.2, `case.yaml` at `8d65a8d`: field split
+        `SimpleSmoothed`/`JacobiSmoothed`, residual stop, `grow` 3, release 1e-4, 12 x 1 momentum-only
+        ramp from anchor 100, damping 3): **16 steps / 111 restart cycles in BOTH arms**, the same
+        per-step minimum inner alpha throughout (0.5 from step 3, 0.25 at step 5), per-step `|R|` to
+        three figures, final `|R|` 1.979e-06 / 1.965e-06, `x_r/h` 8.0686 both. Walls 751 / 666 s differ
+        by the second run's warm compilation cache (step 1 alone: 144 / 80 s), not by the change.
+      - **The probe, at the regenerated target-station iterate (`stall-iterate-skew.npz`, captured and
+        marched WITHOUT damping, so the state is the damping-1 trajectory's), beta 0.5.** At damping 1
+        `d + f` was a real local repair — hotspot cell 10823, `J_kk + beta d` +8.2e-04 / +6.7e-04
+        (owner/skew) to +3.6e-03 / +3.5e-03, `max |dk/k|` at the wall 2168 / 4346 to 32 / 37, kept
+        alpha 1 / 0.5 to 1 / 1, `|G|/|G0|` 0.216 / 0.593 to 0.102 / 0.103 — matching the frozen
+        production operator (0.103). **At the case's own damping 3 there is nothing to repair:** the
+        hotspot moves off the wall-fixed band (cells 504/36/18, `J_kk` already **+5.9e-03**),
+        `max |d log omega|` is 0.11, every arm keeps alpha 1 and reaches `|G|/|G0|` **0.034**; `d + f`
+        moves that to 0.0335 and `max |dk/k|` 6 to 1.2.
+      - **What would re-open it:** a case that runs undamped closure rows (`turbulence_damping` 1) and
+        shows the k-row near-cancellation in the march. The opt-in is then one revert away.
+    - **`explicit_production_viscosity` still addresses the same row at damping 1** (its `frozen` rows
+      gave `J_kk` **+4.78e-03**, alpha **1**, `|G|/|G0|` **0.103** against the exact operator's 0.975 at
+      the August iterate); at damping 3 it is as inert as `d + f` (0.035 against 0.034).
 
   - **⚠️ THE ω SHIFT DIAGONAL INHERITS ω's DYNAMIC RANGE — the root of the "never rebuild the shift"
     rule, and (measured) a ~11–37× step-productivity penalty (2026-07-25, #33).** The coupled shift for
