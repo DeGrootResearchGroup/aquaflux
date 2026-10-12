@@ -4994,7 +4994,9 @@ are bent too (no straight-through factor left anywhere).
   at the far end, no halvings, the two-corner facet's second triangle dropped (red only once the
   geometric test was added: on the rim those triangles hold too little for a 5 % check), never cut,
   sides flipped. **Not handled**: a patch narrower than a facet that misses all three corners; the
-  8-9 % of the route's light still missing at 16 sectors is not decomposed.
+  8-9 % of the route's light still missing at 16 sectors is not decomposed. Fast gate on this tree (`4bfef62`, two
+  workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
+  `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
 - ⚠️ **THE "NO SOUND GEOMETRIC CULL" FINDING USED THE WRONG BOUND.** It summed the largest turn at each
   surface (`90 - asin(n_min/n_max)`: water-quartz 23.9, quartz-air 48.3 deg) to 120 / 216.6 deg, which no
   single path reaches. Through coaxial cylinders a ray keeps its impact parameter `b` and `n u_z`, so its
