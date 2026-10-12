@@ -4995,7 +4995,10 @@ are bent too (no straight-through factor left anywhere).
   geometric test was added: on the rim those triangles hold too little for a 5 % check), never cut,
   sides flipped. **Not handled**: a patch narrower than a facet that misses all three corners. The
   8-9 % of the route's light still missing at 16 sectors is NOT facet size: each arc triangle split four
-  ways reads 0.932 / 0.912 (1,878 s, contended). Not decomposed. Fast gate on this tree (`4bfef62`, two
+  ways reads 0.932 / 0.912 (1,878 s, contended). **It is the 32 x 32 shooting grid**: at 96 x 96 the
+  route reads 0.967 / 0.968 (1,532 s, alone). So `test_no_path_a_fine_grid_finds_is_missed_by_the_shipped_one`
+  (96 x 96 as reference, two-sleeve fixture) passes on a fixture whose paths are all wide in a row; the
+  four-lamp scene has narrower ones. Not fixed yet. Fast gate on this tree (`4bfef62`, two
   workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
   `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
 - **THE GAP ROUTES STAY DESCENDED: SHOOTING MISSES THEIR STEEP PATHS (2026-10-12).** Plan item 3 was to

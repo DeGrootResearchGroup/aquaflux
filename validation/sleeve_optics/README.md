@@ -270,6 +270,7 @@ cylinder (`refraction._shot`); a wall route to a receiver inside another region 
 | 32 x 32, each row's run of existing rays found by its ends | 0.761 | 0.631 | 0.515 | 874 |
 | the same, each straddling facet cut where its paths stop (shipped, 2026-10-12) | **0.924** | **0.910** | 0.799 | 796* |
 | the same, each arc triangle split four ways (`SLEEVE_SLICES=2`, 106,496 facets) | 0.932 | 0.912 | 0.806 | 1,878* |
+| the same as the shipped row, with a 96 x 96 shooting grid (`SLEEVE_SHOT_GRID=96`) | **0.967** | **0.968** | 0.853 | 1,532 |
 
 \* Unit tests shared the 4 cores for part of the run, so the time is an upper bound.
 
@@ -283,9 +284,10 @@ where its paths stop took it to 0.924 / 0.910. What remains, 8-9 % of this route
 0.05 % of G at (55, 25)), is not decomposed. One candidate is a patch narrower than a facet along
 the lamp: the arc's facets are long along it, and a patch that misses all three of a facet's corners
 is still dropped. **Measured, and refuted**: splitting every arc triangle four ways moves the ratio
-only to 0.932 / 0.912, so facet size is not what is left. Not decomposed further; candidates are paths
-the shooting grid's rows miss (the gap routes' finding below shows such a miss along a row), and the
-backward gather's own approximations (infinite sleeves).
+only to 0.932 / 0.912, so facet size is not what is left. **The shooting grid is**: at 96 x 96 the same
+run reads 0.967 / 0.968, for about twice the time (1,532 s, run alone, against 796 s run beside tests).
+So the shipped 32 x 32 grid misses paths, the same kind of miss as the gap routes' finding below:
+paths that exist only in a sliver of a row. The 3 % left at 96 x 96 is not decomposed.
 
 - **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
   (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
