@@ -174,7 +174,7 @@ strategy expects. Three arguments matter, and they are independent of one anothe
 | Value | What it builds |
 | --- | --- |
 | `ViscousMultilevel()` (default) | A multilevel smoothed-aggregation AMG on the **viscous** momentum operator. Mesh-independent, but blind to the cell Péclet number, so it bounds the Reynolds number the solve reaches. |
-| `ConvectionTwoLevel(sweeps=..., omega=...)` | A two-level hierarchy on the frozen `viscous + first-order-upwind` operator, so it stays a good approximation as convection strengthens. Its direct coarse solve does not scale to large meshes. `sweeps` and `omega` set its damped-Jacobi smoother. |
+| `ConvectionTwoLevel(sweeps=..., smoother_weight=...)` | A two-level hierarchy on the frozen `viscous + first-order-upwind` operator, so it stays a good approximation as convection strengthens. Its direct coarse solve does not scale to large meshes. `sweeps` and `smoother_weight` set its damped-Jacobi smoother. |
 | `ConvectionAir()` | The same convective linearization under an lAIR hierarchy — Péclet-robust *and* mesh-independent. |
 
 Each value names the operator and the hierarchy together, because the two do not vary independently: the multilevel hierarchy's Chebyshev smoother needs a symmetric operator, so it cannot coarsen the convection-diffusion one. All three are importable from `aquaflux.flow`.

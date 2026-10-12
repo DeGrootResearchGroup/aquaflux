@@ -510,7 +510,9 @@ def test_damped_jacobi_is_linear_in_rhs() -> None:
     r2 = jnp.asarray(rng.standard_normal(asm.mesh.n_cells))
 
     def solve(r):
-        return damped_jacobi_solve(matvec, diagonal, r, sweeps=12, omega=0.7, pressure_pin=0)
+        return damped_jacobi_solve(
+            matvec, diagonal, r, sweeps=12, smoother_weight=0.7, pressure_pin=0
+        )
 
     lhs = solve(2.5 * r1 - 1.5 * r2)
     rhs = 2.5 * solve(r1) - 1.5 * solve(r2)
@@ -534,7 +536,9 @@ def test_damped_jacobi_converges_toward_solution() -> None:
     rhs = matvec(x_true)  # consistent RHS (pin row carries x_true[0])
 
     def residual_norm(sweeps):
-        x = damped_jacobi_solve(matvec, diagonal, rhs, sweeps=sweeps, omega=0.7, pressure_pin=0)
+        x = damped_jacobi_solve(
+            matvec, diagonal, rhs, sweeps=sweeps, smoother_weight=0.7, pressure_pin=0
+        )
         return float(jnp.linalg.norm(matvec(x) - rhs))
 
     assert residual_norm(40) < 0.3 * residual_norm(5)  # clearly decreasing with sweeps

@@ -101,7 +101,7 @@ def smoothed_cycle(
             residual,
             cycles=1,
             sweeps=sweeps,
-            omega=1.0 if undamped else 0.8,
+            smoother_weight=1.0 if undamped else 0.8,
             spectral_damping=not undamped,
         )
 

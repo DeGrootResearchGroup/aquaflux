@@ -372,7 +372,7 @@ decision keeps it at θ = 0 there.
 
 **The INNER pressure sweep count was never varied before this, and is the best cost lever found.** Four
 inner relaxations sit inside every outer SIMPLE sweep; the spec parser had tokens for outer sweeps,
-levels, coarse size, threshold, aggregation, prolongator and `pressure_omega`, and none for this one — so
+levels, coarse size, threshold, aggregation, prolongator and `pressure_smoother_weight`, and none for this one — so
 the largest single term in the smoother's cost was the one axis held fixed, while the outer count was
 swept 4/8/16. Dropping 4 → 2 is worth **18 % of wall clock** for one extra cycle; 4 → 1 removes the Schur
 matvec entirely (the peeled first sweep is a pure diagonal solve) and costs three cycles, which is too
@@ -455,7 +455,7 @@ term that dominates a sweep here. Neither survives on the flow saddle. Measured 
 | arm | cycles | solve | s/cycle |
 |---|---|---|---|
 | **V-cycle with pre-smoothing** | **8** | **37 s** | 4.63 |
-| W-cycle (`mu = 2`) | 6 | 46 s | 7.67 |
+| W-cycle (`cycle_index = 2`) | 6 | 46 s | 7.67 |
 | no pre-smoothing | 14 | 41 s | 2.93 |
 | W-cycle + no pre-smoothing | 12 | 46 s | 3.83 |
 
@@ -603,7 +603,7 @@ recorded above is a lower bound on how much the partition moved, not an estimate
 (measured 2026-08-13). Do not ship it; the case default stays on the rebuild.** Two full `bfs3d` marches
 differing in **one flag**, `BFS3D_FLOW_FROZEN_COARSENING`; otherwise identical (traced flow block at
 4 outer x 2 inner sweeps, strength 0.25, no singletons, 5 levels, `max_coarse` 500, block splitting,
-`omega` 1.0; traced trailing inverse; field split; `refresh_on_cycles` 3; three Reynolds rungs):
+`smoother_weight` 1.0; traced trailing inverse; field split; `refresh_on_cycles` 3; three Reynolds rungs):
 
 | | steps | wall | **Krylov cycles** | final ‖R‖ | mid-span `x_r/h` |
 |---|---|---|---|---|---|
@@ -1484,7 +1484,7 @@ takes seconds — take it before ranking any cost work.
 ⚠️ **TWO QUALIFICATIONS ON THE 1.45x, added 2026-08-14; the CONCLUSION survives both.**
 - **It is a FOUR-SWEEP number, and the case ships TWO.** Re-measured at the shipped bundle (`omega10`:
   2 sweeps x 2 inner, strength 0.25, no singletons, 5 levels, `max_coarse` 500, block splitting,
-  `omega` 1.0), the traced apply came out 106 ms against the incumbent's 118 ms in one run and 128 ms
+  `smoother_weight` 1.0), the traced apply came out 106 ms against the incumbent's 118 ms in one run and 128 ms
   against 112 ms in a second — so at two sweeps **the two are indistinguishable per application and the
   ordering is not callable.** Do not quote 1.45x for the shipped configuration.
 - **Every number in the table above carries the ~15 % instrument spread** measured under *The noise floor*

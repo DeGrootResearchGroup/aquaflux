@@ -5,8 +5,8 @@ name is how a reader tells what a recorded setting meant. Several words in this 
 two different quantities: ``relaxation`` named both an under-relaxation factor in ``(0, 1]``, which
 damps *less* as it grows, and the pseudo-transient shift strength ``beta``, which damps *more*;
 ``rtol`` named both a residual tolerance and a tolerance on the state increment, with different
-defaults; ``omega`` names both the turbulence model's specific dissipation rate and a smoother's
-damping weight, and one case file sets both a few lines apart. Each such name was introduced by a
+defaults; ``omega`` named both the turbulence model's specific dissipation rate and a smoother's
+damping weight, and one case file set both a few lines apart. Each such name was introduced by a
 change that looked right on its own, because nothing compared it with the other places the word was
 already in use.
 
@@ -90,21 +90,12 @@ VOCABULARY: dict[str, Word] = {
             "turbulence/sources.py": "the specific dissipation rate",
             "turbulence/sst.py": "the specific dissipation rate",
             "turbulence/transport.py": "the specific dissipation rate",
-            "flow/block_preconditioner.py": "a smoother weight (issue #373: rename)",
-            "flow/preconditioner.py": "a smoother weight (issue #373: rename)",
-            "precondition/block_inverse.py": "a smoother weight (issue #373: rename)",
-            "precondition/field_split.py": "a smoother weight (issue #373: rename)",
-            "precondition/multigrid.py": "a smoother weight (issue #373: rename)",
-            "precondition/saddle_multigrid.py": "a smoother weight (issue #373: rename)",
         },
     ),
     "mu": Word(
         meaning="dynamic viscosity",
         modules={
             "flow/rhie_chow.py": "dynamic viscosity",
-            "precondition/block_inverse.py": "the multigrid cycle index (issue #373: rename)",
-            "precondition/multigrid.py": "the multigrid cycle index (issue #373: rename)",
-            "precondition/saddle_multigrid.py": "the multigrid cycle index (issue #373: rename)",
         },
     ),
     "viscosity": Word(
@@ -145,6 +136,8 @@ VOCABULARY: dict[str, Word] = {
 RETIRED: dict[str, str] = {
     "cycles_limit": "RetryPolicy.max_retries: it counted redone steps, not cycles",
     "row_relaxation": "ShiftTerm.row_shift_scale: it scales the shift strength, which is not a relaxation",
+    "pressure_omega": "pressure_smoother_weight: omega is the turbulence model's dissipation rate",
+    "omega_smooth": "prolongation_weight: omega is the turbulence model's dissipation rate",
 }
 
 

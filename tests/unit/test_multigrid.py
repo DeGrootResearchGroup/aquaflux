@@ -386,7 +386,7 @@ def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
     """Chebyshev, damped-Jacobi and FC-Jacobi read the precomputed reciprocal, never re-divide it.
 
     Regression for the frozen-diagonal recomputation: each smoother used to compute
-    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``omega * mask * (1.0 / level.diagonal)``) inside its
+    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``smoother_weight * mask * (1.0 / level.diagonal)``) inside its
     own body on every call, even though the diagonal is a build-time constant. A smoother traced in
     isolation closes over ``level``'s arrays as jaxpr constants, so checking which of ``diagonal`` /
     ``inv_diagonal`` actually appears among them is a direct check of the acceptance criterion ("no
@@ -537,7 +537,7 @@ def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() ->
     # amplification a deep Galerkin coarse smoother would apply at this cell Peclet.
     fine = hierarchy.levels[0]
     error = jnp.asarray(np.random.default_rng(0).standard_normal(n))
-    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, omega=0.8)
+    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, smoother_weight=0.8)
     assert float(jnp.linalg.norm(smoothed)) < float(jnp.linalg.norm(error))
 
 
@@ -1385,10 +1385,10 @@ def test_an_unknown_prolongation_smoothing_is_refused() -> None:
 
 
 def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
-    """``spectral_damping=False`` makes ``omega`` the absolute relaxation, and that is the stronger one.
+    """``spectral_damping=False`` makes ``smoother_weight`` the absolute relaxation, and that is the stronger one.
 
     ``D^-1 A`` has a unit diagonal, so its eigenvalues average one and ``lambda_max >= 1`` always —
-    the spectral default therefore never relaxes by more than ``omega`` and usually by far less. The
+    the spectral default therefore never relaxes by more than ``smoother_weight`` and usually by far less. The
     undamped sweep is what an equivalently-configured PETSc GAMG runs (``richardson`` at its default
     scale of 1), and matching it is what closed the measured gap on the coupled turbulence block, so
     the distinction is pinned rather than left to the two docstrings to agree about.
@@ -1400,7 +1400,7 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
     b = jnp.asarray(np.random.default_rng(0).normal(size=n))
     damped = convection_multigrid_cycles(hierarchy, b, cycles=1, sweeps=4)
     undamped = convection_multigrid_cycles(
-        hierarchy, b, cycles=1, sweeps=4, omega=1.0, spectral_damping=False
+        hierarchy, b, cycles=1, sweeps=4, smoother_weight=1.0, spectral_damping=False
     )
     assert not np.allclose(np.asarray(damped), np.asarray(undamped))
 
@@ -1411,7 +1411,7 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
         b,
         cycles=1,
         sweeps=4,
-        omega=0.8 / float(hierarchy.levels[0].lam_max),
+        smoother_weight=0.8 / float(hierarchy.levels[0].lam_max),
         spectral_damping=False,
     )
     assert np.allclose(np.asarray(damped), np.asarray(restated))

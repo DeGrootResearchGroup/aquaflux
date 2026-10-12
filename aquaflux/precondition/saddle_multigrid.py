@@ -248,7 +248,7 @@ def _simple_pieces(
 
 
 def _simple_correction(
-    pieces: _SimplePieces, residual, pressure_sweeps: int, pressure_omega: float
+    pieces: _SimplePieces, residual, pressure_sweeps: int, pressure_smoother_weight: float
 ):
     """One SIMPLE correction for a level residual: the classical predictor / Schur / correct sequence.
 
@@ -272,13 +272,13 @@ def _simple_correction(
     )
     rhs = pressure_residual - pieces.divergence.apply(predictor)
     # The first sweep is peeled because it would otherwise multiply the Schur complement by a zero
-    # vector: starting from p = 0, the update collapses to omega * S_diag^-1 * rhs. That is one of every
+    # vector: starting from p = 0, the update collapses to pressure_smoother_weight * S_diag^-1 * rhs. That is one of every
     # `pressure_sweeps` applications of the densest operator in the smoother, and it is not folded away
     # -- the sparse product runs at full cost against the zeros. Peeling it is bit-identical.
     if pressure_sweeps <= 0:
         pressure = jnp.zeros_like(rhs)
     else:
-        pressure = pressure_omega * pieces.schur_diagonal_inverse * rhs
+        pressure = pressure_smoother_weight * pieces.schur_diagonal_inverse * rhs
 
     # A LOOP, not a Python `for`, so the remaining sweeps enter the graph ONCE instead of being
     # unrolled into `pressure_sweeps - 1` copies of the densest operator in the smoother. Every sweep
@@ -287,7 +287,9 @@ def _simple_correction(
     # stays linearly transposable -- verified to give the same value AND the same transpose as the
     # unrolled form -- which the adjoint requires.
     def sweep(_, p):
-        return p + pressure_omega * pieces.schur_diagonal_inverse * (rhs - pieces.schur.apply(p))
+        return p + pressure_smoother_weight * pieces.schur_diagonal_inverse * (
+            rhs - pieces.schur.apply(p)
+        )
 
     pressure = jax.lax.fori_loop(0, max(pressure_sweeps - 1, 0), sweep, pressure)
     return jnp.concatenate([predictor - pieces.dg.apply(pressure), pressure])
@@ -305,9 +307,9 @@ class _SmootherSettings(NamedTuple):
     cycles: int
     sweeps: int
     pressure_sweeps: int
-    pressure_omega: float
-    omega: float
-    mu: int
+    pressure_smoother_weight: float
+    smoother_weight: float
+    cycle_index: int
     pre_smooth: bool
 
 
@@ -368,9 +370,9 @@ def _simple_smoothed_cycle(
                 piece,
                 rhs - _operator_matvec(level, g),
                 settings.pressure_sweeps,
-                settings.pressure_omega,
+                settings.pressure_smoother_weight,
             )
-            return g + settings.omega * correction
+            return g + settings.smoother_weight * correction
 
         return jax.lax.fori_loop(0, count, outer, guess)
 
@@ -388,13 +390,16 @@ def _simple_smoothed_cycle(
         if settings.sweeps <= 0:
             return jnp.zeros_like(rhs)
         piece = pieces[level.n]
-        peeled = settings.omega * _simple_correction(
-            piece, rhs, settings.pressure_sweeps, settings.pressure_omega
+        peeled = settings.smoother_weight * _simple_correction(
+            piece, rhs, settings.pressure_sweeps, settings.pressure_smoother_weight
         )
         return sweeps_from(level, rhs, peeled, settings.sweeps - 1)
 
     ops = _smoothed_ops(
-        smooth, mu=settings.mu, pre_smooth=settings.pre_smooth, smooth_zero=smooth_zero
+        smooth,
+        cycle_index=settings.cycle_index,
+        pre_smooth=settings.pre_smooth,
+        smooth_zero=smooth_zero,
     )
     return hierarchy.fixed_cycle_solve(residual, settings.cycles, ops)
 
@@ -484,9 +489,9 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         class.
     cycles, sweeps : int
         V-cycles per application, and SIMPLE sweeps per level. Both fixed, so ``b -> x`` stays linear.
-    pressure_sweeps, pressure_omega : int, float
+    pressure_sweeps, pressure_smoother_weight : int, float
         The damped-Jacobi sweeps used for the Schur solve inside one SIMPLE sweep, and their damping.
-    omega : float
+    smoother_weight : float
         Relaxation applied to the whole SIMPLE correction.
     frobenius : bool
         Approximate the velocity block's inverse by the Frobenius-optimal diagonal
@@ -499,7 +504,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         Use the Frobenius-optimal diagonal, rather than the Jacobi one, in the pressure-Schur
         relaxation as well. Default ``True``.
 
-        It is why ``pressure_omega`` defaults to undamped. Measured as a 2x2 at four sweeps: with
+        It is why ``pressure_smoother_weight`` defaults to undamped. Measured as a 2x2 at four sweeps: with
         the Jacobi diagonal an undamped pressure sweep blows up (3.4e-01 against 6.8e-05), while
         with the Frobenius one removing the damping helps (6.8e-05 to 4.2e-05). The hand-set damping
         and the derived per-row relaxation do the same job, so stacking them over-damps.
@@ -540,7 +545,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
 
         The appeal as a smoother is that the splitting error then annihilates constants exactly, so
         it does not fight the coarse grid over the smoothest mode.
-    mu : int
+    cycle_index : int
         How many times each coarse level is visited per visit of its parent: ``1`` is a V-cycle,
         ``2`` a W-cycle. Default ``1``.
 
@@ -584,8 +589,8 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         # the Frobenius one removing the damping HELPS (6.8e-05 -> 4.2e-05). The hand-set 0.7 and the
         # derived per-row relaxation were doing the same job, so stacking them over-damped -- but the
         # constant cannot simply be dropped, it can only be replaced.
-        pressure_omega: float = 1.0,
-        omega: float = 0.7,
+        pressure_smoother_weight: float = 1.0,
+        smoother_weight: float = 0.7,
         frobenius: bool = True,
         schur_frobenius: bool = True,
         aggressive_levels: int = 1,
@@ -602,7 +607,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         # A W-cycle visits each coarse level twice per visit of its parent. It buys convergence with
         # COARSE work, where every other lever here buys it with fine-level relaxation -- and the fine
         # level is ~60% of the smoothing cost, so the two are priced very differently.
-        mu: int = 1,
+        cycle_index: int = 1,
         # Dropping the pre-relaxation also drops the residual matvec that follows it, which at two inner
         # pressure sweeps is the single largest term in a sweep.
         pre_smooth: bool = True,
@@ -630,9 +635,9 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
             cycles=cycles,
             sweeps=sweeps,
             pressure_sweeps=pressure_sweeps,
-            pressure_omega=pressure_omega,
-            omega=omega,
-            mu=mu,
+            pressure_smoother_weight=pressure_smoother_weight,
+            smoother_weight=smoother_weight,
+            cycle_index=cycle_index,
             pre_smooth=pre_smooth,
         )
         super().__init__(block, n_fields, **hierarchy_settings)
@@ -709,8 +714,8 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         # arm run forty sweeps instead of four while every other line of output looked correct.
         self._report(
             f"      smoother: {smoother.sweeps} sweeps x {smoother.pressure_sweeps} inner, "
-            f"omega {smoother.omega}, simplec {self._simplec}, "
-            f"pressure_omega {smoother.pressure_omega}, "
+            f"smoother_weight {smoother.smoother_weight}, simplec {self._simplec}, "
+            f"pressure_smoother_weight {smoother.pressure_smoother_weight}, "
             f"strength {self._build_settings['strength_threshold']}, "
             f"block splitting {self._block_splitting}",
         )

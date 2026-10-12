@@ -167,12 +167,12 @@ def damped_jacobi_solve(
     diagonal: jnp.ndarray,
     rhs: jnp.ndarray,
     sweeps: int,
-    omega: float,
+    smoother_weight: float,
     pressure_pin: int | None = None,
 ) -> jnp.ndarray:
     """A **fixed** number of damped-Jacobi sweeps for ``A x = rhs`` -- a constant linear operator.
 
-    Each sweep is ``x <- x + omega D^{-1} (rhs - A x)``. A fixed sweep count (no convergence check)
+    Each sweep is ``x <- x + smoother_weight D^{-1} (rhs - A x)``. A fixed sweep count (no convergence check)
     makes the map ``rhs -> x`` a fixed linear operator with frozen coefficients, so it can serve as a
     preconditioner under plain non-flexible GMRES (a *variable*, convergence-based inner would instead
     require FGMRES). The composed preconditioner's inner Schur solve is the mesh-independent
@@ -189,7 +189,7 @@ def damped_jacobi_solve(
         Right-hand side, shape ``(n_cells,)``.
     sweeps : int
         Number of Jacobi sweeps (static).
-    omega : float
+    smoother_weight : float
         Damping factor in ``(0, 1]`` (~0.7 for a Laplacian).
     pressure_pin : int, optional
         Pinned cell held at ``x = rhs`` throughout (its row is identity).
@@ -204,7 +204,7 @@ def damped_jacobi_solve(
     if pressure_pin is not None:
         x = x.at[pressure_pin].set(rhs[pressure_pin])
     for _ in range(sweeps):
-        x = x + omega * inv_diagonal * (rhs - matvec(x))
+        x = x + smoother_weight * inv_diagonal * (rhs - matvec(x))
         if pressure_pin is not None:
             x = x.at[pressure_pin].set(rhs[pressure_pin])
     return x
