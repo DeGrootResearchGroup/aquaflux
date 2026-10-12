@@ -2137,11 +2137,12 @@ tuning follow-up noted above.
     - **Anchor depth: 100 is the cheapest start measured on BOTH cases (2026-10-11).** pitzDaily at its
       shipped march (`3 x 12`, `grow` 3, release 1e-4, momentum-only scaling; `PITZ_RAMP_ANCHOR`), anchor
       1 (no ramp) / 3 / 10 / **100** / 300: **246 / 217 / 178 / 111 / 255** restart cycles, all to the same
-      root; 1000 was stopped at 502 cycles by step 38. bfs3d at its shipped `1.5 x 12` (#685), anchor
+      root; 1000 was stopped at 502 cycles by step 38. With the release backoff (2026-10-12) 300 costs 210
+      and 1000 converges at 612; 100 is unchanged at 111. bfs3d at its shipped `1.5 x 12` (#685), anchor
       10 / **100** / 1000: 239 / **193** / 329 all-attempt cycles. Shallower costs redone steps early, at a
-      small shift; deeper gives the cleanest ramp and then pays at the target -- pitzDaily's release
-      re-firing after each failure (`solve-globalization.md`), bfs3d's 64 floor steps with the release
-      off. ⚠️ At fixed stations a deeper anchor is also a larger per-station viscosity jump, landing at
+      small shift; deeper gives the cleanest ramp and then pays at the target -- pitzDaily's releases
+      failing until the residual is small (re-fired every other step until the backoff,
+      `solve-globalization.md`), bfs3d's 64 floor steps with the release off. ⚠️ At fixed stations a deeper anchor is also a larger per-station viscosity jump, landing at
       the floor; deep anchors with stations scaled to hold the jump are unmeasured. No ramp still
       converges on pitzDaily (16 steps), at 2.2x the cycles. Detail in
       `.claude/notes/solve-globalization-log.md` ("Where the ramp starts").

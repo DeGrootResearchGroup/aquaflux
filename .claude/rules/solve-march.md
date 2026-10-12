@@ -665,7 +665,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
       escalation every step** — the observed low-β tail (β pinned at the floor, each step re-escalating). So
       after an escalation `newton_march` seeds the control's carried β with the escalated value via
       `step_control.carry_beta(state, β)` — **one implementation on `ShiftStrengthControl`, over the shared
-      `(beta, memo)` state, so no control can be missing it** (it once was: the deleted single-step
+      `ShiftControlState(beta, memo, release)` state, so no control can be missing it** (it once was: the deleted single-step
       α-targeter had none, and the `hasattr` guard the march used then meant its escalation feedback
       vanished in silence; since #281 the march asks `isinstance(control, ShiftCarryingControl)`). The memo is preserved across the seed, so a ratio-keyed control does not lose its
       reference and misread the next step as a huge reduction. The control then continues its grow/brake dynamics *from* the discovered-safe β, so
@@ -1152,9 +1152,10 @@ or whose blocks are unnamed: `RowScaledNorm` /
     - **`ShiftStrengthControl` is the shared base, and a subclass supplies ONLY `_adapt` (binding).** It
       owns the first-step seed, the hold-across-a-refresh rule, the `[beta_min, beta_max]` clamp, the
       `tree_at` swap of a `ConstantRelaxation` onto a **dynamic** β leaf (the compilation-cache-hit
-      property), and `carry_beta`. The carried state is **`(beta, memo)`** for every control — β is
-      universal and `memo` is whatever the rule remembers (`None` for the memoryless Courant rule, the
-      previous residual for the two ratio rules). **Why it exists:** written three times, the bookkeeping
+      property), and `carry_beta`. The carried state is **`ShiftControlState(beta, memo, release)`** for every
+      control — β is universal, `memo` is whatever the rule remembers (`None` for the memoryless Courant
+      rule, the previous residual for the two ratio rules), and `release` is the base's own memory of a
+      failed release of the shift floor. **Why it exists:** written three times, the bookkeeping
       drifted — `carry_beta` was byte-identical in two controls and *absent* from the third, which
       `newton_march` then probed for with `hasattr`, so that control silently dropped its escalation
       feedback; and the same class reset β at a refresh boundary where the others held it, i.e. the
@@ -1179,7 +1180,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     through the flat-residual development (the residual-only rule's stall) yet the residual-rise term brakes
     the overshoot the α-only rule is blind to. This is the "pair α with a step-productivity signal" lever the
     single-step α-targeter's non-convergence ceiling flagged, applied to the dual-time controls. State is
-    `(β, previous residual)` — the shared `(beta, memo)` carry — across refreshes like
+    `(β, previous residual)` — the `beta` and `memo` of the shared `ShiftControlState` carry — across refreshes like
     `ResidualRatioDualTimeControl`; opt-in via
     `solve_coupled(step_control=…)`. Unit-tested in `test_step_control.py` (grows on α at a flat residual,
     brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio
