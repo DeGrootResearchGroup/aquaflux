@@ -79,19 +79,19 @@ def test_the_damping_reaches_the_policy_of_every_family_and_a_bordered_step() ->
     mesh, coupled = _cavity(4)
     state = _healthy_state(mesh, coupled)
     shift = CoupledShiftSettings(basis=_BASIS, turbulence_damping=2.0)
-    relaxation = jnp.asarray(0.5)
+    shift_strength = jnp.asarray(0.5)
 
     block = coupled_step(
         coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()), shift=shift
     )
-    assert float(block.shift_policy.turbulence_damping.factor(relaxation, None)) == 2.0
+    assert float(block.shift_policy.turbulence_damping.factor(shift_strength, None)) == 2.0
     assert block.shift_policy.shift_basis is _BASIS
 
     session = open_session(
         MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())), coupled
     )
     lu = session.build(state, shift=shift)
-    assert float(lu.shift_policy.base.turbulence_damping.factor(relaxation, None)) == 2.0
+    assert float(lu.shift_policy.base.turbulence_damping.factor(shift_strength, None)) == 2.0
 
     mass_flow_mesh, mass_flow_coupled = _mass_flow_cavity(4)
     mass_flow = coupled_step(
@@ -100,7 +100,9 @@ def test_the_damping_reaches_the_policy_of_every_family_and_a_bordered_step() ->
         preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars()),
         shift=shift,
     )
-    assert float(mass_flow.shift_policy.inner.turbulence_damping.factor(relaxation, None)) == 2.0
+    assert (
+        float(mass_flow.shift_policy.inner.turbulence_damping.factor(shift_strength, None)) == 2.0
+    )
 
 
 def test_a_point_s_shift_value_is_merged_field_by_field_over_the_shared_one() -> None:

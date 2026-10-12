@@ -192,7 +192,7 @@ class MomentumShiftPolicy(eqx.Module):
         )
 
         def make_preconditioner(
-            relaxation: jnp.ndarray,
+            shift_strength: jnp.ndarray,
         ) -> Callable[[jnp.ndarray], jnp.ndarray]:
             # Invert the same shifted diagonal a_P + β·d the shift adds to the Jacobian, so the
             # preconditioner matches the shifted operator. Frozen: the coefficient is detached.
@@ -201,7 +201,7 @@ class MomentumShiftPolicy(eqx.Module):
                     "this shift policy has no block preconditioner: it supplies only the shift "
                     "diagonal, for a step whose inverse is a monolithic factorization."
                 )
-            return block.apply_at(phi, jax.lax.stop_gradient(a_p + relaxation * d))
+            return block.apply_at(phi, jax.lax.stop_gradient(a_p + shift_strength * d))
 
         return ShiftTerm(diagonal, make_preconditioner)
 

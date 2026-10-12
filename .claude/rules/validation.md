@@ -257,7 +257,7 @@ cannot be written. The guard is what catches the next module that does branch.
   shift through `ShiftTerm.shift(beta)`, never `beta * term.diagonal`.** `closure_stall_probe.py` did
   neither until 2026-10-12: it built its engine, capture and march without `turbulence_damping`, and
   pitzDaily damps the k and omega rows at 3, so every k-row number it produced (#312's included)
-  described a march the case does not run. `beta * term.diagonal` drops `row_relaxation`, which is where
+  described a march the case does not run. `beta * term.diagonal` drops `row_shift_scale`, which is where
   that damping lives, so even an engine built with the setting would have been measured without it.
 - **A harness that calls `solve_linear` outside a Newton step must bind the measure itself**
   (`solve.linear.in_progress_measure(engine.linear_solver(), measure)`). Since #370 the step's GMRES is

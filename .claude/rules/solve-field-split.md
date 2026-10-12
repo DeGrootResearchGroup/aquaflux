@@ -563,7 +563,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
 
     **The reaction to a collapsed cap is quantified, and the RETURN is the waste — not the ladder.** A
     capped step trips `retry.on_alpha` and the ladder escalates β (×2 per retry, to
-    `retry.cycles_limit`); β then has to be walked back at `/grow` per step, and that unwind is
+    `retry.max_retries`); β then has to be walked back at `/grow` per step, and that unwind is
     arithmetic: **walk-back steps = log(β_peak / β_resume) / log(grow)** — predicted 2.4 / 6.0 / 10.0
     across the three marches above, observed ~2 / 6 / 10. Replaying `CflResidualDualTimeControl` over
     each logged (α, ‖R‖) sequence reproduces every logged β to four decimals on **all 22 archived

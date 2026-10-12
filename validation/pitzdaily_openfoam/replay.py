@@ -6,7 +6,7 @@ PITZ_INNER_DUMP_ABOVE=1`` keeps the state every step starts from and every inner
 module rebuilds each system exactly. Inner solve ``i`` of step ``k`` linearizes at ``p_i`` (``p_0`` the
 step's start ``phi_n``, ``p_{i+1}`` the dumped iterate of inner ``i``) and solves
 
-    (J(p_i) + s) delta = -(R(p_i) + s (p_i - phi_n)),     s = beta_k * row_relaxation * d(phi_n),
+    (J(p_i) + s) delta = -(R(p_i) + s (p_i - phi_n)),     s = beta_k * row_shift_scale * d(phi_n),
 
 with ``beta_k`` the step's recorded shift and ``d`` the step's own shift policy. That policy is built once,
 at the hybrid start of the anchor station, exactly as the ramp builds it, and the preconditioner is

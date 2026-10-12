@@ -161,13 +161,13 @@ class ShiftTerm(NamedTuple):
     diagonal : jnp.ndarray
         The **base** pseudo-time diagonal ``d(φ)`` over the *full* state vector, shape ``(n_dof,)``,
         with zeros on the degrees of freedom that receive no shift. The step scales it by the
-        relaxation to form the shift ``β d`` added to the Jacobian diagonal.
+        shift strength ``β`` to form the shift ``β d`` added to the Jacobian diagonal.
     make_preconditioner : callable
-        ``relaxation -> M`` giving the frozen preconditioner ``M`` (a matvec approximating the
+        ``shift_strength -> M`` giving the frozen preconditioner ``M`` (a matvec approximating the
         *shifted* operator's inverse) for a given ``β``, or ``None`` for an unpreconditioned solve.
         Passed the same ``β`` the diagonal is scaled by, so ``M`` inverts the same shifted operator.
-    row_relaxation : callable or None
-        ``relaxation -> scale``, a per-row multiplier on ``β`` of the diagonal's shape, so the shift
+    row_shift_scale : callable or None
+        ``shift_strength -> scale``, a per-row multiplier on ``β`` of the diagonal's shape, so the shift
         becomes ``β scale(β) d`` and different blocks may run at different pseudo-timesteps. ``None``
         (the default) is one ``β`` for the whole state.
 
@@ -181,9 +181,9 @@ class ShiftTerm(NamedTuple):
 
     diagonal: jnp.ndarray
     make_preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray] | None]
-    row_relaxation: Callable[[jnp.ndarray], jnp.ndarray] | None = None
+    row_shift_scale: Callable[[jnp.ndarray], jnp.ndarray] | None = None
 
-    def shift(self, relaxation: jnp.ndarray) -> jnp.ndarray:
+    def shift(self, shift_strength: jnp.ndarray) -> jnp.ndarray:
         """The shift ``β scale(β) d`` actually added to the Jacobian diagonal, shape ``(n_dof,)``.
 
         The one place the base diagonal and the per-row multiplier are combined. Every consumer that
@@ -193,12 +193,12 @@ class ShiftTerm(NamedTuple):
 
         Parameters
         ----------
-        relaxation : jnp.ndarray
+        shift_strength : jnp.ndarray
             The shift strength ``β``, a scalar, as the step will actually use it (already clamped).
         """
-        if self.row_relaxation is None:
-            return relaxation * self.diagonal
-        return relaxation * self.row_relaxation(relaxation) * self.diagonal
+        if self.row_shift_scale is None:
+            return shift_strength * self.diagonal
+        return shift_strength * self.row_shift_scale(shift_strength) * self.diagonal
 
 
 class ShiftPolicy(Protocol):
@@ -570,23 +570,25 @@ class PseudoTransientStep(ShiftedStep):
             # The injected schedule sets the base shift strength for this step's first attempt (SER by
             # default: strong damping while ‖R‖ is large, easing to zero at the root). Escalation below
             # only grows it from here on a rejected attempt.
-            base_relaxation = schedule.shift_strength(residual_norm, residual_norm_0)
+            base_shift_strength = schedule.shift_strength(residual_norm, residual_norm_0)
             # How far the residual may rise and still count as progress. A pseudo-time march is not a
             # descent method -- the steady residual is non-monotone along a transient path -- so a
             # strict-descent ladder vetoes correct steps far from the root. The schedule relaxes that
             # far away and restores strict descent in the basin (monotone by default).
             growth_factor = growth_schedule.growth(residual_norm, residual_norm_0)
 
-            def attempt(relaxation: jnp.ndarray) -> _Attempt:
+            def attempt(shift_strength: jnp.ndarray) -> _Attempt:
                 # The shift only reshapes the forward path (like the preconditioner it damps), so it
                 # is detached: it never perturbs the converged state or its adjoint.
-                # `row_relaxation` lets a block run at its own pseudo-timestep, evaluated at the β
+                # `row_shift_scale` lets a block run at its own pseudo-timestep, evaluated at the β
                 # this attempt actually uses rather than the one current when `term` was formed.
-                shift = jax.lax.stop_gradient(term.shift(relaxation))  # β scale(β) d, full state
+                shift = jax.lax.stop_gradient(
+                    term.shift(shift_strength)
+                )  # β scale(β) d, full state
                 # Preconditioner inverts the *same* shifted operator it is damped by. The solve does
                 # not throw: a non-convergent shifted system yields a candidate the acceptance test
                 # rejects (triggering more damping), rather than raising.
-                preconditioner = term.make_preconditioner(relaxation)
+                preconditioner = term.make_preconditioner(shift_strength)
                 delta, cycles = _shifted_solve(
                     residual_fn,
                     phi,
@@ -638,11 +640,18 @@ class PseudoTransientStep(ShiftedStep):
 
             def record(state: tuple, trial: _Attempt, accept: jnp.ndarray) -> tuple:
                 """Fold one judged attempt into an escalation carry (the shared accept bookkeeping)."""
-                relaxation, best, best_norm, attempts, _, best_cycles, best_alpha, best_ratio = (
-                    state
-                )
+                (
+                    shift_strength,
+                    best,
+                    best_norm,
+                    attempts,
+                    _,
+                    best_cycles,
+                    best_alpha,
+                    best_ratio,
+                ) = state
                 return (
-                    relaxation * escalation_factor,
+                    shift_strength * escalation_factor,
                     jnp.where(accept, trial.candidate, best),
                     # The measure travels with the candidate it belongs to. The driver judges this
                     # step by it, and forms no residual of its own.
@@ -657,8 +666,8 @@ class PseudoTransientStep(ShiftedStep):
                 )
 
             def body(state: tuple) -> tuple:
-                relaxation, _, _, attempts, *_ = state
-                trial = attempt(relaxation)
+                shift_strength, _, _, attempts, *_ = state
+                trial = attempt(shift_strength)
                 accept = acceptance.accept(
                     trial.residual_norm, residual_norm, residual_norm_0, attempts
                 )
@@ -668,7 +677,7 @@ class PseudoTransientStep(ShiftedStep):
             # returns `phi` untouched, so its measure is `phi`'s own -- which the caller measured
             # before the step and handed in as `residual_norm`.
             start = (
-                base_relaxation,
+                base_shift_strength,
                 phi,
                 residual_norm,
                 0,
@@ -958,7 +967,7 @@ class DualTimeStep(ShiftedStep):
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.
             reference_residual = residual_fn(reference)
             reference_norm = norm(reference_residual)
-            relaxation = schedule.shift_strength(reference_norm, residual_norm_0)
+            shift_strength = schedule.shift_strength(reference_norm, residual_norm_0)
             # Hand the policy the residual just computed rather than letting it re-derive R(φⁿ): a
             # policy whose shift depends on how far the state is from a root then reads it for free.
             # ⚠️ Omitting it here does NOT fail — `residual` is optional, so such a policy silently
@@ -967,8 +976,8 @@ class DualTimeStep(ShiftedStep):
             term = policy.shift_term(reference, reference_residual)
             # The shift only reshapes the forward path (like the preconditioner it damps), so detach it:
             # it never perturbs the converged state or its adjoint.
-            shift = jax.lax.stop_gradient(term.shift(relaxation))  # β scale(β) d, full state
-            preconditioner = term.make_preconditioner(relaxation)
+            shift = jax.lax.stop_gradient(term.shift(shift_strength))  # β scale(β) d, full state
+            preconditioner = term.make_preconditioner(shift_strength)
             target = inner_tol * reference_norm
 
             def transient_residual(p: jnp.ndarray) -> jnp.ndarray:

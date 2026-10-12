@@ -508,9 +508,9 @@ What to take from it, none of which is specific to that mechanism:
 
   - **`ShiftTerm` has THREE parts, and two of them are closures of `β` for the same reason (2026-09-11).**
     `diagonal` is the base per-row time scale; `make_preconditioner(β)` builds the inverse of the
-    operator that `β` actually shifts; and `row_relaxation(β)` is an optional per-row multiplier on the
+    operator that `β` actually shifts; and `row_shift_scale(β)` is an optional per-row multiplier on the
     strength, so different blocks may run at different pseudo-timesteps. `ShiftTerm.shift(β)` is the one
-    place they are combined — `β · row_relaxation(β) · diagonal` — and **every** consumer goes through
+    place they are combined — `β · row_shift_scale(β) · diagonal` — and **every** consumer goes through
     it, including anything assembling a preconditioner for that same shifted operator, so the operator
     and its inverse cannot disagree about what "the shift" is.
     - **⚠️ A BLOCK FACTOR MUST NOT BE FOLDED INTO `diagonal`, for two independent reasons.** `β` reaches
@@ -523,7 +523,7 @@ What to take from it, none of which is specific to that mechanism:
     - **⚠️ A WRAPPER POLICY THAT REBUILDS A `ShiftTerm` FROM `.diagonal` ALONE DROPS THE REST IN
       SILENCE** — the march runs and the dropped behaviour simply never happens. Two shipped wrappers
       did exactly that (`MonolithicFactorShiftPolicy`, and the mass-flow policy that is now
-      `flow.BorderedShiftPolicy`, which forwards `row_relaxation`), which is how a
+      `flow.BorderedShiftPolicy`, which forwards `row_shift_scale`), which is how a
       per-block damping measured as a no-op. Forward every part, and find the wrappers **structurally**
       (AST), not by grepping the callee's name.
     - **`residual` is `R(φ)` when the caller has it and `None` otherwise**, offered because both steps
@@ -534,7 +534,7 @@ What to take from it, none of which is specific to that mechanism:
       residual-dependent policy inert on every case that runs `inner_steps > 1`. Pinned on both steps.
 
   - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
-  (`shift_term(φ, residual=None) -> ShiftTerm(diagonal, make_preconditioner, row_relaxation)`;
+  (`shift_term(φ, residual=None) -> ShiftTerm(diagonal, make_preconditioner, row_shift_scale)`;
   `ShiftTerm.diagonal` is the full-state base shift, `make_preconditioner(β)` the frozen shifted `M`),
   and the per-attempt accept/reject
   decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,

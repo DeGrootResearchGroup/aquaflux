@@ -405,6 +405,46 @@ lines by the time anything moved out of it, and nothing measured that it was gro
   `solve/`. And if you are writing a second, simpler path for a residual because the robust one "needs
   turbulence", the robust one has the wrong dependency.*
 
+### 3.7 Vocabulary — one word, one meaning (binding)
+
+The observed failure (issue #373): the package grew several names per concept and several concepts
+per name, one reasonable-looking change at a time. `relaxation` named an under-relaxation factor in
+`(0, 1]`, which damps *less* as it grows, and the shift strength `β`, which damps *more*; `rtol` was a
+residual tolerance on one solve and a tolerance on the *state increment* on another, with different
+defaults; `omega` is the SST field and a smoother weight, and one case file sets both a few lines
+apart; `cycles_limit` counted redone steps, not cycles. This is not cosmetic. A settings field is read
+straight from a case file, so **its name is a user-facing key**, and a parameter name is how a reader
+tells what a recorded setting meant. No single change looked wrong, because nothing compared a new
+name with the places the word was already in use.
+
+- **Before naming a parameter, field or method, grep the package for the word.** If it already means
+  something else anywhere, pick another name, even when the new use is local and private. A word that
+  means two things in two modules means two things to the reader of either.
+- **A name must not invert under the reader.** Where two quantities move in opposite directions (a
+  relaxation factor and a shift strength; a floor on the operator and a floor on its preconditioner),
+  they get names that say which. A docstring saying "careful, this one runs the other way" is the
+  defect, not the fix.
+- **A count names its unit.** `max_restarts`, `max_retries`, `sweeps`, `cycles` (V-cycles in
+  `precondition/`, Krylov restart cycles in `solve/` — itself an open clash), never a bare `limit` or a
+  unit borrowed from a neighbouring count.
+- **One concept, one name.** Before naming something, look for the name its siblings already use
+  (`cycles` vs `v_cycles`, `sweeps` vs `f_iters`) and use that one.
+- **Rename a clash in one change, with no alias** (Principle 4), and add the old name to the guard
+  below so it cannot come back.
+
+**The guard is `tests/unit/test_vocabulary.py`, in the fast tier.** `VOCABULARY` lists each overloaded
+word with the meaning it is being converged on and every module that defines a parameter or field of
+that name, with the meaning it has there (clashes awaiting a rename say so and name the issue).
+Defining one of those words in a module not listed fails; so does a listed module that no longer
+defines it, so the table cannot go stale as renames land. `RETIRED` lists names that may not be defined
+again. **Adding a module under a word is the place to ask whether it means the same thing** — if it
+does not, the answer is another name, not a new entry. The scan parses parameters (lambdas included)
+and class-level fields; it does not see a local variable, a dictionary key or prose, so it is a floor,
+not the whole rule. When you add a word with a history of confusion, add it to `VOCABULARY` too.
+- **Deliberately kept, so do not "finish the job":** `relaxation_schedule` and the `RelaxationSchedule`
+  classes (`SwitchedEvolutionRelaxation` is the literature's name); the method that returns `β` is
+  `shift_strength`, and every parameter carrying `β` is `shift_strength` or `beta`.
+
 ### 4. No compatibility shims before release (pre-release policy — remove this principle at 1.0)
 
 The project is **pre-release: there are no external API consumers, so breaking API changes are free.**
@@ -1314,6 +1354,9 @@ The Engineering Principles as a checklist, plus correctness and user-facing clar
 - **Encapsulation (Principle 3):** passing an object's raw arrays instead of the object; taking a
   whole `Mesh` where `face_cells` suffices; duplicate accessors; god-methods; inlined formulas
   that have a home.
+- **Vocabulary (Principle 3.7):** a name that already means something else in the package, a
+  quantity whose name runs the opposite way to a neighbour's, a count that does not name its unit, or
+  a concept spelled differently from its siblings.
 - **Correctness & clarity:** errors/edge cases; anything a user would find hard to understand or
   misuse.
 
@@ -1427,6 +1470,10 @@ After **every code change**, before considering the task complete, review and ac
    - **Layering (Principle 3.6):** did you put code in a physics package whose one-sentence description
      needs no physics word (a driver, a step assembly, a measure, a settings value)? Move it to `solve/`
      now, and check every residual can reach the capability you added.
+   - **Vocabulary (Principle 3.7):** did you name a parameter, field or method with a word the package
+     already uses for something else, or name a concept differently from its siblings? Grep the word;
+     if `tests/unit/test_vocabulary.py` lists it, your new use must mean the listed thing. A rename adds
+     the old name to its `RETIRED` table in the same change.
    - **Maintainability (Principle 0):** if you took a quick-to-ship shortcut as an
      intermediate step, refactor it before marking the task done.
    - **Scope (Principle 3.5):** did you build what was actually agreed? If you narrowed the design,

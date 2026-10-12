@@ -55,7 +55,7 @@ class RetryPolicy:
     measures, and a step length is dimensionless — it needs no per-arm calibration.
 
     A **value object**, not a bundle of loose numbers: the six settings are meaningless apart (a
-    ``beta_factor`` with no threshold escalates nothing; a ``cycles_limit`` bounds a loop that never
+    ``beta_factor`` with no threshold escalates nothing; a ``max_retries`` bounds a loop that never
     runs), they were previously threaded as six parallel arguments through two signatures, and the
     decisions taken from them — :meth:`escalation_reason`, :meth:`has_diverged` — read three or four of
     them each. Keeping the data and those decisions in one place is what stops a caller reproducing the
@@ -116,12 +116,15 @@ class RetryPolicy:
         attempt exits at the collapse rather than iterating on inside a loop that cannot move.
     beta_factor : float
         The factor the shift strength is multiplied by on each escalation (default ``2``).
-    cycles_limit : int
-        The most successive escalations one step may take (default ``2``).
+    max_retries : int
+        The most times one step may be redone (default ``2``). Every redo counts, whether it
+        escalates the shift or repeats the step at the same shift on a freshly refitted
+        preconditioner. Distinct from ``Globalization.max_escalations``, which caps
+        the shift escalations *within* one attempt of a pseudo-transient step.
 
     Notes
     -----
-    Escalation needs a readable shift leaf on the Newton step (a constant relaxation set by a step
+    Escalation needs a readable shift leaf on the Newton step (a ``ConstantRelaxation`` set by a step
     control). Without one it no-ops, and a diverged step falls through to :attr:`solver` as though no
     thresholds were set.
     """
@@ -131,7 +134,7 @@ class RetryPolicy:
     abort_above_cycles: int | None = None
     on_alpha: float | None = None
     beta_factor: float = 2.0
-    cycles_limit: int = 2
+    max_retries: int = 2
 
     #: The settings for which unset means the feature is off (read by the case-file schema).
     unset_means_off: ClassVar[tuple[str, ...]] = ("solver", "abort_above_cycles", "on_alpha")

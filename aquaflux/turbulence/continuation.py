@@ -102,7 +102,7 @@ class ScalarShiftPolicy(eqx.Module):
         precond = self.preconditioner
 
         def make_preconditioner(
-            relaxation: jnp.ndarray,
+            shift_strength: jnp.ndarray,
         ) -> Callable[[jnp.ndarray], jnp.ndarray] | None:
             # The frozen AMG is built for the unshifted operator; the shift only adds positive
             # diagonal, so the same M preconditions the shifted operator (no per-beta rebuild).

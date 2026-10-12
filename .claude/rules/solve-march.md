@@ -431,9 +431,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
       ran an observed pre-march; that solve now has one march, so nothing selects between marches.
   - **The six retry settings are ONE injected object — `RetryPolicy` (`solve/retry.py`), exported from
     `aquaflux.solve` (BUILT).** `solver` / `divergence_cap` / `on_cycles` / `on_alpha` / `beta_factor` /
-    `cycles_limit` used to be six parallel keyword arguments on **both** `newton_march` and
+    `max_retries` used to be six parallel keyword arguments on **both** `newton_march` and
     `solve_coupled`, and they are meaningless apart: a `beta_factor` with no threshold escalates nothing,
-    a `cycles_limit` bounds a loop that never runs. The three decisions taken from them read three or
+    a `max_retries` bounds a loop that never runs. The three decisions taken from them read three or
     four each, so they are **methods on the policy** rather than free functions taking a subset —
     `retry_reason` (named `escalation_reason` until the 2026-08-17 split; before that
     `_escalation_reason`), `has_diverged` (was `_has_diverged`),
@@ -485,10 +485,10 @@ or whose blocks are unnamed: `RowScaledNorm` /
     larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
     shift makes the same frozen preconditioner more diagonally dominant), and it is far cheaper than the
     tight-Krylov divergence retry. So `newton_march(retry=RetryPolicy(on_cycles=N, beta_factor=2.0,
-    cycles_limit=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
+    max_retries=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
     `retry.divergence_cap`) **from the same pre-step state** with β escalated (`×retry.beta_factor`,
     re-applying `refresh_preconditioner` at the new β so a β-tracking refresh re-shifts), up to
-    `retry.cycles_limit` times or until it converges/drops below `N`. It reads β off
+    `retry.max_retries` times or until it converges/drops below `N`. It reads β off
     `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
     readable β and is inert on the default switched-evolution schedule. an unset threshold (the default) is
     **byte-identical** (and a diverged step then falls straight to `retry.solver`, the pre-reorder

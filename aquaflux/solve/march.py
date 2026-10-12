@@ -952,7 +952,7 @@ def newton_march(
         redone_on_fresh = False
         while (
             (reason := retry.retry_reason(outcome, residual_norm, reference)) is not None
-            and retries < retry.cycles_limit
+            and retries < retry.max_retries
             and not converged_at(float(residual_norm))
         ):
             escalating = reason in ESCALATING_REASONS
@@ -961,7 +961,7 @@ def newton_march(
                 # only in starting on the preconditioner re-fitted for it, so a second redo
                 # at the same shift on the same factorization would repeat it exactly -- burning the
                 # escalation budget on identical attempts and, with no other reason ever firing,
-                # spinning to `cycles_limit` every step.
+                # spinning to `max_retries` every step.
                 if redone_on_fresh:
                     break
                 redone_on_fresh = True

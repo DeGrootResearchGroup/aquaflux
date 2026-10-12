@@ -581,7 +581,7 @@ a re-fitted factorization (the dual-time loop's mid-step refresh until 2026-10-1
   diagnosis.
 - **⚠️ The redo is capped at ONE per step** (`redone_on_fresh` in `march.py`). It differs from the first
   attempt only in starting on the refreshed factorization, so a second at the same shift would repeat
-  it exactly — burning the escalation budget on identical attempts and spinning to `cycles_limit` every
+  it exactly — burning the escalation budget on identical attempts and spinning to `max_retries` every
   step.
 - **⚠️ `cycle_budget` DEPENDS on this redo and would otherwise silently accept a bad iterate.** It
   deliberately truncates a grinding solve and returns a partial, non-converged iterate *expecting it to

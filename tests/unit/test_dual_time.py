@@ -44,7 +44,7 @@ class UniformShiftPolicy(eqx.Module):
 
     def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         diagonal = self.strength * jnp.ones_like(phi)
-        return ShiftTerm(diagonal, lambda relaxation: None)
+        return ShiftTerm(diagonal, lambda shift_strength: None)
 
 
 def _residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
@@ -59,7 +59,7 @@ class _RecordingShiftPolicy(eqx.Module):
 
     def shift_term(self, phi: jnp.ndarray, residual=None) -> ShiftTerm:
         self.seen.append((phi, residual))
-        return ShiftTerm(jnp.ones_like(phi), lambda relaxation: None)
+        return ShiftTerm(jnp.ones_like(phi), lambda shift_strength: None)
 
 
 def test_the_dual_time_step_hands_the_policy_the_residual_it_just_computed() -> None:
