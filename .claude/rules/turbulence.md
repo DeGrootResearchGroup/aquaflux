@@ -483,8 +483,17 @@ Many entries below are dated history written against the old API. Read them thro
       pins that). A segment `refresh` keeps carrying the flow block — a station change is a full build,
       because the flow block is what depends on the viscosity. Before this, `solve_reynolds_ramp` left a
       block spec to the solve, which built it on the TARGET, so every station ran the target's
-      preconditioner and shift. The measured before/after is in the ramp entry under "Initialization,
-      diagnostics, Reynolds continuation".
+      preconditioner and shift. **Measured on the re20000 law-of-the-wall channel ramp (2026-10-12, table
+      in `validation/turbulent_channel/README.md`):** before, the march diverged at station 5 of 16;
+      after, stations 0-10 take full steps at 4-17 restart cycles and the march diverges on arriving at
+      the target with the shift at its floor (0.02). ⚠️ **Each station change recompiles the march step**
+      (~40 s against ~7 s for a step that rebuilds nothing): the rebuilt scalar preconditioners are new
+      static objects. ⚠️ **The materialized family is NOT station-following either, in the opposite
+      direction**: `BetaTrackingRefresh` re-fits the inverse per station but with the step's anchor-built
+      `shift_policy.base`, and the step's shift (hence the row-scaled measure's row scales) is never
+      rebuilt on a re-pointing — probed on the test cavity (both blocks scaled, anchor 100) the held
+      step's shift diagonal after arrival is a median 51x (max 96x) the target's; only a segment refresh
+      rebuilds it, and neither flagship case file sets a refresh trigger. Not changed here.
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
       `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled

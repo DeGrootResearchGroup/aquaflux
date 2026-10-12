@@ -89,6 +89,27 @@ atol 1e-12`, default shift schedule.
 | re240000 | after, dual-time | row-scaled (default) | crawling (ratio 0.054 at step 71), stopped |
 | re240000 | after, ramp (100x, 16 stations) | row-scaled (default) | diverged (`|R|` 1e12), stopped at step 31 |
 
+**The ramp arm on re20000, before and after the block-diagonal preconditioner follows the
+stations (#386).** Measured 2026-10-12, same machine and configuration as the table above (ramp from
+100x the viscosity, 16 stations of one outer step, both blocks scaled, dual-time 3, `BlockDiagonal(
+scalar=ScalarAir(), velocity=ConvectionTwoLevel())`, row-scaled `rtol 1e-10, atol 1e-12`). "Before" is
+the target-built preconditioner and shift on every station (with `_BorderedHomotopy`'s `enter` fixed,
+without which the arm raised before step 1). Restart cycles per station, alpha below 1 marked:
+
+| step (station) | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 (target) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| before | 4 | 16 | 17 | 29 (0.25) | 37 (0.5) | 38 (0) | 33 (0) | 45 (0) | -- | | | | | | | | |
+| after | 5 | 4 | 9 | 4 | 4 | 8 | 5 | 8 | 15 | 17 | 8 | 36 (0.125) | 8 | 18 | 31 (0.5) | 33 (0.001) | 45 (0.125) |
+
+- **Before, the march diverges at station 5** (`|R|` 0.10 to 0.16 to 0.90 to 5.5, then 1e18 frozen by
+  step 86); stopped at step 110.
+- **After, every station through 10 takes a full step at 4-17 cycles, and the march diverges on
+  arriving** at the target with the shift at the control's floor (0.02): `|R|` 9.1e-3 at step 14, then
+  5.2e-2, 0.17, 32, and 1e11 by step 32; stopped at step 33. So following the stations moves the failure
+  from mid-ramp to the target station; it does not make the ramp converge on this case.
+- **Each station costs ~40 s against ~7 s for a step that rebuilds nothing** (steps after arrival): a
+  station change builds new scalar-preconditioner objects, which ride in static fields compared by
+  identity, so the march step recompiles at every station.
 Every converged coupled arm reaches the segregated root to the printed digits (Re_tau 537.5, kappa
 0.340, force 2.889499e-03). What this shows:
 
