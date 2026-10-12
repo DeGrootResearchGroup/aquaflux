@@ -534,7 +534,7 @@ def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monk
     surfaces = Surfaces.from_triangles(jnp.asarray(sheet), emission=1.0)
     receivers = np.zeros((2, 3))
 
-    def stepped_shots(media, chain, sources, points, side, starts, pair_limit):
+    def stepped_shots(media, chain, sources, points, side, starts, pair_limit, grid=None):
         # Side 0 has paths where the near side does; side 1 nowhere.
         valid = (np.asarray(sources)[:, 0] < cut) & (np.asarray(side) == 0)
         return np.zeros((len(sources), 1, 3)), valid, np.zeros((len(sources), 2))
