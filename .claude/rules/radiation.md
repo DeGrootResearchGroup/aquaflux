@@ -4998,7 +4998,21 @@ are bent too (no straight-through factor left anywhere).
   ways reads 0.932 / 0.912 (1,878 s, contended). **It is the 32 x 32 shooting grid**: at 96 x 96 the
   route reads 0.967 / 0.968 (1,532 s, alone). So `test_no_path_a_fine_grid_finds_is_missed_by_the_shipped_one`
   (96 x 96 as reference, two-sleeve fixture) passes on a fixture whose paths are all wide in a row; the
-  four-lamp scene has narrower ones. Not fixed yet. Fast gate on this tree (`4bfef62`, two
+  four-lamp scene has narrower ones. **Fixed by CONTINUATION (2026-10-12, `a443caf`)**:
+  `_continued_paths` shoots every (side, receiver, corner) from the grid, then polishes each corner the
+  grid missed from a facet-edge neighbour's unknowns (`_shot_paths(..., starts=)`,
+  `shooting.rim_crossings(start=)`), repeated from each newly reached corner until none gains a path
+  (used by `_reached_triangles` and `_from_a_reached_point`); `_cut_edges` polishes each midpoint from
+  the inside point's unknowns, and the traced pass polishes every vertex from its host seed (no grid
+  scan). `rim_light.py`, 16 sectors, 32 x 32, alone: **0.988 / 0.995, 730 s** (96 x 96 without it:
+  0.967 / 0.968, 1,532 s). ⚠️ **A patch the grid misses at EVERY corner is still lost** -- a 4 x 4 grid
+  missed one of six paths on the two-sleeve fixture. Pinned by
+  `test_paths_a_coarse_grid_misses_are_reached_from_their_neighbours` (8 x 8 + continuation = 96 x 96's
+  set exactly, crossings to 1e-12; plain 8 x 8 misses 15). Mutation pass 8, 5 red (no continuation,
+  the loop scanning the grid, edges one way, the traced pass scanning the grid, whole triangles seeded
+  from the other side). **Dismissed, equivalent on these fixtures**: the cut's seed not carried, another
+  edge's cut seed, a corner seeded from the other side -- the polish converges from any of these nearby
+  starts. Fast gate on this tree (`4bfef62`, two
   workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
   `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
 - **THE GAP ROUTES STAY DESCENDED: SHOOTING MISSES THEIR STEEP PATHS (2026-10-12).** Plan item 3 was to

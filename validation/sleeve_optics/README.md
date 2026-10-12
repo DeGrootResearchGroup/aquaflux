@@ -268,9 +268,10 @@ cylinder (`refraction._shot`); a wall route to a receiver inside another region 
 | 32 x 32, uniform samples | 0.720 | 0.544 | 0.265 | 711 |
 | 96 x 96, uniform samples | 0.769 | 0.629 | 0.472 | 1,114 |
 | 32 x 32, each row's run of existing rays found by its ends | 0.761 | 0.631 | 0.515 | 874 |
-| the same, each straddling facet cut where its paths stop (shipped, 2026-10-12) | **0.924** | **0.910** | 0.799 | 796* |
+| the same, each straddling facet cut where its paths stop | **0.924** | **0.910** | 0.799 | 796* |
 | the same, each arc triangle split four ways (`SLEEVE_SLICES=2`, 106,496 facets) | 0.932 | 0.912 | 0.806 | 1,878* |
-| the same as the shipped row, with a 96 x 96 shooting grid (`SLEEVE_SHOT_GRID=96`) | **0.967** | **0.968** | 0.853 | 1,532 |
+| the same, with a 96 x 96 shooting grid (`SLEEVE_SHOT_GRID=96`) | 0.967 | 0.968 | 0.853 | 1,532 |
+| 32 x 32, each corner the grid misses polished from a neighbouring corner's path (shipped, `a443caf`) | **0.988** | **0.995** | 0.952 | 730 |
 
 \* Unit tests shared the 4 cores for part of the run, so the time is an upper bound.
 
@@ -288,6 +289,15 @@ only to 0.932 / 0.912, so facet size is not what is left. **The shooting grid is
 run reads 0.967 / 0.968, for about twice the time (1,532 s, run alone, against 796 s run beside tests).
 So the shipped 32 x 32 grid misses paths, the same kind of miss as the gap routes' finding below:
 paths that exist only in a sliver of a row. The 3 % left at 96 x 96 is not decomposed.
+**Fixed by continuation, not by a finer grid** (2026-10-12, run alone): a path's unknowns (the
+fraction across the band and `beta`) range over a band fixed by the shell alone, so a neighbouring
+corner's path is a start inside the polish's basin. Every corner the grid misses beside one it found
+is polished from that one's unknowns, until no corner gains a path; the cut's bisection and the traced
+pass polish from where each point was found too, so the traced pass scans no grid. At the shipped
+32 x 32 grid that reads 0.988 / 0.995 in 730 s -- above the 96 x 96 grid without it, in half its time.
+The grid must still hit each patch once: on the two-sleeve fixture a 4 x 4 grid missed one whole patch
+(six paths), which nothing can seed; 8 x 8 found exactly the 96 x 96 set. The 1.2 % / 0.5 % left is not
+decomposed.
 
 - **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
   (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
