@@ -1794,7 +1794,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      `omega = 0.8`. That is never a *smaller* factor than 0.8 and usually much smaller: `D⁻¹A` has
      unit diagonal blocks, so its eigenvalues average one and `lam_max ≥ 1` always. Dividing by it
      under-relaxes every mode except the extreme one. Worth **10 → 2 cycles** at four sweeps.
-     Reachable as `convection_multigrid_cycles(..., omega=1.0, spectral_damping=False)`; the
+     Reachable as `convection_multigrid_cycles(..., smoother_weight=1.0, spectral_damping=False)`; the
      spectral default is unchanged, because an undamped sweep is not a contraction standing alone —
      it does not need to be under a coarse correction and an outer Krylov.
 
@@ -2385,9 +2385,9 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   level) gets it for free without passing it explicitly.
   `_chebyshev_smooth`/`_jacobi_smooth`/`_jacobi_smooth_zero` read `level.inv_diagonal` instead of
   re-dividing; `_fc_jacobi` additionally hoists `omega * mask * inv_diagonal` out of its per-sweep
-  loops (computed once per call instead of once per sweep) — `omega` stays a **solve-time** argument
+  loops (computed once per call instead of once per sweep) — `smoother_weight` stays a **solve-time** argument
   rather than a build-time field, since it is chosen per `air_multigrid_cycles` call and is not itself
-  a frozen property of the hierarchy; baking it into `_AirLevel` would mean a different `omega` needs
+  a frozen property of the hierarchy; baking it into `_AirLevel` would mean a different `smoother_weight` needs
   a different hierarchy, which is a real behaviour change this fix does not make. Verified two ways
   in `test_multigrid.py`: `inv_diagonal` matches `1.0 / diagonal` exactly on both level kinds, and each
   smoother's jaxpr, traced in isolation, closes over `inv_diagonal` as a constant and never over the

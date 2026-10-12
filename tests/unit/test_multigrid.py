@@ -537,7 +537,7 @@ def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() ->
     # amplification a deep Galerkin coarse smoother would apply at this cell Peclet.
     fine = hierarchy.levels[0]
     error = jnp.asarray(np.random.default_rng(0).standard_normal(n))
-    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, omega=0.8)
+    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, smoother_weight=0.8)
     assert float(jnp.linalg.norm(smoothed)) < float(jnp.linalg.norm(error))
 
 
@@ -1400,7 +1400,7 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
     b = jnp.asarray(np.random.default_rng(0).normal(size=n))
     damped = convection_multigrid_cycles(hierarchy, b, cycles=1, sweeps=4)
     undamped = convection_multigrid_cycles(
-        hierarchy, b, cycles=1, sweeps=4, omega=1.0, spectral_damping=False
+        hierarchy, b, cycles=1, sweeps=4, smoother_weight=1.0, spectral_damping=False
     )
     assert not np.allclose(np.asarray(damped), np.asarray(undamped))
 
@@ -1411,7 +1411,7 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
         b,
         cycles=1,
         sweeps=4,
-        omega=0.8 / float(hierarchy.levels[0].lam_max),
+        smoother_weight=0.8 / float(hierarchy.levels[0].lam_max),
         spectral_damping=False,
     )
     assert np.allclose(np.asarray(damped), np.asarray(restated))

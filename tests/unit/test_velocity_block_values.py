@@ -91,7 +91,9 @@ def test_the_two_level_smoother_settings_reach_the_strategy() -> None:
     """``ConvectionTwoLevel(sweeps, omega)`` builds what the strategy builds when handed them directly."""
     assembler = _channel(2.0)
     state = _characteristic_reference_state(assembler)
-    built = BlockPreconditioner.build(assembler, velocity=ConvectionTwoLevel(sweeps=3, omega=0.7))
+    built = BlockPreconditioner.build(
+        assembler, velocity=ConvectionTwoLevel(sweeps=3, smoother_weight=0.7)
+    )
     assert (built.velocity.sweeps, built.velocity.omega) == (3, 0.7)
 
     owner_e, nb_e, _ = assembler.mesh.face_cells.interior_edges()
@@ -104,7 +106,7 @@ def test_the_two_level_smoother_settings_reach_the_strategy() -> None:
         1,
         jax.lax.stop_gradient(assembler.mass_flux(state)),
         sweeps=3,
-        omega=0.7,
+        smoother_weight=0.7,
     )
     a_p = built.frozen_momentum_diagonal(state)
     ru = jnp.asarray(np.random.default_rng(1).standard_normal((assembler.mesh.n_cells, 2)))

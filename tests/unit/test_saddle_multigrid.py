@@ -111,7 +111,7 @@ def test_the_schur_correction_sign_is_load_bearing() -> None:
     scoped companion test rather than a change to the shared fixture's default.)
 
     Measured under: ``n_cells=240, dim=3`` (the module default), ``pressure_sweeps=4,
-    pressure_omega=1.0`` (``SimpleSmoothedInverse``'s defaults), ``frobenius=True,
+    pressure_smoother_weight=1.0`` (``SimpleSmoothedInverse``'s defaults), ``frobenius=True,
     schur_frobenius=True`` (also its defaults), fixture seed 0, right-hand side
     ``np.random.default_rng(1)``. At those settings one correct sweep measures a true-residual ratio of
     0.873; the sign-flipped RHS measures 1.020 -- the correction stops even contracting the residual.
@@ -122,7 +122,7 @@ def test_the_schur_correction_sign_is_load_bearing() -> None:
     b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
 
     x = np.asarray(
-        _simple_correction(pieces, jnp.asarray(b), pressure_sweeps=4, pressure_omega=1.0)
+        _simple_correction(pieces, jnp.asarray(b), pressure_sweeps=4, pressure_smoother_weight=1.0)
     )
 
     assert np.all(np.isfinite(x))

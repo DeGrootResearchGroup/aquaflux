@@ -146,7 +146,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
   these runs is **contended** (another session ran a test tier throughout) and is not quotable; the
   application counts are contention-immune.
 - **Untested, and the honest remaining scope:** only the sweep count was varied on the traced side. The
-  splitting, `pressure_sweeps`, `omega`, the strength threshold and the level count are all at the
+  splitting, `pressure_sweeps`, `smoother_weight`, the strength threshold and the level count are all at the
   case's shipped values, and this says nothing about them. What it does establish is that the *cheapest*
   lever on that list — more smoothing — is spent.
 
@@ -264,7 +264,7 @@ earned itself again here.
 **The two damping sources are one knob and must move together** (4 sweeps, 20-cycle cap, so not
 comparable with the table above):
 
-| Schur diagonal | `pressure_omega` 0.7 | `pressure_omega` 1.0 |
+| Schur diagonal | `pressure_smoother_weight` 0.7 | `pressure_smoother_weight` 1.0 |
 |---|---|---|
 | Jacobi | 6.774e-05 | **3.435e-01** |
 | Frobenius | 6.828e-05 | **4.199e-05** |
@@ -274,7 +274,7 @@ the hand-set 0.7 was standing in for the derived relaxation, and stacking the tw
 constant cannot simply be dropped, only replaced.
 
 **Set from this:** Frobenius on **both** the velocity predictor and the Schur relaxation, with
-`pressure_omega = 1.0`.
+`pressure_smoother_weight = 1.0`.
 
 ### What does NOT transfer from that paper
 

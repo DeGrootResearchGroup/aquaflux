@@ -137,7 +137,7 @@ SIMPLE_FLOW = dict(
     max_levels=5,
     max_coarse=500,
     block_splitting=True,
-    omega=1.0,
+    smoother_weight=1.0,
     frozen_coarsening=True,
 )
 JACOBI_TRAILING = dict(max_coarse=500, equilibrate=False)

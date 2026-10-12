@@ -411,7 +411,7 @@ The observed failure (issue #373): the package grew several names per concept an
 per name, one reasonable-looking change at a time. `relaxation` named an under-relaxation factor in
 `(0, 1]`, which damps *less* as it grows, and the shift strength `β`, which damps *more*; `rtol` was a
 residual tolerance on one solve and a tolerance on the *state increment* on another, with different
-defaults; `omega` is the SST field and a smoother weight, and one case file sets both a few lines
+defaults; `omega` was the SST field and a smoother weight, and one case file set both a few lines
 apart; `cycles_limit` counted redone steps, not cycles. This is not cosmetic. A settings field is read
 straight from a case file, so **its name is a user-facing key**, and a parameter name is how a reader
 tells what a recorded setting meant. No single change looked wrong, because nothing compared a new

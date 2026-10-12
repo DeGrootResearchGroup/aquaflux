@@ -460,7 +460,7 @@ class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
     """
 
     sweeps: int = eqx.field(static=True)
-    omega: float = eqx.field(static=True)
+    smoother_weight: float = eqx.field(static=True)
 
     @classmethod
     def build(
@@ -474,17 +474,21 @@ class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
         reference_mdot: jnp.ndarray,
         *,
         sweeps: int = 2,
-        omega: float = 0.8,
+        smoother_weight: float = 0.8,
         strength_threshold: float = 0.0,
     ) -> TwoLevelConvectionVelocity:
         a = _convection_operator(geometry, owner_e, nb_e, interior, n_cells, reference_mdot)
         hierarchy = build_convection_hierarchy(a, strength_threshold=strength_threshold)
-        return cls(hierarchy, geometry.dim, v_cycles, sweeps, omega)
+        return cls(hierarchy, geometry.dim, v_cycles, sweeps, smoother_weight)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the two-level V-cycle."""
         return convection_multigrid_cycles(
-            self.hierarchy, b, cycles=self.v_cycles, sweeps=self.sweeps, omega=self.omega
+            self.hierarchy,
+            b,
+            cycles=self.v_cycles,
+            sweeps=self.sweeps,
+            smoother_weight=self.smoother_weight,
         )
 
 
@@ -618,13 +622,13 @@ class ConvectionTwoLevel(_ConvectionVelocityBlock):
 
     Attributes
     ----------
-    sweeps, omega : int, float or None
+    sweeps, smoother_weight : int, float or None
         The damped-Jacobi smoother's sweeps per level and damping factor (see
         :func:`~aquaflux.precondition.convection_multigrid_cycles`).
     """
 
     sweeps: int | None = None
-    omega: float | None = None
+    smoother_weight: float | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (TwoLevelConvectionVelocity.build,)
