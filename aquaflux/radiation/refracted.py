@@ -744,7 +744,7 @@ def _continued_paths(media, chain, sources, receivers, edges, pair_limit, grid=N
     Each pair is first shot from the grid (:func:`~aquaflux.radiation.shooting.rim_crossings`). A
     grid can miss a path whose run of rays is narrower than its spacing, but the unknowns of a path
     fix it whatever its source -- the band they range over depends only on the shell, its core and
-    ``beta`` -- so a source joined by an edge to one with a path is tried again by polishing from
+    ``axial_index`` -- so a source joined by an edge to one with a path is tried again by polishing from
     that path's unknowns. Repeated from every source that gains a path until none does: the paths
     spread along the surface from wherever the grid found one.
 
@@ -885,14 +885,14 @@ def _shared_corners(surfaces: Surfaces, facets: np.ndarray):
 class ShootingGridCheck:
     """What the shooting grid finds round the rims of a scene, and which way to refine it.
 
-    Round a sleeve's rim each path is found by shooting: a grid over its two unknowns (``beta``,
+    Round a sleeve's rim each path is found by shooting: a grid over its two unknowns (``axial_index``,
     the index times the direction's axial component, in rows; and the share across the band of
     impact parameters, in columns) brackets it, and every source corner the grid misses beside one
     with a path is polished from that path. So the grid need only land in each connected patch of
     corners with a path once; a patch it misses at every corner is lost, and leaves no trace. What
     a finished scene can show is how near the grid came to missing the patches it did find: paths
     found only from a neighbour, and why the grid missed each -- too few rows to sample its
-    ``beta``, or rows that bracket it with the miss along them.
+    ``axial_index``, or rows that bracket it with the miss along them.
 
     Attributes
     ----------
@@ -903,7 +903,7 @@ class ShootingGridCheck:
     by_grid : int
         Of those, the ones the grid found itself.
     between_rows : int
-        Paths found only from a neighbour where the rows either side of the path's ``beta`` do not
+        Paths found only from a neighbour where the rows either side of the path's ``axial_index`` do not
         both reach the source: the rows are too far apart.
     along_rows : int
         Paths found only from a neighbour where they do: the miss lies along the rows.

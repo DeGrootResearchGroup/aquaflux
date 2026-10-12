@@ -624,11 +624,11 @@ def test_patches_are_joined_only_through_corners_that_have_a_path():
 
 
 def test_a_path_is_between_rows_unless_both_rows_beside_its_beta_reach_the_source():
-    """Against every grid row's crossing, scanned in full: the path is between rows when its ``beta``
+    """Against every grid row's crossing, scanned in full: the path is between rows when its ``axial_index``
     lies past the outermost row or a row either side of it has no crossing of the source."""
     grid = (4, 32)
     media, arc = _rim_scene(16, 8)
-    # Off the arc's middle, so some paths' beta lies past a coarse grid's outermost rows.
+    # Off the arc's middle, so some paths' axial_index lies past a coarse grid's outermost rows.
     points = np.array(
         [[0.025, 0.06, 0.0], [0.03, 0.065, 0.01], [0.03, 0.07, 0.04], [0.025, 0.065, -0.05]]
     )
@@ -658,30 +658,34 @@ def test_a_path_is_between_rows_unless_both_rows_beside_its_beta_reach_the_sourc
     def every_row(source, receiver, sign):
         geometry = refraction._rim_geometry(media, group.chain, source, receiver)[0]
         misses, _, reach, _ = shooting._problem(geometry, sign)
-        betas = shooting._rows(reach, grid[0])
-        has = jax.vmap(lambda beta: shooting._row(misses, beta, grid[1])[0])(betas)
-        return betas, has
+        axial_indices = shooting._rows(reach, grid[0])
+        has = jax.vmap(lambda axial_index: shooting._row(misses, axial_index, grid[1])[0])(
+            axial_indices
+        )
+        return axial_indices, has
 
-    betas, has = jax.vmap(every_row)(
+    axial_indices, has = jax.vmap(every_row)(
         jnp.asarray(corners[corner]), jnp.asarray(receivers[row]), jnp.asarray(signs)
     )
-    betas, has = np.asarray(betas), np.asarray(has)
+    axial_indices, has = np.asarray(axial_indices), np.asarray(has)
     expected = np.empty(len(side), dtype=bool)
     for k in range(len(side)):
-        beta = found[k, 1]
-        if beta < betas[k, 0] or beta > betas[k, -1]:
+        axial_index = found[k, 1]
+        if axial_index < axial_indices[k, 0] or axial_index > axial_indices[k, -1]:
             expected[k] = True
             continue
-        above = np.flatnonzero(betas[k] >= beta)[0]
+        above = np.flatnonzero(axial_indices[k] >= axial_index)[0]
         above = max(above, 1)
         expected[k] = not (has[k, above - 1] and has[k, above])
     np.testing.assert_array_equal(told, expected)
     assert np.any(told & ~by_grid[side, row, corner]) and np.any(~told)
     # Some path lies past the outermost row while the two rows nearest it both reach the source:
-    # only its ``beta`` says the grid cannot bracket it.
+    # only its ``axial_index`` says the grid cannot bracket it.
     nearest = np.clip(
-        [np.searchsorted(b, f) for b, f in zip(betas, found[:, 1], strict=True)], 1, grid[0] - 1
+        [np.searchsorted(b, f) for b, f in zip(axial_indices, found[:, 1], strict=True)],
+        1,
+        grid[0] - 1,
     )
     reached = has[np.arange(len(side)), nearest - 1] & has[np.arange(len(side)), nearest]
-    outer = (found[:, 1] < betas[:, 0]) | (found[:, 1] > betas[:, -1])
+    outer = (found[:, 1] < axial_indices[:, 0]) | (found[:, 1] > axial_indices[:, -1])
     assert np.any(outer & reached)

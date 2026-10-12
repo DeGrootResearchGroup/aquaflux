@@ -5049,7 +5049,11 @@ are bent too (no straight-through factor left anywhere).
   scanned in full; off-mid-plane receivers so a beta past the outermost row occurs),
   `test_patches_are_joined_only_through_corners_that_have_a_path`. Mutation pass 12, all red after
   those direct tests (first pass: "beyond" ignored, wrong bracketing rows, patches joined through
-  pathless corners survived the report-level test). Fast gate on this tree (`4bfef62`, two
+  pathless corners survived the report-level test). ⚠️ **`shooting.py` calls `n u_z` `axial_index`,
+  never `beta`** (renamed 2026-10-12 when `main`'s vocabulary guard, `tests/unit/test_vocabulary.py`,
+  arrived: `beta` in this package is the pseudo-transient shift). Prose here still writes beta for the
+  same quantity; in code it is `axial_index` (`_trace`, `impact`, `misses`, `_row`, `between_rows`).
+  Fast gate on this tree (`4bfef62`, two
   workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
   `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
 - **THE GAP ROUTES STAY DESCENDED: SHOOTING MISSES THEIR STEEP PATHS (2026-10-12).** Plan item 3 was to
