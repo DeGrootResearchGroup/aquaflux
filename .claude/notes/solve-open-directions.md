@@ -77,6 +77,22 @@ steps, cycles, retries, refreshes, wall, mid-span `x_r/h`. A pass is ≥ 10 % fe
 steps or retries and the same `x_r/h`; then a library-default change needs the project owner. Watch the
 retry ladder: a looser direction near the low-β wall could trip `abort_above_cycles` or the line search.
 
+**Measured on bfs3d under the residual stop instead (2026-10-12, #699):** #699 replaced the `lineax`-stop
+sweep above with 0.1 / 0.3 / 0.6 under `stop: residual` at `refresh_on_cycles` 4 (the better of 6b's
+bfs3d runs); 0.9 and the `lineax` stop were not run. Configuration as in 6b's bfs3d table:
+
+| `rtol` | outer steps | inner solves | cost re-fits | steps redone | final `\|R\|` | solve wall |
+|---|---|---|---|---|---|---|
+| 0.1 | 27 | 89 | 4 | 0 | 9.28e-6 | 774 s |
+| 0.3 | 30 | 123 | 3 | 0 | 5.47e-6 | 787 s |
+| **0.6** | 26 | 126 | 1 | **1** (step 15, `alpha`, beta 0.005 -> 0.01) | 8.02e-6 | **590 s** |
+
+`x_r/h` 8.361 in all. **0.6 is 25 % faster than 0.3 on bfs3d** (13 % on pitzDaily) with one retry, so it
+fails the pre-registered "no extra retries" bar by one step on both cases; unlike pitzDaily it took FEWER
+outer steps. **0.1 is level with 0.3 here** (pitzDaily: 25 % slower), so tightening is not a loss on this
+case, and the Eisenstat–Walker refutation rests on pitzDaily alone. Whether 0.6 moves is the owner's
+call; the retry is the thing a forcing safeguard (6b) would also have to cover.
+
 ## 5. Anderson acceleration / nonlinear GMRES around the outer step
 
 **What.** Treat one pseudo-transient Newton step as a fixed-point map `x ↦ G(x)` and accelerate the
@@ -209,10 +225,30 @@ jax 0.11.2, nothing else running; branch `737d297` against `main` `a2a73d3`:
 
 All `x_r/h` 8.0686, no retries. Fewer re-fits trade against more cycles on staler inverses and the two
 cancel: every wall is within 7 %, single runs, so no arm is separable from `main` on time. 3 was chosen
-for restoring the march's shape (about 20 steps of about four inner iterations), not for speed. bfs3d,
-which ships 3 under the `lineax` stop (one fewer counted cycle per solve), is unmeasured under #290.
-**Still open before the default moves:** bfs3d (its mesh is not in this container), the cost
-thresholds' re-calibration, the end-of-march failures below, and the project owner's decision.
+for restoring the march's shape (about 20 steps of about four inner iterations), not for speed.
+
+**✅ Measured on bfs3d 2026-10-12 (#699) — 1.48-1.52x faster wall, same root, no new retry.** `validation/bfs3d_openfoam/compare.py` at `46af0749` (after #290's step-ending re-fit), `case.yaml` as shipped plus the `BFS3D_*` edits named; Apple M3 Pro, 11 cores, 18 GB, macOS, Python 3.13.4, jax 0.10.2; one run each, back to back through `run_case.sh` with nothing else running, run 0 warming the compile cache.
+Cycle counts are not comparable across stops (see above), so the comparison is wall and steps:
+
+| run | stop, `refresh_on_cycles` | outer steps | inner solves | cost re-fits | re-fit time | steps redone | final `\|R\|` | solve wall |
+|---|---|---|---|---|---|---|---|---|
+| 0 | `lineax`, 3 (shipped) | 36 | 73 | 17 | 415 s | 0 | 9.94e-6 | 1197 s |
+| 1 | `residual`, 3 | 30 | 124 | 5 | 249 s | 0 | 7.98e-6 | **810 s** |
+| 2 | `residual`, 2 | 34 | 105 | 16 | 399 s | **1** (step 18, `alpha`) | 9.96e-6 | 814 s |
+| 3 | `residual`, 4 | 30 | 123 | 3 | 220 s | 0 | 5.47e-6 | **787 s** |
+
+`x_r/h` 8.361 in all four. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
+nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each);
+2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
+runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
+never rising. ⚠️ That tail's rate is the floor's (no release in this file), so these runs cannot show the
+linear-ending failure below either way -- a shifted step converges linearly whatever the stop. ⚠️ bfs3d's march
+**changed under #290/#694** (traced split, re-fit ending the step): the shipped file's 28 steps / 174
+cycles / one retry of 2026-10-11 (`61a14308`) is now 36 / 166 / none at about the same wall (1191 against
+1197 s) -- the two runs part at the first inner solve's fourth digit, and each re-fit's refactor phase
+went from ~2.8 to ~5.3 s. Not bisected; compare bfs3d runs only within one commit.
+**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard), the
+cost thresholds' re-calibration, and the project owner's decision.
 
 **The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
 true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
@@ -338,6 +374,27 @@ unchanged — but only if the eliminated residual is the *same* residual; do not
 operator (the warm-start refutation is the cautionary tale).
 
 **Risk.** Highest in this file; measure on the captured hard iterates before touching the march.
+
+**✅ The census re-taken on today's march (2026-10-12, #699): the pure-ω near-singular cells are still
+there, at the states where the march is slowest.** `cell_block_conditioning.py` on bfs3d's shipped march
+at `46af0749` (#699 run 0, `BFS3D_CHECKPOINT_KEEP=200`; configuration as in 6b's bfs3d table), at the
+checkpoint before each of the three steps with the hardest single inner solve (all three line-search
+clipped and positivity-limited; the march redid no step), each at its own shift, 0.05 and 0:
+
+| state (before step) | hardest solve | shift | cells `sigma_min` < 1e-3 (at 0.05 / 0) | worst cond | median `k` there / whole mesh |
+|---|---|---|---|---|---|
+| `state-00011` (12) | 12 cycles, `alpha` 0.125 | 0.0173 | **644** (614 / 649) | 4.0e7 | 0.115 / 0.544 |
+| `state-00027` (28) | 8 cycles, `alpha` 0.022 | 0.005 | 370 (346 / 375) | 2.7e7 | 0.127 / 0.710 |
+| `state-00028` (29) | 5 cycles, `alpha` 0.25 | 0.01 | 365 (345 / 373) | 3.6e7 | 0.127 / 0.710 |
+
+In every one of the 60 worst blocks the near-null direction is pure ω to three decimals (a `u` trace up
+to 0.003 in two cells), and the worst cells come in spanwise-symmetric pairs (22480/12880,
+21840/13520, ...) in low-`k` regions. **The shift does not reach them**: 0 -> 0.05 changes the count by
+under 10 % at every state. Against the 2026-08-08 census (353 cells, cond 5e6-9e6, median `k` 0.122) the
+count is up to 1.8x higher and the blocks ~5x worse conditioned, but that census was at a different state
+under the deleted ILU bundle, so read it as "still present", not "worse". **By #699's rule this direction
+keeps its motivation**; the three states above (`checkpoints-baseline/` of that run, gitignored) are the
+ones to design and probe it on.
 
 ## 11. MEASURED AND BUILT (opt-in) -- releasing the shift floor once the target station has settled
 
