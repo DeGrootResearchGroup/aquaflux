@@ -54,7 +54,7 @@ from aquaflux.solve import (
 from .drive import MassFlow
 
 if TYPE_CHECKING:
-    from aquaflux.solve import ResidualHomotopy
+    from aquaflux.solve import ResidualHomotopy, StepReport
 
     from .momentum import MomentumContinuity
 
@@ -266,8 +266,8 @@ class _BorderedHomotopy:
         self._inner = inner
         self._border = border
 
-    def enter(self, step: int) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        return self._border.residual(self._inner.enter(step))
+    def enter(self, step: int, previous: StepReport | None) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        return self._border.residual(self._inner.enter(step, previous))
 
     def arrived(self, step: int) -> bool:
         return self._inner.arrived(step)
@@ -290,7 +290,14 @@ class _DetachedSource:
     def __init__(self, inner: ContinuationSource, border: MassFlowBorder) -> None:
         self._inner = inner
         self._border = border
-        self.refresh_preconditioner = inner.refresh_preconditioner
+        self.refresh_preconditioner = (
+            None if inner.refresh_preconditioner is None else self._refresh_on_fields
+        )
+
+    def _refresh_on_fields(
+        self, step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
+    ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
+        return self._inner.refresh_preconditioner(step, self._border.detach(state), due=due)
 
     def build(self, state: jnp.ndarray) -> NewtonStrategy:
         return self._inner.build(self._border.detach(state))

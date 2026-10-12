@@ -619,7 +619,9 @@ def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> Non
     )
     assert source.session._spec == BlockDiagonal()
     assert source.session._spec.resolved_scalar() == ScalarTwoLevel()
-    assert source.refresh_preconditioner is None
+    # Its hook follows a re-pointing only, so a session never re-pointed hands the march nothing.
+    assert source.refresh_preconditioner(None, None) is None
+    assert source.refresh_preconditioner(None, None, due=True) is None
 
 
 def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None:

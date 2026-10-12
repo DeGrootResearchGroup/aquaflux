@@ -140,7 +140,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | both **deleted (#541)**: `coupled_step(coupled, state, preconditioner=BlockDiagonal(...))` and `solve_coupled(coupled, ...)` border themselves when `coupled.momentum.drive` is a `MassFlow`; the held force is `held_force(coupled, flow, k, omega)` |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default). `merged_march_options` merges any value that is a `solve.MergeableSettings` (`isinstance`, #669), not anything with a `filled_from` attribute |
-| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` without a loop is refused where it used to be dropped, and a `refresh_on_cycles` with no refresh hook to take its re-fit (a frozen step or a block-diagonal session) is refused by `newton_march` before the first step. There is no `inner_refresh` (removed 2026-10-10, #290): the step ENDS for the re-fit and the march takes it |
+| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` without a loop is refused where it used to be dropped, and a `refresh_on_cycles` with no refresh hook to take its re-fit (a frozen step) is refused by `newton_march` before the first step, and by a block-diagonal session when it builds the step (its hook only follows a re-pointing, #386). There is no `inner_refresh` (removed 2026-10-10, #290): the step ENDS for the re-fit and the march takes it |
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
 | `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
@@ -439,8 +439,8 @@ Many entries below are dated history written against the old API. Read them thro
     - **`solve_reynolds_continuation`** opens **one** session for a `MaterializedJacobian` spec, shares
       it across points and `rebind`s it per point; a `BlockDiagonal` spec is built per point at its own
       viscosity, exactly as before. `_SOLVE_ONLY` excludes `preconditioner`. **`solve_reynolds_ramp`**
-      opens a materialized session on the **anchor** and hands the homotopy its `rebind`; a block spec
-      stays target-bound (#386). A `point_setup` refresh hook beside a session is refused.
+      opens a session on the **anchor** for EITHER family (a block spec too, since #386) and hands the
+      homotopy its `rebind`. A `point_setup` refresh hook beside a session is refused.
     - **The three builders, both public β-tracking hooks and `_rebinding` are DELETED** (see the rename
       table at the top of this file). Both flagship drivers and every harness open a session or build a
       spec; the drivers' inert monolithic smoother settings under the field split (D1) went with them,
@@ -475,8 +475,16 @@ Many entries below are dated history written against the old API. Read them thro
       follows `jacobian_production_viscosity` for every family (D2, and D7 for the complete LU, whose
       builder materializes the un-frozen assembler), and one probe serves the build and the hook (D3/D5).
       Byte-identical wherever `jacobian_production_viscosity=False`.
-    - **`_BlockSession.rebind` is a no-op** — target-viscosity behaviour on the ramp stays as it was
-      (Q2, #386).
+    - **`_BlockSession` follows a re-pointing (2026-10-12, #386; it was a no-op until then).** It is a
+      `solve.RebuildingSession`: `rebind` stores the companion, and the march's next call to the session's
+      `refresh_preconditioner` builds a step on it at the march's state and grafts its shift policy,
+      adjoint factory and operator stand-in into the held step (`ShiftedStep.preconditioned_as`), keeping
+      the step control's shift strength. Unrebound, the hook returns `None` (and the default-family test
+      pins that). A segment `refresh` keeps carrying the flow block — a station change is a full build,
+      because the flow block is what depends on the viscosity. Before this, `solve_reynolds_ramp` left a
+      block spec to the solve, which built it on the TARGET, so every station ran the target's
+      preconditioner and shift. The measured before/after is in the ramp entry under "Initialization,
+      diagnostics, Reynolds continuation".
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
       `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled

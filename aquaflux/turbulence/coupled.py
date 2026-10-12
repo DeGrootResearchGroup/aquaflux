@@ -82,6 +82,7 @@ from aquaflux.solve import (
     LinearSolveSettings,
     NewtonStrategy,
     PreconditionerSession,
+    RebuildingSession,
     RefreshPolicy,
     RefreshTiming,
     ResidualHomotopy,
@@ -2078,15 +2079,12 @@ def _march_keywords(march: dict) -> dict:
     return arguments
 
 
-class _BlockSession:
+class _BlockSession(RebuildingSession):
     """The block-diagonal family's session: rebuilt from the transport operators, no Jacobian probe.
 
-    It has no per-step hook, and :meth:`rebind` leaves it on the assembler it was opened with -- the
-    behaviour of the block-diagonal continuation before sessions existed, kept deliberately (a ramp that
-    re-points it at each station is a separate change, #386).
+    Re-pointed at another assembler (a viscosity ramp's next station), the march's next step takes the
+    shift and preconditioner rebuilt on it (:class:`~aquaflux.solve.RebuildingSession`).
     """
-
-    refresh_preconditioner = None
 
     def __init__(
         self,
@@ -2096,13 +2094,10 @@ class _BlockSession:
         jacobian_production_viscosity: bool,
         on_build: Callable[[NewtonStrategy], NewtonStrategy] | None,
     ) -> None:
+        super().__init__(coupled)
         self._spec = spec
-        self._coupled = coupled
         self._production_viscosity = jacobian_production_viscosity
         self._on_build = on_build
-
-    def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        return self._build(state, march)
 
     def refresh(
         self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
@@ -2114,16 +2109,13 @@ class _BlockSession:
             reuse = reuse.inner
         return self._finish(self._step(state, _march_keywords(march), reuse=reuse))
 
-    def rebind(self, coupled: CoupledRANS) -> None:
-        del coupled
-
     def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
         return self._finish(self._step(state, _march_keywords(march), reuse=None))
 
     def _step(
         self, state: jnp.ndarray, keywords: dict, *, reuse: CoupledShiftPolicy | None
     ) -> NewtonStrategy:
-        coupled = self._coupled
+        coupled = self.assembler
         step_limit, step_projection = _k_positivity_guards(
             coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
         )
@@ -2304,8 +2296,8 @@ def open_session(
         ]
         if given:
             raise TypeError(
-                f"{given} have nothing to act on in the block-diagonal family: it has no per-step "
-                "refresh hook and no field-split block inverses."
+                f"{given} have nothing to act on in the block-diagonal family: it fits no inverse to "
+                "observe or re-fit, and has no field-split block inverses."
             )
         return _BlockSession(
             spec,
@@ -2575,8 +2567,9 @@ def _continuation_source(
         session = preconditioner
     if refresh.refresh_preconditioner is not None and session.refresh_preconditioner is not None:
         raise TypeError(
-            "RefreshPolicy(refresh_preconditioner=...) was given beside a materialized-Jacobian "
-            "preconditioner, whose session already re-fits its inverse before every step. Drop one."
+            "RefreshPolicy(refresh_preconditioner=...) was given beside a preconditioner session, "
+            "which brings its own: a materialized Jacobian's already re-fits its inverse before every "
+            "step, and a block-diagonal one's rebuilds the step when it is re-pointed. Drop one."
         )
     return SessionSource(session, reference_state, march)
 

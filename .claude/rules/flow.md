@@ -884,6 +884,12 @@ border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelo
   and `validation/turbulent_channel/README.md`.
 - **Two-argument residuals for the adjoint**: `BorderedFlowResidual` (flow) and
   `turbulence.coupled._BorderedCoupledResidual` read everything, border vectors included, from `theta`.
+- **The bordered wrappers forward everything a march hands them (fixed 2026-10-12, #386).**
+  `_BorderedHomotopy.enter(step, previous)` passes `previous` through — it took `enter(step)` alone after
+  the protocol gained `previous` (2026-10-11), so **every ramp on a held bulk velocity raised `TypeError`
+  before step 1** (found by running `mass_flow_march.py`'s ramp arm; the unit test's stub had the old
+  arity too). `_DetachedSource.refresh_preconditioner` detaches the state before calling the inner hook,
+  since a session builds from fields; no hook reached it before the block family gained one.
 - **Observers see fields**: `on_checkpoint` is handed the detached fields state (so the case's checkpoint
   writer reads it unchanged); a restart re-solves the force from the drive's own seed.
 - **Not built: a materialized-Jacobian preconditioner beside a held bulk velocity** — `open_flow_session`

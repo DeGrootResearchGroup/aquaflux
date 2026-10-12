@@ -168,7 +168,7 @@ from .driver import (
     explicit_source,
     staged_march,
 )
-from .session import PreconditionerSession
+from .session import PreconditionerSession, RebuildingSession
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .ramp_schedule import RampPosition, RampSchedule, RampWalk
@@ -236,6 +236,7 @@ __all__ = [
     "RampSchedule",
     "RampWalk",
     "ReadableShift",
+    "RebuildingSession",
     "RefreshPolicy",
     "RefreshTiming",
     "RefreshTrigger",

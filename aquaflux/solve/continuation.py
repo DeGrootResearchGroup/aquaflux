@@ -379,6 +379,32 @@ class ShiftedStep(eqx.Module):
         """This step judging progress by ``norm``, swapped in as a data leaf (a compilation-cache hit)."""
         return eqx.tree_at(lambda s: s.residual_norm, self, norm)
 
+    def preconditioned_as(self, other: ShiftedStep) -> ShiftedStep:
+        """This step, shifted and preconditioned as ``other`` is, with everything else kept.
+
+        Takes ``other``'s :attr:`shift_policy`, :attr:`adjoint_preconditioner_factory` and
+        :attr:`jacobian_residual` -- everything built from the problem the step solves -- and keeps this
+        step's own shift strength, measure, guards and settings. It is how a step built for one problem
+        is handed to a march already running another: the march has set a shift strength on the step it
+        holds, and rebuilding the whole step would throw that away.
+
+        Parameters
+        ----------
+        other : ShiftedStep
+            A step of the same class and settings, built on the problem now being solved.
+
+        Returns
+        -------
+        ShiftedStep
+            The step with ``other``'s three fields in place of its own.
+        """
+        return eqx.tree_at(
+            lambda s: (s.shift_policy, s.adjoint_preconditioner_factory, s.jacobian_residual),
+            self,
+            (other.shift_policy, other.adjoint_preconditioner_factory, other.jacobian_residual),
+            is_leaf=lambda leaf: leaf is None,
+        )
+
     def linear_solver(self) -> lx.AbstractLinearSolver:
         """The injected :attr:`krylov_solver` when set, else the shared inexact continuation default.
 

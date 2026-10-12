@@ -175,6 +175,12 @@ What to take from it, none of which is specific to that mechanism:
     trades in: an operator error of order one is not a slower Newton, it is no Newton at all, so a
     cap's error budget is bounded well below that and not merely "small".
 
+- **`ShiftedStep.preconditioned_as(other)` (2026-10-12, #386)** swaps in `other`'s `shift_policy`,
+  `adjoint_preconditioner_factory` and `jacobian_residual` — everything built from the problem — and keeps
+  every setting of the step itself, the shift strength included. It is how `RebuildingSession` hands a
+  running march a step rebuilt on another problem without discarding the shift its control set. `tree_at`
+  with `is_leaf=None` so an unset field swaps too.
+
 - **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
   split has one ordering, so `FieldSplitInverse.apply` has one body that branches only on
   `transpose` (which reverses the solve order and uses `Cᵀ`).

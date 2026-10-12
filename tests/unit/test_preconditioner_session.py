@@ -48,6 +48,33 @@ def test_a_block_session_refresh_carries_the_flow_block(case) -> None:
     assert refreshed.shift_policy.flow_preconditioner is first.shift_policy.flow_preconditioner
 
 
+def test_a_re_pointed_block_session_hands_the_march_the_new_problems_shift(case) -> None:
+    """Re-pointed at a companion, the next step is shifted and preconditioned for the companion.
+
+    The shift's velocity block reads the momentum diagonal, whose viscous part scales with the
+    molecular viscosity, so a step still built on the original assembler shifts a station with a
+    hundredfold viscosity by the wrong amount. The march's own shift strength must survive the swap.
+    """
+    coupled, state = case
+    companion = coupled.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session = open_session(BlockDiagonal(), coupled)
+    held = eqx.tree_at(
+        lambda s: s.relaxation_schedule,
+        session.build(state, dual_time=loop),
+        ConstantRelaxation(jnp.asarray(0.125)),
+    )
+    assert session.refresh_preconditioner(held, state) is None
+    session.rebind(companion)
+    updated = session.refresh_preconditioner(held, state)(held)
+    expected = open_session(BlockDiagonal(), companion).build(state, dual_time=loop)
+    shift = updated.shift_policy.shift_term(state).diagonal
+    assert jnp.allclose(shift, expected.shift_policy.shift_term(state).diagonal, rtol=1e-12)
+    original = held.shift_policy.shift_term(state).diagonal
+    assert not jnp.allclose(shift, original, rtol=1e-3)
+    assert float(updated.relaxation_schedule.beta) == 0.125
+
+
 def test_the_session_hook_refits_when_the_march_asks_and_not_otherwise(case) -> None:
     """A multigrid session re-fits only on its first call, after a rebind, and when ``due`` is passed.
 
