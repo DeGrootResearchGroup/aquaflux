@@ -5058,13 +5058,15 @@ are bent too (no straight-through factor left anywhere).
   patches span few corners); never at 16 x 8 over 4..32 rows/columns; the whole refracted / media /
   case suite runs with `-W error::UserWarning` clean. Not a proof: a patch missed at every corner gives
   no sign (16 x 8 at 4 x 4 lost one, sparse 0). ⚠️ **A case file cannot declare media yet**, so the
-  setting is read by case files but changes nothing there until it can. Tests:
-  `test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_find_them_again_without_one`
-  (a receiver a pass = all at once; given the mask the gather calls `_continued_paths` 0 times and
-  matches finding them again to 1e-12), `test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_another`,
-  `test_a_grid_that_found_a_patch_at_one_corner_only_says_so_and_names_the_setting`,
-  `test_the_shooting_grid_setting_reaches_every_path_found_round_a_rim` (scene: centroid and corner
-  calls all on the settings' grid), `test_a_shooting_grid_is_read_as_two_whole_numbers`. **Mutation
+  setting is read by case files but changes nothing there until it can. Tests (cut to ~3 min serial
+  after the first version's ~5 min pushed CI's unit shard 3 past its 30-minute cap on both Pythons):
+  `test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_warn_only_where_found` (8 x 4
+  arc at (32, 2): gather and mask each warn "1 of 4"; given the mask, a receiver a pass, the gather
+  calls `_continued_paths` 0 times, is silent and matches finding them itself to 1e-12),
+  `test_a_record_built_a_receiver_at_a_time_is_the_record_built_for_all_at_once` (synthetic `joined`),
+  `test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_another` (also the mask's
+  centroid and corner calls on its grid), `test_the_shooting_grid_setting_reaches_the_refracted_mask_and_gathers`
+  (scene, stubbed), `test_a_shooting_grid_is_read_as_two_whole_numbers`. **Mutation
   pass 13, all red**: gather ignoring the mask's reach, `joined` unordered, grid check dropped, never
   warning, sparse `< 1`, hits from `valid`, `_route_reach` on the default grid, centroids on
   `_host_paths`, corners on the default grid, the scene's mask or gather without the grid, empty

@@ -707,42 +707,25 @@ def _shot_reach(visibility):
     return [reach for reach in visibility.reach if reach is not None]
 
 
-def test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_find_them_again_without_one(
-    monkeypatch,
-):
-    """The mask finds, once, which corners have a path round a rim; a gather given it reads that.
-
-    Built a receiver at a time, the record is the one built for all of them at once. Given it, a
-    gather finds no path again and gives the field it gives when it finds every one itself.
-    """
-    media, arc = _rim_scene(16, 8)
-    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
-    whole = refracted.build_refracted_visibility((), arc, media, points)
-    # Two paths a pair on a shot route, so this is a receiver a pass.
-    apart = refracted.build_refracted_visibility(
-        (), arc, media, points, pair_limit=2 * arc.n_facets
-    )
-    (one,), (other,) = _shot_reach(whole), _shot_reach(apart)
-    np.testing.assert_array_equal(one.valid, other.valid)
-    np.testing.assert_array_equal(one.by_grid, other.by_grid)
-    np.testing.assert_allclose(one.unknowns, other.unknowns, rtol=0.0, atol=1e-12)
-    assert one.valid.any() and (one.patches, one.sparse) == (other.patches, other.sparse)
-
-    calls = []
-    found_again = refracted._continued_paths
-
-    def counted(*args, **kwargs):
-        calls.append(args[3].shape[0])
-        return found_again(*args, **kwargs)
-
-    monkeypatch.setattr(refracted, "_continued_paths", counted)
-    read = np.asarray(refracted_fluence_rate(arc, media, points, visibility=apart))
-    assert calls == []
-    forgotten = refracted.RefractedVisibility(apart.receivers, apart.blocked, apart.hidden)
-    found = np.asarray(refracted_fluence_rate(arc, media, points, visibility=forgotten))
-    assert calls != []
-    np.testing.assert_allclose(read, found, rtol=1e-12)
-    assert np.all(read > 0.0)
+def test_a_record_built_a_receiver_at_a_time_is_the_record_built_for_all_at_once():
+    """The mask finds which corners have a path a pass of receivers at a time; joined, the passes'
+    records are the one record, each path's unknowns beside its own corner."""
+    rng = np.random.default_rng(3)
+    valid = rng.random((2, 5, 7)) < 0.4
+    by_grid = valid & (rng.random(valid.shape) < 0.7)
+    unknowns = rng.random((*valid.shape, 2))
+    edges = np.array([[k, k + 1] for k in range(6)])
+    whole = refracted._Reach.of(valid, unknowns, by_grid, edges, (32, 32))
+    parts = [
+        refracted._Reach.of(valid[:, rows], unknowns[:, rows], by_grid[:, rows], edges, (32, 32))
+        for rows in (slice(0, 2), slice(2, 3), slice(3, 5))
+    ]
+    joined = refracted._Reach.joined(parts)
+    np.testing.assert_array_equal(joined.valid, whole.valid)
+    np.testing.assert_array_equal(joined.unknowns, whole.unknowns)
+    np.testing.assert_array_equal(joined.by_grid, whole.by_grid)
+    assert (joined.patches, joined.sparse) == (whole.patches, whole.sparse)
+    np.testing.assert_array_equal(joined.dense_unknowns()[valid], unknowns[valid])
 
 
 def test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_another(
@@ -763,26 +746,70 @@ def test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_ano
         warnings.simplefilter("ignore")
         refracted_fluence_rate(arc, media, points, shooting_grid=(8, 8))
     assert grids == [(8, 8)]
-    mask = refracted.build_refracted_visibility((), arc, media, points, shooting_grid=(8, 8))
+    sizes = []
+    grids.clear()
+    original = recorded
+
+    def sized(*args, **kwargs):
+        sizes.append(len(args[2]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", sized)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mask = refracted.build_refracted_visibility((), arc, media, points, shooting_grid=(8, 8))
+    # The facets' centroids and their distinct corners, both on the mask's grid.
+    assert arc.n_facets in sizes and any(size < arc.n_facets for size in sizes)
+    assert set(grids) == {(8, 8)}
     with pytest.raises(ValueError, match=r"shooting grid of \(8, 8\)"):
         refracted_fluence_rate(arc, media, points, visibility=mask)
     with pytest.raises(ValueError, match="two whole numbers of at least two"):
         refracted_fluence_rate(arc, media, points, shooting_grid=(1, 8))
 
 
-def test_a_grid_that_found_a_patch_at_one_corner_only_says_so_and_names_the_setting():
-    """Two columns find one of this arc's four patches at a single corner. The warning comes where the
-    corners are found -- the mask, or a gather without one -- and names the setting to raise."""
+def test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_warn_only_where_found(
+    monkeypatch,
+):
+    """Two columns find one of this arc's four patches at a single corner.
+
+    Which corners have a path round the rim is found by a gather without a mask, and by the mask; each
+    warns, naming the setting to raise. A gather given the mask finds none again -- and so is silent
+    -- and gives the field the gather that found them itself gave. The mask is built a receiver a
+    pass, so its record is joined from the passes'.
+    """
     media, arc = _rim_scene(8, 4)
     points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
     coarse = (32, 2)
-    told = check_shooting_grid(arc, media, points, shooting_grid=coarse, backstop=False)
-    assert told.sparse_patches == 1
-    pattern = rf"1 of {told.patches} patches .*RadiationSettings\.shooting_grid"
+    pattern = r"\(32 x 2\) found 1 of 4 patches .*RadiationSettings\.shooting_grid"
     with pytest.warns(UserWarning, match=pattern):
-        refracted_fluence_rate(arc, media, points, shooting_grid=coarse)
+        found = np.asarray(refracted_fluence_rate(arc, media, points, shooting_grid=coarse))
     with pytest.warns(UserWarning, match=pattern):
-        mask = refracted.build_refracted_visibility((), arc, media, points, shooting_grid=coarse)
+        # Two paths a pair on a shot route, so this is a receiver a pass.
+        mask = refracted.build_refracted_visibility(
+            (), arc, media, points, pair_limit=2 * arc.n_facets, shooting_grid=coarse
+        )
+    calls = []
+    found_again = refracted._continued_paths
+
+    def counted(*args, **kwargs):
+        calls.append(args[3].shape[0])
+        return found_again(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", counted)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        refracted_fluence_rate(arc, media, points, visibility=mask, shooting_grid=coarse)
+        read = np.asarray(
+            refracted_fluence_rate(arc, media, points, visibility=mask, shooting_grid=coarse)
+        )
+    assert calls == []
+    # Without the mask's record, the same mask's gather finds the corners itself and agrees.
+    forgotten = refracted.RefractedVisibility(mask.receivers, mask.blocked, mask.hidden)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        again = np.asarray(
+            refracted_fluence_rate(arc, media, points, visibility=forgotten, shooting_grid=coarse)
+        )
+    assert calls != []
+    np.testing.assert_allclose(read, again, rtol=1e-12)
+    np.testing.assert_allclose(read, found, rtol=1e-12)
+    assert np.all(read > 0.0)
