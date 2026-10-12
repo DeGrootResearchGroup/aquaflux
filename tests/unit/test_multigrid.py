@@ -386,7 +386,7 @@ def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
     """Chebyshev, damped-Jacobi and FC-Jacobi read the precomputed reciprocal, never re-divide it.
 
     Regression for the frozen-diagonal recomputation: each smoother used to compute
-    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``omega * mask * (1.0 / level.diagonal)``) inside its
+    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``smoother_weight * mask * (1.0 / level.diagonal)``) inside its
     own body on every call, even though the diagonal is a build-time constant. A smoother traced in
     isolation closes over ``level``'s arrays as jaxpr constants, so checking which of ``diagonal`` /
     ``inv_diagonal`` actually appears among them is a direct check of the acceptance criterion ("no
@@ -1385,10 +1385,10 @@ def test_an_unknown_prolongation_smoothing_is_refused() -> None:
 
 
 def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
-    """``spectral_damping=False`` makes ``omega`` the absolute relaxation, and that is the stronger one.
+    """``spectral_damping=False`` makes ``smoother_weight`` the absolute relaxation, and that is the stronger one.
 
     ``D^-1 A`` has a unit diagonal, so its eigenvalues average one and ``lambda_max >= 1`` always —
-    the spectral default therefore never relaxes by more than ``omega`` and usually by far less. The
+    the spectral default therefore never relaxes by more than ``smoother_weight`` and usually by far less. The
     undamped sweep is what an equivalently-configured PETSc GAMG runs (``richardson`` at its default
     scale of 1), and matching it is what closed the measured gap on the coupled turbulence block, so
     the distinction is pinned rather than left to the two docstrings to agree about.

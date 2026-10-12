@@ -75,7 +75,7 @@ def test_each_value_names_exactly_its_strategy_s_own_settings(value, strategy) -
     ``strength_threshold`` is shared with the pressure Schur, so it is set once on
     :meth:`BlockPreconditioner.build` rather than on the velocity value. A setting added to a strategy
     and not to its value -- or the reverse -- fails here rather than becoming unreachable, which is how
-    the two-level smoother's ``sweeps`` and ``omega`` sat unreachable behind the string.
+    the two-level smoother's ``sweeps`` and ``smoother_weight`` sat unreachable behind the string.
     """
     keyword_only = {
         name
@@ -88,13 +88,13 @@ def test_each_value_names_exactly_its_strategy_s_own_settings(value, strategy) -
 
 
 def test_the_two_level_smoother_settings_reach_the_strategy() -> None:
-    """``ConvectionTwoLevel(sweeps, omega)`` builds what the strategy builds when handed them directly."""
+    """``ConvectionTwoLevel(sweeps, smoother_weight)`` builds what the strategy builds when handed them directly."""
     assembler = _channel(2.0)
     state = _characteristic_reference_state(assembler)
     built = BlockPreconditioner.build(
         assembler, velocity=ConvectionTwoLevel(sweeps=3, smoother_weight=0.7)
     )
-    assert (built.velocity.sweeps, built.velocity.omega) == (3, 0.7)
+    assert (built.velocity.sweeps, built.velocity.smoother_weight) == (3, 0.7)
 
     owner_e, nb_e, _ = assembler.mesh.face_cells.interior_edges()
     direct = TwoLevelConvectionVelocity.build(
