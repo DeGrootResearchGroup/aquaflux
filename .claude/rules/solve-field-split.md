@@ -109,7 +109,16 @@ public method on a published class, so export them when the split is wired.
    the split a bound `apply_traced` is exactly the stale-constant shape #665 fixed. There is no
    `TracedFactors` and no `apply_traced`. The other two capabilities (`RefactorableInverse`,
    `ReleasableInverse`) are in `host_preconditioner.py`; see `solve-direct-preconditioners.md`.
-4. No GPU measurement exists.
+4. No GPU measurement exists. **The harness for it is `validation/traced_split_benchmark.py`
+   (2026-10-12)**: it builds both arms from ONE fitted session at a case checkpoint (`TRACED_CASE`
+   pitzdaily | bfs3d), refuses to time them unless one application agrees to 1e-10, and times one
+   application and a fixed-work GMRES (no stopping test, so both arms do identical work) against the
+   march's own matrix-free `J + beta d`. CPU baseline, pitzDaily `state-00043` (converged, `refresh_on_cycles`
+   3 march), beta 0.05, 61125 dofs, jax 0.11.2, Linux x86_64, 4 cores, 20 repeats: one application host
+   209 ms / traced 203 ms (1.03x), GMRES 15 x 4 cycles 11.59 s / 11.38 s (1.02x), agreement 0.0, both
+   true residuals 9.869e-06, one operator matvec 59 ms. Parity is the CPU answer to want; the GPU run is
+   the open measurement. Since #290 a march's re-fit happens between steps, so wiring the traced split
+   into the march no longer needs a host call inside the step (item 2).
 
 ## The field split — a saddle plus two transported scalars
 
