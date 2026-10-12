@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numba
 import numpy as np
 
-from aquaflux.radiation.clipping import _SLACK, decidable_heights
+from aquaflux.radiation.clipping import _SLACK, point_heights
 
 __all__ = ["BackFaces"]
 
@@ -49,8 +49,7 @@ def _kept(array):
 @jax.jit
 def _certainly_behind(receivers, normal, centroid):
     """Whether each receiver lies certainly behind each plane, all arrays broadcast together."""
-    height = decidable_heights(receivers[..., None, :], normal, through=centroid)
-    return height[..., 0] < 0.0
+    return point_heights(receivers, normal, centroid) < 0.0
 
 
 class BackFaces(eqx.Module):

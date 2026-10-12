@@ -79,7 +79,7 @@ import numpy as np
 
 from aquaflux.morton import morton_order
 from aquaflux.radiation.absorption import UniformAbsorption
-from aquaflux.radiation.clipping import _SLACK
+from aquaflux.radiation.clipping import _SLACK, point_heights
 from aquaflux.radiation.images import plane_exchange
 from aquaflux.radiation.lit_blocks import rounded_width
 from aquaflux.radiation.mirror_visibility import (
@@ -134,7 +134,9 @@ class TransferMatrix(eqx.Module):
         radiosity contributes to the irradiance on ``i``: those are the same number, not two
         related by reciprocity. **The area therefore belongs to the ROW index** — ``A_i``
         multiplies row ``i`` — which is what :func:`reciprocity_residual` weights by, and what
-        an equal-area fixture cannot distinguish from the transpose.
+        an equal-area fixture cannot distinguish from the transpose. Only the points of ``i``
+        in front of ``j``'s plane take anything from it: a facet sends from its front alone, as
+        the gathers' profiles, dark behind a facet, have it.
     source_cosine : jnp.ndarray, shape ``(n_facets, n_facets)``
         Cosine, at source ``j``, of the angle between its normal and the direction to receiver
         ``i``. Needed only to evaluate a non-Lambertian source's own angular distribution, which
@@ -374,9 +376,17 @@ def _row_block(geometry: _Geometry, sample, weight, index, columns):
     ``columns`` and scattered into rows of the full width; every other facet lies behind or in the
     plane of every receiver of the block, where the term is zero (:func:`_columns_in_front`). The
     source cosine and the separation are cheap and are formed against every facet.
+
+    The kernel clips each sending triangle to the receiving point's front half-space, which says
+    nothing of the sender's side, so the term is also zeroed at each quadrature point lying on or
+    behind the sending facet's plane. Without that a facet would send reflected light out of its
+    back, which no gather does. Each point is judged on its own, not the receiving facet's
+    centroid, since a receiving facet can straddle the sender's plane.
     """
     facing = geometry.normal[index]
     triangles = geometry.vertices[columns]
+    sending_normal = geometry.normal[columns]
+    sending_centroid = geometry.centroid[columns]
 
     def accumulate(total, sampled):
         weight_q, point_q = sampled
@@ -385,7 +395,11 @@ def _row_block(geometry: _Geometry, sample, weight, index, columns):
                 lambda triangle: projected_solid_angle(point, facing_i, triangle)
             )(triangles)
         )(point_q, facing)
-        return total + weight_q * at_point, None
+        # A point on or behind the sending facet's plane takes nothing from it.
+        in_front = (
+            point_heights(point_q[:, None, :], sending_normal[None], sending_centroid[None]) > 0.0
+        )
+        return total + weight_q * jnp.where(in_front, at_point, 0.0), None
 
     # Scanned rather than vmapped over the quadrature points so the live intermediate stays
     # (rows, columns) whatever the rule costs, which is what lets ``chunk_size`` keep meaning

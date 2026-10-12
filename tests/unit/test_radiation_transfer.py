@@ -10,11 +10,13 @@ import numpy as np
 import pytest
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
 from aquaflux.radiation.profiles import Isotropic, Lambertian
+from aquaflux.radiation.quadrature import triangle_quadrature
 from aquaflux.radiation.self_occlusion import (
     NoOcclusion,
     RayCastOcclusion,
     SilhouetteOcclusion,
 )
+from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual, row_sum_error
 
@@ -196,6 +198,76 @@ def test_point_sources_take_no_part_in_the_transfer():
     matrix = np.asarray(transfer.geometric)
     np.testing.assert_allclose(matrix[-1, :], 0.0, atol=0.0)
     np.testing.assert_allclose(matrix[:, -1], 0.0, atol=0.0)
+
+
+# ---------------------------------------------------------------------------------------
+# A facet sends from its front only
+# ---------------------------------------------------------------------------------------
+
+_X, _Y, _Z = np.eye(3)
+
+
+def _plate(height: float, *, facing_up: bool) -> np.ndarray:
+    """A 1 m square plate at ``height``, its two triangles' normals ``+z`` or ``-z``."""
+    first, second = (_X, _Y) if facing_up else (_Y, _X)
+    return rectangle_triangles([0.0, 0.0, height], 0.5 * first, 0.5 * second)
+
+
+@pytest.mark.parametrize("strategy", [NoOcclusion(), RayCastOcclusion()])
+def test_a_facet_sends_nothing_out_of_its_back(strategy):
+    """Every gather takes a facet as dark behind itself, and the transfer must agree.
+
+    A plate over another, both facing down: the upper one sees only the lower one's back, so
+    nothing the lower one reflects can reach it. The receiver's own half-space does not decide
+    this -- the lower plate lies in front of the upper one -- only the sender's does. Without
+    that gate the upper plate takes about 0.22 of what the lower one sends. Turning the lower
+    plate to face up gives the control: the same pair, now front to front, exchanges light.
+    """
+    upper = _plate(2.0, facing_up=False)
+    for facing_up, carried in ((False, False), (True, True)):
+        lower = _plate(1.0, facing_up=facing_up)
+        surfaces = Surfaces.from_triangles(np.concatenate([lower, upper]))
+        transfer = build_transfer(surfaces, self_occlusion=strategy)
+        from_lower = np.asarray(transfer.geometric)[2:, :2].sum(axis=1)
+        if carried:
+            assert np.all(from_lower > 0.15)
+        else:
+            np.testing.assert_array_equal(from_lower, 0.0)
+
+
+def test_a_receiver_across_the_sender_s_plane_takes_light_only_at_its_points_in_front():
+    """The sender's side is judged at each quadrature point, not once per receiving facet.
+
+    A small plate facing up sends to a wall standing across its plane and facing it, so the
+    wall's triangles each have points above the plate's plane and points below it. The row is
+    the projected solid angle summed over the points above alone -- strictly between nothing and
+    every point's sum, which a gate taken once per facet (at its centroid, say) cannot give.
+    """
+    sender = rectangle_triangles([0.0, 0.0, 0.0], 0.1 * _X, 0.1 * _Y)
+    wall = rectangle_triangles([1.0, 0.0, 0.2], 0.6 * _Z, 0.6 * _Y)
+    surfaces = Surfaces.from_triangles(np.concatenate([sender, wall]))
+    assert np.allclose(np.asarray(surfaces.normal)[:2], _Z)
+    assert np.allclose(np.asarray(surfaces.normal)[2:], -_X)
+    transfer = build_transfer(surfaces, self_occlusion=NoOcclusion(), receiver_quadrature=6)
+
+    rule = triangle_quadrature(6)
+    points = np.asarray(rule.points(wall))
+    weight = np.asarray(rule.weight)
+    seen = np.array(
+        [
+            [
+                [projected_solid_angle(point, -_X, triangle) / np.pi for triangle in sender]
+                for point in row
+            ]
+            for row in points
+        ]
+    )
+    above = points[:, :, 2] > 0.0
+    assert np.all(above.any(axis=1)) and np.all((~above).any(axis=1))
+    every_point = np.einsum("q,rqs->rs", weight, seen)
+    expected = np.einsum("q,rqs->rs", weight, seen * above[:, :, None])
+    assert np.all(expected > 0.05 * every_point) and np.all(expected < 0.95 * every_point)
+    np.testing.assert_allclose(np.asarray(transfer.geometric)[2:, :2], expected, rtol=1e-12)
 
 
 def _box_with_a_lamp():
