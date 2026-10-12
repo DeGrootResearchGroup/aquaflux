@@ -53,12 +53,16 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import connected_components
 
+from aquaflux.radiation import shooting
 from aquaflux.radiation.culling import _body_blocks
 from aquaflux.radiation.gather import _groups
 from aquaflux.radiation.refraction import (
     Chain,
     Media,
+    _between_rows,
     _only_saddles,
     _pairs_meet,
     _path_count,
@@ -84,7 +88,9 @@ from aquaflux.radiation.work import (
 
 __all__ = [
     "RefractedVisibility",
+    "ShootingGridCheck",
     "build_refracted_visibility",
+    "check_shooting_grid",
     "refracted_fluence_rate",
     "refracted_irradiance",
 ]
@@ -345,7 +351,7 @@ def _from_a_reached_point(
     """
     corners, shared = _shared_corners(surfaces, facets)
     corners = np.asarray(corners, dtype=float)
-    corner_paths, corner_found, _ = _continued_paths(
+    corner_paths, corner_found, _, _ = _continued_paths(
         media, chain, corners, receivers, _corner_edges(shared), pair_limit
     )
     # (paths, rows, facets, 3): which of each facet's corners has a path.
@@ -645,7 +651,7 @@ def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
     corners, shared = _shared_corners(surfaces, facets)
     corners = np.asarray(corners, dtype=float)
     n_rows, n_corners = len(receivers), len(corners)
-    _, reach, unknowns = _continued_paths(
+    _, reach, unknowns, _ = _continued_paths(
         media, chain, corners, receivers, _corner_edges(shared), pair_limit
     )
 
@@ -732,7 +738,7 @@ def _corner_edges(shared):
     return np.unique(np.sort(edges, axis=1), axis=0)
 
 
-def _continued_paths(media, chain, sources, receivers, edges, pair_limit):
+def _continued_paths(media, chain, sources, receivers, edges, pair_limit, grid=None):
     """Paths round each side of a shell between every source and receiver, on a shot route.
 
     Each pair is first shot from the grid (:func:`~aquaflux.radiation.shooting.rim_crossings`). A
@@ -748,6 +754,8 @@ def _continued_paths(media, chain, sources, receivers, edges, pair_limit):
     receivers : np.ndarray, shape ``(n_receivers, 3)``
     edges : np.ndarray of int, shape ``(n_edges, 2)``
         Pairs of sources near enough for one's path to start the other's.
+    grid : tuple of int, optional
+        The shooting grid's rows and columns; the shooting module's default when ``None``.
 
     Returns
     -------
@@ -755,14 +763,17 @@ def _continued_paths(media, chain, sources, receivers, edges, pair_limit):
     valid : np.ndarray of bool, shape ``(2, n_receivers, n_sources)``
     unknowns : np.ndarray, shape ``(2, n_receivers, n_sources, 2)``
         Each side's (0 for ``+1``, 1 for ``-1``).
+    by_grid : np.ndarray of bool, shape ``(2, n_receivers, n_sources)``
+        Which of the paths the grid found itself.
     """
     sources, receivers = np.asarray(sources, dtype=float), np.asarray(receivers, dtype=float)
     n_sources = len(sources)
     shape = (2, len(receivers), n_sources)
     side, row, source = (index.reshape(-1) for index in np.indices(shape))
     points, valid, unknowns = _stepped_shots(
-        media, chain, sources[source], receivers[row], side, None, pair_limit
+        media, chain, sources[source], receivers[row], side, None, pair_limit, grid
     )
+    by_grid = valid.copy()
     directed = np.concatenate([edges, edges[:, ::-1]])
     fresh = valid.reshape(-1, n_sources)
     while True:
@@ -779,6 +790,7 @@ def _continued_paths(media, chain, sources, receivers, edges, pair_limit):
             side[tried],
             unknowns[pair * n_sources + directed[edge, 0]],
             pair_limit,
+            grid,
         )
         # A source reached from several neighbours keeps the first path found.
         gained, first = np.unique(tried[found], return_index=True)
@@ -791,14 +803,15 @@ def _continued_paths(media, chain, sources, receivers, edges, pair_limit):
         points.reshape(*shape, *points.shape[1:]),
         valid.reshape(shape),
         unknowns.reshape(*shape, 2),
+        by_grid.reshape(shape),
     )
 
 
-def _stepped_shots(media, chain, sources, receivers, side, starts, pair_limit):
+def _stepped_shots(media, chain, sources, receivers, side, starts, pair_limit, grid=None):
     """:func:`~aquaflux.radiation.refraction._shot_paths` on the host, a step of pairs at a time.
 
     ``side`` is ``(n,)`` of 0 (``+1``) or 1 (``-1``) and ``starts`` ``(n, 2)`` or ``None`` (the
-    grid). A step's paths each scan a grid, so it is sized as a pass of that many pairs, and padded
+    grid of ``grid`` rows and columns). A step's paths each scan a grid, so it is sized as a pass of that many pairs, and padded
     to one shape -- repeating its last pair, whose answers are dropped -- so it compiles once.
     Returns the crossing points, whether each path exists, and its unknowns, as numpy arrays.
     """
@@ -815,6 +828,7 @@ def _stepped_shots(media, chain, sources, receivers, side, starts, pair_limit):
             jnp.asarray(receivers[rows]),
             jnp.asarray(signs[rows]),
             None if starts is None else jnp.asarray(starts[rows]),
+            grid,
         )
         keep = slice(0, n - first)
         points.append(np.asarray(paths.points)[keep])
@@ -865,3 +879,171 @@ def _shared_corners(surfaces: Surfaces, facets: np.ndarray):
         np.asarray(vertices), axis=0, return_index=True, return_inverse=True
     )
     return jnp.take(vertices, first, axis=0), np.asarray(inverse).reshape(-1, 3)
+
+
+@dataclasses.dataclass(frozen=True)
+class ShootingGridCheck:
+    """What the shooting grid finds round the rims of a scene, and which way to refine it.
+
+    Round a sleeve's rim each path is found by shooting: a grid over its two unknowns (``beta``,
+    the index times the direction's axial component, in rows; and the share across the band of
+    impact parameters, in columns) brackets it, and every source corner the grid misses beside one
+    with a path is polished from that path. So the grid need only land in each connected patch of
+    corners with a path once; a patch it misses at every corner is lost, and leaves no trace. What
+    a finished scene can show is how near the grid came to missing the patches it did find: paths
+    found only from a neighbour, and why the grid missed each -- too few rows to sample its
+    ``beta``, or rows that bracket it with the miss along them.
+
+    Attributes
+    ----------
+    grid : tuple of int
+        The rows and columns checked.
+    paths : int
+        Corner paths found, over every shot route, receiver and side.
+    by_grid : int
+        Of those, the ones the grid found itself.
+    between_rows : int
+        Paths found only from a neighbour where the rows either side of the path's ``beta`` do not
+        both reach the source: the rows are too far apart.
+    along_rows : int
+        Paths found only from a neighbour where they do: the miss lies along the rows.
+    patches : int
+        Connected patches of corners with a path (joined by facet edges), per route, receiver and
+        side.
+    sparse_patches : int
+        Patches in which the grid found at most one corner: a patch a little smaller would have
+        been missed.
+    refine : str or None
+        ``"rows"`` or ``"columns"``, whichever more of the paths found only from a neighbour point
+        to; ``None`` when the grid found every path itself.
+    refined : tuple of int or None
+        The grid the backstop ran, ``refine``'s count doubled; ``None`` when it did not run.
+    new_patches : int or None
+        Patches the refined grid found with no corner found at ``grid``: the patches ``grid``
+        missed entirely. Zero is evidence ``grid`` is enough for these points, not proof.
+    """
+
+    grid: tuple[int, int]
+    paths: int
+    by_grid: int
+    between_rows: int
+    along_rows: int
+    patches: int
+    sparse_patches: int
+    refine: str | None
+    refined: tuple[int, int] | None
+    new_patches: int | None
+
+
+def check_shooting_grid(
+    surfaces: Surfaces,
+    media: Media,
+    points,
+    *,
+    grid: tuple[int, int] | None = None,
+    backstop: bool = True,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+) -> ShootingGridCheck:
+    """Check the shooting grid on the routes round the rims of ``media``, between ``surfaces``' corners
+    and ``points``.
+
+    Every shot route (a path through a sleeve's wall alone) is solved at its source facets' corners
+    as the refracted gathers solve it; the paths the grid found are counted against those reached
+    only from a neighbouring corner, and each of the latter is asked why the grid missed it. With
+    ``backstop``, the direction the misses point to is doubled and the routes solved again; a patch
+    of paths the refined grid finds and ``grid`` did not reach at all is one ``grid`` lost.
+
+    Parameters
+    ----------
+    surfaces : Surfaces
+        The sources, as passed to the refracted gathers.
+    media : Media
+    points : array_like, shape ``(n_points, 3)``
+        Receivers, concrete.
+    grid : tuple of int, optional
+        Rows and columns to check; the default grid when ``None``.
+    backstop : bool
+        Whether to solve again with ``refine``'s count doubled, when there is a direction to refine.
+    pair_limit : int
+        Pairs a host step solves at most.
+
+    Returns
+    -------
+    ShootingGridCheck
+    """
+    grid = tuple(grid or (shooting._ROWS, shooting._COLUMNS))
+    points = np.asarray(points, dtype=float)
+    routes = []
+    for group in _plan(surfaces, media, points, pair_limit):
+        if not _shot(media, group.chain):
+            continue
+        corners, shared = _shared_corners(surfaces, group.facets)
+        corners = np.asarray(corners, dtype=float)
+        routes.append((group.chain, corners, _corner_edges(shared), points[group.rows]))
+
+    totals = dict(paths=0, by_grid=0, between_rows=0, along_rows=0, patches=0, sparse_patches=0)
+    found_at_grid = []
+    for chain, corners, edges, receivers in routes:
+        _, valid, unknowns, by_grid = _continued_paths(
+            media, chain, corners, receivers, edges, pair_limit, grid
+        )
+        found_at_grid.append(valid)
+        side, row, corner = np.nonzero(valid & ~by_grid)
+        rows_short = np.zeros(len(side), dtype=bool)
+        if len(side):
+            rows_short = np.asarray(
+                _between_rows(
+                    media,
+                    chain,
+                    jnp.asarray(corners[corner]),
+                    jnp.asarray(receivers[row]),
+                    jnp.asarray(np.where(side == 0, 1.0, -1.0)),
+                    jnp.asarray(unknowns[side, row, corner]),
+                    grid,
+                )
+            )
+        labels = _patches(valid, edges)
+        hits = np.bincount(labels[by_grid], minlength=labels.max() + 1)
+        patch_ids = np.unique(labels[valid])
+        totals["paths"] += int(valid.sum())
+        totals["by_grid"] += int(by_grid.sum())
+        totals["between_rows"] += int(rows_short.sum())
+        totals["along_rows"] += int((~rows_short).sum())
+        totals["patches"] += len(patch_ids)
+        totals["sparse_patches"] += int(np.sum(hits[patch_ids] <= 1))
+
+    missed = totals["between_rows"] + totals["along_rows"]
+    refine = None
+    if missed:
+        refine = "rows" if totals["between_rows"] >= totals["along_rows"] else "columns"
+    refined = new_patches = None
+    if backstop and refine is not None:
+        refined = (2 * grid[0], grid[1]) if refine == "rows" else (grid[0], 2 * grid[1])
+        new_patches = 0
+        for (chain, corners, edges, receivers), before in zip(routes, found_at_grid, strict=True):
+            _, valid, _, _ = _continued_paths(
+                media, chain, corners, receivers, edges, pair_limit, refined
+            )
+            labels = _patches(valid, edges)
+            fresh = np.setdiff1d(np.unique(labels[valid]), np.unique(labels[valid & before]))
+            new_patches += len(fresh)
+    return ShootingGridCheck(
+        grid=grid, refine=refine, refined=refined, new_patches=new_patches, **totals
+    )
+
+
+def _patches(valid, edges):
+    """``valid.shape`` labels of the connected patches of ``True`` corners, per side and receiver.
+
+    ``valid`` is ``(..., n_corners)`` and ``edges`` ``(n_edges, 2)`` pairs of corners; corners are
+    joined along an edge when both are ``True``. Labels are unique across the leading axes; a
+    ``False`` corner has a label of its own.
+    """
+    n_corners = valid.shape[-1]
+    flat = valid.reshape(-1, n_corners)
+    group, edge = np.nonzero(flat[:, edges[:, 0]] & flat[:, edges[:, 1]])
+    ends = group[:, None] * n_corners + edges[edge]
+    size = flat.size
+    graph = coo_matrix((np.ones(len(ends)), (ends[:, 0], ends[:, 1])), shape=(size, size))
+    _, labels = connected_components(graph, directed=False)
+    return labels.reshape(valid.shape)

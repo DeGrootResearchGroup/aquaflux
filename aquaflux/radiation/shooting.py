@@ -117,7 +117,35 @@ def _trace(b, beta, geometry):
     return across, miss, ok, jnp.stack(points), jnp.stack(heights)
 
 
-def rim_crossings(geometry, side, start=None):
+def _problem(geometry, side):
+    """What a ray fired from the receiver at given unknowns misses the source by, and the band.
+
+    Returns the misses (a function of the unknowns, with whether the ray exists), the impact
+    parameter the unknowns mean, the largest ``|beta|`` scanned, and whether the band exists.
+    """
+    shell, core = geometry["shell_radius"], geometry["core_radius"]
+    inner, outer = geometry["shell_index"], geometry["outside_index"]
+    # The band is empty past the beta at which the core's edge, seen through the shell, reaches
+    # the shell's own radius; and no beta can reach an index of any leg.
+    edge = (shell**2 * outer**2 - core**2 * inner**2) / (shell**2 - core**2)
+    reach = jnp.minimum(
+        jnp.sqrt(jnp.maximum(edge, 0.0)), jnp.min(geometry["indices"]) * (1.0 - 1e-9)
+    )
+    exists = edge > 0.0
+    scale = jnp.maximum(norm(geometry["receiver"] - geometry["source"]), 1e-300)
+
+    def impact(fraction, beta):
+        low = core * jnp.sqrt(inner**2 - beta**2) / jnp.sqrt(outer**2 - beta**2)
+        return side * (low + (shell - low) * fraction)
+
+    def misses(fraction, beta):
+        across, miss, ok, _, _ = _trace(impact(fraction, beta), beta, geometry)
+        return jnp.stack([across, miss]) / scale, ok
+
+    return misses, impact, reach, exists
+
+
+def rim_crossings(geometry, side, start=None, grid=None):
     """Where the path round one side of the shell crosses each surface, and whether it exists.
 
     Found from the grid of :data:`_ROWS` by :data:`_COLUMNS` and a Newton polish, or, given
@@ -139,6 +167,8 @@ def rim_crossings(geometry, side, start=None):
         ``+1`` or ``-1``: which side of the shell's axis the receiver's leg passes.
     start : jnp.ndarray, shape ``(2,)``, optional
         Unknowns to polish from instead of scanning the grid, as ``unknowns`` returns them.
+    grid : tuple of int, optional
+        The grid's rows and columns, a static value; :data:`_ROWS` by :data:`_COLUMNS` by default.
 
     Returns
     -------
@@ -151,24 +181,7 @@ def rim_crossings(geometry, side, start=None):
         The path's share of the way across the band of impact parameters at its ``beta``, and its
         ``beta``: a start for a neighbouring source's path.
     """
-    shell, core = geometry["shell_radius"], geometry["core_radius"]
-    inner, outer = geometry["shell_index"], geometry["outside_index"]
-    # The band is empty past the beta at which the core's edge, seen through the shell, reaches
-    # the shell's own radius; and no beta can reach an index of any leg.
-    edge = (shell**2 * outer**2 - core**2 * inner**2) / (shell**2 - core**2)
-    reach = jnp.minimum(
-        jnp.sqrt(jnp.maximum(edge, 0.0)), jnp.min(geometry["indices"]) * (1.0 - 1e-9)
-    )
-    exists = edge > 0.0
-    scale = jnp.maximum(norm(geometry["receiver"] - geometry["source"]), 1e-300)
-
-    def impact(fraction, beta):
-        low = core * jnp.sqrt(inner**2 - beta**2) / jnp.sqrt(outer**2 - beta**2)
-        return side * (low + (shell - low) * fraction)
-
-    def misses(fraction, beta):
-        across, miss, ok, _, _ = _trace(impact(fraction, beta), beta, geometry)
-        return jnp.stack([across, miss]) / scale, ok
+    misses, impact, reach, exists = _problem(geometry, side)
 
     def polish(_, unknowns):
         values, _ = misses(unknowns[0], unknowns[1])
@@ -178,7 +191,7 @@ def rim_crossings(geometry, side, start=None):
         return jnp.where(jnp.all(jnp.isfinite(moved)), moved, unknowns)
 
     if start is None:
-        start, bracketed = _scanned(misses, reach)
+        start, bracketed = _scanned(misses, reach, *(grid or (_ROWS, _COLUMNS)))
     else:
         bracketed = jnp.asarray(True)
     unknowns = jax.lax.fori_loop(0, _POLISH, polish, start)
@@ -195,56 +208,37 @@ def rim_crossings(geometry, side, start=None):
     return points, heights, found, unknowns
 
 
-def _scanned(misses, reach):
+def _rows(reach, rows):
+    """The values of ``beta`` the grid scans: ``rows`` evenly across ``[-reach, reach]``."""
+    return reach * ((jnp.arange(rows) + 0.5) / rows * 2.0 - 1.0)
+
+
+def between_rows(geometry, side, unknowns, grid=None):
+    """Whether the grid could miss the path at ``unknowns`` for want of rows.
+
+    The grid finds a path only from two neighbouring rows that both have a projected crossing of
+    the source, with the axial miss changing sign between them. This asks it of the two rows either
+    side of the path's ``beta``: if either has none, or the path lies beyond the outermost row, the
+    path's band of existing crossings is narrower in ``beta`` than the rows are apart. Otherwise
+    the rows bracket it and a miss lies along them (too few columns, or a bracket elsewhere taken
+    first). Arguments as for :func:`rim_crossings`.
+    """
+    rows_, columns = grid or (_ROWS, _COLUMNS)
+    misses, _, reach, _ = _problem(geometry, side)
+    rows = _rows(reach, rows_)
+    beta = unknowns[1]
+    above = jnp.clip(jnp.searchsorted(rows, beta), 1, rows_ - 1)
+    has_below = _row(misses, rows[above - 1], columns)[0]
+    has_above = _row(misses, rows[above], columns)[0]
+    beyond = (beta < rows[0]) | (beta > rows[-1])
+    return beyond | ~(has_below & has_above)
+
+
+def _scanned(misses, reach, rows_, columns):
     """A start for the polish from the grid, and whether the grid bracketed a path at all."""
-    fractions = (jnp.arange(_COLUMNS) + 0.5) / _COLUMNS
-    rows = reach * ((jnp.arange(_ROWS) + 0.5) / _ROWS * 2.0 - 1.0)
-
-    def row(beta):
-        """Where along a row the projected ray passes the source, and the axial miss there.
-
-        The coarse samples find where along the band the traced ray exists at all; the ends of that
-        run are then found by bisection and the run sampled again between them, ends included. A
-        path near an end -- grazing the sleeve, or just reaching the source's own sleeve -- lies
-        between the last coarse sample that exists and the edge, where the coarse samples alone
-        cannot see the projected miss change sign.
-        """
-
-        def exists(fraction):
-            return misses(fraction, beta)[1]
-
-        coarse = jax.vmap(exists)(fractions)
-        first_ok = jnp.argmax(coarse)
-        last_ok = _COLUMNS - 1 - jnp.argmax(coarse[::-1])
-
-        def edge(good, bad):
-            """The end of the run between a fraction where the ray exists and one where it may not."""
-            good, bad = jnp.where(exists(bad), bad, good), bad
-
-            def halve(_, ends):
-                inside, outside = ends
-                middle = 0.5 * (inside + outside)
-                there = exists(middle)
-                return jnp.where(there, middle, inside), jnp.where(there, outside, middle)
-
-            return jax.lax.fori_loop(0, _EDGE_HALVINGS, halve, (good, bad))[0]
-
-        low = edge(fractions[first_ok], jnp.where(first_ok > 0, fractions[first_ok - 1], 0.0))
-        high = edge(
-            fractions[last_ok], jnp.where(last_ok < _COLUMNS - 1, fractions[last_ok + 1], 1.0)
-        )
-        samples = low + (high - low) * jnp.linspace(0.0, 1.0, _COLUMNS)
-        values, ok = jax.vmap(lambda fraction: misses(fraction, beta))(samples)
-        across, miss = values[:, 0], values[:, 1]
-        changes = ok[:-1] & ok[1:] & (jnp.sign(across[:-1]) != jnp.sign(across[1:]))
-        first = jnp.argmax(changes)
-        share = across[first] / (across[first] - across[first + 1])
-        fraction = samples[first] + share * (samples[first + 1] - samples[first])
-        found = jnp.any(changes) & jnp.any(coarse)
-        return found, fraction, miss[first] + share * (miss[first + 1] - miss[first])
-
+    rows = _rows(reach, rows_)
     # One row at a time: a whole grid per pair, over a batch of pairs, is too much to hold at once.
-    has, fraction, miss = jax.lax.map(row, rows)
+    has, fraction, miss = jax.lax.map(lambda beta: _row(misses, beta, columns), rows)
     changes = has[:-1] & has[1:] & (jnp.sign(miss[:-1]) != jnp.sign(miss[1:]))
     first = jnp.argmax(changes)
     share = miss[first] / (miss[first] - miss[first + 1])
@@ -255,3 +249,47 @@ def _scanned(misses, reach):
         ]
     )
     return start, jnp.any(changes)
+
+
+def _row(misses, beta, columns):
+    """Where along a row the projected ray passes the source, and the axial miss there.
+
+    The coarse samples find where along the band the traced ray exists at all; the ends of that
+    run are then found by bisection and the run sampled again between them, ends included. A
+    path near an end -- grazing the sleeve, or just reaching the source's own sleeve -- lies
+    between the last coarse sample that exists and the edge, where the coarse samples alone
+    cannot see the projected miss change sign.
+    """
+
+    fractions = (jnp.arange(columns) + 0.5) / columns
+
+    def exists(fraction):
+        return misses(fraction, beta)[1]
+
+    coarse = jax.vmap(exists)(fractions)
+    first_ok = jnp.argmax(coarse)
+    last_ok = columns - 1 - jnp.argmax(coarse[::-1])
+
+    def edge(good, bad):
+        """The end of the run between a fraction where the ray exists and one where it may not."""
+        good, bad = jnp.where(exists(bad), bad, good), bad
+
+        def halve(_, ends):
+            inside, outside = ends
+            middle = 0.5 * (inside + outside)
+            there = exists(middle)
+            return jnp.where(there, middle, inside), jnp.where(there, outside, middle)
+
+        return jax.lax.fori_loop(0, _EDGE_HALVINGS, halve, (good, bad))[0]
+
+    low = edge(fractions[first_ok], jnp.where(first_ok > 0, fractions[first_ok - 1], 0.0))
+    high = edge(fractions[last_ok], jnp.where(last_ok < columns - 1, fractions[last_ok + 1], 1.0))
+    samples = low + (high - low) * jnp.linspace(0.0, 1.0, columns)
+    values, ok = jax.vmap(lambda fraction: misses(fraction, beta))(samples)
+    across, miss = values[:, 0], values[:, 1]
+    changes = ok[:-1] & ok[1:] & (jnp.sign(across[:-1]) != jnp.sign(across[1:]))
+    first = jnp.argmax(changes)
+    share = across[first] / (across[first] - across[first + 1])
+    fraction = samples[first] + share * (samples[first + 1] - samples[first])
+    found = jnp.any(changes) & jnp.any(coarse)
+    return found, fraction, miss[first] + share * (miss[first + 1] - miss[first])

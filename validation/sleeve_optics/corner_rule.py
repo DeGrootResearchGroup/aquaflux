@@ -36,36 +36,16 @@ import aquaflux  # noqa: F401  (enables x64)
 import jax
 import jax.numpy as jnp
 import numpy as np
-from aquaflux.radiation import Surfaces, UniformAbsorption, refracted
-from aquaflux.radiation.refraction import Media, Transparent, _path_count, _shot, solve_paths
+from aquaflux.radiation import refracted
+from aquaflux.radiation.refraction import _path_count, _shot, solve_paths
 from aquaflux.radiation.solid_angle import solid_angle
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT
-from aquaflux.solids import Cylinder
-from check_refraction import graded_tube
-from tracer import AIR, QUARTZ, WATER
-from tracer import Scene as Traced
+from four_lamps import scene
 
 SECTORS = int(os.environ.get("SLEEVE_SECTORS", 16))
 POINTS_MM = [[55.0, 25.0], [50.0, 50.0], [-25.0, 41.0], [0.0, -25.0]]
 
-pitch, absorption = 0.025, -np.log(0.95) / 0.01
-centres = pitch * np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
-traced = Traced(centres=centres, wall=0.1, absorption=absorption, neighbours="optics")
-arc = graded_tube(traced.arc, 1.5, SECTORS)
-triangles = np.concatenate([arc + np.array([x, y, 0.0]) for x, y in centres])
-area = 0.5 * np.linalg.norm(
-    np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1
-)
-lamps = Surfaces.from_triangles(jnp.asarray(triangles), emission=3.0 / (area.sum() / 4))
-sleeves = tuple(
-    Transparent(
-        Cylinder([x, y, 0.0], [0, 0, 1], traced.outer, 1.75),
-        QUARTZ,
-        inside=(Transparent(Cylinder([x, y, 0.0], [0, 0, 1], traced.inner, 1.75), AIR),),
-    )
-    for x, y in centres
-)
-media = Media(WATER, sleeves, UniformAbsorption(absorption))
+lamps, media = scene(SECTORS)
 points = np.array([[*p, 0.0] for p in POINTS_MM]) / 1e3
 print(f"{SECTORS} sectors, {lamps.n_facets} facets, points {POINTS_MM} mm", flush=True)
 

@@ -671,13 +671,14 @@ def _solve_paths(media: Media, chain: Chain, sources, receivers, *, shot: bool) 
 
 
 @eqx.filter_jit
-def _shot_paths(media: Media, chain: Chain, sources, receivers, sides, starts=None):
+def _shot_paths(media: Media, chain: Chain, sources, receivers, sides, starts=None, grid=None):
     """One path per pair round the side of the shell ``sides`` names, on a shot route (:func:`_shot`).
 
     ``sources`` and ``receivers`` are ``(n, 3)`` and ``sides`` is ``(n,)`` of ``+1`` or ``-1``. For
     pairs whose side is already known, which is half the work of :func:`solve_paths`, which finds
     both. ``starts``, ``(n, 2)``, polishes each path from a neighbouring source's unknowns instead of
-    scanning the grid (:func:`~aquaflux.radiation.shooting.rim_crossings`).
+    scanning the grid (:func:`~aquaflux.radiation.shooting.rim_crossings`), whose rows and columns
+    ``grid`` sets (the shooting module's default when ``None``).
 
     Returns
     -------
@@ -687,12 +688,27 @@ def _shot_paths(media: Media, chain: Chain, sources, receivers, sides, starts=No
         Each path's unknowns, a start for a neighbouring source's.
     """
     if starts is None:
-        return jax.vmap(lambda s, r, side: _shot_path(media, chain, s, r, side))(
+        return jax.vmap(lambda s, r, side: _shot_path(media, chain, s, r, side, None, grid))(
             sources, receivers, sides
         )
-    return jax.vmap(lambda s, r, side, start: _shot_path(media, chain, s, r, side, start))(
+    return jax.vmap(lambda s, r, side, start: _shot_path(media, chain, s, r, side, start, grid))(
         sources, receivers, sides, starts
     )
+
+
+@eqx.filter_jit
+def _between_rows(media: Media, chain: Chain, sources, receivers, sides, unknowns, grid=None):
+    """``(n,)`` whether a grid of ``grid`` rows and columns could miss each path for want of rows.
+
+    Each pair's path, round the side ``sides`` names, is the one at ``unknowns``; see
+    :func:`~aquaflux.radiation.shooting.between_rows`. Arguments as for :func:`_shot_paths`.
+    """
+
+    def one(source, receiver, side, found):
+        geometry, _, _, _ = _rim_geometry(media, chain, source, receiver)
+        return shooting.between_rows(geometry, side, found, grid)
+
+    return jax.vmap(one)(sources, receivers, sides, unknowns)
 
 
 def _distinct(paths: Paths, separation) -> Paths:
@@ -781,10 +797,11 @@ def _starts(media: Media, chain: Chain, source, receiver) -> jnp.ndarray:
     )
 
 
-def _shot_path(media: Media, chain: Chain, source, receiver, side, start=None):
-    """One pair's path past one side of a shell, found by shooting (:func:`_shot`), and its unknowns.
+def _rim_geometry(media: Media, chain: Chain, source, receiver):
+    """A shot route's pair in the plane across the shell's axis, as
+    :func:`~aquaflux.radiation.shooting.rim_crossings` takes it, and that plane's frame.
 
-    ``start`` polishes from a neighbouring source's unknowns instead of scanning the grid.
+    Returns the geometry, the two in-plane directions and the axis.
     """
     shell = media.nodes[chain.passing[0]]
     cores = [media.nodes[n] for n, parent in enumerate(media.parents) if parent == chain.passing[0]]
@@ -815,9 +832,20 @@ def _shot_path(media: Media, chain: Chain, source, receiver, side, start=None):
         }
     )
     geometry["outs"] = tuple(out for _, out in chain.crossings)
+    return geometry, first, second, axis
+
+
+def _shot_path(media: Media, chain: Chain, source, receiver, side, start=None, grid=None):
+    """One pair's path past one side of a shell, found by shooting (:func:`_shot`), and its unknowns.
+
+    ``start`` polishes from a neighbouring source's unknowns instead of scanning the grid of
+    ``grid`` rows and columns (the shooting module's default when ``None``).
+    """
+    bodies = [media.nodes[node].body for node, _ in chain.crossings]
+    geometry, first, second, axis = _rim_geometry(media, chain, source, receiver)
     if start is not None:
         start = jax.lax.stop_gradient(start)
-    projected, heights, found, unknowns = shooting.rim_crossings(geometry, side, start)
+    projected, heights, found, unknowns = shooting.rim_crossings(geometry, side, start, grid)
     crossing = (
         projected[:, :1] * jax.lax.stop_gradient(first)
         + projected[:, 1:] * jax.lax.stop_gradient(second)

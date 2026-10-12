@@ -363,6 +363,14 @@ medium's absorption along its own leg. Three things are approximated, and each i
   whose light comes from a patch of the source only a few facets across: there a triangle straddling
   the patch's edge is cut where its paths stop, and the part that has them is counted. The cut is
   found at the values given and held fixed under a derivative, as shadows are.
+- **The paths through a sleeve's wall alone are found from a grid, and the grid is checked.** Each
+  such path is fixed by two unknowns, which a grid of rows and columns brackets; a source corner the
+  grid misses beside one it found is found again from its neighbour's path, so the grid need only land
+  once in each patch of the source that has paths. A patch it misses at every corner is lost without
+  trace. `check_shooting_grid(surfaces, media, points)` reports, for the points given, how many paths
+  were found only from a neighbour and why the grid missed each -- its rows too far apart in the
+  direction's axial component, or its columns too few along a row -- and solves again with that count
+  doubled: a patch the finer grid finds and the given one did not reach is light the given grid lost.
 
 A point source in another medium than a point it lights is refused (it has no area to spread over a
 curved surface), and a scene with transparent solids may not yet hold anything that reflects: the

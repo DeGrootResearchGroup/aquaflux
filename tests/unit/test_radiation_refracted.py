@@ -21,10 +21,12 @@ from aquaflux.radiation import (
     direct_fluence_rate,
     direct_irradiance,
     refracted,
+    refraction,
     shooting,
 )
 from aquaflux.radiation.refracted import (
     build_refracted_visibility,
+    check_shooting_grid,
     refracted_fluence_rate,
     refracted_irradiance,
 )
@@ -552,7 +554,7 @@ def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monk
             assert kept == pytest.approx(_area_below(sheet[f], cut), abs=2e-4)
 
 
-def test_paths_a_coarse_grid_misses_are_reached_from_their_neighbours(monkeypatch):
+def test_paths_a_coarse_grid_misses_are_reached_from_their_neighbours():
     """Polished from a neighbouring corner's path, an 8 x 8 grid's paths spread to a 96 x 96 grid's.
 
     The unknowns of a path round a rim range over a band fixed by the shell alone, so a neighbouring
@@ -571,23 +573,115 @@ def test_paths_a_coarse_grid_misses_are_reached_from_their_neighbours(monkeypatc
     side, row, corner = (index.reshape(-1) for index in np.indices(shape))
 
     def grid(size, continued):
-        monkeypatch.setattr(shooting, "_ROWS", size)
-        monkeypatch.setattr(shooting, "_COLUMNS", size)
-        jax.clear_caches()
         if continued:
-            found, valid, _ = refracted._continued_paths(
-                media, group.chain, corners, receivers, refracted._corner_edges(shared), 1_000_000
+            found, valid, _, _ = refracted._continued_paths(
+                media,
+                group.chain,
+                corners,
+                receivers,
+                refracted._corner_edges(shared),
+                1_000_000,
+                (size, size),
             )
             return found, valid
         found, valid, _ = refracted._stepped_shots(
-            media, group.chain, corners[corner], receivers[row], side, None, 1_000_000
+            media, group.chain, corners[corner], receivers[row], side, None, 1_000_000, (size, size)
         )
         return found.reshape(*shape, *found.shape[1:]), valid.reshape(shape)
 
     _, coarse = grid(8, False)
     continued_points, continued = grid(8, True)
     fine_points, fine = grid(96, False)
-    jax.clear_caches()
     assert np.sum(fine & ~coarse) >= 10
     np.testing.assert_array_equal(continued, fine)
     np.testing.assert_allclose(continued_points[fine], fine_points[fine], atol=1e-12)
+
+
+def test_the_grid_check_says_which_way_a_grid_is_short_and_finds_the_patch_it_lost():
+    """Rows too few: every path the grid misses is between rows, and doubling them finds the patch
+    it lost entirely. Columns too few: misses along the rows, and columns are what to refine."""
+    media, arc = _rim_scene(16, 8)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    short_rows = check_shooting_grid(arc, media, points, grid=(4, 32))
+    assert short_rows.along_rows == 0 and short_rows.between_rows >= 10
+    assert short_rows.refine == "rows" and short_rows.refined == (8, 32)
+    assert short_rows.new_patches == 1
+    assert short_rows.patches + short_rows.new_patches == 4
+    short_columns = check_shooting_grid(arc, media, points, grid=(32, 4), backstop=False)
+    assert short_columns.along_rows > short_columns.between_rows
+    assert short_columns.refine == "columns" and short_columns.refined is None
+    assert short_columns.paths == 348 and short_columns.patches == 4
+
+
+def test_patches_are_joined_only_through_corners_that_have_a_path():
+    """Two runs of corners with paths, one corner apart along a chain, are two patches, per side."""
+    edges = np.array([[0, 1], [1, 2], [2, 3], [3, 4]])
+    valid = np.array([[True, True, False, True, True], [True, True, True, True, True]])
+    labels = refracted._patches(valid, edges)
+    assert len(np.unique(labels[0][valid[0]])) == 2
+    assert len(np.unique(labels[1])) == 1
+    assert labels[0, 0] != labels[1, 0]
+
+
+def test_a_path_is_between_rows_unless_both_rows_beside_its_beta_reach_the_source():
+    """Against every grid row's crossing, scanned in full: the path is between rows when its ``beta``
+    lies past the outermost row or a row either side of it has no crossing of the source."""
+    grid = (4, 32)
+    media, arc = _rim_scene(16, 8)
+    # Off the arc's middle, so some paths' beta lies past a coarse grid's outermost rows.
+    points = np.array(
+        [[0.025, 0.06, 0.0], [0.03, 0.065, 0.01], [0.03, 0.07, 0.04], [0.025, 0.065, -0.05]]
+    )
+    group = next(
+        g for g in refracted._plan(arc, media, points, 1_000_000) if g.chain.passing == (2,)
+    )
+    corners, shared = refracted._shared_corners(arc, group.facets)
+    corners, receivers = np.asarray(corners), points[group.rows]
+    _, valid, unknowns, by_grid = refracted._continued_paths(
+        media, group.chain, corners, receivers, refracted._corner_edges(shared), 1_000_000, grid
+    )
+    side, row, corner = np.nonzero(valid)
+    signs = np.where(side == 0, 1.0, -1.0)
+    found = unknowns[side, row, corner]
+    told = np.asarray(
+        refraction._between_rows(
+            media,
+            group.chain,
+            jnp.asarray(corners[corner]),
+            jnp.asarray(receivers[row]),
+            jnp.asarray(signs),
+            jnp.asarray(found),
+            grid,
+        )
+    )
+
+    def every_row(source, receiver, sign):
+        geometry = refraction._rim_geometry(media, group.chain, source, receiver)[0]
+        misses, _, reach, _ = shooting._problem(geometry, sign)
+        betas = shooting._rows(reach, grid[0])
+        has = jax.vmap(lambda beta: shooting._row(misses, beta, grid[1])[0])(betas)
+        return betas, has
+
+    betas, has = jax.vmap(every_row)(
+        jnp.asarray(corners[corner]), jnp.asarray(receivers[row]), jnp.asarray(signs)
+    )
+    betas, has = np.asarray(betas), np.asarray(has)
+    expected = np.empty(len(side), dtype=bool)
+    for k in range(len(side)):
+        beta = found[k, 1]
+        if beta < betas[k, 0] or beta > betas[k, -1]:
+            expected[k] = True
+            continue
+        above = np.flatnonzero(betas[k] >= beta)[0]
+        above = max(above, 1)
+        expected[k] = not (has[k, above - 1] and has[k, above])
+    np.testing.assert_array_equal(told, expected)
+    assert np.any(told & ~by_grid[side, row, corner]) and np.any(~told)
+    # Some path lies past the outermost row while the two rows nearest it both reach the source:
+    # only its ``beta`` says the grid cannot bracket it.
+    nearest = np.clip(
+        [np.searchsorted(b, f) for b, f in zip(betas, found[:, 1], strict=True)], 1, grid[0] - 1
+    )
+    reached = has[np.arange(len(side)), nearest - 1] & has[np.arange(len(side)), nearest]
+    outer = (found[:, 1] < betas[:, 0]) | (found[:, 1] > betas[:, -1])
+    assert np.any(outer & reached)

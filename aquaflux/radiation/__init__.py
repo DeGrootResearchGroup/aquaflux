@@ -154,7 +154,9 @@ from aquaflux.radiation.coarsen import Coarsening, coarsen_surfaces, coarsen_to_
 from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadrature
 from aquaflux.radiation.refracted import (
     RefractedVisibility,
+    ShootingGridCheck,
     build_refracted_visibility,
+    check_shooting_grid,
     refracted_fluence_rate,
     refracted_irradiance,
 )
@@ -228,6 +230,7 @@ __all__ = [
     "SceneSolution",
     "SelfOcclusion",
     "ShaftCulling",
+    "ShootingGridCheck",
     "SilhouetteOcclusion",
     "StreamedShadows",
     "Subdivision",
@@ -251,6 +254,7 @@ __all__ = [
     "build_visibility",
     "check_points_outside",
     "check_profiles",
+    "check_shooting_grid",
     "check_winding",
     "coarsen_surfaces",
     "coarsen_to_size",

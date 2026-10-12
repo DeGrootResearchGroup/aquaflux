@@ -25,14 +25,11 @@ sys.path.insert(0, str(HERE))
 import aquaflux  # noqa: F401  (enables x64)
 import jax.numpy as jnp
 import numpy as np
-from aquaflux.radiation import Surfaces, UniformAbsorption, refracted, shooting
-from aquaflux.radiation.refraction import Media, Transparent, _shot
+from aquaflux.radiation import refracted, shooting
+from aquaflux.radiation.refraction import _shot
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT
-from aquaflux.solids import Cylinder
 from backward_gather import gather
-from check_refraction import graded_tube
-from tracer import AIR, QUARTZ, WATER
-from tracer import Scene as Traced
+from four_lamps import scene
 
 SECTORS = int(os.environ.get("SLEEVE_SECTORS", 32))
 SLICES = int(os.environ.get("SLEEVE_SLICES", 1))
@@ -41,40 +38,7 @@ GRID = os.environ.get("SLEEVE_SHOT_GRID")
 POINTS_MM = [[55.0, 25.0], [50.0, 50.0], [37.0, 37.0], [-25.0, 41.0]]
 
 
-def sliced(triangles, parts):
-    """Each triangle split into ``parts**2`` by an even lattice on its own corners, winding kept."""
-    if parts == 1:
-        return triangles
-    out = []
-    for first, second, third in triangles:
-        u, v = (second - first) / parts, (third - first) / parts
-        for i in range(parts):
-            for j in range(parts - i):
-                a = first + i * u + j * v
-                out.append([a, a + u, a + v])
-                if j < parts - i - 1:
-                    out.append([a + u, a + u + v, a + v])
-    return np.asarray(out)
-
-
-pitch, absorption = 0.025, -np.log(0.95) / 0.01
-centres = pitch * np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]])
-traced = Traced(centres=centres, wall=0.1, absorption=absorption, neighbours="optics")
-arc = sliced(graded_tube(traced.arc, 1.5, SECTORS), SLICES)
-triangles = np.concatenate([arc + np.array([x, y, 0.0]) for x, y in centres])
-area = 0.5 * np.linalg.norm(
-    np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1
-)
-lamps = Surfaces.from_triangles(jnp.asarray(triangles), emission=3.0 / (area.sum() / 4))
-sleeves = tuple(
-    Transparent(
-        Cylinder([x, y, 0.0], [0, 0, 1], traced.outer, 1.75),
-        QUARTZ,
-        inside=(Transparent(Cylinder([x, y, 0.0], [0, 0, 1], traced.inner, 1.75), AIR),),
-    )
-    for x, y in centres
-)
-media = Media(WATER, sleeves, UniformAbsorption(absorption))
+lamps, media = scene(SECTORS, SLICES)
 points = np.array([[*p, 0.0] for p in POINTS_MM]) / 1e3
 if GRID:
     shooting._ROWS = shooting._COLUMNS = int(GRID)
