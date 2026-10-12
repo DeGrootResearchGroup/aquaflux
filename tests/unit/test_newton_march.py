@@ -702,7 +702,7 @@ def test_a_cost_redo_asks_the_refresh_hook_for_a_refit() -> None:
         max_steps=1,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, cycles_limit=2),
+        retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
         refresh_preconditioner=lambda step, state, *, due: asked.append(due),
     )
     assert asked == [False, True]
@@ -746,7 +746,7 @@ def test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_
         max_steps=2,
         rtol=1e-10,
         atol=1e-12,
-        retry=RetryPolicy(abort_above_cycles=10, cycles_limit=2),
+        retry=RetryPolicy(abort_above_cycles=10, max_retries=2),
         on_retry=lambda reason, attempt, beta: retried.append(reason),
         refresh_preconditioner=refresh,
     )

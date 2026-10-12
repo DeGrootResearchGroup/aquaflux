@@ -142,7 +142,7 @@ class TracedSplitShiftPolicy(eqx.Module):
     Attributes
     ----------
     base : ShiftPolicy
-        The policy supplying the pseudo-transient shift diagonal (and its per-row relaxation).
+        The policy supplying the pseudo-transient shift diagonal (and its per-row shift scale).
     split : TracedFieldSplit
         The frozen field split, as array leaves.
     """
@@ -165,7 +165,7 @@ class TracedSplitShiftPolicy(eqx.Module):
         """
         base = self.base.shift_term(phi, residual)
         apply = self.split.matvec()
-        return ShiftTerm(base.diagonal, lambda relaxation: apply, base.row_relaxation)
+        return ShiftTerm(base.diagonal, lambda shift_strength: apply, base.row_shift_scale)
 
     def adjoint_factory(self) -> _TracedSplitAdjoint:
         """The ``state -> M`` factory for the adjoint, transposed there by :func:`jax.linear_transpose`.
