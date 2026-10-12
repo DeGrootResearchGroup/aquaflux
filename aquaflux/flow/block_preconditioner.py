@@ -224,7 +224,7 @@ class _VelocityGeometry(eqx.Module):
 
     face_cells: FaceCellConnectivity
     mesh_geometry: MeshGeometry
-    viscosity: jnp.ndarray
+    effective_viscosity: jnp.ndarray
     dim: int = eqx.field(static=True)
 
     @classmethod
@@ -233,7 +233,7 @@ class _VelocityGeometry(eqx.Module):
         return cls(
             assembler.mesh.face_cells,
             assembler.geometry,
-            assembler.viscosity,
+            assembler.effective_viscosity,
             assembler.mesh.dim,
         )
 
@@ -434,7 +434,7 @@ def _convection_operator(
     """
     face_cells = geometry.face_cells
     viscous = flux_continuous_conductance(
-        jax.lax.stop_gradient(geometry.viscosity), geometry.mesh_geometry, face_cells
+        jax.lax.stop_gradient(geometry.effective_viscosity), geometry.mesh_geometry, face_cells
     )
     boundary_owner = jnp.where(face_cells.interior, 0.0, viscous + jnp.maximum(reference_mdot, 0.0))
     boundary_diagonal = face_cells.scatter(boundary_owner, jnp.zeros_like(boundary_owner))

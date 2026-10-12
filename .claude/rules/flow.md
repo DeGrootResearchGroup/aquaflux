@@ -9,6 +9,11 @@ paths:
 
 > ⚠️ **`BlockPreconditioner.build(velocity=…)` takes a value, not a string (2026-09-14, #390).** `"smoothed"` → `ViscousMultilevel()`, `"convection"` → `ConvectionTwoLevel()`, `"convection-air"` → `ConvectionAir()`; a string is refused. `SmoothedAmgConvectionVelocity` is split into `TwoLevelConvectionVelocity` / `AirConvectionVelocity`, and `_build_velocity_block` is gone (each value has a private `_build`). `VelocityBlock` and `_ConvectionVelocityBlock` are **abstract** (`abc`), and `SettingsValue.__new__` refuses them at construction naming the three values — an `isinstance` check alone let a bare base through to a late, empty `NotImplementedError` after the pressure Schur was built (review of PR #398). Entries below quoting the strings are dated history.
 
+> ⚠️ **Renamed 2026-10-12 (#373, part 2).** `MomentumContinuity.viscosity` is `effective_viscosity` (it returns `μ + ρν_t`;
+> bare `viscosity` means the molecular property). The mass-flow drive's solved body force is written `f` in the code and
+> its docstrings (`MassFlow.forced(momentum, force)`, `R_aug([w, f])`), because `β` means the pseudo-transient shift
+> strength everywhere else. Entries below that write the force as `β` predate the rename and mean `f`.
+
 > **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
 > *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
@@ -224,7 +229,7 @@ Engineering Principles.
   - **Fluid properties come
   from a `PropertyModel`** (`build(mesh, geom, properties, boundary, *, gradient_scheme=…)` — the
   scheme is keyword-only and defaults to `schemes.DEFAULT_GRADIENT_SCHEME`; must supply
-  `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
+  `"viscosity"`+`"density"`; `.effective_viscosity`/`.density` evaluate them per-cell — the first adds `ρν_t` to the molecular value) — see
   `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
   collection (constructed like a `PropertyModel`), bound inside `build` via
   `boundary.resolve(mesh.face_patches, mesh.face_cells)` (which refuses a map leaving any boundary
@@ -442,8 +447,8 @@ Engineering Principles.
       here: 8×8 perturbed grid, `perturb=0.2`, `seed=2`,
       `MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)`, Stokes, x64.)
 - **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
-  `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
-  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `viscosity` adds it to the
+  `MomentumContinuity.effective_viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
+  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `effective_viscosity` adds it to the
   molecular `μ` from `properties`. Callers pass only `ν_t` and never restate the closure relation.
   - **`with_scaled_molecular_viscosity(factor)` rescales the molecular `μ` only** (the `"viscosity"`
     entry in `properties`, via `PropertyModel.with_scaled`), leaving the eddy-viscosity leaves alone.
@@ -730,7 +735,7 @@ Engineering Principles.
   `boundary`, `interp_factor`, `normal_distance`, `rho`, `pressure_pin`; it also *owns* the Schur-coeff
   computation `coefficient(a_P)` / `boundary_diagonal(a_P)`, so it is a **stored, runtime** object), and
   the velocity family builds from a sibling `_VelocityGeometry` (`face_cells`, `mesh_geometry`,
-  `interp_factor`, `normal_distance`, `viscosity`, `dim`) that is **build-time-only** — the velocity
+  `interp_factor`, `normal_distance`, `effective_viscosity`, `dim`) that is **build-time-only** — the velocity
   strategies freeze their AMG hierarchy at build and never store it. Keep these **siblings, not one union
   bundle** (the runtime-vs-build-time split and the disjoint Schur-only / velocity-only fields are why).
   Anything that is assembler *behaviour* rather than geometry — the Rhie–Chow `mass_flux(reference_state)`

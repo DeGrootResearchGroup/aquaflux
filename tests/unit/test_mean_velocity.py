@@ -4,8 +4,8 @@ The body force is a scalar Lagrange multiplier enforcing ``<U_dir> = target``, a
 state and solved jointly with the flow by the production Newton
 (:func:`aquaflux.flow.bulk_velocity_flow_solve`). Tested in isolation on a laminar Stokes channel --
 no turbulence, a small mesh -- where the exact answer is known: a plane channel of full height ``H``
-driven by a uniform force ``beta`` has bulk velocity ``beta H^2 / (12 mu)``, so the force that hits a
-target ``U_b`` is ``beta = 12 mu U_b / H^2``.
+driven by a uniform force ``f`` has bulk velocity ``f H^2 / (12 mu)``, so the force that hits a
+target ``U_b`` is ``f = 12 mu U_b / H^2``.
 
 The solve is convergence-gated, so the constraint is met to the residual tolerance (machine precision
 here), and the recovered force matches the analytic value to the discretization error alone.
@@ -67,12 +67,12 @@ def test_constraint_is_met_to_machine_precision() -> None:
 
 
 def test_recovers_the_analytic_body_force() -> None:
-    """The converged multiplier matches ``beta = 12 mu U_b / H^2`` to the discretization error."""
+    """The converged multiplier matches ``f = 12 mu U_b / H^2`` to the discretization error."""
     momentum = _channel(beta_initial=0.05)
     solve = bulk_velocity_flow_solve(momentum, root_solve=RootSolveSettings(linear_solver=_DIRECT))
     solved_momentum, _ = solve(momentum, momentum.initial_state())
     beta_analytic = 12.0 * MU * U_TARGET / H**2  # = 3 mu = 0.3
-    # The constraint is met on the *discrete* problem exactly; the gap to the continuum beta is the FVM
+    # The constraint is met on the *discrete* problem exactly; the gap to the continuum f is the FVM
     # discretization on 48 wall-normal cells (a fraction of a percent), not a solver error.
     assert float(solved_momentum.drive.force) == pytest.approx(beta_analytic, rel=2e-3)
 
@@ -105,8 +105,8 @@ def test_bordered_preconditioner_inverts_the_augmented_jacobian() -> None:
     volume = momentum.geometry.cell.volume
 
     def augmented_residual(augmented: jnp.ndarray) -> jnp.ndarray:
-        flow, beta = augmented[:-1], augmented[-1]
-        forced = drive.forced(momentum, beta)
+        flow, force = augmented[:-1], augmented[-1]
+        forced = drive.forced(momentum, force)
         velocity, _ = forced.unpack(flow)
         bulk = jnp.sum(velocity[:, 0] * volume) / jnp.sum(volume)
         return jnp.append(forced.residual(flow), bulk - U_TARGET)
@@ -116,7 +116,7 @@ def test_bordered_preconditioner_inverts_the_augmented_jacobian() -> None:
 
     force, average = drive.constraint_vectors(momentum)
 
-    # AD's border matches the hand-built (a, c): the beta column is [a; 0], and the constraint row is c.
+    # AD's border matches the hand-built (a, c): the f column is [a; 0], and the constraint row is c.
     beta_column = j_augmented(jnp.append(jnp.zeros_like(flow0), 1.0))
     assert jnp.allclose(beta_column[:-1], force, atol=1e-10)
     assert float(beta_column[-1]) == pytest.approx(0.0, abs=1e-12)
@@ -220,8 +220,8 @@ def _laminar_body_force(mu: float, solve) -> float:
 def test_constrained_solve_is_reverse_differentiable() -> None:
     """``jax.grad`` through the constrained solve matches finite differences.
 
-    Differentiate the converged body force ``beta`` (the multiplier) w.r.t. viscosity: for the laminar
-    channel ``<U> = beta H^2 / (12 mu) = U_b`` gives ``beta = 12 mu U_b / H^2``, so ``d beta / d mu =
+    Differentiate the converged body force ``f`` (the multiplier) w.r.t. viscosity: for the laminar
+    channel ``<U> = f H^2 / (12 mu) = U_b`` gives ``f = 12 mu U_b / H^2``, so ``d f / d mu =
     12 U_b / H^2 = 3``. This exercises the implicit-function-theorem adjoint (the assembler threaded as
     the Newton parameter) -- without it the solve raises rather than returning a gradient.
     """
