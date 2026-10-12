@@ -5012,7 +5012,23 @@ are bent too (no straight-through factor left anywhere).
   the loop scanning the grid, edges one way, the traced pass scanning the grid, whole triangles seeded
   from the other side). **Dismissed, equivalent on these fixtures**: the cut's seed not carried, another
   edge's cut seed, a corner seeded from the other side -- the polish converges from any of these nearby
-  starts. Fast gate on this tree (`4bfef62`, two
+  starts. **THE CHECK (`check_shooting_grid` -> `ShootingGridCheck`, 2026-10-12, `073a3a4`)**: per shot
+  route, continued paths vs grid-found ones; each continuation-only path diagnosed by
+  `shooting.between_rows` (the two grid rows beside its beta must both reach the source, and the beta
+  lie within the outermost rows -- else "rows", otherwise "columns"); `_patches` (scipy connected
+  components over facet edges between corners with paths, per side and receiver); backstop re-solves
+  with the majority direction doubled and counts patches the base grid never reached. The grid is a
+  static `grid=(rows, cols)` on `rim_crossings` / `_shot_path` / `_shot_paths` / `_stepped_shots` /
+  `_continued_paths` (module constants `_ROWS`/`_COLUMNS` remain the default). ⚠️ **NOT yet a setting
+  of the gathers or the mask** -- they always use the default. Fixture: 4 x 32 -> 29 between rows, 0
+  along, new patch 1; 32 x 4 -> columns. Four-lamp scene (`grid_check.py`, 16 sectors, 4 points,
+  32 x 32, alone, 1,168 s): 4,195 paths, 3,758 by grid, 437 between rows, 0 along, 6 patches, none
+  sparse, 64 x 32 finds 0 new patches. Tests: `test_the_grid_check_says_which_way_a_grid_is_short_and_finds_the_patch_it_lost`,
+  `test_a_path_is_between_rows_unless_both_rows_beside_its_beta_reach_the_source` (against every row
+  scanned in full; off-mid-plane receivers so a beta past the outermost row occurs),
+  `test_patches_are_joined_only_through_corners_that_have_a_path`. Mutation pass 12, all red after
+  those direct tests (first pass: "beyond" ignored, wrong bracketing rows, patches joined through
+  pathless corners survived the report-level test). Fast gate on this tree (`4bfef62`, two
   workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
   `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
 - **THE GAP ROUTES STAY DESCENDED: SHOOTING MISSES THEIR STEEP PATHS (2026-10-12).** Plan item 3 was to

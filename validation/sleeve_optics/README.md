@@ -298,6 +298,11 @@ pass polish from where each point was found too, so the traced pass scans no gri
 The grid must still hit each patch once: on the two-sleeve fixture a 4 x 4 grid missed one whole patch
 (six paths), which nothing can seed; 8 x 8 found exactly the 96 x 96 set. The 1.2 % / 0.5 % left is not
 decomposed.
+**Checked** (`grid_check.py`, `check_shooting_grid`, 16 sectors, the four points, 32 x 32, run alone,
+1,168 s, 2026-10-12): 4,195 corner paths in 6 patches; the grid found 3,758 itself, and all 437 it
+missed lie between rows (none along them), so rows are the direction to refine; with 64 rows the
+routes find **no new patch**. So at these points 32 x 32 hits every patch and continuation does the
+rest; none of its patches was hit only once.
 
 - **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
   (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
