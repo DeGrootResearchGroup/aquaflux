@@ -169,6 +169,11 @@ def _solver_with_overrides(solver):
             if value is not None
         },
     )
+    # Where the ramp starts (`PITZ_RAMP_ANCHOR`): the viscosity multiplier of its first station, with
+    # `1` taking the ramp off entirely, so the march self-starts at the case's own viscosity.
+    anchor = _environment("RAMP_ANCHOR", float)
+    if anchor is not None:
+        ramp = None if anchor == 1.0 else dataclasses.replace(ramp, anchor=anchor)
     edits = {"continuation": ramp}
     preconditioner = solver.preconditioner
     sweeps = _environment("FLOW_SWEEPS", int)
@@ -485,7 +490,10 @@ _TURB_DAMPING_SHAPE = (
         else " (constant)"
     )
 )
-RAMP_SCALE = SOLVER.continuation.scale
+#: The ramp as the file states it, read for the settings below when `PITZ_RAMP_ANCHOR=1` takes the
+#: march's own ramp off -- they then describe nothing the march runs, and the banner says so.
+_RAMP_SETTINGS = SOLVER.continuation or CASE.spec.solver.continuation
+RAMP_SCALE = _RAMP_SETTINGS.scale
 RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 
 #: The instrument that COUNTS operator applications under each Krylov stop, kept because a cycle does
@@ -560,8 +568,8 @@ KRYLOV_WORK = _KrylovWork()
 #:     momentum-only, 24, gamma 1          264         -11%  scaling
 #:     momentum-only, 16, gamma 1          227         -14%  stations
 #:     momentum-only, 16, gamma 3          196         -14%  damping
-RAMP_STATIONS = SOLVER.continuation.stations
-RAMP_STEPS_PER_STATION = SOLVER.continuation.steps_per_station
+RAMP_STATIONS = _RAMP_SETTINGS.stations
+RAMP_STEPS_PER_STATION = _RAMP_SETTINGS.steps_per_station
 
 #: ⚠️ RE-DAMP ON ENTERING EACH STATION, AND THIS IS LOAD-BEARING RATHER THAN A KNOB. Within a station
 #: the control divides the shift by `grow` every step (1.5 ** 3 = 3.375 per station here). Unopposed,
@@ -577,7 +585,7 @@ RAMP_STEPS_PER_STATION = SOLVER.continuation.steps_per_station
 #: mismatch's size is not the discriminator either: this same march converged at beta = 0.005 against
 #: the same 0.05 preconditioner (a 10x mismatch) with alpha = 1.000, where 4.2x was fatal mid-ramp.
 #: The wall belongs to `(state, beta)`. Damping while the problem MOVES is the distinction.
-RAMP_REDAMPING = SOLVER.continuation.redamping
+RAMP_REDAMPING = _RAMP_SETTINGS.redamping
 
 #: The dual-time inner loop. `inner_tol` 1e-2 rather than a tighter value: measured on the
 #: three-dimensional case, 1e-3 bought nothing over 1e-2 while costing a third of the march.
@@ -1218,6 +1226,8 @@ def solve_aquaflux(
             f", scaling {RAMP_SCALE}"
             f", turbulence damping {TURB_DAMPING:g}"
             f"{_TURB_DAMPING_SHAPE}"
+            if RAMP == "continuous" and solver.continuation is not None
+            else "off (PITZ_RAMP_ANCHOR=1) -- the march self-starts at the case's own viscosity"
             if RAMP == "continuous"
             else f"off ({RAMP}) -- the span is walked as a rung ladder",
         ),
@@ -1292,7 +1302,16 @@ def solve_aquaflux(
             flow, k, omega = solver.solve(
                 coupled,
                 session_options={"observer": logger.on_refresh},
-                point_setup=lambda companion, seed_state, point: logger.note(f"[{point.label}]"),
+                # A march with no ramp (`PITZ_RAMP_ANCHOR=1`) has no stations to announce.
+                **(
+                    {}
+                    if solver.continuation is None
+                    else {
+                        "point_setup": lambda companion, seed_state, point: logger.note(
+                            f"[{point.label}]"
+                        )
+                    }
+                ),
                 **observers,
             )
         else:
@@ -1412,6 +1431,8 @@ def _solve_study_arm(coupled, solver, logger, jacobian_gradient_sweeps, observer
         # target) and the SAME `point_setup` and options, so the two arms differ in how the span is
         # walked and in nothing else. That is what makes them comparable.
         ramp = solver.continuation
+        if ramp is None:
+            raise SystemExit("a study arm walks a ramp, and PITZ_RAMP_ANCHOR=1 took it off")
         return solve_reynolds_ramp(
             coupled,
             anchor=ramp.anchor,

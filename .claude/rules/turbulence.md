@@ -2134,8 +2134,18 @@ tuning follow-up noted above.
       near 40 cycles).
     - **Granularity is the lever, not ramp length** — at a fixed 24 ramp steps, `8 x 3, r=2` costs 286
       against `24 x 1, r=1`'s 191.
-    - **Anchor depth: leave it.** Re/10 271, Re/100 **261**, Re/1000 436 cycles (at `4 x 3`). Re/100 is
-      at or near the optimum and Re/10 within 4 %.
+    - **Anchor depth: 100 is the cheapest start measured on BOTH cases (2026-10-11).** pitzDaily at its
+      shipped march (`3 x 12`, `grow` 3, release 1e-4, momentum-only scaling; `PITZ_RAMP_ANCHOR`), anchor
+      1 (no ramp) / 3 / 10 / **100** / 300: **246 / 217 / 178 / 111 / 255** restart cycles, all to the same
+      root; 1000 was stopped at 502 cycles by step 38. With the release backoff (2026-10-12) 300 costs 210
+      and 1000 converges at 612; 100 is unchanged at 111. bfs3d at its shipped `1.5 x 12` (#685), anchor
+      10 / **100** / 1000: 239 / **193** / 329 all-attempt cycles. Shallower costs redone steps early, at a
+      small shift; deeper gives the cleanest ramp and then pays at the target -- pitzDaily's releases
+      failing until the residual is small (re-fired every other step until the backoff,
+      `solve-globalization.md`), bfs3d's 64 floor steps with the release off. ⚠️ At fixed stations a deeper anchor is also a larger per-station viscosity jump, landing at
+      the floor; deep anchors with stations scaled to hold the jump are unmeasured. No ramp still
+      converges on pitzDaily (16 steps), at 2.2x the cycles. Detail in
+      `.claude/notes/solve-globalization-log.md` ("Where the ramp starts").
     - **Adaptive `steps_per_station` is NOT expressible** — the whole `ResidualHomotopy` protocol keys on
       the outer-step index and is never handed the state, the residual or a `StepReport`. Widening it is
       a design change, and the fine-ramp result says the answer is small stations rather than a clever

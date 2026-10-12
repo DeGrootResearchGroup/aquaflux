@@ -869,6 +869,13 @@ K_POSITIVITY_PROJECTION = _environment_flag(
 # that a norm-based tolerance does not control. Tightening it trades cycles per step for a correction
 # that is closer to the true shifted-Newton direction.
 FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", FILE_SOLVER.linear_solve.rtol))
+#: Which rule ends each inner solve (`LinearSolveSettings.stop`; `BFS3D_FORWARD_STOP`, unset keeping
+#: the file's): `residual` stops the moment the residual meets the tolerance, tested every iteration;
+#: `lineax` also waits for the solution to stop moving and tests only at a restart boundary. pitzDaily
+#: ships `residual`; this file does not set it. ⚠️ The two count cycles differently (`residual` reports
+#: cycles RUN, one more than `lineax` for the same work), so `refresh_on_cycles` and the cycle retry fire
+#: at a different difficulty under each -- an arm that changes the stop changes those triggers too.
+FORWARD_STOP = os.environ.get("BFS3D_FORWARD_STOP") or FILE_SOLVER.linear_solve.stop
 
 
 CYCLE_BUDGET = (
@@ -1077,7 +1084,10 @@ SOLVER = CoupledMarch(
         else None
     ),
     linear_solve=LinearSolveSettings(
-        rtol=FORWARD_RTOL, restart=FORWARD_RESTART, max_restarts=FORWARD_MAX_RESTARTS
+        rtol=FORWARD_RTOL,
+        restart=FORWARD_RESTART,
+        max_restarts=FORWARD_MAX_RESTARTS,
+        stop=FORWARD_STOP,
     ),
     step_control=CONTROL,
     retry=RetryPolicy(
@@ -1461,6 +1471,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "per-cell clip" if K_POSITIVITY_PROJECTION else "off (cap only)",
         ),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
+        ("inner forward stop", FORWARD_STOP or "lineax (unset)"),
         # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
         # changes what is retained appears in it. These three were read and never shown, so two runs
         # could differ in them and produce banners identical to the character.

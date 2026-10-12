@@ -499,7 +499,7 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   march `beta0 = 2 |R0_resumed| / |R0_fresh|`: its first iterate equalled the fresh march's fourth (diff
   0.0), all later ones to 7.8e-16, 9 steps as the fresh march had left (8x4 laminar channel, `FlowMarch`
   defaults, `FirstOrderUpwind`, Re ~ 50; one run, 2026-10-07). A **dual-time** march, by contrast, does
-  hold a shift between steps — the Courant control's `(beta, memo)` — and that one was not carried until
+  hold a shift between steps — the Courant control's carried `beta` (and memo) — and that one was not carried until
   2026-10-08. Measured then (24 x 16 laminar channel, `mu = 5e-3`, `DualTimeLoop(inner_steps=3)`, the
   default `DualTimeControl`, row-scaled `atol = 1e-9`): the fresh march takes 17 steps, its shift walking
   2.0 → 0.02; resumed at its step 3, 6 or 10 with only the reference it took 16, 16 and 14 steps (against
