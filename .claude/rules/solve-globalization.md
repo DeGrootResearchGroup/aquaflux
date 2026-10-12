@@ -388,6 +388,17 @@ What to take from it, none of which is specific to that mechanism:
       Whether bfs3d's file should release is the owner's call; a library default still waits on the three
       slow tests #645 names (a loose terminal step is what they measure). Tables in
       `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").
+    - **⚠️ OPEN DEFECT: a failed release is retried on the next settled step, indefinitely (measured
+      2026-10-11).** `_floored` keeps no memory of a release. When a released step collapses, the retry
+      puts beta back up, the control returns it to `beta_min`, the next full-length step at the floor is
+      `settled` again, and the release fires again. On pitzDaily from a deep ramp start (anchor 300) it
+      fired at steps 19, 21, 23 and 25, failing three times before the residual was small enough to hold
+      (255 cycles against anchor 100's 111); at anchor 1000 it failed eight times in a row (stopped at step
+      38, 502 cycles). It never happens at the shipped anchor 100, whose single release holds -- but
+      nothing guarantees that, and a case adopting the release inherits it. The proposed fix is a
+      backoff (after a failed release, wait for more than one full-length floor step, or for a residual
+      below the one that failed); its pre-registered bar is in `solve-globalization-log.md` ("Where the
+      ramp starts").
     - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
       rule turns a test red) and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
   - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
