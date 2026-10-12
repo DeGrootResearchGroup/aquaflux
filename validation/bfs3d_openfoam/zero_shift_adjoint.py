@@ -62,11 +62,12 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.turbulence import sst_initial_fields
-from aquaflux.solve import (DualTimeLoop, JacobiSmoothed, materialize_block_jacobian,)
-from aquaflux.solve.materialized_session import (jacobian_matvec,)
-from aquaflux.solve.sparse_jacobian import (shifted_jacobian,)
+from aquaflux.solve import DualTimeLoop
+from aquaflux.precondition import JacobiSmoothed, materialize_block_jacobian
+from aquaflux.precondition.materialized_session import (jacobian_matvec,)
+from aquaflux.precondition.sparse_jacobian import (shifted_jacobian,)
 from aquaflux.turbulence import coupled_step
-from aquaflux.solve import FieldSplit, JacobianProbeSpec, MaterializedJacobian
+from aquaflux.precondition import FieldSplit, JacobianProbeSpec, MaterializedJacobian
 
 #: Far past the march's inexact-Newton stop so arms separate rather than tie; modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.

@@ -12,7 +12,7 @@ from __future__ import annotations
 import aquaflux  # noqa: F401  (enables x64)
 import numpy as np
 import pytest
-from aquaflux.solve import ConvectionDiffusionStencil, decouple_dof
+from aquaflux.precondition import ConvectionDiffusionStencil, decouple_dof
 
 # Edges (owner -> neighbour): 0 -> 1 with an outflow, 2 -> 1 with an inflow.
 OWNER = np.array([0, 2])

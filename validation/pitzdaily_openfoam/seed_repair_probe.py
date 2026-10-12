@@ -53,7 +53,7 @@ sys.path.insert(0, str(CASE))
 
 import compare  # noqa: E402
 from aquaflux.solve import (DEFAULT_SHIFT_BASIS,)
-from aquaflux.solve.materialized_session import (frozen_shift_diagonal,)
+from aquaflux.precondition.materialized_session import (frozen_shift_diagonal,)
 from aquaflux.turbulence.coupled import (
     _monolithic_shift_source,
     coupled_scaled_norm,

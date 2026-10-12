@@ -48,7 +48,7 @@ def jacobian_probe_plan(
 
     ``active_rows`` excludes field-pair blocks from the pattern entirely, for a caller that already
     knows some sub-block of the materialized Jacobian will never be read -- see
-    :meth:`~aquaflux.solve.FieldGroups.active_rows`. ``None`` (default) wants every block.
+    :meth:`~aquaflux.precondition.FieldGroups.active_rows`. ``None`` (default) wants every block.
 
     Parameters
     ----------
@@ -150,9 +150,9 @@ class JacobianProbe:
         active_rows : np.ndarray, optional
             Exclude field-pair blocks from the materialized pattern entirely -- for a probe built
             specifically to feed one consumer that is known never to read some sub-block of the
-            Jacobian, such as a :class:`~aquaflux.solve.FieldSplitInverse`'s dropped triangle
-            (:meth:`~aquaflux.solve.FieldGroups.active_rows`). ``None`` (default, and the only sound
-            choice for a probe that might be shared with a monolithic consumer) wants every block.
+            Jacobian, such as a :class:`~aquaflux.precondition.FieldSplitInverse`'s dropped triangle
+            (:meth:`~aquaflux.precondition.FieldGroups.active_rows`). ``None`` (default, and the only
+            sound choice for a probe that might be shared with a monolithic consumer) wants every block.
         narrowing : callable, optional
             The assembler stand-in; see the class.
 

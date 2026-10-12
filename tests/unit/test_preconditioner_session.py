@@ -13,10 +13,8 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
-from aquaflux.solve import (
+from aquaflux.precondition import (
     AirReduction,
-    ConstantRelaxation,
-    DualTimeLoop,
     FieldSplit,
     FieldSplitPreconditioner,
     JacobianProbeSpec,
@@ -25,8 +23,9 @@ from aquaflux.solve import (
     MonolithicFactorShiftPolicy,
     SimpleSmoothed,
 )
-from aquaflux.solve.monolithic_policy import TracedSplitShiftPolicy
-from aquaflux.solve.traced_field_split import contains_host_callback
+from aquaflux.precondition.monolithic_policy import TracedSplitShiftPolicy
+from aquaflux.precondition.traced_field_split import contains_host_callback
+from aquaflux.solve import ConstantRelaxation, DualTimeLoop
 from aquaflux.turbulence import BlockDiagonal, open_session
 
 from tests.unit.test_coupled_rans import _cavity, _healthy_state

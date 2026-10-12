@@ -4,9 +4,9 @@
 but every arm in it is fixed at 2 levels and none of the coarse-size-stopped arms in its ``ARMS`` table
 has ever actually been run. Separately, neither ``avoid_singletons`` nor ``strength_threshold`` is wired
 into that harness's ``smoothed_cycle`` at all, though both are plain
-:func:`~aquaflux.solve.build_convection_hierarchy` parameters and both were the levers that made depth
-pay on the flow saddle's own native hierarchy (a coarsening/singleton-aggregate fix worth ~1.7x there,
-and a strength-of-connection threshold worth ~4x).
+:func:`~aquaflux.precondition.build_convection_hierarchy` parameters and both were the levers that made
+depth pay on the flow saddle's own native hierarchy (a coarsening/singleton-aggregate fix worth ~1.7x
+there, and a strength-of-connection threshold worth ~4x).
 
 This is a one-shot check of the transfer: does the flow saddle's recipe (avoid singleton aggregates,
 deepen past 2 levels via a coarse-size stop rather than a level cap, optionally a strength threshold)
@@ -50,8 +50,9 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy, convection_multigrid_cycles, relative_residual_gmres, restart_cycles, solve_linear,)
-from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
+from aquaflux.solve import relative_residual_gmres, restart_cycles, solve_linear
+from aquaflux.precondition import FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy, convection_multigrid_cycles
+from aquaflux.precondition.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan  # noqa: E402
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 from jax.experimental.sparse import BCOO  # noqa: E402

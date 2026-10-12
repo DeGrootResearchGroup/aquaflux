@@ -79,15 +79,8 @@ from aquaflux.schemes import (
     ProjectedStencilGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import (
-    Convergence,
-    DualTimeLoop,
-    Euclidean,
-    MaterializedJacobian,
-    RowScaled,
-    SimpleSmoothed,
-    newton_march,
-)
+from aquaflux.solve import Convergence, DualTimeLoop, Euclidean, RowScaled, newton_march
+from aquaflux.precondition import MaterializedJacobian, SimpleSmoothed
 
 HERE = Path(__file__).resolve().parent
 POLYMESH = HERE / "of_case" / "constant" / "polyMesh"

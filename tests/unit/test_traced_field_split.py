@@ -14,14 +14,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve import (
+from aquaflux.precondition import (
     AirReduction,
     FieldGroups,
     JacobiSmoothed,
     SimpleSmoothed,
     field_split_inverse,
 )
-from aquaflux.solve.traced_field_split import (
+from aquaflux.precondition.traced_field_split import (
     TracedFieldSplit,
     contains_host_callback,
     traced_field_split,
@@ -254,7 +254,7 @@ def test_both_hierarchies_ride_as_leaves_not_as_constants() -> None:
 def test_the_split_rides_into_a_jit_as_an_argument_without_retracing() -> None:
     """Every array it holds is a leaf, so new values of the same shapes reuse the compiled cycle.
 
-    That is the same property :class:`~aquaflux.solve.multigrid._CsrOperator` has and for the same
+    That is the same property :class:`~aquaflux.precondition.multigrid._CsrOperator` has and for the same
     reason: a mid-march refresh must not recompile the solve it is refreshing.
     """
     _, traced, groups = _pair()

@@ -1,10 +1,11 @@
-"""The `aquaflux.solve` package boundary: `__init__` is the real API surface.
+"""The `aquaflux.solve` and `aquaflux.precondition` boundaries: each `__init__` is a real surface.
 
-`solve/__init__` re-exports what the rest of the library (and a user) may consume. That curation is
+Each ``__init__`` re-exports what the rest of the library (and a user) may consume. That curation is
 only meaningful if consumers actually go through it. That library modules do is pinned for every
-package at once in ``test_layering.py``; this file pins what is particular to ``solve``: the surface
-resolves, it holds only what a user needs, the multigrid toolkit is exported whole, and the study
-harnesses in ``validation/`` keep to the surface too.
+package at once in ``test_layering.py``; this file pins what is particular to these two, which were one
+package until the preconditioners moved out of ``solve``: each surface resolves and holds only what a
+user needs, the multigrid toolkit is exported whole, and the study harnesses in ``validation/`` keep to
+the surfaces too.
 """
 
 from __future__ import annotations
@@ -13,21 +14,33 @@ import ast
 import pathlib
 import re
 
-from aquaflux import solve
+import pytest
+from aquaflux import precondition, solve
 
 PACKAGE_ROOT = pathlib.Path(solve.__file__).resolve().parent.parent
 SOLVE_ROOT = PACKAGE_ROOT / "solve"
 
+#: The packages this file guards, by the name ``aquaflux`` gives each.
+PACKAGES = {"solve": solve, "precondition": precondition}
 
-def test_every_exported_name_resolves() -> None:
+
+@pytest.mark.parametrize("name", sorted(PACKAGES))
+def test_every_exported_name_resolves(name: str) -> None:
     """`__all__` is honest: every advertised name is actually present on the package."""
-    missing = [name for name in solve.__all__ if not hasattr(solve, name)]
-    assert missing == [], f"__all__ advertises names the package does not define: {missing}"
+    package = PACKAGES[name]
+    missing = [export for export in package.__all__ if not hasattr(package, export)]
+    assert missing == [], f"__all__ advertises names {name} does not define: {missing}"
+
+
+def test_no_name_is_exported_by_both() -> None:
+    """A name has one home; exported from both packages, an import could reach either."""
+    shared = sorted(set(solve.__all__) & set(precondition.__all__))
+    assert shared == [], f"exported by both solve and precondition: {shared}"
 
 
 #: Exports that no other package imports and no user documentation names, each kept because a user
-#: writes against it. Anything else that nothing outside ``solve`` uses is plumbing that leaked onto the
-#: surface: it belongs in its submodule, where tests and study harnesses can still reach it.
+#: writes against it. Anything else that nothing outside its own package uses is plumbing that leaked
+#: onto the surface: it belongs in its submodule, where tests and study harnesses can still reach it.
 USER_IMPLEMENTS = frozenset(
     {
         # Protocols and family bases a user writes a new member of.
@@ -96,20 +109,29 @@ USER_CALLS = frozenset(
 USER_FACING = USER_IMPLEMENTS | USER_CONFIGURES | USER_CALLS
 
 
-def _imported_by_other_packages() -> set[str]:
-    """Every name a module outside ``solve/`` imports from ``aquaflux.solve``."""
+def _imported_by_other_packages(name: str) -> set[str]:
+    """Every name a module outside the package ``name`` imports from ``aquaflux.<name>``.
+
+    Relative imports count: ``precondition`` takes what it needs from ``solve`` as ``from ..solve``.
+    """
+    own = PACKAGE_ROOT / name
     names = set()
     for path in PACKAGE_ROOT.rglob("*.py"):
-        if SOLVE_ROOT in path.parents:
+        if own in path.parents:
             continue
+        package = ["aquaflux", *path.parent.relative_to(PACKAGE_ROOT).parts]
         for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.ImportFrom) and node.module == "aquaflux.solve":
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            base = package[: len(package) - (node.level - 1)] if node.level else []
+            target = [*base, *(node.module.split(".") if node.module else [])]
+            if target == ["aquaflux", name]:
                 names.update(alias.name for alias in node.names)
     return names
 
 
-def _named_in_user_documentation() -> set[str]:
-    """Every export the hand-written documentation names (the generated API page aside)."""
+def _named_in_user_documentation(name: str) -> set[str]:
+    """Every export of ``name`` the hand-written documentation names (the generated API page aside)."""
     root = PACKAGE_ROOT.parent
     pages = [root / "README.md", *(root / "docs").glob("*.md")]
     text = "\n".join(
@@ -117,10 +139,12 @@ def _named_in_user_documentation() -> set[str]:
         for page in pages
         if page.is_file() and page.name not in ("api.md", "package_structure.md")
     )
-    return {name for name in solve.__all__ if re.search(rf"\b{re.escape(name)}\b", text)}
+    exports = PACKAGES[name].__all__
+    return {export for export in exports if re.search(rf"\b{re.escape(export)}\b", text)}
 
 
-def test_every_export_is_used_elsewhere_or_declared_user_facing() -> None:
+@pytest.mark.parametrize("name", sorted(PACKAGES))
+def test_every_export_is_used_elsewhere_or_declared_user_facing(name: str) -> None:
     """An export nothing else uses must say why a user needs it, and a stated reason must still hold.
 
     A name reaches ``__all__`` because some other module wanted it; once nothing does, it stays on the
@@ -128,14 +152,21 @@ def test_every_export_is_used_elsewhere_or_declared_user_facing() -> None:
     The declared lists are that question, in both directions: an unlisted unused export fails, and so
     does a listed one that another package now imports or the documentation now names.
     """
-    justified = _imported_by_other_packages() | _named_in_user_documentation()
-    unexplained = sorted(set(solve.__all__) - justified - USER_FACING)
+    exports = set(PACKAGES[name].__all__)
+    justified = _imported_by_other_packages(name) | _named_in_user_documentation(name)
+    unexplained = sorted(exports - justified - USER_FACING)
     assert unexplained == [], (
-        "these exports have no importer outside solve/ and no user documentation; say in "
+        f"these exports have no importer outside {name}/ and no user documentation; say in "
         f"USER_FACING why a user needs each, or leave it in its submodule: {unexplained}"
     )
-    stale = sorted(name for name in USER_FACING if name not in solve.__all__ or name in justified)
-    assert stale == [], f"USER_FACING lists names that are not exported or need no reason: {stale}"
+    stale = sorted(export for export in USER_FACING & exports if export in justified)
+    assert stale == [], f"USER_FACING lists names {name} exports that need no reason: {stale}"
+
+
+def test_every_declared_user_facing_name_is_exported() -> None:
+    """A declared reason for a name neither package exports any more is a stale entry."""
+    exported = set(solve.__all__) | set(precondition.__all__)
+    assert sorted(USER_FACING - exported) == []
 
 
 def test_the_multigrid_surface_is_complete() -> None:
@@ -156,8 +187,8 @@ def test_the_multigrid_surface_is_complete() -> None:
         "SmoothedHierarchy",
         "AirHierarchy",
     }
-    assert required <= set(solve.__all__), (
-        f"missing from the surface: {sorted(required - set(solve.__all__))}"
+    assert required <= set(precondition.__all__), (
+        f"missing from the surface: {sorted(required - set(precondition.__all__))}"
     )
 
 
@@ -217,9 +248,6 @@ VALIDATION_INTERNAL_REACHES = {
     "InnerIterateCheckpointer",
     "combine_metrics",
     "in_progress_measure",
-    # The shift a step will run at, read by the aggressive-continuation harness to log the shift each
-    # rung starts from; the step control's carried state is not the bare shift, so it asks the step.
-    "shift_of",
     # The traced form of a fitted host split and the host-callback detector, reached by the two
     # traced-split harnesses: one times the traced split against the host one, the other checks a
     # refit keeps its array shapes. Both measure the object the session itself builds, so they take it
@@ -235,17 +263,17 @@ def _validation_modules() -> list[pathlib.Path]:
     return sorted(root.rglob("*.py")) if root.is_dir() else []
 
 
-def _deep_imported_names(source: str) -> list[str]:
-    """Every name imported via ``from aquaflux.solve.<submodule> import ...``."""
+def _deep_imported_names(source: str) -> list[tuple[str, str]]:
+    """``(package, name)`` for each ``from aquaflux.<package>.<submodule> import name`` of a guarded one."""
     tree = ast.parse(source)
-    return [
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-        and node.level == 0
-        and (node.module or "").startswith("aquaflux.solve.")
-        for alias in node.names
-    ]
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level != 0:
+            continue
+        parts = (node.module or "").split(".")
+        if len(parts) > 2 and parts[0] == "aquaflux" and parts[1] in PACKAGES:
+            found.extend((parts[1], alias.name) for alias in node.names)
+    return found
 
 
 def test_the_study_harnesses_take_exported_names_from_the_package_surface() -> None:
@@ -262,14 +290,14 @@ def test_the_study_harnesses_take_exported_names_from_the_package_surface() -> N
     such reach is listed in :data:`VALIDATION_INTERNAL_REACHES` with its reason.
     """
     offenders = [
-        f"{path.name}: {name}"
+        f"{path.name}: {package}.{name}"
         for path in _validation_modules()
-        for name in _deep_imported_names(path.read_text())
-        if name in solve.__all__
+        for package, name in _deep_imported_names(path.read_text())
+        if name in PACKAGES[package].__all__
     ]
     assert offenders == [], (
-        "these names are exported, so the harness should import them from `aquaflux.solve` rather "
-        f"than from a submodule: {offenders}"
+        "these names are exported, so the harness should import them from the package rather than "
+        f"from a submodule: {offenders}"
     )
 
 
@@ -282,8 +310,8 @@ def test_the_harnesses_internal_reaches_stay_the_listed_ones() -> None:
     reached = {
         name
         for path in _validation_modules()
-        for name in _deep_imported_names(path.read_text())
-        if name not in solve.__all__
+        for package, name in _deep_imported_names(path.read_text())
+        if name not in PACKAGES[package].__all__
     }
     if not _validation_modules():  # a checkout without the harnesses has nothing to say
         return

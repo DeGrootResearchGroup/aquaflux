@@ -32,10 +32,7 @@ from aquaflux.flow import (
     VelocityInlet,
 )
 from aquaflux.mesh import graded_nodes, structured_grid_2d
-from aquaflux.properties import Constant, PropertyModel
-from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import (
-    DualTimeLoop,
+from aquaflux.precondition import (
     FieldGroups,
     FieldSplit,
     HostPreconditioner,
@@ -44,13 +41,13 @@ from aquaflux.solve import (
     MaterializedJacobianPreconditioner,
     SimpleSmoothed,
     field_split_inverse,
-    relative_residual_gmres,
-    restart_cycles,
-    solve_linear,
 )
-from aquaflux.solve.materialized_session import (
+from aquaflux.precondition.materialized_session import (
     jacobian_matvec,
 )
+from aquaflux.properties import Constant, PropertyModel
+from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import DualTimeLoop, relative_residual_gmres, restart_cycles, solve_linear
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
@@ -486,7 +483,7 @@ def test_the_split_refreshes_in_place_onto_the_same_object(case):
     returned a new object would silently keep preconditioning with the stale one -- and would still
     converge, just slower, which is exactly the kind of bug a march hides.
     """
-    from aquaflux.solve import FieldSplitPreconditioner
+    from aquaflux.precondition import FieldSplitPreconditioner
 
     groups = case["groups"]
     coupled, state = case["coupled"], case["state"]
@@ -530,7 +527,7 @@ def test_the_jacobi_smoothed_inverse_is_a_fixed_linear_map_that_transposes(case)
     """
     import numpy as np
     import scipy.sparse as sp
-    from aquaflux.solve import JacobiSmoothedInverse
+    from aquaflux.precondition import JacobiSmoothedInverse
 
     groups, shifted = case["groups"], case["shifted"]
     block = sp.csr_matrix(shifted[groups.trailing, :][:, groups.trailing])

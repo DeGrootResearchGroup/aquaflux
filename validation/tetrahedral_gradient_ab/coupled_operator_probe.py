@@ -28,7 +28,7 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import materialize_block_jacobian
+from aquaflux.precondition import materialize_block_jacobian
 from aquaflux.turbulence import SSTModel, inlet_k, inlet_omega
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan
 from compare import INTENSITY, LENGTH_SCALE, POLYMESH, U_IN, build_case

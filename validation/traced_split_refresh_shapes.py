@@ -46,8 +46,8 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
+from aquaflux.precondition.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.solve import ConstantRelaxation  # noqa: E402
-from aquaflux.solve.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.turbulence import coupled_step, open_session  # noqa: E402
 
 BETAS = [float(b) for b in os.environ.get("TRACED_BETAS", "2.0,0.5,0.05").split(",")]

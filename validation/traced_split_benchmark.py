@@ -60,15 +60,15 @@ import jax.numpy as jnp  # noqa: E402
 import lineax as lx  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
-from aquaflux.solve import ConstantRelaxation, solve_linear  # noqa: E402
-from aquaflux.solve.materialized_session import (  # noqa: E402
+from aquaflux.precondition.materialized_session import (  # noqa: E402
     frozen_shift_diagonal,
     jacobian_matvec,
 )
-from aquaflux.solve.traced_field_split import (  # noqa: E402
+from aquaflux.precondition.traced_field_split import (  # noqa: E402
     contains_host_callback,
     traced_field_split,
 )
+from aquaflux.solve import ConstantRelaxation, solve_linear  # noqa: E402
 from aquaflux.turbulence import coupled_step, open_session  # noqa: E402
 
 REPEATS = int(os.environ.get("TRACED_REPEATS", "20"))

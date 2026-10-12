@@ -56,9 +56,9 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.schemes import DEFAULT_GRADIENT_SCHEME, GradientScheme  # noqa: E402
-from aquaflux.solve import (JacobianProbe, materialize_block_jacobian,)
-from aquaflux.solve.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
-from aquaflux.solve.sparse_jacobian import (block_stencil_colouring, jacobian_relative_error,)
+from aquaflux.precondition import JacobianProbe, materialize_block_jacobian
+from aquaflux.precondition.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, jacobian_matvec,)
+from aquaflux.precondition.sparse_jacobian import (block_stencil_colouring, jacobian_relative_error,)
 
 REPEATS = int(os.environ.get("PITZ_LOCAL_JAC_REPEATS", "3"))
 

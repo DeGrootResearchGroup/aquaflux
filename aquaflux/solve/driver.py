@@ -33,10 +33,10 @@ import jax.numpy as jnp
 
 from .convergence import Convergence, ResidualMeasures
 from .march import ResidualHomotopy, newton_march
-from .materialized_session import PreconditionerSession
 from .refresh import RefreshPolicy
 from .resumption import Resumption
 from .retry import NO_RETRIES, RetryPolicy
+from .session import PreconditionerSession
 from .step_control import default_dual_time_control
 from .strategy import NewtonStrategy, ShiftCarryingControl, StepControl, StepReport
 

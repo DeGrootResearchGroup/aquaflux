@@ -32,6 +32,10 @@ from aquaflux.flow import (
 from aquaflux.flow.state import flow_state_layout
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.mesh import structured_grid_2d
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+from aquaflux.precondition.materialized_session import (
+    VCYCLE_LINEAR_SOLVE,
+)
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
@@ -42,23 +46,16 @@ from aquaflux.solve import (
     CycleGrowthTrigger,
     DualTimeLoop,
     Euclidean,
-    FieldSplit,
     Globalization,
-    JacobiSmoothed,
     LinearSolveSettings,
-    MaterializedJacobian,
     PseudoTransientStep,
     RefreshPolicy,
     Resumption,
     RowScaledNorm,
     SessionSource,
     ShiftTerm,
-    SimpleSmoothed,
 )
 from aquaflux.solve import driver as driver_module
-from aquaflux.solve.materialized_session import (
-    VCYCLE_LINEAR_SOLVE,
-)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledShiftSettings,
@@ -1588,7 +1585,7 @@ def test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs() -> None:
     assembler as an argument instead. A rung differs only in leaf values (pinned by the test above), so
     a probe that takes the assembler as an argument is a hit.
     """
-    from aquaflux.solve.materialized_session import (
+    from aquaflux.precondition.materialized_session import (
         batched_jacobian_matvec,
         jacobian_matvec,
     )
@@ -1620,11 +1617,11 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
     rebuilt its engine recompiled the whole coupled solve even when it was reusing the very same
     preconditioner -- defeating the point of reusing it.
     """
+    from aquaflux.precondition.monolithic_policy import (
+        FrozenTransposeFactory,
+    )
     from aquaflux.solve import (
         TransposedPreconditioner,
-    )
-    from aquaflux.solve.monolithic_policy import (
-        FrozenTransposeFactory,
     )
 
     class _Pc:
@@ -1646,7 +1643,7 @@ def test_the_adjoint_transpose_factory_compares_by_the_preconditioner_it_wraps()
 def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
     """The factorization is frozen, so the same transpose serves every state -- which is what lets this
     be a value object at all."""
-    from aquaflux.solve.monolithic_policy import (
+    from aquaflux.precondition.monolithic_policy import (
         FrozenTransposeFactory,
     )
 

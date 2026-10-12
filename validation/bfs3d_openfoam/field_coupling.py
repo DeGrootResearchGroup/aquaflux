@@ -1,6 +1,6 @@
 """How strongly is each field coupled to each other field in the coupled Jacobian?
 
-A block-triangular field split (``solve/field_split.py``) partitions the six fields into a leading and
+A block-triangular field split (``precondition/field_split.py``) partitions the six fields into a leading and
 a trailing group, gives each its own multigrid hierarchy, and keeps **one** triangle of the coupling
 between them exactly. The other triangle is dropped. So the question "should these two fields be split
 apart?" has two halves, and this answers the first one cheaply:
@@ -45,7 +45,7 @@ sys.path.insert(0, str(CASE))
 sys.path.insert(0, str(CASE.parents[1]))
 
 import compare  # noqa: E402
-from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)  # noqa: E402
+from aquaflux.precondition.sparse_jacobian import (block_stencil_gather_map,)  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan  # noqa: E402
 from field_split_probe import STATES, load_state, materialize  # noqa: E402
 

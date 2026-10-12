@@ -43,12 +43,13 @@ sys.path.insert(0, str(CASE))
 import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from aquaflux.solve import (FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy, convection_multigrid_cycles, relative_residual_gmres, restart_cycles, solve_linear,)
-from aquaflux.solve.frozen_operator import (symmetrically_equilibrate,)
-from aquaflux.solve.sparse_jacobian import (block_stencil_gather_map,)
+from aquaflux.solve import relative_residual_gmres, restart_cycles, solve_linear
+from aquaflux.precondition import FieldGroups, MaterializedJacobianPreconditioner, build_convection_hierarchy, convection_multigrid_cycles
+from aquaflux.precondition.frozen_operator import (symmetrically_equilibrate,)
+from aquaflux.precondition.sparse_jacobian import (block_stencil_gather_map,)
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
-from aquaflux.solve.materialized_session import (frozen_shift_diagonal,)
+from aquaflux.precondition.materialized_session import (frozen_shift_diagonal,)
 from field_split_probe import FLOOR, STATES, load_state, materialize  # noqa: E402
 from jax.experimental.sparse import BCOO  # noqa: E402
 

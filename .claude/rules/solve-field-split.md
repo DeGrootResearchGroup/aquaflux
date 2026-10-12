@@ -1,11 +1,11 @@
 ---
 paths:
-  - "aquaflux/solve/field_split.py"
-  - "aquaflux/solve/traced_field_split.py"
-  - "aquaflux/solve/traced_cycle.py"
+  - "aquaflux/precondition/field_split.py"
+  - "aquaflux/precondition/traced_field_split.py"
+  - "aquaflux/precondition/traced_cycle.py"
 ---
 
-# Rules — `aquaflux/solve/field_split.py` (the block-triangular field split)
+# Rules — `aquaflux/precondition/field_split.py` (the block-triangular field split)
 
 > ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
 
@@ -80,7 +80,7 @@ This was not a property of one refresh option: **rebuilding the split after a re
 the cache and was just as stale** — measured on `main` at `abdda0d` (jax 0.10.2 CPU, the unit fixture,
 same-pattern operator with values scaled by U(0.5, 1.5)): one trace, and the jitted answer 1.94 (norm)
 away from the refreshed split's own eager answer. Now each inverse offers
-**`traced_cycle() -> TracedCycle`** (`solve/traced_cycle.py`): an `equinox.Module` whose `state` (the
+**`traced_cycle() -> TracedCycle`** (`precondition/traced_cycle.py`): an `equinox.Module` whose `state` (the
 hierarchy, plus `extras` on `HierarchyBlockInverse`) is array leaves and whose `step` is static and
 compares by value (`_HierarchyStep(cycle, smoother)`, `_AirStep(cycles, f_iters, c_iters, omega)` over a
 module-level `_air_cycle`). The inverses' own eager `_solve` routes through the same object, so there is
@@ -101,7 +101,7 @@ session uses, not something a case configures.
 1. **The session chooses the form, at the fit.** `MaterializedSession._build` fits the host
    `FieldSplitPreconditioner` as before, then asks `offers_traced_split(preconditioner.inverse)`. If
    true, the step's policy is `TracedSplitShiftPolicy(base, traced_field_split(inverse))`
-   (`solve/monolithic_policy.py`), an `equinox.Module` holding the split as **data**; otherwise
+   (`precondition/monolithic_policy.py`), an `equinox.Module` holding the split as **data**; otherwise
    `MonolithicFactorShiftPolicy` as before. The problem's `build_step` now receives the glued policy
    (`MaterializedProblem.build_step(state, policy, march, base_regime)`), so neither problem chooses.
    `session.preconditioner` is the host object either way.
@@ -212,7 +212,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
   march's cost is no longer preconditioner-bound (~65 % Krylov, largely fixed per-step matvec rather
   than cycles; 21 % refresh; the rest globalization). The upside on *this* case is bounded, and the
   test needs the hard inner iterates.
-  - **✅ THE SPLIT IS BUILT — `solve/field_split.py` (`FieldGroups`,
+  - **✅ THE SPLIT IS BUILT — `precondition/field_split.py` (`FieldGroups`,
     `FieldSplitInverse`, `field_split_inverse`).** Three facts worth keeping,
     independent of whether it ever wins:
     - **The partition is free, because the coupled state is FIELD-major.** Degree of freedom
@@ -347,7 +347,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
       achieved residual without asserting it. Every arm sees the identical right-hand side, so the
       between-arm comparison is unaffected — but do not compare an absolute residual across the two.
   - **✅ THE INCOMPLETE-LU SWEEP CAN BE CONFINED TO THE SADDLE — the reachable half of the GPU prize.**
-    Every smoother `solve/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
+    Every smoother `precondition/multigrid.py` has is Jacobi-class; the only thing PETSc supplies that it does
     not is the incomplete-LU sweep, which is also the least parallelizable piece (a sequential triangular
     solve). Two claims must be separated, because they have opposite answers:
     - **Remove it everywhere — REFUTED.** A Jacobi-class smoother on the four-field `[u,v,w,p]` block
@@ -436,7 +436,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
       shift. That keeps the full stencil fill and the true source linearizations, and needs **no**
       reparametrization scaling, because the Jacobian is already in the solved variable — the log-ω
       chain factor and its wall-fixation trap simply do not arise. Built as
-      `solve/field_split.PerFieldNativeInverse` / `native_per_field_inverse` (**both DELETED 2026-08-15**
+      `precondition/field_split.PerFieldNativeInverse` / `native_per_field_inverse` (**both DELETED 2026-08-15**
       — see the deletion note in the field-split section; the surviving inverse is `JacobiSmoothedInverse`),
       with the two fields
       composed block-triangularly (k leading).
@@ -652,14 +652,14 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
     `_materialize_jacobian` **once**, over all six fields — that has not changed, and could not without a
     rectangular (unequal row/column field count) Jacobian probe, which this machinery does not have. What
     changed is which *pattern* that one materialize is asked to fill.
-    `ColumnProbePlan`/`column_probe_plan` (`solve/sparse_jacobian.py`) gained `active_rows`, a static
+    `ColumnProbePlan`/`column_probe_plan` (`precondition/sparse_jacobian.py`) gained `active_rows`, a static
     `(n_fields, n_fields)` table `[row_field, column_field]` a caller supplies when it already knows some
     field-pair block will never be read, whatever the mesh or the state — unlike `in_reach` (a per-entry,
     reach-based question), which is why the two are separate mechanisms and stay so. Excluded pairs are
     filtered out of the pattern **before** `block_stencil_gather_map` builds the CSR structure
-    (`aquaflux/solve/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
+    (`aquaflux/precondition/sparse_jacobian.py`), not zeroed after — so the reduction is in the assembled
     `nnz`, the retained `ProbeGather`, and the gather map's own construction cost, not only in the values.
-    `FieldGroups.active_rows()` (`solve/field_split.py`) derives the table straight from the
+    `FieldGroups.active_rows()` (`precondition/field_split.py`) derives the table straight from the
     partition a `FieldSplitInverse` already carries: `True` everywhere except the one triangle
     the split's `apply()` never reads. `coupled_jacobian_probe(..., active_rows=…)` and
     `_coupled_jacobian_plan` thread it through; `coupled_amg_continuation` derives it (`groups.active_rows()`) whenever it builds its own probe
@@ -841,7 +841,7 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
 
 **Deepening either block's own hierarchy does not fix this on its own, and it may dominate memory at a
 1M-cell target regardless of how deep either goes.** `FieldSplitPreconditioner.build` /
-`refresh_in_place` (`aquaflux/solve/materialized_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
+`refresh_in_place` (`aquaflux/precondition/materialized_preconditioner.py`, driven from `aquaflux/turbulence/coupled.py`'s
 `_monolithic_shift_source` / `JacobianProbe`) materialize the coupled Jacobian with **one**
 coloured-probe pass over all `dim+3` fields at reach 3, and `field_split_inverse` slices
 the field-pair blocks out of that one matrix. This is what field-split costs regardless of either block's

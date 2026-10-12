@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.solve.sparse_jacobian import (
+from aquaflux.precondition.sparse_jacobian import (
     ColumnProbePlan,
     _index_dtype,
     _saturation_colouring,

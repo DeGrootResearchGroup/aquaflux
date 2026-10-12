@@ -19,13 +19,13 @@ from __future__ import annotations
 import abc
 import time
 from collections.abc import Callable
-from typing import Protocol
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..solve import FieldLayout, LinearSolveRegime, NewtonStrategy, RefreshTiming, shift_of
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .field_split import FieldGroups, FieldSplitPreconditioner
@@ -36,10 +36,6 @@ from .monolithic_policy import (
     TracedSplitShiftPolicy,
     with_traced_split,
 )
-from .refresh_timing import RefreshTiming
-from .shifted_step import LinearSolveRegime
-from .state import FieldLayout
-from .strategy import NewtonStrategy, shift_of
 from .traced_field_split import offers_traced_split, traced_field_split
 
 __all__ = [
@@ -49,7 +45,6 @@ __all__ = [
     "BetaTrackingRefresh",
     "MaterializedProblem",
     "MaterializedSession",
-    "PreconditionerSession",
     "batched_jacobian_matvec",
     "frozen_shift_diagonal",
     "jacobian_matvec",
@@ -172,42 +167,6 @@ def _is_traced(pytree: object) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
 
 
-class PreconditionerSession(Protocol):
-    """One preconditioner, kept current across every step it serves.
-
-    A session is what a march holds on to between its steps: the frozen inverse, the colouring probe it was
-    materialized with, and the per-step refresh hook. Those must outlive a single Newton step -- a
-    continuation builds a step per rung, a refresh builds one per segment -- and must be the *same
-    objects* each time, because the inverse and the hooks ride in static fields of the step and a new
-    object recompiles the whole solve.
-
-    Attributes
-    ----------
-    refresh_preconditioner : callable or None
-        ``(step, state, *, due=False) -> update or None``, called by the march before every step to
-        re-fit the inverse at that step's shift -- unconditionally when ``due`` -- or ``None`` for a
-        family with nothing to re-fit. It returns ``None`` when the step needs nothing new (nothing was
-        re-fitted, or the inverse is re-fitted in place) and a ``step -> step`` update when the step
-        carries the inverse as data and must be handed the re-fitted one.
-    """
-
-    refresh_preconditioner: Callable[..., Callable[[NewtonStrategy], NewtonStrategy] | None] | None
-
-    def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        """The Newton step at ``state``, configured by the march keywords."""
-        ...
-
-    def refresh(
-        self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
-    ) -> NewtonStrategy:
-        """Re-freeze at the developed ``state``; ``previous`` is the step it replaces."""
-        ...
-
-    def rebind(self, assembler: object) -> None:
-        """Point the session at another companion of the same case, such as the next continuation rung."""
-        ...
-
-
 class BetaTrackingRefresh:
     """The ``refresh_preconditioner`` hook that re-fits a monolithic inverse as the shift strength moves.
 
@@ -234,7 +193,7 @@ class BetaTrackingRefresh:
     preconditioner : MaterializedJacobianPreconditioner
         The host preconditioner it re-fits (``refresh_in_place``). Held here rather than read off the
         step, because a step may carry the inverse in a traced form derived from it
-        (:class:`~aquaflux.solve.monolithic_policy.TracedSplitShiftPolicy`), which has nothing to re-fit.
+        (:class:`~aquaflux.precondition.monolithic_policy.TracedSplitShiftPolicy`), which has nothing to re-fit.
     refit_beta_floor : float
         A lower bound on the shift strength the **preconditioner** is refreshed at: it is built at
         ``max(beta, refit_beta_floor)`` while the march keeps solving at its own ``beta``. ``0.0``
@@ -419,7 +378,7 @@ class MaterializedProblem(abc.ABC):
         """How the state's fields are cut into a leading and a trailing group, or ``None``.
 
         ``None`` means there is nothing to split (a single group of fields), and a
-        :class:`~aquaflux.solve.FieldSplit` inverse is refused for the problem.
+        :class:`~aquaflux.precondition.FieldSplit` inverse is refused for the problem.
         """
 
     @abc.abstractmethod
@@ -444,8 +403,8 @@ class MaterializedProblem(abc.ABC):
         """The Newton step around ``policy``, configured by ``march``.
 
         ``policy`` is the base shift policy glued to the fitted inverse -- a
-        :class:`~aquaflux.solve.MonolithicFactorShiftPolicy` for a host inverse, a
-        :class:`~aquaflux.solve.monolithic_policy.TracedSplitShiftPolicy` for a field split of two traced
+        :class:`~aquaflux.precondition.MonolithicFactorShiftPolicy` for a host inverse, a
+        :class:`~aquaflux.precondition.monolithic_policy.TracedSplitShiftPolicy` for a field split of two traced
         blocks. Both offer ``shift_term`` and ``adjoint_factory()``, which is all a step needs. The
         session chooses between them; the problem never does. ``base_regime`` is the Krylov regime of
         the inverse family; the march's ``linear_solve`` moves it.
@@ -463,11 +422,11 @@ class MaterializedSession:
     march served by it calls the identical object.
 
     **A field split whose two blocks both offer a traced cycle is applied on device**
-    (:func:`~aquaflux.solve.traced_field_split.offers_traced_split`): the step carries it as data
-    through a :class:`~aquaflux.solve.monolithic_policy.TracedSplitShiftPolicy`, so a Krylov iteration
+    (:func:`~aquaflux.precondition.traced_field_split.offers_traced_split`): the step carries it as data
+    through a :class:`~aquaflux.precondition.monolithic_policy.TracedSplitShiftPolicy`, so a Krylov iteration
     emits no host callback. The host split is still what is fitted and re-fitted; after each re-fit the
     hook hands the march a step carrying the traced form of the re-fitted split
-    (:func:`~aquaflux.solve.monolithic_policy.with_traced_split`). That is a compilation-cache hit only
+    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). That is a compilation-cache hit only
     while the two hierarchies keep their array shapes across a re-fit, so a block whose coarsening reads
     operator values must freeze it (``frozen_coarsening``) or pour it into a fixed ladder
     (``shape_headroom``); otherwise every re-fit recompiles the step. Any other inverse is applied

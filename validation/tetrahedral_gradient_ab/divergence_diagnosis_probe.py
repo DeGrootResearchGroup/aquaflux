@@ -50,14 +50,8 @@ from aquaflux.schemes import (
     OwnerGradient,
     SkewCorrectedGradient,
 )
-from aquaflux.solve import (
-    Convergence,
-    DualTimeLoop,
-    FieldSplit,
-    JacobiSmoothed,
-    MaterializedJacobian,
-    SimpleSmoothed,
-)
+from aquaflux.solve import Convergence, DualTimeLoop
+from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.turbulence import (
     SSTModel,
     inlet_k,
