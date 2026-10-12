@@ -107,7 +107,6 @@ from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
 from aquaflux.turbulence import (
     coupled_fields,
     coupled_step,
-    frozen_production_viscosity,
     omega_wall,
     open_session,
     production_and_limit,
@@ -115,7 +114,10 @@ from aquaflux.turbulence import (
     solve_reynolds_continuation,
     strain_rate_magnitude,
 )
-from aquaflux.turbulence.coupled import positive_k_limit  # noqa: E402
+from aquaflux.turbulence.coupled import (  # noqa: E402
+    frozen_production_viscosity,
+    positive_k_limit,
+)
 from aquaflux.turbulence.measures import coupled_scaled_norm  # noqa: E402
 from aquaflux.vectors import dot  # noqa: E402
 
