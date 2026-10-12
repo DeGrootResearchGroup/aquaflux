@@ -156,7 +156,8 @@ class MarchResult(NamedTuple):
         Whether the march stopped early because the injected trigger fired.
     control_state : object
         The injected :class:`StepControl`'s carried state as of the last step (``None`` if no control
-        was used). Returned so a driver running one segment per preconditioner refresh can **thread** it
+        was used). Required, like :attr:`strategy`: a producer that leaves either out fails here rather
+        than handing a driver ``None`` to march or differentiate with. Returned so a driver running one segment per preconditioner refresh can **thread** it
         into the next segment's :func:`newton_march`, rather than each segment restarting the control
         from scratch — a stateful control (e.g. one climbing the shift strength over many steps) would
         otherwise throw its progress away at every refresh.
@@ -170,8 +171,8 @@ class MarchResult(NamedTuple):
     reports: tuple[StepReport, ...]
     converged: bool
     triggered: bool
-    control_state: object = None
-    strategy: object = None
+    control_state: object
+    strategy: NewtonStrategy
 
 
 class ResidualHomotopy(Protocol):

@@ -883,7 +883,7 @@ def test_the_march_is_handed_the_homotopy_and_the_same_arguments_whether_or_not_
 
     def recording_march(step, residual_fn, state, **kwargs):
         calls.append(kwargs)
-        return MarchResult(state, (), True, False, None)
+        return MarchResult(state, (), True, False, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     homotopy = object()
@@ -932,7 +932,9 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
     monkeypatch.setattr(
         driver_module,
         "newton_march",
-        lambda step, residual_fn, state, **kwargs: MarchResult(state, (), converged, False, None),
+        lambda step, residual_fn, state, **kwargs: MarchResult(
+            state, (), converged, False, None, step
+        ),
     )
 
     with pytest.raises(eqx.EquinoxRuntimeError, match=match):
@@ -963,7 +965,7 @@ def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> No
 
     def recording_march(step, residual_fn, state, **kwargs):
         triggers.append(kwargs["trigger"])
-        return MarchResult(state, (), True, kwargs["trigger"] is not None, None)
+        return MarchResult(state, (), True, kwargs["trigger"] is not None, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     trigger = object()
@@ -1111,7 +1113,7 @@ def _recorded_measure_builders(
         builders.append((step, kwargs["norm_builder"]))
         if stop_after_recording:
             raise _Recorded
-        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     step = coupled_step(
@@ -1155,7 +1157,7 @@ def test_a_resumed_solve_anchors_its_first_segment_to_the_reference_and_every_se
         from aquaflux.solve import MarchResult
 
         calls.append(kwargs)
-        return MarchResult(at, (), True, kwargs["trigger"] is not None, None)
+        return MarchResult(at, (), True, kwargs["trigger"] is not None, None, step)
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
     step = coupled_step(
