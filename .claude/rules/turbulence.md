@@ -2148,7 +2148,11 @@ tuning follow-up noted above.
       the state settles (at those paces: at 1.21x per step it settled at the 4th), and the cheapest ramp ends one step after that. Table and the design it closes
       in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
       **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11**; bfs3d keeps its own
-      schedule (#678).
+      schedule: there `3 x 12` with the release cost 214 accepted / 459 all-attempt cycles and nine steps
+      redone against the shipped `1.5 x 12`'s 174 / 193 under bfs3d's lineax inner stop, but 195 with three
+      redone under pitzDaily's `stop: residual` -- the stop, not the rate, was most of the loss. Its anchor
+      100 was the cheapest of 10 / 100 / 1000 (anchor 1000: 92 steps, a 64-step floor tail). (2026-10-11,
+      #678; `solve-globalization-log.md`, "bfs3d: the release, `grow` 3 and the settle-ended ramp".)
   - **⚠️ THE PRECONDITIONER IS REFRESHED PER STATION CHANGE, AND THAT IS CORRECT — but "a full rebuild is
     the most expensive operation in the march" is REFUTED on this case.** Measured, a full
     re-materialize is **1.2-1.6 s** against a **~9 s** outer step. A control arm isolates it: `4 x 3` with

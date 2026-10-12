@@ -109,6 +109,12 @@ or whose blocks are unnamed: `RowScaledNorm` /
       paces 16 and 24 cost 124 and 118 cycles against the hand-tuned 111, and a 3-step finish 114 -- is
       in `.claude/notes/solve-globalization-log.md` ("Ending the ramp on the settle signal"). **Opt-in;
       pitzDaily's file still ships 12 fixed stations** (111 < 114).
+    - **On bfs3d it does not replace the station count (2026-10-11, #678).** At `grow` 3, release 1e-4,
+      pace 24, `finish` 3 the ramp ended itself after step 9 (settled at step 6, 9 station changes
+      against 13) and cost 187 accepted / 267 all-attempt cycles in 19 steps with five steps redone,
+      against the shipped fixed `grow` 1.5 x 12's 174 / 193 in 28 with one -- better than a fixed 12 at
+      `grow` 3 (214 / 459), worse than the shipped schedule. `rho1` gave no lead on the settle there at
+      either `grow` (above one at `grow` 3, below one from the first floor step at the shipped 1.5). Same log, "bfs3d: the release, `grow` 3 and the settle-ended ramp".
     - Station ids: the fixed walk numbers stations `0..stations` exactly as before (byte-identical
       reports); finishing steps continue from the station the end fired at, so the target's id is not
       `stations` on an ended walk -- only equality between adjacent steps means anything.
