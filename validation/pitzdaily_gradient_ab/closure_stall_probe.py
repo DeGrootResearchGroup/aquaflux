@@ -104,6 +104,7 @@ from aquaflux.solve import (
     solve_linear,
 )
 from aquaflux.solve.implicit import backtracking_line_search  # noqa: E402
+from aquaflux.solve.linear import in_progress_measure  # noqa: E402
 from aquaflux.turbulence import (
     coupled_fields,
     coupled_step,
@@ -593,7 +594,7 @@ def _report_step_at(coupled, state, engine, measure, residual, reference, beta) 
     delta, cycles = solve_linear(
         operator,
         -residual,
-        solver=engine.linear_solver(),
+        solver=in_progress_measure(engine.linear_solver(), measure),
         preconditioner=preconditioner,
         throw=False,
     )
@@ -769,7 +770,7 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
             delta, _ = solve_linear(
                 operator,
                 -residual,
-                solver=engine.linear_solver(),
+                solver=in_progress_measure(engine.linear_solver(), measure),
                 preconditioner=preconditioner,
                 throw=False,
             )
@@ -891,7 +892,7 @@ def _additive_shift_test(built, engines, state, steps, measures, beta) -> None:
             delta, _ = solve_linear(
                 operator,
                 -residual,
-                solver=engine.linear_solver(),
+                solver=in_progress_measure(engine.linear_solver(), measure),
                 preconditioner=preconditioner,
                 throw=False,
             )
