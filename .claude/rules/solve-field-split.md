@@ -119,6 +119,17 @@ public method on a published class, so export them when the split is wired.
    true residuals 9.869e-06, one operator matvec 59 ms. Parity is the CPU answer to want; the GPU run is
    the open measurement. Since #290 a march's re-fit happens between steps, so wiring the traced split
    into the march no longer needs a host call inside the step (item 2).
+5. **A refresh keeps the traced split's shapes only if BOTH blocks are shape-stable, and pitzDaily's
+   leading block is not (measured 2026-10-12, `validation/traced_split_refresh_shapes.py`, hybrid start
+   plus ten checkpoints × β 2 / 0.5 / 0.05).** Its `SimpleSmoothed` inverse runs `strength_threshold`
+   0.25 with no `frozen_coarsening`, so it re-coarsens from the current operator: levels went
+   (36675, 9453, 2166, 498) at the hybrid start to (36675, 9579, 2223, 534, 141) late in the march, a
+   level more, moving between consecutive checkpoints early on. On the traced path every such refresh
+   would recompile the whole coupled solve (on the host path it retraces only the leading cycle).
+   bfs3d freezes both blocks. The trailing block also moved, by a defect rather than a setting (the
+   Galerkin product dropping exact zeros), and that is fixed; see `solve-amg-multigrid.md`'s
+   static-indices bullet. Which answer the leading block gets (`frozen_coarsening`, `shape_headroom`,
+   or the host split for a block that cannot promise its shapes) is open, pending the user.
 
 ## The field split — a saddle plus two transported scalars
 

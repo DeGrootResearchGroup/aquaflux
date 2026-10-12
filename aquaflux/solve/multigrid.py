@@ -819,7 +819,7 @@ class SmoothedHierarchy(eqx.Module):
                     _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
                 )
                 csr = prolongation.tocsr()
-                a = (csr.T @ a @ csr).tocsr()
+                a = _galerkin_coarse(csr.T.tocsr(), a, csr)
             else:
                 levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, level.block_size))
         return SmoothedHierarchy(
@@ -1253,7 +1253,10 @@ def _build_aggregation_hierarchy(
                 else shape_budget.operator_nnz[len(levels) - 1],
             )
         )
-        a = (prolongation.T @ a @ prolongation).tocsr()  # Galerkin coarse operator from the true A
+        # The Galerkin coarse operator from the true A, stored on its structural pattern (see
+        # `_galerkin_coarse`): a plain product drops entries that come out exactly zero, so the stored
+        # count -- an array shape -- would move with the operator's values on a refresh.
+        a = _galerkin_coarse(prolongation.T.tocsr(), a, prolongation.tocsr())
         live_cells = occupied
         if budgeted is not None and occupied < n_coarse_cells:
             # An empty aggregate leaves a structurally zero row and column, which no diagonal-based
@@ -1268,7 +1271,16 @@ def _build_aggregation_hierarchy(
             # Only the genuinely structurally-empty ones: the reserved slot already carries a diagonal
             # summed from the padded cells it absorbed, and adding to that would be arbitrary.
             empty = slots[a.diagonal()[slots] == 0.0]
-            a = (a + sp.coo_matrix((np.ones(empty.size), (empty, empty)), shape=a.shape)).tocsr()
+            # Appended through COO rather than added: a sparse sum drops entries that are exactly
+            # zero, which would undo the structural pattern the Galerkin product just stored.
+            entries = a.tocoo()
+            a = sp.coo_matrix(
+                (
+                    np.concatenate([entries.data, np.ones(empty.size)]),
+                    (np.concatenate([entries.row, empty]), np.concatenate([entries.col, empty])),
+                ),
+                shape=a.shape,
+            ).tocsr()
     return SmoothedHierarchy(
         tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
     )

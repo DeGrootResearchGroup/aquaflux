@@ -2140,7 +2140,22 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   — the flow block is frozen, so it can afford the value-dependent SoC below; the scalars cannot without
   a value-refresh). Both properties are pinned in `tests/unit/test_multigrid.py`
   (`test_aggregation_hierarchy_structure_is_value_independent`,
-  `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`). **Caveat — lAIR does NOT get this for
+  `test_refreshing_a_hierarchy_is_a_compilation_cache_hit`).
+  ⚠️ **The shape half of that claim was FALSE on a real operator until 2026-10-12 (#290), and the
+  chain fixtures could not show it.** The Galerkin `Pᵀ A P` was a plain `scipy` product, which drops
+  an entry summing to exactly zero, so on a block whose stored entries are sometimes exactly zero (a
+  coupled `[k, ω]` Jacobian, where closure switches zero a derivative) the coarse operator's stored
+  count moved with the values even at threshold 0. Measured on pitzDaily's trailing block (`JacobiSmoothed`,
+  `max_coarse` 2000, threshold 0, two levels) across its hybrid start and ten march checkpoints:
+  level-1 entries 9360 → 9535 → 9515, so the jitted trailing cycle on the shipped host split
+  retraced on refresh. Both the build and `SmoothedHierarchy.refit` now use `_galerkin_coarse`
+  (`Pᵀ` as the restriction), whose stored pattern is the structural one; afterwards the same probe
+  (`validation/traced_split_refresh_shapes.py`) finds the trailing signature unchanged at every
+  state and shift. Values are bit-identical, and so is the strength graph at a nonzero threshold (a
+  stored zero is never strong); at threshold 0, deeper levels' aggregation now sees structural
+  edges carrying zero weight, which is the value-independence the paragraph above claims. Pinned by
+  `test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero` (mutation-checked
+  on the build and the refit separately). **Caveat — lAIR does NOT get this for
   free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
   thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and
   the shapes: on a 600-cell chain, cold vs developed coefficients (5000× flux, 1000× viscosity ramp)
