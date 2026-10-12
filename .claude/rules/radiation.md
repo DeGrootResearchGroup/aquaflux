@@ -4859,7 +4859,7 @@ are bent too (no straight-through factor left anywhere).
   Linux x86_64, 4 cores, 16 GB, 2026-10-09): per path solve ~155-173 µs on the base route (2 crossings),
   **940-1,080 µs through a neighbour's quartz (4), 1,600-1,670 µs across its gap too (6)**, times 4 starts;
   the scene's refracted mask 355 s and gather 200 s. The full four-lamp check (212,992 facets, 9 points)
-  **could not be run**: first a 20.6 GB allocation in one path solve (fixed: `_centroid_paths` now solves a
+  **could not be run**: first a 20.6 GB allocation in one path solve (fixed: `_host_paths` (then `_centroid_paths`) solves a
   `receivers_per_step` at a time), then an out-of-memory kill (16 GB); a quarter-size run peaked at 6 GB
   and was unfinished after 30 min. Unverified causes: a passing route keeps every facet of the source lamp
   (rows are culled, not pairs), and a vmapped batch iterates until its slowest path ends. The user is
@@ -4924,8 +4924,8 @@ are bent too (no straight-through factor left anywhere).
   (30 halvings each side of the coarse run, then 32 samples between the ends): uniform samples missed
   paths between the last existing sample and the edge -- at 16 sectors (`rim_light.py`, 26,624 facets,
   Linux 4 cores) shot / backward gather 0.720 / 0.544 at (55,25) / (50,50) uniform 32 x 32, 0.769 /
-  0.629 uniform 96 x 96 (1,114 s), **0.761 / 0.631 with the ends (874 s)**. The rest is the corner rule
-  (a facet needs all three corners' paths), shrinking with the facets (prototype 0.925 / 0.836 at 64).
+  0.629 uniform 96 x 96 (1,114 s), 0.761 / 0.631 with the ends (874 s), **0.924 / 0.910 with each
+  straddling facet cut (796 s, contended: an upper bound)** -- see CUT TRIANGLES ROUND A RIM below.
   Pinned by `test_no_path_a_fine_grid_finds_is_missed_by_the_shipped_one` (96 x 96 as the reference;
   red with the run's ends not found). Fast gate on this tree: 2366 passed, 16 skipped, one worker lost
   to memory in `test_flow_march.py` (passes alone; two workers, 15 GB Linux container). The crossings go to **`_Stationary`** -- the descent's
@@ -4958,6 +4958,43 @@ are bent too (no straight-through factor left anywhere).
   are); `found` without the miss tolerance (with a bracketing cell Newton converged on every fixture; a
   guard); and the first form of the traced-geometry check, which the shell's own guard already caught
   -- the test now traces the source sleeve too.
+- **CUT TRIANGLES ROUND A RIM (2026-10-12, agreed with the user as option 1 of three).** `corner_rule.py`
+  (8 sectors, four points, no mask, one run, 1,522 s) measured the all-corners rule and start-index
+  pairing route by route. **Pairing a triangle's corners by start index costs nothing that matters**:
+  re-pairing by nearest path changes a descended gap route by 0.01-0.03 % where it carries over 1e-3 of
+  G, and by under 0.001 % of G anywhere. So **corner matching by branch was not built** (agreed). ⚠️
+  **Nearest-path pairing without a tolerance is wrong**: where a corner's own branch has no path it takes
+  another's, and the triangle spans the sleeve. The probe's first run did this on the shot route and read
+  69x / 199x its light, 31 % / 21 % of G. Triangles reached at only some corners: at most ~0.07 % of G
+  on a descended route (a straight-solid-angle estimate), so **only the shot route is cut**.
+  `refracted._clipped_field` replaces `_group_field` on a shot route when the receivers, the source
+  vertices and `stop_gradient(media)` are all concrete (else the old rule): `_reached_triangles` solves
+  every distinct corner's two sides on the host (`_host_paths`, which replaced `_centroid_paths`; there
+  is no such function any more), keeps whole facets, and bisects each edge from a corner with a path to
+  one without (`_cut_edges`, `_CUT_HALVINGS = 12`, the last point WITH a path kept) using
+  `refraction._shot_paths` (one side per pair). A one-corner facet becomes one triangle, a two-corner one
+  two (the quadrilateral); facets with no corner reached give nothing, **so they are not solved in the
+  traced pass at all**. The traced pass solves the kept triangles' corners live and weights them by
+  `_seen_weight`, the one weighting both paths share. The cut is frozen under a derivative, like a
+  shadow. ⚠️ **A straddling facet's shadow must not be its centroid's**: the centroid often has no path,
+  and the mask then tests the straight line the solve fell back to. `build_refracted_visibility` now
+  takes such a facet's shadow along its first reached corner's path (`_from_a_reached_point`, shot routes
+  only). Found by a test whose two boxes, each across every path past one side, left 17 % unshaded;
+  that was first the test's own box missing paths (fixed), and the substitution is pinned by the same
+  test. ⚠️ **The whole-facet rule is a biased reference for shadow ratios**: it drops the edge facets,
+  so its shaded share (0.770 at 16 x 8, 0.809 at 32 x 16) converges on the cut's (0.821 / 0.822). Tests:
+  `test_round_a_rim_a_triangle_is_counted_for_the_part_of_it_that_has_a_path` (drum arc 8 x 4 within 5 %
+  of 16 x 8: cut 0.001204 / 0.001238 / 0.001252 at 8x4 / 16x8 / 32x16, whole 0.000252 / 0.000795 /
+  0.001076), `test_a_cut_triangle_takes_the_shadow_of_its_own_facet_round_its_own_side` (a box shading
+  only whole facets takes the same light from both counts, 1e-6),
+  `test_a_straddling_facet_is_shadowed_along_a_path_it_has_not_along_its_centroid_s` (two boxes take
+  the whole, 1e-9), `test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path` (stubbed
+  existence `x < 0.3` on a flat sheet: kept area = an independent clip's, per facet). **Mutation pass,
+  8 breaks, all red**: no corner substitution, the other side's shadow, the first facet's shadow, the cut
+  at the far end, no halvings, the two-corner facet's second triangle dropped (red only once the
+  geometric test was added: on the rim those triangles hold too little for a 5 % check), never cut,
+  sides flipped. **Not handled**: a patch narrower than a facet that misses all three corners; the
+  8-9 % of the route's light still missing at 16 sectors is not decomposed.
 - ⚠️ **THE "NO SOUND GEOMETRIC CULL" FINDING USED THE WRONG BOUND.** It summed the largest turn at each
   surface (`90 - asin(n_min/n_max)`: water-quartz 23.9, quartz-air 48.3 deg) to 120 / 216.6 deg, which no
   single path reaches. Through coaxial cylinders a ray keeps its impact parameter `b` and `n u_z`, so its

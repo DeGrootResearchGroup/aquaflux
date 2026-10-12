@@ -358,7 +358,11 @@ medium's absorption along its own leg. Three things are approximated, and each i
   just beyond a neighbour that blocks the straight line.
 - **Each source triangle is seen through its corners**: the solid angle it fills is the closed form
   on the directions its three corners' paths arrive from, which is exact as the triangles become
-  small, the limit the refinement criterion already drives an emitter towards.
+  small, the limit the refinement criterion already drives an emitter towards. A triangle any of
+  whose corners has no path carries nothing, except on the route through a sleeve's wall alone,
+  whose light comes from a patch of the source only a few facets across: there a triangle straddling
+  the patch's edge is cut where its paths stop, and the part that has them is counted. The cut is
+  found at the values given and held fixed under a derivative, as shadows are.
 
 A point source in another medium than a point it lights is refused (it has no area to spread over a
 curved surface), and a scene with transparent solids may not yet hold anything that reflects: the

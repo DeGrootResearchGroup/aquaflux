@@ -20,7 +20,22 @@ distribution, asked about that direction), the share of light the path gets acro
 (:class:`~aquaflux.radiation.refraction.Paths`), each averaged over the three vertices; and the
 square of the ratio of the receiver's index to the source's, because radiance divided by the
 square of the index is what a lossless crossing conserves. A triangle any of whose vertices has no
-transmitted path -- past the critical angle, or off the edge of a face -- carries nothing.
+transmitted path -- past the critical angle, or off the edge of a face -- carries nothing, with one
+exception.
+
+**Round a sleeve's rim, the part of a triangle that has a path is counted.** The light a route
+through a sleeve's wall alone carries comes from a small patch of the source (the band of paths that
+skim the rim), so many of the patch's triangles straddle its edge, and dropping them loses a large
+share of the route's light at any practical facet size. On such a route (shot, see
+:func:`~aquaflux.radiation.refraction._shot`) each edge from a corner with a path to one without is
+bisected for where the path stops, and the triangle is cut there into the one or two triangles that
+have a path at every corner; those are counted as a whole triangle would be. Where the patch's edge
+crosses an edge once, as it does for a patch larger than a facet, this is exact in the same limit
+of small triangles; a patch narrower than a facet that misses all three corners is still missed.
+The cut is found on the host, from the geometry and indices as given, and then frozen -- as every
+shadow is -- so a derivative with respect to an index moves the paths to the cut triangles' corners
+but not where the cut lies. Under a trace of the receivers, the source geometry or the media, the
+cut cannot be found and the triangle is dropped as on any other route.
 
 **What stands in the way** of a path is a frozen mask (:func:`build_refracted_visibility`): every
 leg of the path to each facet's centroid tested against the bodies and the surface's own triangles,
@@ -48,6 +63,8 @@ from aquaflux.radiation.refraction import (
     _pairs_meet,
     _path_count,
     _shot,
+    _shot_paths,
+    _traced,
     solve_paths,
 )
 from aquaflux.radiation.self_occlusion import RayCastOcclusion, SelfOcclusion
@@ -232,13 +249,26 @@ def build_refracted_visibility(
             part = slice(first, first + per_pass)
             rows = group.rows[part]
             # (starts, rows, facets, crossings, 3)
-            paths = _centroid_paths(
+            paths, found = _host_paths(
                 media, group.chain, centroid[group.facets], host_points[rows], pair_limit
             )
             shape = paths.shape[:3]
+            sources = np.broadcast_to(centroid[group.facets][None, None], (*shape, 3))
+            if _shot(media, group.chain):
+                sources, paths = _from_a_reached_point(
+                    media,
+                    group.chain,
+                    surfaces,
+                    group.facets,
+                    host_points[rows],
+                    sources,
+                    paths,
+                    found,
+                    pair_limit,
+                )
             corners = np.concatenate(
                 [
-                    np.broadcast_to(centroid[group.facets][None, None, :, None], (*shape, 1, 3)),
+                    sources[:, :, :, None],
                     paths,
                     np.broadcast_to(host_points[rows][None, :, None, None], (*shape, 1, 3)),
                 ],
@@ -276,27 +306,54 @@ def build_refracted_visibility(
     )
 
 
-def _centroid_paths(media: Media, chain: Chain, sources, receivers, pair_limit) -> np.ndarray:
-    """``(n_paths, n_receivers, n_sources, n_crossings, 3)`` crossing points, on the host.
+def _host_paths(media: Media, chain: Chain, sources, receivers, pair_limit):
+    """Paths between every source and receiver, on the host: crossing points and whether each is one.
 
-    Solved a step of receivers at a time: a path's solve holds a few kilobytes of intermediates,
-    more the more surfaces it crosses, so a whole pass of paths at once would hold gigabytes. Every
-    step has one shape -- the last is filled out by repeating its last receiver, whose answers are
-    dropped -- so the solve compiles once.
+    Returns ``(n_paths, n_receivers, n_sources, n_crossings, 3)`` points and an
+    ``(n_paths, n_receivers, n_sources)`` flag. Solved a step of receivers at a time: a path's solve
+    holds a few kilobytes of intermediates, more the more surfaces it crosses, so a whole pass of
+    paths at once would hold gigabytes. Every step has one shape -- the last is filled out by
+    repeating its last receiver, whose answers are dropped -- so the solve compiles once.
     """
     sources, receivers = np.asarray(sources), np.asarray(receivers)
     step = receivers_per_step(pair_limit, _path_count(media, chain) * len(sources))
     step = min(step, len(receivers))
-    found = []
+    points, valid = [], []
     for first in range(0, len(receivers), step):
         rows = np.minimum(np.arange(first, first + step), len(receivers) - 1)
         paths = solve_paths(
             media, chain, jnp.asarray(sources)[None], jnp.asarray(receivers[rows])[:, None]
         )
-        points = np.asarray(paths.points)
-        points = points if chain.passing else points[None]
-        found.append(points[:, : len(receivers) - first])
-    return np.concatenate(found, axis=1)
+        if not chain.passing:
+            paths = jax.tree.map(lambda leaf: leaf[None], paths)
+        points.append(np.asarray(paths.points)[:, : len(receivers) - first])
+        valid.append(np.asarray(paths.valid)[:, : len(receivers) - first])
+    return np.concatenate(points, axis=1), np.concatenate(valid, axis=1)
+
+
+def _from_a_reached_point(
+    media, chain, surfaces, facets, receivers, sources, paths, found, pair_limit
+):
+    """Where a facet's centroid has no path round a rim, the path from a corner that has one instead.
+
+    The gather counts the part of a straddling facet that has a path
+    (:func:`_reached_triangles`), and that part need not hold the centroid; the shadow of the path
+    to the centroid is then the shadow of a straight line the solve fell back to. Each such facet's
+    shadow is taken along the path from its first corner with one -- as near a path of the part
+    counted as the facet offers. A facet with none keeps the centroid's, and carries nothing.
+    """
+    corners, shared = _shared_corners(surfaces, facets)
+    corners = np.asarray(corners, dtype=float)
+    corner_paths, corner_found = _host_paths(media, chain, corners, receivers, pair_limit)
+    # (paths, rows, facets, 3): which of each facet's corners has a path.
+    reached = corner_found[:, :, shared]
+    first = np.argmax(reached, axis=-1)
+    swap = ~found & np.any(reached, axis=-1)
+    which = shared[np.arange(len(facets))[None, None], first]
+    taken = np.take_along_axis(corner_paths, which[..., None, None], axis=2)
+    sources = np.where(swap[..., None], corners[which], sources)
+    paths = np.where(swap[..., None, None], taken, paths)
+    return sources, paths
 
 
 def refracted_fluence_rate(
@@ -418,12 +475,39 @@ def _route_masks(media, visibility, transmittance, points, plan):
     ]
 
 
+#: Halvings that find where a path stops along a triangle's edge, round a sleeve's rim.
+_CUT_HALVINGS = 12
+
+
+def _seen_weight(receiver, receiver_normal, paths, facet_normal, emission, ratio, profile):
+    """What a triangle sends a receiver along the paths to its three corners, 0 where any is missing.
+
+    ``paths`` is shaped ``(..., 3)`` over the corners; ``receiver`` and ``receiver_normal`` (``None``
+    for a point in a volume) are ``(..., 3)`` broadcast against the triangles, and ``facet_normal``
+    likewise. The solid angle is the closed form on the corners' arrival directions; the radiance in
+    each departure direction and what each path gets across are averaged over the corners.
+    """
+    apparent = receiver[..., None, :] + paths.arrival
+    if receiver_normal is None:
+        omega = solid_angle(receiver, apparent)
+    else:
+        omega = projected_solid_angle(receiver, receiver_normal, apparent)
+    radiance = profile.radiance_per_exitance(paths.departure, facet_normal[..., None, :])
+    carried = jnp.mean(radiance * paths.transmittance, axis=-1)
+    seen = jnp.all(paths.valid, axis=-1)
+    return jnp.where(seen, emission * ratio * carried * omega, 0.0)
+
+
 def _group_field(surfaces, media, group: _Group, points, normals, mask, pair_limit):
     """What one group's receivers get from its facets along one route, ``(n_rows,)``.
 
     On a route through a region every starting point's path is a path of its own -- they are
     distinct where they are valid -- and each source triangle is seen once along each.
     """
+    if _shot(media, group.chain) and not _traced(
+        (points, surfaces.vertices, jax.lax.stop_gradient(media))
+    ):
+        return _clipped_field(surfaces, media, group, points, normals, mask, pair_limit)
     facets = group.facets
     chain = group.chain
     corners, shared = _shared_corners(surfaces, facets)
@@ -446,20 +530,16 @@ def _group_field(surfaces, media, group: _Group, points, normals, mask, pair_lim
         paths = solve_paths(media, chain, corners[None], chunk[:, None])
         if not chain.passing:
             paths = jax.tree.map(lambda leaf: leaf[None], paths)
-        arrival = paths.arrival[:, :, shared]
-        apparent = chunk[None, :, None, None, :] + arrival
-        if chunk_normals is None:
-            omega = solid_angle(chunk[None, :, None, :], apparent)
-        else:
-            omega = projected_solid_angle(
-                chunk[None, :, None, :], chunk_normals[None, :, None, :], apparent
-            )
-        radiance = group.profile.radiance_per_exitance(
-            paths.departure[:, :, shared], normal[None, None, :, None, :]
+        paths = jax.tree.map(lambda leaf: leaf[:, :, shared], paths)
+        weight = _seen_weight(
+            chunk[None, :, None, :],
+            None if chunk_normals is None else chunk_normals[None, :, None, :],
+            paths,
+            normal[None, None],
+            emission,
+            ratio,
+            group.profile,
         )
-        carried = jnp.mean(radiance * paths.transmittance[:, :, shared], axis=-1)
-        seen = jnp.all(paths.valid[:, :, shared], axis=-1)
-        weight = jnp.where(seen, emission * ratio * carried * omega, 0.0)
         if mask is not None:
             chunk_blocked = rest.pop(0)
             chunk_hidden = rest.pop(0) if mask[1] is not None else None
@@ -470,6 +550,198 @@ def _group_field(surfaces, media, group: _Group, points, normals, mask, pair_lim
         return jnp.sum(weight, axis=(0, 2))
 
     return in_passes(arrays, pair_limit, _path_count(media, chain) * corners.shape[0], at)
+
+
+def _clipped_field(surfaces, media, group: _Group, points, normals, mask, pair_limit):
+    """:func:`_group_field` on a shot route, each straddling triangle cut to the part with a path.
+
+    Which corners have a path, and where along each edge a path stops, are found on the host from
+    the geometry and indices as given (:func:`_reached_triangles`); the paths to the resulting
+    triangles' corners are then solved live, so they carry every derivative but the cut's.
+    """
+    chain, facets = group.chain, group.facets
+    still = jax.lax.stop_gradient(media)
+    side, row, facet, vertices = _reached_triangles(
+        surfaces, still, chain, facets, np.asarray(points)[group.rows], pair_limit
+    )
+    if len(side) == 0:
+        return jnp.zeros(len(group.rows))
+    normal = jnp.take(surfaces.normal, facets[facet], axis=0)
+    emission = jnp.take(surfaces.emission, facets[facet])
+    ratio = (media.index_of(chain.legs[-1]) / media.index_of(chain.legs[0])) ** 2
+    receivers = jnp.take(points, group.rows[row], axis=0)
+    arrays = [
+        (receivers, 0),
+        (jnp.asarray(vertices), 0),
+        (jnp.asarray(np.where(side == 0, 1.0, -1.0)), 0),
+        (normal, 0),
+        (emission, 0),
+    ]
+    if normals is not None:
+        arrays.append((jnp.take(normals, group.rows[row], axis=0), 0))
+    if mask is not None:
+        blocked, hidden, _ = mask
+        # Each triangle takes its facet's shadow along its side's path.
+        arrays.append((blocked[side, :, row, facet], 0))
+        if hidden is not None:
+            arrays.append((hidden[side, row, facet], 0))
+
+    def at(chunk, chunk_vertices, chunk_sides, chunk_normal, chunk_emission, *rest):
+        rest = list(rest)
+        chunk_normals = rest.pop(0) if normals is not None else None
+        n = chunk.shape[0]
+        paths = _shot_paths(
+            media,
+            chain,
+            chunk_vertices.reshape(-1, 3),
+            jnp.repeat(chunk, 3, axis=0),
+            jnp.repeat(chunk_sides, 3),
+        )
+        paths = jax.tree.map(lambda leaf: leaf.reshape(n, 3, *leaf.shape[1:]), paths)
+        weight = _seen_weight(
+            chunk,
+            chunk_normals,
+            paths,
+            chunk_normal,
+            chunk_emission,
+            ratio,
+            group.profile,
+        )
+        if mask is not None:
+            chunk_blocked = rest.pop(0)
+            chunk_hidden = rest.pop(0) if mask[1] is not None else None
+            weight = weight * surviving_fraction(chunk_blocked.T, chunk_hidden, mask[2])
+        return weight
+
+    weight = in_passes(arrays, pair_limit, 3, at)
+    return jax.ops.segment_sum(weight, jnp.asarray(row), num_segments=len(group.rows))
+
+
+def _reached_triangles(surfaces, media, chain, facets, receivers, pair_limit):
+    """The triangles of ``facets`` with a path at every corner, round each side of a shell.
+
+    For each receiver and side, a facet with a path at all three corners is itself; one with a path
+    at one or two is cut along each edge from a corner with a path to one without, at the last point
+    of :data:`_CUT_HALVINGS` halvings that still has one, into one triangle (one corner with a
+    path) or two (two); one with none gives nothing. All on the host, at concrete values.
+
+    Returns
+    -------
+    side, row, facet : np.ndarray of int, shape ``(n,)``
+        Each triangle's side (0 for ``+1``, 1 for ``-1``), receiver (an index into ``receivers``) and
+        facet (an index into ``facets``).
+    vertices : np.ndarray, shape ``(n, 3, 3)``
+    """
+    corners, shared = _shared_corners(surfaces, facets)
+    corners = np.asarray(corners, dtype=float)
+    n_rows, n_corners = len(receivers), len(corners)
+    _, reach = _host_paths(media, chain, corners, receivers, pair_limit)
+
+    # (2, rows, facets, 3): which of each triangle's corners has a path.
+    reached = reach[:, :, shared]
+    count = reached.sum(axis=-1)
+    whole = np.argwhere(count == 3)
+    mixed = np.argwhere((count == 1) | (count == 2))
+
+    # Every edge of a mixed triangle from a corner with a path to one without, once per side and
+    # receiver however many triangles share it.
+    s, r, f = mixed.T
+    ends = shared[f]
+    lit = reached[s, r, f]
+    keys = []
+    for a in range(3):
+        for b in range(3):
+            if a == b:
+                continue
+            edge = lit[:, a] & ~lit[:, b]
+            keys.append(np.stack([s, r, ends[:, a], ends[:, b]], axis=1)[edge])
+    keys = np.concatenate(keys) if keys else np.zeros((0, 4), dtype=int)
+    keys = np.unique(keys, axis=0)
+
+    def code(table):
+        """Each ``(side, receiver, corner, corner)`` row as one integer, in the rows' sort order."""
+        side_, row_, from_, to_ = (table[:, k].astype(np.int64) for k in range(4))
+        return ((side_ * n_rows + row_) * n_corners + from_) * n_corners + to_
+
+    cuts = _cut_edges(media, chain, corners, receivers, keys, pair_limit)
+
+    def at_cut(index, a, b):
+        """Where the path stops along each listed triangle's edge from corner ``a`` to ``b``."""
+        wanted = np.stack([s[index], r[index], ends[index, a], ends[index, b]], axis=1)
+        return cuts[np.searchsorted(code(keys), code(wanted))]
+
+    sides, rows_out, facet_out = [whole[:, 0]], [whole[:, 1]], [whole[:, 2]]
+    vertices = [corners[shared[whole[:, 2]]]]
+    one = np.flatnonzero(lit.sum(axis=1) == 1)
+    two = np.flatnonzero(lit.sum(axis=1) == 2)
+    if len(one):
+        a = np.argmax(lit[one], axis=1)
+        b, c = (a + 1) % 3, (a + 2) % 3
+        tri = np.stack(
+            [
+                corners[ends[one, a]],
+                at_cut(one, a, b),
+                at_cut(one, a, c),
+            ],
+            axis=1,
+        )
+        sides.append(s[one])
+        rows_out.append(r[one])
+        facet_out.append(f[one])
+        vertices.append(tri)
+    if len(two):
+        c = np.argmin(lit[two], axis=1)
+        a, b = (c + 1) % 3, (c + 2) % 3
+        cut_a = at_cut(two, a, c)
+        cut_b = at_cut(two, b, c)
+        first = np.stack([corners[ends[two, a]], corners[ends[two, b]], cut_b], axis=1)
+        second = np.stack([corners[ends[two, a]], cut_b, cut_a], axis=1)
+        for tri in (first, second):
+            sides.append(s[two])
+            rows_out.append(r[two])
+            facet_out.append(f[two])
+            vertices.append(tri)
+    return (
+        np.concatenate(sides),
+        np.concatenate(rows_out),
+        np.concatenate(facet_out),
+        np.concatenate(vertices).reshape(-1, 3, 3),
+    )
+
+
+def _cut_edges(media, chain, corners, receivers, keys, pair_limit):
+    """``(n_edges, 3)`` where along each edge the path round one side of a shell stops.
+
+    Each row of ``keys`` is ``(side, receiver, from corner, to corner)``: the path exists at the
+    first corner and not at the second. The edge is halved :data:`_CUT_HALVINGS` times, keeping the
+    half across which the path stops, and the last point found to have one is returned -- so the
+    triangle cut there has a path at every corner.
+    """
+    if len(keys) == 0:
+        return np.zeros((0, 3))
+    inside, outside = corners[keys[:, 2]], corners[keys[:, 3]]
+    targets = receivers[keys[:, 1]]
+    sides = np.where(keys[:, 0] == 0, 1.0, -1.0)
+    n = len(keys)
+    # A step's paths each scan a grid, so a step is sized as a pass of that many pairs, padded to
+    # one shape so it compiles once.
+    step = min(receivers_per_step(pair_limit, 1), n)
+    for _ in range(_CUT_HALVINGS):
+        middle = 0.5 * (inside + outside)
+        found = np.zeros(n, dtype=bool)
+        for first in range(0, n, step):
+            rows = np.minimum(np.arange(first, first + step), n - 1)
+            paths = _shot_paths(
+                media,
+                chain,
+                jnp.asarray(middle[rows]),
+                jnp.asarray(targets[rows]),
+                jnp.asarray(sides[rows]),
+            )
+            found[first : first + step] = np.asarray(paths.valid)[: n - first]
+        inside = np.where(found[:, None], middle, inside)
+        outside = np.where(found[:, None], outside, middle)
+    return inside
 
 
 def _shared_corners(surfaces: Surfaces, facets: np.ndarray):

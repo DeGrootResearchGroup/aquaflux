@@ -670,6 +670,19 @@ def _solve_paths(media: Media, chain: Chain, sources, receivers, *, shot: bool) 
     )
 
 
+@eqx.filter_jit
+def _shot_paths(media: Media, chain: Chain, sources, receivers, sides) -> Paths:
+    """One path per pair round the side of the shell ``sides`` names, on a shot route (:func:`_shot`).
+
+    ``sources`` and ``receivers`` are ``(n, 3)`` and ``sides`` is ``(n,)`` of ``+1`` or ``-1``; the
+    result is shaped ``(n,)``. For pairs whose side is already known, which is half the work of
+    :func:`solve_paths`, which finds both.
+    """
+    return jax.vmap(lambda s, r, side: _shot_path(media, chain, s, r, side))(
+        sources, receivers, sides
+    )
+
+
 def _distinct(paths: Paths, separation) -> Paths:
     """``paths`` from every start, each valid only where no earlier start found the same path."""
     scale = jnp.where(separation > 0.0, separation, 1.0)

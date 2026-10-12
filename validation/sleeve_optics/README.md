@@ -267,15 +267,22 @@ cylinder (`refraction._shot`); a wall route to a receiver inside another region 
 |---|---|---|---|---|
 | 32 x 32, uniform samples | 0.720 | 0.544 | 0.265 | 711 |
 | 96 x 96, uniform samples | 0.769 | 0.629 | 0.472 | 1,114 |
-| 32 x 32, each row's run of existing rays found by its ends (shipped) | **0.761** | **0.631** | 0.515 | 874 |
+| 32 x 32, each row's run of existing rays found by its ends | 0.761 | 0.631 | 0.515 | 874 |
+| the same, each straddling facet cut where its paths stop (shipped, 2026-10-12) | **0.924** | **0.910** | 0.799 | 796* |
+
+\* Unit tests shared the 4 cores for part of the run, so the time is an upper bound.
 
 (-25, 41) is zero in both. Uniform samples missed paths between the last sample where the ray exists
-and the edge of that run; finding the ends recovers what a 96 x 96 grid does. The rest of the gap is
-the gather's rule, not the solve: a facet counts only where all three corners have a path, so the
-small patch of arc that lights this route loses its boundary facets, a loss that shrinks with the
-facets (the prototype, with the same rule: 0.79 / 0.61 at 16 sectors, 0.925 / 0.836 at 64, 0.982 /
-0.964 at 256 sectors with the arc's slices split four ways). As a share of G at 16 sectors that is
-about 0.17 % at (55, 25).
+and the edge of that run; finding the ends recovers what a 96 x 96 grid does. Most of what was left
+was the gather's rule, not the solve: a facet counted only where all three corners had a path, so
+the small patch of arc that lights this route lost its boundary facets (the prototype, with the same
+rule: 0.79 / 0.61 at 16 sectors, 0.925 / 0.836 at 64, 0.982 / 0.964 at 256 sectors with the arc's
+slices split four ways; about 0.17 % of G at (55, 25) at 16 sectors). Cutting each straddling facet
+where its paths stop took it to 0.924 / 0.910. What remains, 8-9 % of this route's light (about
+0.05 % of G at (55, 25)), is not decomposed. One candidate is a patch narrower than a facet along
+the lamp: the arc's facets are long along it, and a patch that misses all three of a facet's corners
+is still dropped. The prototype's gain from splitting the slices points that way; it is not measured
+here.
 
 - **Not decomposed**: the 0.2-0.65 % short on light that entered no other sleeve at some points. At
   (37, 37), 0.985 with 0.1 % of the light having passed another sleeve, the backward gather averaged
@@ -313,3 +320,7 @@ triangles reached at one or two corners. 8 sectors (13,312 facets), points (55,2
   gather puts all of that route's light at 0.71 % and 0.26 %. The rim is a strong lens, so a straight
   solid angle overstates the image of a facet seen through it. The measured loss on that route is
   `rim_light.py`'s: 0.761 / 0.631 of the backward gather at 16 sectors, about 0.17 % of G at (55,25).
+- **What was done with it (2026-10-12):** pairing by path was not built (the first bullet). On the
+  shot route, a straddling facet is now cut where its paths stop and the part with paths counted,
+  which took the route to 0.924 / 0.910 of the backward gather at 16 sectors (table above). The
+  descended routes keep the all-corners rule, at most ~0.07 % of G by the estimate here.

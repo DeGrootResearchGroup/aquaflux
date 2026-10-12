@@ -27,7 +27,7 @@ from aquaflux.radiation.refracted import (
     refracted_fluence_rate,
     refracted_irradiance,
 )
-from aquaflux.radiation.refraction import Media, Transparent, fresnel_transmittance
+from aquaflux.radiation.refraction import Media, Paths, Transparent, fresnel_transmittance
 from aquaflux.radiation.visibility import build_visibility
 from aquaflux.solids import Box, Cylinder, HalfSpace, Sphere
 from scipy import integrate, optimize
@@ -396,3 +396,164 @@ def test_with_every_index_equal_the_corners_absorption_converges_on_the_centroid
         got = float(refracted_fluence_rate(surfaces, media, point)[0])
         direct = float(direct_fluence_rate(surfaces, point, absorption=absorbing)[0])
         assert got == pytest.approx(direct, rel=tolerance)
+
+
+def _rim_scene(sectors: int, slices: int):
+    """An arc in one sleeve, a second sleeve 50 mm off, and a point behind it: the rim's light."""
+    axis = [0.0, 0.0, 1.0]
+
+    def lamp(x, y):
+        gap = Transparent(Cylinder([x, y, 0.0], axis, 0.01025, 1.0), AIR)
+        return Transparent(Cylinder([x, y, 0.0], axis, 0.0115, 1.0), QUARTZ, inside=(gap,))
+
+    media = Media(WATER, (lamp(0.025, -0.025), lamp(0.025, 0.025)))
+    arc = _drum(0.0074, 0.02, sectors, slices) + np.array([0.025, -0.025, 0.0])
+    return media, Surfaces.from_triangles(jnp.asarray(arc), emission=1.0)
+
+
+def _rim_light(media, arc, points, masks=None, *, whole_facets_only=False, monkeypatch=None):
+    """The light of the routes round the second sleeve's rim alone, at each point."""
+    plan = refracted._plan(arc, media, points, 1_000_000)
+    masks = masks or [None] * len(plan)
+    if whole_facets_only:
+        monkeypatch.setattr(refracted, "_shot", lambda media, chain: False)
+    total = np.zeros(len(points))
+    for group, mask in zip(plan, masks, strict=True):
+        if group.chain.passing == (2,):
+            total[group.rows] += np.asarray(
+                refracted._group_field(
+                    arc, media, group, jnp.asarray(points), None, mask, 1_000_000
+                )
+            )
+    if whole_facets_only:
+        monkeypatch.undo()
+    return total
+
+
+def test_round_a_rim_a_triangle_is_counted_for_the_part_of_it_that_has_a_path(monkeypatch):
+    """Cut where the paths stop, a coarse arc gives the fine arc's light; dropped, a fraction of it.
+
+    The light round a sleeve's rim comes from a patch of the arc a few facets across, so most of the
+    patch's triangles straddle its edge. Counting only the triangles with a path at every corner
+    converges on the same limit from far below; counting the part of each that has one is within a
+    few percent at the coarsest arc.
+    """
+    point = np.array([[0.025, 0.06, 0.0]])
+    fine = _rim_light(*_rim_scene(16, 8), point)[0]
+    media, coarse = _rim_scene(8, 4)
+    assert abs(_rim_light(media, coarse, point)[0] / fine - 1.0) < 0.05
+    dropped = _rim_light(media, coarse, point, whole_facets_only=True, monkeypatch=monkeypatch)[0]
+    assert dropped / fine < 0.5
+
+
+def test_a_cut_triangle_takes_the_shadow_of_its_own_facet_round_its_own_side(monkeypatch):
+    """A box in the middle of one side's patch takes the same light from the cut count as the whole.
+
+    The point is off the line of the two axes, so both sides of the second sleeve carry light,
+    unequally, and the box stands across the upper half of the paths past one side, clear of the
+    other's and of the patch's edge: every facet it shades has a path at all three corners. So
+    counting the part of each straddling triangle that has a path adds only light the box does not
+    touch, and the light it takes is the whole-facet rule's to a rounding. A cut triangle given
+    another side's, receiver's or facet's shadow takes a different share.
+    """
+    media, arc = _rim_scene(16, 8)
+    point = np.array([[0.027, 0.06, 0.0]])
+    box = Box([0.0204, 0.0035, 0.25], [0.003, 0.003, 0.25])
+    plan = refracted._plan(arc, media, point, 1_000_000)
+    visibility = build_refracted_visibility([box], arc, media, point, self_occlusion=NoOcclusion())
+    masks = refracted._route_masks(media, visibility, None, point, plan)
+
+    def taken(**whole):
+        return (
+            _rim_light(media, arc, point, **whole)[0]
+            - _rim_light(media, arc, point, masks, **whole)[0]
+        )
+
+    by_cut = taken()
+    by_whole = taken(whole_facets_only=True, monkeypatch=monkeypatch)
+    assert 0.1 < by_cut / _rim_light(media, arc, point)[0] < 0.9
+    assert by_cut == pytest.approx(by_whole, rel=1e-6)
+
+
+def test_a_straddling_facet_is_shadowed_along_a_path_it_has_not_along_its_centroid_s():
+    """Two boxes, each across every path past one side of the sleeve, take all of the light.
+
+    A straddling facet's centroid often has no path round the rim, and the path the solve fell back
+    to is a straight line that need not meet either box; the cut part of the facet would then be
+    counted unshaded behind a box that stands across every path it has. Taken along a corner's path,
+    each box shades its own side's light completely, so the two together take the whole.
+    """
+    media, arc = _rim_scene(16, 8)
+    point = np.array([[0.027, 0.06, 0.0]])
+    plan = refracted._plan(arc, media, point, 1_000_000)
+    unshaded = _rim_light(media, arc, point)[0]
+    left = []
+    for box in (
+        Box([0.019, 0.0035, 0.0], [0.004, 0.003, 0.5]),
+        Box([0.031, 0.003, 0.0], [0.003, 0.003, 0.5]),
+    ):
+        visibility = build_refracted_visibility(
+            [box], arc, media, point, self_occlusion=NoOcclusion()
+        )
+        masks = refracted._route_masks(media, visibility, None, point, plan)
+        left.append(_rim_light(media, arc, point, masks)[0])
+    assert all(0.0 < share < unshaded for share in left)
+    assert sum(left) == pytest.approx(unshaded, rel=1e-9)
+
+
+def _area_below(triangle, cut):
+    """The area of the part of a flat ``(3, 3)`` triangle with ``x < cut``, clipped independently."""
+    polygon = []
+    for a, b in zip(triangle, np.roll(triangle, -1, axis=0), strict=True):
+        if a[0] < cut:
+            polygon.append(a)
+        if (a[0] < cut) != (b[0] < cut):
+            polygon.append(a + (cut - a[0]) / (b[0] - a[0]) * (b - a))
+    if len(polygon) < 3:
+        return 0.0
+    polygon = np.asarray(polygon)
+    fan = [
+        np.cross(polygon[k] - polygon[0], polygon[k + 1] - polygon[0])
+        for k in range(1, len(polygon) - 1)
+    ]
+    return 0.5 * np.linalg.norm(np.sum(fan, axis=0))
+
+
+def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monkeypatch):
+    """With paths where ``x < 0.3`` on a flat sheet, the triangles kept tile exactly that part of it.
+
+    Path existence is stood in for, so this pins the cutting alone: each edge bisected towards the
+    line, a triangle with one corner on the near side kept as one triangle, with two as two that
+    together are the quadrilateral, and none kept with none. Each side of the shell is cut on its own.
+    """
+    cut = 0.3  # Off every edge of the sheet's lattice.
+    sheet = _square(1.0, 4, 0.0)
+    surfaces = Surfaces.from_triangles(jnp.asarray(sheet), emission=1.0)
+    receivers = np.zeros((2, 3))
+
+    def host_paths(media, chain, sources, points, pair_limit):
+        near = np.asarray(sources)[:, 0] < cut
+        shape = (2, len(points), len(sources))
+        # Side 0 has paths where the near side does; side 1 nowhere.
+        valid = np.zeros(shape, bool)
+        valid[0] = near[None]
+        return None, valid
+
+    def shot_paths(media, chain, sources, points, sides):
+        valid = (np.asarray(sources)[:, 0] < cut) & (np.asarray(sides) > 0)
+        return Paths(None, None, None, valid, None)
+
+    monkeypatch.setattr(refracted, "_host_paths", host_paths)
+    monkeypatch.setattr(refracted, "_shot_paths", shot_paths)
+    facets = np.arange(surfaces.n_facets)
+    side, row, facet, vertices = refracted._reached_triangles(
+        surfaces, None, None, facets, receivers, 1_000_000
+    )
+    assert np.all(side == 0)
+    area = 0.5 * np.linalg.norm(
+        np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0]), axis=1
+    )
+    for r in range(2):
+        for f in facets:
+            kept = area[(row == r) & (facet == f)].sum()
+            assert kept == pytest.approx(_area_below(sheet[f], cut), abs=2e-4)
