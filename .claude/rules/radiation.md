@@ -4993,8 +4993,9 @@ are bent too (no straight-through factor left anywhere).
   8 breaks, all red**: no corner substitution, the other side's shadow, the first facet's shadow, the cut
   at the far end, no halvings, the two-corner facet's second triangle dropped (red only once the
   geometric test was added: on the rim those triangles hold too little for a 5 % check), never cut,
-  sides flipped. **Not handled**: a patch narrower than a facet that misses all three corners; the
-  8-9 % of the route's light still missing at 16 sectors is not decomposed. Fast gate on this tree (`4bfef62`, two
+  sides flipped. **Not handled**: a patch narrower than a facet that misses all three corners. The
+  8-9 % of the route's light still missing at 16 sectors is NOT facet size: each arc triangle split four
+  ways reads 0.932 / 0.912 (1,878 s, contended). Not decomposed. Fast gate on this tree (`4bfef62`, two
   workers, 15 GB Linux container): 3534 passed, 18 skipped, one worker lost to memory in
   `test_mean_velocity.py::test_preconditioned_iterative_solve_matches_the_direct_solve` (passes alone).
 - **THE GAP ROUTES STAY DESCENDED: SHOOTING MISSES THEIR STEEP PATHS (2026-10-12).** Plan item 3 was to
