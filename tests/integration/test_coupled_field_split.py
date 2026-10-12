@@ -55,6 +55,7 @@ from aquaflux.turbulence import (
     SSTModel,
     SSTTurbulence,
     UnpreconditionedScalars,
+    coupled_jacobian_probe,
     coupled_step,
     inlet_k,
     inlet_omega,
@@ -377,22 +378,29 @@ def test_a_split_session_re_fits_at_the_current_beta(channel) -> None:
         coupled,
     )
     dual = session.build(state, dual_time=DualTimeLoop(inner_steps=5))
-    preconditioner = dual.shift_policy.preconditioner
+    preconditioner = session.preconditioner
     rng = np.random.default_rng(5)
     b = rng.standard_normal(preconditioner.inverse.n_dofs)
     at_build = preconditioner.inverse.apply(b).copy()
 
     # the control sets a ConstantRelaxation(beta) on the step, at a beta DIFFERENT from the build beta
     active, _ = DualTimeControl(beta_start=0.7).next_step(dual, None, None)
-    session.refresh_preconditioner(active, state)
-    refreshed = active.shift_policy.preconditioner
+    update = session.refresh_preconditioner(active, state)
+    refreshed = session.preconditioner
     assert refreshed is preconditioner, (
         "the refresh replaced the preconditioner instead of re-fitting it"
     )
+    # both blocks offer a traced cycle, so the step carries the split as data and the re-fit comes back
+    # as a step update the march applies -- and that step must apply the re-fitted inverse
+    assert update is not None, "a re-fitted traced split must hand the march a new step"
+    carried = update(active).shift_policy.split.matvec()
 
-    # the same probe and the same shift diagonal, fitted from scratch at beta = 0.7
+    # the same probe and the same shift diagonal, fitted from scratch at beta = 0.7. The same stored
+    # pattern too: a threshold-free coarsening reads the pattern, stored zeros included, so a reference
+    # materialized without the probe's fixed structure (which drops them) coarsens differently
+    probe = coupled_jacobian_probe(coupled, 3)
     jacobian = MaterializedJacobianPreconditioner._materialize_jacobian(
-        lambda v: jacobian_matvec(coupled, state, v), _coupled_jacobian_plan(coupled, 3)
+        lambda v: jacobian_matvec(coupled, state, v), probe.plan, structure=probe.structure
     )
     d = np.asarray(
         _coupled_shift_policy(coupled, state, UnpreconditionedScalars()).shift_term(state).diagonal
@@ -404,6 +412,9 @@ def test_a_split_session_re_fits_at_the_current_beta(channel) -> None:
     try:
         np.testing.assert_allclose(
             refreshed.inverse.apply(b), fresh.apply(b), rtol=1e-10, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            np.asarray(carried(jnp.asarray(b))), fresh.apply(b), rtol=1e-10, atol=1e-12
         )
         assert not np.allclose(refreshed.inverse.apply(b), at_build)
     finally:

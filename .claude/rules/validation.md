@@ -89,6 +89,11 @@ question rather than an oversight — the two meshes coarsen at very different r
 never been measured at the sibling's settings — but it is the next thing to try if the alignment is
 carried further.
 
+**The leading `SimpleSmoothed` block now sets `frozen_coarsening: true` (2026-10-12, #290, the project
+owner's choice).** At `strength_threshold` 0.25 its coarsening reads values, so unfrozen it re-coarsened
+between checkpoints and each refit would recompile the on-device split. Frozen, the march takes 20 steps
+/ 154 restart cycles against the unfrozen 20 / 140, to the same `x_r/h` 8.0686 (`solve-field-split.md`).
+
 ## The obligation (binding)
 
 **A change to the library's public surface is not complete until it has been checked against the cases

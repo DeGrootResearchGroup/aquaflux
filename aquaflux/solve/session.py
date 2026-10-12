@@ -24,17 +24,20 @@ class PreconditionerSession(Protocol):
     A session is what a march holds on to between its steps: the frozen inverse, the colouring probe it was
     materialized with, and the per-step refresh hook. Those must outlive a single Newton step -- a
     continuation builds a step per rung, a refresh builds one per segment -- and must be the *same
-    objects* each time, because the inverse and the hooks ride in static fields of the step and a new
-    object recompiles the whole solve.
+    objects* each time: a host inverse and the hooks ride in static fields of the step, where a new
+    object recompiles the whole solve, and an inverse carried as data must keep its array shapes.
 
     Attributes
     ----------
     refresh_preconditioner : callable or None
-        ``(step, state) -> None``, called by the march before every step to re-fit the inverse at that
-        step's shift; ``None`` for a family with nothing to re-fit.
+        ``(step, state, *, due=False) -> update or None``, called by the march before every step to
+        re-fit the inverse at that step's shift -- unconditionally when ``due`` -- or ``None`` for a
+        family with nothing to re-fit. It returns ``None`` when the step needs nothing new (nothing was
+        re-fitted, or the inverse is re-fitted in place) and a ``step -> step`` update when the step
+        carries the inverse as data and must be handed the re-fitted one.
     """
 
-    refresh_preconditioner: Callable[[NewtonStrategy, jnp.ndarray], None] | None
+    refresh_preconditioner: Callable[..., Callable[[NewtonStrategy], NewtonStrategy] | None] | None
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
         """The Newton step at ``state``, configured by the march keywords."""

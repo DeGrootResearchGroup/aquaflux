@@ -96,6 +96,11 @@ What to take from it, none of which is specific to that mechanism:
   - **`AbortsInnerLoop`** (`with_inner_abort(*, above_cycles, below_alpha)`, `None` = keep the step's
     own): `RetryPolicy.with_inner_abort` calls it instead of probing two field names and rewriting them
     with `dataclasses.replace` on a type it does not own. `DualTimeStep` implements it.
+  - **`StopsForRefresh`** (`refresh_on_cycles: int | None`, a data member): a strategy that can end a
+    step early for a preconditioner re-fit, reporting `StepOutcome.refresh_due` (the ninth field, added
+    with it, 2026-10-10, #290). `newton_march` asks it before the first step and refuses one with
+    `refresh_on_cycles` set and no `refresh_preconditioner`. `DualTimeStep` implements it; see
+    `solve-march.md` for the march side.
   - **`ShiftCarryingControl(StepControl)`** declares `carry_beta`, `resumed_at`, `redamp` and `rebase`
     **together**, and the march and `staged_march` call any of them only on a control that is one.
     ⚠️ **All four or none, by decision (project owner, 2026-10-10):** they are one capability — keeping
@@ -117,6 +122,11 @@ What to take from it, none of which is specific to that mechanism:
   field comments included. A subclass now supplies `stepper` plus the fields its own step shape needs.
   `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `linear_solver` returns a
   different constant, so folding it in would mean inventing a `relaxation_schedule` it does not possess.
+  ⚠️ **`adjoint_preconditioner_factory` is a DATA field since 2026-10-12 (#290); it was static.** A
+  traced field split rides in it as array leaves (`_TracedSplitAdjoint`), so a re-fit can replace it
+  without a recompile. Every other value it takes — a closure, a frozen dataclass such as
+  `FrozenTransposeFactory`, `None` — holds no arrays, so equinox still filters it to the static side and
+  its cache key is unchanged.
   **Verified as a pure refactor**: no field and no default changed on either class, compared field by
   field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
   **0** — it redeclares it, which is why that difference has to be checked rather than assumed).
@@ -379,6 +389,10 @@ What to take from it, none of which is specific to that mechanism:
       in the log), with `release_backoff: 0.5` stated beside it since 2026-10-12 (the class default,
       written out so the file says what the shipped release does after a failure). **Not the class
       default** (`release_floor=None`) and **not bfs3d's file**.
+      ⚠️ Those counts were taken while a cost re-fit ran MID-STEP at `refresh_on_cycles` 2. Since #290 a
+      re-fit ends its step, which at 2 moved the release to step 34 of 39 (the settled test needs a
+      full-length step, which one-iteration steps rarely give); pitzDaily now ships 3, where it fires at
+      step 18 of 20 -- `.claude/notes/solve-open-directions.md` 6b.
     - **bfs3d, measured 2026-10-11 (#678, `61a14308`, M3 Pro, jax 0.10.2):** the release alone at 1e-4 on
       the shipped `grow` 1.5 x 12 stations passes -- 28 -> 24 steps, 174 -> 173 cycles (193 -> 192
       counting rejected attempts), the same one retry, the same root (rel L2 1.8e-4, inside the shipped
