@@ -468,6 +468,13 @@ How it works now, and what not to undo:
   block for the case's lifetime.
 - **`--force` now skips taking the memory/load readings, not only judging them** — `free_gb` reads
   `vm_stat`, which exists only on macOS, so the old code failed on Linux (and in CI) even when forced.
+- **Liveness is the pid AND its start time (2026-10-12).** The run-file records `pid_started=` (`ps -o
+  lstart=`, spaces squeezed), and `live_pid` treats the run as live only when a process with that pid
+  exists and started then; otherwise the run-file is stale and removed. After a cloud-container
+  restart a finished run's pid belonged to a kernel thread, `kill -0` succeeded, and every launch was
+  refused (`--force` does not skip that refusal). A run-file without `pid_started=` reads as stale.
+  Pinned by `test_a_recorded_pid_now_held_by_ANOTHER_process_is_not_a_running_case` (red with the
+  comparison removed); `test_fastgate.py`'s fake run-file carries the start time too.
 - `AQUAFLUX_CASE_POLL_SECONDS` (default 20) sets the waiter's poll interval; it exists for the tests. `run-*.exit` is gitignored beside `run-*.log`.
 
 Pinned by `tests/unit/test_run_case.py` (fast tier): exit 3, an uncaught exception, a self-SIGKILL
