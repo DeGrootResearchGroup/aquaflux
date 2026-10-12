@@ -40,7 +40,7 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from aquaflux.solve import jacobian_matvec  # noqa: E402
+from aquaflux.precondition.materialized_session import jacobian_matvec  # noqa: E402
 from replay import MarchReplay  # noqa: E402
 
 REPEATS = int(os.environ.get("PITZ_BATCH_REPEATS", "10"))
