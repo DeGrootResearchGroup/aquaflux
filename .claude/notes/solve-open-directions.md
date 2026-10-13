@@ -404,9 +404,25 @@ and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 
 ("The shift floor sets the target station's rate"); the built control is in `solve-globalization.md`.
 ⚠️ An earlier version of this entry quoted the march log's wall-clock column as solver work ("1036 raw
 solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
-**Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
-1-8 cycles per released step by the probe (most of the released steps' extra cost -- on bfs3d the two
-released steps cost 12 and 15 cycles against 4-5 at the floor); (b) whether bfs3d's `case.yaml` should
+**(a) Re-fitting the inverse at the released shift: CLOSED on pitzDaily (2026-10-13), worth one cycle.**
+pitzDaily `case.yaml` at `14e3963` (residual stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 3 x 12 stations, `release_floor` 1e-4, field split `SimpleSmoothed` (frozen) / `JacobiSmoothed`), only `PITZ_REFIT_BETA_FLOOR` varied; Linux x86_64, 4 cores, jax 0.11.2, one run each, back to back:
+
+| `refit_beta_floor` | steps | cycles | final `\|R\|` | wall (indicative) |
+|---|---|---|---|---|
+| 0.05 (shipped) | 20 | 154 | 1.7e-6 | 643 s |
+| 1e-4 (tracks every shift, released ones too) | 19 | 144 | 3.5e-7 | 534 s |
+| 0.005 (tracks to `beta_min`, not the release) | 19 | 143 | 3.4e-7 | 546 s |
+
+All `x_r/h` 8.0686, no retries. The 1e-4 and 0.005 arms are identical through step 17 and differ by one
+cycle at step 18: since #290 the release fires at step 17 of 19, so there is nothing left for it to save
+(the replay's 1-8 cycles per step were taken on the 31-step march of 2026-10-10). Ledger entry: "Re-fitting
+at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
+at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
+step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
+hierarchy does not evidently need it. Moving pitzDaily's file to 0.005 is the owner's call, and bfs3d (which
+ships 0.05) is unmeasured. ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
+are deterministic. (bfs3d's two released steps cost 12 and 15 cycles against 4-5 at the floor on #678's
+march, so (a) may be worth more there; unmeasured.) (b) whether bfs3d's `case.yaml` should
 release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
 173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss under bfs3d's
 lineax stop but a win under pitzDaily's `stop: residual` (25 steps / 195 cycles / 792 s, the best arm;

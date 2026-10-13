@@ -1018,3 +1018,13 @@ the shipped case, which damps the closure rows at 3 — a full march is 16 steps
 Deleted rather than kept as an unused option; branch history has it (`probe-312-additive-shift`,
 dda9be7). Full numbers and configuration: `.claude/rules/turbulence.md`, the #312 entry. Re-open only on
 a case that marches undamped closure rows and shows the near-cancellation in the march.
+
+## Re-fitting at the released shift (open-directions 11a) — CLOSED ON pitzDaily (2026-10-13)
+
+Re-fitting the inverse at the released shift (`release_floor` 1e-4) rather than at the `refit_beta_floor`
+it is otherwise floored at. pitzDaily `case.yaml` at `14e3963` (residual stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 3 x 12 stations, `release_floor` 1e-4, field split `SimpleSmoothed` (frozen) / `JacobiSmoothed`), only `PITZ_REFIT_BETA_FLOOR` varied; Linux x86_64, 4 cores, jax 0.11.2, one run each, back to back: `refit_beta_floor` 1e-4 against 0.005 isolates it (the two agree on every
+step not released) and they differ by **one cycle** (144 against 143), identical through step 17. Since
+#290 pitzDaily releases at step 17 of 19, so there are almost no released steps left to save on. Not built
+(it would need a seam from the step control to the refresh hook). bfs3d, whose released steps cost 12-15
+cycles, is unmeasured. The same sweep found the floor itself worth 7 % (open-directions 11).
+
