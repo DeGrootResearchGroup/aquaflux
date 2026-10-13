@@ -26,6 +26,7 @@ import equinox as eqx
 import jax
 
 from aquaflux.initialization import hybrid_initialize
+from aquaflux.precondition import MaterializedSession
 from aquaflux.solve import Convergence, RampSchedule
 
 from .coupled import open_session, solve_coupled
@@ -966,12 +967,19 @@ def solve_reynolds_ramp(
     shared = _shared_session(passed, first, share_block=True)
     passed = _with_session(passed, shared)
     shared.rebind(first)
+    rebind = shared.rebind
+    if isinstance(shared, MaterializedSession):
+        # PROTOTYPE (#701, E5): hold the anchor's shift through the ramp stations and take the target's
+        # once, on arrival. The target is the case's own assembler, by identity.
+        def rebind(assembler: CoupledRANS) -> None:
+            shared.rebind(assembler, follow_shift=assembler is coupled)
+
     homotopy = ViscosityRampHomotopy(
         coupled,
         anchor=anchor,
         ramp=ramp,
         redamping=redamping,
-        rebind=shared.rebind,
+        rebind=rebind,
         companion=companion,
     )
     return solve_coupled(
