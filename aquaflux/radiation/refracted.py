@@ -57,7 +57,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
-from aquaflux.radiation import shooting
+from aquaflux.radiation import coaxial_routes, shooting
 from aquaflux.radiation.culling import _body_blocks
 from aquaflux.radiation.gather import _groups
 from aquaflux.radiation.refraction import (
@@ -245,17 +245,21 @@ class _Group:
 def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int) -> tuple:
     """Every group of pairs with a crossing, worked out on the host from concrete positions.
 
-    Every route is taken for every receiver: a route through a region carries light to receivers
-    whose straight segments miss the region altogether, because an air gap near the critical angle
-    turns light by tens of degrees. No bound on that turn is used to leave any out. The one route left
-    out is one whose paths no solve here can find -- through a sleeve's wall alone where they cannot be
-    shot (:func:`~aquaflux.radiation.refraction._only_saddles`): solving it by descent would cost as
-    much as any other route and carry nothing.
+    A route through a region carries light to receivers whose straight segments miss the region
+    altogether, because an air gap near the critical angle turns light by tens of degrees, so no
+    bound on the turn at each surface is used to leave receivers out. Through a stack of coaxial
+    cylinders -- a neighbouring lamp's sleeve -- the turn of a whole path has a closed form, and the
+    receivers no ray through the stack can reach are left out of that route's group
+    (:func:`~aquaflux.radiation.coaxial_routes.kept_receivers`); a group left with none is dropped.
+    The one route left out whole is one whose paths no solve here can find -- through a sleeve's
+    wall alone where they cannot be shot (:func:`~aquaflux.radiation.refraction._only_saddles`):
+    solving it by descent would cost as much as any other route and carry nothing.
     """
     facet_region = media.region_of_facets(surfaces)
     receiver_region = media.region_of(points, "receiver")
     parents = media.parents
     centroid = np.asarray(surfaces.centroid, dtype=float)
+    vertices = None if _traced(surfaces.vertices) else np.asarray(surfaces.vertices, dtype=float)
     groups = []
     for profile, areal, point in _groups(surfaces):
         for source in np.unique(facet_region[point]):
@@ -277,8 +281,18 @@ def _plan(surfaces: Surfaces, media: Media, points: np.ndarray, pair_limit: int)
             for receiver in np.unique(receiver_region):
                 rows = np.flatnonzero(receiver_region == receiver)
                 for chain in Chain.routes(parents, int(source), int(receiver)):
-                    if _shot(media, chain) or not _only_saddles(media, chain):
-                        groups.append(_Group(chain, facets, rows, profile))
+                    if not _shot(media, chain) and _only_saddles(media, chain):
+                        continue
+                    reached = rows[
+                        coaxial_routes.kept_receivers(
+                            media,
+                            chain,
+                            None if vertices is None else vertices[facets],
+                            points[rows],
+                        )
+                    ]
+                    if reached.size:
+                        groups.append(_Group(chain, facets, reached, profile))
     return tuple(groups)
 
 
