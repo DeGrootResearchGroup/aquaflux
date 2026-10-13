@@ -26,9 +26,9 @@ from aquaflux.precondition import (
 from aquaflux.precondition.monolithic_policy import TracedSplitShiftPolicy
 from aquaflux.precondition.traced_field_split import contains_host_callback
 from aquaflux.solve import ConstantRelaxation, DualTimeLoop
-from aquaflux.turbulence import BlockDiagonal, open_session
+from aquaflux.turbulence import BlockDiagonal, ScalarAir, ScalarTwoLevel, open_session
 
-from tests.unit.test_coupled_rans import _cavity, _healthy_state
+from tests.unit.test_coupled_rans import NU, RHO, _cavity, _healthy_state
 
 _SPLIT = FieldSplit(SimpleSmoothed(), JacobiSmoothed())
 
@@ -46,6 +46,77 @@ def test_a_block_session_refresh_carries_the_flow_block(case) -> None:
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3))
     refreshed = session.refresh(state * 1.01, first, dual_time=DualTimeLoop(inner_steps=3))
     assert refreshed.shift_policy.flow_preconditioner is first.shift_policy.flow_preconditioner
+
+
+def test_a_re_pointed_block_session_hands_the_march_the_new_problems_shift(case) -> None:
+    """Re-pointed at a companion, the next step is shifted and preconditioned for the companion.
+
+    The shift's velocity block reads the momentum diagonal, whose viscous part scales with the
+    molecular viscosity, so a step still built on the original assembler shifts a station with a
+    hundredfold viscosity by the wrong amount. The march's own shift strength must survive the swap.
+    """
+    coupled, state = case
+    companion = coupled.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session = open_session(BlockDiagonal(), coupled)
+    held = eqx.tree_at(
+        lambda s: s.relaxation_schedule,
+        session.build(state, dual_time=loop),
+        ConstantRelaxation(jnp.asarray(0.125)),
+    )
+    assert session.refresh_preconditioner(held, state) is None
+    session.rebind(companion)
+    updated = session.refresh_preconditioner(held, state)(held)
+    expected = open_session(BlockDiagonal(), companion).build(state, dual_time=loop)
+    shift = updated.shift_policy.shift_term(state).diagonal
+    assert jnp.allclose(shift, expected.shift_policy.shift_term(state).diagonal, rtol=1e-12)
+    original = held.shift_policy.shift_term(state).diagonal
+    assert not jnp.allclose(shift, original, rtol=1e-3)
+    assert float(updated.relaxation_schedule.beta) == 0.125
+    # The flow block keeps its frozen hierarchy but preconditions the companion: the momentum diagonal
+    # it rescales that hierarchy to is the companion's.
+    flow = coupled.layout.unpack(state)[0]
+    a_p = updated.shift_policy.flow_preconditioner.frozen_momentum_diagonal(flow)
+    companion_a_p = expected.shift_policy.flow_preconditioner.frozen_momentum_diagonal(flow)
+    assert jnp.allclose(a_p, companion_a_p, rtol=1e-12)
+    anchor_a_p = held.shift_policy.flow_preconditioner.frozen_momentum_diagonal(flow)
+    assert not jnp.allclose(a_p, anchor_a_p, rtol=1e-3)
+
+
+@pytest.mark.parametrize("scalar", [ScalarTwoLevel(), ScalarAir()], ids=["twolevel", "air"])
+def test_a_re_pointed_block_session_step_is_a_compilation_cache_hit(scalar) -> None:
+    """A station change hands the march a step it has already compiled, for either scalar block.
+
+    The march's step is compiled against the whole step it holds, so a re-pointed step that differs in
+    anything but array values -- a new preconditioner object, a coarse grid of another size -- recompiles
+    the coupled solve at every station. The flow block's strength-of-connection aggregation reads the
+    operator's values, and lAIR's coarse/fine split does too, so a step built afresh on the companion is
+    a miss (the control below); the re-pointed one keeps every hierarchy's coarsening and is a hit.
+    """
+    mesh, coupled = _cavity(viscosity=jnp.asarray(RHO * NU))  # an array leaf; a float is static
+    state = _healthy_state(mesh, coupled)
+    loop = DualTimeLoop(inner_steps=3)
+    traces: list[None] = []
+
+    @eqx.filter_jit
+    def apply(step, state):
+        traces.append(None)
+        term = step.shift_policy.shift_term(state)
+        shifted = term.make_preconditioner(jnp.asarray(0.5))(state)
+        return shifted + step.adjoint_preconditioner_factory(state)(state)
+
+    session = open_session(BlockDiagonal(scalar=scalar), coupled)
+    held = session.build(state, dual_time=loop)
+    apply(held, state)
+    for scale in (100.0, 10.0):
+        companion = coupled.with_scaled_molecular_viscosity(scale)
+        session.rebind(companion)
+        held = session.refresh_preconditioner(held, state)(held)
+        apply(held, state)
+    assert len(traces) == 1
+    rebuilt = open_session(BlockDiagonal(scalar=scalar), companion).build(state, dual_time=loop)
+    apply(rebuilt, state)
+    assert len(traces) == 2
 
 
 def test_the_session_hook_refits_when_the_march_asks_and_not_otherwise(case) -> None:

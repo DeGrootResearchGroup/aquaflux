@@ -1139,9 +1139,11 @@ or whose blocks are unnamed: `RowScaledNorm` /
       so updating only it lasts one step) and reports the last on **`MarchResult.strategy`**, which
       `staged_march` carries into the next segment and the adjoint. At unchanged array shapes it is a
       compile-cache hit; see `solve-field-split.md` for what keeps the shapes fixed.
-    The one consumer is `MaterializedSession.refresh_preconditioner` over `BetaTrackingRefresh`, which
+    Two consumers: `MaterializedSession.refresh_preconditioner` over `BetaTrackingRefresh`, which
     re-fits on its first call, after a `rebind`, and when the march passes `due` (a cost-ended step, a
-    trigger). Distinct from the trigger's `refresh.builder`, which restarts a *segment* with a new step.
+    trigger); and `solve.RebuildingSession.refresh_preconditioner` (the block-diagonal family, #386),
+    which hands back an update only after a `rebind`, grafting a step rebuilt on the new problem
+    (`ShiftedStep.preconditioned_as`), and refuses at build a step with `refresh_on_cycles`. Distinct from the trigger's `refresh.builder`, which restarts a *segment* with a new step.
     Pinned by `test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_result` and
     `test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_step`
     (`tests/unit/test_newton_march.py`, both mutation-checked). There is no `lu_beta_tracking_refresh` or

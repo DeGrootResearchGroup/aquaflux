@@ -124,9 +124,10 @@ What to take from it, none of which is specific to that mechanism:
   different constant, so folding it in would mean inventing a `relaxation_schedule` it does not possess.
   ⚠️ **`adjoint_preconditioner_factory` is a DATA field since 2026-10-12 (#290); it was static.** A
   traced field split rides in it as array leaves (`_TracedSplitAdjoint`), so a re-fit can replace it
-  without a recompile. Every other value it takes — a closure, a frozen dataclass such as
-  `FrozenTransposeFactory`, `None` — holds no arrays, so equinox still filters it to the static side and
-  its cache key is unchanged.
+  without a recompile; so does the block-diagonal family's `solve.UnshiftedPreconditioner(policy)` (the
+  policy's preconditioner at zero shift, a module where it was a lambda; #386), so a re-pointed session
+  can replace it. A value holding no arrays — a closure, a frozen dataclass such as
+  `FrozenTransposeFactory`, `None` — is still filtered to the static side and keyed as before.
   **Verified as a pure refactor**: no field and no default changed on either class, compared field by
   field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
   **0** — it redeclares it, which is why that difference has to be checked rather than assumed).
@@ -174,6 +175,12 @@ What to take from it, none of which is specific to that mechanism:
     one that converges. Note this is also the *quantitative* form of the exchange rate the field
     trades in: an operator error of order one is not a slower Newton, it is no Newton at all, so a
     cap's error budget is bounded well below that and not merely "small".
+
+- **`ShiftedStep.preconditioned_as(other)` (2026-10-12, #386)** swaps in `other`'s `shift_policy`,
+  `adjoint_preconditioner_factory` and `jacobian_residual` — everything built from the problem — and keeps
+  every setting of the step itself, the shift strength included. It is how `RebuildingSession` hands a
+  running march a step rebuilt on another problem without discarding the shift its control set. `tree_at`
+  with `is_leaf=None` so an unset field swaps too.
 
 - **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
   split has one ordering, so `FieldSplitInverse.apply` has one body that branches only on
@@ -641,15 +648,28 @@ What to take from it, none of which is specific to that mechanism:
     per-field scales `‖R0_field‖` at the reference state, so the whole system is judged. The adjoint never
     forms a residual norm, so the measure is a **forward-only** device — the converged state and IFT
     gradient are norm-independent, and `root_adjoint` does not take one at all.
-  - **A `ShiftPolicy`'s preconditioner must stay a non-pytree (binding, #105).** `ScalarTransportPreconditioner`
-    (`turbulence/preconditioner.py`) is a plain `dataclasses.dataclass(frozen=True, eq=False)` ABC with
-    `ConvectionAmgPreconditioner` / `AirAmgPreconditioner` concrete strategies — deliberately **not** an
-    `equinox.Module`. Two things break if it is made a pytree: (i) a solve taking it as an argument traces
-    its hierarchy arrays, which then reach `root_adjoint`'s `custom_vjp` as tracers in a
-    `nondiff_argnums` slot and JAX raises `UnexpectedTracerError`; (ii) it is *because* the object is opaque
-    to JAX that carrying one instance across outer sweeps is a `filter_jit` cache **hit** (non-array
-    arguments go to the static side, hashed by identity). Both were hit and fixed while building #105 —
-    do not "modernize" these into `equinox.Module`s.
+  - **A `ShiftPolicy`'s preconditioner is DATA — REVERSED 2026-10-12 (#386); it was a binding
+    non-pytree from #105.** `ScalarTransportPreconditioner` (`turbulence/preconditioner.py`) and its
+    strategies are `equinox.Module`s with their hierarchies on the traced side, and the coupled block
+    policy's adjoint factory is `solve.UnshiftedPreconditioner(policy)`, not a lambda. **Why reversed:**
+    a viscosity ramp re-points the block session at every station, and a station step holding new static
+    preconditioner objects recompiled the coupled solve at every station (~40 s against ~7 s per step on
+    the re20000 channel); as data, a step whose hierarchies keep their coarsening differs only in values,
+    and the march takes it as a cache hit. **The two #105 hazards, re-examined:** (ii) the cache — a
+    carried instance is still a hit, and now so is a rebuild on an unchanged coarsening (two-level, which
+    aggregates by the graph); a rebuild whose coarse shapes move (a fresh lAIR split, a flow block
+    re-aggregated at another viscosity) is a miss by *shape*, which is why `RebuildingSession._repointed`
+    derives the new step from the held one. (i) the adjoint — `UnexpectedTracerError` came from a solve
+    taking the preconditioner as a traced argument; the march now runs on `stop_array_gradients` copies,
+    so the policy's arrays reach `root_adjoint`'s non-differentiated slot concrete, as
+    `_TracedSplitAdjoint`'s have since #290. Confirmed by CI's slow tier on PR #704 (`full-ci`, head
+    `78e0bbf`): the tests that `jax.grad` through a block-diagonal coupled solve
+    (`tests/integration/test_coupled_rans.py`, `test_reynolds_continuation.py`,
+    `test_coupled_mass_flow.py`) all pass. Pinned by
+    `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` (both scalar blocks, with a
+    freshly built control that misses) and
+    `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, both
+    mutation-checked.
 - **`norm_builder` — the residual measure is re-derived every outer iteration, and held FIXED within
   one (binding).** `newton_march(norm_builder=…)` takes a `(step, state) -> ResidualNorm` (the step so a
   measure can read its row diagonals from the step's shift; since #370 a solve builds it from its

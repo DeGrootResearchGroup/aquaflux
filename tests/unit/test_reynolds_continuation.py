@@ -1576,21 +1576,28 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
     assert session.problem.coupled is coupled
 
 
-def test_no_refresh_at_all_is_not_an_error(monkeypatch) -> None:
-    """A case with no frozen preconditioner has nothing to re-point, and ``None`` is the honest answer.
+@pytest.mark.parametrize("given", [None, "spec"])
+def test_the_ramp_opens_a_block_session_on_the_anchor_and_re_points_it(monkeypatch, given) -> None:
+    """The block-diagonal family follows the stations too, whether it is named or the default.
 
-    Distinguished from the case above deliberately: answering both with ``None`` would turn a real
-    misconfiguration into a silent slowdown.
+    It used to be left to the solve, which built it on the TARGET assembler: every station of the ramp
+    was then preconditioned and shifted for the case's own viscosity rather than its own.
     """
-    from aquaflux.turbulence import solve_reynolds_ramp
+    from aquaflux.turbulence import BlockDiagonal, solve_reynolds_ramp
 
     coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
-
     solve_reynolds_ramp(
         coupled,
         anchor=100.0,
         ramp=RampSchedule(2, 1),
         point_setup=lambda companion, state, point: {},
+        **({} if given is None else {"preconditioner": BlockDiagonal()}),
     )
-
-    assert calls[0]["kwargs"]["homotopy"].rebind is None
+    session = calls[0]["kwargs"]["preconditioner"]
+    homotopy = calls[0]["kwargs"]["homotopy"]
+    assert homotopy.rebind == session.rebind
+    bound = session.assembler.momentum.properties.properties["viscosity"].value
+    assert float(bound / (RHO * NU)) == pytest.approx(100.0)
+    for step in range(3):  # stations are entered in order; the third step is the target's
+        homotopy.enter(step, None)
+    assert session.assembler is coupled

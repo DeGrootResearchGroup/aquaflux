@@ -182,13 +182,37 @@ def test_the_source_hands_its_builder_the_fields_alone() -> None:
     assert source.refresh_preconditioner is None
 
 
+def test_the_sources_refresh_hook_is_handed_the_fields_alone() -> None:
+    """A session's hook builds from field states as its builds do, so the march's state is detached first."""
+    momentum = _channel()
+    border = mass_flow_border(momentum, momentum.layout)
+    seen = []
+
+    class _Source:
+        def refresh_preconditioner(self, step, state, *, due=False):
+            seen.append((step, state.shape, due))
+            return "update"
+
+        def build(self, state):
+            return "built"
+
+        def refresh(self, state, previous):
+            return "refreshed"
+
+    source = border.source(_Source())
+    augmented = border.attach(_state(momentum))
+    assert source.refresh_preconditioner("step", augmented, due=True) == "update"
+    assert seen == [("step", (momentum.layout.size,), True)]
+
+
 def test_the_homotopy_borders_every_station_and_delegates_the_rest() -> None:
     momentum = _channel()
     border = mass_flow_border(momentum, momentum.layout)
     stiffer = momentum.with_scaled_molecular_viscosity(4.0)
 
     class _Ramp:
-        def enter(self, step):
+        def enter(self, step, previous):
+            seen.append(previous)
             return (stiffer if step == 0 else momentum).residual
 
         def arrived(self, step):
@@ -200,14 +224,19 @@ def test_the_homotopy_borders_every_station_and_delegates_the_rest() -> None:
         def station(self, step):
             return min(step, 1)
 
+    seen = []
     ramp = border.homotopy(_Ramp())
     augmented = jnp.append(_state(momentum), 0.3)
     assert jnp.allclose(
-        ramp.enter(0)(augmented), border.residual(stiffer.residual)(augmented), atol=1e-12
+        ramp.enter(0, None)(augmented), border.residual(stiffer.residual)(augmented), atol=1e-12
     )
     assert jnp.allclose(
-        ramp.enter(1)(augmented), border.residual(momentum.residual)(augmented), atol=1e-12
+        ramp.enter(1, "report")(augmented),
+        border.residual(momentum.residual)(augmented),
+        atol=1e-12,
     )
+    # The previous step's report reaches the inner homotopy, which may decide where a step runs from it.
+    assert seen == [None, "report"]
     assert (ramp.arrived(0), ramp.arrived(1)) == (False, True)
     assert (ramp.shift_factor(0), ramp.shift_factor(1)) == (1.0, 1.5)
     assert (ramp.station(0), ramp.station(5)) == (0, 1)

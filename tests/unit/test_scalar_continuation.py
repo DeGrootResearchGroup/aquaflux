@@ -265,14 +265,15 @@ def _sweep_traces(*, freeze):
     return per_sweep, state
 
 
-def test_a_carried_preconditioner_compiles_the_scalar_solve_once() -> None:
-    """Reusing one preconditioner across sweeps makes the compiled march step a cache hit.
+def test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt() -> None:
+    """A preconditioner rebuilt on an unchanged coarsening is a compilation-cache hit, like a carried one.
 
-    The preconditioner is a frozen, off-jit constant, so ``equinox.filter_jit`` keeps it on the
-    static side of the march step, hashed by object identity: carrying **one** instance across sweeps
-    reuses the compiled step, while a freshly built one each sweep re-compiles it -- the escalation
-    loop, the GMRES, and the V-cycle. Only the shift diagonal changes per sweep, and being an array it
-    re-traces nothing.
+    The preconditioner is data (an ``equinox`` module whose hierarchy rides on the traced side), so
+    ``equinox.filter_jit`` keys the march step on its array shapes, not on the object. The two-level
+    block aggregates by the mesh graph alone, so a rebuild at a new diffusivity has the same shapes and
+    re-traces nothing -- the march compiles once in both arms. (When the preconditioner was a static
+    object compared by identity, every rebuild recompiled the escalation loop, the GMRES and the
+    V-cycle, which is why the segregated driver carries one; it still does, to skip the build.)
 
     The count is residual *executions*, and a converged sweep is not free of them: the march evaluates
     the residual once, eagerly, for the reference norm it judges progress against. So **one** per sweep
@@ -283,7 +284,7 @@ def test_a_carried_preconditioner_compiles_the_scalar_solve_once() -> None:
 
     assert frozen[0] > 1  # the first sweep compiles
     assert frozen[1:] == [1, 1, 1]  # and every later sweep runs on the compiled step
-    assert all(count > 1 for count in rebuilt[1:])  # rebuilding re-compiles every sweep
+    assert rebuilt[1:] == [1, 1, 1]  # so does a preconditioner rebuilt every sweep
     # Freezing the preconditioner only changes how fast the Krylov iteration converges, never the
     # converged field -- so the two paths agree to solver tolerance.
     assert float(jnp.max(jnp.abs(frozen_state - rebuilt_state))) < 1e-10

@@ -79,6 +79,7 @@ from .continuation import (
     ShiftPolicy,
     ShiftTerm,
     StepAcceptance,
+    UnshiftedPreconditioner,
 )
 from .settings_mapping import SettingsMapping
 from .settings_value import MergeableSettings, SettingsValue, filled_from
@@ -168,7 +169,7 @@ from .driver import (
     explicit_source,
     staged_march,
 )
-from .session import PreconditionerSession
+from .session import PreconditionerSession, RebuildingSession
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .ramp_schedule import RampPosition, RampSchedule, RampWalk
@@ -236,6 +237,7 @@ __all__ = [
     "RampSchedule",
     "RampWalk",
     "ReadableShift",
+    "RebuildingSession",
     "RefreshPolicy",
     "RefreshTiming",
     "RefreshTrigger",
@@ -276,6 +278,7 @@ __all__ = [
     "SubLayout",
     "SwitchedEvolutionRelaxation",
     "TransposedPreconditioner",
+    "UnshiftedPreconditioner",
     "VelocityShiftParts",
     "assembler_residual",
     "block_reference_scales",

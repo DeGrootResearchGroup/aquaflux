@@ -116,11 +116,11 @@ def test_layout_round_trips_and_sizes() -> None:
     assert jnp.array_equal(oo, omega)
 
 
-def _cavity(n=6, mesh=None, gradient=None, drive=None):
+def _cavity(n=6, mesh=None, gradient=None, drive=None, viscosity=RHO * NU):
     mesh = structured_grid_2d(n, n, lx=1.0, ly=1.0, named_boundaries=True) if mesh is None else mesh
     gradient = CompactGreenGauss() if gradient is None else gradient
     geometry = mesh.geometry()
-    properties = PropertyModel({"viscosity": Constant(RHO * NU), "density": Constant(RHO)})
+    properties = PropertyModel({"viscosity": Constant(viscosity), "density": Constant(RHO)})
     momentum = MomentumContinuity.build(
         mesh,
         geometry,
@@ -619,7 +619,9 @@ def test_an_unnamed_preconditioner_is_the_default_block_diagonal_family() -> Non
     )
     assert source.session._spec == BlockDiagonal()
     assert source.session._spec.resolved_scalar() == ScalarTwoLevel()
-    assert source.refresh_preconditioner is None
+    # Its hook follows a re-pointing only, so a session never re-pointed hands the march nothing.
+    assert source.refresh_preconditioner(None, None) is None
+    assert source.refresh_preconditioner(None, None, due=True) is None
 
 
 def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None:
