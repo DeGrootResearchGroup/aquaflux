@@ -8,8 +8,8 @@ module decides which, from closed forms, and never leaves out a receiver a ray c
 
 **The conserved quantities.** Every surface the route crosses inside the sleeve is the side of a
 cylinder on one axis, and the medium round it is uniform. Snell's law at such a surface keeps the
-component of ``n u`` along the axis, ``beta = n u_z``, so in the plane across the axis the ray
-behaves as a ray in media of index ``m = sqrt(n^2 - beta^2)``, and keeps ``m p``, its in-plane
+component of ``n u`` along the axis, ``axial_index = n u_z``, so in the plane across the axis the ray
+behaves as a ray in media of index ``m = sqrt(n^2 - axial_index^2)``, and keeps ``m p``, its in-plane
 index times its impact parameter ``p`` about the axis (its angular momentum about the axis). In
 that plane a ray entering the stack with impact parameter ``p`` in the medium round it leaves with
 the same ``p``, its direction turned by
@@ -31,14 +31,14 @@ the ray leaving the sleeve towards a receiver at polar position ``(rho, theta)``
 D``, the same ``b``. It came from the source side: where the light leaves the region holding the
 source, or the source itself, which lies in a disc of centre ``c`` and radius ``a``. So the
 incoming line must meet that disc, ``|c . n - b| <= a``, before it meets the sleeve,
-``c . d - a < -sqrt(R_0^2 - b^2)``. The unknowns ``(b, beta)`` are covered by cells, each with
-bounds on ``D`` from the closed form (every ratio ``m_out / m_j`` is monotone in ``beta`` and every
+``c . d - a < -sqrt(R_0^2 - b^2)``. The unknowns ``(b, axial_index)`` are covered by cells, each with
+bounds on ``D`` from the closed form (every ratio ``m_out / m_j`` is monotone in ``axial_index`` and every
 term monotone in its argument, so a cell's corners bound it), and a receiver is kept if the test
 can hold anywhere in any cell. Cells that can hold are split, a few times, to tighten the bounds; a
 receiver that keeps too many cells is kept without splitting further. Keeping is always sound, so
 every approximation here keeps more, never less.
 
-**Where it says nothing.** Along the axis a ray's ``u_z`` keeps its sign (``beta`` is conserved and
+**Where it says nothing.** Along the axis a ray's ``u_z`` keeps its sign (``axial_index`` is conserved and
 every index is positive), so a path's height along the axis moves one way from where it leaves the
 source side to the receiver; if both lie within the length of every cylinder of the stack, the path
 crosses their sides and not their ends. Where that fails, where the receiver lies in another region,
@@ -58,7 +58,7 @@ from aquaflux.solids import Cylinder
 #: Cells across the in-plane impact parameter, each sign, before any are split.
 _IMPACT_CELLS = 32
 
-#: Cells across the axial index ``beta`` before any are split.
+#: Cells across the axial index ``axial_index`` before any are split.
 _AXIAL_CELLS = 16
 
 #: How many times a cell that can carry light to a receiver is split in four.
@@ -165,8 +165,8 @@ class CoaxialStack:
         Parameters
         ----------
         cells : numpy.ndarray, shape ``(n, 4)``
-            Each cell's impact parameters ``p`` (unsigned) and axial indices ``beta``, as
-            ``(p_low, p_high, beta_low, beta_high)``, all non-negative.
+            Each cell's impact parameters ``p`` (unsigned) and axial indices ``axial_index``, as
+            ``(p_low, p_high, axial_low, axial_high)``, all non-negative.
 
         Returns
         -------
@@ -174,15 +174,15 @@ class CoaxialStack:
         low, high : numpy.ndarray, shape ``(n,)``
             Bounds on ``D`` over every ray the cell holds; meaningless where not ``possible``.
         """
-        p_low, p_high, beta_low, beta_high = cells.T
+        p_low, p_high, axial_low, axial_high = cells.T
         levels = len(self.radii)
 
         def ratio_bounds(level):
-            # m_out / m_level at each end of the cell's beta range: monotone in beta.
+            # m_out / m_level at each end of the cell's range of axial index: monotone in it.
             if level < 0:
-                one = np.ones_like(beta_low)
+                one = np.ones_like(axial_low)
                 return one, one
-            ends = [self._ratio(level, beta) for beta in (beta_low, beta_high)]
+            ends = [self._ratio(level, axial) for axial in (axial_low, axial_high)]
             return np.minimum(*ends), np.maximum(*ends)
 
         def argument(level, radius):
@@ -216,13 +216,13 @@ class CoaxialStack:
                 low, high = low + weight * most, high + weight * least
         return possible, low, high
 
-    def _ratio(self, level, beta):
+    def _ratio(self, level, axial):
         out, inside = self.indices[0], self.indices[level + 1]
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.sqrt(
-                np.maximum(out * out - beta * beta, 0.0) / (inside * inside - beta * beta)
+                np.maximum(out * out - axial * axial, 0.0) / (inside * inside - axial * axial)
             )
-        return np.where(inside * inside - beta * beta > 0.0, ratio, np.inf)
+        return np.where(inside * inside - axial * axial > 0.0, ratio, np.inf)
 
 
 def reachable(stack: CoaxialStack, centre, radius, span, points) -> np.ndarray:
@@ -281,17 +281,17 @@ def _any_cell_carries(stack, cells, centre, radius, distance, angle) -> np.ndarr
 
 
 def _first_cells(stack) -> np.ndarray:
-    """Cells ``(sign, p_low, p_high, beta_low, beta_high)`` covering every ray into the stack.
+    """Cells ``(sign, p_low, p_high, axial_low, axial_high)`` covering every ray into the stack.
 
     Impact parameters crowd towards the rim and axial indices towards their largest, where the
     turn changes fastest.
     """
     edges_p = stack.radii[0] * np.sin(0.5 * np.pi * np.linspace(0.0, 1.0, _IMPACT_CELLS + 1))
-    beta_max = float(np.min(stack.indices))
-    edges_beta = beta_max * np.sin(0.5 * np.pi * np.linspace(0.0, 1.0, _AXIAL_CELLS + 1))
-    p_low, beta_low = np.meshgrid(edges_p[:-1], edges_beta[:-1], indexing="ij")
-    p_high, beta_high = np.meshgrid(edges_p[1:], edges_beta[1:], indexing="ij")
-    cells = np.stack([p_low, p_high, beta_low, beta_high], axis=-1).reshape(-1, 4)
+    axial_max = float(np.min(stack.indices))
+    edges_axial = axial_max * np.sin(0.5 * np.pi * np.linspace(0.0, 1.0, _AXIAL_CELLS + 1))
+    p_low, axial_low = np.meshgrid(edges_p[:-1], edges_axial[:-1], indexing="ij")
+    p_high, axial_high = np.meshgrid(edges_p[1:], edges_axial[1:], indexing="ij")
+    cells = np.stack([p_low, p_high, axial_low, axial_high], axis=-1).reshape(-1, 4)
     return np.concatenate(
         [np.column_stack([np.full(len(cells), sign), cells]) for sign in (1.0, -1.0)]
     )
@@ -299,13 +299,13 @@ def _first_cells(stack) -> np.ndarray:
 
 def _quartered(cells) -> np.ndarray:
     """Each cell split in two along its impact parameter and its axial index, in place order."""
-    sign, p_low, p_high, beta_low, beta_high = cells.T
-    p_mid, beta_mid = 0.5 * (p_low + p_high), 0.5 * (beta_low + beta_high)
+    sign, p_low, p_high, axial_low, axial_high = cells.T
+    p_mid, axial_mid = 0.5 * (p_low + p_high), 0.5 * (axial_low + axial_high)
     parts = [
-        (p_low, p_mid, beta_low, beta_mid),
-        (p_mid, p_high, beta_low, beta_mid),
-        (p_low, p_mid, beta_mid, beta_high),
-        (p_mid, p_high, beta_mid, beta_high),
+        (p_low, p_mid, axial_low, axial_mid),
+        (p_mid, p_high, axial_low, axial_mid),
+        (p_low, p_mid, axial_mid, axial_high),
+        (p_mid, p_high, axial_mid, axial_high),
     ]
     return np.stack([np.column_stack([sign, *part]) for part in parts], axis=1).reshape(-1, 5)
 

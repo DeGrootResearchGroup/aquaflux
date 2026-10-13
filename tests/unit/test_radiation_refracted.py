@@ -347,7 +347,11 @@ def test_the_fluence_rate_s_derivative_with_respect_to_an_index_is_the_finite_di
 
 
 def test_every_route_through_a_neighbour_is_kept_its_wall_alone_by_shooting():
-    """With a second sleeve the arc's light reaches the water by three routes, all solved."""
+    """With a second sleeve the arc's light reaches the water by three routes, all solved.
+
+    Round the second sleeve's rim the light reaches only the point behind it: the rim route keeps
+    that receiver alone, and a solve on the others finds no path (checked when this was written).
+    """
     axis = [0.0, 0.0, 1.0]
     second = Transparent(
         Cylinder([0.05, 0.0, 0.0], axis, 0.0115, 0.5),
@@ -355,8 +359,10 @@ def test_every_route_through_a_neighbour_is_kept_its_wall_alone_by_shooting():
         inside=(Transparent(Cylinder([0.05, 0.0, 0.0], axis, 0.01025, 0.5), AIR),),
     )
     media = Media(WATER, (*_sleeve().regions, second))
-    planned = refracted._plan(_arc(), media, _POINTS, pair_limit=1_000_000)
+    behind = np.vstack([_POINTS, [[0.085, 0.0, 0.0]]])
+    planned = refracted._plan(_arc(), media, behind, pair_limit=1_000_000)
     assert [group.chain.passing for group in planned] == [(), (2,), (2, 3)]
+    assert [list(group.rows) for group in planned] == [[0, 1, 2, 3, 4], [4], [0, 1, 2, 3, 4]]
 
 
 def test_what_it_cannot_gather_is_refused():

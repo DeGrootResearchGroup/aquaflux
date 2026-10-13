@@ -356,6 +356,14 @@ medium's absorption along its own leg. Three things are approximated, and each i
   lie in the medium round it. Otherwise that light is not carried; in a square of four sleeved lamps
   50 mm apart in 95% UVT water it is under 1% of the fluence rate at the points measured, largest
   just beyond a neighbour that blocks the straight line.
+- **A route through a neighbouring sleeve is solved only for the points it can light.** Where the
+  sleeve is a stack of cylinders on one axis, a ray keeps two quantities through it -- the axial
+  component of `n u` and its distance from the axis across it -- so the angle it turns through has
+  a closed form. Points no ray from the source's side can reach after that turn are left out of the
+  route before any path is solved; the bound is conservative, so a point is left out only where no
+  ray reaches it. Anything else -- a body that is not such a stack, a point inside another region,
+  a source side that is not a cylinder parallel to it, or heights beyond the cylinders' ends --
+  keeps every point.
 - **Each source triangle is seen through its corners**: the solid angle it fills is the closed form
   on the directions its three corners' paths arrive from, which is exact as the triangles become
   small, the limit the refinement criterion already drives an emitter towards. A triangle any of
