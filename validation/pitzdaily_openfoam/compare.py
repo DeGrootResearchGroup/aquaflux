@@ -194,6 +194,11 @@ def _solver_with_overrides(solver):
         preconditioner = dataclasses.replace(
             preconditioner, probe=dataclasses.replace(preconditioner.probe, **probe)
         )
+    # The shift the inverse is re-fitted at is `max(beta, refit_beta_floor)` (`PITZ_REFIT_BETA_FLOOR`):
+    # below the floor the inverse is fitted at the floor while the march solves at its own shift.
+    refit_floor = _environment("REFIT_BETA_FLOOR", float)
+    if refit_floor is not None:
+        preconditioner = dataclasses.replace(preconditioner, refit_beta_floor=refit_floor)
     edits["preconditioner"] = preconditioner
     damping = _environment("TURB_DAMPING", float)
     if damping is not None:
