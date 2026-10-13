@@ -1520,9 +1520,11 @@ Many entries below are dated history written against the old API. Read them thro
     direction once the flow separates. Measured on the developed pitzDaily field (shifted Newton direction
     vs the true one): smoothed gives a direction badly misaligned with the true Newton step and the march
     stalls at rel ~0.18, while **`velocity="convection"`** is nearly aligned. The convection block's
-    linearization stays valid **frozen at the cold initial state**, so **the flow block needs no reference
-    refresh** — verified two ways: an IC-frozen direction is as well aligned as a plateau-rebuilt one, and
-    refreshing the flow block alone at a separated pitzDaily state is if anything slightly *worse*. It is
+    linearization stays valid **frozen once**, so **the flow block needs no reference refresh** — verified
+    two ways: an IC-frozen direction is as well aligned as a plateau-rebuilt one, and refreshing the flow
+    block alone at a separated pitzDaily state is if anything slightly *worse*. ⚠️ Both were measured
+    while "frozen at the IC" meant the **boundary-derived uniform plug** (`BlockPreconditioner.build` with
+    no `reference_state`), not the hybrid start; see the next bullet. It is
     **not** the flow↔turbulence cross-coupling (the block-*diagonal* preconditioner with the right config
     is already nearly aligned on its own — a block-triangular coupling was built, measured, and is worse;
     see `.claude/notes/solve-globalization-log.md`). **The k/ω *scalar* AMGs are the exception: they do go
@@ -1530,6 +1532,38 @@ Many entries below are dated history written against the old API. Read them thro
     (configuration not recorded — re-measure before relying on the size) — the one staleness lever that
     pays; see the staleness bullet in `.claude/notes/solve-globalization-log.md`. Overridable through
     `BlockDiagonal(velocity=…)`.
+  - **✅ The convection velocity block is frozen at the POLICY'S OWN reference flow, not the plug (#389,
+    2026-10-13).** `_coupled_shift_policy` used to call `BlockPreconditioner.build` without
+    `reference_state`, so the block's mass flux came from `_characteristic_reference_state` (a uniform
+    flow at the fastest prescribed speed) while its eddy viscosity, and every other frozen operator in the
+    policy, came from the reference state. It now passes `flow_ref` whenever that flow carries mass flux,
+    and leaves the builder its plug otherwise (a closed domain's hybrid start is at rest; freezing there
+    would give a viscous-only block). The flow-only march already froze at its own reference state, so
+    the two paths now agree where the reference flows; the at-rest fallback is the coupled policy's only.
+    - **Why it is a fix and not a preference: the plug cannot build on a contracting duct.** A uniform
+      flow pushed into a narrowing channel is far from divergence-free (worst cell net flux 75 % of the
+      largest face flux on a 0.3 H bump, against 14 % for the hybrid start), the frozen upwind operator
+      loses positivity on its first coarse level, and the hierarchy refuses with a negative diagonal —
+      so `solve_coupled` with its default preconditioner could not take a first step. Bump-height sweep
+      (2304 cells, Re_H 1e4): the plug builds at 0.05 and 0.10 H and fails at 0.15, 0.20, 0.25, 0.30 H;
+      the reference flow builds at all. Pinned by `tests/unit/test_velocity_block_reference_state.py`
+      (432-cell 0.3 H duct; mutation-checked: dropping the argument, dropping the fallback and passing a
+      rescaled flow each turn one test red).
+    - **Where both build, they are indistinguishable.** Harness `validation/velocity_block_reference.py`
+      (default `BlockDiagonal()`, hybrid start, single shifted step, `max_steps` 300, one run per arm,
+      Linux x86_64, 4 cores, jax 0.11.2): 0.10 H bump — plug 39 steps / 97 restart cycles, reference 39 /
+      91, roots agree to 2e-13, separated length 0.4165 both; 0.30 H bump — plug refused to build,
+      reference 56 / 207, separated length 1.50; straight channel (`test_coupled_rans.py`'s, where the
+      two frozen fluxes agree to 2e-14) — 20 / 17 against 20 / 15. The control is what reads the 0.10 H
+      gap as noise: identical blocks to 5e-14 still differ by two restart cycles (~12 %).
+    - ⚠️ **NOT fixed: the plug's failure on a CLOSED domain.** The 6 x 6 lid cavity at Re 100
+      (`test_coupled_rans._cavity`) is at rest at its hybrid start, so it still takes the plug, and the
+      plug's hierarchy has a negative coarse diagonal there too (−8.1e-3): `_coupled_shift_policy` cannot
+      build the default block for that cavity from its hybrid start, before or after this change. The
+      same holds for `BlockPreconditioner.build(velocity=ConvectionTwoLevel())` on a 6 x 6 lid cavity at
+      viscosity 1e-2. A better at-rest default than a uniform plug (one that is divergence-free in a
+      closed box) is the open question; it was deliberately not moved into the builder, because the
+      flow-only march from rest currently degrades to the viscous block with a warning, which builds.
   - **⚠️ THE PRESSURE SCHUR NO LONGER HARDCODES `schur_scaling="msimple"` (fixed 2026-08-18) — it was
     never necessary at the scale this policy is actually used at, and is dominated where it matters.**
     Superseded finding, kept for the trap: this bullet used to pair `velocity="convection"` with

@@ -1,16 +1,17 @@
 """Which state should the block-diagonal family's velocity block be frozen at? (issue #389)
 
 The block-diagonal coupled preconditioner (`BlockDiagonal`, built by `_coupled_shift_policy`) freezes
-its convection-aware velocity block's convective linearization at a mass flux. As shipped,
-`BlockPreconditioner.build` is called without a `reference_state`, so that mass flux is the
-boundary-derived **uniform plug** at the fastest prescribed speed -- while the eddy viscosity the same
-block is assembled with is taken at the policy's own reference state. This harness compares the two
-choices with everything else held fixed:
+its convection-aware velocity block's convective linearization at a mass flux. Until #389 it called
+`BlockPreconditioner.build` without a `reference_state`, so that mass flux was the boundary-derived
+**uniform plug** at the fastest prescribed speed -- while the eddy viscosity the same block is
+assembled with was taken at the policy's own reference state. It now passes that reference flow. This
+harness compares the two choices with everything else held fixed, each arm setting the frozen state
+itself so the comparison does not depend on which one the library ships:
 
-- ``plug``: the shipped build (boundary-derived uniform flow);
+- ``plug``: the boundary-derived uniform flow (the build before #389);
 - ``reference``: the flow part of the policy's reference state, falling back to the plug when it
   carries no mass flux (a closed domain or a start from rest), where the block would otherwise
-  collapse onto the viscous operator.
+  collapse onto the viscous operator (the build since #389).
 
 Only the first build differs: a refresh carries the flow block over unchanged.
 
@@ -72,7 +73,7 @@ MAX_STEPS = int(os.environ.get("VBR_MAX_STEPS", "300"))
 #
 # `_coupled_shift_policy` is looked up as a module global by the block session, so wrapping it records
 # the state each first build is frozen at; the block builder it calls is likewise a module global, and
-# the `reference` arm substitutes one that passes that state's flow part on.
+# each arm substitutes one that sets the frozen state its own way.
 
 _ORIGINAL_POLICY = coupled_module._coupled_shift_policy
 _ORIGINAL_BUILDER = coupled_module.BlockPreconditioner
@@ -85,11 +86,21 @@ def _recording_policy(coupled, reference_state, scalar, reuse=None, *args, **kwa
     return _ORIGINAL_POLICY(coupled, reference_state, scalar, reuse, *args, **kwargs)
 
 
+class _PlugFrozenBuilder:
+    """`BlockPreconditioner` with `build` given no reference state: the boundary-derived plug."""
+
+    @staticmethod
+    def build(momentum, **options):
+        options.pop("reference_state", None)
+        return _ORIGINAL_BUILDER.build(momentum, **options)
+
+
 class _ReferenceFrozenBuilder:
     """`BlockPreconditioner` with `build` handed the policy's reference flow, plug fallback."""
 
     @staticmethod
     def build(momentum, **options):
+        options.pop("reference_state", None)
         flow = _FROZEN["flow"]
         if float(jnp.max(jnp.abs(momentum.mass_flux(flow)))) > 0.0:
             options["reference_state"] = flow
@@ -98,14 +109,11 @@ class _ReferenceFrozenBuilder:
             _FROZEN["used"] = "plug (reference carries no mass flux)"
         return _ORIGINAL_BUILDER.build(momentum, **options)
 
-    def __getattr__(self, name):  # pragma: no cover - forwards anything else
-        return getattr(_ORIGINAL_BUILDER, name)
-
 
 def _select_arm(arm: str) -> None:
     coupled_module._coupled_shift_policy = _recording_policy
     coupled_module.BlockPreconditioner = (
-        _ReferenceFrozenBuilder if arm == "reference" else _ORIGINAL_BUILDER
+        _ReferenceFrozenBuilder if arm == "reference" else _PlugFrozenBuilder
     )
     _FROZEN.clear()
     _FROZEN["used"] = "plug" if arm == "plug" else "?"

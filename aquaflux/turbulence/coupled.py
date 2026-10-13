@@ -1515,13 +1515,18 @@ def _coupled_shift_policy(
     # The coupled flow block uses the convection-aware velocity AMG, not the viscous multilevel default:
     # a RANS case is high-Reynolds, and the Peclet-blind viscous block produces a poor
     # momentum-block direction once the flow separates (the shifted Newton direction it returns drifts
-    # away from the true one on a developed separated field, and the march stalls). The convection
-    # block's convective linearization stays valid frozen at the cold initial state (the reference), so
-    # no per-sweep refresh is needed. Overridable through a `BlockDiagonal` spec's fields, which arrive
-    # here as `flow_block_options` and are pinned to `BlockPreconditioner.build`'s keywords, so no name
-    # it does not take can reach it. `build_flow_block=False`
-    # leaves it out entirely: a monolithically preconditioned step reads this policy for its shift
-    # diagonal and supplies its own inverse, so the block built here would never be applied.
+    # away from the true one on a developed separated field, and the march stalls). Its convective
+    # linearization is frozen at this policy's own reference flow, like every other frozen operator
+    # here, and stays valid there, so no per-sweep refresh is needed. The builder's own default, the
+    # uniform flow the boundary conditions imply, is far from divergence-free wherever the duct changes
+    # section, and in a contracting one its first coarse level loses positivity, so the hierarchy
+    # cannot be built. A reference flow at rest (a closed domain's potential flow) carries no
+    # convective scale to freeze at, and takes that default instead. Overridable through a
+    # `BlockDiagonal` spec's fields, which arrive here as `flow_block_options` and are pinned to
+    # `BlockPreconditioner.build`'s keywords, so no name it does not take can reach it.
+    # `build_flow_block=False` leaves it out entirely: a monolithically preconditioned step reads this
+    # policy for its shift diagonal and supplies its own inverse, so the block built here would never be
+    # applied.
     #
     # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
     # mass-matrix scaling this used to hardcode, which is not needed at the scale this preconditioner is
@@ -1535,6 +1540,7 @@ def _coupled_shift_policy(
     # (`BlockDiagonal(schur_scaling="msimple")`, or `BlockPreconditioner`) for the one regime it is not
     # dominated in: a standalone, flow-only, convection-dominated solve, where the plain SIMPLE Schur's
     # inner solve can stall outright.
+    mdot = momentum.mass_flux(flow_ref)
     block = (
         None
         if not build_flow_block
@@ -1542,6 +1548,7 @@ def _coupled_shift_policy(
         if reuse is not None
         else BlockPreconditioner.build(
             momentum,
+            reference_state=flow_ref if float(jnp.max(jnp.abs(mdot))) > 0.0 else None,
             **{
                 "velocity": ConvectionTwoLevel(),
                 # Aggregate the velocity/Schur AMGs along strong connections. A no-op on a low-aspect-
@@ -1555,8 +1562,6 @@ def _coupled_shift_policy(
             },
         )
     )
-
-    mdot = momentum.mass_flux(flow_ref)
 
     # The reparametrized block's Jacobian is the physical one scaled by d(phi)/d(w): its shift diagonal
     # is scaled by that factor and its (physical-operator) preconditioner by the reciprocal. For the
