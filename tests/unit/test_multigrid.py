@@ -41,6 +41,7 @@ from aquaflux.precondition.multigrid import (
     _rs_split,
     _SparseLevel,
     _strength_classical,
+    _Structure,
     air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
@@ -1620,6 +1621,40 @@ def test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_
         assert np.array_equal(got.indptr, want.indptr)
         assert np.array_equal(got.indices, want.indices)
         assert np.array_equal(got.data, want.data)
+
+
+def test_a_structure_reuses_positions_only_for_identical_stored_entries(monkeypatch) -> None:
+    """Where an operator's entries land is searched for once and reused only for the same entries.
+
+    ``a`` and ``b`` share their row pointer and differ only in column indices, so a reuse keyed on the
+    row counts alone would scatter ``b`` onto ``a``'s positions. ``unsorted`` stores a row's entries out
+    of column order, which the store must place by key rather than assume sorted. Every result is the
+    operator itself, densely.
+    """
+    pattern = sp.csr_matrix(np.ones((3, 3)))
+    structure = _Structure.of(pattern)
+    indptr = np.array([0, 1, 2, 3])
+    a = sp.csr_matrix((np.array([1.0, 2.0, 3.0]), np.array([0, 1, 2]), indptr), shape=(3, 3))
+    b = sp.csr_matrix((np.array([4.0, 5.0, 6.0]), np.array([1, 2, 0]), indptr), shape=(3, 3))
+    unsorted = sp.csr_matrix(
+        (np.array([7.0, 8.0, 9.0]), np.array([2, 0, 1]), np.array([0, 2, 2, 3])), shape=(3, 3)
+    )
+    revalued_a = a.copy()
+    revalued_a.data = np.array([-1.0, -2.0, -3.0])
+
+    located = []
+    locate = _Structure._locate
+
+    def counted(self, values):
+        located.append(1)
+        return locate(self, values)
+
+    monkeypatch.setattr(_Structure, "_locate", counted)
+    for matrix, times_located in ((a, 1), (revalued_a, 1), (b, 2), (unsorted, 3), (a, 4)):
+        stored = structure.store(matrix)
+        assert len(located) == times_located
+        assert stored.nnz == pattern.nnz  # on the structural pattern, absent entries as zeros
+        assert np.array_equal(stored.toarray(), matrix.toarray())
 
 
 def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:

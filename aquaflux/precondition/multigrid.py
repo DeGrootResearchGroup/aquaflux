@@ -2317,17 +2317,28 @@ def _onto_pattern(values: sp.spmatrix, pattern: sp.spmatrix) -> sp.csr_matrix:
 
 
 def _entry_keys(matrix: sp.csr_matrix) -> np.ndarray:
-    """One ascending key per stored entry of a sorted CSR matrix, ``row * n_columns + column``."""
+    """One key per stored entry of a CSR matrix, ``row * n_columns + column``, in storage order.
+
+    Ascending when the matrix's column indices are sorted within each row.
+    """
     rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
     return rows.astype(np.int64) * matrix.shape[1] + matrix.indices
 
 
 class _Structure:
-    """A structural pattern ready to store values on: the sorted pattern and its entry keys."""
+    """A structural pattern ready to store values on: the sorted pattern and its entry keys.
+
+    It also remembers where the last operator stored on it went. Locating an operator's entries is a
+    search over every key of the pattern, which on a refit costs more than the product it stores; but a
+    refit's product stores the same entries in the same order every time (it drops only entries that
+    come out exactly zero, which change its pattern and so miss), so the positions are reused whenever
+    the operator's index arrays equal the last one's exactly.
+    """
 
     def __init__(self, pattern: sp.csr_matrix, keys: np.ndarray) -> None:
         self.pattern = pattern
         self.keys = keys
+        self._placed: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
     @classmethod
     def of(cls, pattern: sp.spmatrix) -> _Structure:
@@ -2338,21 +2349,33 @@ class _Structure:
     def store(self, values: sp.spmatrix) -> sp.csr_matrix:
         """``values`` on this pattern (:func:`_onto_pattern`)."""
         values = sp.csr_matrix(values)
-        values.sort_indices()
-        pattern = self.pattern
+        placed = self._placed
+        if (
+            placed is None
+            or not np.array_equal(placed[0], values.indptr)
+            or not np.array_equal(placed[1], values.indices)
+        ):
+            placed = (values.indptr, values.indices, self._locate(values))
+            self._placed = placed
+        data = np.zeros(self.pattern.nnz, dtype=values.data.dtype)
+        data[placed[2]] = values.data
+        return sp.csr_matrix(
+            (data, self.pattern.indices, self.pattern.indptr), shape=self.pattern.shape
+        )
+
+    def _locate(self, values: sp.csr_matrix) -> np.ndarray:
+        """Where each stored entry of ``values``, in its own order, sits in this pattern."""
         value_keys = _entry_keys(values)
-        # The (subset) real pattern located in the structural one by a single search rather than a
-        # per-row merge. Clipped before the lookup: a key past the end would index out of range, and
-        # the comparison below is what turns "not found" into the stated invariant.
-        position = np.searchsorted(self.keys, value_keys).clip(max=max(pattern.nnz - 1, 0))
+        # A single search over the pattern's ascending keys; the entries searched for need no order.
+        # Clipped before the lookup: a key past the end would index out of range, and the comparison
+        # below is what turns "not found" into the stated invariant.
+        position = np.searchsorted(self.keys, value_keys).clip(max=max(self.pattern.nnz - 1, 0))
         if value_keys.size and not np.array_equal(self.keys[position], value_keys):
             raise AssertionError(
                 "_onto_pattern: the operator holds an entry its structural pattern does not, which "
                 "cannot happen for a pattern computed from the same expression."
             )
-        data = np.zeros(pattern.nnz, dtype=values.data.dtype)
-        data[position] = values.data
-        return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+        return position
 
 
 def _pattern_fingerprint(operands: Sequence[sp.spmatrix]) -> tuple:

@@ -2184,7 +2184,16 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   which it refuses, so it cannot change an answer. Each `HierarchyBlockInverse` owns one
   (`self._patterns`) and passes it to `SmoothedHierarchy.refit(a, patterns=)` and, for the SIMPLE
   smoother, to `_simple_pieces(patterns=)`; `None` computes every pattern afresh. Same probe after: split
-  **0.83 s**, leading block **0.48 s**. A hierarchy BUILD does not use it (a rebuild re-derives the
+  **0.83 s**, leading block **0.48 s**. ⚠️ **On bfs3d that recovered under half** (#708 comment, `state-00036`,
+  shift 0.05, best of 5, M3 Pro, jax 0.10.2: split 2.46 s before #290, 4.80 s on `main`, 3.75 s), because
+  `_Structure.store` then searched every key of the pattern (`np.searchsorted`, 1.42 s of 1.76 s; the
+  7.1M-entry Schur complement dominates). So `_Structure` also remembers where the last operator's
+  entries went, reused while the new operator's `indptr` and `indices` are EXACTLY equal to the last
+  one's (compared, not checksummed: a hit skips the subset check, so a collision would scatter values
+  silently); a scipy product that drops an exact zero changes them and is located afresh. Unsorted
+  operators are placed by key, so the sort before the search is gone too. Pinned by
+  `test_a_structure_reuses_positions_only_for_identical_stored_entries` (mutation-checked three ways:
+  row pointer only, always reuse, never reuse). Not yet re-timed on either case. A hierarchy BUILD does not use it (a rebuild re-derives the
   prolongations, so the Galerkin operands change); the pitzDaily trailing block, unfrozen, still
   rebuilds and still pays (0.25 s). Pinned by
   `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold` and
