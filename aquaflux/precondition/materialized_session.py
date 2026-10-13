@@ -450,6 +450,14 @@ class MaterializedSession:
     grafted step differs from the held one in array values alone, so it is a compilation-cache hit as long
     as the companion's viscosity is an array.
 
+    The new companion's policy is built at the state the held steps were built at (:meth:`build`, or the
+    last :meth:`refresh`), not at the march's current iterate, so a re-pointing moves the problem and
+    nothing else. A policy frozen at a state carries quantities of that state -- an eddy viscosity in the
+    momentum diagonal, a transport time scale, and, for a log-transformed field, a coordinate factor equal
+    to the field itself -- and re-freezing them at a developed iterate can change the shift far more than
+    the companion does, on rows (the closure's, say) the companion does not touch at all. Moving the
+    reference state is a refresh's job (:meth:`refresh`).
+
     Parameters
     ----------
     spec : MaterializedJacobian
@@ -509,13 +517,16 @@ class MaterializedSession:
         # Whether the fitted inverse is carried in the step in its traced form; decided at the fit.
         self._traced = False
         self._repointing = Repointing()
+        # The state the steps in use were built at: a re-pointing builds the new companion's policy at
+        # it, so only the companion moves (see the class summary).
+        self._reference_state: jnp.ndarray | None = None
 
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
         ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
             # After a re-pointing, first move the step onto the new problem, so the re-fit (forced by
             # the same re-pointing) reads the new problem's shift diagonal off it rather than the old's.
-            graft = self._repointing.graft(lambda march: self._step(state, march))
+            graft = self._repointing.graft(lambda march: self._step(self._reference_state, march))
             if graft is not None:
                 active_step = graft(active_step)
             refitted = self._refresh_hook()(active_step, state, due=due)
@@ -551,6 +562,7 @@ class MaterializedSession:
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
         step = self._build(state, march)
         self._repointing.built(march)
+        self._reference_state = state
         return step
 
     def refresh(
@@ -559,6 +571,7 @@ class MaterializedSession:
         del previous  # the shared inverse is re-fitted in place, not re-derived from the old step
         step = self._build(state, march)
         self._repointing.built(march)
+        self._reference_state = state
         if self._hook is not None:
             # The standing inverse was fitted before the march moved; force the next refresh to be full.
             self._hook.rebind(self._problem.assembler)

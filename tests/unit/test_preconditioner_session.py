@@ -173,6 +173,31 @@ def test_a_re_pointed_materialized_session_hands_the_march_the_new_problems_shif
     assert float(measured) != pytest.approx(float(in_anchor_scales), rel=1e-6)
 
 
+def test_a_re_pointing_moves_the_problem_and_not_the_state_the_shift_was_built_at(case) -> None:
+    """The graft is built on the new companion at the HELD steps' build state, not the march's iterate.
+
+    A policy frozen at a state carries that state's eddy viscosity, transport time scale and (for the
+    log-solved omega) coordinate factor. Re-freezing them at the iterate a station is entered at moves
+    the shift on every row, the closure's included, where the companion moves only what its viscosity
+    reaches; that is a refresh's job, not a re-pointing's.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session, held = _materialized_step_held_on(target, anchor, state, loop)
+    iterate = state * 1.05
+    session.rebind(target)
+    updated = session.refresh_preconditioner(held, iterate)(held)
+
+    def base_diagonal(step):
+        return step.shift_policy.base.shift_term(state).diagonal
+
+    at_build_state = open_session(MaterializedJacobian(_SPLIT), target).build(state, dual_time=loop)
+    at_iterate = open_session(MaterializedJacobian(_SPLIT), target).build(iterate, dual_time=loop)
+    assert jnp.allclose(base_diagonal(updated), base_diagonal(at_build_state), rtol=1e-12)
+    assert not jnp.allclose(base_diagonal(updated), base_diagonal(at_iterate), rtol=1e-6)
+
+
 def test_a_re_pointed_materialized_session_refits_against_the_new_problems_shift(
     case, monkeypatch
 ) -> None:
