@@ -507,8 +507,22 @@ Many entries below are dated history written against the old API. Read them thro
       reads the grafted step. Pinned by the three `test_a_re_pointed_materialized_session_*` tests in
       `test_preconditioner_session.py` (mutation-checked). ⚠️ **Both flagship cases ship this family on
       the ramp, so their trajectories move**, and every tuning measured on them (`turbulence_damping`,
-      `grow`, the floor release, the station count, anchor depth) was taken under the old behaviour; see
-      the #701 PR for what was re-measured. The march builds the step's measure BEFORE calling the hook,
+      `grow`, the floor release, the station count, anchor depth) was taken under the old behaviour.
+      **pitzDaily, measured 2026-10-13** (shipped `case.yaml`: 12 x 1 momentum-only ramp from anchor
+      100, damping 3, `grow` 3, release 1e-4, `beta_min` 0.005, dual-time 5 / 0.01, `refresh_on_cycles`
+      3, residual stop, field split `SimpleSmoothed`/`JacobiSmoothed`; Linux x86_64, 4 cores; control
+      `78e0bbf` (#704 head) in its own worktree, fix `69d8d17`; `run_case.sh --force`, because its
+      free-memory reading is macOS-only, on an idle machine): **control 20 steps / 154 restart cycles /
+      no escalations; fix 28 steps / 157 cycles / 6 escalations (steps 16, 18, 19, 25), both `x_r/h`
+      8.0686**, march time after step 1 527 s against 599 s. The arms part at step 3. From step 8 to 14
+      (stations 8-12 and arrival) every fix step ends after ONE inner iteration at 3 cycles, `a_min`
+      0.25, `beta` at its 0.005 floor, the residual crawling 1.10e-2 to 8.6e-3: the station's own
+      (smaller) velocity shift makes the first solve reach `refresh_on_cycles` 3, which ends the step.
+      The control's anchor shift, 100x the target's viscous `a_P`, was heavier velocity damping the
+      schedule had been tuned around — the stale shift was load-bearing (the globalization lesson at
+      the top of `solve-globalization.md`). ⚠️ The control's 20 / 154 is not the 16 / 111 `case.yaml`
+      records for its own schedule (measured 2026-10-11 on an earlier base); unexplained, and it is a
+      second change between that record and now. bfs3d not measured. The march builds the step's measure BEFORE calling the hook,
       so the step that ENTERS a station is still judged in the previous station's row scales; every later
       step on it uses its own.
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
