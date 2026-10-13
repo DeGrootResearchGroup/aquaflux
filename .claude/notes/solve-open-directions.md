@@ -419,8 +419,9 @@ cycle at step 18: since #290 the release fires at step 17 of 19, so there is not
 at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
 at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
 step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
-hierarchy does not evidently need it. Moving pitzDaily's file to 0.005 is the owner's call, and bfs3d (which
-ships 0.05) is unmeasured. ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
+hierarchy does not evidently need it. **pitzDaily's file drops the floor** (2026-10-13, owner's decision;
+none is the 1e-4 arm exactly, since the shift never goes below `release_floor`). bfs3d, which ships 0.05,
+is unmeasured: `BFS3D_` arms at 0.05 / 0.005 / none are the next measurement. ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
 are deterministic. (bfs3d's two released steps cost 12 and 15 cycles against 4-5 at the floor on #678's
 march, so (a) may be worth more there; unmeasured.) (b) whether bfs3d's `case.yaml` should
 release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->

@@ -773,7 +773,6 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
                 JacobiSmoothed(max_coarse=2000, equilibrate=False),
             ),
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
-            refit_beta_floor=0.05,
         ),
         # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
         # script stopped building its march.
