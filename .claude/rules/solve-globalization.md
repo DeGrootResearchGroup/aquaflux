@@ -389,8 +389,9 @@ What to take from it, none of which is specific to that mechanism:
     - **Measured:** pitzDaily 31 -> 22 steps, 161 -> 141 cycles, target station 15 -> 6 steps and 67 -> 30
       inner solves, same `x_r/h`, final `|R|` 1.7e-6 against 8.3e-6. Cycles fall less than steps because
       each released step's solves cost 2-3x a floor step's: the inverse is still re-fitted at
-      `refit_beta_floor` (0.05), and re-fitting at the released shift is the open half (worth 1-8 cycles per
-      released step by the probe). Full tables and configuration in `solve-globalization-log.md`.
+      `refit_beta_floor` (0.05). Re-fitting at the released shift instead was measured 2026-10-13 on the
+      post-#290 march and is worth one cycle there (`.claude/notes/solve-open-directions.md` 11a); the floor
+      itself was worth 10, and pitzDaily's file now sets none. Full tables and configuration in `solve-globalization-log.md`.
     - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
       stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
       in the log), with `release_backoff: 0.5` stated beside it since 2026-10-12 (the class default,

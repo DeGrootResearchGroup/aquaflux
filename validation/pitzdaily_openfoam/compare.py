@@ -194,6 +194,11 @@ def _solver_with_overrides(solver):
         preconditioner = dataclasses.replace(
             preconditioner, probe=dataclasses.replace(preconditioner.probe, **probe)
         )
+    # The shift the inverse is re-fitted at is `max(beta, refit_beta_floor)` (`PITZ_REFIT_BETA_FLOOR`):
+    # below the floor the inverse is fitted at the floor while the march solves at its own shift.
+    refit_floor = _environment("REFIT_BETA_FLOOR", float)
+    if refit_floor is not None:
+        preconditioner = dataclasses.replace(preconditioner, refit_beta_floor=refit_floor)
     edits["preconditioner"] = preconditioner
     damping = _environment("TURB_DAMPING", float)
     if damping is not None:
@@ -579,8 +584,8 @@ RAMP_STEPS_PER_STATION = _RAMP_SETTINGS.steps_per_station
 #: same march that never went there. At 2.0 the net is 3.375 / 2 = 1.69 per station, so beta halves
 #: per station and bottoms at 0.062.
 #: ⚠️ Two different floors here, and they are easy to conflate. `CONTROL.beta_min` (0.005) bounds the
-#: shift the OPERATOR is solved with; `PC_BETA_FLOOR` (0.05) floors only the preconditioner's own copy.
-#: The preconditioner sat at 0.05 throughout the collapse and never saw 0.012 -- so the wall is the
+#: shift the OPERATOR is solved with; `PC_BETA_FLOOR` floors only the preconditioner's own copy (0.05 when
+#: this was measured; the file sets none since 2026-10-13). The preconditioner sat at 0.05 throughout the collapse and never saw 0.012 -- so the wall is the
 #: operator/preconditioner MISMATCH opening up, not a shift the V-cycle cannot invert. And the
 #: mismatch's size is not the discriminator either: this same march converged at beta = 0.005 against
 #: the same 0.05 preconditioner (a 10x mismatch) with alpha = 1.000, where 4.2x was fatal mid-ramp.

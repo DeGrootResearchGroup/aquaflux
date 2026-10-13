@@ -407,14 +407,44 @@ and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 
 ("The shift floor sets the target station's rate"); the built control is in `solve-globalization.md`.
 ⚠️ An earlier version of this entry quoted the march log's wall-clock column as solver work ("1036 raw
 solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
-**Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
-1-8 cycles per released step by the probe (most of the released steps' extra cost -- on bfs3d the two
-released steps cost 12 and 15 cycles against 4-5 at the floor); (b) whether bfs3d's `case.yaml` should
+**(a) Re-fitting the inverse at the released shift: CLOSED on pitzDaily and bfs3d (2026-10-13), worth one cycle on pitzDaily and none on bfs3d.**
+pitzDaily `case.yaml` at `14e3963` (residual stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 3 x 12 stations, `release_floor` 1e-4, field split `SimpleSmoothed` (frozen) / `JacobiSmoothed`), only `PITZ_REFIT_BETA_FLOOR` varied; Linux x86_64, 4 cores, jax 0.11.2, one run each, back to back:
+
+| `refit_beta_floor` | steps | cycles | final `\|R\|` | wall (indicative) |
+|---|---|---|---|---|
+| 0.05 (shipped) | 20 | 154 | 1.7e-6 | 643 s |
+| 1e-4 (tracks every shift, released ones too) | 19 | 144 | 3.5e-7 | 534 s |
+| 0.005 (tracks to `beta_min`, not the release) | 19 | 143 | 3.4e-7 | 546 s |
+
+All `x_r/h` 8.0686, no retries. The 1e-4 and 0.005 arms are identical through step 17 and differ by one
+cycle at step 18: since #290 the release fires at step 17 of 19, so there is nothing left for it to save
+(the replay's 1-8 cycles per step were taken on the 31-step march of 2026-10-10). Ledger entry: "Re-fitting
+at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
+at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
+step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
+hierarchy does not evidently need it. **pitzDaily's file drops the floor** (2026-10-13, owner's decision;
+none is the 1e-4 arm exactly, since the shift never goes below `release_floor`; confirmed by a march of
+the file as committed, whose step table matches the 1e-4 arm's line for line). ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
+are deterministic.
+
+**bfs3d, measured 2026-10-13 by the owner (comment on #709):** `validation/bfs3d_openfoam/compare.py` at `7eccaea5`, `case.yaml` as shipped (`lineax` stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 1.5 x 12, release as in the table, `SimpleSmoothed` / `JacobiSmoothed`) with a local, unpushed `BFS3D_REFIT_BETA_FLOOR` override; Apple M3 Pro, 11 cores, Python 3.13.4, jax 0.10.2, one run each, back to back, nothing else running; no step redone in any run:
+
+| `refit_beta_floor` | release | steps | cycles | re-fit time | final `\|R\|` | solve wall |
+|---|---|---|---|---|---|---|
+| 0.05 (shipped) | off | 36 | 166 | 420 s | 9.94e-6 | 1197 s |
+| 0.005 | off | 33 | 155 | 336 s | 7.24e-6 | 1079 s |
+| none | off | 33 | 155 | 333 s | 7.24e-6 | 1086 s |
+| 0.005 | 1e-4 | 29 | 139 | 347 s | 7.00e-6 | 1019 s |
+| none | 1e-4 | 29 | 141 | 345 s | 6.47e-7 | 1027 s |
+
+`x_r/h` 8.361 in all; the 0.05 arm reproduces #699's baseline (36 / 166). Dropping the floor saves 3 steps and 11 cycles (7 %, as on pitzDaily) and ~10 % of the wall. 0.005 and none are identical without the release (the shift never goes below `beta_min` there). **(a) on bfs3d is worth nothing:** with the release, the two arms are identical through step 27, the release fires at step 28, both finish at step 29, and no floor costs 2 more cycles for a deeper final `|R|`. Both released steps cost 3 cycles each, not #678's 12 and 15 (measured before #290/#694 changed this march). bfs3d's file still ships 0.05 and no release; dropping the floor, and adding the release, are both measured wins there -- the owner's call.
+
+(b) whether bfs3d's `case.yaml` should
 release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
 173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss under bfs3d's
 lineax stop but a win under pitzDaily's `stop: residual` (25 steps / 195 cycles / 792 s, the best arm;
 log, "bfs3d: the release, `grow` 3 and the settle-ended ramp") -- the owner's call, and it is a choice of
-the stop as much as of the release; (c) whether the library default
+the stop as much as of the release; on the post-#290 march with no refit floor (table above) it saves 4 steps, 16 cycles and 60 s; (c) whether the library default
 should release, after the three slow tests #645 names (a loose terminal step is what they measure).
 pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 

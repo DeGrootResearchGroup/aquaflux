@@ -212,7 +212,8 @@ or whose blocks are unnamed: `RowScaledNorm` /
       was right and the expectation wrong.
     - **⚠️ TWO DIFFERENT FLOORS, and conflating them mis-states the mechanism.** `beta_min`
       (on the step control) floors the shift the **operator** is solved with; `refit_beta_floor` (on the
-      preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case) floors only the preconditioner's
+      preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case when measured; pitzDaily's file sets none since
+      2026-10-13) floors only the preconditioner's
       **copy** — `pc_beta = max(beta, refit_beta_floor)` — so the V-cycle stays in a regime it inverts well
       while the solved system keeps the small shift it needs for pseudo-transient progress. During the
       collapse the preconditioner was built at **0.05 throughout and never saw 0.012**, so this is not
@@ -247,8 +248,10 @@ or whose blocks are unnamed: `RowScaledNorm` /
       came from conflating the two floors above: `beta_min = 0.005` is demonstrably *fine* — the march
       converges there, comfortably, at the settled state. What the collapse locates is the level at
       which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
-      value chosen against no recorded evidence on this case. Whether 0.05 is right, and whether the
-      floor should track the ramp rather than sit still, is open and unmeasured.
+      value chosen against no recorded evidence on this case. **Measured 2026-10-13 and dropped from
+      pitzDaily's file:** with no refit floor the shipped march takes 19 steps / 144 cycles against 20 /
+      154 at 0.05, same `x_r/h` (`.claude/notes/solve-open-directions.md` 11a). bfs3d still ships 0.05,
+      though without it its march takes 33 steps / 155 cycles against 36 / 166 (owner's runs, #709).
       ⚠️ **"Fine" means stable, not fast (measured 2026-10-10).** `beta_min = 0.005` is reached at ramp
       step 13 and then sets the whole target station's rate: a dual-time step at a fixed shift contracts
       each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the
