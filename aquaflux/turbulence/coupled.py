@@ -2624,6 +2624,7 @@ def solve_coupled(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    stop_step: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
     resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     **strategy_kwargs: object,
@@ -2914,6 +2915,7 @@ def solve_coupled(
         station_step=station_step,
         resume=resume,
         on_residuals=on_residuals,
+        stop_step=stop_step,
         caller="solve_coupled",
     )
     root = root_adjoint(

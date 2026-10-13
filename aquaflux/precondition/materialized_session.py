@@ -577,6 +577,21 @@ class MaterializedSession:
             self._hook.rebind(self._problem.assembler)
         return step
 
+    def judged_on(self, assembler: object) -> Callable[[NewtonStrategy], NewtonStrategy]:
+        """PROTOTYPE (#701, E6): ``held -> held`` with ``assembler``'s shift policy, for a measure only.
+
+        The step on ``assembler`` is built once, at the state the held steps were built at, on first use.
+        """
+        built: list[NewtonStrategy] = []
+
+        def judged(held: NewtonStrategy) -> NewtonStrategy:
+            if not built:
+                problem = self._problem.with_assembler(assembler)
+                built.append(self._step(self._reference_state, self._repointing._march, problem))
+            return held.preconditioned_as(built[0])
+
+        return judged
+
     def rebind(self, assembler: object, *, follow_shift: bool = True) -> None:
         # PROTOTYPE (#701, E5): `follow_shift=False` re-points the problem and forces the inverse's
         # re-fit, but leaves the held step's shift policy (and so the measure built from it) as it is.
@@ -599,13 +614,15 @@ class MaterializedSession:
         step = self._step(state, march)
         return step if self._on_build is None else self._on_build(step)
 
-    def _step(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
+    def _step(
+        self, state: jnp.ndarray, march: dict, problem: MaterializedProblem | None = None
+    ) -> NewtonStrategy:
         """Fit the inverse (once) and assemble the step around it.
 
         Not instrumented: a re-pointing grafts only this step's problem-built fields onto the step the
         march holds, which ``on_build`` already instrumented when it was built.
         """
-        problem = self._problem
+        problem = self._problem if problem is None else problem
         bound = problem.bind_march(march)
         if _is_traced((problem.assembler, state)):
             raise ValueError(

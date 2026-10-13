@@ -967,12 +967,14 @@ def solve_reynolds_ramp(
     shared = _shared_session(passed, first, share_block=True)
     passed = _with_session(passed, shared)
     shared.rebind(first)
-    rebind = shared.rebind
+    rebind, stop = shared.rebind, {}
     if isinstance(shared, MaterializedSession):
-        # PROTOTYPE (#701, E5): hold the anchor's shift through the ramp stations and take the target's
-        # once, on arrival. The target is the case's own assembler, by identity.
+        # PROTOTYPE (#701, E6): hold the anchor's shift for the whole march, and judge the stop in the
+        # target's row scales.
         def rebind(assembler: CoupledRANS) -> None:
-            shared.rebind(assembler, follow_shift=assembler is coupled)
+            shared.rebind(assembler, follow_shift=False)
+
+        stop = {"stop_step": shared.judged_on(coupled)}
 
     homotopy = ViscosityRampHomotopy(
         coupled,
@@ -983,7 +985,7 @@ def solve_reynolds_ramp(
         companion=companion,
     )
     return solve_coupled(
-        coupled, *seed_fields, homotopy=homotopy, **merged_march_options(passed, extra)
+        coupled, *seed_fields, homotopy=homotopy, **stop, **merged_march_options(passed, extra)
     )
 
 

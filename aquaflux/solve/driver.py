@@ -249,6 +249,7 @@ def staged_march(
     retry: RetryPolicy = NO_RETRIES,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
+    stop_step: Callable | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
     resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
@@ -374,6 +375,7 @@ def staged_march(
             homotopy=homotopy,
             station_step=station_step,
             on_residuals=on_residuals,
+            stop_step=stop_step,
         )
         state = result.state
         control_state = result.control_state
@@ -387,7 +389,11 @@ def staged_march(
         strategy = source.refresh(state, strategy)
 
     # Judge convergence in the measure the march steered by, built at the state reached.
-    residual_norm = float(norm_builder(strategy, state)(residual_fn(state)))
+    residual_norm = float(
+        norm_builder(strategy if stop_step is None else stop_step(strategy), state)(
+            residual_fn(state)
+        )
+    )
     target = convergence.atol + convergence.rtol * reference_norm
     arrived = homotopy is None or result.converged
     if not (math.isfinite(residual_norm) and residual_norm <= target and arrived):
