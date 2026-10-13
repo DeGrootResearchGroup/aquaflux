@@ -1019,22 +1019,25 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      **Measured on pitzDaily (shipped `case.yaml`, 2026-10-08, jax 0.11.2, CPU; `PITZ_FORWARD_RTOL`), the
      march is not sensitive to tightening and IS to loosening:** `rtol` 0.1 / 0.3 / 0.6 / 0.9 → 245 / 203 /
      166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
-     changed (bfs3d, where it was calibrated, is unmeasured); see `solve-refuted-directions.md`'s
-     Eisenstat–Walker entry and the open-directions note.
+     changed. On bfs3d (where it was calibrated), under the residual stop at `refresh_on_cycles` 4
+     (2026-10-12, #699, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each), 0.1 / 0.3 / 0.6 took 774 /
+     787 / 590 s at the same `x_r/h`, with one retry at 0.6 only; moving 0.3 is the owner's call (#637).
+     See `solve-refuted-directions.md`'s Eisenstat–Walker entry and the open-directions note's 4b.
      ⚠️ **What the stop costs, replayed (2026-10-08, `krylov_recycling_probe.py`):** a solve reported as
      "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
      test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
      march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
      **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
      iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
-     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). **Selected by
+     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b); on bfs3d (#699,
+     2026-10-12, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each) 810 s at `refresh_on_cycles` 3 and
+     787 s at 4 against the shipped stop's 1197 s, same `x_r/h`, no retry (refresh 2 added one). **Selected by
      `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
      case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
      regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
      still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
      is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
-     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, bfs3d is
-     unmeasured, and forced as the default it fails three slow tests (linear convergence at the end of
+     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, and forced as the default it fails three slow tests (linear convergence at the end of
      the march, and one Reynolds-continuation march that goes erratic; #645). **pitzDaily's `case.yaml`
      opts in** (`stop: residual`, 2026-10-09; `refresh_on_cycles` 2 then, 3 since a cost re-fit ends the step, #290, 2026-10-11 — see `.claude/notes/solve-open-directions.md` 6b). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
