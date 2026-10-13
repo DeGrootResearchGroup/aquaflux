@@ -39,11 +39,12 @@ import scipy.sparse as sp
 from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
+    StructuralPatterns,
     _CsrOperator,
     _ones,
-    _onto_pattern,
     _operator_matvec,
     _smoothed_ops,
+    _structured,
 )
 
 __all__ = ["SimpleSmoothedInverse", "block_approximate_inverse"]
@@ -153,6 +154,7 @@ def _simple_pieces(
     block_splitting: bool = False,
     simplec: bool = False,
     report: Callable[[str], None] = lambda _message: None,
+    patterns: StructuralPatterns | None = None,
 ) -> tuple[_SimplePieces, sp.csr_matrix]:
     """Form one level's SIMPLE pieces from that level's assembled operator.
 
@@ -160,6 +162,10 @@ def _simple_pieces(
     matrix -- which is the property that decides whether a SIMPLE relaxation can be a smoother at all.
     The assembler-built Schur cannot: it needs the mesh, the Rhie--Chow coefficients and the boundary
     closures, none of which a coarse level has.
+
+    ``patterns``, when given, keeps the structural patterns of ``D⁻¹G`` and the Schur complement
+    between calls on a level whose blocks store the same entries (:class:`StructuralPatterns`), so a
+    re-fit on a frozen coarsening computes each once.
 
     Returns
     -------
@@ -206,9 +212,21 @@ def _simple_pieces(
     # out exactly zero, so stored as computed their entry counts -- array shapes in the traced pieces --
     # would move with the operator's values, and a refit on a fixed coarsening would retrace whatever
     # compiled program holds them.
-    dg = _onto_pattern(f_inverse_matrix @ g_block, _ones(f_inverse_matrix) @ _ones(g_block))
+    dg = _structured(
+        f_inverse_matrix @ g_block,
+        (f_inverse_matrix, g_block),
+        lambda: _ones(f_inverse_matrix) @ _ones(g_block),
+        patterns,
+        ("dg", a.shape[0]),
+    )
     c_block = a[nv:, nv:]
-    schur = _onto_pattern(c_block - d_block @ dg, _ones(c_block) + _ones(d_block) @ _ones(dg))
+    schur = _structured(
+        c_block - d_block @ dg,
+        (c_block, d_block, dg),
+        lambda: _ones(c_block) + _ones(d_block) @ _ones(dg),
+        patterns,
+        ("schur", a.shape[0]),
+    )
     # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
     # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
     # which side carries more nonzeros. Printed rather than assumed.
@@ -689,6 +707,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
                 self._block_splitting,
                 self._simplec,
                 report=self._report,
+                patterns=self._patterns,
             )
         sizes = ", ".join(
             f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.data.shape[0] / 1e6:.1f}M nnz"

@@ -2171,6 +2171,40 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   parametrized over the three prolongation forms; each fix mutation-checked on its own (no structural
   graph fails all three, an unpatterned standard or symmetric-part branch fails its own). A nonzero
   threshold still reads values, so a rebuild there is shape-stable only under `frozen_coarsening`.
+  ⚠️ **Those structural patterns doubled the refactor phase of a refit, and a cache now pays for them
+  once (`StructuralPatterns`, 2026-10-13).** Each pattern is the same product recomputed over
+  `_ones` copies of its operands, so every Galerkin operator and every SIMPLE `D⁻¹G`/Schur cost two
+  products plus a key search on every refit. Measured with `validation/refit_cost_probe.py` (pitzDaily
+  `state-00031`, shift 0.05, leading block frozen on both trees, best of 3, Linux x86_64, 4 cores, jax
+  0.11.2): the split's `refactor_block` took 0.88 s at `61a14308` (before #290) and 1.06 s on `main`
+  (leading block 0.50 → 0.69 s); bfs3d's refactor phase went ~2.8 → ~5.3 s per re-fit (#699 run 0, not
+  re-measured here). `StructuralPatterns` (`multigrid.py`) holds one pattern per slot (call site and
+  level), keyed by a checksum of the operands' stored patterns, so a pattern is recomputed only when an
+  operand's pattern moved; a collision can only hand `_Structure.store` a pattern missing an entry,
+  which it refuses, so it cannot change an answer. Each `HierarchyBlockInverse` owns one
+  (`self._patterns`) and passes it to `SmoothedHierarchy.refit(a, patterns=)` and, for the SIMPLE
+  smoother, to `_simple_pieces(patterns=)`; `None` computes every pattern afresh. Same probe after: split
+  **0.83 s**, leading block **0.48 s**. ⚠️ **On bfs3d that recovered under half** (#708 comment, `state-00036`,
+  shift 0.05, best of 5, M3 Pro, jax 0.10.2: split 2.46 s before #290, 4.80 s on `main`, 3.75 s), because
+  `_Structure.store` then searched every key of the pattern (`np.searchsorted`, 1.42 s of 1.76 s; the
+  7.1M-entry Schur complement dominates). So `_Structure` also remembers where the last operator's
+  entries went, reused while the new operator's `indptr` and `indices` are EXACTLY equal to the last
+  one's (compared, not checksummed: a hit skips the subset check, so a collision would scatter values
+  silently); a scipy product that drops an exact zero changes them and is located afresh. Unsorted
+  operators are placed by key, so the sort before the search is gone too. Pinned by
+  `test_a_structure_reuses_positions_only_for_identical_stored_entries` (mutation-checked three ways:
+  row pointer only, always reuse, never reuse). **bfs3d after it** (#708 comment, same probe, state and
+  machine, `e3c61519` re-run the same session as the control at 3.78 s): split **2.03 s**, leading block
+  1.71 s, trailing 0.20 s -- 2.4x `main` and 0.43 s below the pre-#290 2.46 s, the patterns and positions
+  now being computed once where before #290 every refit did its own sparse bookkeeping; what remains is
+  the products (`__matmul__` 1.28 s) and the spectral-radius estimates. Refit only; no bfs3d march on it. A hierarchy BUILD does not use it (a rebuild re-derives the
+  prolongations, so the Galerkin operands change); the pitzDaily trailing block, unfrozen, still
+  rebuilds and still pays (0.25 s). Pinned by
+  `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold` and
+  `test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_computing_them_would` (no
+  `_ones` call on a second frozen refresh, and every leaf equal to an uncached inverse's), mutation-checked
+  five ways (always reuse, never reuse, the inverse or the smoother not passing the cache, one slot for
+  every level).
   **Caveat — lAIR does NOT get this for
   free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
   thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and
