@@ -1521,20 +1521,14 @@ def _coupled_shift_policy(
     # by measuring, not by pattern-matching the helper.
     momentum = coupled.momentum.with_eddy_viscosity(closure.nu_t)
     # The coupled flow block uses the convection-aware velocity AMG, not the viscous multilevel default:
-    # a RANS case is high-Reynolds, and the Peclet-blind viscous block produces a poor
-    # momentum-block direction once the flow separates (the shifted Newton direction it returns drifts
-    # away from the true one on a developed separated field, and the march stalls). Its convective
-    # linearization is frozen at this policy's own reference flow, like every other frozen operator
-    # here, and stays valid there, so no per-sweep refresh is needed. The builder's own default, the
-    # uniform flow the boundary conditions imply, is far from divergence-free wherever the duct changes
-    # section, and in a contracting one its first coarse level loses positivity, so the hierarchy
-    # cannot be built. A reference flow at rest (a closed domain's potential flow) carries no
-    # convective scale to freeze at, and takes that default instead. Overridable through a
-    # `BlockDiagonal` spec's fields, which arrive here as `flow_block_options` and are pinned to
-    # `BlockPreconditioner.build`'s keywords, so no name it does not take can reach it.
-    # `build_flow_block=False` leaves it out entirely: a monolithically preconditioned step reads this
-    # policy for its shift diagonal and supplies its own inverse, so the block built here would never be
-    # applied.
+    # a RANS case is high-Reynolds, and the Peclet-blind viscous block produces a poor momentum-block
+    # direction once the flow separates (the shifted Newton direction drifts away from the true one on
+    # a developed separated field, and the march stalls). It is frozen at the reference flow, or, for a
+    # reference at rest, at the builder's uniform plug (which cannot build in a contracting duct), and
+    # needs no per-sweep refresh. Overridable through a `BlockDiagonal` spec's fields, which arrive here
+    # as `flow_block_options`, pinned to `BlockPreconditioner.build`'s keywords. `build_flow_block=False`
+    # leaves it out: a monolithic step reads this policy for its shift diagonal and supplies its own
+    # inverse, so the block built here would never be applied.
     #
     # The pressure Schur is left at BlockPreconditioner's own default (a_P-scaled SIMPLE), not the
     # mass-matrix scaling this used to hardcode, which is not needed at the scale this preconditioner is
