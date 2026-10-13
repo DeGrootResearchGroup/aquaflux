@@ -294,7 +294,7 @@ def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
         print(
             f"  [{name}] {rung:<6} step {report.step:>3d}  |R| {report.residual_norm:.4e}  "
             f"ratio {report.residual_ratio:.3e}  alpha {report.alpha:>8.4g}  "
-            f"cyc {report.cycles:>3d}  esc {report.escalations}",
+            f"cyc {report.raw_cycles:>3d}  esc {report.escalations}",
             flush=True,
         )
 

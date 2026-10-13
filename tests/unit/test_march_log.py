@@ -28,7 +28,7 @@ from aquaflux.solve.march_log import (
 
 
 def _report(**kwargs) -> StepReport:
-    fields = dict(step=0, cycles=10, residual_norm=2.0e-2, residual_ratio=4.0e-2, alpha=1.0)
+    fields = dict(step=0, raw_cycles=10, residual_norm=2.0e-2, residual_ratio=4.0e-2, alpha=1.0)
     return StepReport(**(fields | kwargs))
 
 
@@ -150,9 +150,9 @@ def test_a_redone_step_is_flagged() -> None:
 def test_cumulative_cycles_and_steps_run_across_phases() -> None:
     """A phase (a continuation rung) relabels the log; it does not restart the running totals."""
     logger, buffer = _log()
-    logger.on_step(_report(cycles=10))
+    logger.on_step(_report(raw_cycles=10))
     logger.phase("rung", total=3)
-    logger.on_step(_report(cycles=5))
+    logger.on_step(_report(raw_cycles=5))
 
     assert any("rung 1/3" in line for line in buffer.getvalue().splitlines())
     assert _step_rows(buffer)[1]["step"] == "2"
@@ -166,7 +166,7 @@ def test_solve_cost_is_split_into_inner_count_and_corrected_cycles() -> None:
     is really 15 cycles over 3 inner iterations, not 21.
     """
     logger, buffer = _log()
-    logger.on_step(_report(cycles=21, inner_iterations=3))
+    logger.on_step(_report(raw_cycles=21, inner_iterations=3))
 
     row = _step_rows(buffer)[0]
     assert row["in"] == "3"
@@ -180,7 +180,7 @@ def test_a_step_whose_count_is_entirely_offset_reads_as_its_real_cost() -> None:
     number is dominated by the offset rather than by any real work.
     """
     logger, buffer = _log()
-    logger.on_step(_report(cycles=6, inner_iterations=2))
+    logger.on_step(_report(raw_cycles=6, inner_iterations=2))
 
     assert _step_rows(buffer)[0]["cyc"] == "2"
 

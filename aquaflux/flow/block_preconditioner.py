@@ -266,7 +266,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
     symmetric diagonal rescaling ``Ŝ_cur⁻¹ ≈ D⁻¹ Ŝ_ref⁻¹ D⁻¹``, ``D = sqrt(diag_cur/diag_ref)`` — exact
     for a uniform rescale, and capturing per-cell scale (including convection) otherwise.
 
-    Regime limit (measured, and the reason ``v_cycles`` is not a high-Reynolds lever): with the
+    Regime limit (measured, and the reason ``cycles`` is not a high-Reynolds lever): with the
     ``"msimple"`` scaling this is a **constant-coefficient** pressure Poisson — a near-Stokes
     approximation of the true Schur complement that degrades as convection strengthens. Once the flow is
     convection-dominated (high Reynolds number, recirculation) that *approximation* — not its inversion —
@@ -279,7 +279,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
 
     geometry: _SchurGeometry
     hierarchy: SmoothedHierarchy
-    v_cycles: int = eqx.field(static=True)
+    cycles: int = eqx.field(static=True)
 
     @classmethod
     def build(
@@ -289,7 +289,7 @@ class SmoothedAmgSchur(InnerSchurSolver):
         nb_e: np.ndarray,
         interior: np.ndarray,
         n_cells: int,
-        v_cycles: int,
+        cycles: int,
         reference_diagonal: jnp.ndarray | None = None,
         strength_threshold: float = 0.0,
     ) -> SmoothedAmgSchur:
@@ -320,13 +320,13 @@ class SmoothedAmgSchur(InnerSchurSolver):
         if geometry.pressure_pin is not None:  # closed domain: regularize by decoupling the pin
             a = decouple_dof(a, geometry.pressure_pin)
         hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
-        return cls(geometry, hierarchy, v_cycles)
+        return cls(geometry, hierarchy, cycles)
 
     def apply(self, a_p: jnp.ndarray) -> _PressureSolve:
         # The reference hierarchy carries the boundary (outlet) stiffness in its diagonal, and
         # `geometry.diagonal` includes it, so the symmetric rescaling stays consistent.
         return _symmetric_rescaled(
-            lambda rp: smoothed_multigrid_cycles(self.hierarchy, rp, cycles=self.v_cycles),
+            lambda rp: smoothed_multigrid_cycles(self.hierarchy, rp, cycles=self.cycles),
             self.hierarchy.levels[0].diagonal,
             self.geometry.diagonal(a_p),
         )
@@ -356,7 +356,7 @@ class _RescaledAmgVelocity(VelocityBlockSolver):
 
     hierarchy: SmoothedHierarchy | AirHierarchy
     dim: int = eqx.field(static=True)
-    v_cycles: int = eqx.field(static=True)
+    cycles: int = eqx.field(static=True)
 
     @abc.abstractmethod
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
@@ -387,7 +387,7 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
         nb_e: np.ndarray,
         interior: np.ndarray,
         n_cells: int,
-        v_cycles: int,
+        cycles: int,
         strength_threshold: float = 0.0,
     ) -> SmoothedAmgVelocity:
         face_cells = geometry.face_cells
@@ -409,11 +409,11 @@ class SmoothedAmgVelocity(_RescaledAmgVelocity):
             boundary_diagonal=np.asarray(boundary_diagonal),
         ).assemble()
         hierarchy = build_smoothed_hierarchy(a, strength_threshold=strength_threshold)
-        return cls(hierarchy, geometry.dim, v_cycles)
+        return cls(hierarchy, geometry.dim, cycles)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the smoothed-aggregation V-cycle."""
-        return smoothed_multigrid_cycles(self.hierarchy, b, cycles=self.v_cycles)
+        return smoothed_multigrid_cycles(self.hierarchy, b, cycles=self.cycles)
 
 
 def _convection_operator(
@@ -470,7 +470,7 @@ class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
         nb_e: np.ndarray,
         interior: np.ndarray,
         n_cells: int,
-        v_cycles: int,
+        cycles: int,
         reference_mdot: jnp.ndarray,
         *,
         sweeps: int = 2,
@@ -479,14 +479,14 @@ class TwoLevelConvectionVelocity(_RescaledAmgVelocity):
     ) -> TwoLevelConvectionVelocity:
         a = _convection_operator(geometry, owner_e, nb_e, interior, n_cells, reference_mdot)
         hierarchy = build_convection_hierarchy(a, strength_threshold=strength_threshold)
-        return cls(hierarchy, geometry.dim, v_cycles, sweeps, smoother_weight)
+        return cls(hierarchy, geometry.dim, cycles, sweeps, smoother_weight)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the two-level V-cycle."""
         return convection_multigrid_cycles(
             self.hierarchy,
             b,
-            cycles=self.v_cycles,
+            cycles=self.cycles,
             sweeps=self.sweeps,
             smoother_weight=self.smoother_weight,
         )
@@ -508,15 +508,15 @@ class AirConvectionVelocity(_RescaledAmgVelocity):
         nb_e: np.ndarray,
         interior: np.ndarray,
         n_cells: int,
-        v_cycles: int,
+        cycles: int,
         reference_mdot: jnp.ndarray,
     ) -> AirConvectionVelocity:
         a = _convection_operator(geometry, owner_e, nb_e, interior, n_cells, reference_mdot)
-        return cls(build_air_hierarchy(a), geometry.dim, v_cycles)
+        return cls(build_air_hierarchy(a), geometry.dim, cycles)
 
     def _inner_solve(self, b: jnp.ndarray) -> jnp.ndarray:
         """One momentum-component inner solve: the lAIR V-cycle."""
-        return air_multigrid_cycles(self.hierarchy, b, cycles=self.v_cycles)
+        return air_multigrid_cycles(self.hierarchy, b, cycles=self.cycles)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -562,7 +562,7 @@ class ViscousMultilevel(VelocityBlock):
             inputs.nb_e,
             inputs.interior,
             inputs.n_cells,
-            inputs.v_cycles,
+            inputs.cycles,
             strength_threshold=inputs.strength_threshold,
         )
 
@@ -607,7 +607,7 @@ class _ConvectionVelocityBlock(VelocityBlock):
             inputs.nb_e,
             inputs.interior,
             inputs.n_cells,
-            inputs.v_cycles,
+            inputs.cycles,
             reference_mdot,
             **self._strategy_settings(inputs),
         )
@@ -804,7 +804,7 @@ class _StrategyInputs(NamedTuple):
         The mesh's interior-edge connectivity (`mesh.face_cells.interior_edges()` / `.interior`).
     n_cells : int
         Cells in the mesh.
-    v_cycles : int
+    cycles : int
         Multigrid V-cycles per apply.
     strength_threshold : float
         Strength-of-connection threshold for the AMG aggregation.
@@ -818,7 +818,7 @@ class _StrategyInputs(NamedTuple):
     nb_e: np.ndarray
     interior: np.ndarray
     n_cells: int
-    v_cycles: int
+    cycles: int
     strength_threshold: float
     assembler: MomentumContinuity
     reference_state: jnp.ndarray | None
@@ -840,7 +840,7 @@ def _build_schur(
         inputs.nb_e,
         inputs.interior,
         inputs.n_cells,
-        inputs.v_cycles,
+        inputs.cycles,
         reference_diagonal=schur_mass_diagonal,
         strength_threshold=inputs.strength_threshold,
     )
@@ -1081,7 +1081,7 @@ class BlockPreconditioner(eqx.Module):
         schur_scaling: str = "simple",
         composition: str = "triangular",
         mass_scale: float | None = None,
-        v_cycles: int = 1,
+        cycles: int = 1,
         strength_threshold: float = 0.0,
     ) -> BlockPreconditioner:
         """Build the block-triangular preconditioner for ``assembler``.
@@ -1134,7 +1134,7 @@ class BlockPreconditioner(eqx.Module):
             from the **real** momentum diagonal at the current flow — which encodes the true velocity
             / density / viscosity scale, so it matches the SIMPLE Schur magnitude with no assumption
             on the characteristic speed. Pass an explicit value only to pin ``k`` (e.g. for a study).
-        v_cycles : int
+        cycles : int
             Multigrid V-cycles per apply. Raising it does **not** rescue the high-Reynolds coupled solve:
             at high cell Peclet the block's accuracy is limited by the *Schur approximation*, not by how
             well that approximation is inverted, so extra velocity cycles leave the preconditioned error
@@ -1194,7 +1194,7 @@ class BlockPreconditioner(eqx.Module):
             nb_e,
             interior,
             n_cells,
-            v_cycles,
+            cycles,
             strength_threshold,
             assembler,
             reference_state,

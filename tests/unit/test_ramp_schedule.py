@@ -9,7 +9,7 @@ from aquaflux.solve import RampPosition, RampSchedule, StepReport
 def _report(step: int, *, arrived: bool = False, alpha: float = 0.5) -> StepReport:
     """A step report carrying what a ramp's end test may read, and nothing else of note."""
     return StepReport(
-        step=step, cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=alpha, arrived=arrived
+        step=step, raw_cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=alpha, arrived=arrived
     )
 
 

@@ -218,8 +218,8 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
     def gnorm(p: jnp.ndarray) -> float:
         return float(jnp.linalg.norm(_residual(p, theta) + (p - phi0)))
 
-    phi1, cyc1 = (lambda o: (o.phi, o.cycles))(run(1))
-    phi4, cyc4 = (lambda o: (o.phi, o.cycles))(run(4))
+    phi1, cyc1 = (lambda o: (o.phi, o.raw_cycles))(run(1))
+    phi4, cyc4 = (lambda o: (o.phi, o.raw_cycles))(run(4))
     assert gnorm(phi4) < gnorm(phi1)  # more inner iterations converge the implicit step further
     assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
 
@@ -329,8 +329,8 @@ def test_dual_time_cycle_budget_caps_the_inner_loop() -> None:
 
     out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.linear_solver())
     out_b = budgeted.stepper()(residual_fn, phi0, r0, budgeted.linear_solver())
-    cyc_u, inner_u = out_u.cycles, out_u.inner_iterations
-    cyc_b, inner_b = out_b.cycles, out_b.inner_iterations
+    cyc_u, inner_u = out_u.raw_cycles, out_u.inner_iterations
+    cyc_b, inner_b = out_b.raw_cycles, out_b.inner_iterations
 
     assert int(inner_u) == 20  # unreachable target -> ran the full inner budget
     assert int(cyc_u) > 5  # accumulated more than the budget without a cap (sanity for the test)
@@ -380,7 +380,7 @@ def test_a_cut_short_step_reports_that_it_did_not_reach_its_target() -> None:
 
     assert not bool(cut_out.reached_target)  # an unreachable target, stopped by the budget
     assert bool(met_out.reached_target)  # a loose target the inner loop actually met
-    assert int(met_out.max_inner_cycles) <= int(met_out.cycles)  # one solve, not their sum
+    assert int(met_out.max_inner_cycles) <= int(met_out.raw_cycles)  # one solve, not their sum
 
 
 def test_positive_block_limit_keeps_a_constrained_field_off_zero() -> None:
@@ -654,7 +654,7 @@ def test_abort_above_inner_cycles_stops_a_doomed_attempt_early() -> None:
 
     assert int(out_u.inner_iterations) == 20  # unreachable target -> the full inner budget
     assert int(out_a.inner_iterations) == 1  # stopped as soon as one solve crossed the threshold
-    assert int(out_a.cycles) < int(out_u.cycles)
+    assert int(out_a.raw_cycles) < int(out_u.raw_cycles)
     # Cut short, so the march must still see it as not having met its own criterion and escalate.
     assert not bool(out_a.reached_target)
 
@@ -709,7 +709,7 @@ def test_abort_above_inner_cycles_none_is_the_unbounded_step() -> None:
     out_d = default.stepper()(residual_fn, phi0, r0, default.linear_solver())
     out_e = explicit.stepper()(residual_fn, phi0, r0, explicit.linear_solver())
     assert jnp.array_equal(out_d.phi, out_e.phi)
-    assert int(out_d.cycles) == int(out_e.cycles)
+    assert int(out_d.raw_cycles) == int(out_e.raw_cycles)
 
 
 def test_the_march_pushes_its_discard_threshold_into_the_step() -> None:
@@ -886,7 +886,7 @@ def test_abort_below_alpha_stops_an_attempt_that_can_no_longer_move() -> None:
 
     assert int(out_u.inner_iterations) == 20  # runs the full budget going nowhere
     assert int(out_a.inner_iterations) == 1  # stops as soon as the length collapses
-    assert int(out_a.cycles) < int(out_u.cycles)
+    assert int(out_a.raw_cycles) < int(out_u.raw_cycles)
     # Cut short, so the march must still read it as not having met its own criterion and escalate.
     assert not bool(out_a.reached_target)
 

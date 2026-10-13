@@ -648,7 +648,7 @@ def test_the_march_reports_progress_without_a_refresh_trigger(case) -> None:
 
     assert seen, "an instrumented solve produced no step reports"
     assert [report.step for report in seen] == list(range(len(seen)))
-    assert all(report.cycles > 0 for report in seen)
+    assert all(report.raw_cycles > 0 for report in seen)
     # The checkpoint seam carries the state alongside the identical reports.
     assert [step for step, _ in saved] == [report.step for report in seen]
     assert saved[-1][1].shape == coupled.pack_state(flow_ws, k_ws, omega_ws).shape
@@ -696,7 +696,7 @@ def test_a_refresh_is_observed_as_two_reported_segments(case) -> None:
 
     # Every reported step carries a real measurement, so a consumer reading these as a cost signal
     # is not seeing the "no measurement" zero that a fully-rejected step would report.
-    assert all(report.cycles > 0 for report in reports)
+    assert all(report.raw_cycles > 0 for report in reports)
     # The march kept descending across the rebuild -- the refresh reshaped the path, not the problem.
     assert post[-1].residual_ratio < pre[0].residual_ratio
 

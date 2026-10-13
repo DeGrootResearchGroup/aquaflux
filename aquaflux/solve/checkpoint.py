@@ -140,7 +140,7 @@ def report_record(report: StepReport) -> dict[str, Any]:
     it came from or how converged it was, so a directory of them is unusable without the log.
 
     Both cycle counts are written, because they answer different questions and using the wrong one is
-    a real mistake rather than a rounding difference. ``cycles`` is the step's whole cost, summed over
+    a real mistake rather than a rounding difference. ``raw_cycles`` is the step's whole cost, summed over
     the dual-time inner loop; ``max_inner_cycles`` is the most any **single** linear solve took, which
     is the inner-count-invariant measure of how hard the *operator* was. A step with many easy inner
     solves outranks a step with one hard one on the first and not on the second -- so a study looking
@@ -155,7 +155,7 @@ def report_record(report: StepReport) -> dict[str, Any]:
     Returns
     -------
     dict
-        ``step``, ``residual_norm``, ``residual_ratio``, ``shift``, ``alpha``, ``cycles``,
+        ``step``, ``residual_norm``, ``residual_ratio``, ``shift``, ``alpha``, ``raw_cycles``,
         ``max_inner_cycles``, ``inner_iterations`` and ``damping_reference``, ready to hand to
         ``numpy.savez``.
     """
@@ -165,7 +165,7 @@ def report_record(report: StepReport) -> dict[str, Any]:
         "residual_ratio": report.residual_ratio,
         "shift": report.shift,
         "alpha": report.alpha,
-        "cycles": report.cycles,
+        "raw_cycles": report.raw_cycles,
         "max_inner_cycles": report.max_inner_cycles,
         "inner_iterations": report.inner_iterations,
         "damping_reference": report.damping_reference,

@@ -996,7 +996,7 @@ class SSTTurbulence(eqx.Module):
                     closure.strain_rate,
                     closure.omega,
                     self.model,
-                    explicit_limiter=self.explicit_production_limiter,
+                    explicit_production_limiter=self.explicit_production_limiter,
                     near_wall=near_wall,
                 ),
                 KDestruction(closure.omega, self.model, near_wall=near_wall),

@@ -875,7 +875,7 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   2026-09-13 (#371), dominated.** The algebraic, nonuniform-mesh stabilized form of Elman, Howle, Shadid,
   Silvester & Tuminaro (2007), the right variant for a Rhie–Chow collocated discretization, with the
   viscosity cancelled. On the coupled solve it lost to msimple 96 vs 13 cycles / 526 vs 38.9 s on one
-  shifted solve at a developed pitzDaily state (block-diagonal `coupled_continuation`, `v_cycles=4`; no
+  shifted solve at a developed pitzDaily state (block-diagonal `coupled_continuation`, `cycles=4`; no
   shift recorded) and ~2.9x on the coupled channel, at identical residual trajectories. Its one claimed
   win, 9 vs 15 GMRES on an *isolated* flow block at Re=1e4, named no mesh or configuration, and nothing
   in validation or any test selected it. The trap it taught survives: under a block-diagonal coupled

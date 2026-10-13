@@ -603,9 +603,9 @@ def _dumping(factory):
         def destroy(self):
             self._inverse.destroy()
 
-    def build(block, n_group_fields):
+    def build(block, n_fields):
         save(block)
-        return Dumping(factory(block, n_group_fields))
+        return Dumping(factory(block, n_fields))
 
     return build
 

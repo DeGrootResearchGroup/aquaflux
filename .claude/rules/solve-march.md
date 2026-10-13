@@ -786,7 +786,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
     — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
     one full solve per candidate instead of one logged run for all of them.
-  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha, drift,
+  - **Reporting seam.** `StepReport(step, raw_cycles, residual_norm, residual_ratio, alpha, drift,
     inner_iterations, shift, escalations, diverged_retry)` + `MarchResult`,
     plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
@@ -806,7 +806,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     Three report fields exist because the log could not otherwise carry them. **`shift`** is the `beta`
     the step was taken at — already read at the construction site for `carry_beta`, and otherwise
     recovered by every driver wrapping the step control. **`escalations` / `diverged_retry`** record
-    whether the step was redone: `cycles` counts only the **accepted** attempt, so a redone step is
+    whether the step was redone: `raw_cycles` counts only the **accepted** attempt, so a redone step is
     indistinguishable from a cheap one, **and a retry mechanism left unconfigured never announces its
     absence** — which is not hypothetical (a bfs3d march ran with `cycle_budget` set but
     the cost threshold at its `None` default, so the beta-escalation never fired and nothing in the log
@@ -815,7 +815,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
     was invisible. Pinned by `tests/unit/test_march_log.py` (synthetic reports, no solve).
   - **Solve cost is reported offset-corrected, split by inner iteration (BUILT).** The raw count is
-    lineax's `num_steps`, which carries **+2 per solve**, so a two-inner step reporting `cycles = 6` did
+    lineax's `num_steps`, which carries **+2 per solve**, so a two-inner step reporting `raw_cycles = 6` did
     two ideal single-cycle solves — the raw number is *entirely* offset and overstates the work
     threefold, worst exactly on the cheap near-root steps where the march's economics are decided.
     `restart_cycles(raw, solves)` in `solve/linear.py` is the one place that offset is stripped;

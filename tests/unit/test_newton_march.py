@@ -98,7 +98,7 @@ class _Cubic(eqx.Module):
 def _report(step: int, cycles: int, ratio: float) -> StepReport:
     """A synthetic report; only ``cycles`` and ``residual_ratio`` drive the trigger."""
     return StepReport(
-        step=step, cycles=cycles, residual_norm=ratio, residual_ratio=ratio, alpha=1.0
+        step=step, raw_cycles=cycles, residual_norm=ratio, residual_ratio=ratio, alpha=1.0
     )
 
 
@@ -260,7 +260,7 @@ def test_march_retries_a_diverged_step_with_the_tighter_solver() -> None:
     )
     assert recovered.converged
     assert jnp.allclose(recovered.state, 0.0, atol=1e-8)
-    assert recovered.reports[-1].cycles == 6  # accepted the tight retry, not the loose attempt
+    assert recovered.reports[-1].raw_cycles == 6  # accepted the tight retry, not the loose attempt
 
 
 def test_march_does_not_retry_a_finite_step() -> None:
@@ -480,7 +480,7 @@ def test_repeated_steps_reuse_the_compiled_march_step() -> None:
 def _drift_history(drifts: list[float]) -> list[StepReport]:
     """A synthetic history in which only the drift varies -- the drift trigger reads nothing else."""
     return [
-        StepReport(step=i, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, drift=d)
+        StepReport(step=i, raw_cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, drift=d)
         for i, d in enumerate(drifts)
     ]
 
@@ -502,7 +502,7 @@ def test_drift_trigger_never_fires_without_a_drift_measure() -> None:
     """Reports default to ``drift = 0.0`` -- "not measured" -- so the trigger fails closed."""
     trigger = CoefficientDriftTrigger(threshold=0.5, warmup=0)
     history = [
-        StepReport(step=i, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
+        StepReport(step=i, raw_cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
         for i in range(6)
     ]
     assert not trigger.should_refresh(history)
@@ -520,7 +520,7 @@ def test_drift_trigger_is_independent_of_the_damping_confound() -> None:
     for ratio in (1.0, 1e-1, 1e-4):
         history = [
             StepReport(
-                step=i, cycles=10, residual_norm=ratio, residual_ratio=ratio, alpha=1.0, drift=d
+                step=i, raw_cycles=10, residual_norm=ratio, residual_ratio=ratio, alpha=1.0, drift=d
             )
             for i, d in enumerate([0.0, 0.2, 0.9])
         ]
@@ -681,7 +681,7 @@ def test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate() -> None:
         retry=RetryPolicy(abort_above_cycles=10, beta_factor=2.0, max_retries=2),
         on_retry=lambda reason, attempt, beta: seen.append((reason, float(beta))),
     )
-    assert int(result.reports[0].cycles) == 40  # β never moved, so the count never dropped
+    assert int(result.reports[0].raw_cycles) == 40  # β never moved, so the count never dropped
     assert seen == [("cycles", 1.0)]  # one redo, at the shift it already had
 
 
@@ -751,7 +751,7 @@ def test_an_update_returned_before_a_cost_redo_reaches_the_redo_and_every_later_
         refresh_preconditioner=refresh,
     )
     assert retried == ["cycles"]
-    assert [int(report.cycles) for report in result.reports] == [1, 1]
+    assert [int(report.raw_cycles) for report in result.reports] == [1, 1]
     assert int(result.strategy.cost) == 1
 
 
@@ -880,7 +880,7 @@ def test_march_does_not_escalate_below_the_cycle_cap() -> None:
         atol=1e-12,
         retry=RetryPolicy(abort_above_cycles=100),
     )
-    assert int(result.reports[0].cycles) == 40  # under the cap -> no escalation
+    assert int(result.reports[0].raw_cycles) == 40  # under the cap -> no escalation
 
 
 def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
@@ -983,7 +983,7 @@ def test_march_escalates_beta_before_the_tight_divergence_retry() -> None:
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
     assert (
-        result.reports[0].cycles == 3
+        result.reports[0].raw_cycles == 3
     )  # β=0.5 -> 1.0 recovered it (cost 3); the tight retry (99/6) never fired
 
 
@@ -1007,7 +1007,7 @@ def test_march_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergen
     assert result.converged
     assert jnp.allclose(result.state, 0.0, atol=1e-8)
     assert (
-        result.reports[0].cycles == 6
+        result.reports[0].raw_cycles == 6
     )  # escalation exhausted -> fell back to the tight retry (cost 6)
 
 
@@ -1245,7 +1245,7 @@ def _recorded(rows):
     """Step reports from ``(step, residual_norm, binding_limit)`` triples off a real march log."""
     return [
         StepReport(
-            step=n, cycles=0, residual_norm=r, residual_ratio=0.0, alpha=0.0, binding_limit=cap
+            step=n, raw_cycles=0, residual_norm=r, residual_ratio=0.0, alpha=0.0, binding_limit=cap
         )
         for n, r, cap in rows
     ]
@@ -1316,7 +1316,7 @@ def test_a_constraint_bound_step_is_only_a_stall_when_it_narrows_and_gains_nothi
     def report(binding, residual):
         return StepReport(
             step=0,
-            cycles=1,
+            raw_cycles=1,
             residual_norm=residual,
             residual_ratio=residual,
             alpha=binding,

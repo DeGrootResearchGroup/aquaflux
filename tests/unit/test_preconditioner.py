@@ -608,7 +608,7 @@ def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
     )
     owner_e, nb_e, _ = face_cells.interior_edges()
     interior = np.asarray(face_cells.interior)
-    block = SmoothedAmgVelocity.build(geometry, owner_e, nb_e, interior, n_cells, v_cycles=1)
+    block = SmoothedAmgVelocity.build(geometry, owner_e, nb_e, interior, n_cells, cycles=1)
 
     solve = block.apply(jnp.full(n_cells, 2.0))  # the per-iterate velocity solve at a_P = 2
     ru = jnp.asarray(np.random.default_rng(0).standard_normal((n_cells, mesh.dim)))

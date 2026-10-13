@@ -1,7 +1,7 @@
 """Is the k-production cap ACTIVE at a converged root, and does freezing it corrupt the adjoint?
 
 ``KProduction`` caps production at the destruction scale, ``P_k = min(nu_t S^2, 10 beta* k omega)``.
-The cap itself is a model term. ``explicit_limiter`` is a separate and much less innocent thing: it
+The cap itself is a model term. ``explicit_production_limiter`` is a separate and much less innocent thing: it
 wraps the cap's ``k`` in ``stop_gradient``, so the Jacobian omits the term where the cap is active.
 
 That is a **forward-solve** device, and it is only free if the cap is **inactive at the converged
@@ -71,7 +71,7 @@ INTENSITY, LENGTH_SCALE = 0.05, 0.07 * H
 PRECONDITIONER = {"velocity": ConvectionTwoLevel()}
 
 
-def build_case(nu=NU, *, explicit_limiter: bool):
+def build_case(nu=NU, *, explicit_production_limiter: bool):
     """The graded turbulent channel, with the production limiter set either way."""
     y_nodes = graded_nodes(14, H, 1.2)
     mesh = structured_grid_2d(20, 14, lx=L, ly=H, named_boundaries=True, y_nodes=y_nodes)
@@ -103,7 +103,7 @@ def build_case(nu=NU, *, explicit_limiter: bool):
         properties,
         gradient_scheme=CompactGreenGauss(),
         wall_patches=["bottom", "top"],
-        explicit_production_limiter=explicit_limiter,
+        explicit_production_limiter=explicit_production_limiter,
         k_boundary=BoundaryConditions(
             {
                 "left": Dirichlet(k_in),
@@ -164,9 +164,9 @@ def cap_activity(coupled, flow, k, omega):
     }
 
 
-def solve(nu, *, explicit_limiter, state=None):
+def solve(nu, *, explicit_production_limiter, state=None):
     """Converge the coupled channel; returns the physical fields."""
-    coupled = build_case(nu, explicit_limiter=explicit_limiter)
+    coupled = build_case(nu, explicit_production_limiter=explicit_production_limiter)
     f0, k0, o0 = hybrid_initialize(coupled) if state is None else state
     return coupled, solve_coupled(
         coupled,
@@ -179,13 +179,13 @@ def solve(nu, *, explicit_limiter, state=None):
     )
 
 
-def objective(nu, *, explicit_limiter, seed):
+def objective(nu, *, explicit_production_limiter, seed):
     """A scalar through the converged solve: mean turbulent kinetic energy.
 
     The continuation is built OUTSIDE the differentiated call, on concrete parameters, as the coupled
     adjoint requires.
     """
-    coupled0 = build_case(NU, explicit_limiter=explicit_limiter)
+    coupled0 = build_case(NU, explicit_production_limiter=explicit_production_limiter)
     continuation = coupled_step(
         coupled0,
         coupled0.state_from_physical(*seed),
@@ -193,7 +193,7 @@ def objective(nu, *, explicit_limiter, seed):
     )
 
     def scalar(viscosity):
-        coupled = build_case(viscosity, explicit_limiter=explicit_limiter)
+        coupled = build_case(viscosity, explicit_production_limiter=explicit_production_limiter)
         _, k, _ = solve_coupled(
             coupled,
             *seed,
@@ -212,7 +212,7 @@ def main() -> None:
     print("=" * 78)
 
     print("\n[1] converging with the limiter ON (the shipped default) ...", flush=True)
-    coupled_on, (f_on, k_on, o_on) = solve(NU, explicit_limiter=True)
+    coupled_on, (f_on, k_on, o_on) = solve(NU, explicit_production_limiter=True)
     act = cap_activity(coupled_on, f_on, k_on, o_on)
     print(
         f"    cap ACTIVE in {act['cells_active']}/{act['n_cells']} cells "
@@ -233,7 +233,7 @@ def main() -> None:
     )
 
     print("\n[2] converging with the limiter OFF (the exact operator) ...", flush=True)
-    coupled_off, (f_off, k_off, o_off) = solve(NU, explicit_limiter=False)
+    coupled_off, (f_off, k_off, o_off) = solve(NU, explicit_production_limiter=False)
     same = max(
         float(jnp.max(jnp.abs(f_on - f_off))),
         float(jnp.max(jnp.abs(k_on - k_off))),
@@ -252,14 +252,14 @@ def main() -> None:
     )
     seed = hybrid_initialize(coupled_on)
     h = NU * 1e-3
-    exact_fn = objective(NU, explicit_limiter=False, seed=seed)
+    exact_fn = objective(NU, explicit_production_limiter=False, seed=seed)
     fd = (float(exact_fn(NU + h)) - float(exact_fn(NU - h))) / (2 * h)
     print(f"    central finite difference      : {fd:+.8e}")
     for label, flag in (
         ("limiter OFF (exact operator)", False),
         ("limiter ON  (shipped default)", True),
     ):
-        g = float(jax.grad(objective(NU, explicit_limiter=flag, seed=seed))(NU))
+        g = float(jax.grad(objective(NU, explicit_production_limiter=flag, seed=seed))(NU))
         rel = abs(g - fd) / max(abs(fd), 1e-300)
         print(f"    jax.grad, {label}: {g:+.8e}   rel. error vs FD = {rel:.3e}")
 

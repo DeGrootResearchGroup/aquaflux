@@ -493,7 +493,7 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
         return _residual(phi, theta)
 
     outcome = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
-    phi_next, cycles, alpha = outcome.phi, outcome.cycles, outcome.alpha
+    phi_next, cycles, alpha = outcome.phi, outcome.raw_cycles, outcome.alpha
 
     # A real shifted solve was taken: the iterate moved, and stayed finite. Deliberately not a
     # descent assertion -- the pseudo-transient march is non-monotone (which is why its acceptance

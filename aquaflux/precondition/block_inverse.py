@@ -189,7 +189,7 @@ class JacobiSmoothed(BlockInverse):
 class AirReduction(BlockInverse):
     """An :class:`~aquaflux.precondition.field_split.AirReductionInverse`: a reduction (lAIR) hierarchy.
 
-    ``cycles``, ``f_iters``, ``c_iters`` and ``smoother_weight`` are the class's own keywords; the rest are the
+    ``cycles``, ``f_sweeps``, ``c_sweeps`` and ``smoother_weight`` are the class's own keywords; the rest are the
     settings it forwards to :func:`~aquaflux.precondition.build_air_hierarchy`. The block size is not a
     setting: it is the group's field count, supplied when the inverse is built. This family keeps no
     build record, so :meth:`bound` refuses a ``report``.
@@ -198,8 +198,8 @@ class AirReduction(BlockInverse):
     _reports = False
 
     cycles: int | None = None
-    f_iters: int | None = None
-    c_iters: int | None = None
+    f_sweeps: int | None = None
+    c_sweeps: int | None = None
     smoother_weight: float | None = None
     theta: float | None = None
     restriction_theta: float | None = None

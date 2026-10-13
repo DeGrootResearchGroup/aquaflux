@@ -391,7 +391,7 @@ Many entries below are dated history written against the old API. Read them thro
       `scalar`, where `null` and an absent key are both unset and no preconditioner is
       `{kind: UnpreconditionedScalars}`.)
     - **The scalar block is a value family beside the velocity block (#394, 2026-09-16).**
-      `ScalarBlock` (abstract `SettingsValue`) with `ScalarTwoLevel(v_cycles)`, `ScalarAir(v_cycles)` and
+      `ScalarBlock` (abstract `SettingsValue`) with `ScalarTwoLevel(cycles)`, `ScalarAir(cycles)` and
       `UnpreconditionedScalars()`, in `turbulence/preconditioner.py` beside
       `scalar_transport_preconditioner`, which takes `scalar=` and **returns `None` for
       `UnpreconditionedScalars` without assembling the operator** (the value's `_build` is handed a
@@ -402,8 +402,8 @@ Many entries below are dated history written against the old API. Read them thro
       ScalarTwoLevel()` is the one home for the builder's, `SSTTurbulence`'s and the spec's unset value,
       and `solve_segregated` still defaults to no preconditioner (`UnpreconditionedScalars()`). Each
       multigrid value's fields are pinned to its preconditioner dataclass's fields minus `hierarchy`
-      (`test_scalar_transport_preconditioner.py`), which made the scalar `v_cycles` reachable from a
-      spec for the first time; `BlockDiagonal.v_cycles` stays the **flow** block's alone.
+      (`test_scalar_transport_preconditioner.py`), which made the scalar `cycles` reachable from a
+      spec for the first time; `BlockDiagonal.cycles` stays the **flow** block's alone.
     - `JacobianProbeSpec.column_reach` is stored as a tuple of `int`s **however it arrives** — a
       tuple of floats from a parser included; it used to convert only non-tuples, and the loader hands
       over tuples.
@@ -598,7 +598,7 @@ Many entries below are dated history written against the old API. Read them thro
       `RootSolver.solve` now refuses on the same terms). A session the **caller** re-points at a live assembler (`session.rebind(coupled)` inside
       `jax.grad`) still refuses to build, since the session holds that assembler itself.
   - **`on_step` / `on_checkpoint` instrument the march, and work WITHOUT a refresh trigger.** `on_step`
-    receives each `StepReport` (step, cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
+    receives each `StepReport` (step, raw_cycles, ‖R‖, ratio); `on_checkpoint` additionally receives the
     *solved-variable* state (map with `physical_fields`). Both are the seam a solver study logs a long
     march through — needed because a multi-hour coupled march that prints nothing cannot be told from a
     hung one, and this case's documented failure mode is a march that keeps stepping while the residual
@@ -1166,7 +1166,7 @@ Many entries below are dated history written against the old API. Read them thro
     boundary on the **one** smooth weight `wall_function_weight(nu,d,k,model) = tanh((y*/y*_lam)⁴)`
     (never a `y*` switch — an AD-Newton residual cannot converge through a jump; see the docstring), and
     all live in `boundary.py` as pure functions with a `NearWallKClosure` collaborator in `sources.py`
-    holding the per-wall-cell data (`cells`/`distance`/`viscosity`/`shear_rate`) that always travels
+    holding the per-wall-cell data (`cells`/`distance`/`kinematic_viscosity`/`shear_rate`) that always travels
     together.
     1. **The production carries the WALL-FACE shear, not the cell strain.** `wall_shear_stress =
        (ν+ν_t,wall)·|dU/dn|_wall` with `|dU/dn|_wall = |U_P − U_wall|/d` (`SSTTurbulence.wall_shear_rate`,
