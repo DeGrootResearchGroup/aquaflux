@@ -2193,7 +2193,11 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   silently); a scipy product that drops an exact zero changes them and is located afresh. Unsorted
   operators are placed by key, so the sort before the search is gone too. Pinned by
   `test_a_structure_reuses_positions_only_for_identical_stored_entries` (mutation-checked three ways:
-  row pointer only, always reuse, never reuse). Not yet re-timed on either case. A hierarchy BUILD does not use it (a rebuild re-derives the
+  row pointer only, always reuse, never reuse). **bfs3d after it** (#708 comment, same probe, state and
+  machine, `e3c61519` re-run the same session as the control at 3.78 s): split **2.03 s**, leading block
+  1.71 s, trailing 0.20 s -- 2.4x `main` and 0.43 s below the pre-#290 2.46 s, the patterns and positions
+  now being computed once where before #290 every refit did its own sparse bookkeeping; what remains is
+  the products (`__matmul__` 1.28 s) and the spectral-radius estimates. Refit only; no bfs3d march on it. A hierarchy BUILD does not use it (a rebuild re-derives the
   prolongations, so the Galerkin operands change); the pitzDaily trailing block, unfrozen, still
   rebuilds and still pays (0.25 s). Pinned by
   `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold` and
