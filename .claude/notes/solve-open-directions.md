@@ -78,7 +78,7 @@ steps or retries and the same `x_r/h`; then a library-default change needs the p
 retry ladder: a looser direction near the low-β wall could trip `abort_above_cycles` or the line search.
 
 **Measured on bfs3d under the residual stop instead (2026-10-12, #699):** #699 replaced the `lineax`-stop
-sweep above with 0.1 / 0.3 / 0.6 under `stop: residual` at `refresh_on_cycles` 4 (the better of 6b's
+sweep above with 0.1 / 0.3 / 0.6 under `stop: residual` at `refresh_on_cycles` 4 (tied with 3 in 6b's
 bfs3d runs); 0.9 and the `lineax` stop were not run. Configuration as in 6b's bfs3d table:
 
 | `rtol` | outer steps | inner solves | cost re-fits | steps redone | final `\|R\|` | solve wall |
