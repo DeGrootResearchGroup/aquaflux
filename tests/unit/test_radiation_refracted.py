@@ -819,3 +819,44 @@ def test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_warn_only_
     np.testing.assert_allclose(read, again, rtol=1e-12)
     np.testing.assert_allclose(read, found, rtol=1e-12)
     assert np.all(read > 0.0)
+
+
+def test_short_steps_of_host_paths_compile_a_few_shapes_not_one_per_count(monkeypatch):
+    """The continuation and the edge cuts hand the host solves a different number of pairs almost
+    every call; padded to a power of two, those calls share a few compiled shapes, where one shape
+    per count exhausted a four-lamp run's memory mappings."""
+    from aquaflux.radiation.refraction import Chain
+
+    media = _sleeve()
+    chain = Chain.between(media.parents, 1, -1)
+    shot_shapes, solved_shapes = [], []
+
+    def shot(media, chain, sources, receivers, signs, starts, grid):
+        shot_shapes.append(sources.shape[0])
+        n = sources.shape[0]
+        paths = refraction.Paths(
+            departure=jnp.zeros((n, 3)),
+            arrival=jnp.zeros((n, 3)),
+            transmittance=jnp.zeros(n),
+            valid=jnp.zeros(n, bool),
+            points=jnp.zeros((n, chain.n_crossings, 3)),
+        )
+        return paths, jnp.zeros((n, 2))
+
+    monkeypatch.setattr(refracted, "_shot_paths", shot)
+    for n in range(1, 40):
+        refracted._stepped_shots(
+            media, chain, np.zeros((n, 3)), np.ones((n, 3)), np.zeros(n, int), None, 10**6
+        )
+    real = refraction.solve_paths
+
+    def solve(media, chain, sources, receivers):
+        solved_shapes.append(receivers.shape[0])
+        return real(media, chain, sources, receivers)
+
+    monkeypatch.setattr(refracted, "solve_paths", solve)
+    source = np.array([[0.004, 0.0, 0.0]])
+    for n in (3, 5, 6, 7):
+        refracted._host_paths(media, chain, source, np.full((n, 3), [0.03, 0.0, 0.0]), 10**6)
+    assert set(shot_shapes) <= {1, 2, 4, 8, 16, 32, 64}
+    assert set(solved_shapes) <= {4, 8}

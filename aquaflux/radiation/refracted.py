@@ -75,6 +75,7 @@ from aquaflux.radiation.refraction import (
 from aquaflux.radiation.self_occlusion import RayCastOcclusion, SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle, solid_angle
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.radiation.triangles import padded_length
 from aquaflux.radiation.visibility import (
     refuse_points_inside,
     same_receivers,
@@ -464,11 +465,12 @@ def _host_paths(media: Media, chain: Chain, sources, receivers, pair_limit):
     ``(n_paths, n_receivers, n_sources)`` flag. Solved a step of receivers at a time: a path's solve
     holds a few kilobytes of intermediates, more the more surfaces it crosses, so a whole pass of
     paths at once would hold gigabytes. Every step has one shape -- the last is filled out by
-    repeating its last receiver, whose answers are dropped -- so the solve compiles once.
+    repeating its last receiver, whose answers are dropped -- and a call with fewer receivers than a
+    step is padded to the next power of two, so the solve compiles a few programs, not one per count.
     """
     sources, receivers = np.asarray(sources), np.asarray(receivers)
     step = receivers_per_step(pair_limit, _path_count(media, chain) * len(sources))
-    step = min(step, len(receivers))
+    step = min(step, padded_length(len(receivers)))
     points, valid = [], []
     for first in range(0, len(receivers), step):
         rows = np.minimum(np.arange(first, first + step), len(receivers) - 1)
@@ -1021,13 +1023,16 @@ def _stepped_shots(media, chain, sources, receivers, side, starts, pair_limit, g
     """:func:`~aquaflux.radiation.refraction._shot_paths` on the host, a step of pairs at a time.
 
     ``side`` is ``(n,)`` of 0 (``+1``) or 1 (``-1``) and ``starts`` ``(n, 2)`` or ``None`` (the
-    grid of ``grid`` rows and columns). A step's paths each scan a grid, so it is sized as a pass of that many pairs, and padded
-    to one shape -- repeating its last pair, whose answers are dropped -- so it compiles once.
+    grid of ``grid`` rows and columns). A step's paths each scan a grid, so it is sized as a pass of that
+    many pairs, and padded -- repeating its last pair, whose answers are dropped -- to one shape, or for
+    fewer pairs than a step to the next power of two. The continuation and the edge cuts call this with
+    a different number of pairs almost every time, and a program compiled for each count exhausted the
+    process's memory mappings on a four-lamp scene.
     Returns the crossing points, whether each path exists, and its unknowns, as numpy arrays.
     """
     n = len(sources)
     signs = np.where(np.asarray(side) == 0, 1.0, -1.0)
-    step = max(1, min(receivers_per_step(pair_limit, 1), n))
+    step = max(1, min(receivers_per_step(pair_limit, 1), padded_length(n)))
     points, valid, unknowns = [], [], []
     for first in range(0, n, step):
         rows = np.minimum(np.arange(first, first + step), n - 1)
