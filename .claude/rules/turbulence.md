@@ -548,7 +548,12 @@ Many entries below are dated history written against the old API. Read them thro
       0.13 at the 1st and 0.030 at the worst cell -- so the anchor damped the velocity rows ~1.6x harder
       in the bulk and up to ~33x in its most viscous-dominated cells, and k / omega within 0.95-1.12.
       The lost damping is real and concentrated; it is not two orders of magnitude across the board. ⚠️ All of these predate main's dropping pitzDaily's refit floor (#709,
-      `refit_beta_floor` 0.05 -> none: 19 / 144 on the control); the merged branch is re-measured below.
+      `refit_beta_floor` 0.05 -> none: 19 / 144 on the control, measured by that change on the same
+      class of machine). **The merged branch at main's file (`2c267d4`, no refit floor, otherwise as
+      above, one run): 18 steps / 136 restart cycles / no retries, `x_r/h` 8.0686**, march time after step
+      1 534 s, solve line 674 s -- one step and eight cycles under main's control. Steps 10-12 still stop
+      after one inner iteration at 3 cycles with the residual flat near 6e-3. bfs3d is not measured on
+      this branch.
       **A latent defect the reviews found (F4), not fixed:** a `station_step` swap is undone on a
       station-entering step, because the graft replaces the step after `station_step` has reshaped it --
       reachable today only from the `PITZ_TURB_DAMPING_TARGET` harness arm. Also noted, not acted on:
