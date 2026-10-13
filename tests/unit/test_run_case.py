@@ -190,3 +190,29 @@ def test_a_run_with_NO_RECORDED_STATUS_is_reported_as_a_failure(tmp_path: Path) 
 
     assert waiter.returncode != 0, output
     assert "NO exit status was recorded" in output
+
+
+def test_a_recorded_pid_now_held_by_ANOTHER_process_is_not_a_running_case(tmp_path: Path) -> None:
+    """After a restart a dead run's pid can belong to an unrelated process; that run is not live.
+
+    The run-file names a live process -- this test's own -- but a start time that is not its, as after
+    a container restart that handed the pid to a kernel thread. ``--running`` must say nothing is
+    running and drop the stale file; with the true start time it must report the process.
+    """
+    run_file = tmp_path / "tmp" / "aquaflux-case-run"
+    run_file.parent.mkdir()
+    pid = os.getpid()
+    started = " ".join(
+        subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.split()
+    )
+
+    run_file.write_text(f"pid={pid}\npid_started=Thu Jan  1 00:00:00 1970\nscript=x.py\n")
+    assert _run(tmp_path, "--running").returncode != 0
+    assert not run_file.exists()
+
+    run_file.write_text(f"pid={pid}\npid_started={started}\nscript=x.py\n")
+    result = _run(tmp_path, "--running")
+    assert result.returncode == 0 and str(pid) in result.stdout
+    assert run_file.exists()

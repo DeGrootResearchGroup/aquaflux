@@ -356,7 +356,7 @@ def test_a_sourceless_assembler_is_bit_identical_to_the_bare_face_assembly() -> 
     bare = momentum_diagonal(
         mesh.face_cells,
         plain.geometry,
-        plain.viscosity,
+        plain.effective_viscosity,
         mdot_lagged=None,  # Stokes: no convective term
     )
 

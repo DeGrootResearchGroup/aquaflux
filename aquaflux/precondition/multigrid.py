@@ -18,7 +18,7 @@ family contributes only its ops:
 
 * **Smoothed aggregation** (:func:`build_smoothed_hierarchy`, :func:`smoothed_multigrid_cycles`): the
   symmetric pressure Schur. The tentative piecewise-constant prolongation is smoothed
-  ``P = (I - omega D^-1 A) P_tent``, restriction is ``Pᵀ``, the smoother is a Chebyshev polynomial,
+  ``P = (I - prolongation_weight D^-1 A) P_tent``, restriction is ``Pᵀ``, the smoother is a Chebyshev polynomial,
   and the coarse level is a direct dense solve — ~0.25 mesh-independent contraction.
   Its two-level convection variant (:func:`build_convection_hierarchy`,
   :func:`convection_multigrid_cycles`) uses a damped-Jacobi smoother for the nonsymmetric momentum
@@ -45,7 +45,8 @@ from __future__ import annotations
 
 import heapq
 import warnings
-from collections.abc import Callable
+import zlib
+from collections.abc import Callable, Hashable, Sequence
 from typing import NamedTuple
 
 import equinox as eqx
@@ -563,7 +564,7 @@ def _aggregate(owner: np.ndarray, nb: np.ndarray, n: int) -> tuple[np.ndarray, i
 #
 # Piecewise-constant (unsmoothed) aggregation is correct but weak (V-cycle contraction ~0.97): the
 # coarse space cannot represent smooth error. Smoothed aggregation fixes this by smoothing the
-# tentative prolongation, ``P = (I - omega D^-1 A) P_tent`` -- which makes the coarse operator denser
+# tentative prolongation, ``P = (I - prolongation_weight D^-1 A) P_tent`` -- which makes the coarse operator denser
 # (no longer a graph Laplacian), so each level is a **general sparse operator** ``(row, col, val)`` and
 # the Galerkin coarse operator ``A_c = P^T A P`` is a genuine sparse triple product. That product is
 # nonlinear in the coefficients, so the hierarchy is built **once, off the jit path** with
@@ -758,7 +759,9 @@ class SmoothedHierarchy(eqx.Module):
             operator_nnz.append(int(np.ceil(int(level.operator.data.shape[0]) * headroom)))
         return ShapeBudget(tuple(coarse_cells), tuple(operator_nnz))
 
-    def refit(self, a: sp.csr_matrix) -> SmoothedHierarchy:
+    def refit(
+        self, a: sp.csr_matrix, patterns: StructuralPatterns | None = None
+    ) -> SmoothedHierarchy:
         """Re-derive every level's operator at a new ``a``, reusing **this** hierarchy's prolongations.
 
         A plain rebuild re-runs the aggregation, which reproduces the same partition only when the
@@ -788,6 +791,10 @@ class SmoothedHierarchy(eqx.Module):
         ----------
         a : scipy.sparse matrix
             The new fine operator, of the shape this hierarchy was built at.
+        patterns : StructuralPatterns, optional
+            Where each level's Galerkin pattern is kept between refits. The prolongations are this
+            hierarchy's, so on a fine operator with an unchanged pattern every level's pattern is too,
+            and only the first refit pays to compute them. ``None`` computes them every time.
 
         Returns
         -------
@@ -819,7 +826,7 @@ class SmoothedHierarchy(eqx.Module):
                     _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
                 )
                 csr = prolongation.tocsr()
-                a = _galerkin_coarse(csr.T.tocsr(), a, csr)
+                a = _galerkin_coarse(csr.T.tocsr(), a, csr, patterns, ("galerkin", depth))
             else:
                 levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, level.block_size))
         return SmoothedHierarchy(
@@ -1035,7 +1042,7 @@ def _build_aggregation_hierarchy(
     a: sp.csr_matrix,
     *,
     aggregation_operator: Callable[[sp.csr_matrix], sp.csr_matrix],
-    omega_smooth: float,
+    prolongation_weight: float,
     max_coarse: int,
     max_levels: int,
     strength_threshold: float = 0.0,
@@ -1246,7 +1253,8 @@ def _build_aggregation_hierarchy(
             # `D^-1 A_agg`, and use the block diagonal on a nodal level. On the symmetric path
             # `A_agg is A` and the two forms coincide up to the damping constant.
             prolongation = _onto_pattern(
-                tentative - (omega_smooth * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative)),
+                tentative
+                - (prolongation_weight * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative)),
                 _smoothing_pattern(tentative, a, block_size),
             )
         levels.append(
@@ -1298,7 +1306,7 @@ def _build_aggregation_hierarchy(
 def build_smoothed_hierarchy(
     a: sp.csr_matrix,
     *,
-    omega_smooth: float = 2.0 / 3.0,
+    prolongation_weight: float = 2.0 / 3.0,
     max_coarse: int = 16,
     max_levels: int = 20,
     strength_threshold: float = 0.0,
@@ -1315,8 +1323,8 @@ def build_smoothed_hierarchy(
     ----------
     a : scipy.sparse matrix
         The frozen symmetric fine operator, shape ``(n_cells, n_cells)``.
-    omega_smooth : float
-        Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
+    prolongation_weight : float
+        Prolongation-smoothing damping factor; the applied damping is ``prolongation_weight * 2 / lambda_max``
         (i.e. ``4/(3 lambda_max)`` at the default ``2/3``), with ``lambda_max`` estimated per level.
     max_coarse : int
         Stop coarsening once a level has at most this many **degrees of freedom** (solved directly
@@ -1347,7 +1355,7 @@ def build_smoothed_hierarchy(
     return _build_aggregation_hierarchy(
         a.tocsr(),
         aggregation_operator=lambda m: m,
-        omega_smooth=omega_smooth,
+        prolongation_weight=prolongation_weight,
         max_coarse=max_coarse,
         max_levels=max_levels,
         strength_threshold=strength_threshold,
@@ -1553,7 +1561,7 @@ class _VCycleOps(NamedTuple):
     ``R`` (:func:`_air_ops`); the smoother is Chebyshev / damped-Jacobi (symmetric / convection
     two-level) or FC-Jacobi (reduction).
 
-    ``mu`` is the number of times each coarse level is visited per visit of its parent: 1 is a V-cycle,
+    ``cycle_index`` is the number of times each coarse level is visited per visit of its parent: 1 is a V-cycle,
     2 a W-cycle, which moves work onto the cheaper coarse levels instead of buying convergence with more
     fine-level relaxation. ``pre_smooth`` may be turned off, which removes both the pre-relaxation and
     the residual evaluation that follows it — with a zero initial guess the fine residual *is* the
@@ -1571,7 +1579,7 @@ class _VCycleOps(NamedTuple):
     prolong: Callable[[object, jnp.ndarray], jnp.ndarray]
     smooth: _Smoother
     smooth_zero: _Smoother | None = None
-    mu: int = 1
+    cycle_index: int = 1
     pre_smooth: bool = True
 
 
@@ -1604,7 +1612,7 @@ def _frozen_v_cycle(
     coarse_residual = ops.restrict(level, residual)
     coarse_error = _frozen_v_cycle(levels, coarse_residual, level_index + 1, ops)
     coarse = levels[level_index + 1]
-    for _ in range(ops.mu - 1):
+    for _ in range(ops.cycle_index - 1):
         if coarse.coarse_inv is not None:
             break  # the child solves exactly; visiting it again corrects nothing
         defect = coarse_residual - _operator_matvec(coarse, coarse_error)
@@ -1637,7 +1645,7 @@ def _fixed_cycles(levels: tuple, b: jnp.ndarray, cycles: int, ops: _VCycleOps) -
 
 def _smoothed_ops(
     smoother: _Smoother,
-    mu: int = 1,
+    cycle_index: int = 1,
     pre_smooth: bool = True,
     smooth_zero: _Smoother | None = None,
 ) -> _VCycleOps:
@@ -1647,7 +1655,7 @@ def _smoothed_ops(
     general form and is byte-identical.
     """
     return _VCycleOps(
-        mu=mu,
+        cycle_index=cycle_index,
         pre_smooth=pre_smooth,
         smooth_zero=smooth_zero,
         # Restriction is the prolongation applied TRANSPOSED, so the segment identifiers are its COLUMN
@@ -1735,7 +1743,7 @@ _CONVECTION_LEVELS = 2
 def build_convection_hierarchy(
     a: sp.csr_matrix,
     *,
-    omega_smooth: float = 2.0 / 3.0,
+    prolongation_weight: float = 2.0 / 3.0,
     max_coarse: int = 16,
     strength_threshold: float = 0.0,
     block_size: int = 1,
@@ -1770,8 +1778,8 @@ def build_convection_hierarchy(
     a : scipy.sparse matrix
         The frozen (nonsymmetric) convection-diffusion operator, shape ``(n_dofs, n_dofs)`` with
         ``n_dofs = block_size * n_cells``, field-major.
-    omega_smooth : float
-        Prolongation-smoothing damping factor; the applied damping is ``omega_smooth * 2 / lambda_max``
+    prolongation_weight : float
+        Prolongation-smoothing damping factor; the applied damping is ``prolongation_weight * 2 / lambda_max``
         (``lambda_max`` of the symmetric part).
     max_coarse : int
         Stop coarsening once a level has at most this many **degrees of freedom**, and solve it
@@ -1830,7 +1838,7 @@ def build_convection_hierarchy(
     return _build_aggregation_hierarchy(
         a.tocsr(),
         aggregation_operator=lambda m: (0.5 * (m + m.T)).tocsr(),
-        omega_smooth=omega_smooth,
+        prolongation_weight=prolongation_weight,
         max_coarse=max_coarse,
         max_levels=max_levels,
         strength_threshold=strength_threshold,
@@ -1864,22 +1872,22 @@ def _jacobi_smooth(
     b: jnp.ndarray,
     x: jnp.ndarray,
     sweeps: int,
-    omega: float,
+    smoother_weight: float,
     spectral_damping: bool = True,
 ) -> jnp.ndarray:
     """Damped-Jacobi smoother ``x <- x + alpha D^-1 (b - A x)`` (``sweeps`` times).
 
     Matrix-free and a fixed linear operator. With ``spectral_damping`` the relaxation is
-    ``alpha = omega / lambda_max``, scaled by the per-level ``lambda_max`` — which is the estimate for
+    ``alpha = smoother_weight / lambda_max``, scaled by the per-level ``lambda_max`` — which is the estimate for
     the **true** ``D^-1 A``, not for its symmetric part; the symmetric part only sets the prolongation
-    smoothing at build time — so ``omega`` in ``(0, 1]`` is a mesh- and scale-independent damping — the high-frequency-smoothing
+    smoothing at build time — so ``smoother_weight`` in ``(0, 1]`` is a mesh- and scale-independent damping — the high-frequency-smoothing
     choice for the M-matrix convection-diffusion operator, where a Chebyshev interval smoother
     (assuming a real spectrum) is not safe.
 
-    **Without it, ``alpha = omega`` is an absolute Richardson scale, and ``omega = 1`` is the
+    **Without it, ``alpha = smoother_weight`` is an absolute Richardson scale, and ``smoother_weight = 1`` is the
     undamped sweep ``x <- x + D^-1 (b - A x)``.** That is a real and sometimes much better choice, not
     a degenerate one: ``D^-1 A`` has unit diagonal blocks, so its eigenvalues average one and
-    ``lambda_max >= 1`` always — spectral damping therefore *never* relaxes by more than ``omega``,
+    ``lambda_max >= 1`` always — spectral damping therefore *never* relaxes by more than ``smoother_weight``,
     and on an operator with an eigenvalue tail it relaxes by far less, under-smoothing every mode that
     is not the extreme one. Measured on the coupled turbulence block, the undamped sweep is worth 10
     cycles against 2 at four sweeps, closing the whole gap to an equivalently-configured PETSc GAMG.
@@ -1892,7 +1900,7 @@ def _jacobi_smooth(
     independent — a batched tiny contraction, no sequential dependency — so unlike the incomplete-LU
     sweep this is the same shape on an accelerator as on a host.
     """
-    alpha = omega / level.lam_max if spectral_damping else omega
+    alpha = smoother_weight / level.lam_max if spectral_damping else smoother_weight
     if level.block_inverse is None:
         for _ in range(sweeps):
             x = x + alpha * level.inv_diagonal * (b - _operator_matvec(level, x))
@@ -1908,7 +1916,7 @@ def _jacobi_smooth_zero(
     level: _SparseLevel,
     b: jnp.ndarray,
     sweeps: int,
-    omega: float,
+    smoother_weight: float,
     spectral_damping: bool = True,
 ) -> jnp.ndarray:
     """:func:`_jacobi_smooth` from a ZERO initial guess, with the first sweep's matvec peeled off.
@@ -1926,7 +1934,7 @@ def _jacobi_smooth_zero(
     """
     if sweeps <= 0:
         return jnp.zeros_like(b)
-    alpha = omega / level.lam_max if spectral_damping else omega
+    alpha = smoother_weight / level.lam_max if spectral_damping else smoother_weight
     if level.block_inverse is None:
         # Written in the order `_jacobi_smooth`'s own first sweep evaluates it -- `alpha * inv * b`
         # rather than `alpha * (b / diagonal)` -- so the peel cannot move a rounding. Reading the
@@ -1935,7 +1943,7 @@ def _jacobi_smooth_zero(
         x = alpha * level.inv_diagonal * b
     else:
         x = alpha * _apply_block_inverse(level.block_inverse, level.block_size, b)
-    return _jacobi_smooth(level, b, x, sweeps - 1, omega, spectral_damping)
+    return _jacobi_smooth(level, b, x, sweeps - 1, smoother_weight, spectral_damping)
 
 
 def convection_multigrid_cycles(
@@ -1944,7 +1952,7 @@ def convection_multigrid_cycles(
     *,
     cycles: int = 1,
     sweeps: int = 2,
-    omega: float = 0.8,
+    smoother_weight: float = 0.8,
     spectral_damping: bool = True,
 ) -> jnp.ndarray:
     """A **fixed** number of convection-diffusion V-cycles for ``A x = b`` — the Peclet-robust,
@@ -1965,13 +1973,13 @@ def convection_multigrid_cycles(
         Number of V-cycles (static).
     sweeps : int
         Damped-Jacobi pre/post sweeps per level (static).
-    omega : float
+    smoother_weight : float
         The smoother's relaxation factor (static). Its meaning depends on ``spectral_damping``: a
         damping in ``(0, 1]`` relative to the level's ``lambda_max`` when that is set, or the absolute
         relaxation itself when it is not.
     spectral_damping : bool
         Scale the relaxation by the level's ``lambda_max`` (default). Setting it ``False`` makes
-        ``omega`` an absolute relaxation, so ``omega = 1`` is the plain undamped sweep — which on a
+        ``smoother_weight`` an absolute relaxation, so ``smoother_weight = 1`` is the plain undamped sweep — which on a
         strongly nonsymmetric multi-field block is much the stronger smoother, because
         ``lambda_max >= 1`` always and dividing by it under-relaxes every mode but the extreme one.
         See :func:`_jacobi_smooth`.
@@ -1983,10 +1991,10 @@ def convection_multigrid_cycles(
     """
 
     def smoother(level: _SparseLevel, rhs: jnp.ndarray, guess: jnp.ndarray) -> jnp.ndarray:
-        return _jacobi_smooth(level, rhs, guess, sweeps, omega, spectral_damping)
+        return _jacobi_smooth(level, rhs, guess, sweeps, smoother_weight, spectral_damping)
 
     def smoother_zero(level: _SparseLevel, rhs: jnp.ndarray) -> jnp.ndarray:
-        return _jacobi_smooth_zero(level, rhs, sweeps, omega, spectral_damping)
+        return _jacobi_smooth_zero(level, rhs, sweeps, smoother_weight, spectral_damping)
 
     return hierarchy.fixed_cycle_solve(
         b, cycles, _smoothed_ops(smoother, smooth_zero=smoother_zero)
@@ -2305,34 +2313,161 @@ def _onto_pattern(values: sp.spmatrix, pattern: sp.spmatrix) -> sp.csr_matrix:
         If ``values`` stores an entry ``pattern`` does not -- impossible for a pattern computed from the
         same expression over :func:`_ones`.
     """
-    values = sp.csr_matrix(values)
-    pattern = sp.csr_matrix(pattern)
-    values.sort_indices()
-    pattern.sort_indices()
-    columns = pattern.shape[1]
+    return _Structure.of(pattern).store(values)
 
-    # One ascending key per stored entry on each side, so the (subset) real pattern locates into the
-    # structural one with a single search rather than a per-row merge.
-    def keys(matrix: sp.csr_matrix) -> np.ndarray:
-        rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
-        return rows.astype(np.int64) * columns + matrix.indices
 
-    pattern_keys, value_keys = keys(pattern), keys(values)
-    # Clipped before the lookup: a key past the end of `pattern_keys` would index out of range, and the
-    # comparison below is what turns "not found" into the stated invariant rather than an IndexError.
-    position = np.searchsorted(pattern_keys, value_keys).clip(max=max(pattern.nnz - 1, 0))
-    if value_keys.size and not np.array_equal(pattern_keys[position], value_keys):
-        raise AssertionError(
-            "_onto_pattern: the operator holds an entry its structural pattern does not, which cannot "
-            "happen for a pattern computed from the same expression."
+def _entry_keys(matrix: sp.csr_matrix) -> np.ndarray:
+    """One key per stored entry of a CSR matrix, ``row * n_columns + column``, in storage order.
+
+    Ascending when the matrix's column indices are sorted within each row.
+    """
+    rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
+    return rows.astype(np.int64) * matrix.shape[1] + matrix.indices
+
+
+class _Structure:
+    """A structural pattern ready to store values on: the sorted pattern and its entry keys.
+
+    It also remembers where the last operator stored on it went. Locating an operator's entries is a
+    search over every key of the pattern, which on a refit costs more than the product it stores; but a
+    refit's product stores the same entries in the same order every time (it drops only entries that
+    come out exactly zero, which change its pattern and so miss), so the positions are reused whenever
+    the operator's index arrays equal the last one's exactly.
+    """
+
+    def __init__(self, pattern: sp.csr_matrix, keys: np.ndarray) -> None:
+        self.pattern = pattern
+        self.keys = keys
+        self._placed: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+
+    @classmethod
+    def of(cls, pattern: sp.spmatrix) -> _Structure:
+        pattern = sp.csr_matrix(pattern)
+        pattern.sort_indices()
+        return cls(pattern, _entry_keys(pattern))
+
+    def store(self, values: sp.spmatrix) -> sp.csr_matrix:
+        """``values`` on this pattern (:func:`_onto_pattern`)."""
+        values = sp.csr_matrix(values)
+        placed = self._placed
+        if (
+            placed is None
+            or not np.array_equal(placed[0], values.indptr)
+            or not np.array_equal(placed[1], values.indices)
+        ):
+            placed = (values.indptr, values.indices, self._locate(values))
+            self._placed = placed
+        data = np.zeros(self.pattern.nnz, dtype=values.data.dtype)
+        data[placed[2]] = values.data
+        return sp.csr_matrix(
+            (data, self.pattern.indices, self.pattern.indptr), shape=self.pattern.shape
         )
-    data = np.zeros(pattern.nnz, dtype=values.data.dtype)
-    data[position] = values.data
-    return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+
+    def _locate(self, values: sp.csr_matrix) -> np.ndarray:
+        """Where each stored entry of ``values``, in its own order, sits in this pattern."""
+        value_keys = _entry_keys(values)
+        # A single search over the pattern's ascending keys; the entries searched for need no order.
+        # Clipped before the lookup: a key past the end would index out of range, and the comparison
+        # below is what turns "not found" into the stated invariant.
+        position = np.searchsorted(self.keys, value_keys).clip(max=max(self.pattern.nnz - 1, 0))
+        if value_keys.size and not np.array_equal(self.keys[position], value_keys):
+            raise AssertionError(
+                "_onto_pattern: the operator holds an entry its structural pattern does not, which "
+                "cannot happen for a pattern computed from the same expression."
+            )
+        return position
+
+
+def _pattern_fingerprint(operands: Sequence[sp.spmatrix]) -> tuple:
+    """Each operand's shape and a checksum of its stored pattern, independent of its values.
+
+    A collision could at worst hand :meth:`_Structure.store` a pattern missing one of the operator's
+    entries, which it refuses; a superset stores the same operator. So it can never change an answer.
+    """
+    fingerprint = []
+    for operand in operands:
+        operand = sp.csr_matrix(operand)
+        fingerprint.append(
+            (
+                operand.shape,
+                zlib.crc32(np.ascontiguousarray(operand.indptr)),
+                zlib.crc32(np.ascontiguousarray(operand.indices)),
+            )
+        )
+    return tuple(fingerprint)
+
+
+class StructuralPatterns:
+    """The structural patterns of computed operators, kept while their operands' patterns hold.
+
+    A structural pattern (:func:`_onto_pattern`) is the same product computed a second time over
+    all-ones copies of the operands, which costs as much as the product itself. It depends only on the
+    operands' patterns, and on a re-fit those do not move: a frozen coarsening keeps every prolongation,
+    and the fine operator comes from a probe with a fixed pattern. Held by one block inverse for its
+    life, this computes each pattern once and reuses it at every later re-fit, after checking that the
+    operands still store the same entries -- so the result is identical to computing it afresh, and an
+    operand whose pattern did change gets its pattern recomputed.
+
+    One entry per ``slot`` (a call site and level), replaced when the operands change, so it holds at
+    most one pattern per computed operator. A host object, never a leaf of a traced hierarchy.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[Hashable, tuple[tuple, _Structure]] = {}
+
+    def onto(
+        self,
+        slot: Hashable,
+        values: sp.spmatrix,
+        operands: Sequence[sp.spmatrix],
+        pattern: Callable[[], sp.spmatrix],
+    ) -> sp.csr_matrix:
+        """``values`` stored on the structural pattern of ``operands``, computed only when it moved.
+
+        Parameters
+        ----------
+        slot : hashable
+            Which computed operator this is, e.g. ``("galerkin", 0)``.
+        values : scipy.sparse matrix
+            The operator, computed from ``operands``.
+        operands : sequence of scipy.sparse matrix
+            The matrices it was computed from; their stored patterns decide the structural one.
+        pattern : callable
+            Computes the structural pattern from the operands over :func:`_ones`; called only when
+            this slot has none for the operands' current patterns.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            ``values`` on the structural pattern.
+        """
+        fingerprint = _pattern_fingerprint(operands)
+        entry = self._entries.get(slot)
+        if entry is None or entry[0] != fingerprint:
+            entry = (fingerprint, _Structure.of(pattern()))
+            self._entries[slot] = entry
+        return entry[1].store(values)
+
+
+def _structured(
+    values: sp.spmatrix,
+    operands: Sequence[sp.spmatrix],
+    pattern: Callable[[], sp.spmatrix],
+    patterns: StructuralPatterns | None,
+    slot: Hashable,
+) -> sp.csr_matrix:
+    """``values`` on the structural pattern of ``operands``: from ``patterns`` if given, else computed."""
+    if patterns is None:
+        return _onto_pattern(values, pattern())
+    return patterns.onto(slot, values, operands, pattern)
 
 
 def _galerkin_coarse(
-    restriction: sp.csr_matrix, a: sp.csr_matrix, prolongation: sp.csr_matrix
+    restriction: sp.csr_matrix,
+    a: sp.csr_matrix,
+    prolongation: sp.csr_matrix,
+    patterns: StructuralPatterns | None = None,
+    slot: Hashable = "galerkin",
 ) -> sp.csr_matrix:
     """``R A P``, stored on a pattern that depends on the three *patterns* and not on their values.
 
@@ -2350,14 +2485,23 @@ def _galerkin_coarse(
     ----------
     restriction, a, prolongation : scipy.sparse.csr_matrix
         The restriction ``R``, the level operator ``A`` and the prolongation ``P``.
+    patterns : StructuralPatterns, optional
+        Reuse the structural pattern computed at an earlier call on operands with the same patterns,
+        under ``slot``. ``None`` computes it.
+    slot : hashable
+        Which coarse operator this is, when ``patterns`` is given.
 
     Returns
     -------
     scipy.sparse.csr_matrix
         The coarse operator, shape ``(R.shape[0], P.shape[1])``.
     """
-    return _onto_pattern(
-        restriction @ a @ prolongation, _ones(restriction) @ _ones(a) @ _ones(prolongation)
+    return _structured(
+        restriction @ a @ prolongation,
+        (restriction, a, prolongation),
+        lambda: _ones(restriction) @ _ones(a) @ _ones(prolongation),
+        patterns,
+        slot,
     )
 
 
@@ -2793,9 +2937,14 @@ def build_air_hierarchy(
 
 
 def _fc_jacobi(
-    level: _AirLevel, b: jnp.ndarray, x: jnp.ndarray, f_iters: int, c_iters: int, omega: float
+    level: _AirLevel,
+    b: jnp.ndarray,
+    x: jnp.ndarray,
+    f_sweeps: int,
+    c_sweeps: int,
+    smoother_weight: float,
 ) -> jnp.ndarray:
-    """FC-Jacobi smoother: ``f_iters`` F-point damped-Jacobi sweeps then ``c_iters`` C-point sweeps.
+    """FC-Jacobi smoother: ``f_sweeps`` F-point damped-Jacobi sweeps then ``c_sweeps`` C-point sweeps.
 
     Each sweep relaxes only the fine (or coarse) block via the mask, matrix-free and a fixed linear
     operator. The F-relaxation is the reduction-based smoother that suppresses the F-point error the
@@ -2806,27 +2955,29 @@ def _fc_jacobi(
         # between a cell's fields can exceed the diagonal, and a point sweep throws all of it away.
         def relax(mask, vector):
             return (
-                omega * mask * _apply_block_inverse(level.block_inverse, level.block_size, vector)
+                smoother_weight
+                * mask
+                * _apply_block_inverse(level.block_inverse, level.block_size, vector)
             )
 
-        for _ in range(f_iters):
+        for _ in range(f_sweeps):
             x = x + relax(level.f_mask, b - _operator_matvec(level, x))
-        for _ in range(c_iters):
+        for _ in range(c_sweeps):
             x = x + relax(level.c_mask, b - _operator_matvec(level, x))
         return x
-    # `mask * inv_diagonal` is the same product on every sweep of its own loop -- `omega` is a
+    # `mask * inv_diagonal` is the same product on every sweep of its own loop -- `smoother_weight` is a
     # solve-time argument (not baked into the frozen level), so it is folded in here too, once per
     # call, rather than once per sweep.
-    f_scale = omega * level.f_mask * level.inv_diagonal
-    c_scale = omega * level.c_mask * level.inv_diagonal
-    for _ in range(f_iters):
+    f_scale = smoother_weight * level.f_mask * level.inv_diagonal
+    c_scale = smoother_weight * level.c_mask * level.inv_diagonal
+    for _ in range(f_sweeps):
         x = x + f_scale * (b - _operator_matvec(level, x))
-    for _ in range(c_iters):
+    for _ in range(c_sweeps):
         x = x + c_scale * (b - _operator_matvec(level, x))
     return x
 
 
-def _air_ops(f_iters: int, c_iters: int, omega: float) -> _VCycleOps:
+def _air_ops(f_sweeps: int, c_sweeps: int, smoother_weight: float) -> _VCycleOps:
     """V-cycle ops for a reduction (lAIR) level: an independent restriction ``R != Pᵀ`` and an
     FC-Jacobi smoother (the reduction analogue of :func:`_smoothed_ops`)."""
     return _VCycleOps(
@@ -2834,7 +2985,7 @@ def _air_ops(f_iters: int, c_iters: int, omega: float) -> _VCycleOps:
             level.r_row, level.r_col, level.r_val, r, level.n_coarse
         ),
         prolong=lambda level, e: _coo_apply(level.p_row, level.p_col, level.p_val, e, level.n),
-        smooth=lambda level, b, x: _fc_jacobi(level, b, x, f_iters, c_iters, omega),
+        smooth=lambda level, b, x: _fc_jacobi(level, b, x, f_sweeps, c_sweeps, smoother_weight),
     )
 
 
@@ -2843,9 +2994,9 @@ def air_multigrid_cycles(
     b: jnp.ndarray,
     *,
     cycles: int = 1,
-    f_iters: int = 2,
-    c_iters: int = 1,
-    omega: float = 1.0,
+    f_sweeps: int = 2,
+    c_sweeps: int = 1,
+    smoother_weight: float = 1.0,
 ) -> jnp.ndarray:
     """A **fixed** number of lAIR V-cycles for ``A x = b`` — the Peclet-robust, mesh-independent inner
     solve for a convection-dominated (velocity) block.
@@ -2863,9 +3014,9 @@ def air_multigrid_cycles(
         Right-hand side, shape ``(n_cells,)``.
     cycles : int
         Number of V-cycles (static).
-    f_iters, c_iters : int
+    f_sweeps, c_sweeps : int
         Fine- and coarse-point Jacobi sweeps per smoother application (static).
-    omega : float
+    smoother_weight : float
         Jacobi damping factor (static).
 
     Returns
@@ -2873,4 +3024,4 @@ def air_multigrid_cycles(
     jnp.ndarray
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
-    return _fixed_cycles(hierarchy.levels, b, cycles, _air_ops(f_iters, c_iters, omega))
+    return _fixed_cycles(hierarchy.levels, b, cycles, _air_ops(f_sweeps, c_sweeps, smoother_weight))

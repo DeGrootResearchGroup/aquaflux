@@ -16,7 +16,7 @@ solve -- it decides what the unknowns *are*:
 That second one is why a flow assembler carries a drive at all. A force that is simply *prescribed*
 is a :class:`~aquaflux.flow.UniformBodyForce` source and needs nothing here; a force that is
 **solved for** cannot be a source, because the residual has to write the current iterate into it on
-every evaluation and the border column ``dR/dbeta = -V`` has to come from somewhere. Keeping the two
+every evaluation and the border column ``dR/df = -V`` has to come from somewhere. Keeping the two
 apart is what stops one field meaning a fixed input on one case and a live unknown on another.
 
 Everything the bordered form needs of the drive is here rather than at the solves that run it -- the
@@ -238,10 +238,10 @@ class MassFlow(Drive):
     (volume-averaged) velocity by a uniform body force along one axis. Holding that target with an
     *outer* controller -- solve at a fixed force, measure the bulk velocity, nudge the force -- can
     overshoot badly when the momentum operator changes between solves, so the force is instead a
-    scalar Lagrange multiplier ``beta`` appended to the state, with the residual bordered by the
+    scalar Lagrange multiplier ``f`` appended to the state, with the residual bordered by the
     constraint row:
 
-        R_aug([w, beta]) = [ R(w; beta) ; <U_dir>(w) - target ].
+        R_aug([w, f]) = [ R(w; f) ; <U_dir>(w) - target ].
 
     ``<U_dir> = target`` then holds at the converged root by construction, the bordered Jacobian
     ``[[J, a], [c^T, 0]]`` is assembled by automatic differentiation like any other, and the
@@ -341,22 +341,22 @@ class MassFlow(Drive):
         """This drive carrying the force ``driven`` ends at."""
         return eqx.tree_at(lambda d: d.force, self, self.split(fields, driven)[1])
 
-    def forced(self, momentum: MomentumContinuity, beta: jnp.ndarray) -> MomentumContinuity:
-        """``momentum`` with its drive carrying ``beta`` -- the assembler one Newton iterate sees.
+    def forced(self, momentum: MomentumContinuity, force: jnp.ndarray) -> MomentumContinuity:
+        """``momentum`` with its drive carrying ``f`` -- the assembler one Newton iterate sees.
 
         Parameters
         ----------
         momentum : MomentumContinuity
             The flow assembler, whose drive is this one.
-        beta : jnp.ndarray
+        force : jnp.ndarray
             The multiplier's value for this evaluation.
 
         Returns
         -------
         MomentumContinuity
-            The assembler forced at ``beta``.
+            The assembler forced at ``f``.
         """
-        return eqx.tree_at(lambda m: m.drive.force, momentum, beta)
+        return eqx.tree_at(lambda m: m.drive.force, momentum, force)
 
     def bulk_velocity(self, velocity: jnp.ndarray, volume: jnp.ndarray) -> jnp.ndarray:
         """The volume-averaged velocity component along ``flow_direction``.
@@ -378,8 +378,8 @@ class MassFlow(Drive):
     def constraint_vectors(self, momentum: MomentumContinuity) -> tuple[jnp.ndarray, jnp.ndarray]:
         """The border column ``a`` and row ``c`` of the augmented Jacobian, as flat flow vectors.
 
-        ``a = dR/dbeta = -V`` on the flow-direction velocity rows (the force enters as
-        ``R = flux - beta V``); ``c = d<U_dir>/dw = V / sum(V)`` there, so ``c . w = <U_dir>``. Both are
+        ``a = dR/df = -V`` on the flow-direction velocity rows (the force enters as
+        ``R = flux - f V``); ``c = d<U_dir>/dw = V / sum(V)`` there, so ``c . w = <U_dir>``. Both are
         fixed by the geometry, which is why the constraint preconditioner can be built once from a
         concrete reference.
 
@@ -405,7 +405,7 @@ class MassFlow(Drive):
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """:meth:`constraint_vectors` in an outer layout whose **first** block is the flow.
 
-        ``beta`` enters only the momentum block, and ``<U_dir>`` reads only the velocity, so in a
+        ``f`` enters only the momentum block, and ``<U_dir>`` reads only the velocity, so in a
         coupled state the border column and row are the flow block's own, padded with zeros over every
         other block. Written once here rather than at each residual that borders itself, and derived
         from the outer layout rather than from a count of its blocks, so a state that grows a field

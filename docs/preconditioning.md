@@ -125,7 +125,7 @@ It returns a {class}`~aquaflux.turbulence.ScalarTransportPreconditioner`, which 
 `phi -> M` factory of the shape the solvers expect.
 
 The `scalar` argument picks the hierarchy, as a value that carries its own settings (the
-V-cycles per apply, `v_cycles`):
+V-cycles per apply, `cycles`):
 
 - {class}`~aquaflux.turbulence.ScalarTwoLevel` (default) builds a
   {class}`~aquaflux.turbulence.ConvectionAmgPreconditioner` — a stable two-level nonsymmetric
@@ -174,7 +174,7 @@ strategy expects. Three arguments matter, and they are independent of one anothe
 | Value | What it builds |
 | --- | --- |
 | `ViscousMultilevel()` (default) | A multilevel smoothed-aggregation AMG on the **viscous** momentum operator. Mesh-independent, but blind to the cell Péclet number, so it bounds the Reynolds number the solve reaches. |
-| `ConvectionTwoLevel(sweeps=..., omega=...)` | A two-level hierarchy on the frozen `viscous + first-order-upwind` operator, so it stays a good approximation as convection strengthens. Its direct coarse solve does not scale to large meshes. `sweeps` and `omega` set its damped-Jacobi smoother. |
+| `ConvectionTwoLevel(sweeps=..., smoother_weight=...)` | A two-level hierarchy on the frozen `viscous + first-order-upwind` operator, so it stays a good approximation as convection strengthens. Its direct coarse solve does not scale to large meshes. `sweeps` and `smoother_weight` set its damped-Jacobi smoother. |
 | `ConvectionAir()` | The same convective linearization under an lAIR hierarchy — Péclet-robust *and* mesh-independent. |
 
 Each value names the operator and the hierarchy together, because the two do not vary independently: the multilevel hierarchy's Chebyshev smoother needs a symmetric operator, so it cannot coarsen the convection-diffusion one. All three are importable from `aquaflux.flow`.
@@ -193,7 +193,7 @@ Péclet number without assuming a flow speed.
 
 Both scaled Laplacians are near-Stokes approximations. Once a flow is strongly
 convection-dominated, what limits the block is the *approximation* rather than how
-accurately it is inverted — at which point raising `v_cycles` does not help, and on the
+accurately it is inverted — at which point raising `cycles` does not help, and on the
 Schur it can hurt, because inverting the wrong operator more exactly is not progress.
 
 ### `composition` — how the two solves are combined
@@ -232,7 +232,7 @@ on the `a_P`-scaled Schur that sensitivity is enough to stop the solve convergin
 
 ### The remaining arguments
 
-`v_cycles` sets the multigrid cycles per inner apply; see the caution above before raising
+`cycles` sets the multigrid cycles per inner apply; see the caution above before raising
 it. `strength_threshold` (default `0`, meaning isotropic aggregation over the full graph)
 aggregates only along **strong** connections when set — typically `0.25`. That is what
 keeps the V-cycle contracting on a high-aspect-ratio or skewed mesh, where isotropic

@@ -9,6 +9,11 @@ paths:
 
 > ⚠️ **`BlockPreconditioner.build(velocity=…)` takes a value, not a string (2026-09-14, #390).** `"smoothed"` → `ViscousMultilevel()`, `"convection"` → `ConvectionTwoLevel()`, `"convection-air"` → `ConvectionAir()`; a string is refused. `SmoothedAmgConvectionVelocity` is split into `TwoLevelConvectionVelocity` / `AirConvectionVelocity`, and `_build_velocity_block` is gone (each value has a private `_build`). `VelocityBlock` and `_ConvectionVelocityBlock` are **abstract** (`abc`), and `SettingsValue.__new__` refuses them at construction naming the three values — an `isinstance` check alone let a bare base through to a late, empty `NotImplementedError` after the pressure Schur was built (review of PR #398). Entries below quoting the strings are dated history.
 
+> ⚠️ **Renamed 2026-10-12 (#373, part 2).** `MomentumContinuity.viscosity` is `effective_viscosity` (it returns `μ + ρν_t`;
+> bare `viscosity` means the molecular property). The mass-flow drive's solved body force is written `f` in the code and
+> its docstrings (`MassFlow.forced(momentum, force)`, `R_aug([w, f])`), because `β` means the pseudo-transient shift
+> strength everywhere else. Entries below that write the force as `β` predate the rename and mean `f`.
+
 > **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
 > *your* understanding — that is its job, and why it loads into your
 > context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
@@ -224,7 +229,7 @@ Engineering Principles.
   - **Fluid properties come
   from a `PropertyModel`** (`build(mesh, geom, properties, boundary, *, gradient_scheme=…)` — the
   scheme is keyword-only and defaults to `schemes.DEFAULT_GRADIENT_SCHEME`; must supply
-  `"viscosity"`+`"density"`; `.viscosity`/`.density` evaluate them per-cell) — see
+  `"viscosity"`+`"density"`; `.effective_viscosity`/`.density` evaluate them per-cell — the first adds `ρν_t` to the molecular value) — see
   `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
   collection (constructed like a `PropertyModel`), bound inside `build` via
   `boundary.resolve(mesh.face_patches, mesh.face_cells)` (which refuses a map leaving any boundary
@@ -442,8 +447,8 @@ Engineering Principles.
       here: 8×8 perturbed grid, `perturb=0.2`, `seed=2`,
       `MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)`, Stokes, x64.)
 - **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
-  `MomentumContinuity.viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
-  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `viscosity` adds it to the
+  `MomentumContinuity.effective_viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
+  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `effective_viscosity` adds it to the
   molecular `μ` from `properties`. Callers pass only `ν_t` and never restate the closure relation.
   - **`with_scaled_molecular_viscosity(factor)` rescales the molecular `μ` only** (the `"viscosity"`
     entry in `properties`, via `PropertyModel.with_scaled`), leaving the eddy-viscosity leaves alone.
@@ -725,7 +730,7 @@ Engineering Principles.
   diag_cur)`; the momentum block's per-component lift lives once in `_per_component(scalar_solve, dim)`.
   `SmoothedAmgSchur.apply` composes the first; both velocity blocks inherit a **single** `apply`
   (`_per_component` ∘ `_symmetric_rescaled`) from the intermediate base `_RescaledAmgVelocity`, which
-  owns the shared `hierarchy` / `dim` / `v_cycles` fields and defers to an abstract `_inner_solve` — the
+  owns the shared `hierarchy` / `dim` / `cycles` fields and defers to an abstract `_inner_solve` — the
   only thing the viscous and convection-aware blocks actually differ in (besides how they *build* the
   hierarchy). A new AMG-based velocity block subclasses `_RescaledAmgVelocity` and supplies `build` +
   `_inner_solve`; do **not** re-write the rescale sandwich or the component loop in a strategy's `apply`.
@@ -738,7 +743,7 @@ Engineering Principles.
   `boundary`, `interp_factor`, `normal_distance`, `rho`, `pressure_pin`; it also *owns* the Schur-coeff
   computation `coefficient(a_P)` / `boundary_diagonal(a_P)`, so it is a **stored, runtime** object), and
   the velocity family builds from a sibling `_VelocityGeometry` (`face_cells`, `mesh_geometry`,
-  `interp_factor`, `normal_distance`, `viscosity`, `dim`) that is **build-time-only** — the velocity
+  `interp_factor`, `normal_distance`, `effective_viscosity`, `dim`) that is **build-time-only** — the velocity
   strategies freeze their AMG hierarchy at build and never store it. Keep these **siblings, not one union
   bundle** (the runtime-vs-build-time split and the disjoint Schur-only / velocity-only fields are why).
   Anything that is assembler *behaviour* rather than geometry — the Rhie–Chow `mass_flux(reference_state)`
@@ -748,7 +753,7 @@ Engineering Principles.
   do **not** thread the assembler into a strategy.
 - **The mesh connectivity + multigrid knobs `_build_schur`/a velocity-block value's `_build` share are ONE
   resolved value, `_StrategyInputs`, not a repeated 8-value positional bundle (issue #272, fixed
-  2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`v_cycles`/
+  2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`cycles`/
   `strength_threshold`/`assembler`/`reference_state` once and used to fan them out positionally into
   both helpers' ~10-12-argument calls — a `NamedTuple` (plain host data, live only for one `build()`
   call, so it needs none of `_SchurGeometry`/`_VelocityGeometry`'s pytree machinery) now carries the
@@ -1012,7 +1017,7 @@ border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelo
   the mechanism is inferred from the timings, not read off the program.
 - **Outer block preconditioner — Stage 3: the remaining limit IS the Schur approximation, and no amount
   of inner accuracy reaches it (measured on a developed Re=1e5 SST channel; binding, do not re-attempt).**
-  The `v_cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
+  The `cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
   the flow block's error operator `ρ(I − A_flow·M_flow)` at 34.02 / 33.99 / 34.03 / 34.05 (no effect);
   Schur V-cycles ×2/×4/×8 make it *worse* (41.6 / 48.7 / 48.5)**; both-exact never beats the 1-cycle
   baseline; and **rebuilding the whole block at the developed state does not help** (34.0 → 31.6 on the

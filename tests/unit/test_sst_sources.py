@@ -65,7 +65,7 @@ def test_k_production_limited() -> None:
 
 
 def test_k_production_explicit_limiter_keeps_the_value_but_drops_the_k_derivative() -> None:
-    """``explicit_limiter`` (a forward-solve stabilization) leaves the production *value* identical
+    """``explicit_production_limiter`` (a forward-solve stabilization) leaves the production *value* identical
     but removes its ``k``-derivative where the cap is active -- so the k-equation Jacobian loses the
     destabilizing feedback term and stays an M-matrix, while the residual is unchanged."""
     context, _ = _context_and_volume()
@@ -73,7 +73,7 @@ def test_k_production_explicit_limiter_keeps_the_value_but_drops_the_k_derivativ
         nu_t=_cell(10.0, 10.0), strain_rate=_cell(1.0, 1.0), omega=_cell(1.0, 1.0), model=MODEL
     )
     exact = KProduction(**args)
-    explicit = KProduction(**args, explicit_limiter=True)
+    explicit = KProduction(**args, explicit_production_limiter=True)
     k = _cell(1.0, 1.0)  # cap active (ν_t S² = 10 > 10 β* k ω)
 
     # Same forward value.
@@ -100,7 +100,7 @@ def _near_wall(cells, d, nu=1e-5, shear=900.0):
     return NearWallKClosure(
         cells=jnp.array(cells),
         distance=ones * d,
-        viscosity=ones * nu,
+        kinematic_viscosity=ones * nu,
         shear_rate=ones * shear,
         model=MODEL,
     )

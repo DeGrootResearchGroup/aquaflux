@@ -77,6 +77,22 @@ steps, cycles, retries, refreshes, wall, mid-span `x_r/h`. A pass is ≥ 10 % fe
 steps or retries and the same `x_r/h`; then a library-default change needs the project owner. Watch the
 retry ladder: a looser direction near the low-β wall could trip `abort_above_cycles` or the line search.
 
+**Measured on bfs3d under the residual stop instead (2026-10-12, #699):** #699 replaced the `lineax`-stop
+sweep above with 0.1 / 0.3 / 0.6 under `stop: residual` at `refresh_on_cycles` 4 (tied with 3 in 6b's
+bfs3d runs); 0.9 and the `lineax` stop were not run. Configuration as in 6b's bfs3d table:
+
+| `rtol` | outer steps | inner solves | cost re-fits | steps redone | final `\|R\|` | solve wall |
+|---|---|---|---|---|---|---|
+| 0.1 | 27 | 89 | 4 | 0 | 9.28e-6 | 774 s |
+| 0.3 | 30 | 123 | 3 | 0 | 5.47e-6 | 787 s |
+| **0.6** | 26 | 126 | 1 | **1** (step 15, `alpha`, beta 0.005 -> 0.01) | 8.02e-6 | **590 s** |
+
+`x_r/h` 8.361 in all. **0.6 is 25 % faster than 0.3 on bfs3d** (13 % on pitzDaily) with one retry, so it
+fails the pre-registered "no extra retries" bar by one step on both cases; unlike pitzDaily it took FEWER
+outer steps. **0.1 is level with 0.3 here** (pitzDaily: 25 % slower), so tightening is not a loss on this
+case, and the Eisenstat–Walker refutation rests on pitzDaily alone. Whether 0.6 moves is the owner's
+call; the retry is the thing a forcing safeguard (6b) would also have to cover.
+
 ## 5. Anderson acceleration / nonlinear GMRES around the outer step
 
 **What.** Treat one pseudo-transient Newton step as a fixed-point map `x ↦ G(x)` and accelerate the
@@ -209,10 +225,33 @@ jax 0.11.2, nothing else running; branch `737d297` against `main` `a2a73d3`:
 
 All `x_r/h` 8.0686, no retries. Fewer re-fits trade against more cycles on staler inverses and the two
 cancel: every wall is within 7 %, single runs, so no arm is separable from `main` on time. 3 was chosen
-for restoring the march's shape (about 20 steps of about four inner iterations), not for speed. bfs3d,
-which ships 3 under the `lineax` stop (one fewer counted cycle per solve), is unmeasured under #290.
-**Still open before the default moves:** bfs3d (its mesh is not in this container), the cost
-thresholds' re-calibration, the end-of-march failures below, and the project owner's decision.
+for restoring the march's shape (about 20 steps of about four inner iterations), not for speed.
+
+**✅ Measured on bfs3d 2026-10-12 (#699) — 1.48-1.52x faster wall, same root, no new retry.** `validation/bfs3d_openfoam/compare.py` at `46af0749` (after #290's step-ending re-fit), `case.yaml` as shipped plus the `BFS3D_*` edits named; Apple M3 Pro, 11 cores, 18 GB, macOS, Python 3.13.4, jax 0.10.2; one run each, back to back through `run_case.sh` with nothing else running, run 0 warming the compile cache.
+Cycle counts are not comparable across stops (see above), so the comparison is wall and steps:
+
+| run | stop, `refresh_on_cycles` | outer steps | inner solves | cost re-fits | re-fit time | steps redone | final `\|R\|` | solve wall |
+|---|---|---|---|---|---|---|---|---|
+| 0 | `lineax`, 3 (shipped) | 36 | 73 | 17 | 415 s | 0 | 9.94e-6 | 1197 s |
+| 1 | `residual`, 3 | 30 | 124 | 5 | 249 s | 0 | 7.98e-6 | **810 s** |
+| 2 | `residual`, 2 | 34 | 105 | 16 | 399 s | **1** (step 18, `alpha`) | 9.96e-6 | 814 s |
+| 3 | `residual`, 4 | 30 | 123 | 3 | 220 s | 0 | 5.47e-6 | **787 s** |
+
+`x_r/h` 8.361 in all four. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
+nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each);
+2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
+runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
+never rising. ⚠️ That tail's rate is the floor's (no release in this file), so these runs cannot show the
+linear-ending failure below either way -- a shifted step converges linearly whatever the stop. ⚠️ bfs3d's march
+**changed under #290/#694** (traced split, re-fit ending the step): the shipped file's 28 steps / 174
+cycles / one retry of 2026-10-11 (`61a14308`) is now 36 / 166 / none at about the same wall (1191 against
+1197 s) -- the two runs part at the first inner solve's fourth digit, and each re-fit's refactor phase
+went from ~2.8 to ~5.3 s. Compare bfs3d runs only within one commit. The refactor-phase rise is the
+structural-pattern products of 868ab80/f7326c1 (on pitzDaily 0.88 -> 1.06 s per split refit), cached
+since 2026-10-13 (`StructuralPatterns`, `solve-amg-multigrid.md`: 0.83 s); the trajectory change is not
+explained by it and is not bisected.
+**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard), the
+cost thresholds' re-calibration, and the project owner's decision.
 
 **The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
 true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
@@ -314,21 +353,12 @@ sequential global sweep that does not parallelize.
 the first GPU march's step/cycle counts against the CPU march's — counts should match; clocks are the
 result.
 
-## 9. Batch the parameter sweep with `vmap` over the whole Newton step
+## 9. CLOSED ON CPU — batching a parameter sweep with `vmap`; reopen with entry 8
 
-**What.** For calibration and gradient sweeps (`uvreactor_openfoam/gradient_sweep_calibration.py`,
-Reynolds sweeps), `jax.vmap` the compiled Newton step over 4–8 parameter values and march them in
-lock-step, with per-member convergence masks.
-
-**Why it should win.** The ledger already measured per-call overhead amortizing under `vmap`
-(9.08 → 3.22 ms per matvec in 2D, 33 → 17 ms in 3D). On GPU the amortization is far larger because
-each member is too small to fill the device alone. Independent solves at nearby parameters also share
-their compile.
-
-**Caveats.** `RootSolver` reads residual norms back as Python numbers and refuses to run under
-`vmap`/`jit` by design (`steady_state_solving.md`); this needs a batched march driver with traced
-convergence masks — a new driver, not a wrapper. Members converging at different step counts waste
-work on the finished ones; members starting closer together would help (entry 3, a predictor, is closed).
+Bounded on pitzDaily (2026-10-10, `batch_bound_probe.py`) at **at most 1.10x on the Krylov work at 8
+members**, because the preconditioner is ~80 % of each application and does not batch. Recorded in
+`solve-refuted-directions.md` ("Batching a parameter sweep with `vmap`"). It is a GPU question, where
+the preconditioner would be traced and a member too small to fill the device; reopen it there.
 
 ## 10. Nonlinear elimination of the ω stiffness
 
@@ -348,6 +378,27 @@ operator (the warm-start refutation is the cautionary tale).
 
 **Risk.** Highest in this file; measure on the captured hard iterates before touching the march.
 
+**✅ The census re-taken on today's march (2026-10-12, #699): the pure-ω near-singular cells are still
+there, at the states where the march is slowest.** `cell_block_conditioning.py` on bfs3d's shipped march
+at `46af0749` (#699 run 0, `BFS3D_CHECKPOINT_KEEP=200`; configuration as in 6b's bfs3d table), at the
+checkpoint before each of the three steps with the hardest single inner solve (all three line-search
+clipped and positivity-limited; the march redid no step), each at its own shift, 0.05 and 0:
+
+| state (before step) | hardest solve | shift | cells `sigma_min` < 1e-3 (at 0.05 / 0) | worst cond | median `k` there / whole mesh |
+|---|---|---|---|---|---|
+| `state-00011` (12) | 12 cycles, `alpha` 0.125 | 0.0173 | **644** (614 / 649) | 4.0e7 | 0.115 / 0.544 |
+| `state-00027` (28) | 8 cycles, `alpha` 0.022 | 0.005 | 370 (346 / 375) | 2.7e7 | 0.127 / 0.710 |
+| `state-00028` (29) | 5 cycles, `alpha` 0.25 | 0.01 | 365 (345 / 373) | 3.6e7 | 0.127 / 0.710 |
+
+In every one of the 60 worst blocks the near-null direction is pure ω to three decimals (a `u` trace up
+to 0.003 in two cells), and the worst cells come in spanwise-symmetric pairs (22480/12880,
+21840/13520, ...) in low-`k` regions. **The shift does not reach them**: 0 -> 0.05 changes the count by
+under 10 % at every state. Against the 2026-08-08 census (353 cells, cond 5e6-9e6, median `k` 0.122) the
+count is up to 1.8x higher and the blocks ~5x worse conditioned, but that census was at a different state
+under the deleted ILU bundle, so read it as "still present", not "worse". **By #699's rule this direction
+keeps its motivation**; the three states above (`checkpoints-baseline/` of that run, gitignored) are the
+ones to design and probe it on.
+
 ## 11. MEASURED AND BUILT (opt-in) -- releasing the shift floor once the target station has settled
 
 Probed and marched on pitzDaily 2026-10-10: the floor `beta_min` sets the target station's linear rate,
@@ -356,14 +407,44 @@ and `release_floor` (`ShiftStrengthControl`, off by default) cut the march from 
 ("The shift floor sets the target station's rate"); the built control is in `solve-globalization.md`.
 ⚠️ An earlier version of this entry quoted the march log's wall-clock column as solver work ("1036 raw
 solver steps", "174 solver steps"); those were seconds, and the log entry carries the corrected counts.
-**Still open:** (a) re-fitting the inverse at the released shift rather than at `refit_beta_floor`, worth
-1-8 cycles per released step by the probe (most of the released steps' extra cost -- on bfs3d the two
-released steps cost 12 and 15 cycles against 4-5 at the floor); (b) whether bfs3d's `case.yaml` should
+**(a) Re-fitting the inverse at the released shift: CLOSED on pitzDaily and bfs3d (2026-10-13), worth one cycle on pitzDaily and none on bfs3d.**
+pitzDaily `case.yaml` at `14e3963` (residual stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 3 x 12 stations, `release_floor` 1e-4, field split `SimpleSmoothed` (frozen) / `JacobiSmoothed`), only `PITZ_REFIT_BETA_FLOOR` varied; Linux x86_64, 4 cores, jax 0.11.2, one run each, back to back:
+
+| `refit_beta_floor` | steps | cycles | final `\|R\|` | wall (indicative) |
+|---|---|---|---|---|
+| 0.05 (shipped) | 20 | 154 | 1.7e-6 | 643 s |
+| 1e-4 (tracks every shift, released ones too) | 19 | 144 | 3.5e-7 | 534 s |
+| 0.005 (tracks to `beta_min`, not the release) | 19 | 143 | 3.4e-7 | 546 s |
+
+All `x_r/h` 8.0686, no retries. The 1e-4 and 0.005 arms are identical through step 17 and differ by one
+cycle at step 18: since #290 the release fires at step 17 of 19, so there is nothing left for it to save
+(the replay's 1-8 cycles per step were taken on the 31-step march of 2026-10-10). Ledger entry: "Re-fitting
+at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
+at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
+step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
+hierarchy does not evidently need it. **pitzDaily's file drops the floor** (2026-10-13, owner's decision;
+none is the 1e-4 arm exactly, since the shift never goes below `release_floor`; confirmed by a march of
+the file as committed, whose step table matches the 1e-4 arm's line for line). ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
+are deterministic.
+
+**bfs3d, measured 2026-10-13 by the owner (comment on #709):** `validation/bfs3d_openfoam/compare.py` at `7eccaea5`, `case.yaml` as shipped (`lineax` stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 1.5 x 12, release as in the table, `SimpleSmoothed` / `JacobiSmoothed`) with a local, unpushed `BFS3D_REFIT_BETA_FLOOR` override; Apple M3 Pro, 11 cores, Python 3.13.4, jax 0.10.2, one run each, back to back, nothing else running; no step redone in any run:
+
+| `refit_beta_floor` | release | steps | cycles | re-fit time | final `\|R\|` | solve wall |
+|---|---|---|---|---|---|---|
+| 0.05 (shipped) | off | 36 | 166 | 420 s | 9.94e-6 | 1197 s |
+| 0.005 | off | 33 | 155 | 336 s | 7.24e-6 | 1079 s |
+| none | off | 33 | 155 | 333 s | 7.24e-6 | 1086 s |
+| 0.005 | 1e-4 | 29 | 139 | 347 s | 7.00e-6 | 1019 s |
+| none | 1e-4 | 29 | 141 | 345 s | 6.47e-7 | 1027 s |
+
+`x_r/h` 8.361 in all; the 0.05 arm reproduces #699's baseline (36 / 166). Dropping the floor saves 3 steps and 11 cycles (7 %, as on pitzDaily) and ~10 % of the wall. 0.005 and none are identical without the release (the shift never goes below `beta_min` there). **(a) on bfs3d is worth nothing:** with the release, the two arms are identical through step 27, the release fires at step 28, both finish at step 29, and no floor costs 2 more cycles for a deeper final `|R|`. Both released steps cost 3 cycles each, not #678's 12 and 15 (measured before #290/#694 changed this march). bfs3d's file still ships 0.05 and no release; dropping the floor, and adding the release, are both measured wins there -- the owner's call.
+
+(b) whether bfs3d's `case.yaml` should
 release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
 173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss under bfs3d's
 lineax stop but a win under pitzDaily's `stop: residual` (25 steps / 195 cycles / 792 s, the best arm;
 log, "bfs3d: the release, `grow` 3 and the settle-ended ramp") -- the owner's call, and it is a choice of
-the stop as much as of the release; (c) whether the library default
+the stop as much as of the release; on the post-#290 march with no refit floor (table above) it saves 4 steps, 16 cycles and 60 s; (c) whether the library default
 should release, after the three slow tests #645 names (a loose terminal step is what they measure).
 pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 
@@ -406,16 +487,19 @@ bfs3d (since measured, #678: see the top of this entry).
 
 ## Smaller housekeeping
 
-- **Compile on the critical path.** 396 s of XLA compilation before step 1 on pitzDaily. Ahead-of-time
-  lower-and-compile the *next* station's program (new viscosity leaf, new measure) in a background
-  thread while the current station marches; the persistent cache already makes repeat runs cheap, so
-  this is for first runs and parameter changes.
-- **First-order seed for the second-order residual.** March the `FirstOrderUpwind` residual to a loose
-  tolerance and hand the state to the second-order residual as a seed (defect-correction seeding). Not
-  recorded as tried; cheap to measure on pitzDaily's opening residual.
-- **Gradient reconstruction `sweeps`.** `schemes.md` is explicit that `sweeps=4` must not be lowered
-  globally; the open question is whether the *tangent* reconstruction inside the JVP needs the same
-  count as the primal (still open: entry 2, which would have made this moot, is closed).
+- **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
+  ledger ("Compiling the next station ahead of time"). The 396 s quoted here first is gone: a cold
+  pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
+- **First-order seed for the second-order residual — CLOSED (2026-10-10), even at best.** See the
+  ledger ("Seeding the second-order march from a first-order solve").
+- **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry
+  was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
+  operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
+  identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
+  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d still ships
+  `CorrectedGreenGauss` and is unmeasured. `jacobian_gradient_sweeps` stays a script-only study arm and
+  is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better
+  for this solver, so the direction is to move cases off swept gradients rather than to tune their sweeps.
 
 ## Where this file does not go
 

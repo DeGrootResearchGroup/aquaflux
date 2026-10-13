@@ -105,6 +105,7 @@ from aquaflux.radiation.profiles import Lambertian
 from aquaflux.radiation.quadrature import TriangleQuadrature
 from aquaflux.radiation.receiver_shadows import FrozenShadows, ReceiverShadows, StreamedShadows
 from aquaflux.radiation.self_occlusion import SelfOcclusion
+from aquaflux.radiation.shooting import checked_grid
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import TransferMatrix, build_transfer
 from aquaflux.solve import relative_residual_gmres, solve_linear
@@ -188,6 +189,15 @@ class RadiationSettings(eqx.Module):
 
         Pass :class:`~aquaflux.radiation.culling.EveryPair` to test every body against every pair,
         which gives the same masks for more tests, or a ``ShaftCulling`` with other group sizes.
+    shooting_grid : tuple of int or None
+        Rows and columns of the grid that finds the light round a sleeve's rim, through a
+        transparent solid's wall alone (:func:`~aquaflux.radiation.shooting.rim_crossings`). Unset,
+        32 by 32. The grid need land in each patch of such paths only once -- the rest of the patch is
+        reached from there -- so a patch it misses at every point is lost without a sign; a warning
+        names this setting when the grid found a patch at one point only.
+        :func:`~aquaflux.radiation.refracted.check_shooting_grid` says whether the rows or the
+        columns are short. Read as a pair of whole numbers of at least two, so a case file's
+        two-item list will do.
     """
 
     receiver_quadrature: int | TriangleQuadrature | None = eqx.field(static=True, default=None)
@@ -197,6 +207,11 @@ class RadiationSettings(eqx.Module):
     self_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
     receiver_occlusion: SelfOcclusion | None = eqx.field(static=True, default=None)
     body_culling: BodyCulling | None = eqx.field(static=True, default=None)
+    shooting_grid: tuple[int, int] | None = eqx.field(
+        static=True,
+        default=None,
+        converter=lambda grid: None if grid is None else checked_grid(grid),
+    )
 
     def _passed(self, **named):
         """Drop the unset entries, so each reaches its own default rather than a copy of it."""
@@ -279,6 +294,10 @@ class RadiationSettings(eqx.Module):
     def gather_options(self) -> dict:
         """The subset the volume gather reads."""
         return self._passed(pair_limit=self.gather_pair_limit)
+
+    def refraction_options(self) -> dict:
+        """The subset the refracted gathers and their masks read, beside :meth:`gather_options`."""
+        return self._passed(shooting_grid=self.shooting_grid)
 
 
 class RadiationModel(eqx.Module):

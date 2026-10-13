@@ -197,7 +197,7 @@ class MomentumContinuity(eqx.Module):
         The fluid's **material** properties, supplying its per-cell molecular ``"viscosity"`` and
         ``"density"``. These describe the fluid alone and are never overwritten by a flow state; a
         turbulence closure's contribution rides separately in :attr:`eddy_viscosity`, and
-        :attr:`viscosity` combines the two.
+        :attr:`effective_viscosity` combines the two.
     eddy_viscosity : jnp.ndarray or None
         Per-cell **kinematic** eddy viscosity ``nu_t`` from a Reynolds-averaged Navier--Stokes (RANS)
         closure, shape ``(n_cells,)``, or ``None`` for laminar flow. Set with
@@ -317,7 +317,7 @@ class MomentumContinuity(eqx.Module):
         and a **prescribed** uniform driving force (:class:`UniformBodyForce`) — subtracted from the
         momentum balance. A driving force belongs there unless it is the unknown of a
         :class:`~aquaflux.flow.MassFlow` solve, which needs a leaf of its own to write each iterate
-        into and a border column ``dR/dbeta = −V`` a source cannot supply.
+        into and a border column ``dR/df = −V`` a source cannot supply.
         """
         needed = {"viscosity", "density"} | declared_properties(sources)
         properties.require(*sorted(needed))
@@ -443,7 +443,7 @@ class MomentumContinuity(eqx.Module):
         The one seam a RANS closure enters the momentum block through. The closure supplies only its
         own quantity, the **kinematic** eddy viscosity; combining it with the fluid's molecular
         viscosity into the momentum diffusion coefficient ``mu_eff = mu + rho nu_t`` is done once, by
-        :attr:`viscosity`, so no caller restates the closure relation.
+        :attr:`effective_viscosity`, so no caller restates the closure relation.
 
         ``nu_t`` replaces a dedicated leaf rather than overwriting the material properties, which
         means the molecular viscosity in :attr:`properties` stays intact and authoritative (so this
@@ -506,8 +506,8 @@ class MomentumContinuity(eqx.Module):
     # --- properties -----------------------------------------------------------
 
     @property
-    def viscosity(self) -> jnp.ndarray:
-        """Per-cell dynamic viscosity — the momentum diffusion coefficient, shape ``(n_cells,)``.
+    def effective_viscosity(self) -> jnp.ndarray:
+        """Per-cell effective dynamic viscosity — the momentum diffusion coefficient, shape ``(n_cells,)``.
 
         The molecular viscosity from :attr:`properties`, plus the turbulent contribution
         ``rho nu_t`` when a closure has supplied one via :meth:`with_eddy_viscosity`. This is the
@@ -574,7 +574,7 @@ class MomentumContinuity(eqx.Module):
             jnp.zeros(self.mesh.n_faces),
             lambda bc, faces, owner: jnp.full(faces.shape, float(bc.shears_flow())),
         )
-        return jnp.where(shears > 0.0, wall_mu, self.viscosity[owner])
+        return jnp.where(shears > 0.0, wall_mu, self.effective_viscosity[owner])
 
     def _boundary_face_viscosity(self) -> jnp.ndarray:
         """The per-face effective viscosity the momentum diffusion uses at each boundary face.
@@ -589,7 +589,7 @@ class MomentumContinuity(eqx.Module):
         wall model's value and the log-layer owner-cell ``k/omega`` value differ by a large factor.
         """
         wall = self._wall_boundary_viscosity()
-        return wall if wall is not None else self.viscosity[self.mesh.face_cells.owner]
+        return wall if wall is not None else self.effective_viscosity[self.mesh.face_cells.owner]
 
     # --- boundary assembly -------------------------------------------------------------
 
@@ -904,7 +904,7 @@ class MomentumContinuity(eqx.Module):
         a_p = momentum_diagonal(
             self.mesh.face_cells,
             self.geometry,
-            self.viscosity,
+            self.effective_viscosity,
             mdot_lagged=mdot_estimate,
             boundary_owner_coeff=boundary_owner_coeff,
         )
@@ -988,7 +988,7 @@ class MomentumContinuity(eqx.Module):
         convective, dissipative = momentum_diagonal_parts(
             self.mesh.face_cells,
             self.geometry,
-            self.viscosity,
+            self.effective_viscosity,
             mdot_lagged=self._lagged_mdot_estimate(velocity, grad_velocity),
         )
         source_diagonal = self._source_diagonal(velocity)
@@ -1030,7 +1030,7 @@ class MomentumContinuity(eqx.Module):
         quantity and cannot ride in a balance's scalar ``source_operators``.
         """
         velocity = kinematic.velocity
-        viscosity = self.viscosity  # per-cell mu, the momentum diffusion coefficient
+        mu_eff = self.effective_viscosity  # per-cell, the momentum diffusion coefficient
         volume = self.geometry.cell.volume
         # The wall-function effective viscosity, if any, overrides only the shearing-wall boundary
         # faces (None -> plain per-cell coefficient, bit-identical).
@@ -1047,7 +1047,7 @@ class MomentumContinuity(eqx.Module):
         mesh_context = MeshContext(
             face_cells=self.mesh.face_cells,
             geometry=self.geometry,
-            properties={"viscosity": viscosity},
+            properties={"viscosity": mu_eff},
         )
         columns = []
         for i in range(self.mesh.dim):

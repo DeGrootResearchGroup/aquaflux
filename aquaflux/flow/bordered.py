@@ -1,9 +1,9 @@
 """A residual held at a bulk velocity, in the form any staged march can drive.
 
-A :class:`~aquaflux.flow.MassFlow` drive makes the body force ``beta`` an unknown of the solve: it is
+A :class:`~aquaflux.flow.MassFlow` drive makes the body force ``f`` an unknown of the solve: it is
 appended to the state, and the residual is bordered with the constraint row,
 
-    R_aug([w, beta]) = [ R(w; beta) ; c . w - target ],
+    R_aug([w, f]) = [ R(w; f) ; c . w - target ],
 
 where ``c`` averages the flow-direction velocity over the volume. Everything a march needs to run that
 augmented system -- its residual, its shift policy and preconditioner, its residual measures, its seed
@@ -11,18 +11,18 @@ and its answer -- is here, written once for every residual that carries a flow b
 the coupled flow-and-turbulence system border themselves through the same :class:`MassFlowBorder`.
 
 **The multiplier enters linearly, and that is what lets the border wrap any residual.** The force acts as
-``R = flux - beta V`` on the flow-direction momentum rows, so the residual at one force is the residual at
-another plus ``(beta - beta_0) a``, with the column ``a = dR/dbeta = -V``. :class:`BorderedResidual`
+``R = flux - f V`` on the flow-direction momentum rows, so the residual at one force is the residual at
+another plus ``(f - f_0) a``, with the column ``a = dR/df = -V``. :class:`BorderedResidual`
 therefore needs only a residual evaluated at the force the assembler carries, and adds the difference:
-it never writes ``beta`` into the assembler. That is what lets it border a residual handed over as a bare
+it never writes ``f`` into the assembler. That is what lets it border a residual handed over as a bare
 callable -- the station a viscosity-ramp homotopy enters, say -- as readily as an assembler's own, and it
 gives the identical function: the carried force cancels exactly, so neither the values nor the
 derivatives depend on it.
 
-**Preconditioning the augmented system.** ``beta`` is a multiplier, not a function of ``w``, so it is
+**Preconditioning the augmented system.** ``f`` is a multiplier, not a function of ``w``, so it is
 eliminated one layer down, in the preconditioner: :func:`~aquaflux.precondition.bordered_preconditioner`
 extends ``M ~ J^{-1}`` for the unbordered block through the 1x1 Schur complement ``c . M a``, with the
-drive saying where ``beta`` sits. Building ``a`` and ``c`` by hand here is legitimate: a preconditioner
+drive saying where ``f`` sits. Building ``a`` and ``c`` by hand here is legitimate: a preconditioner
 is an approximate inverse that changes only how fast the Krylov solve converges, never the solution or
 its adjoint.
 
@@ -92,7 +92,7 @@ class BorderedResidual(eqx.Module):
     fields : FieldLayout
         The unbordered layout ``residual`` works in.
     force, average : jnp.ndarray
-        The border column ``a = dR/dbeta`` and row ``c``, shape ``(fields.size,)``
+        The border column ``a = dR/df`` and row ``c``, shape ``(fields.size,)``
         (:meth:`~aquaflux.flow.MassFlow.constraint_vectors`).
     """
 
@@ -103,9 +103,9 @@ class BorderedResidual(eqx.Module):
     average: jnp.ndarray
 
     def __call__(self, augmented: jnp.ndarray) -> jnp.ndarray:
-        """The augmented residual ``[R(w; beta) ; c . w - target]``, shape ``(fields.size + 1,)``."""
-        state, beta = self.drive.split(self.fields, augmented)
-        shifted = self.residual(state) + (beta - self.drive.force) * self.force
+        """The augmented residual ``[R(w; f) ; c . w - target]``, shape ``(fields.size + 1,)``."""
+        state, iterate_force = self.drive.split(self.fields, augmented)
+        shifted = self.residual(state) + (iterate_force - self.drive.force) * self.force
         return self.drive.join(
             self.fields, shifted, jnp.dot(self.average, state) - self.drive.target
         )
@@ -130,7 +130,7 @@ class BorderedShiftPolicy(eqx.Module):
     """A shift policy for the unbordered block, bordered for the augmented state.
 
     The inner preconditioner is wrapped by :func:`~aquaflux.precondition.bordered_preconditioner`, and
-    the shift diagonal gains a zero entry for ``beta``: the constraint row is never shifted.
+    the shift diagonal gains a zero entry for ``f``: the constraint row is never shifted.
 
     **An unshifted constraint row, not a damped one.** The constraint is linear in the fields and holds
     no time derivative, so a shifted step asks the damped fields to reach the target bulk velocity in one
@@ -317,7 +317,7 @@ class MassFlowBorder(eqx.Module):
     fields : FieldLayout
         That residual's unbordered layout.
     force, average : jnp.ndarray
-        The border column ``a = dR/dbeta`` and row ``c``, shape ``(fields.size,)``.
+        The border column ``a = dR/df`` and row ``c``, shape ``(fields.size,)``.
     """
 
     drive: MassFlow
@@ -340,14 +340,14 @@ class MassFlowBorder(eqx.Module):
     def force_holding(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The force a root of the bordered system holds, read from its fields' residual alone.
 
-        At a root ``R(w; beta_0) + (beta - beta_0) a = 0``, with ``beta_0`` the force the drive carries,
-        so the force is the least-squares ``beta = beta_0 - (a . R) / (a . a)`` -- exact to the solve's
+        At a root ``R(w; f_0) + (f - f_0) a = 0``, with ``f_0`` the force the drive carries,
+        so the force is the least-squares ``f = f_0 - (a . R) / (a . a)`` -- exact to the solve's
         tolerance, and differentiable through the fields like any function of them.
 
         Parameters
         ----------
         residual : jnp.ndarray
-            ``R(w; beta_0)`` at the converged fields, shape ``(fields.size,)``.
+            ``R(w; f_0)`` at the converged fields, shape ``(fields.size,)``.
 
         Returns
         -------

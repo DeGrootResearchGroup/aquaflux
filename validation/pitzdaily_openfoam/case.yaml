@@ -61,8 +61,10 @@ solver:
   convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-05}
   # The materialized coupled Jacobian, split into the [u, v, p] saddle and the [k, omega] block: a
   # SIMPLE-smoothed hierarchy for the saddle (which never eliminates the matrix, so it does not depend
-  # on an elimination order) and a Jacobi-smoothed one for the closure. Refitted at a shift no lower
-  # than 0.05. The saddle's coarsening reads operator values (the strength threshold), so it is frozen
+  # on an elimination order) and a Jacobi-smoothed one for the closure, refitted at the step's own
+  # shift: a refit floor of 0.05 (set for an incomplete-LU smoother this case no longer runs) cost 154
+  # cycles / 20 steps against 144 / 19 with none, to the same x_r/h 8.0686 (2026-10-13, one run each,
+  # Linux x86_64, 4 cores). The saddle's coarsening reads operator values (the strength threshold), so it is frozen
   # at the first build and a refit only re-derives values: re-coarsening moved its level sizes between
   # consecutive steps (validation/traced_split_refresh_shapes.py), which recompiles whatever compiled
   # solve holds the hierarchy.
@@ -70,7 +72,7 @@ solver:
     kind: MaterializedJacobian
     inverse:
       kind: FieldSplit
-      leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
+      leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, smoother_weight: 1.0, aggressive_levels: 0,
         avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
         frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
@@ -80,7 +82,6 @@ solver:
     # OpenFOAM state; reach 4 is exact to round-off but costs 265 probes against 165
     # (validation/pitzdaily_openfoam/probe_reach_check.py). Kept at 3 pending a march comparison.
     probe: {kind: JacobianProbeSpec, stencil_reach: 3}
-    refit_beta_floor: 0.05
   # Each outer step a dual-time inner loop of up to five Newton iterations, stopping at a hundredth of
   # the step's starting residual; a solve that runs 3 restart cycles ends the step, and the
   # preconditioner is refitted before the next (counted as cycles run, the residual stop's count).

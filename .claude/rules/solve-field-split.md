@@ -82,7 +82,7 @@ same-pattern operator with values scaled by U(0.5, 1.5)): one trace, and the jit
 away from the refreshed split's own eager answer. Now each inverse offers
 **`traced_cycle() -> TracedCycle`** (`precondition/traced_cycle.py`): an `equinox.Module` whose `state` (the
 hierarchy, plus `extras` on `HierarchyBlockInverse`) is array leaves and whose `step` is static and
-compares by value (`_HierarchyStep(cycle, smoother)`, `_AirStep(cycles, f_iters, c_iters, omega)` over a
+compares by value (`_HierarchyStep(cycle, smoother)`, `_AirStep(cycles, f_sweeps, c_sweeps, smoother_weight)` over a
 module-level `_air_cycle`). The inverses' own eager `_solve` routes through the same object, so there is
 one path. `traced_field_split` checks `isinstance(inverse, OffersTracedCycle)` (a `runtime_checkable`
 protocol) and raises **`TypeError`** (was `AttributeError` on a `hasattr(_solve)` probe).

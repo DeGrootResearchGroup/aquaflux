@@ -212,7 +212,8 @@ or whose blocks are unnamed: `RowScaledNorm` /
       was right and the expectation wrong.
     - **⚠️ TWO DIFFERENT FLOORS, and conflating them mis-states the mechanism.** `beta_min`
       (on the step control) floors the shift the **operator** is solved with; `refit_beta_floor` (on the
-      preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case) floors only the preconditioner's
+      preconditioner refresh, `PC_BETA_FLOOR = 0.05` on this case when measured; pitzDaily's file sets none since
+      2026-10-13) floors only the preconditioner's
       **copy** — `pc_beta = max(beta, refit_beta_floor)` — so the V-cycle stays in a regime it inverts well
       while the solved system keeps the small shift it needs for pseudo-transient progress. During the
       collapse the preconditioner was built at **0.05 throughout and never saw 0.012**, so this is not
@@ -247,8 +248,10 @@ or whose blocks are unnamed: `RowScaledNorm` /
       came from conflating the two floors above: `beta_min = 0.005` is demonstrably *fine* — the march
       converges there, comfortably, at the settled state. What the collapse locates is the level at
       which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
-      value chosen against no recorded evidence on this case. Whether 0.05 is right, and whether the
-      floor should track the ramp rather than sit still, is open and unmeasured.
+      value chosen against no recorded evidence on this case. **Measured 2026-10-13 and dropped from
+      pitzDaily's file:** with no refit floor the shipped march takes 19 steps / 144 cycles against 20 /
+      154 at 0.05, same `x_r/h` (`.claude/notes/solve-open-directions.md` 11a). bfs3d still ships 0.05,
+      though without it its march takes 33 steps / 155 cycles against 36 / 166 (owner's runs, #709).
       ⚠️ **"Fine" means stable, not fast (measured 2026-10-10).** `beta_min = 0.005` is reached at ramp
       step 13 and then sets the whole target station's rate: a dual-time step at a fixed shift contracts
       each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the
@@ -786,7 +789,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
     — put the state on that seam and a trigger could read the physics, and trigger calibration would cost
     one full solve per candidate instead of one logged run for all of them.
-  - **Reporting seam.** `StepReport(step, cycles, residual_norm, residual_ratio, alpha, drift,
+  - **Reporting seam.** `StepReport(step, raw_cycles, residual_norm, residual_ratio, alpha, drift,
     inner_iterations, shift, escalations, diverged_retry)` + `MarchResult`,
     plus an optional streaming `observer` (a long march must not withhold all logging until it finishes).
     The trigger and a future logger consume the identical objects, so there is no second reporting path.
@@ -806,7 +809,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     Three report fields exist because the log could not otherwise carry them. **`shift`** is the `beta`
     the step was taken at — already read at the construction site for `carry_beta`, and otherwise
     recovered by every driver wrapping the step control. **`escalations` / `diverged_retry`** record
-    whether the step was redone: `cycles` counts only the **accepted** attempt, so a redone step is
+    whether the step was redone: `raw_cycles` counts only the **accepted** attempt, so a redone step is
     indistinguishable from a cheap one, **and a retry mechanism left unconfigured never announces its
     absence** — which is not hypothetical (a bfs3d march ran with `cycle_budget` set but
     the cost threshold at its `None` default, so the beta-escalation never fired and nothing in the log
@@ -815,7 +818,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     `‖R‖ <= atol + rtol·‖R₀‖`, and the march reports `‖R‖` and `‖R‖/‖R₀‖` but not `‖R₀‖`, so the target
     was invisible. Pinned by `tests/unit/test_march_log.py` (synthetic reports, no solve).
   - **Solve cost is reported offset-corrected, split by inner iteration (BUILT).** The raw count is
-    lineax's `num_steps`, which carries **+2 per solve**, so a two-inner step reporting `cycles = 6` did
+    lineax's `num_steps`, which carries **+2 per solve**, so a two-inner step reporting `raw_cycles = 6` did
     two ideal single-cycle solves — the raw number is *entirely* offset and overstates the work
     threefold, worst exactly on the cheap near-root steps where the march's economics are decided.
     `restart_cycles(raw, solves)` in `solve/linear.py` is the one place that offset is stripped;

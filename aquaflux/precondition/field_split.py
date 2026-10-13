@@ -571,7 +571,7 @@ class _NodalSmoother(NamedTuple):
 
     cycles: int
     sweeps: int
-    omega: float
+    smoother_weight: float
     spectral_damping: bool
 
 
@@ -595,7 +595,7 @@ def _jacobi_smoothed_cycle(
         residual,
         cycles=smoother.cycles,
         sweeps=smoother.sweeps,
-        omega=smoother.omega,
+        smoother_weight=smoother.smoother_weight,
         spectral_damping=smoother.spectral_damping,
     )
 
@@ -635,7 +635,7 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
         prolongation, ``"symmetric-part"`` or ``"standard"``.
     spectral_damping : bool
         Scale the smoother's relaxation by the level's largest eigenvalue estimate. ``False``
-        (default) is the undamped sweep the note below explains; it also selects ``omega``'s meaning,
+        (default) is the undamped sweep the note below explains; it also selects ``smoother_weight``'s meaning,
         which is why the two travel together.
     equilibrate : bool
         Coarsen the operator rescaled to a unit-magnitude diagonal; see the note below.
@@ -697,10 +697,10 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
         self._smoother = _NodalSmoother(
             cycles=cycles,
             sweeps=sweeps,
-            # `omega` means different things either side of `spectral_damping`: a damping relative to
+            # `smoother_weight` means different things either side of `spectral_damping`: a damping relative to
             # the level's `lambda_max`, or the absolute relaxation itself. Undamped is the measured
             # default and is why the pair travels together.
-            omega=1.0 if not spectral_damping else 0.8,
+            smoother_weight=1.0 if not spectral_damping else 0.8,
             spectral_damping=spectral_damping,
         )
         super().__init__(block, n_fields, max_coarse=max_coarse, **hierarchy_settings)
@@ -730,9 +730,9 @@ def _air_cycle(hierarchy: AirHierarchy, b: jnp.ndarray, settings: _AirStep) -> j
         hierarchy,
         b,
         cycles=settings.cycles,
-        f_iters=settings.f_iters,
-        c_iters=settings.c_iters,
-        omega=settings.omega,
+        f_sweeps=settings.f_sweeps,
+        c_sweeps=settings.c_sweeps,
+        smoother_weight=settings.smoother_weight,
     )
 
 
@@ -745,9 +745,9 @@ class _AirStep:
     """
 
     cycles: int
-    f_iters: int
-    c_iters: int
-    omega: float
+    f_sweeps: int
+    c_sweeps: int
+    smoother_weight: float
 
     def __call__(self, hierarchy: AirHierarchy, b: jnp.ndarray) -> jnp.ndarray:
         return _air_cycle(hierarchy, b, self)
@@ -773,15 +773,15 @@ class AirReductionInverse:
     Parameters
     ----------
     block : scipy.sparse matrix
-        The group's diagonal block, field-major, shape ``(n_group_fields * n_cells,) * 2``.
-    n_group_fields : int
+        The group's diagonal block, field-major, shape ``(n_fields * n_cells,) * 2``.
+    n_fields : int
         Fields per cell in this group.
     cycles : int
         V-cycles per application. The count is fixed, so ``b -> x`` stays a linear map, as the
         non-flexible outer Krylov solve and the transposed adjoint solve both require.
-    f_iters, c_iters : int
+    f_sweeps, c_sweeps : int
         Fine- and coarse-point sweeps in the FC-Jacobi smoother.
-    omega : float
+    smoother_weight : float
         Smoother damping.
     **settings
         Forwarded to :func:`~aquaflux.precondition.multigrid.build_air_hierarchy` (``theta``,
@@ -791,23 +791,25 @@ class AirReductionInverse:
     def __init__(
         self,
         block: sp.spmatrix,
-        n_group_fields: int,
+        n_fields: int,
         *,
         cycles: int = 1,
-        f_iters: int = 2,
-        c_iters: int = 1,
-        omega: float = 1.0,
+        f_sweeps: int = 2,
+        c_sweeps: int = 1,
+        smoother_weight: float = 1.0,
         **settings,
     ) -> None:
         self._n_dofs = int(block.shape[0])
-        self._block_size = int(n_group_fields)
+        self._block_size = int(n_fields)
         self._settings = settings
         self._transpose_fn = None
         # The hierarchy rides as an ARGUMENT, never a closure. A `jax.jit` built fresh per refresh
         # starts with an empty compilation cache and recompiles whether or not anything moved --
         # measured at ~4x on a comparable block, with the control being a sibling that already passed
         # its hierarchy in and moved 1.01x.
-        self._step = _AirStep(cycles=cycles, f_iters=f_iters, c_iters=c_iters, omega=omega)
+        self._step = _AirStep(
+            cycles=cycles, f_sweeps=f_sweeps, c_sweeps=c_sweeps, smoother_weight=smoother_weight
+        )
         self._hierarchy = build_air_hierarchy(
             sp.csr_matrix(block), block_size=self._block_size, **settings
         )

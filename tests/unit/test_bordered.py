@@ -58,13 +58,13 @@ def test_a_boundary_driven_assembler_has_no_border() -> None:
 
 
 def test_the_bordered_residual_is_the_residual_forced_at_the_solved_force() -> None:
-    """``[R(w; beta) ; <U> - target]``, written independently by forcing the assembler at ``beta``."""
+    """``[R(w; f) ; <U> - target]``, written independently by forcing the assembler at ``f``."""
     momentum = _channel(force=0.05)
     border = mass_flow_border(momentum, momentum.layout)
-    w, beta = _state(momentum), jnp.asarray(0.37)
-    augmented = border.drive.join(momentum.layout, w, beta)
+    w, force = _state(momentum), jnp.asarray(0.37)
+    augmented = border.drive.join(momentum.layout, w, force)
 
-    forced = border.drive.forced(momentum, beta)
+    forced = border.drive.forced(momentum, force)
     velocity, _ = momentum.unpack(w)
     bulk = border.drive.bulk_velocity(velocity, momentum.geometry.cell.volume)
     expected = jnp.append(forced.residual(w), bulk - U_TARGET)
@@ -93,13 +93,13 @@ def test_the_force_read_back_is_exact_at_a_root() -> None:
     momentum = _channel(force=0.05)
     border = mass_flow_border(momentum, momentum.layout)
     w = _state(momentum, seed=4)
-    beta = border.force_holding(momentum.residual(w))
-    rows = border.drive.forced(momentum, beta).residual(w)
+    force = border.force_holding(momentum.residual(w))
+    rows = border.drive.forced(momentum, force).residual(w)
     assert float(jnp.dot(border.force, rows)) == pytest.approx(0.0, abs=1e-10)
     # And a carried force elsewhere changes the residual but not the force read back.
     other = _channel(force=3.0)
     assert float(mass_flow_border(other, other.layout).force_holding(other.residual(w))) == (
-        pytest.approx(float(beta), rel=1e-12)
+        pytest.approx(float(force), rel=1e-12)
     )
 
 

@@ -566,7 +566,9 @@ direction that measured worse. The whole gain is the loose end, which a fixed va
 schedule.
 
 **What it found instead:** (1) the shipped 0.3 is tighter than pitzDaily needs — moved to the open note as
-its own direction, to be measured on bfs3d (where 0.3 was calibrated) before any default changes; (2) the
+its own direction, to be measured on bfs3d (where 0.3 was calibrated) before any default changes -- done
+2026-10-12 under the residual stop (#699, open note 4b): 0.1 is level with 0.3 on bfs3d, so this
+refutation's "tightening costs" half rests on pitzDaily alone; (2) the
 stop is not the pure relative-residual test its docstring claimed — lineax also requires the solution's
 change over the last cycle to be ≤ `rtol` and spends a counted start-up cycle (docstring corrected; see
 `solve.md`); (3) pitzDaily's `PITZ_*` march overrides had been inert since #437 (fixed; `validation.md`).
@@ -628,6 +630,95 @@ rarely restarts anything.
 different Krylov space, and on this operator it did not converge on any system within 400 applications
 (60 unrestarted iterations: weighted residual 0.97). The weighted inner product over plain GMRES's space
 is the similar operator `W A M W^-1` from `W b`.
+
+## Seeding the second-order march from a first-order solve — NOT WORTH BUILDING (2026-10-10)
+
+**What was proposed** (`solve-open-directions.md`, housekeeping): defect-correction seeding — march the
+residual with first-order upwind momentum advection to a loose tolerance, and start the shipped
+second-order march from that state instead of from the viscosity ramp.
+
+**Measured** (`validation/pitzdaily_openfoam/seed_study.py`: case files derived from the shipped
+`case.yaml` — residual stop, `refresh_on_cycles` 2, `LimitedUpwind` + Venkatakrishnan momentum,
+first-order `k`/`omega` — each run through `aquaflux run` in its own process; jax 0.11.2, CPU, 4-core
+Linux, one run per arm, compile seconds from JAX's compile log). The seed keeps the ramp (a first-order
+march from the hybrid start needs it as much as the second-order one), and the second-order march from it
+drops the ramp:
+
+| arm | steps | wall | compiling | without |
+|---|---|---|---|---|
+| first-order seed, `atol` 1e-3 | 20 | 474 s | 100 s | 374 s |
+| second-order from it | 18 | 290 s | 36 s | 254 s |
+| first-order seed, `atol` 1e-2 | 17 | 371 s | 49 s | 322 s |
+| second-order from it | 19 | 299 s | 34 s | 265 s |
+| **shipped (ramp, then target)** | **31** | **676 s** | 59 s | **617 s** |
+
+Seeded totals 765 / 670 s (628 / 587 s without compiling) against 676 / 617 s. **Why it loses:** the
+ramp's 16 stations are paid either way, and a first-order root is a WORSE start for the second-order
+target than the ramp's own last station — 18–19 steps from the seed against 15 for the shipped target
+station. The best arm is within the ~15 % single-run spread of the baseline, and it doubles the compiled
+programs and adds a second problem to every solve.
+
+## Compiling the next station ahead of time — NOT WORTH BUILDING (2026-10-10)
+
+**What was proposed** (`solve-open-directions.md`, housekeeping): lower and compile the next viscosity
+station's program in a background thread while the current station marches, against "396 s of XLA
+compilation before step 1".
+
+**Measured** (`validation/pitzdaily_openfoam/compile_timeline.py` over a march logged with
+`JAX_LOG_COMPILES=1`). pitzDaily, shipped `case.yaml` (residual stop, `refresh_on_cycles` 2), jax 0.11.2,
+CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
+
+| run | compile before step 1 | compile after it | step 1 at | march |
+|---|---|---|---|---|
+| cold (empty `AQUAFLUX_COMPILATION_CACHE_DIR`) | 76.7 s (986 programs) | 38.0 s (1697) | 110 s | 748 s |
+| default cache, first run after `main` moved | 64.4 s | 37.8 s | 99 s | 736 s |
+| default cache, warm (stopped after step 1) | — | — | 62 s | — |
+
+- **A station change is already a cache hit.** After step 1, steps compile 0.4–2 s each, almost all of
+  it small eager programs; the exceptions are the flow V-cycle (~0.4 s whenever a refresh moves the
+  thresholded coarsening, which is documented) and one 7.1 s recompile of `batched_jacobian_matvec` at
+  step 9, whose signature differs from step 1's only in one argument being committed to the device
+  rather than uncommitted. So overlapping a next station's compile hides at most ~38 s (5 % of a cold
+  run) and nothing on a warm one.
+- **The persistent cache works, including for programs holding the preconditioner's host callback**
+  (checked on a toy and on the march step itself, which a warm run took from the cache). The
+  "default cache" row above is partly cold only because every library change re-keys its programs.
+  Programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`) are never
+  written, so ~1700 small ones (~30 s) recompile every run.
+- ⚠️ **A trap met while measuring:** "the cache did not serve the march step" was first read as JAX
+  refusing to persist host-callback programs. It was a key change from the library moving under the
+  cache; a warm run settled it. Read a cache miss against what changed since the cache was written.
+
+## Batching a parameter sweep with `vmap` over the Newton step — NOT WORTH A DRIVER ON CPU (2026-10-10)
+
+**What was proposed** (`solve-open-directions.md` item 9): march 4–8 parameter values in lock-step, `vmap`ing
+the compiled step over the members with per-member convergence masks — a new batched march driver, since
+the march is an eager Python loop that refuses `vmap` by design.
+
+**Probe, no implementation** (`validation/pitzdaily_openfoam/batch_bound_probe.py`). Only the work that is
+one JAX program for every member batches: the residual and its Jacobian-vector product (JVP). The
+preconditioner is a host object behind a callback, fitted per member, and its refits are per member too.
+So one Krylov application costs `pc + jvp` alone and at best `pc + jvp_B / B` per member batched. Measured
+at the march's own target-station states (capture of the shipped `case.yaml`: residual stop, `rtol` 0.3,
+restart 15, `refresh_on_cycles` 2, field split `SimpleSmoothed` / `JacobiSmoothed`; jax 0.11.2, CPU,
+4-core Linux, best of 10):
+
+| | per member |
+|---|---|
+| field-split preconditioner apply | 197.6 ms (196.0–200.5 over steps 17, 24, 31) |
+| coupled-residual JVP, alone | 45.4 ms |
+| JVP under `vmap`, B = 2 / 4 / 8 | 31.8 / 27.3 / 23.7 ms |
+| one Krylov application, B = 1 / 2 / 4 / 8 | 243.0 / 229.4 / 224.9 / 221.3 ms → **at most 1.06 / 1.08 / 1.10x** |
+
+**Why it loses:** the JVP does amortize (1.9x at 8 members), but it is a fifth of an application, and
+the remaining four fifths cannot batch. The march-level bound is lower still: the preconditioner
+refreshes (196 s of the 850 s capture march) are per member, and members converging at different step
+counts idle the finished ones. Nothing in the repository runs such a sweep either:
+`uvreactor_openfoam/gradient_sweep_calibration.py`, which the open note named, calibrates a gradient
+reconstruction and runs no solve, and the channel study's three Reynolds numbers are 2–200x apart.
+
+**When to reopen:** on a GPU with a traced preconditioner (open direction 8), where every part of an
+application is one program and a single member does not fill the device.
 
 ## `jax.linearize` in place of the per-matvec `jax.jvp` — REFUTED, and it looks obviously right
 
@@ -784,7 +875,7 @@ load-bearing status of the flow block itself is in `solve-flow-block.md`.
   2026-09-13 (#371), dominated.** The algebraic, nonuniform-mesh stabilized form of Elman, Howle, Shadid,
   Silvester & Tuminaro (2007), the right variant for a Rhie–Chow collocated discretization, with the
   viscosity cancelled. On the coupled solve it lost to msimple 96 vs 13 cycles / 526 vs 38.9 s on one
-  shifted solve at a developed pitzDaily state (block-diagonal `coupled_continuation`, `v_cycles=4`; no
+  shifted solve at a developed pitzDaily state (block-diagonal `coupled_continuation`, `cycles=4`; no
   shift recorded) and ~2.9x on the coupled channel, at identical residual trajectories. Its one claimed
   win, 9 vs 15 GMRES on an *isolated* flow block at Re=1e4, named no mesh or configuration, and nothing
   in validation or any test selected it. The trap it taught survives: under a block-diagonal coupled
@@ -927,3 +1018,14 @@ the shipped case, which damps the closure rows at 3 — a full march is 16 steps
 Deleted rather than kept as an unused option; branch history has it (`probe-312-additive-shift`,
 dda9be7). Full numbers and configuration: `.claude/rules/turbulence.md`, the #312 entry. Re-open only on
 a case that marches undamped closure rows and shows the near-cancellation in the march.
+
+## Re-fitting at the released shift (open-directions 11a) — CLOSED ON pitzDaily AND bfs3d (2026-10-13)
+
+Re-fitting the inverse at the released shift (`release_floor` 1e-4) rather than at the `refit_beta_floor`
+it is otherwise floored at. pitzDaily `case.yaml` at `14e3963` (residual stop, `rtol` 0.3, `refresh_on_cycles` 3, `grow` 3 x 12 stations, `release_floor` 1e-4, field split `SimpleSmoothed` (frozen) / `JacobiSmoothed`), only `PITZ_REFIT_BETA_FLOOR` varied; Linux x86_64, 4 cores, jax 0.11.2, one run each, back to back: `refit_beta_floor` 1e-4 against 0.005 isolates it (the two agree on every
+step not released) and they differ by **one cycle** (144 against 143), identical through step 17. Since
+#290 pitzDaily releases at step 17 of 19, so there are almost no released steps left to save on. Not built
+(it would need a seam from the step control to the refresh hook). On bfs3d (owner's runs, comment on #709; configuration in open-directions 11a) it is worth nothing: with the
+release at 1e-4, no floor against 0.005 is identical through step 27 and both end at step 29, no floor costing 2
+more cycles (141 against 139) for a deeper final `|R|`. #678's 12-15-cycle released steps predate #290/#694. The same sweeps found the floor itself worth 7 % of cycles on both cases (open-directions 11a).
+

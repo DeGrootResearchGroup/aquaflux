@@ -28,11 +28,13 @@ proposing to revisit the traced flow block, so a re-litigated idea is not mistak
 
 **The SIMPLE level's derived pieces are stored on their structural pattern (binding, #290,
 2026-10-12).** `saddle_multigrid.py` forms each level's `D⁻¹G` and Schur `C − D (D⁻¹G)` with
-`_onto_pattern(values, <same expression over _ones>)` (`multigrid.py`), and the non-block-splitting
+`_structured(values, operands, <same expression over _ones>, ...)` (`multigrid.py`, the `_onto_pattern` rule), and the non-block-splitting
 `D⁻¹` as an explicit CSR rather than a `diags` product. A plain `scipy` product or difference drops an
 entry that comes out exactly zero, so these pieces' stored counts — array shapes, leaves of the traced
 split — moved with the operator's values and recompiled the coupled step on a refit. Values are
-unchanged. Do not "simplify" either back to a bare product.
+unchanged. Do not "simplify" either back to a bare product. Both patterns are kept between refits by the inverse's
+`StructuralPatterns` (`_simple_pieces(patterns=)`, 2026-10-13), since recomputing them every refit
+cost as much as the pieces themselves; see `solve-amg-multigrid.md`'s Galerkin-shape entry.
 
 **Adding new content: a dated measurement or investigation step goes in `solve-flow-block-log.md`, not
 here.** Update the current-status paragraph above only when an investigation reaches a durable verdict
@@ -146,7 +148,7 @@ entirely the *finite difference's* fault — the adjoint barely moves while the 
   these runs is **contended** (another session ran a test tier throughout) and is not quotable; the
   application counts are contention-immune.
 - **Untested, and the honest remaining scope:** only the sweep count was varied on the traced side. The
-  splitting, `pressure_sweeps`, `omega`, the strength threshold and the level count are all at the
+  splitting, `pressure_sweeps`, `smoother_weight`, the strength threshold and the level count are all at the
   case's shipped values, and this says nothing about them. What it does establish is that the *cheapest*
   lever on that list — more smoothing — is spent.
 
@@ -264,7 +266,7 @@ earned itself again here.
 **The two damping sources are one knob and must move together** (4 sweeps, 20-cycle cap, so not
 comparable with the table above):
 
-| Schur diagonal | `pressure_omega` 0.7 | `pressure_omega` 1.0 |
+| Schur diagonal | `pressure_smoother_weight` 0.7 | `pressure_smoother_weight` 1.0 |
 |---|---|---|
 | Jacobi | 6.774e-05 | **3.435e-01** |
 | Frobenius | 6.828e-05 | **4.199e-05** |
@@ -274,7 +276,7 @@ the hand-set 0.7 was standing in for the derived relaxation, and stacking the tw
 constant cannot simply be dropped, only replaced.
 
 **Set from this:** Frobenius on **both** the velocity predictor and the Schur relaxation, with
-`pressure_omega = 1.0`.
+`pressure_smoother_weight = 1.0`.
 
 ### What does NOT transfer from that paper
 

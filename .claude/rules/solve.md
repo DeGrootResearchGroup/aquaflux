@@ -337,6 +337,18 @@ archived march logs and any private notes still use the left column).
 | `solve_segregated(rtol=)` | `increment_tol=` (#373, 2026-09-22) | it is a tolerance on the **state increment** (the largest per-field relative change over a sweep), not on a residual, and it sat beside `solve_coupled(rtol=)`, which is one |
 | `ShiftTerm.row_relaxation`, and every `relaxation` parameter carrying `β` (`ShiftTerm.shift`, `make_preconditioner`, `TurbulenceDamping.factor`) | `row_shift_scale`, `shift_strength` (#373, 2026-10-12) | the rest of #373's `relaxation` clash: those parameters carried `β` under the word the segregated loop uses for an under-relaxation factor, which runs the other way. `relaxation` now means only the latter. Retired names are refused by `tests/unit/test_vocabulary.py` |
 | `RetryPolicy.cycles_limit` | `max_retries` (#373, 2026-10-12) | it counted redone steps -- every redo, escalating or not -- not cycles. **Not** `max_escalations`, which was the proposal on the issue: that name is `Globalization`'s cap on the shift escalations *within* one attempt, a different setting that can sit in the same case file |
+| `MomentumContinuity.viscosity` (and `_VelocityGeometry.viscosity`) | `effective_viscosity` (#373, 2026-10-12) | it returns `μ + ρν_t`, while `properties["viscosity"]` -- the word everywhere else -- is the molecular value |
+| `MassFlow.forced(momentum, beta)`, and `beta` for the mass-flow body force in `flow/` prose and locals | `force`, written `f` in formulas (#373, 2026-10-12) | `β` means the pseudo-transient shift strength; the solved body force is a different quantity |
+| `omega` / `pressure_omega` for a smoother's damping weight (`SimpleSmoothed`, `AirReduction`, `ConvectionTwoLevel`, the multigrid cycle functions, `damped_jacobi_solve`) | `smoother_weight` / `pressure_smoother_weight` (#373, 2026-10-12) | `omega` is the SST specific dissipation rate; a case file set both a few lines apart. **A case-file key**: `SimpleSmoothed`'s `omega: 1.0` in both flagship `case.yaml`s is now `smoother_weight: 1.0` |
+| `omega_smooth` (smoothed-aggregation prolongation) | `prolongation_weight` (#373, 2026-10-12) | the same clash; it weights the prolongation smoother, not a level smoother |
+| `mu` for the multigrid cycle index (`SimpleSmoothed`, `SimpleSmoothedInverse`, `_VCycleOps`) | `cycle_index` (#373, 2026-10-12) | `mu` is the dynamic viscosity; 1 is a V-cycle, 2 a W-cycle |
+| `v_cycles` (`BlockDiagonal`, `ScalarTwoLevel`, `ScalarAir`, the velocity blocks, `BlockPreconditioner.build`) | `cycles` (#373, 2026-10-13) | the name every other multigrid value already used for V-cycles per application. **A case-file key** on `BlockDiagonal` and the scalar blocks; no shipped case file set it |
+| `f_iters` / `c_iters` (`AirReduction`, `AirReductionInverse`, `air_multigrid_cycles`) | `f_sweeps` / `c_sweeps` (#373, 2026-10-13) | smoother passes are `sweeps` everywhere else. **A case-file key** on `AirReduction`; no shipped case file set it |
+| `n_group_fields` (`AirReductionInverse`) | `n_fields` (#373, 2026-10-13) | the field count of the block, as every other inverse spells it |
+| `StepReport.cycles`, `StepOutcome.cycles`, and the checkpoint key `"cycles"` | `raw_cycles` (#373, 2026-10-13) | it is lineax's raw count, offset included, beside `restart_cycles` (corrected) and `max_inner_cycles`; `cycles` now means V-cycles. The march-history column follows the field. ⚠️ **Checkpoints written before this carry `cycles`**, and the two harnesses that read the step record (`damping_taper_trace.py`, `endgame_shift_probe.py`) now read `raw_cycles` with no fallback, by the project owner's choice. An inner-iterate checkpoint's `cycles` (offset-corrected, `InnerIterateCheckpointer`) is unchanged, and so are the harnesses that read one (`field_split_probe.py`, `probe_reach_audit.py`, `singular_cell_probe.py`, `replay.py`) |
+| `KProduction(explicit_limiter=)` | `explicit_production_limiter` (#373, 2026-10-13) | the name `SSTTurbulence` already gave the same setting |
+| `FacePatches.from_dict(groups)` | `patches` (#373, 2026-10-13) | beside `patch_groups`, `groups` read as groups of patches. `CellZones` keeps the inherited `LabelledGroups.from_dict(groups)`: an override only to rename it would be a forwarding wrapper |
+| `NearWallKClosure.viscosity` | `kinematic_viscosity` (#373, 2026-10-13) | `viscosity` is the molecular DYNAMIC viscosity everywhere else; this one is kinematic. `SSTTurbulence.molecular_viscosity` is kinematic too and keeps its name |
 | `MaterializedJacobian(beta_floor=)`, `beta_tracking_refresh(beta_floor=)` | `refit_beta_floor=` (#373, 2026-09-22); the function itself is now the class `BetaTrackingRefresh` (#661) | the shift the **inverse is re-fitted at**. `Globalization.beta_floor` (the march's own) keeps its name; the step control's `beta_min` is a third floor and is unchanged |
 | `reused_flow_solve(max_steps=)`, `bulk_velocity_flow_solve(max_steps=, solver=)`, `scalar_pseudo_transient_solve(max_steps=, rtol=, atol=, solver=)` | `root_solve=RootSolveSettings(max_steps=…, convergence=…, linear_solver=…, adjoint_solver=…)` (#428, 2026-09-22) | one value on all three, so a setting reachable from one is reachable from all — `adjoint_solver` was reachable from none |
 
@@ -1042,22 +1054,25 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      **Measured on pitzDaily (shipped `case.yaml`, 2026-10-08, jax 0.11.2, CPU; `PITZ_FORWARD_RTOL`), the
      march is not sensitive to tightening and IS to loosening:** `rtol` 0.1 / 0.3 / 0.6 / 0.9 → 245 / 203 /
      166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
-     changed (bfs3d, where it was calibrated, is unmeasured); see `solve-refuted-directions.md`'s
-     Eisenstat–Walker entry and the open-directions note.
+     changed. On bfs3d (where it was calibrated), under the residual stop at `refresh_on_cycles` 4
+     (2026-10-12, #699, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each), 0.1 / 0.3 / 0.6 took 774 /
+     787 / 590 s at the same `x_r/h`, with one retry at 0.6 only; moving 0.3 is the owner's call (#637).
+     See `solve-refuted-directions.md`'s Eisenstat–Walker entry and the open-directions note's 4b.
      ⚠️ **What the stop costs, replayed (2026-10-08, `krylov_recycling_probe.py`):** a solve reported as
      "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
      test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
      march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
      **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
      iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
-     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). **Selected by
+     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b); on bfs3d (#699,
+     2026-10-12, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each) 810 s at `refresh_on_cycles` 3 and
+     787 s at 4 against the shipped stop's 1197 s, same `x_r/h`, no retry (refresh 2 added one). **Selected by
      `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
      case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
      regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
      still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
      is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
-     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, bfs3d is
-     unmeasured, and forced as the default it fails three slow tests (linear convergence at the end of
+     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, and forced as the default it fails three slow tests (linear convergence at the end of
      the march, and one Reynolds-continuation march that goes erratic; #645). **pitzDaily's `case.yaml`
      opts in** (`stop: residual`, 2026-10-09; `refresh_on_cycles` 2 then, 3 since a cost re-fit ends the step, #290, 2026-10-11 — see `.claude/notes/solve-open-directions.md` 6b). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled

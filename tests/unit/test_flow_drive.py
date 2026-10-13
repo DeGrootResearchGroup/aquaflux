@@ -84,7 +84,7 @@ def test_a_mass_flow_drive_at_zero_still_reports_a_force() -> None:
 
 
 def test_the_solved_force_acts_only_along_the_flow_direction() -> None:
-    """A scalar multiplier on one axis, zero on the others -- what makes ``dR/dbeta = -V`` exact."""
+    """A scalar multiplier on one axis, zero on the others -- what makes ``dR/df = -V`` exact."""
     assert jnp.array_equal(
         MassFlow(target=TARGET, flow_direction=1, force=0.7).volumetric_force(3),
         jnp.array([0.0, 0.7, 0.0]),
@@ -185,7 +185,7 @@ def test_join_and_split_are_inverses() -> None:
 def test_the_seed_is_the_drives_own_force_and_the_answer_comes_back_on_it() -> None:
     """The solve starts at the multiplier the drive carries and leaves the converged one there.
 
-    That round trip is the whole interface a segregated outer loop threads ``beta`` through.
+    That round trip is the whole interface a segregated outer loop threads ``f`` through.
     """
     drive = MassFlow(target=TARGET, force=0.04)
     fields = _fields()
@@ -215,22 +215,22 @@ def test_forcing_the_assembler_moves_the_multiplier_and_nothing_else() -> None:
 def test_the_solved_force_enters_the_residual_as_minus_beta_times_volume() -> None:
     """The drive's force is subtracted per component, exactly as a uniform source would be.
 
-    This is what makes the analytic border column ``a = dR/dbeta = -V`` correct; a drive whose force
+    This is what makes the analytic border column ``a = dR/df = -V`` correct; a drive whose force
     reached the residual scaled, signed or directed differently would leave the bordered solve solving
     a system its preconditioner does not describe.
     """
-    beta = 0.35
+    force = 0.35
     at_rest = _channel()
-    driven = _channel(drive=MassFlow(target=TARGET, force=beta))
+    driven = _channel(drive=MassFlow(target=TARGET, force=force))
     state = at_rest.initial_state()
     difference, _ = at_rest.unpack(driven.residual(state) - at_rest.residual(state))
     volume = at_rest.geometry.cell.volume
-    assert jnp.allclose(difference[:, 0], -beta * volume)
+    assert jnp.allclose(difference[:, 0], -force * volume)
     assert jnp.allclose(difference[:, 1], 0.0)
 
 
 def test_the_padded_border_is_the_flow_border_and_zeros_elsewhere() -> None:
-    """``beta`` enters only momentum and ``<U>`` reads only velocity, so every other block is zero.
+    """``f`` enters only momentum and ``<U>`` reads only velocity, so every other block is zero.
 
     Derived from the outer layout rather than from a count of its blocks, so a coupled state that grows
     a field cannot be padded to the wrong width.

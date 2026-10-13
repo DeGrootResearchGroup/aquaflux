@@ -13,6 +13,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.flow.block_preconditioner import _characteristic_reference_state
 from aquaflux.precondition import (
     AirReduction,
     FieldSplit,
@@ -94,7 +95,11 @@ def test_a_re_pointed_block_session_step_is_a_compilation_cache_hit(scalar) -> N
     a miss (the control below); the re-pointed one keeps every hierarchy's coarsening and is a hit.
     """
     mesh, coupled = _cavity(viscosity=jnp.asarray(RHO * NU))  # an array leaf; a float is static
-    state = _healthy_state(mesh, coupled)
+    # The flow block is frozen at this state's flow, so the flow must carry the lid's convective scale
+    # for its coarsening to depend on the viscosity at all: at the healthy state's small random flow the
+    # operator is viscous-dominated and the control's fresh build would coarsen the same way.
+    _, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    state = coupled.pack_state(_characteristic_reference_state(coupled.momentum), k, omega)
     loop = DualTimeLoop(inner_steps=3)
     traces: list[None] = []
 

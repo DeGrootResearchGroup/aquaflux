@@ -198,12 +198,12 @@ class FacePatches(LabelledGroups):
     def from_dict(
         cls,
         neighbour: jnp.ndarray,
-        groups: dict[str, object],
+        patches: dict[str, object],
         *,
         patch_types: Mapping[str, str] | None = None,
         patch_groups: Mapping[str, Iterable[str]] | None = None,
     ) -> FacePatches:
-        """Build face patches: ``"interior"``/``"boundary"`` by default, then overlay ``groups``.
+        """Build face patches: ``"interior"``/``"boundary"`` by default, then overlay ``patches``.
 
         Named patches move their faces off the default; two named patches may not claim the
         same face. Out-of-range indices raise ``ValueError``. The names ``"interior"`` and
@@ -217,20 +217,20 @@ class FacePatches(LabelledGroups):
         """
         nb = np.asarray(neighbour)
         n_faces = nb.shape[0]
-        reserved = [n for n in groups if n in RESERVED_PATCH_NAMES]
+        reserved = [n for n in patches if n in RESERVED_PATCH_NAMES]
         if reserved:
             raise ValueError(
                 f"patch name(s) {reserved} are reserved (interior/boundary are assigned "
                 "automatically, and padding marks a distributed partition's inert faces); use a "
                 "different name"
             )
-        names = [INTERIOR_PATCH, BOUNDARY_PATCH, *groups]
+        names = [INTERIOR_PATCH, BOUNDARY_PATCH, *patches]
         name_to_id = {n: i for i, n in enumerate(names)}
         label = np.where(nb < 0, name_to_id[BOUNDARY_PATCH], name_to_id[INTERIOR_PATCH]).astype(
             np.int64
         )
         assigned = np.zeros(n_faces, dtype=bool)  # tracks explicit (named) assignment only
-        for name, indices in groups.items():
+        for name, indices in patches.items():
             idx = np.asarray(list(indices), dtype=np.int64)
             if idx.size == 0:
                 continue

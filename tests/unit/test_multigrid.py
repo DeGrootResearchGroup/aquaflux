@@ -21,6 +21,7 @@ import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.precondition.frozen_operator import ConvectionDiffusionStencil, decouple_dof
 from aquaflux.precondition.multigrid import (
+    StructuralPatterns,
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
@@ -33,11 +34,14 @@ from aquaflux.precondition.multigrid import (
     _lair_restriction,
     _mis_aggregate,
     _one_point_interpolation,
+    _ones,
+    _onto_pattern,
     _reattach_to_adjacent_root,
     _restriction_neighbourhoods,
     _rs_split,
     _SparseLevel,
     _strength_classical,
+    _Structure,
     air_multigrid_cycles,
     build_air_hierarchy,
     build_convection_hierarchy,
@@ -386,7 +390,7 @@ def test_smoother_bodies_never_close_over_the_raw_diagonal() -> None:
     """Chebyshev, damped-Jacobi and FC-Jacobi read the precomputed reciprocal, never re-divide it.
 
     Regression for the frozen-diagonal recomputation: each smoother used to compute
-    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``omega * mask * (1.0 / level.diagonal)``) inside its
+    ``1.0 / level.diagonal`` (or, for FC-Jacobi, ``smoother_weight * mask * (1.0 / level.diagonal)``) inside its
     own body on every call, even though the diagonal is a build-time constant. A smoother traced in
     isolation closes over ``level``'s arrays as jaxpr constants, so checking which of ``diagonal`` /
     ``inv_diagonal`` actually appears among them is a direct check of the acceptance criterion ("no
@@ -537,7 +541,7 @@ def test_convection_hierarchy_is_two_level_with_a_contractive_fine_smoother() ->
     # amplification a deep Galerkin coarse smoother would apply at this cell Peclet.
     fine = hierarchy.levels[0]
     error = jnp.asarray(np.random.default_rng(0).standard_normal(n))
-    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, omega=0.8)
+    smoothed = _jacobi_smooth(fine, jnp.zeros(n), error, sweeps=5, smoother_weight=0.8)
     assert float(jnp.linalg.norm(smoothed)) < float(jnp.linalg.norm(error))
 
 
@@ -1385,10 +1389,10 @@ def test_an_unknown_prolongation_smoothing_is_refused() -> None:
 
 
 def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
-    """``spectral_damping=False`` makes ``omega`` the absolute relaxation, and that is the stronger one.
+    """``spectral_damping=False`` makes ``smoother_weight`` the absolute relaxation, and that is the stronger one.
 
     ``D^-1 A`` has a unit diagonal, so its eigenvalues average one and ``lambda_max >= 1`` always —
-    the spectral default therefore never relaxes by more than ``omega`` and usually by far less. The
+    the spectral default therefore never relaxes by more than ``smoother_weight`` and usually by far less. The
     undamped sweep is what an equivalently-configured PETSc GAMG runs (``richardson`` at its default
     scale of 1), and matching it is what closed the measured gap on the coupled turbulence block, so
     the distinction is pinned rather than left to the two docstrings to agree about.
@@ -1400,7 +1404,7 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
     b = jnp.asarray(np.random.default_rng(0).normal(size=n))
     damped = convection_multigrid_cycles(hierarchy, b, cycles=1, sweeps=4)
     undamped = convection_multigrid_cycles(
-        hierarchy, b, cycles=1, sweeps=4, omega=1.0, spectral_damping=False
+        hierarchy, b, cycles=1, sweeps=4, smoother_weight=1.0, spectral_damping=False
     )
     assert not np.allclose(np.asarray(damped), np.asarray(undamped))
 
@@ -1411,7 +1415,7 @@ def test_undamped_smoothing_relaxes_further_than_the_spectral_default() -> None:
         b,
         cycles=1,
         sweeps=4,
-        omega=0.8 / float(hierarchy.levels[0].lam_max),
+        smoother_weight=0.8 / float(hierarchy.levels[0].lam_max),
         spectral_damping=False,
     )
     assert np.allclose(np.asarray(damped), np.asarray(restated))
@@ -1584,6 +1588,73 @@ def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() 
     assert not np.allclose(
         np.asarray(refitted.levels[0].operator.data), np.asarray(cold.levels[0].operator.data)
     )
+
+
+def test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold() -> None:
+    """A cached structural pattern is reused only while its operands store the same entries.
+
+    Three calls on one slot: new values on the same pattern (with stored exact zeros, so the plain
+    product genuinely drops entries the pattern keeps) must reuse the pattern; an operand whose pattern
+    has grown must recompute it. Every answer must equal the one a fresh computation gives, entry for
+    entry -- the cache may change what a refit costs, never what it returns.
+    """
+    rng = np.random.default_rng(0)
+    base = (sp.random(40, 40, density=0.1, random_state=0) + sp.eye(40)).tocsr()
+    revalued = base.copy()
+    revalued.data = rng.normal(size=revalued.nnz)
+    revalued.data[:12] = 0.0  # stored, so still in the pattern; dropped by the plain product
+    grown = (base + sp.random(40, 40, density=0.05, random_state=1)).tocsr()
+    assert (revalued @ revalued).nnz < (_ones(revalued) @ _ones(revalued)).nnz  # the zeros bite
+    assert grown.nnz > base.nnz
+
+    computed = []
+    patterns = StructuralPatterns()
+    for matrix, times_computed in ((base, 1), (revalued, 1), (grown, 2)):
+
+        def pattern(m=matrix):
+            computed.append(1)
+            return _ones(m) @ _ones(m)
+
+        got = patterns.onto("square", matrix @ matrix, (matrix,), pattern)
+        want = _onto_pattern(matrix @ matrix, _ones(matrix) @ _ones(matrix))
+        assert len(computed) == times_computed
+        assert np.array_equal(got.indptr, want.indptr)
+        assert np.array_equal(got.indices, want.indices)
+        assert np.array_equal(got.data, want.data)
+
+
+def test_a_structure_reuses_positions_only_for_identical_stored_entries(monkeypatch) -> None:
+    """Where an operator's entries land is searched for once and reused only for the same entries.
+
+    ``a`` and ``b`` share their row pointer and differ only in column indices, so a reuse keyed on the
+    row counts alone would scatter ``b`` onto ``a``'s positions. ``unsorted`` stores a row's entries out
+    of column order, which the store must place by key rather than assume sorted. Every result is the
+    operator itself, densely.
+    """
+    pattern = sp.csr_matrix(np.ones((3, 3)))
+    structure = _Structure.of(pattern)
+    indptr = np.array([0, 1, 2, 3])
+    a = sp.csr_matrix((np.array([1.0, 2.0, 3.0]), np.array([0, 1, 2]), indptr), shape=(3, 3))
+    b = sp.csr_matrix((np.array([4.0, 5.0, 6.0]), np.array([1, 2, 0]), indptr), shape=(3, 3))
+    unsorted = sp.csr_matrix(
+        (np.array([7.0, 8.0, 9.0]), np.array([2, 0, 1]), np.array([0, 2, 2, 3])), shape=(3, 3)
+    )
+    revalued_a = a.copy()
+    revalued_a.data = np.array([-1.0, -2.0, -3.0])
+
+    located = []
+    locate = _Structure._locate
+
+    def counted(self, values):
+        located.append(1)
+        return locate(self, values)
+
+    monkeypatch.setattr(_Structure, "_locate", counted)
+    for matrix, times_located in ((a, 1), (revalued_a, 1), (b, 2), (unsorted, 3), (a, 4)):
+        stored = structure.store(matrix)
+        assert len(located) == times_located
+        assert stored.nnz == pattern.nnz  # on the structural pattern, absent entries as zeros
+        assert np.array_equal(stored.toarray(), matrix.toarray())
 
 
 def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:

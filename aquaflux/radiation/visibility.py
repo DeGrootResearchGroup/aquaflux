@@ -41,6 +41,7 @@ import numpy as np
 
 from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.culling import BodyCulling, culling_or_default
+from aquaflux.radiation.refraction import Media, straight_reach
 from aquaflux.radiation.self_occlusion import (
     RayCastOcclusion,
     SelfOcclusion,
@@ -53,10 +54,11 @@ __all__ = [
     "refuse_points_inside",
     "same_receivers",
     "surviving_fraction",
+    "surviving_from_layers",
 ]
 
 
-def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarray:
+def surviving_fraction(blocked, hidden_by_geometry, transmittance, straight=None) -> jnp.ndarray:
     """Fraction of light getting through, from a mask's layers and each body's transmittance.
 
     The one expression of it, evaluated by :meth:`Visibility.surviving` over a whole mask and by
@@ -73,6 +75,9 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
         the widened copy is never the size of the problem. ``None`` hides nothing.
     transmittance : array_like, shape ``(n_occluders,)``
         What fraction each body transmits, in ``[0, 1]``. Differentiable.
+    straight : jnp.ndarray of bool, shape ``pairs``, or None
+        Whether each straight segment carries its light past the transparent regions
+        (:attr:`Visibility.straight`). ``None`` where there are none.
 
     Returns
     -------
@@ -82,9 +87,33 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance) -> jnp.ndarra
     per_body = transmittance.reshape(-1, *([1] * (blocked.ndim - 1)))
     attenuation = 1.0 - blocked * (1.0 - per_body)
     surviving = jnp.prod(attenuation, axis=0)
-    if hidden_by_geometry is None:
-        return surviving
-    return surviving * (1.0 - jnp.asarray(hidden_by_geometry, dtype=float))
+    if hidden_by_geometry is not None:
+        surviving = surviving * (1.0 - jnp.asarray(hidden_by_geometry, dtype=float))
+    if straight is not None:
+        surviving = surviving * jnp.asarray(straight, dtype=float)
+    return surviving
+
+
+def surviving_from_layers(kinds, arrays, transmittance) -> jnp.ndarray:
+    """:func:`surviving_fraction` from layers named as :meth:`Visibility.layers` names them.
+
+    Parameters
+    ----------
+    kinds : tuple of str
+        What each of ``arrays`` is: ``"blocked"`` first, then any of ``"hidden_by_geometry"`` and
+        ``"straight"``.
+    arrays : sequence of jnp.ndarray
+        The layers, whole or a chunk or a gathering of their pairs.
+    transmittance : array_like, shape ``(n_occluders,)``
+
+    Returns
+    -------
+    jnp.ndarray
+    """
+    named = dict(zip(kinds, arrays, strict=True))
+    return surviving_fraction(
+        named["blocked"], named.get("hidden_by_geometry"), transmittance, named.get("straight")
+    )
 
 
 class Visibility(eqx.Module):
@@ -114,6 +143,12 @@ class Visibility(eqx.Module):
         and is the common benign case -- so this reports "not proven", not "wrong". ``None``
         where no pair can be such an addition: from a ray test, whose ``or`` is idempotent, and
         where nothing is hidden at all.
+    straight : jnp.ndarray of bool, shape ``(n_receivers, n_facets)``, or None
+        Where the scene has transparent regions (:class:`~aquaflux.radiation.refraction.Media`),
+        whether the straight segment carries the pair's light: the facet and the receiver lie in
+        one medium and the segment meets no region. Elsewhere the light goes by refracted paths
+        (:func:`~aquaflux.radiation.refraction.straight_reach`), gathered apart. Frozen, like the
+        rest of the mask. ``None`` where there are no regions.
     clear_behind : bool
         Whether pairs whose source faces away from the receiver were recorded clear without
         being tested -- in :attr:`blocked`, as every mask of receivers in the volume does when
@@ -137,6 +172,7 @@ class Visibility(eqx.Module):
     receivers: jnp.ndarray
     hidden_by_geometry: jnp.ndarray | None
     overlapping: jnp.ndarray | None
+    straight: jnp.ndarray | None = None
     clear_behind: bool = eqx.field(static=True, default=False)
 
     @property
@@ -156,7 +192,32 @@ class Visibility(eqx.Module):
         -------
         jnp.ndarray, shape ``(n_receivers, n_facets)``
         """
-        return surviving_fraction(self.blocked, self.hidden_by_geometry, transmittance)
+        return surviving_fraction(
+            self.blocked, self.hidden_by_geometry, transmittance, self.straight
+        )
+
+    def layers(self) -> tuple[tuple[str, ...], tuple]:
+        """The layers a fraction is formed from, by name, each with its receiver axis.
+
+        Only the layers the mask holds: the bodies' always, the surface's own and the transparent
+        regions' where there are any. A gather cuts them into chunks along those axes and forms the
+        fraction per chunk with :func:`surviving_from_layers`, so no floating-point copy of the
+        whole mask is ever made.
+
+        Returns
+        -------
+        kinds : tuple of str
+        layers : tuple of (jnp.ndarray, int)
+        """
+        named = [("blocked", self.blocked, 1)]
+        for name in ("hidden_by_geometry", "straight"):
+            array = getattr(self, name)
+            if array is not None:
+                named.append((name, array, 0))
+        return (
+            tuple(name for name, _, _ in named),
+            tuple((array, axis) for _, array, axis in named),
+        )
 
     def for_receivers(self, points) -> jnp.ndarray:
         """Check that ``points`` are the receivers this mask was built for, and return it.
@@ -253,6 +314,7 @@ def build_visibility(
     body_culling: BodyCulling | None = None,
     offset_scale: float = 1e-6,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    media: Media | None = None,
 ) -> Visibility:
     """Work out, once, which bodies lie between which sources and which receivers.
 
@@ -324,6 +386,12 @@ def build_visibility(
         Receiver-by-facet pairs per pass of the analytic-body test, bounding its peak memory
         whatever the facet count. Each self-occlusion strategy carries its own bound, because
         what has to be bounded differs between them.
+    media : Media, optional
+        The transparent regions, if the scene has any. A pair whose ends lie in different media,
+        or whose segment passes through a region, is then recorded as getting nothing along the
+        straight line (:attr:`Visibility.straight`): its light goes by refracted paths, which
+        :func:`~aquaflux.radiation.refracted.build_refracted_visibility` masks. The positions must
+        be concrete.
 
     Returns
     -------
@@ -350,6 +418,7 @@ def build_visibility(
         body_culling=body_culling,
         offset_scale=offset_scale,
         pair_limit=pair_limit,
+        media=media,
     )
 
 
@@ -364,6 +433,7 @@ def _unchecked_visibility(
     body_culling: BodyCulling | None = None,
     offset_scale: float = 1e-6,
     pair_limit: int = DEFAULT_PAIR_LIMIT,
+    media: Media | None = None,
 ) -> Visibility:
     """:func:`build_visibility` without its refusal of points inside a body.
 
@@ -395,11 +465,17 @@ def _unchecked_visibility(
         else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
     geometry = strategy.field(surfaces, points, near, receiver_facet, receiver_normal)
+    straight = (
+        None
+        if media is None or not media.regions
+        else jnp.asarray(straight_reach(media, surfaces, points, pair_limit=pair_limit))
+    )
     return Visibility(
         blocked=blocked,
         receivers=points,
         hidden_by_geometry=geometry.fraction,
         overlapping=geometry.overlapping,
+        straight=straight,
         clear_behind=geometry.clear_behind or (facing is not None and bool(occluders)),
     )
 

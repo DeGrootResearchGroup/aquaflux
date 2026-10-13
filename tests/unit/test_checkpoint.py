@@ -21,7 +21,7 @@ from aquaflux.solve.checkpoint import (
 
 
 def _report(**kwargs) -> StepReport:
-    fields = dict(step=0, cycles=10, residual_norm=2.0e-2, residual_ratio=4.0e-2, alpha=1.0)
+    fields = dict(step=0, raw_cycles=10, residual_norm=2.0e-2, residual_ratio=4.0e-2, alpha=1.0)
     return StepReport(**(fields | kwargs))
 
 

@@ -140,7 +140,7 @@ def test_boundary_a_p_drops_wall_convection() -> None:
     """
     asm = _geometry(6)  # closed cavity: every patch is a NoSlipWall
     n_faces = asm.mesh.n_faces
-    boundary_mu = asm.viscosity[asm.mesh.face_cells.owner]  # per-face (no wall model)
+    boundary_mu = asm.effective_viscosity[asm.mesh.face_cells.owner]  # per-face (no wall model)
     viscous_only = asm.boundary_momentum_diagonal(boundary_mu, None)
     with_huge_mdot = asm.boundary_momentum_diagonal(boundary_mu, jnp.full(n_faces, 1e6))
     assert jnp.allclose(viscous_only, with_huge_mdot)  # convective dropped at every wall face
@@ -157,10 +157,12 @@ def test_boundary_a_p_drops_outlet_viscosity() -> None:
     asm = _channel(u_in=1.0)  # velocity inlet + pressure outlet + no-slip walls
     fc = asm.mesh.face_cells
     boundary_a_p = asm.boundary_momentum_diagonal(
-        asm.viscosity[fc.owner], jnp.zeros(asm.mesh.n_faces)
+        asm.effective_viscosity[fc.owner], jnp.zeros(asm.mesh.n_faces)
     )
     all_faces_viscous = jnp.where(
-        fc.interior, 0.0, asm.viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance
+        fc.interior,
+        0.0,
+        asm.effective_viscosity[fc.owner] * asm.geometry.face.area / asm.normal_distance,
     )
     assert float(jnp.sum(boundary_a_p)) < float(
         jnp.sum(all_faces_viscous)
@@ -292,7 +294,7 @@ def test_convection_velocity_operator_diagonal_is_the_momentum_diagonal() -> Non
         momentum_diagonal(
             asm.mesh.face_cells,
             asm.geometry,
-            asm.viscosity,
+            asm.effective_viscosity,
             mdot_lagged=reference_mdot,
         ),
         axis=1,
@@ -508,7 +510,9 @@ def test_damped_jacobi_is_linear_in_rhs() -> None:
     r2 = jnp.asarray(rng.standard_normal(asm.mesh.n_cells))
 
     def solve(r):
-        return damped_jacobi_solve(matvec, diagonal, r, sweeps=12, omega=0.7, pressure_pin=0)
+        return damped_jacobi_solve(
+            matvec, diagonal, r, sweeps=12, smoother_weight=0.7, pressure_pin=0
+        )
 
     lhs = solve(2.5 * r1 - 1.5 * r2)
     rhs = 2.5 * solve(r1) - 1.5 * solve(r2)
@@ -532,7 +536,9 @@ def test_damped_jacobi_converges_toward_solution() -> None:
     rhs = matvec(x_true)  # consistent RHS (pin row carries x_true[0])
 
     def residual_norm(sweeps):
-        x = damped_jacobi_solve(matvec, diagonal, rhs, sweeps=sweeps, omega=0.7, pressure_pin=0)
+        x = damped_jacobi_solve(
+            matvec, diagonal, rhs, sweeps=sweeps, smoother_weight=0.7, pressure_pin=0
+        )
         return float(jnp.linalg.norm(matvec(x) - rhs))
 
     assert residual_norm(40) < 0.3 * residual_norm(5)  # clearly decreasing with sweeps
@@ -597,12 +603,12 @@ def test_velocity_block_builds_from_a_narrow_geometry_seam() -> None:
     geometry = _VelocityGeometry(
         face_cells=face_cells,
         mesh_geometry=mesh.geometry(),
-        viscosity=jnp.ones(n_cells),
+        effective_viscosity=jnp.ones(n_cells),
         dim=mesh.dim,
     )
     owner_e, nb_e, _ = face_cells.interior_edges()
     interior = np.asarray(face_cells.interior)
-    block = SmoothedAmgVelocity.build(geometry, owner_e, nb_e, interior, n_cells, v_cycles=1)
+    block = SmoothedAmgVelocity.build(geometry, owner_e, nb_e, interior, n_cells, cycles=1)
 
     solve = block.apply(jnp.full(n_cells, 2.0))  # the per-iterate velocity solve at a_P = 2
     ru = jnp.asarray(np.random.default_rng(0).standard_normal((n_cells, mesh.dim)))

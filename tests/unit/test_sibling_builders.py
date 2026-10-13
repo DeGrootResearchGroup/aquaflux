@@ -42,7 +42,7 @@ def smoothed_solve(hierarchy, b, *, cycles=1, omega=1.0, sweeps=2):
     return Result(hierarchy, b, cycles)
 
 
-def air_solve(hierarchy, b, *, cycles=1, f_iters=2, c_iters=1):
+def air_solve(hierarchy, b, *, cycles=1, f_sweeps=2, c_sweeps=1):
     return Result(hierarchy, b, cycles)
 """
 

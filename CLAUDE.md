@@ -52,7 +52,7 @@ Checklist still governs).
 | `.claude/rules/io.md` | `aquaflux/io/**` | mesh import, **CAD import** (STEP through OpenCASCADE/OCP into exact `solids` bodies checked against the drawing by boundary distance, and size-bounded emitting triangles — the only kernel import is `io/cad/kernel.py`), **and field export**: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard; the OpenFOAM field writer that inherits dimensions and `boundaryField` from a template so its output restarts; the VTK XML `.vtu`/`.pvd` writer (arbitrary polygon/polyhedron cells, appended-binary) and why its face winding is re-derived rather than taken as stored; the boundary-patch writer (`patches.vtm` + one `.vtp` per patch, a layout the browser viewer depends on) |
 | `.claude/rules/validation.md` | `validation/**` | the scientific cases and study harnesses: why no test tier drives them, the obligation to check an API change against them, what the static guard catches and what it cannot, and the harness traps that have produced wrong results |
 | `.claude/rules/parallel.md` | `aquaflux/parallel/**` | distributed memory: graph partitioners, the `PartitionedMesh` owned+halo decomposition, uniform-shape padding, and the `shard_map` residual that runs an *injected* assembler per device (never a re-implementation) |
-| `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour; the scene (`solve_scene`: lamps' emission kept out of the transfer, their facets reflecting and shadowing in it) a radiation case file builds; transparent solids (`refraction.py`, `refracted.py`: Fresnel, the refracted path by a descent on the optical length, the refracted direct gather) |
+| `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour; the scene (`solve_scene`: lamps' emission kept out of the transfer, their facets reflecting and shadowing in it) a radiation case file builds; transparent solids (`refraction.py`, `refracted.py`: Fresnel, the refracted path by a descent on the optical length, the refracted direct gather, a scene's lamps' light routed by medium with `Visibility.through` for regions crossed straight) |
 | `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract (`blocks`/`contains`/`traceable`), analytic primitives, constructive solid geometry over line intervals, `Outside` (a vessel as the fluid it holds), the grazing-robust cylinder discriminant; generic geometry, held to the same import-nothing rule as `solve/` — what a CAD model is read into and what radiation shadows with |
 | `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (top-level package, `ui` extra; Setup / Run / Results sections; Setup edits case files through one long-lived `aquaflux serve` process, Run starts `aquaflux run` as its own process and follows the history it writes): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam (`RunDirectory` reads what `run.yaml` lists, `VtkFiles`), the render-free `Pipeline` and its large-mesh policy (surface/slice/threshold only, cached by dependency), and the trame page |
 | `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case described in one YAML file: the `CaseSpec` core plus the physics (laminar, RANS, or radiation — lamps, reflecting walls, surfaces from CAD/STL/mesh) and drive discriminators, one physical kind per boundary patch or patch group (closures and wall set derived, never restated), the fluid stated once with exactly one viscosity, why the YAML parse is 1.2 and refuses duplicate keys, how the build derives each equation's closures, the wall set and one property model (bit-identical to the hand-built drivers, and the float-leaf trap that almost hid a recompile), the solver section (four solves, the library's own settings values read directly, a script may observe a solve but never configure it), `aquaflux run` with its outputs section and run records, the `initial` section (`Checkpoint`: a restart from an earlier run's physical-field files with a mesh-checked header, carrying the stopped march's history (`solve.Resumption`: reference residual, damping anchor, step-control shift) when the problem and measure are unchanged; `Fields`: an OpenFOAM time directory, pressure per unit density both ways; the ramp's refusal), and what is not built yet |
@@ -411,7 +411,7 @@ The observed failure (issue #373): the package grew several names per concept an
 per name, one reasonable-looking change at a time. `relaxation` named an under-relaxation factor in
 `(0, 1]`, which damps *less* as it grows, and the shift strength `β`, which damps *more*; `rtol` was a
 residual tolerance on one solve and a tolerance on the *state increment* on another, with different
-defaults; `omega` is the SST field and a smoother weight, and one case file sets both a few lines
+defaults; `omega` was the SST field and a smoother weight, and one case file set both a few lines
 apart; `cycles_limit` counted redone steps, not cycles. This is not cosmetic. A settings field is read
 straight from a case file, so **its name is a user-facing key**, and a parameter name is how a reader
 tells what a recorded setting meant. No single change looked wrong, because nothing compared a new
@@ -424,11 +424,13 @@ name with the places the word was already in use.
   relaxation factor and a shift strength; a floor on the operator and a floor on its preconditioner),
   they get names that say which. A docstring saying "careful, this one runs the other way" is the
   defect, not the fix.
-- **A count names its unit.** `max_restarts`, `max_retries`, `sweeps`, `cycles` (V-cycles in
-  `precondition/`, Krylov restart cycles in `solve/` — itself an open clash), never a bare `limit` or a
-  unit borrowed from a neighbouring count.
+- **A count names its unit.** `max_restarts`, `max_retries`, `sweeps`, `cycles` (V-cycles per
+  application in `precondition/`; a step's Krylov count is `raw_cycles`, offset-corrected
+  `restart_cycles`), never a bare `limit` or a unit borrowed from a neighbouring count. ⚠️ Still open:
+  the inner-loop observer's `cycles` argument and the private `_Attempt.cycles` in `solve/` are Krylov
+  counts.
 - **One concept, one name.** Before naming something, look for the name its siblings already use
-  (`cycles` vs `v_cycles`, `sweeps` vs `f_iters`) and use that one.
+  and use that one (`v_cycles` became `cycles`, `f_iters` became `f_sweeps`, both retired).
 - **Rename a clash in one change, with no alias** (Principle 4), and add the old name to the guard
   below so it cannot come back.
 
@@ -438,9 +440,9 @@ that name, with the meaning it has there (clashes awaiting a rename say so and n
 Defining one of those words in a module not listed fails; so does a listed module that no longer
 defines it, so the table cannot go stale as renames land. `RETIRED` lists names that may not be defined
 again. **Adding a module under a word is the place to ask whether it means the same thing** — if it
-does not, the answer is another name, not a new entry. The scan parses parameters (lambdas included)
-and class-level fields; it does not see a local variable, a dictionary key or prose, so it is a floor,
-not the whole rule. When you add a word with a history of confusion, add it to `VOCABULARY` too.
+does not, the answer is another name, not a new entry. The scan parses function, method and property
+names, their parameters (lambdas included) and class-level fields; it does not see a local variable, a
+dictionary key or prose, so it is a floor, not the whole rule. When you add a word with a history of confusion, add it to `VOCABULARY` too.
 - **Deliberately kept, so do not "finish the job":** `relaxation_schedule` and the `RelaxationSchedule`
   classes (`SwitchedEvolutionRelaxation` is the literature's name); the method that returns `β` is
   `shift_strength`, and every parameter carrying `β` is `shift_strength` or `beta`.

@@ -93,11 +93,11 @@ def wetted_length(mesh: Mesh, geometry: MeshGeometry, wall_patches: Iterable[str
 def friction_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     """Wall friction velocity ``u_tau = sqrt(tau_w / rho)`` of a body-force-driven flow.
 
-    A uniform body force ``beta`` (per unit volume) is balanced at steady state by the drag on the
-    solid surfaces, ``beta * V_total = tau_w * A_wall``, so the wall shear stress is ``tau_w = beta * h``
+    A uniform body force ``f`` (per unit volume) is balanced at steady state by the drag on the
+    solid surfaces, ``f * V_total = tau_w * A_wall``, so the wall shear stress is ``tau_w = f * h``
     with ``h`` the hydraulic length (:func:`hydraulic_length`) and
 
-        u_tau = sqrt(beta * h / rho).
+        u_tau = sqrt(f * h / rho).
 
     This follows from the force balance alone — no viscous or turbulence assumption — which makes it
     the one velocity scale a body-force-driven wall-bounded flow always has, laminar or turbulent. It
@@ -117,8 +117,8 @@ def friction_velocity(assembler: MomentumContinuity) -> jnp.ndarray:
     h = hydraulic_length(assembler)
     if h <= 0.0:
         return jnp.asarray(0.0)
-    beta = jnp.linalg.norm(assembler.uniform_body_force())
-    return jnp.sqrt(beta * h / jnp.mean(assembler.density))
+    force = jnp.linalg.norm(assembler.uniform_body_force())
+    return jnp.sqrt(force * h / jnp.mean(assembler.density))
 
 
 def body_force_speed(
@@ -127,17 +127,17 @@ def body_force_speed(
     """Characteristic speed of a flow driven by a uniform body force, from a global force balance.
 
     A streamwise-periodic channel prescribes velocity nowhere: the flow is driven by the body force
-    ``beta`` (per unit volume) and resisted by the drag on the solid surfaces, so at steady state
+    ``f`` (per unit volume) and resisted by the drag on the solid surfaces, so at steady state
 
-        beta * V_total = tau_w * A_wall,
+        f * V_total = tau_w * A_wall,
 
-    giving the wall shear stress ``tau_w = beta * h`` in terms of the hydraulic length
+    giving the wall shear stress ``tau_w = f * h`` in terms of the hydraulic length
     ``h = V_total / A_wall`` (:func:`hydraulic_length`). That length is what the boundaries fail to
     supply as a velocity, and it closes the estimate two ways:
 
-    - **Laminar.** Fully-developed flow between plates has bulk velocity ``beta h^2 / (3 mu)``
-      (equivalently ``beta H^2 / (12 mu)`` for full height ``H = 2h``) — exact in this regime.
-    - **Turbulent.** The friction velocity ``u_tau = sqrt(tau_w / rho) = sqrt(beta h / rho)`` follows
+    - **Laminar.** Fully-developed flow between plates has bulk velocity ``f h^2 / (3 mu)``
+      (equivalently ``f H^2 / (12 mu)`` for full height ``H = 2h``) — exact in this regime.
+    - **Turbulent.** The friction velocity ``u_tau = sqrt(tau_w / rho) = sqrt(f h / rho)`` follows
       from the same balance with no viscous assumption, and the bulk velocity is
       ``bulk_to_friction * u_tau``.
 
@@ -160,12 +160,12 @@ def body_force_speed(
     jnp.ndarray
         The scalar characteristic speed (zero with no body force, or no wetted wall to balance it).
     """
-    beta = jnp.linalg.norm(assembler.uniform_body_force())
+    force = jnp.linalg.norm(assembler.uniform_body_force())
     h = hydraulic_length(assembler)
     if h <= 0.0:
         return jnp.asarray(0.0)
-    mu = jnp.mean(assembler.viscosity)
-    laminar = beta * h**2 / (3.0 * mu)
+    mu_eff = jnp.mean(assembler.effective_viscosity)
+    laminar = force * h**2 / (3.0 * mu_eff)
     turbulent = bulk_to_friction * friction_velocity(assembler)
     return jnp.minimum(laminar, turbulent)
 

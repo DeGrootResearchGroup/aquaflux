@@ -90,7 +90,7 @@ def main() -> int:
     for path in states:
         with np.load(path) as data:
             state = jnp.asarray(data["state"])
-            step, beta, cycles = int(data["step"]), float(data["shift"]), int(data["cycles"])
+            step, beta, cycles = int(data["step"]), float(data["shift"]), int(data["raw_cycles"])
         residual = coupled.residual(state)
         norm = float(turbulence_residual_norm(coupled.layout, residual))
         share = min(1.0, max(0.0, norm / reference))

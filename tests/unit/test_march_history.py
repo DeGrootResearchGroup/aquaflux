@@ -89,7 +89,7 @@ def test_a_step_naming_other_equations_than_the_header_is_refused(tmp_path):
 def test_a_row_carries_every_value_exactly(tmp_path):
     report = StepReport(
         step=4,
-        cycles=9,
+        raw_cycles=9,
         residual_norm=1.0 / 3.0,
         residual_ratio=2.0e-7 / 3.0,
         alpha=0.25,
@@ -134,7 +134,7 @@ def test_array_scalars_are_written_as_plain_numbers(tmp_path):
     # A march's report can carry NumPy or JAX scalars, whose own repr names their type.
     report = StepReport(
         step=np.int64(0),
-        cycles=jnp.asarray(5),
+        raw_cycles=jnp.asarray(5),
         residual_norm=np.float64(0.1),
         residual_ratio=jnp.asarray(0.2),
         alpha=np.float32(0.5),
@@ -143,7 +143,7 @@ def test_array_scalars_are_written_as_plain_numbers(tmp_path):
     with StepHistory(tmp_path / "h.csv") as history:
         history.on_checkpoint(report)
     (row,) = _rows(tmp_path / "h.csv")
-    assert (row["cycles"], row["residual_norm"], row["alpha"], row["diverged_retry"]) == (
+    assert (row["raw_cycles"], row["residual_norm"], row["alpha"], row["diverged_retry"]) == (
         "5",
         "0.1",
         "0.5",

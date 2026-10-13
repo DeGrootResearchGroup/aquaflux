@@ -43,7 +43,7 @@ def _base_step() -> PseudoTransientStep:
 
 
 def _report(alpha: float) -> StepReport:
-    return StepReport(step=0, cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=alpha)
+    return StepReport(step=0, raw_cycles=10, residual_norm=1.0, residual_ratio=1.0, alpha=alpha)
 
 
 def _dual_step() -> DualTimeStep:
@@ -158,7 +158,7 @@ def test_dual_time_control_step_differs_from_base_only_in_a_dynamic_beta_leaf() 
 
 def _res_report(alpha: float, residual: float) -> StepReport:
     return StepReport(
-        step=0, cycles=6, residual_norm=residual, residual_ratio=residual, alpha=alpha
+        step=0, raw_cycles=6, residual_norm=residual, residual_ratio=residual, alpha=alpha
     )
 
 
@@ -326,20 +326,20 @@ def test_residual_ratio_step_differs_from_base_only_in_a_dynamic_beta_leaf() -> 
 def test_step_report_restart_cycles_corrects_the_num_steps_offset() -> None:
     """`restart_cycles` strips lineax's +2-per-inner-solve offset.
 
-    lineax's `num_steps` (StepReport.cycles) reports 3 for any solve within one 120-restart cycle and is
+    lineax's `num_steps` (StepReport.raw_cycles) reports 3 for any solve within one 120-restart cycle and is
     summed over the inner Newton iterations for a dual-time step, so the raw number conflates the
     nonlinear inner work with the linear cost. The offset-corrected accessors report them honestly.
     """
-    single = StepReport(step=0, cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
+    single = StepReport(step=0, raw_cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
     assert single.inner_iterations == 1  # default: a single-step march has no inner loop
     assert single.restart_cycles == 1  # 3 - 2*1: one ideal restart cycle
 
     dual = StepReport(
-        step=0, cycles=6, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, inner_iterations=2
+        step=0, raw_cycles=6, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, inner_iterations=2
     )
     assert dual.restart_cycles == 2  # 6 - 2*2: two inner iters, each an ideal 1-cycle solve
 
-    rejected = StepReport(step=0, cycles=0, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
+    rejected = StepReport(step=0, raw_cycles=0, residual_norm=1.0, residual_ratio=1.0, alpha=1.0)
     assert rejected.restart_cycles == 0  # a no-measurement step stays 0, not negative
 
 
@@ -485,7 +485,7 @@ def _settled(shift: float, alpha: float, residual: float = 0.5, arrived: bool = 
     """A step that ran at ``shift`` with line-search factor ``alpha``, its residual half its memo's."""
     return StepReport(
         step=20,
-        cycles=10,
+        raw_cycles=10,
         residual_norm=residual,
         residual_ratio=residual,
         alpha=alpha,

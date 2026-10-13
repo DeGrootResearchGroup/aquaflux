@@ -47,7 +47,7 @@ solver:
     kind: MaterializedJacobian
     inverse:
       kind: FieldSplit
-      leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, omega: 1.0, aggressive_levels: 0,
+      leading: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, smoother_weight: 1.0, aggressive_levels: 0,
         avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
         frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 200, aggressive_levels: 0, equilibrate: false, avoid_singletons: false,

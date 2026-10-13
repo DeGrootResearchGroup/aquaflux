@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.precondition import SimpleSmoothed, SimpleSmoothedInverse
+from aquaflux.precondition import SimpleSmoothed, SimpleSmoothedInverse, multigrid, saddle_multigrid
 from aquaflux.precondition.saddle_multigrid import (
     _simple_correction,
     _simple_pieces,
@@ -111,7 +111,7 @@ def test_the_schur_correction_sign_is_load_bearing() -> None:
     scoped companion test rather than a change to the shared fixture's default.)
 
     Measured under: ``n_cells=240, dim=3`` (the module default), ``pressure_sweeps=4,
-    pressure_omega=1.0`` (``SimpleSmoothedInverse``'s defaults), ``frobenius=True,
+    pressure_smoother_weight=1.0`` (``SimpleSmoothedInverse``'s defaults), ``frobenius=True,
     schur_frobenius=True`` (also its defaults), fixture seed 0, right-hand side
     ``np.random.default_rng(1)``. At those settings one correct sweep measures a true-residual ratio of
     0.873; the sign-flipped RHS measures 1.020 -- the correction stops even contracting the residual.
@@ -122,7 +122,7 @@ def test_the_schur_correction_sign_is_load_bearing() -> None:
     b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
 
     x = np.asarray(
-        _simple_correction(pieces, jnp.asarray(b), pressure_sweeps=4, pressure_omega=1.0)
+        _simple_correction(pieces, jnp.asarray(b), pressure_sweeps=4, pressure_smoother_weight=1.0)
     )
 
     assert np.all(np.isfinite(x))
@@ -317,6 +317,49 @@ def test_a_frozen_coarsening_refresh_reports_its_own_last_aggregation_not_a_stra
         "a frozen-coarsening refresh aggregates nothing new, so the stats must be unchanged"
     )
     assert leading._aggregate_stats != trailing._aggregate_stats
+
+
+def test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_computing_them_would(
+    monkeypatch,
+) -> None:
+    """A frozen-coarsening refit on an unchanged pattern computes no structural pattern after the first.
+
+    Every structural pattern -- each level's Galerkin operator, and the SIMPLE level's ``D^-1 G`` and
+    Schur complement -- is computed over all-ones copies of its operands (``_ones``), which costs as much
+    as the product itself. On a frozen coarsening those patterns cannot move, so a second refresh must
+    compute none of them; and the refreshed hierarchy and smoother pieces must be exactly the ones an
+    inverse computing every pattern afresh arrives at.
+    """
+    cached = SimpleSmoothedInverse(_saddle(), 4, **_SETTINGS, frozen_coarsening=True)
+    fresh = SimpleSmoothedInverse(_saddle(), 4, **_SETTINGS, frozen_coarsening=True)
+    fresh._patterns = None  # every pattern computed afresh, as before the cache existed
+    for inverse in (cached, fresh):
+        inverse.refactor_block((_saddle() * 1.7).tocsr())
+
+    computed = []
+    ones = multigrid._ones
+
+    def counted(matrix):
+        computed.append(1)
+        return ones(matrix)
+
+    monkeypatch.setattr(multigrid, "_ones", counted)
+    monkeypatch.setattr(saddle_multigrid, "_ones", counted)
+    refreshed = (_saddle(seed=1) * 0.6).tocsr()
+    # Stored exact zeros off the diagonal: the plain products drop what the patterns keep.
+    rows = np.repeat(np.arange(refreshed.shape[0]), np.diff(refreshed.indptr))
+    off_diagonal = np.flatnonzero(rows != refreshed.indices)
+    refreshed.data[off_diagonal[::7]] = 0.0
+    cached.refactor_block(refreshed)
+    assert not computed
+    monkeypatch.undo()
+
+    fresh.refactor_block(refreshed)
+    got = jax.tree.leaves(cached.traced_cycle().state)
+    want = jax.tree.leaves(fresh.traced_cycle().state)
+    assert len(got) == len(want)
+    for a, b in zip(got, want, strict=True):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
 
 
 def test_the_factory_builds_what_the_field_split_expects() -> None:

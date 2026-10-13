@@ -369,7 +369,7 @@ def main() -> None:
                 print(
                     f"  [{tag}] {rung:<6} step {report.step:>3d}  |R| {report.residual_norm:.4e}  "
                     f"ratio {report.residual_ratio:.3e}  alpha {report.alpha:>8.4g}  "
-                    f"cyc {report.cycles:>3d}  esc {report.escalations}",
+                    f"cyc {report.raw_cycles:>3d}  esc {report.escalations}",
                     flush=True,
                 )
 
