@@ -577,7 +577,9 @@ class MaterializedSession:
             self._hook.rebind(self._problem.assembler)
         return step
 
-    def rebind(self, assembler: object) -> None:
+    def rebind(self, assembler: object, *, follow_shift: bool = True) -> None:
+        # PROTOTYPE (#701, E5): `follow_shift=False` re-points the problem and forces the inverse's
+        # re-fit, but leaves the held step's shift policy (and so the measure built from it) as it is.
         current = self._problem.layout
         rebound = self._problem.with_assembler(assembler)
         if rebound.layout.size != current.size or rebound.layout.n_fields != current.n_fields:
@@ -587,7 +589,8 @@ class MaterializedSession:
                 f"assembler has {rebound.layout.n_fields} fields and size {rebound.layout.size}."
             )
         self._problem = rebound
-        self._repointing.repointed()
+        if follow_shift:
+            self._repointing.repointed()
         if self._hook is not None:
             self._hook.rebind(assembler)
 
