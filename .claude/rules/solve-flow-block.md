@@ -28,11 +28,13 @@ proposing to revisit the traced flow block, so a re-litigated idea is not mistak
 
 **The SIMPLE level's derived pieces are stored on their structural pattern (binding, #290,
 2026-10-12).** `saddle_multigrid.py` forms each level's `D⁻¹G` and Schur `C − D (D⁻¹G)` with
-`_onto_pattern(values, <same expression over _ones>)` (`multigrid.py`), and the non-block-splitting
+`_structured(values, operands, <same expression over _ones>, ...)` (`multigrid.py`, the `_onto_pattern` rule), and the non-block-splitting
 `D⁻¹` as an explicit CSR rather than a `diags` product. A plain `scipy` product or difference drops an
 entry that comes out exactly zero, so these pieces' stored counts — array shapes, leaves of the traced
 split — moved with the operator's values and recompiled the coupled step on a refit. Values are
-unchanged. Do not "simplify" either back to a bare product.
+unchanged. Do not "simplify" either back to a bare product. Both patterns are kept between refits by the inverse's
+`StructuralPatterns` (`_simple_pieces(patterns=)`, 2026-10-13), since recomputing them every refit
+cost as much as the pieces themselves; see `solve-amg-multigrid.md`'s Galerkin-shape entry.
 
 **Adding new content: a dated measurement or investigation step goes in `solve-flow-block-log.md`, not
 here.** Update the current-status paragraph above only when an investigation reaches a durable verdict

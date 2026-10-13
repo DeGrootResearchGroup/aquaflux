@@ -45,7 +45,8 @@ from __future__ import annotations
 
 import heapq
 import warnings
-from collections.abc import Callable
+import zlib
+from collections.abc import Callable, Hashable, Sequence
 from typing import NamedTuple
 
 import equinox as eqx
@@ -758,7 +759,9 @@ class SmoothedHierarchy(eqx.Module):
             operator_nnz.append(int(np.ceil(int(level.operator.data.shape[0]) * headroom)))
         return ShapeBudget(tuple(coarse_cells), tuple(operator_nnz))
 
-    def refit(self, a: sp.csr_matrix) -> SmoothedHierarchy:
+    def refit(
+        self, a: sp.csr_matrix, patterns: StructuralPatterns | None = None
+    ) -> SmoothedHierarchy:
         """Re-derive every level's operator at a new ``a``, reusing **this** hierarchy's prolongations.
 
         A plain rebuild re-runs the aggregation, which reproduces the same partition only when the
@@ -788,6 +791,10 @@ class SmoothedHierarchy(eqx.Module):
         ----------
         a : scipy.sparse matrix
             The new fine operator, of the shape this hierarchy was built at.
+        patterns : StructuralPatterns, optional
+            Where each level's Galerkin pattern is kept between refits. The prolongations are this
+            hierarchy's, so on a fine operator with an unchanged pattern every level's pattern is too,
+            and only the first refit pays to compute them. ``None`` computes them every time.
 
         Returns
         -------
@@ -819,7 +826,7 @@ class SmoothedHierarchy(eqx.Module):
                     _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
                 )
                 csr = prolongation.tocsr()
-                a = _galerkin_coarse(csr.T.tocsr(), a, csr)
+                a = _galerkin_coarse(csr.T.tocsr(), a, csr, patterns, ("galerkin", depth))
             else:
                 levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, level.block_size))
         return SmoothedHierarchy(
@@ -2306,34 +2313,138 @@ def _onto_pattern(values: sp.spmatrix, pattern: sp.spmatrix) -> sp.csr_matrix:
         If ``values`` stores an entry ``pattern`` does not -- impossible for a pattern computed from the
         same expression over :func:`_ones`.
     """
-    values = sp.csr_matrix(values)
-    pattern = sp.csr_matrix(pattern)
-    values.sort_indices()
-    pattern.sort_indices()
-    columns = pattern.shape[1]
+    return _Structure.of(pattern).store(values)
 
-    # One ascending key per stored entry on each side, so the (subset) real pattern locates into the
-    # structural one with a single search rather than a per-row merge.
-    def keys(matrix: sp.csr_matrix) -> np.ndarray:
-        rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
-        return rows.astype(np.int64) * columns + matrix.indices
 
-    pattern_keys, value_keys = keys(pattern), keys(values)
-    # Clipped before the lookup: a key past the end of `pattern_keys` would index out of range, and the
-    # comparison below is what turns "not found" into the stated invariant rather than an IndexError.
-    position = np.searchsorted(pattern_keys, value_keys).clip(max=max(pattern.nnz - 1, 0))
-    if value_keys.size and not np.array_equal(pattern_keys[position], value_keys):
-        raise AssertionError(
-            "_onto_pattern: the operator holds an entry its structural pattern does not, which cannot "
-            "happen for a pattern computed from the same expression."
+def _entry_keys(matrix: sp.csr_matrix) -> np.ndarray:
+    """One ascending key per stored entry of a sorted CSR matrix, ``row * n_columns + column``."""
+    rows = np.repeat(np.arange(matrix.shape[0]), np.diff(matrix.indptr))
+    return rows.astype(np.int64) * matrix.shape[1] + matrix.indices
+
+
+class _Structure:
+    """A structural pattern ready to store values on: the sorted pattern and its entry keys."""
+
+    def __init__(self, pattern: sp.csr_matrix, keys: np.ndarray) -> None:
+        self.pattern = pattern
+        self.keys = keys
+
+    @classmethod
+    def of(cls, pattern: sp.spmatrix) -> _Structure:
+        pattern = sp.csr_matrix(pattern)
+        pattern.sort_indices()
+        return cls(pattern, _entry_keys(pattern))
+
+    def store(self, values: sp.spmatrix) -> sp.csr_matrix:
+        """``values`` on this pattern (:func:`_onto_pattern`)."""
+        values = sp.csr_matrix(values)
+        values.sort_indices()
+        pattern = self.pattern
+        value_keys = _entry_keys(values)
+        # The (subset) real pattern located in the structural one by a single search rather than a
+        # per-row merge. Clipped before the lookup: a key past the end would index out of range, and
+        # the comparison below is what turns "not found" into the stated invariant.
+        position = np.searchsorted(self.keys, value_keys).clip(max=max(pattern.nnz - 1, 0))
+        if value_keys.size and not np.array_equal(self.keys[position], value_keys):
+            raise AssertionError(
+                "_onto_pattern: the operator holds an entry its structural pattern does not, which "
+                "cannot happen for a pattern computed from the same expression."
+            )
+        data = np.zeros(pattern.nnz, dtype=values.data.dtype)
+        data[position] = values.data
+        return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+
+
+def _pattern_fingerprint(operands: Sequence[sp.spmatrix]) -> tuple:
+    """Each operand's shape and a checksum of its stored pattern, independent of its values.
+
+    A collision could at worst hand :meth:`_Structure.store` a pattern missing one of the operator's
+    entries, which it refuses; a superset stores the same operator. So it can never change an answer.
+    """
+    fingerprint = []
+    for operand in operands:
+        operand = sp.csr_matrix(operand)
+        fingerprint.append(
+            (
+                operand.shape,
+                zlib.crc32(np.ascontiguousarray(operand.indptr)),
+                zlib.crc32(np.ascontiguousarray(operand.indices)),
+            )
         )
-    data = np.zeros(pattern.nnz, dtype=values.data.dtype)
-    data[position] = values.data
-    return sp.csr_matrix((data, pattern.indices, pattern.indptr), shape=pattern.shape)
+    return tuple(fingerprint)
+
+
+class StructuralPatterns:
+    """The structural patterns of computed operators, kept while their operands' patterns hold.
+
+    A structural pattern (:func:`_onto_pattern`) is the same product computed a second time over
+    all-ones copies of the operands, which costs as much as the product itself. It depends only on the
+    operands' patterns, and on a re-fit those do not move: a frozen coarsening keeps every prolongation,
+    and the fine operator comes from a probe with a fixed pattern. Held by one block inverse for its
+    life, this computes each pattern once and reuses it at every later re-fit, after checking that the
+    operands still store the same entries -- so the result is identical to computing it afresh, and an
+    operand whose pattern did change gets its pattern recomputed.
+
+    One entry per ``slot`` (a call site and level), replaced when the operands change, so it holds at
+    most one pattern per computed operator. A host object, never a leaf of a traced hierarchy.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[Hashable, tuple[tuple, _Structure]] = {}
+
+    def onto(
+        self,
+        slot: Hashable,
+        values: sp.spmatrix,
+        operands: Sequence[sp.spmatrix],
+        pattern: Callable[[], sp.spmatrix],
+    ) -> sp.csr_matrix:
+        """``values`` stored on the structural pattern of ``operands``, computed only when it moved.
+
+        Parameters
+        ----------
+        slot : hashable
+            Which computed operator this is, e.g. ``("galerkin", 0)``.
+        values : scipy.sparse matrix
+            The operator, computed from ``operands``.
+        operands : sequence of scipy.sparse matrix
+            The matrices it was computed from; their stored patterns decide the structural one.
+        pattern : callable
+            Computes the structural pattern from the operands over :func:`_ones`; called only when
+            this slot has none for the operands' current patterns.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix
+            ``values`` on the structural pattern.
+        """
+        fingerprint = _pattern_fingerprint(operands)
+        entry = self._entries.get(slot)
+        if entry is None or entry[0] != fingerprint:
+            entry = (fingerprint, _Structure.of(pattern()))
+            self._entries[slot] = entry
+        return entry[1].store(values)
+
+
+def _structured(
+    values: sp.spmatrix,
+    operands: Sequence[sp.spmatrix],
+    pattern: Callable[[], sp.spmatrix],
+    patterns: StructuralPatterns | None,
+    slot: Hashable,
+) -> sp.csr_matrix:
+    """``values`` on the structural pattern of ``operands``: from ``patterns`` if given, else computed."""
+    if patterns is None:
+        return _onto_pattern(values, pattern())
+    return patterns.onto(slot, values, operands, pattern)
 
 
 def _galerkin_coarse(
-    restriction: sp.csr_matrix, a: sp.csr_matrix, prolongation: sp.csr_matrix
+    restriction: sp.csr_matrix,
+    a: sp.csr_matrix,
+    prolongation: sp.csr_matrix,
+    patterns: StructuralPatterns | None = None,
+    slot: Hashable = "galerkin",
 ) -> sp.csr_matrix:
     """``R A P``, stored on a pattern that depends on the three *patterns* and not on their values.
 
@@ -2351,14 +2462,23 @@ def _galerkin_coarse(
     ----------
     restriction, a, prolongation : scipy.sparse.csr_matrix
         The restriction ``R``, the level operator ``A`` and the prolongation ``P``.
+    patterns : StructuralPatterns, optional
+        Reuse the structural pattern computed at an earlier call on operands with the same patterns,
+        under ``slot``. ``None`` computes it.
+    slot : hashable
+        Which coarse operator this is, when ``patterns`` is given.
 
     Returns
     -------
     scipy.sparse.csr_matrix
         The coarse operator, shape ``(R.shape[0], P.shape[1])``.
     """
-    return _onto_pattern(
-        restriction @ a @ prolongation, _ones(restriction) @ _ones(a) @ _ones(prolongation)
+    return _structured(
+        restriction @ a @ prolongation,
+        (restriction, a, prolongation),
+        lambda: _ones(restriction) @ _ones(a) @ _ones(prolongation),
+        patterns,
+        slot,
     )
 
 

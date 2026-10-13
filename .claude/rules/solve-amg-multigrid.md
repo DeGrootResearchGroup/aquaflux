@@ -2171,6 +2171,27 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   parametrized over the three prolongation forms; each fix mutation-checked on its own (no structural
   graph fails all three, an unpatterned standard or symmetric-part branch fails its own). A nonzero
   threshold still reads values, so a rebuild there is shape-stable only under `frozen_coarsening`.
+  ⚠️ **Those structural patterns doubled the refactor phase of a refit, and a cache now pays for them
+  once (`StructuralPatterns`, 2026-10-13).** Each pattern is the same product recomputed over
+  `_ones` copies of its operands, so every Galerkin operator and every SIMPLE `D⁻¹G`/Schur cost two
+  products plus a key search on every refit. Measured with `validation/refit_cost_probe.py` (pitzDaily
+  `state-00031`, shift 0.05, leading block frozen on both trees, best of 3, Linux x86_64, 4 cores, jax
+  0.11.2): the split's `refactor_block` took 0.88 s at `61a14308` (before #290) and 1.06 s on `main`
+  (leading block 0.50 → 0.69 s); bfs3d's refactor phase went ~2.8 → ~5.3 s per re-fit (#699 run 0, not
+  re-measured here). `StructuralPatterns` (`multigrid.py`) holds one pattern per slot (call site and
+  level), keyed by a checksum of the operands' stored patterns, so a pattern is recomputed only when an
+  operand's pattern moved; a collision can only hand `_Structure.store` a pattern missing an entry,
+  which it refuses, so it cannot change an answer. Each `HierarchyBlockInverse` owns one
+  (`self._patterns`) and passes it to `SmoothedHierarchy.refit(a, patterns=)` and, for the SIMPLE
+  smoother, to `_simple_pieces(patterns=)`; `None` computes every pattern afresh. Same probe after: split
+  **0.83 s**, leading block **0.48 s**. A hierarchy BUILD does not use it (a rebuild re-derives the
+  prolongations, so the Galerkin operands change); the pitzDaily trailing block, unfrozen, still
+  rebuilds and still pays (0.25 s). Pinned by
+  `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold` and
+  `test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_computing_them_would` (no
+  `_ones` call on a second frozen refresh, and every leaf equal to an uncached inverse's), mutation-checked
+  five ways (always reuse, never reuse, the inverse or the smoother not passing the cache, one slot for
+  every level).
   **Caveat — lAIR does NOT get this for
   free, and this is measured, not hypothetical.** Its C/F split comes from `_strength_classical`, which
   thresholds on `|A_ij|`, so re-deriving a reduction hierarchy at a new operator changes the split and

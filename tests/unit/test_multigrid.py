@@ -21,6 +21,7 @@ import scipy.sparse as sp
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.precondition.frozen_operator import ConvectionDiffusionStencil, decouple_dof
 from aquaflux.precondition.multigrid import (
+    StructuralPatterns,
     _cell_graph,
     _chebyshev_smooth,
     _CsrOperator,
@@ -33,6 +34,8 @@ from aquaflux.precondition.multigrid import (
     _lair_restriction,
     _mis_aggregate,
     _one_point_interpolation,
+    _ones,
+    _onto_pattern,
     _reattach_to_adjacent_root,
     _restriction_neighbourhoods,
     _rs_split,
@@ -1584,6 +1587,39 @@ def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() 
     assert not np.allclose(
         np.asarray(refitted.levels[0].operator.data), np.asarray(cold.levels[0].operator.data)
     )
+
+
+def test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold() -> None:
+    """A cached structural pattern is reused only while its operands store the same entries.
+
+    Three calls on one slot: new values on the same pattern (with stored exact zeros, so the plain
+    product genuinely drops entries the pattern keeps) must reuse the pattern; an operand whose pattern
+    has grown must recompute it. Every answer must equal the one a fresh computation gives, entry for
+    entry -- the cache may change what a refit costs, never what it returns.
+    """
+    rng = np.random.default_rng(0)
+    base = (sp.random(40, 40, density=0.1, random_state=0) + sp.eye(40)).tocsr()
+    revalued = base.copy()
+    revalued.data = rng.normal(size=revalued.nnz)
+    revalued.data[:12] = 0.0  # stored, so still in the pattern; dropped by the plain product
+    grown = (base + sp.random(40, 40, density=0.05, random_state=1)).tocsr()
+    assert (revalued @ revalued).nnz < (_ones(revalued) @ _ones(revalued)).nnz  # the zeros bite
+    assert grown.nnz > base.nnz
+
+    computed = []
+    patterns = StructuralPatterns()
+    for matrix, times_computed in ((base, 1), (revalued, 1), (grown, 2)):
+
+        def pattern(m=matrix):
+            computed.append(1)
+            return _ones(m) @ _ones(m)
+
+        got = patterns.onto("square", matrix @ matrix, (matrix,), pattern)
+        want = _onto_pattern(matrix @ matrix, _ones(matrix) @ _ones(matrix))
+        assert len(computed) == times_computed
+        assert np.array_equal(got.indptr, want.indptr)
+        assert np.array_equal(got.indices, want.indices)
+        assert np.array_equal(got.data, want.data)
 
 
 def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:

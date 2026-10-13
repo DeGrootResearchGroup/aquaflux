@@ -38,7 +38,12 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .multigrid import ShapeBudget, SmoothedHierarchy, build_convection_hierarchy
+from .multigrid import (
+    ShapeBudget,
+    SmoothedHierarchy,
+    StructuralPatterns,
+    build_convection_hierarchy,
+)
 from .traced_cycle import TracedCycle
 
 
@@ -139,6 +144,11 @@ class HierarchyBlockInverse:
         # build, and left untouched by a frozen-coarsening refresh (`refit`), which aggregates nothing
         # new. A diagnostic only; a subclass that wants to report it reads this rather than the builder.
         self._aggregate_stats: tuple[dict, ...] = ()
+        # The structural patterns of this inverse's computed operators (Galerkin products, a smoother's
+        # derived pieces), kept between refreshes: they move only with the operands' patterns, which a
+        # frozen coarsening on a fixed-pattern block never changes, and they cost as much as the
+        # products they pattern.
+        self._patterns = StructuralPatterns()
         self._rebuild(matrix)
 
     # --- the four hooks a smoother supplies -------------------------------------------------
@@ -271,7 +281,7 @@ class HierarchyBlockInverse:
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
             )
         if self._frozen_coarsening:
-            self._hierarchy = self._hierarchy.refit(matrix)
+            self._hierarchy = self._hierarchy.refit(matrix, patterns=self._patterns)
             self._after_coarsening()
             return
         before = tuple(level.n for level in self._hierarchy.levels)

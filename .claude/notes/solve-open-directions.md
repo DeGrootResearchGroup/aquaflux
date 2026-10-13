@@ -246,7 +246,10 @@ linear-ending failure below either way -- a shifted step converges linearly what
 **changed under #290/#694** (traced split, re-fit ending the step): the shipped file's 28 steps / 174
 cycles / one retry of 2026-10-11 (`61a14308`) is now 36 / 166 / none at about the same wall (1191 against
 1197 s) -- the two runs part at the first inner solve's fourth digit, and each re-fit's refactor phase
-went from ~2.8 to ~5.3 s. Not bisected; compare bfs3d runs only within one commit.
+went from ~2.8 to ~5.3 s. Compare bfs3d runs only within one commit. The refactor-phase rise is the
+structural-pattern products of 868ab80/f7326c1 (on pitzDaily 0.88 -> 1.06 s per split refit), cached
+since 2026-10-13 (`StructuralPatterns`, `solve-amg-multigrid.md`: 0.83 s); the trajectory change is not
+explained by it and is not bisected.
 **Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard), the
 cost thresholds' re-calibration, and the project owner's decision.
 
