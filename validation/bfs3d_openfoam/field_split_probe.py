@@ -210,7 +210,7 @@ def load_state(name: str) -> jnp.ndarray:
     if "attempt" in data:
         detail = (
             f"attempt {int(data['attempt'])} inner {int(data['inner'])}, the march took "
-            f"{int(data['raw_cycles'])} cycles at alpha {float(data['alpha']):.2e}, "
+            f"{int(data['cycles'])} cycles at alpha {float(data['alpha']):.2e}, "
             f"|G| {float(data['g_before']):.4e} -> {float(data['g_after']):.4e}"
         )
     else:

@@ -141,7 +141,7 @@ def test_inner_iterate_checkpointer_keeps_only_the_expensive_iterations(tmp_path
     keeper.on_inner(1, 0.5, 0.4, 17, 0.01, np.array([3.0, 4.0]))
     assert len(keeper.written) == 1
     saved = np.load(keeper.written[0])
-    assert saved["raw_cycles"] == 15
+    assert saved["cycles"] == 15
     assert saved["inner"] == 1
     np.testing.assert_array_equal(saved["state"], [3.0, 4.0])
 

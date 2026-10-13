@@ -78,7 +78,7 @@ def describe(stored) -> str:
     # exactly why the sweep below exists rather than a single pairing.
     return (
         f"attempt {int(stored['attempt'])} inner {int(stored['inner'])}, "
-        f"{int(stored['raw_cycles'])} cycles, alpha {float(stored['alpha']):.3f}, "
+        f"{int(stored['cycles'])} cycles, alpha {float(stored['alpha']):.3f}, "
         f"|G| {float(stored['g_before']):.4e} -> {float(stored['g_after']):.4e}"
     )
 
