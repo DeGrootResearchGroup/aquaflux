@@ -1142,6 +1142,13 @@ or whose blocks are unnamed: `RowScaledNorm` /
       so updating only it lasts one step) and reports the last on **`MarchResult.strategy`**, which
       `staged_march` carries into the next segment and the adjoint. At unchanged array shapes it is a
       compile-cache hit; see `solve-field-split.md` for what keeps the shapes fixed.
+    **When `norm_builder` is set, the march builds the step's measure AGAIN from the updated step
+    (2026-10-13, #701)**: an update can carry a new shift policy (a re-pointed session), and the
+    row-scaled measure reads its scales from the step's policy, so without the rebuild the step entering
+    a new problem was judged in the previous one's scales. Pinned by
+    `test_a_step_an_update_moves_is_judged_in_the_measure_built_from_the_updated_step` (mutation-checked).
+    The escalation's redo path applies an update without rebuilding the measure (a redo keeps the
+    attempt's measure; only a `rebind`'s first step can carry a new policy, and that is the top path).
     Two consumers: `MaterializedSession.refresh_preconditioner` over `BetaTrackingRefresh`, which
     re-fits on its first call, after a `rebind`, and when the march passes `due` (a cost-ended step, a
     trigger); and `solve.RebuildingSession.refresh_preconditioner` (the block-diagonal family, #386),

@@ -518,23 +518,42 @@ Many entries below are dated history written against the old API. Read them thro
       (stations 8-12 and arrival) every fix step ends after ONE inner iteration at 3 cycles, `a_min`
       0.25, `beta` at its 0.005 floor, the residual crawling 1.10e-2 to 8.6e-3: the station's own
       (smaller) velocity shift makes the first solve reach `refresh_on_cycles` 3, which ends the step.
-      The control's anchor shift, 100x the target's viscous `a_P`, was heavier velocity damping the
-      schedule had been tuned around — the stale shift was load-bearing (the globalization lesson at
-      the top of `solve-globalization.md`). ⚠️ The control's 20 / 154 is not the 16 / 111 `case.yaml`
-      records for its own schedule (measured 2026-10-11 on an earlier base); unexplained, and it is a
-      second change between that record and now. bfs3d not measured.
-      **Retune sweep on the fix (2026-10-13, same configuration, one setting edited per arm through
-      `PITZ_CASE_FILE` and the committed `sweep-*.yaml` files beside `case.yaml`), steps / restart
-      cycles / escalating retries, every arm to `x_r/h` 8.0686:** shipped file 28 / 157 / 6;
-      `refresh_on_cycles` 4: 35 / 339 / many; `beta_min` 0.01: **24 / 176 / 0**; `beta_min` 0.02:
-      stopped at step 37, residual 6.5e-3, 283 cycles, repeated divergence; `beta_min` 0.01 with
-      `turbulence_damping` 1.5: 31 / 209 / 3; `beta_min` 0.0075 with damping 2: 28 / 196 / 4. **The
-      two paired arms test and REFUTE "the lost damping was on the velocity rows, so damp the flow
-      harder and leave the closure's floor shift (3 x 0.005) alone"**: both lose to the shipped file,
-      and both go non-finite early in the ramp (steps 6-8, while the closure is least damped). No arm
-      beats the shipped file on cycles; `beta_min` 0.01 trades 19 cycles for 4 steps and no retries. The march builds the step's measure BEFORE calling the hook,
-      so the step that ENTERS a station is still judged in the previous station's row scales; every later
-      step on it uses its own.
+      ⚠️ **That first version was itself wrong, and the two reviews that found it are why the numbers
+      below exist.** It built the station step with `reuse=None` at the MARCH'S ITERATE, which re-froze
+      `nu_t`, the mass flux, the transport scale and the log-omega coordinate factor (`domega/dw = omega`)
+      at every station as well as moving the viscosity -- the #156 freeze hazard, re-referencing the omega
+      shift by a median 1.86x (up to 25x) on pitzDaily (developed state against the seed's reference). **Now (E1, `673d447`) the graft is built at the
+      state the held steps were built at** (`MaterializedSession._reference_state`, set by `build` and
+      `refresh`), so a re-pointing moves the problem and nothing else; pinned by
+      `test_a_re_pointing_moves_the_problem_and_not_the_state_the_shift_was_built_at` (fails if the
+      graft uses the iterate). **And the march rebuilds the step's measure after the hook's update (E4,
+      `5c4943c`, `march.py`)**: it used to build it before the hook ran, so the step entering a station
+      was judged in the previous station's row scales; pinned mesh-free by
+      `test_a_step_an_update_moves_is_judged_in_the_measure_built_from_the_updated_step`
+      (`test_newton_march.py`; mutation: dropping the rebuild reports `|R|` instead of `|R| / 10`).
+      **The pitzDaily arms (same configuration as above, one run each), steps / restart cycles /
+      escalating retries / march time after step 1, all `x_r/h` 8.0686:** control 20 / 154 / 0 / 527 s;
+      first version 28 / 157 / 6 / 599 s; E1 22 / 129 / 2 (both at step 15, which took 147 s, its inner
+      1 hitting the 14-cycle cap twice) / 650 s; E1 + E4 25 / 145 / 0 / 606 s. E1 and E1 + E4 agree to
+      two or three figures through step 14 (the station re-damping holds the step control off the
+      residual ratio throughout the ramp, so a lagged measure misleads nothing there) and part only after
+      arrival, which reads as path sensitivity rather than a property of either. Both keep, by the owner's
+      decision (2026-10-13), trading cycles for no restarts. **What neither recovers:** steps 10-14 each
+      stop after one inner iteration at 3 cycles with the residual flat near 7e-3, where the control
+      descends with multi-inner steps -- the station's own viscosity shrinking the velocity rows' shift.
+      ⚠️ **"The anchor shift was 100x the target's viscous `a_P`" (this entry's first draft) is WRONG**:
+      the viscosity ratio is 100, but the shift diagonal is convective plus viscous. Measured by a
+      reviewer's probe on pitzDaily (the shipped seed state, both policies referenced there), the
+      target's velocity diagonal over the anchor's is 0.64 at the median, 0.44 at the 10th percentile,
+      0.13 at the 1st and 0.030 at the worst cell -- so the anchor damped the velocity rows ~1.6x harder
+      in the bulk and up to ~33x in its most viscous-dominated cells, and k / omega within 0.95-1.12.
+      The lost damping is real and concentrated; it is not two orders of magnitude across the board. ⚠️ All of these predate main's dropping pitzDaily's refit floor (#709,
+      `refit_beta_floor` 0.05 -> none: 19 / 144 on the control); the merged branch is re-measured below.
+      **A latent defect the reviews found (F4), not fixed:** a `station_step` swap is undone on a
+      station-entering step, because the graft replaces the step after `station_step` has reshaped it --
+      reachable today only from the `PITZ_TURB_DAMPING_TARGET` harness arm. Also noted, not acted on:
+      the new measure's stop is ~18 % stricter at the same `atol` (the target's own row scales), and
+      near-wall velocity rows dominate it. Reviewer harnesses were scratch-only.
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
       `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled

@@ -858,6 +858,67 @@ def test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_res
     assert float(result.strategy.factor) == 0.25
 
 
+class _JudgedOnItsScale(eqx.Module):
+    """A step whose measure is built from a leaf of the step, as a row-scaled one reads its shift.
+
+    It halves the state and reports the residual in the measure it was handed, so a report says which
+    measure the step was judged in.
+    """
+
+    scale: jnp.ndarray
+    residual_norm: object
+    relaxation_schedule: ConstantRelaxation
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            stepped = 0.5 * phi
+            return _outcome(stepped, 1)._replace(
+                residual_norm=self.residual_norm(residual_fn(stepped))
+            )
+
+        return step
+
+    def norm(self):
+        return self.residual_norm
+
+    def with_norm(self, norm):
+        return eqx.tree_at(lambda s: s.residual_norm, self, norm)
+
+    def linear_solver(self):
+        return None
+
+
+def test_a_step_an_update_moves_is_judged_in_the_measure_built_from_the_updated_step() -> None:
+    """An update can carry what the measure is built from (a re-pointed problem's shift), so the march
+    builds the measure again from the updated step.
+
+    The update on the first step raises the scale from 1 to 10. A march that kept the measure it built
+    before the hook ran would judge that step in the old scale and report ``|R|`` instead of ``|R| / 10``.
+    """
+    updated = []
+
+    def refresh(step, state, *, due):
+        if updated:
+            return None
+        updated.append(1)
+        return lambda s: eqx.tree_at(lambda t: t.scale, s, jnp.asarray(10.0))
+
+    def norm_builder(step, state):
+        return lambda residual: jnp.linalg.norm(residual) / step.scale
+
+    result = newton_march(
+        _JudgedOnItsScale(jnp.asarray(1.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=2,
+        rtol=0.0,
+        atol=0.0,
+        norm_builder=norm_builder,
+        refresh_preconditioner=refresh,
+    )
+    assert [float(r.residual_norm) for r in result.reports] == [0.5**3 / 10.0, 0.25**3 / 10.0]
+
+
 def test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it() -> None:
     """Every hard step would end early and the preconditioner would never be refreshed: refuse it."""
     step = _StopsForRefit(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))
