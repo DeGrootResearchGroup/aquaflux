@@ -102,9 +102,13 @@ def _tree(tmp_path: Path, **modules: str) -> Path:
 _XDIST_MARKERS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT", "PYTEST_XDIST_TESTRUNUID")
 
 
-#: A run-file in the shape `validation/run_case.sh` writes, naming ``pid``. Only the pid is read (the
-#: rest is echoed back to a human), so a live process of any kind stands in for a march.
-_RUN_FILE = "pid={pid}\nscript=validation/pitzdaily_openfoam/compare.py\nlog=/tmp/pretend.log\n"
+#: A run-file in the shape `validation/run_case.sh` writes, naming ``pid`` and when it started. Only
+#: those two are read (the rest is echoed back to a human), so a live process of any kind stands in
+#: for a march.
+_RUN_FILE = (
+    "pid={pid}\npid_started={started}\n"
+    "script=validation/pitzdaily_openfoam/compare.py\nlog=/tmp/pretend.log\n"
+)
 
 
 def _case_running(tmp_path: Path, pid: int) -> dict[str, str]:
@@ -116,7 +120,12 @@ def _case_running(tmp_path: Path, pid: int) -> dict[str, str]:
     """
     tmpdir = tmp_path / "tmp"
     tmpdir.mkdir(exist_ok=True)
-    (tmpdir / "aquaflux-case-run").write_text(_RUN_FILE.format(pid=pid))
+    started = " ".join(
+        subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.split()
+    )
+    (tmpdir / "aquaflux-case-run").write_text(_RUN_FILE.format(pid=pid, started=started))
     return {"TMPDIR": str(tmpdir), "CI": ""}
 
 

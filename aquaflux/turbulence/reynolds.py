@@ -958,21 +958,19 @@ def solve_reynolds_ramp(
     state = first.state_from_physical(*seed_fields)
     extra = point_setup(first, state, ReynoldsPoint(1, 1, float(anchor)))
     passed = {key: value for key, value in solve_kwargs.items() if key not in _LADDER_ONLY}
-    # A materialized preconditioner is opened as one session on the ANCHOR, so the first step is fitted
-    # to the problem it solves, and the homotopy re-points it at every station change. A block-diagonal
-    # spec is left to the solve, which builds it on the target as it always has (#386).
-    rebind = None
-    shared = _shared_session(passed, first)
-    if shared is not None:
-        passed = _with_session(passed, shared)
-        shared.rebind(first)
-        rebind = shared.rebind
+    # One session, opened on the ANCHOR so the first step is fitted to the problem it solves, and
+    # re-pointed by the homotopy at every station change: a materialized inverse is re-fitted there, and
+    # a block-diagonal step rebuilt on the station's viscosity. A session the caller opened is re-pointed
+    # the same way.
+    shared = _shared_session(passed, first, share_block=True)
+    passed = _with_session(passed, shared)
+    shared.rebind(first)
     homotopy = ViscosityRampHomotopy(
         coupled,
         anchor=anchor,
         ramp=ramp,
         redamping=redamping,
-        rebind=rebind,
+        rebind=shared.rebind,
         companion=companion,
     )
     return solve_coupled(
@@ -980,17 +978,22 @@ def solve_reynolds_ramp(
     )
 
 
-def _shared_session(kwargs: dict, assembler: CoupledRANS) -> object | None:
+def _shared_session(
+    kwargs: dict, assembler: CoupledRANS, *, share_block: bool = False
+) -> object | None:
     """The session several solves should share, or ``None`` when each builds its own.
 
     A :class:`MaterializedJacobian` spec is opened here -- with the options' own
     ``jacobian_production_viscosity``, which the session owns -- and a session the caller opened is used
-    as given. A :class:`BlockDiagonal` spec, or none, is left for each solve to build.
+    as given. A :class:`BlockDiagonal` spec, or none, is opened too when ``share_block``, and otherwise
+    left for each solve to build on its own assembler.
     """
     preconditioner = kwargs.get("preconditioner")
-    if preconditioner is None or isinstance(preconditioner, BlockDiagonal):
+    if not share_block and (preconditioner is None or isinstance(preconditioner, BlockDiagonal)):
         return None
-    if not isinstance(preconditioner, MaterializedJacobian):
+    if preconditioner is not None and not isinstance(
+        preconditioner, BlockDiagonal | MaterializedJacobian
+    ):
         return preconditioner
     production = kwargs.get("jacobian_production_viscosity")
     return open_session(
@@ -1003,11 +1006,10 @@ def _shared_session(kwargs: dict, assembler: CoupledRANS) -> object | None:
 def _with_session(kwargs: dict, session: object) -> dict:
     """``kwargs`` with ``session`` as the preconditioner, and the setting the session now owns removed."""
     preconditioner = kwargs.get("preconditioner")
-    owned = (
-        ()
-        if not isinstance(preconditioner, MaterializedJacobian)
-        else ("jacobian_production_viscosity",)
+    opened_here = preconditioner is None or isinstance(
+        preconditioner, BlockDiagonal | MaterializedJacobian
     )
+    owned = ("jacobian_production_viscosity",) if opened_here else ()
     return {key: value for key, value in kwargs.items() if key not in owned} | {
         "preconditioner": session
     }

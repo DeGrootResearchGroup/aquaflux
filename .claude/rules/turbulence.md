@@ -140,7 +140,7 @@ Many entries below are dated history written against the old API. Read them thro
 | `mass_flow_coupled_continuation(..., method=M, **flow_opts)`, `solve_coupled_mass_flow(method=M, **flow_opts)` | both **deleted (#541)**: `coupled_step(coupled, state, preconditioner=BlockDiagonal(...))` and `solve_coupled(coupled, ...)` border themselves when `coupled.momentum.drive` is a `MassFlow`; the held force is `held_force(coupled, flow, k, omega)` |
 | `BlockDiagonal(velocity="convection")`, `"smoothed"`, `"convection-air"` (and the same strings on `BlockPreconditioner.build`, `momentum_continuation`, `reused_flow_solve`) | `ConvectionTwoLevel()`, `ViscousMultilevel()`, `ConvectionAir()` from `aquaflux.flow` (#390); a string is refused |
 | `shift_basis=…`, `velocity_shift_parts=…`, `turbulence_damping=…` on `coupled_step` / the mass-flow builder / `solve_coupled` | `shift=CoupledShiftSettings(basis=…, velocity_parts=…, turbulence_damping=…)` (#387; since #450 stage 3 it subclasses `solve.ShiftSettings(basis, velocity_parts)`, the flow's part, and adds `turbulence_damping`; `ShiftSettings` from `aquaflux.turbulence` no longer exists); a Reynolds `point_setup` value merges field by field over the shared one (so does a `Globalization`; an unset field takes the shared setting, so a point cannot reset one to its default). `merged_march_options` merges any value that is a `solve.MergeableSettings` (`isinstance`, #669), not anything with a `filled_from` attribute |
-| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` without a loop is refused where it used to be dropped, and a `refresh_on_cycles` with no refresh hook to take its re-fit (a frozen step or a block-diagonal session) is refused by `newton_march` before the first step. There is no `inner_refresh` (removed 2026-10-10, #290): the step ENDS for the re-fit and the march takes it |
+| `inner_steps=N` (N > 1), `inner_tol=…`, `cycle_budget=…`, `refresh_on_cycles=…` | `dual_time=DualTimeLoop(inner_steps=N, …)` (#388); unset is the single shifted step. `inner_observer` without a loop is refused where it used to be dropped, and a `refresh_on_cycles` with no refresh hook to take its re-fit (a frozen step) is refused by `newton_march` before the first step, and by a block-diagonal session when it builds the step (its hook only follows a re-pointing, #386). There is no `inner_refresh` (removed 2026-10-10, #290): the step ENDS for the re-fit and the march takes it |
 | `krylov_solver=S`, `forward_rtol=…` / `forward_restart=…` / `forward_max_restarts=…` | `linear_solve=S` or `linear_solve=LinearSolveSettings(rtol=…, restart=…, max_restarts=…)` (#388) — one slot, so a solver beside a regime setting cannot be written |
 | the scalar multigrid string `M` = `"twolevel"` / `"air"` / `None` — on `BlockDiagonal.method`, `scalar_transport_preconditioner(method=)`, `SSTTurbulence.k_preconditioner`/`omega_preconditioner(method=)`, `solve_segregated(scalar_preconditioner=)`, and `_coupled_shift_policy(coupled, state, M)` | a `ScalarBlock` value `S` = `ScalarTwoLevel()` / `ScalarAir()` / `UnpreconditionedScalars()` from `aquaflux.turbulence` (#394), on `BlockDiagonal.scalar` and a `scalar=` keyword everywhere else; `_UNSET` and `resolved_method` are gone (`resolved_scalar`); a string is refused |
 | `point_setup` returning `strategy` + `RefreshPolicy(refresh_preconditioner=hook)`, `_rebinding` | `solve_reynolds_continuation` / `solve_reynolds_ramp` given `preconditioner=`; `point_setup` keeps only per-point march settings |
@@ -325,10 +325,10 @@ Many entries below are dated history written against the old API. Read them thro
   exactly (pinned in `test_scalar_transport_preconditioner.py`).
   `scalar_transport_preconditioner` returns a **`ScalarTransportPreconditioner`** strategy
   (`ConvectionAmgPreconditioner` / `AirAmgPreconditioner`) rather than the old opaque `lambda phi: solve`.
-  These are plain frozen dataclasses, **not `equinox.Module`s** — see the binding note in
-  `.claude/rules/solve-globalization.md`; making them pytrees breaks both the IFT adjoint and the jit cache.
-  `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output factor — the
-  reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a frozen dataclass.
+  They are **`equinox.Module`s since 2026-10-12 (#386)**, hierarchies on the traced side — reversing
+  #105's binding "not a pytree"; see the reversed note in `.claude/rules/solve-globalization.md` for why
+  and what it costs. `ScaledScalarPreconditioner(inner, scale)` wraps one with a fixed per-cell output
+  factor — the reciprocal chain-rule scaling a log-transformed scalar block needs (above); also a module.
   - **Which continuation a solve runs is ONE injected source, not two parallel branches (binding, #278,
     2026-08-20).** `solve_coupled` needs a continuation twice — the initial build and every refresh —
     and those were written as two independent two-way branches (`refresh.builder` vs the default
@@ -439,8 +439,8 @@ Many entries below are dated history written against the old API. Read them thro
     - **`solve_reynolds_continuation`** opens **one** session for a `MaterializedJacobian` spec, shares
       it across points and `rebind`s it per point; a `BlockDiagonal` spec is built per point at its own
       viscosity, exactly as before. `_SOLVE_ONLY` excludes `preconditioner`. **`solve_reynolds_ramp`**
-      opens a materialized session on the **anchor** and hands the homotopy its `rebind`; a block spec
-      stays target-bound (#386). A `point_setup` refresh hook beside a session is refused.
+      opens a session on the **anchor** for EITHER family (a block spec too, since #386) and hands the
+      homotopy its `rebind`. A `point_setup` refresh hook beside a session is refused.
     - **The three builders, both public β-tracking hooks and `_rebinding` are DELETED** (see the rename
       table at the top of this file). Both flagship drivers and every harness open a session or build a
       spec; the drivers' inert monolithic smoother settings under the field split (D1) went with them,
@@ -475,8 +475,32 @@ Many entries below are dated history written against the old API. Read them thro
       follows `jacobian_production_viscosity` for every family (D2, and D7 for the complete LU, whose
       builder materializes the un-frozen assembler), and one probe serves the build and the hook (D3/D5).
       Byte-identical wherever `jacobian_production_viscosity=False`.
-    - **`_BlockSession.rebind` is a no-op** — target-viscosity behaviour on the ramp stays as it was
-      (Q2, #386).
+    - **`_BlockSession` follows a re-pointing (2026-10-12, #386; it was a no-op until then).** It is a
+      `solve.RebuildingSession`: `rebind` stores the companion, and the march's next call to the session's
+      `refresh_preconditioner` derives a step on it at the march's state from the held one (`_repointed`:
+      the held policy refreshed with `repointed=True` — k/omega hierarchies on their reused coarsening, the
+      flow block's anchor hierarchy applied to the station's momentum by `flow.BlockPreconditioner.on`)
+      and grafts its shift policy, adjoint factory and operator stand-in into the held step
+      (`ShiftedStep.preconditioned_as`), keeping the step control's shift strength. Unrebound, the hook
+      returns `None` (and the default-family test pins that). A segment `refresh` keeps carrying the flow
+      block with its build-state assembler, as before. Before this, `solve_reynolds_ramp` left a
+      block spec to the solve, which built it on the TARGET, so every station ran the target's
+      preconditioner and shift. **Measured on the re20000 law-of-the-wall channel ramp (2026-10-12, table
+      in `validation/turbulent_channel/README.md`):** before, the march diverged at station 5 of 16;
+      after, stations 0-10 take full steps at 4-17 restart cycles and the march diverges on arriving at
+      the target with the shift at its floor (0.02). ⚠️ **That "after" arm was the first version, which
+      rebuilt each station from scratch and recompiled the march step at every station** (~40 s against
+      ~7 s per step): the rebuilt preconditioners were new static objects. The station step now keeps the
+      held step's structure and is a cache hit (`test_a_re_pointed_block_session_step_is_a_compilation_cache_hit`),
+      which needed the scalar preconditioners to become data (the reversed #105 note in
+      `solve-globalization.md`). ⚠️ **NOT re-measured since**, and the change is numerical too (the flow
+      block is no longer re-aggregated per station), so the 4-17 cycles above describe the first version.
+      ⚠️ **The materialized family is NOT station-following either, in the opposite
+      direction**: `BetaTrackingRefresh` re-fits the inverse per station but with the step's anchor-built
+      `shift_policy.base`, and the step's shift (hence the row-scaled measure's row scales) is never
+      rebuilt on a re-pointing — probed on the test cavity (both blocks scaled, anchor 100) the held
+      step's shift diagonal after arrival is a median 51x (max 96x) the target's; only a segment refresh
+      rebuilds it, and neither flagship case file sets a refresh trigger. Not changed here.
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
       `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled
@@ -636,14 +660,18 @@ Many entries below are dated history written against the old API. Read them thro
   `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
   moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing
   and every sweep pays one eager residual evaluation for the march's reference norm.** The property is
-  unchanged and still pinned by `test_a_carried_preconditioner_compiles_the_scalar_solve_once`, whose
-  fixture had to start disturbing the state to keep measuring it (see `solve.md`).
+  unchanged and pinned by
+  `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, whose fixture
+  had to start disturbing the state to keep measuring it (see `solve.md`). ⚠️ **Since the preconditioner
+  became data (#386) a REBUILT two-level preconditioner is a cache hit too** (its coarsening reads only the
+  graph, so the shapes do not move) — carrying it now saves only the ~1 s build, not a recompile; a
+  rebuilt lAIR still misses, by shape.
 - **`transport.py`'s `omega_residual` returns a `WallFixedResidual`, not a closure (binding, #105).** It is
   rebuilt every sweep and reaches the compiled march step as an argument, so as a bare closure it landed on
   `filter_jit`'s static side and identity-missed the cache every sweep. As an `equinox.Module` its arrays
   ride on the traced side and only their *values* change. (`k_residual` already returned a bound
-  `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) Note the
-  contrast with the preconditioner above: a *per-sweep* callable must be a pytree, a *frozen* one must not.
+  `ResidualAssembler.residual`, which equinox treats as a pytree — that one was always fine.) The
+  preconditioner is a pytree too since #386, for the same reason.
 
 ## Which patches are walls is stated twice, and reconciled at the coupled build (#355, 2026-09-24)
 
