@@ -1518,6 +1518,11 @@ steps by trigger.
 
 ## bfs3d: the release, `grow` 3 and the settle-ended ramp (#678), 2026-10-11
 
+⚠️ **Every arm below predates #290/#694 (a re-fit ends the step; traced split), which changed bfs3d's
+march**: at `46af0749` the shipped file takes 36 steps / 166 cycles / no retry against arm 1's 28 / 174 /
+one, at about the same wall (`solve-open-directions.md` 6b, bfs3d table). Compare these arms with each
+other, not with a run on a later tree.
+
 **Configuration.** `validation/bfs3d_openfoam/compare.py` at `61a14308` (#677 merged), `case.yaml` as
 shipped (12 stations x 1 step, `turbulence_damping` 5, `CflResidualDualTimeControl` `beta_start` 0.5,
 `beta_min` 0.005, `grow` 1.5; field split `simplesmooth` + Jacobi, `refit_beta_floor` 0.05, refresh on 3

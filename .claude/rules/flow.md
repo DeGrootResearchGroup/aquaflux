@@ -710,6 +710,14 @@ Engineering Principles.
     coarse-grid array shapes moved with the molecular viscosity, recompiling the whole coupled solve at
     every Reynolds-continuation rung. See `.claude/rules/turbulence.md`. The method stays as the one
     call site's convenience; the function is the one home.
+- **`BlockPreconditioner.on(assembler)` applies a built preconditioner to another problem, its frozen
+  hierarchies kept (2026-10-12, #386).** The hierarchies are rescaled to the current `a_P` on every
+  application, so the assembler is all that ties them to one problem; `on` swaps it (`eqx.tree_at`) and
+  every array keeps its shape. That is what a viscosity ramp's station change uses
+  (`turbulence._BlockSession._repointed`): a `build` on the companion re-aggregates along its strong
+  connections, whose coarse shapes move with the viscosity, and recompiles the march (the freshly built
+  control in `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` is that miss). Pinned by the re-pointing tests in
+  `tests/unit/test_preconditioner_session.py` (the carried block's `a_P` is the companion's; mutation-checked).
 - **Frozen operators are assembled by `aquaflux/precondition/frozen_operator.py`, not here (#45).** All three preconditioner hierarchies (pressure Schur, viscous velocity block,
   convection velocity block) build their scipy CSR operator with
   `ConvectionDiffusionStencil(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None).assemble()`
@@ -889,6 +897,12 @@ border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelo
   and `validation/turbulent_channel/README.md`.
 - **Two-argument residuals for the adjoint**: `BorderedFlowResidual` (flow) and
   `turbulence.coupled._BorderedCoupledResidual` read everything, border vectors included, from `theta`.
+- **The bordered wrappers forward everything a march hands them (fixed 2026-10-12, #386).**
+  `_BorderedHomotopy.enter(step, previous)` passes `previous` through — it took `enter(step)` alone after
+  the protocol gained `previous` (2026-10-11), so **every ramp on a held bulk velocity raised `TypeError`
+  before step 1** (found by running `mass_flow_march.py`'s ramp arm; the unit test's stub had the old
+  arity too). `_DetachedSource.refresh_preconditioner` detaches the state before calling the inner hook,
+  since a session builds from fields; no hook reached it before the block family gained one.
 - **Observers see fields**: `on_checkpoint` is handed the detached fields state (so the case's checkpoint
   writer reads it unchanged); a restart re-solves the force from the drive's own seed.
 - **Not built: a materialized-Jacobian preconditioner beside a held bulk velocity** — `open_flow_session`

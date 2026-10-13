@@ -10,6 +10,8 @@ absorption together.
 
 from __future__ import annotations
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,15 +22,19 @@ from aquaflux.radiation import (
     UniformAbsorption,
     direct_fluence_rate,
     direct_irradiance,
+    refracted,
+    refraction,
+    shooting,
 )
 from aquaflux.radiation.refracted import (
     build_refracted_visibility,
+    check_shooting_grid,
     refracted_fluence_rate,
     refracted_irradiance,
 )
 from aquaflux.radiation.refraction import Media, Transparent, fresnel_transmittance
 from aquaflux.radiation.visibility import build_visibility
-from aquaflux.solids import Cylinder, HalfSpace, Sphere
+from aquaflux.solids import Box, Cylinder, HalfSpace, Sphere
 from scipy import integrate, optimize
 
 WATER, QUARTZ, AIR = 1.376, 1.5048, 1.0003
@@ -97,37 +103,19 @@ def test_with_every_index_equal_it_is_the_direct_gather():
     )
 
 
-def _through_a_plane(
-    n_source, n_receiver, a_source, a_receiver, depth, height, half_width, exitance, cosine=False
-):
-    """Fluence rate on the axis above a square Lambertian emitter seen through the plane ``z = 0``.
+def _over_directions(reach, carried, widest, half_width, cosine=False):
+    """Integrate what arrives over the receiver's directions, from a square emitter centred below it.
 
-    With ``cosine``, the irradiance on a surface there facing down at the emitter instead: each
-    direction weighted by its cosine to the vertical.
-
-    Integrated over the receiver's directions: each arrives with the source's radiance, times
-    ``(n_receiver / n_source)^2``, the Fresnel transmittance and both legs' absorption, wherever the
-    refracted ray lands on the square. Eight symmetric sectors; for each azimuth the polar limit is
-    where the ray's lateral reach meets the square's edge.
+    ``reach(theta)`` is how far sideways a ray arriving at polar angle ``theta`` meets the emitter's
+    plane, and ``carried(theta)`` what radiance it brings per unit of the emitter's; ``widest`` is the
+    largest polar angle any ray arrives at. Eight symmetric sectors; for each azimuth the polar limit
+    is where the reach meets the square's edge. With ``cosine``, each direction is weighted by its
+    cosine to the vertical, as on a surface facing down at the emitter.
     """
 
-    def source_angle(theta):
-        return np.arcsin(np.clip(n_receiver * np.sin(theta) / n_source, -1.0, 1.0))
-
-    widest = np.pi / 2 if n_source >= n_receiver else np.arcsin(n_source / n_receiver)
-
-    def reach(theta):
-        return height * np.tan(theta) + depth * np.tan(source_angle(theta))
-
     def radiance(theta):
-        inside = source_angle(theta)
-        crossing = float(fresnel_transmittance(np.cos(inside), n_source, n_receiver))
-        legs = a_source * depth / np.cos(inside) + a_receiver * height / np.cos(theta)
         weight = np.cos(theta) if cosine else 1.0
-        return (
-            (n_receiver / n_source) ** 2 * crossing * exitance / np.pi * np.exp(-legs)
-            * np.sin(theta) * weight
-        )  # fmt: skip
+        return carried(theta) * np.sin(theta) * weight
 
     def sector(phi):
         top = widest * (1 - 1e-12)
@@ -138,6 +126,32 @@ def _through_a_plane(
         return integrate.quad(radiance, 0.0, top, epsabs=0, epsrel=1e-11, limit=200)[0]
 
     return 8.0 * integrate.quad(sector, 0.0, np.pi / 4, epsabs=0, epsrel=1e-10)[0]
+
+
+def _through_a_plane(
+    n_source, n_receiver, a_source, a_receiver, depth, height, half_width, exitance, cosine=False
+):
+    """Fluence rate on the axis above a square Lambertian emitter seen through the plane ``z = 0``.
+
+    With ``cosine``, the irradiance on a surface there facing down at the emitter instead. Each
+    direction arrives with the source's radiance, times ``(n_receiver / n_source)^2``, the Fresnel
+    transmittance and both legs' absorption, wherever the refracted ray lands on the square.
+    """
+
+    def source_angle(theta):
+        return np.arcsin(np.clip(n_receiver * np.sin(theta) / n_source, -1.0, 1.0))
+
+    def reach(theta):
+        return height * np.tan(theta) + depth * np.tan(source_angle(theta))
+
+    def carried(theta):
+        inside = source_angle(theta)
+        crossing = float(fresnel_transmittance(np.cos(inside), n_source, n_receiver))
+        legs = a_source * depth / np.cos(inside) + a_receiver * height / np.cos(theta)
+        return (n_receiver / n_source) ** 2 * crossing * exitance / np.pi * np.exp(-legs)
+
+    widest = np.pi / 2 if n_source >= n_receiver else np.arcsin(n_source / n_receiver)
+    return _over_directions(reach, carried, widest, half_width, cosine)
 
 
 @pytest.mark.parametrize(
@@ -200,6 +214,48 @@ def test_through_a_flat_interface_the_error_falls_at_second_order():
         got = float(refracted_fluence_rate(surfaces, media, np.array([[0.0, 0.0, height]]))[0])
         errors.append(abs(got / expected - 1.0))
     assert errors[0] / errors[1] > 3.0
+
+
+def test_a_slab_between_an_emitter_and_a_point_in_one_medium_is_the_quadrature_over_directions():
+    """A thick absorbing quartz slab across all the light from a square emitter, all in water.
+
+    The light reaches the point only by routes through the slab, at every angle up to grazing on
+    the wide emitter: each direction enters and leaves the slab at the same angle, so it arrives
+    parallel to how it left, shifted sideways, with the source's radiance times both crossings'
+    Fresnel transmittance and the absorption along both water legs and the slab. Each of the four
+    starting points of a route finds the one path there is, and it is counted once.
+    """
+    n_water, n_slab, a_water, a_slab = WATER, QUARTZ, 5.0, 12.0
+    below, thickness, above, half_width, exitance = 0.015, 0.03, 0.055, 0.2, 10.0
+    height = below + thickness + above
+
+    def slab_angle(theta):
+        return np.arcsin(n_water * np.sin(theta) / n_slab)
+
+    def reach(theta):
+        return (height - thickness) * np.tan(theta) + thickness * np.tan(slab_angle(theta))
+
+    def carried(theta):
+        inside = slab_angle(theta)
+        crossings = float(fresnel_transmittance(np.cos(theta), n_water, n_slab)) * float(
+            fresnel_transmittance(np.cos(inside), n_slab, n_water)
+        )
+        legs = a_water * (height - thickness) / np.cos(theta) + a_slab * thickness / np.cos(inside)
+        return crossings * exitance / np.pi * np.exp(-legs)
+
+    expected = _over_directions(reach, carried, np.pi / 2, half_width)
+    slab = Box([0.0, 0.0, -above - thickness / 2], [1.0, 1.0, thickness / 2])
+    media = Media(
+        n_water,
+        (Transparent(slab, n_slab, UniformAbsorption(a_slab)),),
+        UniformAbsorption(a_water),
+    )
+    triangles = _square(half_width, 32, -height)
+    surfaces = Surfaces.from_triangles(triangles).with_optics(
+        emission=jnp.full(len(triangles), exitance)
+    )
+    got = float(refracted_fluence_rate(surfaces, media, np.zeros((1, 3)))[0])
+    assert got == pytest.approx(expected, rel=2.5e-3)
 
 
 def test_a_triangle_with_a_corner_that_has_no_path_carries_nothing():
@@ -290,10 +346,25 @@ def test_the_fluence_rate_s_derivative_with_respect_to_an_index_is_the_finite_di
     assert derivative == pytest.approx(finite, rel=1e-5)
 
 
+def test_every_route_through_a_neighbour_is_kept_its_wall_alone_by_shooting():
+    """With a second sleeve the arc's light reaches the water by three routes, all solved."""
+    axis = [0.0, 0.0, 1.0]
+    second = Transparent(
+        Cylinder([0.05, 0.0, 0.0], axis, 0.0115, 0.5),
+        QUARTZ,
+        inside=(Transparent(Cylinder([0.05, 0.0, 0.0], axis, 0.01025, 0.5), AIR),),
+    )
+    media = Media(WATER, (*_sleeve().regions, second))
+    planned = refracted._plan(_arc(), media, _POINTS, pair_limit=1_000_000)
+    assert [group.chain.passing for group in planned] == [(), (2,), (2, 3)]
+
+
 def test_what_it_cannot_gather_is_refused():
     media = _sleeve()
     lamp = Surfaces.from_triangles(_drum(0.0075, 0.2, 6, 1), point_sources=[0])
-    with pytest.raises(ValueError, match="a point source and a receiver are in different media"):
+    with pytest.raises(
+        ValueError, match="a point source's light would cross the surface of a transparent region"
+    ):
         refracted_fluence_rate(lamp, media, _POINTS[:1])
     straddling = Surfaces.from_triangles(
         np.array([[[0.01, 0.0, 0.0], [0.012, 0.0, 0.0], [0.011, 0.001, 0.0]]])
@@ -330,3 +401,415 @@ def test_with_every_index_equal_the_corners_absorption_converges_on_the_centroid
         got = float(refracted_fluence_rate(surfaces, media, point)[0])
         direct = float(direct_fluence_rate(surfaces, point, absorption=absorbing)[0])
         assert got == pytest.approx(direct, rel=tolerance)
+
+
+def _rim_scene(sectors: int, slices: int):
+    """An arc in one sleeve, a second sleeve 50 mm off, and a point behind it: the rim's light."""
+    axis = [0.0, 0.0, 1.0]
+
+    def lamp(x, y):
+        gap = Transparent(Cylinder([x, y, 0.0], axis, 0.01025, 1.0), AIR)
+        return Transparent(Cylinder([x, y, 0.0], axis, 0.0115, 1.0), QUARTZ, inside=(gap,))
+
+    media = Media(WATER, (lamp(0.025, -0.025), lamp(0.025, 0.025)))
+    arc = _drum(0.0074, 0.02, sectors, slices) + np.array([0.025, -0.025, 0.0])
+    return media, Surfaces.from_triangles(jnp.asarray(arc), emission=1.0)
+
+
+def _rim_light(media, arc, points, masks=None, *, whole_facets_only=False, monkeypatch=None):
+    """The light of the routes round the second sleeve's rim alone, at each point."""
+    plan = refracted._plan(arc, media, points, 1_000_000)
+    masks = masks or [None] * len(plan)
+    if whole_facets_only:
+        monkeypatch.setattr(refracted, "_shot", lambda media, chain: False)
+    total = np.zeros(len(points))
+    for group, mask in zip(plan, masks, strict=True):
+        if group.chain.passing == (2,):
+            reach = None
+            if refracted._shot(media, group.chain):
+                reach = refracted._route_reach(arc, media, group, points, 1_000_000, (32, 32))
+            total[group.rows] += np.asarray(
+                refracted._group_field(
+                    arc, media, group, jnp.asarray(points), None, mask, reach, 1_000_000
+                )
+            )
+    if whole_facets_only:
+        monkeypatch.undo()
+    return total
+
+
+def test_round_a_rim_a_triangle_is_counted_for_the_part_of_it_that_has_a_path(monkeypatch):
+    """Cut where the paths stop, a coarse arc gives the fine arc's light; dropped, a fraction of it.
+
+    The light round a sleeve's rim comes from a patch of the arc a few facets across, so most of the
+    patch's triangles straddle its edge. Counting only the triangles with a path at every corner
+    converges on the same limit from far below; counting the part of each that has one is within a
+    few percent at the coarsest arc.
+    """
+    point = np.array([[0.025, 0.06, 0.0]])
+    fine = _rim_light(*_rim_scene(16, 8), point)[0]
+    media, coarse = _rim_scene(8, 4)
+    assert abs(_rim_light(media, coarse, point)[0] / fine - 1.0) < 0.05
+    dropped = _rim_light(media, coarse, point, whole_facets_only=True, monkeypatch=monkeypatch)[0]
+    assert dropped / fine < 0.5
+
+
+def test_a_cut_triangle_takes_the_shadow_of_its_own_facet_round_its_own_side(monkeypatch):
+    """A box in the middle of one side's patch takes the same light from the cut count as the whole.
+
+    The point is off the line of the two axes, so both sides of the second sleeve carry light,
+    unequally, and the box stands across the upper half of the paths past one side, clear of the
+    other's and of the patch's edge: every facet it shades has a path at all three corners. So
+    counting the part of each straddling triangle that has a path adds only light the box does not
+    touch, and the light it takes is the whole-facet rule's to a rounding. A cut triangle given
+    another side's, receiver's or facet's shadow takes a different share.
+    """
+    media, arc = _rim_scene(16, 8)
+    point = np.array([[0.027, 0.06, 0.0]])
+    box = Box([0.0204, 0.0035, 0.25], [0.003, 0.003, 0.25])
+    plan = refracted._plan(arc, media, point, 1_000_000)
+    visibility = build_refracted_visibility([box], arc, media, point, self_occlusion=NoOcclusion())
+    masks = refracted._route_masks(media, visibility, None, point, plan)
+
+    def taken(**whole):
+        return (
+            _rim_light(media, arc, point, **whole)[0]
+            - _rim_light(media, arc, point, masks, **whole)[0]
+        )
+
+    by_cut = taken()
+    by_whole = taken(whole_facets_only=True, monkeypatch=monkeypatch)
+    assert 0.1 < by_cut / _rim_light(media, arc, point)[0] < 0.9
+    assert by_cut == pytest.approx(by_whole, rel=1e-6)
+
+
+def test_a_straddling_facet_is_shadowed_along_a_path_it_has_not_along_its_centroid_s():
+    """Two boxes, each across every path past one side of the sleeve, take all of the light.
+
+    A straddling facet's centroid often has no path round the rim, and the path the solve fell back
+    to is a straight line that need not meet either box; the cut part of the facet would then be
+    counted unshaded behind a box that stands across every path it has. Taken along a corner's path,
+    each box shades its own side's light completely, so the two together take the whole.
+    """
+    media, arc = _rim_scene(16, 8)
+    point = np.array([[0.027, 0.06, 0.0]])
+    plan = refracted._plan(arc, media, point, 1_000_000)
+    unshaded = _rim_light(media, arc, point)[0]
+    left = []
+    for box in (
+        Box([0.019, 0.0035, 0.0], [0.004, 0.003, 0.5]),
+        Box([0.031, 0.003, 0.0], [0.003, 0.003, 0.5]),
+    ):
+        visibility = build_refracted_visibility(
+            [box], arc, media, point, self_occlusion=NoOcclusion()
+        )
+        masks = refracted._route_masks(media, visibility, None, point, plan)
+        left.append(_rim_light(media, arc, point, masks)[0])
+    assert all(0.0 < share < unshaded for share in left)
+    assert sum(left) == pytest.approx(unshaded, rel=1e-9)
+
+
+def _area_below(triangle, cut):
+    """The area of the part of a flat ``(3, 3)`` triangle with ``x < cut``, clipped independently."""
+    polygon = []
+    for a, b in zip(triangle, np.roll(triangle, -1, axis=0), strict=True):
+        if a[0] < cut:
+            polygon.append(a)
+        if (a[0] < cut) != (b[0] < cut):
+            polygon.append(a + (cut - a[0]) / (b[0] - a[0]) * (b - a))
+    if len(polygon) < 3:
+        return 0.0
+    polygon = np.asarray(polygon)
+    fan = [
+        np.cross(polygon[k] - polygon[0], polygon[k + 1] - polygon[0])
+        for k in range(1, len(polygon) - 1)
+    ]
+    return 0.5 * np.linalg.norm(np.sum(fan, axis=0))
+
+
+def test_a_straddling_triangle_is_cut_into_exactly_the_part_that_has_a_path(monkeypatch):
+    """With paths where ``x < 0.3`` on a flat sheet, the triangles kept tile exactly that part of it.
+
+    Path existence is stood in for, so this pins the cutting alone: each edge bisected towards the
+    line, a triangle with one corner on the near side kept as one triangle, with two as two that
+    together are the quadrilateral, and none kept with none. Each side of the shell is cut on its own.
+    """
+    cut = 0.3  # Off every edge of the sheet's lattice.
+    sheet = _square(1.0, 4, 0.0)
+    surfaces = Surfaces.from_triangles(jnp.asarray(sheet), emission=1.0)
+    receivers = np.zeros((2, 3))
+
+    def stepped_shots(media, chain, sources, points, side, starts, pair_limit, grid=None):
+        # Side 0 has paths where the near side does; side 1 nowhere.
+        valid = (np.asarray(sources)[:, 0] < cut) & (np.asarray(side) == 0)
+        return np.zeros((len(sources), 1, 3)), valid, np.zeros((len(sources), 2))
+
+    monkeypatch.setattr(refracted, "_stepped_shots", stepped_shots)
+    facets = np.arange(surfaces.n_facets)
+    corners, shared = refracted._shared_corners(surfaces, facets)
+    edges = refracted._corner_edges(shared)
+    _, valid, unknowns, by_grid = refracted._continued_paths(
+        None, None, np.asarray(corners), receivers, edges, 1_000_000
+    )
+    reach = refracted._Reach.of(valid, unknowns, by_grid, edges, (32, 32))
+    side, row, facet, vertices, _ = refracted._reached_triangles(
+        surfaces, None, None, facets, receivers, reach, 1_000_000
+    )
+    assert np.all(side == 0)
+    area = 0.5 * np.linalg.norm(
+        np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0]), axis=1
+    )
+    for r in range(2):
+        for f in facets:
+            kept = area[(row == r) & (facet == f)].sum()
+            assert kept == pytest.approx(_area_below(sheet[f], cut), abs=2e-4)
+
+
+def test_paths_a_coarse_grid_misses_are_reached_from_their_neighbours():
+    """Polished from a neighbouring corner's path, an 8 x 8 grid's paths spread to a 96 x 96 grid's.
+
+    The unknowns of a path round a rim range over a band fixed by the shell alone, so a neighbouring
+    corner's path is a start inside the polish's basin; from the corners the coarse grid reaches, the
+    rest of each patch is found, at the same crossings. A patch the grid misses at every corner is not
+    reached (a 4 x 4 grid misses one here), so the grid must still hit each patch once.
+    """
+    media, arc = _rim_scene(16, 8)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    group = next(
+        g for g in refracted._plan(arc, media, points, 1_000_000) if g.chain.passing == (2,)
+    )
+    corners, shared = refracted._shared_corners(arc, group.facets)
+    corners, receivers = np.asarray(corners), points[group.rows]
+    shape = (2, len(receivers), len(corners))
+    side, row, corner = (index.reshape(-1) for index in np.indices(shape))
+
+    def grid(size, continued):
+        if continued:
+            found, valid, _, _ = refracted._continued_paths(
+                media,
+                group.chain,
+                corners,
+                receivers,
+                refracted._corner_edges(shared),
+                1_000_000,
+                (size, size),
+            )
+            return found, valid
+        found, valid, _ = refracted._stepped_shots(
+            media, group.chain, corners[corner], receivers[row], side, None, 1_000_000, (size, size)
+        )
+        return found.reshape(*shape, *found.shape[1:]), valid.reshape(shape)
+
+    _, coarse = grid(8, False)
+    continued_points, continued = grid(8, True)
+    fine_points, fine = grid(96, False)
+    assert np.sum(fine & ~coarse) >= 10
+    np.testing.assert_array_equal(continued, fine)
+    np.testing.assert_allclose(continued_points[fine], fine_points[fine], atol=1e-12)
+
+
+def test_the_grid_check_says_which_way_a_grid_is_short_and_finds_the_patch_it_lost():
+    """Rows too few: every path the grid misses is between rows, and doubling them finds the patch
+    it lost entirely. Columns too few: misses along the rows, and columns are what to refine."""
+    media, arc = _rim_scene(16, 8)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    short_rows = check_shooting_grid(arc, media, points, shooting_grid=(4, 32))
+    assert short_rows.along_rows == 0 and short_rows.between_rows >= 10
+    assert short_rows.refine == "rows" and short_rows.refined == (8, 32)
+    assert short_rows.new_patches == 1
+    assert short_rows.patches + short_rows.new_patches == 4
+    short_columns = check_shooting_grid(arc, media, points, shooting_grid=(32, 4), backstop=False)
+    assert short_columns.along_rows > short_columns.between_rows
+    assert short_columns.refine == "columns" and short_columns.refined is None
+    assert short_columns.paths == 348 and short_columns.patches == 4
+
+
+def test_patches_are_joined_only_through_corners_that_have_a_path():
+    """Two runs of corners with paths, one corner apart along a chain, are two patches, per side."""
+    edges = np.array([[0, 1], [1, 2], [2, 3], [3, 4]])
+    valid = np.array([[True, True, False, True, True], [True, True, True, True, True]])
+    labels = refracted._patches(valid, edges)
+    assert len(np.unique(labels[0][valid[0]])) == 2
+    assert len(np.unique(labels[1])) == 1
+    assert labels[0, 0] != labels[1, 0]
+
+
+def test_a_path_is_between_rows_unless_both_rows_beside_its_beta_reach_the_source():
+    """Against every grid row's crossing, scanned in full: the path is between rows when its ``axial_index``
+    lies past the outermost row or a row either side of it has no crossing of the source."""
+    grid = (4, 32)
+    media, arc = _rim_scene(16, 8)
+    # Off the arc's middle, so some paths' axial_index lies past a coarse grid's outermost rows.
+    points = np.array(
+        [[0.025, 0.06, 0.0], [0.03, 0.065, 0.01], [0.03, 0.07, 0.04], [0.025, 0.065, -0.05]]
+    )
+    group = next(
+        g for g in refracted._plan(arc, media, points, 1_000_000) if g.chain.passing == (2,)
+    )
+    corners, shared = refracted._shared_corners(arc, group.facets)
+    corners, receivers = np.asarray(corners), points[group.rows]
+    _, valid, unknowns, by_grid = refracted._continued_paths(
+        media, group.chain, corners, receivers, refracted._corner_edges(shared), 1_000_000, grid
+    )
+    side, row, corner = np.nonzero(valid)
+    signs = np.where(side == 0, 1.0, -1.0)
+    found = unknowns[side, row, corner]
+    told = np.asarray(
+        refraction._between_rows(
+            media,
+            group.chain,
+            jnp.asarray(corners[corner]),
+            jnp.asarray(receivers[row]),
+            jnp.asarray(signs),
+            jnp.asarray(found),
+            grid,
+        )
+    )
+
+    def every_row(source, receiver, sign):
+        geometry = refraction._rim_geometry(media, group.chain, source, receiver)[0]
+        misses, _, reach, _ = shooting._problem(geometry, sign)
+        axial_indices = shooting._rows(reach, grid[0])
+        has = jax.vmap(lambda axial_index: shooting._row(misses, axial_index, grid[1])[0])(
+            axial_indices
+        )
+        return axial_indices, has
+
+    axial_indices, has = jax.vmap(every_row)(
+        jnp.asarray(corners[corner]), jnp.asarray(receivers[row]), jnp.asarray(signs)
+    )
+    axial_indices, has = np.asarray(axial_indices), np.asarray(has)
+    expected = np.empty(len(side), dtype=bool)
+    for k in range(len(side)):
+        axial_index = found[k, 1]
+        if axial_index < axial_indices[k, 0] or axial_index > axial_indices[k, -1]:
+            expected[k] = True
+            continue
+        above = np.flatnonzero(axial_indices[k] >= axial_index)[0]
+        above = max(above, 1)
+        expected[k] = not (has[k, above - 1] and has[k, above])
+    np.testing.assert_array_equal(told, expected)
+    assert np.any(told & ~by_grid[side, row, corner]) and np.any(~told)
+    # Some path lies past the outermost row while the two rows nearest it both reach the source:
+    # only its ``axial_index`` says the grid cannot bracket it.
+    nearest = np.clip(
+        [np.searchsorted(b, f) for b, f in zip(axial_indices, found[:, 1], strict=True)],
+        1,
+        grid[0] - 1,
+    )
+    reached = has[np.arange(len(side)), nearest - 1] & has[np.arange(len(side)), nearest]
+    outer = (found[:, 1] < axial_indices[:, 0]) | (found[:, 1] > axial_indices[:, -1])
+    assert np.any(outer & reached)
+
+
+def _shot_reach(visibility):
+    """The mask's record of each route round a rim, the others left out."""
+    return [reach for reach in visibility.reach if reach is not None]
+
+
+def test_a_record_built_a_receiver_at_a_time_is_the_record_built_for_all_at_once():
+    """The mask finds which corners have a path a pass of receivers at a time; joined, the passes'
+    records are the one record, each path's unknowns beside its own corner."""
+    rng = np.random.default_rng(3)
+    valid = rng.random((2, 5, 7)) < 0.4
+    by_grid = valid & (rng.random(valid.shape) < 0.7)
+    unknowns = rng.random((*valid.shape, 2))
+    edges = np.array([[k, k + 1] for k in range(6)])
+    whole = refracted._Reach.of(valid, unknowns, by_grid, edges, (32, 32))
+    parts = [
+        refracted._Reach.of(valid[:, rows], unknowns[:, rows], by_grid[:, rows], edges, (32, 32))
+        for rows in (slice(0, 2), slice(2, 3), slice(3, 5))
+    ]
+    joined = refracted._Reach.joined(parts)
+    np.testing.assert_array_equal(joined.valid, whole.valid)
+    np.testing.assert_array_equal(joined.unknowns, whole.unknowns)
+    np.testing.assert_array_equal(joined.by_grid, whole.by_grid)
+    assert (joined.patches, joined.sparse) == (whole.patches, whole.sparse)
+    np.testing.assert_array_equal(joined.dense_unknowns()[valid], unknowns[valid])
+
+
+def test_a_gather_finds_its_paths_on_its_own_grid_and_refuses_a_mask_made_on_another(
+    monkeypatch,
+):
+    """Which corners have a path depends on the grid, so a gather asked for another one refuses."""
+    media, arc = _rim_scene(8, 4)
+    points = np.array([[0.025, 0.06, 0.0]])
+    grids = []
+    found = refracted._continued_paths
+
+    def recorded(*args, **kwargs):
+        grids.append(args[6])
+        return found(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", recorded)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        refracted_fluence_rate(arc, media, points, shooting_grid=(8, 8))
+    assert grids == [(8, 8)]
+    sizes = []
+    grids.clear()
+    original = recorded
+
+    def sized(*args, **kwargs):
+        sizes.append(len(args[2]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", sized)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mask = refracted.build_refracted_visibility((), arc, media, points, shooting_grid=(8, 8))
+    # The facets' centroids and their distinct corners, both on the mask's grid.
+    assert arc.n_facets in sizes and any(size < arc.n_facets for size in sizes)
+    assert set(grids) == {(8, 8)}
+    with pytest.raises(ValueError, match=r"shooting grid of \(8, 8\)"):
+        refracted_fluence_rate(arc, media, points, visibility=mask)
+    with pytest.raises(ValueError, match="two whole numbers of at least two"):
+        refracted_fluence_rate(arc, media, points, shooting_grid=(1, 8))
+
+
+def test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_warn_only_where_found(
+    monkeypatch,
+):
+    """Two columns find one of this arc's four patches at a single corner.
+
+    Which corners have a path round the rim is found by a gather without a mask, and by the mask; each
+    warns, naming the setting to raise. A gather given the mask finds none again -- and so is silent
+    -- and gives the field the gather that found them itself gave. The mask is built a receiver a
+    pass, so its record is joined from the passes'.
+    """
+    media, arc = _rim_scene(8, 4)
+    points = np.array([[0.025, 0.06, 0.0], [0.03, 0.065, 0.01]])
+    coarse = (32, 2)
+    pattern = r"\(32 x 2\) found 1 of 4 patches .*RadiationSettings\.shooting_grid"
+    with pytest.warns(UserWarning, match=pattern):
+        found = np.asarray(refracted_fluence_rate(arc, media, points, shooting_grid=coarse))
+    with pytest.warns(UserWarning, match=pattern):
+        # Two paths a pair on a shot route, so this is a receiver a pass.
+        mask = refracted.build_refracted_visibility(
+            (), arc, media, points, pair_limit=2 * arc.n_facets, shooting_grid=coarse
+        )
+    calls = []
+    found_again = refracted._continued_paths
+
+    def counted(*args, **kwargs):
+        calls.append(args[3].shape[0])
+        return found_again(*args, **kwargs)
+
+    monkeypatch.setattr(refracted, "_continued_paths", counted)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        read = np.asarray(
+            refracted_fluence_rate(arc, media, points, visibility=mask, shooting_grid=coarse)
+        )
+    assert calls == []
+    # Without the mask's record, the same mask's gather finds the corners itself and agrees.
+    forgotten = refracted.RefractedVisibility(mask.receivers, mask.blocked, mask.hidden)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        again = np.asarray(
+            refracted_fluence_rate(arc, media, points, visibility=forgotten, shooting_grid=coarse)
+        )
+    assert calls != []
+    np.testing.assert_allclose(read, again, rtol=1e-12)
+    np.testing.assert_allclose(read, found, rtol=1e-12)
+    assert np.all(read > 0.0)

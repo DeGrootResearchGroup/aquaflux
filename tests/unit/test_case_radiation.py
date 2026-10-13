@@ -157,6 +157,18 @@ def test_the_case_builds_the_scene_the_library_calls_build_by_hand(tmp_path) -> 
     assert scene.settings == RadiationSettings(self_occlusion=NoOcclusion())
 
 
+def test_a_shooting_grid_is_read_as_two_whole_numbers(tmp_path) -> None:
+    sections = _sections()
+    sections["physics"]["settings"]["shooting_grid"] = [64, 48]
+    spec = case_spec_from_mapping(sections)
+    assert spec.physics.settings == RadiationSettings(
+        self_occlusion=NoOcclusion(), shooting_grid=(64, 48)
+    )
+    sections["physics"]["settings"]["shooting_grid"] = [1, 48]
+    with pytest.raises(ValueError, match="two whole numbers of at least two"):
+        case_spec_from_mapping(sections)
+
+
 def test_unset_numerics_reach_the_librarys_own_defaults(tmp_path) -> None:
     physics = {"kind": "Radiation"}
     sections = _sections(physics=physics)

@@ -50,7 +50,7 @@ import aquaflux.case.solver as case_solver
 import jax
 from aquaflux.case import read_case
 from aquaflux.flow import ConvectionTwoLevel
-from aquaflux.solve import Convergence, DualTimeLoop, Euclidean, RowScaled
+from aquaflux.solve import Convergence, DualTimeLoop, Euclidean, RampSchedule, RowScaled
 from aquaflux.turbulence import (
     BlockDiagonal,
     ScalarAir,
@@ -72,8 +72,8 @@ PRECONDITIONER = os.environ.get("CHANNEL_PRECONDITIONER", "default")
 MEASURES = {"rowscaled": RowScaled(), "euclidean": Euclidean()}
 MEASURE = os.environ.get("CHANNEL_MEASURE", "rowscaled")
 ARMS = ("segregated", "coupled", "coupled-dual", "coupled-ramp")
-#: The ramp arm's schedule: the anchor viscosity factor, the stations and the outer steps per station.
-RAMP = {"anchor": 100.0, "stations": 16, "steps_per_station": 1}
+#: The ramp arm's schedule: the anchor viscosity factor, and 16 stations of one outer step each.
+RAMP = {"anchor": 100.0, "ramp": RampSchedule(16, 1)}
 
 
 class _Clock:

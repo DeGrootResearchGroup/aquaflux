@@ -101,15 +101,30 @@ print(f"{count} {total}")
 PYEOF
 }
 
+# When a process started, as `ps` reports it; empty when there is no such process. Recorded beside the
+# pid so a pid the system has since handed to another process is not taken for the run.
+pid_started() {
+  ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '
+}
+
 # The PID of a live run, or empty. Reads the run-file rather than scanning the process table: a
 # `pgrep -f <script>` matches any shell whose own command line mentions the script, including the
-# waiter doing the matching, which is a deadlock that has happened here.
+# waiter doing the matching, which is a deadlock that has happened here. A pid alone is not enough:
+# after a restart (a cloud container's, or the machine's) the recorded pid can belong to an unrelated
+# process, and `kill -0` then reports a finished run as live and every launch is refused -- observed
+# with a kernel thread holding a dead case's pid. So the run is live only if a process with that pid
+# exists AND started when the run-file says the run's did; anything else is stale and removed.
 live_pid() {
   [ -f "$RUN_FILE" ] || return 0
-  local pid
+  local pid recorded
   pid=$(sed -n 's/^pid=//p' "$RUN_FILE")
+  recorded=$(sed -n 's/^pid_started=//p' "$RUN_FILE")
   [ -n "$pid" ] || return 0
-  if kill -0 "$pid" 2>/dev/null; then printf '%s' "$pid"; else rm -f "$RUN_FILE"; fi
+  if kill -0 "$pid" 2>/dev/null && [ -n "$recorded" ] && [ "$(pid_started "$pid")" = "$recorded" ]; then
+    printf '%s' "$pid"
+  else
+    rm -f "$RUN_FILE"
+  fi
 }
 
 # The same question as `--status`, answered by EXIT STATUS so another script can branch on it without
@@ -297,6 +312,7 @@ fi
 
 {
   echo "pid=$PID"
+  echo "pid_started=$(pid_started "$PID")"
   echo "script=$SCRIPT"
   echo "log=$LOG"
   echo "started=$STARTED_AT"

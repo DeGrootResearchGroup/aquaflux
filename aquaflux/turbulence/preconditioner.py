@@ -30,6 +30,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import ClassVar
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -50,21 +51,20 @@ from aquaflux.precondition import (
 from aquaflux.solve import SettingsValue
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
-class ScalarTransportPreconditioner(abc.ABC):
+class ScalarTransportPreconditioner(eqx.Module):
     """A frozen multigrid preconditioner for a scalar transport solve, as a ``phi -> M`` factory.
 
     The hierarchy is frozen at build, so the returned matvec does not depend on ``phi``; calling the
     preconditioner is how the continuation asks for it at the current iterate.
 
-    **Deliberately not an ``equinox.Module`` / pytree.** The hierarchy is built off the jit path and
-    held fixed, so it is a compile-time *constant*, not solver state. Two things follow, and both
-    break if it is made a pytree. First, a solve that takes it as an argument would trace its arrays;
-    they would then reach the implicit-function-theorem ``custom_vjp`` as tracers in a
-    ``nondiff_argnums`` position, which JAX rejects. Second, it is precisely because the object is
-    opaque to JAX that reusing **one** instance across outer sweeps is a compilation-cache *hit*:
-    ``equinox.filter_jit`` puts a non-array argument on the static side, hashed by object identity.
-    Build it once and carry it; a freshly built one each sweep re-compiles the whole solve.
+    **An ``equinox.Module``, so its hierarchy's arrays are data.** A solve compiled against one
+    preconditioner is then a compilation-cache hit for any other of the same structure, which is what
+    lets its values be re-derived -- at a developed state, or at another viscosity -- without
+    recompiling the solve it preconditions. That holds only while the shapes hold: a two-level
+    aggregation reads the graph alone, so any rebuild on the mesh keeps them, and a reduction hierarchy
+    keeps them when refreshed on its frozen coarsening (``reuse=``). Build it from concrete arrays: a
+    preconditioner is never differentiated, and one built from traced values would carry tracers into
+    the adjoint's preconditioner slot.
 
     Concrete strategies differ only in which cycle they apply; add a subclass rather than a branch.
     """
@@ -78,7 +78,6 @@ class ScalarTransportPreconditioner(abc.ABC):
         return self.apply
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
 class ScaledScalarPreconditioner(ScalarTransportPreconditioner):
     """Wrap a scalar preconditioner with a fixed per-cell output scaling ``M(r) = scale * inner(r)``.
 
@@ -87,25 +86,23 @@ class ScaledScalarPreconditioner(ScalarTransportPreconditioner):
     The frozen ``inner`` preconditioner approximates ``J_phi^{-1}`` (it is built for the physical
     operator), and this wrapper supplies the leading diagonal ``scale = 1 / (d(phi)/d(w))`` evaluated
     at the reference state -- so the frozen preconditioner acts on the reparametrized block without
-    rebuilding the hierarchy. ``scale`` is a plain array held as a compile-time constant, exactly like
-    the wrapped hierarchy (this stays a frozen dataclass, not a pytree -- see the base class note).
+    rebuilding the hierarchy. ``scale`` is data, like the wrapped hierarchy.
 
     Attributes
     ----------
     inner : ScalarTransportPreconditioner
         The frozen physical-operator preconditioner being rescaled.
-    scale : np.ndarray
+    scale : jnp.ndarray
         Per-cell output factor ``1 / (d(phi)/d(w))`` at the reference state, shape ``(n_cells,)``.
     """
 
     inner: ScalarTransportPreconditioner
-    scale: np.ndarray
+    scale: jnp.ndarray = eqx.field(converter=jnp.asarray)
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
         return self.scale * self.inner.apply(residual)
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
 class ConvectionAmgPreconditioner(ScalarTransportPreconditioner):
     """Two-level nonsymmetric aggregation multigrid on the convection-diffusion operator.
 
@@ -118,13 +115,12 @@ class ConvectionAmgPreconditioner(ScalarTransportPreconditioner):
     """
 
     hierarchy: SmoothedHierarchy
-    cycles: int = 1
+    cycles: int = eqx.field(static=True, default=1)
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
         return convection_multigrid_cycles(self.hierarchy, residual, cycles=self.cycles)
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
 class AirAmgPreconditioner(ScalarTransportPreconditioner):
     """Reduction-based (lAIR) multigrid, which coarsens fully and stays mesh-independent.
 
@@ -137,7 +133,7 @@ class AirAmgPreconditioner(ScalarTransportPreconditioner):
     """
 
     hierarchy: AirHierarchy
-    cycles: int = 1
+    cycles: int = eqx.field(static=True, default=1)
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
         return air_multigrid_cycles(self.hierarchy, residual, cycles=self.cycles)

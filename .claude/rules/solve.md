@@ -728,6 +728,27 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
 
 - **`materialized_session.py` + `materialized_spec.py` — MOVED to `solve/` 2026-09-19 (#450 stage 2), and on to `precondition/` (#284 part 1); the `PreconditionerSession` protocol stayed behind in `solve/session.py`.** `MaterializedSession(spec, problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse and one refresh hook, each created at most once, so every step built from it carries the identical static objects. It is written against **`MaterializedProblem`**, an ABC that is everything the lifecycle needs from a residual: `assembler`, `layout`, `with_assembler`, `probe(settings, active_rows)`, `groups()` (`None` ⇒ nothing to split), `bind_march`, `shift_source`, `build_step(state, policy, march, base_regime)` — the session hands it the glued shift policy (traced split or host factor, chosen at the fit; #290), so no problem chooses the preconditioner's form. `bind_march`'s result is the problem's own to interpret (it carried `inner_refresh` for the session to set until #290, 2026-10-11 — there is no mid-step hook now); it is also where a residual validates early (coupled RANS raises its `k`-positivity refusals there, before any inverse is fitted). Implementations: `turbulence._CoupledProblem`, `flow._FlowProblem`. A `FieldSplit` inverse is refused at construction for a problem whose `groups()` is `None`. `BetaTrackingRefresh(assembler, probe, preconditioner, refit_beta_floor=, observer=)` — a plain mutable class (called per step as `(active_step, state, *, due=False)`, re-fitting when the march passes `due` and **returning whether it re-fitted**; `rebind(companion)`; its `refresh_at` mid-step method went with #290), **deliberately not an `equinox.Module`**: it re-fits the host preconditioner it is given in place (it no longer reads one off the step, which a traced policy cannot supply) and rides in a static field compared by identity, which is what makes one hook shared across rungs a compile-cache hit. The session wraps it: after a re-fit of a traced split it returns `with_traced_split(step, traced_field_split(inverse))` for the march to apply, else `None` (see `solve-march.md`). ⚠️ **There is no `beta_tracking_refresh` function any more (#661, 2026-10-10)**: it was a closure over mutable dicts with `refresh_at`/`rebind` assigned onto it as attributes while its annotation said `Callable`; its tests moved from `test_coupled_rans.py` to `tests/unit/test_beta_tracking_refresh.py` (mutation-checked eight ways). `jacobian_matvec` / `batched_jacobian_matvec` (module-level `filter_jit`, assembler an ARGUMENT so a rung is a cache hit), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE` and the family regime (`VCYCLE_LINEAR_SOLVE`) came with it. The specs (`MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` / `materialized_spec_from_mapping` / `materialized_spec_to_mapping` are here too; a solve with more kinds extends `MATERIALIZED_MAPPING.kinds` rather than restating them. `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
 
+- **`session.py` — `RebuildingSession` (BUILT 2026-10-12, #386).** The generic half of a session with
+  nothing to re-fit: its steps are built whole from `assembler`, `rebind` re-points it and marks the steps
+  in use stale, and its `refresh_preconditioner` then makes ONE step on the new problem at the state the
+  march hands it, **derived from the step the march holds** (`_repointed(state, held, march)`), and
+  returns `held -> held.preconditioned_as(rebuilt)` (shift policy, adjoint factory and operator stand-in
+  swapped; the step control's shift strength kept). Unrebound it returns `None`, so a march over one
+  problem is unchanged. `build` refuses a `StopsForRefresh` step with `refresh_on_cycles` (nothing would
+  take the re-fit). A subclass supplies `_build(state, march)` (the name `coupled_step` calls on either
+  family), `_repointed` and `refresh`. The one subclass is `turbulence._BlockSession`.
+  ⚠️ **`_repointed` must keep the held step's STRUCTURE, or every re-pointing recompiles the march step.**
+  The march compiles against the whole step it holds; a step built from scratch on the new problem has
+  hierarchies whose coarse shapes follow its values (lAIR's split, the flow block's strength
+  aggregation), so its first version (a plain `build`) recompiled at every station of a viscosity ramp,
+  ~40 s against ~7 s for a step (re20000 channel, 2026-10-12). `_BlockSession._repointed` refreshes the
+  held policy instead (`_coupled_shift_policy(..., reuse=held policy, repointed=True)`): k/omega
+  hierarchies on their reused coarsening, the flow block's hierarchy carried and applied to the new
+  momentum (`flow.BlockPreconditioner.on`). That needs every preconditioner to be data, not a static
+  object (see `solve-globalization.md`, the reversed #105 note). Pinned mesh-free by
+  `tests/unit/test_rebuilding_session.py` and on the coupled cavity by
+  `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` (both mutation-checked).
+
 - **`block_preconditioner.py` — BUILT 2026-09-19.** `MaterializedBlockPreconditioner`: one `BlockInverse` (e.g. `SimpleSmoothed`) fitted to the whole materialized, shifted Jacobian, sharing the probe/shift/in-place-refresh of `MaterializedJacobianPreconditioner` with the field split. It is the inverse of a problem whose fields form a **single group** (`MaterializedProblem.groups()` is `None`), and the session enforces the mirror pair: `FieldSplit` refused for one group, a bare `BlockInverse` refused for two. `MaterializedJacobian.inverse` accepts a bare `BlockInverse`. The hierarchy is traced JAX. Tested for exact transposition and for being an approximate inverse of the SHIFTED operator (mutating the shift away fails it).
 
 - **`linear.py` — BUILT.** `solve_linear(matvec, b, solver, preconditioner=None)` is a
@@ -847,7 +868,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     (was `_BulkVelocityResidual`) or `_ParameterFreeResidual` — small `equinox.Module`s whose settings
     compare by value and whose arrays ride as dynamic leaves. `RootSolver.solve` binds `theta`
     into `_ResidualAt`, a module for the same reason. Pinned by
-    `test_a_carried_preconditioner_compiles_the_scalar_solve_once`.
+    `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt` (renamed
+    2026-10-12, #386, when the preconditioner became data and a rebuilt one stopped recompiling).
   - ⚠️ **That test measured nothing until this change fixed its fixture, and the reason generalizes.**
     Under a `lax.while_loop` the body is traced whether or not it executes, so the test's later sweeps —
     which started from the previous sweep's converged state and took **zero** steps — still reported
@@ -1026,22 +1048,25 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      **Measured on pitzDaily (shipped `case.yaml`, 2026-10-08, jax 0.11.2, CPU; `PITZ_FORWARD_RTOL`), the
      march is not sensitive to tightening and IS to loosening:** `rtol` 0.1 / 0.3 / 0.6 / 0.9 → 245 / 203 /
      166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
-     changed (bfs3d, where it was calibrated, is unmeasured); see `solve-refuted-directions.md`'s
-     Eisenstat–Walker entry and the open-directions note.
+     changed. On bfs3d (where it was calibrated), under the residual stop at `refresh_on_cycles` 4
+     (2026-10-12, #699, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each), 0.1 / 0.3 / 0.6 took 774 /
+     787 / 590 s at the same `x_r/h`, with one retry at 0.6 only; moving 0.3 is the owner's call (#637).
+     See `solve-refuted-directions.md`'s Eisenstat–Walker entry and the open-directions note's 4b.
      ⚠️ **What the stop costs, replayed (2026-10-08, `krylov_recycling_probe.py`):** a solve reported as
      "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
      test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
      march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
      **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
      iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
-     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b). **Selected by
+     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b); on bfs3d (#699,
+     2026-10-12, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each) 810 s at `refresh_on_cycles` 3 and
+     787 s at 4 against the shipped stop's 1197 s, same `x_r/h`, no retry (refresh 2 added one). **Selected by
      `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
      case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
      regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
      still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
      is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
-     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, bfs3d is
-     unmeasured, and forced as the default it fails three slow tests (linear convergence at the end of
+     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, and forced as the default it fails three slow tests (linear convergence at the end of
      the march, and one Reynolds-continuation march that goes erratic; #645). **pitzDaily's `case.yaml`
      opts in** (`stop: residual`, 2026-10-09; `refresh_on_cycles` 2 then, 3 since a cost re-fit ends the step, #290, 2026-10-11 — see `.claude/notes/solve-open-directions.md` 6b). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled

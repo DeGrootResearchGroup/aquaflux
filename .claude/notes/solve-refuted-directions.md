@@ -566,7 +566,9 @@ direction that measured worse. The whole gain is the loose end, which a fixed va
 schedule.
 
 **What it found instead:** (1) the shipped 0.3 is tighter than pitzDaily needs — moved to the open note as
-its own direction, to be measured on bfs3d (where 0.3 was calibrated) before any default changes; (2) the
+its own direction, to be measured on bfs3d (where 0.3 was calibrated) before any default changes -- done
+2026-10-12 under the residual stop (#699, open note 4b): 0.1 is level with 0.3 on bfs3d, so this
+refutation's "tightening costs" half rests on pitzDaily alone; (2) the
 stop is not the pure relative-residual test its docstring claimed — lineax also requires the solution's
 change over the last cycle to be ≤ `rtol` and spends a counted start-up cycle (docstring corrected; see
 `solve.md`); (3) pitzDaily's `PITZ_*` march overrides had been inert since #437 (fixed; `validation.md`).
