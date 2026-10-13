@@ -169,7 +169,7 @@ from .driver import (
     explicit_source,
     staged_march,
 )
-from .session import PreconditionerSession, RebuildingSession
+from .session import PreconditionerSession, RebuildingSession, Repointing
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .ramp_schedule import RampPosition, RampSchedule, RampWalk
@@ -244,6 +244,7 @@ __all__ = [
     "RelaxationSchedule",
     "RelaxedFarFromRoot",
     "ReleaseMemory",
+    "Repointing",
     "ResidualHomotopy",
     "ResidualMeasure",
     "ResidualMeasures",

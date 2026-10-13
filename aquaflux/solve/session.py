@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 from .strategy import NewtonStrategy, StopsForRefresh
 
-__all__ = ["PreconditionerSession", "RebuildingSession"]
+__all__ = ["PreconditionerSession", "RebuildingSession", "Repointing"]
 
 
 class PreconditionerSession(Protocol):
@@ -55,6 +55,63 @@ class PreconditionerSession(Protocol):
         ...
 
 
+class Repointing:
+    """How a session hands the march's step a change of problem: the step grafted onto what it holds.
+
+    A session is re-pointed (``rebind``) while the march is running, and the steps the march holds were
+    built on the problem it pointed at before. Their pseudo-transient shift, preconditioner, adjoint
+    factory and operator stand-in are all built from that problem, so each must follow it; the shift
+    strength the march's step control set on them must not, and rebuilding the whole step would discard
+    it. So at the march's next call to ``refresh_preconditioner`` a session makes one step on the new
+    problem, configured as its last build was, and the march grafts that step's problem-built fields onto
+    each step it holds (:meth:`~aquaflux.solve.ShiftedStep.preconditioned_as`).
+
+    This object is the bookkeeping that procedure needs and nothing else: the march keywords of the last
+    build, and whether the session has been re-pointed since. A session reports each build to
+    :meth:`built` and each re-pointing to :meth:`repointed`, and asks :meth:`graft` from its
+    ``refresh_preconditioner``.
+    """
+
+    def __init__(self) -> None:
+        # The march keywords of the last build, which the step a re-pointing makes is configured by.
+        self._march: dict = {}
+        # Whether the problem has changed since the last build, so the steps in use were built on
+        # another one.
+        self._since_build = False
+
+    def built(self, march: dict) -> None:
+        """Record a build made with ``march``; the steps in use are now built on the current problem."""
+        self._march, self._since_build = march, False
+
+    def repointed(self) -> None:
+        """Record that the session now points at another problem than the steps in use were built on."""
+        self._since_build = True
+
+    def graft(
+        self, make: Callable[[dict], NewtonStrategy]
+    ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
+        """After a re-pointing, the update grafting a step on the new problem onto each held step.
+
+        Parameters
+        ----------
+        make : callable
+            ``march -> step``, the step on the problem now pointed at, configured by the march keywords
+            of the last build. Called only after a re-pointing, and at most once per re-pointing.
+
+        Returns
+        -------
+        callable or None
+            ``held -> held`` with the new step's shift policy, adjoint factory and operator stand-in in
+            place of its own, or ``None`` when the session has not been re-pointed since the last build
+            or graft.
+        """
+        if not self._since_build:
+            return None
+        rebuilt = make(self._march)
+        self._since_build = False
+        return lambda held: held.preconditioned_as(rebuilt)
+
+
 class RebuildingSession(abc.ABC):
     """A session whose steps are built whole from the problem it is pointed at, with nothing to re-fit.
 
@@ -84,11 +141,7 @@ class RebuildingSession(abc.ABC):
 
     def __init__(self, assembler: object) -> None:
         self.assembler = assembler
-        # The march keywords of the last build, which a rebuild after a re-pointing is made with.
-        self._march: dict = {}
-        # Whether the problem has changed since the last build, so the steps in use were built on
-        # another one.
-        self._repointed_since_build = False
+        self._repointing = Repointing()
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
         """The step at ``state`` on :attr:`assembler`, configured by the march keywords.
@@ -107,12 +160,13 @@ class RebuildingSession(abc.ABC):
                 "hard step would end early and nothing would be refreshed. Leave refresh_on_cycles "
                 "unset, or precondition with a session that re-fits (a materialized Jacobian)."
             )
-        self._march, self._repointed_since_build = march, False
+        self._repointing.built(march)
         return step
 
     def rebind(self, assembler: object) -> None:
         """Point the session at ``assembler``; the next step the march takes is rebuilt on it."""
-        self.assembler, self._repointed_since_build = assembler, True
+        self.assembler = assembler
+        self._repointing.repointed()
 
     def refresh_preconditioner(
         self, step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
@@ -122,11 +176,7 @@ class RebuildingSession(abc.ABC):
         ``due`` is not consulted: a step asking for a re-fit is refused when it is built.
         """
         del due
-        if not self._repointed_since_build:
-            return None
-        rebuilt = self._repointed(state, step, self._march)
-        self._repointed_since_build = False
-        return lambda held: held.preconditioned_as(rebuilt)
+        return self._repointing.graft(lambda march: self._repointed(state, step, march))
 
     @abc.abstractmethod
     def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:

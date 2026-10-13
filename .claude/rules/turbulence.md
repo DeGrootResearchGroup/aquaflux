@@ -495,12 +495,22 @@ Many entries below are dated history written against the old API. Read them thro
       which needed the scalar preconditioners to become data (the reversed #105 note in
       `solve-globalization.md`). ⚠️ **NOT re-measured since**, and the change is numerical too (the flow
       block is no longer re-aggregated per station), so the 4-17 cycles above describe the first version.
-      ⚠️ **The materialized family is NOT station-following either, in the opposite
-      direction**: `BetaTrackingRefresh` re-fits the inverse per station but with the step's anchor-built
-      `shift_policy.base`, and the step's shift (hence the row-scaled measure's row scales) is never
-      rebuilt on a re-pointing — probed on the test cavity (both blocks scaled, anchor 100) the held
-      step's shift diagonal after arrival is a median 51x (max 96x) the target's; only a segment refresh
-      rebuilds it, and neither flagship case file sets a refresh trigger. Not changed here.
+    - **The materialized session follows a re-pointing's SHIFT too (2026-10-13, #701; until then it
+      re-fitted the inverse per station but nothing else).** Before, the held step kept the anchor's base
+      shift policy through convergence: the march's `beta * d`, the inverse's re-fit at `J(station) +
+      beta * d` and the row-scaled measure's row scales (`_CoupledMeasures.row_scaled` reads
+      `step.shift_policy`) all used the ANCHOR's diagonal at every station, target included — probed on
+      the test cavity (both blocks scaled, anchor 100) at a median 51x (max 96x) the target's on the
+      shifted rows. Now `MaterializedSession.refresh_preconditioner`, after a `rebind`, builds a step on
+      the new companion and grafts its shift policy, adjoint factory and operator stand-in onto the held
+      step (`solve.Repointing`, the bookkeeping `RebuildingSession` shares), and the forced re-fit then
+      reads the grafted step. Pinned by the three `test_a_re_pointed_materialized_session_*` tests in
+      `test_preconditioner_session.py` (mutation-checked). ⚠️ **Both flagship cases ship this family on
+      the ramp, so their trajectories move**, and every tuning measured on them (`turbulence_damping`,
+      `grow`, the floor release, the station count, anchor depth) was taken under the old behaviour; see
+      the #701 PR for what was re-measured. The march builds the step's measure BEFORE calling the hook,
+      so the step that ENTERS a station is still judged in the previous station's row scales; every later
+      step on it uses its own.
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
       `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled

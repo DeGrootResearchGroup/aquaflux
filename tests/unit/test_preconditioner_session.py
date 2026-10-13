@@ -119,6 +119,142 @@ def test_a_re_pointed_block_session_step_is_a_compilation_cache_hit(scalar) -> N
     assert len(traces) == 2
 
 
+def _materialized_step_held_on(coupled, anchor, state, loop, beta=0.125):
+    """A materialized session opened on ``coupled``, re-pointed at ``anchor``, and its step as a march holds it.
+
+    That is how a viscosity ramp opens its session: on the target, re-pointed at the anchor before the
+    first build, so the first step is fitted to the problem it solves. The held step carries the shift
+    strength a step control set, and has been through the march's first refresh, the forced first fit.
+    """
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
+    session.rebind(anchor)
+    held = eqx.tree_at(
+        lambda s: s.relaxation_schedule,
+        session.build(state, dual_time=loop),
+        ConstantRelaxation(jnp.asarray(beta)),
+    )
+    update = session.refresh_preconditioner(held, state)
+    return session, held if update is None else update(held)
+
+
+def test_a_re_pointed_materialized_session_hands_the_march_the_new_problems_shift(case) -> None:
+    """Re-pointed at the target, the held step is shifted, and measured, as the target's own step is.
+
+    The step's base shift diagonal carries the momentum ``a_P``, whose viscous part scales with the
+    molecular viscosity, so a step left on the anchor shifts the target by the anchor's hundredfold
+    diagonal. The row-scaled measure takes its row scales from the same policy, so it would judge the
+    target in the anchor's scales. The march's own shift strength must survive the swap.
+    """
+    from aquaflux.turbulence.measures import coupled_scaled_norm
+
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session, held = _materialized_step_held_on(target, anchor, state, loop)
+    assert (
+        session.refresh_preconditioner(held, state) is None
+    )  # not re-pointed: nothing to hand back
+    session.rebind(target)
+    update = session.refresh_preconditioner(held, state)
+    assert update is not None
+    updated = update(held)
+
+    expected = open_session(MaterializedJacobian(_SPLIT), target).build(state, dual_time=loop)
+    shift = updated.shift_policy.base.shift_term(state).diagonal
+    assert jnp.allclose(shift, expected.shift_policy.base.shift_term(state).diagonal, rtol=1e-12)
+    assert not jnp.allclose(shift, held.shift_policy.base.shift_term(state).diagonal, rtol=1e-3)
+    assert float(updated.relaxation_schedule.beta) == 0.125
+
+    residual = target.residual(state)
+    measured = coupled_scaled_norm(target, updated.shift_policy, state)(residual)
+    in_target_scales = coupled_scaled_norm(target, expected.shift_policy, state)(residual)
+    in_anchor_scales = coupled_scaled_norm(target, held.shift_policy, state)(residual)
+    assert float(measured) == pytest.approx(float(in_target_scales), rel=1e-12)
+    assert float(measured) != pytest.approx(float(in_anchor_scales), rel=1e-6)
+
+
+def test_a_re_pointed_materialized_session_refits_against_the_new_problems_shift(
+    case, monkeypatch
+) -> None:
+    """The re-fit at a station change is of the station's Jacobian plus the STATION'S shift.
+
+    The inverse is re-fitted at ``J + beta * d``; with ``d`` read off a step still built on the anchor,
+    it fits the target's Jacobian plus the anchor's shift, an operator the march never solves.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    session, held = _materialized_step_held_on(target, anchor, state, DualTimeLoop(inner_steps=3))
+    built_at: list[jnp.ndarray] = []
+    monkeypatch.setattr(
+        FieldSplitPreconditioner,
+        "refresh_in_place",
+        lambda _self, _mv, _plan, shift, **_kw: built_at.append(jnp.asarray(shift)),
+    )
+    session.rebind(target)
+    session.refresh_preconditioner(held, state)
+    assert len(built_at) == 1
+    expected = open_session(MaterializedJacobian(_SPLIT), target).build(
+        state, dual_time=DualTimeLoop(inner_steps=3)
+    )
+    at_target = 0.125 * expected.shift_policy.base.shift_term(state).diagonal
+    at_anchor = 0.125 * held.shift_policy.base.shift_term(state).diagonal
+    assert jnp.allclose(built_at[0], at_target, rtol=1e-12)
+    assert not jnp.allclose(built_at[0], at_anchor, rtol=1e-3)
+
+
+def test_a_re_pointed_materialized_session_step_is_a_compilation_cache_hit() -> None:
+    """A station change hands the march a step of the structure it has already compiled.
+
+    The march's step is compiled against the whole step it holds, so a re-pointed step that differs in
+    anything but array values recompiles the coupled solve at every station of a ramp.
+    """
+    mesh, target = _cavity(viscosity=jnp.asarray(RHO * NU))  # an array leaf; a float is static
+    state = _healthy_state(mesh, target)
+    loop = DualTimeLoop(inner_steps=3)
+    traces: list[None] = []
+
+    @eqx.filter_jit
+    def apply(step, state):
+        traces.append(None)
+        term = step.shift_policy.shift_term(state)
+        shifted = term.make_preconditioner(jnp.asarray(0.5))(state)
+        return shifted + step.adjoint_preconditioner_factory(state)(state)
+
+    session, held = _materialized_step_held_on(
+        target, target.with_scaled_molecular_viscosity(100.0), state, loop
+    )
+    apply(held, state)
+    for scale in (10.0, 1.0):
+        session.rebind(target.with_scaled_molecular_viscosity(scale))
+        held = session.refresh_preconditioner(held, state)(held)
+        apply(held, state)
+    assert len(traces) == 1
+
+
+def test_a_re_pointing_does_not_instrument_a_step_the_march_never_takes(case) -> None:
+    """``on_build`` sees every step handed to a march, and not the step a re-pointing grafts from.
+
+    The graft takes three fields of that step onto a held step ``on_build`` has already instrumented; a
+    driver that records something per step it builds (a residual reporter, say) would otherwise gain a
+    record per station for a step no march ever runs.
+    """
+    target, state = case
+    built: list[object] = []
+    session = open_session(
+        MaterializedJacobian(_SPLIT), target, on_build=lambda step: built.append(step) or step
+    )
+    session.rebind(target.with_scaled_molecular_viscosity(100.0))
+    held = eqx.tree_at(
+        lambda s: s.relaxation_schedule,
+        session.build(state, dual_time=DualTimeLoop(inner_steps=3)),
+        ConstantRelaxation(jnp.asarray(0.125)),
+    )
+    session.refresh_preconditioner(held, state)
+    session.rebind(target)
+    assert session.refresh_preconditioner(held, state) is not None
+    assert len(built) == 1
+
+
 def test_the_session_hook_refits_when_the_march_asks_and_not_otherwise(case) -> None:
     """A multigrid session re-fits only on its first call, after a rebind, and when ``due`` is passed.
 

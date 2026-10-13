@@ -25,7 +25,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..solve import FieldLayout, LinearSolveRegime, NewtonStrategy, RefreshTiming, shift_of
+from ..solve import (
+    FieldLayout,
+    LinearSolveRegime,
+    NewtonStrategy,
+    RefreshTiming,
+    Repointing,
+    shift_of,
+)
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
 from .field_split import FieldGroups, FieldSplitPreconditioner
@@ -432,6 +439,17 @@ class MaterializedSession:
     (``shape_headroom``); otherwise every re-fit recompiles the step. Any other inverse is applied
     through a host callback and re-fitted in place.
 
+    **A re-pointed session hands the march the new problem's shift as well as a re-fitted inverse.**
+    :meth:`rebind` points the session at another companion (a station of a viscosity ramp, say) while the
+    march holds steps built on the one before, and their base shift policy is built from that problem: the
+    pseudo-transient shift diagonal carries its momentum ``a_P``, and the row-scaled residual measure
+    takes its row scales from the same policy. So the next :attr:`refresh_preconditioner` call builds a
+    step on the new companion and grafts its shift policy, adjoint factory and operator stand-in onto the
+    held step (:class:`~aquaflux.solve.Repointing`), keeping the shift strength the march set, and re-fits
+    the inverse against that step -- the new companion's Jacobian plus the new companion's shift. The
+    grafted step differs from the held one in array values alone, so it is a compilation-cache hit as long
+    as the companion's viscosity is an array.
+
     Parameters
     ----------
     spec : MaterializedJacobian
@@ -490,15 +508,25 @@ class MaterializedSession:
         self._preconditioner: object | None = None
         # Whether the fitted inverse is carried in the step in its traced form; decided at the fit.
         self._traced = False
+        self._repointing = Repointing()
 
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
         ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
+            # After a re-pointing, first move the step onto the new problem, so the re-fit (forced by
+            # the same re-pointing) reads the new problem's shift diagonal off it rather than the old's.
+            graft = self._repointing.graft(lambda march: self._step(state, march))
+            if graft is not None:
+                active_step = graft(active_step)
             refitted = self._refresh_hook()(active_step, state, due=due)
             if not (refitted and self._traced):
-                return None
+                return graft
             split = traced_field_split(self._preconditioner.inverse)
-            return lambda step: with_traced_split(step, split)
+
+            def refit(step: NewtonStrategy) -> NewtonStrategy:
+                return with_traced_split(step, split)
+
+            return refit if graft is None else lambda step: refit(graft(step))
 
         self.refresh_preconditioner = (
             refresh_preconditioner
@@ -521,13 +549,16 @@ class MaterializedSession:
         return self._preconditioner
 
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
-        return self._build(state, march)
+        step = self._build(state, march)
+        self._repointing.built(march)
+        return step
 
     def refresh(
         self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
     ) -> NewtonStrategy:
         del previous  # the shared inverse is re-fitted in place, not re-derived from the old step
         step = self._build(state, march)
+        self._repointing.built(march)
         if self._hook is not None:
             # The standing inverse was fitted before the march moved; force the next refresh to be full.
             self._hook.rebind(self._problem.assembler)
@@ -543,11 +574,21 @@ class MaterializedSession:
                 f"assembler has {rebound.layout.n_fields} fields and size {rebound.layout.size}."
             )
         self._problem = rebound
+        self._repointing.repointed()
         if self._hook is not None:
             self._hook.rebind(assembler)
 
     def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
-        """Fit the inverse (once) and assemble the step around it."""
+        """The step at ``state``, instrumented by ``on_build`` as every step handed to a march is."""
+        step = self._step(state, march)
+        return step if self._on_build is None else self._on_build(step)
+
+    def _step(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
+        """Fit the inverse (once) and assemble the step around it.
+
+        Not instrumented: a re-pointing grafts only this step's problem-built fields onto the step the
+        march holds, which ``on_build`` already instrumented when it was built.
+        """
         problem = self._problem
         bound = problem.bind_march(march)
         if _is_traced((problem.assembler, state)):
@@ -561,8 +602,7 @@ class MaterializedSession:
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
             self._traced = offers_traced_split(self._preconditioner.inverse)
-        step = problem.build_step(state, self._policy(base), bound, VCYCLE_LINEAR_SOLVE)
-        return step if self._on_build is None else self._on_build(step)
+        return problem.build_step(state, self._policy(base), bound, VCYCLE_LINEAR_SOLVE)
 
     def _policy(self, base) -> MonolithicFactorShiftPolicy | TracedSplitShiftPolicy:
         """``base`` glued to the fitted inverse, in whichever form the step carries it."""

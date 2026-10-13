@@ -98,6 +98,20 @@ def test_a_re_pointed_session_rebuilds_once_on_the_new_problem_at_the_marchs_sta
     assert session.built == [(1.0, 1.0), (5.0, 2.0)]
 
 
+def test_a_build_after_a_re_pointing_is_already_on_the_new_problem() -> None:
+    """A ramp re-points its session at the anchor before the first build; that build needs no rebuild.
+
+    The step it makes is built on the anchor, so the first refresh of the march has nothing to hand
+    back. A session that kept the re-pointing pending across the build would rebuild the step it had
+    just built, at the start of every ramp.
+    """
+    session = _Session(1.0)
+    session.rebind(5.0)
+    step = _held(session.build(jnp.ones(3)))
+    assert session.refresh_preconditioner(step, jnp.ones(3)) is None
+    assert session.built == [(5.0, 1.0)]
+
+
 def test_the_update_carries_the_new_problems_preconditioning_and_keeps_the_marchs_shift() -> None:
     """Shift policy, adjoint factory and operator stand-in come from the rebuild; the shift strength stays.
 
