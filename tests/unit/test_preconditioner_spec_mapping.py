@@ -46,8 +46,8 @@ _SPECS = [
     BlockDiagonal(),
     BlockDiagonal(scalar=UnpreconditionedScalars()),
     BlockDiagonal(scalar=ScalarAir(), velocity=ViscousMultilevel()),
-    BlockDiagonal(scalar=ScalarTwoLevel(v_cycles=2)),
-    BlockDiagonal(velocity=ConvectionAir(), v_cycles=2),
+    BlockDiagonal(scalar=ScalarTwoLevel(cycles=2)),
+    BlockDiagonal(velocity=ConvectionAir(), cycles=2),
     BlockDiagonal(
         velocity=ConvectionTwoLevel(sweeps=3, smoother_weight=0.7),
         schur_scaling="msimple",

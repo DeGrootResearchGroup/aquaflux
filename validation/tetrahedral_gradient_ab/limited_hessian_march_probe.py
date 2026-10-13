@@ -70,7 +70,7 @@ def main() -> None:
         def on_step(report, started=started):
             print(
                 f"  step {report.step:3d} |R| {report.residual_norm:.4e} "
-                f"ratio {report.residual_ratio:.3e} alpha {report.alpha:.4g} cyc {report.cycles} "
+                f"ratio {report.residual_ratio:.3e} alpha {report.alpha:.4g} cyc {report.raw_cycles} "
                 f"esc {report.escalations}  {time.perf_counter() - started:.0f}s",
                 flush=True,
             )

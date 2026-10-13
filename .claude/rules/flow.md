@@ -722,7 +722,7 @@ Engineering Principles.
   diag_cur)`; the momentum block's per-component lift lives once in `_per_component(scalar_solve, dim)`.
   `SmoothedAmgSchur.apply` composes the first; both velocity blocks inherit a **single** `apply`
   (`_per_component` ∘ `_symmetric_rescaled`) from the intermediate base `_RescaledAmgVelocity`, which
-  owns the shared `hierarchy` / `dim` / `v_cycles` fields and defers to an abstract `_inner_solve` — the
+  owns the shared `hierarchy` / `dim` / `cycles` fields and defers to an abstract `_inner_solve` — the
   only thing the viscous and convection-aware blocks actually differ in (besides how they *build* the
   hierarchy). A new AMG-based velocity block subclasses `_RescaledAmgVelocity` and supplies `build` +
   `_inner_solve`; do **not** re-write the rescale sandwich or the component loop in a strategy's `apply`.
@@ -745,7 +745,7 @@ Engineering Principles.
   do **not** thread the assembler into a strategy.
 - **The mesh connectivity + multigrid knobs `_build_schur`/a velocity-block value's `_build` share are ONE
   resolved value, `_StrategyInputs`, not a repeated 8-value positional bundle (issue #272, fixed
-  2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`v_cycles`/
+  2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`cycles`/
   `strength_threshold`/`assembler`/`reference_state` once and used to fan them out positionally into
   both helpers' ~10-12-argument calls — a `NamedTuple` (plain host data, live only for one `build()`
   call, so it needs none of `_SchurGeometry`/`_VelocityGeometry`'s pytree machinery) now carries the
@@ -1003,7 +1003,7 @@ border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelo
   the mechanism is inferred from the timings, not read off the program.
 - **Outer block preconditioner — Stage 3: the remaining limit IS the Schur approximation, and no amount
   of inner accuracy reaches it (measured on a developed Re=1e5 SST channel; binding, do not re-attempt).**
-  The `v_cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
+  The `cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
   the flow block's error operator `ρ(I − A_flow·M_flow)` at 34.02 / 33.99 / 34.03 / 34.05 (no effect);
   Schur V-cycles ×2/×4/×8 make it *worse* (41.6 / 48.7 / 48.5)**; both-exact never beats the 1-cycle
   baseline; and **rebuilding the whole block at the developed state does not help** (34.0 → 31.6 on the

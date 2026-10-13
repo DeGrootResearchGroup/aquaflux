@@ -144,7 +144,7 @@ def _log(arm: str):
 
     def on_step(report) -> None:
         print(
-            f"[{arm}] step {report.step:3d}  cycles {report.cycles:3d}  "
+            f"[{arm}] step {report.step:3d}  cycles {report.raw_cycles:3d}  "
             f"|R| {report.residual_norm:.3e}  ratio {report.residual_ratio:.3e}  "
             f"t {time.perf_counter() - started:6.1f}s",
             flush=True,

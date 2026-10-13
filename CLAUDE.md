@@ -424,11 +424,13 @@ name with the places the word was already in use.
   relaxation factor and a shift strength; a floor on the operator and a floor on its preconditioner),
   they get names that say which. A docstring saying "careful, this one runs the other way" is the
   defect, not the fix.
-- **A count names its unit.** `max_restarts`, `max_retries`, `sweeps`, `cycles` (V-cycles in
-  `precondition/`, Krylov restart cycles in `solve/` — itself an open clash), never a bare `limit` or a
-  unit borrowed from a neighbouring count.
+- **A count names its unit.** `max_restarts`, `max_retries`, `sweeps`, `cycles` (V-cycles per
+  application in `precondition/`; a step's Krylov count is `raw_cycles`, offset-corrected
+  `restart_cycles`), never a bare `limit` or a unit borrowed from a neighbouring count. ⚠️ Still open:
+  the inner-loop observer's `cycles` argument and the private `_Attempt.cycles` in `solve/` are Krylov
+  counts.
 - **One concept, one name.** Before naming something, look for the name its siblings already use
-  (`cycles` vs `v_cycles`, `sweeps` vs `f_iters`) and use that one.
+  and use that one (`v_cycles` became `cycles`, `f_iters` became `f_sweeps`, both retired).
 - **Rename a clash in one change, with no alias** (Principle 4), and add the old name to the guard
   below so it cannot come back.
 

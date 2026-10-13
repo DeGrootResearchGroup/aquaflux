@@ -168,7 +168,7 @@ def main():
         if "attempt" in data.files:
             detail = (
                 f"inner iterate, attempt {int(data['attempt'])} inner {int(data['inner'])},"
-                f" {int(data['cycles'])} cycles at alpha {float(data['alpha']):.2e}"
+                f" {int(data['raw_cycles'])} cycles at alpha {float(data['alpha']):.2e}"
             )
         else:
             detail = (

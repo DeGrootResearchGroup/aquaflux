@@ -567,7 +567,7 @@ class MarchLogger:
     def _log(self, report: StepReport, state: Any | None) -> None:
         self._close_block()
         self._steps += 1
-        # The offset-corrected count, not the raw one: a two-inner step reporting `cycles = 6` did two
+        # The offset-corrected count, not the raw one: a two-inner step reporting `raw_cycles = 6` did two
         # single-cycle solves, so the raw number is entirely offset and overstates the work threefold.
         cycles = report.restart_cycles
         inner = max(int(report.inner_iterations), 1)

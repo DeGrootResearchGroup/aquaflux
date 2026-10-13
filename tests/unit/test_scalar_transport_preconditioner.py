@@ -311,7 +311,7 @@ def test_each_scalar_value_names_exactly_its_preconditioner_s_own_settings(
     """A value's fields are its preconditioner's fields, less the hierarchy the build supplies.
 
     A setting added to a preconditioner and not to its value -- or the reverse -- fails here rather than
-    becoming unreachable, which is how ``v_cycles`` sat unreachable from a coupled spec behind the string.
+    becoming unreachable, which is how ``cycles`` sat unreachable from a coupled spec behind the string.
     """
     settings = {field.name for field in dataclasses.fields(preconditioner)} - {"hierarchy"}
     assert {field.name for field in dataclasses.fields(value)} == settings
@@ -325,8 +325,8 @@ def test_leaving_the_blocks_unpreconditioned_has_no_settings() -> None:
 def test_a_set_v_cycle_count_reaches_the_preconditioner_and_an_unset_one_keeps_its_default(
     value,
 ) -> None:
-    assert _built(value(v_cycles=3), 1.0, 1.0).v_cycles == 3
-    assert _built(value(), 1.0, 1.0).v_cycles == 1
+    assert _built(value(cycles=3), 1.0, 1.0).cycles == 3
+    assert _built(value(), 1.0, 1.0).cycles == 1
 
 
 def test_unpreconditioned_scalars_build_nothing_and_assemble_no_operator() -> None:

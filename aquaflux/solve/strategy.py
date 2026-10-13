@@ -115,7 +115,7 @@ class StepOutcome(NamedTuple):
         *different* measure (a dual-time inner Newton, which converges the shifted ``G`` rather than
         ``R``) has to form this itself -- there the field costs what the driver used to pay and saves
         nothing, but it keeps one contract instead of an optional one.
-    cycles : jnp.ndarray
+    raw_cycles : jnp.ndarray
         The **raw** solver count summed over the step's inner iterations (lineax's ``num_steps``, with
         its per-solve offset still in). Total cost, and what a summed cost cap is measured against.
     alpha : jnp.ndarray
@@ -129,7 +129,7 @@ class StepOutcome(NamedTuple):
         would discard the former -- throwing away a good iterate for a shorter step.
     max_inner_cycles : jnp.ndarray
         The **offset-corrected** cost of the step's most expensive single solve. This is the
-        inner-count-invariant difficulty signal: the summed :attr:`cycles` grows with how many times the
+        inner-count-invariant difficulty signal: the summed :attr:`raw_cycles` grows with how many times the
         step solved, so a threshold on it is ~6x more sensitive for a 5-iteration step than a
         1-iteration one, and the same per-solve difficulty trips it or not depending on a count that
         says nothing about conditioning.
@@ -155,7 +155,7 @@ class StepOutcome(NamedTuple):
 
     phi: jnp.ndarray
     residual_norm: jnp.ndarray
-    cycles: jnp.ndarray
+    raw_cycles: jnp.ndarray
     alpha: jnp.ndarray
     inner_iterations: jnp.ndarray
     reached_target: jnp.ndarray
@@ -190,7 +190,7 @@ class NewtonStrategy(Protocol):
     def stepper(self) -> StepFn:
         """The Newton step ``(residual_fn, phi, residual_norm_0, solver) -> StepOutcome``.
 
-        ``StepOutcome.cycles`` is the restart-cycle count of the linear solve behind the accepted step
+        ``StepOutcome.raw_cycles`` is the restart-cycle count of the linear solve behind the accepted step
         (its cost, which an observed march reads to detect a stale preconditioner);
         ``StepOutcome.alpha`` is the line-search factor of that step (its quality — ``1`` if the full
         shifted step descended, smaller if it was clipped, the signal a step controller drives the
@@ -374,24 +374,24 @@ class StepReport(NamedTuple):
     ----------
     step : int
         The 0-based index of the step within its march segment.
-    cycles : int
+    raw_cycles : int
         The **raw** solver iteration count behind the accepted step, summed over the step's inner Newton
         iterations (:attr:`inner_iterations`). This is lineax's ``num_steps``, which carries a **+2
         offset and is blind within a restart cycle**: a solve that converges in 1, a few, or up to
         ``restart`` matvecs all report ``3``, and it only climbs once a solve genuinely spills past a
-        restart cycle. So ``cycles`` is a raw cost primitive, **not** a literal cycle count — read
+        restart cycle. So ``raw_cycles`` is a raw cost primitive, **not** a literal cycle count — read
         :attr:`restart_cycles` (offset-corrected) for the honest per-step cycle count. **``0`` means "no measurement", not "free":** a
         pseudo-transient step records its count only on acceptance, so a step whose every damping
         attempt was rejected reports ``0`` despite having burned several solves — skip zeros.
     inner_iterations : int
         How many inner Newton iterations the step took: the backward-Euler inner-loop count for a
-        :class:`~aquaflux.solve.DualTimeStep` (what the summed :attr:`cycles` is spread over), and ``1``
+        :class:`~aquaflux.solve.DualTimeStep` (what the summed :attr:`raw_cycles` is spread over), and ``1``
         for a single-step (pseudo-transient / damped-Newton) march. Reporting it separately from
-        :attr:`cycles` is what keeps the two costs — nonlinear inner work vs linear solve cost — from
+        :attr:`raw_cycles` is what keeps the two costs — nonlinear inner work vs linear solve cost — from
         being conflated into one misleading number.
     max_inner_cycles : int
         The offset-corrected cost of the step's most expensive **single** solve -- the
-        inner-count-invariant difficulty signal, and what the escalation triggers on. ``cycles`` sums
+        inner-count-invariant difficulty signal, and what the escalation triggers on. ``raw_cycles`` sums
         over the inner iterations, so a threshold on it is ~6x more sensitive for a 5-iteration step
         than a 1-iteration one and answers partly a question about nonlinear difficulty rather than
         conditioning. ``0`` when not measured.
@@ -410,7 +410,7 @@ class StepReport(NamedTuple):
     diverged_retry : bool
         Whether the step was redone by the retry policy's tighter solver after diverging. Recorded
         alongside
-        ``escalations`` because ``cycles`` reports only the **accepted** attempt: without them a redone
+        ``escalations`` because ``raw_cycles`` reports only the **accepted** attempt: without them a redone
         step is indistinguishable from a cheap one, and a retry mechanism that never fires (because it
         was left unconfigured) is invisible in the log.
     shift : float
@@ -429,7 +429,7 @@ class StepReport(NamedTuple):
         a relative measure, from the march's injected ``drift_measure``. **The staleness signal a
         :class:`CoefficientDriftTrigger` fires on**, and the one quantity here that reports on the
         *preconditioner* rather than on the step. ``0.0`` when no measure was supplied — "not
-        measured", like ``cycles = 0``, and it fails closed because a drift trigger compares against a
+        measured", like ``raw_cycles = 0``, and it fails closed because a drift trigger compares against a
         positive threshold.
 
         It is a **scalar**, deliberately: computing it needs the state, but putting the state on the
@@ -457,7 +457,7 @@ class StepReport(NamedTuple):
     """
 
     step: int
-    cycles: int
+    raw_cycles: int
     residual_norm: float
     residual_ratio: float
     alpha: float
@@ -477,12 +477,12 @@ class StepReport(NamedTuple):
     def restart_cycles(self) -> int:
         """The offset-corrected restart-cycle count.
 
-        ``cycles`` with lineax's +2-per-inner-solve offset removed, summed over the inner loop. Each
+        ``raw_cycles`` with lineax's +2-per-inner-solve offset removed, summed over the inner loop. Each
         solve's corrected count is one less than the Arnoldi cycles it ran (see
-        :func:`~aquaflux.solve.restart_cycles`). Clamped at ``0`` (a no-measurement ``cycles = 0`` step
+        :func:`~aquaflux.solve.restart_cycles`). Clamped at ``0`` (a no-measurement ``raw_cycles = 0`` step
         stays ``0``).
         """
-        return _strip_step_offset(self.cycles, self.inner_iterations)
+        return _strip_step_offset(self.raw_cycles, self.inner_iterations)
 
 
 class StepControl(Protocol):

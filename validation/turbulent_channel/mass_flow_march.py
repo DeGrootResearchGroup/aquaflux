@@ -116,7 +116,7 @@ def _printing(clock: _Clock, reports: list):
         reports.append(report)
         print(
             f"step {report.step:4d}  |R| {report.residual_norm:.3e}  ratio "
-            f"{report.residual_ratio:.3e}  cycles {report.cycles:3d}  inner "
+            f"{report.residual_ratio:.3e}  cycles {report.raw_cycles:3d}  inner "
             f"{report.inner_iterations:2d}  alpha {report.alpha:.3f}  shift {report.shift:.4f}  esc "
             f"{report.escalations}  t {clock():8.1f}s",
             flush=True,
@@ -173,7 +173,7 @@ def main() -> None:
         else:
             flow, k, omega = solve_coupled(coupled, **settings)
         cost = (
-            f"{len(reports)} steps, {sum(r.cycles for r in reports)} restart cycles, "
+            f"{len(reports)} steps, {sum(r.raw_cycles for r in reports)} restart cycles, "
             f"{sum(r.escalations for r in reports)} escalations, "
             f"beta {float(held_force(coupled, flow, k, omega)):.6e}"
         )

@@ -78,7 +78,7 @@ def _report(
 ) -> StepReport:
     return StepReport(
         step=step,
-        cycles=3,
+        raw_cycles=3,
         residual_norm=residual,
         residual_ratio=ratio,
         alpha=1.0,

@@ -54,7 +54,7 @@ def test_an_unset_scalar_block_resolves_to_the_two_level_default() -> None:
     assert BlockDiagonal().resolved_scalar() == ScalarTwoLevel()
     unpreconditioned = BlockDiagonal(scalar=UnpreconditionedScalars())
     assert unpreconditioned.resolved_scalar() == UnpreconditionedScalars()
-    assert BlockDiagonal(scalar=ScalarAir(v_cycles=2)).resolved_scalar() == ScalarAir(v_cycles=2)
+    assert BlockDiagonal(scalar=ScalarAir(cycles=2)).resolved_scalar() == ScalarAir(cycles=2)
 
 
 def test_a_scalar_block_given_as_a_string_is_refused() -> None:
@@ -64,7 +64,7 @@ def test_a_scalar_block_given_as_a_string_is_refused() -> None:
 
 def test_only_set_flow_block_settings_are_forwarded_and_the_scalar_block_never_is() -> None:
     assert BlockDiagonal().flow_block_options() == {}
-    assert BlockDiagonal(scalar=ScalarAir(), v_cycles=2).flow_block_options() == {"v_cycles": 2}
+    assert BlockDiagonal(scalar=ScalarAir(), cycles=2).flow_block_options() == {"cycles": 2}
 
 
 def test_a_column_reach_list_is_stored_as_a_tuple_so_the_spec_hashes() -> None:

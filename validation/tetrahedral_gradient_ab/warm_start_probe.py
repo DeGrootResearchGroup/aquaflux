@@ -61,7 +61,7 @@ def march(label, coupled, flow, k, omega, rtol, max_steps=STEPS):
     def on_step(report):
         print(
             f"  [{label}] step {report.step:3d} |R| {report.residual_norm:.4e} "
-            f"ratio {report.residual_ratio:.3e} alpha {report.alpha:.4g} cyc {report.cycles} "
+            f"ratio {report.residual_ratio:.3e} alpha {report.alpha:.4g} cyc {report.raw_cycles} "
             f"esc {report.escalations}  {time.perf_counter() - started:.0f}s",
             flush=True,
         )

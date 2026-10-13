@@ -113,15 +113,15 @@ class ConvectionAmgPreconditioner(ScalarTransportPreconditioner):
     ----------
     hierarchy : SmoothedHierarchy
         The frozen aggregation hierarchy.
-    v_cycles : int
+    cycles : int
         V-cycles per apply.
     """
 
     hierarchy: SmoothedHierarchy
-    v_cycles: int = 1
+    cycles: int = 1
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
-        return convection_multigrid_cycles(self.hierarchy, residual, cycles=self.v_cycles)
+        return convection_multigrid_cycles(self.hierarchy, residual, cycles=self.cycles)
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -132,15 +132,15 @@ class AirAmgPreconditioner(ScalarTransportPreconditioner):
     ----------
     hierarchy : AirHierarchy
         The frozen lAIR hierarchy.
-    v_cycles : int
+    cycles : int
         V-cycles per apply.
     """
 
     hierarchy: AirHierarchy
-    v_cycles: int = 1
+    cycles: int = 1
 
     def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
-        return air_multigrid_cycles(self.hierarchy, residual, cycles=self.v_cycles)
+        return air_multigrid_cycles(self.hierarchy, residual, cycles=self.cycles)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -180,11 +180,11 @@ class ScalarTwoLevel(ScalarBlock):
 
     Attributes
     ----------
-    v_cycles : int or None
+    cycles : int or None
         V-cycles per apply.
     """
 
-    v_cycles: int | None = None
+    cycles: int | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (ConvectionAmgPreconditioner,)
@@ -211,11 +211,11 @@ class ScalarAir(ScalarBlock):
 
     Attributes
     ----------
-    v_cycles : int or None
+    cycles : int or None
         V-cycles per apply.
     """
 
-    v_cycles: int | None = None
+    cycles: int | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (AirAmgPreconditioner,)

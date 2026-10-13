@@ -776,7 +776,7 @@ def test_a_ramp_ended_early_walks_its_finish_and_then_hands_back_the_case() -> N
 
     def report(step: int) -> StepReport:
         return StepReport(
-            step=step, cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, arrived=False
+            step=step, raw_cycles=3, residual_norm=1.0, residual_ratio=1.0, alpha=1.0, arrived=False
         )
 
     ramp.enter(0, None)

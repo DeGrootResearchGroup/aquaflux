@@ -110,7 +110,7 @@ class BlockDiagonal(SettingsValue):
         unbalanced and stalls. The automatic value is ``mean(rho V / a_P)``, which encodes the true
         velocity, density and viscosity scale. Pass an explicit value only to pin ``k``, for a study
         say. See :meth:`~aquaflux.flow.BlockPreconditioner.build`.
-    v_cycles : int or None
+    cycles : int or None
         Multigrid V-cycles per application of the flow block. This count is the flow block's alone;
         the scalar blocks' is set on their own value. Unset, one.
 
@@ -142,7 +142,7 @@ class BlockDiagonal(SettingsValue):
     schur_scaling: Literal["simple", "msimple"] | None = None
     composition: Literal["triangular", "simple", "simpler"] | None = None
     mass_scale: float | None = None
-    v_cycles: int | None = None
+    cycles: int | None = None
     strength_threshold: float | None = None
 
     def __post_init__(self) -> None:
