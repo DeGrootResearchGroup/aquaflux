@@ -522,7 +522,17 @@ Many entries below are dated history written against the old API. Read them thro
       schedule had been tuned around — the stale shift was load-bearing (the globalization lesson at
       the top of `solve-globalization.md`). ⚠️ The control's 20 / 154 is not the 16 / 111 `case.yaml`
       records for its own schedule (measured 2026-10-11 on an earlier base); unexplained, and it is a
-      second change between that record and now. bfs3d not measured. The march builds the step's measure BEFORE calling the hook,
+      second change between that record and now. bfs3d not measured.
+      **Retune sweep on the fix (2026-10-13, same configuration, one setting edited per arm through
+      `PITZ_CASE_FILE` and the committed `sweep-*.yaml` files beside `case.yaml`), steps / restart
+      cycles / escalating retries, every arm to `x_r/h` 8.0686:** shipped file 28 / 157 / 6;
+      `refresh_on_cycles` 4: 35 / 339 / many; `beta_min` 0.01: **24 / 176 / 0**; `beta_min` 0.02:
+      stopped at step 37, residual 6.5e-3, 283 cycles, repeated divergence; `beta_min` 0.01 with
+      `turbulence_damping` 1.5: 31 / 209 / 3; `beta_min` 0.0075 with damping 2: 28 / 196 / 4. **The
+      two paired arms test and REFUTE "the lost damping was on the velocity rows, so damp the flow
+      harder and leave the closure's floor shift (3 x 0.005) alone"**: both lose to the shipped file,
+      and both go non-finite early in the ramp (steps 6-8, while the closure is least damped). No arm
+      beats the shipped file on cycles; `beta_min` 0.01 trades 19 cycles for 4 steps and no retries. The march builds the step's measure BEFORE calling the hook,
       so the step that ENTERS a station is still judged in the previous station's row scales; every later
       step on it uses its own.
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
