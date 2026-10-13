@@ -927,6 +927,12 @@ def newton_march(
             update = refresh_preconditioner(active_step, state, due=refresh_due)
             if update is not None:
                 strategy, active_step = update(strategy), update(active_step)
+                if norm_builder is not None:
+                    # An update may carry a new shift policy (a session re-pointed at another problem),
+                    # and the measure is built from the step's policy, so build it again from the step
+                    # as updated: otherwise the step that enters a new problem is judged -- its line
+                    # search, its inner stop, the residual it reports -- in the previous one's scales.
+                    active_step = active_step.with_norm(norm_builder(strategy, state))
         prestep_state = state
         outcome, residual_norm = _march_step(
             active_step, step_residual, prestep_state, residual_norm_0, solver
