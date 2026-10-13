@@ -1556,7 +1556,7 @@ Many entries below are dated history written against the old API. Read them thro
       reference 56 / 207, separated length 1.50; straight channel (`test_coupled_rans.py`'s, where the
       two frozen fluxes agree to 2e-14) — 20 / 17 against 20 / 15. The control is what reads the 0.10 H
       gap as noise: identical blocks to 5e-14 still differ by two restart cycles (~12 %).
-    - ⚠️ **NOT fixed: the plug's failure on a CLOSED domain.** The 6 x 6 lid cavity at Re 100
+    - ⚠️ **NOT fixed: the plug's failure on a CLOSED domain (#706).** The 6 x 6 lid cavity at Re 100
       (`test_coupled_rans._cavity`) is at rest at its hybrid start, so it still takes the plug, and the
       plug's hierarchy has a negative coarse diagonal there too (−8.1e-3): `_coupled_shift_policy` cannot
       build the default block for that cavity from its hybrid start, before or after this change. The
