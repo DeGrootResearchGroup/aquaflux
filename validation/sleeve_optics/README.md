@@ -373,3 +373,20 @@ contended and not quoted), 2026-10-12:
 - Many of these paths cross the receiver's neighbour's arc inside its gap, and the shadow mask
   would take them out. The criterion agreed for switching was to find every path, so that was not
   used to excuse them.
+
+## The coaxial route cull: what it saves (`cull_cost.py`, `cull_check.py`)
+
+`cull_check.py` (4 sectors, 46 receivers, every corner of every source facet solved on every route):
+**sound** -- on the shot wall routes the cull leaves out 506 of 552 (route, receiver) rows and no path
+reaches any of them; the gap routes keep all 552 (paths reach 465). 8,437 s.
+
+`cull_cost.py`, `optics`, **4 sectors** (6,656 facets), 9 points, each arm its own process, one run each
+(jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, 16 GB, `vm.max_map_count` 1,048,576, 2026-10-13, `deccdff`):
+
+| arm | solve | peak mappings | peak RSS |
+|---|---|---|---|
+| cull off | 4,937 s | 80,658 | 13.1 GB |
+| cull on | **3,924 s** (1.26x) | 67,532 | 11.8 GB |
+
+Fields equal to 1.9e-12 relative at every point. Both arms pass Linux's default 65,530 mappings, which is
+what killed every earlier attempt (4, 8 and 16 sectors) with an LLVM allocation error and RAM free.

@@ -5183,3 +5183,33 @@ shell, sources beyond the ends, rays aimed into the wall band from each corner).
 bound at `p_low` rather than `p_high` -- it can lose only a line grazing the source disc, because a line
 that truly meets the disc before the stack has its disc chord ending before entry, so its lower end clears
 the margin by twice the chord.
+
+**Cost, measured** (`validation/sleeve_optics/cull_cost.py`: `check_array.py`'s scene, `optics` mode,
+**4 sectors** (6,656 facets), its 9 points, `RayCastOcclusion(grid=True)`, the scene's direct light
+through `solve_scene`; each arm in its own process through `run_case.sh`, one run each; jax 0.10.2, CPU,
+x64, Linux x86_64, 4 cores, 16 GB, `vm.max_map_count` raised to 1,048,576 (below), 2026-10-13, `deccdff`):
+**cull off 4,937 s, on 3,924 s -- 1.26x**; fields agree to 1.9e-12 relative at every point (not bit for
+bit: fewer rows per group cut the passes differently). ⚠️ **The saving is small because only the wall
+routes are culled**, and on this scene the gap routes -- every receiver kept, paths reaching most of
+them -- are the bulk of the work. The "1-5 of 24 groups carry light" count did not translate into time.
+At 8 and 16 sectors the cull-off arm could not be run at all here (below).
+
+⚠️ **A SCENE WITH MANY ROUTES EXHAUSTS THE PROCESS'S MEMORY MAPPINGS, NOT ITS RAM (found 2026-10-13, NOT
+FIXED).** Every route has its own static `Chain`, so the mask's path solves and the gather's traced
+passes compile separate programs per route (and per shape), none ever freed; each compiled path-solve
+program holds ~450 mappings of JIT code (three `_solve_paths` compiles moved a process from 3,223 to
+4,600). Linux's default `vm.max_map_count` is **65,530**, and the four-lamp scene died at it with
+`LLVM ERROR: Unable to allocate section memory` / `Cannot allocate memory` and ~6 GB of RAM free -- at
+16, 8 and 4 sectors, cull off, after 3.5 h / 2.3 h / 1.3 h. With the limit raised the 4-sector runs
+peaked at **80,658 mappings cull off and 67,532 cull on** (13.1 / 11.8 GB RSS), both past the default.
+So on an ordinary Linux machine the four-lamp refracted scene cannot finish even with the cull. Probably
+also why the full four-lamp check of 2026-10-09 was "killed for memory" above. **Fix not designed**
+(releasing a route's programs once its group is done, or sharing programs across chains by passing the
+chain's structure as data, are the candidates). Workaround: `sysctl -w vm.max_map_count=1048576`.
+⚠️ **A first fix was right and not enough**: `_stepped_shots` and `_host_paths` sized a short call to its
+exact count, so continuation rounds and edge cuts compiled a program per count; they now pad to a power
+of two (`triangles.padded_length`; pinned by
+`test_short_steps_of_host_paths_compile_a_few_shapes_not_one_per_count`, red with either site
+reverted). The run still died, at the same time: the per-route programs, not the per-count ones, were
+the bulk. ⚠️ **Watching mappings needs the run's own pid**: `pgrep -f <script>` from a logger matched
+the logger's own shell (30 mappings, 6 MB) and read as a healthy plateau.
