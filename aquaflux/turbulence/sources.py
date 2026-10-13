@@ -90,7 +90,7 @@ class NearWallKClosure(eqx.Module):
         Indices of the wall-adjacent cells, shape ``(n_wall,)``.
     distance : jnp.ndarray
         Wall distance of those cells, shape ``(n_wall,)``.
-    viscosity : jnp.ndarray
+    kinematic_viscosity : jnp.ndarray
         Molecular (kinematic) viscosity there, shape ``(n_wall,)``.
     shear_rate : jnp.ndarray
         Wall-face normal velocity gradient magnitude ``|U_P - U_wall| / d`` there, shape
@@ -102,7 +102,7 @@ class NearWallKClosure(eqx.Module):
 
     cells: jnp.ndarray
     distance: jnp.ndarray
-    viscosity: jnp.ndarray
+    kinematic_viscosity: jnp.ndarray
     shear_rate: jnp.ndarray
     model: SSTModel
 
@@ -128,9 +128,11 @@ class NearWallKClosure(eqx.Module):
         # k-sensitivity exceeds the destruction's, that slope passes 1 and the iteration *diverges*
         # (measured). Linearizing it exactly keeps Newton on a genuine root instead.
         k_wall = k[self.cells]
-        log_layer = wall_function_weight(self.viscosity, self.distance, k_wall, self.model)
+        log_layer = wall_function_weight(
+            self.kinematic_viscosity, self.distance, k_wall, self.model
+        )
         wall_value = k_wall_production(
-            self.viscosity, self.distance, k_wall, self.shear_rate, self.model
+            self.kinematic_viscosity, self.distance, k_wall, self.shear_rate, self.model
         )
         # Blend, do not switch: the two branches differ by several-fold at the crossover, and a jump
         # would make the residual non-differentiable (see `wall_function_weight`).
@@ -158,7 +160,7 @@ class NearWallKClosure(eqx.Module):
             The dissipation rate per cell with the wall fixation applied, shape ``(n_cells,)``.
         """
         return omega.at[self.cells].set(
-            omega_wall(self.viscosity, self.distance, k[self.cells], self.model)
+            omega_wall(self.kinematic_viscosity, self.distance, k[self.cells], self.model)
         )
 
 
@@ -178,7 +180,7 @@ def production_and_limit(nu_t, strain_rate, omega, k, model):
         The frozen closure fields, each shape ``(n_cells,)``.
     k : jnp.ndarray
         The turbulent kinetic energy the cap is evaluated at, shape ``(n_cells,)``. The residual
-        passes the **solved** field here (frozen when ``explicit_limiter`` is set); a check at a
+        passes the **solved** field here (frozen when ``explicit_production_limiter`` is set); a check at a
         converged state passes that state's ``k``.
     model : SSTModel
         Supplies ``beta_star``.
@@ -212,7 +214,7 @@ class KProduction(VolumeSource):
     Where the cap is active it makes production an *increasing* function of ``k``, whose exact
     linearization is a negative diagonal contribution (production feeds ``k`` back into itself) that
     can destroy the diagonal dominance of the k-equation's Jacobian and stall its linear solve at
-    high Reynolds number. ``explicit_limiter`` freezes the cap's ``k`` (a Patankar / deferred-
+    high Reynolds number. ``explicit_production_limiter`` freezes the cap's ``k`` (a Patankar / deferred-
     correction treatment: production is evaluated with the current ``k`` but not differentiated
     through it), keeping the residual value exact while removing that destabilizing term from the
     Jacobian, so the forward solve sees an M-matrix. It is a **forward-solve device only**: the
@@ -229,7 +231,7 @@ class KProduction(VolumeSource):
         Specific dissipation rate per cell, shape ``(n_cells,)`` (frozen).
     model : SSTModel
         The model constants (reads ``beta_star``).
-    explicit_limiter : bool
+    explicit_production_limiter : bool
         Freeze the cap's ``k`` for the linearization (a forward-solve stabilization); static.
     near_wall : NearWallKClosure or None
         The adaptive near-wall treatment, blending the resolved production toward the log-layer wall
@@ -240,11 +242,11 @@ class KProduction(VolumeSource):
     strain_rate: jnp.ndarray
     omega: jnp.ndarray
     model: SSTModel
-    explicit_limiter: bool = eqx.field(static=True, default=False)
+    explicit_production_limiter: bool = eqx.field(static=True, default=False)
     near_wall: NearWallKClosure | None = None
 
     def source(self, field: jnp.ndarray, context: FieldContext) -> jnp.ndarray:
-        cap_field = jax.lax.stop_gradient(field) if self.explicit_limiter else field
+        cap_field = jax.lax.stop_gradient(field) if self.explicit_production_limiter else field
         # The Menter cap `10 β* k ω` is an upper bound on a non-negative production, so it must not be
         # allowed to go negative: at a transiently negative `k` the unclamped limit wins the `min` and
         # turns this term into a SINK, driving `k` further down -- the production term deepening the very

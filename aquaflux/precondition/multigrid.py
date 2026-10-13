@@ -2940,11 +2940,11 @@ def _fc_jacobi(
     level: _AirLevel,
     b: jnp.ndarray,
     x: jnp.ndarray,
-    f_iters: int,
-    c_iters: int,
+    f_sweeps: int,
+    c_sweeps: int,
     smoother_weight: float,
 ) -> jnp.ndarray:
-    """FC-Jacobi smoother: ``f_iters`` F-point damped-Jacobi sweeps then ``c_iters`` C-point sweeps.
+    """FC-Jacobi smoother: ``f_sweeps`` F-point damped-Jacobi sweeps then ``c_sweeps`` C-point sweeps.
 
     Each sweep relaxes only the fine (or coarse) block via the mask, matrix-free and a fixed linear
     operator. The F-relaxation is the reduction-based smoother that suppresses the F-point error the
@@ -2960,9 +2960,9 @@ def _fc_jacobi(
                 * _apply_block_inverse(level.block_inverse, level.block_size, vector)
             )
 
-        for _ in range(f_iters):
+        for _ in range(f_sweeps):
             x = x + relax(level.f_mask, b - _operator_matvec(level, x))
-        for _ in range(c_iters):
+        for _ in range(c_sweeps):
             x = x + relax(level.c_mask, b - _operator_matvec(level, x))
         return x
     # `mask * inv_diagonal` is the same product on every sweep of its own loop -- `smoother_weight` is a
@@ -2970,14 +2970,14 @@ def _fc_jacobi(
     # call, rather than once per sweep.
     f_scale = smoother_weight * level.f_mask * level.inv_diagonal
     c_scale = smoother_weight * level.c_mask * level.inv_diagonal
-    for _ in range(f_iters):
+    for _ in range(f_sweeps):
         x = x + f_scale * (b - _operator_matvec(level, x))
-    for _ in range(c_iters):
+    for _ in range(c_sweeps):
         x = x + c_scale * (b - _operator_matvec(level, x))
     return x
 
 
-def _air_ops(f_iters: int, c_iters: int, smoother_weight: float) -> _VCycleOps:
+def _air_ops(f_sweeps: int, c_sweeps: int, smoother_weight: float) -> _VCycleOps:
     """V-cycle ops for a reduction (lAIR) level: an independent restriction ``R != Pᵀ`` and an
     FC-Jacobi smoother (the reduction analogue of :func:`_smoothed_ops`)."""
     return _VCycleOps(
@@ -2985,7 +2985,7 @@ def _air_ops(f_iters: int, c_iters: int, smoother_weight: float) -> _VCycleOps:
             level.r_row, level.r_col, level.r_val, r, level.n_coarse
         ),
         prolong=lambda level, e: _coo_apply(level.p_row, level.p_col, level.p_val, e, level.n),
-        smooth=lambda level, b, x: _fc_jacobi(level, b, x, f_iters, c_iters, smoother_weight),
+        smooth=lambda level, b, x: _fc_jacobi(level, b, x, f_sweeps, c_sweeps, smoother_weight),
     )
 
 
@@ -2994,8 +2994,8 @@ def air_multigrid_cycles(
     b: jnp.ndarray,
     *,
     cycles: int = 1,
-    f_iters: int = 2,
-    c_iters: int = 1,
+    f_sweeps: int = 2,
+    c_sweeps: int = 1,
     smoother_weight: float = 1.0,
 ) -> jnp.ndarray:
     """A **fixed** number of lAIR V-cycles for ``A x = b`` — the Peclet-robust, mesh-independent inner
@@ -3014,7 +3014,7 @@ def air_multigrid_cycles(
         Right-hand side, shape ``(n_cells,)``.
     cycles : int
         Number of V-cycles (static).
-    f_iters, c_iters : int
+    f_sweeps, c_sweeps : int
         Fine- and coarse-point Jacobi sweeps per smoother application (static).
     smoother_weight : float
         Jacobi damping factor (static).
@@ -3024,4 +3024,4 @@ def air_multigrid_cycles(
     jnp.ndarray
         The approximate solution ``x``, shape ``(n_cells,)``.
     """
-    return _fixed_cycles(hierarchy.levels, b, cycles, _air_ops(f_iters, c_iters, smoother_weight))
+    return _fixed_cycles(hierarchy.levels, b, cycles, _air_ops(f_sweeps, c_sweeps, smoother_weight))

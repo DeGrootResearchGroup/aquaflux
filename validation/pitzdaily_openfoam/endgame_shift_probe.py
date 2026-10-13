@@ -179,15 +179,15 @@ def main() -> None:
         print(
             f"\nstate {k} (step {k + 1} starts here): |R| {float(reference_norm):.4e} in its own measure; "
             f"recorded step {k + 1}: shift {beta_c:.4g}, |R| {float(record['residual_norm']):.4e} "
-            f"(ratio {recorded:.4f}), cycles {int(record['cycles'])}, inner {int(record['inner_iterations'])}, "
+            f"(ratio {recorded:.4f}), cycles {int(record['raw_cycles'])}, inner {int(record['inner_iterations'])}, "
             f"alpha {float(record['alpha']):.3f}",
             flush=True,
         )
-        same = abs(rho_c - recorded) <= 1e-3 * max(recorded, 1e-12) and int(outcome.cycles) == int(
-            record["cycles"]
+        same = abs(rho_c - recorded) <= 1e-3 * max(recorded, 1e-12) and int(outcome.raw_cycles) == int(
+            record["raw_cycles"]
         )
         print(
-            f"control (march's own step re-taken): ratio {rho_c:.4f}, cycles {int(outcome.cycles)}, inner "
+            f"control (march's own step re-taken): ratio {rho_c:.4f}, cycles {int(outcome.raw_cycles)}, inner "
             f"{int(outcome.inner_iterations)}, alpha {float(outcome.alpha):.3f}, {seconds:.1f} s -- "
             f"{'reproduces the record' if same else '⚠️ DOES NOT reproduce the record'}",
             flush=True,
@@ -208,7 +208,7 @@ def main() -> None:
                     predicted = beta / (lam + beta)
                     print(
                         f"{k:5d} {floor + '/' + inner:>16} {beta:7.4g} | {ratio:9.4f} {predicted:8.4f} "
-                        f"{int(outcome.inner_iterations):5d} {int(outcome.cycles):6d} "
+                        f"{int(outcome.inner_iterations):5d} {int(outcome.raw_cycles):6d} "
                         f"{int(outcome.max_inner_cycles):4d} {float(outcome.alpha):6.3f} "
                         f"{float(outcome.binding_limit):6.3f} {'yes' if bool(outcome.reached_target) else 'no':>3} "
                         f"{seconds:6.1f}",

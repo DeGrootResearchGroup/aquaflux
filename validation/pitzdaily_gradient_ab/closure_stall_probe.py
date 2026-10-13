@@ -1203,7 +1203,7 @@ def march_from_seed() -> None:
             print(
                 f"  step {int(report.step):>3} done: |R| {float(report.residual_norm):.5e} "
                 f"alpha_min {float(report.alpha):.4g} shift {float(report.shift):.4g} "
-                f"inner {int(report.inner_iterations)} cyc {int(report.cycles)}",
+                f"inner {int(report.inner_iterations)} cyc {int(report.raw_cycles)}",
                 flush=True,
             )
 

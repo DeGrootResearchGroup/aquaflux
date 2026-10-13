@@ -160,13 +160,13 @@ def solve_aquaflux_continuation(**solve_kwargs: object) -> dict:
 
     def on_checkpoint(report, state):
         counters["obs"] += 1
-        counters["cum_cycles"] += int(report.cycles)
+        counters["cum_cycles"] += int(report.raw_cycles)
         flow, _k, _omega = coupled.physical_fields(state)
         velocity, _p = momentum.unpack(flow)
         xr = compare.reattachment_length(centroid, np.asarray(velocity)[:, 0])
         print(
             f"  t={time.time() - t0:6.0f}s step={counters['obs']:4d} beta={control.last_beta:6.3f} "
-            f"cyc={report.cycles:3d} cumcyc={counters['cum_cycles']:5d} "
+            f"cyc={report.raw_cycles:3d} cumcyc={counters['cum_cycles']:5d} "
             f"matvecs~{counters['cum_cycles'] * RESTART:7d} |R|={report.residual_norm:.4e} "
             f"ratio={report.residual_ratio:.3e} alpha_inner={report.alpha:.3f} "
             f"drift={report.drift:.3f} x_r/h={xr:.3f}",

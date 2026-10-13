@@ -77,7 +77,7 @@ def rung_histories(text: str) -> list[list[StepReport]]:
             history.append(
                 StepReport(
                     step=int(row.group(1)),
-                    cycles=int(row.group(5)),
+                    raw_cycles=int(row.group(5)),
                     residual_norm=float(row.group(6)),
                     residual_ratio=0.0,
                     alpha=float(row.group(7)),

@@ -100,9 +100,7 @@ VOCABULARY: dict[str, Word] = {
     ),
     "viscosity": Word(
         meaning="the molecular dynamic viscosity of the fluid",
-        modules={
-            "turbulence/sources.py": "the molecular KINEMATIC viscosity (issue #373: rename)",
-        },
+        modules={},
     ),
     "rtol": Word(
         meaning="a relative tolerance on a residual norm",
@@ -138,6 +136,11 @@ RETIRED: dict[str, str] = {
     "row_relaxation": "ShiftTerm.row_shift_scale: it scales the shift strength, which is not a relaxation",
     "pressure_omega": "pressure_smoother_weight: omega is the turbulence model's dissipation rate",
     "omega_smooth": "prolongation_weight: omega is the turbulence model's dissipation rate",
+    "v_cycles": "cycles: the name every other multigrid value uses for V-cycles per application",
+    "n_group_fields": "n_fields: the field count of the block the inverse is fitted to",
+    "f_iters": "f_sweeps: smoother sweeps are counted in sweeps everywhere else",
+    "c_iters": "c_sweeps: smoother sweeps are counted in sweeps everywhere else",
+    "explicit_limiter": "explicit_production_limiter: the name SSTTurbulence gives the same setting",
 }
 
 

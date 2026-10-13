@@ -559,7 +559,7 @@ class PseudoTransientStep(ShiftedStep):
     def stepper(self) -> StepFn:
         """The accepted shifted-Newton step and its linear solve's cycle count.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. ``cycles`` is the
+        ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. ``raw_cycles`` is the
         raw solver count of the **accepted** attempt's shifted linear solve — the cost of the step that
         was actually taken, not the sum over rejected escalation attempts; ``inner_iterations`` is ``1``
         (a single-step attempt has no inner loop); ``alpha`` is that attempt's
@@ -976,7 +976,7 @@ class DualTimeStep(ShiftedStep):
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
 
         ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. The reference
-        ``φⁿ`` is ``φ``; ``cycles`` is the **summed** raw solver count over the inner Newton iterations
+        ``φⁿ`` is ``φ``; ``raw_cycles`` is the **summed** raw solver count over the inner Newton iterations
         and ``inner_iterations`` is that count (so a consumer can recover the per-solve cost); ``alpha``
         is the **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
         when the implicit step had to be clipped, and ``0`` if any inner step failed to reduce ``‖G‖`` —

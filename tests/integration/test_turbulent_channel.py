@@ -2,7 +2,7 @@
 
 The k equation caps turbulent production at ``10 beta* k omega``. Keeping that cap's exact
 derivative in the Jacobian -- rather than the Patankar-style positive linearization that
-``KProduction.explicit_limiter`` applies -- leaves an operator that is indefinite wherever the cap
+``KProduction.explicit_production_limiter`` applies -- leaves an operator that is indefinite wherever the cap
 is active, and an unpreconditioned Krylov solve stagnates there. This drives that exact operator
 from a synthetic limiter-active state on a wall-resolved channel mesh, and checks that the
 convection-diffusion algebraic-multigrid (AMG) preconditioner carried by the continuation policy

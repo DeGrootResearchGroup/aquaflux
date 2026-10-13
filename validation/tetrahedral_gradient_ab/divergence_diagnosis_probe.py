@@ -293,7 +293,7 @@ def run_and_checkpoint(coupled, flow, k, omega, rtol, max_steps):
     def on_step(report):
         print(
             f"  [option1] step {report.step:3d} |R| {report.residual_norm:.4e} "
-            f"alpha {report.alpha:.4g} cyc {report.cycles} esc {report.escalations} "
+            f"alpha {report.alpha:.4g} cyc {report.raw_cycles} esc {report.escalations} "
             f"{time.perf_counter() - started:.0f}s",
             flush=True,
         )

@@ -47,8 +47,8 @@ def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
     # A linear residual: the undamped step is exact in one call, so the step is unchanged by
     # reporting the count and line-search factor alongside it.
     assert jnp.allclose(outcome.phi, jnp.linalg.solve(A, B), atol=1e-10)
-    assert int(outcome.cycles) > 0
-    assert outcome.cycles.dtype == jnp.int32
+    assert int(outcome.raw_cycles) > 0
+    assert outcome.raw_cycles.dtype == jnp.int32
     assert jnp.allclose(outcome.alpha, 1.0)  # line_search=0 takes the full step
     # ...and the step reports the measure at the iterate it returns, which for an exact step on a
     # linear residual is zero to round-off.

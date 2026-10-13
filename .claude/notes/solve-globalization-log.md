@@ -1094,8 +1094,8 @@
         | Schur | cycles | wall |
         |---|---|---|
         | **msimple** | **13** | **38.9 s** |
-        | lsc (`v_cycles=4`) | 96 | 526 s |
-        | lsc (`v_cycles=8`) | 82 | 662 s |
+        | lsc (`cycles=4`) | 96 | 526 s |
+        | lsc (`cycles=8`) | 82 | 662 s |
 
         6–7× the cycles and 13–17× the wall time, with both solves genuinely converged
         (`lin_rel ~2e-9`), plus ~2.9× slower on the coupled channel at an identical residual trajectory.

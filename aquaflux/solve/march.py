@@ -348,12 +348,12 @@ class CycleGrowthTrigger(eqx.Module):
         # Zero counts are "no measurement" (a step whose every damping attempt was rejected, or a
         # direct solver reporting nothing). They must not set the baseline: a zero minimum would
         # make every subsequent step "grown" and latch the trigger on permanently.
-        measured = [report.cycles for report in history if report.cycles > 0]
+        measured = [report.raw_cycles for report in history if report.raw_cycles > 0]
         if not measured:
             return False
         threshold = self.growth * min(measured)
         recent = history[-self.patience :]
-        return all(report.cycles > 0 and report.cycles >= threshold for report in recent)
+        return all(report.raw_cycles > 0 and report.raw_cycles >= threshold for report in recent)
 
 
 class CoefficientDriftTrigger(eqx.Module):
@@ -1053,7 +1053,7 @@ def newton_march(
         step_shift = shift_of(active_step)
         report = StepReport(
             step=len(reports),
-            cycles=int(outcome.cycles),
+            raw_cycles=int(outcome.raw_cycles),
             residual_norm=current,
             residual_ratio=current / reference if reference > 0.0 else 0.0,
             alpha=float(outcome.alpha),
