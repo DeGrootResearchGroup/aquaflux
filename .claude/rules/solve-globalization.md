@@ -662,11 +662,10 @@ What to take from it, none of which is specific to that mechanism:
     derives the new step from the held one. (i) the adjoint — `UnexpectedTracerError` came from a solve
     taking the preconditioner as a traced argument; the march now runs on `stop_array_gradients` copies,
     so the policy's arrays reach `root_adjoint`'s non-differentiated slot concrete, as
-    `_TracedSplitAdjoint`'s have since #290. ⚠️ **That adjoint argument is reasoned, not yet run:** the
-    fast tier's coupled tests pass, but the slow-tier tests that `jax.grad` through a block-diagonal
-    coupled solve (`tests/integration/test_coupled_rans.py`, `test_reynolds_continuation.py`,
-    `test_coupled_mass_flow.py`) were not run on the change — they are left to CI's slow tier (merge, or
-    `full-ci` on the PR). If one raises `UnexpectedTracerError`, this note is wrong. Pinned by
+    `_TracedSplitAdjoint`'s have since #290. Confirmed by CI's slow tier on PR #704 (`full-ci`, head
+    `78e0bbf`): the tests that `jax.grad` through a block-diagonal coupled solve
+    (`tests/integration/test_coupled_rans.py`, `test_reynolds_continuation.py`,
+    `test_coupled_mass_flow.py`) all pass. Pinned by
     `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` (both scalar blocks, with a
     freshly built control that misses) and
     `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, both
