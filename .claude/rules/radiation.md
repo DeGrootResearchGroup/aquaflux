@@ -46,6 +46,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `mirror_visibility.py` — `MirrorVisibility` / `build_mirror_visibility` / `build_mirror_masks`: what stands across each path reflected in one mirror, both legs, per body counted 0/1/2 (#537 PR 3b) | **BUILT** |
 | `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested; `Media.region_of_facets`), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08); `Chain.routes`, `straight_reach`, `_only_saddles` / `_shot` and `shooting.py` (a sleeve's wall alone, its saddle paths shot) (#604 step 2b-i) | **BUILT** |
 | `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path; `receiver_facet` excluded on the last leg since 2b-i) (#604 step 2a) | **BUILT** (in the scene's direct light since 2b-i; not yet in the model or the transfer — 2b-ii) |
+| `coaxial_routes.py` — `CoaxialStack`, `reachable`, `kept_receivers`: which receivers a route through a neighbouring sleeve can reach, from the closed-form turn through coaxial cylinders, so `refracted._plan` leaves the rest out (#604 step 2b-ii PR 1) | **BUILT** |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
 | `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07); every triangle of the scene shadows the direct AND the reflected light (`_Direct`, #622, 2026-10-10); reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of the lamps or the reflectors (checked once against both, cut per build by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
 
@@ -4863,12 +4864,11 @@ are bent too (no straight-through factor left anywhere).
   the straight line MISSES lies outside it: the polyline then never crossed its surfaces, every crossing
   ended ~30 mm off them, and the route always read zero (see the probe below).
 - **Masks.** `Visibility.straight` (bool, `straight_reach`): same medium and the centroid segment meets no
-  region. Refracted masks are per route, `(_path_count, n_occ, n_rows, n_facets)`; a passing route's rows
-  are **not culled** (2026-10-10): every route is taken for every receiver, except a sleeve's wall alone
-  (`_only_saddles`, below). The first version kept only rows whose straight segment from some facet met
-  N, which dropped exactly the light below. A sound cull for coaxial cylinders exists on the cylinder
-  invariants and is not built (below) (the user's uncut run cost 6,278 s against 1,456 s at 64 sectors,
-  `optics`).
+  region. Refracted masks are per route, `(_path_count, n_occ, n_rows, n_facets)`. A passing route's rows
+  were **not culled** from 2026-10-10 (the user's uncut run cost 6,278 s against 1,456 s at 64 sectors,
+  `optics`): the first version kept only rows whose straight segment from some facet met N, which
+  dropped exactly the light below. ⚠️ **Since 2b-ii PR 1 they are culled by the conserved quantities**
+  (`coaxial_routes`, THE COAXIAL ROUTE CULL below) -- never by a straight segment.
 - ⚠️ **THE DESCENT FINDS ONLY MINIMA, AND THE PATHS A LENS ADDS ARE SADDLES.** Glass rod radius 10 mm,
   n 1.5 in n 1.0, source 30 mm from its axis: a 2D Snell trace finds the axial path plus a symmetric pair
   (±0.27 / ±0.22 / ±0.15 rad departure) at receivers 18 / 22 / 26 mm beyond the axis; aquaflux finds the
@@ -4884,8 +4884,8 @@ are bent too (no straight-through factor left anywhere).
   `receivers_per_step` at a time), then an out-of-memory kill (16 GB); a quarter-size run peaked at 6 GB
   and was unfinished after 30 min. Unverified causes: a passing route keeps every facet of the source lamp
   (rows are culled, not pairs), and a vmapped batch iterates until its slowest path ends. The user is
-  moving it to a larger machine; `validation/sleeve_optics/rerun_aquaflux.py` reruns aquaflux's side
-  against `work/check_array-<mode>.json` (temporary, to be deleted once measured).
+  moving it to a larger machine. (The temporary harness that reran aquaflux's side against the stored
+  traces is deleted; `validation/sleeve_optics/cull_cost.py` reruns the same scene, cull on or off.)
 - **THE USER'S RUN AND THE PROBE THAT FOLLOWED (2026-10-09/10, PR #643 comments).** At 64 sectors (64 vs 128
   agree to 0.9998-1.0000) the routes left (55,25) / (50,50) 2.9 / 2.8 % low, and a per-route split showed
   the through-neighbour routes carrying <= 0.07 % of the traced value. Single pair, lamp 1 (25,-25) to
@@ -5104,8 +5104,8 @@ are bent too (no straight-through factor left anywhere).
   turn D(b, beta), axial shift and transmittance are closed forms: through a quartz wall alone it turns
   28-47 deg in-plane, through the gap 30-90; the wall band needs `|u_z| < 0.493` in water. With that, a
   reviewer's count found only **1-5 of the 24 passing (neighbour, route, source) groups carry light** per
-  point (scratch, not committed). **A sound cull for coaxial cylinders exists and is not built**; for any
-  other transparent body the per-surface argument still stands.
+  point (scratch, not committed). **That cull is built since 2b-ii PR 1** (THE COAXIAL ROUTE CULL below);
+  for any other transparent body the per-surface argument still stands and every receiver is kept.
 - **Tests**: routes (`test_a_route_through_a_region_enters_it_from_a_leg_s_medium_and_leaves_it_the_same_way`),
   the ball's axial path through its route and invalid round it, `straight_reach`, a slab in one medium
   brings a small lamp nearer by `t (1 - n_w/n_q)` (scene, paraxial, 1e-3), and an absorbing slab against a
@@ -5121,3 +5121,65 @@ are bent too (no straight-through factor left anywhere).
   path; kept as written because the user's 535b0fa run measured it), and the first guess split at the
   pass's start rather than its end (`onto` puts every crossing back on its face before the descent).
 
+
+### #604 STEP 2b-ii: THE PLAN, AND PR 1 -- THE COAXIAL ROUTE CULL (2026-10-13)
+
+**Agreed with the user (2026-10-12/13), three PRs:** (1) the route cull, the gather using it, its cost
+re-measured; (2) the refracted transfer -- wall<->wall, wall<->lamp and lamp<->lamp along routes, the
+water's absorption live per pair, indices frozen, the six-point receiver quadrature, the scene's refusal of
+an exchange with media lifted, `media=` on `build_radiation_model`; **lamps stay in the exchange as a
+COARSE tessellation** for the transfer, separate from the fine arc the direct gather uses ("keep arcs in,
+coarse": 106k arc facets make an `n^2` transfer impossible); (3) the tracer gains a Lambertian reflecting
+wall of reflectance rho, a four-lamp reflecting-wall check, cost at Sozzi scale.
+
+**What PR 1 built.** `coaxial_routes.py`: `CoaxialStack.of(media, chain)` (a route through one region, or
+a region and its single child, each a `Cylinder` on one axis, concrete geometry and indices; else `None`),
+`reachable(stack, centre, radius, span, points)`, `kept_receivers(media, chain, sources, points)` (the
+chain-level fallbacks), used by `refracted._plan` -- so the mask, the gathers and `check_shooting_grid`
+all see one set of rows; a group left with none is dropped.
+- **The turn**: in-plane index `m = sqrt(n^2 - axial_index^2)`, impact `p_j = m_out p / m_j`,
+  `D = Phi - 2 acos(p / R_0)`, `Phi = 2 sum_{j<k}[acos(p_j/R_j) - acos(p_j/R_{j+1})] + 2 acos(p_k/R_k)`;
+  verified against a 3D vector-Snell trace to 4e-11 (both routes). Sign: with `d = (cos a, sin a)`,
+  `n = (-sin a, cos a)`, line `x . n = b`, `alpha_out = alpha_in - sign(b) D`.
+- **The test** per (receiver, cell): `alpha_out = theta - asin(b / rho)`; the incoming line must meet the
+  source disc (`|c . n - b| <= a`) and meet it before the stack (`c . d - a < -sqrt(R_0^2 - p_high^2)`).
+  Cells over `(sign, p, axial_index)`, 32 x 16 per sign, `p` and the axial index crowded towards their
+  ends by sine spacing; bounds from the cell's corners (each `m_out/m_j` monotone in the axial index, acos
+  decreasing, arguments clipped to [0, 1] -- every valid ray's are); feasibility (enters each level, no total
+  reflection, misses the core on the wall route) drops cells. Live cells split in four, 5 times; **a
+  receiver with over 512 live cells is kept outright** (sound; it is what makes a wide or near source cheap).
+- **The source side**: the leg in the stack's medium starts on the region the source side leaves into it --
+  its disc if a parallel `Cylinder` -- or, for sources in that medium, the bounding disc of the facets'
+  vertices. Heights: `u_z` keeps its sign, so the path's height runs monotonically from where it leaves the
+  source side to the receiver; both must lie within every cylinder's length or no cull.
+- **Fallbacks (every receiver kept)**: no passing region; not such a stack; the pass not at the chain's end
+  (receiver inside another region); the source side's region not a parallel cylinder, or entered rather
+  than left; heights beyond the stack's ends; anything traced (a traced index under `jit` keeps all).
+- ⚠️ **`reachable` takes the disc centre in the STACK'S frame** (`CoaxialStack.plane`), not world
+  coordinates; a test that passed world coordinates read a correct cull as dropping the lit side.
+- ⚠️ **On a wide or close source the 512-cell cap keeps most receivers**: measured on a facet 12 cm wide
+  beside the sleeve, the probe receiver kept 654 cells at the third split.
+
+**Soundness, measured** (`validation/sleeve_optics/cull_check.py`: four lamps, 4 sectors, 6,656 facets; the
+six `route_split.py` points plus 40 drawn in the water (`z` in +-0.3 m, clear of the sleeves); every
+distinct corner of every source facet solved on every route for every receiver -- shot routes with
+continuation; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, 8,437 s, one run, 2026-10-13): **SOUND** --
+of 552 (route, receiver) rows on the shot wall routes, 46 kept and 506 left out, paths reach 33 of the
+kept and **none** of those left out; on the descended gap routes all 552 kept (paths reach 465). Per wall
+route 1-7 receivers of 46 kept. ⚠️ **The gap routes are not culled at all on this scene**: the air gap
+turns light up to ~90 deg, and paths really do reach 76-91% of the points through each.
+
+**Tests** (`tests/unit/test_radiation_coaxial_routes.py`): 300 rays traced forward by 3D vector Snell
+through tilted stacks (wall and gap, denser and less dense shell, half the discs all but touching), at the
+shipped splits and unsplit; the turn bounds hold traced turns; `_cosine_bounds` against sampling; a ring
+lit only where traced rim light lands (kept arc within 2x + 30 deg of it, nothing on the side facing the
+disc); rays from each corner of a wide source in the water; every fallback, each with a fixture the cull
+would otherwise drop; a receiver inside the stack's disc. Plus the planning test in
+`test_radiation_refracted.py`, now with a point behind the second sleeve (the rim route keeps it alone;
+a solve on the other four finds no path). **Mutation pass, 16 breaks, 15 red** after closing 6 that first
+passed (no cosine peak, entry at `p_low`, no chain-end check, no span check, the core's parallel check,
+a zero source disc -- each needed a fixture of its own: unsplit cells, touching discs, a core as long as the
+shell, sources beyond the ends, rays aimed into the wall band from each corner). **Dismissed**: the entry
+bound at `p_low` rather than `p_high` -- it can lose only a line grazing the source disc, because a line
+that truly meets the disc before the stack has its disc chord ending before entry, so its lower end clears
+the margin by twice the chord.

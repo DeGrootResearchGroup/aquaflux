@@ -182,7 +182,8 @@ starting points inside that sleeve, and a path meeting a sleeve it does not pass
 the branch at `535b0fa7`: `optics` mode, **64 sectors** per arc (106,496 facets; 64 against 128 sectors
 agree to 0.9998-1.0000 at every point in `invisible` mode), the stored 60M-ray traces (2 mm disc),
 `RayCastOcclusion(grid=True)`; jax 0.10.2, CPU, x64, macOS arm64, 11 cores, one run, 2026-10-10;
-aquaflux by `rerun_aquaflux.py` against `work/check_array-optics.json`.
+aquaflux by a since-deleted rerun harness against `work/check_array-optics.json` (`cull_cost.py` reruns
+the same scene now).
 
 | point (mm) | traced | straight crossing (60M rays, 64 sectors) | bent routes | in standard errors |
 |---|---|---|---|---|
