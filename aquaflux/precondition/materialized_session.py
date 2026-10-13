@@ -520,13 +520,18 @@ class MaterializedSession:
         # The state the steps in use were built at: a re-pointing builds the new companion's policy at
         # it, so only the companion moves (see the class summary).
         self._reference_state: jnp.ndarray | None = None
+        # PROTOTYPE (#701, E7): the problem a graft takes its shift from (the last re-pointing that
+        # followed the shift), which need not be the problem the session currently serves.
+        self._shift_problem: MaterializedProblem | None = None
 
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
         ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
             # After a re-pointing, first move the step onto the new problem, so the re-fit (forced by
             # the same re-pointing) reads the new problem's shift diagonal off it rather than the old's.
-            graft = self._repointing.graft(lambda march: self._step(self._reference_state, march))
+            graft = self._repointing.graft(
+                lambda march: self._step(self._reference_state, march, self._shift_problem)
+            )
             if graft is not None:
                 active_step = graft(active_step)
             refitted = self._refresh_hook()(active_step, state, due=due)
@@ -590,6 +595,7 @@ class MaterializedSession:
             )
         self._problem = rebound
         if follow_shift:
+            self._shift_problem = rebound
             self._repointing.repointed()
         if self._hook is not None:
             self._hook.rebind(assembler)
@@ -599,13 +605,15 @@ class MaterializedSession:
         step = self._step(state, march)
         return step if self._on_build is None else self._on_build(step)
 
-    def _step(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
+    def _step(
+        self, state: jnp.ndarray, march: dict, problem: MaterializedProblem | None = None
+    ) -> NewtonStrategy:
         """Fit the inverse (once) and assemble the step around it.
 
         Not instrumented: a re-pointing grafts only this step's problem-built fields onto the step the
         march holds, which ``on_build`` already instrumented when it was built.
         """
-        problem = self._problem
+        problem = self._problem if problem is None else problem
         bound = problem.bind_march(march)
         if _is_traced((problem.assembler, state)):
             raise ValueError(

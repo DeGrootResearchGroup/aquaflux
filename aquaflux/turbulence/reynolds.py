@@ -969,10 +969,15 @@ def solve_reynolds_ramp(
     shared.rebind(first)
     rebind = shared.rebind
     if isinstance(shared, MaterializedSession):
-        # PROTOTYPE (#701, E5): hold the anchor's shift through the ramp stations and take the target's
-        # once, on arrival. The target is the case's own assembler, by identity.
+        # PROTOTYPE (#701, E7): take the TARGET's shift on the march's first station and hold it to the
+        # end; every station still re-points the residual and re-fits the inverse.
+        taken = []
+
         def rebind(assembler: CoupledRANS) -> None:
-            shared.rebind(assembler, follow_shift=assembler is coupled)
+            if not taken:
+                taken.append(True)
+                shared.rebind(coupled, follow_shift=True)
+            shared.rebind(assembler, follow_shift=False)
 
     homotopy = ViscosityRampHomotopy(
         coupled,
