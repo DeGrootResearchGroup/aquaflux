@@ -198,7 +198,10 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
     literature is importing it across a regime boundary.
   - **The measured failure is not a saddle pathology.** The near-null direction of the degenerate cell
     blocks is **pure ω** — nothing on `u,v,w,p,k` — and per-field V-cycle smoothing has pressure *well*
-    handled with ω the outlier. The saddle part of our operator is not what is hurting.
+    handled with ω the outlier. ⚠️ On pitzDaily (2026-10-14) that pure-ω direction comes from a large
+    ω-ROW coupling to the cell's own `p`/`u` (∂R_ω/∂p ≈ 1e3 equilibrated), not from a weak ω diagonal:
+    removing those couplings leaves no near-singular block (`.claude/notes/solve-refuted-directions.md`,
+    the WHICH-row entry). That coupling is the split's lower block, which is one more reason it suits. The saddle part of our operator is not what is hurting.
   **The direction this points at is a FIELD SPLIT that keeps the coupling** — a block-triangular
   preconditioner with the `(u,p)` saddle handled as now and k/ω preconditioned by something suited to
   transport (`scalar_transport_preconditioner` already exists and already serves those blocks in the
