@@ -291,8 +291,8 @@ def test_a_stable_residual_keeps_repeated_solves_on_one_compiled_step() -> None:
     are measured here, because the second is the trap and a test of only the first would pass just as
     well if the binding had been written as a closure.
 
-    One residual execution per solve is the floor: the march evaluates it once, eagerly, for the
-    reference norm it judges progress against.
+    The march reads its reference norm through a compiled program too, so a repeated solve executes
+    the residual not at all; the fresh lambda recompiles both.
     """
     evaluations = {"n": 0}
 
@@ -313,7 +313,7 @@ def test_a_stable_residual_keeps_repeated_solves_on_one_compiled_step() -> None:
     rebuilt = evaluations["n"]
 
     assert first > 1  # the first solve compiles the step
-    assert reused == 1  # the second runs on it: only the eager reference-norm evaluation
+    assert reused == 0  # the second runs on the compiled step and the compiled reference norm
     assert rebuilt > reused  # a fresh lambda is a fresh key, and compiles again
 
 

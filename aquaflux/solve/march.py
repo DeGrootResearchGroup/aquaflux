@@ -50,7 +50,7 @@ import jax.numpy as jnp
 import lineax as lx
 
 from .convergence import MeasureBuilder
-from .norm import named_blocks
+from .norm import named_blocks, norm_of_residual
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
 from .strategy import (
@@ -782,8 +782,8 @@ def newton_march(
     # starting strength and freezing the march.
     # The anchor is the scale the FIRST step's inner loop is judged against, so it is taken at the
     # station that step actually runs. With no homotopy that is `residual_fn` and this is unchanged.
-    measured_norm_0 = jnp.asarray(
-        norm(residual_fn(phi0) if homotopy is None else homotopy.enter(0, None)(phi0))
+    measured_norm_0 = norm_of_residual(
+        norm, residual_fn if homotopy is None else homotopy.enter(0, None), phi0
     )
     residual_norm_0 = (
         measured_norm_0 if damping_reference is None else jnp.asarray(float(damping_reference))
@@ -795,7 +795,9 @@ def newton_march(
     elif stopping_reference is not None:
         stop_reference = float(stopping_reference)
     else:
-        stop_reference = float(norm_builder(stopping_step(strategy), phi0)(residual_fn(phi0)))
+        stop_reference = float(
+            norm_of_residual(norm_builder(stopping_step(strategy), phi0), residual_fn, phi0)
+        )
 
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
     # step-length one the moment a line search collapses -- but the reaction below only runs once the
@@ -863,7 +865,7 @@ def newton_march(
         # the one `stopping_step` measures the target in.
         if stopping_step is None or not arrived:
             return steered
-        return float(norm_builder(stopping_step(step), phi)(residual(phi)))
+        return float(norm_of_residual(norm_builder(stopping_step(step), phi), residual, phi))
 
     stop_norm = judged(strategy, phi0, residual_fn, current)
 

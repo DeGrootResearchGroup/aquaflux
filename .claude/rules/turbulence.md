@@ -733,8 +733,9 @@ Many entries below are dated history written against the old API. Read them thro
   definition damps a scalar on both paths; `solve_segregated` builds the
   former on the first sweep and the latter every sweep. Measured: traces per sweep went `[5,5,5,5,5]` →
   `[5,5,0,0,0]` with the converged field bit-identical — **under the traced solve of the day; the counts
-  moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing
-  and every sweep pays one eager residual evaluation for the march's reference norm.** The property is
+  moved when the solve became an eager march (2026-09-15), because a converged sweep now traces nothing;
+  since 2026-10-14 the march's reference norm is compiled too, so a sweep that recompiles nothing
+  executes the residual not at all (`[n, 0, 0, 0]`; it was one eager evaluation per sweep).** The property is
   unchanged and pinned by
   `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, whose fixture
   had to start disturbing the state to keep measuring it (see `solve.md`). ⚠️ **Since the preconditioner
@@ -2211,6 +2212,15 @@ tuning follow-up noted above.
     directly or in log form). Velocity is **split per component** so each lines up with its own
     momentum equation; `p` is gauge-free; `ν_t` rides along (derived, not solved — it is what the
     momentum equations actually see, and it moves when k and ω move in ways their own norms hide).
+    **Compiled since 2026-10-14**: the values come from the module-level `eqx.filter_jit`
+    `_field_values(coupled, state)` (the assembler an argument, so a read at a new state is a cache hit),
+    and are named OUTSIDE it from a tuple -- ⚠️ a dict returned from a compiled program comes back with
+    its keys sorted, which would reorder the log's rows. Read once per logged step, it cost 34 s of an
+    800 s pitzDaily march op by op (see `solve.md`, `norm_of_residual`). Pinned by
+    `test_coupled_fields_are_each_field_s_own_value_read_through_one_compiled_program`.
+    `coupled_residuals` below reads its per-block terms through `_per_block_residual`, compiled the same
+    way (its measure is still built per step, a few ms); bfs3d's `compare.py` logs it every step. Pinned by
+    `test_the_per_equation_residuals_are_read_through_one_compiled_program`.
   - `coupled_residuals(coupled, continuation, reference_state=None)` → the **per-equation residual** on
     the march's own measure, `coupled_scaled_norm(...).per_block(coupled.residual(state))`. Reads
     `strategy` **late** for its `shift_policy`, so a refreshed segment's rebuilt diagonals are the

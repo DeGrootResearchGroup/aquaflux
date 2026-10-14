@@ -298,6 +298,35 @@ def _block_terms(measure, residual_fn, state):
     return measure.per_block(residual_fn(state))
 
 
+@eqx.filter_jit
+def norm_of_residual(measure, residual_fn, state):
+    """``measure(residual_fn(state))`` as one compiled program.
+
+    The march reads a residual norm outside its compiled step at several points: the reference it damps
+    against, the reference a relative tolerance is scaled by, and, when it stops in another measure than
+    it steps in, that measure at every step. Run op by op, each costs one dispatch per operation of the
+    residual, which on a coupled problem is far more than the evaluation itself. Compiled here, it costs
+    one compilation per measure structure and residual, after which a call with new values is a cache
+    hit -- provided ``residual_fn`` keeps one identity (a bound method or a module, as the march step
+    already requires) and ``measure`` changes only in its array values.
+
+    Parameters
+    ----------
+    measure : callable
+        The norm, ``residual -> scalar`` (a residual measure module, or a plain function).
+    residual_fn : callable
+        ``state -> residual``, shape ``(n,) -> (n,)``.
+    state : jnp.ndarray
+        Where to evaluate it, shape ``(n,)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The norm, a scalar.
+    """
+    return measure(residual_fn(state))
+
+
 def _check_names(names: tuple[str, ...], sizes: tuple[int, ...]) -> None:
     """Refuse block names that do not name every block once."""
     if names and (len(names) != len(sizes) or len(set(names)) != len(names)):

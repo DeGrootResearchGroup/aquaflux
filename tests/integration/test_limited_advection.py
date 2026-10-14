@@ -151,9 +151,9 @@ class _BdfStep(eqx.Module):
     docstring gives: the solve compiles its step with the residual as an argument, and a closure built
     per timestep is hashed by identity, so a time loop written with one would recompile the whole
     solve at every timestep. Here the previous states are array fields over a fixed structure, so the
-    opening steps compile and the rest of the march runs on what they built -- measured on this
-    fixture, the first three steps execute the residual in Python and every step after them executes
-    it exactly once, which is the march's own eager evaluation of its reference norm.
+    opening steps compile and the rest of the march runs on what they built, the march's own
+    reference-norm program included -- measured on this fixture, only the first three steps execute the
+    residual in Python.
 
     ``phi_older`` is ``None`` on the first step, which the transient term reads as "start from the
     first-order form". That is a structural difference rather than a value, so the first step is a
