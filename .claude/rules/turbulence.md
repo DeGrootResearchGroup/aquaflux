@@ -499,7 +499,7 @@ Many entries below are dated history written against the old API. Read them thro
       and is judged at the target in the case's own row scales (2026-10-14).** The issue read the held
       diagonal as a stale bug: the march's `beta * d`, the inverse's re-fit at `J(station) + beta * d`
       and the row-scaled measure (`_CoupledMeasures.row_scaled` reads `step.shift_policy`) all used the
-      anchor's diagonal at every station and at the target. **Seven arms say the diagonal should stay,
+      anchor's diagonal at every station and at the target. **Every arm says the diagonal should stay,
       and only the stop should move.** The step control adapts the scalar shift strength on the premise
       that the diagonal it scales is fixed; a diagonal swapped under it changes the damping by a different
       amount on every row (the target's velocity diagonal over the anchor's, measured on pitzDaily at the
@@ -519,8 +519,9 @@ Many entries below are dated history written against the old API. Read them thro
       anchor 100, damping 3, `grow` 3, release 1e-4, `beta_min` 0.005, dual-time 5 / 0.01,
       `refresh_on_cycles` 3, residual stop, field split `SimpleSmoothed`/`JacobiSmoothed`, `atol` 1e-5 /
       `rtol` 0; Linux x86_64, 4 cores, `run_case.sh --force` (its free-memory reading is macOS-only); one
-      run each; every arm `x_r/h` 8.0686. bfs3d: `validation/bfs3d_openfoam/compare.py`, shipped
-      `case.yaml` (`lineax` stop, `refresh_on_cycles` 3, 12 x 1 ramp, `grow` 1.5, no release, field split),
+      run each; every arm `x_r/h` 8.0686. bfs3d: `validation/bfs3d_openfoam/compare.py`, its `case.yaml`
+      as it was BEFORE #712 (`CorrectedGreenGauss`, `lineax` stop, `refresh_on_cycles` 3, 12 x 1 ramp,
+      `grow` 1.5, no release, refit floor 0.05, field split),
       no-floor arms by the owner's local `BFS3D_REFIT_BETA_FLOOR` override; Apple M3 Pro, 11 cores, jax
       0.10.2, owner's runs (PR #710 comments); every arm `x_r/h` 8.361, converged states within relative
       L2 2.3e-4 of main's. Steps / restart cycles / escalating retries:
@@ -534,6 +535,8 @@ Many entries below are dated history written against the old API. Read them thro
       | anchor's shift, target's once on arrival (E5) | D, measure at arrival | -- | 18 / 134 / 0 | 38 / 192 / 1 | 44 / 202 / 2 |
       | target's shift throughout (E7) | D from step 1 | -- | 27 / 183 / 0 | -- | -- |
       | **anchor's shift, stop in the target's scales (E6, built)** | the stop | -- | **19 / 144 / 0** | **38 / 176 / 0** | **34 / 157 / 0** |
+      | E6 + steered in the target's scales from arrival (E8 `arrived`) | the stop, the measure at arrival | -- | 17 / 128 / 0 | 35 / 151 / 0 | 41 / 194 / 1 |
+      | E6 + steered in the target's scales from step 1 (E8 `always`) | the stop, the measure from step 1 | -- | 19 / 142 / 0 | 35 / 136 / 1 | 38 / 159 / 1 |
 
       (Columns: pitzDaily's `refit_beta_floor` was 0.05 until #709 and none after; the "floor 0.05"
       pitzDaily arms ran at `78e0bbf`-based commits, the rest on the merge with main at `159536c`.)
@@ -552,6 +555,19 @@ Many entries below are dated history written against the old API. Read them thro
       because the case's own scales read its residual 1.4-4x higher than the anchor's at bfs3d's end
       state. That extra is the stated `atol` actually being met: main stopped at a looser bar than the
       case file says. The owner kept `atol` 1e-5 (2026-10-14).
+      **E8, steering in the target's scales too (prototype `AQUAFLUX_STEER_BY_STOPPING`, branch
+      `materialized-ramp-e8` at `61331d6`, not merged), loses on the case file bfs3d ships now.** Asked
+      because one measure for steering and stopping is the consistent design; it keeps the anchor's shift
+      and changes only the measure the line search, step control and Krylov stop read. It won on pitzDaily
+      (`arrived`) and on the pre-#712 bfs3d file at the 0.05 floor, and lost without the floor (`arrived`'s
+      first full-length trial at arrival had a residual ratio of 4e11, then a six-step park near `|R|`
+      8e-3 and a twice-redone step). On **#712's bfs3d file** (multiple-correction gradient, residual stop,
+      `grow` 3 with the release, no refit floor, damping 3, uniform probe reach 3; owner's runs at
+      `61331d6` + #712's `case.yaml`/`compare.py`, same machine), steps / restart cycles (with rejected
+      attempts) / steps redone: main 19 / 126 (157) / 2, **E6 20 / 134 (165) / 2**, E8 `arrived` 21 / 159
+      (194) / 2, E8 `always` 25 / 153 (203) / 7; main's two redone steps (6 twice, 14) are #712's own and
+      E6 repeats them. E6 again follows main row for row and takes one more step: main's last state reads
+      1.95e-5 in the case's scales, 3.8x its steered 5.18e-6. So the steering measure stays the anchor's.
       **Retired with the swap:** a retune sweep of the swapping arm (`beta_min` 0.01: 24 / 176 / 0;
       `refresh_on_cycles` 4: 35 / 339; `beta_min` 0.02: stopped at step 37; two arms damping the flow
       rows harder at the closure's shift, both worse and non-finite early) ran from `sweep-*.yaml` files
