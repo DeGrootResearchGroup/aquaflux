@@ -101,10 +101,17 @@ print(f"{count} {total}")
 PYEOF
 }
 
+# A start time in one canonical spelling: runs of blanks squeezed to one, none leading or trailing.
+# macOS `ps` pads `lstart` to its column width, so a bare `tr -s ' '` leaves one trailing blank there
+# (and none on Linux) -- a value no other spelling of the same time compares equal to.
+canonical_time() {
+  awk '{$1 = $1; print}'
+}
+
 # When a process started, as `ps` reports it; empty when there is no such process. Recorded beside the
 # pid so a pid the system has since handed to another process is not taken for the run.
 pid_started() {
-  ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '
+  ps -o lstart= -p "$1" 2>/dev/null | canonical_time
 }
 
 # The PID of a live run, or empty. Reads the run-file rather than scanning the process table: a
@@ -118,7 +125,8 @@ live_pid() {
   [ -f "$RUN_FILE" ] || return 0
   local pid recorded
   pid=$(sed -n 's/^pid=//p' "$RUN_FILE")
-  recorded=$(sed -n 's/^pid_started=//p' "$RUN_FILE")
+  # Canonicalized on read as well, so a run-file written with the trailing blank is still read as live.
+  recorded=$(sed -n 's/^pid_started=//p' "$RUN_FILE" | canonical_time)
   [ -n "$pid" ] || return 0
   if kill -0 "$pid" 2>/dev/null && [ -n "$recorded" ] && [ "$(pid_started "$pid")" = "$recorded" ]; then
     printf '%s' "$pid"

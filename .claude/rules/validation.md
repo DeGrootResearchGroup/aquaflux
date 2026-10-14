@@ -489,6 +489,12 @@ How it works now, and what not to undo:
   refused (`--force` does not skip that refusal). A run-file without `pid_started=` reads as stale.
   Pinned by `test_a_recorded_pid_now_held_by_ANOTHER_process_is_not_a_running_case` (red with the
   comparison removed); `test_fastgate.py`'s fake run-file carries the start time too.
+  ⚠️ **Both sides go through `canonical_time` (blanks squeezed AND trimmed), not `tr -s ' '` alone
+  (2026-10-14).** macOS `ps` pads `lstart` to its column width, so `tr -s` kept one trailing blank there
+  and none on Linux. The script matched its own run-files, but the two tests above write the time
+  `split()`-and-joined, so both failed on every Mac while CI (Linux) stayed green. Canonicalizing the
+  *recorded* value too keeps a run-file written before the fix live.
+  `test_a_start_time_is_compared_whatever_its_blanks` pads the time on every platform.
 - `AQUAFLUX_CASE_POLL_SECONDS` (default 20) sets the waiter's poll interval; it exists for the tests. `run-*.exit` is gitignored beside `run-*.log`.
 
 Pinned by `tests/unit/test_run_case.py` (fast tier): exit 3, an uncaught exception, a self-SIGKILL
