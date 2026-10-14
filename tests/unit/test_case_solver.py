@@ -810,7 +810,12 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
 
 
 def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
-    """``validation/bfs3d_openfoam/compare.py``'s march at its defaults -- see the pitzDaily twin."""
+    """``validation/bfs3d_openfoam/compare.py``'s march at its defaults -- see the pitzDaily twin.
+
+    Since the file took pitzDaily's march settings (the uniform probe, no refit floor, the residual
+    stop, the faster shift descent with its release, the lighter turbulence damping) it differs from
+    the twin only in its trailing inverse and in keeping its own ``k`` positivity floor and cap.
+    """
     settings = {
         "max_steps": 150,
         "convergence": Convergence(rtol=0.0, atol=1e-5),
@@ -838,22 +843,22 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
                     avoid_singletons=False,
                 ),
             ),
-            probe=JacobianProbeSpec(column_reach=(3, 3, 3, 3, 2, 2)),
-            refit_beta_floor=0.05,
+            probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
         ),
         "dual_time": DualTimeLoop(
             inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
         ),
-        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14),
+        "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "positivity_floor": 1e-8,
         "positivity_projection": False,
         "step_control": CflResidualDualTimeControl(
             beta_start=0.5,
             beta_min=0.005,
-            grow=1.5,
+            grow=3.0,
             backoff=2.0,
             grow_above=0.5,
             backoff_below=0.25,
+            release_floor=1e-4,
         ),
         "retry": RetryPolicy(
             solver=GmresSolve(1e-4, restart=40),
@@ -861,7 +866,7 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
             on_alpha=0.01,
             beta_factor=2.0,
         ),
-        "shift": CoupledShiftSettings(turbulence_damping=5.0),
+        "shift": CoupledShiftSettings(turbulence_damping=3.0),
     }
     ramp = {
         "anchor": 10.0**2,
