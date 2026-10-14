@@ -29,6 +29,7 @@ the readings that belong to no column, one per line.
 
 from __future__ import annotations
 
+import math
 import sys
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -585,7 +586,8 @@ class MarchLogger:
 
         # The stopping test is a constant within a rung, so it belongs in a banner rather than in every
         # row -- repeating `|R0|` and `target` on each line was most of the old line's width.
-        reference = self._reference_norm(report)
+        judged, judged_ratio = self._judged(report)
+        reference = self._reference_norm(judged, judged_ratio)
         if reference is not None and (
             self._reference is None or abs(reference - self._reference) > 1e-12 * self._reference
         ):
@@ -620,7 +622,7 @@ class MarchLogger:
                     report.shift,
                     inner,
                     cycles,
-                    report.residual_norm,
+                    judged,
                     report.alpha,
                     report.full_step_ratio,
                     marks,
@@ -694,6 +696,10 @@ class MarchLogger:
             self._refreshes = []
         if columns:
             lines.append("  ".join(f"{name} {value:.4g}" for name, value in columns.items()))
+        if self._judged(report)[0] != report.residual_norm:
+            # Once a march judges its stop in another measure, R is that measure's; the measure the
+            # step was steered in (and the per-equation residuals are terms of) is shown here.
+            lines.append(f"steered R {report.residual_norm:.3e}; R is the stopping measure")
         if report.binding_limit < 1.0:
             lines.append(f"limit {report.binding_limit:.2e}")
         lines.append(f"cum {self._cumulative_cycles}")
@@ -735,13 +741,24 @@ class MarchLogger:
         return f"{line} ({' '.join(parts)})"
 
     @staticmethod
-    def _reference_norm(report: StepReport) -> float | None:
-        """Recover ``‖R₀‖`` from the report's own two residual fields (``‖R‖`` and ``‖R‖/‖R₀‖``)."""
+    def _judged(report: StepReport) -> tuple[float, float]:
+        """The residual the stopping test read and its ratio: what the ``R`` column and the banner show.
+
+        The report's ``stopping_norm`` / ``stopping_ratio`` where recorded, else its ``residual_norm`` /
+        ``residual_ratio`` (a report built without them).
+        """
+        if math.isnan(report.stopping_norm):
+            return report.residual_norm, report.residual_ratio
+        return report.stopping_norm, report.stopping_ratio
+
+    @staticmethod
+    def _reference_norm(norm: float, ratio: float) -> float | None:
+        """Recover ``‖R₀‖`` from a residual and its ratio ``‖R‖/‖R₀‖``."""
         # `not > 0` rather than `<= 0`: a diverged step reports a NaN ratio, and every NaN comparison
         # is False, so a `<= 0` guard would let it through and print `|R0|=nan target=nan`.
-        if not report.residual_ratio > 0.0:
+        if not ratio > 0.0:
             return None
-        return report.residual_norm / report.residual_ratio
+        return norm / ratio
 
     def _target(self, reference: float) -> float | None:
         """The stopping target ``atol + rtol·‖R₀‖``, or ``None`` when no tolerance was supplied."""

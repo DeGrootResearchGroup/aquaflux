@@ -295,6 +295,33 @@ def test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure() -> No
     assert float(jnp.linalg.norm(state - reference) / jnp.linalg.norm(reference)) < 1e-6
 
 
+def test_a_stopping_step_reaches_the_march_from_the_flow_solve(channel, monkeypatch) -> None:
+    """``solve_flow_march(stopping_step=...)`` is handed to the march, as from the coupled solve."""
+    from aquaflux.solve import MarchResult
+    from aquaflux.solve import driver as driver_module
+
+    assembler, _ = channel
+    calls: list[dict] = []
+
+    def recording_march(step, residual_fn, state, **kwargs):
+        calls.append(kwargs)
+        return MarchResult(state, (), True, False, None, step)
+
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
+
+    def stopping(step):
+        return step
+
+    solve_flow_march(
+        assembler,
+        assembler.initial_state(),
+        strategy=flow_march_step(assembler, assembler.initial_state()),
+        convergence=Convergence(measure=Euclidean(), rtol=1.0, atol=1e30),
+        stopping_step=stopping,
+    )
+    assert calls[0]["stopping_step"] is stopping
+
+
 def test_globalization_reaches_the_flow_march_step(channel) -> None:
     assembler, _ = channel
     step = flow_march_step(

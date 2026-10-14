@@ -2624,6 +2624,7 @@ def solve_coupled(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    stopping_step: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
     resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     **strategy_kwargs: object,
@@ -2805,19 +2806,17 @@ def solve_coupled(
         Walk related problems within this one march, ending at the target (see
         :func:`~aquaflux.solve.newton_march`); it converges only once the homotopy has arrived.
     station_step : callable, optional
-        ``(step, station, arrived) -> step``, forwarded to
-        :func:`~aquaflux.solve.newton_march`: reshape the Newton step for the continuation station it
-        is about to run. The use it exists for is a per-block damping that differs between a homotopy's
-        intermediate stations and its target -- measured on a viscosity ramp, the closure's rows want a
-        much larger share of the shift while the ramp is walking than once the target problem is
-        reached, and no signal a shift policy can read for itself distinguishes those. It reshapes the
-        path, not the root, and ``None`` (the default) is byte-identical.
+        ``(step, station, arrived) -> step``, forwarded to :func:`~aquaflux.solve.newton_march`:
+        reshape the Newton step for the station it is about to run, e.g. a per-block damping that
+        differs between a homotopy's intermediate stations and its target, which no signal a shift
+        policy can read for itself distinguishes. It reshapes the path, not the root, and ``None``
+        (the default) is byte-identical.
         ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
     resume : Resumption or None
         The interrupted march this one resumes; see :func:`~aquaflux.solve.staged_march`.
-    on_residuals : callable, optional
-        Forwarded to :func:`~aquaflux.solve.newton_march`; named by :func:`coupled_equation_names`
-        under the default row-scaled measure, and not called under the block-scaled one.
+    on_residuals, stopping_step : callable, optional
+        Forwarded to :func:`~aquaflux.solve.newton_march`; ``on_residuals`` is named by
+        :func:`coupled_equation_names`, and called only under the row-scaled measure.
     **strategy_kwargs
         The march settings of :func:`coupled_step` (``dual_time``, ``positivity_floor``, ``linear_solve``,
         ...), handed to every build and refresh of the internally-built continuation; an unknown
@@ -2914,6 +2913,7 @@ def solve_coupled(
         station_step=station_step,
         resume=resume,
         on_residuals=on_residuals,
+        stopping_step=stopping_step,
         caller="solve_coupled",
     )
     root = root_adjoint(

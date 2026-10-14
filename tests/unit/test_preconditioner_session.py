@@ -124,6 +124,146 @@ def test_a_re_pointed_block_session_step_is_a_compilation_cache_hit(scalar) -> N
     assert len(traces) == 2
 
 
+def _materialized_step_held_on(coupled, anchor, state, loop, beta=0.125):
+    """A materialized session opened on ``coupled``, re-pointed at ``anchor``, and its step as a march holds it.
+
+    That is how a viscosity ramp opens its session: on the target, re-pointed at the anchor before the
+    first build, so the first step is fitted to the problem it solves. The held step carries the shift
+    strength a step control set, and has been through the march's first refresh, the forced first fit.
+    """
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
+    session.rebind(anchor)
+    held = eqx.tree_at(
+        lambda s: s.relaxation_schedule,
+        session.build(state, dual_time=loop),
+        ConstantRelaxation(jnp.asarray(beta)),
+    )
+    update = session.refresh_preconditioner(held, state)
+    return session, held if update is None else update(held)
+
+
+def _base_diagonal(step, state):
+    return step.shift_policy.base.shift_term(state).diagonal
+
+
+def test_a_re_pointed_materialized_session_keeps_the_shift_the_held_step_carries(case) -> None:
+    """Re-pointed at the target, the held step keeps the anchor's shift diagonal and shift strength.
+
+    The step control adapts the shift strength on the premise that the diagonal it scales is fixed, so
+    a station change must not swap the diagonal under it. What the re-pointing hands back, if anything,
+    is the re-fitted inverse.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    session, held = _materialized_step_held_on(target, anchor, state, DualTimeLoop(inner_steps=3))
+    session.rebind(target)
+    update = session.refresh_preconditioner(held, state)
+    stepped = held if update is None else update(held)
+
+    on_target = open_session(MaterializedJacobian(_SPLIT), target).build(
+        state, dual_time=DualTimeLoop(inner_steps=3)
+    )
+    assert jnp.array_equal(_base_diagonal(stepped, state), _base_diagonal(held, state))
+    assert not jnp.allclose(
+        _base_diagonal(stepped, state), _base_diagonal(on_target, state), rtol=1e-3
+    )
+    assert float(stepped.relaxation_schedule.beta) == 0.125
+
+
+def test_a_re_pointed_materialized_session_refits_against_the_shift_the_step_carries(
+    case, monkeypatch
+) -> None:
+    """The re-fit at a station change is of the station's Jacobian plus the shift the march solves with.
+
+    That shift is the held step's, so an inverse fitted to the new problem's own diagonal would
+    precondition an operator the march never solves.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    session, held = _materialized_step_held_on(target, anchor, state, DualTimeLoop(inner_steps=3))
+    built_at: list[jnp.ndarray] = []
+    monkeypatch.setattr(
+        FieldSplitPreconditioner,
+        "refresh_in_place",
+        lambda _self, _mv, _plan, shift, **_kw: built_at.append(jnp.asarray(shift)),
+    )
+    session.rebind(target)
+    session.refresh_preconditioner(held, state)
+    assert len(built_at) == 1
+    assert jnp.allclose(built_at[0], 0.125 * _base_diagonal(held, state), rtol=1e-12)
+
+
+def test_the_stopping_step_measures_the_target_in_its_own_row_scales(case) -> None:
+    """``stopping_step(target)`` hands the held step the target's shift policy, for a measure only.
+
+    It is built at the state the session's steps were built at, so only the problem differs: the march
+    is judged in the row scales the target's own step would have from that state.
+    """
+    from aquaflux.turbulence.measures import coupled_scaled_norm
+
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session, held = _materialized_step_held_on(target, anchor, state, loop)
+    judged = session.stopping_step(target)(held)
+
+    on_target = open_session(MaterializedJacobian(_SPLIT), target).build(state, dual_time=loop)
+    assert jnp.allclose(_base_diagonal(judged, state), _base_diagonal(on_target, state), rtol=1e-12)
+    residual = target.residual(state)
+    in_target_scales = coupled_scaled_norm(target, on_target.shift_policy, state)(residual)
+    in_anchor_scales = coupled_scaled_norm(target, held.shift_policy, state)(residual)
+    measured = coupled_scaled_norm(target, judged.shift_policy, state)(residual)
+    assert float(measured) == pytest.approx(float(in_target_scales), rel=1e-12)
+    assert float(measured) != pytest.approx(float(in_anchor_scales), rel=1e-6)
+
+
+def test_the_stopping_step_follows_the_state_a_refresh_rebuilds_at(case) -> None:
+    """After a refresh re-freezes the session's steps at a new state, the stopping step is rebuilt there.
+
+    A stopping step built at the old state would judge the march in scales frozen at a state none of
+    its steps are built at any more.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session, held = _materialized_step_held_on(target, anchor, state, loop)
+    stopping = session.stopping_step(target)
+    before = _base_diagonal(stopping(held), state)
+    developed = state * 1.05
+    refreshed = session.refresh(developed, held, dual_time=loop)
+    after = _base_diagonal(stopping(refreshed), state)
+
+    at_developed = open_session(MaterializedJacobian(_SPLIT), target).build(
+        developed, dual_time=loop
+    )
+    assert jnp.allclose(after, _base_diagonal(at_developed, state), rtol=1e-12)
+    assert not jnp.allclose(after, before, rtol=1e-6)
+
+
+def test_a_stopping_step_is_not_a_step_handed_to_a_march(case) -> None:
+    """``on_build`` sees every step a march takes, and not the one the stopping test measures with.
+
+    A driver recording something per step it builds (a residual reporter, say) would otherwise gain a
+    record for a step no march runs.
+    """
+    target, state = case
+    built: list[object] = []
+    session = open_session(
+        MaterializedJacobian(_SPLIT), target, on_build=lambda step: built.append(step) or step
+    )
+    held = session.build(state, dual_time=DualTimeLoop(inner_steps=3))
+    session.stopping_step(target.with_scaled_molecular_viscosity(10.0))(held)
+    assert len(built) == 1
+
+
+def test_a_stopping_step_needs_a_built_session(case) -> None:
+    """Its step is built at the state of the session's last build, so there must have been one."""
+    target, _ = case
+    session = open_session(MaterializedJacobian(_SPLIT), target)
+    with pytest.raises(RuntimeError, match="before the session built a step"):
+        session.stopping_step(target)(None)
+
+
 def test_the_session_hook_refits_when_the_march_asks_and_not_otherwise(case) -> None:
     """A multigrid session re-fits only on its first call, after a rebind, and when ``due`` is passed.
 

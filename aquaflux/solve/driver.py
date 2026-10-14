@@ -252,6 +252,7 @@ def staged_march(
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
     resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
+    stopping_step: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
     caller: str = "staged_march",
 ) -> StagedResult:
     """March ``residual_fn`` to convergence in refresh segments, and refuse a state that is not a root.
@@ -279,7 +280,7 @@ def staged_march(
         ``state -> drift(state)``, re-based at each segment's starting state, since a refresh re-freezes
         there and a measure carried across would keep reporting drift the refresh had absorbed. ``None``
         for a residual with no coefficient drift to watch (a refresh trigger then needs to read costs).
-    max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals
+    max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals, stopping_step
         Forwarded to :func:`~aquaflux.solve.newton_march` on every segment.
     resume : Resumption or None
         The history of an interrupted march, for a march **resuming** it from the state it stopped at;
@@ -335,6 +336,17 @@ def staged_march(
         if resume is None
         else float(resume.reference_residual)
     )
+    # A stopping step judges the stop in its own measure, so its tolerance's reference is taken there.
+    if stopping_step is not None and resume is not None:
+        raise ValueError(
+            f"{caller}: a resumed march carries its reference residual in the measure it steered by, "
+            "which does not scale a stopping step's tolerance; resume without one."
+        )
+    stopping_reference = (
+        None
+        if stopping_step is None
+        else float(norm_builder(stopping_step(strategy), state)(residual_fn(state)))
+    )
     # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
     # must still be marched, or the newly-refreshed preconditioner would never be used.
     control_state: object = None
@@ -374,6 +386,8 @@ def staged_march(
             homotopy=homotopy,
             station_step=station_step,
             on_residuals=on_residuals,
+            stopping_step=stopping_step,
+            stopping_reference=stopping_reference,
         )
         state = result.state
         control_state = result.control_state
@@ -386,9 +400,12 @@ def staged_march(
         # build above rather than a second one made here.
         strategy = source.refresh(state, strategy)
 
-    # Judge convergence in the measure the march steered by, built at the state reached.
-    residual_norm = float(norm_builder(strategy, state)(residual_fn(state)))
-    target = convergence.atol + convergence.rtol * reference_norm
+    # Judge convergence in the measure the march stopped by, built at the state reached.
+    judged = strategy if stopping_step is None else stopping_step(strategy)
+    residual_norm = float(norm_builder(judged, state)(residual_fn(state)))
+    target = convergence.atol + convergence.rtol * (
+        reference_norm if stopping_reference is None else stopping_reference
+    )
     arrived = homotopy is None or result.converged
     if not (math.isfinite(residual_norm) and residual_norm <= target and arrived):
         raise eqx.EquinoxRuntimeError(

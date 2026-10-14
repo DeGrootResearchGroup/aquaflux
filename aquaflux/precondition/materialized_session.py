@@ -432,6 +432,16 @@ class MaterializedSession:
     (``shape_headroom``); otherwise every re-fit recompiles the step. Any other inverse is applied
     through a host callback and re-fitted in place.
 
+    **A re-pointed session re-fits the inverse and leaves the shift alone.** :meth:`rebind` points the
+    session at another companion (a station of a viscosity ramp, say) and forces the next re-fit, which
+    is fitted to the new companion's Jacobian plus the shift the march's step already carries. That
+    shift's diagonal stays the one the step was built with: a step control adapts the shift strength on
+    the premise that the diagonal it scales is fixed, and swapping the diagonal under it at each station
+    changes the damping by a different amount on every row, which the control can neither see nor undo.
+    The shift vanishes at the root, so which fixed diagonal is held changes the path and not the answer.
+    What must be the new problem's is how the march is *judged*: :meth:`stopping_step` gives the step a
+    march's stopping test reads its measure from, built on the problem the march is meant to solve.
+
     Parameters
     ----------
     spec : MaterializedJacobian
@@ -490,6 +500,12 @@ class MaterializedSession:
         self._preconditioner: object | None = None
         # Whether the fitted inverse is carried in the step in its traced form; decided at the fit.
         self._traced = False
+        # What the last build was made at and with, for building a step on another problem alike.
+        self._reference_state: jnp.ndarray | None = None
+        self._march: dict = {}
+        # The steps built on other problems for `stopping_step`, keyed by the problem's identity and
+        # dropped whenever the session builds again, since they are made at the last build's state.
+        self._stopping_steps: dict[int, NewtonStrategy] = {}
 
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
@@ -523,6 +539,42 @@ class MaterializedSession:
     def build(self, state: jnp.ndarray, **march: object) -> NewtonStrategy:
         return self._build(state, march)
 
+    def stopping_step(self, target: object) -> Callable[[NewtonStrategy], NewtonStrategy]:
+        """The map from a step the march holds to the step its stopping test is measured with.
+
+        That step is the held one with ``target``'s shift policy in place of its own
+        (:meth:`~aquaflux.solve.ShiftedStep.preconditioned_as`). A row-scaled measure takes its row
+        scales from the step's shift policy, so the march is then judged in ``target``'s scales while it
+        is still stepped with the shift it holds (see the class summary).
+
+        The step on ``target`` is built once, on first use after a build, at the state and with the march
+        keywords of that build, so only the problem differs from the steps in use: a shift policy is
+        frozen at a state, and building it at the march's iterate would move everything it freezes
+        there as well as the problem.
+
+        Parameters
+        ----------
+        target : object
+            An assembler of the same case -- in practice the case itself, after a continuation's
+            stations.
+
+        Returns
+        -------
+        callable
+            ``held -> step``, for the march's stopping test only; the march never steps with it.
+        """
+
+        def stopping(held: NewtonStrategy) -> NewtonStrategy:
+            key = id(target)
+            if key not in self._stopping_steps:
+                if self._reference_state is None:
+                    raise RuntimeError("stopping_step was used before the session built a step")
+                problem = self._problem.with_assembler(target)
+                self._stopping_steps[key] = self._step(self._reference_state, self._march, problem)
+            return held.preconditioned_as(self._stopping_steps[key])
+
+        return stopping
+
     def refresh(
         self, state: jnp.ndarray, previous: NewtonStrategy, **march: object
     ) -> NewtonStrategy:
@@ -547,8 +599,15 @@ class MaterializedSession:
             self._hook.rebind(assembler)
 
     def _build(self, state: jnp.ndarray, march: dict) -> NewtonStrategy:
-        """Fit the inverse (once) and assemble the step around it."""
-        problem = self._problem
+        """The step at ``state``, instrumented by ``on_build`` as every step handed to a march is."""
+        self._reference_state, self._march, self._stopping_steps = state, march, {}
+        step = self._step(state, march, self._problem)
+        return step if self._on_build is None else self._on_build(step)
+
+    def _step(
+        self, state: jnp.ndarray, march: dict, problem: MaterializedProblem
+    ) -> NewtonStrategy:
+        """Fit the inverse (once) and assemble a step on ``problem`` around it."""
         bound = problem.bind_march(march)
         if _is_traced((problem.assembler, state)):
             raise ValueError(
@@ -561,8 +620,7 @@ class MaterializedSession:
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
             self._traced = offers_traced_split(self._preconditioner.inverse)
-        step = problem.build_step(state, self._policy(base), bound, VCYCLE_LINEAR_SOLVE)
-        return step if self._on_build is None else self._on_build(step)
+        return problem.build_step(state, self._policy(base), bound, VCYCLE_LINEAR_SOLVE)
 
     def _policy(self, base) -> MonolithicFactorShiftPolicy | TracedSplitShiftPolicy:
         """``base`` glued to the fitted inverse, in whichever form the step carries it."""

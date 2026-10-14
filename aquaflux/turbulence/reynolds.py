@@ -26,7 +26,7 @@ import equinox as eqx
 import jax
 
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import Convergence, RampSchedule
+from aquaflux.solve import Convergence, RampSchedule, StoppingStepSource
 
 from .coupled import open_session, solve_coupled
 from .march_settings import merged_march_options
@@ -961,7 +961,9 @@ def solve_reynolds_ramp(
     # One session, opened on the ANCHOR so the first step is fitted to the problem it solves, and
     # re-pointed by the homotopy at every station change: a materialized inverse is re-fitted there, and
     # a block-diagonal step rebuilt on the station's viscosity. A session the caller opened is re-pointed
-    # the same way.
+    # the same way. A materialized session's steps keep the anchor's shift diagonal throughout -- the
+    # step control adapts the shift strength on the premise that the diagonal it scales is fixed -- so
+    # the target is judged in its own row scales through the session's stopping step instead.
     shared = _shared_session(passed, first, share_block=True)
     passed = _with_session(passed, shared)
     shared.rebind(first)
@@ -973,8 +975,13 @@ def solve_reynolds_ramp(
         rebind=shared.rebind,
         companion=companion,
     )
+    stopping = (
+        {"stopping_step": shared.stopping_step(coupled)}
+        if isinstance(shared, StoppingStepSource)
+        else {}
+    )
     return solve_coupled(
-        coupled, *seed_fields, homotopy=homotopy, **merged_march_options(passed, extra)
+        coupled, *seed_fields, homotopy=homotopy, **(stopping | merged_march_options(passed, extra))
     )
 
 

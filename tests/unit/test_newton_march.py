@@ -858,6 +858,213 @@ def test_an_update_the_refresh_hook_returns_reaches_every_later_step_and_the_res
     assert float(result.strategy.factor) == 0.25
 
 
+class _JudgedOnItsScale(eqx.Module):
+    """A step whose measure is built from a leaf of the step, as a row-scaled one reads its shift.
+
+    It halves the state and reports the residual in the measure it was handed, so a report says which
+    measure the step was judged in.
+    """
+
+    scale: jnp.ndarray
+    residual_norm: object
+    relaxation_schedule: ConstantRelaxation
+
+    def stepper(self):
+        def step(residual_fn, phi, residual_norm_0, solver):
+            stepped = 0.5 * phi
+            return _outcome(stepped, 1)._replace(
+                residual_norm=self.residual_norm(residual_fn(stepped))
+            )
+
+        return step
+
+    def norm(self):
+        return self.residual_norm
+
+    def with_norm(self, norm):
+        return eqx.tree_at(lambda s: s.residual_norm, self, norm)
+
+    def linear_solver(self):
+        return None
+
+
+def test_a_step_an_update_moves_is_judged_in_the_measure_built_from_the_updated_step() -> None:
+    """An update can carry what the measure is built from (a re-pointed problem's shift), so the march
+    builds the measure again from the updated step.
+
+    The update on the first step raises the scale from 1 to 10. A march that kept the measure it built
+    before the hook ran would judge that step in the old scale and report ``|R|`` instead of ``|R| / 10``.
+    """
+    updated = []
+
+    def refresh(step, state, *, due):
+        if updated:
+            return None
+        updated.append(1)
+        return lambda s: eqx.tree_at(lambda t: t.scale, s, jnp.asarray(10.0))
+
+    def norm_builder(step, state):
+        return lambda residual: jnp.linalg.norm(residual) / step.scale
+
+    result = newton_march(
+        _JudgedOnItsScale(jnp.asarray(1.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=2,
+        rtol=0.0,
+        atol=0.0,
+        norm_builder=norm_builder,
+        refresh_preconditioner=refresh,
+    )
+    assert [float(r.residual_norm) for r in result.reports] == [0.5**3 / 10.0, 0.25**3 / 10.0]
+
+
+def _scaled_by_step(step, state):
+    """A measure built from the step: the residual's 2-norm over the step's ``scale``."""
+    del state
+    return lambda residual: jnp.linalg.norm(residual) / step.scale
+
+
+def _judged_on(scale):
+    """The stopping step of a target whose own scale is ``scale``, for :class:`_JudgedOnItsScale`."""
+    return lambda step: eqx.tree_at(lambda t: t.scale, step, jnp.asarray(scale))
+
+
+def _march_judged(steering_scale, *, max_steps=6, rtol=0.0, atol=0.0, **kwargs):
+    """March ``phi**3 = 0`` from one, halving each step, in a measure scaled by ``steering_scale``."""
+    return newton_march(
+        _JudgedOnItsScale(
+            jnp.asarray(steering_scale), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))
+        ),
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        max_steps=max_steps,
+        rtol=rtol,
+        atol=atol,
+        norm_builder=_scaled_by_step,
+        **kwargs,
+    )
+
+
+def test_a_stopping_step_decides_when_the_march_stops_and_the_step_s_measure_how_it_steps() -> None:
+    """The stop is judged in the stopping step's measure; each step is still reported in its own.
+
+    Steered in a measure ten times looser than the target's, the march would stop after one step
+    (``|R| / 10 = 0.0125 <= 0.02``); judged in the target's, it needs a second (``0.125 > 0.02``,
+    ``0.0156 <= 0.02``).
+    """
+    assert len(_march_judged(10.0, atol=0.02).reports) == 1
+    judged = _march_judged(10.0, atol=0.02, stopping_step=_judged_on(1.0))
+    assert judged.converged
+    assert [float(r.residual_norm) for r in judged.reports] == [0.5**3 / 10.0, 0.25**3 / 10.0]
+
+
+def test_a_stopping_step_s_relative_tolerance_is_relative_to_the_residual_in_its_own_measure() -> (
+    None
+):
+    """``rtol`` scales the stopping step's measure of the starting residual, not the step's own.
+
+    Judged in the target's measure against a reference taken in it (``|R0| = 1``), ``rtol = 0.05`` is
+    met at the second step (0.0156). A reference taken in the ten-times-looser steering measure (0.1)
+    would demand 0.005 and a third step.
+    """
+    judged = _march_judged(10.0, rtol=0.05, stopping_step=_judged_on(1.0))
+    assert judged.converged
+    assert len(judged.reports) == 2
+
+
+def test_each_report_carries_the_residual_the_stopping_test_read() -> None:
+    """``stopping_norm`` / ``stopping_ratio`` are what the stop compared, ``residual_norm`` what steered.
+
+    Judged in the target's measure (ten times the steering one, ``|R0| = 1`` there), the reports read
+    ``0.125`` and ``0.0156`` with ratios equal to them; without a stopping step the two pairs agree.
+    """
+    judged = _march_judged(10.0, atol=0.02, stopping_step=_judged_on(1.0))
+    assert [r.stopping_norm for r in judged.reports] == pytest.approx([0.5**3, 0.25**3])
+    assert [r.stopping_ratio for r in judged.reports] == pytest.approx([0.5**3, 0.25**3])
+    plain = _march_judged(10.0, atol=0.002)
+    assert [r.stopping_norm for r in plain.reports] == [r.residual_norm for r in plain.reports]
+    assert [r.stopping_ratio for r in plain.reports] == [r.residual_ratio for r in plain.reports]
+
+
+def test_a_stopping_step_needs_a_measure_built_from_a_step() -> None:
+    """Without ``norm_builder`` there is no measure to build from the stopping step."""
+    with pytest.raises(ValueError, match="needs a norm_builder"):
+        newton_march(
+            _JudgedOnItsScale(
+                jnp.asarray(1.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))
+            ),
+            _Cubic(jnp.zeros((1,))),
+            jnp.ones((1,)),
+            max_steps=1,
+            rtol=0.0,
+            atol=0.0,
+            stopping_step=_judged_on(1.0),
+        )
+
+
+class _ScaledByStep:
+    """Measures for :func:`~aquaflux.solve.staged_march` whose row scale is the step's ``scale``."""
+
+    def row_scaled(self, step, state):
+        return _scaled_by_step(step, state)
+
+    def block_scaled(self, state):
+        raise TypeError("not used")
+
+
+def test_the_staged_march_judges_its_root_in_the_measure_the_march_stopped_by() -> None:
+    """The driver's final convergence test reads the stopping step's measure, as the march did.
+
+    Judged in a target measure ten times looser than the steering one, the march stops after one step
+    (``0.0125 <= 0.02``). Judged again in the steering measure (0.125) the driver would refuse that
+    state as not a root.
+    """
+    from aquaflux.solve import NO_REFRESH, Convergence, RowScaled, staged_march
+    from aquaflux.solve.driver import FinishedSource
+
+    result = staged_march(
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        strategy=_JudgedOnItsScale(
+            jnp.asarray(1.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))
+        ),
+        source=FinishedSource(),
+        refresh=NO_REFRESH,
+        convergence=Convergence(measure=RowScaled(), rtol=0.0, atol=0.02),
+        measures=_ScaledByStep(),
+        max_steps=6,
+        stopping_step=_judged_on(10.0),
+    )
+    assert float(result.state[0]) == 0.5
+
+
+def test_the_staged_march_scales_its_relative_tolerance_by_the_stopping_measure() -> None:
+    """``rtol`` at the driver's final test scales the starting residual in the stopping step's measure.
+
+    Steered ten times looser than the target, the march stops at the second step, where the target's
+    measure reads 0.0156 against ``0.05 * |R0| = 0.05``. Scaled instead by the starting residual in the
+    steering measure (0.1), the driver would demand 0.005 and refuse the state.
+    """
+    from aquaflux.solve import NO_REFRESH, Convergence, RowScaled, staged_march
+    from aquaflux.solve.driver import FinishedSource
+
+    result = staged_march(
+        _Cubic(jnp.zeros((1,))),
+        jnp.ones((1,)),
+        strategy=_JudgedOnItsScale(
+            jnp.asarray(10.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))
+        ),
+        source=FinishedSource(),
+        refresh=NO_REFRESH,
+        convergence=Convergence(measure=RowScaled(), rtol=0.05, atol=0.0),
+        measures=_ScaledByStep(),
+        max_steps=6,
+        stopping_step=_judged_on(1.0),
+    )
+    assert float(result.state[0]) == 0.25
+
+
 def test_a_step_that_can_stop_for_a_refit_is_refused_without_a_hook_to_take_it() -> None:
     """Every hard step would end early and the preconditioner would never be refreshed: refuse it."""
     step = _StopsForRefit(relaxation_schedule=ConstantRelaxation(jnp.asarray(1.0)))

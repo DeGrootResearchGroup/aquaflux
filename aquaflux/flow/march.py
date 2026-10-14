@@ -452,6 +452,7 @@ def solve_flow_march(
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
     resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
+    stopping_step: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
     **march: object,
 ) -> jnp.ndarray:
     """Solve the coupled flow system ``R(u, p) = 0`` on the staged march every coupled solve uses.
@@ -501,7 +502,7 @@ def solve_flow_march(
     refresh : RefreshPolicy
         How the frozen preconditioner is kept current. There is no coefficient to watch drift on a
         constant-viscosity flow, so use a cost trigger (:class:`~aquaflux.solve.CycleGrowthTrigger`).
-    step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals
+    step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals, stopping_step
         As for :func:`~aquaflux.turbulence.solve_coupled`. A dual-time march given no ``step_control``
         defaults to the Courant ramp. ``on_residuals`` arrives under
         :func:`flow_equation_names`, and only under the row-scaled measure (the default).
@@ -579,6 +580,7 @@ def solve_flow_march(
         station_step=station_step,
         resume=resume,
         on_residuals=on_residuals,
+        stopping_step=stopping_step,
         caller="solve_flow_march",
     )
     root = root_adjoint(

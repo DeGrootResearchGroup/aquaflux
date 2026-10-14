@@ -122,7 +122,9 @@ FIGS = HERE / "figures"
 # the comparison, what observes the march (its log and checkpoints), the `PITZ_*` study overrides as
 # edits of the file, and the study arms no file can state; the two scales the comparison normalizes by
 # are read back out of the file rather than restated beside it.
-CASE_FILE = HERE / "case.yaml"
+#: ``PITZ_CASE_FILE`` names another case file beside this script to run instead (a schedule study's
+#: edited copy, say). It must sit here, not elsewhere: the file's mesh path is relative to it.
+CASE_FILE = HERE / os.environ.get("PITZ_CASE_FILE", "case.yaml")
 CASE = read_case(CASE_FILE)
 U_IN = float(CASE.spec.boundaries["inlet"].velocity[0])
 NU = CASE.spec.fluid.kinematic_viscosity

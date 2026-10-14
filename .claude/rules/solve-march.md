@@ -1078,7 +1078,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
       so a row near the total *owns* the residual. Names come from `coupled_equation_names(dim)` —
       `(u, v, w, p, k, omega)`, the flat layout's block order — the single home shared with
       `coupled_fields`, so the two grids join. Costs **one extra residual evaluation per logged step**,
-      which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** — pinned at
+      which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** (the steered `R`: after a `stopping_step` march arrives they add up to the `steered R` aside instead) — pinned at
       `rel=1e-12`. That requires equilibrating at the **previous** state, not the logged one:
       `newton_march` re-derives the measure at the state each outer iteration *starts* from and holds
       it for the whole iteration (every trial step, the acceptance test, and the reported norm), so a
@@ -1143,6 +1143,58 @@ or whose blocks are unnamed: `RowScaledNorm` /
       so updating only it lasts one step) and reports the last on **`MarchResult.strategy`**, which
       `staged_march` carries into the next segment and the adjoint. At unchanged array shapes it is a
       compile-cache hit; see `solve-field-split.md` for what keeps the shapes fixed.
+    **When `norm_builder` is set, the march builds the step's measure AGAIN from the updated step
+    (2026-10-13, #701)**: an update can carry a new shift policy (`RebuildingSession`, the block-diagonal
+    family, grafts the station's policy at a `rebind`), and the row-scaled measure reads its scales from
+    the step's policy, so without the rebuild the step entering a new problem was judged in the previous
+    one's scales. A materialized session's update carries only a re-fitted traced split, whose rebuild
+    gives the same scales. Pinned by
+    `test_a_step_an_update_moves_is_judged_in_the_measure_built_from_the_updated_step` (mutation-checked).
+    The escalation's redo path applies an update without rebuilding the measure (a redo keeps the
+    attempt's measure; only a `rebind`'s first step can carry a new policy, and that is the top path).
+  - **`stopping_step` / `stopping_reference` — judge the STOP in another step's measure (BUILT
+    2026-10-14, #701).** `newton_march(stopping_step=step -> step)` (threaded through `staged_march` and
+    `solve_coupled`): once arrived, the stopping test (the loop condition, the retry loop's
+    "already converged" check, `MarchResult.converged`) reads `norm_builder(stopping_step(step),
+    state)(R(state))` instead of the step's own measure; every step is still steered, line-searched and
+    REPORTED in its own (so `StepReport.residual_norm`, the step controls and the triggers are untouched
+    -- a march with one is step-for-step identical to one without, up to where it stops). The tolerance
+    is `atol + rtol * stopping_reference`, the starting residual measured in the stopping measure
+    (`staged_march` takes it once at its initial state and passes it on; `newton_march` takes it at
+    `phi0` otherwise); reports keep `reference_norm`. Needs `norm_builder`; `staged_march` refuses it
+    beside a `resume` (whose reference was taken in the steering measure). Costs a measure build and a
+    residual evaluation per step once arrived. **What the stop read is reported too (2026-10-14):**
+    `StepReport.stopping_norm` / `stopping_ratio` carry the norm the stopping test compared and its ratio
+    to `judged_reference()` (the starting residual in that measure) on every step -- equal to
+    `residual_norm` / `residual_ratio` without a stopping step, `nan` on a hand-built report.
+    `MarchLogger`'s `R` column and its `reference |R0| ... stopping at` banner read them (falling back to
+    the steered pair when `nan`), so the banner re-heads at arrival in the stopping measure, and a step
+    whose two norms differ gets an aside `steered R ...; R is the stopping measure` -- the per-equation
+    grid stays the steered measure's terms. `case/run.py` records `stopping_norm` as the run's
+    `residual`. ⚠️ Before this, a log's final `R` (bfs3d E6: 2.55e-6) was the steered norm, not the
+    number compared with `atol`. ⚠️ **`aquaflux_ui`'s Run section still plots and judges
+    `residual_norm`** (`run_monitor.py`); the new columns reach `history.csv` (`StepHistory.COLUMNS`
+    follows `StepReport._fields`) but the page does not read them yet. Pinned by
+    `test_each_report_carries_the_residual_the_stopping_test_read` (`test_newton_march.py`),
+    `test_once_a_march_judges_its_stop_in_another_measure_the_log_reports_that_measure`
+    (`test_march_log.py`) and `test_case_run.py`'s step count; six mutations each turn one red. **What it is for:** a materialized viscosity ramp holds
+    the anchor's shift diagonal for the whole march (deliberately -- `solve.md`'s `materialized_session`
+    entry), so the case was judged in the anchor's row scales, which under-read its residual by
+    1.4-4x at bfs3d's end state; `solve_reynolds_ramp` passes the session's
+    `stopping_step(case)`. Measured on both flagship cases (configurations in `turbulence.md`, "#701"):
+    pitzDaily 19 / 144 identical to main on every row; bfs3d (its pre-#712 file) identical on every row
+    to main's stop, then 2 more steps at `refit_beta_floor` 0.05 (176 against 166 cycles) and 1 without
+    (157 against 155), to the same `x_r/h`; on #712's bfs3d file 20 / 134 against main's 19 / 126, the
+    same way. **Steering in the stopping measure as well (prototype E8) lost on #712's file** and is not
+    built; the march steers in the step's own measure (`turbulence.md`, "#701"). Pinned by `test_a_stopping_step_decides_when_the_march_stops_and_the_step_s_measure_how_it_steps`,
+    `..._relative_tolerance_is_relative_to_the_residual_in_its_own_measure`,
+    `test_the_staged_march_judges_its_root_in_the_measure_the_march_stopped_by` and
+    `..._scales_its_relative_tolerance_by_the_stopping_measure` (`test_newton_march.py`; mutations
+    caught: the stop read in the steering measure, the stop reference taken in it, the driver's final
+    check in it, and the driver's relative target scaled by it). **Dismissed, not tested:** the retry
+    loop's converged check reading the steering measure instead (reachable only when a retry reason
+    fires on a step one measure calls converged and the other does not), and the driver handing
+    `newton_march` its reference rather than letting it measure the same value at `phi0`.
     Two consumers: `MaterializedSession.refresh_preconditioner` over `BetaTrackingRefresh`, which
     re-fits on its first call, after a `rebind`, and when the march passes `due` (a cost-ended step, a
     trigger); and `solve.RebuildingSession.refresh_preconditioner` (the block-diagonal family, #386),

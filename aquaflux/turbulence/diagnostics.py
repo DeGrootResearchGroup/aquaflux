@@ -115,8 +115,9 @@ def coupled_residuals(
     from and holds it for the whole iteration -- every trial step, the acceptance test, and the norm it
     reports -- so a step's residual is ``norm_at_start(R(state_at_end))``. Building the scales at the
     state handed in here instead would measure the right residual vector in the *wrong* scales, and the
-    per-equation rows would not add up to the number printed above them. So this holds the previous
-    state and equilibrates against that.
+    per-equation rows would not add up to the step's ``residual_norm``. So this holds the previous
+    state and equilibrates against that. (A march that judges its stop in another measure once arrived
+    logs that measure as ``R``; these rows are still the terms of ``residual_norm``.)
 
     **Stateful by construction**, therefore: it must be called once per step, in order, from
     :meth:`~aquaflux.solve.MarchLogger.on_checkpoint` -- the same contract

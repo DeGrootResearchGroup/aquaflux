@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import jax.numpy as jnp
 
 from .strategy import NewtonStrategy, StopsForRefresh
 
-__all__ = ["PreconditionerSession", "RebuildingSession"]
+__all__ = ["PreconditionerSession", "RebuildingSession", "StoppingStepSource"]
 
 
 class PreconditionerSession(Protocol):
@@ -52,6 +52,21 @@ class PreconditionerSession(Protocol):
 
     def rebind(self, assembler: object) -> None:
         """Point the session at another companion of the same case, such as the next continuation rung."""
+        ...
+
+
+@runtime_checkable
+class StoppingStepSource(Protocol):
+    """A session that can say what a march's steps would be on another problem, for its stopping test.
+
+    A continuation steps through companions of a case and stops only on the case itself. A session whose
+    steps keep what they were built with across a change of problem -- a shift diagonal, which a
+    row-scaled measure reads its scales from -- would have the march judge the case in a companion's
+    scales. It offers instead the step to judge by.
+    """
+
+    def stopping_step(self, target: object) -> Callable[[NewtonStrategy], NewtonStrategy]:
+        """``held -> step``, the step a march holding ``held`` is judged by when solving ``target``."""
         ...
 
 

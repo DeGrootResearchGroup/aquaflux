@@ -537,7 +537,8 @@ def test_the_run_hands_each_march_hook_to_every_recorder_that_has_it() -> None:
     steps.on_retry("alpha", 1, 0.5)
     steps.on_refresh("timing")
     steps.on_residuals({"u": 1.0})
-    steps.on_checkpoint(types.SimpleNamespace(residual_norm=0.25), None)
+    # The record keeps the residual the stopping test read, not the one the step was steered by.
+    steps.on_checkpoint(types.SimpleNamespace(residual_norm=0.5, stopping_norm=0.25), None)
     assert seen == [
         ("history", "alpha"),
         ("history", "timing"),
