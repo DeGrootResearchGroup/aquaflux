@@ -136,7 +136,11 @@
       signature appears (6 cells below 1e-3, pure ω, shift-insensitive), and removing the ω row's
       couplings to the other fields takes the count below 1e-3 from 6 to **0** (below 1e-2, 273 to **0**)
       while removing the ω column's changes neither; cell 721's raw ∂R_ω/∂ω is 0.6, its equilibrated
-      ω–p entry 1348. bfs3d has not been re-measured this way (the probe now prints both counts). If it
+      ω–p entry 1348. **Its source is measured (2026-10-14, `pitzdaily_openfoam/omega_row_coupling.py`):
+the conservative upwind ω advection on the Rhie--Chow flux, entirely. In the bulk it is ω_P × the
+continuity row. In the flagged cells it is mostly the wall-fixed neighbour's ω convected across one face.
+It is physical, not a scaling defect**; table and verdict under open direction 10 in
+`solve-open-directions.md`. bfs3d has not been re-measured this way (the probe now prints both counts). If it
       agrees, what a cell-centred patch meets is non-normality -- an error in its local pressure
       multiplied by ~1e3 into ω -- which a global cell-major incomplete-LU sweep and the block-triangular
       field split (whose lower block is exactly this coupling) carry without inverting it in isolation. The affected

@@ -378,9 +378,74 @@ Over the 200 smallest blocks `σ_min` tracks one over the largest ω-row couplin
 solve with the flow frozen is already well posed, so the elimination below targets nothing; the shift
 not reaching the cells is predicted too (it adds to a diagonal that was never small). **To close or
 reopen it:** run `validation/bfs3d_openfoam/cell_block_conditioning.py N <shift> 0.05 0` on the three
-states in the table below; the `no ω-row` / `no ω-col` columns decide it. Why ∂R_ω/∂p is so large near
-walls is unmeasured (a hypothesis: ω's convective flux through the Rhie--Chow mass flux, where ω is
-large, against a small pressure diagonal).
+states in the table below; the `no ω-row` / `no ω-col` columns decide it.
+
+**✅ WHERE ∂R_ω/∂p AND ∂R_ω/∂u COME FROM — measured 2026-10-14: ω's conservative ADVECTION, and nothing
+else.** Harness `validation/pitzdaily_openfoam/omega_row_coupling.py` (splits the ω residual into its
+five terms, checks they sum to the residual's ω rows — max diff 3.9e-13 against terms of 53 — and takes
+each term's `jax.jvp` along a unit `u`/`v`/`p`/ω perturbation of the cell). Configuration: pitzDaily
+`state-00017` of the shipped march re-run at `dcaf134` (`PITZ_CHECKPOINT_KEEP=200`; 19 steps, 144 restart
+cycles; the census reproduces the 6 / 273 above and cell 721's 176 / 0.597 exactly), shift 1e-4, Linux
+x86_64, 4 cores, jax 0.11.2, Python 3.13.
+
+| cell | where | ω_P | ∂R_ω/∂p (all advection) | ∂R_c/∂p | ∂R_ω/∂p ÷ ∂R_c/∂p | bounded ∂R_ω/∂p | ∂R_ω/∂u (advection share) |
+|---|---|---|---|---|---|---|---|
+| 721 | 2nd column off the step wall | 2190 | 176.4 | 0.0287 | 6153 | 113.6 (64 %) | −5.298 (100 %) |
+| 1081 | same column | 2416 | 125.6 | 0.0193 | 6516 | 79.0 (63 %) | −5.202 (100 %) |
+| 10619 | 2nd row off the upper wall | 13760 | 308.6 | 0.0086 | 35890 | 190.3 (62 %) | ∂/∂v 33.45 (100 %) |
+| 5000 | bulk control | 1359 | 0.340 | 2.5e-4 | **1359 = ω_P** | **1.5e-6 (0 %)** | 0.025 (1 %) |
+
+Diffusion, production, destruction and cross-diffusion contribute **exactly 0** to ∂R_ω/∂p and under
+0.1 % to ∂R_ω/∂u in the flagged cells. The upwind advection row is `Σ_f F_f ω_up,f`, so its pressure entry is
+`Σ_f (∂F_f/∂p_P) ω_up,f` through the Rhie--Chow flux. That splits into **ω_P × the continuity row**
+(`R_c = Σ mdot`, ρ = 1) plus `Σ_f (∂F_f/∂p_P)(ω_up,f − ω_P)`. In the bulk it is the first part to four
+figures. In the flagged cells the effective ω is 2.6–2.8× ω_P, because the upwind neighbour is the
+**wall-fixed cell** carrying the near-wall `ω_wall` (~1e4): the steep near-wall ω profile is convected
+across one face. The log transform is not implicated: the row is the physical residual, its ω column is
+`ω·∂R/∂ω` (0.597 at 721), and equilibration multiplies 176 by `1/sqrt(0.597 · 0.0287)` = 7.6 to give the
+1345 the census prints. **Physical and expected for a conservative upwind discretization on a coupled
+Rhie--Chow flux. It is not a missing division, a missing `1/ω` or a wall-blend artifact.** A segregated
+code never sees it: SIMPLE freezes `phi` inside the ω solve. OpenFOAM's steady pitzDaily (`of_case/system/fvSchemes`)
+also writes `div(phi,omega) bounded Gauss`, which subtracts `ω·div(phi)`, i.e. the first part above
+(its transient `of_transient` does not).
+
+**The bounded rewrite, measured as a counterfactual (not built).** `R_ω − ω_P R_c / ρ` on the
+transported rows only (a wall-fixed row is a value fixation and must be left alone; rewriting those too
+made the census *worse*, 91 below 1e-3, the trap to avoid). It shares every root (`R_c = 0` there), so
+neither the solution nor the adjoint moves. At this state `‖ω_P R_c‖` is 9.7 % of the unfixed `‖R_ω‖`
+(0.090 of 0.923).
+
+| shift 1e-4 (0 identical) | median `σ_min` | min | < 1e-3 | < 1e-2 |
+|---|---|---|---|---|
+| conservative (as assembled) | 0.170 | 5.9e-4 | 6 | 273 |
+| bounded, transported rows | **0.518** | 7.7e-4 | **2** | **119** |
+
+It decouples the bulk (median 3×), but the worst cells are the same step-wall column (721, 901, 1081,
+1621, 1261, 1441) at 7.7e-4 to 1.2e-3. What survives is the wall ω convected in, which no rewrite of the
+row can remove because it is the operator.
+
+**Verdict on pitzDaily: close the motivation, change nothing.** (1) There is no ω stiffness for a local
+nonlinear ω solve to eliminate. The diagonal is ordinary, and the large entries are the ω row's
+dependence on the *flow*, which a frozen-flow ω solve holds fixed by construction. (2) Nothing shipped
+inverts a cell block in isolation. The field split's lower block applies this coupling to the leading
+block's correction, where a continuity error `e_c` in that correction reaches the ω right-hand side as
+`ω_P e_c` (the bounded form would leave only the `ω_up − ω_P` part). Whether that costs Krylov cycles
+is **unmeasured**, and nothing on record attributes field-split cycles to it. The march at this state
+takes 5–7 cycles per step. (3) The measure: the ω rows of the row-scaled norm carry `ω_P R_c`, 10 % of
+the ω-row residual here, so not a dominant contamination. **What would reopen it:** a field-split solve
+whose cost tracks the leading block's continuity error. The first A/B is then the bounded row
+combination applied as a left row operation `L = I − diag(ω_P/ρ)P_{c→ω}` (transported rows only) inside
+the preconditioner. That leaves the residual and its root untouched.
+
+**bfs3d (owner's machine; its mesh is not in a cloud container).** At the three states in the table
+below, one run each and on its own (it materializes the coupled Jacobian):
+
+    python3 validation/pitzdaily_openfoam/omega_row_coupling.py --case bfs3d_openfoam 11 0.0173 22480 12880 21840 13520
+    python3 validation/pitzdaily_openfoam/omega_row_coupling.py --case bfs3d_openfoam 27 0.005 22480 12880
+    python3 validation/pitzdaily_openfoam/omega_row_coupling.py --case bfs3d_openfoam 28 0.01 22480 12880
+
+(cells from the census's worst list; substitute that run's own worst cells if they differ). It closes on
+bfs3d too if the ∂R_ω/∂p rows are again all advection and the census's `no ω-row` column again goes to ~0.
 
 **What.** Before each global Newton step, run a few cheap local nonlinear solves of the ω equation
 (flow and `k` frozen) in the cells the cell-block SVD flags (`σ_min < 1e-3`, ~1.5 % of bfs3d), then
