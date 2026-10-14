@@ -101,8 +101,9 @@ from aquaflux.solve import (
     VelocityShiftParts,
     assembler_residual,
     block_reference_scales,
+    bounded_block_projection,
+    composed_projection,
     explicit_source,
-    positive_block_limit,
     positive_block_projection,
     refuse_a_transform_the_march_cannot_run_in,
     resolve_linear_solve,
@@ -179,7 +180,7 @@ class DirectScalars(ScalarVariableTransform):
     """The identity parametrization: the solved unknown *is* the physical field (``phi = w``).
 
     Positivity is not structural here -- it is carried by the pseudo-transient shift, the divergence
-    guard, and (for ``k``) the fraction-to-the-boundary step limiter :func:`positive_k_limit` -- so a
+    guard, and (for ``k``) the per-cell clip :func:`positive_k_projection` -- so a
     full Newton step can transiently violate ``omega > 0`` on a stiff high-Reynolds case. The
     historical default; use :class:`LogScalars` where that matters.
     """
@@ -1309,56 +1310,20 @@ class _CoupledMeasures(eqx.Module):
         return _coupled_residual_norm(self.coupled, state)
 
 
-def positive_k_limit(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
-    """The step limiter keeping ``k`` strictly positive, or ``None`` when the transform already does.
-
-    ``k`` is solved DIRECTLY (``log k`` is singular at a no-slip wall, where ``k = 0`` is the physical
-    boundary condition), so nothing structurally prevents a Newton step from carrying it negative --
-    and the SST closure's ``sqrt(k)`` turns a single negative cell into NaN across the whole residual.
-    Measured: a march ran 62 healthy steps and died when **two cells out of 23040** reached
-    ``k = -3.3e-4``, with every field still finite and moving by ~1e-4.
-
-    Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
-    since a cap there would only throttle a step for no benefit.
-
-    Parameters
-    ----------
-    coupled : CoupledRANS
-        The assembled case, for its block layout.
-    tau : float
-        Fraction of the distance to the boundary taken (see
-        :func:`~aquaflux.solve.positive_block_limit`).
-    floor : float
-        Absolute room in ``k`` granted to every cell, so a cell whose ``k`` is numerically zero stops
-        setting the step length for all of them (see :func:`~aquaflux.solve.positive_block_limit` for
-        the collapse this prevents and how to choose it). ``0`` (default) is the plain rule. Give it as
-        a fraction of a reference ``k`` for the case -- an absolute constant does not transfer between
-        cases with different velocity scales.
-
-    Returns
-    -------
-    callable or None
-        ``(phi, delta) -> alpha_max`` for a directly-solved ``k``; ``None`` otherwise.
-    """
-    if not isinstance(coupled.k_transform, DirectScalars):
-        return None
-    k_block = coupled.layout.slice_of("k")
-    return positive_block_limit(k_block.start, k_block.stop, tau, floor)
-
-
-def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float = 0.0):
+def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99):
     """The step projection keeping ``k`` positive per cell, or ``None`` when the transform already does.
 
-    The per-cell counterpart of :func:`positive_k_limit`, and the reason to prefer it on this system:
-    the cap is a minimum over cells, so a single cell whose ``k`` is numerically zero sets the step
-    length for all of them. That is not hypothetical here -- on a 3D backward-facing step the binding
-    cell is the stagnant corner where the step face, the floor and a side wall meet, which has no shear
-    and therefore no turbulent-energy production, so its ``k`` decays with nothing to arrest it. Its
-    correction then throttles the whole march while every other cell is healthy.
+    ``k`` is solved directly (``log k`` is singular at a no-slip wall, where ``k = 0`` is the physical
+    boundary condition), so nothing structurally stops a Newton step carrying it negative, and the SST
+    closure's ``sqrt(k)`` turns a single negative cell into NaN across the whole residual. This clips
+    each cell's own ``k`` correction to within ``tau`` of zero (:func:`~aquaflux.solve.positive_block_projection`).
 
-    Clipping each cell's own correction leaves that cell to decay alone and lets the rest take a full
-    step. See :func:`~aquaflux.solve.positive_block_projection` for the rule, why a floor on the cap
-    postpones rather than removes the collapse, and why this stays a single search direction.
+    **Why per cell, not a cap on the whole step.** The alternative, shortening the whole step by the
+    fraction-to-the-boundary rule, takes a minimum over cells, so one cell whose ``k`` is numerically
+    zero sets the step length for all of them. On a 3D backward-facing step that cell is a stagnant
+    side-wall corner -- no shear, so no turbulent-energy production -- and it held the step to 0.001-0.002
+    while every other cell admitted 0.6 or more, which is what made the march redo steps at a larger
+    shift. Clipping per cell leaves that cell to decay alone and lets the rest take the step.
 
     Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
     since a projection there would clip nothing.
@@ -1368,11 +1333,7 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float 
     coupled : CoupledRANS
         The assembled case, for its block layout.
     tau : float
-        Fraction of the distance to the boundary a cell may take.
-    floor : float
-        Absolute room in ``k`` granted to every cell. ``0`` (default) is the plain rule and is normally
-        what this wants -- unlike the cap, a projection has no reason to exempt a dead cell, because a
-        dead cell no longer costs anything.
+        Fraction of the distance to zero a cell's ``k`` may move in one correction.
 
     Returns
     -------
@@ -1382,65 +1343,96 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99, floor: float 
     if not isinstance(coupled.k_transform, DirectScalars):
         return None
     k_block = coupled.layout.slice_of("k")
-    return positive_block_projection(k_block.start, k_block.stop, tau, floor)
+    return positive_block_projection(k_block.start, k_block.stop, tau)
 
 
-def _k_positivity_guards(
-    coupled: CoupledRANS, positivity_floor: float, positivity_projection: bool
-) -> tuple[Callable[..., jnp.ndarray] | None, Callable[..., jnp.ndarray] | None]:
-    """The ``(step_limit, step_projection)`` pair every coupled continuation builder installs.
+#: The largest factor one cell's ``omega`` may change by in one correction, unless a solve says
+#: otherwise: ``|delta log omega| <= 1`` (see :func:`omega_step_bound`).
+DEFAULT_OMEGA_STEP_RATIO = math.e
 
-    One tail for the four builders (#365): each independently built :func:`positive_k_limit` and
-    :func:`positive_k_projection` from the same two arguments -- the drifting-sibling shape the
-    shared-tail rule warns about, and here it was hiding a real trap rather than just duplication.
 
-    **``positivity_floor`` is provably inert whenever ``positivity_projection`` is true (the
-    default).** The Newton step applies ``step_projection`` to ``delta`` first, then hands the
-    result to ``step_limit`` (:func:`_coupled_step`). The projection clips every cell to within
-    ``tau`` of its own boundary, so after it runs, the limiter's room is `>= 1/tau` for every entry
-    and it reports ``alpha_max = 1`` regardless of what floor it was built with. So a caller who
-    raises ``positivity_floor`` under the default projection gets neither an error nor the
-    protection they asked for -- the limiter that floor feeds never binds. Raised here instead of
-    silently doing nothing, the same choice already made for ``preconditioner`` / ``reference_state`` /
-    ``**strategy_kwargs`` in :func:`_continuation_source`.
+def omega_step_bound(coupled: CoupledRANS, ratio: float):
+    """The step projection bounding each cell's ``omega`` to change by at most ``ratio`` in one correction.
 
-    A non-zero floor is not refused when ``k`` is solved in log form (:func:`positive_k_limit`
-    returns ``None`` there): that inertness is a different, already-documented story (the transform
-    already keeps ``k`` positive by construction), not the projection masking a real guard.
+    ``omega`` must be solved as its logarithm, where the bound is ``log(ratio)`` on each entry's
+    correction (:func:`~aquaflux.solve.bounded_block_projection`): a factor, the same whatever the
+    local ``omega``, which spans orders of magnitude across a wall-bounded flow.
+
+    **Why it exists: the per-cell ``k`` clip does not keep the step's ``omega``.** Clipping a cell's
+    ``k`` correction (:func:`positive_k_projection`) leaves that cell's ``omega`` correction as it was
+    solved -- for a ``k`` move that is no longer taken. Measured on the 3D backward-facing step (23040
+    cells, multiple-correction gradient, ``beta`` 0.0062 at the sixth step of a 12-station viscosity
+    ramp, from that step's start): under the clip alone one step moved ``log omega`` by up to 11.6 in a
+    single cell, a factor of 1e5. Bounding it to 1 in the same step held it to 2.8 across the step's
+    four inner iterations, and the step's own residual reduction was the same or better.
 
     Parameters
     ----------
     coupled : CoupledRANS
-        The assembled case, forwarded to :func:`positive_k_limit` / :func:`positive_k_projection`.
-    positivity_floor : float
-        Forwarded to the limiter only. See :func:`positive_k_projection`'s own docstring for why
-        the projection does not want a floor: a dead cell decays alone under it, so there is nothing
-        to exempt it from.
-    positivity_projection : bool
-        Whether the per-cell projection replaces the global cap as the active guard.
+        The assembled case, for its block layout and ``omega``'s parametrization.
+    ratio : float
+        The largest factor one cell's ``omega`` may change by in one correction; above 1.
 
     Returns
     -------
-    tuple of (callable or None, callable or None)
-        ``(step_limit, step_projection)``, ready for ``_coupled_step`` / ``_monolithic_factor_step``.
+    callable
+        ``(phi, delta) -> delta'``.
 
     Raises
     ------
     ValueError
-        If ``positivity_floor`` is non-zero, ``k`` is solved directly (so the limiter it feeds is a
-        real guard, not ``None``), and ``positivity_projection`` is true.
+        If ``omega`` is not solved as its logarithm, or ``ratio`` is not above 1.
     """
-    step_limit = positive_k_limit(coupled, floor=positivity_floor)
-    if positivity_floor and positivity_projection and step_limit is not None:
+    if not isinstance(coupled.omega_transform, LogScalars):
         raise ValueError(
-            f"positivity_floor={positivity_floor!r} has no effect here: positivity_projection=True "
-            "(the default) clips every k correction to within `tau` of its own boundary before the "
-            "limiter runs, so the limiter always reports alpha_max=1 regardless of its floor. Pass "
-            "positivity_projection=False to make the floor take effect, or leave positivity_floor=0.0 "
-            "to keep the (per-cell) projection."
+            "omega_step_ratio bounds the change in log(omega), so omega must be solved as its "
+            f"logarithm (omega_transform=LogScalars()); this case solves it with "
+            f"{type(coupled.omega_transform).__name__}."
         )
-    step_projection = positive_k_projection(coupled) if positivity_projection else None
-    return step_limit, step_projection
+    if not ratio > 1.0:
+        raise ValueError(f"omega_step_ratio must be above 1, got {ratio!r}")
+    omega_block = coupled.layout.slice_of("omega")
+    return bounded_block_projection(omega_block.start, omega_block.stop, math.log(ratio))
+
+
+def _closure_step_projection(
+    coupled: CoupledRANS, omega_step_ratio: float | None = None
+) -> Callable[..., jnp.ndarray] | None:
+    """The step projection every coupled builder installs: ``k`` clipped per cell, then ``omega`` bounded.
+
+    The two are one guard, not two options. Clipping a cell's ``k`` correction
+    (:func:`positive_k_projection`) leaves that cell's ``omega`` correction as it was solved, for a ``k``
+    move that is no longer taken, and on the 3D backward-facing step that alone produced full-length
+    trials whose residual rose by up to 4e91. Bounding ``omega`` per cell as well
+    (:func:`omega_step_bound`) is what makes the clip safe to take.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled case, for its block layout and the two scalars' parametrizations.
+    omega_step_ratio : float or None
+        The largest factor one cell's ``omega`` may change by in one correction. ``None`` (default) is
+        :data:`DEFAULT_OMEGA_STEP_RATIO` where ``omega`` is solved as its logarithm and no bound where it
+        is solved directly; ``math.inf`` bounds nothing.
+
+    Returns
+    -------
+    callable or None
+        ``(phi, delta) -> delta'``, or ``None`` when neither scalar needs guarding.
+
+    Raises
+    ------
+    ValueError
+        If a finite ``omega_step_ratio`` is given for a directly-solved ``omega`` (see
+        :func:`omega_step_bound`).
+    """
+    if omega_step_ratio is None:
+        log_omega = isinstance(coupled.omega_transform, LogScalars)
+        omega_step_ratio = DEFAULT_OMEGA_STEP_RATIO if log_omega else math.inf
+    return composed_projection(
+        positive_k_projection(coupled),
+        None if math.isinf(omega_step_ratio) else omega_step_bound(coupled, omega_step_ratio),
+    )
 
 
 def _coupled_shift_policy(
@@ -1858,7 +1850,6 @@ def _coupled_step(
     dual_time: DualTimeLoop | None,
     krylov_solver: lx.AbstractLinearSolver | None,
     inner_observer: Callable[..., None] | None = None,
-    step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
@@ -1908,8 +1899,8 @@ def _coupled_step(
         The dual-time inner loop, or ``None`` for the single shifted step. Unlike the settings above
         this is not shared: the flow-only and scalar marches have no dual-time form, so the loop is a
         coupled choice and stays on the coupled builders.
-    krylov_solver, inner_observer, step_limit, step_projection
-        The linear solve and the per-step guards. See the two step classes.
+    krylov_solver, inner_observer, step_projection
+        The linear solve, the inner-iteration hook and the per-cell guard. See the two step classes.
     jacobian_production_viscosity : bool
         Freeze ``k`` inside the k-production's eddy viscosity in the **operator** the shifted solve
         differentiates, leaving the residual it is driving to zero exact (see
@@ -1980,7 +1971,6 @@ def _coupled_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=policy.adjoint_factory(),
         inner_observer=inner_observer,
-        step_limit=step_limit,
         step_projection=step_projection,
         jacobian_residual=jacobian_residual,
         line_search=_COUPLED_LINE_SEARCH,
@@ -1997,7 +1987,6 @@ def _monolithic_factor_step(
     krylov_solver: lx.AbstractLinearSolver | None,
     regime: LinearSolveRegime,
     inner_observer: Callable[..., None] | None = None,
-    step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_gradient_sweeps: int | None = None,
     jacobian_production_viscosity: bool = False,
@@ -2017,7 +2006,6 @@ def _monolithic_factor_step(
         dual_time=dual_time,
         krylov_solver=krylov_solver,
         inner_observer=inner_observer,
-        step_limit=step_limit,
         step_projection=step_projection,
         jacobian_gradient_sweeps=jacobian_gradient_sweeps,
         jacobian_production_viscosity=jacobian_production_viscosity,
@@ -2133,9 +2121,7 @@ class _BlockSession(RebuildingSession):
         repointed: bool = False,
     ) -> NewtonStrategy:
         coupled = self.assembler
-        step_limit, step_projection = _k_positivity_guards(
-            coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
-        )
+        step_projection = _closure_step_projection(coupled, keywords.pop("omega_step_ratio"))
         policy = _coupled_shift_policy(
             coupled,
             state,
@@ -2159,7 +2145,6 @@ class _BlockSession(RebuildingSession):
             regime=regime,
             krylov_solver=krylov_solver,
             dual_time=dual_time,
-            step_limit=step_limit,
             step_projection=step_projection,
             jacobian_production_viscosity=self._production_viscosity,
             **keywords,
@@ -2226,8 +2211,8 @@ class _CoupledProblem(MaterializedProblem):
         keywords = _march_keywords(march)
         # Before any inverse is fitted: a misconfigured floor is a caller mistake, and the multigrid
         # families import an optional dependency the check must not wait on.
-        keywords["step_limit"], keywords["step_projection"] = _k_positivity_guards(
-            self.coupled, keywords.pop("positivity_floor"), keywords.pop("positivity_projection")
+        keywords["step_projection"] = _closure_step_projection(
+            self.coupled, keywords.pop("omega_step_ratio")
         )
         return keywords
 
@@ -2374,8 +2359,7 @@ def coupled_step(
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
     shift: CoupledShiftSettings | None = None,
     inner_observer: Callable[..., None] | None = None,
-    positivity_floor: float = 0.0,
-    positivity_projection: bool = True,
+    omega_step_ratio: float | None = None,
     jacobian_gradient_sweeps: int | None = None,
 ) -> NewtonStrategy:
     """Build the coupled march's Newton step with its preconditioner **frozen** at ``reference_state``.
@@ -2431,15 +2415,14 @@ def coupled_step(
         the path: the shift vanishes at the root.
     inner_observer : callable or None
         A per-inner-iteration hook forwarded to the dual-time step. Forward-only.
-    positivity_floor : float
-        Absolute room in ``k`` the step limiter gives every cell, so a numerically dead cell cannot set
-        the step length for all of them. ``0.0`` (default) is the plain fraction-to-the-boundary rule. A
-        non-zero floor beside ``positivity_projection=True`` is refused, because the projection runs first
-        and the limiter it feeds can then never bind.
-    positivity_projection : bool
-        Clip each cell's own ``k`` correction instead of shortening the whole step for the worst cell.
-        ``True`` (default); ``False`` restores the global cap. Neither moves the converged root or its
-        adjoint -- at a root the correction vanishes.
+    omega_step_ratio : float or None
+        The largest factor one cell's ``omega`` may change by in one correction. Every step clips each
+        cell's own ``k`` correction to keep ``k`` positive, and bounds ``omega`` alongside it, because a
+        clipped ``k`` leaves its cell's ``omega`` correction computed for a move that is no longer taken
+        (:func:`_closure_step_projection`). ``None`` (default) is :data:`DEFAULT_OMEGA_STEP_RATIO`,
+        ``e``, where ``omega`` is solved as its logarithm and no bound where it is solved directly;
+        ``math.inf`` bounds nothing. Neither guard moves the converged root or its adjoint: at a root
+        the correction vanishes.
     jacobian_gradient_sweeps : int or None
         Cap the gradient reconstruction's sweeps in the copy of the residual the forward Jacobian is
         differentiated from, leaving the residual itself -- and so the root and the adjoint -- unchanged.
@@ -2464,8 +2447,7 @@ def coupled_step(
             "linear_solve": linear_solve,
             "shift": shift,
             "inner_observer": inner_observer,
-            "positivity_floor": positivity_floor,
-            "positivity_projection": positivity_projection,
+            "omega_step_ratio": omega_step_ratio,
             "jacobian_gradient_sweeps": jacobian_gradient_sweeps,
         },
     )
@@ -2520,7 +2502,7 @@ def _reject_a_root_the_frozen_cap_invalidates(
     anywhere: the forward fields would be perfectly good, and the **gradient through them silently
     wrong**, which is precisely the failure that must not be shipped quietly.
 
-    The same discipline the positivity floors are held to -- a stabilization that alters the
+    The same discipline the positivity guards are held to -- a stabilization that alters the
     linearization is free only while it is inactive at the root, and something has to check rather
     than assume. ``error_if`` (not a Python ``if``) because the check must fire on the traced
     ``jax.grad`` path too, which is the only path where the damage is real. A bordered ``state``
@@ -2557,7 +2539,7 @@ def _continuation_source(
     ``**strategy_kwargs`` configure the continuation ``solve_coupled`` builds. On the two paths where
     it does not build one -- an explicit ``strategy``, or a ``RefreshPolicy(builder=...)`` -- they
     reached nothing at all, with no error and no log line: a caller asking for a dual-time loop or
-    ``positivity_floor=1e-6`` got the library defaults and a march that looked like the one they
+    ``omega_step_ratio=3.0`` got the library defaults and a march that looked like the one they
     configured. ``**kwargs`` is what made it silent, since it accepts every keyword and checks none, and
     that door is the main entry point's.
 
@@ -2819,7 +2801,7 @@ def solve_coupled(
         Forwarded to :func:`~aquaflux.solve.newton_march`; named by :func:`coupled_equation_names`
         under the default row-scaled measure, and not called under the block-scaled one.
     **strategy_kwargs
-        The march settings of :func:`coupled_step` (``dual_time``, ``positivity_floor``, ``linear_solve``,
+        The march settings of :func:`coupled_step` (``dual_time``, ``omega_step_ratio``, ``linear_solve``,
         ...), handed to every build and refresh of the internally-built continuation; an unknown
         keyword raises. A preconditioner setting belongs on the ``preconditioner`` spec instead.
         Notably ``dual_time`` selects the **dual-time** (backward-Euler) march
@@ -2833,7 +2815,7 @@ def solve_coupled(
         so they are only accepted when it builds one.** Supply a ``strategy`` or a
         ``RefreshPolicy(builder=...)`` and that object owns its whole configuration; passing any of them
         alongside raises :exc:`TypeError` naming which ones. They used to be **dropped in silence** on
-        both of those paths — a solve asked for a dual-time loop and ``positivity_floor=1e-6`` ran the
+        both of those paths — a solve asked for a dual-time loop and ``omega_step_ratio=3.0`` ran the
         library defaults, with no error and no log line — and ``**kwargs`` is what made it quiet, since
         it accepts every keyword and checks none. That door is this function's, which makes it the one
         place in the package where a misplaced setting cannot be caught by reading a signature.
@@ -2847,7 +2829,7 @@ def solve_coupled(
     ------
     equinox.EquinoxRuntimeError
         If the march ends short of its stopping target -- it exhausted ``max_steps`` in its last
-        segment, stopped on a stalled positivity cap, went non-finite, or a homotopy never reached its
+        segment, stopped on a stalled step limit, went non-finite, or a homotopy never reached its
         target. The implicit-function-theorem adjoint is valid only at a root, so a state that is not
         one is refused rather than returned.
     ValueError

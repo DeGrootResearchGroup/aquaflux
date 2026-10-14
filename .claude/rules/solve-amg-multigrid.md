@@ -892,6 +892,13 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      any row or column where the Frobenius form is not. A structurally empty row is named
      explicitly, since it makes the bound zero and no determinant compares below it.
 
+  ⚠️ **Everything from here to the `k`-trough entries below about the k positivity CAP, its `floor` and the
+  `positivity_projection` switch is dated history: all three were deleted 2026-10-14** (the global cap
+  `positive_block_limit`/`positive_k_limit` let one or two near-zero-k corner cells throttle the whole
+  step). Every coupled step now clips `k` per cell and bounds ω's per-cell change (`omega_step_ratio`);
+  see `solve-march.md` and `.claude/notes/solve-globalization-log.md`, "bfs3d's retried steps: the global
+  k cap, replaced by a per-cell clip with an omega bound (2026-10-14)".
+
   **⚠️ THE α COLLAPSE IN THESE MARCHES IS THE POSITIVITY LIMITER, AND THE STEP TABLE SAYS SO — READ
   `limit` BEFORE ATTRIBUTING ANYTHING TO THE PRECONDITIONER.** `a_min` and the `limit` aside are the
   **same number** wherever both appear (0.579/5.79e-01, 0.651/6.51e-01, 0.004/3.76e-03, …). Those
@@ -987,17 +994,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   cells is still open**, and the global-scalar-cap design (one cell throttling all 23040) is the thing
   to reconsider.
 
-  **Capturing the step DIRECTION, which no checkpoint holds.** The cap is a property of `delta`, so
-  "which cells does it bind on" cannot be answered from a state — a step checkpoint holds where a step
-  ended and the inner-iterate dump holds where an inner iteration reached, and neither carries a
-  direction. `compare.py` gained `BFS3D_DUMP_STEP_LIMIT=<cap>` (with `BFS3D_DUMP_STEP_LIMIT_KEEP`),
-  which wraps the engine's `step_limit` in a `_DumpingStepLimit` — a **frozen dataclass**, not a
-  closure, because the limiter rides in a *static* field compared by `__eq__` and a closure there
-  recompiles the whole coupled solve on every rebuild. It returns the real cap unchanged, so the march
-  it instruments is the march that would have run. Dumps **stop** after `KEEP` rather than wrapping, so
-  the first binding event survives the escalation ladder that follows it. `singular_cell_probe.py`
-  reads such a dump and reports the exact per-cell room, the binding set, and the binding cells'
-  conditioning against the **base rate** for the mesh.
+  **Capturing the step direction:** `compare.py`'s `BFS3D_DUMP_STEP_LIMIT` dump of the step at a binding
+  cap, read by `singular_cell_probe.py`, located the binding cells below; both were deleted 2026-10-14 with the cap.
 
   **⚠️ SUPERSEDED THE SAME DAY — equilibration is a TRIGGER, not the cause. Read the floored-limiter
   entry above before using anything here.** The A/B below is real and reproducible, but it holds **only
@@ -1031,7 +1029,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   march is also deterministic: four runs at identical configuration agree in every printed field.
 
   **⚠️ The dump wrapper is NOT the confound (checked, not argued).** `221936` ran with
-  `BFS3D_DUMP_STEP_LIMIT` and `003915` did not. A dump-ON/dump-OFF control pair at otherwise equal
+  `BFS3D_DUMP_STEP_LIMIT` (a since-deleted instrument) and `003915` did not. A dump-ON/dump-OFF control pair at otherwise equal
   settings differs in **zero** content lines over 16 steps, against the equilibrate flag's **77**.
   `_DumpingStepLimit` returns the inner cap unchanged and preserves static-field value equality, so it
   neither alters the step nor forces a retrace.
@@ -1107,7 +1105,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   on top of the PC build.
 
   **⚠️ THE α COLLAPSES ARE TWO DIFFERENT FAILURE MODES, and only one is the limiter's fault — measured
-  2026-08-11 by a floored-limiter A/B.** `PositiveBlockLimit` gained a `floor`: the room becomes
+  2026-08-11 by a floored-limiter A/B.** `PositiveBlockLimit` (deleted 2026-10-14) gained a `floor`: the room becomes
   `(phi_i + floor)/|delta_i|`, so an entry that is numerically zero stops setting the step for all of
   them. `floor=0` (the library default) is bit-identical to the plain rule, and the limiter is inactive
   at a root for **any** floor (there `delta = 0`), which is what keeps it out of the converged state and
@@ -1119,7 +1117,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   `zerogradient`, 3-rung Reynolds continuation (`N_POINTS=2`), ILU(0) ×4, `coarse_eq_limit` 2000, plain
   aggregation, reach 3, forward restart 15, `refresh_on_cycles` 3, `retry on cycles / alpha` 10 / 0.01,
   PC β floor 0.05, stop `(0.0, 1e-5)`. Floor **1e-8**, calibrated by replaying the recorded clips
-  (`positivity_floor_calibration.py`).
+  (a harness deleted 2026-10-14 with the floor).
 
   | | floor 0 | **floor 1e-8** |
   |---|---|---|
@@ -1204,11 +1202,10 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   failure mode nothing else does — so it is not a deletion candidate, but it must not be sold as a
   performance feature.
 
-  ⚠️ **"off by default" is now only true of THIS CASE. The LIBRARY default flipped to `True` on
-  2026-08-25** (all four continuation builders, and `pitzdaily_openfoam` with them), on a pitzDaily
-  measurement where the cap was losing a march outright. `bfs3d_openfoam` keeps
-  `K_POSITIVITY_PROJECTION` off, so `positivity_projection=False` is a case override now, not the
-  inherited default.
+  ⚠️ **The `positivity_projection` switch no longer exists** (deleted 2026-10-14): the per-cell clip is
+  unconditional on every case, bfs3d included, now composed with a per-cell ω step bound. The 2026-08-25
+  pair below (projection costing bfs3d 41 % more cycles) is the trap that bound fixes — full-length
+  steps into bad iterates once the global cap stopped shortening them.
 
   ✅ **RE-ADJUDICATED AT TODAY'S DEFAULTS (2026-08-25, #314): the neutral result above has become a
   41 % CYCLE COST, and the conclusion — robustness, not speed — is unchanged and now has a price.**
@@ -1364,7 +1361,6 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 
   **Harnesses kept (all in `validation/bfs3d_openfoam/`):** `trailing_hierarchy_sweep.py` (the block
   alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated),
-  `singular_cell_probe.py` (which cells, from a checkpoint **or** a dumped block),
   `k_row_scale_probe.py` (exact `∂R_k/∂k` per cell by one-hot Jacobian-vector product, stratified by
   `k` — the harness that refuted the row-promotion explanation above, and the cheap way to ask whether
   any field's rows are what a rescaling promotes).
@@ -1441,8 +1437,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
       solve** that comes out positive, at `+3.90e-10` (β = 0) through `+1.90e-15` (β = 10), i.e.
       **positive at every β from 0 to 10** while the dumped value is negative and 3–5 orders off.
 
-    `positive_block_limit` then computes a purely **relative** room `0.99·k/|dk|` and lets that cell veto
-    the global step.
+    `positive_block_limit` (the global cap, deleted 2026-10-14) then computed a purely **relative** room
+    `0.99·k/|dk|` and let that cell veto the global step.
     - **⚠️ THE MOST USEFUL LEAD OF THE LOT: at β ≥ 0.5 an exact k-block solve produces NO binding cell at
       all (cap = 1.0).** Only at β ≤ 0.05 does an exact solve give a tight cap, and then on a *different*
       cell (7.6e-14 at cell 2679). So the cap is **not intrinsic to the `k` equations at a healthy
@@ -1584,7 +1580,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   **not** establish the sign of the coupled Newton direction, nor anything about the other 1875 collapsed
   cells, nor that no state has a negative root. Two defects remain, and they are different from
   each other:
-  1. **`positive_block_limit` is a purely RELATIVE rule** — `room = tau·k/|dk|` — applied to a field
+  1. *(Moot since 2026-10-14: the cap, and the floor built for it 2026-08-11, are deleted; `k` is clipped
+     per cell.)* **`positive_block_limit` is a purely RELATIVE rule** — `room = tau·k/|dk|` — applied to a field
      whose physical floor is 0. A relative rule has no lower bound, so a roundoff-level `dk` in an
      already-collapsed cell produces an arbitrarily small cap. An **absolute floor**
      (`room = tau·(k + k_abs)/|dk|`) fixes it, is pure globalization, sits off the IFT path entirely,

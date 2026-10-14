@@ -107,7 +107,8 @@ from .implicit import (
     RootSolveSettings,
     RootSolver,
     assembler_residual,
-    positive_block_limit,
+    bounded_block_projection,
+    composed_projection,
     positive_block_projection,
 )
 from .line_search_growth import (
@@ -282,7 +283,9 @@ __all__ = [
     "VelocityShiftParts",
     "assembler_residual",
     "block_reference_scales",
+    "bounded_block_projection",
     "combine_observers",
+    "composed_projection",
     "default_linear_solver",
     "explicit_source",
     "field_change_metrics",
@@ -290,7 +293,6 @@ __all__ = [
     "find_checkpoint",
     "newton_march",
     "newton_step",
-    "positive_block_limit",
     "positive_block_projection",
     "refuse_a_transform_the_march_cannot_run_in",
     "relative_residual_gmres",

@@ -359,14 +359,9 @@ def main() -> None:
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=compare.COLUMN_REACH),
         ),
         linear_solve=LinearSolveSettings(rtol=FORWARD_RTOL),
-        # THE CASE'S positivity settings, not the library's. Every step is capped by the k-positivity
-        # rule whether or not one asks for it (`step_limit` is unconditional), and unfloored that cap
-        # ratchets toward zero on this case -- observed here as a solve that decays geometrically at
-        # ~0.855 per step from a converged root, identically at `forward_rtol` 0.3 and 1e-6, which is
-        # what proved the linear solve was not what limited it. A probe that builds its own
-        # continuation silently gets library defaults; this case's floor is load-bearing.
-        positivity_floor=compare.K_POSITIVITY_FLOOR,
-        positivity_projection=compare.K_POSITIVITY_PROJECTION,
+        # The case's omega step bound, so a run with `BFS3D_OMEGA_STEP_RATIO` set probes the march it
+        # describes; unset it is the library default, as in the case.
+        omega_step_ratio=compare.OMEGA_STEP_RATIO,
     )
     print(f"  preconditioner built in {time.time() - started:.0f}s", flush=True)
     counter = count_adjoint_applies(continuation, heartbeat=ADJOINT_HEARTBEAT)

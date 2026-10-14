@@ -1726,9 +1726,82 @@ The distance-3 share of the leading block rose 4.1e-6 -> 2.9e-3. Reach 4 is unau
   gradient moves the state 3.7e-3 against the corrected one and the report's `U_x` error 0.059 -> 0.061,
   `U_z` 0.006 -> 0.005, the outermost spanwise slab's `x_r/h` (the side-wall corner) 11.74 -> 12.53.
 - **The positivity choice.** Both match variants run in the same time; the full match's full-length
-  trials at steps 8-12 read `rho1` 1e7 to 4e91 (the line search catching near-blow-ups), against 64 at
-  worst with bfs3d's floor and cap -- consistent with the record that the global cap does stabilizing work
-  on this case. Kept on that evidence; the cost is one more redone step.
-- **Neither variant meets "no new retry"**; the owner accepted the retries for half the wall time. What
-  causes them is the next question (open).
+  trials at steps 8-12 read `rho1` 1e7 to 4e91, against 64 at worst with bfs3d's floor and cap, so the
+  cap was kept. **Superseded the next day:** the cap was the cause of both retries, and a per-cell clip
+  with an omega bound beat both arms; the cap and floor are deleted (next entry).
+- **Neither variant met "no new retry"**; the owner accepted the retries for half the wall time. The
+  next entry finds their cause and removes them.
 - `case_file_parity.py bfs3d`: same pytree, residual at the hybrid start bit-identical (2.140695e+00).
+
+## bfs3d's retried steps: the global k cap, replaced by a per-cell clip with an omega bound (2026-10-14)
+
+**Decision (project owner, 2026-10-14):** the coupled march keeps `k` positive one way only -- each cell's
+own `k` correction clipped (`positive_k_projection`), then each cell's `log omega` correction bounded by
+`omega_step_ratio` (`omega_step_bound`, default `e`, so `|d log omega| <= 1`, where omega is solved as its
+logarithm). The global fraction-to-the-boundary cap (`positive_k_limit` / `positive_block_limit`) and its
+`positivity_floor`, and the `positivity_projection` switch between the two, are **deleted**: on both
+validation cases the new guard is at least as good, and nothing selected the cap but bfs3d's file.
+
+**Configuration** (every row): main `dfb21bc2` (#712's case file: multiple-correction gradient, uniform
+probe reach 3, `grow` 3 with the release, 12 stations), Apple M3 Pro, 11 cores, macOS, jax 0.10.2; one run
+each through `run_case.sh`, sharing the machine in turns with another session's marches (never two at
+once), so walls are indicative. The guard arms are the library change of this entry with
+`BFS3D_K_POSITIVITY_PROJECTION=1 BFS3D_K_POSITIVITY_FLOOR=0 BFS3D_OMEGA_STEP_RATIO=<ratio>` (the switches
+were deleted afterwards; the ratio override remains).
+
+**The cause, from replaying the two retried steps** (`validation/bfs3d_openfoam/step_replay.py`, which
+reproduces the march's inner rows digit for digit from the capture's checkpoints):
+- Step 6 (station 5, beta 0.0062) and step 14 (the target, beta 0.005) each collapse in their second inner
+  iteration to alpha 0.004 / 0.001, below `on_alpha` 0.01, so the step is redone at twice the shift.
+- **Not** the linear solve (60 restarts instead of 14 change nothing), **not** the station change (the
+  previous station's residual fails the same way), **not** the refit floor (0.05 still gives alpha 0.043),
+  and **not** an inexact Jacobian (AD agrees with finite differences in every field, error falling with
+  the step to round-off).
+- The Newton direction is a good one: along it `||G||` falls well below its start at alpha 0.25 (step 6:
+  7.22e-3 -> 6.06e-3) and 0.5 (step 14: 2.01e-3 -> 1.40e-3). What stops it is the global cap,
+  `0.99 min (k + 1e-8)/(-dk)`, set by one or two cells whose `k` is near zero: step 6, cell 13178
+  (x/h 4.5, y/h -0.34, against a side wall in the bubble; cap 0.0020, next cell 0.63); step 14, cells
+  12744 / 3144 (x/h 7.2, y/h 0.95, the top-wall / side-wall corners, spanwise mirror pair; caps 0.0010 /
+  0.0026, then 0.008, then 1.3). Another session found the same on every one of E8's nine retries, and that
+  the binding cell's `dk` does **not** shrink as beta doubles (cell 3142: -0.54, -0.54, -0.70, -1.31 at
+  beta 0.01-0.08), so escalation is a poor cure there.
+- Disabling the alpha abort (so a cap-limited step is not a "collapse") does nothing: the next solve
+  re-derives the same direction and the same cap. Consistent with the earlier A/B recorded in
+  `solve/retry.py` that gating the retry on `binding_limit` cost 8 steps.
+
+**Replayed guards** at each step's failing first attempt (march's redo reached `||R||` 9.66e-3 at step 6,
+1.517e-3 at step 14):
+
+| guard | step 6 alpha / `||R||` / max `|d log omega|` | step 14 alpha / `||R||` |
+|---|---|---|
+| per-cell k clip only | 0.25 / 5.38e-3 / **11.6** | 0.5 / 2.27e-3 |
+| clip + omega bound 2 | 0.5 / 5.15e-3 / 4.8 | 0.125 / 2.40e-3 |
+| clip + omega bound 1 | 0.5 / 4.97e-3 / 2.8 | 0.125 / 2.44e-3 |
+| every field scaled per cell by its k room | 0.5 / 4.95e-3 / 1.35 | **0.008** (fails) |
+
+So only the clip variants take both steps without a retry; the clip alone lets one cell's omega move by
+1e5 (the 4e91 trials of the 2026-10-13 full match), and scaling all fields per cell breaks the direction
+at the target. A single step cannot rank them, so full marches did:
+
+| bfs3d | steps | cycles accepted (all) | redone | worst `rho1` | solve wall | `x_r/h` |
+|---|---|---|---|---|---|---|
+| global cap + floor 1e-8 (the file) | 19 | 126 (157) | step 6 x2, step 14 | 64 | 616 s | 8.361 |
+| per-cell clip, omega unbounded (2026-10-13) | 20 | 154 (164) | step 9 x2 | 4e91 | 660 s | 8.36 |
+| **clip + omega bound e** | **17** | **134 (134)** | **none** | **2.54** | **558 s** | 8.361 |
+| clip + omega bound e^2 | 17 | 129 (129) | none | 2.54 | 531 s | 8.361 |
+
+The bound-e state matches the cap march's root to relative L2 1.1e-4 (worst field `w`, 5e-4). The two
+bounds differ only at steps 6-7; `e` is the default for its margin over the 4e91 failure, at no measured
+cost. pitzDaily, which shipped the clip alone, is neutral: 18 steps / 133 cycles / 126 s against 18 / 130 /
+132 s with the bound, `x_r/h` 8.0686 both, worst `rho1` 5.68 -> 3.88.
+
+**Alternatives measured and not taken** (another session, E8 at `61331d69` with #712's file):
+18 viscosity stations instead of 12 also removes every retry (22 steps / 132 cycles / 750 s), because a
+smaller viscosity jump per station drives the corner `k` down less; a gentler shift ramp does not (`grow`
+2: 23 steps, 2 retries; 1.5: 29, 1 retry), and holding `beta_min` at 0.02 thrashes the release (44 steps).
+More stations costs steps the guard does not.
+
+**Left open:** nothing in the library now installs a whole-step `step_limit`, so the generic seam
+(`step_limit` on the step classes, `StepOutcome.binding_limit`, `stop_on_limit_stall`, the log's `limit`
+aside, `retry.py`'s commentary on capped steps) is unused; its removal is a separate change.
+

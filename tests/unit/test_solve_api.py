@@ -201,6 +201,11 @@ def test_the_multigrid_surface_is_complete() -> None:
 #: reviewable instead of invisible. Adding a row is cheap and deliberate; the guard below is what stops
 #: the list growing by accident.
 VALIDATION_INTERNAL_REACHES = {
+    # The march's own single-step call, reached by the harness that replays one outer step of a recorded
+    # march from its checkpoint (`bfs3d_openfoam/step_replay.py`). Reproducing the march's inner rows
+    # digit for digit is what makes a replayed arm evidence about the march, so it must run the march's
+    # step, not a re-implementation of it.
+    "_march_step",
     # The march's lock-up predicate, replayed over archived march logs to check a candidate rule fires
     # on the runs that stalled and on nothing that recovered. Replaying a private predicate is the
     # whole point of that harness, so this one is unlikely ever to become public.

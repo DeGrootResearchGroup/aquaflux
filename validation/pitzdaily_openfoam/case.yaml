@@ -120,9 +120,6 @@ solver:
   # The k and omega rows damped three times harder than the flow's: the ramp weakens the momentum
   # equation's nonlinearity directly, while the closure's stiff sources are what the shift addresses.
   turbulence_damping: 3.0
-  # k is projected back to zero after a step rather than the step being shortened to keep it positive.
-  positivity_floor: 0.0
-  positivity_projection: true
   # From a cold start at the case's viscosity the march integrates a long transient to develop the
   # recirculation. Start at a hundred times the viscosity -- the momentum equation's only, so the
   # closure keeps its target near-wall omega -- and walk it down in 12 stations of one step each: long

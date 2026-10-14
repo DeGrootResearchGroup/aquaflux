@@ -116,10 +116,7 @@ from aquaflux.turbulence import (  # noqa: E402
     solve_reynolds_continuation,
     strain_rate_magnitude,
 )
-from aquaflux.turbulence.coupled import (  # noqa: E402
-    frozen_production_viscosity,
-    positive_k_limit,
-)
+from aquaflux.turbulence.coupled import frozen_production_viscosity  # noqa: E402
 from aquaflux.turbulence.measures import coupled_scaled_norm  # noqa: E402
 from aquaflux.vectors import dot  # noqa: E402
 
@@ -227,8 +224,7 @@ def capture() -> None:
                 restart=compare.FORWARD_RESTART,
                 max_restarts=compare.FORWARD_MAX_RESTARTS,
             ),
-            positivity_floor=compare.K_POSITIVITY_FLOOR,
-            positivity_projection=compare.POSITIVITY_PROJECTION,
+            omega_step_ratio=compare.OMEGA_STEP_RATIO,
             shift=SHIFT,
             preconditioner=session,
             inner_observer=logger.on_inner,
@@ -269,10 +265,19 @@ def _engine_at(coupled, state):
             restart=compare.FORWARD_RESTART,
             max_restarts=compare.FORWARD_MAX_RESTARTS,
         ),
-        positivity_floor=compare.K_POSITIVITY_FLOOR,
-        positivity_projection=compare.POSITIVITY_PROJECTION,
+        omega_step_ratio=compare.OMEGA_STEP_RATIO,
         shift=SHIFT,
     )
+
+
+def _as_taken(engine, state, delta):
+    """``delta`` as the march takes it: ``k`` clipped per cell, then ``omega`` bounded per cell.
+
+    The march applies its step projection to every correction once, before the line search, so a search
+    run on the raw correction is not the march's search.
+    """
+    project = engine.step_projection
+    return delta if project is None else project(state, delta)
 
 
 def _blocks(coupled, vector):
@@ -616,19 +621,19 @@ def _report_step_at(coupled, state, engine, measure, residual, reference, beta) 
         return coupled.residual(p) + shift * (p - state)
 
     slope = float(jax.jvp(lambda p: measure(transient(p)), (state,), (delta,))[1])
-    # The march caps every rung by the fraction-to-the-boundary limit that keeps `k` positive, so a
-    # search run without it is not the march's search. An alpha of 0.001 can be the ladder finding no
-    # admissible rung OR this cap binding, and those are different failures with different cures.
-    limit = positive_k_limit(coupled, floor=compare.K_POSITIVITY_FLOOR)
-    max_alpha = 1.0 if limit is None else limit(state, delta)
+    # The search runs on the correction as the march takes it (per-cell `k` clip, per-cell omega
+    # bound); the block norms below report the correction as solved. How far the projection moved it is
+    # reported beside the kept step, since a short step can be the ladder finding no admissible rung OR
+    # the projection having cut the correction the solve returned.
+    taken = _as_taken(engine, state, delta)
+    projected = float(jnp.linalg.norm(taken - delta) / jnp.linalg.norm(delta))
     searched = backtracking_line_search(
         transient,
         state,
-        delta,
+        taken,
         jnp.asarray(reference),
         engine.line_search,
         norm=measure,
-        max_alpha=max_alpha,
     )
     profile = " ".join(
         f"{float(measure(transient(state + 0.5**power * delta))) / reference:>8.4f}"
@@ -660,7 +665,7 @@ def _report_step_at(coupled, state, engine, measure, residual, reference, beta) 
     print(
         f"    beta {beta:>7.4g}  linear rel {linear:>9.3e} ({int(cycles):>2} cyc)  "
         f"|delta| {float(jnp.linalg.norm(delta)):>10.4e}  slope {slope:>+11.4e}  "
-        f"k cap {float(max_alpha):>9.4g}  "
+        f"projected {projected:>9.3e}  "
         f"kept alpha {float(searched.alpha):>8.4g} -> {float(searched.residual_norm) / reference:.6f}",
         flush=True,
     )
@@ -787,15 +792,13 @@ def _frozen_production_test(built, engines, state, steps, measures, beta) -> Non
             def transient(p, coupled=coupled, shift=shift):
                 return coupled.residual(p) + shift * (p - state)
 
-            limit = positive_k_limit(coupled, floor=compare.K_POSITIVITY_FLOOR)
             searched = backtracking_line_search(
                 transient,
                 state,
-                delta,
+                _as_taken(engine, state, delta),
                 jnp.asarray(reference),
                 engine.line_search,
                 norm=measure,
-                max_alpha=1.0 if limit is None else limit(state, delta),
             )
             d_k = np.asarray(_blocks(coupled, delta)[-2])[wall]
             d_omega = np.asarray(_blocks(coupled, delta)[-1])[wall]
@@ -910,15 +913,13 @@ def _additive_shift_test(built, engines, state, steps, measures, beta) -> None:
             def transient(p, coupled=coupled, shift=shift):
                 return coupled.residual(p) + shift * (p - state)
 
-            limit = positive_k_limit(coupled, floor=compare.K_POSITIVITY_FLOOR)
             searched = backtracking_line_search(
                 transient,
                 state,
-                delta,
+                _as_taken(engine, state, delta),
                 jnp.asarray(reference),
                 engine.line_search,
                 norm=measure,
-                max_alpha=1.0 if limit is None else limit(state, delta),
             )
             d_k = np.asarray(_blocks(coupled, delta)[-2])[wall]
             d_omega = np.asarray(_blocks(coupled, delta)[-1])[wall]
@@ -1072,13 +1073,13 @@ def _wall_fixation_identity(built, state, steps, beta) -> None:
         f"k = {k_wall[worst]:.4e}, d(log omega_target)/dk = {chain[worst]:.4e}",
         flush=True,
     )
-    # Which SIGN the large k corrections carry, because the shipped limiter is one-sided:
-    # `positive_block_limit` bounds only entries with `delta < 0` (the ones that could cross zero), so
-    # an unbounded *increase* in a tiny near-wall `k` passes it untouched -- and the fixation row then
-    # carries that increase straight into `log omega`.
+    # Which SIGN the large k corrections carry, because the per-cell `k` clip is one-sided: it acts only
+    # on entries with `delta < 0` (the ones that could cross zero), so an unbounded *increase* in a tiny
+    # near-wall `k` passes it untouched -- and the fixation row then carries that increase straight into
+    # `log omega` (which the per-cell omega bound then limits).
     print(
         f"\n  {'arm':<9} {'min dk/k at wall':>18} {'max dk/k at wall':>18} "
-        f"{'k cap fires?':>14} {'dk at the worst omega cell':>28}",
+        f"{'k clip fires?':>14} {'dk at the worst omega cell':>28}",
         flush=True,
     )
     for name, coupled in built.items():
@@ -1224,8 +1225,7 @@ def march_from_seed() -> None:
                     restart=compare.FORWARD_RESTART,
                     max_restarts=compare.FORWARD_MAX_RESTARTS,
                 ),
-                positivity_floor=compare.K_POSITIVITY_FLOOR,
-                positivity_projection=compare.POSITIVITY_PROJECTION,
+                omega_step_ratio=compare.OMEGA_STEP_RATIO,
                 shift=SHIFT,
                 inner_observer=on_inner,
                 max_steps=MARCH_STEPS,

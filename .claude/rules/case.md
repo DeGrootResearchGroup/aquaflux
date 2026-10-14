@@ -292,8 +292,10 @@ by construction), and not passing `drive` (the only nameable drive is the builde
 - **The shared march settings are ONE dataclass, `_March`, that both marches derive from** — `max_steps`,
   `convergence`, `preconditioner`, `dual_time`, `linear_solve`, `step_control`, `retry` — so a setting added
   there reaches both (Principle 2's sibling rule, at the file surface). `CoupledMarch` adds the closure's:
-  `turbulence_damping` (→ `shift=CoupledShiftSettings(turbulence_damping=...)`), `positivity_floor`,
-  `positivity_projection`, `continuation`.
+  `turbulence_damping` (→ `shift=CoupledShiftSettings(turbulence_damping=...)`), `omega_step_ratio`
+  (per-cell bound on ω's change per correction; unset = e under log-ω, infinite = unbounded), `continuation`.
+  There are no `positivity_floor` / `positivity_projection` keys (deleted 2026-10-14 with the global k cap;
+  the per-cell k clip is now unconditional).
 - **The library's own settings values are read directly** — `Convergence` (+ `RowScaled`/`BlockScaled`/
   `Euclidean`), `DualTimeLoop`, `LinearSolveSettings`, the three dual-time controls (equinox modules are
   dataclasses; their float fields read), `RetryPolicy`, and every coupled-preconditioner kind via
@@ -315,7 +317,7 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   not changed (that needs the project owner, #542); the validation files state their calibrated values.
 - **A script can observe a solve, never configure it.** `solve(problem, **observers)` refuses any keyword
   that is one of the solve's settings **whether the file sets it or not** (`_owned()`, derived from the
-  `_March` fields plus `shift`/`positivity_*`/`homotopy`) — an unset setting is still the file's, since its
+  `_March` fields plus `shift`/`omega_step_ratio`/`homotopy`) — an unset setting is still the file's, since its
   default is part of what the file says. A materialized-Jacobian preconditioner is **opened as a session
   here** (`open_session(spec, problem, **session_options)`), so a harness passes the session's *observers*
   (`observer`, `reports`, `on_build`, the wrappers) rather than a session of its own that might hold other

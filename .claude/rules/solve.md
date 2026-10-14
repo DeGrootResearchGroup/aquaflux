@@ -256,8 +256,9 @@ separately and pinned equal by a test — which is what found that a round-trip 
 > **What belongs in `__all__` is what a user CONFIGURES, IMPLEMENTS or RECEIVES — not everything
 > another module happens to need (#284 part 2, 2026-10-11).** 37 names left the surface that day
 > (185 → 148 that day; `refuse_unforwardable_settings` followed once #541 left `solve/` its only caller): regime and batch constants, the coloured probe's plan/gather/matvecs, equilibration and
-> reordering helpers, `PositiveBlockLimit`/`PositiveBlockProjection` (users call
-> `positive_block_limit`/`positive_block_projection`), `CallerBuiltSource`/`FinishedSource` (what
+> reordering helpers, `PositiveBlockProjection` (users call `positive_block_projection`; there is no
+> `positive_block_limit`/`PositiveBlockLimit` any more — the global k cap was deleted 2026-10-14),
+> `CallerBuiltSource`/`FinishedSource` (what
 > `explicit_source` picks), `BetaTrackingRefresh`, `FrozenTransposeFactory`,
 > `MaterializedBlockPreconditioner`, `PhaseTimer`, `ShapeBudget`, `PLAIN_RESIDUAL`, `named_blocks`,
 > `shift_of`, `default_dual_time_control`, `checkpoint_name`, `combine_metrics`, `in_progress_measure`,
@@ -345,7 +346,7 @@ archived march logs and any private notes still use the left column).
 | `v_cycles` (`BlockDiagonal`, `ScalarTwoLevel`, `ScalarAir`, the velocity blocks, `BlockPreconditioner.build`) | `cycles` (#373, 2026-10-13) | the name every other multigrid value already used for V-cycles per application. **A case-file key** on `BlockDiagonal` and the scalar blocks; no shipped case file set it |
 | `f_iters` / `c_iters` (`AirReduction`, `AirReductionInverse`, `air_multigrid_cycles`) | `f_sweeps` / `c_sweeps` (#373, 2026-10-13) | smoother passes are `sweeps` everywhere else. **A case-file key** on `AirReduction`; no shipped case file set it |
 | `n_group_fields` (`AirReductionInverse`) | `n_fields` (#373, 2026-10-13) | the field count of the block, as every other inverse spells it |
-| `StepReport.cycles`, `StepOutcome.cycles`, and the checkpoint key `"cycles"` | `raw_cycles` (#373, 2026-10-13) | it is lineax's raw count, offset included, beside `restart_cycles` (corrected) and `max_inner_cycles`; `cycles` now means V-cycles. The march-history column follows the field. ⚠️ **Checkpoints written before this carry `cycles`**, and the two harnesses that read the step record (`damping_taper_trace.py`, `endgame_shift_probe.py`) now read `raw_cycles` with no fallback, by the project owner's choice. An inner-iterate checkpoint's `cycles` (offset-corrected, `InnerIterateCheckpointer`) is unchanged, and so are the harnesses that read one (`field_split_probe.py`, `probe_reach_audit.py`, `singular_cell_probe.py`, `replay.py`) |
+| `StepReport.cycles`, `StepOutcome.cycles`, and the checkpoint key `"cycles"` | `raw_cycles` (#373, 2026-10-13) | it is lineax's raw count, offset included, beside `restart_cycles` (corrected) and `max_inner_cycles`; `cycles` now means V-cycles. The march-history column follows the field. ⚠️ **Checkpoints written before this carry `cycles`**, and the two harnesses that read the step record (`damping_taper_trace.py`, `endgame_shift_probe.py`) now read `raw_cycles` with no fallback, by the project owner's choice. An inner-iterate checkpoint's `cycles` (offset-corrected, `InnerIterateCheckpointer`) is unchanged, and so are the harnesses that read one (`field_split_probe.py`, `probe_reach_audit.py`, `replay.py`; `singular_cell_probe.py` was deleted 2026-10-14) |
 | `KProduction(explicit_limiter=)` | `explicit_production_limiter` (#373, 2026-10-13) | the name `SSTTurbulence` already gave the same setting |
 | `FacePatches.from_dict(groups)` | `patches` (#373, 2026-10-13) | beside `patch_groups`, `groups` read as groups of patches. `CellZones` keeps the inherited `LabelledGroups.from_dict(groups)`: an override only to rename it would be a forwarding wrapper |
 | `NearWallKClosure.viscosity` | `kinematic_viscosity` (#373, 2026-10-13) | `viscosity` is the molecular DYNAMIC viscosity everywhere else; this one is kinematic. `SSTTurbulence.molecular_viscosity` is kinematic too and keeps its name |
@@ -462,10 +463,10 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 
 | | library default | validated `bfs3d` bundle | where |
 |---|---|---|---|
-| PC shift floor | `refit_beta_floor=0.0` | **0.05** | `MaterializedJacobian` / `compare.py` |
+| PC shift floor | `refit_beta_floor=0.0` | 0.0 (no floor since #712, as on pitzDaily) | `case.yaml` → `compare.py` `PC_BETA_FLOOR` |
 | inverse | none — `MaterializedJacobian.inverse` is required | **`FieldSplit`** (the case refuses anything else) | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
-| probe column reach | `column_reach=None` (uniform) | **(3,3,3,3,2,2)** | `compare.py` `COLUMN_REACH` |
+| probe column reach | `column_reach=None` (uniform) | uniform (since #712: under `MultipleCorrectionGradient` every column reaches distance three) | `case.yaml` → `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
 | flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` (#371) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
 | trailing hierarchy depth | `HierarchyBlockInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `JACOBI_TRAILING` |

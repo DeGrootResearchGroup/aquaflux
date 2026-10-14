@@ -78,7 +78,6 @@ def march(label, coupled, flow, k, omega, rtol, max_steps=STEPS):
             ),
             max_steps=max_steps,
             convergence=Convergence(rtol=rtol, atol=0.0),
-            positivity_projection=True,
             retry=RETRY,
             on_step=on_step,
         )

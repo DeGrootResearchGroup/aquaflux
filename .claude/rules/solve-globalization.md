@@ -305,10 +305,11 @@ What to take from it, none of which is specific to that mechanism:
       values, because filtering first made a misplaced `acceptance=None` vanish — and a setting given both
       on the object and as a step field raises rather than one silently winning.
     - **The membership test is whether a setting's reason can be stated without naming a residual or a
-      preconditioner.** It can for all of the above. It cannot for the k-positivity guard, whose value is a
-      function of the state layout — so `positivity_floor`/`positivity_projection` stay on the coupled
-      builders, which hold the `CoupledRANS` that can construct one, and arrive at `step()` as ordinary
-      fields. Nor can it for the per-family Krylov restart regime or the progress measure's default.
+      preconditioner.** It can for all of the above. It cannot for the closure's step projection (per-cell k clip +
+      ω step bound), whose value is a function of the state layout — so its one setting,
+      `omega_step_ratio`, stays on the coupled builders, which hold the `CoupledRANS` that can construct
+      it (`_closure_step_projection`), and arrives at `step()` as an ordinary `step_projection` field.
+      (`positivity_floor`/`positivity_projection` no longer exist — deleted 2026-10-14.) Nor can it for the per-family Krylov restart regime or the progress measure's default.
       **Decided (#387, 2026-09-14):** `shift_basis`, the velocity shift parts and `turbulence_damping`
       pass the test but describe how the *shift* is formed rather than how the march damps, so they are
       their own value, `turbulence.CoupledShiftSettings`, on the coupled builders — kept off this object also

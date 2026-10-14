@@ -1412,8 +1412,9 @@ rather than measured; the preconditioner-application totals over one gradient ev
 - **NOT the linear solve.** Tightening it five orders costs 4–8× the Krylov work per step and moves the
   nonlinear trajectory *not at all*.
 - **NOT the k-positivity limiter**, which was the obvious suspect since `coupled_amg_continuation`
-  applies `step_limit=positive_k_limit(...)` **unconditionally**. The case's 1e-8 floor reproduces the
-  unfloored trajectory exactly.
+  then applied `step_limit=positive_k_limit(...)` **unconditionally**. The case's 1e-8 floor reproduces the
+  unfloored trajectory exactly. (That cap and floor were deleted 2026-10-14; today's per-cell k clip and
+  ω step bound were not tested against this rate.)
 
 **So the rate is set by the Jacobian or the residual itself, and that is UNDIAGNOSED.** The residual path
 carries no `stop_gradient` (every one in `turbulence/coupled.py` is on the preconditioner or the shift,

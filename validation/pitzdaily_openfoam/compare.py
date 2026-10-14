@@ -64,6 +64,7 @@ Run (after ``run_of.sh``) from the repo root:
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 import re
 import sys
@@ -203,12 +204,11 @@ def _solver_with_overrides(solver):
     damping = _environment("TURB_DAMPING", float)
     if damping is not None:
         edits["turbulence_damping"] = damping
-    projection = _environment("K_POSITIVITY_PROJECTION", lambda v: v != "0")
-    if projection is not None:
-        edits |= {
-            "positivity_projection": projection,
-            "positivity_floor": 0.0 if projection else 1e-8,
-        }
+    # The largest factor one cell's omega may change by in one correction, after the per-cell `k` clip
+    # every coupled step applies (`PITZ_OMEGA_STEP_RATIO`, `none` for unbounded; unset keeps the file's).
+    omega_ratio = _environment("OMEGA_STEP_RATIO", lambda v: math.inf if v == "none" else float(v))
+    if omega_ratio is not None:
+        edits["omega_step_ratio"] = omega_ratio
     control = {
         name: value
         for name, value in (
@@ -272,9 +272,10 @@ RTOL, ATOL = SOLVER.convergence.rtol, SOLVER.convergence.atol
 # The values were first the three-dimensional case's, because that is where each was measured. Two are
 # load-bearing enough to name:
 #
-#   * `POSITIVITY_FLOOR` -- without it the step limiter's room is a purely RELATIVE quantity, so a
-#     numerically dead cell ratchets the global step cap by a factor of a hundred per step until the
-#     march is taking no step at all while every field still reads finite.
+#   * keeping `k` positive per cell -- the global step cap this case first ran let one numerically dead
+#     cell ratchet the whole step's length down a hundredfold per step until the march took no step at
+#     all while every field still read finite; the per-cell clip every coupled step now makes confines
+#     such a cell to itself (see `OMEGA_STEP_RATIO` below).
 #   * the row-scaled residual measure (the coupled solve's default) -- the coupled Euclidean residual
 #     is very nearly all omega, so a march judged on it cannot see the flow converge. The row-scaled
 #     measure judges every equation comparably.
@@ -615,31 +616,13 @@ PC_BETA_FLOOR = SOLVER.preconditioner.refit_beta_floor
 #: V-cycles plus one sparse coupling product apply far more cheaply than one six-field V-cycle.
 FIELD_SPLIT = isinstance(SOLVER.preconditioner.inverse, FieldSplit)
 
-#: Clip each cell's own correction rather than scaling the whole step by the worst cell. **ON since
-#: 2026-08-25**, because on this case the plain global cap was measured losing a march outright.
-#:
-#: Every failing step length under the cap was the cap and not a rung of the line search's ladder
-#: (`0.003108`, `0.154`, `0.0004484` -- none a power of one half, the last BELOW the shortest rung),
-#: and the march then died in the `1 - tau`-per-step collapse `positive_block_projection` derives, its
-#: inner residual running `8.462e-06 -> 8.353e-08 -> 8.353e-10` at ratios of exactly 0.01. Raising
-#: `K_POSITIVITY_FLOOR` cannot remove that -- `(k + floor)` decays by the same factor whatever the
-#: floor is.
-#:
-#: Measured here, same commit, same everything else: an arm that stalls at the target rung under the
-#: cap completes under the projection, and **the arm that already worked got faster** -- 703.7 s /
-#: 437 cycles / 73 steps against 664.0 s / 459 cycles / 67 steps, both `x_r/h` 8.069. Two gradient
-#: reconstructions whose costs differ sharply under the cap land within 0.5 % of each other under it.
-#: `PITZ_K_POSITIVITY_PROJECTION=0` restores the cap.
-POSITIVITY_PROJECTION = SOLVER.positivity_projection
-
-#: Buys the step limiter out of a numerically dead cell instead of letting one cell ratchet the
-#: global step cap toward zero. ⚠️ Only meaningful with the cap active (`PITZ_K_POSITIVITY_PROJECTION=0`
-#: above): with the projection on (the default here) it runs first and clips every cell to within
-#: `tau` of its own boundary, so the cap this floor feeds always reports `alpha_max = 1` regardless of
-#: its value -- a floor set alongside the default projection was always inert, and the coupled march now
-#: refuses that combination rather than silently doing nothing (#365). It is a march setting of
-#: `coupled_step`, so it applies whichever preconditioner the march runs.
-K_POSITIVITY_FLOOR = SOLVER.positivity_floor
+#: The bound on each cell's change in log(omega) per correction, applied after the per-cell `k` clip
+#: every coupled step makes (`None`: the library default `e`). The march once offered a global step cap
+#: instead, scaling the whole step by the worst cell; on this case it lost a march outright, every
+#: failing step length being the cap, and was removed. Measured 2026-10-14 (Apple M3 Pro, jax 0.10.2,
+#: one run each, the case file then on `main`): clip alone 18 steps / 133 cycles / 126 s, clip + bound
+#: `e` 18 / 130 / 132 s, `x_r/h` 8.0686 both.
+OMEGA_STEP_RATIO = SOLVER.omega_step_ratio
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
 #: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --
@@ -1192,7 +1175,6 @@ def solve_aquaflux(
         ("case file", f"{CASE_FILE.name}, solver {type(solver).__name__}"),
         ("script-only study arms", ", ".join(study) or "none -- the case file's solve"),
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL}"),
-        ("k positivity floor", K_POSITIVITY_FLOOR),
         ("inner forward rtol (row-scaled) / restart", f"{FORWARD_RTOL} / {FORWARD_RESTART}"),
         ("cycle budget", CYCLE_BUDGET),
         ("retry on cycles / alpha", f"{RETRY.abort_above_cycles} / {RETRY.on_alpha}"),
@@ -1268,7 +1250,14 @@ def solve_aquaflux(
         ),
         ("probe column reach", probe.column_reach or "uniform"),
         ("forward restart / max restarts", f"{FORWARD_RESTART} / {FORWARD_MAX_RESTARTS}"),
-        ("k positivity projection", POSITIVITY_PROJECTION),
+        (
+            "omega step ratio",
+            "default (e)"
+            if OMEGA_STEP_RATIO is None
+            else "unbounded"
+            if math.isinf(OMEGA_STEP_RATIO)
+            else OMEGA_STEP_RATIO,
+        ),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("inner dump above", INNER_DUMP_ABOVE or "off"),
     ):

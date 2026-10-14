@@ -69,11 +69,6 @@ solver:
     abort_above_cycles: 10
     on_alpha: 0.01
   turbulence_damping: 3.0
-  # k kept above 1e-8 by shortening the step, rather than projected back after it. This is where
-  # bfs3d deliberately differs from pitzDaily: the global step cap does stabilizing work here that a
-  # per-cell clip does not (see compare.py beside K_POSITIVITY_PROJECTION).
-  positivity_floor: 1.0e-08
-  positivity_projection: false
   # 12 stations here where the 2D case takes 16: a station change forces a preconditioner rebuild,
   # which costs a third of a step on this mesh and a sixth on the 2D one.
   continuation: {kind: ViscosityRamp, anchor: 100.0, stations: 12, steps_per_station: 1, scale: flow}

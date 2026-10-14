@@ -532,7 +532,9 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
     So the traced inverse is not merely at parity on a march, it is ahead, and **the case defaults moved
     to it** (`BFS3D_TURBULENCE_INVERSE` now defaults to `jacobi`, with `K_WALL` `zerogradient` and
     `K_POSITIVITY_FLOOR` 1e-08 moved in the same change so the default configuration *is* the arm
-    measured above; `compare.py` states all three in its banner).
+    measured above; `compare.py` states all three in its banner). ⚠️ Both arms ran under the global k cap
+    and its floor, deleted 2026-10-14 (`K_POSITIVITY_FLOOR` no longer exists); the cap-collapse this pair
+    localized is not in today's march.
 
     **⚠️ THE "PETSC IS FASTER" READING THAT THIS REPLACES WAS A THREE-WAY CONFOUND, AND NO SINGLE LOG
     WAS WRONG.** The belief was 58 steps against 67. The 58-step run (`march-20260811-095526.log`) used

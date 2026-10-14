@@ -348,7 +348,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
     refresh needs **no new trigger** — `refresh_preconditioner` is already called once per *attempt*, after the
     control has set β, so a rebuild on escalation would be a condition inside that hook (the deleted
     `beta_rel_change` gate was one, never measured in that role); (b) that would **not** address
-    the lock-ups this case actually hits, which run at `binding_limit < 1` (the positivity ratchet) where
+    the lock-ups this case hit under the since-deleted global k cap (2026-10-14), which ran at `binding_limit < 1` (the positivity ratchet) where
     the direction is measured accurate and the solve already over-delivers against its tolerance. Where α
     *is* the right refresh signal is the **constraint-free** collapse (`binding_limit == 1`, direction
     genuinely bad), and that case is invisible to every trigger today.
@@ -905,7 +905,8 @@ or whose blocks are unnamed: `RowScaledNorm` /
       triggers agree on 62 steps and disagree on one — the expensive step, which per-inner catches and
       summed misses. The change is correctness, not speed.) **`cycle_budget` stays SUMMED** and should:
       it is a cost cap, and total cost is exactly what it caps.
-    - **`binding_limit`** — the step cap where it was the *binding* constraint, else 1. A small `alpha`
+    - **`binding_limit`** — the step cap where it was the *binding* constraint, else 1 (always 1 since
+      2026-10-14: nothing installs a whole-step limit). A small `alpha`
       has two opposite causes (the direction overshot; a constraint stopped it being followed further),
       so `alpha` alone cannot be acted on or reported honestly.
     - **`full_step_ratio` (2026-10-11)** — the step's first full-length trial over the state it started
@@ -930,32 +931,31 @@ or whose blocks are unnamed: `RowScaledNorm` /
     field still finite, all of `u, p, k, omega` moving by ~1e-4, only the derived `nu_t` NaN, because
     the SST closure takes `sqrt(k)`. The line search had crawled along that boundary for four inner
     iterations (`alpha` halving `0.008 → 0.001`, residual falling under 1% each) with no way to see it.
-    - **`positive_block_limit(start, stop, tau)` COMPUTES the admissible fraction, it does not search
-      for one** — the fraction-to-the-boundary rule, `alpha_max = tau·min(phi_i / −delta_i)` over
-      decreasing entries. Rejecting violating rungs is **not** sufficient: `alpha` was already at the
-      ladder's shortest rung when the field crossed zero, so there was nothing shorter to fall back to.
-      `backtracking_line_search(max_alpha=…)` caps every rung **including the growth rungs**, and its
-      default is `inf`, **not 1** — a default of 1 silently disables the growth rungs, a regression the
-      growth tests caught.
-    - `turbulence.positive_k_limit(coupled)` returns the limiter for a directly-solved `k` and `None`
-      for a log-solved one (positive by construction there, so a cap would only throttle);
-      `coupled_amg_continuation` wires it automatically.
+    - **What guards it now (2026-10-14): a PER-CELL step projection, not a whole-step cap.** Every
+      coupled builder installs `_closure_step_projection(coupled, omega_step_ratio)` as `step_projection`:
+      `solve.composed_projection` of the k clip (`turbulence.positive_k_projection` →
+      `solve.positive_block_projection`, each cell's decreasing `k` correction clipped to `tau = 0.99` of its
+      own room; unconditional for a directly-solved `k`) and the ω bound (`turbulence.omega_step_bound` →
+      `solve.bounded_block_projection`, `|Δ log ω| ≤ log(omega_step_ratio)` per cell; default
+      `DEFAULT_OMEGA_STEP_RATIO = e` under `LogScalars`, none for a direct ω, `math.inf` = unbounded, a
+      finite ratio with direct ω raises). **The bound is part of the guard, not an option:** clipping a
+      cell's `k` alone leaves its ω correction solved for a `k` move no longer taken, and on `bfs3d` that
+      gave full-length trials with residual ratios up to 4e91.
+    - **There is no `positive_block_limit` / `PositiveBlockLimit` / `turbulence.positive_k_limit` any
+      more** — the fraction-to-the-boundary *global* cap, deleted 2026-10-14. Its trap, worth keeping: a
+      global cap lets one near-zero cell throttle the whole step (on `bfs3d` one or two near-zero-k
+      side-wall corner cells set it to 0.001–0.002 and caused all of its redone attempts). Coupled steps
+      now carry `step_limit=None`; the generic `step_limit` seam, `StepOutcome.binding_limit`,
+      `stop_on_limit_stall` and the log's `limit` aside remain but nothing in the library installs a
+      whole-step limit (removal is a planned follow-up). Measurements and the A/B are in
+      `.claude/notes/solve-globalization-log.md`, "bfs3d's retried steps: the global k cap, replaced by a
+      per-cell clip with an omega bound (2026-10-14)". `backtracking_line_search(max_alpha=…)` still
+      caps every rung **including the growth rungs**, and its default is `inf`, **not 1** — a default of 1
+      silently disables the growth rungs.
     - **BOTH strategies carry `step_limit` / `step_projection` (fixed 2026-08-15).** They were
-      `DualTimeStep` fields only, so choosing `PseudoTransientStep` **silently gave up the guard** —
-      and the guard exists because its absence is a recorded march death (two cells of 23040 took `k`
-      negative and NaN'd the whole residual through a bare `sqrt`, every field still finite, nothing in
-      the ordinary stopping tests able to see it). The guard protects the **state**, not the march: a
-      field that must stay positive must stay positive whichever strategy steps it. `PseudoTransientStep`
-      now applies the identical pair in the identical order — project per entry first, then read the cap,
-      which then finds nothing binding — so the two compose the same way on both. Both default `None`,
-      which is the unconstrained step exactly, so the default path is unchanged.
-    - **The cap is GLOBAL, so one entry near zero throttles the whole step** — a real risk on a field
-      spanning `1e-5` to `4.5`. Measured, it does not bite, because the escape is not the cap: the cap
-      forces `alpha → 0`, `CflResidualDualTimeControl` reads that as "shift too weak" and escalates
-      `beta` `0.5 → 1.0 → 2.0`, and at the larger shift the implicit step is short enough to fit inside
-      the constraint — full `alpha = 1`, residual descending. **The two mechanisms compose without
-      having been designed together**, and the march then converged in 20 steps where two previous runs
-      had died. Do not "fix" the throttling without re-measuring; the globalization already handles it.
+      `DualTimeStep` fields only, so choosing `PseudoTransientStep` silently gave up the guard. The guard
+      protects the **state**, not the march, so `PseudoTransientStep` applies the identical pair in the
+      identical order (projection first, then any limit). Both default `None`, the unconstrained step.
     - Why not a log variable for `k`: `k = 0` is the physical no-slip wall condition, so `log k` is
       singular exactly where the mesh is finest (recorded and measured in `.claude/rules/turbulence.md`
       — the full-log form descends then freezes). `log(k+1)` is regular there but bounds `k > −1`, not

@@ -79,7 +79,7 @@ from aquaflux.turbulence.coupled import (
     _BLOCK_LINEAR_SOLVE,
     CoupledRANS,
     LiveViscosityVelocityParts,
-    _k_positivity_guards,
+    _closure_step_projection,
     _row_jacobian_scale,
     coupled_jacobian_probe,
     coupled_rans_layout,
@@ -306,7 +306,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
     """
     mesh, coupled = _cavity()
     state = _healthy_state(mesh, coupled)
-    # Both branches: the single-step one needs the cap as much as the dual-time one, because its
+    # Both branches: the single-step one needs the guard as much as the dual-time one, because its
     # escalation ladder cannot catch `k < 0` -- the divergence guard fires on a residual that is already
     # non-finite, by which point `sqrt(k)` has poisoned the closure.
     built = {
@@ -322,7 +322,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         ),
     }
     for name, step in built.items():
-        assert step.step_limit is not None, f"{name} has no k-positivity limit"
+        assert step.step_projection is not None, f"{name} has no k-positivity guard"
 
     # ...and the surfaces themselves agree, so a knob cannot reappear on one side. Everything here is a
     # property of the coupled march rather than of any preconditioner, which is the test: a parameter
@@ -345,8 +345,7 @@ def test_every_continuation_builder_installs_the_same_globalization() -> None:
         "shift",
         # The per-step guards.
         "inner_observer",
-        "positivity_floor",
-        "positivity_projection",
+        "omega_step_ratio",
     }
     # One builder for every preconditioner family and for a held bulk velocity alike -- so the surfaces
     # that used to drift across five builders are one signature.
@@ -545,7 +544,7 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
     ``preconditioner`` / ``reference_state`` / ``**strategy_kwargs`` configure the continuation
     ``solve_coupled`` builds. On the two paths where it builds none -- an explicit ``strategy``, or a
     ``RefreshPolicy(builder=...)`` -- they reached nothing at all: a solve asked for a dual-time loop
-    and ``positivity_floor=1e-6`` ran the library defaults, with no error and no log line. ``**kwargs``
+    and ``omega_step_ratio=3.0`` ran the library defaults, with no error and no log line. ``**kwargs``
     is what made it quiet, since it accepts every keyword and checks none, and that door is the main
     entry point's.
 
@@ -560,7 +559,7 @@ def test_continuation_settings_are_refused_where_they_would_be_dropped() -> None
 
     for kwargs in (
         {"strategy": step, "dual_time": DualTimeLoop(inner_steps=3)},
-        {"strategy": step, "positivity_floor": 1e-6},
+        {"strategy": step, "omega_step_ratio": 3.0},
         {"strategy": step, "preconditioner": BlockDiagonal()},
         {"strategy": step, "reference_state": state},
         {
@@ -1667,12 +1666,12 @@ def test_the_frozen_transpose_factory_ignores_the_state_it_is_given() -> None:
 
 
 def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transform() -> None:
-    """Both positivity constructions target the ``k`` slice, and both stand down for a log variable.
+    """The positivity projection targets the ``k`` slice, and stands down for a log variable.
 
     Worth its own test for two reasons. The slice ``((dim + 1) n, (dim + 2) n)`` is block-order
     knowledge, so a builder that computed it independently would drift silently when the order
     changed -- here both ask the layout for the block by name, and this pins the answer. And these
-    builders are the only place the projection is constructed for a coupled case, so a missing import
+    builder is the only place the projection is constructed for a coupled case, so a missing import
     in the module would otherwise surface for the first time in the middle of a march rather than here.
 
     The builders read only the transform and the block layout, and a layout is mesh-free, so a stub
@@ -1680,7 +1679,7 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
     """
     from types import SimpleNamespace
 
-    from aquaflux.turbulence import positive_k_limit, positive_k_projection
+    from aquaflux.turbulence import positive_k_projection
     from aquaflux.turbulence.coupled import DirectScalars, LogScalars
 
     n, dim = 7, 3
@@ -1689,64 +1688,75 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
         layout=coupled_rans_layout(flow_state_layout(dim=dim, n_cells=n)),
     )
 
-    cap = positive_k_limit(direct)
     project = positive_k_projection(direct)
-    assert (cap.start, cap.stop) == ((dim + 1) * n, (dim + 2) * n)
-    assert (project.start, project.stop) == (cap.start, cap.stop)
+    assert (project.start, project.stop) == ((dim + 1) * n, (dim + 2) * n)
 
-    # ...and each acts on that slice only. One dead k cell, one healthy, velocities driven hard.
+    # ...and it acts on that slice only. One dead k cell, one healthy, velocities driven hard.
     phi = jnp.ones((dim + 3) * n)
-    phi = phi.at[cap.start].set(1.0e-12)
-    delta = -jnp.ones_like(phi)
-    assert float(cap(phi, delta)) < 1.0e-9  # the dead cell throttles the whole step
+    phi = phi.at[project.start].set(1.0e-12)
+    delta = -0.5 * jnp.ones_like(phi)
     clipped = project(phi, delta)
-    assert float(clipped[cap.start]) == pytest.approx(-0.99e-12)  # ...held back alone
-    assert float(clipped[0]) == -1.0  # a velocity entry is untouched
-    assert float(cap(phi, clipped)) == pytest.approx(1.0)  # the cap now finds nothing binding
+    assert float(clipped[project.start]) == pytest.approx(-0.99e-12)  # held back alone
+    assert float(clipped[project.start + 1]) == -0.5  # a healthy k cell keeps its correction
+    assert float(clipped[0]) == -0.5  # a velocity entry is untouched
 
-    # A log variable is positive by construction, so neither constrains it.
+    # A log variable is positive by construction, so nothing constrains it.
     logged = SimpleNamespace(k_transform=LogScalars(), layout=direct.layout)
-    assert positive_k_limit(logged) is None
     assert positive_k_projection(logged) is None
 
 
-def test_k_positivity_guards_refuses_a_floor_the_default_projection_would_silence() -> None:
-    """``positivity_floor`` fed only to the limiter is provably inert once the projection runs first.
+def test_omega_step_ratio_bounds_log_omega_per_cell_after_the_k_clip() -> None:
+    """``omega_step_ratio`` clips each cell's ``log omega`` correction to ``log(ratio)``, after the k clip.
 
-    The projection clips every k correction to within ``tau`` of its own boundary; the limiter then
-    sees room ``>= 1/tau`` on every entry whatever floor it carries, so it always reports
-    ``alpha_max = 1``. A non-zero floor under the default ``positivity_projection=True`` therefore
-    protects nothing -- refused here rather than left as a step-length surprise (#365).
+    The wrong answers it catches: the bound landing on the wrong block (k, or the flow), a bound in
+    omega rather than log omega (``ratio`` itself instead of its logarithm), the k clip dropped when the
+    bound is composed with it, and a bound accepted where omega is solved directly -- where a bound on
+    the correction is a bound in absolute omega, which means something else entirely.
     """
+    import math
     from types import SimpleNamespace
 
+    from aquaflux.turbulence import omega_step_bound
     from aquaflux.turbulence.coupled import DirectScalars, LogScalars
 
-    direct = SimpleNamespace(
-        k_transform=DirectScalars(),
-        layout=coupled_rans_layout(flow_state_layout(dim=2, n_cells=5)),
+    n, dim = 4, 2
+    layout = coupled_rans_layout(flow_state_layout(dim=dim, n_cells=n))
+    case = SimpleNamespace(k_transform=DirectScalars(), omega_transform=LogScalars(), layout=layout)
+    k, omega = layout.slice_of("k"), layout.slice_of("omega")
+
+    phi = jnp.ones(layout.size)
+    # One cell's omega correction far past the bound each way, one inside it; k driven through zero.
+    delta = jnp.zeros(layout.size)
+    delta = (
+        delta.at[omega.start].set(5.0).at[omega.start + 1].set(-5.0).at[omega.start + 2].set(0.3)
     )
+    delta = delta.at[k.start].set(-10.0).at[0].set(-7.0)
 
-    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
-        _k_positivity_guards(direct, 1e-6, True)
-    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
-        _k_positivity_guards(direct, 1e-6, True)  # not consumed by the first call: pure function
+    out = _closure_step_projection(case, 3.0)(phi, delta)
+    assert float(out[omega.start]) == pytest.approx(math.log(3.0))
+    assert float(out[omega.start + 1]) == pytest.approx(-math.log(3.0))
+    assert float(out[omega.start + 2]) == pytest.approx(0.3)  # inside the bound: untouched
+    assert float(out[k.start]) == pytest.approx(-0.99)  # the k clip still runs
+    assert float(out[0]) == -7.0  # the flow is untouched
 
-    # The floor is genuinely usable paired with the plain global cap.
-    step_limit, step_projection = _k_positivity_guards(direct, 1e-6, False)
-    assert step_limit.floor == 1e-6
-    assert step_projection is None
+    # Unset is the default bound, e: |delta log omega| <= 1 ...
+    default = _closure_step_projection(case)(phi, delta)
+    assert float(default[omega.start]) == pytest.approx(1.0)
+    assert float(default[k.start]) == pytest.approx(-0.99)
+    # ...and infinity bounds nothing, leaving the k clip alone.
+    unbounded = _closure_step_projection(case, math.inf)(phi, delta)
+    assert float(unbounded[omega.start]) == 5.0
+    assert float(unbounded[k.start]) == pytest.approx(-0.99)
+    # Omega solved directly: no default bound (it would be a bound in absolute omega), the k clip only.
+    direct_omega = SimpleNamespace(
+        k_transform=DirectScalars(), omega_transform=DirectScalars(), layout=layout
+    )
+    assert float(_closure_step_projection(direct_omega)(phi, delta)[omega.start]) == 5.0
 
-    # A zero floor is never refused, under either setting -- it is what the projection already does.
-    for projection in (True, False):
-        step_limit, step_projection = _k_positivity_guards(direct, 0.0, projection)
-        assert step_limit.floor == 0.0
-        assert (step_projection is not None) is projection
-
-    # Inert for a different, already-documented reason (the transform, not the projection) when k is
-    # solved in log form -- no limiter is built at all, so there is nothing for the floor to feed.
-    logged = SimpleNamespace(k_transform=LogScalars(), layout=direct.layout)
-    assert _k_positivity_guards(logged, 1e-6, True) == (None, None)
+    with pytest.raises(ValueError, match=r"solved as its\s+logarithm"):
+        omega_step_bound(SimpleNamespace(omega_transform=DirectScalars(), layout=layout), 3.0)
+    with pytest.raises(ValueError, match=r"must be above 1"):
+        omega_step_bound(case, 1.0)
 
 
 def _block_step(coupled, state, **march):
@@ -1762,32 +1772,21 @@ def _split_step(coupled, state, **march):
     [_block_step, _split_step, _mass_flow_step],
     ids=["block", "split", "mass flow"],
 )
-def test_every_coupled_continuation_builder_refuses_the_same_inert_combination(builder) -> None:
-    """Every preconditioner family routes through :func:`_k_positivity_guards`, and it is checked first.
+def test_every_coupled_builder_routes_its_guard_through_one_place(builder) -> None:
+    """Every preconditioner family builds its step guard with :func:`_closure_step_projection`.
 
-    First specifically so a real caller's mistake -- and this test -- never pays for building the
-    preconditioner the raise makes moot.
+    Shown by the one refusal that guard makes: a finite ``omega`` bound where ``omega`` is solved
+    directly (these fixtures solve it directly), which would be a bound in absolute ``omega``. It is
+    refused before the preconditioner is built, so a caller's mistake -- and this test -- never pays
+    for a build the raise makes moot. ``math.inf`` (no bound) is accepted on the same case.
     """
+    import math
+
     mesh, coupled = _case_for(builder)
     state = _healthy_state(mesh, coupled)
-    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
-        builder(coupled, state, positivity_floor=1e-6)
-    with pytest.raises(ValueError, match=r"positivity_floor.*has no effect"):
-        builder(coupled, state, positivity_floor=1e-6, positivity_projection=True)
-
-
-@pytest.mark.parametrize(
-    "builder",
-    [_block_step, _split_step, _mass_flow_step],
-    ids=["block", "split", "mass flow"],
-)
-def test_the_inert_combination_is_the_only_thing_refused(builder) -> None:
-    """Every other pairing of the two settings still builds -- including a floor that now matters."""
-    mesh, coupled = _case_for(builder)
-    state = _healthy_state(mesh, coupled)
-    builder(coupled, state, positivity_floor=1e-6, positivity_projection=False)
-    builder(coupled, state, positivity_floor=0.0)
-    builder(coupled, state, positivity_floor=0.0, positivity_projection=False)
+    with pytest.raises(ValueError, match=r"solved as its\s+logarithm"):
+        builder(coupled, state, omega_step_ratio=3.0)
+    builder(coupled, state, omega_step_ratio=math.inf)
 
 
 def test_the_probe_is_the_same_for_every_reynolds_rung() -> None:
@@ -1956,23 +1955,6 @@ def test_freezing_the_production_viscosity_changes_the_operator_and_not_the_resi
     flow_block, omega_block = layout.slice_of("flow"), layout.slice_of("omega")
     assert jnp.array_equal(frozen_action[flow_block], exact_action[flow_block])
     assert jnp.array_equal(frozen_action[omega_block], exact_action[omega_block])
-
-
-def test_every_continuation_builder_defaults_to_the_per_entry_positivity_projection() -> None:
-    """The default is a value, pinned, because the global cap it replaces loses a march.
-
-    The plain fraction-to-the-boundary cap scales the whole step by the worst entry of the
-    smallest-magnitude block, so one numerically-dead cell sets the step length for every degree of
-    freedom -- and then ratchets, the capped entry decaying by ``1 - tau`` per step whatever the floor
-    is. Measured on a separating coupled-RANS benchmark, that loses the march outright while the
-    per-entry projection completes it *and* speeds up the arm that already worked.
-
-    Pinned on every builder together: a default that reverts on one of them reverts silently, and
-    the failure it re-arms shows up as a step length rather than as an error.
-    """
-    for builder in (coupled_step,):
-        got = inspect.signature(builder).parameters["positivity_projection"].default
-        assert got is True, f"{builder.__name__} defaults positivity_projection to {got!r}"
 
 
 def test_the_probe_materializes_the_operator_the_solve_applies() -> None:
