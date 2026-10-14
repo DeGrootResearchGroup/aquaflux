@@ -275,16 +275,16 @@ def test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or
     object compared by identity, every rebuild recompiled the escalation loop, the GMRES and the
     V-cycle, which is why the segregated driver carries one; it still does, to skip the build.)
 
-    The count is residual *executions*, and a converged sweep is not free of them: the march evaluates
-    the residual once, eagerly, for the reference norm it judges progress against. So **one** per sweep
-    is the no-recompile floor here, and a retrace costs several on top of it.
+    The count is residual *executions*. The march reads its reference norm through a compiled program
+    as well as stepping through one, so a sweep that recompiles nothing executes the residual not at
+    all: **zero** per sweep is the no-recompile floor, and a retrace costs several.
     """
     frozen, frozen_state = _sweep_traces(freeze=True)
     rebuilt, rebuilt_state = _sweep_traces(freeze=False)
 
     assert frozen[0] > 1  # the first sweep compiles
-    assert frozen[1:] == [1, 1, 1]  # and every later sweep runs on the compiled step
-    assert rebuilt[1:] == [1, 1, 1]  # so does a preconditioner rebuilt every sweep
+    assert frozen[1:] == [0, 0, 0]  # and every later sweep runs on the compiled programs
+    assert rebuilt[1:] == [0, 0, 0]  # so does a preconditioner rebuilt every sweep
     # Freezing the preconditioner only changes how fast the Krylov iteration converges, never the
     # converged field -- so the two paths agree to solver tolerance.
     assert float(jnp.max(jnp.abs(frozen_state - rebuilt_state))) < 1e-10

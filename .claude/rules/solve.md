@@ -671,6 +671,29 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     per step, **194 → 202 in total (+4 %)** — the inner Krylov stop now reading the rebuilt measure
     instead of the one the step was built with. Wall clock is not quotable: another session loaded the
     machine during the arm (1-minute load ~10).
+- **A residual norm read OUTSIDE the compiled step goes through `norm.norm_of_residual` — never
+  `measure(residual_fn(state))` written eagerly (binding, 2026-10-14).** `norm_of_residual(measure,
+  residual_fn, state)` is an `eqx.filter_jit` program beside `_block_terms`; `newton_march` reads the
+  starting norm its damping ramps against, the starting norm in a stopping measure and the stopping
+  measure at every step through it, and `staged_march` its two references and its final root check. Run
+  op by op each of those was one dispatch per operation of the residual, which on a coupled problem
+  costs seconds; compiled, it is one compilation per measure structure and residual, then a cache hit.
+  It inherits `_march_step`'s two caller obligations: a residual with a stable identity (bound method or
+  module) and a measure that changes only in array values (`RowScaledNorm` / `BlockScaledNorm` do; a
+  measure built as a fresh `lambda` per call recompiles every call -- correct, but slower than eager).
+  - **Measured, pitzDaily `case.yaml` at `66aec63b` (#715) against this change, back to back, warm
+    compile cache, Linux x86_64, 4 cores, jax 0.11.2, one run each under `py-spy` (25 Hz):** identical
+    step tables (18 steps / 123 cycles, `x_r/h` 8.0686), solve 804 -> **727 s**. By profile bucket: the
+    stopping test 25.3 -> 1.6 s, the driver's references 20.4 -> 7.4 s, and the march log's field
+    extraction (`turbulence.coupled_fields`, compiled in the same change) 34.4 -> 0.3 s; compilation
+    122 -> 124 s.
+  - Pinned by `test_the_march_reads_its_norms_through_compiled_programs_not_op_by_op` and its
+    `staged_march` twin (`test_newton_march.py`: a second march over the same objects calls the residual
+    zero times; each of the six call sites reverted to the eager form fails at least one of them).
+    ⚠️ **A test that takes a march's trace count as its STEP's compile count now includes this
+    program's one trace** -- warm it first (`_warm_the_march_norm` in `test_newton_march.py`). The
+    "one eager residual execution per solve/sweep" floors in `test_root_solver.py` and
+    `test_scalar_continuation.py` are now zero.
 - **`driver.py` + `shifted_step.py` — BUILT 2026-09-19 (#448, #277): the robust march is residual-agnostic,
   and lives HERE (root `CLAUDE.md`, Principle 3.6).** Both were `turbulence/coupled.py` internals until a
   laminar flow problem found it could not reach them. **`solve.staged_march(residual_fn, state, *, strategy,
@@ -852,8 +875,9 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   affected site in the repository, found by running that tier rather than by the grep for `jit`/`vmap`
   that preceded the decision). It is now a Python loop whose per-step residual is an `equinox.Module`
   holding the previous states (`_BdfStep`), so the later timesteps run on the compiled Newton step the
-  opening ones build — measured 7/4/4 residual executions for the first three steps and exactly 1 for
-  every step after, that one being the march's own eager reference-norm evaluation. `docs/` carries the
+  opening ones build — measured 4/4/4 residual executions for the first three steps and **none** for
+  any step after (2026-10-14, once the march's reference norm became a compiled program; it was 1 per
+  step before, that one evaluation eager). `docs/` carries the
   pattern for users. **The lesson for the next decision of this shape: "which transforms does this
   break" is not answered by grepping for the transforms' names — `lax.scan` traces its body just as
   `jit` does, and a test tier found what the grep did not.** So `solve()` refuses a transform up front via

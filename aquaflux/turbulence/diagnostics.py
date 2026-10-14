@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
+import equinox as eqx
 import jax.numpy as jnp
 
 from .measures import coupled_equation_names, coupled_scaled_norm
@@ -78,24 +79,33 @@ def coupled_fields(coupled) -> Callable[[jnp.ndarray], Mapping[str, jnp.ndarray]
     >>> metrics = field_change_metrics(coupled_fields(coupled))  # doctest: +SKIP
     >>> MarchLogger(metrics=metrics)  # doctest: +SKIP
     """
-    momentum, turbulence = coupled.momentum, coupled.turbulence
     dim = coupled.momentum.mesh.dim
-    velocity_names = coupled_equation_names(dim)[:dim]
+    names = (*coupled_equation_names(dim)[:dim], "p", "k", "omega", "nut")
 
     def fields(state: jnp.ndarray) -> Mapping[str, jnp.ndarray]:
-        flow, k, omega = coupled.physical_fields(state)
-        velocity, pressure = momentum.unpack(flow)
-        nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
-        components = {name: velocity[:, i] for i, name in enumerate(velocity_names)}
-        return {
-            **components,
-            "p": pressure - jnp.mean(pressure),  # gauge-free: see the docstring
-            "k": k,
-            "omega": omega,
-            "nut": nu_t,
-        }
+        # Named here, in this order, rather than inside the compiled program: a mapping returned from
+        # one comes back with its keys sorted, which would reorder the log's rows.
+        return dict(zip(names, _field_values(coupled, state), strict=True))
 
     return fields
+
+
+@eqx.filter_jit
+def _field_values(coupled, state: jnp.ndarray) -> tuple[jnp.ndarray, ...]:
+    """:func:`coupled_fields`'s fields at ``state``, in its order, as one compiled program.
+
+    It is called once per logged step, and run op by op the closure's eddy viscosity alone (a velocity
+    gradient and the closure fields) costs far more in dispatch than in arithmetic. The assembler is an
+    argument rather than a captured value, so its arrays are inputs to the program and one compilation
+    serves every step.
+    """
+    momentum, turbulence = coupled.momentum, coupled.turbulence
+    flow, k, omega = coupled.physical_fields(state)
+    velocity, pressure = momentum.unpack(flow)
+    nu_t = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega).nu_t
+    components = tuple(velocity[:, i] for i in range(momentum.mesh.dim))
+    # Pressure gauge-free: see coupled_fields.
+    return (*components, pressure - jnp.mean(pressure), k, omega, nu_t)
 
 
 def coupled_residuals(
@@ -159,8 +169,19 @@ def coupled_residuals(
     def residuals(state: jnp.ndarray) -> Mapping[str, float]:
         at = state if equilibrate_at[0] is None else equilibrate_at[0]
         measure = coupled_scaled_norm(coupled, continuation.shift_policy, at)
-        per_block = measure.per_block(coupled.residual(state))
+        per_block = _per_block_residual(coupled, measure, state)
         equilibrate_at[0] = state
         return {name: float(value) for name, value in zip(names, per_block, strict=True)}
 
     return residuals
+
+
+@eqx.filter_jit
+def _per_block_residual(coupled, measure, state: jnp.ndarray) -> jnp.ndarray:
+    """``measure``'s per-equation terms of the coupled residual at ``state``, as one compiled program.
+
+    :func:`coupled_residuals` reads these once per logged step; op by op the coupled residual is a
+    dispatch per operation. The assembler and the measure are arguments, so a later step (new values,
+    same structure) is a cache hit.
+    """
+    return measure.per_block(coupled.residual(state))

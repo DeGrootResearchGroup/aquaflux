@@ -1454,6 +1454,72 @@ def test_coupled_fields_splits_velocity_per_component_and_names_omega() -> None:
     assert jnp.allclose(fields["v"], velocity[:, 1])
 
 
+def test_coupled_fields_are_each_field_s_own_value_read_through_one_compiled_program(
+    monkeypatch,
+) -> None:
+    """Every named field is the field it is named for, and a later step's read runs no Python.
+
+    The log reads these once per step; evaluated op by op, the eddy viscosity alone was a dispatch per
+    operation of a velocity gradient and the closure. Compiled with the assembler as an argument, a read
+    at a new state of the same case is a cache hit -- counted here as calls of ``physical_fields``,
+    which the compiled program makes only while it is traced.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    flow, k, omega = coupled.physical_fields(state)
+    velocity, pressure = coupled.momentum.unpack(flow)
+    expected = {
+        "u": velocity[:, 0],
+        "v": velocity[:, 1],
+        "p": pressure - jnp.mean(pressure),
+        "k": k,
+        "omega": omega,
+        "nut": coupled.turbulence.closure_fields(
+            coupled.momentum.velocity_fields(flow), k, omega
+        ).nu_t,
+    }
+
+    calls = []
+    original = CoupledRANS.physical_fields
+    monkeypatch.setattr(
+        CoupledRANS, "physical_fields", lambda self, s: calls.append(1) or original(self, s)
+    )
+    fields = coupled_fields(coupled)
+    read = fields(state)
+    assert list(read) == list(expected)
+    for name, value in expected.items():
+        assert jnp.allclose(read[name], value, rtol=1e-12, atol=0.0), name
+
+    calls.clear()
+    fields(state * 1.01)
+    assert calls == []
+
+
+def test_the_per_equation_residuals_are_read_through_one_compiled_program(monkeypatch) -> None:
+    """A later step's per-equation read runs no Python of the coupled residual.
+
+    The log reads these once per step (bfs3d logs them on every one); op by op the coupled residual is a
+    dispatch per operation. Counted here as calls of ``CoupledRANS.residual``, which the compiled
+    program makes only while it is traced: the first read compiles, a read at a new state of the same
+    case does not call it.
+    """
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    engine = coupled_step(
+        coupled, state, preconditioner=BlockDiagonal(scalar=UnpreconditionedScalars())
+    )
+    calls = []
+    original = CoupledRANS.residual
+    monkeypatch.setattr(
+        CoupledRANS, "residual", lambda self, s: calls.append(1) or original(self, s)
+    )
+    reporter = coupled_residuals(coupled, engine, state)
+    reporter(state)
+    calls.clear()
+    reporter(state * 1.01)
+    assert calls == []
+
+
 def test_the_per_equation_residuals_compose_into_the_march_s_own_measure() -> None:
     """They are read on the same scale as the scalar residual beside them, which only holds if they
     are the very numbers that scalar is built from -- not a separately-scaled lookalike."""

@@ -39,6 +39,33 @@ number of OUTER steps the target station takes, which its shift floor sets (meas
 
 ---
 
+### Re-measured 2026-10-14 by profile, on the shipped march
+
+pitzDaily `case.yaml` at `da37958a`, one cold-cache run under `py-spy` (25 Hz, whole process), Linux
+x86_64, 4 cores, jax 0.11.2; `PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1` (checkpoint writing
+measured at 0.5 s). 18 steps / 123 cycles, `x_r/h` 8.0686, 898 s:
+
+| bucket | s | share |
+|---|---|---|
+| the compiled step program (GMRES, preconditioner applies, JVPs) | 417 | 46 % |
+| compilation and tracing, all phases (cold cache) | 212 | 24 % |
+| refit: coloured probe (~165 batched JVPs, ~6 s per refit) | 95 | 11 % |
+| refit: hierarchy refactor (host) and other build | 56 | 6 % |
+| march-log field extraction, op by op | 35 | 4 % |
+| the stopping test's residual, op by op | 32 | 4 % |
+| driver, setup, report | 50 | 5 % |
+
+Inside one Krylov application, timed at the target-station states of that capture (steps 13, 15, 18;
+`replay.py` as repaired in #719): field-split apply **186-190 ms** (the `[u, v, p]` SIMPLE-smoothed
+V-cycle ~130 ms, the `[k, omega]` Jacobi-smoothed one ~55 ms, the coupling product ~7 ms) against a JVP
+of **77-86 ms**, so the preconditioner is ~70 % of an application. The JVP was 45 ms on 2026-10-10;
+the multiple-correction gradient is the likely cause (not measured, and not a lever: that gradient is
+the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve.md`,
+`norm_of_residual`): 804 -> 727 s warm, identical march.
+⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
+built once per session and reused by every refit. A refit's ~6 s is the ~165 JVPs that compute the new
+VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).
+
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
 Both were measured on 2026-10-07 and moved to `solve-refuted-directions.md` ("Local (staged) AD assembly

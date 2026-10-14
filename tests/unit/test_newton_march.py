@@ -38,6 +38,7 @@ from aquaflux.solve import (
 )
 from aquaflux.solve.implicit import backtracking_line_search
 from aquaflux.solve.march import _march_step
+from aquaflux.solve.norm import norm_of_residual
 
 # Incremented on every *trace* of the residual below, so a test can assert that repeated steps
 # reuse a compiled march step instead of retracing it.
@@ -93,6 +94,16 @@ class _Cubic(eqx.Module):
         if isinstance(phi, jax.core.Tracer):
             _TRACES.append(1)
         return phi**3 - self.theta
+
+
+def _warm_the_march_norm(step, residual, phi0) -> None:
+    """Compile the march's starting-norm program before a test counts the step's traces.
+
+    The march reads its starting residual norm through a compiled program of its own, which traces the
+    residual once the first time it meets a residual of that structure. A test that takes the first
+    march's trace count as the compile count of the STEP would count that trace too.
+    """
+    norm_of_residual(step.norm(), residual, phi0)
 
 
 def _report(step: int, cycles: int, ratio: float) -> StepReport:
@@ -367,6 +378,7 @@ def test_step_control_drives_the_march_and_stays_a_cache_hit() -> None:
     common = dict(rtol=1e-12, atol=1e-14, step_control=control)
 
     # One controlled step pays the compilation (which invokes the residual several times per trace).
+    _warm_the_march_norm(base, residual, phi0)
     _TRACES.clear()
     one = newton_march(base, residual, phi0, max_steps=1, **common)
     compiled = len(_TRACES)
@@ -1114,6 +1126,7 @@ def test_a_forced_escalation_adds_no_march_step_compilations() -> None:
     )
 
     # One step with escalation disabled compiles `_march_step` once, and collapses (alpha 0 at β = 1).
+    _warm_the_march_norm(step, residual, phi0)
     # Escalation is driven by a COLLAPSED STEP LENGTH, the only thing that escalates: a costly solve
     # redoes at unchanged β, so it would make this test pass without an escalation ever happening.
     _TRACES.clear()
@@ -2664,3 +2677,107 @@ def test_a_released_shift_turns_a_linear_tail_into_newton_steps() -> None:
     assert not floored.converged
     assert released.converged and len(released.reports) <= 5
     assert released.reports[0].shift == 5e-3 and released.reports[1].shift == 1e-6
+
+
+# Incremented on EVERY call of the residual below, traced or eager, so a test can tell a residual
+# evaluated op by op (one call per evaluation) from one evaluated through a compiled program (calls
+# only while it is traced).
+_CALLS: list[int] = []
+
+
+class _CountedCubic(eqx.Module):
+    """``phi**3 - theta``, counting every call -- what the march's norms must not evaluate op by op."""
+
+    theta: jnp.ndarray
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        _CALLS.append(1)
+        return phi**3 - self.theta
+
+
+class _ScaledNorm(eqx.Module):
+    """The residual's 2-norm over a scale held as an array leaf, as a row-scaled measure holds its rows."""
+
+    scale: jnp.ndarray
+
+    def __call__(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return jnp.linalg.norm(residual) / self.scale
+
+
+class _ModuleScaledByStep:
+    """Measures for :func:`~aquaflux.solve.staged_march` built as modules from the step's ``scale``."""
+
+    def row_scaled(self, step, state):
+        del state
+        return _ScaledNorm(step.scale)
+
+    def block_scaled(self, state):
+        raise TypeError("not used")
+
+
+def test_the_march_reads_its_norms_through_compiled_programs_not_op_by_op() -> None:
+    """A second march over the same objects evaluates the residual no more than its compiled step does.
+
+    Outside its compiled step the march reads three norms of the residual: the starting one its damping
+    ramps against, the starting one in the stopping measure, and the stopping measure at every step.
+    Each was evaluated op by op, one Python call of the residual per evaluation -- on a coupled problem
+    a dispatch per operation, and the first march's largest cost outside its linear solves. Compiled,
+    a march repeated over the same objects (new measure values, same structure) calls it not at all.
+    """
+    step = _JudgedOnItsScale(
+        jnp.asarray(10.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))
+    )
+    residual = _CountedCubic(jnp.zeros((3,)))
+
+    def march():
+        return newton_march(
+            step,
+            residual,
+            jnp.ones((3,)),
+            max_steps=4,
+            rtol=0.0,
+            atol=0.0,
+            norm_builder=lambda strategy, state: _ScaledNorm(strategy.scale),
+            stopping_step=_judged_on(1.0),
+        )
+
+    first = march()
+    assert len(first.reports) == 4  # the stopping norm was read at every one of them
+    _CALLS.clear()
+    second = march()
+    assert [r.stopping_norm for r in second.reports] == [r.stopping_norm for r in first.reports]
+    assert _CALLS == []
+
+
+def test_the_staged_march_reads_its_norms_through_compiled_programs_not_op_by_op() -> None:
+    """The driver's references and its final root test are compiled too.
+
+    :func:`~aquaflux.solve.staged_march` takes the starting residual in the steering measure and in the
+    stopping measure before it marches, and the residual at the state reached afterwards. Repeated over
+    the same objects, the whole solve -- driver and march -- calls the residual not at all.
+    """
+    from aquaflux.solve import NO_REFRESH, Convergence, RowScaled, staged_march
+    from aquaflux.solve.driver import FinishedSource
+
+    residual = _CountedCubic(jnp.zeros((2,)))
+
+    def solve():
+        return staged_march(
+            residual,
+            jnp.ones((2,)),
+            strategy=_JudgedOnItsScale(
+                jnp.asarray(10.0), jnp.linalg.norm, ConstantRelaxation(jnp.asarray(1.0))
+            ),
+            source=FinishedSource(),
+            refresh=NO_REFRESH,
+            convergence=Convergence(measure=RowScaled(), rtol=0.0, atol=0.02),
+            measures=_ModuleScaledByStep(),
+            max_steps=6,
+            stopping_step=_judged_on(1.0),
+        )
+
+    first = solve()
+    _CALLS.clear()
+    second = solve()
+    assert jnp.array_equal(second.state, first.state)
+    assert _CALLS == []
