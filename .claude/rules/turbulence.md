@@ -514,7 +514,7 @@ Many entries below are dated history written against the old API. Read them thro
       -- and its `rtol` reference -- is read in the case's row scales while every step is main's
       (`solve-march.md`, `stopping_step`; `solve.md`, `materialized_session`). The block-diagonal
       family (#704's `RebuildingSession`) still swaps the station's shift in at every station; whether
-      it should hold the anchor's too is a separate issue, unmeasured.
+      it should hold the anchor's too is #711, unmeasured.
       **The arms.** pitzDaily: `validation/pitzdaily_openfoam/compare.py`, 12 x 1 momentum-only ramp from
       anchor 100, damping 3, `grow` 3, release 1e-4, `beta_min` 0.005, dual-time 5 / 0.01,
       `refresh_on_cycles` 3, residual stop, field split `SimpleSmoothed`/`JacobiSmoothed`, `atol` 1e-5 /
