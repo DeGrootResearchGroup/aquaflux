@@ -57,11 +57,21 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
+from aquaflux.precondition import (
+    FieldSplit,
+    JacobianProbeSpec,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    materialize_block_jacobian,
+)
+from aquaflux.precondition.materialized_session import (
+    jacobian_matvec,
+)
+from aquaflux.precondition.sparse_jacobian import (
+    shifted_jacobian,
+)
 from aquaflux.solve import DualTimeLoop
-from aquaflux.precondition import FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, materialize_block_jacobian
-from aquaflux.precondition.materialized_session import (jacobian_matvec,)
-from aquaflux.precondition.sparse_jacobian import (shifted_jacobian,)
-from aquaflux.turbulence import coupled_step, sst_initial_fields
+from aquaflux.turbulence import open_session, sst_initial_fields
 
 #: Far past the march's inexact-Newton stop, so arms separate rather than tie, and modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -108,19 +118,25 @@ def measure(label, factors, a, rhs, transpose):
 
 
 def field_split_arm(coupled, state, beta):
-    """The preconditioner `compare.py` ships, built at `beta`."""
-    return coupled_step(
-        coupled,
-        state,
-        preconditioner=MaterializedJacobian(
+    """The host inverse of the preconditioner `compare.py` ships, built at `beta`.
+
+    Read from the session rather than off the step: a step applies a traced copy of a field split whose
+    blocks both offer one, and only the session's host object takes ``apply(..., transpose=True)``.
+    """
+    session = open_session(
+        MaterializedJacobian(
             # The case's own selection, imported rather than re-branched here: a second copy of that
             # leading-inverse choice is how two files that must agree stop agreeing.
             FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING)),
             probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
             build_beta=beta,
         ),
-        dual_time=DualTimeLoop(inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL),
+        coupled,
     )
+    session.build(
+        state, dual_time=DualTimeLoop(inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL)
+    )
+    return session.preconditioner.inverse
 
 
 #: How far below the case's own self-start a state must sit to count as converged FOR THIS CASE.
@@ -206,15 +222,14 @@ def main() -> None:
     for label, build in (arms[k] for k in wanted):
         try:
             began = time.perf_counter()
-            engine = build()
-            factors = engine.shift_policy.preconditioner.inverse
+            factors = build()
             print(f"{label}  (built in {time.perf_counter() - began:.1f}s)", flush=True)
             measure(label, factors, a, rhs, transpose=False)
             measure(label, factors, a, rhs, transpose=True)
         except Exception as exc:  # a failing arm is a result; do not lose the others
             print(f"{label}  BUILD FAILED: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
         finally:
-            engine = factors = None
+            factors = None
             gc.collect()
 
 

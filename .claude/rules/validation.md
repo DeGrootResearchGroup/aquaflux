@@ -255,6 +255,27 @@ cannot be written. The guard is what catches the next module that does branch.
   pitzDaily damps the k and omega rows at 3, so every k-row number it produced (#312's included)
   described a march the case does not run. `beta * term.diagonal` drops `row_shift_scale`, which is where
   that damping lives, so even an engine built with the setting would have been measured without it.
+- **A harness that applies the march's preconditioner must apply what the STEP holds, and take it as an
+  argument of anything it compiles.** Since #290 a shipped field split is applied as a traced copy
+  (`TracedSplitShiftPolicy.split`) taken at each fit; a refit re-fits the session's host object in place
+  and reaches the step only through the replacement `refresh_preconditioner` returns. `pitzdaily_openfoam/
+  replay.py` still read `policy.preconditioner` (a host-policy field) and so raised `AttributeError` on
+  construction, which broke every probe built on it (`batch_bound_probe.py`, `krylov_recycling_probe.py`,
+  `precision_replay_probe.py`, `csr_kernel_precision.py`, `endgame_shift_probe.py`) with nothing
+  reporting it. Repaired 2026-10-14: `MarchReplay.refit` applies the returned replacement as the march
+  does, and `apply_pc` / `solve` / `preconditioned` compile with the step's policy as an argument, since
+  a split captured in a closure keeps applying the first fit's hierarchies after every refit, silently.
+  `MarchReplay(host=True)` applies the host object instead, for a probe that changes the host inverse in
+  place (`precision_replay_probe.py` swaps its blocks' precision; the traced copy would not see that).
+  Checked on a capture of `main` `da37958a`'s shipped pitzDaily march (18 steps, 4-core Linux, jax
+  0.11.2): all 68 inner solves, steps 1-18 with every station refit, reproduce the recorded counts
+  (`restart_cycles` of the replayed raw count; the inner dump stores the corrected count).
+  `pitzdaily_openfoam/zero_shift_arms.py` and `bfs3d_openfoam/zero_shift_adjoint.py` read
+  `engine.shift_policy.preconditioner.inverse` the same way, inside a `try` that reports a failure as an
+  arm's result, so they printed `BUILD FAILED: AttributeError` as if it were a measurement. They now
+  build through `open_session` and read `session.preconditioner.inverse`, the host object whose
+  `apply(..., transpose=True)` they need (pitzDaily smoke test at a self-start: finite both ways,
+  `w.Mv = v.M^T w` to 3.5e-14).
 - **A harness that calls `solve_linear` outside a Newton step must bind the measure itself**
   (`solve.linear.in_progress_measure(engine.linear_solver(), measure)`). Since #370 the step's GMRES is
   built with `norm=None` ("the measure of the step that runs me") and raises when run anywhere else;
@@ -480,8 +501,17 @@ How it works now, and what not to undo:
 - **`caffeinate` watches the wrapper's pid (`-w`) instead of wrapping the case**, so it is out of the path
   the status travels. The wrapper's stdio is detached so a caller capturing the launch output does not
   block for the case's lifetime.
-- **`--force` now skips taking the memory/load readings, not only judging them** — `free_gb` reads
-  `vm_stat`, which exists only on macOS, so the old code failed on Linux (and in CI) even when forced.
+- **`--force` skips taking the memory/load readings, not only judging them**, so a reading that cannot be
+  taken never blocks a forced launch.
+- **`free_gb` reads Linux too (2026-10-14).** It read only macOS's `vm_stat` (free + inactive pages), so
+  on Linux every UNFORCED launch died in a Python traceback before the case started, and runs here were
+  launched by hand around the runner. It now falls back to `/proc/meminfo`'s `MemAvailable`, the kernel's
+  own estimate of the same thing. Every test above passes `--force`, which is why nothing saw it; the
+  unforced pre-flight is pinned by
+  `test_the_PRE_FLIGHT_reads_free_memory_on_this_platform_and_refuses_below_its_bar` and
+  `test_an_unforced_launch_that_PASSES_the_pre_flight_runs_the_case` (both red with the `vm_stat`-only
+  reading restored, on Linux). Entries elsewhere saying a run went around `run_case.sh` because "it needs
+  `vm_stat`" record how those runs were made, not a limit that still holds.
 - **Liveness is the pid AND its start time (2026-10-12).** The run-file records `pid_started=` (`ps -o
   lstart=`, spaces squeezed), and `live_pid` treats the run as live only when a process with that pid
   exists and started then; otherwise the run-file is stale and removed. After a cloud-container

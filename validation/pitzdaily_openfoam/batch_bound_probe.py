@@ -64,7 +64,6 @@ def main():
     # The first system of each target-station step, in the march's order (the generator refits the
     # preconditioner as it goes, so the timed apply is the one the march used there).
     firsts, timed = {}, []
-    apply_pc = eqx.filter_jit(replay.apply_pc)
     jvp = eqx.filter_jit(jacobian_matvec)
     rng = np.random.default_rng(0)
     timed_steps = set(np.linspace(replay.stations + 1, max(replay.states), 3).round().astype(int))
@@ -74,7 +73,7 @@ def main():
         firsts[system.step] = system
         if system.step in timed_steps:
             v = jnp.asarray(rng.standard_normal(system.b.size))
-            pc = _best(apply_pc, v)
+            pc = _best(replay.apply_pc, v)
             single = _best(jvp, system.assembler, system.p, v)
             timed.append((system.step, pc, single))
             print(f"step {system.step:3d}: pc {pc:8.1f} ms, jvp {single:6.1f} ms", flush=True)

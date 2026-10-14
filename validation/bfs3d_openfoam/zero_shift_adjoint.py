@@ -61,13 +61,21 @@ import compare  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
-from aquaflux.turbulence import sst_initial_fields
+from aquaflux.precondition import (
+    FieldSplit,
+    JacobianProbeSpec,
+    JacobiSmoothed,
+    MaterializedJacobian,
+    materialize_block_jacobian,
+)
+from aquaflux.precondition.materialized_session import (
+    jacobian_matvec,
+)
+from aquaflux.precondition.sparse_jacobian import (
+    shifted_jacobian,
+)
 from aquaflux.solve import DualTimeLoop
-from aquaflux.precondition import JacobiSmoothed, materialize_block_jacobian
-from aquaflux.precondition.materialized_session import (jacobian_matvec,)
-from aquaflux.precondition.sparse_jacobian import (shifted_jacobian,)
-from aquaflux.turbulence import coupled_step
-from aquaflux.precondition import FieldSplit, JacobianProbeSpec, MaterializedJacobian
+from aquaflux.turbulence import open_session, sst_initial_fields
 
 #: Far past the march's inexact-Newton stop so arms separate rather than tie; modest in restarts
 #: because a failing arm is identified by its true residual long before it would converge.
@@ -180,16 +188,21 @@ def main() -> None:
     )
 
     def field_split(beta):
-        return coupled_step(
-            coupled,
-            state,
-            preconditioner=MaterializedJacobian(
+        # The host inverse, read from the session: a step applies a traced copy of a split whose blocks
+        # both offer one, and only the host object takes ``apply(..., transpose=True)``.
+        session = open_session(
+            MaterializedJacobian(
                 FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING)),
                 probe=JacobianProbeSpec(stencil_reach=REACH),
                 build_beta=beta,
             ),
+            coupled,
+        )
+        session.build(
+            state,
             dual_time=DualTimeLoop(inner_steps=compare.INNER_STEPS, inner_tol=compare.INNER_TOL),
         )
+        return session.preconditioner.inverse
 
     # Built at zero shift, and at the shipped floor against the same zero-shift operator: the second
     # is what the shipped code would actually do, the first is what "zero shift" implies. Reporting
@@ -199,19 +212,17 @@ def main() -> None:
         f"field split @ floor {compare.PC_BETA_FLOOR}": lambda: field_split(compare.PC_BETA_FLOOR),
     }
 
-    engine = None
     for label, build in arms.items():
         try:
             began = time.perf_counter()
-            engine = build()
-            factors = engine.shift_policy.preconditioner.inverse
+            factors = build()
             print(f"{label}  (built in {time.perf_counter() - began:.1f}s)", flush=True)
             measure(label, factors, a, rhs, transpose=False)
             measure(label, factors, a, rhs, transpose=True)
         except Exception as exc:  # a failing arm is a result; do not lose the others
             print(f"{label}  BUILD FAILED: {type(exc).__name__}: {str(exc)[:120]}", flush=True)
         finally:
-            engine = None
+            factors = None
             gc.collect()
 
 

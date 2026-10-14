@@ -12,12 +12,14 @@ reporting success for everything would look exactly like a string of successful 
 
 Every case here points ``TMPDIR`` at a throwaway directory, so the machine-global run-file that real
 cases use is never read or written, and passes ``--force`` so the memory and load pre-flight (which
-judges the machine, not the script) cannot refuse a launch that the test is about.
+judges the machine, not the script) cannot refuse a launch that the test is about -- except the two
+tests of that pre-flight, which set its bars instead.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import time
@@ -63,13 +65,15 @@ def _environment(tmp_path: Path) -> dict[str, str]:
     return {**os.environ, "TMPDIR": str(tmpdir), "AQUAFLUX_CASE_POLL_SECONDS": "0.1"}
 
 
-def _run(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    tmp_path: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(RUN_CASE), *args],
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env=_environment(tmp_path),
+        env={**_environment(tmp_path), **(env or {})},
         timeout=120,
     )
 
@@ -239,3 +243,32 @@ def test_a_start_time_is_compared_whatever_its_blanks(tmp_path: Path) -> None:
     result = _run(tmp_path, "--running")
     assert result.returncode == 0 and str(pid) in result.stdout
     assert run_file.exists()
+
+
+def test_the_PRE_FLIGHT_reads_free_memory_on_this_platform_and_refuses_below_its_bar(
+    tmp_path: Path,
+) -> None:
+    """Unforced, a launch reads the machine's free memory and refuses one below the bar.
+
+    Every other test here passes ``--force``, which skips the readings, so a reading that could not be
+    taken on a platform went unseen: ``free_gb`` read only macOS's ``vm_stat``, and on Linux every
+    unforced launch died in a Python traceback before the case started. A bar no machine meets must be
+    refused with the reading in the message -- a whole number of gigabytes -- and the case never run.
+    """
+    case = _script(tmp_path, "case", _EXITS_3)
+    result = _run(tmp_path, str(case), "--wait", env={"AQUAFLUX_MIN_FREE_GB": "1000000"})
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert re.search(r"only \d+ GB free \(want >= 1000000\)", result.stderr), result.stderr
+    assert not list(tmp_path.glob("run-*.log"))
+
+
+def test_an_unforced_launch_that_PASSES_the_pre_flight_runs_the_case(tmp_path: Path) -> None:
+    """With bars every machine meets, the pre-flight lets the case run and ``--wait`` reports it."""
+    result = _run(
+        tmp_path,
+        str(_script(tmp_path, "case", _EXITS_3)),
+        "--wait",
+        env={"AQUAFLUX_MIN_FREE_GB": "0", "AQUAFLUX_MAX_LOAD": "1000000"},
+    )
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "exit status: 3" in result.stdout
