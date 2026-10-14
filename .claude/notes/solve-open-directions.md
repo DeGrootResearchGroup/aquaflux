@@ -93,43 +93,13 @@ outer steps. **0.1 is level with 0.3 here** (pitzDaily: 25 % slower), so tighten
 case, and the Eisenstat–Walker refutation rests on pitzDaily alone. Whether 0.6 moves is the owner's
 call; the retry is the thing a forcing safeguard (6b) would also have to cover.
 
-## 5. Anderson acceleration / nonlinear GMRES around the outer step
+## 5. CLOSED — Anderson acceleration / nonlinear GMRES around the outer step
 
-**What.** Treat one pseudo-transient Newton step as a fixed-point map `x ↦ G(x)` and accelerate the
-sequence with Anderson mixing (depth 3–5, damping 1), or NGMRES (Washio & Oosterlee; De Sterck). Vector
-operations only; one small least-squares per step.
-
-**Why it should win.** The ladder descends β one notch per outer step with `α_min = 1.000` on eleven of
-twelve steps — the control "had no reason for caution and crawled anyway". Anderson extrapolates
-exactly such a well-behaved sequence. The notes mention Aitken/Anderson once, in passing, as something
-that *could* sit on the SER ramp; it was never built.
-
-**What it does not change.** Like every globalization here, the mixing vanishes at the fixed point:
-converged state and adjoint unchanged.
-
-**Pre-registered measurement.** pitzDaily ramp arm, steps/cycles/wall, Anderson depth 0 / 3 / 5.
-Watch the retry region: Anderson on a stiff sequence can extrapolate into non-descent; keep the line
-search as the acceptance gate and reset the history on any rejected step.
-
-**Probed 2026-10-08 (`validation/pitzdaily_openfoam/anderson_replay_probe.py`) — modest, tail-only.**
-Replay on the shipped pitzDaily march (`case.yaml` as shipped, 31 steps / 203 cycles / `x_r/h` 8.0686,
-every step checkpointed; jax 0.11.2, CPU): at each target-station step the Anderson proposal of depth
-1/2/3/5, built from the unaccelerated iterates, scored in one row-scaled measure built at `x_{k+1}`.
-⚠️ The step labels below are corrected (2026-10-08): the harness keyed checkpoints by their `step`
-field, which counts from zero, so it printed every state one lower than its file index and skipped the
-station's first step. The numbers are the harness's; only the labels moved. The harness now keys by file.
-- **Steps 18–23** (early target station): proposal ≈ the march's own next iterate (ratio 0.80–1.25), never
-  better than `x_{k+2}`; depth 5 sometimes worse. No saving.
-- **Steps 24–30** (the linear tail, β at its 0.005 floor, the march's own rate 0.64 → 0.82 per step and
-  slowing): every depth beats `x_{k+2}` (ratio 0.55–0.77), i.e. about one saved step per step.
-- **Bound:** compounding that factor over the tail gives ~2.5 steps for the march's 6, i.e. ~3–4 outer
-  steps and ~14 of 203 cycles (~7 %). Optimistic — a one-step replay on the unaccelerated sequence, not a
-  march feeding its own proposals back. The pre-registered march (depth 0 / 3 / 5, history reset on a
-  station change or a rejected step, line search as the acceptance gate) is what would settle it, and it
-  needs `newton_march` to carry the history: an implementation, not a probe.
-- Depth 2–3 is as good as 5; the gain is confined to where the shifted step converges linearly.
-
-**Deferred — tracked in #639** (needs the real march above, and bfs3d, before it is worth building).
+Measured 2026-10-14 and moved to `solve-refuted-directions.md` ("Anderson acceleration around the outer
+step"), #639. Its gain was confined to the linear tail at the shift floor. On today's pitzDaily march
+(19 steps, `release_floor` 1e-4) that tail is four steps long, and no Anderson proposal at any depth
+reaches the march's own `x_{k+2}`: the bound is zero outer steps. The 2026-10-08 bound (~3–4 steps, ~7 %
+of cycles on the 31-step march) is superseded. The release removed the tail Anderson was extrapolating.
 
 ## 6. CLOSED — Krylov subspace recycling (GCRO-DR); it found 6b instead
 

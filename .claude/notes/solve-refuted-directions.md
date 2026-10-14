@@ -533,7 +533,7 @@ scored in the row-equilibrated measure the march stops on, rebuilt at the new st
   bound, since a real predictor is solved loosely against a frozen preconditioner.
 - The 15 target-station steps cost 92 of the 203 cycles and see no station change at all.
 - The cost-free secant form, on a one-step-per-station ramp, extrapolates the iteration itself — that is
-  item 5 (Anderson / NGMRES), not a path predictor.
+  item 5 (Anderson / NGMRES, closed 2026-10-14 — see its own entry below), not a path predictor.
 
 Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
 fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
@@ -1029,3 +1029,33 @@ step not released) and they differ by **one cycle** (144 against 143), identical
 release at 1e-4, no floor against 0.005 is identical through step 27 and both end at step 29, no floor costing 2
 more cycles (141 against 139) for a deeper final `|R|`. #678's 12-15-cycle released steps predate #290/#694. The same sweeps found the floor itself worth 7 % of cycles on both cases (open-directions 11a).
 
+
+## Anderson acceleration around the outer step (open-directions 5, #639) — NOT WORTH BUILDING (2026-10-14)
+
+Anderson mixing of the march's own iterates (`x ↦ G(x)` = one outer step; depth 1/2/3/5, least squares
+weighted per field by the newest increment's RMS, `k` projected non-negative), replayed offline by
+`validation/pitzdaily_openfoam/anderson_replay_probe.py`. Each proposal is scored in the row-scaled
+measure built at `x_{k+1}`. **Its only niche was the linear tail at the shift floor, and `release_floor`
+removed that tail.**
+
+- **Today's march, 2026-10-14.** pitzDaily `case.yaml` as shipped at `159536cd` (residual stop, `rtol` 0.3,
+  `refresh_on_cycles` 3, `grow` 3, `release_floor` 1e-4, 12 x 1 stations, no refit floor, field split
+  `SimpleSmoothed` (frozen) / `JacobiSmoothed`), `PITZ_CHECKPOINT_KEEP=500`. It took **19 steps / 144
+  cycles**, 618 s of solve, reproducing #709's record. ⚠️ The figure step died on a missing
+  `matplotlib` (cloud container), so this run printed no `x_r/h`. The step table matches the recorded
+  8.0686 march. Linux x86_64, 4 cores, jax 0.11.2, Python 3.13.
+- **The target station is steps 13–19.** Steps 13–16 run at the floor (rate 0.63–0.72 per step). The
+  release fires at step 17. Steps 18–19 are inexact Newton steps (6.4e-4 → 1.1e-5 → 3.5e-7). There are
+  four linear-tail steps where the 2026-10-08 march had fifteen.
+- **No proposal at any depth reaches `x_{k+2}`, so the bound is ZERO outer steps.** The best rows only
+  match the march's own next iterate: ratios 0.985 (step 14, m = 1), 0.919 (16, m = 1) and 0.779 (18,
+  m = 1). Every depth ≥ 2 is worse than `x_{k+1}` on every floor step (1.0–1.6).
+- **Mixing across the release is harmful:** ratios 17–48 at step 17, and 3.6–19 at depth ≥ 2 on
+  step 18. A history spanning a shift change is a different map, as the reset rule on #639 assumed.
+- **Superseded bound:** the 2026-10-08 replay of the 31-step march (no release) gave ~3–4 steps and ~7 %
+  of cycles over its fifteen-step tail. That tail was the floor's linear rate, and `release_floor` is the
+  cheaper cure for it. The 2026-10-08 table is on #639.
+- **bfs3d was not replayed.** Its mesh is not in the cloud container, and the harness imports pitzDaily's
+  `compare`. bfs3d still ships no release, so it keeps a floor tail (33–36 steps). The release is already
+  measured there: 33 → 29 steps (open-directions 11a). Reopen only for a march that must keep a long
+  linear tail at a floor the release cannot remove.

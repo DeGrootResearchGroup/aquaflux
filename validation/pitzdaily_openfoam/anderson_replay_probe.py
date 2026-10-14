@@ -14,7 +14,8 @@ outer step only if it reaches what the march reaches one or more steps later.
 
 The map has to be (nearly) the same map from step to step for the extrapolation to mean anything, so
 the replay covers the **target station** only: the viscosity ramp has arrived, the residual is the
-case's own, and the shift sits at its floor. That is also where most of the march's Krylov work is.
+case's own, and the shift sits at its floor until the march releases it (``release_floor``). The rows that
+straddle the release mix two different maps, so read them as the cost of not resetting the history there.
 
 Every candidate at step ``k`` is scored in one measure -- the row-equilibrated measure the march stops
 on, built once at the march's own next iterate ``x_{k+1}`` -- so the comparison is not a change of
