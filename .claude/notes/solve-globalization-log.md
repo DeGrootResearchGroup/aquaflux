@@ -1795,11 +1795,57 @@ bounds differ only at steps 6-7; `e` is the default for its margin over the 4e91
 cost. pitzDaily, which shipped the clip alone, is neutral: 18 steps / 133 cycles / 126 s against 18 / 130 /
 132 s with the bound, `x_r/h` 8.0686 both, worst `rho1` 5.68 -> 3.88.
 
-**Alternatives measured and not taken** (another session, E8 at `61331d69` with #712's file):
-18 viscosity stations instead of 12 also removes every retry (22 steps / 132 cycles / 750 s), because a
-smaller viscosity jump per station drives the corner `k` down less; a gentler shift ramp does not (`grow`
-2: 23 steps, 2 retries; 1.5: 29, 1 retry), and holding `beta_min` at 0.02 thrashes the release (44 steps).
-More stations costs steps the guard does not.
+**The shift ramp is not the cause; the viscosity ramp is (2026-10-14).** The question was whether
+#712's aggressive shift ramp (`grow` 3 driving `beta` to `beta_min` 0.005 mid-ramp) caused the retries.
+It does not, and the measurements below say so for both steering rules. Configuration: the E8 prototype
+(`61331d69`, branch `materialized-ramp-e8`, `AQUAFLUX_STEER_BY_STOPPING`; not merged) with #712's
+`case.yaml`/`compare.py`, Apple M3 Pro, 11 cores, jax 0.10.2, one run each through `run_case.sh`, in
+turns with another session's marches (never two at once) -- walls are indicative. One override per arm
+from #712's file. `beta_min` was a local `BFS3D_BETA_MIN` edit of `compare.py`'s `CONTROL` (beside
+`BFS3D_GROW`), not on main. Rows above the italic row run the global cap (as shipped then); below it, the
+library change of this entry ported onto `61331d69`. Worst `rho1` is the largest first full-length
+trial's residual ratio, as in the table above. Wall is the last step's `t(s)`; `x_r/h` 8.361 in
+every row.
+
+| E8 arm (one change from #712's file) | steps | cycles (incl. rejected) | redone | worst `rho1` | wall |
+|---|---|---|---|---|---|
+| `arrived`, as filed | 21 | 159 (194) | 6, 6, 16, 16 | 64 | 721 s |
+| `always`, as filed | 25 | 153 (203) | 6, 8, 9, 14, 14, 15, 19, 19, 20 | 1e41 | 789 s |
+| `arrived`, `grow` 2 | 23 | 160 (182) | 7, 18 | 1.39 | 739 s |
+| `arrived`, `grow` 1.5 | 29 | 193 (199) | 22 | 1e27 | 790 s |
+| `arrived`, `beta_min` 0.02 (released to 1e-4 at the target) | 44 | 292 (292) | none | 3e25 | 993 s |
+| `arrived`, 15 stations | 23 | 143 (188) | 9, 10, 11, 17, 17 | 2e30 | 719 s |
+| `arrived`, 18 stations | 22 | 132 (132) | none | 1.29 | 750 s |
+| `always`, 18 stations | 22 | 101 (101) | none | 0.84 | 557 s |
+| *per-cell clip + omega bound below* | | | | | |
+| `arrived`, bound `e` | **17** | **133 (133)** | **none** | 2.54 | **566 s** |
+| `arrived`, bound `e^2` | 28 | 199 (243) | 19, 19, 20, 21, 21, 22, 22 | 129 | 901 s |
+| `arrived`, unbounded | 24 | 189 (233) | 9, 9, 19, 19 | 4e91 | 838 s |
+| `always`, bound `e^2` | 38 | 349 (407) | 10, 10, 28, 28, 29 | 8.66 | 1474 s |
+
+- **Every one of E8's retries under the cap is the cap**, read from step-limit dumps of the `always`
+  march (`BFS3D_DUMP_STEP_LIMIT=0.0101`, deleted with the cap; the march was bit-identical with it on):
+  all 11 sub-0.01 caps reproduce to the digit, each set by one or two cells in a spanwise mirror pair
+  against a side wall (z/h 0.09 / 3.91), the next cell's room usually >= 0.08. The lower-corner binders
+  (y/h -0.56 to -0.74) sit at x/h 4.15, 4.92, 5.34 -- **equal to that step's mid-span `x_r/h`**, so the
+  binding cell travels with the reattachment front; later ones are top-wall corners (y/h 0.95-0.99,
+  x/h 6.2-9.0). Two shapes: a collapse at inner 0 (steps 14, 15, 19), and a **ratchet** within one step
+  (6, 8, 9, 20): inner 0 is cap-bound at alpha 0.5-0.7, which leaves the binding cell at 1 % of its `k`,
+  and inner 1 then gets alpha ~0.001.
+- **The shift ramp only moves the retries.** `grow` 2 and 1.5 keep one or two; `beta_min` 0.02 removes
+  them but each release to 1e-4 collapses alpha and escalates back, and the march thrashes.
+- **A gentler viscosity ramp removes them**: 18 stations (not 15) is clean under both steering rules,
+  with inner alpha >= 0.25 throughout, and `always` + 18 stations ran the fewest cycles of any arm. It
+  costs steps the guard does not, so it was not taken.
+- **Under E8 the omega bound must be `e`.** At `e^2` or unbounded, `arrived` keeps a clean ramp but stalls
+  after the release to 1e-4 at the target (`G` 2.27e-5 at alpha 1 and rate 0.99, just above `atol` 1e-5)
+  and the alpha retry escalates `beta` to 1.28 before it recovers; `always` at `e^2` is the worst arm, with
+  inner solves running out their 14 restarts mid-ramp and trial steps 21-92x up. On main `e^2` was clean
+  (17 / 129 above), so the margin `e` buys is real, not just over the 4e91 failure.
+- **Merged main, as shipped** (`da37958a`: #710's stopping test + this entry's guard, bound `e` by default,
+  no overrides, same machine): **18 steps / 137 (137) cycles / none redone / worst `rho1` 2.54 / 552 s**,
+  `x_r/h` 8.361, final `|R|` 5.1e-6 in the case's scales. One step more than the guard on `dfb21bc2` (17 /
+  134), which is #710 meeting `atol` in the case's own scales.
 
 **Left open:** nothing in the library now installs a whole-step `step_limit`, so the generic seam
 (`step_limit` on the step classes, `StepOutcome.binding_limit`, `stop_on_limit_stall`, the log's `limit`

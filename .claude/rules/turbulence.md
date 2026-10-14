@@ -569,6 +569,14 @@ Many entries below are dated history written against the old API. Read them thro
       (194) / 2, E8 `always` 25 / 153 (203) / 7; main's two redone steps (6 twice, 14) are #712's own and
       E6 repeats them. E6 again follows main row for row and takes one more step: main's last state reads
       1.95e-5 in the case's scales, 3.8x its steered 5.18e-6. So the steering measure stays the anchor's.
+      ⚠️ **Every E8 number above was taken under the global k cap, deleted 2026-10-14, and the cap is
+      what E8 lost to:** each of its redone steps is the cap set by one or two side-wall corner cells. Under
+      the per-cell clip + omega bound `e` that replaced it (same machine and file, E8 at `61331d6` with the
+      guard ported), E8 `arrived` takes **17 / 133 (133) / 0 / 566 s** against merged main's (`da37958a`,
+      #710 + the guard) **18 / 137 (137) / 0 / 552 s** -- a tie on single runs, not a loss. At bound `e^2`
+      or unbounded E8 regresses (28 and 24 steps); `always` at `e^2`, 38. So the decision stands (no gain
+      measured), but its reason is now "no gain", not "loses"; arms and configuration in
+      `.claude/notes/solve-globalization-log.md`, "The shift ramp is not the cause".
       **Retired with the swap:** a retune sweep of the swapping arm (`beta_min` 0.01: 24 / 176 / 0;
       `refresh_on_cycles` 4: 35 / 339; `beta_min` 0.02: stopped at step 37; two arms damping the flow
       rows harder at the closure's shift, both worse and non-finite early) ran from `sweep-*.yaml` files
