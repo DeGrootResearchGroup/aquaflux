@@ -2220,7 +2220,7 @@ tuning follow-up noted above.
     *and* its continuation are both rebuilt, so the reporter must be rebuilt with them (the bfs3d driver
     keeps the current rung's in a list the logger's callable defers to).
   ⚠️ **Equilibrate at the PREVIOUS state, never the logged one** — this is what makes the per-equation
-  rows add up to the `R` reported beside them (pinned `rel=1e-12`). `newton_march` re-derives the
+  rows add up to the steered `R` reported beside them (pinned `rel=1e-12`; once a `stopping_step` march arrives the `R` column is the stopping measure and the rows add up to the `steered R` aside). `newton_march` re-derives the
   measure at the state each outer iteration *starts* from and holds it for the whole iteration, so a
   step's residual is `norm_at_start(R(state_at_end))`; scaling at the end state measures the right
   residual in the wrong scales. Consequences: the reporter is **stateful and order-dependent** (once per

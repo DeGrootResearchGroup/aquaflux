@@ -973,6 +973,20 @@ def test_a_stopping_step_s_relative_tolerance_is_relative_to_the_residual_in_its
     assert len(judged.reports) == 2
 
 
+def test_each_report_carries_the_residual_the_stopping_test_read() -> None:
+    """``stopping_norm`` / ``stopping_ratio`` are what the stop compared, ``residual_norm`` what steered.
+
+    Judged in the target's measure (ten times the steering one, ``|R0| = 1`` there), the reports read
+    ``0.125`` and ``0.0156`` with ratios equal to them; without a stopping step the two pairs agree.
+    """
+    judged = _march_judged(10.0, atol=0.02, stopping_step=_judged_on(1.0))
+    assert [r.stopping_norm for r in judged.reports] == pytest.approx([0.5**3, 0.25**3])
+    assert [r.stopping_ratio for r in judged.reports] == pytest.approx([0.5**3, 0.25**3])
+    plain = _march_judged(10.0, atol=0.002)
+    assert [r.stopping_norm for r in plain.reports] == [r.residual_norm for r in plain.reports]
+    assert [r.stopping_ratio for r in plain.reports] == [r.residual_ratio for r in plain.reports]
+
+
 def test_a_stopping_step_needs_a_measure_built_from_a_step() -> None:
     """Without ``norm_builder`` there is no measure to build from the stopping step."""
     with pytest.raises(ValueError, match="needs a norm_builder"):

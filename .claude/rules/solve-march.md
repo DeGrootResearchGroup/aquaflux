@@ -1077,7 +1077,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
       so a row near the total *owns* the residual. Names come from `coupled_equation_names(dim)` —
       `(u, v, w, p, k, omega)`, the flat layout's block order — the single home shared with
       `coupled_fields`, so the two grids join. Costs **one extra residual evaluation per logged step**,
-      which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** — pinned at
+      which is why it is opt-in. **The rows add up to the `R` printed above them, exactly** (the steered `R`: after a `stopping_step` march arrives they add up to the `steered R` aside instead) — pinned at
       `rel=1e-12`. That requires equilibrating at the **previous** state, not the logged one:
       `newton_march` re-derives the measure at the state each outer iteration *starts* from and holds
       it for the whole iteration (every trial step, the acceptance test, and the reported norm), so a
@@ -1162,7 +1162,21 @@ or whose blocks are unnamed: `RowScaledNorm` /
     (`staged_march` takes it once at its initial state and passes it on; `newton_march` takes it at
     `phi0` otherwise); reports keep `reference_norm`. Needs `norm_builder`; `staged_march` refuses it
     beside a `resume` (whose reference was taken in the steering measure). Costs a measure build and a
-    residual evaluation per step once arrived. **What it is for:** a materialized viscosity ramp holds
+    residual evaluation per step once arrived. **What the stop read is reported too (2026-10-14):**
+    `StepReport.stopping_norm` / `stopping_ratio` carry the norm the stopping test compared and its ratio
+    to `judged_reference()` (the starting residual in that measure) on every step -- equal to
+    `residual_norm` / `residual_ratio` without a stopping step, `nan` on a hand-built report.
+    `MarchLogger`'s `R` column and its `reference |R0| ... stopping at` banner read them (falling back to
+    the steered pair when `nan`), so the banner re-heads at arrival in the stopping measure, and a step
+    whose two norms differ gets an aside `steered R ...; R is the stopping measure` -- the per-equation
+    grid stays the steered measure's terms. `case/run.py` records `stopping_norm` as the run's
+    `residual`. ⚠️ Before this, a log's final `R` (bfs3d E6: 2.55e-6) was the steered norm, not the
+    number compared with `atol`. ⚠️ **`aquaflux_ui`'s Run section still plots and judges
+    `residual_norm`** (`run_monitor.py`); the new columns reach `history.csv` (`StepHistory.COLUMNS`
+    follows `StepReport._fields`) but the page does not read them yet. Pinned by
+    `test_each_report_carries_the_residual_the_stopping_test_read` (`test_newton_march.py`),
+    `test_once_a_march_judges_its_stop_in_another_measure_the_log_reports_that_measure`
+    (`test_march_log.py`) and `test_case_run.py`'s step count; six mutations each turn one red. **What it is for:** a materialized viscosity ramp holds
     the anchor's shift diagonal for the whole march (deliberately -- `solve.md`'s `materialized_session`
     entry), so the case was judged in the anchor's row scales, which under-read its residual by
     1.4-4x at bfs3d's end state; `solve_reynolds_ramp` passes the session's

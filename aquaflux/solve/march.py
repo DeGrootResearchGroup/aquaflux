@@ -831,6 +831,11 @@ def newton_march(
     # `control_state` is a parameter (the initial state), threaded and returned so a multi-segment
     # driver can continue a stateful control across a refresh instead of restarting it.
 
+    def judged_reference() -> float:
+        # The starting residual the stopping test scales its relative tolerance by: the steering
+        # measure's, or -- once arrived with a stopping step -- the stopping measure's.
+        return stop_reference if stopping_step is not None and arrived else reference
+
     def converged_at(residual_norm: float) -> bool:
         # Finiteness is tested separately because `within_tolerance` alone cannot reject a diverged
         # march: it compares with `<=`, and when the residual norm AND the threshold it is judged
@@ -841,7 +846,7 @@ def newton_march(
             jnp.isfinite(jnp.asarray(residual_norm))
             and within_tolerance(
                 jnp.asarray(residual_norm),
-                stop_reference if stopping_step is not None and arrived else reference,
+                judged_reference(),
                 rtol,
                 atol,
             )
@@ -1119,6 +1124,8 @@ def newton_march(
             station=0 if homotopy is None else int(homotopy.station(len(reports))),
             arrived=bool(arrived),
             full_step_ratio=float(outcome.full_step_ratio),
+            stopping_norm=stop_norm,
+            stopping_ratio=stop_norm / judged_reference() if judged_reference() > 0.0 else 0.0,
         )
         stalled = stalled + 1 if _limit_collapsing(reports[-1] if reports else None, report) else 0
         reports.append(report)

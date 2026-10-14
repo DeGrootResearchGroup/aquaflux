@@ -454,6 +454,13 @@ class StepReport(NamedTuple):
         full-length trial was from being accepted (below one, it was). ``alpha`` reports only whether
         the full step was taken; this says by how much it missed, so its trend over successive steps
         shows a full step becoming acceptable a step or two before it is. ``nan`` is "not measured".
+    stopping_norm, stopping_ratio : float
+        The residual norm the march's **stopping test** read at the state the step produced, and that
+        norm over the starting residual measured the same way. Equal to ``residual_norm`` and
+        ``residual_ratio`` unless the march judges its stop in another measure once arrived (its
+        ``stopping_step``), where ``residual_norm`` stays the measure the step was steered by. Without
+        these a log would report a residual the stop never compared with its tolerance. ``nan`` is
+        "not recorded".
     """
 
     step: int
@@ -472,6 +479,8 @@ class StepReport(NamedTuple):
     station: int = 0
     arrived: bool = True
     full_step_ratio: float = float("nan")
+    stopping_norm: float = float("nan")
+    stopping_ratio: float = float("nan")
 
     @property
     def restart_cycles(self) -> int:

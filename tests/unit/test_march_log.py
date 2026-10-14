@@ -717,3 +717,33 @@ def test_the_aside_puts_one_concern_on_each_line() -> None:
     logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
 
     assert _asides(buffer)[:3] == ["pc full 21.8s", "xr/h 6.728", "limit 2.43e-01"]
+
+
+def test_once_a_march_judges_its_stop_in_another_measure_the_log_reports_that_measure() -> None:
+    """``R`` and the banner are what the stopping test read, and the steered residual is still shown.
+
+    A march judged in a stopping measure once arrived reports the residual it was steered in as
+    ``residual_norm``; printed as ``R`` it would be a number the stop never compared with its tolerance.
+    """
+    logger, buffer = _log(rtol=1e-3, atol=0.0)
+    # Before arrival the two measures are one; after it the stop reads 3x the steered residual and has
+    # its own starting residual (3.0e-2 / 3.0e-2 = 1.0).
+    logger.on_step(
+        _report(
+            residual_norm=2.0e-2, residual_ratio=4.0e-2, stopping_norm=2.0e-2, stopping_ratio=4.0e-2
+        )
+    )
+    logger.on_step(
+        _report(
+            residual_norm=1.0e-2, residual_ratio=2.0e-2, stopping_norm=3.0e-2, stopping_ratio=3.0e-2
+        )
+    )
+
+    rows = _step_rows(buffer)
+    assert [row["R"] for row in rows] == ["2.000e-02", "3.000e-02"]
+    banners = [line for line in buffer.getvalue().splitlines() if line.startswith("reference")]
+    assert len(banners) == 2
+    assert "|R0| = 1.0000e+00" in banners[1]
+    assert "stopping at |R| <= 1.000e-03" in banners[1]
+    steered = [line for line in _asides(buffer) if line.startswith("steered R")]
+    assert steered == ["steered R 1.000e-02; R is the stopping measure"]

@@ -75,7 +75,7 @@ class RunRecord:
         The outer steps the march took; ``None`` for a solve with no steps to count (the segregated
         loop).
     residual : float or None
-        The march's last residual, in the measure it was steered by; ``None`` as for ``steps``.
+        The march's last residual, in the measure its stopping test read; ``None`` as for ``steps``.
     written : tuple of pathlib.Path
         Every file or directory written, fields first.
     message : str or None
@@ -429,7 +429,7 @@ class _StepCount:
 
     def on_checkpoint(self, report: StepReport, state: object) -> None:
         self.count += 1
-        self.residual = float(report.residual_norm)
+        self.residual = float(report.stopping_norm)
         for recorder in self._recorders:
             recorder.on_checkpoint(report, state)
 
