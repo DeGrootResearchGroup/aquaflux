@@ -362,6 +362,26 @@ the preconditioner would be traced and a member too small to fill the device; re
 
 ## 10. Nonlinear elimination of the ω stiffness
 
+**⚠️ ITS MOTIVATION IS REFUTED ON pitzDaily (2026-10-14); bfs3d is the deciding check.** The entry below
+reads the census's pure-ω near-null direction as "the cell block is weakly coupled in ω". On pitzDaily `state-00017` (shift 1e-4, 2026-10-14, `cell_block_conditioning.py --case pitzdaily_openfoam`, jax 0.11.2, Linux, 4 cores)
+the same signature appears, and it is a large coupling in the ω ROW to the cell's own pressure and
+velocity (equilibrated ω–p 1348, ω–u −787 in cell 721, against an ω diagonal of 1), not a weak ω column:
+
+| blocks | `σ_min` < 1e-3 | < 1e-2 |
+|---|---|---|
+| as assembled | 6 | 273 |
+| ω row's couplings to the other fields zeroed | **0** | **0** |
+| ω column's couplings zeroed (control) | 6 | 274 |
+
+Over the 200 smallest blocks `σ_min` tracks one over the largest ω-row coupling (log-log correlation
+0.99), and the inverse's largest entry is that coupling's size -- non-normal, not singular. A local ω
+solve with the flow frozen is already well posed, so the elimination below targets nothing; the shift
+not reaching the cells is predicted too (it adds to a diagonal that was never small). **To close or
+reopen it:** run `validation/bfs3d_openfoam/cell_block_conditioning.py N <shift> 0.05 0` on the three
+states in the table below; the `no ω-row` / `no ω-col` columns decide it. Why ∂R_ω/∂p is so large near
+walls is unmeasured (a hypothesis: ω's convective flux through the Rhie--Chow mass flux, where ω is
+large, against a small pressure diagonal).
+
 **What.** Before each global Newton step, run a few cheap local nonlinear solves of the ω equation
 (flow and `k` frozen) in the cells the cell-block SVD flags (`σ_min < 1e-3`, ~1.5 % of bfs3d), then
 take the global step from the eliminated state (Cai & Keyes, nonlinear elimination / ASPIN family).
