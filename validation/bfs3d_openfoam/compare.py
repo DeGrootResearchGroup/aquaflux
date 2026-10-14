@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import math
 import os
 import re
 import sys
@@ -67,7 +68,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aquaflux  # noqa: F401  (enables x64)
-import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -510,7 +510,8 @@ if not isinstance(_FILE_INVERSE, FieldSplit):
 # Which inverse the trailing [k, omega] block gets: "jacobi" (default), the traced nodal hierarchy with a
 # Jacobi-class level smoother, or "air", the reduction-based (lAIR) hierarchy. The host GAMG V-cycle this
 # case originally ran here lost a controlled pair to "jacobi" -- 2893 s / 72 steps against 2124 s / 67, to
-# the same mid-span x_r/h 8.36, at the `zerogradient` k wall and a 1e-08 positivity floor -- and was
+# the same mid-span x_r/h 8.36, at the `zerogradient` k wall under the since-removed global `k` step cap
+# with a 1e-08 floor -- and was
 # removed with the library's PETSc split blocks (#371).
 _TURBULENCE_INVERSES = ("jacobi", "air")
 TURBULENCE_INVERSE = os.environ.get("BFS3D_TURBULENCE_INVERSE", "jacobi")
@@ -542,15 +543,11 @@ def _environment_flag(name, file_value):
 
 
 JACOBI_TRAILING = {
-    # Kept off by default, and kept exposed. With NO positivity floor this flag decides whether the case
-    # converges at all: an otherwise-identical pair of marches came out opposite, the rescaled one losing
-    # its line-search factor on the middle rung and stalling with the residual frozen. But that turned out
-    # to be a trigger rather than a cause -- with `K_POSITIVITY_FLOOR` set, both settings converge to the
-    # same root (69 steps rescaled, 67 unscaled), because what actually killed the rescaled arm was one
-    # numerically-zero cell ratcheting the global step cap toward zero. Rescaling merely reached that cell
-    # a few steps sooner: the two arms differ from step one in the pressure-block residual and amplify
-    # until they cross the limiter around step sixteen, where one is clipped and the other is not.
-    # Off is free and is what the converging arms were measured with; both arms stay runnable.
+    # Kept off by default, and kept exposed. Under the since-removed global `k` step cap the rescaled arm
+    # once stalled where the unscaled one converged; the cause was one numerically-zero cell ratcheting
+    # that cap toward zero, which the rescaling merely reached a few steps sooner (with a floor under the
+    # cap both converged to the same root, 69 steps rescaled against 67). Not re-measured under the
+    # per-cell clip; off is what the converging arms were measured with, and both arms stay runnable.
     # Default OFF, which is NOT the class default: on this case it is the difference between a march
     # that converges every rung and one that stalls. `BFS3D_NATIVE_EQUILIBRATE=1` selects the rescaled
     # arm for an A/B of the flag itself.
@@ -778,106 +775,36 @@ def _jacobi_trailing_description() -> str:
     return ", ".join(f"{k}={v}" for k, v in settings.items())
 
 
-# Absolute room in `k` the step limiter grants every cell, so a cell whose `k` is numerically zero
-# cannot set the step length for all 23040. Calibrated by replaying the recorded clips
-# (`positivity_floor_calibration.py`): unfloored, the worst recorded cap is 1.05e-09; the dead cells
-# form a graded population rather than a single outlier, so a small floor only promotes the next one
-# (1e-12 reaches 1.6e-02, 1e-10 reaches 6.9e-02) and the knee is near 1e-08, where the worst cap
-# becomes ~0.35. At 1e-06 the binding cell is a live one (k 4.7e-03) capped at 0.84, which is the
-# limiter working -- so 1e-08 keeps two orders of margin below anything physical here, where the inlet
-# k is 0.375 and the mesh median ~3e-2.
+# How the march keeps `k` positive: every coupled step clips each cell's own `k` correction so the cell
+# stays non-negative, then bounds each cell's change in log(omega) per correction by this ratio. The case
+# runs the library default (unset: `e`, since omega is solved as its log); `BFS3D_OMEGA_STEP_RATIO`
+# overrides it, `none` meaning unbounded. The clip alone leaves a clipped cell's omega correction as
+# solved, for a `k` move no longer taken -- replayed at the sixth step of the march (beta 0.0062) it moved
+# log(omega) by up to 11.6 in one cell, where a bound of 1 held it to 2.8 at the same residual reduction.
 #
-# `0` (the library default, and `BFS3D_K_POSITIVITY_FLOOR=0` here) is the plain
-# fraction-to-the-boundary rule. It moves neither the converged root nor the adjoint: at a root the
-# correction vanishes and the limiter is inactive for any floor. It is safe here only because every
-# consumer of the solved `k` clamps at zero, so a cell that dips slightly negative no longer reaches a
-# bare sqrt -- and the destruction term, running on the k-independent viscous omega branch there,
-# pushes such a cell back up.
+# The global step cap (fraction-to-the-boundary over all cells) this replaced was dropped because one
+# or two near-zero-`k` side-wall corner cells set the whole step's length to 0.001-0.002 while every
+# other cell admitted >= 0.6. One run per arm (2026-10-14, main dfb21bc2 with the case file of PR #712:
+# multiple-correction gradient, grow 3, release, 12 stations; Apple M3 Pro, jax 0.10.2, run_case.sh):
 #
-# ⚠️ THE CASE DEFAULT IS 1e-08, WHICH IS NOT THE LIBRARY DEFAULT, and it is load-bearing rather than a
-# tuning preference: with the `zerogradient` wall condition above, an unfloored march is the one whose
-# cap ratchets to 1.05e-09 and stalls. Every archived measurement quoted in this file was taken at
-# 1e-08, so leaving the default at the library's `0` would mean the case's own default configuration
-# was one that none of its recorded numbers describe -- and, on the arm that was measured both ways,
-# one that does not converge.
+#     | arm                              | steps | cycles (incl. rejected) | redone | worst rho1 | solve |
+#     |----------------------------------|-------|-------------------------|--------|------------|-------|
+#     | global cap + absolute floor 1e-8 | 19    | 126 (157)               | 3      | 64         | 616 s |
+#     | per-cell clip alone              | 20    | 154 (164)               | 2      | 4e91       | 660 s |
+#     | per-cell clip + omega bound e    | 17    | 134 (134)               | 0      | 2.54       | 558 s |
+#     | per-cell clip + omega bound e^2  | 17    | 129 (129)               | 0      | 2.54       | 531 s |
 #
-# ⚠️ BUT THE FLOOR POSTPONES THE RATCHET, IT DOES NOT REMOVE IT -- and this is algebra, not a
-# measurement, so no configuration caveat applies. When the cap binds, the step takes
-# `k_new = k - tau*(k + floor)`, hence
-#
-#     (k_new + floor) = (1 - tau) * (k + floor)
-#
-# so the SHIFTED variable `k + floor` decays by exactly `1 - tau` per clipped step whatever the floor
-# is. The cell parks at `k -> -tau*floor` while the cap keeps falling 100x per step; the floor buys
-# `log10(floor / k_0)` decades of headroom and then reproduces the same collapse. That is why 1e-08
-# moved the march 77 -> 67 steps yet the cap still reached 1.44e-05 at step 51 WITH the floor active.
-# Raising the floor further buys two more decades and one-off ceiling (worst cap ~0.84 at 1e-06 rather
-# than ~0.35 at 1e-08), not a cure -- and 1e-06 is one decade from this case's own live near-wall `k`.
-# The structural fix is to stop one cell setting a GLOBAL step length at all; see the discussion of
-# clipping the correction per cell rather than capping the step, which leaves the cap at 1.
-K_POSITIVITY_FLOOR = float(
-    os.environ.get("BFS3D_K_POSITIVITY_FLOOR", FILE_SOLVER.positivity_floor) or 0.0
-)
-
-#: Clip each cell's OWN `k` correction rather than capping the whole step by the worst cell
-#: (`BFS3D_K_POSITIVITY_PROJECTION=1`). ⚠️ **OFF HERE, and deliberately, against the library default and
-#: the sibling case -- which both moved to ON on 2026-08-25 on a measurement taken on the sibling.**
-#: There the cap was losing a march outright: every failing step length was the cap rather than a rung
-#: of the ladder, one of them below the shortest rung, and the march then died in the `1 - tau` collapse
-#: derived below. Turning the projection on completed that march AND made the already-working arm faster
-#: (703.7 s / 73 steps -> 664.0 s / 67 steps, same answer).
-#:
-#: ⚠️ **IT DOES NOT CARRY OVER. Marched here as a controlled pair (2026-08-25, every other setting in
-#: this file at its default, only this one varying, back to back on one machine), it reaches the SAME
-#: root and costs 41 % more Krylov cycles and 40 % more wall:**
-#:
-#:     |            | cap only (shipped) | + projection |
-#:     |------------|--------------------|--------------|
-#:     | steps      | 69                 | 62           |
-#:     | cycles     | 365                | 515          |
-#:     | wall       | 2268 s             | 3166 s       |
-#:     | capped (L) | 26                 | 0            |
-#:     | step redos | 7                  | 11           |
-#:     | mid-span `x_r/h` | 8.3611       | 8.3611       |
-#:
-#:
-#: ⚠️ **TAKEN AT `e46564a`, WHICH CARRIED A COUPLED-`k`-SHIFT CHANGE REVERTED THE NEXT DAY.** The revert
-#: alters the `k` shift diagonal, and that is the term this limiter clips against -- the shift sets the
-#: `k` correction, and the cap and the projection are two ways of bounding it. Both arms ran under it, so
-#: the pair is controlled and the qualitative reading holds, but re-run before quoting the figures. The
-#: default here is unaffected: it was off before this measurement and nothing here argues for flipping it.
-#: The mechanism does exactly what it claims -- the cap never binds once, against 26 times -- and the
-#: projection WINS the first two rungs outright (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
-#: **The whole loss is the target rung**, where it spends 373 cycles and 2315 s against 203 and 1310,
-#: at 13.8 cycles per step against 6.8. What the cap was buying there is visible in the log: with the
-#: step no longer shortened, the line search takes full steps into iterates the carried preconditioner
-#: solves badly (inner solves pinned at 12 cycles where the shipped arm's run 2-5, and one attempt at
-#: `alpha` 1.000 whose inner residual reaches 2.7e+10), each of which trips the `RETRY_ON_CYCLES`
-#: bailout below and redoes the step -- 8 cycle-triggered redos against 2. So on THIS case the global
-#: cap is not only a positivity device; it is doing globalization work, and the per-cell clip removes
-#: that without replacing it.
-#:
-#: Consistent with the earlier full-march pair on this case (2026-08-11), which found the two arms
-#: identical at 329 cycles apiece and concluded the projection was worth keeping for robustness and not
-#: for speed. Under today's defaults the neutral result has become a real cost, so the reasoning stands
-#: and the price has risen. **Open, and untested:** `RETRY_ON_CYCLES` is calibrated under the cap, so
-#: whether the target-rung loss is the projection or a stale bailout threshold is not established here.
-#:
-#: This is the structural answer to what the floor above can only postpone. The cap is a minimum over
-#: cells, so the stagnant corner where the step face, the floor and a side wall meet -- no shear, so no
-#: `k` production, so `k` decaying with nothing to arrest it -- sets the step length for all 23040.
-#: A floor buys `log10(floor / k)` decades and no more, because when the cap binds the step takes
-#: `k_new = k - tau (k + floor)`, hence `(k_new + floor) = (1 - tau)(k + floor)`: the SHIFTED value
-#: decays by exactly `1 - tau` per capped step whatever the floor is, so the collapse repeats a fixed
-#: number of decades later. That is algebra, not a measurement, and it is why raising the floor is not
-#: the lever here. Clipping per cell removes the coupling instead -- the dead cell still decays,
-#: because that is what its own equation asks, but alone.
-#:
-#: It composes with the cap rather than replacing it: applied first, it leaves every decreasing cell
-#: with `|dk| <= tau (k + floor)`, so the cap computes exactly 1 and the `limit` aside below keeps
-#: reporting (as "nothing bound") instead of going silent.
-K_POSITIVITY_PROJECTION = _environment_flag(
-    "BFS3D_K_POSITIVITY_PROJECTION", FILE_SOLVER.positivity_projection
+# Mid-span x_r/h 8.361 in every arm, and the converged states agree with the cap march's to relative
+# L2 1.1e-4. (The clip-alone row is from the 2026-10-13 runs, with one step redone twice.)
+# A trap the cap taught, kept because it applies to any global cap: an absolute floor only postpones its
+# collapse, since a capped step gives `(k_new + floor) = (1 - tau)(k + floor)` whatever the floor.
+_omega_step_ratio = os.environ.get("BFS3D_OMEGA_STEP_RATIO", FILE_SOLVER.omega_step_ratio)
+OMEGA_STEP_RATIO = (
+    None
+    if _omega_step_ratio is None
+    else math.inf
+    if _omega_step_ratio == "none"
+    else float(_omega_step_ratio)
 )
 
 
@@ -908,8 +835,8 @@ RETRY_ON_CYCLES = (
     FILE_SOLVER.retry.abort_above_cycles  # PER SOLVE: a summed trigger is ~6x more sensitive for a 5-inner step than a 1-inner one
 )
 # The step-length bailout, which catches the failure the cycle count cannot see: solves that stay CHEAP
-# while the step achieves nothing, because a positivity cap or a non-descending direction leaves almost
-# none of the correction followable. On the march this replaced, four consecutive steps ran a full inner
+# while the step achieves nothing, because a non-descending direction leaves almost none of the
+# correction followable. On the march this replaced (which then ran a global `k` step cap, since removed), four consecutive steps ran a full inner
 # loop each at 5-12 cycles, moved the residual not at all, and escaped only once the step control's own
 # backoff had doubled beta four times -- one whole step per doubling.
 #
@@ -968,22 +895,6 @@ CHECKPOINT_KEEP = int(os.environ.get("BFS3D_CHECKPOINT_KEEP", "3"))
 # here: they cannot be replayed from a checkpoint afterwards, because a step's preconditioner and shift
 # are a product of the refresh history rather than of the state.
 INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
-# Save the (iterate, correction) pair whenever the k-positivity cap comes out below this fraction. Off
-# by default (0), and the march is byte-identical with it off.
-#
-# It exists because the cap is the only quantity in the step table that CANNOT be reconstructed after
-# the fact: it is a property of the correction `delta`, and no checkpoint holds one. A step checkpoint
-# holds the state a step ended at, and the inner-iterate dump holds the iterate an inner iteration
-# reached -- neither carries the direction, so "which cells is the cap binding on" is unanswerable from
-# either. Capturing it at the call site is the only honest answer; dividing an iterate difference by the
-# reported alpha would recover the direction only up to whatever the line search did to it.
-#
-# The threshold is `RETRY_ON_ALPHA` by default, i.e. exactly the caps the march reacts to. Dumps STOP
-# after `DUMP_STEP_LIMIT_KEEP` of them rather than wrapping, so the FIRST binding events survive -- the
-# escalation ladder that follows one drives the cap two orders of magnitude further down, and a rolling
-# buffer would keep only that tail and throw away the step that started it.
-DUMP_STEP_LIMIT = float(os.environ.get("BFS3D_DUMP_STEP_LIMIT", "0") or 0.0)
-DUMP_STEP_LIMIT_KEEP = int(os.environ.get("BFS3D_DUMP_STEP_LIMIT_KEEP", "12"))
 # Refresh the preconditioner as soon as one solve reaches this many restart cycles -- the step ends there,
 # keeping its iterate, and the next starts on the re-fit -- and switch the scheduled refreshes off. `0` selects the scheduled cadence instead.
 #
@@ -1046,8 +957,8 @@ PRODUCTION_LIMITER = os.environ.get("BFS3D_PRODUCTION_LIMITER", "1") not in ("0"
 #: fully in the log layer), which is where the faded-flux / unfaded-gradient disagreement bites.
 #:
 #: State the cost honestly, because it runs the other way and a reader comparing archived logs will hit
-#: it. Measured as a controlled pair -- same code, same native trailing inverse, same 1e-08 floor, only
-#: the wall condition differing:
+#: it. Measured as a controlled pair under the since-removed global `k` step cap with a 1e-08 floor --
+#: same code, same native trailing inverse, only the wall condition differing:
 #:
 #:                       dirichlet   zerogradient
 #:     wall                 1911 s         2124 s   (+11 %)
@@ -1059,9 +970,9 @@ PRODUCTION_LIMITER = os.environ.get("BFS3D_PRODUCTION_LIMITER", "1") not in ("0"
 #: step counts are not a like-for-like comparison of solver cost, and the cheaper one is cheaper for a
 #: diagnosable
 #: reason -- under `zerogradient` near-wall `k` is free to ratchet toward zero, and one numerically dead
-#: cell then sets the global positivity cap for the whole march. Measured minimum cap over a whole
-#: march: 2.02e-01 under `dirichlet`, against 1.44e-05 (native) and 5.41e-03 (host) under
-#: `zerogradient`. The `K_POSITIVITY_FLOOR` below is what keeps that ratchet survivable.
+#: cell then set that global cap for the whole march (minimum cap 2.02e-01 under `dirichlet` against
+#: 1.44e-05 under `zerogradient`). The per-cell `k` clip the march now runs confines such a cell to
+#: itself; the pair has not been re-measured under it.
 _K_WALL_BCS = {"dirichlet": Dirichlet(0.0), "zerogradient": ZeroGradient()}
 K_WALL = os.environ.get("BFS3D_K_WALL", "zerogradient")
 if K_WALL not in _K_WALL_BCS:
@@ -1122,8 +1033,7 @@ SOLVER = CoupledMarch(
         beta_factor=RETRY_BETA_FACTOR,
     ),
     turbulence_damping=TURB_DAMPING,
-    positivity_floor=K_POSITIVITY_FLOOR,
-    positivity_projection=K_POSITIVITY_PROJECTION,
+    omega_step_ratio=OMEGA_STEP_RATIO,
     continuation=ViscosityRamp(
         anchor=SCHEDULE.anchor(N_POINTS) if "BFS3D_N_POINTS" in os.environ else _FILE_RAMP.anchor,
         stations=RAMP_STATIONS,
@@ -1140,78 +1050,6 @@ if not any(name.startswith("BFS3D_") for name in os.environ) and SOLVER != FILE_
         f"override set: the settings above have drifted from the file.\n  file: {FILE_SOLVER}\n  "
         f"here: {SOLVER}"
     )
-
-_STEP_LIMIT_DUMPS = 0
-#: The shift and the anchor of the step currently being taken. The limiter is called with only
-#: ``(phi, delta)``, so without these a dump cannot be paired with the linear system that produced it --
-#: and that is exactly what a reader needs to re-solve it. Captured from ``refresh_preconditioner``, which the
-#: march calls once per attempt with the step (carrying its beta) and the state the attempt starts from.
-_STEP_BETA, _STEP_ANCHOR = float("nan"), None
-
-
-def _recording_precondition(refresh):
-    """Wrap the preconditioner refresh so each attempt's shift and anchor are recorded for the dumps.
-
-    The march calls ``refresh_preconditioner(step, state, due=...)`` once per attempt, after the control has
-    set beta and before the step runs -- so it is the one place where both are in hand together. Delegates
-    unchanged; only used when the step-limit dump is switched on.
-    """
-
-    def precondition(step, state, *, due=False):
-        global _STEP_BETA, _STEP_ANCHOR
-        _STEP_BETA = float(getattr(step.relaxation_schedule, "beta", float("nan")))
-        _STEP_ANCHOR = np.asarray(state)
-        return refresh(step, state, due=due)
-
-    return precondition
-
-
-def _save_step_limit(cap, phi, delta):
-    """Write one ``(cap, iterate, correction)`` triple, if the cap is tight and the budget is unspent.
-
-    Records the attempt's ``beta`` and ``anchor`` alongside, so the dump identifies the shifted system
-    ``(J + beta*d) delta = -G(phi; anchor)`` rather than just its solution. Without them a reader can
-    reproduce the *residual* at the iterate but not the *correction*, which is the half that matters --
-    an attempt to identify beta by least squares from the dump alone was inconsistent across blocks
-    (beta ~2.7 fitted on the k rows against ~130 on the omega rows, 52% residual).
-    """
-    global _STEP_LIMIT_DUMPS
-    cap = float(cap)
-    if cap >= DUMP_STEP_LIMIT or _STEP_LIMIT_DUMPS >= DUMP_STEP_LIMIT_KEEP:
-        return
-    path = HERE / "checkpoints" / f"step-limit-{_STEP_LIMIT_DUMPS:02d}.npz"
-    np.savez(
-        path,
-        cap=cap,
-        state=np.asarray(phi),
-        delta=np.asarray(delta),
-        beta=_STEP_BETA,
-        anchor=_STEP_ANCHOR if _STEP_ANCHOR is not None else np.asarray(phi),
-    )
-    _STEP_LIMIT_DUMPS += 1
-    print(f"[step-limit] cap {cap:.3e} beta {_STEP_BETA:.4g} -> {path.name}", flush=True)
-
-
-@dataclasses.dataclass(frozen=True)
-class _DumpingStepLimit:
-    """A step limiter that saves the pair it was called on whenever it comes out tight.
-
-    Wraps the real limiter and returns its cap unchanged, so the march it instruments takes exactly the
-    steps it would have taken without it. A **frozen dataclass around the real limiter**, not a closure,
-    for the reason the limiter itself is one: it rides in a static field of the compiled step, which is
-    compared by ``__eq__``, and a function compares by identity -- so a closure here would make every
-    rebuilt step a fresh compilation key and retrace the whole coupled solve.
-    """
-
-    inner: object
-
-    def __call__(self, phi, delta):
-        cap = self.inner(phi, delta)
-        # Fires during execution (this runs inside the inner loop's `while_loop`) and is a no-op under
-        # differentiation; the host side decides whether the cap is worth a file.
-        jax.debug.callback(_save_step_limit, cap, phi, delta, ordered=True)
-        return cap
-
 
 # --- OpenFOAM ascii internalField parsing (nonuniform scalar / vector list) ---
 def _of_scalar(path):
@@ -1489,16 +1327,17 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("gradient", GRADIENT),
         ("k wall BC", K_WALL),
-        ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
         (
             "production limiter (frozen cap k)",
             "on" if PRODUCTION_LIMITER else "OFF (exact operator)",
         ),
-        # Beside the floor, because the two are alternative answers to the same failure and a run
-        # carrying the projection is a different arm from one carrying only a floor.
         (
-            "k positivity projection",
-            "per-cell clip" if K_POSITIVITY_PROJECTION else "off (cap only)",
+            "omega step ratio",
+            "default (e)"
+            if OMEGA_STEP_RATIO is None
+            else "unbounded"
+            if math.isinf(OMEGA_STEP_RATIO)
+            else OMEGA_STEP_RATIO,
         ),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
         ("inner forward stop", FORWARD_STOP or "lineax (unset)"),
@@ -1508,11 +1347,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         ("checkpoint keep", CHECKPOINT_KEEP),
         ("inner dump above", INNER_DUMP_ABOVE or "off"),
         ("trailing block dump", DUMP_TRAILING_BLOCK or "off"),
-        *(
-            [("step-limit dump below / keep", f"{DUMP_STEP_LIMIT} / {DUMP_STEP_LIMIT_KEEP}")]
-            if DUMP_STEP_LIMIT
-            else []
-        ),
     ):
         logger.note(f"  {name}: {value}")
 
@@ -1560,21 +1394,16 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
     rung: dict = {}
 
     def on_build(step):
-        """Instrument every step the session builds: the rung's residual reporter, and the cap dump."""
+        """Instrument every step the session builds with the rung's residual reporter."""
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
         # its per-equation rows would not add up to the residual reported beside them.
         rung_residuals.append(coupled_residuals(rung["companion"], step, rung["seed_state"]))
-        if DUMP_STEP_LIMIT and step.step_limit is not None:
-            # `dataclasses.replace`, not `eqx.tree_at`: the limiter is a STATIC field, so it lives in the
-            # treedef rather than among the leaves and `tree_at` (which addresses leaves) cannot reach it.
-            step = dataclasses.replace(step, step_limit=_DumpingStepLimit(step.step_limit))
         return step
 
     session_options = dict(
         observer=logger.on_refresh,
         on_build=on_build,
-        precondition_wrapper=_recording_precondition if DUMP_STEP_LIMIT else None,
         **SESSION_OPTIONS,
     )
 

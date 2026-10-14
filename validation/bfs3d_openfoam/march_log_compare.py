@@ -203,7 +203,8 @@ def summarize(run: Run) -> None:
     for key in (
         "turbulence inverse",
         "k wall BC",
-        "k positivity floor",
+        "k positivity floor",  # logs written while the global k step cap existed
+        "omega step ratio",
         "native trailing settings",
     ):
         if key in run.config:

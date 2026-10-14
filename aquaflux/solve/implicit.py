@@ -49,125 +49,16 @@ _INEXACT_FORWARD_SOLVER = lx.GMRES(rtol=1e-3, atol=1e-3)
 
 
 @dataclasses.dataclass(frozen=True)
-class PositiveBlockLimit:
-    """``(phi, delta) -> alpha_max``: the largest step fraction keeping ``phi[start:stop] > 0``.
-
-    Built by :func:`positive_block_limit`, whose docstring carries the rule and the failure it exists
-    to prevent. This is a **value object rather than a closure**, and that is load-bearing: it rides in
-    a strategy's ``step_limit``, which is a *static* field and therefore part of the compiled
-    step's cache key. Static fields are compared by ``__eq__``, so two structurally identical limiters
-    built at different times are interchangeable here and a closure is not -- functions compare by
-    identity, so every rebuild is a fresh key and recompiles the whole coupled solve.
-
-    That is not hypothetical: a Reynolds-continuation ramp rebuilds its engine per rung, and each
-    rung's first step was measured at ~100-150 s more than that rung's median step *at an identical
-    cycle count*. Its three fields are plain numbers, so equality is exact and cheap.
-
-    Attributes
-    ----------
-    start, stop : int
-        The half-open slice of the flat state that must stay positive.
-    tau : float
-        Fraction of the distance to the boundary actually taken, in ``(0, 1)``.
-    floor : float
-        Absolute room granted to every entry on top of its own value, in the units of ``phi``. ``0``
-        (default) is the plain rule.
-    """
-
-    start: int
-    stop: int
-    tau: float = 0.99
-    floor: float = 0.0
-
-    def __call__(self, phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
-        values, corrections = phi[self.start : self.stop], delta[self.start : self.stop]
-        # Only decreasing entries can cross zero; the rest are unbounded, hence `inf` so `min` skips them.
-        room = jnp.where(corrections < 0.0, (values + self.floor) / jnp.abs(corrections), jnp.inf)
-        return jnp.minimum(jnp.asarray(1.0), self.tau * jnp.min(room))
-
-
-def positive_block_limit(
-    start: int, stop: int, tau: float = 0.99, floor: float = 0.0
-) -> PositiveBlockLimit:
-    """Build ``(phi, delta) -> alpha_max``: the largest step fraction keeping ``phi[start:stop] > 0``.
-
-    The **fraction-to-the-boundary** rule from interior-point methods:
-    ``alpha_max = tau * min over entries with delta < 0 of (phi_i / -delta_i)``, and ``1`` when the
-    step decreases nothing in the block. Because the current iterate is strictly positive, a positive
-    admissible fraction always exists -- positivity becomes a property of the construction rather than
-    something a discrete rung ladder might or might not contain.
-
-    The motivating failure: a coupled RANS march ran 62 healthy steps and then died because **two
-    cells out of 23040** took the turbulent kinetic energy to ``-3.3e-4``. Every field stayed finite;
-    the closure's ``sqrt(k)`` turned those two cells into NaN, which poisoned the whole residual. The
-    line search had been crawling along that boundary for four inner iterations (``alpha`` halving
-    ``0.008 -> 0.001``, the residual falling under 1% per iteration) without any way to see it.
-
-    Positivity cannot be carried by the pseudo-transient shift and the divergence guard alone, which
-    is what the direct-variable path assumes: the guard fires on a non-finite residual, and by the
-    time ``sqrt`` of a negative value has produced one, the state is already poisoned.
-
-    Parameters
-    ----------
-    start, stop : int
-        The half-open slice of the flat state that must stay positive.
-    tau : float
-        Fraction of the distance to the boundary actually taken, in ``(0, 1)``. ``0.99`` (default)
-        stops just short, so the constrained entries stay strictly positive rather than landing on
-        zero -- where ``sqrt`` is defined but its derivative is not.
-    floor : float
-        Absolute room granted to every entry on top of its own value: the room becomes
-        ``(phi_i + floor) / -delta_i``. ``0`` (default) is the plain rule, bit-identical to it.
-
-        **Why a floor is wanted.** The cap is a minimum over entries, so an entry that is numerically
-        zero -- and whose own equation is asking it to be zero -- sets the step length for the entire
-        state. Protecting such an entry's positivity to *relative* precision buys nothing, and the cost
-        is unbounded: taking ``tau`` of the distance leaves it at ``1 - tau`` of its value, so the next
-        step's room is smaller by the same factor and the cap collapses geometrically while the
-        correction at that entry never changes. Measured on a coupled turbulence march: one cell of
-        23040 drove the cap from ``3.8e-03`` to ``1.1e-09`` across four recorded steps, its value
-        falling ``3.08e-16 -> 3.08e-22`` with the mantissa preserved -- exactly ``1 - tau`` per step --
-        while the march made no progress at all.
-
-        A floor grants that much *absolute* room instead, so an entry below it stops setting the cap
-        while an entry well above it is unaffected. Choose it far below any physically meaningful value
-        of the field, and scale it with the field (a fraction of a reference value) rather than as a
-        bare dimensional constant: too small and the cap is simply set by the next numerically-dead
-        entry, since these come in graded populations rather than singly; too large and it exempts
-        entries that are genuinely small rather than dead.
-
-        **It changes neither the converged state nor the adjoint.** At a root ``delta = 0``, so the
-        room is infinite for any floor and the limiter is inactive -- the same reason the plain rule is
-        absent there. The entries it exempts may go slightly negative on the way, which is safe only if
-        every consumer of the constrained field clamps at zero; verify that before using it.
-
-    Returns
-    -------
-    PositiveBlockLimit
-        A callable ``(phi, delta) -> alpha_max``, a scalar in ``(0, 1]``, for
-        ``backtracking_line_search``'s ``max_alpha``. A **value object**, not a closure, so that two
-        limiters built for the same block are equal and a Newton step carrying one stays a
-        compilation-cache hit across rebuilds (see :class:`PositiveBlockLimit`).
-
-    Notes
-    -----
-    The cap is **global**: one entry near zero throttles the whole step. On a field spanning several
-    orders of magnitude that can trade a failure for a crawl, so a march using this should report the
-    cap and check whether it binds every step or only near the boundary. ``floor`` is the lever for
-    exactly that case.
-    """
-    return PositiveBlockLimit(start, stop, tau, floor)
-
-
-@dataclasses.dataclass(frozen=True)
 class PositiveBlockProjection:
     """``(phi, delta) -> delta'``: clip each entry's own correction so ``phi[start:stop]`` stays > 0.
 
-    Built by :func:`positive_block_projection`, whose docstring carries the rule and why it exists
-    beside the cap. A **value object rather than a closure** for the same reason as
-    :class:`PositiveBlockLimit`: it rides in a strategy's static fields, which are compared by
-    ``__eq__`` to form the compiled step's cache key, and a closure compares by identity so every
-    rebuild would recompile the whole solve.
+    Built by :func:`positive_block_projection`, whose docstring carries the rule and why it exists.
+    This is a **value object rather than a closure**, and that is load-bearing: it rides in a
+    strategy's ``step_projection``, a *static* field and therefore part of the compiled step's cache
+    key. Static fields are compared by ``__eq__``, so two projections built for the same block at
+    different times are interchangeable, where a closure compares by identity and every rebuild would
+    recompile the whole solve. A continuation ramp rebuilds its step at every station, and a step
+    limiter written as a closure once cost each station's first step ~100-150 s of recompilation.
 
     Attributes
     ----------
@@ -197,39 +88,30 @@ def positive_block_projection(
 ) -> PositiveBlockProjection:
     """Build ``(phi, delta) -> delta'`` clipping each entry's correction to keep ``phi`` positive.
 
-    The **per-entry** counterpart of :func:`positive_block_limit`. Both enforce the same
-    fraction-to-the-boundary condition; they differ in *who pays for it*. The cap scales the whole
-    step by ``tau * min_i(room_i)``, so a single entry near zero throttles every entry in the state.
-    This clips each entry's own correction instead::
+    The fraction-to-the-boundary rule from interior-point methods, applied to each entry on its own::
 
         delta_i <- max(delta_i, -tau * (phi_i + floor))
 
-    leaving every other entry's correction untouched.
+    so no entry of the block can cross zero, and every other entry's correction is untouched.
 
-    **Why the cap alone is not enough.** The cap is a minimum over entries, so one entry whose value
-    is numerically zero -- and whose own equation is asking it to be zero -- sets the step length for
-    the entire state. A ``floor`` was introduced to stop that, and it postpones the collapse rather
-    than removing it, which is arithmetic rather than a measurement: when the cap binds, the step takes
-    ``phi_new = phi - tau * (phi + floor)``, so
+    **Why per entry rather than a cap on the whole step.** The same rule can instead shorten the whole
+    step, to ``tau * min_i (phi_i / -delta_i)``, and that is a minimum over entries: one entry whose value
+    is numerically zero -- and whose own equation is asking it to be zero -- sets the step length for the
+    entire state. Measured on a coupled turbulence march, one side-wall corner cell of 23040 held the
+    step to 0.001-0.002 while every other cell admitted 0.6 or more; the step was then redone at a
+    larger shift. And a floor on the cap's room only postpones that: when the cap binds, the entry takes
+    ``phi_new + floor = (1 - tau) (phi + floor)``, so the room shrinks by ``1 - tau`` every step
+    whatever the floor is. Clipping per entry removes the coupling instead -- the dead entry still decays,
+    because that is what its own equation asks, but alone.
 
-        ``(phi_new + floor) = (1 - tau) * (phi + floor)``
+    **It remains one search direction.** A per-entry step *length* would make ``phi_i + alpha_i delta_i``
+    a different direction at every backtracking rung, so the descent test, the non-descent fallback and
+    the reported step fraction would each stop meaning anything. Clipping produces a single modified
+    vector, once, before the search -- which then walks a genuine ray through it.
 
-    and the shifted value ``phi + floor`` decays by exactly ``1 - tau`` per capped step **whatever the
-    floor is**. The entry parks at ``phi -> -tau * floor`` while the cap keeps falling by that same
-    factor per step; a floor buys a fixed number of decades of headroom and the collapse then repeats.
-    Clipping removes the mechanism instead: the constrained entry still decays toward zero, because
-    that is what its own equation asks, but it does so *alone*.
-
-    **It remains one search direction, which is the constraint that rules out a per-entry step
-    length.** A per-entry ``alpha`` would make ``phi_i + alpha_i * delta_i`` a different direction at
-    every backtracking rung, so the descent test, the non-descent fallback and the reported step
-    fraction would each stop meaning anything. Clipping produces a single modified vector, once, before
-    the search -- which then walks a genuine ray through it, exactly as before.
-
-    **Composes with the cap rather than replacing it.** Applied first, this makes the cap compute
-    exactly ``1``: every decreasing entry then satisfies ``|delta_i| <= tau * (phi_i + floor)``, hence
-    ``room_i >= 1 / tau`` and ``tau * min_i(room_i) >= 1``. So a step carrying both reports an
-    unbinding cap, and the diagnostics keyed on that cap keep working and simply say "nothing bound".
+    **What it does not do: keep the other fields consistent.** A clipped entry's coupled fields keep
+    the corrections they were solved with, for a move that is no longer taken. Where that matters, bound
+    them per entry too (:func:`bounded_block_projection`, composed with :func:`composed_projection`).
 
     Parameters
     ----------
@@ -241,8 +123,8 @@ def positive_block_projection(
         where ``sqrt`` is defined but its derivative is not.
     floor : float
         Absolute room granted on top of each entry's own value. ``0`` (default) is the plain rule and
-        is sufficient here: an entry at exactly zero has its correction clipped to zero, which freezes
-        it harmlessly rather than throttling anything else.
+        is sufficient: an entry at exactly zero has its correction clipped to zero, which freezes it
+        harmlessly rather than throttling anything else.
 
     Returns
     -------
@@ -263,6 +145,116 @@ def positive_block_projection(
     ``||delta' - delta|| / ||delta||``) rather than assuming it.
     """
     return PositiveBlockProjection(start, stop, tau, floor)
+
+
+@dataclasses.dataclass(frozen=True)
+class BoundedBlockProjection:
+    """``(phi, delta) -> delta'``: clip each entry of a block's correction to ``[-bound, bound]``.
+
+    Built by :func:`bounded_block_projection`, whose docstring carries the rule. A value object rather
+    than a closure, for the cache-key reason given on :class:`PositiveBlockProjection`.
+
+    Attributes
+    ----------
+    start, stop : int
+        The half-open slice of the flat state whose correction is bounded.
+    bound : float
+        The largest change one entry may take in one correction, in the units of ``phi``; positive.
+    """
+
+    start: int
+    stop: int
+    bound: float
+
+    def __call__(self, phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
+        del phi
+        clipped = jnp.clip(delta[self.start : self.stop], -self.bound, self.bound)
+        return delta.at[self.start : self.stop].set(clipped)
+
+
+def bounded_block_projection(start: int, stop: int, bound: float) -> BoundedBlockProjection:
+    """Build ``(phi, delta) -> delta'`` clipping each entry of a block's correction to ``[-bound, bound]``.
+
+    A per-entry trust region: no entry of the block may move by more than ``bound`` in one correction,
+    and every other entry is untouched. Its use is beside :func:`positive_block_projection`. Clipping
+    one field's correction per entry makes the step a different direction in the cells it clips, and
+    the fields the residual couples to it there are left with corrections computed for a move that is
+    no longer taken. Where that clipped field is small and the others are large, the result can be a
+    jump of many orders of magnitude in a coupled field; bounding that field per entry too stops one
+    cell's jump from becoming the step. Like the positivity projection it keeps a single search
+    direction -- one modified vector, formed once, before the line search walks a ray through it.
+
+    Parameters
+    ----------
+    start, stop : int
+        The half-open slice of the flat state whose correction is bounded.
+    bound : float
+        The largest change one entry may take in one correction, in the units of ``phi``. For a field
+        solved as its logarithm this bounds the factor it may change by, ``exp(bound)``.
+
+    Returns
+    -------
+    BoundedBlockProjection
+        A callable ``(phi, delta) -> delta'`` of the same shape as ``delta``.
+
+    Raises
+    ------
+    ValueError
+        If ``bound`` is not positive.
+
+    Notes
+    -----
+    **Inactive at a root**, for the same reason as the positivity projection: there ``delta = 0``, which
+    no bound clips, so neither the converged state nor its adjoint can be reached by it.
+    """
+    if not bound > 0.0:
+        raise ValueError(f"bound must be positive, got {bound!r}")
+    return BoundedBlockProjection(start, stop, float(bound))
+
+
+@dataclasses.dataclass(frozen=True)
+class ComposedProjection:
+    """``(phi, delta) -> delta'``: several step projections applied in order.
+
+    Built by :func:`composed_projection`. A value object, so two built from equal parts are equal and a
+    step carrying one stays a compilation-cache hit across rebuilds.
+
+    Attributes
+    ----------
+    parts : tuple of callable
+        The projections, each ``(phi, delta) -> delta'``, applied first to last.
+    """
+
+    parts: tuple[Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray], ...]
+
+    def __call__(self, phi: jnp.ndarray, delta: jnp.ndarray) -> jnp.ndarray:
+        for part in self.parts:
+            delta = part(phi, delta)
+        return delta
+
+
+def composed_projection(
+    *parts: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None,
+) -> Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None:
+    """The step projection applying each given one in order, skipping ``None``.
+
+    A Newton step carries one ``step_projection``; this is how it carries several. With none given it
+    returns ``None`` and with one it returns that one, so a step that composes nothing is unchanged.
+
+    Parameters
+    ----------
+    *parts : callable or None
+        Projections ``(phi, delta) -> delta'``, applied first to last.
+
+    Returns
+    -------
+    callable or None
+        The composition, the single projection, or ``None``.
+    """
+    present = tuple(part for part in parts if part is not None)
+    if not present:
+        return None
+    return present[0] if len(present) == 1 else ComposedProjection(present)
 
 
 def backtracking_line_search(
@@ -345,9 +337,8 @@ def backtracking_line_search(
         driver's convergence guard all test this number with ``isfinite``.
     max_alpha : float or jnp.ndarray, optional
         An upper bound on the step fraction, applied to **every** rung including the growth rungs.
-        The seam for a constraint the residual cannot express: a field that must stay positive gives
-        the largest fraction that keeps it so (see
-        :func:`~aquaflux.solve.positive_block_limit`), and capping is what makes an admissible step
+        The seam for a constraint the residual cannot express: a field that must stay positive can
+        give the largest fraction that keeps it so, and capping is what makes an admissible step
         *reachable* rather than something the ladder might happen to contain. Default ``inf`` -- no
         cap, byte-identical.
 

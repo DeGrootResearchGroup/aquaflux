@@ -490,11 +490,10 @@ class CoupledMarch(_March):
     turbulence_damping : float or None
         How much harder the ``k`` and ``omega`` rows are damped than the flow's, as a multiplier on
         their shift strength; unset, ``1``.
-    positivity_floor : float or None
-        The least ``k`` a step may leave; unset, the solve's own.
-    positivity_projection : bool or None
-        Project ``k`` back to the floor after a step rather than shortening the step to respect it;
-        unset, the solve's own.
+    omega_step_ratio : float or None
+        The largest factor one cell's ``omega`` may change by in one correction, beside the per-cell
+        clip that keeps ``k`` positive; unset, the solve's own (``e`` where ``omega`` is solved as its
+        logarithm).
     continuation : ViscosityRamp or None
         Reach the case's viscosity along a ramp; unset, march at it from the start.
 
@@ -506,8 +505,7 @@ class CoupledMarch(_March):
     """
 
     turbulence_damping: float | None = None
-    positivity_floor: float | None = None
-    positivity_projection: bool | None = None
+    omega_step_ratio: float | None = None
     continuation: ViscosityRamp | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
@@ -529,7 +527,10 @@ class CoupledMarch(_March):
 
     def _owned(self) -> frozenset[str]:
         """The march's keywords and the closure's -- see :meth:`_March._owned`."""
-        return super()._owned() | {"positivity_floor", "positivity_projection", "shift"}
+        return super()._owned() | {
+            "omega_step_ratio",
+            "shift",
+        }
 
     def refuse_for(self, physics: Physics, drive: DriveSpec | None) -> None:
         """Refuse a laminar case, or a held bulk velocity beside a materialized-Jacobian preconditioner.
@@ -576,8 +577,7 @@ class CoupledMarch(_March):
             By keyword; a setting left unset is absent, so the solve's own default applies.
         """
         settings = self._march_settings() | _set(
-            positivity_floor=self.positivity_floor,
-            positivity_projection=self.positivity_projection,
+            omega_step_ratio=self.omega_step_ratio,
         )
         if self.turbulence_damping is not None:
             settings["shift"] = CoupledShiftSettings(turbulence_damping=self.turbulence_damping)

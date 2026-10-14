@@ -2328,8 +2328,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   **⚠️ AND THE `k` CORRECTION THAT DRIVES IT IS UNBOUNDED IN THE DIRECTION NOTHING GUARDS.** The
   *decrease* side is `min dk/k = -0.270` in **all four arms** — identical to three figures, and nowhere
-  near `-1`, which is exactly why `positive_k_limit` reports a cap of 1 at every shift measured. The
-  **increase** side is where the arms differ, and `positive_block_limit` is one-sided by construction:
+  near `-1`, which is exactly why `positive_k_limit` (the global cap, deleted 2026-10-14) reports a cap of 1 at every
+  shift measured. The **increase** side is where the arms differ, and that cap was one-sided by construction:
   it bounds only entries with `delta < 0`, the ones that could cross zero. A Newton step asking to
   raise a near-wall `k` by **four thousand times** passes it untouched. At the worst cell
   (`k` = 3.998e-02) the four arms ask for `dk` of +1.43, +7.34, +11.65, **+43.55**.
@@ -2483,7 +2483,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   even once it is admissible. That is the whole failure: not "no admissible step", but "no step that
   is both admissible and worth taking". Direct `omega` would be worse, not better — the same
   correction would drive it far negative, which is what log transport exists to prevent and what
-  `positive_k_limit` prevents for `k`.
+  the k positivity guard (then `positive_k_limit`, deleted 2026-10-14) prevents for `k`.
 
   **✅✅✅ RESOLVED (2026-08-25): THE STALL IS THE k-POSITIVITY CAP, AND THE PER-ENTRY PROJECTION FIXES
   IT. `SkewCorrectedGradient` MARCHES THIS CASE.**
@@ -2537,7 +2537,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   search takes full steps into iterates the carried preconditioner solves badly (inner solves pinned at
   12 cycles against 2–5, one attempt at α = 1.000 reaching an inner residual of 2.7e+10), each tripping
   that case's per-solve cycle bailout. Full numbers and configuration in
-  `.claude/rules/solve-amg-multigrid.md`.
+  `.claude/rules/solve-amg-multigrid.md`. ⚠️ **All of this table was measured with the global cap and its
+  projection switch, both deleted 2026-10-14**: every coupled step now clips `k` per cell AND bounds ω's
+  per-cell change, which removed bfs3d's bad full-length trials (`.claude/notes/solve-globalization-log.md`,
+  "bfs3d's retried steps: the global k cap, replaced by a per-cell clip with an omega bound (2026-10-14)").
   **So read the table above as "the cap can lose a march and the projection can rescue it", which is
   what justifies the default — NOT as "the projection is free".** On a case where the cap is not losing
   the march, it is not.

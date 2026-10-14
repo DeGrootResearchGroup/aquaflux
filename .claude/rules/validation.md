@@ -181,19 +181,15 @@ cannot be written. The guard is what catches the next module that does branch.
 
 ## Known API gaps these cases exposed
 
-- **`positivity_floor` was a parameter of `coupled_amg_continuation` ALONE — FIXED, see the entry
-  below; it is now on all four builders.** `pitzdaily_openfoam/compare.py` spells it
-  `K_POSITIVITY_FLOOR`, matching the sibling case so a future diff lines up.
-- **✅ FIXED 2026-08-19 — this was a behavioural gap between the arms, and it was wider than recorded
-  here.** It said `coupled_lu_continuation` marched with no k-positivity limiter while
-  `coupled_amg_continuation` always carried it. True, and **three** of the four builders lacked it, not
-  one: `coupled_continuation` and `mass_flow_coupled_continuation` too, and even the AMG builder only
-  wired it on its dual-time branch. All four now route through `_coupled_step`, which passes
-  `step_limit=positive_k_limit(...)` on both branches;
-  `test_every_continuation_builder_installs_the_same_globalization` fails if one loses it. The confound
-  this warned about — an LU-versus-AMG comparison being between a guarded march and an unguarded one —
-  applied to every cross-builder comparison on record, so treat any of them with that in mind. The
-  confound still applies to archived runs.
+- **The k-positivity guard was wired on one builder of four until 2026-08-19 (FIXED).** All builders now
+  route through `_coupled_step`, which installs the per-cell k clip + ω step bound
+  (`_closure_step_projection`; the global cap `positive_k_limit` and the `positivity_floor` /
+  `positivity_projection` keywords, with their `K_POSITIVITY_*` / `POSITIVITY_PROJECTION` harness
+  constants and env vars, were deleted 2026-10-14 — the one knob left is `omega_step_ratio`, overridden by
+  `BFS3D_OMEGA_STEP_RATIO` / `PITZ_OMEGA_STEP_RATIO`, `none` = unbounded);
+  `test_every_continuation_builder_installs_the_same_globalization` fails if one loses it. The confound —
+  a cross-builder comparison between a guarded march and an unguarded one — still applies to archived
+  runs before 2026-08-19.
 - **✅ FIXED 2026-08-20 (#282) — the SAME defect recurred TWICE MORE on the same four builders, with the
   shared tail already extracted.** `forward_rtol` / `forward_restart` / `forward_max_restarts` were on
   `coupled_amg_continuation` alone, so the *default* path — what `solve_coupled` builds when nothing is
@@ -551,7 +547,7 @@ writing a harness:
 ⚠️ **From that change (2026-09-24, #437) until 2026-10-08, pitzDaily's `PITZ_*` MARCH overrides were
 INERT.** `solve_aquaflux` solved `case["spec"].solver` (the file's) while the banner printed the edited
 `SOLVER`, so every override — `BETA_START`, `REFRESH_ON_CYCLES`, `RETRY_ON_CYCLES`, `TURB_DAMPING`,
-`K_POSITIVITY_PROJECTION`, `FLOW_SWEEPS`, `FIELD_SPLIT`, `PROBE_GRADIENT_SWEEPS`, `RAMP_*`, the new
+`K_POSITIVITY_PROJECTION` (since deleted), `FLOW_SWEEPS`, `FIELD_SPLIT`, `PROBE_GRADIENT_SWEEPS`, `RAMP_*`, the new
 `FORWARD_RTOL` — was reported as in force and ran the file unchanged; the study arms received the same
 unedited solver. Found when three marches at `FORWARD_RTOL` 0.01 / 0.1 / 0.6 came back bit-identical to
 the 0.3 baseline. Fixed (`solver = SOLVER`) and pinned by

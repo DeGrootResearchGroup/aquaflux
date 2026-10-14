@@ -85,7 +85,6 @@ def main() -> None:
                 dual_time=DualTimeLoop(inner_steps=INNER_STEPS, inner_tol=INNER_TOL),
                 max_steps=STEPS,
                 convergence=Convergence(rtol=1e-3, atol=0.0),
-                positivity_projection=True,
                 retry=RETRY,
                 on_step=on_step,
             )

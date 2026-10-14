@@ -316,7 +316,6 @@ def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
             dual_time=dual_time,
             max_steps=MAX_STEPS,
             convergence=Convergence(rtol=ANCHOR_RTOL, atol=0.0),
-            positivity_projection=True,
             retry=RETRY,
             on_step=lambda r: on_step(r, rung="anchor"),
         )
@@ -329,7 +328,6 @@ def run_march_ab(name: str, gradient_scheme, start=_hybrid_start) -> dict:
             dual_time=dual_time,
             max_steps=MAX_STEPS,
             convergence=Convergence(rtol=RTOL, atol=ATOL),
-            positivity_projection=True,
             retry=RETRY,
             on_step=lambda r: on_step(r, rung="target"),
         )

@@ -142,8 +142,7 @@ _FULL_COUPLED_MARCH = {
         "on_alpha": 0.01,
     },
     "turbulence_damping": 3.0,
-    "positivity_floor": 1e-8,
-    "positivity_projection": False,
+    "omega_step_ratio": 3.0,
     "continuation": {
         "kind": "ViscosityRamp",
         "anchor": 100.0,
@@ -175,12 +174,13 @@ def test_a_coupled_march_reads_into_the_librarys_own_settings_values() -> None:
             solver=GmresSolve(1e-4, restart=40), abort_above_cycles=10, on_alpha=0.01
         ),
         turbulence_damping=3.0,
-        positivity_floor=1e-8,
-        positivity_projection=False,
+        omega_step_ratio=3.0,
         continuation=ViscosityRamp(
             anchor=100.0, stations=16, steps_per_station=1, scale="flow", redamping=2.0
         ),
     )
+    # ...and reaches the solve as the coupled step's own keyword.
+    assert spec.solver.settings()["omega_step_ratio"] == 3.0
 
 
 def test_a_solver_section_is_written_as_plain_data_and_read_back_equal() -> None:
@@ -533,7 +533,7 @@ def test_a_coupled_march_hands_solve_coupled_its_settings_and_nothing_it_leaves_
         max_steps=7,
         dual_time=DualTimeLoop(inner_steps=3),
         turbulence_damping=2.0,
-        positivity_projection=False,
+        omega_step_ratio=3.0,
     )
     assert march.solve("problem", on_retry="logger") == "<solve_coupled>"
     ((args, kwargs),) = recorded.solve_coupled.calls
@@ -542,7 +542,7 @@ def test_a_coupled_march_hands_solve_coupled_its_settings_and_nothing_it_leaves_
         "max_steps": 7,
         "dual_time": DualTimeLoop(inner_steps=3),
         "shift": CoupledShiftSettings(turbulence_damping=2.0),
-        "positivity_projection": False,
+        "omega_step_ratio": 3.0,
         "on_retry": "logger",
     }
     assert recorded.solve_reynolds_ramp.calls == []
@@ -619,7 +619,7 @@ def test_a_block_diagonal_preconditioner_is_left_to_the_solve(recorded) -> None:
 
 @pytest.mark.parametrize(
     "keyword",
-    ["dual_time", "max_steps", "retry", "shift", "positivity_floor", "homotopy", "preconditioner"],
+    ["dual_time", "max_steps", "retry", "shift", "omega_step_ratio", "homotopy", "preconditioner"],
 )
 def test_a_script_cannot_pass_a_setting_even_one_the_file_leaves_unset(recorded, keyword) -> None:
     with pytest.raises(TypeError, match=rf"CoupledMarch: {keyword} is a setting of the case"):
@@ -780,8 +780,6 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
             inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
         ),
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
-        "positivity_floor": 0.0,
-        "positivity_projection": True,
         # The faster shift descent and its release once the target has settled, the case's own since
         # the script stopped building its march.
         "step_control": CflResidualDualTimeControl(
@@ -814,7 +812,7 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
 
     Since the file took pitzDaily's march settings (the uniform probe, no refit floor, the residual
     stop, the faster shift descent with its release, the lighter turbulence damping) it differs from
-    the twin only in its trailing inverse and in keeping its own ``k`` positivity floor and cap.
+    the twin only in its trailing inverse.
     """
     settings = {
         "max_steps": 150,
@@ -849,8 +847,6 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
             inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
         ),
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
-        "positivity_floor": 1e-8,
-        "positivity_projection": False,
         "step_control": CflResidualDualTimeControl(
             beta_start=0.5,
             beta_min=0.005,

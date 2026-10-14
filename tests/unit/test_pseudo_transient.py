@@ -29,7 +29,6 @@ from aquaflux.solve import (
     ShiftTerm,
     SwitchedEvolutionRelaxation,
     newton_march,
-    positive_block_limit,
     positive_block_projection,
 )
 from aquaflux.solve.continuation import _shifted_solve
@@ -688,37 +687,13 @@ def _unshifted_step(**overrides) -> PseudoTransientStep:
     )
 
 
-def test_the_positivity_cap_is_available_on_the_pseudo_transient_step() -> None:
+def test_the_positivity_projection_is_available_on_the_pseudo_transient_step() -> None:
     """The guard protects the *state*, so it cannot depend on which strategy is stepping it.
 
-    It used to live only on :class:`~aquaflux.solve.DualTimeStep`, so choosing the single-step strategy
-    silently gave up a guard whose absence is a recorded march death: two cells of 23040 took ``k``
-    negative and NaN'd the whole residual through a bare ``sqrt``, with every field still finite and
-    nothing in the ordinary stopping tests able to see it.
-    """
-    phi0 = jnp.array([1.0, 2.0])
-    common = dict(max_steps=1, rtol=1e-12, atol=1e-14)
-
-    unguarded = newton_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
-    guarded = newton_march(
-        _unshifted_step(step_limit=positive_block_limit(0, 2, tau=0.99)),
-        _NegativeRoot(),
-        phi0,
-        **common,
-    )
-
-    assert float(unguarded.state[0]) < 0.0  # the unconstrained step really does cross zero
-    assert float(guarded.state[0]) > 0.0  # and the cap holds it back
-    # `tau = 0.99` leaves the binding entry at 1% of its value -- the fraction-to-the-boundary rule.
-    assert float(guarded.state[0]) == pytest.approx(0.01, rel=1e-6)
-
-
-def test_the_per_entry_projection_is_available_too_and_leaves_the_cap_inactive() -> None:
-    """The projection clips each entry's own correction, so the global cap then finds nothing binding.
-
-    Same composition the dual-time step relies on, and the reason both are offered rather than one: a
-    global cap lets a single dead entry throttle every other one, which is what the projection exists
-    to avoid.
+    The unconstrained step crosses zero -- the recorded failure this guards against: two cells of
+    23040 took ``k`` negative and NaN'd the whole residual through a bare ``sqrt``, with every field
+    still finite. The projection clips that entry's own correction and leaves the other entry's alone,
+    so the second entry still reaches its root in the one step.
     """
     phi0 = jnp.array([1.0, 2.0])
     projected = newton_march(
@@ -730,10 +705,13 @@ def test_the_per_entry_projection_is_available_too_and_leaves_the_cap_inactive()
         atol=1e-14,
     )
 
+    unguarded = newton_march(
+        _unshifted_step(), _NegativeRoot(), phi0, max_steps=1, rtol=1e-12, atol=1e-14
+    )
+    assert float(unguarded.state[0]) < 0.0  # the unconstrained step really does cross zero
     assert float(projected.state[0]) > 0.0  # held positive
     # The second entry reaches its own root: the projection did not shorten the whole step for it.
     assert float(projected.state[1]) == pytest.approx(1.0, rel=1e-6)
-    assert float(projected.reports[0].binding_limit) == pytest.approx(1.0)
 
 
 def test_both_default_to_off_and_leave_the_step_untouched() -> None:

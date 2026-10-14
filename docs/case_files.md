@@ -242,7 +242,9 @@ The two marches share their settings, each a value of the solver library written
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
 
 `CoupledMarch` adds the closure's: `turbulence_damping` (a multiplier on the `k` and `omega`
-rows' shift), `positivity_floor` and `positivity_projection` (how `k` is kept positive), and
+rows' shift), `omega_step_ratio` (the largest factor one cell's `omega` may change by in one
+correction; every step also clips each cell's `k` correction to keep `k` positive, and the bound
+keeps `omega` consistent with that clip; unset, `e` where `omega` is solved as its logarithm), and
 `continuation` — {class}`~aquaflux.case.ViscosityRamp`, which starts the march at `anchor` times
 the case's viscosity and walks it down to the case's in `stations` geometric steps, each held
 for `steps_per_station` outer steps, keeping the state and the preconditioner throughout. Its

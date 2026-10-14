@@ -155,59 +155,35 @@ runs at. Because it is a fixed linear operator it is also
 transposable, so the exact coupled adjoint (the point of a differentiable solver) reuses its transpose
 V-cycle — verified against finite differences on a channel case at the time.
 
-## The k-positivity cap is doing globalization work here, and the per-cell clip removes it
+## Keeping `k` positive: a per-cell clip and a per-cell omega bound
 
-The step limiter that keeps `k` positive comes in two forms. The **cap** scales the whole step by the
-worst cell, so one numerically-dead cell sets the step length for all 23040 — on this mesh the stagnant
-corner where the step face, the floor and a side wall meet, which has no shear, hence no `k` production,
-hence `k` decaying with nothing to arrest it. The **per-cell projection** clips each cell's own `k`
-correction instead, leaving the cap to compute exactly 1. The projection is the library default and the
-2D sibling case's, on a measurement taken there: it rescued a march the cap was losing outright, and made
-the arm that already worked faster.
+Every coupled step clips each cell's own `k` correction so that cell stays non-negative, then bounds each
+cell's change in log(ω) per correction (by a factor `e` by default; `BFS3D_OMEGA_STEP_RATIO` overrides it,
+`none` for unbounded). The clip alone leaves a clipped cell's ω correction as solved, for a `k` move that
+is no longer taken; the bound is what stops that cell's ω from jumping.
 
-**It does not carry over.** Run here as a controlled pair — everything else at its default, only this
-setting varying, back to back on one machine — both arms reach the same root and the projection costs
-41 % more Krylov cycles and 40 % more wall. *Measured 2026-08-25 at the settings this file describes:
-three-rung Reynolds continuation, field split on, `simplesmooth` flow inverse at 2 sweeps with frozen
-coarsening, in-framework trailing inverse, `zerogradient` wall condition on `k`, positivity floor
-`1e-08`, compiled incomplete-LU kernel live.*
+This replaced a **global step cap** (fraction-to-the-boundary over all cells, with an absolute floor),
+which scaled the whole step by the worst cell. On this mesh the worst cells are one or two near-zero-`k`
+cells in the stagnant side-wall corners, which set the step length to 0.001–0.002 while every other cell
+admitted at least 0.6. One run per arm, 2026-10-14, at `main` `dfb21bc2` with the case file of PR #712
+(multiple-correction gradient, `grow` 3, release, 12 stations), Apple M3 Pro, jax 0.10.2, through
+`run_case.sh`:
 
-| | cap only (shipped) | + projection |
-|---|---|---|
-| steps | 69 | **62** |
-| Krylov cycles | **365** | 515 (+41 %) |
-| wall | **2268 s** | 3166 s (+40 %) |
-| positivity-capped (`L`) steps | 26 | **0** |
-| step redos | **7** | 11 |
-| mid-span `x_r/h` | 8.3611 | 8.3611 |
+| | steps | cycles (incl. rejected) | redone attempts | worst full-step ratio | solve |
+|---|---|---|---|---|---|
+| global cap + floor `1e-08` | 19 | 126 (157) | 3 | 64 | 616 s |
+| per-cell clip alone (2026-10-13) | 20 | 154 (164) | 2 (one step, twice) | 4e91 | 660 s |
+| **per-cell clip + ω bound `e`** | **17** | **134 (134)** | **0** | **2.54** | **558 s** |
+| per-cell clip + ω bound `e²` | 17 | 129 (129) | 0 | 2.54 | 531 s |
 
-> ⚠️ **These numbers were taken at `e46564a`, which carried a coupled-`k`-shift change that was reverted
-> the next day.** The revert alters the `k` shift diagonal, which is the term the positivity limiter
-> clips against — the shift sets the `k` correction, and the cap and the projection are two ways of
-> bounding it. Both arms ran under it, so the pair is still controlled and the qualitative reading holds,
-> but the figures describe a code state the library no longer has and should be re-run before being
-> quoted. The default here is unaffected: it was off before this measurement and nothing here argues for
-> flipping it.
+Mid-span `x_r/h` is 8.361 in every arm, and the converged states agree with the capped march's to a
+relative L2 difference of 1.1e-4.
 
-The mechanism does exactly what it claims — the cap never binds once, against 26 times — and the
-projection **wins the first two rungs outright** (35 steps / 142 cycles / 851 s against 39 / 162 / 958).
-The whole loss is the **target rung**: 373 cycles and 2315 s against 203 and 1310, which is 13.8 Krylov
-cycles per step against 6.8.
-
-What the cap was buying there is visible in the log. With the step no longer shortened, the line search
-takes full steps into iterates the carried preconditioner solves badly — inner solves pinned at 12 cycles
-where the shipped arm's run 2–5, and one attempt at `alpha` 1.000 whose inner residual reaches 2.7e+10 —
-and each such solve trips the per-solve cycle bailout and redoes the step, **8 times against 2**. So the
-global cap is not only a positivity device on this case; it is doing globalization work, and clipping per
-cell removes that without replacing it. The projection stays available
-(`BFS3D_K_POSITIVITY_PROJECTION=1`) and off by default here.
-
-This is consistent with the earlier full-march pair on this case, which found the two arms identical at
-329 Krylov cycles apiece and concluded the projection was worth keeping for robustness rather than for
-speed. Under today's defaults that neutral result has become a real cost, so the conclusion stands and
-the price has risen. **One thing this pair does not settle:** the per-solve cycle bailout was calibrated
-under the cap, so whether the target-rung loss belongs to the projection or to a threshold that no longer
-suits it is untested.
+One trap the cap taught, worth keeping for any global cap: an absolute floor only postpones its collapse.
+When the cap binds, the step gives `(k_new + floor) = (1 - tau)(k + floor)` whatever the floor, so the
+shifted value decays by the same factor per capped step and the collapse repeats a fixed number of decades
+later. Earlier measurements on this page that name a "positivity floor" or a "positivity cap" were taken
+under that cap.
 
 ## Near-wall caveat
 

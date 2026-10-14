@@ -213,7 +213,8 @@ Many entries below are dated history written against the old API. Read them thro
       one cell differ by **12 %** in `|grad u|` and in `P_k`, and by **30×** in the `k` correction the
       Newton step asks for, purely because a 12 % move in `J_kk` is a 3× move in the near-cancelling
       sum. The `k` correction then reaches **+4000×** the local `k`, in the increasing direction that
-      `positive_block_limit` does not guard (it bounds only entries that could cross zero). The
+      the k positivity guard (then the global cap, now the per-cell clip) does not touch — it bounds only
+      entries that could cross zero; the ω step bound added 2026-10-14 now limits what reaches `omega`. The
       near-wall `omega` fixation row `log omega = log omega_wall(k)` hands that straight to `omega`,
       whose log transport exponentiates it — which is how a 12 % gradient difference loses a march.
       The full trail, with the four-way tables, is in `.claude/rules/schemes.md` under the
@@ -341,7 +342,7 @@ Many entries below are dated history written against the old API. Read them thro
       forwarded, not dropped.** They configure the continuation `solve_coupled` builds. On the two paths
       where it builds none — an explicit `strategy`, or a `RefreshPolicy(builder=...)` — they reached
       nothing at all, with no error and no log line, so a march asked for `inner_steps=3` /
-      `positivity_floor=1e-6` and silently ran the library defaults. `**kwargs` is what made it quiet:
+      `positivity_floor=1e-6` (a keyword since deleted) and silently ran the library defaults. `**kwargs` is what made it quiet:
       it accepts every keyword and checks none, and it is the main entry point's door. This had already
       cost a study harness (`lu_vs_hostilu.py`, since deleted, #371, carried a warning comment about a `refresh_preconditioner=`
       swallowed here instead of reaching its `RefreshPolicy`).
@@ -1490,47 +1491,28 @@ Many entries below are dated history written against the old API. Read them thro
     cell. The divergence guard cannot catch it: it fires on a non-finite residual, which is already the
     poisoned state. Measured on `bfs3d`: 62 healthy steps, then **two cells of 23040** at
     `k = -3.3e-4`, every field finite, only the derived `nu_t` NaN.
-    **Every** continuation builder therefore wires `positive_k_limit(coupled)` — the fraction-to-the-
-    boundary cap — automatically for a directly-solved `k`, and passes `None` for a log-solved one, where
-    positivity is already structural and a cap would only throttle. See `.claude/rules/solve-march.md`.
-    ⚠️ **Until 2026-08-19 only `coupled_amg_continuation` did, and that is worth knowing before citing
-    any comparison between the builders.** `coupled_continuation` and `coupled_lu_continuation` never set
-    `step_limit`, whose default is `None`, so the block-diagonal and complete-LU paths marched with **no
-    positivity guard at all**. Two consequences. Any recorded block-SIMPLE-versus-monolithic result
-    compared a guarded march against an unguarded one. And the recorded verdict that "the low-β wall is
-    the block-SIMPLE preconditioner — its coupled solve goes NaN at a low shift"
-    (`solve-globalization-log.md`) is now **suspect**: an unguarded `k` crossing zero produces exactly
-    that signature, so the preconditioner may have been blamed for a missing globalization. Not
-    established — the experiment is one flag and has not been run — but that verdict is dead anyway on
-    its own terms: its remedy, the monolithic ILUT, was measured dominated and **deleted**, and the
-    shipped AMG preconditioners reach adjoint grade at zero shift, which is the regime it claimed only a
-    complete factorization could reach (the entry is collapsed to one line in
-    `solve-globalization-log.md`). All **four** builders now route through `_coupled_step`, and
-    `test_every_continuation_builder_installs_the_same_globalization` fails if one loses the guard.
-    - **⚠️ `positivity_floor` alongside the default `positivity_projection=True` is REFUSED, not
-      silently inert (binding, #365, fixed 2026-09-13).** The per-step tail applies `step_projection`
-      to `delta` **before** `step_limit` sees it (`solve/continuation.py`), and `positive_block_projection`
-      clips every entry to within `tau` of its own boundary — so the limiter it hands off to always has
-      room `>= 1/tau` on every entry and reports `alpha_max = 1`, **whatever floor `step_limit` carries**.
-      A caller who raised `positivity_floor` under the (default) projection therefore got neither an
-      error nor the protection asked for: the limiter that floor feeds never bound. This is provable
-      algebraically, not case-specific, and was already implicit in this file's own test
-      (`test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transform`'s
-      `# the cap now finds nothing binding`) — nobody had connected it to what a nonzero
-      `positivity_floor` does under the shipped default. `_k_positivity_guards` (the single tail all
-      four builders now call, checked **before** any preconditioner is built — including
-      the V-cycle's, so the raise needed no `petsc4py` while that existed) raises `ValueError` naming both
-      keywords when `floor != 0` and the transform-appropriate limiter is real (i.e. `k` is
-      `DirectScalars`) and `positivity_projection` is true. `positive_k_projection`'s own `floor=0.0`
-      default is untouched and still deliberately not fed from `positivity_floor` — a projection has
-      nothing to exempt a dead cell from (see its docstring) — so this is a refusal of a caller
-      combination that was always a no-op, not a behaviour change for a combination that ever worked.
-      **`pitzdaily_openfoam/compare.py` was shipping exactly this inert combination**
-      (`K_POSITIVITY_FLOOR = 1e-8` unconditional, `POSITIVITY_PROJECTION` defaulting `True`) — fixed to
-      `K_POSITIVITY_FLOOR = 1e-8 if not POSITIVITY_PROJECTION else 0.0`, so `PITZ_K_POSITIVITY_PROJECTION=0`
-      still restores the floor exactly as its own comment already promised. `bfs3d_openfoam/compare.py`
-      needed no change: its `K_POSITIVITY_PROJECTION` defaults `False`, so the floor there was always
-      live.
+    **Every** coupled builder therefore installs `_closure_step_projection(coupled, omega_step_ratio)`
+    as its `step_projection` (2026-10-14): each cell's `k` correction clipped to its own room
+    (`positive_k_projection`, unconditional for a directly-solved `k`), then each cell's log-ω change
+    bounded (`omega_step_bound`, `omega_step_ratio` default `DEFAULT_OMEGA_STEP_RATIO = e` under
+    `LogScalars`; `math.inf` = unbounded; a finite ratio with direct ω raises), and `step_limit=None`.
+    See `.claude/rules/solve-march.md`. **There is no `positive_k_limit`, `_k_positivity_guards`,
+    `positivity_floor` or `positivity_projection` any more** — the global fraction-to-the-boundary cap
+    and its floor/projection switches were deleted 2026-10-14, because one or two near-zero-k `bfs3d`
+    side-wall corner cells set that whole-step cap to 0.001–0.002 and caused every redone attempt; the
+    per-cell clip + ω bound e took `bfs3d` from 19 steps / 3 redone / 616 s to 17 / 0 / 558 s at the same
+    x_r/h 8.361 (`.claude/notes/solve-globalization-log.md`, "bfs3d's retried steps: the global k cap,
+    replaced by a per-cell clip with an omega bound (2026-10-14)"). The trap the floor refusal (#365)
+    taught still holds for any future cap: **a projection applied before a limit leaves the limit nothing
+    to bind**, so a floor fed only to the limit is inert.
+    ⚠️ **Until 2026-08-19 only `coupled_amg_continuation` installed the guard, and that is worth knowing
+    before citing any comparison between the builders.** `coupled_continuation` and
+    `coupled_lu_continuation` marched with **no positivity guard at all**, so any recorded
+    block-SIMPLE-versus-monolithic result compared a guarded march against an unguarded one, and the
+    verdict that "the low-β wall is the block-SIMPLE preconditioner" (`solve-globalization-log.md`, already
+    collapsed and dead on its own terms) is suspect on this ground too. All builders now route through
+    `_coupled_step`, and `test_every_continuation_builder_installs_the_same_globalization` fails if one
+    loses the guard.
   - **⚠️ THE FORWARD SOLVE'S STOPPING MEASURE IS `_coupled_step`'s, NOT A BUILDER'S (binding, #282,
     2026-08-20) — and the surfaces above `_coupled_step` had drifted TWICE MORE after the tail was
     extracted.** `_coupled_step` builds the default forward solver with `norm=None`, which each step binds
@@ -3228,7 +3210,7 @@ tuning follow-up noted above.
         independent argument for detect-then-react, alongside the three refuted predictors above.
       - **Two existing design choices are independently corroborated.** Yildirim, Kenway, Mader &
         Martins (JCP 397:108741, 2019) use `θ_phys = 0.99` on the turbulence variable, checking **only
-        negative-direction updates** — the same rule and constant as `positive_k_limit`. And Hicken et
+        negative-direction updates** — the same rule and constant as the since-deleted global cap `positive_k_limit` (today's per-cell `positive_k_projection` keeps the 0.99). And Hicken et
         al. (2011) §II.C recommend "equation scaling … that ensures the 2-norm of the residuals are the
         same order of magnitude", which is `coupled_scaled_norm` arrived at separately.
       - **Grid sequencing is not the prize it looks like.** CFL3D's Table 7-1 gives multigrid ~10× but

@@ -337,8 +337,8 @@ class ShiftedStep(eqx.Module):
     line_search : int
         Backtracking rungs the step may try below the full length (``0`` takes the full step).
     step_limit, step_projection : callable or None
-        The positivity constraint: a global cap on the step length, and a per-entry clip of the
-        correction. Both guard the *state* rather than the march -- a field that must stay positive must
+        Constraints the residual cannot express: a cap on the whole step's length, and a per-entry clip
+        of the correction (the one positivity uses). Both guard the *state* rather than the march -- a field that must stay positive must
         stay positive whichever strategy is stepping it -- which is why they are here rather than on one
         subclass. Both default ``None``, the unconstrained step exactly.
     krylov_solver : lineax.AbstractLinearSolver or None
@@ -852,17 +852,16 @@ class DualTimeStep(ShiftedStep):
         differentiated solve.
     step_limit : callable or None
         ``(phi, delta) -> alpha_max``, capping every inner line search (static). The seam for a
-        constraint the residual cannot express -- chiefly a field that must stay positive, via
-        :func:`~aquaflux.solve.positive_block_limit`. Without it a direct-variable field can cross
-        zero and reach a ``sqrt`` in the closure, which turns a healthy state into NaN with no warning
-        the guard can act on. ``None`` (default) is byte-identical.
-    step_projection : callable or None
-        ``(phi, delta) -> delta'``, clipping the correction itself before the line search (static). The
-        per-entry form of the same positivity constraint ``step_limit`` caps globally, via
-        :func:`~aquaflux.solve.positive_block_projection`. Applied FIRST, so a step carrying both then
-        computes an unbinding cap of exactly ``1`` and the diagnostics keyed on the cap keep working.
-        Prefer it wherever one near-zero entry would otherwise set the step length for the whole state.
+        constraint the residual cannot express that has to shorten the whole step. Nothing in the
+        library installs one now: positivity is kept per entry by ``step_projection`` instead.
         ``None`` (default) is byte-identical.
+    step_projection : callable or None
+        ``(phi, delta) -> delta'``, clipping the correction itself before the line search (static) --
+        chiefly to keep a directly-solved field positive per entry
+        (:func:`~aquaflux.solve.positive_block_projection`), since a field crossing zero into a
+        ``sqrt`` in the closure turns a healthy state into NaN with no warning the divergence guard can
+        act on. Applied before ``step_limit`` reads the correction. ``None`` (default) is
+        byte-identical.
     refresh_on_cycles : int or None
         Stop the inner loop once a single solve reaches this many restart cycles, **keeping** the iterate
         it reached, and report :attr:`~aquaflux.solve.StepOutcome.refresh_due` so the march re-fits the

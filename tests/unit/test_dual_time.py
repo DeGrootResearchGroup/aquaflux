@@ -11,8 +11,6 @@ step it reduces to the ordinary pseudo-transient step.
 
 from __future__ import annotations
 
-import itertools
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -26,8 +24,9 @@ from aquaflux.solve import (
     RootSolver,
     ShiftTerm,
     SwitchedEvolutionRelaxation,
+    bounded_block_projection,
+    composed_projection,
     newton_march,
-    positive_block_limit,
     positive_block_projection,
 )
 from aquaflux.solve.implicit import backtracking_line_search
@@ -383,25 +382,6 @@ def test_a_cut_short_step_reports_that_it_did_not_reach_its_target() -> None:
     assert int(met_out.max_inner_cycles) <= int(met_out.raw_cycles)  # one solve, not their sum
 
 
-def test_positive_block_limit_keeps_a_constrained_field_off_zero() -> None:
-    """Fraction-to-the-boundary: the largest step that keeps the block strictly positive.
-
-    Rejecting violating rungs is not enough -- on the march that motivated this, the search was
-    already at its shortest rung when the field crossed zero, so there was no shorter rung to take.
-    Capping makes an admissible step reachable by construction.
-    """
-    limit = positive_block_limit(2, 5)
-    phi = jnp.array([1.0, 1.0, 1.0e-5, 2.0, 3.0])
-    delta = jnp.array([9.0, 9.0, -1.0e-3, 0.5, -1.0])
-
-    alpha = limit(phi, delta)
-
-    assert float(alpha) == pytest.approx(0.99 * 1.0e-5 / 1.0e-3)  # set by the one near-zero entry
-    assert bool(((phi + alpha * delta)[2:5] > 0).all())
-    # Entries outside the block are unconstrained: the cap ignores them however far they move.
-    assert float(limit(phi, jnp.array([-1e3, 0.0, 1.0, 1.0, 1.0]))) == 1.0
-
-
 def test_the_projection_holds_each_entry_off_zero_without_shortening_the_step() -> None:
     """The per-entry counterpart of the cap: a dead entry is held back ALONE.
 
@@ -424,22 +404,40 @@ def test_the_projection_holds_each_entry_off_zero_without_shortening_the_step() 
     assert bool(((phi + clipped)[2:5] > 0).all())
 
 
-def test_the_projection_makes_the_cap_unbinding_so_the_two_compose() -> None:
-    """Projection first, cap second: the cap then computes exactly 1 rather than being deleted.
+def test_the_bounded_projection_clips_each_entry_of_its_block_and_nothing_else() -> None:
+    """A per-entry trust region: no entry of the block moves by more than ``bound``, either way.
 
-    This is what lets the projection be added without tearing out the cap and everything keyed on it.
-    After clipping, every decreasing entry satisfies ``|delta_i| <= tau (phi_i + floor)``, hence
-    ``room_i >= 1 / tau`` and ``tau * min_i(room_i) >= 1`` -- so a step carrying both reports an
-    unbinding cap and its diagnostics keep working, saying "nothing bound" rather than going silent.
+    Catches a one-sided clip (only the decreasing side, as the positivity projection has), a bound
+    leaking outside the block, and a scaling of the whole block instead of a clip -- under which the
+    entry already inside the bound would shrink too.
     """
-    phi = jnp.array([1.0e-12, 3.0e-2, 5.0, 0.25])
-    delta = jnp.array([-7.0e-4, -1.0e-1, -9.0, -1.0e-3])
-    for floor in (0.0, 1.0e-8):
-        cap = positive_block_limit(0, 4, floor=floor)
-        project = positive_block_projection(0, 4, floor=floor)
-        # Unprojected, one near-zero entry throttles everything.
-        assert float(cap(phi, delta)) < 1.0e-3
-        assert float(cap(phi, project(phi, delta))) == pytest.approx(1.0)
+    project = bounded_block_projection(1, 4, 0.5)
+    phi = jnp.zeros(5)
+    delta = jnp.array([9.0, 2.0, -3.0, 0.25, -9.0])
+
+    clipped = project(phi, delta)
+
+    assert clipped.tolist() == [9.0, 0.5, -0.5, 0.25, -9.0]
+    with pytest.raises(ValueError, match="bound must be positive"):
+        bounded_block_projection(1, 4, 0.0)
+
+
+def test_composed_projection_applies_its_parts_in_order_and_skips_none() -> None:
+    """Parts apply first to last; ``None`` and a single part pass through, so composing nothing is inert.
+
+    Order is pinned with two parts that do not commute (doubling and shifting): applying them in the
+    other order gives ``2d + 2`` rather than ``2d + 1``. The positivity clip and a bound happen to
+    commute, so they could not pin it.
+    """
+    double = lambda phi, delta: 2.0 * delta  # noqa: E731
+    shift = lambda phi, delta: delta + 1.0  # noqa: E731
+    phi, delta = jnp.zeros(2), jnp.array([1.0, -3.0])
+
+    assert composed_projection(double, None, shift)(phi, delta).tolist() == [3.0, -5.0]
+    assert composed_projection(shift, double)(phi, delta).tolist() == [4.0, -4.0]
+    positivity = positive_block_projection(0, 2)
+    assert composed_projection(None, positivity) is positivity
+    assert composed_projection(None, None) is None
 
 
 def test_the_projection_is_inactive_at_a_root_and_is_a_compilation_cache_hit() -> None:
@@ -447,9 +445,9 @@ def test_the_projection_is_inactive_at_a_root_and_is_a_compilation_cache_hit() -
 
     At a root the correction vanishes, so the projection returns it unchanged for any ``tau`` and
     ``floor`` -- which is what keeps it from perturbing the converged state, and therefore from
-    reaching the implicit-function-theorem adjoint taken there. And like the cap it is a value object
-    rather than a closure, so two built for the same block compare equal and a Newton step carrying
-    one stays a compilation-cache hit across rebuilds instead of retracing the whole solve.
+    reaching the implicit-function-theorem adjoint taken there. And it is a value object rather than a
+    closure, so two built for the same block compare equal and a Newton step carrying one stays a
+    compilation-cache hit across rebuilds instead of retracing the whole solve.
     """
     phi = jnp.array([1.0, 2.0, 3.0])
     zero = jnp.zeros_like(phi)
@@ -463,92 +461,6 @@ def test_the_projection_is_inactive_at_a_root_and_is_a_compilation_cache_hit() -
         0, 3, floor=1e-9
     )
     assert positive_block_projection(0, 3, floor=0.0) == positive_block_projection(0, 3)
-    # ...and it is not interchangeable with the cap, which returns a scalar rather than a direction.
-    assert positive_block_projection(0, 3) != positive_block_limit(0, 3)
-
-
-def test_the_projection_does_not_reproduce_the_floors_ratchet() -> None:
-    """A floored CAP postpones the collapse; the projection removes the coupling that caused it.
-
-    Iterating the capped rule on a dead entry, ``(phi + floor)`` decays by exactly ``1 - tau`` per
-    step whatever the floor is -- so the cap falls by that factor per step and every other entry pays.
-    Under the projection the same entry decays identically, because that is what its own equation
-    asks, but the admissible step for everything else stays 1.
-    """
-    tau, floor, correction = 0.99, 1.0e-8, -7.0e-4
-    cap = positive_block_limit(0, 2, tau=tau, floor=floor)
-    project = positive_block_projection(0, 2, tau=tau, floor=floor)
-
-    capped, projected = jnp.array([0.0, 1.0]), jnp.array([0.0, 1.0])
-    delta = jnp.array([correction, -1.0e-3])
-    caps = []
-    for _ in range(4):
-        alpha = cap(capped, delta)
-        caps.append(float(alpha))
-        capped = capped + alpha * delta
-        # The projection leaves a full step admissible at every iteration.
-        assert float(cap(projected, project(projected, delta))) == pytest.approx(1.0)
-        projected = projected + project(projected, delta)
-
-    # The capped rule's admissible step falls by (1 - tau) per step, without bound.
-    for earlier, later in itertools.pairwise(caps):
-        assert later == pytest.approx((1.0 - tau) * earlier, rel=1e-6)
-    # ...and the healthy entry has been dragged down with it, while the projected one is untouched.
-    assert float(capped[1]) == pytest.approx(1.0, abs=1e-5)  # throttled: it never moved
-    assert float(projected[1]) < float(capped[1])  # ...whereas this one made progress every step
-
-
-def test_a_floored_limit_ignores_a_numerically_dead_entry_but_still_guards_a_live_one() -> None:
-    """The floor exists so one entry that is numerically zero cannot set the step for all of them.
-
-    The failure it answers: the cap is a minimum over entries, so taking ``tau`` of the distance to
-    the boundary leaves the binding entry at ``1 - tau`` of its value, whose next room is smaller by
-    the same factor. That is a geometric collapse -- on the march that motivated this, one cell of
-    23040 drove the cap from 3.8e-03 to 1.1e-09 while its own correction never changed.
-    """
-    dead, live = 3.08e-22, 1.0e-2
-    phi = jnp.array([dead, live])
-    delta = jnp.array([-8.1e-14, -1.0e-2])
-
-    plain = positive_block_limit(0, 2)
-    floored = positive_block_limit(0, 2, floor=1.0e-8)
-
-    # Unfloored, the dead entry sets the cap and it is catastrophic.
-    assert float(plain(phi, delta)) == pytest.approx(0.99 * dead / 8.1e-14)
-    # Floored, the dead entry is bought out of the minimum and the LIVE entry sets the cap -- the
-    # limiter is still guarding, just not on an entry whose own equation is asking it to be zero.
-    assert float(floored(phi, delta)) == pytest.approx(0.99 * (live + 1.0e-8) / 1.0e-2)
-
-
-def test_a_floor_of_zero_is_the_plain_rule_and_a_floored_limit_is_inactive_at_a_root() -> None:
-    """Two properties the floor must not break.
-
-    ``floor=0`` has to be bit-identical, so adopting the parameter cannot move an existing march. And
-    the limiter has to stay inactive at a root for **any** floor -- that is what keeps it out of the
-    converged state, and therefore out of the implicit-function-theorem adjoint, which is taken at
-    that state.
-    """
-    phi = jnp.array([1.0, 1.0e-5, 2.0])
-    delta = jnp.array([-0.5, -1.0e-3, -1.0])
-
-    assert float(positive_block_limit(0, 3, floor=0.0)(phi, delta)) == float(
-        positive_block_limit(0, 3)(phi, delta)
-    )
-    # At a root the correction vanishes, so nothing decreases and the cap is 1 whatever the floor.
-    for floor in (0.0, 1.0e-8, 1.0):
-        assert float(positive_block_limit(0, 3, floor=floor)(phi, jnp.zeros_like(phi))) == 1.0
-
-
-def test_a_floored_limiter_is_still_a_compilation_cache_hit() -> None:
-    """The floor rides in the same static field, so it must not break value equality.
-
-    A closure here would make every rebuild a fresh cache key and recompile the whole coupled solve;
-    the limiter is a frozen dataclass of plain numbers precisely to avoid that, and adding a field
-    must not change it.
-    """
-    assert positive_block_limit(0, 3, floor=1e-8) == positive_block_limit(0, 3, floor=1e-8)
-    assert positive_block_limit(0, 3, floor=1e-8) != positive_block_limit(0, 3, floor=1e-9)
-    assert positive_block_limit(0, 3, floor=0.0) == positive_block_limit(0, 3)
 
 
 @pytest.mark.parametrize(
@@ -741,20 +653,25 @@ def test_no_discard_threshold_leaves_the_step_untouched() -> None:
     assert RetryPolicy().with_inner_abort(step) is step
 
 
-def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
-    """Two limiters built for the same block must be interchangeable in the compiled step's cache key.
+def test_a_rebuilt_step_projection_is_a_compilation_cache_hit() -> None:
+    """Two projections built for the same block must be interchangeable in the compiled step's cache key.
 
-    ``step_limit`` is a STATIC field, so it is part of that key, and static fields are compared by
-    ``__eq__``. A closure compares by identity, so every rebuild was a fresh key and recompiled the
-    whole coupled solve -- measured on a Reynolds ramp, ~100-150 s per rung at an identical cycle count.
-    A value object compares by value, so a rebuild is a hit while a genuinely different block still
-    retraces.
+    ``step_projection`` is a STATIC field, so it is part of that key, and static fields are compared by
+    ``__eq__``. A closure compares by identity, so every rebuild would be a fresh key and recompile the
+    whole coupled solve -- measured on a Reynolds ramp with a step limiter written as one, ~100-150 s
+    per rung at an identical cycle count. A value object compares by value, so a rebuild is a hit while
+    a genuinely different block still retraces. Checked on a composed projection, since that is what
+    the coupled march installs.
     """
-    from aquaflux.solve import positive_block_limit
     from aquaflux.solve.march import _march_step
 
-    assert positive_block_limit(1, 3) == positive_block_limit(1, 3)
-    assert positive_block_limit(1, 3) != positive_block_limit(0, 3)
+    def guard(start: int):
+        return composed_projection(
+            positive_block_projection(start, 3), bounded_block_projection(3, 5, 1.0)
+        )
+
+    assert guard(1) == guard(1)
+    assert guard(1) != guard(0)
 
     # A unique state size, so a would-be recompile cannot be a hit from another test's compiled step.
     target = jnp.asarray([8.0, 27.0, 64.0, 125.0, 216.0])
@@ -768,17 +685,17 @@ def test_a_rebuilt_step_limiter_is_a_compilation_cache_hit() -> None:
     phi0 = jnp.ones(5)
     policy = UniformShiftPolicy(strength=1.0)
 
-    def run(limit) -> int:
-        step = DualTimeStep(policy, inner_steps=2, inner_tol=1e-3, step_limit=limit)
+    def run(projection) -> int:
+        step = DualTimeStep(policy, inner_steps=2, inner_tol=1e-3, step_projection=projection)
         before = len(_TRACES)
         _march_step(step, residual_fn, phi0, jnp.asarray(1.0), step.linear_solver())
         return len(_TRACES) - before
 
     _TRACES.clear()
-    assert run(positive_block_limit(1, 3)) > 0  # first build compiles
-    for _ in range(2):  # two further "rungs", each rebuilding an equal limiter
-        assert run(positive_block_limit(1, 3)) == 0
-    assert run(positive_block_limit(0, 3)) > 0  # a genuinely different block must still retrace
+    assert run(guard(1)) > 0  # first build compiles
+    for _ in range(2):  # two further "rungs", each rebuilding an equal projection
+        assert run(guard(1)) == 0
+    assert run(guard(0)) > 0  # a genuinely different block must still retrace
 
 
 def test_refresh_on_cycles_ends_the_step_keeping_the_iterate_it_reached() -> None:
