@@ -41,6 +41,7 @@ reported ratio mean the same thing throughout. The first must never be substitut
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NamedTuple, Protocol
 
@@ -774,7 +775,22 @@ def newton_march(
         )
     # When the measure is rebuilt each iteration, the segment reference must be taken in that same
     # measure -- otherwise the damping schedule divides two differently-scaled quantities.
-    norm = norm_builder(strategy, phi0) if norm_builder is not None else strategy.norm()
+    # PROTOTYPE (#701, arms E8a/E8b): steer in the stopping step's measure too -- "always", or once
+    # "arrived" -- instead of only stopping in it. Not for merging.
+    steer_by_stopping = os.environ.get("AQUAFLUX_STEER_BY_STOPPING", "never")
+    if steer_by_stopping not in ("never", "arrived", "always"):
+        raise ValueError(f"AQUAFLUX_STEER_BY_STOPPING={steer_by_stopping!r}")
+
+    def steering(step: NewtonStrategy, phi: jnp.ndarray, on_target: bool):
+        if stopping_step is not None and (
+            steer_by_stopping == "always" or (steer_by_stopping == "arrived" and on_target)
+        ):
+            return norm_builder(stopping_step(step), phi)
+        return norm_builder(step, phi)
+
+    norm = (
+        steering(strategy, phi0, homotopy is None) if norm_builder is not None else strategy.norm()
+    )
 
     # The segment-local reference: what the step's damping schedule ramps against. Recomputed here,
     # never inherited, so a segment resumed after a refresh restarts its ramp. It is fixed for the
@@ -894,7 +910,7 @@ def newton_march(
             # candidate win by shrinking its own denominator rather than its residual, so the search
             # would stop comparing like with like. The swap is a compilation-cache hit as long as the
             # measure carries its scales as data over a fixed block structure.
-            active_step = active_step.with_norm(norm_builder(strategy, state))
+            active_step = active_step.with_norm(steering(strategy, state, bool(arrived)))
         if station_step is not None and homotopy is not None:
             # Let the caller reshape the step for the station it is about to run -- the seam by which
             # anything a homotopy changes about the PROBLEM can be matched by a change to how the step
@@ -979,7 +995,7 @@ def newton_march(
                     # and the measure is built from the step's policy, so build it again from the step
                     # as updated: otherwise the step that enters a new problem is judged -- its line
                     # search, its inner stop, the residual it reports -- in the previous one's scales.
-                    active_step = active_step.with_norm(norm_builder(strategy, state))
+                    active_step = active_step.with_norm(steering(strategy, state, bool(arrived)))
         prestep_state = state
         outcome, residual_norm = _march_step(
             active_step, step_residual, prestep_state, residual_norm_0, solver
