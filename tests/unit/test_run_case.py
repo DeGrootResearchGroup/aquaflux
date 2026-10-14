@@ -216,3 +216,26 @@ def test_a_recorded_pid_now_held_by_ANOTHER_process_is_not_a_running_case(tmp_pa
     result = _run(tmp_path, "--running")
     assert result.returncode == 0 and str(pid) in result.stdout
     assert run_file.exists()
+
+
+def test_a_start_time_is_compared_whatever_its_blanks(tmp_path: Path) -> None:
+    """A recorded start time differing from ``ps`` only in blanks is the same time; the run is live.
+
+    macOS ``ps`` pads ``lstart`` to its column width, so a start time squeezed with ``tr -s ' '``
+    alone kept one trailing blank there and none on Linux: a run-file written by the script then
+    matched only its own spelling, and the true start time written any other way read as stale.
+    Recorded here with padding of every kind -- leading, doubled and trailing -- which a comparison
+    that does not canonicalize both sides rejects on every platform.
+    """
+    run_file = tmp_path / "tmp" / "aquaflux-case-run"
+    run_file.parent.mkdir()
+    pid = os.getpid()
+    fields = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.split()
+    padded = "  " + "  ".join(fields) + "   "
+
+    run_file.write_text(f"pid={pid}\npid_started={padded}\nscript=x.py\n")
+    result = _run(tmp_path, "--running")
+    assert result.returncode == 0 and str(pid) in result.stdout
+    assert run_file.exists()
