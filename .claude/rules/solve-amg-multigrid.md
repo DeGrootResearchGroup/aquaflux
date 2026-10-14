@@ -880,7 +880,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      row walk does not. Measured on the 4.2M-nnz block: `segment_sum` 13.3 ms, `BCOO @ x` 13.4 ms,
      scipy CSR on the host 2.6 ms, **`BCSR @ x` 1.4 ms**. The level operator is applied ~10× per
      V-cycle, so this alone took the apply from **117.8 ms to 13.3 ms (8.8×)**. Landed as
-     `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val`. **Not** a jit
+     `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val` — and was itself
+     replaced 2026-10-14 by the padded-row `_PaddedRowOperator` (see "Binding decisions" below). **Not** a jit
      or marshalling problem — both were measured out (1 trace everywhere; a numpy↔jnp round trip is
      0.02 ms), which also retires the older claim that "marshalling is ~half the gap".
   4. **The singularity guard was WRONG, and it was aborting the march.** `_cell_block_inverse`
@@ -2051,13 +2052,51 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 > The rest of `solve.md`'s "Binding decisions" carries the general Newton/adjoint decisions and a
 > short pointer to this section; these are the `multigrid.py`-specific ones, moved here in full.
 
-- **Reading a frozen level back onto the host has one home per array it owns — `_CsrOperator.to_scipy()`
+- **A level operator is a PADDED-ROW (ELLPACK) operator, `_PaddedRowOperator` — there is no
+  `_CsrOperator` and no `BCSR` product in the package (2026-10-14).** Every row is padded to one width:
+  `columns` / `values` are `(n_rows, width)`, `row_lengths` marks which slots are stored entries, and
+  `apply` is `jnp.sum(values * x[columns], axis=1)` — a gather, a multiply and a row sum the compiler
+  fuses into one threaded loop. `jax.experimental.sparse.BCSR @ x` lowers instead to one opaque
+  single-threaded kernel call (`cpu_csr_sparse_dense_ffi`) that fuses with nothing.
+  - **Measured** (pitzDaily `case.yaml`, the shipped field split built at the hybrid start, Linux
+    x86_64, 4 cores, jax 0.11.2, best of 15, two runs per arm, `main` `a5d61d49` against this change, a
+    quiet machine): one split apply **168–176 → 113–126 ms**, its transpose (the adjoint's direction)
+    **171–174 → 118–129 ms**, results equal to 1.2e-14; first-call compile 1.0 → 1.7 s. Per operator on
+    the finest saddle level: the level operator (36675 rows, 2.68M entries) 6.5 → 4.4–5.2 ms, the Schur
+    complement (0.99M entries) 6.3 → 1.8–2.0 ms, divergence and `D⁻¹G` (0.60M each) 4.5 → 0.6–1.2 ms.
+    ⚠️ **The kernel's cost is machine-dependent and the `BCSR` figure recorded in the traced-multigrid
+    section (1.4 ms on a 4.2M-entry block) was a different machine**, so re-measure there before
+    quoting this gain for it: `validation/pitzdaily_openfoam/csr_kernel_precision.py` times the
+    padded-row, CSR and segment-sum forms side by side.
+  - **What the padding costs:** storage `n_rows * width`. On pitzDaily's split the fine levels pad
+    3–5 %, aggregation's coarse levels up to 1.95× (they are small), 1.09× over the whole split. An
+    operator with a few very wide rows (a dense constraint row) would pay that width on every row; no
+    level operator here has one.
+  - **The reduction form, not an unrolled sum.** `vectors.dot` unrolls its sum because a
+    reduction-rooted fusion ran on one thread on macOS arm64; here an unrolled row sum was ~10 % faster
+    standalone on Linux and multiplies the compiled program by the row width (up to 85 terms), so the
+    reduction was kept. **Unmeasured on macOS**; if the padded-row product does not beat CSR there, an
+    unrolled sum is the first thing to try.
+  - **The shape budget is a WIDTH per coarse level now (`ShapeBudget.operator_width`, was
+    `operator_nnz`)**, and `from_scipy(a, width=)` refuses a row wider than the budget rather than
+    dropping entries. `_require_matching_structure` compares widths: the width is the compilation
+    signature.
+  - **`to_scipy` returns exactly the stored sparsity, explicit zeros included, padding excluded** (the
+    structural patterns of a refit are read from it). The old CSR form's entry-count budget appended its
+    padding to the last row as stored zeros, so a budgeted coarse level read back with extra entries;
+    this one does not. `nnz` is the stored-entry count.
+  - Pinned by `test_a_padded_row_operator_reproduces_the_matrix_it_froze`,
+    `..._takes_a_wider_budget_and_refuses_a_narrower_one` and `..._transposes_to_the_transposed_matrix`
+    (a ragged rectangular operator with an empty row and a stored zero), mutation-checked six ways (slot
+    placement, stored zeros dropped, the overflow check, the diagonal, `nnz`, `row_lengths`).
+
+- **Reading a frozen level back onto the host has one home per array it owns — `_PaddedRowOperator.to_scipy()`
   and `_SparseLevel`/`_AirLevel.prolongation_scipy()` (binding, #287).** Every host-side consumer of a
   traced level's arrays — the host-smoothed inverse factorizing an operator, a march refresh re-deriving
   a hierarchy at a new operator, a SIMPLE-smoothed level forming its Schur pieces — needs the exact same
-  `indptr`/`indices`/`data` → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
+  operator → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
   four call sites (`ilu_inverse.py` — since deleted, #371 — `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
-  `refresh_air_hierarchy`) each open-coded them. `_CsrOperator.to_scipy()` is the exact inverse of the
+  `refresh_air_hierarchy`) each open-coded them. `_PaddedRowOperator.to_scipy()` is the exact inverse of the
   existing `from_scipy`; `prolongation_scipy()` is level-kind-specific because `_SparseLevel` stores a
   COO triple (`p_frow`/`p_ccol`/`p_val`, one prolongation doubling as the transposed restriction) while
   `_AirLevel` stores an independent CSR-shaped one (`p_row`/`p_col`/`p_val`, restriction and
@@ -2406,8 +2445,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   for exactly this. lAIR's restriction/prolongation are each an **independent** `scipy.sparse` CSR
   matrix (never a transpose of another), so their COO round-trip is sorted by construction and
   `_air_ops` uses the default correctly as-is — checked, not merely assumed. `_operator_matvec` itself
-  does not go through `_coo_apply` at all: every level's own operator applies via `_CsrOperator`
-  (`BCSR` matmul), a proper CSR primitive that needs no sortedness hint.
+  does not go through `_coo_apply` at all: every level's own operator applies via `_PaddedRowOperator`
+  (a padded-row product, one output per row), which needs no sortedness hint.
 - **Frozen level diagonals are inverted ONCE, in `__post_init__`, not on every smoother apply (issue
   #110's second finding, fixed 2026-08-18).** `_SparseLevel`/`_AirLevel` both carry `inv_diagonal`,
   derived automatically the moment either is constructed — the same `__post_init__` +

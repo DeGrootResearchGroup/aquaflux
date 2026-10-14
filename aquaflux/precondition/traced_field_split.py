@@ -20,7 +20,7 @@ that drains the device pipeline -- on an accelerator that cost is paid against a
 so it grows as a share of the solve rather than shrinking.
 
 This module removes it. The algebra is identical to the host split's; what changes is that the vector is
-a traced array throughout, the coupling is a :class:`~aquaflux.precondition.multigrid._CsrOperator`
+a traced array throughout, the coupling is a :class:`~aquaflux.precondition.multigrid._PaddedRowOperator`
 rather than a ``scipy`` matrix, and the two inverses are entered through their traced cycle rather than
 through their host-shaped ``apply``. Nothing crosses the device boundary between the Krylov solve and the
 preconditioned vector it gets back.
@@ -45,7 +45,7 @@ import jax
 import jax.numpy as jnp
 
 from .field_split import FieldGroups, FieldSplitInverse
-from .multigrid import _CsrOperator
+from .multigrid import _PaddedRowOperator
 from .traced_cycle import OffersTracedCycle, TracedCycle
 
 __all__ = ["TracedFieldSplit", "offers_traced_split", "traced_field_split"]
@@ -63,14 +63,14 @@ class TracedFieldSplit(eqx.Module):
     coupling and both hierarchies -- is a traced leaf, so the whole split rides into a jitted solve as an
     argument. Re-deriving it after a refresh on unchanged shapes is then a compilation-cache hit that
     applies the new values, rather than a retrace -- the same property, and for the same reason, that
-    :class:`~aquaflux.precondition.multigrid._CsrOperator` has. Only each cycle's code and settings, and
+    :class:`~aquaflux.precondition.multigrid._PaddedRowOperator` has. Only each cycle's code and settings, and
     the partition's sizes, are static.
 
     Attributes
     ----------
     leading_cycle, trailing_cycle : TracedCycle
         Each group's traced solve, ``jnp.ndarray -> jnp.ndarray``, holding its hierarchy as leaves.
-    coupling : _CsrOperator
+    coupling : _PaddedRowOperator
         The retained coupling block. No transpose is stored: ``jax.linear_transpose`` derives ``M^T``
         from the forward code, so there is nothing to keep in step with it.
     groups : FieldGroups
@@ -79,7 +79,7 @@ class TracedFieldSplit(eqx.Module):
 
     leading_cycle: TracedCycle
     trailing_cycle: TracedCycle
-    coupling: _CsrOperator
+    coupling: _PaddedRowOperator
     groups: FieldGroups = eqx.field(static=True)
 
     @property
@@ -190,7 +190,7 @@ def traced_field_split(inverse: FieldSplitInverse) -> TracedFieldSplit:
     return TracedFieldSplit(
         leading_cycle=inverse.leading.traced_cycle(),
         trailing_cycle=inverse.trailing.traced_cycle(),
-        coupling=_CsrOperator.from_scipy(inverse.coupling),
+        coupling=_PaddedRowOperator.from_scipy(inverse.coupling),
         groups=inverse.groups,
     )
 

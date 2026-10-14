@@ -24,7 +24,6 @@ from aquaflux.precondition.multigrid import (
     StructuralPatterns,
     _cell_graph,
     _chebyshev_smooth,
-    _CsrOperator,
     _dense_inverse,
     _fc_jacobi,
     _frozen_neighbourhoods,
@@ -36,6 +35,7 @@ from aquaflux.precondition.multigrid import (
     _one_point_interpolation,
     _ones,
     _onto_pattern,
+    _PaddedRowOperator,
     _reattach_to_adjacent_root,
     _restriction_neighbourhoods,
     _rs_split,
@@ -125,6 +125,56 @@ def _smoothed_residual_factor(n):
         x = proj(x + proj(smoothed_multigrid_cycles(hierarchy, b - matvec(x), cycles=1)))
         norms.append(float(jnp.linalg.norm(matvec(x) - b)))
     return (norms[-1] / norms[-4]) ** (1 / 3)
+
+
+def _ragged_operator() -> sp.csr_matrix:
+    """A rectangular operator whose rows differ in width -- one empty, one holding a stored zero.
+
+    Rows of one width would let an operator that mixed up which row a slot belongs to pass, and a
+    stored zero is part of the sparsity a refit's structural patterns are read from.
+    """
+    rows = np.array([0, 0, 0, 2, 3, 3, 3, 3])
+    cols = np.array([4, 0, 2, 1, 0, 1, 2, 3])
+    vals = np.array([1.5, -2.0, 0.0, 3.0, 0.25, -1.0, 4.0, 2.5])
+    return sp.csr_matrix((vals, (rows, cols)), shape=(4, 5))
+
+
+def test_a_padded_row_operator_reproduces_the_matrix_it_froze() -> None:
+    a = _ragged_operator()
+    operator = _PaddedRowOperator.from_scipy(a)
+    assert operator.values.shape == (4, 4), "padded to the widest row"
+    assert operator.nnz == a.nnz == 8, "the stored zero is counted"
+    back = operator.to_scipy()
+    assert np.array_equal(back.indptr, a.indptr)
+    assert np.array_equal(back.indices, a.indices)
+    assert np.array_equal(back.data, a.data)
+    x = np.random.default_rng(0).standard_normal(5)
+    assert np.allclose(np.asarray(operator.apply(jnp.asarray(x))), a @ x, rtol=0, atol=1e-14)
+    square = sp.csr_matrix(a[:, :4])
+    assert np.array_equal(
+        np.asarray(_PaddedRowOperator.from_scipy(square).diagonal), square.diagonal()
+    )
+
+
+def test_a_padded_row_operator_takes_a_wider_budget_and_refuses_a_narrower_one() -> None:
+    a = _ragged_operator()
+    padded = _PaddedRowOperator.from_scipy(a, width=7)
+    assert padded.values.shape == (4, 7)
+    x = jnp.asarray(np.random.default_rng(1).standard_normal(5))
+    assert np.array_equal(
+        np.asarray(padded.apply(x)), np.asarray(_PaddedRowOperator.from_scipy(a).apply(x))
+    )
+    assert padded.to_scipy().nnz == a.nnz, "padding slots are not stored entries"
+    with pytest.raises(ValueError, match="a row of 4 entries, wider than the 3 budgeted"):
+        _PaddedRowOperator.from_scipy(a, width=3)
+
+
+def test_a_padded_row_operator_transposes_to_the_transposed_matrix() -> None:
+    a = _ragged_operator()
+    operator = _PaddedRowOperator.from_scipy(a)
+    y = np.random.default_rng(2).standard_normal(4)
+    (transposed,) = jax.linear_transpose(operator.apply, jnp.zeros(5))(jnp.asarray(y))
+    assert np.allclose(np.asarray(transposed), a.T @ y, rtol=0, atol=1e-14)
 
 
 def test_smoothed_aggregation_v_cycle_is_mesh_independent() -> None:
@@ -319,7 +369,7 @@ def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):
     n = len(eigenvalues)
     level = _SparseLevel(
         n=n,
-        operator=_CsrOperator.from_scipy(sp.diags(np.asarray(eigenvalues)).tocsr()),
+        operator=_PaddedRowOperator.from_scipy(sp.diags(np.asarray(eigenvalues)).tocsr()),
         diagonal=jnp.ones(n),
         lam_max=float(lam_max),
         coarse_inv=None,
@@ -607,7 +657,7 @@ def test_a_wider_restriction_neighbourhood_buys_accuracy_and_costs_density() -> 
 
     def peak_density(**kwargs):
         levels = build_air_hierarchy(operator, **kwargs).levels
-        return max(level.operator.data.shape[0] / level.n for level in levels)
+        return max(level.operator.nnz / level.n for level in levels)
 
     assert peak_density() < 0.5 * peak_density(restriction_theta=0.0), (
         "the wider neighbourhood is no longer denser, so the default is paying accuracy for nothing"
@@ -874,7 +924,7 @@ def test_air_coarse_operators_stay_sparse_on_a_distance_two_operator() -> None:
     rediscovered on a real mesh.
     """
     hierarchy = build_air_hierarchy(_distance_two_operator(10))
-    density = [level.operator.data.shape[0] / level.n for level in hierarchy.levels]
+    density = [level.operator.nnz / level.n for level in hierarchy.levels]
     assert len(density) > 2, "too few levels to say anything about how the recursion behaves"
     growth = [after / before for before, after in itertools.pairwise(density)]
     assert max(growth) < 2.0, f"the coarse operators are densifying: {density}"
@@ -946,13 +996,14 @@ def test_aggregation_hierarchy_structure_is_value_independent() -> None:
     assert len(cold.levels) == len(developed.levels)
     for lo, hi in zip(cold.levels, developed.levels, strict=True):
         assert (lo.n, lo.n_coarse) == (hi.n, hi.n_coarse)  # static metadata
-        assert lo.operator.data.shape == hi.operator.data.shape  # operator sparsity
+        assert lo.operator.values.shape == hi.operator.values.shape  # operator sparsity
         assert lo.diagonal.shape == hi.diagonal.shape
         if lo.p_val is not None:
             assert lo.p_val.shape == hi.p_val.shape  # prolongation sparsity
     # ...and the values really do differ, so the invariance above is not a trivial no-op.
     assert not np.allclose(
-        np.asarray(cold.levels[0].operator.data), np.asarray(developed.levels[0].operator.data)
+        np.asarray(cold.levels[0].operator.to_scipy().data),
+        np.asarray(developed.levels[0].operator.to_scipy().data),
     )
 
 
@@ -1004,8 +1055,8 @@ def test_lair_structure_is_value_dependent_unlike_aggregation() -> None:
     cold = build_air_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)))
     developed = build_air_hierarchy(_chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1)))
 
-    shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.levels]
-    developed_shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in developed.levels]
+    shapes = [(lv.n, lv.n_coarse, lv.operator.values.shape) for lv in cold.levels]
+    developed_shapes = [(lv.n, lv.n_coarse, lv.operator.values.shape) for lv in developed.levels]
     assert shapes != developed_shapes, (
         "lAIR coarsening happened to be shape-stable here; the refresh-by-reusing-the-split "
         "requirement is justified by its value dependence, so re-check _strength_classical"
@@ -1030,10 +1081,11 @@ def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
     assert len(refreshed.levels) == len(cold.levels)
     for old, new in zip(cold.levels, refreshed.levels, strict=True):
         assert (old.n, old.n_coarse) == (new.n, new.n_coarse)
-        assert old.operator.data.shape == new.operator.data.shape
+        assert old.operator.values.shape == new.operator.values.shape
     # ...but the values genuinely moved to the new operator.
     assert not np.allclose(
-        np.asarray(cold.levels[0].operator.data), np.asarray(refreshed.levels[0].operator.data)
+        np.asarray(cold.levels[0].operator.to_scipy().data),
+        np.asarray(refreshed.levels[0].operator.to_scipy().data),
     )
 
     traces = []
@@ -1115,11 +1167,13 @@ def test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero
     built_live = build_convection_hierarchy(live, **settings)
     assert len(built_zero.levels) == len(built_live.levels) >= 2
     for a, b in zip(built_zero.levels, built_live.levels, strict=True):
-        assert a.operator.data.shape == b.operator.data.shape, "a rebuild moved the coarse shape"
+        assert a.operator.values.shape == b.operator.values.shape, (
+            "a rebuild moved the coarse shape"
+        )
 
     refitted = built_live.refit(zero)
     for a, b in zip(refitted.levels, built_live.levels, strict=True):
-        assert a.operator.data.shape == b.operator.data.shape, "a refit moved the coarse shape"
+        assert a.operator.values.shape == b.operator.values.shape, "a refit moved the coarse shape"
 
     # The stored zeros are only padding: the coarse operator still IS the Galerkin product.
     prolongation = built_zero.levels[0].prolongation_scipy().tocsr()
@@ -1180,7 +1234,7 @@ def test_a_threshold_free_mis_coarsening_keeps_its_shapes_when_a_coupling_become
     assert len(built_zero.levels) == len(built_live.levels) >= 3
     for a, b in zip(built_zero.levels, built_live.levels, strict=True):
         assert (a.n, a.n_coarse) == (b.n, b.n_coarse), "the aggregates moved with the values"
-        assert a.operator.data.shape == b.operator.data.shape, "a coarse shape moved"
+        assert a.operator.values.shape == b.operator.values.shape, "a coarse shape moved"
 
 
 def test_galerkin_coarse_pattern_does_not_move_when_a_weight_becomes_zero() -> None:
@@ -1581,12 +1635,15 @@ def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() 
     assert len(refitted.levels) == len(rebuilt.levels)
     for got, want in zip(refitted.levels, rebuilt.levels, strict=True):
         assert (got.n, got.n_coarse) == (want.n, want.n_coarse)
-        assert np.allclose(np.asarray(got.operator.data), np.asarray(want.operator.data))
+        assert np.allclose(
+            np.asarray(got.operator.to_scipy().data), np.asarray(want.operator.to_scipy().data)
+        )
         assert np.allclose(np.asarray(got.diagonal), np.asarray(want.diagonal))
         assert np.allclose(float(got.lam_max), float(want.lam_max))
     # ...and the refit really moved the values, so the agreement above is not two copies of `cold`.
     assert not np.allclose(
-        np.asarray(refitted.levels[0].operator.data), np.asarray(cold.levels[0].operator.data)
+        np.asarray(refitted.levels[0].operator.to_scipy().data),
+        np.asarray(cold.levels[0].operator.to_scipy().data),
     )
 
 
@@ -1675,8 +1732,8 @@ def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:
 
     coarsest = -1
     assert not np.allclose(
-        np.asarray(refitted.levels[coarsest].operator.data),
-        np.asarray(rebuilt.levels[coarsest].operator.data),
+        np.asarray(refitted.levels[coarsest].operator.to_scipy().data),
+        np.asarray(rebuilt.levels[coarsest].operator.to_scipy().data),
     )
 
 
@@ -1712,7 +1769,9 @@ def test_refit_holds_a_partition_that_a_rebuild_would_move() -> None:
         "the rotated operator did not re-partition, so this fixture cannot show the difference"
     )
     # The refit is over the NEW operator, not a copy of the old hierarchy.
-    assert np.allclose(np.asarray(refitted.levels[0].operator.data), strong_x.tocsr().data, atol=0)
+    assert np.allclose(
+        np.asarray(refitted.levels[0].operator.to_scipy().data), strong_x.tocsr().data, atol=0
+    )
 
 
 def test_refit_rejects_an_operator_of_the_wrong_size() -> None:
@@ -1770,7 +1829,7 @@ def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -
             (
                 level.n,
                 level.n_coarse,
-                int(level.operator.data.shape[0]),
+                level.operator.values.shape,
                 None if level.p_val is None else int(level.p_val.shape[0]),
             )
             for level in hierarchy.levels
@@ -2038,8 +2097,9 @@ def test_block_air_refresh_preserves_the_structure() -> None:
     assert len(refreshed.levels) == len(built.levels)
     for old, new in zip(built.levels, refreshed.levels, strict=True):
         assert (old.n, old.n_coarse, old.block_size) == (new.n, new.n_coarse, new.block_size)
-        assert old.operator.data.shape == new.operator.data.shape
+        assert old.operator.values.shape == new.operator.values.shape
     # ...and the refresh is not a no-op: the values moved with the operator.
     assert not np.allclose(
-        np.asarray(built.levels[0].operator.data), np.asarray(refreshed.levels[0].operator.data)
+        np.asarray(built.levels[0].operator.to_scipy().data),
+        np.asarray(refreshed.levels[0].operator.to_scipy().data),
     )

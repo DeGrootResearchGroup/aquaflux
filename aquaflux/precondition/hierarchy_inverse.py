@@ -212,7 +212,7 @@ class HierarchyBlockInverse:
             self._budget = self._hierarchy.shape_budget(self._shape_headroom)
             self._report(
                 f"      shape ladder: cells {self._budget.coarse_cells}, "
-                f"nnz {self._budget.operator_nnz} (headroom {self._shape_headroom})",
+                f"row widths {self._budget.operator_width} (headroom {self._shape_headroom})",
             )
             self._hierarchy = self._coarsen(matrix, self._budget)
         self._after_coarsening()
