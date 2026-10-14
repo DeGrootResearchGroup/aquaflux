@@ -20,7 +20,8 @@ aquaflux setup, mirroring the 2D case:
 * **second-order upwind** momentum advection (:class:`aquaflux.discretization.LimitedUpwind` with the
   :class:`aquaflux.schemes.VenkatakrishnanLimiter`); the stiff k/omega scalars use bounded first-order
   upwind;
-* **corrected Green-Gauss** gradients (:class:`aquaflux.schemes.CorrectedGreenGauss`);
+* **multiple-correction** gradients (:class:`aquaflux.schemes.MultipleCorrectionGradient`), two face
+  passes and no solve (``BFS3D_GRADIENT=corrected`` selects the corrected Green-Gauss scheme instead);
 * **log-variable omega** (:class:`aquaflux.turbulence.LogScalars` on ``omega_transform``): ``omega =
   e^w`` stays strictly positive under any Newton step, the fix for a direct-omega step driving omega
   negative once recirculation forms.
@@ -77,6 +78,7 @@ from aquaflux.io import read_openfoam
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
+    MultipleCorrectionGradient,
     ProjectedStencilGradient,
     VenkatakrishnanLimiter,
 )
@@ -267,9 +269,12 @@ RAMP_COMPANION = _RAMP_SCALINGS[RAMP_SCALE]
 #: the archived one, so those arms share a base and the shift-strength fix is confirmed a no-op at
 #: ratio 1 on a real march.
 #:
-#: ⚠️ **The default is 5, not the 3 that table picks**, because the station count moved to 12 and the
-#: two knobs interact -- see `RAMP_STATIONS` for the joint sweep. At 24 stations gamma 5 is worse than
-#: 3; at 12 it is better. A gamma calibrated at one station count does not transfer to another.
+#: ⚠️ **The file ships 3 since 2026-10-13, with pitzDaily's march settings (the multiple-correction
+#: gradient, the residual stop, `grow` 3, the floor release, no refit floor) -- and every number in this
+#: comment and in `RAMP_STATIONS`' joint sweep was taken under the earlier configuration** (the corrected
+#: Green-Gauss gradient, the lineax stop, `grow` 1.5, no release, refit floor 0.05), where 5 was chosen
+#: over 3 at 12 stations. The two knobs interact -- at 24 stations gamma 5 is worse than 3, at 12 it was
+#: better -- so a gamma calibrated under one schedule does not transfer to another; 3 is not swept here.
 #:
 #: ⚠️ THE OPTIMUM DIFFERS BETWEEN THE TWO CASES -- 5 here at 12 stations, 2 on pitzDaily at 16 (227 /
 #: 200 / 212 / 329 at gamma 1 / 2 / 5 / 10). Do not carry either number to a third case, or to a
@@ -374,9 +379,26 @@ INNER_STEPS = int(os.environ.get("BFS3D_INNER_STEPS", FILE_SOLVER.dual_time.inne
 DUAL_TIME = INNER_STEPS > 1
 INNER_TOL = float(os.environ.get("BFS3D_INNER_TOL", FILE_SOLVER.dual_time.inner_tol))
 # The beta floor is PRECONDITIONER-ONLY: the inverse is fitted at max(beta, floor) while the march solves
-# at its own beta, so the root and the adjoint are unchanged.
+# at its own beta, so the root and the adjoint are unchanged. The file sets none since 2026-10-13: on this
+# march a floor of 0.05 cost 3 steps and 11 cycles against none (36 / 166 against 33 / 155, lineax stop,
+# same root, one run each).
 PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
-# How far each COLUMN of the Jacobian is probed. The coloured probe costs one directional derivative per
+# How far each COLUMN of the Jacobian is probed.
+#
+# ⚠️ **UNDER THE MULTIPLE-CORRECTION GRADIENT THE FILE SHIPS (2026-10-13) NO COLUMN MAY BE SHORTENED, and
+# the file probes at a uniform reach of three.** `probe_reach_audit.py` at the converged state of the
+# shipped march of 2026-10-12, under each gradient, the share of each column's norm beyond reach two:
+#
+#     corrected Green-Gauss    u 1.3e-04  v 1.1e-05  w 4.1e-05  |  p 1.2e-16  k 3.0e-18  omega 1.6e-18
+#     multiple-correction      u 8.1e-04  v 2.0e-05  w 5.2e-05  |  p 1.1e-03  k 6.7e-05  omega 3.9e-05
+#
+# The second pass carries every gradient one ring further, so p, k and omega no longer close inside
+# reach two, and the share at distance three rose ~700x in the flow block (4.1e-06 -> 2.9e-03). Whether
+# anything reaches distance FOUR is not measured: the audit's widest pattern is three (pitzDaily's
+# velocity columns reach four through the eddy viscosity under this scheme). Everything below was
+# measured under the corrected Green-Gauss scheme and holds only for it.
+#
+# The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
 # 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The
 # assembled sparsity stays at reach three either way, so every consumer sees the same matrix.
@@ -393,7 +415,8 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # couplings corrupts its near entries rather than truncating them.
 #
 # Shortening all three would be 564 probes -> 399 (-29%), and the two Jacobians agree to 5.7e-16 relative
-# Frobenius, i.e. float64 rounding. The SHIPPED value shortens only k and omega: 564 -> 454 (-16%).
+# Frobenius, i.e. float64 rounding. The value shipped under that scheme shortened only k and omega:
+# 564 -> 454 (-16%).
 #
 # That measurement is sound and it is NOT what licenses the shortening, which is worth stating plainly
 # because shortening p on the strength of it has been tried twice and withdrawn twice.
@@ -642,15 +665,9 @@ TRAILING_INVERSE = (
 #: hierarchy smoothed by a zero-fill incomplete LU) -- were removed with the library's PETSc split blocks
 #: and its ILU(0) kernel (#371); `BFS3D_FLOW_INVERSE` set to anything else now refuses to start.
 #:
-#: ⚠️ `BFS3D_REFRESH_ON_CYCLES` may want raising (UNVALIDATED, flagged not fixed): the
-#: refresh fires when a solve REACHES the threshold, and the shipped `3` is calibrated to an
-#: incomplete-LU that runs two cycles per solve. A full-march A/B (this default vs a matched, since
-#: removed, `hostilu` run) measured the native flow arm at 349 cumulative cycles / 1782 s against 208 / 1403 s, same root
-#: (`x_r/h` 8.3611 both) -- some of that gap is plausibly the refresh threshold tripping on this
-#: hierarchy's ordinary 4-9-cycle solves rather than on genuine staleness, and some is plausibly the
-#: native hierarchy's own per-apply cost away from zero shift, which prior single-state measurements put
-#: at several times an incomplete-LU sweep. Neither is isolated yet -- re-tune `REFRESH_ON_CYCLES`
-#: against this bundle before trusting either explanation.
+#: `BFS3D_REFRESH_ON_CYCLES`: the file's `3` was re-measured under the residual stop (2026-10-12, at
+#: `46af0749`, corrected Green-Gauss, `grow` 1.5, one run each): 2 / 3 / 4 took 814 / 810 / 787 s, 34 /
+#: 30 / 30 steps, and 2 added a retry. 3 and 4 are not separable on single runs; 2 loses.
 def _flush_print(message: str) -> None:
     """Send a preconditioner's build record to the run log, flushed so it lands in order.
 
@@ -668,13 +685,17 @@ def _flush_print(message: str) -> None:
 #: dependence and no sequential triangular solve, so it is also the arm with a route to a GPU. A
 #: full-march A/B against a matched `hostilu` run reached the identical root (`x_r/h` 8.3611) at a real
 #: wall-clock cost (349 cumulative cycles / 1782 s against 208 / 1403 s).
-#: The gradient reconstruction, ``BFS3D_GRADIENT``: ``corrected`` (default,
-#: :class:`~aquaflux.schemes.CorrectedGreenGauss`) or ``projected``
+#: The gradient reconstruction, ``BFS3D_GRADIENT``: ``multcorr`` (default, the file's), ``corrected``
+#: (:class:`~aquaflux.schemes.CorrectedGreenGauss`), ``projected``
 #: (:class:`~aquaflux.schemes.ProjectedStencilGradient`, whose per-cell weights are exact for
-#: quadratics and nearest ``BFS3D_GRADIENT_BLEND`` x a reconstruction that damps). This mesh is
+#: quadratics and nearest ``BFS3D_GRADIENT_BLEND`` x a reconstruction that damps) or ``multcorr``
+#: (:class:`~aquaflux.schemes.MultipleCorrectionGradient`, two face passes and no solve). The default is
+#: assembled here by hand and must match the case file's ``numerics.gradient``, which
+#: ``validation/case_file_parity.py`` checks. A scheme change can move the Jacobian's column reach, which the probe's
+#: `column_reach` was measured for: re-run `probe_reach_audit.py` under the new scheme. This mesh is
 #: orthogonal, where every scheme here agrees closely, so the arm tests that nothing regresses rather
 #: than expecting a gain.
-GRADIENT = os.environ.get("BFS3D_GRADIENT", "corrected")
+GRADIENT = os.environ.get("BFS3D_GRADIENT", "multcorr")
 GRADIENT_BLEND = float(os.environ.get("BFS3D_GRADIENT_BLEND", "0.75"))
 FLOW_INVERSE = os.environ.get("BFS3D_FLOW_INVERSE", "simplesmooth")
 if FLOW_INVERSE != "simplesmooth":
@@ -722,7 +743,9 @@ LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS)
 #: than re-assembling.
 PRECONDITIONER = MaterializedJacobian(
     FieldSplit(LEADING_INVERSE, TRAILING_INVERSE),
-    probe=JacobianProbeSpec(column_reach=COLUMN_REACH),
+    probe=JacobianProbeSpec(
+        column_reach=COLUMN_REACH, stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach
+    ),
     refit_beta_floor=PC_BETA_FLOOR,
 )
 
@@ -872,7 +895,7 @@ FORWARD_RTOL = float(os.environ.get("BFS3D_FORWARD_RTOL", FILE_SOLVER.linear_sol
 #: Which rule ends each inner solve (`LinearSolveSettings.stop`; `BFS3D_FORWARD_STOP`, unset keeping
 #: the file's): `residual` stops the moment the residual meets the tolerance, tested every iteration;
 #: `lineax` also waits for the solution to stop moving and tests only at a restart boundary. pitzDaily
-#: ships `residual`; this file does not set it. ⚠️ The two count cycles differently (`residual` reports
+#: ships `residual`, and so does this file since 2026-10-13. ⚠️ The two count cycles differently (`residual` reports
 #: cycles RUN, one more than `lineax` for the same work), so `refresh_on_cycles` and the cycle retry fire
 #: at a different difficulty under each -- an arm that changes the stop changes those triggers too.
 FORWARD_STOP = os.environ.get("BFS3D_FORWARD_STOP") or FILE_SOLVER.linear_solve.stop
@@ -1045,7 +1068,8 @@ if K_WALL not in _K_WALL_BCS:
     raise SystemExit(f"BFS3D_K_WALL={K_WALL!r} is not one of {sorted(_K_WALL_BCS)}")
 K_WALL_BC = _K_WALL_BCS[K_WALL]
 
-#: Two study overrides of the file's step control, unset keeping the file's. `BFS3D_RELEASE_FLOOR`
+#: Two study overrides of the file's step control, unset keeping the file's (`grow` 3 and a release to
+#: 1e-4 since 2026-10-13, with the residual stop). `BFS3D_RELEASE_FLOOR`
 #: releases the shift below `beta_min` once the target station has settled: after the first full-length
 #: step at the floor on the target, the next step runs at this shift, so the station's linear tail
 #: becomes inexact Newton steps (measured on pitzDaily first,
@@ -1054,9 +1078,10 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: steps the state then needed there, so 3 with 12 stations beat the class default 1.5 with 16 (111
 #: against 141 cycles with the release on). On this case (2026-10-11, one run per arm) the release
 #: alone at 1e-4 took 24 steps / 173 cycles against the file's 28 / 174 at the same root, while `grow`
-#: 3 with it cost 214 cycles and redid nine steps under this file's inner stop (lineax). Under
-#: pitzDaily's `residual` stop the same pairing took 25 steps and redid three, beating the file's own
-#: schedule under that stop: on this case the pairing goes with the stop.
+#: 3 with it cost 214 cycles and redid nine steps under the lineax inner stop the file then shipped.
+#: Under pitzDaily's `residual` stop the same pairing took 25 steps and redid three, beating the file's
+#: own schedule under that stop: on this case the pairing goes with the stop, which is why the file now
+#: ships the two together.
 CONTROL = dataclasses.replace(
     FILE_SOLVER.step_control,
     **{
@@ -1235,7 +1260,11 @@ def _gradient_scheme():
         return CorrectedGreenGauss()
     if GRADIENT == "projected":
         return ProjectedStencilGradient(blend=GRADIENT_BLEND)
-    raise SystemExit(f"BFS3D_GRADIENT={GRADIENT!r} is not one of ['corrected', 'projected']")
+    if GRADIENT == "multcorr":
+        return MultipleCorrectionGradient()
+    raise SystemExit(
+        f"BFS3D_GRADIENT={GRADIENT!r} is not one of ['corrected', 'projected', 'multcorr']"
+    )
 
 
 def build_case(model=None, momentum_advection=None, gradient=None):
@@ -1251,8 +1280,8 @@ def build_case(model=None, momentum_advection=None, gradient=None):
         The SST constants to use. Defaults to :class:`~aquaflux.turbulence.SSTModel`.
     gradient : GradientScheme, optional
         The gradient reconstruction, for the same reason as ``momentum_advection``: its stencil is part
-        of what the coloured probe has to cover. ``None`` (default) is the benchmark's own corrected
-        Green-Gauss.
+        of what the coloured probe has to cover. ``None`` (default) is the benchmark's own, the one
+        ``BFS3D_GRADIENT`` names (multiple-correction unless set).
     momentum_advection : AdvectionScheme, optional
         The momentum face-value reconstruction, so a study can ask what the *scheme* costs -- its
         stencil reach sets how far the coloured Jacobian probe has to see. ``None`` (default) is the
@@ -1458,6 +1487,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             f"{'off' if CONTROL.release_floor is None else f'to {CONTROL.release_floor:g}'})",
         ),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
+        ("gradient", GRADIENT),
         ("k wall BC", K_WALL),
         ("k positivity floor", K_POSITIVITY_FLOOR or "0 (plain rule)"),
         (
@@ -1887,7 +1917,7 @@ def _report(m, aq_span, of_span):
         "A finite-width 3D backward-facing step (step height h = 0.01 m, expansion ratio 2, span 4h",
         "between no-slip side walls), solved by OpenFOAM `incompressibleFluid` (kOmegaSST) and, on the",
         "**same imported mesh**, by aquaflux's coupled RANS solver (hybrid initialization, second-order",
-        "upwind momentum advection, corrected Green-Gauss gradients, log-omega, field-split",
+        "upwind momentum advection, multiple-correction gradients, log-omega, field-split",
         "algebraic-multigrid preconditioner). U_in = 10 m/s, nu = 1e-5 -> Re_h = 10000.",
         "",
         "## Results",

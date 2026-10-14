@@ -281,11 +281,13 @@ cannot be written. The guard is what catches the next module that does branch.
   rebuilding it is not a converged root, and measuring "at the converged root" against it silently answers
   a different question: the zero-shift coupled Jacobian is nearly singular at a self-start and is not at a
   root. Read what wrote a state before trusting it.
-- **`bfs3d`'s shipped `COLUMN_REACH = (3,3,3,3,2,2)` is licensed for the FIELD SPLIT ONLY.** A flow-first
-  split never applies `dR_flow/dturb`, so it never touches the shortened k/ω columns. A **monolithic**
-  factorization (the complete LU) does apply them, and a short colouring does not truncate a column —
-  it folds far couplings onto near entries. Probe every arm at a uniform reach whenever a monolithic arm
-  is in the comparison, or the arms are not being compared on the same matrix.
+- **A per-column probe reach is licensed by the scheme AND the split, so re-audit it when either changes.**
+  `bfs3d` shipped `COLUMN_REACH = (3,3,3,3,2,2)` under `CorrectedGreenGauss`, licensed for the field split
+  only (a flow-first split never applies `dR_flow/dturb`; a monolithic factorization does, and a short
+  colouring folds far couplings onto near entries rather than dropping them). Since 2026-10-13 it ships
+  `MultipleCorrectionGradient` at a **uniform reach of 3**: under that scheme `probe_reach_audit.py` finds
+  p, k and omega carrying 1.1e-3 / 6.7e-5 / 3.9e-5 of their norm beyond reach 2, so no column may be
+  shortened. Reach 4 is unaudited (the harness's widest pattern is 3).
 
 ## A validation case can collide with a test tier, or a test tier with another tier (both now closed)
 

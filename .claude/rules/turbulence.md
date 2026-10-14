@@ -2303,8 +2303,8 @@ tuning follow-up noted above.
       (identical histories at 1.33x and 2x per step); what is conserved is 6-9 steps AT the floor before
       the state settles (at those paces: at 1.21x per step it settled at the 4th), and the cheapest ramp ends one step after that. Table and the design it closes
       in `.claude/notes/solve-globalization-log.md` ("The ramp's length is the shift's descent").
-      **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11**; bfs3d keeps its own
-      schedule: there `3 x 12` with the release cost 214 accepted / 459 all-attempt cycles and nine steps
+      **pitzDaily's `case.yaml` ships `3 x 12` with the release since 2026-10-11, and bfs3d's since
+      2026-10-13** -- with the residual stop, which it needs: there `3 x 12` with the release cost 214 accepted / 459 all-attempt cycles and nine steps
       redone against the shipped `1.5 x 12`'s 174 / 193 under bfs3d's lineax inner stop, but 195 with three
       redone under pitzDaily's `stop: residual` -- the stop, not the rate, was most of the loss. Its anchor
       100 was the cheapest of 10 / 100 / 1000 (anchor 1000: 92 steps, a 64-step floor tail). (2026-10-11,
@@ -2643,7 +2643,8 @@ tuning follow-up noted above.
                 calibrated at `gamma = 1` does not survive the introduction of damping, and a `gamma`
                 calibrated at one station count does not transfer to another.
               - **⚠️ THE TWO CASES WANT OPPOSITE SCHEDULES, AND THE DISCRIMINATOR IS THE REBUILD COST.**
-                `bfs3d` ships **12 stations at `gamma = 5`**, pitzDaily shipped **16 at `gamma = 3`** at the
+                `bfs3d` shipped **12 stations at `gamma = 5`** (until 2026-10-13: it now takes pitzDaily's
+                `gamma = 3` with `grow` 3, unswept on bfs3d), pitzDaily shipped **16 at `gamma = 3`** at the
                 control's `grow` 1.5 (since 2026-10-11 it ships 12 at `gamma = 3` with `grow` 3 and the
                 release, which is a different optimum for a different reason: the "station count is the
                 shift's descent" entry under the ramp). Swept on

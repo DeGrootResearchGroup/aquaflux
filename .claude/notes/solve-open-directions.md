@@ -93,43 +93,13 @@ outer steps. **0.1 is level with 0.3 here** (pitzDaily: 25 % slower), so tighten
 case, and the Eisenstat–Walker refutation rests on pitzDaily alone. Whether 0.6 moves is the owner's
 call; the retry is the thing a forcing safeguard (6b) would also have to cover.
 
-## 5. Anderson acceleration / nonlinear GMRES around the outer step
+## 5. CLOSED — Anderson acceleration / nonlinear GMRES around the outer step
 
-**What.** Treat one pseudo-transient Newton step as a fixed-point map `x ↦ G(x)` and accelerate the
-sequence with Anderson mixing (depth 3–5, damping 1), or NGMRES (Washio & Oosterlee; De Sterck). Vector
-operations only; one small least-squares per step.
-
-**Why it should win.** The ladder descends β one notch per outer step with `α_min = 1.000` on eleven of
-twelve steps — the control "had no reason for caution and crawled anyway". Anderson extrapolates
-exactly such a well-behaved sequence. The notes mention Aitken/Anderson once, in passing, as something
-that *could* sit on the SER ramp; it was never built.
-
-**What it does not change.** Like every globalization here, the mixing vanishes at the fixed point:
-converged state and adjoint unchanged.
-
-**Pre-registered measurement.** pitzDaily ramp arm, steps/cycles/wall, Anderson depth 0 / 3 / 5.
-Watch the retry region: Anderson on a stiff sequence can extrapolate into non-descent; keep the line
-search as the acceptance gate and reset the history on any rejected step.
-
-**Probed 2026-10-08 (`validation/pitzdaily_openfoam/anderson_replay_probe.py`) — modest, tail-only.**
-Replay on the shipped pitzDaily march (`case.yaml` as shipped, 31 steps / 203 cycles / `x_r/h` 8.0686,
-every step checkpointed; jax 0.11.2, CPU): at each target-station step the Anderson proposal of depth
-1/2/3/5, built from the unaccelerated iterates, scored in one row-scaled measure built at `x_{k+1}`.
-⚠️ The step labels below are corrected (2026-10-08): the harness keyed checkpoints by their `step`
-field, which counts from zero, so it printed every state one lower than its file index and skipped the
-station's first step. The numbers are the harness's; only the labels moved. The harness now keys by file.
-- **Steps 18–23** (early target station): proposal ≈ the march's own next iterate (ratio 0.80–1.25), never
-  better than `x_{k+2}`; depth 5 sometimes worse. No saving.
-- **Steps 24–30** (the linear tail, β at its 0.005 floor, the march's own rate 0.64 → 0.82 per step and
-  slowing): every depth beats `x_{k+2}` (ratio 0.55–0.77), i.e. about one saved step per step.
-- **Bound:** compounding that factor over the tail gives ~2.5 steps for the march's 6, i.e. ~3–4 outer
-  steps and ~14 of 203 cycles (~7 %). Optimistic — a one-step replay on the unaccelerated sequence, not a
-  march feeding its own proposals back. The pre-registered march (depth 0 / 3 / 5, history reset on a
-  station change or a rejected step, line search as the acceptance gate) is what would settle it, and it
-  needs `newton_march` to carry the history: an implementation, not a probe.
-- Depth 2–3 is as good as 5; the gain is confined to where the shifted step converges linearly.
-
-**Deferred — tracked in #639** (needs the real march above, and bfs3d, before it is worth building).
+Measured 2026-10-14 and moved to `solve-refuted-directions.md` ("Anderson acceleration around the outer
+step"), #639. Its gain was confined to the linear tail at the shift floor. On today's pitzDaily march
+(19 steps, `release_floor` 1e-4) that tail is four steps long, and no Anderson proposal at any depth
+reaches the march's own `x_{k+2}`: the bound is zero outer steps. The 2026-10-08 bound (~3–4 steps, ~7 %
+of cycles on the 31-step march) is superseded. The release removed the tail Anderson was extrapolating.
 
 ## 6. CLOSED — Krylov subspace recycling (GCRO-DR); it found 6b instead
 
@@ -237,7 +207,8 @@ Cycle counts are not comparable across stops (see above), so the comparison is w
 | 2 | `residual`, 2 | 34 | 105 | 16 | 399 s | **1** (step 18, `alpha`) | 9.96e-6 | 814 s |
 | 3 | `residual`, 4 | 30 | 123 | 3 | 220 s | 0 | 5.47e-6 | **787 s** |
 
-`x_r/h` 8.361 in all four. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
+`x_r/h` 8.361 in all four. bfs3d's `case.yaml` takes the residual stop since 2026-10-13, at `refresh_on_cycles`
+3. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
 nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each);
 2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
 runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
@@ -437,14 +408,14 @@ are deterministic.
 | 0.005 | 1e-4 | 29 | 139 | 347 s | 7.00e-6 | 1019 s |
 | none | 1e-4 | 29 | 141 | 345 s | 6.47e-7 | 1027 s |
 
-`x_r/h` 8.361 in all; the 0.05 arm reproduces #699's baseline (36 / 166). Dropping the floor saves 3 steps and 11 cycles (7 %, as on pitzDaily) and ~10 % of the wall. 0.005 and none are identical without the release (the shift never goes below `beta_min` there). **(a) on bfs3d is worth nothing:** with the release, the two arms are identical through step 27, the release fires at step 28, both finish at step 29, and no floor costs 2 more cycles for a deeper final `|R|`. Both released steps cost 3 cycles each, not #678's 12 and 15 (measured before #290/#694 changed this march). bfs3d's file still ships 0.05 and no release; dropping the floor, and adding the release, are both measured wins there -- the owner's call.
+`x_r/h` 8.361 in all; the 0.05 arm reproduces #699's baseline (36 / 166). Dropping the floor saves 3 steps and 11 cycles (7 %, as on pitzDaily) and ~10 % of the wall. 0.005 and none are identical without the release (the shift never goes below `beta_min` there). **(a) on bfs3d is worth nothing:** with the release, the two arms are identical through step 27, the release fires at step 28, both finish at step 29, and no floor costs 2 more cycles for a deeper final `|R|`. Both released steps cost 3 cycles each, not #678's 12 and 15 (measured before #290/#694 changed this march). bfs3d's file dropped the floor and releases since 2026-10-13 (owner's decision, with pitzDaily's other march settings; `solve-globalization-log.md`, "bfs3d takes pitzDaily's march settings").
 
 (b) whether bfs3d's `case.yaml` should
-release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
+release -- DECIDED 2026-10-13: it does, with `grow` 3 and the residual stop. Measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
 173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss under bfs3d's
 lineax stop but a win under pitzDaily's `stop: residual` (25 steps / 195 cycles / 792 s, the best arm;
-log, "bfs3d: the release, `grow` 3 and the settle-ended ramp") -- the owner's call, and it is a choice of
-the stop as much as of the release; on the post-#290 march with no refit floor (table above) it saves 4 steps, 16 cycles and 60 s; (c) whether the library default
+log, "bfs3d: the release, `grow` 3 and the settle-ended ramp"), a choice of the stop as much as of the
+release; on the post-#290 march with no refit floor (table above) it saves 4 steps, 16 cycles and 60 s; (c) whether the library default
 should release, after the three slow tests #645 names (a loose terminal step is what they measure).
 pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 
@@ -496,8 +467,8 @@ bfs3d (since measured, #678: see the top of this entry).
   was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
   operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
   identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
-  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d still ships
-  `CorrectedGreenGauss` and is unmeasured. `jacobian_gradient_sweeps` stays a script-only study arm and
+  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d moved to
+  `MultipleCorrectionGradient` too (2026-10-13), so it no longer applies to either case. `jacobian_gradient_sweeps` stays a script-only study arm and
   is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better
   for this solver, so the direction is to move cases off swept gradients rather than to tune their sweeps.
 

@@ -18,7 +18,8 @@ The references are deliberately independent of the case files:
   that driver's defaults: the multiple-correction gradient, ``k`` zero-gradient at the walls). The
   driver itself cannot be the reference any more, since it now builds from the very file under test.
 * **bfs3d** -- ``bfs3d_openfoam/compare.py``'s own ``build_case()``, which still assembles by hand, at
-  its defaults (corrected Green--Gauss, ``k`` zero-gradient at the walls, the production limiter on).
+  its defaults (the multiple-correction gradient, ``k`` zero-gradient at the walls, the production
+  limiter on).
 
 Run from the repository root::
 
