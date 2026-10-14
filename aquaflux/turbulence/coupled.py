@@ -2624,6 +2624,7 @@ def solve_coupled(
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
+    stopping_step: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
     resume: Resumption | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
     **strategy_kwargs: object,
@@ -2813,6 +2814,12 @@ def solve_coupled(
         reached, and no signal a shift policy can read for itself distinguishes those. It reshapes the
         path, not the root, and ``None`` (the default) is byte-identical.
         ⚠️ It must swap **array** leaves over a fixed structure or every station recompiles the solve.
+    stopping_step : callable, optional
+        ``step -> step``, forwarded to :func:`~aquaflux.solve.newton_march`: the step whose measure the
+        stopping test reads once a homotopy has arrived, so a march whose steps keep its first
+        station's shift is judged in the case's own row scales. :func:`solve_reynolds_ramp` passes its
+        session's (:class:`~aquaflux.solve.StoppingStepSource`). Needs ``rtol == 0``; ``None`` (the
+        default) stops in the step's own measure.
     resume : Resumption or None
         The interrupted march this one resumes; see :func:`~aquaflux.solve.staged_march`.
     on_residuals : callable, optional
@@ -2914,6 +2921,7 @@ def solve_coupled(
         station_step=station_step,
         resume=resume,
         on_residuals=on_residuals,
+        stopping_step=stopping_step,
         caller="solve_coupled",
     )
     root = root_adjoint(

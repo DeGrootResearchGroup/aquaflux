@@ -484,11 +484,12 @@ A {class}`~aquaflux.precondition.MaterializedJacobian` preconditioner keeps itse
 without a policy. Its session re-fits the inverse before the first step, after being pointed at a
 new case with `rebind`, and before the step after one whose inner solve cost `refresh_on_cycles`
 restart cycles; such a step ends there, keeping the iterate it reached, and the next step starts
-from it on the re-fitted preconditioner. The compiled solve is reused rather than retraced. After a
-`rebind` the step the march holds also takes the new case's pseudo-transient shift (and with it the
-row scales of the residual measure), keeping the shift strength the march had reached, and the
-inverse is re-fitted against that shift; a viscosity ramp that re-points its session at every
-station therefore shifts and measures each station as that station, not as the one it started from.
+from it on the re-fitted preconditioner. The compiled solve is reused rather than retraced. A
+`rebind` re-fits the inverse and leaves the step's pseudo-transient shift as it was built, so a
+viscosity ramp holds its first station's shift diagonal throughout: the march adapts the shift strength
+on the premise that the diagonal it scales does not change, and the shift vanishes at the root. Once
+the ramp reaches the case itself, the march's stopping test is judged in the case's own row scales,
+through the session's `stopping_step`.
 
 When both blocks of a {class}`~aquaflux.precondition.FieldSplit` are traced multigrid cycles (every
 shipped block inverse is), the split is applied on device inside the Krylov solve, with no round

@@ -1576,6 +1576,49 @@ def test_the_ramp_opens_a_materialized_session_on_the_anchor_and_re_points_it(mo
     assert session.problem.coupled is coupled
 
 
+def test_a_materialized_ramp_is_judged_by_its_session_s_stopping_step_for_the_case(
+    monkeypatch,
+) -> None:
+    """The march stops in the case's own row scales, which its anchor-built steps do not carry.
+
+    A materialized session keeps the anchor's shift diagonal for the whole march, so the stopping test
+    has to read the measure of the step built on the CASE -- not on the anchor, nor on any station.
+    """
+    from aquaflux.precondition import (
+        FieldSplit,
+        JacobiSmoothed,
+        MaterializedJacobian,
+        MaterializedSession,
+        SimpleSmoothed,
+    )
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    monkeypatch.setattr(
+        MaterializedSession, "stopping_step", lambda self, target: ("stopping", self, target)
+    )
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        ramp=RampSchedule(2, 1),
+        point_setup=lambda companion, state, point: {},
+        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
+    )
+    kwargs = calls[0]["kwargs"]
+    assert kwargs["stopping_step"] == ("stopping", kwargs["preconditioner"], coupled)
+
+
+def test_a_block_diagonal_ramp_stops_in_its_steps_own_measure(monkeypatch) -> None:
+    """A block-diagonal step takes the station's shift at every station, so it needs no stopping step."""
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    solve_reynolds_ramp(
+        coupled, anchor=100.0, ramp=RampSchedule(2, 1), point_setup=lambda c, s, p: {}
+    )
+    assert "stopping_step" not in calls[0]["kwargs"]
+
+
 @pytest.mark.parametrize("given", [None, "spec"])
 def test_the_ramp_opens_a_block_session_on_the_anchor_and_re_points_it(monkeypatch, given) -> None:
     """The block-diagonal family follows the stations too, whether it is named or the default.

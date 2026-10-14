@@ -495,70 +495,70 @@ Many entries below are dated history written against the old API. Read them thro
       which needed the scalar preconditioners to become data (the reversed #105 note in
       `solve-globalization.md`). ⚠️ **NOT re-measured since**, and the change is numerical too (the flow
       block is no longer re-aggregated per station), so the 4-17 cycles above describe the first version.
-    - **The materialized session follows a re-pointing's SHIFT too (2026-10-13, #701; until then it
-      re-fitted the inverse per station but nothing else).** Before, the held step kept the anchor's base
-      shift policy through convergence: the march's `beta * d`, the inverse's re-fit at `J(station) +
-      beta * d` and the row-scaled measure's row scales (`_CoupledMeasures.row_scaled` reads
-      `step.shift_policy`) all used the ANCHOR's diagonal at every station, target included — probed on
-      the test cavity (both blocks scaled, anchor 100) at a median 51x (max 96x) the target's on the
-      shifted rows. Now `MaterializedSession.refresh_preconditioner`, after a `rebind`, builds a step on
-      the new companion and grafts its shift policy, adjoint factory and operator stand-in onto the held
-      step (`solve.Repointing`, the bookkeeping `RebuildingSession` shares), and the forced re-fit then
-      reads the grafted step. Pinned by the three `test_a_re_pointed_materialized_session_*` tests in
-      `test_preconditioner_session.py` (mutation-checked). ⚠️ **Both flagship cases ship this family on
-      the ramp, so their trajectories move**, and every tuning measured on them (`turbulence_damping`,
-      `grow`, the floor release, the station count, anchor depth) was taken under the old behaviour.
-      **pitzDaily, measured 2026-10-13** (shipped `case.yaml`: 12 x 1 momentum-only ramp from anchor
-      100, damping 3, `grow` 3, release 1e-4, `beta_min` 0.005, dual-time 5 / 0.01, `refresh_on_cycles`
-      3, residual stop, field split `SimpleSmoothed`/`JacobiSmoothed`; Linux x86_64, 4 cores; control
-      `78e0bbf` (#704 head) in its own worktree, fix `69d8d17`; `run_case.sh --force`, because its
-      free-memory reading is macOS-only, on an idle machine): **control 20 steps / 154 restart cycles /
-      no escalations; fix 28 steps / 157 cycles / 6 escalations (steps 16, 18, 19, 25), both `x_r/h`
-      8.0686**, march time after step 1 527 s against 599 s. The arms part at step 3. From step 8 to 14
-      (stations 8-12 and arrival) every fix step ends after ONE inner iteration at 3 cycles, `a_min`
-      0.25, `beta` at its 0.005 floor, the residual crawling 1.10e-2 to 8.6e-3: the station's own
-      (smaller) velocity shift makes the first solve reach `refresh_on_cycles` 3, which ends the step.
-      ⚠️ **That first version was itself wrong, and the two reviews that found it are why the numbers
-      below exist.** It built the station step with `reuse=None` at the MARCH'S ITERATE, which re-froze
-      `nu_t`, the mass flux, the transport scale and the log-omega coordinate factor (`domega/dw = omega`)
-      at every station as well as moving the viscosity -- the #156 freeze hazard, re-referencing the omega
-      shift by a median 1.86x (up to 25x) on pitzDaily (developed state against the seed's reference). **Now (E1, `673d447`) the graft is built at the
-      state the held steps were built at** (`MaterializedSession._reference_state`, set by `build` and
-      `refresh`), so a re-pointing moves the problem and nothing else; pinned by
-      `test_a_re_pointing_moves_the_problem_and_not_the_state_the_shift_was_built_at` (fails if the
-      graft uses the iterate). **And the march rebuilds the step's measure after the hook's update (E4,
-      `5c4943c`, `march.py`)**: it used to build it before the hook ran, so the step entering a station
-      was judged in the previous station's row scales; pinned mesh-free by
-      `test_a_step_an_update_moves_is_judged_in_the_measure_built_from_the_updated_step`
-      (`test_newton_march.py`; mutation: dropping the rebuild reports `|R|` instead of `|R| / 10`).
-      **The pitzDaily arms (same configuration as above, one run each), steps / restart cycles /
-      escalating retries / march time after step 1, all `x_r/h` 8.0686:** control 20 / 154 / 0 / 527 s;
-      first version 28 / 157 / 6 / 599 s; E1 22 / 129 / 2 (both at step 15, which took 147 s, its inner
-      1 hitting the 14-cycle cap twice) / 650 s; E1 + E4 25 / 145 / 0 / 606 s. E1 and E1 + E4 agree to
-      two or three figures through step 14 (the station re-damping holds the step control off the
-      residual ratio throughout the ramp, so a lagged measure misleads nothing there) and part only after
-      arrival, which reads as path sensitivity rather than a property of either. Both keep, by the owner's
-      decision (2026-10-13), trading cycles for no restarts. **What neither recovers:** steps 10-14 each
-      stop after one inner iteration at 3 cycles with the residual flat near 7e-3, where the control
-      descends with multi-inner steps -- the station's own viscosity shrinking the velocity rows' shift.
-      ⚠️ **"The anchor shift was 100x the target's viscous `a_P`" (this entry's first draft) is WRONG**:
-      the viscosity ratio is 100, but the shift diagonal is convective plus viscous. Measured by a
-      reviewer's probe on pitzDaily (the shipped seed state, both policies referenced there), the
-      target's velocity diagonal over the anchor's is 0.64 at the median, 0.44 at the 10th percentile,
-      0.13 at the 1st and 0.030 at the worst cell -- so the anchor damped the velocity rows ~1.6x harder
-      in the bulk and up to ~33x in its most viscous-dominated cells, and k / omega within 0.95-1.12.
-      The lost damping is real and concentrated; it is not two orders of magnitude across the board. ⚠️ All of these predate main's dropping pitzDaily's refit floor (#709,
-      `refit_beta_floor` 0.05 -> none: 19 / 144 on the control, measured by that change on the same
-      class of machine). **The merged branch at main's file (`2c267d4`, no refit floor, otherwise as
-      above, one run): 18 steps / 136 restart cycles / no retries, `x_r/h` 8.0686**, march time after step
-      1 534 s, solve line 674 s -- one step and eight cycles under main's control. Steps 10-12 still stop
-      after one inner iteration at 3 cycles with the residual flat near 6e-3. bfs3d is not measured on
-      this branch.
-      **A latent defect the reviews found (F4), not fixed:** a `station_step` swap is undone on a
-      station-entering step, because the graft replaces the step after `station_step` has reshaped it --
-      reachable today only from the `PITZ_TURB_DAMPING_TARGET` harness arm. Also noted, not acted on:
-      the new measure's stop is ~18 % stricter at the same `atol` (the target's own row scales), and
-      near-wall velocity rows dominate it. Reviewer harnesses were scratch-only.
+    - **#701 — a materialized ramp HOLDS the anchor's shift diagonal for the whole march, deliberately,
+      and is judged at the target in the case's own row scales (2026-10-14).** The issue read the held
+      diagonal as a stale bug: the march's `beta * d`, the inverse's re-fit at `J(station) + beta * d`
+      and the row-scaled measure (`_CoupledMeasures.row_scaled` reads `step.shift_policy`) all used the
+      anchor's diagonal at every station and at the target. **Seven arms say the diagonal should stay,
+      and only the stop should move.** The step control adapts the scalar shift strength on the premise
+      that the diagonal it scales is fixed; a diagonal swapped under it changes the damping by a different
+      amount on every row (the target's velocity diagonal over the anchor's, measured on pitzDaily at the
+      seed state: 0.64 median, 0.44 at the 10th percentile, 0.13 at the 1st, 0.030 at the worst cell --
+      ~1.6x less damping in the bulk, up to ~33x in the most viscous cells; k and omega within
+      0.95-1.12), which the control cannot see, and every arm that did it lost on bfs3d. The shift
+      vanishes at the root, so which fixed diagonal is held changes only the path.
+      ⚠️ "The anchor shift is 100x the target's viscous `a_P`" (an earlier draft) is wrong: the
+      viscosity ratio is 100, the diagonal is convective plus viscous.
+      **Built:** `MaterializedSession.rebind` re-fits only (as before #701), and `solve_reynolds_ramp`
+      passes the session's `stopping_step(case)` (`solve.StoppingStepSource`) to the solve, so the stop
+      -- and its `rtol` reference -- is read in the case's row scales while every step is main's
+      (`solve-march.md`, `stopping_step`; `solve.md`, `materialized_session`). The block-diagonal
+      family (#704's `RebuildingSession`) still swaps the station's shift in at every station; whether
+      it should hold the anchor's too is a separate issue, unmeasured.
+      **The arms.** pitzDaily: `validation/pitzdaily_openfoam/compare.py`, 12 x 1 momentum-only ramp from
+      anchor 100, damping 3, `grow` 3, release 1e-4, `beta_min` 0.005, dual-time 5 / 0.01,
+      `refresh_on_cycles` 3, residual stop, field split `SimpleSmoothed`/`JacobiSmoothed`, `atol` 1e-5 /
+      `rtol` 0; Linux x86_64, 4 cores, `run_case.sh --force` (its free-memory reading is macOS-only); one
+      run each; every arm `x_r/h` 8.0686. bfs3d: `validation/bfs3d_openfoam/compare.py`, shipped
+      `case.yaml` (`lineax` stop, `refresh_on_cycles` 3, 12 x 1 ramp, `grow` 1.5, no release, field split),
+      no-floor arms by the owner's local `BFS3D_REFIT_BETA_FLOOR` override; Apple M3 Pro, 11 cores, jax
+      0.10.2, owner's runs (PR #710 comments); every arm `x_r/h` 8.361, converged states within relative
+      L2 2.3e-4 of main's. Steps / restart cycles / escalating retries:
+
+      | arm | what moves | pitzDaily, floor 0.05 | pitzDaily, no floor | bfs3d, floor 0.05 | bfs3d, no floor |
+      |---|---|---|---|---|---|
+      | main (`78e0bbf` / `159536c`) | nothing | 20 / 154 / 0 | 19 / 144 / 0 | 36 / 166 / 0 | 33 / 155 / 0 |
+      | station's shift each station, built at the iterate | D, measure, nu_t/mdot/omega factor | 28 / 157 / 6 | -- | -- | -- |
+      | ... built at the held steps' state (E1) | D, measure | 22 / 129 / 2 | -- | -- | -- |
+      | ... + measure rebuilt after the graft (E1 + E4) | D, measure | 25 / 145 / 0 | 18 / 136 / 0 | 40 / 178 / 2 | 43 / 195 / 2 |
+      | anchor's shift, target's once on arrival (E5) | D, measure at arrival | -- | 18 / 134 / 0 | 38 / 192 / 1 | 44 / 202 / 2 |
+      | target's shift throughout (E7) | D from step 1 | -- | 27 / 183 / 0 | -- | -- |
+      | **anchor's shift, stop in the target's scales (E6, built)** | the stop | -- | **19 / 144 / 0** | **38 / 176 / 0** | **34 / 157 / 0** |
+
+      (Columns: pitzDaily's `refit_beta_floor` was 0.05 until #709 and none after; the "floor 0.05"
+      pitzDaily arms ran at `78e0bbf`-based commits, the rest on the merge with main at `159536c`.)
+      **What each arm showed.** Building the station's policy at the march's iterate re-froze `nu_t`, the
+      mass flux and the log-omega coordinate factor as well as the viscosity (the #156 hazard; omega shift
+      moved by a median 1.86x, up to 25x, on pitzDaily), which two independent reviews caught. With that
+      fixed, any change of `D` still cost: on bfs3d every swapping arm parted from main at the first
+      change, ran line-search clipped and positivity-limited, and had to walk the shift strength back up
+      (to ~0.1 where main stays at or below 0.035) before a plateau near `|R|` 2.2e-2; E5 matched main
+      exactly through step 12 and paid the same plateau after arrival. On pitzDaily the arms that damped
+      the viscous rows at about the target's level late in the ramp (the per-station swap, E7) stalled
+      at steps 10-14 with one-inner, 3-cycle steps; E5 kept the anchor's there and descended, and E7 had a
+      `rho1` of 1.6e7 three steps after arriving. **E6 is main step for step** -- pitzDaily's step table identical to
+      main's on every row (main re-run at `159536c` on the same machine, 591 s against E6's 618 s, noise);
+      bfs3d identical on every row through main's stop, then 2 more steps at the floor and 1 without,
+      because the case's own scales read its residual 1.4-4x higher than the anchor's at bfs3d's end
+      state. That extra is the stated `atol` actually being met: main stopped at a looser bar than the
+      case file says. The owner kept `atol` 1e-5 (2026-10-14).
+      **Retired with the swap:** a retune sweep of the swapping arm (`beta_min` 0.01: 24 / 176 / 0;
+      `refresh_on_cycles` 4: 35 / 339; `beta_min` 0.02: stopped at step 37; two arms damping the flow
+      rows harder at the closure's shift, both worse and non-finite early) ran from `sweep-*.yaml` files
+      beside pitzDaily's `case.yaml` at commit `0074a1a`, deleted since; `PITZ_CASE_FILE` (an edited copy
+      of the case file) stays in `compare.py`. **Not fixed, found by the reviews:** a `station_step` swap
+      is undone on a station-entering step under `RebuildingSession`'s graft (the block family; reachable
+      from the `PITZ_TURB_DAMPING_TARGET` harness arm only).
     - **`tools/sibling_builders.py` reports `coupled_step` (fixed 2026-09-14, #392) — beside
       `flow_march_step` since #541 deleted its mass-flow sibling, which it paired with until then.** It was blind to `coupled_step` for the life of #371 — the call
       `session._build(...)` names a method four classes define, and the tool dropped it — so the coupled

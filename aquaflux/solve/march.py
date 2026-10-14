@@ -550,6 +550,8 @@ def newton_march(
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
     on_residuals: Callable[[Mapping[str, float]], None] | None = None,
+    stopping_step: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
+    stopping_reference: float | None = None,
 ) -> MarchResult:
     """March the residual eagerly, reporting each step and stopping early if the trigger fires.
 
@@ -737,6 +739,20 @@ def newton_march(
         (:func:`~aquaflux.solve.norm.named_blocks`); a plain Euclidean measure has nothing to split.
         Costs one residual evaluation per step, at the station the step drove; ``None`` (default)
         costs nothing.
+    stopping_step : callable, optional
+        ``step -> step``, the step whose measure the **stopping test** reads, from ``norm_builder``, once
+        the march drives the target problem; every step is still steered, line-searched and reported in
+        its own measure. For a march whose steps keep something built on another problem -- a
+        continuation that holds its first station's shift diagonal, from which a row-scaled measure
+        takes its row scales -- so that the target is judged in its own scales without changing a step
+        (a session that offers it is a :class:`~aquaflux.solve.StoppingStepSource`). The tolerance is
+        then ``atol + rtol * stopping_reference``. Costs a measure build and a residual evaluation per
+        step once arrived. Needs ``norm_builder``. ``None`` (default) stops in the step's own measure.
+    stopping_reference : float, optional
+        The reference residual a ``stopping_step``'s tolerance is relative to, in its measure; by
+        default ``residual_fn`` at ``phi0``, measured there. A driver marching in segments passes the one
+        it measured at the start, as it does ``reference_norm``. Reports, and the controls and triggers
+        that read them, keep ``reference_norm``.
 
     Returns
     -------
@@ -751,6 +767,11 @@ def newton_march(
     """
     if solver is None:
         solver = strategy.linear_solver()
+    if stopping_step is not None and norm_builder is None:
+        raise ValueError(
+            "a stopping_step is judged in the measure norm_builder builds from it, so it needs a "
+            "norm_builder."
+        )
     # When the measure is rebuilt each iteration, the segment reference must be taken in that same
     # measure -- otherwise the damping schedule divides two differently-scaled quantities.
     norm = norm_builder(strategy, phi0) if norm_builder is not None else strategy.norm()
@@ -768,6 +789,13 @@ def newton_march(
         measured_norm_0 if damping_reference is None else jnp.asarray(float(damping_reference))
     )
     reference = float(measured_norm_0) if reference_norm is None else float(reference_norm)
+    # A tolerance relative to a residual is relative to that residual in the measure it is judged in.
+    if stopping_step is None:
+        stop_reference = reference
+    elif stopping_reference is not None:
+        stop_reference = float(stopping_reference)
+    else:
+        stop_reference = float(norm_builder(stopping_step(strategy), phi0)(residual_fn(phi0)))
 
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
     # step-length one the moment a line search collapses -- but the reaction below only runs once the
@@ -811,7 +839,12 @@ def newton_march(
         # comparison is false); `+inf` is the case that needs this.
         return bool(
             jnp.isfinite(jnp.asarray(residual_norm))
-            and within_tolerance(jnp.asarray(residual_norm), reference, rtol, atol)
+            and within_tolerance(
+                jnp.asarray(residual_norm),
+                stop_reference if stopping_step is not None and arrived else reference,
+                rtol,
+                atol,
+            )
         )
 
     # Whether the step just set up runs the TARGET problem. A homotopy march may not stop on the
@@ -819,6 +852,15 @@ def newton_march(
     # about the target -- so this starts False and the loop always takes at least one step. Without a
     # homotopy it is True throughout and the stopping test is unchanged.
     arrived = homotopy is None
+
+    def judged(step: NewtonStrategy, phi: jnp.ndarray, residual: Callable, steered: float) -> float:
+        # The residual norm the stopping test reads: the step's own (`steered`), or -- once arrived --
+        # the one `stopping_step` measures the target in.
+        if stopping_step is None or not arrived:
+            return steered
+        return float(norm_builder(stopping_step(step), phi)(residual(phi)))
+
+    stop_norm = judged(strategy, phi0, residual_fn, current)
 
     # A non-finite residual at the state the march is handed stops it before it steps: the step's
     # linear solve would be asked to factor a NaN/inf right-hand side and raise from inside the Krylov
@@ -828,7 +870,7 @@ def newton_march(
     while (
         len(reports) < max_steps
         and math.isfinite(current)
-        and not (converged_at(current) and arrived)
+        and not (converged_at(stop_norm) and arrived)
         and not triggered
     ):
         # The station this step drives. `enter` is where a homotopy re-points whatever must follow the
@@ -959,7 +1001,9 @@ def newton_march(
         while (
             (reason := retry.retry_reason(outcome, residual_norm, reference)) is not None
             and retries < retry.max_retries
-            and not converged_at(float(residual_norm))
+            and not converged_at(
+                judged(active_step, outcome.phi, step_residual, float(residual_norm))
+            )
         ):
             escalating = reason in ESCALATING_REASONS
             if not escalating:
@@ -1053,6 +1097,7 @@ def newton_march(
             control_state = step_control.carry_beta(control_state, float(carried))
         state = outcome.phi
         current = float(residual_norm)
+        stop_norm = judged(active_step, state, step_residual, current)
         refresh_due = bool(outcome.refresh_due)
         # Not every NewtonStrategy carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
@@ -1095,13 +1140,13 @@ def newton_march(
         # of the budget is spent on steps that move nothing. Stop on the same terms.
         if stop_on_limit_stall is not None and stalled >= stop_on_limit_stall:
             break
-        if trigger is not None and not converged_at(current):
+        if trigger is not None and not converged_at(stop_norm):
             triggered = trigger.should_refresh(reports)
 
     return MarchResult(
         state=state,
         reports=tuple(reports),
-        converged=converged_at(current) and arrived,
+        converged=converged_at(stop_norm) and arrived,
         triggered=triggered,
         control_state=control_state,
         strategy=strategy,

@@ -948,6 +948,35 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
         )
 
 
+def test_a_stopping_step_reaches_the_march_from_the_coupled_solve(monkeypatch) -> None:
+    """``solve_coupled(stopping_step=...)`` is handed to the march, which judges its stop by it."""
+    from aquaflux.solve import MarchResult
+
+    mesh, coupled = _cavity()
+    flow, k, omega = coupled.physical_fields(_healthy_state(mesh, coupled))
+    calls: list[dict] = []
+
+    def recording_march(step, residual_fn, state, **kwargs):
+        calls.append(kwargs)
+        return MarchResult(state, (), True, False, None, step)
+
+    monkeypatch.setattr(driver_module, "newton_march", recording_march)
+
+    def stopping(step):
+        return step
+
+    solve_coupled(
+        coupled,
+        flow,
+        k,
+        omega,
+        convergence=Convergence(measure=Euclidean(), rtol=1.0, atol=1e30),
+        strategy=_single_step(),
+        stopping_step=stopping,
+    )
+    assert calls[0]["stopping_step"] is stopping
+
+
 def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> None:
     """With no refresh left to spend, the last segment must not stop where the trigger fires.
 
