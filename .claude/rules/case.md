@@ -243,7 +243,8 @@ at the reference's hybrid initial condition. References, independent of the file
 **frozen copy** of the assembly `compare.py` used to write by hand (the driver cannot be the reference any
 more, since it builds from the file); bfs3d — its driver's own `build_case()`, which stays hand-built for
 exactly this reason. **Both pass** (2026-09-24, commit 9476606 + this change): pitzDaily |R| 2.884371e+02,
-bfs3d |R| 2.178624e+00, both bit-identical. bfs3d is kept out of CI **by design** (project owner, 2026-09-24: its run is too long and its generated
+bfs3d |R| 2.178624e+00 (2.140695e+00 since bfs3d's gradient became the multiple-correction one,
+2026-10-13), both bit-identical. bfs3d is kept out of CI **by design** (project owner, 2026-09-24: its run is too long and its generated
 mesh, gitignored under `runs/`, too large), so the harness is a local check — link `runs/` from a checkout
 that has the mesh.
 The fast tier's own guard is `tests/unit/test_case_file.py`'s build tests on the 2D slab fixture (laminar,

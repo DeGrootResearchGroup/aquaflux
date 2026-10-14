@@ -250,8 +250,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
       which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
       value chosen against no recorded evidence on this case. **Measured 2026-10-13 and dropped from
       pitzDaily's file:** with no refit floor the shipped march takes 19 steps / 144 cycles against 20 /
-      154 at 0.05, same `x_r/h` (`.claude/notes/solve-open-directions.md` 11a). bfs3d still ships 0.05,
-      though without it its march takes 33 steps / 155 cycles against 36 / 166 (owner's runs, #709).
+      154 at 0.05, same `x_r/h` (`.claude/notes/solve-open-directions.md` 11a). bfs3d dropped it too
+      (2026-10-13, with pitzDaily's other march settings): without it its march took 33 steps / 155 cycles
+      against 36 / 166 (#709).
       ⚠️ **"Fine" means stable, not fast (measured 2026-10-10).** `beta_min = 0.005` is reached at ramp
       step 13 and then sets the whole target station's rate: a dual-time step at a fixed shift contracts
       each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the

@@ -1688,3 +1688,47 @@ only, as before.
   (anchor 100).
 - **Verdict on the anchor question: unchanged.** 100 remains the cheapest start; the backoff turns a deep
   start from a thrash into a slow but steady march.
+
+## bfs3d takes pitzDaily's march settings, keeping its own `k` positivity (2026-10-13)
+
+**Decision (project owner, 2026-10-13):** bfs3d's `case.yaml` takes pitzDaily's march settings -- the
+multiple-correction gradient, `stop: residual`, `grow` 3 with `release_floor` 1e-4 and `release_backoff`
+0.5, no `refit_beta_floor`, `turbulence_damping` 3 -- and **keeps its own `k` positivity** (floor 1e-8, the
+global step cap, no per-cell projection), its own trailing inverse (mesh-tuned), anchor 100 and 12 stations.
+The probe goes from per-column `(3,3,3,3,2,2)` to a **uniform reach of 3**, because the new gradient extends
+the p, k and omega columns (audit below).
+
+**Configuration.** `validation/bfs3d_openfoam/compare.py` at `159536cd` plus this change (each candidate
+run as its own `case.yaml`, no `BFS3D_*` override, the reassembled solver checked equal to the file's).
+Apple M3 Pro, 11 cores, macOS, Python 3.13.4, jax 0.10.2; one run each through `run_case.sh` with no other
+case or test tier; desktop apps open, so walls are indicative (the control ran in the afternoon, the rest
+in the evening). Cycle counts are not comparable across the lineax and residual stops.
+
+**The probe audit** (`probe_reach_audit.py`, `state-00036` of the 2026-10-12 shipped march), share of each
+column's norm beyond reach 2:
+
+| gradient | u | v | w | p | k | omega |
+|---|---|---|---|---|---|---|
+| corrected Green-Gauss | 1.3e-4 | 1.1e-5 | 4.1e-5 | 1.2e-16 | 3.0e-18 | 1.6e-18 |
+| multiple-correction | 8.1e-4 | 2.0e-5 | 5.2e-5 | **1.1e-3** | **6.7e-5** | **3.9e-5** |
+
+The distance-3 share of the leading block rose 4.1e-6 -> 2.9e-3. Reach 4 is unaudited.
+
+| run | steps | cycles accepted / all | steps redone | max `rho1` | solve wall | `x_r/h` | `U_x` err |
+|---|---|---|---|---|---|---|---|
+| shipped file (control, `corrected`, lineax) | 36 | 166 / 166 | 0 | 1.6 | 1250 s | 8.36 | 0.059 |
+| multiple-correction only (uniform reach 3) | 42 | 167 / 172 | 1 (step 30, x2, `alpha`) | 14 | 1114 s | 8.36 | 0.061 |
+| full pitzDaily match (positivity floor 0 + per-cell projection) | 20 | 154 / 164 | 1 (step 9, x2) | **4e91** | 660 s | 8.36 | 0.061 |
+| **shipped now: match, keeping bfs3d's positivity** | **19** | 126 / 157 | 2 (step 6 x2, step 14) | 64 | **656 s** | 8.36 | 0.061 |
+| the committed files, rerun | 19 | identical row for row | | | 660 s | 8.36 | 0.061 |
+
+- All converged states agree within relative L2 2e-4 of the multiple-correction march; the change of
+  gradient moves the state 3.7e-3 against the corrected one and the report's `U_x` error 0.059 -> 0.061,
+  `U_z` 0.006 -> 0.005, the outermost spanwise slab's `x_r/h` (the side-wall corner) 11.74 -> 12.53.
+- **The positivity choice.** Both match variants run in the same time; the full match's full-length
+  trials at steps 8-12 read `rho1` 1e7 to 4e91 (the line search catching near-blow-ups), against 64 at
+  worst with bfs3d's floor and cap -- consistent with the record that the global cap does stabilizing work
+  on this case. Kept on that evidence; the cost is one more redone step.
+- **Neither variant meets "no new retry"**; the owner accepted the retries for half the wall time. What
+  causes them is the next question (open).
+- `case_file_parity.py bfs3d`: same pytree, residual at the hybrid start bit-identical (2.140695e+00).

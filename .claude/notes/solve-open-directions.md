@@ -237,7 +237,8 @@ Cycle counts are not comparable across stops (see above), so the comparison is w
 | 2 | `residual`, 2 | 34 | 105 | 16 | 399 s | **1** (step 18, `alpha`) | 9.96e-6 | 814 s |
 | 3 | `residual`, 4 | 30 | 123 | 3 | 220 s | 0 | 5.47e-6 | **787 s** |
 
-`x_r/h` 8.361 in all four. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
+`x_r/h` 8.361 in all four. bfs3d's `case.yaml` takes the residual stop since 2026-10-13, at `refresh_on_cycles`
+3. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
 nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each);
 2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
 runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
@@ -437,14 +438,14 @@ are deterministic.
 | 0.005 | 1e-4 | 29 | 139 | 347 s | 7.00e-6 | 1019 s |
 | none | 1e-4 | 29 | 141 | 345 s | 6.47e-7 | 1027 s |
 
-`x_r/h` 8.361 in all; the 0.05 arm reproduces #699's baseline (36 / 166). Dropping the floor saves 3 steps and 11 cycles (7 %, as on pitzDaily) and ~10 % of the wall. 0.005 and none are identical without the release (the shift never goes below `beta_min` there). **(a) on bfs3d is worth nothing:** with the release, the two arms are identical through step 27, the release fires at step 28, both finish at step 29, and no floor costs 2 more cycles for a deeper final `|R|`. Both released steps cost 3 cycles each, not #678's 12 and 15 (measured before #290/#694 changed this march). bfs3d's file still ships 0.05 and no release; dropping the floor, and adding the release, are both measured wins there -- the owner's call.
+`x_r/h` 8.361 in all; the 0.05 arm reproduces #699's baseline (36 / 166). Dropping the floor saves 3 steps and 11 cycles (7 %, as on pitzDaily) and ~10 % of the wall. 0.005 and none are identical without the release (the shift never goes below `beta_min` there). **(a) on bfs3d is worth nothing:** with the release, the two arms are identical through step 27, the release fires at step 28, both finish at step 29, and no floor costs 2 more cycles for a deeper final `|R|`. Both released steps cost 3 cycles each, not #678's 12 and 15 (measured before #290/#694 changed this march). bfs3d's file dropped the floor and releases since 2026-10-13 (owner's decision, with pitzDaily's other march settings; `solve-globalization-log.md`, "bfs3d takes pitzDaily's march settings").
 
 (b) whether bfs3d's `case.yaml` should
-release -- measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
+release -- DECIDED 2026-10-13: it does, with `grow` 3 and the residual stop. Measured 2026-10-11 (#678): alone, on its shipped `grow` 1.5 x 12, 28 -> 24 steps and 174 ->
 173 cycles at the same root, a pass on steps only; with pitzDaily's `grow` 3 a clear loss under bfs3d's
 lineax stop but a win under pitzDaily's `stop: residual` (25 steps / 195 cycles / 792 s, the best arm;
-log, "bfs3d: the release, `grow` 3 and the settle-ended ramp") -- the owner's call, and it is a choice of
-the stop as much as of the release; on the post-#290 march with no refit floor (table above) it saves 4 steps, 16 cycles and 60 s; (c) whether the library default
+log, "bfs3d: the release, `grow` 3 and the settle-ended ramp"), a choice of the stop as much as of the
+release; on the post-#290 march with no refit floor (table above) it saves 4 steps, 16 cycles and 60 s; (c) whether the library default
 should release, after the three slow tests #645 names (a loose terminal step is what they measure).
 pitzDaily's `case.yaml` releases since 2026-10-11, with `grow` 3 and 12 stations.
 
@@ -496,8 +497,8 @@ bfs3d (since measured, #678: see the top of this entry).
   was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
   operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
   identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
-  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d still ships
-  `CorrectedGreenGauss` and is unmeasured. `jacobian_gradient_sweeps` stays a script-only study arm and
+  `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d moved to
+  `MultipleCorrectionGradient` too (2026-10-13), so it no longer applies to either case. `jacobian_gradient_sweeps` stays a script-only study arm and
   is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better
   for this solver, so the direction is to move cases off swept gradients rather than to tune their sweeps.
 

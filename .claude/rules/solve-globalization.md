@@ -411,8 +411,9 @@ What to take from it, none of which is specific to that mechanism:
       accepted / 459 all cycles with nine steps redone; under `stop: residual` it is 25 steps / 195 all
       cycles with three redone, beating the shipped schedule under that stop (35 / 294) and fastest of
       every arm (792 s against 1191, indicative).
-      Whether bfs3d's file should release is the owner's call; a library default still waits on the three
-      slow tests #645 names (a loose terminal step is what they measure). Tables in
+      **bfs3d's file releases since 2026-10-13** (owner's decision, with `grow` 3, the residual stop, no
+      refit floor and the multiple-correction gradient: 19 steps / 656 s against 36 / 1250 s, same
+      `x_r/h`); a library default still waits on the three slow tests #645 names (a loose terminal step is what they measure). Tables in
       `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").
     - **A failed release is not retried until the residual falls below a bar (`release_backoff`, BUILT
       2026-10-12, default 0.5).** Without it `_floored` kept no memory: a released step collapsed, the rule

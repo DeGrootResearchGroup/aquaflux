@@ -2065,8 +2065,11 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   PROPERTY OF SKEW-FREE MESHES, NOT OF THE DISCRETIZATION … the sibling gets 3 for free and that is luck,
   not physics": with a two-pass reconstruction, the **gradient's** reach becomes a property of the scheme
   on a genuinely skewed mesh too. pitzDaily has since adopted it (its `case.yaml` states
-  `MultipleCorrectionGradient`, which `PITZ_GRADIENT` overrides only when set; `STENCIL_REACH` defaults to 3); `bfs3d` still builds `CorrectedGreenGauss` in its own
-  `build_case`, where the choice is inert — see the library-default entry below.
+  `MultipleCorrectionGradient`, which `PITZ_GRADIENT` overrides only when set; `STENCIL_REACH` defaults to 3). So does `bfs3d` since 2026-10-13 (its hand-built `build_case` and its
+  `case.yaml` both), and there the choice is NOT inert for the probe: under it the p, k and omega columns
+  carry 1.1e-3 / 6.7e-5 / 3.9e-5 of their norm beyond reach 2 (against ~1e-16 under `CorrectedGreenGauss`),
+  so its probe went from per-column `(3,3,3,3,2,2)` to a uniform reach of 3
+  (`.claude/notes/solve-globalization-log.md`, "bfs3d takes pitzDaily's march settings").
 
   **⚠️ THE COUPLED pitzDaily RESIDUAL REACHES 4, NOT 3, UNDER THIS SCHEME — so the shipped probe at reach 3
   folds (measured 2026-10-07, `validation/pitzdaily_openfoam/probe_reach_check.py`).** The scalar figure
