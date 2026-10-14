@@ -175,9 +175,13 @@ admitted at least 0.6. One run per arm, 2026-10-14, at `main` `dfb21bc2` with th
 | per-cell clip alone (2026-10-13) | 20 | 154 (164) | 2 (one step, twice) | 4e91 | 660 s |
 | **per-cell clip + ω bound `e`** | **17** | **134 (134)** | **0** | **2.54** | **558 s** |
 | per-cell clip + ω bound `e²` | 17 | 129 (129) | 0 | 2.54 | 531 s |
+| per-cell clip + ω bound `e`, `main` `da37958a` as shipped | 18 | 137 (137) | 0 | 2.54 | 552 s |
 
 Mid-span `x_r/h` is 8.361 in every arm, and the converged states agree with the capped march's to a
-relative L2 difference of 1.1e-4.
+relative L2 difference of 1.1e-4. The last row is the shipped case file on `main` after the guard merged,
+with no overrides: it also judges the stop in the case's own residual scales rather than the ramp's
+anchor scales, which costs one step to meet `atol` 1e-5 there (its state was not compared with
+the others).
 
 One trap the cap taught, worth keeping for any global cap: an absolute floor only postpones its collapse.
 When the cap binds, the step gives `(k_new + floor) = (1 - tau)(k + floor)` whatever the floor, so the

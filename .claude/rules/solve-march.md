@@ -1185,7 +1185,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
     pitzDaily 19 / 144 identical to main on every row; bfs3d (its pre-#712 file) identical on every row
     to main's stop, then 2 more steps at `refit_beta_floor` 0.05 (176 against 166 cycles) and 1 without
     (157 against 155), to the same `x_r/h`; on #712's bfs3d file 20 / 134 against main's 19 / 126, the
-    same way. **Steering in the stopping measure as well (prototype E8) lost on #712's file** and is not
+    same way. **Steering in the stopping measure as well (prototype E8) lost on #712's file under the
+    global k cap, and ties under the per-cell clip + omega bound that replaced it** (17 / 133 against merged
+    main's 18 / 137, `turbulence.md`, "#701"), so it is not
     built; the march steers in the step's own measure (`turbulence.md`, "#701"). Pinned by `test_a_stopping_step_decides_when_the_march_stops_and_the_step_s_measure_how_it_steps`,
     `..._relative_tolerance_is_relative_to_the_residual_in_its_own_measure`,
     `test_the_staged_march_judges_its_root_in_the_measure_the_march_stopped_by` and
