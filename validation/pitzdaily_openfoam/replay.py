@@ -39,9 +39,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import (ConstantRelaxation, solve_linear,)
-from aquaflux.solve.linear import (in_progress_measure,)
-from aquaflux.precondition.materialized_session import (jacobian_matvec,)
+from aquaflux.precondition.materialized_session import (
+    jacobian_matvec,
+)
+from aquaflux.solve import (
+    ConstantRelaxation,
+    solve_linear,
+)
+from aquaflux.solve.linear import (
+    in_progress_measure,
+)
 from aquaflux.turbulence import coupled_step, open_session, scale_both_blocks, scale_momentum_only
 from aquaflux.turbulence.coupled import coupled_scaled_norm
 
@@ -64,6 +71,15 @@ def load(directory: Path = CHECKPOINTS):
                 k: np.asarray(data[k]) for k in data.files
             }
     return states, inner
+
+
+def _matvec(carrier):
+    """``v -> M v`` for what ``carrier`` holds: a policy's traced split, a policy's host object, or a
+    host preconditioner itself."""
+    split = getattr(carrier, "split", None)
+    if split is not None:
+        return split.matvec()
+    return getattr(carrier, "preconditioner", carrier).matvec()
 
 
 @dataclass(frozen=True)
@@ -89,12 +105,22 @@ class System:
 class MarchReplay:
     """The march's systems in order, with its preconditioner refitted where the march refitted it.
 
-    ``preconditioner`` is the march's own (a host object behind a callback), so a probe may change how
-    it applies between solves; ``apply_pc`` is its matvec and :meth:`preconditioned` the operator
-    ``(J + s) M`` the solve sees.
+    ``preconditioner`` is the session's host object, the one a refit re-fits in place (its ``inverse``
+    holds the hierarchies a probe may inspect or change). What the march APPLIES is ``step``'s: a traced
+    field split carried in the step's shift policy when both block inverses offer a traced cycle (the
+    shipped split does), the host object's callback otherwise. :meth:`refit` replaces the traced split in
+    ``step`` exactly as the march does after a re-fit, so ``apply_pc`` -- the matvec of what ``step``
+    holds now -- and :meth:`preconditioned` (the operator ``(J + s) M`` the solve sees) always follow
+    the latest refit: both are compiled with the step's policy as an argument, not a captured constant.
+
+    ``host=True`` applies the host object instead, through its callback, which reads ``inverse`` when it
+    is called -- for a probe that changes the host inverse in place (its precision, say) and must see
+    the change in every solve. Without it such a change reaches nothing the replay applies, since the
+    traced split is a copy taken at the fit. The two apply the same algebra.
     """
 
-    def __init__(self, directory: Path = CHECKPOINTS):
+    def __init__(self, directory: Path = CHECKPOINTS, *, host: bool = False):
+        self.host = host
         self.solver = compare.SOLVER
         self.ramp = self.solver.continuation
         self.refresh_on = self.solver.dual_time.refresh_on_cycles
@@ -114,28 +140,41 @@ class MarchReplay:
         self.session.rebind(anchor)
         self.march = march
         self.step = self.session.build(self.seed, **march)
-        self.policy = self.step.shift_policy
-        self.preconditioner = self.policy.preconditioner
-        self.apply_pc = self.preconditioner.matvec()
-        apply_pc = self.apply_pc
+        self.preconditioner = self.session.preconditioner
 
         @eqx.filter_jit
-        def preconditioned(assembler, p, shift, v):
-            z = apply_pc(v)
+        def preconditioned(assembler, p, shift, v, policy):
+            z = _matvec(policy)(v)
             return jacobian_matvec(assembler, p, z) + shift * z
 
         @eqx.filter_jit
-        def solve(assembler, p, shift, b, solver):
+        def solve(assembler, p, shift, b, solver, policy):
             return solve_linear(
                 lambda v: jacobian_matvec(assembler, p, v) + shift * v,
                 b,
                 solver=solver,
-                preconditioner=apply_pc,
+                preconditioner=_matvec(policy),
                 throw=False,
             )
 
         self._preconditioned = preconditioned
         self._solve = solve
+        # The policy is an argument, never a closure, so a refit at unchanged shapes is a cache hit that
+        # applies the new hierarchies rather than the ones the first call compiled in.
+        self._apply_pc = eqx.filter_jit(lambda policy, v: _matvec(policy)(v))
+
+    @property
+    def policy(self):
+        """The shift policy of the step the march holds now, the preconditioner's carrier included."""
+        return self.step.shift_policy
+
+    def apply_pc(self, v):
+        """``M v`` for the preconditioner the march applies now (see the class summary)."""
+        return self._apply_pc(self._carrier(), v)
+
+    def _carrier(self):
+        """What the solves apply: the step's policy, or with ``host`` the session's host object."""
+        return self.preconditioner if self.host else self.policy
 
     @property
     def stations(self) -> int:
@@ -157,18 +196,24 @@ class MarchReplay:
 
     def solve(self, system: System, solver):
         """``solver`` on ``system`` with the current preconditioner: ``(delta, raw_steps)``."""
-        return self._solve(system.assembler, system.p, system.shift, system.b, solver)
+        return self._solve(
+            system.assembler, system.p, system.shift, system.b, solver, self._carrier()
+        )
 
     def preconditioned(self, system: System, v):
         """``(J + s) M v`` at ``system``."""
-        return self._preconditioned(system.assembler, system.p, system.shift, v)
+        return self._preconditioned(system.assembler, system.p, system.shift, v, self._carrier())
 
     def refit(self, assembler, beta, state):
         """Re-fit the preconditioner in full at ``state`` and ``beta`` (floored as the march floors it)."""
         self.session.rebind(assembler)
-        self.session.refresh_preconditioner(
+        replace = self.session.refresh_preconditioner(
             eqx.tree_at(lambda s: s.relaxation_schedule, self.step, ConstantRelaxation(beta)), state
         )
+        # A traced split is a copy of the host hierarchies taken at the fit, so the re-fit reaches the
+        # step only through the replacement the session returns -- which the march applies too.
+        if replace is not None:
+            self.step = replace(self.step)
 
     def systems(self, first: int | None = None, last: int | None = None):
         """Yield every inner system of steps ``first..last`` in the march's order.

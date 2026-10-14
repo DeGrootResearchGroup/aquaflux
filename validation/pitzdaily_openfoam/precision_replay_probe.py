@@ -49,8 +49,8 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from aquaflux.solve import residual_stop_gmres, restart_cycles  # noqa: E402
 from aquaflux.precondition import HierarchyBlockInverse  # noqa: E402
+from aquaflux.solve import residual_stop_gmres, restart_cycles  # noqa: E402
 from replay import MarchReplay  # noqa: E402
 
 #: Repeats per timed apply; the best is kept, since the slower ones measure other load on the machine.
@@ -146,7 +146,9 @@ def _best_apply(split, vector) -> float:
 
 
 def main():
-    replay = MarchReplay()
+    # The float32 arm swaps the HOST inverse's blocks in place, so the solves must apply the host
+    # object (the march itself applies a traced copy taken at each fit, which the swap cannot reach).
+    replay = MarchReplay(host=True)
     linear = replay.solver.linear_solve
     print(f"{replay.describe()}; arms float64, float32; repeats {REPEATS}", flush=True)
     split = replay.preconditioner.inverse

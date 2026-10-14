@@ -50,16 +50,23 @@ POLL_SECONDS="${AQUAFLUX_CASE_POLL_SECONDS:-20}"
 
 die() { printf 'run_case: %s\n' "$1" >&2; exit 1; }
 
-# Free-ish memory in whole GB. `Pages free` alone reads near zero on a warm machine and would block
-# every launch; inactive pages are reclaimable, so the two together are the number a launch cares about.
+# Free-ish memory in whole GB: what a launch could have without pushing anything else out. On macOS that
+# is `vm_stat`'s free plus inactive pages -- `Pages free` alone reads near zero on a warm machine and would
+# block every launch, and inactive pages are reclaimable. Linux has no `vm_stat`; the kernel publishes the
+# same estimate itself as `MemAvailable` in /proc/meminfo, which counts reclaimable page cache rather
+# than only the free pages (`MemFree`), for the same reason.
 free_gb() {
   python3 -c "
-import re, subprocess
-out = subprocess.run(['vm_stat'], capture_output=True, text=True).stdout
-size = int(re.search(r'page size of (\d+)', out).group(1))
-pages = dict(re.findall(r'^(.*?):\s+(\d+)\.', out, re.M))
-free = int(pages['Pages free']) + int(pages['Pages inactive'])
-print(int(free * size / 1e9))
+import re, shutil, subprocess
+if shutil.which('vm_stat'):
+    out = subprocess.run(['vm_stat'], capture_output=True, text=True).stdout
+    size = int(re.search(r'page size of (\d+)', out).group(1))
+    pages = dict(re.findall(r'^(.*?):\s+(\d+)\.', out, re.M))
+    free = (int(pages['Pages free']) + int(pages['Pages inactive'])) * size
+else:
+    with open('/proc/meminfo') as meminfo:
+        free = int(re.search(r'^MemAvailable:\s+(\d+) kB', meminfo.read(), re.M).group(1)) * 1024
+print(int(free / 1e9))
 "
 }
 
@@ -249,8 +256,7 @@ if [ -n "$EXISTING" ]; then
 fi
 
 # --- health pre-flight ----------------------------------------------------------------------------
-# Measured only when it will be judged: `free_gb` reads `vm_stat`, which exists only on macOS, so taking
-# the reading unconditionally made `--force` fail there too, on a number it was about to ignore.
+# Measured only when it will be judged: `--force` ignores both readings, so it does not take them.
 if [ "$FORCE" -eq 0 ]; then
   FREE=$(free_gb)
   LOAD=$(load_1min)
