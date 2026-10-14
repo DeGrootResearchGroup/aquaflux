@@ -1031,8 +1031,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   **⚠️ The dump wrapper is NOT the confound (checked, not argued).** `221936` ran with
   `BFS3D_DUMP_STEP_LIMIT` (a since-deleted instrument) and `003915` did not. A dump-ON/dump-OFF control pair at otherwise equal
   settings differs in **zero** content lines over 16 steps, against the equilibrate flag's **77**.
-  `_DumpingStepLimit` returns the inner cap unchanged and preserves static-field value equality, so it
-  neither alters the step nor forces a retrace.
+  The (deleted) dump wrapper returned the inner cap unchanged and preserved static-field value
+  equality, so it neither altered the step nor forced a retrace.
 
   **⚠️ The separation is a GROWING PERTURBATION, not a threshold event — an earlier version of this
   entry said "bit-identical for 15 steps, then separated on α alone" and BOTH halves are wrong.** The
