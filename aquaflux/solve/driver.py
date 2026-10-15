@@ -304,8 +304,8 @@ def staged_march(
     Raises
     ------
     equinox.EquinoxRuntimeError
-        If the march ends short of its target: it exhausted ``max_steps`` in its last segment, stopped on
-        a stalled positivity cap, went non-finite, or a homotopy never reached its target.
+        If the march ends short of its target: it exhausted ``max_steps`` in its last segment, went
+        non-finite, or a homotopy never reached its target.
     ValueError
         If ``resume`` is given beside a ``homotopy``.
     """

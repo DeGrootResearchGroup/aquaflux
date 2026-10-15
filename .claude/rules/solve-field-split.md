@@ -590,11 +590,12 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
       up at 0.2341 / 0.5549 and the cures were 0.9364 / 4.4394. Suppressing it lengthens each cascade.
 
     **⚠️ "Damping cannot widen a positivity cap" is FALSE as a general statement.** The per-attempt
-    `checkpoints/step-limit-*.npz` dumps (which `compare.py` wrongly called unobservable) show
+    `checkpoints/step-limit-*.npz` dumps (no longer produced: they went with the global k cap, 2026-10-14; which `compare.py` wrongly called unobservable) show
     `d(cap)/dβ` with **no fixed sign** at a fixed anchor: doubling β narrowed the cap ×9.4 then ×1.6 on
     one anchor and widened it ×3.3 then ×5.6 on another, and on a third the binding cell *changed
     between attempts* (3181 → 22400 → 12800) so consecutive caps do not even measure the same thing.
-    This does not reopen gating on `binding_limit == 1` (measured and reverted, below).
+    This does not reopen gating on `binding_limit == 1` (measured and reverted, below; `binding_limit`
+    itself was deleted 2026-10-14 with the whole-step limit).
 
     **⚠️ AND THE FUTILITY READING IS CONFOUNDED.** The host trio's step-51 attempts all ran with
     `pc none 0.0s` — the β-mismatch gate was off, so the `refresh_preconditioner` the march calls on

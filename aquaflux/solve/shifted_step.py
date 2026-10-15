@@ -155,7 +155,6 @@ def shifted_step(
     krylov_solver: lx.AbstractLinearSolver | None,
     adjoint_preconditioner_factory: Callable | None,
     inner_observer: Callable[..., None] | None = None,
-    step_limit: Callable[..., jnp.ndarray] | None = None,
     step_projection: Callable[..., jnp.ndarray] | None = None,
     jacobian_residual: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     line_search: int | None = None,
@@ -183,8 +182,8 @@ def shifted_step(
     adjoint_preconditioner_factory : callable or None
         Builds the preconditioner of the converged adjoint solve. Not the policy's to supply: a flow-only
         policy has no ``adjoint_factory`` method, its block preconditioner does.
-    inner_observer, step_limit, step_projection, jacobian_residual
-        The dual-time loop's observer and the per-step guards, forwarded to the step class.
+    inner_observer, step_projection, jacobian_residual
+        The dual-time loop's observer, the per-step positivity guard and the operator stand-in, forwarded to the step class.
         Forward-only. A loop's ``refresh_on_cycles`` needs no hook here: the step stops for the re-fit
         and the march takes it (:func:`~aquaflux.solve.newton_march`, which refuses a march with
         nothing to take it).
@@ -221,7 +220,6 @@ def shifted_step(
             policy,
             krylov_solver=krylov_solver,
             adjoint_preconditioner_factory=adjoint_preconditioner_factory,
-            step_limit=step_limit,
             step_projection=step_projection,
             jacobian_residual=jacobian_residual,
         )
@@ -229,7 +227,7 @@ def shifted_step(
     # residual, so the measured steady residual is the honest discrete time derivative rather than
     # beta x travel, and a larger pseudo-timestep (smaller beta, driven by a step control) stays
     # stable. The inner loop replaces the escalation ladder, so `dual_time_step` refuses the
-    # escalation/acceptance settings and the line search's growth rung and rule rather than dropping
+    # escalation/acceptance settings and the line search's growth rule rather than dropping
     # them.
     return globalization.dual_time_step(
         policy,
@@ -237,7 +235,6 @@ def shifted_step(
         krylov_solver=krylov_solver,
         adjoint_preconditioner_factory=adjoint_preconditioner_factory,
         inner_observer=inner_observer,
-        step_limit=step_limit,
         step_projection=step_projection,
         jacobian_residual=jacobian_residual,
     )

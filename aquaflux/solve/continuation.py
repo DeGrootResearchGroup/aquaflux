@@ -336,11 +336,11 @@ class ShiftedStep(eqx.Module):
         compilation-cache hit.
     line_search : int
         Backtracking rungs the step may try below the full length (``0`` takes the full step).
-    step_limit, step_projection : callable or None
-        Constraints the residual cannot express: a cap on the whole step's length, and a per-entry clip
-        of the correction (the one positivity uses). Both guard the *state* rather than the march -- a field that must stay positive must
-        stay positive whichever strategy is stepping it -- which is why they are here rather than on one
-        subclass. Both default ``None``, the unconstrained step exactly.
+    step_projection : callable or None
+        A constraint the residual cannot express: a per-entry clip of the correction (the one
+        positivity uses). It guards the *state* rather than the march -- a field that must stay positive
+        must stay positive whichever strategy is stepping it -- which is why it is here rather than on
+        one subclass. ``None`` (default) is the unconstrained step exactly.
     krylov_solver : lineax.AbstractLinearSolver or None
         The shifted-solve Krylov solver, or ``None`` for this march's shared inexact default. Data, not
         static: a solver configured with a row-scaled stopping measure carries that measure's scale
@@ -378,9 +378,6 @@ class ShiftedStep(eqx.Module):
     shift_policy: ShiftPolicy
     relaxation_schedule: RelaxationSchedule = eqx.field(default_factory=SwitchedEvolutionRelaxation)
     line_search: int = eqx.field(static=True, default=0)
-    step_limit: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
-        static=True, default=None
-    )
     step_projection: Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray] | None = eqx.field(
         static=True, default=None
     )
@@ -481,13 +478,6 @@ class PseudoTransientStep(ShiftedStep):
         :class:`DivergenceGuard` (accept unless the candidate is non-finite or exceeds
         ``divergence_cap × ‖R₀‖``) — the divergence guard the non-monotone march needs. Swap in a
         monotone / sufficient-decrease or forcing rule without touching the escalation loop.
-    grow : int
-        Rungs the backtracking ladder may try **above** the full step, i.e.
-        ``α = 2**grow, …, 2, 1, 1/2, …`` (static). ``0`` (the default) is the one-sided ladder that
-        starts at the full step. The admissible step is often longer than the full one, and a ladder
-        starting at ``1`` cannot express that — so a march reporting ``α = 1`` every step may simply
-        never have been asked whether more was allowed. A growth rung is only ever reachable by
-        passing the acceptance test; the no-admissible-rung fallback is capped at the full step.
     line_search : int
         Maximum backtracking step-halvings applied to the shifted correction *before* the step is
         judged (static). ``0`` (the default) takes the full shifted step ``φ + δ``, so escalating
@@ -549,12 +539,6 @@ class PseudoTransientStep(ShiftedStep):
     # with `tree_at`, and that is only a compilation-cache hit if the measure rides as data. A plain
     # callable (the default) has no array leaves, so it is filtered to the static side anyway and the
     # default path is unchanged.
-    # Rungs the line search may try ABOVE the full step (alpha = 2**grow ... 2, 1, 1/2 ...). Zero is
-    # a one-sided ladder, the historical behaviour. The admissible step is often longer than the full
-    # one: measured at a cold start, alpha = 2 sat inside the acceptance tolerance and travelled twice
-    # as far, but a ladder starting at one could not express it -- so a march reporting alpha = 1 every
-    # step may simply never have been asked whether more was allowed.
-    grow: int = eqx.field(static=True, default=0)
 
     def stepper(self) -> StepFn:
         """The accepted shifted-Newton step and its linear solve's cycle count.
@@ -595,9 +579,8 @@ class PseudoTransientStep(ShiftedStep):
         max_escalations, escalation_factor = self.max_escalations, self.escalation_factor
         acceptance = self.acceptance
         line_search = self.line_search
-        grow = self.grow
         norm = self.residual_norm
-        step_limit, step_projection = self.step_limit, self.step_projection
+        step_projection = self.step_projection
         jacobian_residual = self.jacobian_residual
 
         def step(
@@ -647,13 +630,11 @@ class PseudoTransientStep(ShiftedStep):
                 # Backtrack the step length before judging it: when the shifted direction is accurate
                 # but the full step overshoots, a scaled-back step descends from this one solve,
                 # sparing a re-solve at larger beta. `line_search == 0` takes the full step (alpha = 1).
-                # Clip the correction per entry BEFORE the cap reads it: an entry that would cross
-                # zero is held back on its own, rather than shortening the step for every entry. The
-                # cap below then finds nothing binding and returns 1, so the two compose -- the same
-                # ordering, and the same reasoning, as the dual-time step's inner loop.
+                # Clip the correction per entry before the search: an entry that would cross zero is
+                # held back on its own, rather than shortening the step for every entry -- the same
+                # treatment as the dual-time step's inner loop.
                 if step_projection is not None:
                     delta = step_projection(phi, delta)
-                max_alpha = 1.0 if step_limit is None else step_limit(phi, delta)
                 searched = backtracking_line_search(
                     residual_fn,
                     phi,
@@ -662,8 +643,6 @@ class PseudoTransientStep(ShiftedStep):
                     line_search,
                     norm=norm,
                     growth=growth_factor,
-                    grow=grow,
-                    max_alpha=max_alpha,
                 )
                 return _Attempt(
                     candidate=searched.phi,
@@ -750,7 +729,6 @@ class PseudoTransientStep(ShiftedStep):
                 1,
                 jnp.asarray(True),
                 corrected_cycles(step_cycles),
-                jnp.asarray(1.0),
                 step_ratio,
                 jnp.asarray(False),
             )
@@ -850,18 +828,12 @@ class DualTimeStep(ShiftedStep):
         Emitted through :func:`jax.debug.callback`, so it is forward-only and transform-transparent;
         ``None`` (default) elides the call entirely, leaving the step byte-identical. Do not set it on a
         differentiated solve.
-    step_limit : callable or None
-        ``(phi, delta) -> alpha_max``, capping every inner line search (static). The seam for a
-        constraint the residual cannot express that has to shorten the whole step. Nothing in the
-        library installs one now: positivity is kept per entry by ``step_projection`` instead.
-        ``None`` (default) is byte-identical.
     step_projection : callable or None
         ``(phi, delta) -> delta'``, clipping the correction itself before the line search (static) --
         chiefly to keep a directly-solved field positive per entry
         (:func:`~aquaflux.solve.positive_block_projection`), since a field crossing zero into a
         ``sqrt`` in the closure turns a healthy state into NaN with no warning the divergence guard can
-        act on. Applied before ``step_limit`` reads the correction. ``None`` (default) is
-        byte-identical.
+        act on. ``None`` (default) is byte-identical.
     refresh_on_cycles : int or None
         Stop the inner loop once a single solve reaches this many restart cycles, **keeping** the iterate
         it reached, and report :attr:`~aquaflux.solve.StepOutcome.refresh_due` so the march re-fits the
@@ -993,7 +965,6 @@ class DualTimeStep(ShiftedStep):
         refresh_on_cycles = self.refresh_on_cycles
         cycle_budget = self.cycle_budget
 
-        step_limit = self.step_limit
         step_projection = self.step_projection
         abort_above = self.abort_above_inner_cycles
         abort_below = self.abort_below_alpha
@@ -1031,7 +1002,7 @@ class DualTimeStep(ShiftedStep):
                 return residual_fn(p) + shift * (p - reference)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, min_alpha, max_inner, refresh_due, _, _ = carry
+                _, inner, gnorm, cycles, min_alpha, max_inner, refresh_due, _ = carry
                 # The convergence target is tested FIRST, and that ordering is what makes the cost
                 # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
                 # here with `reached_target` set and is kept, never binned for its cost.
@@ -1060,11 +1031,10 @@ class DualTimeStep(ShiftedStep):
                 if refresh_on_cycles is not None:
                     keep = keep & jnp.logical_not(refresh_due)
                 # Doomed-attempt bailout, the other way an attempt dies: the ladder can no longer move.
-                # `min_alpha` is zero when an iteration failed to descend and tiny when a positivity cap
-                # bound the length, and neither recovers within the step -- the iterate is unchanged, so
-                # the next solve re-derives the same correction and the same cap. Every further iteration
-                # is therefore a re-solve that returns where it started. The march redoes the attempt at a
-                # larger shift, which is the cure for both causes.
+                # `min_alpha` is zero when an iteration failed to descend, and that does not recover within
+                # the step -- the iterate is unchanged, so the next solve re-derives the same correction.
+                # Every further iteration is therefore a re-solve that returns where it started. The march
+                # redoes the attempt at a larger shift, which is the cure.
                 if abort_below is not None:
                     keep = keep & (min_alpha > abort_below)
                 return keep
@@ -1078,7 +1048,6 @@ class DualTimeStep(ShiftedStep):
                     min_alpha,
                     max_inner,
                     refresh_due,
-                    binding,
                     first_ratio,
                 ) = carry
                 delta, step_cycles = _shifted_solve(
@@ -1092,17 +1061,13 @@ class DualTimeStep(ShiftedStep):
                 )
                 # Strict-descent (monotone) line search on ‖G‖: G = 0 is a well-posed fixed-φⁿ solve, so
                 # a clipped inner step is a signal the pseudo-timestep is too large, read out via alpha.
-                # Cap the ladder by whatever constraint the residual cannot express (positivity of a
-                # directly-solved field). `None` leaves the cap at 1, i.e. no cap.
-                # Clip the correction per entry BEFORE the cap reads it: an entry that would cross
-                # zero is held back on its own, rather than shortening the step for every entry. The
-                # cap below then finds nothing binding and returns 1 (see
-                # `positive_block_projection`), so the two compose and the cap's diagnostics survive.
+                # Clip the correction per entry before the search, for whatever constraint the residual
+                # cannot express (positivity of a directly-solved field): an entry that would cross zero
+                # is held back on its own, rather than shortening the step for every entry.
                 if step_projection is not None:
                     delta = step_projection(p, delta)
-                max_alpha = 1.0 if step_limit is None else step_limit(p, delta)
                 searched = backtracking_line_search(
-                    transient_residual, p, delta, gnorm, line_search, norm=norm, max_alpha=max_alpha
+                    transient_residual, p, delta, gnorm, line_search, norm=norm
                 )
                 candidate, alpha = searched.phi, searched.alpha
                 # The search's own measure of `G` at the rung it kept -- the inner loop is judged by
@@ -1149,9 +1114,6 @@ class DualTimeStep(ShiftedStep):
                     # signal: the summed count above also counts how many times the step solved.
                     jnp.maximum(max_inner, corrected),
                     refresh_due | due,
-                    # The cap only where it was the BINDING constraint: `alpha` reaching it means the
-                    # ladder wanted a longer step and the limit, not the descent test, stopped it.
-                    jnp.minimum(binding, jnp.where(alpha >= max_alpha, max_alpha, 1.0)),
                     # The FIRST inner iteration's full-step ratio: its `G` at the anchor is the steady
                     # residual, so this is the one ratio comparable from step to step -- the later
                     # iterations start from wherever the earlier ones left them.
@@ -1166,7 +1128,6 @@ class DualTimeStep(ShiftedStep):
                 alpha,
                 max_inner,
                 refresh_due,
-                binding,
                 full_step_ratio,
             ) = jax.lax.while_loop(
                 cond,
@@ -1179,7 +1140,6 @@ class DualTimeStep(ShiftedStep):
                     jnp.asarray(1.0),
                     jnp.asarray(0, dtype=jnp.int32),
                     jnp.asarray(False),
-                    jnp.asarray(1.0),
                     jnp.asarray(jnp.nan),
                 ),
             )
@@ -1202,7 +1162,6 @@ class DualTimeStep(ShiftedStep):
                 inner_iterations,
                 final_gnorm <= target,
                 max_inner,
-                binding,
                 full_step_ratio,
                 refresh_due,
             )
@@ -1212,12 +1171,11 @@ class DualTimeStep(ShiftedStep):
 
 #: The settings a dual-time step has no field for. Its inner Newton loop replaces the escalation ladder
 #: and runs a plain descent line search, so the ladder's two counts, its acceptance guard, and the line
-#: search's growth rungs and growth rule belong to the single-step shape alone.
+#: search's growth rule belong to the single-step shape alone.
 _ESCALATION_LADDER = (
     "max_escalations",
     "escalation_factor",
     "divergence_cap",
-    "grow",
     "line_search_growth",
 )
 
@@ -1227,12 +1185,12 @@ class Globalization(eqx.Module):
 
     The configuration every pseudo-transient march shares, whatever it is solving: the
     switched-evolution-relaxation schedule (:attr:`beta0`, :attr:`exponent`, :attr:`beta_floor`), the
-    backtracking ladder (:attr:`line_search`, :attr:`grow`, :attr:`line_search_growth`), the
+    backtracking ladder (:attr:`line_search`, :attr:`line_search_growth`), the
     escalation ladder (:attr:`max_escalations`, :attr:`escalation_factor`) and the guard that judges
     each attempt (:attr:`divergence_cap`). **The membership test is whether a setting's reason can be
     stated without naming a residual or a preconditioner.** It can for all of these -- they describe
     the march, not the problem -- so they belong together and reach every march. It cannot for the
-    k-positivity limit, whose value is a function of the state layout, nor for the progress measure's
+    k-positivity step projection, whose value is a function of the state layout, nor for the progress measure's
     per-family default, so those stay with the builder that knows them and arrive through
     :meth:`step` as ordinary fields.
 
@@ -1288,10 +1246,6 @@ class Globalization(eqx.Module):
         builders take ten rungs, because the coupled residual's full step overshoots by orders of
         magnitude from the hybrid start, while the flow-only and scalar builders take the step's own
         ``0``.
-    grow : int or None
-        Rungs the ladder may try **above** the full step (``α = 2**grow, …, 2, 1, 1/2, …``). ``0`` is
-        the one-sided ladder starting at the full step, which cannot express an admissible step longer
-        than the full one. Inert when the ladder has no rungs (a ``line_search`` of ``0``).
     line_search_growth : LineSearchGrowth or None
         How far the residual may rise and still be accepted by the ladder:
         :class:`~aquaflux.solve.MonotoneLineSearch` (strict descent) or
@@ -1309,7 +1263,7 @@ class Globalization(eqx.Module):
     """
 
     # Static, matching every field these end up in (the schedule's three, the guard's cap and the
-    # step's four ladder counts are all static there); the growth rule is data on the step and so here.
+    # step's three ladder settings are all static there); the growth rule is data on the step and so here.
     # The object is built off the jit path and read once.
     beta0: float | None = eqx.field(static=True, default=None)
     exponent: float | None = eqx.field(static=True, default=None)
@@ -1318,7 +1272,6 @@ class Globalization(eqx.Module):
     escalation_factor: float | None = eqx.field(static=True, default=None)
     divergence_cap: float | None = eqx.field(static=True, default=None)
     line_search: int | None = eqx.field(static=True, default=None)
-    grow: int | None = eqx.field(static=True, default=None)
     line_search_growth: LineSearchGrowth | None = None
 
     def with_defaults(self, **base: object) -> Globalization:
@@ -1380,7 +1333,7 @@ class Globalization(eqx.Module):
             The problem's shift diagonal and shifted-operator preconditioner.
         **fields
             The step's remaining, problem-specific fields, passed straight through:
-            ``adjoint_preconditioner_factory``, ``krylov_solver``, ``residual_norm``, ``step_limit``,
+            ``adjoint_preconditioner_factory``, ``krylov_solver``, ``residual_norm``,
             ``step_projection``, ``jacobian_residual``. A field left out, or passed as ``None``, keeps
             :class:`PseudoTransientStep`'s own default. A step field this object leaves unset may be
             supplied here instead -- a non-default ``acceptance`` rule, say, with
@@ -1407,7 +1360,6 @@ class Globalization(eqx.Module):
                 "max_escalations": self.max_escalations,
                 "escalation_factor": self.escalation_factor,
                 "line_search": self.line_search,
-                "grow": self.grow,
                 "line_search_growth": self.line_search_growth,
             },
         )
@@ -1422,7 +1374,7 @@ class Globalization(eqx.Module):
         far enough apart in the tree that a reader of either builder would not see the omission.
 
         The inner Newton loop replaces the escalation ladder, so a dual-time step has no field for
-        :attr:`max_escalations`, :attr:`escalation_factor`, :attr:`divergence_cap`, :attr:`grow` or
+        :attr:`max_escalations`, :attr:`escalation_factor`, :attr:`divergence_cap` or
         :attr:`line_search_growth`. Setting one is refused rather than dropped: it would reach
         nothing, and a march configured with a setting that does nothing looks exactly like one
         configured without it.

@@ -2509,7 +2509,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
 
   - `_COUPLED_LINE_SEARCH = 10`, so a rung is `0.5**k` down to **9.766e-04**. The failing march
     `alpha`s are **0.003108, 0.154, 0.03744, 0.0004484, 0.1149, 0.001161** — not one is a rung, and
-    **0.0004484 is BELOW the shortest**, which only `max_alpha` can produce.
+    **0.0004484 is BELOW the shortest**, which only the line search's `max_alpha` cap (deleted 2026-10-14) could produce.
   - The terminal freeze is the **fraction-to-the-boundary ratchet** `positive_block_projection`'s own
     docstring derives: the inner block runs `8.462e-06 → 8.353e-08 → 8.353e-10 → 8.353e-12`, ratios
     `9.871e-03, 1.000e-02, 1.000e-02` — exactly `1 - tau` at `tau = 0.99`.

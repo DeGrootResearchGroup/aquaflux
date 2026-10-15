@@ -341,17 +341,18 @@ or whose blocks are unnamed: `RowScaledNorm` /
     exist and they key on different things: the post-step `RefreshTrigger`s (`CycleGrowthTrigger` →
     `cycles` + `residual_ratio`; `CoefficientDriftTrigger` → `ν_t` drift) and the per-attempt `refresh_preconditioner` hook (`amg_beta_tracking_refresh`, which since 2026-09-13
     (#371) re-fits only on its first call and after `rebind` — its scheduled gates were deleted).
-    **Neither reads `alpha` or `binding_limit`**, so a collapsed line search can only ever escalate β — it
+    **Neither reads `alpha`**, so a collapsed line search can only ever escalate β — it
     can never buy a rebuild — and the **only** live cost trigger is the reactive "one solve
     reached `refresh_on_cycles` restart cycles" (since 2026-10-10 that ENDS the step and the march re-fits
     before the next one, passing `due=True`; it used to re-fit mid-step). Two consequences worth holding: (a) an α-triggered
     refresh needs **no new trigger** — `refresh_preconditioner` is already called once per *attempt*, after the
     control has set β, so a rebuild on escalation would be a condition inside that hook (the deleted
-    `beta_rel_change` gate was one, never measured in that role); (b) that would **not** address
-    the lock-ups this case hit under the since-deleted global k cap (2026-10-14), which ran at `binding_limit < 1` (the positivity ratchet) where
-    the direction is measured accurate and the solve already over-delivers against its tolerance. Where α
-    *is* the right refresh signal is the **constraint-free** collapse (`binding_limit == 1`, direction
-    genuinely bad), and that case is invisible to every trigger today.
+    `beta_rel_change` gate was one, never measured in that role); (b) that would **not** have addressed
+    the lock-ups this case hit under the global k cap, which were constraint-bound (the positivity ratchet)
+    while the direction was measured accurate and the solve over-delivered against its tolerance. That cap
+    was deleted 2026-10-14 and the whole-step-limit seam after it (`step_limit`, `binding_limit`), so every
+    collapse now is the **constraint-free** kind (direction genuinely bad) -- the one where α *is* the right
+    refresh signal, and that case is invisible to every trigger today.
   - **Why the early stop is the DRIVER's, not the solver's (binding — do not "simplify" it back).**
     The root guard raises whenever the terminal state is not a root, and a trigger-stopped segment exits
     un-converged *by design*. Putting the early stop behind the guard would require an **exemption** in
@@ -410,14 +411,12 @@ or whose blocks are unnamed: `RowScaledNorm` /
     accelerates. Pinned by a trace-counting test (extra steps add zero traces). Note the residual is
     invoked several times *within one trace* (step, line-search ladder, norm), so trace count ≠ compile
     count — assert that further steps add none, not that the total is 1.
-  - **`solve_coupled` does NOT declare `grow`, and must not be "fixed" to (binding).** It is a
-    `coupled_continuation` parameter and reaches it through `**strategy_kwargs`, which
-    `solve_coupled` already splats into that same function at both of its build sites. Declaring it as
-    well — which it used to — meant an extra parameter on an already-wide signature forwarding what was
-    forwarded anyway. Its documented home is `coupled_continuation`, where the parameter actually
-    lives; pinned call-for-call by `test_globalization_knobs_still_reach_the_continuation_builder`.
-    (`descent_backoff` / `descent_test` used to be named alongside it here; both are deleted — see
-    `.claude/notes/solve-refuted-directions.md`.)
+  - **`solve_coupled` declares no globalization setting, and must not be "fixed" to (binding).** They
+    ride `**strategy_kwargs` (as one `Globalization`) to the step builder, which `solve_coupled` already
+    splats at its build sites; declaring one as well -- `grow` once was, and `grow` itself was deleted
+    2026-10-14 -- only forwards what is forwarded anyway. Pinned call-for-call by
+    `test_globalization_knobs_still_reach_the_continuation_builder`. (`descent_backoff` /
+    `descent_test` are deleted too — see `.claude/notes/solve-refuted-directions.md`.)
   - **The four refresh settings are ONE injected object — `RefreshPolicy` (`solve/refresh.py`),
     exported from `aquaflux.solve` (BUILT).** `trigger` / `limit` / `builder` / `refresh_preconditioner`
     were four keyword arguments on `solve_coupled`, meaningless apart: a `limit` with no trigger bounds
@@ -658,10 +657,11 @@ or whose blocks are unnamed: `RowScaledNorm` /
       escalated retry then re-matched the preconditioner anyway. ⚠️ **Since 2026-10-10 the shape is
       different and unmeasured:** an attempt that asks for a re-fit stops there, and the escalated redo
       takes the re-fit (`due=True`) at the pre-step state and the escalated β — one re-fit, at the operator
-      the redo solves, rather than one mid-attempt plus a gated re-match. Suppressing it would need to distinguish a
-      constraint-bound step (`binding_limit < 1`, where no preconditioner can help) from a non-descending
-      one (where a refresh might be exactly the cure) — `binding_limit` exists for precisely that
-      distinction. Measured evidence that the refresh cannot rescue a constraint-bound step: at baseline
+      the redo solves, rather than one mid-attempt plus a gated re-match. While the global k cap existed,
+      suppressing it would have needed to tell a constraint-bound step (where no preconditioner can help)
+      from a non-descending one (where a refresh might be exactly the cure); with the cap and the
+      whole-step-limit seam deleted (2026-10-14) every collapse is the non-descending kind. Measured
+      evidence, under that cap, that the refresh cannot rescue a constraint-bound step: at baseline
       step 51 the mid-step refresh fired at inner 1 and took the following solves from 5 cycles to 2,
       while α stayed 0.000 and `‖G‖` did not move for three more iterations.
     - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
@@ -848,18 +848,19 @@ or whose blocks are unnamed: `RowScaledNorm` /
     that share a width but not a column layout — where a segmented rule would appear to belong to
     whichever grid its ticks happened to line up with. A step therefore renders as **one framed block**:
     step row, then the per-equation grid, then the asides **one concern per line** (preconditioner /
-    case metrics / `limit` / `cum`). Run together on a single line those three had to be read in full to
+    case metrics / `cum`; a `limit` line, and the `L` flag, went with the whole-step limit 2026-10-14). Run together on a single line those three had to be read in full to
     find any one of them.
     An over-wide value **widens its row rather than being truncated**: a cut-off number is a wrong
     number. Pinned by `tests/unit/test_text_table.py`.
-  - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to nine
-    values (`phi, residual_norm, cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
-    binding_limit, full_step_ratio`; a tenth, `refresh_due`, joined 2026-10-11 with `StopsForRefresh`, #290), which is the missing-object smell: a positional tuple is where a consumer silently
+  - **`StepOutcome` — the strategy's return is a record, not a tuple (BUILT).** It grew to ten
+    values (`binding_limit`, the ninth, left 2026-10-14 with the whole-step limit; `refresh_due` joined
+    2026-10-11 with `StopsForRefresh`, #290; it is nine now: `phi, residual_norm, raw_cycles, alpha,
+    inner_iterations, reached_target, max_inner_cycles, full_step_ratio, refresh_due`), which is the missing-object smell: a positional tuple is where a consumer silently
     mis-unpacks one field for another, and every growth broke all five test doubles separately — which
     is why they are built by a single `_outcome` helper now. **The growth to eight demonstrated exactly
     that failure:** `residual_norm` was inserted *second*, and the one test still unpacking positionally
     (`phi_next, cycles, alpha, *_ = ...`) began reading the norm as its cycle count and failed on the
-    dtype. Four of the fields are there because a march could not otherwise act correctly:
+    dtype. Several of the fields are there because a march could not otherwise act correctly:
     - **`residual_norm`** — `norm(R(phi))` at the step's own returned iterate, in the step's own measure.
       **Both drivers used to evaluate this for themselves** (the deleted `_forward`'s loop body,
       `_march_step`'s return), spending a full residual per outer iteration to recompute a number the step was already
@@ -905,17 +906,17 @@ or whose blocks are unnamed: `RowScaledNorm` /
       triggers agree on 62 steps and disagree on one — the expensive step, which per-inner catches and
       summed misses. The change is correctness, not speed.) **`cycle_budget` stays SUMMED** and should:
       it is a cost cap, and total cost is exactly what it caps.
-    - **`binding_limit`** — the step cap where it was the *binding* constraint, else 1 (always 1 since
-      2026-10-14: nothing installs a whole-step limit). A small `alpha`
-      has two opposite causes (the direction overshot; a constraint stopped it being followed further),
-      so `alpha` alone cannot be acted on or reported honestly.
+    - ⚠️ **There is no `binding_limit`** (on `StepOutcome`, `StepReport`, the march history or the log;
+      deleted 2026-10-14 with the whole-step limit it reported). An archived `history.csv` still carries
+      the column and an archived `march.log` its `limit` lines and `L` flags; nothing reads either back.
     - **`full_step_ratio` (2026-10-11)** — the step's first full-length trial over the state it started
       from, `norm(G(phi + delta)) / norm(G(phi))`: what the line search compares with one to accept the
       full step, and used to discard when it rejected it. The DUAL-TIME step reports its FIRST inner
       iteration's (whose `G` at the anchor is the steady `R`, so it compares step to step); the two
       single-step strategies the accepted attempt's. It comes from `LineSearchStep.full_step_norm`,
-      which the ladder records at rung 0 whatever the test decided -- `nan` when a growth rung was
-      accepted first and the full step never evaluated. On the report and in `StepHistory`, and the
+      which the ladder records at rung 0 whatever the test decided (the ladder starts at the full step
+      since `grow` was deleted, 2026-10-14; `nan` only for a pseudo-transient step whose every attempt
+      was rejected). On the report and in `StepHistory`, and the
       march log's `rho1` column. **Why:** `alpha` is a halving ladder (1 or 0.5 at the floor), so it
       says only WHETHER the full step was taken; on pitzDaily this ratio walked 1.23, 1.13, 1.04, 0.90
       over the four steps before the settle, so the settle is visible a step or two ahead
@@ -944,18 +945,23 @@ or whose blocks are unnamed: `RowScaledNorm` /
     - **There is no `positive_block_limit` / `PositiveBlockLimit` / `turbulence.positive_k_limit` any
       more** — the fraction-to-the-boundary *global* cap, deleted 2026-10-14. Its trap, worth keeping: a
       global cap lets one near-zero cell throttle the whole step (on `bfs3d` one or two near-zero-k
-      side-wall corner cells set it to 0.001–0.002 and caused all of its redone attempts). Coupled steps
-      now carry `step_limit=None`; the generic `step_limit` seam, `StepOutcome.binding_limit`,
-      `stop_on_limit_stall` and the log's `limit` aside remain but nothing in the library installs a
-      whole-step limit (removal is a planned follow-up). Measurements and the A/B are in
-      `.claude/notes/solve-globalization-log.md`, "bfs3d's retried steps: the global k cap, replaced by a
-      per-cell clip with an omega bound (2026-10-14)". `backtracking_line_search(max_alpha=…)` still
-      caps every rung **including the growth rungs**, and its default is `inf`, **not 1** — a default of 1
-      silently disables the growth rungs.
-    - **BOTH strategies carry `step_limit` / `step_projection` (fixed 2026-08-15).** They were
-      `DualTimeStep` fields only, so choosing `PseudoTransientStep` silently gave up the guard. The guard
-      protects the **state**, not the march, so `PseudoTransientStep` applies the identical pair in the
-      identical order (projection first, then any limit). Both default `None`, the unconstrained step.
+      side-wall corner cells set it to 0.001–0.002 and caused all of its redone attempts). Measurements and
+      the A/B are in `.claude/notes/solve-globalization-log.md`, "bfs3d's retried steps: the global k cap,
+      replaced by a per-cell clip with an omega bound (2026-10-14)".
+    - **There is no whole-step limit seam either (deleted 2026-10-14, the same day, as unused):** no
+      `step_limit` on `PseudoTransientStep` / `DualTimeStep` / `shifted_step`, no
+      `backtracking_line_search(max_alpha=)`, no `StepOutcome`/`StepReport.binding_limit`, no
+      `newton_march(stop_on_limit_stall=)` and no `_limit_collapsing` (the fraction-to-the-boundary
+      lock-up stop, which only a narrowing cap could trip). A constraint the residual cannot express goes
+      in `step_projection`, per entry. If a whole-step cap is ever wanted again, restore it from git
+      history with its two traps: its "no cap" must not be `1.0` if anything can ask for a step longer
+      than the full one (a `1.0` default is what silently disabled the line search's growth rungs from
+      2026-08-15 until they were deleted as inert, 2026-10-14); and a fraction-to-the-boundary cap collapses
+      geometrically once a cell sits on the boundary, which is what `stop_on_limit_stall` existed to end.
+    - **BOTH strategies carry `step_projection` (fixed 2026-08-15).** It was a `DualTimeStep` field
+      only, so choosing `PseudoTransientStep` silently gave up the guard. The guard protects the
+      **state**, not the march, so `PseudoTransientStep` applies it identically. Default `None`, the
+      unconstrained step.
     - Why not a log variable for `k`: `k = 0` is the physical no-slip wall condition, so `log k` is
       singular exactly where the mesh is finest (recorded and measured in `.claude/rules/turbulence.md`
       — the full-log form descends then freezes). `log(k+1)` is regular there but bounds `k > −1`, not

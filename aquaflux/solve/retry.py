@@ -106,8 +106,8 @@ class RetryPolicy:
 
         It catches the failure a cycle count cannot see. A step length of essentially zero is as dead
         as an expensive one and is invisible to the cost trigger, because the solves are *cheap* -- the
-        correction simply cannot be followed, either because it does not descend or because a
-        positivity cap admits almost none of it. Measured on a three-dimensional coupled march: four
+        correction simply cannot be followed. Measured on a three-dimensional coupled march (one that
+        still capped the whole step for positivity, a cap since removed): four
         consecutive steps each ran a full inner loop at 5-12 cycles, moved the residual not at all, and
         escaped only once the step control's own backoff had doubled the shift four times, one step per
         doubling. Escalating instead does those doublings as discarded attempts of a single step.
@@ -312,27 +312,10 @@ class RetryPolicy:
             return "diverged"
         if bool(outcome.reached_target):
             return None
-        # ...and step length is a reason WHATEVER collapsed it, including an injected constraint. That
-        # is not an oversight: gating it on `binding_limit == 1` was tried and is a regression.
-        # MEASURED -- the one escalation of an entire coupled RANS march fired at a step whose cap was
-        # 4.37e-10, and suppressing it cost 8 steps and 199 s end to end. (The mechanism usually offered
-        # for the gate, that more damping tightens such a cap, is not measurable from a march LOG --
-        # only the accepted attempt's cap is recorded there. It IS measurable if the limiter's inputs
-        # are dumped per call, and when that was done the answer was that `d(cap)/d(shift)` has NO FIXED
-        # SIGN at a fixed state: doubling the shift narrowed the cap ~9x on one state and widened it
-        # ~3x on another, and on a third the binding cell changed between attempts, so consecutive caps
-        # did not measure the same quantity. Rest the decision on the A/B above, not on a mechanism --
-        # in either direction.)
-        #
-        # What damping cannot do is un-pin a cell already ON the boundary, WITH AN UNFLOORED LIMITER:
-        # the room is `phi_i / |delta_i|`, so once the constrained entry is driven to (almost) zero the
-        # cap is small however small the correction gets, and the fraction-to-the-boundary rule then
-        # shrinks it by a fixed factor per step. Note this is exactly the unfloored case -- give the
-        # limiter a `floor` and the room becomes `(phi_i + floor)/|delta_i|`, which a smaller correction
-        # DOES widen. It does not rescue the cell, though: the floored rule leaves `(phi_i + floor)`
-        # decaying by that same fixed factor per clipped step, so the collapse restarts a fixed number
-        # of decades later. That failure is not this predicate's to catch -- the march's stall guard
-        # ends the segment instead.
+        # ...and step length is a reason whatever collapsed it. The march once ran a whole-step
+        # positivity cap, and gating this on the cap not binding was tried and was a regression: the
+        # one escalation of an entire coupled RANS march fired at a capped step, and suppressing it cost
+        # 8 steps and 199 s end to end. No step carries such a cap now, so alpha is the descent test's.
         if self.escalates and self.on_alpha is not None and float(outcome.alpha) <= self.on_alpha:
             return "alpha"
         # Last, and deliberately last: a step that merely cost too much is the weakest of the three
