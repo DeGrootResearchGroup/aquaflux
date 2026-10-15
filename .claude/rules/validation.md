@@ -305,6 +305,12 @@ cannot be written. The guard is what catches the next module that does branch.
   `MultipleCorrectionGradient` at a **uniform reach of 3**: under that scheme `probe_reach_audit.py` finds
   p, k and omega carrying 1.1e-3 / 6.7e-5 / 3.9e-5 of their norm beyond reach 2, so no column may be
   shortened. Reach 4 is unaudited (the harness's widest pattern is 3).
+  ⚠️ **"No column may be shortened" was an exact-recovery rule, and pitzDaily now breaks it on purpose
+  (2026-10-14):** it probes every column at reach 2 inside its reach-3 pattern, folding ~4e-4 of the
+  Jacobian's norm onto near entries, and its march is unchanged (18 steps, 123 restart cycles, `x_r/h`
+  8.0686, as uniform reach 3 and reach 4) for a probe 40 % cheaper. The flow block is SIMPLE-smoothed and
+  no factorization runs on that case; the folding that broke bfs3d's `p` column (#191) was a zero-fill
+  factorization's. bfs3d's own answer is measured separately (`solve-direct-preconditioners.md`).
 
 ## A validation case can collide with a test tier, or a test tier with another tier (both now closed)
 
