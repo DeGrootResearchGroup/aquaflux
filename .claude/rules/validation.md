@@ -310,7 +310,9 @@ cannot be written. The guard is what catches the next module that does branch.
   Jacobian's norm onto near entries, and its march is unchanged (18 steps, 123 restart cycles, `x_r/h`
   8.0686, as uniform reach 3 and reach 4) for a probe 40 % cheaper. The flow block is SIMPLE-smoothed and
   no factorization runs on that case; the folding that broke bfs3d's `p` column (#191) was a zero-fill
-  factorization's. bfs3d's own answer is measured separately (`solve-direct-preconditioners.md`).
+  factorization's. **bfs3d's answer is no** (2026-10-15, PR #722): the same colouring took it from 18
+  steps / 137 cycles / 522 s to 21 / 216 / 697 s, same `x_r/h` 8.361, so its uniform reach 3 stands
+  (`solve-direct-preconditioners.md` has the table).
 
 ## A validation case can collide with a test tier, or a test tier with another tier (both now closed)
 
