@@ -343,6 +343,13 @@ coloured probe still depends on it (as the complete LU did until it was deleted,
       the previous refit's far values from the folded near entries was tried statically and is NOT worth
       building: between refits the far values change about as much as they are large, so the correction
       cut the per-block error by at most ~2× and in some blocks not at all.
+      **At ZERO shift — the adjoint's operator — the shortened probe costs 7 % forward and nothing
+      transposed** (`zero_shift_arms.py` at the converged root `state-00018` of the shipped march, operator
+      probed exact at uniform reach 3, preconditioner as the case configures it, GMRES restart 30 to 1e-8 on
+      the true residual, same machine): uniform 262 / 283 applies (forward / transposed), reach-2 colouring
+      280 / 284, both converged. ⚠️ The harness's `splitfloor` arm fails identically in both (621 applies,
+      true 3e-2 to 1e-1): `compare.PC_BETA_FLOOR` is `None` since #712, so that arm is built at an unset
+      shift and measures nothing about a floor.
       **The pattern stays at reach 3 for the reason the bullet below gives** — the coarse space reads it;
       only the colouring is shortened. Harnesses: `validation/pitzdaily_openfoam/compare.py` (the arms are
       `case.yaml` edits; a reach-4 pattern is `PITZ_STENCIL_REACH=4`).
