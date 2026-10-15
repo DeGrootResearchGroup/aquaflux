@@ -18,6 +18,11 @@ The same sensitivity makes two marches of such checkouts different marches from 
 ``BFS3D_SPLIT_TIMING_SAVE`` (a ``.npz`` path) saves both outputs and the level table, so the two runs
 can be checked equal.
 
+``BFS3D_SPLIT_TIMING_PRECISION=float32`` casts the split's arrays and the vector before timing (float64
+default), and reports how far its apply moves from the float64 one. ``BFS3D_SPLIT_TIMING_OPERATORS``
+(a ``.npz`` path) writes the split's sparse operators for
+``validation/padded_row_forms.py``, which times each form their product could take.
+
 Usage
 -----
     BFS3D_SPLIT_TIMING_STATE=validation/bfs3d_openfoam/checkpoints/state-00018.npz \\
@@ -34,6 +39,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 
 import aquaflux  # noqa: E402  (enables x64)
 import compare  # noqa: E402
@@ -44,6 +50,7 @@ import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.turbulence import open_session  # noqa: E402
+from padded_row_forms import in_precision, save_operators  # noqa: E402
 
 REPEATS = int(os.environ.get("BFS3D_SPLIT_TIMING_REPEATS", "10"))
 
@@ -82,7 +89,7 @@ def _levels(name, inverse):
 def main():
     print(
         f"[configuration] aquaflux {Path(aquaflux.__file__).parents[1]}, jax {jax.__version__}, "
-        f"{jax.default_backend()}, {os.cpu_count()} cpus",
+        f"{jax.default_backend()}, {os.cpu_count()} cpus, XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r}",
         flush=True,
     )
     coupled = compare.build_case()["coupled"]
@@ -100,7 +107,20 @@ def main():
     leading = _levels("leading", inverse._leading)
     trailing = _levels("trailing", inverse._trailing)
     split = traced_field_split(inverse)
+    precision = jnp.dtype(os.environ.get("BFS3D_SPLIT_TIMING_PRECISION", "float64"))
     v = jnp.asarray(np.random.default_rng(0).standard_normal(split.groups.n_dofs))
+    operators = os.environ.get("BFS3D_SPLIT_TIMING_OPERATORS")
+    if operators:
+        save_operators(split, operators)
+    if precision != jnp.float64:
+        reference = np.asarray(eqx.filter_jit(lambda s, x: s.apply(x))(split, v))
+        split, v = in_precision(split, precision), v.astype(precision)
+        narrowed = np.asarray(eqx.filter_jit(lambda s, x: s.apply(x))(split, v), dtype=np.float64)
+        print(
+            f"precision {precision}: apply differs from float64 by "
+            f"{np.max(np.abs(narrowed - reference)) / np.max(np.abs(reference)):.1e} (relative max)",
+            flush=True,
+        )
 
     forward = eqx.filter_jit(lambda s, x: s.apply(x))
     transposed = eqx.filter_jit(lambda s, x: jax.linear_transpose(s.apply, x)(x)[0])

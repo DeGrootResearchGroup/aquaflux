@@ -44,12 +44,14 @@ diagonal rescaling in the apply.
 from __future__ import annotations
 
 import heapq
+import os
 import warnings
 import zlib
 from collections.abc import Callable, Hashable, Sequence
 from typing import NamedTuple
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.linalg as sla
@@ -1400,6 +1402,10 @@ class _PaddedRowOperator(eqx.Module):
         jnp.ndarray
     )  # (n_rows,) stored entries in each row; the slots after them are padding
     shape: tuple[int, int] = eqx.field(static=True)
+    # PROTOTYPE (stored transpose): A^T in the same padded form, applied as a gather when the product
+    # is transposed, instead of the scatter-add jax.linear_transpose derives from the forward gather.
+    t_columns: jnp.ndarray | None = None
+    t_values: jnp.ndarray | None = None
 
     @classmethod
     def from_scipy(cls, a: sp.spmatrix, width: int | None = None) -> _PaddedRowOperator:
@@ -1447,11 +1453,26 @@ class _PaddedRowOperator(eqx.Module):
         values = np.zeros((a.shape[0], width), dtype=a.dtype)
         columns[rows, slots] = a.indices
         values[rows, slots] = a.data
+        t_columns = t_values = None
+        if _STORE_TRANSPOSE:
+            t = sp.csr_matrix(a.T)
+            t.sort_indices()
+            t_lengths = np.diff(t.indptr)
+            t_width = max(int(t_lengths.max()) if t_lengths.size else 0, 1)
+            t_rows = np.repeat(np.arange(t.shape[0]), t_lengths)
+            t_slots = np.arange(t.nnz) - t.indptr[t_rows]
+            t_columns = np.zeros((t.shape[0], t_width), dtype=np.int32)
+            t_values = np.zeros((t.shape[0], t_width), dtype=a.dtype)
+            t_columns[t_rows, t_slots] = t.indices
+            t_values[t_rows, t_slots] = t.data
+            t_columns, t_values = jnp.asarray(t_columns), jnp.asarray(t_values)
         return cls(
             columns=jnp.asarray(columns),
             values=jnp.asarray(values),
             row_lengths=jnp.asarray(lengths.astype(np.int32)),
             shape=a.shape,
+            t_columns=t_columns,
+            t_values=t_values,
         )
 
     @property
@@ -1466,7 +1487,14 @@ class _PaddedRowOperator(eqx.Module):
 
     def apply(self, x: jnp.ndarray) -> jnp.ndarray:
         """``A x``. Linear and transposable, so the adjoint's transpose solve goes through it."""
-        return jnp.sum(self.values * x[self.columns], axis=1)
+        if self.t_columns is None:
+            return jnp.sum(self.values * x[self.columns], axis=1)
+        return jax.custom_derivatives.linear_call(
+            _padded_product,
+            _padded_transposed_product,
+            (self.columns, self.values, self.t_columns, self.t_values),
+            x,
+        )
 
     def to_scipy(self) -> sp.csr_matrix:
         """The exact inverse of :meth:`from_scipy`: this operator as a host ``scipy`` CSR matrix.
@@ -1488,6 +1516,19 @@ class _PaddedRowOperator(eqx.Module):
         """The operator's diagonal, read off the stored entries (a padding slot holds zero)."""
         rows = jnp.arange(self.shape[0])[:, None]
         return jnp.sum(jnp.where(self.columns == rows, self.values, 0.0), axis=1)
+
+
+_STORE_TRANSPOSE = os.environ.get("AQUAFLUX_PROTOTYPE_STORED_TRANSPOSE", "0") == "1"
+
+
+def _padded_product(arrays, x):
+    columns, values, _, _ = arrays
+    return jnp.sum(values * x[columns], axis=1)
+
+
+def _padded_transposed_product(arrays, y):
+    _, _, t_columns, t_values = arrays
+    return jnp.sum(t_values * y[t_columns], axis=1)
 
 
 def _coo_apply(

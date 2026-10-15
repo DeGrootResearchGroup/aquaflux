@@ -10,6 +10,11 @@ long the first call of each took (the compilation).
 Run it in two checkouts to compare them; it saves both outputs to ``PITZ_SPLIT_TIMING_SAVE`` (a ``.npy``
 path) when that is set, so the two can be checked equal.
 
+``PITZ_SPLIT_TIMING_PRECISION=float32`` casts the split's arrays and the vector before timing (float64
+default), and reports how far its apply moves from the float64 one. ``PITZ_SPLIT_TIMING_OPERATORS``
+(a ``.npz`` path) writes the split's sparse operators for
+``validation/padded_row_forms.py``, which times each form their product could take.
+
 Usage
 -----
     validation/run_case.sh validation/pitzdaily_openfoam/split_apply_timing.py --wait
@@ -25,6 +30,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1]))
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 
 import aquaflux  # noqa: E402  (enables x64)
 import compare  # noqa: E402
@@ -35,6 +41,7 @@ import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.turbulence import open_session  # noqa: E402
+from padded_row_forms import in_precision, save_operators  # noqa: E402
 
 REPEATS = int(os.environ.get("PITZ_SPLIT_TIMING_REPEATS", "15"))
 
@@ -59,7 +66,7 @@ def _first_call(f, *args):
 def main():
     print(
         f"[configuration] aquaflux {Path(aquaflux.__file__).parents[1]}, jax {jax.__version__}, "
-        f"{jax.default_backend()}, {os.cpu_count()} cpus",
+        f"{jax.default_backend()}, {os.cpu_count()} cpus, XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r}",
         flush=True,
     )
     coupled = compare.build_case()["coupled"]
@@ -67,7 +74,20 @@ def main():
     session = open_session(compare.SOLVER.settings()["preconditioner"], coupled)
     session.build(seed, dual_time=compare.SOLVER.dual_time)
     split = traced_field_split(session.preconditioner.inverse)
+    precision = jnp.dtype(os.environ.get("PITZ_SPLIT_TIMING_PRECISION", "float64"))
     v = jnp.asarray(np.random.default_rng(0).standard_normal(split.groups.n_dofs))
+    operators = os.environ.get("PITZ_SPLIT_TIMING_OPERATORS")
+    if operators:
+        save_operators(split, operators)
+    if precision != jnp.float64:
+        reference = np.asarray(eqx.filter_jit(lambda s, x: s.apply(x))(split, v))
+        split, v = in_precision(split, precision), v.astype(precision)
+        narrowed = np.asarray(eqx.filter_jit(lambda s, x: s.apply(x))(split, v), dtype=np.float64)
+        print(
+            f"precision {precision}: apply differs from float64 by "
+            f"{np.max(np.abs(narrowed - reference)) / np.max(np.abs(reference)):.1e} (relative max)",
+            flush=True,
+        )
 
     forward = eqx.filter_jit(lambda s, x: s.apply(x))
     transposed = eqx.filter_jit(lambda s, x: jax.linear_transpose(s.apply, x)(x)[0])
