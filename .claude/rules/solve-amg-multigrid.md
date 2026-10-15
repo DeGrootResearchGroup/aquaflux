@@ -2068,8 +2068,19 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     section (1.4 ms on a 4.2M-entry block) was a different machine**, so re-measure there before
     quoting this gain for it: `validation/pitzdaily_openfoam/csr_kernel_precision.py` times the
     padded-row, CSR and segment-sum forms side by side.
+  - **bfs3d, at ONE fixed state (2026-10-15, `validation/bfs3d_openfoam/split_apply_timing.py`,
+    same Linux machine, best of 10, two runs):** both checkouts build the identical split (every level
+    equal, outputs within 9e-16); apply **779–791 → 606–693 ms**, transpose **870–918 → 911–1017 ms** — the
+    forward gain is 1.14–1.28× and the transpose gains nothing, since the transpose of a padded-row gather
+    is a scatter-add over `n_rows * width` slots. On the project owner's Apple M3 Pro (jax 0.10.2, PR #721)
+    the pitzDaily kernel is 2.1× faster forward and 1.3× transposed, but a bfs3d march ran **8.5 % slower
+    per step** (529 → 574 s). ⚠️ That march pair compared two DIFFERENT hierarchies (see `validation.md`,
+    "bfs3d's leading coarsening moves under rounding"), so it separates neither format nor hierarchy;
+    the fixed-state harness is the measurement that does, and it is unmeasured on macOS.
   - **What the padding costs:** storage `n_rows * width`. On pitzDaily's split the fine levels pad
-    3–5 %, aggregation's coarse levels up to 1.95× (they are small), 1.09× over the whole split. An
+    3–5 %, aggregation's coarse levels up to 1.95× (they are small), 1.09× over the whole split. On
+    bfs3d's: fine levels 1.11×, the leading coarse levels 1.7–2.4×, the trailing ones' deepest up to
+    6.6×, about 1.3× over the two hierarchies. An
     operator with a few very wide rows (a dense constraint row) would pay that width on every row; no
     level operator here has one.
   - **The reduction form, not an unrolled sum.** `vectors.dot` unrolls its sum because a

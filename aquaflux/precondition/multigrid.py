@@ -1380,9 +1380,11 @@ class _PaddedRowOperator(eqx.Module):
 
     **What the padding costs.** A row is as wide as the widest row of its operator, so the storage is
     ``n_rows * width`` rather than the entry count. On a cell-graph operator every row of the fine
-    level has nearly the same width (3-5 % padding on that hierarchy); aggregation's coarse levels
-    vary more (up to 1.95x) but are small. An operator with a few very wide rows -- a dense constraint
-    row -- would pay that width on every row, and this form is the wrong one for it.
+    level has nearly the same width (3-5 % padding on that hierarchy, 11 % on a 3D hexahedral one);
+    aggregation's coarse levels vary more (up to 1.95x on the 2D hierarchy and 6.6x on the deepest
+    levels of the 3D one) but are small, so a whole 3D field split stores 1.3x its entries. An operator
+    with a few very wide rows -- a dense constraint row -- would pay that width on every row, and this
+    form is the wrong one for it.
 
     Kept as its own object rather than loose arrays on each level because both level kinds carry one
     and both apply it the same way; the arrays never travel without each other.

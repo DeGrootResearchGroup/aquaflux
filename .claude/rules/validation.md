@@ -298,6 +298,19 @@ cannot be written. The guard is what catches the next module that does branch.
   rebuilding it is not a converged root, and measuring "at the converged root" against it silently answers
   a different question: the zero-shift coupled Jacobian is nearly singular at a self-start and is not at a
   root. Read what wrote a state before trusting it.
+- **⚠️ bfs3d's leading coarsening moves under ROUNDING, so a bfs3d march A/B of two checkouts that
+  differ in rounding is not a controlled pair (found 2026-10-15, PR #721).** The `[u, v, w, p]` block
+  coarsens at `strength_threshold` 0.25, reading values. #721 changed only how a sparse product is
+  stored; that moved the hybrid start by ~1e-13 (its potential-flow solve runs multigrid cycles on such
+  operators), and bfs3d's leading
+  hierarchy by tens of aggregates (26252 against 26248 dofs at level 1, 284 against 236 at the bottom;
+  applies 2.5 % apart), so the two marches differed from step 1 (`R` 0.1468 against 0.1474) and took
+  137 against 129 cycles. Built from the SAME state, the two checkouts' hierarchies were identical and
+  their applies agreed to 4e-16. pitzDaily's march happened not to move. **Any change that moves
+  rounding anywhere upstream of the first fit does this** -- a different gradient inverse, a jax upgrade.
+  Compare a preconditioner's cost at one fixed checkpoint
+  (`bfs3d_openfoam/split_apply_timing.py` with `BFS3D_SPLIT_TIMING_STATE`; its level table must agree
+  between the runs), and read a march pair's step and cycle counts as two samples, not as a difference.
 - **A per-column probe reach is licensed by the scheme AND the split, so re-audit it when either changes.**
   `bfs3d` shipped `COLUMN_REACH = (3,3,3,3,2,2)` under `CorrectedGreenGauss`, licensed for the field split
   only (a flow-first split never applies `dR_flow/dturb`; a monolithic factorization does, and a short
