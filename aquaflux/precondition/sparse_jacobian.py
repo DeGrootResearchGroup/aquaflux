@@ -102,8 +102,11 @@ class ColumnProbePlan:
     a near entry rather than dropped. Where the column genuinely has nothing that far out, there is
     nothing to fold, and the recovered matrix is the same one a full-reach probe returns.
 
-    So a shorter reach is only admissible for a column measured to carry no mass beyond it. Choosing one
-    on the assumption that the far couplings are "small" silently perturbs the near entries instead.
+    So a shorter reach recovers the matrix exactly only for a column measured to carry no mass beyond
+    it. Choosing one where the far couplings are merely small perturbs the near entries instead, by the
+    folded mass -- a trade some preconditioners take with no change to the solve and others do not
+    (an incomplete factorization of the perturbed pattern can fail outright), so it is measured per
+    case, never assumed.
 
     Attributes
     ----------
@@ -265,8 +268,8 @@ def column_probe_plan(
     One colouring is built per *distinct* reach rather than per field, since fields sharing a reach share
     a colouring.
 
-    **Only shorten a column measured to carry no mass beyond its reach** — see
-    :class:`ColumnProbePlan` for why a column with far couplings is corrupted rather than truncated.
+    **A column with mass beyond its reach is perturbed, not truncated** — see :class:`ColumnProbePlan`.
+    Shorten one only where that has been measured to leave the solve unchanged.
     Which columns qualify depends on the discretization: a first-order-upwind scalar with a
     non-orthogonal diffusion correction reaches two, while a second-order upwind reconstruction on the
     same field reaches three. It is therefore a property of the assembled case, not a library constant.

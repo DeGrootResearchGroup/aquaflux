@@ -30,6 +30,9 @@ verdict somewhere in this project):
 * the Jacobian probed at ``compare.STENCIL_REACH``, which is measured exact on this mesh -- at the
   shorter reach the colouring folds far couplings onto near entries and every arm would be ranked on
   a matrix that is not the Jacobian;
+* the PRECONDITIONER probed as the case ships it (``case.yaml``'s probe, which colours every column at
+  reach 2 inside the reach-3 pattern), so its folded matrix is measured against the operator above
+  rather than against itself;
 * one preconditioner in memory at a time.
 
 ⚠️ **The state is the initial one, and that is a HARD state rather than the adjoint's own.** No
@@ -59,7 +62,6 @@ import numpy as np  # noqa: E402
 import scipy.sparse.linalg as spla  # noqa: E402
 from aquaflux.precondition import (
     FieldSplit,
-    JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
     materialize_block_jacobian,
@@ -128,7 +130,8 @@ def field_split_arm(coupled, state, beta):
             # The case's own selection, imported rather than re-branched here: a second copy of that
             # leading-inverse choice is how two files that must agree stop agreeing.
             FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING)),
-            probe=JacobianProbeSpec(stencil_reach=compare.STENCIL_REACH),
+            # The case's own probe, not the operator's: what ships is what the adjoint would meet.
+            probe=compare.SOLVER.preconditioner.probe,
             build_beta=beta,
         ),
         coupled,
@@ -201,7 +204,8 @@ def main() -> None:
     print(
         f"pitzDaily, {a.shape[0]} dofs, reach {compare.STENCIL_REACH}, nnz {a.nnz / 1e6:.2f} M; "
         f"zero shift; gmres rtol {RTOL}, restart {RESTART}; "
-        f"leading inverse {compare.FLOW_INVERSE}",
+        f"leading inverse {compare.FLOW_INVERSE}; preconditioner probe "
+        f"{compare.SOLVER.preconditioner.probe}",
         flush=True,
     )
 
