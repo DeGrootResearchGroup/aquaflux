@@ -31,7 +31,7 @@ from typing import Protocol
 import equinox as eqx
 import jax.numpy as jnp
 
-from .adaptive_tolerance import AdaptiveLinearTolerance
+from .adaptive_tolerance import DEFAULT_ADAPTIVE_TOLERANCE, AdaptiveLinearTolerance
 from .convergence import Convergence, ResidualMeasures
 from .march import ResidualHomotopy, newton_march
 from .norm import norm_of_residual
@@ -249,7 +249,7 @@ def staged_march(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
-    adaptive_tolerance: AdaptiveLinearTolerance | None = None,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = DEFAULT_ADAPTIVE_TOLERANCE,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,

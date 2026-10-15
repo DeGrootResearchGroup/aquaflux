@@ -84,9 +84,9 @@ or whose blocks are unnamed: `RowScaledNorm` /
     detail should be fed from it and `coupled_residuals` deleted as dominated is an open question, not
     decided here.
 
-## `newton_march(adaptive_tolerance=)` and `StepReport.linear_tolerance` (BUILT 2026-10-15, #645)
+## `newton_march(adaptive_tolerance=)` and `StepReport.linear_tolerance` (BUILT 2026-10-15, #645; default)
 
-An opt-in `AdaptiveLinearTolerance` varies the relative tolerance each step's linear solve stops at —
+`AdaptiveLinearTolerance` (the default on every march since 2026-10-15, `DEFAULT_ADAPTIVE_TOLERANCE`; `None` switches it off) varies the relative tolerance each step's linear solve stops at —
 the rule, its measurements and why it is not Eisenstat–Walker are in `solve.md`'s contract entry. On the
 march side: the solver's base tolerance is read and converted to a float64 array leaf once, before the
 first step; each step (and a redo of it) runs `with_relative_tolerance(solver, tolerance)`; after the

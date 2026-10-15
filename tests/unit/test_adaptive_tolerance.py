@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import lineax as lx
 import pytest
 from aquaflux.solve import (
+    DEFAULT_ADAPTIVE_TOLERANCE,
     AdaptiveLinearTolerance,
     DampedNewtonStep,
     PseudoTransientStep,
@@ -180,15 +181,14 @@ def _loose_step(beta0: float = 0.5, exponent: float = 2.0) -> PseudoTransientSte
 def test_a_march_limited_by_its_linear_solve_converges_in_fewer_steps_with_it() -> None:
     """At a fixed tolerance of 0.3 the tail is linear; tightened in the tail it is superlinear.
 
-    Measured on this system: 12 steps at 0.3 throughout, 5 with the rule, both to the same root.
+    Measured on this system: 12 steps at 0.3 throughout, 5 with the rule, both to the same root. The
+    rule is the march's default, so it is switched off for the fixed arm.
     """
     residual, phi0 = _coupled_cubic(40), jnp.zeros(40)
     common = dict(max_steps=60, rtol=1e-10, atol=1e-12)
 
-    fixed = newton_march(_loose_step(), residual, phi0, **common)
-    adaptive = newton_march(
-        _loose_step(), residual, phi0, adaptive_tolerance=AdaptiveLinearTolerance(), **common
-    )
+    fixed = newton_march(_loose_step(), residual, phi0, adaptive_tolerance=None, **common)
+    adaptive = newton_march(_loose_step(), residual, phi0, **common)
 
     assert fixed.converged and adaptive.converged
     assert len(adaptive.reports) <= len(fixed.reports) - 4
@@ -254,17 +254,34 @@ def test_a_tolerance_that_changes_every_step_does_not_recompile_the_step() -> No
     assert len(_TRACES) == compiled  # ...and no step recompiled for it
 
 
-def test_a_march_whose_solver_has_no_relative_tolerance_refuses_the_setting() -> None:
-    with pytest.raises(TypeError, match=r"adaptive_tolerance varies .* which has none to vary"):
-        newton_march(
-            DampedNewtonStep(),
-            _Arctan(jnp.array([0.0])),
-            jnp.array([0.5]),
-            max_steps=3,
-            rtol=1e-10,
-            atol=1e-12,
-            adaptive_tolerance=AdaptiveLinearTolerance(),
-        )
+def test_a_march_whose_solver_has_no_relative_tolerance_solves_to_its_own() -> None:
+    """A stock or direct solver has no single tolerance to vary, so the default rule leaves it alone.
+
+    The damped Newton step's solver is a stock GMRES; its reports claim no tolerance, and the march is
+    the one it would be with the rule switched off.
+    """
+    args = (DampedNewtonStep(), _Arctan(jnp.array([0.0, 0.5])), jnp.array([0.9, 1.1]))
+    common = dict(max_steps=30, rtol=1e-10, atol=1e-12)
+    default = newton_march(*args, **common)
+    off = newton_march(*args, adaptive_tolerance=None, **common)
+    assert default.converged
+    assert all(math.isnan(report.linear_tolerance) for report in default.reports)
+    assert [r.residual_norm for r in default.reports] == [r.residual_norm for r in off.reports]
+
+
+def test_every_march_runs_the_default_rule_unless_told_otherwise() -> None:
+    """The rule reaches a march nobody configured, and ``None`` switches it off."""
+    residual, phi0 = _coupled_cubic(40), jnp.zeros(40)
+    common = dict(max_steps=60, rtol=1e-10, atol=1e-12)
+    default = newton_march(_loose_step(), residual, phi0, **common)
+    explicit = newton_march(
+        _loose_step(), residual, phi0, adaptive_tolerance=DEFAULT_ADAPTIVE_TOLERANCE, **common
+    )
+    assert DEFAULT_ADAPTIVE_TOLERANCE == AdaptiveLinearTolerance()
+    assert [r.linear_tolerance for r in default.reports] == [
+        r.linear_tolerance for r in explicit.reports
+    ]
+    assert min(r.linear_tolerance for r in default.reports) < 0.3
 
 
 class _GrowingScale(eqx.Module):

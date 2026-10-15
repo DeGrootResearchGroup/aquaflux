@@ -234,7 +234,8 @@ class _March(SolverSpec):
         When and how a bad step is redone; unset, never.
     adaptive_tolerance : AdaptiveLinearTolerance or None
         How tightly each step solves its linear system, adapted from how the previous step went; unset,
-        every step solves to the linear-solve regime's own tolerance.
+        the library's default (``solve.DEFAULT_ADAPTIVE_TOLERANCE``). To solve every step to the regime's
+        own tolerance, set one with both rules off (``after_setback: null, tail_gate: null``).
     """
 
     max_steps: int | None = None

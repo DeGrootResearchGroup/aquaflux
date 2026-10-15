@@ -496,7 +496,7 @@ A held bulk velocity (a `MassFlow`-driven problem, bordered by `flow.MassFlowBor
 family's regime: its Euclidean `_CONSTRAINED_LINEAR_SOLVE` (1e-2) existed only for want of a bordered
 row-scaled measure and was deleted with `mass_flow_coupled_continuation` in #541.
 
-Every regime also carries `stop` (`"lineax"` unset), the rule a solve ends by — see measurement
+Every regime also carries `stop` (`"residual"` unset since #645's default flip, 2026-10-15), the rule a solve ends by — see measurement
 discipline item 5 for what `lineax`'s costs and `residual_stop_gmres` for the alternative.
 
 Both coupled builders take the regime as one value, `linear_solve=LinearSolveSettings(rtol=…, restart=…,
@@ -822,7 +822,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     behavioural check that **a better preconditioner strictly lowers the count** (otherwise it measures
     nothing).
 - **`adaptive_tolerance.py` — `AdaptiveLinearTolerance`, the relative tolerance each step of a march
-  solves to, varied step by step (BUILT 2026-10-15, #645, OPT-IN).** `newton_march(adaptive_tolerance=…)`,
+  solves to, varied step by step (BUILT 2026-10-15, #645; the DEFAULT on every march since the same day,
+  `DEFAULT_ADAPTIVE_TOLERANCE`).** `newton_march(adaptive_tolerance=…)`,
   threaded through `staged_march`, `solve_coupled`, `solve_flow_march` (and `solve_reynolds_continuation` /
   `solve_reynolds_ramp` through `**solve_kwargs`) and the case file's `_March` (both march kinds, a
   registered kind in `case/spec.py`). It mirrors `RetryPolicy`'s reach; `RootSolver` takes neither.
@@ -854,7 +855,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `atol` of a `_RelativeResidualGMRES` by `eqx.tree_at`); the march converts the base once, before the
     first step, so every later value is a data change and `_march_step` a compile-cache hit. A Python float
     would be static and recompile per value. `linear.relative_tolerance(solver)` reads it (`None` for any
-    other solver); a march given the setting with a solver that has none raises `TypeError` before step 1.
+    other solver, which the march then solves to its own tolerance; it raised `TypeError` until the
+    setting became the default).
     `tight_solver` (the divergence retry) is never varied.
   - `StepReport.linear_tolerance` records the tolerance each step ran at (`nan` without the setting); it
     reaches `StepHistory` automatically.
@@ -869,10 +871,15 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     fails — ledger entry. pitzDaily `case.yaml` (residual stop already shipped): 18 → 21 steps, 123 → 112
     cycles, 553 → 566 s, same `x_r/h` 8.0686 — a wash there; the setback rule fired on steps 3–18 because
     a dual-time step's `alpha` is the inner minimum and sits at 0.5 / 0.25 through the ramp.
-  - **Not a library default and in no case file** (shipped-default changes are the project owner's).
-    bfs3d has no arm yet. Pinned by `tests/unit/test_adaptive_tolerance.py` (the rule on hand-computed
-    numbers, the helpers, the march's tolerance replayed report by report, a setback step, the compile
-    cache, the refusal; twelve mutations each turn a test red) and the reach tests in
+  - **The default (2026-10-15, the project owner's request, with the residual stop):** every march
+    defaults to `DEFAULT_ADAPTIVE_TOLERANCE` and applies it wherever its solver is a relative-residual
+    GMRES; any other solver (a stock or direct one, a `RootSolver`'s default) keeps its own tolerance,
+    with no refusal. `None` switches it off in Python; a case file (where `None` means unset) writes one
+    with both rules off. The case layer passes nothing when the file sets nothing, so the library default
+    applies. The slow tier passes 39 of 39 under both defaults; bfs3d has no arm yet. Pinned by
+    `tests/unit/test_adaptive_tolerance.py` (the rule on hand-computed numbers, the helpers, the march's
+    tolerance replayed report by report, a setback step, the compile cache, the default reaching an
+    unconfigured march, a stock solver left alone; each mutation-checked) and the reach tests in
     `test_case_solver.py`, `test_coupled_rans.py` and `tests/integration/test_flow_march.py`.
 
 - **`newton.py` — BUILT: `newton_step` / `newton_correction`, one correction each. There is NO
@@ -1145,12 +1152,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      787 s at 4 against the shipped stop's 1197 s, same `x_r/h`, no retry (refresh 2 added one). **Selected by
      `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
      case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
-     regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **The default is
-     still `lineax`**: flipping it is a shipped-default change awaiting the project owner, its reported count
-     is cycles RUN (one more than `lineax`'s for the same work) so the cost triggers fire at a different
-     difficulty, `max_restarts` counts cycles under it rather than raw `lineax` steps, and forced as the default it fails three slow tests (linear convergence at the end of
-     the march, and one Reynolds-continuation march that goes erratic; #645). **`AdaptiveLinearTolerance`
-     (opt-in, 2026-10-15) is the forcing safeguard #645 asked for** — see its contract entry below. **pitzDaily's `case.yaml`
+     regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **It is the default
+     since 2026-10-15 (#645, the project owner's request, on a PR for testing bfs3d)**, together with
+     `AdaptiveLinearTolerance`, the forcing safeguard #645 asked for — see its contract entry below. Alone,
+     forced as the default, it failed four slow tests (linear convergence at the end of the march, and one
+     Reynolds-continuation march that goes erratic); with the adaptive tolerance all 39 pass. Its reported
+     count is cycles RUN (one more than `lineax`'s for the same work), so the cost triggers fire at a
+     different difficulty, and `max_restarts` counts cycles under it rather than raw `lineax` steps;
+     `stop: lineax` restores the old rule. **pitzDaily's `case.yaml`
      opts in** (`stop: residual`, 2026-10-09; `refresh_on_cycles` 2 then, 3 since a cost re-fit ends the step, #290, 2026-10-11 — see `.claude/notes/solve-open-directions.md` 6b). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered

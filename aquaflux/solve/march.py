@@ -49,7 +49,7 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
-from .adaptive_tolerance import AdaptiveLinearTolerance
+from .adaptive_tolerance import DEFAULT_ADAPTIVE_TOLERANCE, AdaptiveLinearTolerance
 from .convergence import MeasureBuilder
 from .linear import relative_tolerance, with_relative_tolerance
 from .norm import named_blocks, norm_of_residual
@@ -486,7 +486,7 @@ def newton_march(
     refresh_preconditioner: Callable[..., None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
     retry: RetryPolicy = NO_RETRIES,
-    adaptive_tolerance: AdaptiveLinearTolerance | None = None,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = DEFAULT_ADAPTIVE_TOLERANCE,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -655,9 +655,11 @@ def newton_march(
         Vary the relative tolerance each step's linear solve stops at, from how the previous step went:
         tighter after a step the line search cut back or whose residual rose, and tighter in a tail of
         full-length steps limited by their own solve (see :class:`~aquaflux.solve.AdaptiveLinearTolerance`).
-        Each step starts from the base tolerance the march's ``solver`` was built with, which must be a
-        relative-residual GMRES. A step's reduction is its reported residual over the one reported before
-        it. ``None`` (default) solves every step to the solver's own tolerance.
+        Each step starts from the base tolerance the march's ``solver`` was built with. Only a
+        relative-residual GMRES has a tolerance to vary; any other solver is solved to its own, whatever
+        this says. A step's reduction is its reported residual over the one reported before it. Default
+        :data:`~aquaflux.solve.DEFAULT_ADAPTIVE_TOLERANCE`; ``None`` solves every step to the solver's own
+        tolerance.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, called immediately before a step is redone. ``reason`` is
         ``"cycles"`` (the cost trigger, and the step was cut short), ``"alpha"`` (the step-length
@@ -707,15 +709,12 @@ def newton_march(
     if solver is None:
         solver = strategy.linear_solver()
     # The tolerance an adaptive rule varies is the solver's own, carried as an array from the first step
-    # so that every later value is a change of data and the compiled step a cache hit.
+    # so that every later value is a change of data and the compiled step a cache hit. A solver with no
+    # single relative tolerance (a stock or direct solver) has nothing to vary and keeps its own.
     base_tolerance = None if adaptive_tolerance is None else relative_tolerance(solver)
-    if adaptive_tolerance is not None:
-        if base_tolerance is None:
-            raise TypeError(
-                "adaptive_tolerance varies the relative tolerance of a relative-residual GMRES "
-                "(relative_residual_gmres or residual_stop_gmres), and this march's linear solver is a "
-                f"{type(solver).__name__}, which has none to vary."
-            )
+    if base_tolerance is None:
+        adaptive_tolerance = None
+    else:
         solver = with_relative_tolerance(solver, base_tolerance)
     tolerance = base_tolerance
     if stopping_step is not None and norm_builder is None:

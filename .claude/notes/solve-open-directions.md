@@ -196,7 +196,8 @@ default flip the case files would carry `stop: residual, refresh_on_cycles: 2` (
 re-measured there).
 
 **In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
-builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
+builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the library default became `residual`
+on 2026-10-15 (#645, with the adaptive tolerance).
 **pitzDaily opts in (2026-10-09, project owner's decision):** its `case.yaml` carries `stop: residual`
 and `refresh_on_cycles: 2`. ⚠️ So "the shipped `case.yaml`" in any pitzDaily entry dated before
 2026-10-09 means the `lineax` stop at `refresh_on_cycles` 3; `PITZ_FORWARD_STOP=lineax
@@ -248,9 +249,9 @@ went from ~2.8 to ~5.3 s. Compare bfs3d runs only within one commit. The refacto
 structural-pattern products of 868ab80/f7326c1 (on pitzDaily 0.88 -> 1.06 s per split refit), cached
 since 2026-10-13 (`StructuralPatterns`, `solve-amg-multigrid.md`: 0.83 s); the trajectory change is not
 explained by it and is not bisected.
-**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard,
-built opt-in 2026-10-15 as `AdaptiveLinearTolerance`; see below), the cost thresholds' re-calibration, a
-bfs3d arm with the setting, and the project owner's decision.
+**The default moved on 2026-10-15 (#645), with `AdaptiveLinearTolerance` as the forcing safeguard for
+the end-of-march failures below.** Still open: the cost thresholds' re-calibration under the new count,
+and a bfs3d arm with the adaptive tolerance (its file already ran the residual stop).
 
 **The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
 true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
@@ -284,8 +285,8 @@ pass under `lineax`:
   (`test_coupled_field_split.py`'s two channel marches, which errored, plus its adjoint test, and the
   Reynolds-continuation adjoint test). ⚠️ The first forced run, with the
   reduction re-measured in each step's own scales, still failed the Reynolds test (6.5e-3 at 60 target
-  steps): see `solve.md` for why the reduction is read report to report. Neither the stop nor the
-  setting is a default; bfs3d has no arm yet.
+  steps): see `solve.md` for why the reduction is read report to report. Both became the library
+  defaults the same day; bfs3d has no arm with the adaptive tolerance yet.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of

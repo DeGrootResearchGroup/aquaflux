@@ -230,7 +230,8 @@ The two marches share their settings, each a value of the solver library written
   {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
 - `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;
 - `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`:
-  its tolerance, restart length and cap, and `stop`, which rule ends a solve;
+  its tolerance, restart length and cap, and `stop`, which rule ends a solve (unset,
+  `residual`: the moment the residual meets the tolerance);
 - `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
   {class}`~aquaflux.solve.CflResidualDualTimeControl`. Any of them takes `release_floor`, a shift
@@ -243,7 +244,8 @@ The two marches share their settings, each a value of the solver library written
 - `adaptive_tolerance` — how tightly each step solves its linear system,
   {class}`~aquaflux.solve.AdaptiveLinearTolerance`: tighter for the step after one the line search
   cut back or whose residual rose, and tighter in a tail of full-length steps held back by their
-  own solve. Unset, every step solves to `linear_solve`'s `rtol`.
+  own solve. Unset, both rules run at their defaults; to solve every step to `linear_solve`'s
+  `rtol`, set `{kind: AdaptiveLinearTolerance, after_setback: null, tail_gate: null}`.
 
 `CoupledMarch` adds the closure's: `turbulence_damping` (a multiplier on the `k` and `omega`
 rows' shift), `omega_step_ratio` (the largest factor one cell's `omega` may change by in one

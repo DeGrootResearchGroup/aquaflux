@@ -63,7 +63,8 @@ unit tests. The surface is four groups:
   escalation limit, and the optional tighter linear solver that is the fallback for a step more
   damping cannot fix. The default policy retries nothing. How tightly each step solves its linear
   system can be adapted from step to step by an `AdaptiveLinearTolerance` -- tighter after a setback,
-  and in a tail of steps limited by their own solve; unset, every step solves to its solver's own.
+  and in a tail of steps limited by their own solve. Every march runs `DEFAULT_ADAPTIVE_TOLERANCE`
+  unless given another, or `None` to solve every step to its solver's own tolerance.
 
 The preconditioners those linear solves take live in :mod:`aquaflux.precondition`, which builds on
 this package; nothing here imports it.
@@ -176,7 +177,7 @@ from .session import PreconditionerSession, RebuildingSession, StoppingStepSourc
 from .shifted_step import LinearSolveRegime, LinearSolveSettings, resolve_linear_solve, shifted_step
 from .linear_solver_spec import DirectSolve, GmresSolve, LinearSolverSpec
 from .ramp_schedule import RampPosition, RampSchedule, RampWalk
-from .adaptive_tolerance import AdaptiveLinearTolerance
+from .adaptive_tolerance import DEFAULT_ADAPTIVE_TOLERANCE, AdaptiveLinearTolerance
 from .retry import NO_RETRIES, RetryPolicy
 from .shift_basis import (
     DEFAULT_SHIFT_BASIS,
@@ -195,6 +196,7 @@ from .step_control import (
 )
 
 __all__ = [
+    "DEFAULT_ADAPTIVE_TOLERANCE",
     "DEFAULT_GLOBALIZATION",
     "DEFAULT_ROOT_SOLVE",
     "DEFAULT_SHIFT_BASIS",

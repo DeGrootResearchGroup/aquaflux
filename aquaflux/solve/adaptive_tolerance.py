@@ -26,7 +26,7 @@ from __future__ import annotations
 import dataclasses
 import math
 
-__all__ = ["AdaptiveLinearTolerance"]
+__all__ = ["DEFAULT_ADAPTIVE_TOLERANCE", "AdaptiveLinearTolerance"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,13 +71,14 @@ class AdaptiveLinearTolerance:
 
     Examples
     --------
-    Opt in on a coupled solve, with both rules at their defaults::
+    Every march runs :data:`DEFAULT_ADAPTIVE_TOLERANCE`; a coupled solve that keeps the setback rule but
+    solves the tail at the base tolerance::
 
         from aquaflux.solve import AdaptiveLinearTolerance
         from aquaflux.turbulence import solve_coupled
 
         flow, k, omega = solve_coupled(
-            coupled, flow0, k0, omega0, adaptive_tolerance=AdaptiveLinearTolerance()
+            coupled, flow0, k0, omega0, adaptive_tolerance=AdaptiveLinearTolerance(tail_gate=None)
         )
     """
 
@@ -145,3 +146,13 @@ class AdaptiveLinearTolerance:
                 floor = max(floor, self.target_margin * target / stopping_norm)
             return min(base, max(self.tail_scale * reduction**2, floor))
         return base
+
+
+DEFAULT_ADAPTIVE_TOLERANCE = AdaptiveLinearTolerance()
+"""The adaptive tolerance a march runs with unless told otherwise: both rules at their defaults.
+
+Every march applies it wherever its linear solver is a relative-residual GMRES; any other solver is
+solved to its own tolerance. Pass ``None`` to solve every step to the base tolerance, or, where ``None``
+means unset (a case file), an ``AdaptiveLinearTolerance`` with both rules switched off
+(``after_setback=None, tail_gate=None``), which never moves the tolerance from the base.
+"""

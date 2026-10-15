@@ -31,6 +31,7 @@ from aquaflux.precondition import (
 )
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
+    DEFAULT_ADAPTIVE_TOLERANCE,
     DEFAULT_GLOBALIZATION,
     NO_REFRESH,
     NO_RETRIES,
@@ -448,7 +449,7 @@ def solve_flow_march(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
-    adaptive_tolerance: AdaptiveLinearTolerance | None = None,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = DEFAULT_ADAPTIVE_TOLERANCE,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
