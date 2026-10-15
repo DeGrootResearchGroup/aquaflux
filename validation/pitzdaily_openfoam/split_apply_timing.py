@@ -4,10 +4,10 @@ The preconditioner apply is most of a Krylov application on this case, and its c
 level operators' sparse products compile on the machine at hand -- which differs between machines by
 more than any change to the hierarchy. This builds the split ``case.yaml`` ships at the case's hybrid
 start (no march, no capture needed), applies its traced copy to one random vector, and reports the best
-of ``SPLIT_TIMING_REPEATS`` timings of the apply and of its transpose (the adjoint's direction), and how
+of ``PITZ_SPLIT_TIMING_REPEATS`` timings of the apply and of its transpose (the adjoint's direction), and how
 long the first call of each took (the compilation).
 
-Run it in two checkouts to compare them; it saves both outputs to ``SPLIT_TIMING_SAVE`` (a ``.npy``
+Run it in two checkouts to compare them; it saves both outputs to ``PITZ_SPLIT_TIMING_SAVE`` (a ``.npy``
 path) when that is set, so the two can be checked equal.
 
 Usage
@@ -36,7 +36,7 @@ from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.turbulence import open_session  # noqa: E402
 
-REPEATS = int(os.environ.get("SPLIT_TIMING_REPEATS", "15"))
+REPEATS = int(os.environ.get("PITZ_SPLIT_TIMING_REPEATS", "15"))
 
 
 def _best(f, *args):
@@ -78,7 +78,7 @@ def main():
         f"ms (best of {REPEATS}); first call {compile_forward:.1f} s / {compile_transposed:.1f} s",
         flush=True,
     )
-    save = os.environ.get("SPLIT_TIMING_SAVE")
+    save = os.environ.get("PITZ_SPLIT_TIMING_SAVE")
     if save:
         np.save(save, np.stack([np.asarray(forward(split, v)), np.asarray(transposed(split, v))]))
         print(f"wrote {save}", flush=True)
