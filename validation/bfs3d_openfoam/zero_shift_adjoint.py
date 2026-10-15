@@ -14,11 +14,12 @@ singular (smallest pivot ``1.3e-12`` against a matrix 1-norm of ``278``) and eve
 an accurate inverse of it -- so a cold-state failure says nothing about the adjoint. This runs at a
 **converged checkpoint** instead.
 
-⚠️ **UNIFORM reach, NOT the case's shipped ``COLUMN_REACH``.** ``(3, 3, 3, 3, 2, 2)`` is sound for the
-field split alone, because a flow-first split never applies ``dR_flow/dturb`` and so never touches the
-shortened k/omega columns. A monolithic factorization applies them, and a short colouring does not
-truncate a column -- it folds far couplings onto near entries, corrupting the matrix. Probing every arm
-uniformly is what makes them comparable.
+**The OPERATOR is probed at a uniform reach 3 (exact on this skew-free mesh); the PRECONDITIONER as the
+case configures it** (``compare.COLUMN_REACH``, uniform by default, ``BFS3D_COLUMN_REACH`` to shorten
+columns). A short colouring does not truncate a column -- it folds far couplings onto near entries -- so
+the operator must stay exact for the true residual to mean anything, while the preconditioner's copy is
+exactly what a shortened probe would hand the adjoint. Compare ``BFS3D_COLUMN_REACH=2,2,2,2,2,2``
+against the default to measure that.
 
 **Method** (each of these has produced a retracted verdict somewhere in this project):
 
@@ -183,7 +184,8 @@ def main() -> None:
     print(
         f"{a.shape[0]} dofs, uniform reach {REACH}, nnz {a.nnz / 1e6:.2f} M; zero shift; "
         f"gmres rtol {RTOL}, restart {RESTART}; "
-        f"leading inverse {compare.FLOW_INVERSE}, trailing {compare.TURBULENCE_INVERSE}",
+        f"leading inverse {compare.FLOW_INVERSE}, trailing {compare.TURBULENCE_INVERSE}, "
+        f"preconditioner column reach {compare.COLUMN_REACH or 'uniform'}",
         flush=True,
     )
 
@@ -193,7 +195,7 @@ def main() -> None:
         session = open_session(
             MaterializedJacobian(
                 FieldSplit(compare.LEADING_INVERSE, JacobiSmoothed(**compare.JACOBI_TRAILING)),
-                probe=JacobianProbeSpec(stencil_reach=REACH),
+                probe=JacobianProbeSpec(stencil_reach=REACH, column_reach=compare.COLUMN_REACH),
                 build_beta=beta,
             ),
             coupled,
