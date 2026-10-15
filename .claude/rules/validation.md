@@ -207,6 +207,13 @@ cannot be written. The guard is what catches the next module that does branch.
 
 ## ⚠️ Traps when writing a harness (each one produced a wrong result here)
 
+- **⚠️ A LOG PARSER KEYED ON THE TABLE'S SHAPE RETURNS NOTHING, SILENTLY, WHEN THE LOGGER GAINS A
+  COLUMN.** `bfs3d_openfoam/march_log_compare.py` matched the step row by its eight columns; the march
+  log gained `rho1` on 2026-10-11 (`af98897`), and for three days the script summarized every new log as
+  zero steps -- no error, a well-formed table of zeros (found 2026-10-14 when it was asked for a study
+  table). `step_policy_replay.py` reads logs through the same parser. The column is now optional, and the
+  script refuses a log with no step rows. Any reader of the march log should do both: accept the old
+  and the new shape, and treat "found nothing" as an error rather than as an answer.
 - **Build the reference state with `state_from_physical`, NOT `pack_state`.** `pack_state` takes the
   **solved** variables; a case transporting `log(omega)` differs from the physical fields by an
   exponential. Packing physical omega where a log is expected exponentiates ~1e5, and the residual is
