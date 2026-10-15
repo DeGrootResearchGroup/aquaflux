@@ -1488,7 +1488,7 @@ class _PaddedRowOperator(eqx.Module):
     def apply(self, x: jnp.ndarray) -> jnp.ndarray:
         """``A x``. Linear and transposable, so the adjoint's transpose solve goes through it."""
         if self.t_columns is None:
-            return jnp.sum(self.values * x[self.columns], axis=1)
+            return _row_sum(self.values * x[self.columns])
         return jax.custom_derivatives.linear_call(
             _padded_product,
             _padded_transposed_product,
@@ -1519,16 +1519,43 @@ class _PaddedRowOperator(eqx.Module):
 
 
 _STORE_TRANSPOSE = os.environ.get("AQUAFLUX_PROTOTYPE_STORED_TRANSPOSE", "0") == "1"
+_HALVING_SUM = os.environ.get("AQUAFLUX_PROTOTYPE_HALVING_SUM", "0") == "1"
+
+
+def halving_row_sum(products: jnp.ndarray) -> jnp.ndarray:
+    """Each row's sum of ``products`` (shape ``(n_rows, width)``), with no reduction operation.
+
+    PROTOTYPE: the row is folded in half, the halves added, until at most seven columns remain, which
+    are added one by one; an odd column is set aside first and added at the end. Only slices and
+    elementwise adds, so the compiler emits plain loop fusions rather than a library reduction kernel.
+    """
+    width = products.shape[1]
+    leftover = None
+    while width > 7:
+        if width % 2:
+            column = products[:, width - 1]
+            leftover = column if leftover is None else leftover + column
+            products, width = products[:, : width - 1], width - 1
+        width //= 2
+        products = products[:, :width] + products[:, width:]
+    total = products[:, 0]
+    for j in range(1, width):
+        total = total + products[:, j]
+    return total if leftover is None else total + leftover
+
+
+def _row_sum(products: jnp.ndarray) -> jnp.ndarray:
+    return halving_row_sum(products) if _HALVING_SUM else jnp.sum(products, axis=1)
 
 
 def _padded_product(arrays, x):
     columns, values, _, _ = arrays
-    return jnp.sum(values * x[columns], axis=1)
+    return _row_sum(values * x[columns])
 
 
 def _padded_transposed_product(arrays, y):
     _, _, t_columns, t_values = arrays
-    return jnp.sum(t_values * y[t_columns], axis=1)
+    return _row_sum(t_values * y[t_columns])
 
 
 def _coo_apply(

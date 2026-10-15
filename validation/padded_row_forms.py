@@ -19,6 +19,9 @@ The forms:
     The width padded to a multiple of ``CHUNK`` and summed in two stages, chunk then chunks.
 ``einsum``
     The row sum written as a batched dot product, ``einsum('rw,rw->r', values, x[columns])``.
+``halving``
+    The row sum folded in half repeatedly, the halves added, with no reduction operation (only
+    slices and elementwise adds), so no library reduction kernel can be chosen for it.
 ``segment``
     A coordinate-form gather and sorted segment sum, the form the intergrid transfers use.
 ``csr``
@@ -73,7 +76,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from aquaflux.precondition.multigrid import _PaddedRowOperator  # noqa: E402
+from aquaflux.precondition.multigrid import _PaddedRowOperator, halving_row_sum  # noqa: E402
 from jax.experimental.sparse import BCSR  # noqa: E402
 
 CHUNK = int(os.environ.get("PADDED_ROW_FORMS_CHUNK", "8"))
@@ -205,6 +208,10 @@ def _einsum_apply(arrays, x):
     return jnp.einsum("rw,rw->r", arrays["values"], x[arrays["columns"]])
 
 
+def _halving_apply(arrays, x):
+    return halving_row_sum(arrays["values"] * x[arrays["columns"]])
+
+
 def _segment_prepare(a, dtype):
     coo = a.tocoo()
     return {
@@ -234,11 +241,16 @@ FORMS = {
     "columns_major": (_columns_major_prepare, _columns_major_apply),
     "chunked": (_chunked_prepare, _chunked_apply),
     "einsum": (_rows_prepare, _einsum_apply),
+    "halving": (_rows_prepare, _halving_apply),
     "segment": (_segment_prepare, _segment_apply),
     "csr": (_csr_prepare, _csr_apply),
 }
 # Transposed arms applying a stored copy of the transposed matrix as a forward product.
-STORED_TRANSPOSES = {"stored_rows": "rows", "stored_columns_major": "columns_major"}
+STORED_TRANSPOSES = {
+    "stored_rows": "rows",
+    "stored_columns_major": "columns_major",
+    "stored_halving": "halving",
+}
 STATIC = ("n",)
 
 
