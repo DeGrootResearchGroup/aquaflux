@@ -217,6 +217,9 @@ VALIDATION_INTERNAL_REACHES = {
     "_cell_graph",
     "_aggregation_edges",
     "_mis_aggregate",
+    # The level operator's own product, timed by `csr_kernel_precision.py` on a synthetic matrix beside
+    # the CSR and segment-sum forms it replaced: the comparison is only worth making with the real kernel.
+    "_PaddedRowOperator",
     # The strength graph and the Vanek aggregation, reached by the local-descent probe to build a
     # "line-like" block smoother out of the coarsening the preconditioner already uses. A line through
     # an anisotropic near-wall layer is a chain of strong couplings, so the strength filter is the
