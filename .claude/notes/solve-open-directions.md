@@ -277,8 +277,15 @@ pass under `lineax`:
   `½ target / |R_k|`), and solve the step after a cut-back or a rising residual to 0.1. The other proposed
   remedy, re-solving the cut-back step tighter, was refuted (ledger: "Re-solving a cut-back step at a
   tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve.md`'s
-  contract entry and `validation/adaptive_tolerance_probe.py`; the slow tier forced to both is recorded
-  below. Neither the stop nor the setting is a default; bfs3d has no arm yet.
+  contract entry and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
+  (`LinearSolveRegime.stop` defaulting to `residual`, and the setting at its defaults on every march whose
+  solver is a relative-residual GMRES) passes: 39 of 39** (2026-10-15, `d0871e2` + the two forcings in a
+  scratch worktree, Linux x86_64, 4 cores, jax 0.11.2, 1:01:39). The stop alone failed four
+  (`test_coupled_field_split.py`'s two channel marches, which errored, plus its adjoint test, and the
+  Reynolds-continuation adjoint test). ⚠️ The first forced run, with the
+  reduction re-measured in each step's own scales, still failed the Reynolds test (6.5e-3 at 60 target
+  steps): see `solve.md` for why the reduction is read report to report. Neither the stop nor the
+  setting is a default; bfs3d has no arm yet.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
