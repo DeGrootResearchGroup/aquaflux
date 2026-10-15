@@ -31,6 +31,7 @@ from typing import Protocol
 import equinox as eqx
 import jax.numpy as jnp
 
+from .adaptive_tolerance import AdaptiveLinearTolerance
 from .convergence import Convergence, ResidualMeasures
 from .march import ResidualHomotopy, newton_march
 from .norm import norm_of_residual
@@ -248,6 +249,7 @@ def staged_march(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = None,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -281,7 +283,7 @@ def staged_march(
         ``state -> drift(state)``, re-based at each segment's starting state, since a refresh re-freezes
         there and a measure carried across would keep reporting drift the refresh had absorbed. ``None``
         for a residual with no coefficient drift to watch (a refresh trigger then needs to read costs).
-    max_steps, step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals, stopping_step
+    max_steps, step_control, on_step, on_checkpoint, retry, adaptive_tolerance, on_retry, homotopy, station_step, on_residuals, stopping_step
         Forwarded to :func:`~aquaflux.solve.newton_march` on every segment.
     resume : Resumption or None
         The history of an interrupted march, for a march **resuming** it from the state it stopped at;
@@ -385,6 +387,7 @@ def staged_march(
             norm_builder=norm_builder,
             refresh_preconditioner=refresh_preconditioner,
             retry=retry,
+            adaptive_tolerance=adaptive_tolerance,
             on_retry=on_retry,
             homotopy=homotopy,
             station_step=station_step,

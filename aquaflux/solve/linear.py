@@ -372,6 +372,63 @@ def residual_stop_gmres(
     )
 
 
+def relative_tolerance(solver: lx.AbstractLinearSolver) -> float | None:
+    """The relative-residual tolerance ``solver`` stops at, or ``None`` if it has no such single number.
+
+    Only the relative-residual GMRES family (:func:`relative_residual_gmres`, :func:`residual_stop_gmres`)
+    stops at one; any other solver -- a stock ``lineax`` solver, a direct factorization -- has none a
+    march could vary.
+
+    Parameters
+    ----------
+    solver : lineax.AbstractLinearSolver
+        The linear solver to read.
+
+    Returns
+    -------
+    float or None
+        The tolerance, or ``None``.
+    """
+    if isinstance(solver, _RelativeResidualGMRES):
+        return float(solver.atol)
+    return None
+
+
+def with_relative_tolerance(
+    solver: lx.AbstractLinearSolver, tolerance: float
+) -> lx.AbstractLinearSolver:
+    """``solver`` stopping at the relative-residual tolerance ``tolerance`` instead of its own.
+
+    The tolerance is carried as a 64-bit array rather than a Python float. A solver is an argument of the
+    march's compiled step, where a float is part of the compilation key and an array is not, so a march
+    that changes the tolerance from step to step stays a compilation-cache hit once every value it hands
+    over is made here.
+
+    Parameters
+    ----------
+    solver : lineax.AbstractLinearSolver
+        A relative-residual GMRES (:func:`relative_residual_gmres` or :func:`residual_stop_gmres`).
+    tolerance : float
+        The relative tolerance to stop at.
+
+    Returns
+    -------
+    lineax.AbstractLinearSolver
+        The same solver with ``tolerance`` in place of its own.
+
+    Raises
+    ------
+    TypeError
+        If ``solver`` is not one whose tolerance can be replaced.
+    """
+    if not isinstance(solver, _RelativeResidualGMRES):
+        raise TypeError(
+            f"only a relative-residual GMRES (relative_residual_gmres, residual_stop_gmres) stops at "
+            f"one relative tolerance that can be replaced; got {type(solver).__name__}."
+        )
+    return eqx.tree_at(lambda s: s.atol, solver, jnp.asarray(float(tolerance), dtype=jnp.float64))
+
+
 def in_progress_measure(
     solver: lx.AbstractLinearSolver, norm: Callable[[Any], jnp.ndarray]
 ) -> lx.AbstractLinearSolver:

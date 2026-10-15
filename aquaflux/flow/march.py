@@ -34,6 +34,7 @@ from aquaflux.solve import (
     DEFAULT_GLOBALIZATION,
     NO_REFRESH,
     NO_RETRIES,
+    AdaptiveLinearTolerance,
     Convergence,
     DualTimeLoop,
     Globalization,
@@ -447,6 +448,7 @@ def solve_flow_march(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = None,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -502,7 +504,7 @@ def solve_flow_march(
     refresh : RefreshPolicy
         How the frozen preconditioner is kept current. There is no coefficient to watch drift on a
         constant-viscosity flow, so use a cost trigger (:class:`~aquaflux.solve.CycleGrowthTrigger`).
-    step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals, stopping_step
+    step_control, on_step, on_checkpoint, retry, adaptive_tolerance, on_retry, homotopy, station_step, on_residuals, stopping_step
         As for :func:`~aquaflux.turbulence.solve_coupled`. A dual-time march given no ``step_control``
         defaults to the Courant ramp. ``on_residuals`` arrives under
         :func:`flow_equation_names`, and only under the row-scaled measure (the default).
@@ -575,6 +577,7 @@ def solve_flow_march(
         on_step=on_step,
         on_checkpoint=on_checkpoint,
         retry=retry,
+        adaptive_tolerance=adaptive_tolerance,
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,

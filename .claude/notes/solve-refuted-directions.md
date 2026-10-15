@@ -545,6 +545,28 @@ scored in the row-equilibrated measure the march stops on, rebuilt at the new st
 Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
 fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
 
+## Re-solving a cut-back step at a tighter tolerance — DOES NOT RECOVER IT (2026-10-15, #645)
+
+**What was proposed** (`solve-open-directions.md` 6b, as a remedy for the residual stop's erratic
+Reynolds-continuation march): when a step's line search cuts it back, redo that step from the same state
+with the Krylov tolerance tightened tenfold (0.3 → 0.03; floored at 1e-6), keeping the redo if its
+residual is lower. Fired on a step with line-search `alpha < 0.5`.
+
+**Probe** (env-switched prototype in `newton_march`, never committed): the Reynolds-continuation adjoint
+test's forward march (`tests/integration/test_reynolds_continuation.py`, 28×20 channel, `n_points=1`,
+`max_steps` 60, `BlockDiagonal(ScalarTwoLevel, ConvectionTwoLevel)`, default `Convergence`), residual stop at
+0.3; main `a5d61d4`, Linux x86_64, 4 cores, jax 0.11.2. **It still failed at 60 target steps**, alone and
+with the tail rule, like the plain residual stop (4.8e-2). The redo almost never helped: across the ~20
+redone steps the redo's line search cut back to the SAME `alpha` as the original in all but two, and its
+residual moved by at most a few per cent either way (e.g. step 24: `alpha` 0.008, `|R|` 1.517e-1 both
+times). So the cut-back is not the linear solve's error — a tighter solve of the same linearization from
+the same state gives the same direction — and once the march has entered the region where those steps
+happen, repairing one step does not leave it.
+
+**What worked instead:** solving the NEXT step tighter (0.1) — 12 steps, no collapses — which keeps the
+march out of that region rather than repairing a step inside it. Built as `AdaptiveLinearTolerance`'s
+setback rule (`solve.md`).
+
 ## Eisenstat–Walker adaptive forcing terms — NOT WORTH BUILDING (2026-10-08); a looser FIXED term is
 
 **What was proposed** (`solve-open-directions.md` item 4): replace the fixed inner `rtol = 0.3` with

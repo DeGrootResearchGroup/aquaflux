@@ -56,6 +56,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import (
+    AdaptiveLinearTolerance,
     BlockScaled,
     CflResidualDualTimeControl,
     Convergence,
@@ -567,6 +568,7 @@ _CASE_MAPPING = SettingsMapping(
         ResidualRatioDualTimeControl,
         CflResidualDualTimeControl,
         RetryPolicy,
+        AdaptiveLinearTolerance,
         GmresSolve,
         DirectSolve,
         *PRECONDITIONER_SPEC_MAPPING.kinds,

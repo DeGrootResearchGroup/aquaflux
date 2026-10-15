@@ -71,6 +71,7 @@ from aquaflux.solve import (
     DEFAULT_SHIFT_BASIS,
     NO_REFRESH,
     NO_RETRIES,
+    AdaptiveLinearTolerance,
     BlockScaledNorm,
     CellFields,
     ContinuationSource,
@@ -2603,6 +2604,7 @@ def solve_coupled(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = None,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -2780,6 +2782,9 @@ def solve_coupled(
         produces. The step is redone from the same state at the tighter tolerance -- only the Krylov
         solve changes -- which recovers it while keeping the accepted trajectory, and pays the tighter
         solve on the few trouble steps rather than on every step.
+    adaptive_tolerance : AdaptiveLinearTolerance or None
+        Vary how tightly each step solves its linear system, from how the previous step went; see
+        :class:`~aquaflux.solve.AdaptiveLinearTolerance`. Unset, every step solves to the regime's own.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, forwarded to
         :func:`~aquaflux.solve.newton_march`: called before a step is redone, with why. A log without it
@@ -2890,6 +2895,7 @@ def solve_coupled(
         on_step=on_step,
         on_checkpoint=on_checkpoint,
         retry=retry,
+        adaptive_tolerance=adaptive_tolerance,
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,

@@ -240,6 +240,10 @@ The two marches share their settings, each a value of the solver library written
   0.5) times the residual it was tried from;
 - `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
+- `adaptive_tolerance` — how tightly each step solves its linear system,
+  {class}`~aquaflux.solve.AdaptiveLinearTolerance`: tighter for the step after one the line search
+  cut back or whose residual rose, and tighter in a tail of full-length steps held back by their
+  own solve. Unset, every step solves to `linear_solve`'s `rtol`.
 
 `CoupledMarch` adds the closure's: `turbulence_damping` (a multiplier on the `k` and `omega`
 rows' shift), `omega_step_ratio` (the largest factor one cell's `omega` may change by in one

@@ -248,8 +248,9 @@ went from ~2.8 to ~5.3 s. Compare bfs3d runs only within one commit. The refacto
 structural-pattern products of 868ab80/f7326c1 (on pitzDaily 0.88 -> 1.06 s per split refit), cached
 since 2026-10-13 (`StructuralPatterns`, `solve-amg-multigrid.md`: 0.83 s); the trajectory change is not
 explained by it and is not bisected.
-**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard), the
-cost thresholds' re-calibration, and the project owner's decision.
+**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard,
+built opt-in 2026-10-15 as `AdaptiveLinearTolerance`; see below), the cost thresholds' re-calibration, a
+bfs3d arm with the setting, and the project owner's decision.
 
 **The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
 true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
@@ -269,10 +270,15 @@ pass under `lineax`:
   (ramp rung on lineax, a slightly different anchor) it converges in 24, linearly. So the inexact step is
   fragile here near the anchor, not only slow at the end.
 - **Consequence:** flipping the default as built would trade pitzDaily's 1.88x for slower, linear endings
-  on tight-tolerance solves and a lost robustness margin on at least one continuation. Candidate remedies,
-  unbuilt and unmeasured: a terminal forcing safeguard (solve no looser than `½ target / |R_k|`, which
-  tightens only in the last few steps and so avoids what refuted Eisenstat–Walker), and re-solving tighter
-  after a line-search cut.
+  on tight-tolerance solves and a lost robustness margin on at least one continuation.
+- **The remedy, BUILT opt-in 2026-10-15 (#645): `solve.AdaptiveLinearTolerance`** — two rules, one setting
+  (`newton_march(adaptive_tolerance=)`, reachable from every march and a case file's `solver` section):
+  tighten in a tail of full-length steps limited by their own solve (`0.9·ρ²`, floored at
+  `½ target / |R_k|`), and solve the step after a cut-back or a rising residual to 0.1. The other proposed
+  remedy, re-solving the cut-back step tighter, was refuted (ledger: "Re-solving a cut-back step at a
+  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve.md`'s
+  contract entry and `validation/adaptive_tolerance_probe.py`; the slow tier forced to both is recorded
+  below. Neither the stop nor the setting is a default; bfs3d has no arm yet.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
