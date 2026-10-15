@@ -265,13 +265,11 @@ def backtracking_line_search(
     steps,
     norm=jnp.linalg.norm,
     growth=1.0,
-    grow=0,
-    max_alpha=jnp.inf,
     fallback_growth=100.0,
 ):
-    """Backtrack the step length: the largest ``alpha`` in ``{2**grow, ..., 1, ..., 1/2**steps}`` with
+    """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``. When none is admissible it falls back to the
-    longest rung that is no longer than the full step, finite, **and** within ``fallback_growth`` of
+    longest rung that is finite **and** within ``fallback_growth`` of
     ``reference_norm`` -- and to ``alpha = 0``, leaving the iterate untouched, when no finite rung
     comes in under that bound.
 
@@ -318,12 +316,6 @@ def backtracking_line_search(
         controlled growth far from the root admits those steps. Near the root the monotone test is
         wanted again, for the terminal quadratic phase -- hence a *schedule* rather than a constant
         (see :class:`~aquaflux.solve.LineSearchGrowth`).
-    grow : int, optional
-        Rungs of *doubling* added above ``alpha = 1``, so the ladder starts at ``2**grow`` (default
-        ``0`` -- the ladder starts at the full step). The admissible step is often longer than the
-        full step, and a ladder starting at one cannot reach it. A growth rung is only ever reachable
-        by **passing** the acceptance test: the fallback taken when nothing is admissible is capped at
-        the full step, so it can never land on one.
     fallback_growth : float, optional
         The most a **fallback** rung may raise the measure above ``reference_norm`` and still be taken
         (default ``100.0``). A fallback is only reached when nothing passed the acceptance test, so it
@@ -335,21 +327,6 @@ def backtracking_line_search(
         A search with **no finite rung at all** is a separate case and is unchanged: it still reports
         a non-finite measure, because the divergence guard, the acceptance policy and the Newton
         driver's convergence guard all test this number with ``isfinite``.
-    max_alpha : float or jnp.ndarray, optional
-        An upper bound on the step fraction, applied to **every** rung including the growth rungs.
-        The seam for a constraint the residual cannot express: a field that must stay positive can
-        give the largest fraction that keeps it so, and capping is what makes an admissible step
-        *reachable* rather than something the ladder might happen to contain. Default ``inf`` -- no
-        cap, byte-identical.
-
-        **The default must not be ``1``.** The growth rungs deliberately reach ``alpha > 1``, so a cap
-        of one silently disables them; that regression was caught by the growth-rung tests. A real cap
-        *does* apply to the growth rungs, which is correct -- a step four times the full step would
-        violate the constraint by four times as much.
-
-        Rejecting violating rungs instead would not be enough: on a measured coupled march the search
-        was already at its shortest rung (``alpha = 2**-10``) when a field crossed zero, so there was
-        no shorter rung left to fall back to.
     norm : callable, optional
         The residual measure ``R -> scalar`` the acceptance is judged by (default the Euclidean
         norm). A heterogeneous block system passes a :class:`~aquaflux.solve.BlockScaledNorm` so the
@@ -372,10 +349,9 @@ def backtracking_line_search(
         walked no ladder; there it costs exactly what the caller used to pay.
     """
     if steps == 0:
-        alpha = jnp.minimum(jnp.asarray(1.0), max_alpha)
-        stepped = phi + alpha * delta
+        stepped = phi + delta
         measure = norm(residual_fn(stepped))
-        return LineSearchStep(stepped, alpha, measure, measure)
+        return LineSearchStep(stepped, jnp.asarray(1.0), measure, measure)
 
     # Walk the ladder from the LONGEST step down and keep the first admissible one -- the largest
     # step the acceptance tolerance allows, not the one that minimizes the residual.
@@ -387,13 +363,7 @@ def backtracking_line_search(
     # step and progress per step are different objectives here, and progress is the one that matters
     # while the solution is still forming.
     #
-    # The ladder extends ABOVE one (``grow`` rungs of doubling) because the admissible step is often
-    # longer than the full step. Measured on a developed state: the full step moved the reattachment
-    # not at all, while alpha ~ 5.7 moved it four times further and still sat inside the tolerance the
-    # acceptance rule already allowed -- it was simply unreachable from a ladder that starts at one.
-    #
-    # When NOTHING is admissible the fallback is the longest finite rung **no longer than the full
-    # step**, not the shortest rung. The shortest is a near-null step that changes nothing and which
+    # When NOTHING is admissible the fallback is the longest finite rung, not the shortest rung. The shortest is a near-null step that changes nothing and which
     # the divergence guard then accepts as finite, so the march reports a step and stands still -- a
     # guaranteed stall rather than a slow one, and the observed failure mode on a stiff coupled march.
     #
@@ -409,13 +379,6 @@ def backtracking_line_search(
     # never reached -- the largest benign fallback seen anywhere was 4.5x, and the harmful ones were
     # 9.2e+28 and above. Twenty-odd decades of daylight, so the value is not delicate.
     #
-    # The cap at one is not incidental. Without it, extending the ladder upward also extends the
-    # FALLBACK upward, so a step with no admissible length quietly becomes a multiple of the full step:
-    # measured with two growth rungs, a march took alpha = 4 as a fallback and multiplied its residual
-    # measure by 4.6 in a single step. A growth rung must only ever be reachable by PASSING the
-    # acceptance test, never by falling back onto it -- the fallback exists to avoid a null step, not
-    # to license an excursion.
-    #
     # The carry (index, chosen, found, longest_finite, seen_finite) is fixed-shape, so the body
     # compiles once. Walking longest-first means the first finite rung encountered IS the longest
     # finite one, so the fallback needs no second pass.
@@ -424,7 +387,6 @@ def backtracking_line_search(
     # fallback is by definition a rung that failed the acceptance test, so it is expected to be worse
     # than the reference -- just not unboundedly worse.
     bounded = fallback_growth * reference_norm
-    lowest = -grow  # rung index; alpha = 0.5**index, so negative indices are steps longer than one
 
     # Each rung's measure is carried beside its alpha -- both for the accepted rung and for the
     # fallback one, which is a DIFFERENT rung and so needs its own. The two travel together or the
@@ -446,15 +408,13 @@ def backtracking_line_search(
             seen_finite,
             full_norm,
         ) = carry
-        # Capped, not rejected: the cap makes an admissible step reachable by construction.
-        alpha = jnp.minimum(0.5**index, max_alpha)
+        alpha = jnp.asarray(0.5**index)
         value = norm(residual_fn(phi + alpha * delta))
         finite = jnp.isfinite(value)
         accepted = finite & (value < admissible)
-        # The fallback candidate ignores rungs longer than the full step (index < 0), and -- unlike
-        # the plain finiteness test that used to gate it -- must also come in under `bounded`.
-        finite_here = finite & (index >= 0)
-        eligible = finite_here & (value <= bounded)
+        # The fallback candidate must, unlike the plain finiteness test that used to gate it, also
+        # come in under `bounded`.
+        eligible = finite & (value <= bounded)
         first_eligible = eligible & ~seen_eligible
         return (
             index + 1,
@@ -464,12 +424,12 @@ def backtracking_line_search(
             jnp.where(first_eligible, alpha, longest_finite),
             jnp.where(first_eligible, value, longest_norm),
             seen_eligible | eligible,
-            seen_finite | finite_here,
-            # Rung 0 is the full step (capped); its measure is kept whatever the test decided of it.
+            seen_finite | finite,
+            # Rung 0 is the full step, always evaluated; its measure is kept whatever the test decided.
             jnp.where(index == 0, value, full_norm),
         )
 
-    shortest = jnp.minimum(jnp.asarray(0.5**steps), max_alpha)
+    shortest = jnp.asarray(0.5**steps)
     # The seeds are only ever read when the loop found nothing finite at all, in which case every
     # rung's measure was non-finite and so is this one -- which is what the divergence guard is for.
     seed_norm = jnp.asarray(jnp.inf, dtype=jnp.asarray(reference_norm).dtype)
@@ -487,7 +447,7 @@ def backtracking_line_search(
         cond,
         body,
         (
-            jnp.asarray(lowest),
+            jnp.asarray(0),
             shortest,
             seed_norm,
             jnp.asarray(False),
@@ -495,8 +455,7 @@ def backtracking_line_search(
             seed_norm,
             jnp.asarray(False),
             jnp.asarray(False),
-            # Not evaluated until the ladder reaches the full step, which a growth rung accepted
-            # first prevents -- `nan`, "not measured", rather than a value it never had.
+            # Overwritten by the first rung, the full step.
             jnp.full_like(seed_norm, jnp.nan),
         ),
     )
@@ -532,11 +491,11 @@ def _damped_newton_step(
     Returns a :class:`~aquaflux.solve.StepOutcome` carrying the stepped iterate, the measure at it,
     the raw solver count of the one linear solve behind it, the line-search factor,
     ``inner_iterations = 1`` (a single Newton step has no inner loop), ``reached_target = True``, the
-    offset-corrected cost of that one solve, an unbinding ``binding_limit`` of ``1``, and the full
-    step's measure over ``norm(R(phi))`` (the trial the search judged first, taken or not). The line
-    search itself costs only residual evaluations, so the step's linear-solve cost is exactly that
-    single solve's — and the measure it reports is the one the search already formed at the rung it
-    kept, so the driver judging this step adds no residual evaluation of its own.
+    offset-corrected cost of that one solve, and the full step's measure over ``norm(R(phi))`` (the
+    trial the search judged first, taken or not). The line search itself costs only residual
+    evaluations, so the step's linear-solve cost is exactly that single solve's — and the measure it
+    reports is the one the search already formed at the rung it kept, so the driver judging this
+    step adds no residual evaluation of its own.
     """
     delta, r, cycles = newton_correction(
         residual_fn, phi, solver=solver, preconditioner=preconditioner
@@ -554,7 +513,6 @@ def _damped_newton_step(
         1,
         jnp.asarray(True),
         _corrected(cycles),
-        jnp.asarray(1.0),
         searched.full_step_norm / reference,
         jnp.asarray(False),
     )
@@ -790,10 +748,10 @@ class RootSolver(eqx.Module):
             unaffected.
         equinox.EquinoxRuntimeError
             If the Newton iteration does not converge — it exhausts ``max_steps`` short of
-            ``atol + rtol*||R0||``, stalls against a collapsing constraint cap, or the residual norm
-            becomes non-finite. The implicit-function-theorem adjoint is valid only at a converged
-            root, so a non-converged field is rejected rather than returned (its gradient would be
-            silently wrong). Raised at solve time, and equally on the ``jax.grad`` path.
+            ``atol + rtol*||R0||``, or the residual norm becomes non-finite. The
+            implicit-function-theorem adjoint is valid only at a converged root, so a non-converged
+            field is rejected rather than returned (its gradient would be silently wrong). Raised at
+            solve time, and equally on the ``jax.grad`` path.
         """
         refuse_a_transform_the_march_cannot_run_in((phi0, theta), caller="RootSolver.solve")
         strategy = self.strategy

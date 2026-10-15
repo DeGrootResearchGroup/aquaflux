@@ -1504,7 +1504,8 @@ Many entries below are dated history written against the old API. Read them thro
     as its `step_projection` (2026-10-14): each cell's `k` correction clipped to its own room
     (`positive_k_projection`, unconditional for a directly-solved `k`), then each cell's log-ω change
     bounded (`omega_step_bound`, `omega_step_ratio` default `DEFAULT_OMEGA_STEP_RATIO = e` under
-    `LogScalars`; `math.inf` = unbounded; a finite ratio with direct ω raises), and `step_limit=None`.
+    `LogScalars`; `math.inf` = unbounded; a finite ratio with direct ω raises). There is no whole-step
+    `step_limit` to set beside it: that seam was deleted the same day as unused.
     See `.claude/rules/solve-march.md`. **There is no `positive_k_limit`, `_k_positivity_guards`,
     `positivity_floor` or `positivity_projection` any more** — the global fraction-to-the-boundary cap
     and its floor/projection switches were deleted 2026-10-14, because one or two near-zero-k `bfs3d`

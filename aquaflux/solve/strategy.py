@@ -80,12 +80,12 @@ class LineSearchStep(NamedTuple):
     residual_norm : jnp.ndarray
         ``norm(R(phi))`` at :attr:`phi`, in the measure the search was given.
     full_step_norm : jnp.ndarray
-        The measure at the **full-length** trial, ``alpha = min(1, max_alpha)`` -- what the acceptance
+        The measure at the **full-length** trial, ``alpha = 1`` -- what the acceptance
         test compared with the reference when it decided whether the full step could be taken. Kept
         because a rejected full step is the information a step's ``alpha`` summarizes as a bare "no":
         the ratio of this to the reference says by how much it failed, so its trend over successive
-        steps shows the full step becoming acceptable before it is. ``nan`` when the ladder accepted a
-        longer (growth) rung and never evaluated the full one.
+        steps shows the full step becoming acceptable before it is. The ladder starts at the full step,
+        so it is always evaluated.
     """
 
     phi: jnp.ndarray
@@ -97,8 +97,8 @@ class LineSearchStep(NamedTuple):
 class StepOutcome(NamedTuple):
     """What one Newton step produced, what it cost, and how it ended.
 
-    A record rather than a widening tuple: these ten values travel together through every stepper and
-    both consumers, and a positional 10-tuple is where a caller silently mis-unpacks one for another.
+    A record rather than a widening tuple: these nine values travel together through every stepper and
+    both consumers, and a positional 9-tuple is where a caller silently mis-unpacks one for another.
 
     Attributes
     ----------
@@ -133,19 +133,13 @@ class StepOutcome(NamedTuple):
         step solved, so a threshold on it is ~6x more sensitive for a 5-iteration step than a
         1-iteration one, and the same per-solve difficulty trips it or not depending on a count that
         says nothing about conditioning.
-    binding_limit : jnp.ndarray
-        The step cap **where it was the binding constraint**, else ``1``. A small ``alpha`` has two
-        completely different causes -- the direction overshot (shorten it, escalate the shift) or a
-        constraint bound (the direction is fine, it just cannot be followed that far) -- and they call
-        for opposite responses, so ``alpha`` alone cannot be acted on. Below ``1`` means an injected
-        limit, not the descent test, decided the step length; the value is how tight it was.
     full_step_ratio : jnp.ndarray
         The step's first full-length trial measured against the state it started from,
         ``norm(G(phi + delta)) / norm(G(phi))`` -- the number the line search compares with one to
         accept the full step. For a dual-time step it is the **first** inner iteration's, whose
         ``G`` at the anchor is the steady residual; for a single-step strategy it is the accepted
-        attempt's. ``nan`` when no full-length trial was evaluated (see
-        :attr:`LineSearchStep.full_step_norm`).
+        attempt's. ``nan`` when no full-length trial was evaluated (a pseudo-transient step whose
+        every attempt was rejected).
     refresh_due : jnp.ndarray
         Whether one of the step's solves cost enough that its frozen preconditioner should be re-fitted
         before the next attempt runs. A dual-time step with ``refresh_on_cycles`` set stops its inner loop
@@ -160,7 +154,6 @@ class StepOutcome(NamedTuple):
     inner_iterations: jnp.ndarray
     reached_target: jnp.ndarray
     max_inner_cycles: jnp.ndarray
-    binding_limit: jnp.ndarray
     full_step_ratio: jnp.ndarray
     refresh_due: jnp.ndarray
 
@@ -395,10 +388,6 @@ class StepReport(NamedTuple):
         over the inner iterations, so a threshold on it is ~6x more sensitive for a 5-iteration step
         than a 1-iteration one and answers partly a question about nonlinear difficulty rather than
         conditioning. ``0`` when not measured.
-    binding_limit : float
-        The step cap where it was the **binding** constraint, else ``1``. A small ``alpha`` means
-        either that the direction overshot or that a constraint stopped the step being followed
-        further -- opposite diagnoses, so ``alpha`` alone cannot be acted on or reported honestly.
     residual_norm : float
         The residual measure at the state the step produced.
     residual_ratio : float
@@ -471,7 +460,6 @@ class StepReport(NamedTuple):
     drift: float = 0.0
     inner_iterations: int = 1
     max_inner_cycles: int = 0
-    binding_limit: float = 1.0
     shift: float = 0.0
     escalations: int = 0
     diverged_retry: bool = False

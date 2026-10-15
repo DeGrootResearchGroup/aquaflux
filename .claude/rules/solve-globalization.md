@@ -115,9 +115,10 @@ What to take from it, none of which is specific to that mechanism:
 
 - **`ShiftedStep` is the shared body of the two shifted Newton steps (`solve/continuation.py`, BUILT
   2026-08-15).** `PseudoTransientStep` and `DualTimeStep` differ entirely in `stepper()` — what one
-  *outer step* means — and not at all in how they are configured or interrogated. The eight fields they
-  share (`shift_policy`, `relaxation_schedule`, `line_search`, `step_limit`, `step_projection`,
-  `krylov_solver`, `residual_norm`, `adjoint_preconditioner_factory`) and all three `NewtonStrategy`
+  *outer step* means — and not at all in how they are configured or interrogated. The fields they
+  share (`shift_policy`, `relaxation_schedule`, `line_search`, `step_projection`, `krylov_solver`,
+  `residual_norm`, `adjoint_preconditioner_factory`, and `jacobian_residual` since; a ninth, `step_limit`,
+  a whole-step cap, was deleted 2026-10-14 as unused) and all three `NewtonStrategy`
   accessors (`norm`, `linear_solver`, `adjoint_preconditioner`) were written out **twice, identically**,
   field comments included. A subclass now supplies `stepper` plus the fields its own step shape needs.
   `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `linear_solver` returns a
@@ -284,10 +285,10 @@ What to take from it, none of which is specific to that mechanism:
     carries every setting that describes *how a march damps* rather than *what it is solving*: the SER
     schedule (`beta0`, `exponent`, `beta_floor`), the escalation ladder (`max_escalations`,
     `escalation_factor`), the divergence guard's `divergence_cap`, and the backtracking ladder
-    (`line_search`, `grow`, `line_search_growth`). Its two methods, `step(policy, **fields)` and
+    (`line_search`, `line_search_growth`). Its two methods, `step(policy, **fields)` and
     `dual_time_step(policy, **fields)`, are the **only** places a globalization becomes a step; the
     per-problem fields (`adjoint_preconditioner_factory`, `krylov_solver`, `residual_norm`,
-    `step_limit`, `step_projection`, `jacobian_residual`) ride through as passthroughs.
+    `step_projection`, `jacobian_residual`) ride through as passthroughs.
     - **Every field is UNSET by default (`None`), and unset falls through — first to the builder's base,
       then to the step class's own default (binding).** `_coupled_step` calls
       `globalization.with_defaults(line_search=_COUPLED_LINE_SEARCH)`, so `Globalization(beta0=1.5)`
@@ -299,7 +300,7 @@ What to take from it, none of which is specific to that mechanism:
       a declarative case file's `globalization: {beta0: 1.5}` had no way to say which preset it meant.
       There is no `COUPLED_GLOBALIZATION` now; `DEFAULT_GLOBALIZATION` is the empty override.
     - **What it refuses rather than drops.** `dual_time_step` raises on any escalation-ladder field that is
-      set (`max_escalations`, `escalation_factor`, `divergence_cap`, `grow`, `line_search_growth`): the
+      set (`max_escalations`, `escalation_factor`, `divergence_cap`, `line_search_growth`): the
       dual-time inner loop has no ladder, so they would reach nothing. A step field the target class does
       not declare raises **even when passed as `None`** — `_supplied` checks names before dropping unset
       values, because filtering first made a misplaced `acceptance=None` vanish — and a setting given both
@@ -320,8 +321,12 @@ What to take from it, none of which is specific to that mechanism:
     - **What it replaced, and the reach it still does not give.** The four coupled builders carried eight
       of these keywords apiece; `momentum_continuation` and `scalar_pseudo_transient_solve` carried **two**,
       so `beta_floor`, `line_search`, `grow` and the growth rule were unreachable from the flow-only and
-      scalar paths, and `line_search_growth` from all six. The problem-specific step fields (`step_limit`,
-      `step_projection`, `krylov_solver`, `residual_norm`, `jacobian_residual`) are **still** unreachable
+      scalar paths, and `line_search_growth` from all six. (⚠️ **There is no `grow` any more** -- the
+      ladder's rungs above the full step, on `Globalization`, `PseudoTransientStep` and
+      `backtracking_line_search` -- deleted 2026-10-14: a `max_alpha = 1.0` default the step passed
+      whenever no whole-step limit was set had capped every rung at the full step since 2026-08-15
+      (`7c1361bd`), so it had reached nothing for two months. The ladder starts at the full step.) The problem-specific step fields
+      (`step_projection`, `krylov_solver`, `residual_norm`, `jacobian_residual`) are **still** unreachable
       from those two builders — outside #372's settings, not closed by it. The segregated flow solve
       `bulk_velocity_flow_solve` is a `DampedNewtonStep`, a different engine that takes no `Globalization`.
     - **⚠️ Moving keywords off a builder that keeps `**kwargs` turns a retired name into a silent one.**

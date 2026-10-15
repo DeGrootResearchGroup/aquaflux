@@ -552,27 +552,6 @@ def test_the_line_search_takes_the_longest_admissible_step_not_the_best_one() ->
     assert float(alpha) == 0.5
 
 
-def test_the_ladder_reaches_step_lengths_longer_than_the_full_step() -> None:
-    """``grow`` rungs above one, because the admissible step is often longer than the full step.
-
-    Measured on a developed state: the full step moved the reattachment not at all while ``alpha`` of
-    about 5.7 moved it four times further, and that longer step already sat inside the tolerance the
-    acceptance rule allowed -- it was simply unreachable from a ladder starting at one. Here every step
-    length keeps reducing out to ``alpha = 4``, so that is what a largest-admissible search must take.
-    """
-
-    def residual_fn(phi):
-        return jnp.abs(phi - 4.0) + 0.1  # still improving all the way out to alpha = 4
-
-    phi = jnp.array([0.0])
-    delta = jnp.array([1.0])
-    reference = jnp.linalg.norm(residual_fn(phi))
-    without = backtracking_line_search(residual_fn, phi, delta, reference, 6).alpha
-    with_growth = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3).alpha
-    assert float(without) == 1.0  # a one-sided ladder cannot express it
-    assert float(with_growth) == 4.0
-
-
 def test_when_nothing_is_admissible_the_search_moves_as_far_as_it_finitely_can() -> None:
     """The fallback must not be the shortest rung -- that is a null step and a guaranteed stall.
 
@@ -635,39 +614,6 @@ def test_growth_factor_widens_what_the_line_search_accepts() -> None:
     assert float(relaxed) == 1.0
 
 
-def test_a_growth_rung_is_never_reached_by_falling_back_onto_it() -> None:
-    """The fallback is capped at the full step, so extending the ladder cannot license an excursion.
-
-    Without the cap, adding rungs above one also moves the no-admissible-step fallback above one, and a
-    step with no acceptable length quietly becomes a multiple of the full step. Measured on a real
-    march with two growth rungs: it fell back onto ``alpha = 4`` and multiplied its residual measure by
-    4.6 in a single step. Growth rungs must be reachable only by PASSING the acceptance test.
-    """
-
-    def residual_fn(phi):
-        return phi * 1.05  # every step length raises the norm, so nothing is admissible
-
-    phi = jnp.array([1.0])
-    delta = jnp.array([1.0])
-    reference = jnp.linalg.norm(residual_fn(phi))
-    capped = backtracking_line_search(residual_fn, phi, delta, reference, 6, grow=3).alpha
-    assert float(capped) == 1.0  # not 8.0, the longest rung on the extended ladder
-
-    # ...while a growth rung IS taken when it genuinely passes the acceptance test.
-    def improving(phi):
-        return jnp.abs(phi - 4.0) + 0.1  # keeps improving out to alpha = 4
-
-    taken = backtracking_line_search(
-        improving,
-        jnp.array([0.0]),
-        jnp.array([1.0]),
-        jnp.linalg.norm(improving(jnp.array([0.0]))),
-        6,
-        grow=3,
-    ).alpha
-    assert float(taken) == 4.0
-
-
 class _NegativeRoot(eqx.Module):
     """A residual whose Newton step drives the first entry straight through zero."""
 
@@ -717,12 +663,12 @@ def test_the_positivity_projection_is_available_on_the_pseudo_transient_step() -
 def test_both_default_to_off_and_leave_the_step_untouched() -> None:
     """Off by default, and byte-identical off -- the guard is opt-in on both strategies."""
     plain = PseudoTransientStep(UniformShiftPolicy())
-    assert plain.step_limit is None and plain.step_projection is None
+    assert plain.step_projection is None
 
     phi0 = jnp.array([1.0, 2.0])
     common = dict(max_steps=1, rtol=1e-12, atol=1e-14)
     without = newton_march(_unshifted_step(), _NegativeRoot(), phi0, **common)
     explicit_none = newton_march(
-        _unshifted_step(step_limit=None, step_projection=None), _NegativeRoot(), phi0, **common
+        _unshifted_step(step_projection=None), _NegativeRoot(), phi0, **common
     )
     assert jnp.array_equal(without.state, explicit_none.state)

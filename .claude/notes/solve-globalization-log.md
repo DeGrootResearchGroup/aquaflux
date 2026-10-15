@@ -705,7 +705,11 @@
     negative slope. Note ‖δ‖ *decreases* as β is backed off (1049 → 856 → 760 for β = 2 → 1 → 0.5), so
     "α collapsing" is not a large-correction artefact.
   - **⚠️ EXTENDING THE LADDER ABOVE α = 1 (`grow`): inert on the Euclidean measure, live on the
-    equilibrated one — and it exposed a fallback bug (2026-07-27).** (The equilibrated/row-scaled measure
+    equilibrated one — and it exposed a fallback bug (2026-07-27).** ⚠️ **`grow` no longer exists
+    (deleted 2026-10-14):** from 2026-08-15 (`7c1361bd`) the pseudo-transient step passed the line search
+    `max_alpha = 1.0` whenever no whole-step limit was set, which capped every growth rung at the full
+    step, so nothing measured after that date ran with it; deleted as inert with the whole-step-limit
+    seam. The measurements below predate the cap. (The equilibrated/row-scaled measure
     is now the *default*, so `grow` is live on the shipped configuration; the Euclidean result below is the
     now-non-default measure.)
     - On the **Euclidean** march, `grow = 2` produced a trajectory **bit-identical** to the
@@ -811,7 +815,8 @@
       `fallback_growth` at the end of this file.** A rung must now also be under
       `fallback_growth * reference_norm`; the *longest qualifying* one still wins, so this reasoning is
       unchanged, but a rung 130 decades above the reference no longer qualifies at all.
-    - **The ladder can extend ABOVE α = 1 (`grow` rungs of doubling; default 0 = off).** Measured on a
+    - **The ladder could extend ABOVE α = 1 (`grow` rungs of doubling; default 0 = off; deleted
+      2026-10-14, inert since 2026-08-15 -- see the `grow` entry above).** Measured on a
       developed state: the full step moved the reattachment not at all, while `α ≈ 5.7` moved it four
       times further **and already sat inside the tolerance the acceptance rule allowed** — it was simply
       unreachable from a ladder that starts at 1. Any scan or study of step length must therefore not
@@ -1847,7 +1852,10 @@ every row.
   `x_r/h` 8.361, final `|R|` 5.1e-6 in the case's scales. One step more than the guard on `dfb21bc2` (17 /
   134), which is #710 meeting `atol` in the case's own scales.
 
-**Left open:** nothing in the library now installs a whole-step `step_limit`, so the generic seam
-(`step_limit` on the step classes, `StepOutcome.binding_limit`, `stop_on_limit_stall`, the log's `limit`
-aside, `retry.py`'s commentary on capped steps) is unused; its removal is a separate change.
+**Closed the same day:** with nothing installing a whole-step `step_limit`, the generic seam
+(`step_limit` on the step classes and `shifted_step`, `backtracking_line_search(max_alpha=)`,
+`StepOutcome`/`StepReport.binding_limit`, `newton_march(stop_on_limit_stall=)` / `_limit_collapsing`,
+the log's `limit` aside and `L` flag) was deleted as unused, with the harnesses that only read it
+(`march_stall_replay.py`, `k_row_scale_probe.py`). The line search's `grow` went with it: the step's `max_alpha = 1.0`
+default had capped its rungs at the full step since 2026-08-15, so it too reached nothing.
 

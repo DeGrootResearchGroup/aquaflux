@@ -206,10 +206,6 @@ VALIDATION_INTERNAL_REACHES = {
     # digit for digit is what makes a replayed arm evidence about the march, so it must run the march's
     # step, not a re-implementation of it.
     "_march_step",
-    # The march's lock-up predicate, replayed over archived march logs to check a candidate rule fires
-    # on the runs that stalled and on nothing that recovered. Replaying a private predicate is the
-    # whole point of that harness, so this one is unlikely ever to become public.
-    "_limit_collapsing",
     # The aggregation's internals, reached by the harness that measured whether equilibration changes
     # the graph the coarsening sees (it does not -- 0.03% of edges). Running the real `_cell_graph` /
     # `_aggregation_edges` / `_mis_aggregate` is the point: a re-implementation would have measured a

@@ -29,7 +29,6 @@ from aquaflux.solve import (
     newton_march,
     positive_block_projection,
 )
-from aquaflux.solve.implicit import backtracking_line_search
 
 #: Incremented on every *trace* of a residual below, so a test can assert that a rebuilt step
 #: reuses the compiled march step instead of retracing it.
@@ -501,43 +500,6 @@ def test_the_step_reports_its_first_inner_iterations_full_step_ratio(
     assert (float(outcome.alpha) == 1.0) is first_full_step_taken
 
 
-def test_a_capped_line_search_never_exceeds_the_cap() -> None:
-    """The cap applies to every rung, including the growth rungs above one."""
-    phi, delta = jnp.array([1.0]), jnp.array([-1.0])
-    searched = backtracking_line_search(
-        lambda p: p * 0.0, phi, delta, jnp.asarray(1.0), steps=4, grow=2, max_alpha=0.1
-    )
-
-    assert float(searched.alpha) <= 0.1
-    assert float(searched.phi[0]) >= 0.9  # phi - alpha, with alpha capped
-    # The first (growth) rung was accepted, so the ladder never reached the full step: its measure was
-    # not taken, and is reported as such rather than as a value it never had.
-    assert jnp.isnan(searched.full_step_norm)
-
-
-def test_the_inner_line_search_honours_an_injected_step_limit() -> None:
-    """A step that would drive the constrained block negative is shortened, not taken."""
-    theta = jnp.array([8.0, 27.0, 64.0])
-
-    def residual_fn(phi: jnp.ndarray) -> jnp.ndarray:
-        return _residual(phi, theta)
-
-    phi0 = jnp.ones_like(theta)
-    r0 = jnp.linalg.norm(residual_fn(phi0))
-    common = dict(relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0), inner_steps=3)
-    free = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
-    capped = DualTimeStep(
-        UniformShiftPolicy(strength=1.0), step_limit=lambda p, d: jnp.asarray(0.01), **common
-    )
-
-    free_out = free.stepper()(residual_fn, phi0, r0, free.linear_solver())
-    capped_out = capped.stepper()(residual_fn, phi0, r0, capped.linear_solver())
-
-    assert float(capped_out.alpha) <= 0.01 < float(free_out.alpha)
-    # The capped step still moves -- a cap shortens the step, it does not null it.
-    assert not jnp.allclose(capped_out.phi, phi0)
-
-
 def test_abort_above_inner_cycles_stops_a_doomed_attempt_early() -> None:
     """A solve costing more than the march's discard threshold ends the attempt there and then.
 
@@ -773,13 +735,12 @@ def test_a_step_only_asks_for_a_refit_once_a_solve_reaches_the_threshold() -> No
 
 
 def test_abort_below_alpha_stops_an_attempt_that_can_no_longer_move() -> None:
-    """A step length capped at essentially nothing ends the attempt, instead of iterating on in place.
+    """An iteration that cannot descend ends the attempt, instead of iterating on in place.
 
     The failure this catches is invisible to the cost bailout, because the solves stay *cheap*: the
-    correction simply cannot be followed. Here an injected limit admits 1e-12 of every step, which is
-    the shape a positivity cap takes when a cell sits on the boundary -- measured on a three-dimensional
-    coupled march at a limit of 4.4e-10, where four consecutive inner iterations moved ``‖G‖`` from
-    4.442e-03 to 4.440e-03 and the loop ran to the end of its budget regardless.
+    correction simply cannot be followed. Here a projection clips every correction away entirely, so
+    no rung reduces ``‖G‖``, the line search reports the iteration as non-descending (``alpha`` 0),
+    and the iterate never moves -- each further inner iteration re-derives the same correction.
     """
     theta = jnp.array([8.0, 27.0, 64.0])
 
@@ -792,8 +753,8 @@ def test_abort_below_alpha_stops_an_attempt_that_can_no_longer_move() -> None:
         relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
         inner_steps=20,
         inner_tol=0.0,
-        # Admit almost none of any correction, so the ladder cannot move the iterate.
-        step_limit=lambda p, d: jnp.asarray(1e-12),
+        # Clip every correction away, so the ladder cannot move the iterate.
+        step_projection=lambda p, d: d * 0.0,
     )
     unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_below_alpha=1e-6, **common)

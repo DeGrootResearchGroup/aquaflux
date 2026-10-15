@@ -262,8 +262,11 @@ Rules, with FVM-specific teeth:
   surface that is one configuration, not one namespace.
   And check the other direction before unifying: a parameter present on only one sibling may be
   **dominated rather than missing** (`descent_backoff`/`descent_test` were exactly this — recorded as
-  counterproductive and since deleted along with the `while_loop` and seeding dance they alone required;
-  `grow` is inert on a non-default measure and stays, since inert is not the same as counterproductive).
+  counterproductive and since deleted along with the `while_loop` and seeding dance they alone required.
+  `grow`, the line search's rungs above the full step, was kept on the argument that inert is not the same
+  as counterproductive -- and was found 2026-10-14 to have reached nothing since 2026-08-15, when a
+  whole-step-limit default of `1.0` began capping every rung at the full step; it was deleted. Before
+  keeping an "inert" setting, check that it reaches anything at all).
   Principle 0 says delete those, not promote them onto the shared builder.
 - **Concrete trigger:** *If a change would require editing the same formula — or the same wiring, or the
   same default — in more than one place, it is in the wrong place: consolidate it first, then make the

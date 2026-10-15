@@ -593,23 +593,6 @@ def test_the_free_form_lines_are_ruled_off_from_the_columned_row() -> None:
     assert lines[row + 2].startswith("| pc ")
 
 
-def test_a_step_clipped_by_a_constraint_is_distinguished_from_one_that_overshot() -> None:
-    """A small ``a_min`` has two opposite causes, so reporting it alone is not enough.
-
-    Overshoot says shorten the step and escalate the shift; a binding constraint says the direction
-    is fine and simply cannot be followed that far. The flag and the reported limit separate them.
-    """
-    logger, buffer = _log()
-    logger.on_step(_report(alpha=0.013, binding_limit=0.013))  # stopped by the limit
-    logger.on_step(_report(alpha=0.5))  # stopped by the descent test
-
-    limited, overshot = _step_rows(buffer)
-    assert limited["flg"] == "L"
-    assert overshot["flg"] == ""
-    assert "limit 1.30e-02" in _asides(buffer)[0]
-    assert "limit" not in _asides(buffer)[1]
-
-
 def _field_rows(buffer: io.StringIO) -> dict[str, dict[str, str]]:
     """The per-equation block's rows, as ``{field: {heading: cell}}`` (the last block logged)."""
     headings, rows = None, {}
@@ -695,7 +678,7 @@ def test_every_line_of_a_step_block_is_the_same_width() -> None:
         detail=("fields", "residuals", "pc"),
     )
     logger.on_refresh(RefreshTiming("full", 21.8))
-    logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
+    logger.on_checkpoint(_report(), 1.0)
 
     grid = [line for line in buffer.getvalue().splitlines() if line.startswith(("|", "+"))]
     assert len({len(line) for line in grid}) == 1
@@ -714,9 +697,11 @@ def test_the_aside_puts_one_concern_on_each_line() -> None:
     all had to be read to find any one of them."""
     logger, buffer = _log(metrics=lambda s: {"xr/h": 6.728}, detail=("pc",))
     logger.on_refresh(RefreshTiming("full", 21.8))
-    logger.on_checkpoint(_report(binding_limit=0.243), 1.0)
+    logger.on_checkpoint(_report(), 1.0)
 
-    assert _asides(buffer)[:3] == ["pc full 21.8s", "xr/h 6.728", "limit 2.43e-01"]
+    asides = _asides(buffer)
+    assert asides[:2] == ["pc full 21.8s", "xr/h 6.728"]
+    assert asides[2].startswith("cum ")
 
 
 def test_once_a_march_judges_its_stop_in_another_measure_the_log_reports_that_measure() -> None:
