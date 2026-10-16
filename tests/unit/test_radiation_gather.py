@@ -829,6 +829,7 @@ def test_the_gradient_reaches_every_vertex_of_every_facet():
     facet = rectangle_triangles([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
     surfaces = Surfaces.from_triangles(facet, emission=100.0)
     probe = np.array([[0.02, 0.01, 0.3]])
+
     def field(vertices):
         return jnp.sum(direct_fluence_rate(surfaces.with_geometry(vertices), probe))
 
