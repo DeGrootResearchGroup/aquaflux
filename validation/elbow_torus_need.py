@@ -1,9 +1,10 @@
 """Does a pipe elbow need a torus, or is a chain of cylinders enough to shadow it? (#504)
 
-An elbow's fluid is a quarter torus, and a torus is the one primitive the solids package does not
-have: a line can pass through its tube twice, and the ray test is a quartic. Before the quartic is
-written, this asks whether it is needed -- whether describing the elbow as a chain of ``N``
-cylinders, which :class:`~aquaflux.solids.Outside` already takes, shadows the light the same way.
+An elbow's fluid is a quarter torus, and a torus is the awkward primitive: a line can pass through
+its tube twice, and the ray test is a quartic. This asks whether that is needed -- whether
+describing the elbow as a chain of ``N`` cylinders, which :class:`~aquaflux.solids.Outside` takes
+without one, shadows the light the same way. (It was measured before
+:class:`~aquaflux.solids.Torus` was written, and is why it was.)
 
 **The reference does not need the quartic either.** A pipe is everything within its radius of its
 centreline, so the fluid's signed distance is the distance to that curve -- two segments and a
@@ -57,6 +58,7 @@ import json
 import os
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -223,7 +225,7 @@ def _walk(origin, target, near, kind, shape, cylinders, planes, blocked, grazed,
                             shape,
                             cylinders,
                             planes,
-                        )  # fmt: skip
+                        )
                         > 0.0
                     ):
                         hit = True
@@ -373,7 +375,7 @@ def overlapping(bend, pieces):
 def as_primitives(cylinders, planes, tolerance):
     """The same regions as :class:`~aquaflux.solids.Outside` of primitives."""
     regions = []
-    for row, cuts in zip(cylinders, planes):
+    for row, cuts in zip(cylinders, planes, strict=True):
         body = Cylinder(centre=row[:3], axis=row[3:6], radius=row[6], half_length=row[7])
         halves = [HalfSpace(point=c[:3], normal=c[3:]) for c in cuts if np.any(c[3:] != 0.0)]
         regions.append(Intersection(body, *halves) if halves else body)
@@ -394,7 +396,7 @@ def lamp() -> Surfaces:
     )
     ring[-1] = ring[0]  # close the tube on one vertex table, not on trigonometry evaluated twice
     triangles = []
-    for a, b in zip(rings[:-1], rings[1:]):
+    for a, b in pairwise(rings):
         for j in range(LAMP_SECTORS):
             p00, p01 = ring[j] + [a, 0, 0], ring[j + 1] + [a, 0, 0]
             p10, p11 = ring[j] + [b, 0, 0], ring[j + 1] + [b, 0, 0]
