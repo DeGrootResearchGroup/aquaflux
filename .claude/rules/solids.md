@@ -251,6 +251,34 @@ ends of a cylinder). Generic geometry, so it lives here; what light does at the 
   reporting two slots in with no re-cut of the algebra. Approximating an elbow by a fan of convex
   wedges is available and is **not** the answer: it reintroduces exactly the faceting error
   primitives exist to remove.
+  **Measured (#504, 2026-10-16, `validation/elbow_torus_need.py`): a chain of cylinders converges
+  on the torus, but slowly, and it costs more than one primitive would.** DN100 pipe (radius 50 mm),
+  90° bend at R = 1.0 D and 1.5 D, 0.5 m legs; a 1,536-facet emitting tube on the inlet axis
+  (x -0.45 to -0.05 m); 95 % UVT (5.129 /m); `NoOcclusion`; 3,000 receivers uniform in each of the
+  inlet (control, x <= -R_pipe), the bend, and the outlet's first 0.3 m. Reference: the pipe as
+  everything within its radius of its centreline, walked by its signed distance (no quartic) --
+  zero set 0 / 1,000,000 against an independent membership test, and the same walk on a 4-piece
+  mitre 0 / 2.3M pairs against `Outside` of primitives. Control: 0 pairs differ in the inlet at
+  every N. Mitred chords with ends on the arc; plain overlapping cylinders read the same to the
+  digit from N = 2 (they are the mitre bend in the bend's plane). jax 0.11.2, numba 0.68.0, CPU,
+  Linux x86_64, 4 cores, one run. Relative G over the reference's lit cells, median / p99, and the
+  region's volume-mean G:
+
+  | N | R = 1.0 D bend | R = 1.0 D outlet (99 lit cells) | R = 1.5 D bend |
+  |---|---|---|---|
+  | 4 | 0 / 379 %, -0.47 % | 166 / 2,553 %, +46 % | 0 / 812 %, -1.21 % |
+  | 8 | 0 / 100 %, -0.41 % | 7.9 / 157 %, +8.2 % | 0 / 134 %, -0.88 % |
+  | 16 | 0 / 9.6 %, -0.34 % | 0 / 58 %, +2.1 % | 0 / 49 %, -0.62 % |
+  | 32 | 0 / 1.6 %, +0.03 % | 0 / 26 %, +0.66 % | 0 / 4.6 %, -0.44 % |
+  | 64 | 0 / 0.20 %, +0.01 % | 0 / 0 %, 0.00 % | 0 / 0.52 %, -0.18 % |
+
+  Against #501's faceting (1.2 % median, 8.9 % p99, judged worth removing): ~24-32 pieces at 1.0 D
+  and ~32-48 at 1.5 D before the bend's p99 is below it, ~48 before the dark outlet's is. A gentler
+  bend needs MORE pieces (each chord's sagitta R(1 - cos(pi/4N)) grows with R). Cells of the real
+  bend outside the chain's water (refused by `Outside`, or dark once given a tolerance): 61 / 18 / 3
+  / 0 at N = 4 / 8 / 16 / 32 (R = 1.0 D). Mask cost at 13.8M rays: 64 regions 50-80 s against
+  7-10 s at N = 1, and the covering test's memory goes as the square of the regions (34 regions at
+  the default 4M-pair pass was killed for memory; the harness scales its pass down).
 - **A STEP reader — BUILT, but in `aquaflux/io/cad/`, not here (#505).** It reads through
   OpenCASCADE's Python binding OCP and emits these bodies; nothing of OpenCASCADE crosses into this
   package, which is what keeps it import-free and traceable. The primitives were already the

@@ -1,0 +1,2398 @@
+{
+  "configuration": {
+    "pipe_radius": 0.05,
+    "leg": 0.5,
+    "lamp": {
+      "radius": 0.0115,
+      "from": -0.45,
+      "to": -0.05,
+      "facets": 1536,
+      "exitance": 696.42
+    },
+    "absorption_per_m": 5.129329438755057,
+    "receivers_per_region": 3000,
+    "outlet_reach": 0.3,
+    "faceting_yardstick_from_501": {
+      "median": 0.012,
+      "p99": 0.089
+    }
+  },
+  "bends": {
+    "short radius, R = 1.0 D": {
+      "bend_radius": 0.1,
+      "zero_set": {
+        "points": 1000000,
+        "inside": 169054,
+        "disagree": 0,
+        "disagree_further_than_1e-12_from_the_wall": 0
+      },
+      "walk_check": {
+        "pieces": 4,
+        "pairs": 2304000,
+        "blocked": 452994,
+        "pairs_masked_differently": 0,
+        "walk_segments": 970560,
+        "walk_grazed": 0,
+        "walk_unresolved": 0
+      },
+      "reference": {
+        "rays": 13824000,
+        "seconds": 6.8,
+        "blocked_share": 0.2018720341435185,
+        "segments": 5840544,
+        "grazed": 2,
+        "unresolved": 0
+      },
+      "arms": {
+        "mitred 1": {
+          "regions": 3,
+          "mask_seconds": 7.59,
+          "rays_per_second": 1821341,
+          "deepest_receiver_outside_the_water_m": 0.02828226831922226,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 852,
+              "cells_lit_by_arm_but_dark_in_reference": 121,
+              "pairs_masked_differently": 588836,
+              "relative_difference_lit": {
+                "median": 0.09053863904110393,
+                "p99": 26.02566490445762,
+                "max": 7742.222285475429
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 75.49022796707018,
+                "max": 7742.222285475429
+              },
+              "volume_mean_G_relative_difference": -0.046628500275573304
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 565,
+              "pairs_masked_differently": 35940,
+              "relative_difference_lit": {
+                "median": 12.559482507374742,
+                "p99": 1197.9957536006702,
+                "max": 1593.0332449245843
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 12.559482507374742,
+                "p99": 1197.9957536006702,
+                "max": 1593.0332449245843
+              },
+              "volume_mean_G_relative_difference": 25.651422385122476
+            }
+          }
+        },
+        "mitred 2": {
+          "regions": 4,
+          "mask_seconds": 12.75,
+          "rays_per_second": 1084599,
+          "deepest_receiver_outside_the_water_m": 0.007405155278348341,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 259,
+              "cells_lit_by_arm_but_dark_in_reference": 64,
+              "pairs_masked_differently": 219114,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 13.894407561320357,
+                "max": 4445.224324841424
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 17.662393490874244,
+                "max": 4445.224324841424
+              },
+              "volume_mean_G_relative_difference": -0.007381749591331532
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 56,
+              "pairs_masked_differently": 4825,
+              "relative_difference_lit": {
+                "median": 6.549408087094572,
+                "p99": 356.214210066337,
+                "max": 379.65043712887655
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 6.549408087094572,
+                "p99": 356.214210066337,
+                "max": 379.65043712887655
+              },
+              "volume_mean_G_relative_difference": 2.5303241192456007
+            }
+          }
+        },
+        "mitred 4": {
+          "regions": 6,
+          "mask_seconds": 20.36,
+          "rays_per_second": 679108,
+          "deepest_receiver_outside_the_water_m": 0.001599515266896015,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 61,
+              "cells_lit_by_arm_but_dark_in_reference": 23,
+              "pairs_masked_differently": 60249,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 3.7906685388590557,
+                "max": 501.40948036763257
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 3.887149034006873,
+                "max": 501.40948036763257
+              },
+              "volume_mean_G_relative_difference": -0.004695574504949951
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 23,
+              "pairs_masked_differently": 829,
+              "relative_difference_lit": {
+                "median": 1.6610649654403473,
+                "p99": 25.53075314330684,
+                "max": 27.704969317658612
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 1.6610649654403473,
+                "p99": 25.53075314330684,
+                "max": 27.704969317658612
+              },
+              "volume_mean_G_relative_difference": 0.46073083462304987
+            }
+          }
+        },
+        "mitred 8": {
+          "regions": 10,
+          "mask_seconds": 9.01,
+          "rays_per_second": 1533744,
+          "deepest_receiver_outside_the_water_m": 0.0003614685582595256,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 18,
+              "cells_lit_by_arm_but_dark_in_reference": 4,
+              "pairs_masked_differently": 18033,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 1.0,
+                "max": 10.158854749256468
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.3519105031858318,
+                "max": 10.158854749256468
+              },
+              "volume_mean_G_relative_difference": -0.004090363769111427
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 1,
+              "pairs_masked_differently": 169,
+              "relative_difference_lit": {
+                "median": 0.07890038686545195,
+                "p99": 1.5673231753020553,
+                "max": 2.453934990141245
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.07890038686545195,
+                "p99": 1.5673231753020553,
+                "max": 2.453934990141245
+              },
+              "volume_mean_G_relative_difference": 0.08209254847839653
+            }
+          }
+        },
+        "mitred 12": {
+          "regions": 14,
+          "mask_seconds": 9.6,
+          "rays_per_second": 1440007,
+          "deepest_receiver_outside_the_water_m": 0.0001396880425366745,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 5,
+              "cells_lit_by_arm_but_dark_in_reference": 3,
+              "pairs_masked_differently": 6162,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.21234598891755133,
+                "max": 5.833305234297496
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.15569696215856843,
+                "max": 5.833305234297496
+              },
+              "volume_mean_G_relative_difference": -0.0016040910127869124
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 1,
+              "pairs_masked_differently": 78,
+              "relative_difference_lit": {
+                "median": 0.0049796679485209485,
+                "p99": 0.9862955141732083,
+                "max": 1.5492290566318714
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0049796679485209485,
+                "p99": 0.9862955141732083,
+                "max": 1.5492290566318714
+              },
+              "volume_mean_G_relative_difference": 0.0372660852413742
+            }
+          }
+        },
+        "mitred 16": {
+          "regions": 18,
+          "mask_seconds": 20.41,
+          "rays_per_second": 677274,
+          "deepest_receiver_outside_the_water_m": 5.258895014216558e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 3,
+              "cells_lit_by_arm_but_dark_in_reference": 1,
+              "pairs_masked_differently": 3845,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.09585635581340532,
+                "max": 3.789471760795736
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0856337384508078,
+                "max": 3.789471760795736
+              },
+              "volume_mean_G_relative_difference": -0.0033576884036434773
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 41,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.5793497533517481,
+                "max": 0.6021560116438573
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.5793497533517481,
+                "max": 0.6021560116438573
+              },
+              "volume_mean_G_relative_difference": 0.02049343467324416
+            }
+          }
+        },
+        "mitred 24": {
+          "regions": 26,
+          "mask_seconds": 29.5,
+          "rays_per_second": 468537,
+          "deepest_receiver_outside_the_water_m": 3.372299422919889e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 2,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 2089,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.03305345703435798,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.03037702796234951,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": -0.0015333862260106246
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 19,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "volume_mean_G_relative_difference": 0.008385128468449077
+            }
+          }
+        },
+        "mitred 32": {
+          "regions": 34,
+          "mask_seconds": 38.65,
+          "rays_per_second": 357631,
+          "deepest_receiver_outside_the_water_m": 0.0,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 484,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.01564661442181564,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.01564661442181564,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": 0.00030101172979124513
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 14,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "volume_mean_G_relative_difference": 0.006641900556993319
+            }
+          }
+        },
+        "mitred 48": {
+          "regions": 50,
+          "mask_seconds": 48.67,
+          "rays_per_second": 284026,
+          "deepest_receiver_outside_the_water_m": 0.0,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 202,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.004923130564028556,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.004923130564028556,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": 0.00010010968750195914
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 5,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.07621982851528088,
+                "max": 0.23471091065331562
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.07621982851528088,
+                "max": 0.23471091065331562
+              },
+              "volume_mean_G_relative_difference": 0.0022215312348168315
+            }
+          }
+        },
+        "mitred 64": {
+          "regions": 66,
+          "mask_seconds": 79.36,
+          "rays_per_second": 174194,
+          "deepest_receiver_outside_the_water_m": 0.0,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 113,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0019797364131352814,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0019797364131352814,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": 6.931761355688515e-05
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 1,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 2.2051294780516836e-05,
+                "max": 0.0011025647390260612
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 2.2051294780516836e-05,
+                "max": 0.0011025647390260612
+              },
+              "volume_mean_G_relative_difference": 2.5628135260191698e-05
+            }
+          }
+        },
+        "overlapping 1": {
+          "regions": 3,
+          "mask_seconds": 6.86,
+          "rays_per_second": 2016444,
+          "deepest_receiver_outside_the_water_m": 0.02828226831922226,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 843,
+              "cells_lit_by_arm_but_dark_in_reference": 121,
+              "pairs_masked_differently": 584952,
+              "relative_difference_lit": {
+                "median": 0.08741154986550062,
+                "p99": 26.02566490445762,
+                "max": 7742.222285475429
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 74.64486198396682,
+                "max": 7742.222285475429
+              },
+              "volume_mean_G_relative_difference": -0.03880684142831892
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 565,
+              "pairs_masked_differently": 35940,
+              "relative_difference_lit": {
+                "median": 12.559482507374742,
+                "p99": 1197.9957536006702,
+                "max": 1593.0332449245843
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 12.559482507374742,
+                "p99": 1197.9957536006702,
+                "max": 1593.0332449245843
+              },
+              "volume_mean_G_relative_difference": 25.651422385122476
+            }
+          }
+        },
+        "overlapping 2": {
+          "regions": 4,
+          "mask_seconds": 8.59,
+          "rays_per_second": 1608597,
+          "deepest_receiver_outside_the_water_m": 0.007405155278348341,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 258,
+              "cells_lit_by_arm_but_dark_in_reference": 64,
+              "pairs_masked_differently": 219139,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 13.894407561320357,
+                "max": 4445.224324841424
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 17.64906813742942,
+                "max": 4445.224324841424
+              },
+              "volume_mean_G_relative_difference": -0.007289064873924556
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 56,
+              "pairs_masked_differently": 4825,
+              "relative_difference_lit": {
+                "median": 6.549408087094572,
+                "p99": 356.214210066337,
+                "max": 379.65043712887655
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 6.549408087094572,
+                "p99": 356.214210066337,
+                "max": 379.65043712887655
+              },
+              "volume_mean_G_relative_difference": 2.5303241192456007
+            }
+          }
+        },
+        "overlapping 4": {
+          "regions": 6,
+          "mask_seconds": 19.67,
+          "rays_per_second": 702932,
+          "deepest_receiver_outside_the_water_m": 0.001599515266896015,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 61,
+              "cells_lit_by_arm_but_dark_in_reference": 23,
+              "pairs_masked_differently": 60249,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 3.7906685388590557,
+                "max": 501.40948036763257
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 3.887149034006873,
+                "max": 501.40948036763257
+              },
+              "volume_mean_G_relative_difference": -0.004695574504949951
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 23,
+              "pairs_masked_differently": 829,
+              "relative_difference_lit": {
+                "median": 1.6610649654403473,
+                "p99": 25.53075314330684,
+                "max": 27.704969317658612
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 1.6610649654403473,
+                "p99": 25.53075314330684,
+                "max": 27.704969317658612
+              },
+              "volume_mean_G_relative_difference": 0.46073083462304987
+            }
+          }
+        },
+        "overlapping 8": {
+          "regions": 10,
+          "mask_seconds": 6.96,
+          "rays_per_second": 1985392,
+          "deepest_receiver_outside_the_water_m": 0.0003614685582595395,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 18,
+              "cells_lit_by_arm_but_dark_in_reference": 4,
+              "pairs_masked_differently": 18033,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 1.0,
+                "max": 10.158854749256468
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.3519105031858318,
+                "max": 10.158854749256468
+              },
+              "volume_mean_G_relative_difference": -0.004090363769111427
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 1,
+              "pairs_masked_differently": 169,
+              "relative_difference_lit": {
+                "median": 0.07890038686545195,
+                "p99": 1.5673231753020553,
+                "max": 2.453934990141245
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.07890038686545195,
+                "p99": 1.5673231753020553,
+                "max": 2.453934990141245
+              },
+              "volume_mean_G_relative_difference": 0.08209254847839653
+            }
+          }
+        },
+        "overlapping 12": {
+          "regions": 14,
+          "mask_seconds": 10.0,
+          "rays_per_second": 1382917,
+          "deepest_receiver_outside_the_water_m": 0.0001396880425366745,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 5,
+              "cells_lit_by_arm_but_dark_in_reference": 3,
+              "pairs_masked_differently": 6162,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.21234598891755133,
+                "max": 5.833305234297496
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.15569696215856843,
+                "max": 5.833305234297496
+              },
+              "volume_mean_G_relative_difference": -0.0016040910127869124
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 1,
+              "pairs_masked_differently": 78,
+              "relative_difference_lit": {
+                "median": 0.0049796679485209485,
+                "p99": 0.9862955141732083,
+                "max": 1.5492290566318714
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0049796679485209485,
+                "p99": 0.9862955141732083,
+                "max": 1.5492290566318714
+              },
+              "volume_mean_G_relative_difference": 0.0372660852413742
+            }
+          }
+        },
+        "overlapping 16": {
+          "regions": 18,
+          "mask_seconds": 12.79,
+          "rays_per_second": 1080699,
+          "deepest_receiver_outside_the_water_m": 5.258895014216558e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 3,
+              "cells_lit_by_arm_but_dark_in_reference": 1,
+              "pairs_masked_differently": 3845,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.09585635581340532,
+                "max": 3.789471760795736
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0856337384508078,
+                "max": 3.789471760795736
+              },
+              "volume_mean_G_relative_difference": -0.0033576884036434773
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 41,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.5793497533517481,
+                "max": 0.6021560116438573
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.5793497533517481,
+                "max": 0.6021560116438573
+              },
+              "volume_mean_G_relative_difference": 0.02049343467324416
+            }
+          }
+        },
+        "overlapping 24": {
+          "regions": 26,
+          "mask_seconds": 22.1,
+          "rays_per_second": 625517,
+          "deepest_receiver_outside_the_water_m": 3.372299422919889e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 2,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 2089,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.03305345703435798,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.03037702796234951,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": -0.0015333862260106246
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 19,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "volume_mean_G_relative_difference": 0.008385128468449077
+            }
+          }
+        },
+        "overlapping 32": {
+          "regions": 34,
+          "mask_seconds": 25.92,
+          "rays_per_second": 533304,
+          "deepest_receiver_outside_the_water_m": 0.0,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 484,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.01564661442181564,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.01564661442181564,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": 0.00030101172979124513
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 14,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.2622283602405818,
+                "max": 0.5788843195090521
+              },
+              "volume_mean_G_relative_difference": 0.006641900556993319
+            }
+          }
+        },
+        "overlapping 48": {
+          "regions": 50,
+          "mask_seconds": 41.76,
+          "rays_per_second": 331055,
+          "deepest_receiver_outside_the_water_m": 0.0,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 202,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.004923130564028556,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.004923130564028556,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": 0.00010010968750195914
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 5,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.07621982851528088,
+                "max": 0.23471091065331562
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.07621982851528088,
+                "max": 0.23471091065331562
+              },
+              "volume_mean_G_relative_difference": 0.0022215312348168315
+            }
+          }
+        },
+        "overlapping 64": {
+          "regions": 66,
+          "mask_seconds": 50.75,
+          "rays_per_second": 272386,
+          "deepest_receiver_outside_the_water_m": 0.0,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2879,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 113,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0019797364131352814,
+                "max": 2.53476399789501
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0019797364131352814,
+                "max": 2.53476399789501
+              },
+              "volume_mean_G_relative_difference": 6.931761355688515e-05
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 99,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 1,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 2.2051294780516836e-05,
+                "max": 0.0011025647390260612
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 2.2051294780516836e-05,
+                "max": 0.0011025647390260612
+              },
+              "volume_mean_G_relative_difference": 2.5628135260191698e-05
+            }
+          }
+        }
+      }
+    },
+    "long radius, R = 1.5 D": {
+      "bend_radius": 0.15000000000000002,
+      "zero_set": {
+        "points": 1000000,
+        "inside": 155755,
+        "disagree": 0,
+        "disagree_further_than_1e-12_from_the_wall": 0
+      },
+      "walk_check": {
+        "pieces": 4,
+        "pairs": 2304000,
+        "blocked": 531453,
+        "pairs_masked_differently": 0,
+        "walk_segments": 991872,
+        "walk_grazed": 0,
+        "walk_unresolved": 0
+      },
+      "reference": {
+        "rays": 13824000,
+        "seconds": 4.0,
+        "blocked_share": 0.22588324652777778,
+        "segments": 5942688,
+        "grazed": 0,
+        "unresolved": 0
+      },
+      "arms": {
+        "mitred 1": {
+          "regions": 3,
+          "mask_seconds": 6.56,
+          "rays_per_second": 2106818,
+          "deepest_receiver_outside_the_water_m": 0.04276073897868195,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 1114,
+              "cells_lit_by_arm_but_dark_in_reference": 482,
+              "pairs_masked_differently": 656303,
+              "relative_difference_lit": {
+                "median": 1.0,
+                "p99": 162.32750008569334,
+                "max": 5355.480224573541
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 242.30300792454,
+                "max": 5355.480224573541
+              },
+              "volume_mean_G_relative_difference": -0.07198975224442183
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 711,
+              "pairs_masked_differently": 31669,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 2": {
+          "regions": 4,
+          "mask_seconds": 11.48,
+          "rays_per_second": 1203920,
+          "deepest_receiver_outside_the_water_m": 0.010835464876632277,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 314,
+              "cells_lit_by_arm_but_dark_in_reference": 187,
+              "pairs_masked_differently": 241328,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 103.14524959514003,
+                "max": 3360.7524902752684
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 114.3187143066232,
+                "max": 3360.7524902752684
+              },
+              "volume_mean_G_relative_difference": -0.006947882178501508
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 13,
+              "pairs_masked_differently": 119,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 4": {
+          "regions": 6,
+          "mask_seconds": 21.66,
+          "rays_per_second": 638255,
+          "deepest_receiver_outside_the_water_m": 0.002683065899982122,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 94,
+              "cells_lit_by_arm_but_dark_in_reference": 80,
+              "pairs_masked_differently": 82662,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 8.122787175321028,
+                "max": 404.1864107966948
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 8.171957168578805,
+                "max": 404.1864107966948
+              },
+              "volume_mean_G_relative_difference": -0.012148498489182757
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 2,
+              "pairs_masked_differently": 2,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 8": {
+          "regions": 10,
+          "mask_seconds": 8.12,
+          "rays_per_second": 1702172,
+          "deepest_receiver_outside_the_water_m": 0.000494742112090725,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 30,
+              "cells_lit_by_arm_but_dark_in_reference": 18,
+              "pairs_masked_differently": 23097,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 1.3359394354540342,
+                "max": 52.968339611045515
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 1.3439142844392724,
+                "max": 52.968339611045515
+              },
+              "volume_mean_G_relative_difference": -0.008753110614604376
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 12": {
+          "regions": 14,
+          "mask_seconds": 9.11,
+          "rays_per_second": 1516644,
+          "deepest_receiver_outside_the_water_m": 0.00021076204561706197,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 12,
+              "cells_lit_by_arm_but_dark_in_reference": 7,
+              "pairs_masked_differently": 9623,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.8273136369675069,
+                "max": 52.968339611045515
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.32745551415243956,
+                "max": 52.968339611045515
+              },
+              "volume_mean_G_relative_difference": -0.008510684065836882
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 16": {
+          "regions": 18,
+          "mask_seconds": 19.31,
+          "rays_per_second": 715747,
+          "deepest_receiver_outside_the_water_m": 9.999174437200914e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 8,
+              "cells_lit_by_arm_but_dark_in_reference": 5,
+              "pairs_masked_differently": 6323,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.48621041759082306,
+                "max": 3.98108312681659
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.18735395586014017,
+                "max": 3.98108312681659
+              },
+              "volume_mean_G_relative_difference": -0.006233924238507105
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 24": {
+          "regions": 26,
+          "mask_seconds": 27.24,
+          "rays_per_second": 507469,
+          "deepest_receiver_outside_the_water_m": 4.305749102265222e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 4,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 3164,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.09842661352370274,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.089244661852414,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.0068749328576707125
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 32": {
+          "regions": 34,
+          "mask_seconds": 24.78,
+          "rays_per_second": 557960,
+          "deepest_receiver_outside_the_water_m": 2.4744641208489238e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 3,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 2082,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0461035305688197,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.04544997947528181,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.004430494576188049
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 48": {
+          "regions": 50,
+          "mask_seconds": 52.75,
+          "rays_per_second": 262059,
+          "deepest_receiver_outside_the_water_m": 1.3747535491964724e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 1,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 812,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.012546901665644206,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.010620999104499297,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.0017119833581832333
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "mitred 64": {
+          "regions": 66,
+          "mask_seconds": 47.72,
+          "rays_per_second": 289696,
+          "deepest_receiver_outside_the_water_m": 7.63499016984831e-06,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 1,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 708,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0052285586651138385,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.005153486163853858,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.0017899042023356015
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 1": {
+          "regions": 3,
+          "mask_seconds": 4.67,
+          "rays_per_second": 2958101,
+          "deepest_receiver_outside_the_water_m": 0.04276073897868196,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 1107,
+              "cells_lit_by_arm_but_dark_in_reference": 484,
+              "pairs_masked_differently": 654660,
+              "relative_difference_lit": {
+                "median": 1.0,
+                "p99": 162.32750008569334,
+                "max": 5355.480224573541
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 242.09949367551906,
+                "max": 5355.480224573541
+              },
+              "volume_mean_G_relative_difference": -0.06598235428630772
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 711,
+              "pairs_masked_differently": 31669,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 2": {
+          "regions": 4,
+          "mask_seconds": 6.19,
+          "rays_per_second": 2231589,
+          "deepest_receiver_outside_the_water_m": 0.010835464876632277,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 313,
+              "cells_lit_by_arm_but_dark_in_reference": 187,
+              "pairs_masked_differently": 241328,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 103.14524959514003,
+                "max": 3360.7524902752684
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 114.3187143066232,
+                "max": 3360.7524902752684
+              },
+              "volume_mean_G_relative_difference": -0.006947882178501508
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 13,
+              "pairs_masked_differently": 119,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 4": {
+          "regions": 6,
+          "mask_seconds": 14.21,
+          "rays_per_second": 972824,
+          "deepest_receiver_outside_the_water_m": 0.002683065899982108,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 94,
+              "cells_lit_by_arm_but_dark_in_reference": 80,
+              "pairs_masked_differently": 82662,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 8.122787175321028,
+                "max": 404.1864107966948
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 8.171957168578805,
+                "max": 404.1864107966948
+              },
+              "volume_mean_G_relative_difference": -0.012148498489182757
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 2,
+              "pairs_masked_differently": 2,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 8": {
+          "regions": 10,
+          "mask_seconds": 4.79,
+          "rays_per_second": 2885229,
+          "deepest_receiver_outside_the_water_m": 0.000494742112090725,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 30,
+              "cells_lit_by_arm_but_dark_in_reference": 18,
+              "pairs_masked_differently": 23097,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 1.3359394354540342,
+                "max": 52.968339611045515
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 1.3439142844392724,
+                "max": 52.968339611045515
+              },
+              "volume_mean_G_relative_difference": -0.008753110614604376
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 12": {
+          "regions": 14,
+          "mask_seconds": 6.2,
+          "rays_per_second": 2228581,
+          "deepest_receiver_outside_the_water_m": 0.00021076204561705503,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 12,
+              "cells_lit_by_arm_but_dark_in_reference": 7,
+              "pairs_masked_differently": 9623,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.8273136369675069,
+                "max": 52.968339611045515
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.32745551415243956,
+                "max": 52.968339611045515
+              },
+              "volume_mean_G_relative_difference": -0.008510684065836882
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 16": {
+          "regions": 18,
+          "mask_seconds": 10.0,
+          "rays_per_second": 1382464,
+          "deepest_receiver_outside_the_water_m": 9.999174437200914e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 8,
+              "cells_lit_by_arm_but_dark_in_reference": 5,
+              "pairs_masked_differently": 6323,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.48621041759082306,
+                "max": 3.98108312681659
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.18735395586014017,
+                "max": 3.98108312681659
+              },
+              "volume_mean_G_relative_difference": -0.006233924238507105
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 24": {
+          "regions": 26,
+          "mask_seconds": 17.75,
+          "rays_per_second": 778671,
+          "deepest_receiver_outside_the_water_m": 4.3057491022659156e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 4,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 3164,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.09842661352370274,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.089244661852414,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.0068749328576707125
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 32": {
+          "regions": 34,
+          "mask_seconds": 14.77,
+          "rays_per_second": 936142,
+          "deepest_receiver_outside_the_water_m": 2.4744641208489238e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 3,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 2082,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0461035305688197,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.04544997947528181,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.004430494576188049
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 48": {
+          "regions": 50,
+          "mask_seconds": 29.22,
+          "rays_per_second": 473120,
+          "deepest_receiver_outside_the_water_m": 1.3747535491964724e-05,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 1,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 812,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.012546901665644206,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.010620999104499297,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.0017119833581832333
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        },
+        "overlapping 64": {
+          "regions": 66,
+          "mask_seconds": 32.54,
+          "rays_per_second": 424807,
+          "deepest_receiver_outside_the_water_m": 7.63499016984831e-06,
+          "by_region": {
+            "inlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 3000,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.0,
+                "max": 0.0
+              },
+              "volume_mean_G_relative_difference": 0.0
+            },
+            "bend": {
+              "cells": 3000,
+              "cells_lit_by_reference": 2506,
+              "cells_outside_the_arm_s_water": 1,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 708,
+              "relative_difference_lit": {
+                "median": 0.0,
+                "p99": 0.0052285586651138385,
+                "max": 1.238935072805813
+              },
+              "relative_difference_lit_inside_the_arm_s_water": {
+                "median": 0.0,
+                "p99": 0.005153486163853858,
+                "max": 1.238935072805813
+              },
+              "volume_mean_G_relative_difference": -0.0017899042023356015
+            },
+            "outlet": {
+              "cells": 3000,
+              "cells_lit_by_reference": 0,
+              "cells_outside_the_arm_s_water": 0,
+              "cells_lit_by_arm_but_dark_in_reference": 0,
+              "pairs_masked_differently": 0,
+              "relative_difference_lit": null,
+              "relative_difference_lit_inside_the_arm_s_water": null,
+              "volume_mean_G_relative_difference": null
+            }
+          }
+        }
+      }
+    }
+  }
+}
