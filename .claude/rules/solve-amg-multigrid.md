@@ -880,7 +880,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
      row walk does not. Measured on the 4.2M-nnz block: `segment_sum` 13.3 ms, `BCOO @ x` 13.4 ms,
      scipy CSR on the host 2.6 ms, **`BCSR @ x` 1.4 ms**. The level operator is applied ~10× per
      V-cycle, so this alone took the apply from **117.8 ms to 13.3 ms (8.8×)**. Landed as
-     `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val`. **Not** a jit
+     `_CsrOperator`, which owns its matvec and replaced the loose `row`/`col`/`val` — and was itself
+     replaced 2026-10-14 by the padded-row `_PaddedRowOperator` (see "Binding decisions" below). **Not** a jit
      or marshalling problem — both were measured out (1 trace everywhere; a numpy↔jnp round trip is
      0.02 ms), which also retires the older claim that "marshalling is ~half the gap".
   4. **The singularity guard was WRONG, and it was aborting the march.** `_cell_block_inverse`
@@ -2034,13 +2035,94 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
 > The rest of `solve.md`'s "Binding decisions" carries the general Newton/adjoint decisions and a
 > short pointer to this section; these are the `multigrid.py`-specific ones, moved here in full.
 
-- **Reading a frozen level back onto the host has one home per array it owns — `_CsrOperator.to_scipy()`
+- **A level operator is a PADDED-ROW (ELLPACK) operator, `_PaddedRowOperator` — there is no
+  `_CsrOperator` and no `BCSR` product in the package (2026-10-14).** Every row is padded to one width:
+  `columns` / `values` are `(n_rows, width)`, `row_lengths` marks which slots are stored entries, and
+  `apply` is `sum(values * x[columns], axis=1)`. ⚠️ **It is NOT one fused loop** (an earlier version of
+  this entry said so; the compiled program says otherwise, 2026-10-15): XLA writes `x[columns]` to memory
+  in a gather fusion and a second kernel reads it back for the multiply and row sum — on CPU a
+  `__ynn_fusion` (`kCustom`) with empty `outer_dimension_partitions`. On 4-core Linux both kernels are
+  threaded (4 cores ≈ 2× one core). `jax.experimental.sparse.BCSR @ x` lowers instead to one opaque
+  kernel call (`cpu_csr_sparse_dense_ffi`).
+  - **⚠️ ON macOS THAT ROW-SUM KERNEL IS THE BOTTLENECK FOR WIDE ROWS, AND NO FORM OF THE SUM AVOIDS IT
+    CHEAPLY (measured 2026-10-15/16, Apple M3 Pro, bfs3d `state-00018`, `split_apply_timing.py`, best of
+    10, the `ell-csr-forms-probes` branch).** Split apply: padded 140 ms against CSR 105–109; with
+    `XLA_FLAGS=--xla_cpu_experimental_ynn_fusion_type=-reduce` **91 ms** — same on jax 0.10.2 and 0.11.2,
+    so not a version artefact. On Linux the same flag is neutral to worse (a 228-wide row 36 → 45 ms), so
+    it cannot be a global setting. Measured and rejected: `einsum` and a chunked two-stage sum (compile to
+    the same kernels), a column-major `(width, n_rows)` layout (~1.4× slower on Linux, 3× on Mac per
+    operator), and a reduce-free halving sum (2× slower on Linux, **6× slower** on the Mac: 902 ms). What
+    does fix the Mac's forward apply is float32 (82 ms), shipped by both cases (`solve-field-split.md`).
+    pitzDaily's narrow rows (≤ ~85) win on both platforms (Mac 32.6 → 15.7 ms). Harness:
+    `validation/padded_row_forms.py` on that branch (per-operator forms, precisions and compiled fusions).
+  - **The TRANSPOSE is stored (`t_columns` / `t_values`) and applied as a gather (2026-10-16).** `apply`
+    goes through `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` applies `A^T` as a
+    forward product instead of deriving a scatter-add over every slot from the gather. Mac bfs3d split
+    transpose (float64, prototype): **480 → 143 ms** (CSR `main`: 258–263); per operator on the Mac the
+    stored form was 4× the derived one and 7× CSR. On the 4-core Linux container after its 2026-10-16
+    restart the pitzDaily split transpose was within noise (91–111 against 100–110 ms, three interleaved
+    rounds), where the same prototype on the earlier host gave 110 → 76 ms. Costs: a second copy of the
+    operator storage (pitzDaily split 115 + 115 MB); its width is budgeted per coarse level too
+    (`ShapeBudget.transpose_width`) and compared by `_require_matching_structure`; and **`apply` has no
+    `jax.vmap` rule** (`linear_call` has none) — nothing in the package vmaps a preconditioner apply (the
+    materialized probe vmaps the RESIDUAL's JVP, and no residual applies a multigrid level). Pinned by
+    `test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose` (no scatter in the
+    transposed program), `..._transpose_takes_its_own_budget` and the budgeted-widths assertions in
+    `test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit`; mutation-checked (rule
+    removed, budget not passed, overflow unchecked). `_require_matching_structure`'s transpose-width
+    comparison is not mutation-checked: no fixture refreshes into a different transposed width.
+  - **Measured** (pitzDaily `case.yaml`, the shipped field split built at the hybrid start, Linux
+    x86_64, 4 cores, jax 0.11.2, best of 15, two runs per arm, `main` `a5d61d49` against this change, a
+    quiet machine): one split apply **168–176 → 113–126 ms**, its transpose (the adjoint's direction)
+    **171–174 → 118–129 ms**, results equal to 1.2e-14; first-call compile 1.0 → 1.7 s. Per operator on
+    the finest saddle level: the level operator (36675 rows, 2.68M entries) 6.5 → 4.4–5.2 ms, the Schur
+    complement (0.99M entries) 6.3 → 1.8–2.0 ms, divergence and `D⁻¹G` (0.60M each) 4.5 → 0.6–1.2 ms.
+    ⚠️ **The kernel's cost is machine-dependent and the `BCSR` figure recorded in the traced-multigrid
+    section (1.4 ms on a 4.2M-entry block) was a different machine**, so re-measure there before
+    quoting this gain for it: `validation/pitzdaily_openfoam/csr_kernel_precision.py` times the
+    padded-row, CSR and segment-sum forms side by side.
+  - **bfs3d, at ONE fixed state (2026-10-15, `validation/bfs3d_openfoam/split_apply_timing.py`,
+    same Linux machine, best of 10, two runs):** both checkouts build the identical split (every level
+    equal, outputs within 9e-16); apply **779–791 → 606–693 ms**, transpose **870–918 → 911–1017 ms** — the
+    forward gain is 1.14–1.28× and the transpose gains nothing, since the transpose of a padded-row gather
+    is a scatter-add over `n_rows * width` slots. On the project owner's Apple M3 Pro (jax 0.10.2, PR #721)
+    the pitzDaily kernel is 2.1× faster forward and 1.3× transposed, but a bfs3d march ran **8.5 % slower
+    per step** (529 → 574 s). ⚠️ That march pair compared two DIFFERENT hierarchies (see `validation.md`,
+    "bfs3d's leading coarsening moves under rounding"), so it separates neither format nor hierarchy;
+    the fixed-state harness is the measurement that does: on macOS it showed the padded form **slower**
+    at a fixed state (apply 105–109 → 138–139 ms, transpose 258–263 → 461–462 ms), the cause and
+    remedies being the two bullets above.
+  - **What the padding costs:** storage `n_rows * width`. On pitzDaily's split the fine levels pad
+    3–5 %, aggregation's coarse levels up to 1.95× (they are small), 1.09× over the whole split. On
+    bfs3d's: fine levels 1.11×, the leading coarse levels 1.7–2.4×, the trailing ones' deepest up to
+    6.6×, about 1.3× over the two hierarchies. An
+    operator with a few very wide rows (a dense constraint row) would pay that width on every row; no
+    level operator here has one.
+  - **The reduction form, not an unrolled sum.** `vectors.dot` unrolls its sum because a
+    reduction-rooted fusion ran on one thread on macOS arm64; here an unrolled row sum was ~10 % faster
+    standalone on Linux, multiplies the compiled program by the row width (up to 364 on bfs3d) and its
+    transpose was up to 4× slower, so the reduction was kept. The Mac's wide-row loss is that same
+    reduction kernel (bullet above); the reduce-free sum measured there was far worse, not better.
+  - **The shape budget is a WIDTH per coarse level now (`ShapeBudget.operator_width`, was
+    `operator_nnz`)**, and `from_scipy(a, width=)` refuses a row wider than the budget rather than
+    dropping entries. `_require_matching_structure` compares widths: the width is the compilation
+    signature.
+  - **`to_scipy` returns exactly the stored sparsity, explicit zeros included, padding excluded** (the
+    structural patterns of a refit are read from it). The old CSR form's entry-count budget appended its
+    padding to the last row as stored zeros, so a budgeted coarse level read back with extra entries;
+    this one does not. `nnz` is the stored-entry count.
+  - Pinned by `test_a_padded_row_operator_reproduces_the_matrix_it_froze`,
+    `..._takes_a_wider_budget_and_refuses_a_narrower_one` and `..._transposes_to_the_transposed_matrix`
+    (a ragged rectangular operator with an empty row and a stored zero), mutation-checked six ways (slot
+    placement, stored zeros dropped, the overflow check, the diagonal, `nnz`, `row_lengths`).
+
+- **Reading a frozen level back onto the host has one home per array it owns — `_PaddedRowOperator.to_scipy()`
   and `_SparseLevel`/`_AirLevel.prolongation_scipy()` (binding, #287).** Every host-side consumer of a
   traced level's arrays — the host-smoothed inverse factorizing an operator, a march refresh re-deriving
   a hierarchy at a new operator, a SIMPLE-smoothed level forming its Schur pieces — needs the exact same
-  `indptr`/`indices`/`data` → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
+  operator → `scipy.sparse.csr_matrix` and `p_*` → prolongation reconstructions, and
   four call sites (`ilu_inverse.py` — since deleted, #371 — `saddle_multigrid.py`'s `derive_extras`, `SmoothedHierarchy.refit`,
-  `refresh_air_hierarchy`) each open-coded them. `_CsrOperator.to_scipy()` is the exact inverse of the
+  `refresh_air_hierarchy`) each open-coded them. `_PaddedRowOperator.to_scipy()` is the exact inverse of the
   existing `from_scipy`; `prolongation_scipy()` is level-kind-specific because `_SparseLevel` stores a
   COO triple (`p_frow`/`p_ccol`/`p_val`, one prolongation doubling as the transposed restriction) while
   `_AirLevel` stores an independent CSR-shaped one (`p_row`/`p_col`/`p_val`, restriction and
@@ -2389,8 +2471,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   for exactly this. lAIR's restriction/prolongation are each an **independent** `scipy.sparse` CSR
   matrix (never a transpose of another), so their COO round-trip is sorted by construction and
   `_air_ops` uses the default correctly as-is — checked, not merely assumed. `_operator_matvec` itself
-  does not go through `_coo_apply` at all: every level's own operator applies via `_CsrOperator`
-  (`BCSR` matmul), a proper CSR primitive that needs no sortedness hint.
+  does not go through `_coo_apply` at all: every level's own operator applies via `_PaddedRowOperator`
+  (a padded-row product, one output per row), which needs no sortedness hint.
 - **Frozen level diagonals are inverted ONCE, in `__post_init__`, not on every smoother apply (issue
   #110's second finding, fixed 2026-08-18).** `_SparseLevel`/`_AirLevel` both carry `inv_diagonal`,
   derived automatically the moment either is constructed — the same `__post_init__` +

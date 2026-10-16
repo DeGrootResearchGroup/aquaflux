@@ -331,6 +331,10 @@ cycle count.
   On a synthetic matrix of the same shape and density it is 21.1 against 6.4 ms, so it is the kernel,
   not this operator. A gather plus sorted segment sum IS faster in float32 (8.9 against 10.7 ms) but is
   still slower than the float64 CSR kernel, so no CPU kernel choice makes float32 pay here.
+- ⚠️ **The kernel this rests on is gone (2026-10-14):** the level operators are padded-row
+  (`_PaddedRowOperator`), a fused gather-multiply-sum rather than the CSR kernel call, so "no CPU kernel
+  choice makes float32 pay" is unmeasured for the shipped form and the CPU half is open again.
+  `csr_kernel_precision.py` now times the padded-row form beside the CSR one, in both precisions.
 - **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.

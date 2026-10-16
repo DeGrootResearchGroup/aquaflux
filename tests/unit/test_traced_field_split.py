@@ -254,7 +254,7 @@ def test_both_hierarchies_ride_as_leaves_not_as_constants() -> None:
 def test_the_split_rides_into_a_jit_as_an_argument_without_retracing() -> None:
     """Every array it holds is a leaf, so new values of the same shapes reuse the compiled cycle.
 
-    That is the same property :class:`~aquaflux.precondition.multigrid._CsrOperator` has and for the same
+    That is the same property :class:`~aquaflux.precondition.multigrid._PaddedRowOperator` has and for the same
     reason: a mid-march refresh must not recompile the solve it is refreshing.
     """
     _, traced, groups = _pair()
