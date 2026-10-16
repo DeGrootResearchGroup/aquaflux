@@ -295,6 +295,29 @@ def test_the_medium_absorbs_its_coefficient_times_the_volume_integral_of_the_flu
     assert solution.fluence_rate_reflected is None and solution.radiosity is None
 
 
+def test_the_medium_absorbs_the_light_the_walls_reflect_as_well_as_the_lamps() -> None:
+    # The test above has no reflectors, so the field it integrates is the direct one alone and
+    # leaving the reflected field out of the medium's power could not show there.
+    triangles, top = _box_split(2)
+    points = _inside_points()
+    volumes = np.linspace(1.0, 2.0, len(points)) / len(points)
+    solution = solve_scene(
+        Scene(
+            lamps=Surfaces.from_triangles(triangles[top], emission=LAMP_EXITANCE),
+            reflectors=Surfaces.from_triangles(
+                triangles[~top], solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+            ),
+            absorption=UniformAbsorption(3.0),
+            volume=VolumeReceivers(points=points, volumes=volumes),
+            settings=SETTINGS,
+        )
+    )
+    direct = float(np.sum(solution.fluence_rate_direct * volumes))
+    reflected = float(np.sum(solution.fluence_rate_reflected * volumes))
+    assert reflected > 0.1 * direct, "the walls must reflect a share worth seeing"
+    assert solution.medium_absorbed_power == pytest.approx(3.0 * (direct + reflected), rel=1e-12)
+
+
 @pytest.mark.parametrize("per_side", [1, 2, 3, 5])
 def test_the_subtriangle_centroids_are_an_equal_area_average_over_the_triangle(per_side) -> None:
     triangle = np.array([[[0.2, 0.1, 0.0], [1.7, 0.4, 0.3], [0.5, 1.9, -0.2]]])
@@ -627,8 +650,9 @@ def test_lamps_with_no_reflectors_exchange_light_only_when_one_of_them_reflects(
     assert np.all(shining.lamp_irradiance > 0.0)
 
 
-def test_a_point_source_lamp_neither_reflects_nor_shadows_and_receives_nothing() -> None:
-    # A point source has no surface: the walls reflect around it, and what lands on it reads zero.
+def test_a_point_source_lamp_receives_nothing_and_its_power_is_counted() -> None:
+    # A point source has no surface: what lands on it reads zero, and it emits its power rather
+    # than an exitance, which the scene's total must count beside the areal lamps' M A.
     triangles, top = _box_split()
     point = np.repeat(np.array([[[0.5, 0.5, 0.5]]]), 3, axis=1)
     lamps = Surfaces.from_triangles(
@@ -648,6 +672,8 @@ def test_a_point_source_lamp_neither_reflects_nor_shadows_and_receives_nothing()
     assert solution.lamp_irradiance.shape == (lamps.n_facets,)
     assert solution.lamp_irradiance[-1] == 0.0
     assert np.all(solution.lamp_irradiance[:-1] > 0.0)
+    areal = LAMP_EXITANCE * float(np.sum(np.asarray(lamps.area)[:-1]))
+    assert solution.lamp_power == pytest.approx(areal + 2.0, rel=1e-12)
 
 
 def test_points_on_a_lamp_are_not_shadowed_by_the_facet_they_lie_on() -> None:

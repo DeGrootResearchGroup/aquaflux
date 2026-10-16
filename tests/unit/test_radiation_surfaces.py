@@ -131,8 +131,8 @@ def test_a_longer_catalogue_without_an_index_is_refused():
     [
         ([0], r"profile_index must be \(2,\)"),
         ([0, 0, 0], r"profile_index must be \(2,\)"),
-        ([0, 3], "outside the 1 profiles given"),
-        ([-1, 0], "outside the 1 profiles given"),
+        ([0, 3], "profile_index selects profile 3 but only 1 were given"),
+        ([-1, 0], "profile_index selects profile -1 but only 1 were given"),
     ],
 )
 def test_an_index_that_does_not_fit_the_catalogue_is_refused(index, message):
@@ -148,6 +148,20 @@ def test_an_index_that_does_not_fit_the_catalogue_is_refused(index, message):
         ({"vertices": np.zeros((2, 4, 3))}, "shape"),
         ({"vertices": np.zeros((2, 3, 3)), "solid_id": [0]}, "solid_id must have shape"),
         ({"vertices": np.zeros((2, 3, 3)), "solid_id": [0, 5]}, "solid_id selects body 5"),
+        # A negative label would select from the end of the table when gathered, so a -1
+        # silently named the last body or profile rather than being refused.
+        (
+            {"vertices": np.zeros((2, 3, 3)), "solid_id": [0, -1], "solid_names": ("a", "b")},
+            "solid_id selects body -1",
+        ),
+        (
+            {
+                "vertices": np.zeros((2, 3, 3)),
+                "profile_index": [-1, 0],
+                "profiles": (Lambertian(), Isotropic()),
+            },
+            "profile_index selects profile -1",
+        ),
     ],
 )
 def test_an_inconsistent_construction_is_refused(kwargs, message):

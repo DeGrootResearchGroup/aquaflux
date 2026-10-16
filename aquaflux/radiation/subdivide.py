@@ -196,7 +196,8 @@ def refine_for_receivers(
     reflectances are intensive, so splitting a facet does not divide them. Radiant power is the
     exception and is **not** carried, because it is extensive -- a point source has no area to
     split and never meets the criterion anyway, so a surface set carrying point sources should
-    be refined before they are added rather than after.
+    be refined before they are added rather than after. Which facets are point sources is
+    carried across, through :attr:`Subdivision.origin`, rather than read again off the areas.
 
     Returns
     -------
@@ -208,7 +209,8 @@ def refine_for_receivers(
     Raises
     ------
     ValueError
-        If any facet carries non-zero radiant power.
+        If any facet carries non-zero radiant power, or a facet labelled a point source is wide
+        enough for the criterion to split it.
     """
     if bool(np.any(np.asarray(surfaces.power) != 0.0)):
         msg = (
@@ -226,6 +228,18 @@ def refine_for_receivers(
         max_levels=max_levels,
     )
     inherited = division.origin
+    # Which facets are point sources is a label, not something read off the area, so it is
+    # carried through the refinement rather than inferred again: a facet labelled a point source
+    # may have an area, and re-inference would silently relabel it areal.
+    labelled = np.isin(inherited, np.asarray(surfaces.point_source_index, dtype=int))
+    split = np.unique(inherited[labelled], return_counts=True)
+    if np.any(split[1] > 1):
+        msg = (
+            f"facet {int(split[0][split[1] > 1][0])} is labelled a point source but has an area "
+            "wide enough for refinement to split it; a point source has no area to divide. "
+            "Refine the areal facets first, then add the point sources."
+        )
+        raise ValueError(msg)
     refined = Surfaces.from_triangles(
         division.vertices,
         solid_id=np.asarray(surfaces.solid_id)[inherited],
@@ -235,5 +249,6 @@ def refine_for_receivers(
         specular_reflectance=np.asarray(surfaces.specular_reflectance)[inherited],
         profiles=surfaces.profiles,
         profile_index=np.asarray(surfaces.profile_index)[inherited],
+        point_sources=np.flatnonzero(labelled),
     )
     return refined, division

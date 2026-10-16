@@ -81,7 +81,9 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance, straight=None
 
     Returns
     -------
-    jnp.ndarray, shape ``(n_receivers, n_facets)``
+    jnp.ndarray, shape ``pairs``
+        Laid out as ``hidden_by_geometry`` is: the whole mask's ``(n_receivers, n_facets)``, or
+        the gathering of its pairs that was passed.
     """
     transmittance = jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (blocked.shape[0],))
     per_body = transmittance.reshape(-1, *([1] * (blocked.ndim - 1)))

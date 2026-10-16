@@ -571,11 +571,12 @@ def _solve(model, surfaces, absorption, transmittance, external_irradiance, solv
     )
 
     # The two matrices are one array whenever every areal source is Lambertian, and then their
-    # difference is an n^2 array of zeros: skip forming it rather than multiply by it.
+    # difference is zero: skip it. Otherwise each is multiplied by the emission on its own, so
+    # no n^2 difference of the two is ever formed.
     source = (
         emission
         if emitted is reflected
-        else emission + reflectance * ((emitted - reflected) @ emission)
+        else emission + reflectance * (emitted @ emission - reflected @ emission)
     )
     arriving = _point_source_irradiance(model, surfaces, absorption, transmittance)
     if external_irradiance is not None:
