@@ -177,6 +177,34 @@ def test_the_file_form_of_a_field_split_spec() -> None:
     }
 
 
+def test_a_split_precision_is_written_only_when_it_is_not_double_and_reads_back() -> None:
+    double = MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+    single = MaterializedJacobian(
+        FieldSplit(SimpleSmoothed(), JacobiSmoothed(), precision="float32")
+    )
+    assert "precision" not in preconditioner_spec_to_mapping(double)["inverse"]
+    written = preconditioner_spec_to_mapping(single)
+    assert written["inverse"]["precision"] == "float32"
+    assert preconditioner_spec_from_mapping(written) == single
+
+
+def test_a_split_precision_other_than_double_or_single_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"FieldSplit\.precision must be one of"):
+        FieldSplit(SimpleSmoothed(), JacobiSmoothed(), precision="float16")
+    with pytest.raises(ValueError, match=r"'half' at 'inverse\.precision' is not accepted"):
+        preconditioner_spec_from_mapping(
+            {
+                "kind": "MaterializedJacobian",
+                "inverse": {
+                    "kind": "FieldSplit",
+                    "leading": {"kind": "SimpleSmoothed"},
+                    "trailing": {"kind": "JacobiSmoothed"},
+                    "precision": "half",
+                },
+            }
+        )
+
+
 def test_the_default_probe_is_omitted_and_an_omitted_probe_reads_back_as_the_default() -> None:
     assert preconditioner_spec_to_mapping(MaterializedJacobian(SimpleSmoothed())) == {
         "kind": "MaterializedJacobian",

@@ -272,3 +272,90 @@ def test_the_split_rides_into_a_jit_as_an_argument_without_retracing() -> None:
     apply(moved, r).block_until_ready()
 
     assert len(traces) == 1
+
+
+def _equations(jaxpr):
+    """Every equation of ``jaxpr``, those of the sub-programs a loop or a call holds included."""
+    for equation in jaxpr.eqns:
+        yield equation
+        for parameter in equation.params.values():
+            for sub in parameter if isinstance(parameter, tuple | list) else (parameter,):
+                inner = getattr(sub, "jaxpr", sub)
+                if hasattr(inner, "eqns"):
+                    yield from _equations(inner)
+
+
+def test_a_single_precision_split_runs_in_single_precision_and_returns_double() -> None:
+    """Rounded once after the fit, applied in single precision, widened back on the way out.
+
+    It must agree with the double-precision split to single-precision rounding and NOT to double
+    precision -- a split that ignored the setting would agree exactly -- and every arithmetic equation
+    of the apply must produce single precision, so the bytes moved are the ones the setting is for.
+    """
+    host, double, groups = _pair()
+    single = traced_field_split(host, "float32")
+    floating = [
+        leaf
+        for leaf in jax.tree.leaves(eqx.filter(single, eqx.is_array))
+        if jnp.issubdtype(leaf.dtype, jnp.floating)
+    ]
+    assert floating and all(leaf.dtype == jnp.float32 for leaf in floating)
+    r = jnp.asarray(np.random.default_rng(3).normal(size=groups.n_dofs))
+    out = single.apply(r)
+    assert out.dtype == jnp.float64
+    reference = double.apply(r)
+    difference = float(jnp.max(jnp.abs(out - reference)) / jnp.max(jnp.abs(reference)))
+    assert 1e-12 < difference < 1e-5
+    jaxpr = jax.make_jaxpr(single.apply)(r).jaxpr
+    widened = [
+        equation.primitive.name
+        for equation in _equations(jaxpr)
+        if equation.primitive.name != "convert_element_type"
+        and any(getattr(v.aval, "dtype", None) == jnp.float64 for v in equation.outvars)
+    ]
+    assert widened == []
+
+
+def test_a_single_precision_split_transposes_to_its_adjoint() -> None:
+    """``jax.linear_transpose`` still yields the adjoint, to single-precision rounding."""
+    host, _, groups = _pair()
+    single = traced_field_split(host, "float32")
+    rng = np.random.default_rng(4)
+    x = jnp.asarray(rng.normal(size=groups.n_dofs))
+    y = jnp.asarray(rng.normal(size=groups.n_dofs))
+    (transposed,) = jax.linear_transpose(single.apply, x)(y)
+    assert transposed.dtype == jnp.float64
+    forward, backward = float(y @ single.apply(x)), float(transposed @ x)
+    assert abs(forward - backward) / abs(forward) < 1e-5
+
+
+def test_the_adjoint_applies_a_single_precision_split_in_double_and_so_exactly_linearly() -> None:
+    """A transpose solve run to ``1e-10`` stagnates on a map that is linear only to ``1e-7``.
+
+    Applied in single precision the split is not exactly linear; the adjoint's factory widens its
+    rounded entries back to double precision, which is. The single-precision defect is asserted too, so
+    the test cannot pass on a split that was never narrowed.
+    """
+    from aquaflux.precondition.monolithic_policy import _TracedSplitAdjoint
+
+    host, double, groups = _pair()
+    single = traced_field_split(host, "float32")
+    rng = np.random.default_rng(5)
+    x = jnp.asarray(rng.normal(size=groups.n_dofs))
+    y = jnp.asarray(rng.normal(size=groups.n_dofs))
+
+    def linearity_defect(apply) -> float:
+        combined = apply(0.3 * x + 1.7 * y)
+        return float(
+            jnp.max(jnp.abs(combined - 0.3 * apply(x) - 1.7 * apply(y)))
+            / jnp.max(jnp.abs(combined))
+        )
+
+    assert linearity_defect(single.apply) > 1e-10
+    adjoint = _TracedSplitAdjoint(single)(None)
+    assert linearity_defect(adjoint) < 1e-13
+    assert (
+        1e-12
+        < float(jnp.max(jnp.abs(adjoint(x) - double.apply(x))) / jnp.max(jnp.abs(double.apply(x))))
+        < 1e-5
+    )

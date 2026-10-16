@@ -8,6 +8,8 @@ the driver seams, and the refusals.
 
 from __future__ import annotations
 
+import dataclasses
+
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
@@ -408,6 +410,34 @@ def test_a_split_with_a_host_block_is_applied_through_a_callback_and_refit_in_pl
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
     assert session.refresh_preconditioner(active, state) is None
     assert session.refresh_preconditioner(active, state * 1.05, due=True) is None
+
+
+def test_a_single_precision_split_reaches_the_step_and_a_host_split_refuses_it(case) -> None:
+    """The precision the spec names is the precision the step's split is applied in.
+
+    A split that has to run on the host is applied in double precision there, so asking for single
+    precision of it is refused rather than silently ignored.
+    """
+    coupled, state = case
+    single = dataclasses.replace(_SPLIT, precision="float32")
+    session = open_session(MaterializedJacobian(single), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    assert step.shift_policy.split.precision == "float32"
+    assert step.shift_policy.split.coupling.values.dtype == jnp.float32
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    session.refresh_preconditioner(active, state)  # the forced first fit
+    refitted = session.refresh_preconditioner(active, state * 1.05, due=True)(active)
+    assert refitted.shift_policy.split.precision == "float32"
+    assert refitted.shift_policy.split.coupling.values.dtype == jnp.float32
+
+    def host_trailing(role, factory):
+        if role == "leading":
+            return factory
+        return lambda block, n_fields: _HostOnly(factory(block, n_fields))
+
+    session = open_session(MaterializedJacobian(single), coupled, inverse_wrapper=host_trailing)
+    with pytest.raises(ValueError, match="no traced cycle, so it is applied on the host"):
+        session.build(state, dual_time=DualTimeLoop(inner_steps=3))
 
 
 def test_the_session_probe_follows_the_operator_stand_in(case) -> None:
