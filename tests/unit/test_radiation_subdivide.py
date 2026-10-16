@@ -175,3 +175,15 @@ def test_a_meaningless_request_is_refused(kwargs, message):
     receivers = kwargs.pop("receivers", NEAR_RECEIVER)
     with pytest.raises(ValueError, match=message):
         subdivide_to_width(SQUARE, receivers, **kwargs)
+
+
+def test_a_degenerate_point_source_may_be_split_and_its_children_stay_point_sources():
+    """A collinear triangle has no area but has a length, so the width criterion can split it;
+    its children have no area either, and each stays a point source."""
+    sliver = np.array([[[0.4, 0.5, 0.1], [0.6, 0.5, 0.1], [0.5, 0.5, 0.1]]])
+    surfaces = Surfaces.from_triangles(np.concatenate([SQUARE, sliver]))
+    assert surfaces.point_source_index == (2,)
+    refined, division = refine_for_receivers(surfaces, NEAR_RECEIVER, max_ratio=0.25)
+    children = np.flatnonzero(division.origin == 2)
+    assert len(children) > 1, "the sliver must have been split"
+    assert refined.point_source_index == tuple(int(child) for child in children)

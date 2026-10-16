@@ -231,13 +231,17 @@ def refine_for_receivers(
     # Which facets are point sources is a label, not something read off the area, so it is
     # carried through the refinement rather than inferred again: a facet labelled a point source
     # may have an area, and re-inference would silently relabel it areal.
+    # A degenerate (collinear) triangle has no area but does have a length, so it may be split;
+    # its children have no area either and stay point sources. Splitting one with an area would
+    # divide a point among children, which is refused.
     labelled = np.isin(inherited, np.asarray(surfaces.point_source_index, dtype=int))
-    split = np.unique(inherited[labelled], return_counts=True)
-    if np.any(split[1] > 1):
+    facets, children = np.unique(inherited[labelled], return_counts=True)
+    divided = facets[(children > 1) & (np.asarray(surfaces.area)[facets] > 0.0)]
+    if divided.size:
         msg = (
-            f"facet {int(split[0][split[1] > 1][0])} is labelled a point source but has an area "
-            "wide enough for refinement to split it; a point source has no area to divide. "
-            "Refine the areal facets first, then add the point sources."
+            f"facet {int(divided[0])} is labelled a point source but has an area wide enough "
+            "for refinement to split it; a point source has no area to divide. Refine the "
+            "areal facets first, then add the point sources."
         )
         raise ValueError(msg)
     refined = Surfaces.from_triangles(
