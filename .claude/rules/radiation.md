@@ -301,6 +301,17 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   once, at `Photometry.profile`, so the traced code has no symmetry branch. Pinned against an
   independent numpy reading, and cross-checked against the ray-effects reference's own parser to
   **1.4e-15 of the peak** over 20,000 random directions.
+- ⚠️ **The symmetry is read off the horizontal SPAN, not the last angle (#621, 2026-10-16, chosen by
+  the user over refusing such files).** By the last angle, a 90-270 table (LM-63's mirror symmetry
+  about the 90-270 plane) read as a full table closed straight across the missing half, and a
+  -90-90 one as quadrant-symmetric. Now a half-turn span is `bilateral` about the plane through its
+  two ends (`_fold(angle, kind, start)`, images `2 start + 360 - h`), a quarter-turn span must start
+  at 0 (refused otherwise), and `PhotometricProfile.angles` measures `h` from the table's first
+  angle. Every earlier fixture started at 0, which is why dropping that start passed the suite.
+  Pinned by `test_a_half_turn_table_is_mirrored_about_the_plane_through_its_ends` (each layout
+  against the same lobe stored as a full table on the same knots; red for the last-angle rule,
+  the old images, the old fold, and `h` taken from 0) and `test_a_table_it_cannot_read_as_a_distribution_is_refused`
+  (every `Photometry` refusal). OOR's reader is only known to agree for tables starting at 0.
 - **Normalization is closed form and over the FRONT HEMISPHERE** — `front_hemisphere_flux`, the exact
   integral of the bilinear table times `sin gamma` over `[0, 90]` degrees, clamped. That is what a flat
   emitter can radiate, and what OOR's BC normalizes over (its outgoing rays), so both emit exactly `P`.

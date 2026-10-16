@@ -17,11 +17,13 @@ down emits the table about the downward direction; ``up`` fixes the rotation abo
 
 **Between the tabulated directions the intensity is bilinear in** ``(gamma, h)`` **in degrees**,
 clamped (not extrapolated) outside the tabulated vertical range. A table covering only part of
-the circle is completed by the symmetry its last horizontal angle declares: a single angle is
-rotationally symmetric, a last angle of 90 degrees is symmetric in each quadrant, one of 180 is
-mirror-symmetric about the 0-180 plane, and anything else is a full table closed periodically.
-These are the LM-63 conventions, and the ones of-optical-radiation's ``iesEmitter`` boundary
-condition follows, so the two solvers read one file as one continuous distribution.
+the circle is completed by the symmetry its horizontal range declares: a single angle is
+rotationally symmetric, a range of 0 to 90 degrees is symmetric in each quadrant, a range of half
+a turn is mirror-symmetric about the plane through its two ends -- 0 to 180 about the 0-180 plane,
+90 to 270 (or -90 to 90) about the 90-270 plane -- and anything else is a full table closed
+periodically. These are the LM-63 conventions; for tables starting at 0 degrees they are the ones
+of-optical-radiation's ``iesEmitter`` boundary condition follows, so the two solvers read such a
+file as one continuous distribution.
 
 **Normalization is exact.** A bilinear table weighted by ``sin gamma`` integrates in closed form
 cell by cell, so the flux, and the constant that makes the profile integrate to one, carry no
@@ -56,7 +58,7 @@ __all__ = ["MIN_COSINE", "PhotometricProfile", "Photometry", "read_ies"]
 # of-optical-radiation's iesEmitter applies.
 MIN_COSINE = 1e-3
 
-# How close a last horizontal angle must be to 90 or 180 degrees to declare that symmetry.
+# How close a horizontal range must be to a quarter or half turn to declare that symmetry.
 _SYMMETRY_TOLERANCE = 1e-3
 
 
@@ -107,19 +109,34 @@ class Photometry:
         if self.vertical[0] < 0.0 or self.vertical[-1] > 180.0:
             msg = f"vertical angles must lie in [0, 180] degrees; got {self.vertical[[0, -1]]}"
             raise ValueError(msg)
-        if self.symmetry == "full" and self.horizontal[-1] - self.horizontal[0] > 360.0:
+        span = self.horizontal[-1] - self.horizontal[0]
+        if (
+            abs(span - 90.0) < _SYMMETRY_TOLERANCE
+            and abs(self.horizontal[0]) >= _SYMMETRY_TOLERANCE
+        ):
+            msg = (
+                f"horizontal angles {self.horizontal[[0, -1]]} span a quarter turn not starting at "
+                "0 degrees, which is not an LM-63 layout: a quadrant-symmetric table covers 0 to 90"
+            )
+            raise ValueError(msg)
+        if self.symmetry == "full" and span > 360.0:
             msg = f"horizontal angles span more than a turn: {self.horizontal[[0, -1]]}"
             raise ValueError(msg)
 
     @property
     def symmetry(self) -> str:
-        """``"rotational"``, ``"quadrant"``, ``"bilateral"`` or ``"full"``, from the stored range."""
+        """``"rotational"``, ``"quadrant"``, ``"bilateral"`` or ``"full"``, from the stored range.
+
+        Read off the range's **span**, not its last angle: a table over 90 to 270 degrees ends at
+        270 and is mirror-symmetric (about the 90-270 plane), not a full table, and one over -90 to
+        90 ends at 90 and is mirror-symmetric too, not symmetric in each quadrant.
+        """
         if len(self.horizontal) == 1:
             return "rotational"
-        last = self.horizontal[-1]
-        if abs(last - 90.0) < _SYMMETRY_TOLERANCE:
+        span = self.horizontal[-1] - self.horizontal[0]
+        if abs(span - 90.0) < _SYMMETRY_TOLERANCE:
             return "quadrant"
-        if abs(last - 180.0) < _SYMMETRY_TOLERANCE:
+        if abs(span - 180.0) < _SYMMETRY_TOLERANCE:
             return "bilateral"
         return "full"
 
@@ -143,13 +160,15 @@ class Photometry:
             if abs(h[-1] - h[0] - 360.0) < _SYMMETRY_TOLERANCE:
                 return h, table
             return np.append(h, h[0] + 360.0), np.vstack([table, table[:1]])
-        # A mirror symmetry: every angle of the circle folds exactly onto a stored one.
+        # A mirror symmetry: every angle of the circle folds exactly onto a stored one. The
+        # circle runs from the first stored angle, the mirror plane's one end, round one turn.
+        start = h[0]
         if kind == "bilateral":
-            images = [h, 360.0 - h]
+            images = [h, 2.0 * start + 360.0 - h]
         else:
             images = [h, 180.0 - h, 180.0 + h, 360.0 - h]
         full = np.unique(np.round(np.concatenate(images), 9))
-        folded = np.array([_fold(angle, kind) for angle in full])
+        folded = np.array([_fold(angle, kind, start) for angle in full])
         rows = np.minimum(np.searchsorted(h, folded - 1e-9), len(h) - 1)
         if not np.allclose(h[rows], folded, atol=1e-6):
             msg = f"a {kind}-symmetric table's folded angles do not land on its stored angles"
@@ -401,8 +420,14 @@ def read_ies(path) -> Photometry:
     )
 
 
-def _fold(angle: float, kind: str) -> float:
-    """An angle in ``[0, 360]`` degrees folded onto a symmetric table's stored range."""
+def _fold(angle: float, kind: str, start: float) -> float:
+    """An angle in one turn from ``start`` folded onto a symmetric table's stored range.
+
+    A quadrant table starts at 0 (any other start is refused when the table is built); a
+    bilateral one is mirrored about the plane through ``start`` and ``start + 180``.
+    """
+    if kind == "bilateral":
+        return 2.0 * start + 360.0 - angle if angle > start + 180.0 else angle
     if kind == "quadrant":
         if angle > 270.0:
             return 360.0 - angle
@@ -411,7 +436,8 @@ def _fold(angle: float, kind: str) -> float:
         if angle > 90.0:
             return 180.0 - angle
         return angle
-    return 360.0 - angle if angle > 180.0 else angle
+    msg = f"no fold for a {kind!r} table"
+    raise ValueError(msg)
 
 
 def _clamped_to(vertical, table, low, high):
