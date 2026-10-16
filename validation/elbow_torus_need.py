@@ -98,7 +98,9 @@ WATER = UniformAbsorption(absorption_from_uvt(95.0))
 OUTLET_REACH = 0.30
 
 RECEIVERS = int(os.environ.get("ELBOW_RECEIVERS", 3_000))
-PIECES = tuple(int(n) for n in os.environ.get("ELBOW_PIECES", "1,2,4,8,12,16,24,32,48,64").split(","))
+PIECES = tuple(
+    int(n) for n in os.environ.get("ELBOW_PIECES", "1,2,4,8,12,16,24,32,48,64").split(",")
+)
 
 #: Joints are overlapped by this much, so neighbouring regions share a sliver rather than meeting
 #: on one plane, where two separately rounded intersections can leave a gap of a rounding.
@@ -434,9 +436,22 @@ def receivers(rng, bend):
     return regions
 
 
-def mask_and_field(surfaces, points, body):
+#: Receiver-by-facet pairs per pass of the covering test, times the square of the region count.
+#: The test compares every pooled interval with every other for each pair, so its working memory
+#: per pair grows as the square of the regions; at the library's default pass a 34-region chain
+#: needed tens of gigabytes and was killed.
+_PAIRS_TIMES_REGIONS_SQUARED = 100_000_000
+
+
+def mask_and_field(surfaces, points, body, regions=1):
     started = time.perf_counter()
-    visibility = build_visibility([body], surfaces, points, self_occlusion=NoOcclusion())
+    visibility = build_visibility(
+        [body],
+        surfaces,
+        points,
+        self_occlusion=NoOcclusion(),
+        pair_limit=min(4_000_000, max(20_000, _PAIRS_TIMES_REGIONS_SQUARED // regions**2)),
+    )
     blocked = np.asarray(visibility.blocked[0])
     built = time.perf_counter() - started
     field = np.asarray(
@@ -579,7 +594,7 @@ def main() -> None:
                 water = as_primitives(cylinders, planes, tolerance=1.0)
                 outside = np.asarray(water.fluid.signed_distance(jnp.asarray(points))) > 0.0
                 depth = np.asarray(water.fluid.signed_distance(jnp.asarray(points)))
-                blocked, field, built = mask_and_field(surfaces, points, water)
+                blocked, field, built = mask_and_field(surfaces, points, water, len(water.regions))
                 arm = {
                     "regions": len(water.regions),
                     "mask_seconds": round(built, 2),
