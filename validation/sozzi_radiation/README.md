@@ -95,6 +95,9 @@ the finest cell: 0.5 um, 0.25 um at `_l6`) unless the arm names one (`_s<mm>`).
 | uniform 8 mm | 0.5 mm | 18,673 | 60 | 13 / 26 | 6.9 / 14 | 3.1 / 14 | 2.1 / 12 | 1.3 / 5.2 | 0.71 / 2.3 | 0.63 / 4.3 |
 | uniform 4 mm | 0.5 mm | 109,400 | 193 | 9.7 / 40 | 2.5 / 30 | 2.0 / 23 | 1.0 / 13 | 0.23 / 1.3 | 0.17 / 0.68 | 0.17 / 2.4 |
 | uniform 2 mm | 0.5 mm | 742,136 | 1233 | 7.1 / 24 | 1.2 / 13 | 0.81 / 6.3 | 0.19 / 1.2 | 0.075 / 0.39 | 0.045 / 0.20 | 0.043 / 0.94 |
+| uniform 8 mm | 8 um | 20,050 | 50 | 7.1 / 22 | 3.9 / 27 | 4.6 / 29 | 4.6 / 24 | 1.3 / 5.4 | 0.71 / 2.3 | 0.61 / 4.9 |
+| uniform 4 mm | 4 um | 120,934 | 152 | 4.2 / 14 | 4.6 / 15 | 4.0 / 15 | 1.1 / 9.0 | 0.23 / 1.3 | 0.17 / 0.68 | 0.15 / 1.9 |
+| uniform 2 mm | 2 um | 851,056 | 957 | 3.7 / 7.9 | 3.6 / 7.8 | 1.1 / 5.0 | 0.20 / 1.1 | 0.075 / 0.39 | 0.045 / 0.20 | 0.036 / 0.27 |
 | tol 0.05 | 0.5 mm | 235,979 | 227 | 6.6 / 19 | 1.3 / 8.9 | 0.63 / 4.0 | 0.21 / 1.0 | 0.12 / 0.68 | 0.25 / 1.1 | 0.30 / 1.9 |
 | tol 0.05 | 0.25 mm | 363,562 | 356 | 2.0 / 12 | 0.49 / 3.7 | 0.37 / 2.2 | 0.20 / 1.1 | 0.12 / 0.68 | 0.26 / 1.1 | 0.33 / 1.9 |
 | tol 0.03 | 0.25 mm | 787,446 | 678 | 1.5 / 12 | 0.29 / 3.4 | 0.21 / 2.0 | 0.12 / 0.80 | 0.081 / 0.43 | 0.19 / 0.90 | 0.15 / 1.8 |
@@ -103,14 +106,20 @@ the finest cell: 0.5 um, 0.25 um at `_l6`) unless the arm names one (`_s<mm>`).
 | tol 0.05, 0.25 mm cells | 0.25 um | 2,218,577 | 1274 | 0.77 / 4.2 | 0.23 / 1.7 | 0.16 / 0.82 | 0.13 / 1.0 | 0.11 / 0.67 | 0.26 / 1.1 | 0.30 / 1.8 |
 
 Each cell is median / 99th percentile, in per cent. Time is the whole build, almost all of it
-gathering. The uniform grids' standoff is the one they were built with (0.5 mm) and they have no
-probes (nothing is split); their records predate the probes and are unaffected by them.
+gathering. Uniform grids have no probes (nothing is split), so the probes do not affect them; they
+are shown at both standoffs.
 
 - **Sampling right up to the sleeve is what tightens the near field.** At the default standoff the 1-2 mm
   band is 0.16 % / 0.82 % against 0.63 % / 4.0 % at 0.5 mm and the uniform 2 mm grid's 0.81 % / 6.3 %;
   0.5-1 mm is 0.28 % / 1.7 % against 1.2 % / 13 %. It costs 1.5x uniform 2 mm's samples, most of them
   in the layer around the sleeve: 233k cut points, and the refinement taken to the deepest level along
   the whole lamp.
+- **On a grid that is never refined the same standoff makes the near field WORSE** (uniform 4 mm, 1-2 mm:
+  2.0 % median at 0.5 mm, 4.0 % at 4 um): a sample on the sleeve sits on the steepest part of a
+  convex profile, and a straight line from it across a 2-4 mm cell overshoots everything between. The
+  standoff pays only with refinement to cells small against that bend, which is what the adaptive tree
+  does near the sleeve. Against each uniform grid's better standoff, the adaptive default beats uniform
+  2 mm in every band within 5 mm at 1.3-1.5x its samples.
 - **Before the probes a nearer standoff made things WORSE**: with a 0.1 mm standoff and no probes the
   1-2 mm p99 was 8.5 %, from a strip of 4 mm cells along the whole lamp, two corners inside the lamp,
   never split and 10 % high from 0.5 to 2.5 mm off the sleeve. Their corners and cut points agreed with

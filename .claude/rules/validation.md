@@ -707,16 +707,18 @@ snapped mesh. Its README carries every number with its configuration. What to kn
 - **`sozzi_radiation/adaptive_grid.py`: the adaptive octree against uniform grids, no mesh (2026-10-16, #726).**
   Everything from the drawing; reference = the gather at 14,000 random water points banded by distance from
   the sleeve (stages `ripple`, `reference`, `grids`, `summary`; `work/adaptive/`). Linux x86_64, 4 cores,
-  jax 0.11.2; lamp 25,876 facets (chord 5e-5, 4 mm); ln G floored at 1 W/m2; standoff 0.5 mm. **The issue's
-  acceptance (4 mm's error everywhere at a fraction of its points) is NOT met**: tolerance 0.05 from a 4 mm
-  start matches 4 mm in every band at 2.3x its samples (250k vs 109k), because the bulk -- most of the water
-  -- needs ~4 mm to reach 4 mm's 0.17 % median. What adaptivity buys is the sleeve layer: tolerance 0.05
-  matches or beats uniform 2 mm within 5 mm (p99 9.0/4.2/1.0 % vs 13/6.3/1.2 %) at 29 % of its samples. The
-  table is in the README. ⚠️ Every number before 2026-10-16 05:50 in that run's logs was taken under an
-  earlier interpolant or standoff (the octree rule records the sequence); only `work/adaptive/*.json` of the
-  05:50 run onward are the README's. ⚠️ Within the 0.5 mm standoff every grid extrapolates (4-13 % median):
-  the gathered field there carries the lamp's facets (relative std ~2 % within 0.1 mm, `ripple`). ⚠️ The
-  dose was not run (needs the uvmesh mesh and tracker, on the author's machine).
+  jax 0.11.2; lamp 25,876 facets (chord 5e-5, 4 mm); ln G floored at 1 W/m2. Arms name their options
+  (`_s<mm>` standoff, `_l<levels>`, `_m<min_level>`); unnamed, the standoff is the library default (1e-3 of
+  the finest cell). The README table is the record. **Headline (tolerance 0.05, 5 levels, probes, default
+  standoff, 1.09M samples): 1-2 mm 0.16 % median / 0.82 % p99** against uniform 2 mm's best 0.81 / 5.0 %;
+  it beats uniform 2 mm in every band within 5 mm at 1.3-1.5x its samples. ⚠️ **The issue's acceptance
+  (4 mm's error everywhere at a fraction of its points) is NOT met**: the bulk (>10 mm) stays at
+  0.26-0.30 % median against 4 mm's 0.15-0.17 % at tolerance 0.05. ⚠️ **A tiny standoff HURTS a uniform
+  grid** (4 mm, 1-2 mm median 2.0 % -> 4.0 %): a sample on the sleeve's steep, convex profile, joined
+  linearly across a coarse cell, overshoots. ⚠️ One more level (0.25 mm cells) doubled the samples and
+  moved nothing beyond 0.5 mm. ⚠️ Records renamed `_s0.5` were taken at a 0.5 mm standoff; `no_probes/`
+  holds the arms before the probes; the pre-probe 0.5 mm table (216k samples, 1-2 mm 0.72 / 4.2 %) is
+  superseded. ⚠️ The dose was not run (needs the uvmesh mesh and tracker, on the author's machine).
 - **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
   984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
   reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256
