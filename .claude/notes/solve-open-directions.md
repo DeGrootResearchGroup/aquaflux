@@ -348,7 +348,11 @@ cycle count.
   - *Adjoint:* a split applied in float32 ARITHMETIC broke the transpose solve (stagnation at rtol 1e-10:
     it is linear only to ~1e-7); the adjoint now widens the rounded split to float64, and the float32
     arm then matches the finite difference to 1e-5 on the coupled channel.
-  - Open: the bfs3d march A/B (macOS), and whether to ship it in either case file.
+  - *bfs3d march* (shipped `case.yaml`, `7e96745a`, Apple M3 Pro, jax 0.10.2, one run per arm, float64
+    first, idle machine): **498 s against 599 s (-17 %)**, 18 steps / 129 cycles both with identical
+    per-step inner and cycle counts, final `R` 6.185e-07 and `x_r/h` 8.361 both; steps from 5 on are
+    20-35 % faster, step 1 (compilation) level, the refit unchanged (it is float64 work).
+  - Open: whether to ship it in either case file (the project owner's call).
 - **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.
