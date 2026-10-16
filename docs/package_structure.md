@@ -81,6 +81,13 @@ cfd/                                  # repo root
 │   │       ├── assembler.py          #     assemble(PolyMeshData) → Mesh: neighbour pad, n_cells, patches/zones, from_csr
 │   │       └── reader.py             #     OpenFOAMReader: file I/O; parse → assemble → collapse (empty-patch 2D)
 │   │
+│   ├── octree/                       # adaptive sampling of a field on an octree (generic: field = callable, region = a solid)
+│   │   ├── tree.py                   #   Octree: root cells on one integer lattice; split, subset, locate, node_level, key/unkey
+│   │   ├── hierarchy.py              #   Hierarchy: hat-function interpolant, one surplus per node; with_values (coarse first)
+│   │   ├── cuts.py                   #   cut points where cell edges cross the region's boundary, a standoff deep by signed distance
+│   │   ├── ghosts.py                 #   ghost_values: values for nodes outside the region (edges + bounded weighted extrapolation)
+│   │   ├── region.py                 #   the region's signed_distance / intervals, jit-compiled per power-of-two batch
+│   │   └── sampling.py               #   sample_adaptively → SampledField (callable, hexahedra()); Linear / Logarithm
 │   ├── properties/                   # per-cell physical property fields, decoupled from the numerics (operators name what they consume)
 │   │   ├── property.py               #   Property → Constant, ZoneConstant, FieldProperty (evaluated from the cell partition and state fields; values are plain differentiable leaves)
 │   │   └── model.py                  #   PropertyModel: named {name: Property} collection; evaluate() → {name: (n_cells,)}, require()
