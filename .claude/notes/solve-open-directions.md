@@ -335,6 +335,20 @@ cycle count.
   (`_PaddedRowOperator`), a fused gather-multiply-sum rather than the CSR kernel call, so "no CPU kernel
   choice makes float32 pay" is unmeasured for the shipped form and the CPU half is open again.
   `csr_kernel_precision.py` now times the padded-row form beside the CSR one, in both precisions.
+- **On the padded-row form float32 PAYS, and is shippable as `FieldSplit(precision="float32")` (2026-10-16,
+  PR #732, opt-in; `solve-field-split.md` holds the design).** Every number below is one run per arm at a
+  fixed configuration; "pitzDaily march" is the shipped `case.yaml` on `float32-field-split` `d8ca69ab`,
+  4-core Linux container, jax 0.11.2, the two arms back to back, differing only in `PITZ_SPLIT_PRECISION`.
+  - *Kernel, split apply:* pitzDaily at its hybrid start (Linux, best of 15) 52.5 ms against 71-87 ms
+    float64; bfs3d at `state-00018` (Apple M3 Pro, jax 0.10.2, best of 10) **82 ms against 140 ms**, which
+    also beats `main`'s CSR (105-109 ms) -- float32 is the one change found that recovers the Mac's
+    forward loss on wide rows without an XLA flag (see `solve-amg-multigrid.md`'s padded-row entry).
+  - *pitzDaily march:* **405 s against 531 s (-24 %)**, 18 steps / 123 cycles both, the step tables
+    identical to four figures through step 17, final `R` 9.093e-06 against 9.071e-06, `x_r/h` 8.0686 both.
+  - *Adjoint:* a split applied in float32 ARITHMETIC broke the transpose solve (stagnation at rtol 1e-10:
+    it is linear only to ~1e-7); the adjoint now widens the rounded split to float64, and the float32
+    arm then matches the finite difference to 1e-5 on the coupled channel.
+  - Open: the bfs3d march A/B (macOS), and whether to ship it in either case file.
 - **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.
