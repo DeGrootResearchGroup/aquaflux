@@ -79,7 +79,9 @@ drawing (`SozziTaghipour.step`): the water is the three cylinders less the lamp'
 lamp is the drawing's lamp triangulated at chord 5e-5 m and 4 mm facets (25,876 facets, 35.417 W at
 696.42 W/m2), absorption 35.67 /m, black walls, the fluid the only occluder. The interpolant is of ln G,
 floored at 1 W/m2 (`FLOOR`; at 1e-3 the refinement chased shadow edges in the pipes, which carry almost
-no dose). No sample lies nearer the water's boundary than 0.5 mm (`STANDOFF`, see below).
+no dose). ⚠️ The table below was taken with every sample 0.5 mm off the water's boundary and before
+cells the boundary cuts were probed at their centres; the harness now defaults to a thousandth of the
+finest cell, and the table is being re-measured.
 
 **Reference**: the gather itself at 14,000 random water points, 2,000 per band of distance from the
 sleeve's true surface. Error = |interpolated / gathered - 1| over points above the floor. Configuration

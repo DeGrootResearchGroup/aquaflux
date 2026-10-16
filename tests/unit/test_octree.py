@@ -535,3 +535,27 @@ def test_a_cell_with_a_corner_not_sampled_is_tested_at_its_centre_and_split_wher
     # Each probe joined the interpolant as a node: it passes through the value sampled there.
     at = nodes[np.isin(sampled, centres[probed])]
     np.testing.assert_allclose(field(field.points[at]), field.values[at], rtol=1e-10)
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e-3])
+def test_the_default_standoff_is_a_thousandth_of_the_finest_cell_at_any_scale(scale):
+    """The same vessel at two sizes a thousand apart: every sample lies inside the region by at least
+    a thousandth of the finest cell, and the cut points lie exactly that deep."""
+    vessel = Cylinder(centre=[0.0, 0.0, 0.0], axis=[1.0, 0.0, 0.0], radius=0.02 * scale,
+                      half_length=0.02 * scale)  # fmt: skip
+    rod = Cylinder(centre=[0.0, 0.0, 0.0], axis=[1.0, 0.0, 0.0], radius=0.005 * scale,
+                   half_length=0.05 * scale)  # fmt: skip
+    water = Difference(vessel, rod)
+    box = {key: np.asarray(value) * scale for key, value in BOX.items()}
+    field = sample_adaptively(lambda p: _decay(p / scale), water, **box, spacing=0.005 * scale,
+                              max_level=2, tolerance=0.05, transform=Logarithm(1e-6))  # fmt: skip
+    standoff = 1e-3 * 0.005 * scale / 4
+    depth = -np.asarray(water.signed_distance(field.points))
+    assert depth.min() >= standoff * (1 - 1e-6)
+    np.testing.assert_allclose(depth[field.is_cut], standoff, rtol=1e-6)
+
+
+def test_a_standoff_that_is_not_positive_is_refused():
+    with pytest.raises(ValueError, match="standoff must be positive"):
+        sample_adaptively(_decay, _water(), **BOX, spacing=0.01, max_level=0, tolerance=np.inf,
+                          standoff=0.0, min_level=0)  # fmt: skip

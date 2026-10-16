@@ -635,7 +635,9 @@ instead, refined only where the field needs it:
    crosses the water's boundary — the sleeve, the vessel wall — a small standoff inside the water;
 2. split the cells, gather only the new points, and compare each with what the coarser grid
    predicted there. That **miss** is the interpolation error the coarser grid made, measured rather
-   than estimated;
+   than estimated. A cell the boundary cuts is also gathered at its centre: its corners outside the
+   water carry fitted values, so its own corners and cut points cannot show how far it misses
+   between them;
 3. split again wherever a miss exceeds the tolerance, until nothing is split or the deepest level
    is reached.
 
@@ -663,7 +665,6 @@ field = sample_adaptively(
     spacing=0.008,  # the coarse grid
     max_level=4,  # halved at most four times: 0.5 mm
     tolerance=0.01,  # on ln G: about one per cent
-    standoff=5e-4,  # no sample nearer the sleeve or a wall than this
     transform=Logarithm(floor=1.0),
 )
 G = field(cell_centres)
@@ -672,9 +673,11 @@ G = field(cell_centres)
 Interpolating `ln G` makes the tolerance relative, and suits a field that falls off roughly
 exponentially. The floor (in W/m²) is where the tolerance stops applying: below it a miss counts as
 zero, so a shadow edge in water that carries almost no light — far up an outlet pipe — is not chased
-to the deepest level. The standoff keeps every sample that far from the water's boundary: the
-field within a few chord tolerances of a triangulated lamp carries the pattern of its facets, and
-a tolerance finer than that pattern would chase it. `field.hexahedra()` gives the leaves as hexahedra for
+to the deepest level. Cut points lie a small standoff inside the water, by default a thousandth of
+the finest cell: a point on a triangulated lamp's surface can lie in a facet's plane, where the
+field is not defined, while any point of the drawn water is clear of a convex lamp's facets, which
+lie inside its drawn surface. Where a lamp is concave its facets bulge past the drawing; pass a
+`standoff` beyond its chord tolerance there. `field.hexahedra()` gives the leaves as hexahedra for
 `aquaflux.io.write_hexahedra`, to look at in ParaView.
 
 ## Air disinfection

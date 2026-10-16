@@ -69,6 +69,9 @@ _AROUND = np.array(
     ],
     dtype=np.int64,
 )
+#: The default standoff, as a fraction of the finest cell's edge: small enough that the samples lie
+#: next to the boundary at any scale, large against the rounding of the cut points' bisection.
+STANDOFF_FRACTION = 1e-3
 #: Two cut points closer than this many lattice steps are one: the same crossing reached along edges
 #: of different lengths lands within rounding of itself, far below any standoff.
 _SAME_POINT = 1e-9
@@ -258,7 +261,7 @@ def sample_adaptively(
     spacing: float,
     max_level: int,
     tolerance: float,
-    standoff: float,
+    standoff: float | None = None,
     transform: Linear | Logarithm | None = None,
     min_level: int = 1,
     report: Callable[[str], None] | None = None,
@@ -283,12 +286,15 @@ def sample_adaptively(
         How many times a root cell may be halved.
     tolerance : float
         The largest miss, in the transformed field, that leaves a cell unsplit.
-    standoff : float
+    standoff : float, optional
         How far from the boundary, by the region's signed distance, every sample lies: a node nearer
-        it is not sampled, and a cut point is placed that deep. Set it beyond any layer in which the
-        field is not to be trusted -- a lamp drawn as flat facets lies up to its chord tolerance
-        inside the true surface, and the field a few chords from it still carries the facets'
-        pattern, which a refinement asked to resolve it would chase.
+        it is not sampled, and a cut point is placed that deep. Unset, it is a
+        thousandth of the finest cell's edge, so it scales with the tree. A sample on
+        the boundary itself is avoided because a field computed from a triangulated surface is not
+        defined in a facet's plane, and a lattice node on a drawn surface can lie in one; any
+        positive standoff avoids that where the triangulation lies inside the region's boundary (a
+        convex body inscribed in its drawing). Where it bulges past it -- a concave part -- set the
+        standoff beyond the triangulation's chord tolerance.
     transform : Linear or Logarithm, optional
         What is interpolated; the field itself if unset.
     min_level : int, optional
@@ -313,6 +319,10 @@ def sample_adaptively(
             f"sample_adaptively: min_level must lie in [0, max_level], got {min_level} and {max_level}."
         )
     transform = Linear() if transform is None else transform
+    if standoff is None:
+        standoff = STANDOFF_FRACTION * spacing / 2**max_level
+    if not standoff > 0.0:
+        raise ValueError(f"sample_adaptively: the standoff must be positive, got {standoff!r}.")
     say = report or (lambda _: None)
     build = _Refinement(sample, region, transform, standoff)
     tree = Octree.covering(low, high, spacing, max_level)

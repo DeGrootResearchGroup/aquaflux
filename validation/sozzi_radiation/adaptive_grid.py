@@ -16,20 +16,23 @@ base disc left out (it faces the end wall). 35 W at :data:`EXITANCE`, water abso
 
 **The reference** is the gather itself, at random points of the water stratified by distance from the
 sleeve's true surface (:data:`BANDS`): the error of any grid is its interpolated value against the
-exact value at the same point, with no grid or mesh in the reference. The points within
-:data:`STANDOFF` of the sleeve are included: a grid has to interpolate there too.
+exact value at the same point, with no grid or mesh in the reference. Points right up to the sleeve
+are included: a grid has to interpolate there too.
 
 **The grids.** ``uniform_h<mm>``: a tree of root cells at that spacing, never split -- the same
 interpolant, cut points and all, so the comparison isolates the adaptivity. ``adaptive_t<tol>``:
 root cells at :data:`ADAPTIVE_SPACING`, refined to :data:`ADAPTIVE_LEVELS` levels at that tolerance on
-the natural logarithm of ``G`` (a relative tolerance), floored at :data:`FLOOR`.
+the natural logarithm of ``G`` (a relative tolerance), floored at :data:`FLOOR`, with the library's
+default standoff (a thousandth of the finest cell: the lamp is convex and its facets lie inside the
+drawn sleeve, so any point of the drawn water is clear of them). Options, appended in any order:
+``_m<level>`` (every cell split to that level first), ``_s<mm>`` (another standoff), ``_l<levels>``
+(halved more often than :data:`ADAPTIVE_LEVELS`).
 
 Stages, by argument or ``SOZZI_ADAPTIVE_STAGE``:
 
 ``ripple``
     How much the gathered field varies at a fixed distance from the sleeve, around it and along one
-    facet's length: the structure the lamp's triangulation puts in it, which sets how near the sleeve
-    a sample is worth taking (:data:`STANDOFF`).
+    facet's length: the structure the lamp's triangulation puts in the field next to it.
 
 ``reference``
     Gather at the reference points; kept in ``work/adaptive/reference.npz``.
@@ -83,12 +86,6 @@ EXITANCE = 696.42  # W/m^2 on the lamp, 35.4 W over its surface
 ABSORPTION = 35.67  # 1/m, napierian (70 % UVT)
 #: The lamp's triangulation: its facets lie up to the chord inside the true surface.
 LAMP_CHORD, LAMP_FACET = 5e-5, 4e-3
-#: No sample is taken nearer the water's boundary than this (by signed distance). The gathered field
-#: within a millimetre of the sleeve carries the lamp's own triangulation: at the same distance it
-#: varies around the sleeve and along one facet by a relative std of ~2 % within 0.1 mm, 0.7 % at
-#: 0.5 mm and 0.16 % at 2 mm (the ``ripple`` stage). A refinement asked for less than that chases the
-#: facets. 0.5 mm is ten times the chord, so it is also clear of the facets themselves.
-STANDOFF = 5e-4
 #: Below this the logarithm is floored, so shadowed and nearly dark water sets no tolerance (W/m^2).
 #: The field reaches 2 M = 1393 at the sleeve and its volume mean over the reactor is ~134, while the
 #: pipes' is 0.01 (inlet) and 0.5 (riser): at a floor of 1e-3 the refinement chased every shadow edge
@@ -160,7 +157,6 @@ class Reactor:
             "walls": "black",
             "occluders": "the drawing's fluid (Outside of its three cylinders)",
             "self_occlusion": "none (the lamp is convex)",
-            "standoff_m": STANDOFF,
             "floor_W_per_m2": FLOOR,
             "box_m": [self.low.tolist(), self.high.tolist()],
         }
@@ -259,7 +255,7 @@ def _arms() -> list[str]:
 def build(arm: str, reactor: Reactor):
     """The tree of one arm, with the reactor's field sampled on it."""
     calls = {"seconds": 0.0, "points": 0}
-    standoff = STANDOFF
+    standoff = None  # the library's: a thousandth of the finest cell
 
     def sample(points):
         started = time.perf_counter()
@@ -272,7 +268,8 @@ def build(arm: str, reactor: Reactor):
         spacing, levels, tolerance, min_level = float(arm[len("uniform_h") :]) * 1e-3, 0, np.inf, 0
     elif arm.startswith("adaptive_t"):
         # adaptive_t<tolerance>, then optionally _m<min_level> to split every cell holding water to
-        # that level first (_m2 starts from a uniform 4 mm grid) and _s<mm> for another standoff.
+        # that level first (_m2 starts from a uniform 4 mm grid), _s<mm> for a standoff other than
+        # the library's default, and _l<levels> for a tree halved more often than ADAPTIVE_LEVELS.
         tolerance_text, *options = arm[len("adaptive_t") :].split("_")
         spacing, levels, tolerance = ADAPTIVE_SPACING, ADAPTIVE_LEVELS, float(tolerance_text)
         min_level = 1
@@ -281,6 +278,8 @@ def build(arm: str, reactor: Reactor):
                 min_level = int(option[1:])
             elif option.startswith("s"):
                 standoff = float(option[1:]) * 1e-3
+            elif option.startswith("l"):
+                levels = int(option[1:])
             else:
                 raise ValueError(f"unknown option {option!r} in arm {arm!r}")
     else:
@@ -301,7 +300,8 @@ def build(arm: str, reactor: Reactor):
         report=lambda line: _say(f"  {arm}: {line}"),
     )
     total = time.perf_counter() - started
-    settings = {"root_spacing_m": spacing, "max_level": levels, "min_level": min_level, "standoff_m": standoff,
+    settings = {"root_spacing_m": spacing, "max_level": levels, "min_level": min_level,
+                "standoff_m": 1e-3 * spacing / 2**levels if standoff is None else standoff,
                 "tolerance_ln_G": None if not np.isfinite(tolerance) else tolerance}  # fmt: skip
     return field, settings, total, calls
 
