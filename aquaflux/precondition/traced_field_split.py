@@ -40,6 +40,8 @@ that work genuinely belongs on a CPU.
 
 from __future__ import annotations
 
+import dataclasses
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -81,6 +83,24 @@ class TracedFieldSplit(eqx.Module):
     trailing_cycle: TracedCycle
     coupling: _PaddedRowOperator
     groups: FieldGroups = eqx.field(static=True)
+    precision: str = eqx.field(static=True, default="float64")
+
+    def in_precision(self, precision: str) -> TracedFieldSplit:
+        """This split with every floating-point array cast to ``precision``, and applied in it.
+
+        Integer index arrays are unchanged. Narrowing rounds the fitted entries once; widening a
+        narrowed split back gives the same rounded entries applied in double precision, which is an
+        exactly linear map again -- what a transpose solve run to a tight tolerance needs.
+        """
+        cast = jax.tree.map(
+            lambda leaf: (
+                leaf.astype(precision)
+                if eqx.is_array(leaf) and jnp.issubdtype(leaf.dtype, jnp.floating)
+                else leaf
+            ),
+            self,
+        )
+        return dataclasses.replace(cast, precision=precision)
 
     @property
     def n_dofs(self) -> int:
@@ -115,9 +135,11 @@ class TracedFieldSplit(eqx.Module):
         :class:`~aquaflux.precondition.FieldGroups`), so this slices rather than gathers.
         """
         split = self.groups.n_leading_dofs
-        lead, trail = residual[:split], residual[split:]
+        narrowed = residual.astype(self.precision)
+        lead, trail = narrowed[:split], narrowed[split:]
         first = self.leading_cycle(lead)
-        return jnp.concatenate([first, self.trailing_cycle(trail - self.coupling.apply(first))])
+        result = jnp.concatenate([first, self.trailing_cycle(trail - self.coupling.apply(first))])
+        return result.astype(residual.dtype)
 
     def matvec(self):
         """The preconditioner matvec, as the ``residual -> M residual`` callable a Krylov solve takes.
@@ -156,7 +178,7 @@ def offers_traced_split(inverse: object) -> bool:
     )
 
 
-def traced_field_split(inverse: FieldSplitInverse) -> TracedFieldSplit:
+def traced_field_split(inverse: FieldSplitInverse, precision: str = "float64") -> TracedFieldSplit:
     """The traced form of a host field split, over what its two inverses and its coupling hold now.
 
     The split captures each inverse's hierarchy **as it is now**. After a refresh
@@ -170,6 +192,10 @@ def traced_field_split(inverse: FieldSplitInverse) -> TracedFieldSplit:
         ``traced_cycle()``, which :class:`~aquaflux.precondition.hierarchy_inverse.HierarchyBlockInverse` and
         :class:`~aquaflux.precondition.field_split.AirReductionInverse` both do. The leading group is solved
         first, retaining the trailing-by-leading coupling, as in the host split.
+    precision : {"float64", "float32"}
+        The precision the split is applied in (see :attr:`~aquaflux.precondition.FieldSplit.precision`).
+        Every floating-point array the split holds is rounded to it once, here, after the fit; integer
+        index arrays are unchanged.
 
     Returns
     -------
@@ -187,12 +213,13 @@ def traced_field_split(inverse: FieldSplitInverse) -> TracedFieldSplit:
                 f"the {name} inverse {type(block).__name__} offers no traced cycle, so this bundle "
                 "cannot be composed on device; use FieldSplitInverse for a host inverse."
             )
-    return TracedFieldSplit(
+    split = TracedFieldSplit(
         leading_cycle=inverse.leading.traced_cycle(),
         trailing_cycle=inverse.trailing.traced_cycle(),
         coupling=_PaddedRowOperator.from_scipy(inverse.coupling),
         groups=inverse.groups,
     )
+    return split if precision == "float64" else split.in_precision(precision)
 
 
 def contains_host_callback(fn, example: jnp.ndarray) -> bool:

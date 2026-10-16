@@ -738,8 +738,12 @@ LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS)
 
 #: What preconditions this case's march, as one value, which every harness in this directory reads rather
 #: than re-assembling.
+#: The precision the split is applied in (``BFS3D_SPLIT_PRECISION``, ``float64`` or ``float32``); the
+#: residual, the Krylov solves and the adjoint's preconditioner stay in double precision.
+SPLIT_PRECISION = os.environ.get("BFS3D_SPLIT_PRECISION") or _FILE_INVERSE.precision
+
 PRECONDITIONER = MaterializedJacobian(
-    FieldSplit(LEADING_INVERSE, TRAILING_INVERSE),
+    FieldSplit(LEADING_INVERSE, TRAILING_INVERSE, precision=SPLIT_PRECISION),
     probe=JacobianProbeSpec(
         column_reach=COLUMN_REACH, stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach
     ),
@@ -1293,6 +1297,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             f"{FLOW_INVERSE} {LEADING_SETTINGS}",
         ),
         ("turbulence inverse", TURBULENCE_INVERSE),
+        ("split precision", SPLIT_PRECISION),
         *([("lAIR trailing settings", AIR_TRAILING)] if TURBULENCE_INVERSE == "air" else []),
         *(
             [("native trailing settings", _jacobi_trailing_description())]

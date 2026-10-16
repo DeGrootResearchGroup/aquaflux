@@ -771,6 +771,8 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
                     frozen_coarsening=True,
                 ),
                 JacobiSmoothed(max_coarse=2000, equilibrate=False),
+                # Applied in single precision, the case's own since #732.
+                precision="float32",
             ),
             probe=JacobianProbeSpec(
                 stencil_reach=3, column_reach=(2, 2, 2, 2, 2), gradient_sweeps=None
@@ -842,6 +844,7 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
                     equilibrate=False,
                     avoid_singletons=False,
                 ),
+                precision="float32",
             ),
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
         ),

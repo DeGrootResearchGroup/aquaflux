@@ -469,6 +469,7 @@ recorded error.** A default here that disagrees with the code is a defect — fi
 | probe column reach | `column_reach=None` (uniform) | uniform (since #712: under `MultipleCorrectionGradient` every column reaches distance three) | `case.yaml` → `compare.py` `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `compare.py` `INNER_TOL` |
 | flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` (#371) | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
+| field split precision | `FieldSplit.precision="float64"` | **`float32`** (pitzDaily too; the adjoint's preconditioner stays float64) | `case.yaml` → `compare.py` `SPLIT_PRECISION` |
 | trailing hierarchy depth | `HierarchyBlockInverse` class default: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `compare.py` `JACOBI_TRAILING` |
 
 **The coupled forward solve: one MEASURE, per-family RESTART REGIMES (restructured 2026-08-20, #282).**
