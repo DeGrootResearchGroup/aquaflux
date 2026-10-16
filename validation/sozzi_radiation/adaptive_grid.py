@@ -26,7 +26,7 @@ the natural logarithm of ``G`` (a relative tolerance), floored at :data:`FLOOR`,
 default standoff (a thousandth of the finest cell: the lamp is convex and its facets lie inside the
 drawn sleeve, so any point of the drawn water is clear of them). Options, appended in any order:
 ``_m<level>`` (every cell split to that level first), ``_s<mm>`` (another standoff), ``_l<levels>``
-(halved more often than :data:`ADAPTIVE_LEVELS`).
+(halved more often than :data:`ADAPTIVE_LEVELS`); a uniform arm takes ``_s<mm>``.
 
 Stages, by argument or ``SOZZI_ADAPTIVE_STAGE``:
 
@@ -103,9 +103,8 @@ ADAPTIVE_LEVELS = 5
 DEFAULT_ARMS = (
     "uniform_h8",
     "uniform_h4",
+    "adaptive_t0.05_s0.25",
     "adaptive_t0.05",
-    "adaptive_t0.05_m2",
-    "adaptive_t0.02",
     "uniform_h2",
 )
 
@@ -264,26 +263,28 @@ def build(arm: str, reactor: Reactor):
         calls["points"] += len(points)
         return values
 
+    # uniform_h<mm> or adaptive_t<tolerance>, then optionally _s<mm> for a standoff other than the
+    # library's default; an adaptive arm also takes _m<min_level> to split every cell holding water
+    # to that level first (_m2 starts from a uniform 4 mm grid) and _l<levels> for a tree halved more
+    # often than ADAPTIVE_LEVELS.
     if arm.startswith("uniform_h"):
-        spacing, levels, tolerance, min_level = float(arm[len("uniform_h") :]) * 1e-3, 0, np.inf, 0
+        spacing_text, *options = arm[len("uniform_h") :].split("_")
+        spacing, levels, tolerance, min_level = float(spacing_text) * 1e-3, 0, np.inf, 0
     elif arm.startswith("adaptive_t"):
-        # adaptive_t<tolerance>, then optionally _m<min_level> to split every cell holding water to
-        # that level first (_m2 starts from a uniform 4 mm grid), _s<mm> for a standoff other than
-        # the library's default, and _l<levels> for a tree halved more often than ADAPTIVE_LEVELS.
         tolerance_text, *options = arm[len("adaptive_t") :].split("_")
         spacing, levels, tolerance = ADAPTIVE_SPACING, ADAPTIVE_LEVELS, float(tolerance_text)
         min_level = 1
-        for option in options:
-            if option.startswith("m"):
-                min_level = int(option[1:])
-            elif option.startswith("s"):
-                standoff = float(option[1:]) * 1e-3
-            elif option.startswith("l"):
-                levels = int(option[1:])
-            else:
-                raise ValueError(f"unknown option {option!r} in arm {arm!r}")
     else:
         raise ValueError(f"unknown arm {arm!r}")
+    for option in options:
+        if option.startswith("s"):
+            standoff = float(option[1:]) * 1e-3
+        elif option.startswith("m") and arm.startswith("adaptive"):
+            min_level = int(option[1:])
+        elif option.startswith("l") and arm.startswith("adaptive"):
+            levels = int(option[1:])
+        else:
+            raise ValueError(f"unknown option {option!r} in arm {arm!r}")
     pad = 0.5 * spacing
     started = time.perf_counter()
     field = sample_adaptively(

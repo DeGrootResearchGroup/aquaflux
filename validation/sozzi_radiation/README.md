@@ -79,48 +79,56 @@ drawing (`SozziTaghipour.step`): the water is the three cylinders less the lamp'
 lamp is the drawing's lamp triangulated at chord 5e-5 m and 4 mm facets (25,876 facets, 35.417 W at
 696.42 W/m2), absorption 35.67 /m, black walls, the fluid the only occluder. The interpolant is of ln G,
 floored at 1 W/m2 (`FLOOR`; at 1e-3 the refinement chased shadow edges in the pipes, which carry almost
-no dose). ⚠️ The table below was taken with every sample 0.5 mm off the water's boundary and before
-cells the boundary cuts were probed at their centres; the harness now defaults to a thousandth of the
-finest cell, and the table is being re-measured.
+no dose). A cell the boundary cuts is also sampled at its centre (a **probe**), since its corners
+outside the water carry fitted values and cannot show how it misses between them.
 
 **Reference**: the gather itself at 14,000 random water points, 2,000 per band of distance from the
 sleeve's true surface. Error = |interpolated / gathered - 1| over points above the floor. Configuration
 for every number here: Linux x86_64, 4 cores, jax 0.11.2, Python 3.13.16, branch
 `claude/aquaflux-issue-726-yq46n4`; each run alone on the machine. Adaptive arms: root cells 16 mm,
-up to 5 halvings (0.5 mm); `_m2` splits every cell to 4 mm first.
+every cell holding water split once (8 mm), then up to 5 halvings (0.5 mm), or 6 (0.25 mm, `_l6`);
+the standoff -- how far inside the water every sample lies -- is the library's default (a thousandth of
+the finest cell: 0.5 um, 0.25 um at `_l6`) unless the arm names one (`_s<mm>`).
 
-| arm | samples | time s | 0-0.5 mm | 0.5-1 mm | 1-2 mm | 2-5 mm | 5-10 mm | 10-30 mm | >30 mm |
-|---|---|---|---|---|---|---|---|---|---|
-| uniform 8 mm | 18,673 | 60 | 13 % / 26 % | 6.9 % / 14 % | 3.1 % / 14 % | 2.1 % / 12 % | 1.3 % / 5.2 % | 0.71 % / 2.3 % | 0.63 % / 4.3 % |
-| uniform 4 mm | 109,400 | 193 | 9.7 % / 40 % | 2.5 % / 30 % | 2.0 % / 23 % | 1.0 % / 13 % | 0.23 % / 1.3 % | 0.17 % / 0.68 % | 0.17 % / 2.4 % |
-| uniform 2 mm | 742,136 | 1233 | 7.1 % / 24 % | 1.2 % / 13 % | 0.81 % / 6.3 % | 0.19 % / 1.2 % | 0.075 % / 0.39 % | 0.045 % / 0.20 % | 0.043 % / 0.94 % |
-| adaptive, tol 0.05 | 216,154 | 334 | 6.6 % / 19 % | 1.5 % / 9.0 % | 0.72 % / 4.2 % | 0.21 % / 1.0 % | 0.12 % / 0.68 % | 0.26 % / 1.2 % | 0.34 % / 2.1 % |
-| adaptive, tol 0.05, from 4 mm | 249,793 | 413 | 6.6 % / 19 % | 1.5 % / 9.0 % | 0.72 % / 4.2 % | 0.21 % / 1.0 % | 0.11 % / 0.68 % | 0.18 % / 0.62 % | 0.15 % / 2.0 % |
-| adaptive, tol 0.02 | 1,201,461 | 1495 | 4.1 % / 14 % | 0.31 % / 3.4 % | 0.13 % / 1.2 % | 0.061 % / 0.41 % | 0.059 % / 0.29 % | 0.12 % / 0.52 % | 0.15 % / 1.9 % |
+| arm | standoff | samples | time s | 0-0.5 mm | 0.5-1 mm | 1-2 mm | 2-5 mm | 5-10 mm | 10-30 mm | >30 mm |
+|---|---|---|---|---|---|---|---|---|---|---|
+| uniform 8 mm | 0.5 mm | 18,673 | 60 | 13 / 26 | 6.9 / 14 | 3.1 / 14 | 2.1 / 12 | 1.3 / 5.2 | 0.71 / 2.3 | 0.63 / 4.3 |
+| uniform 4 mm | 0.5 mm | 109,400 | 193 | 9.7 / 40 | 2.5 / 30 | 2.0 / 23 | 1.0 / 13 | 0.23 / 1.3 | 0.17 / 0.68 | 0.17 / 2.4 |
+| uniform 2 mm | 0.5 mm | 742,136 | 1233 | 7.1 / 24 | 1.2 / 13 | 0.81 / 6.3 | 0.19 / 1.2 | 0.075 / 0.39 | 0.045 / 0.20 | 0.043 / 0.94 |
+| tol 0.05 | 0.5 mm | 235,979 | 227 | 6.6 / 19 | 1.3 / 8.9 | 0.63 / 4.0 | 0.21 / 1.0 | 0.12 / 0.68 | 0.25 / 1.1 | 0.30 / 1.9 |
+| tol 0.05 | 0.25 mm | 363,562 | 356 | 2.0 / 12 | 0.49 / 3.7 | 0.37 / 2.2 | 0.20 / 1.1 | 0.12 / 0.68 | 0.26 / 1.1 | 0.33 / 1.9 |
+| tol 0.03 | 0.25 mm | 787,446 | 678 | 1.5 / 12 | 0.29 / 3.4 | 0.21 / 2.0 | 0.12 / 0.80 | 0.081 / 0.43 | 0.19 / 0.90 | 0.15 / 1.8 |
+| tol 0.05 | 0.1 mm | 494,425 | 387 | 0.91 / 5.9 | 0.69 / 4.3 | 0.34 / 4.2 | 0.21 / 1.3 | 0.12 / 0.68 | 0.26 / 1.1 | 0.31 / 1.9 |
+| **tol 0.05** | **0.5 um** | **1,092,986** | **718** | **1.1 / 4.4** | **0.28 / 1.7** | **0.16 / 0.82** | **0.13 / 1.0** | **0.11 / 0.67** | **0.26 / 1.1** | **0.30 / 1.8** |
+| tol 0.05, 0.25 mm cells | 0.25 um | 2,218,577 | 1274 | 0.77 / 4.2 | 0.23 / 1.7 | 0.16 / 0.82 | 0.13 / 1.0 | 0.11 / 0.67 | 0.26 / 1.1 | 0.30 / 1.8 |
 
-Each cell is median / 99th percentile. Time is the whole build, almost all of it gathering.
+Each cell is median / 99th percentile, in per cent. Time is the whole build, almost all of it
+gathering. The uniform grids' standoff is the one they were built with (0.5 mm) and they have no
+probes (nothing is split); their records predate the probes and are unaffected by them.
 
+- **Sampling right up to the sleeve is what tightens the near field.** At the default standoff the 1-2 mm
+  band is 0.16 % / 0.82 % against 0.63 % / 4.0 % at 0.5 mm and the uniform 2 mm grid's 0.81 % / 6.3 %;
+  0.5-1 mm is 0.28 % / 1.7 % against 1.2 % / 13 %. It costs 1.5x uniform 2 mm's samples, most of them
+  in the layer around the sleeve: 233k cut points, and the refinement taken to the deepest level along
+  the whole lamp.
+- **Before the probes a nearer standoff made things WORSE**: with a 0.1 mm standoff and no probes the
+  1-2 mm p99 was 8.5 %, from a strip of 4 mm cells along the whole lamp, two corners inside the lamp,
+  never split and 10 % high from 0.5 to 2.5 mm off the sleeve. Their corners and cut points agreed with
+  the coarser tree; only their interiors were wrong, which nothing sampled. The probes are the fix.
+- **One level deeper (0.25 mm cells) buys almost nothing for twice the samples**: beyond 0.5 mm every
+  band is unchanged and within it the p99 stays at 4.2 %. What is left there is the lamp's
+  triangulation: at a fixed distance from the sleeve the gathered field varies around it and along one
+  facet by a relative std of 1.8-1.9 % within 0.01 mm, 1.2 % at 0.1 mm and 0.74 % at 0.5 mm (stage
+  `ripple`). The deepest-level misses (up to 0.65 in ln G) are real features: the end wall at x = 0
+  meets the sleeve, where G rises 25 % in the first millimetre off the wall (the wall sees the lamp's
+  cylinder edge-on; the base disc does not emit), and the pipe junctions. Checked: the gather is smooth
+  in depth at those points down to 0.5 um, so they are not an occlusion artefact of sampling near a wall.
+- **A tighter tolerance does not reach the near-sleeve tail**: 0.03 against 0.05 at 0.25 mm halves the
+  medians for 2.2x the samples and moves the 0.5-2 mm p99 from 3.7 / 2.2 % to 3.4 / 2.0 %.
 - **Against the issue's acceptance -- the 4 mm grid's error everywhere at a fraction of its points --
-  this is NOT met.** The closest arm, tolerance 0.05 from a 4 mm start, matches or beats 4 mm in every
-  band (bulk 0.18 % against 0.17 % median, 0.62 % against 0.68 % p99) at **2.3 times** its samples. The
-  bulk is the obstacle: at 8 mm it is 0.7 % median against 4 mm's 0.17 %, and it is most of the water,
-  so matching 4 mm there needs ~4 mm there.
-- **What the adaptivity buys is the layer beside the sleeve.** Tolerance 0.05 matches or beats the
-  uniform 2 mm grid within 5 mm of it (p99 9.0 / 4.2 / 1.0 % against 13 / 6.3 / 1.2 % in the 0.5-1,
-  1-2 and 2-5 mm bands) at 29 % of its samples; the 4 mm start adds the 4 mm bulk for 16 % more.
-- **Inside the standoff (0-0.5 mm) every grid extrapolates** -- nothing is sampled there -- and the
-  error is 4-13 % median whatever the grid. That is the price of the standoff, chosen because the
-  gathered field there carries the lamp's triangulation: around the sleeve and along one facet at a
-  fixed distance it varies by a relative std of 1.8-1.9 % within 0.01 mm, 1.2 % at 0.1 mm, 0.74 % at
-  0.5 mm, 0.46 % at 1 mm and 0.16 % at 2 mm (stage `ripple`, `work/adaptive/ripple.json`). With a
-  0.1 mm standoff measured along the edge (and before ghosts were bounded), the 0.05 arm never
-  converged: misses of ~0.5 stayed at
-  the deepest level, 73 % of them at cut points within 0.07 mm of the sleeve, for 540k samples.
-- **Uniform grids' p99 near the sleeve is large** (4 mm: 23-30 % within 2 mm): a coarse cell the sleeve
-  cuts is interpolated from ghost values extrapolated over its whole width. Not investigated further:
-  the adaptive arms refine those cells.
-- Tolerance 0.02 converges (largest miss 1.02, 0.73, 0.55, 0.23, 0.12 per pass) but refines most of the
-  chamber, to 1.2 M samples -- more than uniform 2 mm.
+  this is NOT met.** The bulk (>10 mm) sits at 0.26-0.30 % median against 4 mm's 0.17 % in every arm at
+  tolerance 0.05: refining it is a tolerance question (0.03 gives 0.15-0.19 %), and it is most of the
+  water. The adaptivity's gain is the layer beside the sleeve.
 - **Not done here**: the dose. The tracker needs the uvmesh mesh and flow, which are on the author's
   machine; `background_grid.py`'s `write` and `compare` stages are the route.
 

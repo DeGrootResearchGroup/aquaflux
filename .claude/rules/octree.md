@@ -101,6 +101,22 @@ there, `_BINARY_TO_VTK_HEXAHEDRON`; `vtu_parts` gained `point_fields`, written a
   that layer carry the lamp's triangulation, and a refinement asked for less than it chases the facets:
   the first full Sozzi run (standoff 0.1 mm along the edge, tolerance 0.05) still had misses of ~0.5 at
   the deepest level, 73 % of them at cut points within 0.07 mm of the sleeve, and took 540k samples.
+- **The standoff defaults to `STANDOFF_FRACTION` (1e-3) of the finest cell's edge** (`sampling.py`; a
+  non-positive one is refused). The project owner's call (2026-10-16): a fixed length does not travel
+  between cases of different sizes, and the region is the DRAWN shape -- a convex lamp's facets lie
+  inside it, so every point of the drawn water is at least its depth from them. The only hazard a
+  standoff must keep away is the boundary itself (a node on it can lie in a facet's plane). A concave
+  emitter's facets bulge past the drawing by up to the chord; there the caller passes a standoff beyond
+  it (the docstring says so). ⚠️ **The 0.5 mm standoff this replaced was too far and the record above
+  overstated the ripple's cost**: the 540k-sample non-convergence predates the probes, the depth-based
+  cut points and the ghost bound. Measured 2026-10-16 (Sozzi, tolerance 0.05, root 16 mm, 5 levels,
+  probes, Linux x86_64 4 cores jax 0.11.2), 1-2 mm band median / p99: 0.5 mm standoff 0.63 / 4.0 %
+  (236k samples); 0.25 mm 0.37 / 2.2 % (364k); 0.1 mm 0.34 / 4.2 % (494k); default 0.5 um **0.16 / 0.82 %
+  (1.09M, 233k of them sleeve cut points)**; 0-0.5 mm 6.6 / 19 % -> 1.1 / 4.4 %. One level deeper
+  (0.25 mm cells, 0.25 um) cost 2.2M samples and moved nothing beyond 0.5 mm (0-0.5 mm p99 4.4 -> 4.2 %):
+  the remaining near-sleeve error is the facet pattern. The deepest-level misses are real field features
+  (the x = 0 end wall meeting the sleeve: +25 % in 1 mm off the wall; the pipe junctions), checked
+  smooth in depth to 0.5 um -- not an occlusion artefact of sampling beside a wall.
 - **A crossing within `_AT_THE_END` (1e-9 of the segment) of its end is a crossing** — an edge ending
   on a boundary that lies along a lattice plane (the vessel's flat ends). Without it that whole layer
   had no cut points and refined to the deepest level along the plane. `exit_points` uses only the far
