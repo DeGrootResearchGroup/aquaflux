@@ -55,6 +55,10 @@ solver:
         frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 200, aggressive_levels: 0, equilibrate: false, avoid_singletons: false,
         strength_threshold: 0.25, max_levels: 20, frozen_coarsening: true}
+      # Applied in single precision: fitted in double, its arrays rounded once, the residual, Krylov
+      # solves and the adjoint's preconditioner kept in double. Same steps, cycles and root as float64,
+      # faster (bfs3d march 498 s against 599 s, #732).
+      precision: float32
     probe: {kind: JacobianProbeSpec, stencil_reach: 3}
   dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 3}
   # Each inner solve stops the moment its residual meets the tolerance, as on pitzDaily.

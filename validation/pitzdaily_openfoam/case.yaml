@@ -76,6 +76,10 @@ solver:
         avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
         frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
+      # Applied in single precision: fitted in double, its arrays rounded once, the residual, Krylov
+      # solves and the adjoint's preconditioner kept in double. Same steps, cycles and root as float64,
+      # faster (pitzDaily march 405 s against 531 s, #732).
+      precision: float32
     # Reach 3 is NOT exact for this coupled residual: the velocity gradient feeds the eddy viscosity,
     # which spends one more ring, so the u and v columns (and, weakly, k into omega) reach 4. At reach 3
     # the far coupling is folded onto near entries, relative error up to ~5e-6 per block at the

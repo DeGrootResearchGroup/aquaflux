@@ -352,7 +352,8 @@ cycle count.
     first, idle machine): **498 s against 599 s (-17 %)**, 18 steps / 129 cycles both with identical
     per-step inner and cycle counts, final `R` 6.185e-07 and `x_r/h` 8.361 both; steps from 5 on are
     20-35 % faster, step 1 (compilation) level, the refit unchanged (it is float64 work).
-  - Open: whether to ship it in either case file (the project owner's call).
+  - **Shipped (2026-10-16, the project owner's decision): both case files set `precision: float32`;
+    the library default stays float64.** This direction's CPU half is closed as a win.
 - **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.

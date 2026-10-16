@@ -18,7 +18,13 @@ paths:
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
 
-## `FieldSplit(precision="float32")`: the split applied in single precision — BUILT, opt-in (2026-10-16)
+## `FieldSplit(precision="float32")`: the split applied in single precision — BUILT, SHIPPED by both flagship cases (2026-10-16)
+
+**The library default stays `"float64"`; pitzDaily's and bfs3d's `case.yaml` set `precision: float32`**
+(the project owner's decision, #732, after a march A/B on each: same steps, cycles and root, pitzDaily
+-24 % and bfs3d -17 % wall; `.claude/notes/solve-open-directions.md` §7). ⚠️ So every split-apply or
+march timing on either case recorded BEFORE 2026-10-16 was taken in float64; set
+`PITZ_SPLIT_PRECISION` / `BFS3D_SPLIT_PRECISION=float64` to reproduce one.
 
 `FieldSplit.precision` (`"float64"` default | `"float32"`, `SPLIT_PRECISIONS`) reaches the traced split
 through `MaterializedSession._precision` (both places a split is made: the first fit's policy and a
