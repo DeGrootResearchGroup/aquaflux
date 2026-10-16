@@ -510,3 +510,28 @@ def test_the_cut_points_misses_take_the_cells_beside_the_rod_to_the_deepest_leve
     assert deepest.any()
     centres = field.tree.centres(np.flatnonzero(deepest))
     assert np.median(np.hypot(centres[:, 1], centres[:, 2]) - 0.005) < 0.001
+
+
+def test_a_cell_with_a_corner_not_sampled_is_tested_at_its_centre_and_split_where_that_misses():
+    """A cell the rod cuts has corners that are ghosts, fitted to agree with its cut points, so its
+    own samples cannot show how far it misses between them. Its centre is sampled as a probe; no cell
+    is left unsplit above the deepest level with a probe at its centre that missed by more than the
+    tolerance. At this standoff the cut points lie far enough from the rod that several cells' corners
+    and cut points all agree while their centres do not."""
+    tolerance = 0.05
+    field = sample_adaptively(_decay, _water(), **BOX, spacing=0.005, max_level=4,
+                              tolerance=tolerance, standoff=5e-4, transform=Logarithm(1e-6))  # fmt: skip
+    tree = field.tree
+    # The last pass probes too: its probes join the interpolant then, with no later pass to add them.
+    assert field.rounds[-1].probes > 0
+    rows = np.flatnonzero(tree.levels < tree.max_level)
+    centres = tree.key(tree.low[rows] + tree.size(tree.levels[rows])[:, None] // 2)
+    nodes = np.flatnonzero(~field.is_cut)
+    sampled = tree.key(np.round(tree.lattice(field.points[nodes])).astype(np.int64))
+    probed = np.isin(centres, sampled)
+    assert probed.sum() > 100  # cells beside the rod, left whole, with a probe at the centre
+    miss = dict(zip(sampled.tolist(), field.misses[nodes].tolist(), strict=True))
+    assert max(miss[key] for key in centres[probed].tolist()) <= tolerance
+    # Each probe joined the interpolant as a node: it passes through the value sampled there.
+    at = nodes[np.isin(sampled, centres[probed])]
+    np.testing.assert_allclose(field(field.points[at]), field.values[at], rtol=1e-10)

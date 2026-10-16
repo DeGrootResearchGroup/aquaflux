@@ -9,9 +9,16 @@ The loop, from a uniform tree of root cells over a region:
 2. **Measure each new sample's miss**: its value against what the tree *before* this pass predicted
    there. That is the interpolation error the previous tree made at that point, measured rather than
    estimated.
-3. **Split** each new cell where a sample on it (a new corner, or a new cut point on one of its
-   edges) missed by more than the tolerance; or where the cell is coarser than ``min_level``.
-4. Repeat until no cell is split, or every cell that would be is at ``max_level``.
+3. **Probe the cells the boundary cuts.** A new cell with a corner that is not sampled -- outside
+   the region, or nearer its boundary than the standoff -- has its centre sampled too, where that lies
+   in the region, and the miss there is the cell's own: its value against the interpolant this pass
+   built, which the probe had no part in. Such a cell's corners and cut points cannot show it, since
+   its unsampled corners are given values fitted to agree with its cut points (below), so a cell can
+   pass through all of them and still miss between them. The centre is the node the cell's children
+   would add, so the probe is then entered in the interpolant as one.
+4. **Split** each new cell where a sample on it (a new corner, a new cut point on one of its edges,
+   or its probe) missed by more than the tolerance; or where the cell is coarser than ``min_level``.
+5. Repeat until no cell is split, or every cell that would be is at ``max_level``.
 
 **The interpolant** is the hierarchical one of :mod:`.hierarchy`: continuous everywhere, and through
 every node sampled. A node outside the region -- or inside it by less than the standoff -- is not
@@ -124,12 +131,16 @@ class Round:
         New nodes sampled (inside the region).
     cut_points : int
         New cut points sampled.
+    probes : int
+        New cells' centres sampled to test them, where a corner of the cell is not sampled.
     ghosts : int
         Nodes outside the region (or nearer its boundary than the standoff) given a ghost value: new
         ones, and old ones fitted again at the scale of the pass's new cells.
     largest_miss : float
-        The largest miss among the pass's samples, in the interpolated (transformed) values; ``nan``
-        on the first pass, which had nothing to predict them.
+        The largest miss among the pass's new nodes and cut points, in the interpolated (transformed)
+        values; ``nan`` on the first pass, which had nothing to predict them.
+    largest_probe_miss : float
+        The largest miss among its probes, against the tree the pass made; ``nan`` with no probe.
     marked : int
         New cells marked to be split in the next pass.
     seconds : float
@@ -140,8 +151,10 @@ class Round:
     split: int
     nodes: int
     cut_points: int
+    probes: int
     ghosts: int
     largest_miss: float
+    largest_probe_miss: float
     marked: int
     seconds: float
 
@@ -256,7 +269,7 @@ def sample_adaptively(
     ----------
     sample : callable
         ``sample(points)`` with points ``(n, 3)`` inside the region returns the field there, ``(n,)``.
-        Called once per pass, with only that pass's new points.
+        Called once per pass, with only that pass's new points: nodes, cut points and probes.
     region : aquaflux.solids.Solid
         Where the field lives: anything answering ``intervals(origin, direction)`` and
         ``signed_distance(points)`` as :class:`aquaflux.solids.Solid` does. A node
@@ -280,7 +293,8 @@ def sample_adaptively(
         What is interpolated; the field itself if unset.
     min_level : int, optional
         Every cell holding part of the region is split at least to this level, whatever its misses.
-        The first pass has nothing to measure a miss against, so at zero nothing is refined.
+        The first pass has nothing to measure its nodes' and cut points' misses against, so at zero
+        only the root cells whose probes miss are refined.
     report : callable, optional
         Called with a line of text after each pass.
 
@@ -313,8 +327,9 @@ def sample_adaptively(
         build.rounds.append(record)
         say(
             f"pass {len(build.rounds) - 1}: {record.leaves} leaves; sampled {record.nodes} nodes and "
-            f"{record.cut_points} cut points in {record.seconds:.1f} s, {record.ghosts} ghosts; "
-            f"largest miss {record.largest_miss:.3g}; {record.marked} cells to split"
+            f"{record.cut_points} cut points and {record.probes} probes in {record.seconds:.1f} s, "
+            f"{record.ghosts} ghosts; largest miss {record.largest_miss:.3g} "
+            f"(probes {record.largest_probe_miss:.3g}); {record.marked} cells to split"
         )
         if not marked.any():
             break
@@ -393,7 +408,8 @@ class _Refinement:
         rebuild the interpolant from every node's value.
 
         Returns the pass's record and each new leaf's largest miss: ``-inf`` where it had no new
-        sample, and everywhere on the first pass, which had nothing to predict its samples.
+        sample; on the first pass, which had nothing to predict its nodes and cut points, only the
+        probes' misses count.
         """
         first = self.hierarchy is None
         corner_keys = tree.key(tree.corners(new))  # (r, 8)
@@ -439,8 +455,23 @@ class _Refinement:
         cut_rows = np.array(list(pending.values()), dtype=np.int64)
         first_of = {key: index for index, key in reversed(list(enumerate(rounded)))}
         cut_points = cut_like[[first_of[key] for key in pending]] if pending else np.zeros((0, 3))
+        # The probes: the centre of each new leaf with a corner not sampled, where it is in the region.
+        # Such a leaf's own samples cannot show how it interpolates between them -- its unsampled
+        # corners are ghosts, fitted to agree with its cut points -- so it is tested one level down,
+        # at the node its children would add.
+        corner_inside = corner_known & self.node_inside[corner_slot]
+        probed = np.flatnonzero(~corner_inside.all(axis=1) & (tree.levels[new] < tree.max_level))
+        centre = tree.low[new[probed]] + tree.size(tree.levels[new[probed]])[:, None] // 2
+        centre_inside = region_distance(self.region, tree.position(centre)) <= -self.standoff
+        probed, probe_keys = probed[centre_inside], tree.key(centre[centre_inside])
 
-        points = np.concatenate([tree.position(tree.unkey(sampled_nodes)), cut_points])
+        points = np.concatenate(
+            [
+                tree.position(tree.unkey(sampled_nodes)),
+                cut_points,
+                tree.position(tree.unkey(probe_keys)),
+            ]
+        )
         started = time.perf_counter()
         values = np.asarray(self.sample(points), dtype=float) if len(points) else np.zeros(0)
         seconds = time.perf_counter() - started
@@ -454,15 +485,17 @@ class _Refinement:
                 "check the box and the region, or use a finer root spacing."
             )
         transformed = self.transform.forward(values)
+        n_measured = len(sampled_nodes) + len(cut_points)
         if first:
-            miss = np.full(len(points), -np.inf)
+            miss = np.full(n_measured, -np.inf)
         else:
-            miss = np.abs(transformed - self.hierarchy(self.tree, points))
+            miss = np.abs(transformed[:n_measured] - self.hierarchy(self.tree, points[:n_measured]))
 
         self.points.append(points)
         self.values.append(values)
-        self.is_cut.append(np.arange(len(points)) >= len(sampled_nodes))
-        self.misses.append(np.full(len(points), np.nan) if first else miss)
+        self.is_cut.append(
+            (np.arange(len(points)) >= len(sampled_nodes)) & (np.arange(len(points)) < n_measured)
+        )
         self.transformed = np.concatenate([self.transformed, transformed])
         for key, row in zip(pending, cut_rows, strict=True):
             self.cut_index[key] = base + len(sampled_nodes) + row
@@ -479,6 +512,20 @@ class _Refinement:
             np.concatenate([sampled_values, self.ghost_values]),
         )
         self.tree = tree
+        # The probes' misses are against the interpolant just built, which they had no part in: how far
+        # the leaf, as it now stands, misses the field halfway between its corners. Then they join it,
+        # as nodes of the level below the leaf's.
+        probe_miss = np.abs(transformed[n_measured:] - self.hierarchy(tree, points[n_measured:]))
+        self.misses.append(
+            np.concatenate([np.full(n_measured, np.nan) if first else miss, probe_miss])
+        )
+        probe_order = np.argsort(probe_keys)
+        self._register_nodes(
+            probe_keys[probe_order],
+            np.ones(len(probe_keys), dtype=bool),
+            base + n_measured + probe_order,
+        )
+        self.hierarchy = self.hierarchy.with_values(tree, probe_keys, transformed[n_measured:])
 
         # Each new leaf's largest miss over the new samples on it: its new corners in the region and
         # the new cut points on its edges.
@@ -493,13 +540,16 @@ class _Refinement:
         owner = cut_leaf[np.repeat(np.arange(len(cut_leaf)), np.diff(cuts.offsets))]
         if len(owner):
             np.maximum.at(leaf_miss, owner, cut_miss[cuts.items])
+        leaf_miss[probed] = np.maximum(leaf_miss[probed], probe_miss)
         record = Round(
             leaves=tree.n_leaves,
             split=0,
             nodes=len(sampled_nodes),
             cut_points=len(cut_points),
+            probes=len(probe_keys),
             ghosts=len(ghost_keys),
             largest_miss=float(np.max(miss)) if (len(miss) and not first) else float("nan"),
+            largest_probe_miss=float(np.max(probe_miss)) if len(probe_miss) else float("nan"),
             marked=0,
             seconds=seconds,
         )

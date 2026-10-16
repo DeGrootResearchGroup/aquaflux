@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import platform
 import sys
 import time
@@ -258,6 +259,7 @@ def _arms() -> list[str]:
 def build(arm: str, reactor: Reactor):
     """The tree of one arm, with the reactor's field sampled on it."""
     calls = {"seconds": 0.0, "points": 0}
+    standoff = STANDOFF
 
     def sample(points):
         started = time.perf_counter()
@@ -269,11 +271,18 @@ def build(arm: str, reactor: Reactor):
     if arm.startswith("uniform_h"):
         spacing, levels, tolerance, min_level = float(arm[len("uniform_h") :]) * 1e-3, 0, np.inf, 0
     elif arm.startswith("adaptive_t"):
-        # adaptive_t<tolerance>, or adaptive_t<tolerance>_m<min_level> to split every cell holding
-        # water to that level first: _m2 starts from a uniform 4 mm grid.
-        tolerance_text, _, minimum = arm[len("adaptive_t") :].partition("_m")
+        # adaptive_t<tolerance>, then optionally _m<min_level> to split every cell holding water to
+        # that level first (_m2 starts from a uniform 4 mm grid) and _s<mm> for another standoff.
+        tolerance_text, *options = arm[len("adaptive_t") :].split("_")
         spacing, levels, tolerance = ADAPTIVE_SPACING, ADAPTIVE_LEVELS, float(tolerance_text)
-        min_level = int(minimum) if minimum else 1
+        min_level = 1
+        for option in options:
+            if option.startswith("m"):
+                min_level = int(option[1:])
+            elif option.startswith("s"):
+                standoff = float(option[1:]) * 1e-3
+            else:
+                raise ValueError(f"unknown option {option!r} in arm {arm!r}")
     else:
         raise ValueError(f"unknown arm {arm!r}")
     pad = 0.5 * spacing
@@ -286,13 +295,13 @@ def build(arm: str, reactor: Reactor):
         spacing=spacing,
         max_level=levels,
         tolerance=tolerance,
-        standoff=STANDOFF,
+        standoff=standoff,
         transform=Logarithm(FLOOR),
         min_level=min_level,
         report=lambda line: _say(f"  {arm}: {line}"),
     )
     total = time.perf_counter() - started
-    settings = {"root_spacing_m": spacing, "max_level": levels, "min_level": min_level,
+    settings = {"root_spacing_m": spacing, "max_level": levels, "min_level": min_level, "standoff_m": standoff,
                 "tolerance_ln_G": None if not np.isfinite(tolerance) else tolerance}  # fmt: skip
     return field, settings, total, calls
 
@@ -340,7 +349,6 @@ def stage_grids() -> None:
         result = errors(estimate, reference["G"], reference["band"])
         record = {
             "arm": arm,
-            **settings,
             "leaves": int(field.tree.n_leaves),
             "nodes_sampled": int((~field.is_cut).sum()),
             "cut_points_sampled": int(field.is_cut.sum()),
@@ -355,11 +363,14 @@ def stage_grids() -> None:
             "passes": [r.__dict__ for r in field.rounds],
             "error_by_band": result,
             **reactor.record(),
+            **settings,
             **_environment(),
         }
         record_path.write_text(json.dumps(record, indent=2) + "\n")
         np.savez(OUT / f"{arm}_samples.npz", points=field.points, values=field.values,
-                 misses=field.misses, is_cut=field.is_cut)  # fmt: skip
+                 misses=field.misses, is_cut=field.is_cut, reference_estimate=estimate)  # fmt: skip
+        with open(OUT / f"{arm}_field.pickle", "wb") as file:
+            pickle.dump(field, file)
         _say(f"{arm}: {record['samples']} samples ({record['cut_points_sampled']} cut), "
              f"{total:.0f} s ({calls['seconds']:.0f} s gathering)")  # fmt: skip
         for band, stats in result.items():

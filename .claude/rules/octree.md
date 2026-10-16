@@ -45,9 +45,25 @@ there, `_BINARY_TO_VTK_HEXAHEDRON`; `vtu_parts` gained `point_fields`, written a
   hanging-node cases, which the hat basis does not have. Reported to the owner as a deviation.
 - **Misses are measured, not estimated**: every pass compares each NEW sample (node or cut point)
   against the previous pass's interpolant, before adding it. A new leaf is split when a new sample on
-  its closure (its new corners, the new cut points on its 12 edges) missed by more than `tolerance`, or
-  when it is coarser than `min_level`. The first pass has nothing to predict, so `min_level=0` refines
-  nothing.
+  its closure (its new corners, the new cut points on its 12 edges, its probe) missed by more than
+  `tolerance`, or when it is coarser than `min_level`. The first pass has nothing to predict its nodes and
+  cut points, so at `min_level=0` only probes can split a root cell.
+- **A new leaf with a corner NOT SAMPLED gets a PROBE at its centre** (where that is a standoff inside),
+  missed against the interpolant the pass just built (which the probe had no part in), then entered in
+  the hierarchy as a node of the level below (`_Refinement.absorb`; `Round.probes`,
+  `largest_probe_miss`). ⚠️ **Without it a cut leaf's interior is never tested**: its unsampled corners
+  are ghosts fitted to agree with its cut points, so it can pass through every sample on its closure and
+  still miss between them. Measured on Sozzi (tolerance 0.05, standoff 0.1 mm, no probes): a strip of
+  4 mm leaves along the whole lamp at one angular position, two corners 0.68 mm inside the lamp, never
+  split, overshooting **10 %** (G ~1090 vs ~990) from 0.5 to 2.5 mm off the sleeve -- every one of the
+  worst points in the 0.5-1, 1-2 and 2-5 mm bands. A nearer standoff made it WORSE (1-2 mm p99 3.3 % at
+  0.25 mm, 8.5 % at 0.1 mm): the cut point sits higher on the convex profile, so the ghost is higher and
+  the straight line through the cell overshoots more. Pinned by
+  `test_a_cell_with_a_corner_not_sampled_is_tested_at_its_centre_and_split_where_that_misses` (red with
+  the probe's miss dropped from the split decision, and with the last pass's probes left out of the
+  interpolant -- earlier passes' probes are re-entered by the rebuild, so only `max_level=4` there, whose
+  last pass probes, sees that). Probes are taken in the same `sample` call as the pass's nodes and cut
+  points, and are kept out of that pass's ghost fit and rebuild so their misses are honest.
 - **A node outside the region gets a GHOST value entered in the hierarchy, RE-FITTED whenever finer
   cells appear around it, and the surpluses are REBUILT from every node's value each pass**
   (`_Refinement._set_ghosts`, `Hierarchy.empty(...).with_values(all)`). Sampled values never change; a
