@@ -54,6 +54,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.linalg as sla
 import scipy.sparse as sp
+from jax.custom_derivatives import linear_call
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
@@ -688,10 +689,13 @@ class ShapeBudget(NamedTuple):
         ``k + 1``-th level directly.
     operator_width : tuple of int
         Slots per row of each coarse level's operator (:class:`_PaddedRowOperator`), in the same order.
+    transpose_width : tuple of int
+        Slots per row of each coarse level's stored transpose, in the same order.
     """
 
     coarse_cells: tuple[int, ...]
     operator_width: tuple[int, ...]
+    transpose_width: tuple[int, ...]
 
 
 class SmoothedHierarchy(eqx.Module):
@@ -752,11 +756,12 @@ class SmoothedHierarchy(eqx.Module):
         ShapeBudget
             Aggregate counts and operator entry counts for each coarse level, finest first.
         """
-        coarse_cells, operator_width = [], []
+        coarse_cells, operator_width, transpose_width = [], [], []
         for level in self.levels[1:]:
             coarse_cells.append(int(np.ceil(level.n // level.block_size * headroom)))
             operator_width.append(int(np.ceil(level.operator.width * headroom)))
-        return ShapeBudget(tuple(coarse_cells), tuple(operator_width))
+            transpose_width.append(int(np.ceil(level.operator.transpose_width * headroom)))
+        return ShapeBudget(tuple(coarse_cells), tuple(operator_width), tuple(transpose_width))
 
     def refit(
         self, a: sp.csr_matrix, patterns: StructuralPatterns | None = None
@@ -868,6 +873,7 @@ def _sparse_level(
     n_coarse: int,
     block_size: int = 1,
     width: int | None = None,
+    transpose_width: int | None = None,
 ) -> _SparseLevel:
     """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays.
 
@@ -882,7 +888,7 @@ def _sparse_level(
         p_val = jnp.asarray(prolongation.data)
     return _SparseLevel(
         n=a.shape[0],
-        operator=_PaddedRowOperator.from_scipy(a, width),
+        operator=_PaddedRowOperator.from_scipy(a, width, transpose_width),
         diagonal=jnp.asarray(a.diagonal()),
         lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
@@ -1143,6 +1149,9 @@ def _build_aggregation_hierarchy(
                     width=None
                     if len(levels) == 0 or shape_budget is None
                     else shape_budget.operator_width[len(levels) - 1],
+                    transpose_width=None
+                    if len(levels) == 0 or shape_budget is None
+                    else shape_budget.transpose_width[len(levels) - 1],
                 )
             )
             break
@@ -1268,6 +1277,9 @@ def _build_aggregation_hierarchy(
                 width=None
                 if len(levels) == 0 or shape_budget is None
                 else shape_budget.operator_width[len(levels) - 1],
+                transpose_width=None
+                if len(levels) == 0 or shape_budget is None
+                else shape_budget.transpose_width[len(levels) - 1],
             )
         )
         # The Galerkin coarse operator from the true A, stored on its structural pattern (see
@@ -1368,8 +1380,15 @@ class _PaddedRowOperator(eqx.Module):
 
     Stored in padded-row form (the ELLPACK layout): two ``(n_rows, width)`` arrays holding each row's
     column indices and entries, rows shorter than ``width`` filled with zero-valued slots. The product
-    is then a gather of ``x`` at the stored columns, a multiply, and a sum along each row -- operations
-    the compiler fuses into one loop over the rows that it splits across threads.
+    is then a gather of ``x`` at the stored columns, a multiply, and a sum along each row, each step
+    split across threads by the compiler. (The gather is written out to memory before the row sum
+    reads it back; the two are not fused into one loop.)
+
+    **The transpose is stored too.** ``A^T`` is kept in the same padded form (``t_columns``,
+    ``t_values``), and :meth:`apply` tells ``jax.linear_transpose`` to apply it as a forward product.
+    Derived automatically, the transpose of a gather is a scatter-add into every slot, which runs on
+    one thread and collides on its outputs; the adjoint's transpose solve applies every level operator
+    that way, so it paid a scatter per product. The cost is a second copy of the operator's storage.
 
     **Why not compressed-sparse-row (CSR).** A CSR product in JAX lowers to one dedicated sparse kernel
     call, which runs on one thread and does not fuse with the arithmetic around it. Measured on a
@@ -1400,9 +1419,13 @@ class _PaddedRowOperator(eqx.Module):
         jnp.ndarray
     )  # (n_rows,) stored entries in each row; the slots after them are padding
     shape: tuple[int, int] = eqx.field(static=True)
+    t_columns: jnp.ndarray  # (n_cols, transpose_width) the same, for A^T
+    t_values: jnp.ndarray  # (n_cols, transpose_width)
 
     @classmethod
-    def from_scipy(cls, a: sp.spmatrix, width: int | None = None) -> _PaddedRowOperator:
+    def from_scipy(
+        cls, a: sp.spmatrix, width: int | None = None, transpose_width: int | None = None
+    ) -> _PaddedRowOperator:
         """Freeze an assembled ``scipy`` matrix, each row's entries in ascending column order.
 
         Every stored entry is kept, an explicit zero included: :meth:`to_scipy` returns the same
@@ -1416,6 +1439,9 @@ class _PaddedRowOperator(eqx.Module):
             Pad every row to exactly this many slots, so an operator whose sparsity depends on a
             coarsening keeps a **fixed shape** across rebuilds and the compiled cycle stays a cache hit.
             ``None`` pads to the widest row of ``a``.
+        transpose_width : int, optional
+            The same for the stored ``A^T``: slots per column of ``a``. ``None`` pads to the widest
+            column.
 
         Returns
         -------
@@ -1425,33 +1451,20 @@ class _PaddedRowOperator(eqx.Module):
         Raises
         ------
         ValueError
-            If a row of ``a`` has more entries than ``width``. This is a **checked overflow, never a
-            silent truncation** -- dropping entries would corrupt the Galerkin operator with no bound on
+            If a row of ``a`` has more entries than ``width``, or a column more than
+            ``transpose_width``. This is a **checked overflow, never a silent truncation** -- dropping entries would corrupt the Galerkin operator with no bound on
             the error, so the budget must be raised instead.
         """
         a = sp.csr_matrix(a)
-        a.sort_indices()
-        lengths = np.diff(a.indptr)
-        widest = int(lengths.max()) if lengths.size else 0
-        if width is None:
-            width = max(widest, 1)
-        elif widest > width:
-            raise ValueError(
-                f"operator has a row of {widest} entries, wider than the {width} budgeted for this "
-                f"level. Raise the budget (see SmoothedHierarchy.shape_budget's headroom); entries are "
-                f"never dropped to fit."
-            )
-        rows = np.repeat(np.arange(a.shape[0]), lengths)
-        slots = np.arange(a.nnz) - a.indptr[rows]
-        columns = np.zeros((a.shape[0], width), dtype=np.int32)
-        values = np.zeros((a.shape[0], width), dtype=a.dtype)
-        columns[rows, slots] = a.indices
-        values[rows, slots] = a.data
+        columns, values, lengths = _padded_rows(a, width, "row")
+        t_columns, t_values, _ = _padded_rows(sp.csr_matrix(a.T), transpose_width, "column")
         return cls(
             columns=jnp.asarray(columns),
             values=jnp.asarray(values),
             row_lengths=jnp.asarray(lengths.astype(np.int32)),
             shape=a.shape,
+            t_columns=jnp.asarray(t_columns),
+            t_values=jnp.asarray(t_values),
         )
 
     @property
@@ -1460,13 +1473,28 @@ class _PaddedRowOperator(eqx.Module):
         return int(self.values.shape[1])
 
     @property
+    def transpose_width(self) -> int:
+        """Slots per row of the stored transpose: the widest column, or its budget."""
+        return int(self.t_values.shape[1])
+
+    @property
     def nnz(self) -> int:
         """Stored entries, padding slots excluded."""
         return int(np.sum(np.asarray(self.row_lengths)))
 
     def apply(self, x: jnp.ndarray) -> jnp.ndarray:
-        """``A x``. Linear and transposable, so the adjoint's transpose solve goes through it."""
-        return jnp.sum(self.values * x[self.columns], axis=1)
+        """``A x``. Linear; transposed, it applies the stored ``A^T`` as a forward product.
+
+        Works under ``jax.jit``, forward- and reverse-mode differentiation and
+        ``jax.linear_transpose``, but not under ``jax.vmap``: the rule that hands the transpose to
+        ``A^T`` has no batching rule.
+        """
+        return linear_call(
+            _padded_product,
+            _padded_product_transposed,
+            (self.columns, self.values, self.t_columns, self.t_values),
+            x,
+        )
 
     def to_scipy(self) -> sp.csr_matrix:
         """The exact inverse of :meth:`from_scipy`: this operator as a host ``scipy`` CSR matrix.
@@ -1488,6 +1516,38 @@ class _PaddedRowOperator(eqx.Module):
         """The operator's diagonal, read off the stored entries (a padding slot holds zero)."""
         rows = jnp.arange(self.shape[0])[:, None]
         return jnp.sum(jnp.where(self.columns == rows, self.values, 0.0), axis=1)
+
+
+def _padded_rows(a: sp.csr_matrix, width: int | None, what: str):
+    """``a``'s rows as ``(columns, values, lengths)``, each row padded to ``width`` slots."""
+    a.sort_indices()
+    lengths = np.diff(a.indptr)
+    widest = int(lengths.max()) if lengths.size else 0
+    if width is None:
+        width = max(widest, 1)
+    elif widest > width:
+        raise ValueError(
+            f"operator has a {what} of {widest} entries, wider than the {width} budgeted for this "
+            f"level. Raise the budget (see SmoothedHierarchy.shape_budget's headroom); entries are "
+            f"never dropped to fit."
+        )
+    rows = np.repeat(np.arange(a.shape[0]), lengths)
+    slots = np.arange(a.nnz) - a.indptr[rows]
+    columns = np.zeros((a.shape[0], width), dtype=np.int32)
+    values = np.zeros((a.shape[0], width), dtype=a.dtype)
+    columns[rows, slots] = a.indices
+    values[rows, slots] = a.data
+    return columns, values, lengths
+
+
+def _padded_product(arrays, x: jnp.ndarray) -> jnp.ndarray:
+    columns, values, _, _ = arrays
+    return jnp.sum(values * x[columns], axis=1)
+
+
+def _padded_product_transposed(arrays, y: jnp.ndarray) -> jnp.ndarray:
+    _, _, t_columns, t_values = arrays
+    return jnp.sum(t_values * y[t_columns], axis=1)
 
 
 def _coo_apply(
@@ -2837,14 +2897,12 @@ def _require_matching_structure(original, refreshed, where: str) -> None:
             "hierarchy was built from (same mesh graph)."
         )
     for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
-        if (old.n, old.n_coarse) != (
-            new.n,
-            new.n_coarse,
-        ) or old.operator.width != new.operator.width:
+        old_shape = (old.n, old.n_coarse, old.operator.width, old.operator.transpose_width)
+        new_shape = (new.n, new.n_coarse, new.operator.width, new.operator.transpose_width)
+        if old_shape != new_shape:
             raise ValueError(
-                f"{where}: level {i} changed shape — (n, n_coarse, width) "
-                f"{(old.n, old.n_coarse, old.operator.width)} -> "
-                f"{(new.n, new.n_coarse, new.operator.width)}. The refreshed values would be a new "
+                f"{where}: level {i} changed shape — (n, n_coarse, width, transpose width) "
+                f"{old_shape} -> {new_shape}. The refreshed values would be a new "
                 "compilation signature, defeating the purpose; check that `a` has the same sparsity "
                 "pattern as the operator the hierarchy was built from."
             )

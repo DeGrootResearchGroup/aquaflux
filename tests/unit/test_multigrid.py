@@ -177,6 +177,46 @@ def test_a_padded_row_operator_transposes_to_the_transposed_matrix() -> None:
     assert np.allclose(np.asarray(transposed), a.T @ y, rtol=0, atol=1e-14)
 
 
+def _primitives(jaxpr) -> set[str]:
+    """Every primitive in ``jaxpr``, those of the sub-programs it calls included."""
+    names = set()
+    for equation in jaxpr.eqns:
+        names.add(equation.primitive.name)
+        for parameter in equation.params.values():
+            for sub in parameter if isinstance(parameter, tuple | list) else (parameter,):
+                inner = getattr(sub, "jaxpr", sub)
+                if hasattr(inner, "eqns"):
+                    names |= _primitives(inner)
+    return names
+
+
+def test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose() -> None:
+    """The adjoint applies every level operator transposed, so the transpose must not be a scatter.
+
+    Derived from the forward gather, ``jax.linear_transpose`` produces a scatter-add over every slot;
+    the stored ``A^T`` is applied as a forward product instead. The forward product scatters nothing
+    either, so a program free of any scatter is the stored path and nothing else.
+    """
+    a = _ragged_operator()
+    operator = _PaddedRowOperator.from_scipy(a)
+    assert operator.t_values.shape == (5, 2), "A^T padded to the widest column"
+    transposed = jax.linear_transpose(operator.apply, jnp.zeros(5))
+    primitives = _primitives(jax.make_jaxpr(transposed)(jnp.zeros(4)).jaxpr)
+    assert "gather" in primitives
+    assert not any("scatter" in name for name in primitives)
+
+
+def test_a_padded_row_operators_transpose_takes_its_own_budget() -> None:
+    a = _ragged_operator()
+    padded = _PaddedRowOperator.from_scipy(a, transpose_width=6)
+    assert padded.t_values.shape == (5, 6)
+    y = jnp.asarray(np.random.default_rng(3).standard_normal(4))
+    (transposed,) = jax.linear_transpose(padded.apply, jnp.zeros(5))(y)
+    assert np.allclose(np.asarray(transposed), a.T @ np.asarray(y), rtol=0, atol=1e-14)
+    with pytest.raises(ValueError, match="a column of 2 entries, wider than the 1 budgeted"):
+        _PaddedRowOperator.from_scipy(a, transpose_width=1)
+
+
 def test_smoothed_aggregation_v_cycle_is_mesh_independent() -> None:
     """The whole point: the fixed smoothed V-cycle's contraction factor stays bounded (does not
     degrade toward 1) as the mesh refines — what makes it a scalable inner solve."""
@@ -1830,12 +1870,19 @@ def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -
                 level.n,
                 level.n_coarse,
                 level.operator.values.shape,
+                level.operator.t_values.shape,
                 None if level.p_val is None else int(level.p_val.shape[0]),
             )
             for level in hierarchy.levels
         ]
 
     assert signature(built[0]) == signature(built[1])
+    # Each coarse level is padded to its budget, operator and stored transpose alike; equal signatures
+    # alone would hold for any two builds whose natural widths happened to agree.
+    for hierarchy in built:
+        coarse = hierarchy.levels[1:]
+        assert [level.operator.width for level in coarse] == list(budget.operator_width)
+        assert [level.operator.transpose_width for level in coarse] == list(budget.transpose_width)
 
     traces = []
 
