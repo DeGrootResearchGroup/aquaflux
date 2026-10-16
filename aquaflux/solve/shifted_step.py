@@ -54,7 +54,7 @@ class LinearSolveRegime(NamedTuple):
     rtol: float
     restart: int
     max_restarts: int
-    stop: Literal["lineax", "residual"] = "lineax"
+    stop: Literal["lineax", "residual"] = "residual"
 
     def solver(self) -> lx.AbstractLinearSolver:
         """The forward solver this regime describes, stopping in the measure of the step that runs it."""
@@ -95,7 +95,7 @@ class LinearSolveSettings(SettingsValue):
         Under ``stop: lineax`` it counts raw ``lineax`` steps, two more than the corrected count a march
         reports; under ``stop: residual`` it counts the cycles run.
     stop : {"lineax", "residual"} or None
-        Which rule ends a solve; unset, ``lineax``. ``lineax`` is ``lineax``'s own GMRES rule: the
+        Which rule ends a solve; unset, ``residual``. ``lineax`` is ``lineax``'s own GMRES rule: the
         residual is tested only at a restart boundary, and the solve also runs until its solution moved
         by less than ``rtol`` over a whole cycle, so every solve runs at least two cycles.
         ``residual`` stops the moment the residual meets ``rtol``, tested after every iteration, which is

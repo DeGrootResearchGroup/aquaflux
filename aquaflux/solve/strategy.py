@@ -450,6 +450,9 @@ class StepReport(NamedTuple):
         ``stopping_step``), where ``residual_norm`` stays the measure the step was steered by. Without
         these a log would report a residual the stop never compared with its tolerance. ``nan`` is
         "not recorded".
+    linear_tolerance : float
+        The relative tolerance the step's linear solves stopped at, when the march varied it from step to
+        step (its ``adaptive_tolerance``); ``nan`` when the march solved every step to its solver's own.
     """
 
     step: int
@@ -469,6 +472,7 @@ class StepReport(NamedTuple):
     full_step_ratio: float = float("nan")
     stopping_norm: float = float("nan")
     stopping_ratio: float = float("nan")
+    linear_tolerance: float = float("nan")
 
     @property
     def restart_cycles(self) -> int:

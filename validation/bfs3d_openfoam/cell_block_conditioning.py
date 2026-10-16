@@ -16,25 +16,36 @@ turbulence row is usually a story about the state, not the discretization.
 Measured on the three-dimensional backward-facing step at a mid-march state (2026-08-08, entering the
 step at beta 0.0293, V-cycle shift at the 0.05 floor): median ``sigma_min`` 2.9e-2, **353 of 23040 cells
 below 1e-3** with condition numbers of 5e6-9e6, and in every one of the twenty worst blocks the
-near-null direction is **pure omega** to three decimals. So it is the omega column that is nearly empty:
-changing omega in such a cell barely moves any of that cell's own equations, since omega's influence
-there travels through neighbour transport rather than locally. Those cells sit in low-``k`` regions
-(median ``k`` 0.122 against 0.655 over the mesh) and come in spanwise-symmetric pairs.
+near-null direction is **pure omega** to three decimals. Those cells sit in low-``k`` regions (median
+``k`` 0.122 against 0.655 over the mesh) and come in spanwise-symmetric pairs.
 
-**Sweeping the shift is the interesting use, and it is cheap.** The Jacobian does not depend on beta --
-only the diagonal added to it does -- so one materialization serves every shift, and each extra value
-costs an assembly and a batched decomposition rather than another coloured probe. That matters because
-of what it can settle: the pseudo-transient shift is what keeps a degenerate row solvable, so if
-``sigma_min`` in those blocks tracks beta downwards, the march's low-shift conditioning wall **is** this
-local degeneracy, and the lever is a field-specific shift rather than anything global.
+**A pure-omega near-null direction does NOT mean the omega column is empty**, which is how that result was
+first read. A block that is the identity plus one large entry in the omega ROW -- the omega residual
+depending strongly on the cell's own pressure or velocity -- has a ``sigma_min`` of about one over that
+entry and a near-null right singular vector along omega, while its omega diagonal is ordinary and an exact
+local solve is perfectly stable (the inverse grows by the size of the entry, not by a small pivot). The two
+readings are told apart by removing couplings rather than by the singular vector: this script also reports
+the near-singular count with the omega row's couplings to the other fields set to zero, and, as the
+control, with the omega column's set to zero instead, plus the largest omega-row coupling in each worst
+block. On pitzDaily (``state-00017``, shift 1e-4, 2026-10-14) removing the omega-row couplings took the
+count below 1e-3 from 6 to **0** and below 1e-2 from 273 to **0**, removing the omega-column couplings
+changed neither, and over the 200 smallest blocks ``sigma_min`` tracked one over the largest omega-row
+coupling with a log-log correlation of 0.99 -- the large-coupling reading, not the empty-column one.
+
+**Sweeping the shift is cheap.** The Jacobian does not depend on beta -- only the diagonal added to it
+does -- so one materialization serves every shift, and each extra value costs an assembly and a batched
+decomposition rather than another coloured probe. On the step the count barely moved between shift 0 and
+0.05, which the large-coupling reading predicts: the shift adds to a diagonal that was never the small part.
 
 **Usage** -- the checkpoint index, then one or more shifts to report at::
 
     python3 validation/bfs3d_openfoam/cell_block_conditioning.py 49 0.0293
     python3 validation/bfs3d_openfoam/cell_block_conditioning.py 49 0.5 0.1 0.05 0.02 0.005 0.0
+    python3 validation/bfs3d_openfoam/cell_block_conditioning.py --case pitzdaily_openfoam 17 0.0001
 
 The first shift is the one whose worst blocks get the per-field breakdown; the rest are reported as
-summary rows. Pass ``0`` for the unshifted Jacobian. Materializes the coupled Jacobian, so run it on its
+summary rows. ``--case`` names another case directory under ``validation/`` with a ``compare.build_case``
+and a ``checkpoints/`` directory (the step's own by default). Pass ``0`` for the unshifted Jacobian. Materializes the coupled Jacobian, so run it on its
 own: it is a couple of gigabytes.
 """
 
@@ -45,8 +56,17 @@ from pathlib import Path
 
 import numpy as np
 
-CASE = Path(__file__).resolve().parent
-ROOT = CASE.parents[1]
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _case_directory(argv: list[str]) -> tuple[Path, list[str]]:
+    """The case directory ``--case`` names (this script's own by default), and the remaining arguments."""
+    if argv[:1] == ["--case"]:
+        return ROOT / "validation" / argv[1], argv[2:]
+    return Path(__file__).resolve().parent, argv
+
+
+CASE, ARGUMENTS = _case_directory(sys.argv[1:])
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(CASE))
 
@@ -59,8 +79,8 @@ from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 from aquaflux.turbulence.coupled import _coupled_jacobian_plan, _coupled_shift_policy
 from aquaflux.precondition.materialized_session import (PROBE_BATCH_SIZE, batched_jacobian_matvec, frozen_shift_diagonal, jacobian_matvec,)
 
-#: Field order of the coupled state, for labelling the null direction.
-FIELDS = ("u", "v", "w", "p", "k", "omega")
+#: Field order of the coupled state, for labelling the null direction, by field count.
+FIELDS = {5: ("u", "v", "p", "k", "omega"), 6: ("u", "v", "w", "p", "k", "omega")}
 
 #: Below this smallest singular value a cell block counts as near-singular. The operator is
 #: symmetrically equilibrated to unit diagonals, so this is three orders down from the block's own scale
@@ -86,14 +106,32 @@ def conditioning(blocks):
     return singular[:, -1], singular[:, 0] / np.maximum(singular[:, -1], 1e-300)
 
 
+def without_couplings(blocks: np.ndarray, field: int, *, row: bool) -> np.ndarray:
+    """The blocks with one field's row (or column) couplings to the other fields set to zero.
+
+    Its own diagonal entry is kept. Comparing ``sigma_min`` before and after tells a field whose own
+    column is nearly empty (removing its ROW couplings leaves the block near-singular) from one whose row
+    carries a large coupling to the other fields (removing them makes the block well conditioned).
+    """
+    cut = blocks.copy()
+    others = [f for f in range(blocks.shape[1]) if f != field]
+    if row:
+        cut[:, field, others] = 0.0
+    else:
+        cut[:, others, field] = 0.0
+    return cut
+
+
 def main():
-    index = int(sys.argv[1])
-    shifts = [float(argument) for argument in sys.argv[2:]] or [0.0]
+    index = int(ARGUMENTS[0])
+    shifts = [float(argument) for argument in ARGUMENTS[1:]] or [0.0]
     data = np.load(CASE / f"checkpoints/state-{index:05d}.npz")
     state = jnp.asarray(data["state"])
     coupled = compare.build_case()["coupled"]
     n_fields = coupled.layout.n_fields
     n_cells = coupled.layout.n_cells
+    fields = FIELDS[n_fields]
+    omega = fields.index("omega")
     plan = _coupled_jacobian_plan(coupled, 3)
     structure = block_stencil_gather_map(plan)
     policy = _coupled_shift_policy(coupled, state, ScalarTwoLevel())
@@ -107,7 +145,8 @@ def main():
     k = np.asarray(coupled.layout.unpack(state)[1])  # [flow, k, omega]
     print(
         f"state-{index:05d}: {n_cells} cells, block size {n_fields}, equilibrated to unit diagonals\n"
-        f"{'shift':>10} {'median':>11} {'p1':>11} {'min':>11} {'below ' + format(SINGULAR_BELOW, 'g'):>11}",
+        f"{'shift':>10} {'median':>11} {'p1':>11} {'min':>11} {'below ' + format(SINGULAR_BELOW, 'g'):>11}"
+        f" {'no ω-row':>9} {'no ω-col':>9}   (counts below with omega's row / column couplings removed)",
         flush=True,
     )
     first = None
@@ -120,9 +159,12 @@ def main():
         )
         blocks = diagonal_blocks(cell_major, n_fields, n_cells)
         smallest, condition = conditioning(blocks)
+        no_row, _ = conditioning(without_couplings(blocks, omega, row=True))
+        no_column, _ = conditioning(without_couplings(blocks, omega, row=False))
         print(
             f"{beta:>10.4g} {np.median(smallest):>11.3e} {np.quantile(smallest, 0.01):>11.3e} "
-            f"{smallest.min():>11.3e} {int((smallest < SINGULAR_BELOW).sum()):>11}",
+            f"{smallest.min():>11.3e} {int((smallest < SINGULAR_BELOW).sum()):>11}"
+            f" {int((no_row < SINGULAR_BELOW).sum()):>9} {int((no_column < SINGULAR_BELOW).sum()):>9}",
             flush=True,
         )
         if first is None:
@@ -131,17 +173,22 @@ def main():
     beta, blocks, smallest, condition = first
     order = np.argsort(smallest)
     near_singular = int((smallest < SINGULAR_BELOW).sum())
-    _, _, right = np.linalg.svd(blocks[order[:20]])
+    worst20 = order[:20]
+    _, _, right = np.linalg.svd(blocks[worst20])
+    no_row, _ = conditioning(without_couplings(blocks[worst20], omega, row=True))
+    coupling = np.abs(np.delete(blocks[worst20, omega, :], omega, axis=1)).max(axis=1)
     print(f"\nat shift {beta:g}, the 20 most singular blocks -- near-null direction by field:")
     print(
         f"  {'cell':>7} {'sigma_min':>10} {'cond':>9} {'k':>10}  "
-        + "".join(f"{f:>8}" for f in FIELDS)
+        + "".join(f"{f:>8}" for f in fields)
+        + f"  {'max|ω row|':>11} {'1/that':>9} {'no ω-row':>9}"
     )
-    for row, cell in enumerate(order[:20]):
+    for row, cell in enumerate(worst20):
         weights = np.abs(right[row, -1])
         print(
             f"  {cell:>7} {smallest[cell]:>10.2e} {condition[cell]:>9.1e} "
             f"{k[cell]:>10.2e}  " + "".join(f"{w:>8.3f}" for w in weights)
+            + f"  {coupling[row]:>11.3e} {1 / coupling[row]:>9.2e} {no_row[row]:>9.2e}"
         )
     if near_singular:
         worst = order[:near_singular]

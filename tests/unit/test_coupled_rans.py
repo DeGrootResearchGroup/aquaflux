@@ -40,6 +40,7 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss, CorrectedGreenGauss, SweptGradientSolve
 from aquaflux.solve import (
     NO_REFRESH,
+    AdaptiveLinearTolerance,
     BlockScaled,
     BlockScaledNorm,
     Convergence,
@@ -947,8 +948,10 @@ def test_a_march_that_ends_short_of_a_root_is_refused_rather_than_returned(
         )
 
 
-def test_a_stopping_step_reaches_the_march_from_the_coupled_solve(monkeypatch) -> None:
-    """``solve_coupled(stopping_step=...)`` is handed to the march, which judges its stop by it."""
+def test_a_stopping_step_and_an_adaptive_tolerance_reach_the_march_from_the_coupled_solve(
+    monkeypatch,
+) -> None:
+    """``solve_coupled`` hands both march settings to the march, through the staged driver."""
     from aquaflux.solve import MarchResult
 
     mesh, coupled = _cavity()
@@ -961,6 +964,8 @@ def test_a_stopping_step_reaches_the_march_from_the_coupled_solve(monkeypatch) -
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
 
+    adaptive = AdaptiveLinearTolerance()
+
     def stopping(step):
         return step
 
@@ -972,8 +977,10 @@ def test_a_stopping_step_reaches_the_march_from_the_coupled_solve(monkeypatch) -
         convergence=Convergence(measure=Euclidean(), rtol=1.0, atol=1e30),
         strategy=_single_step(),
         stopping_step=stopping,
+        adaptive_tolerance=adaptive,
     )
     assert calls[0]["stopping_step"] is stopping
+    assert calls[0]["adaptive_tolerance"] is adaptive
 
 
 def test_the_last_refresh_segment_marches_without_the_trigger(monkeypatch) -> None:

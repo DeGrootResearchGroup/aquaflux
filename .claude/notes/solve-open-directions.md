@@ -206,7 +206,8 @@ default flip the case files would carry `stop: residual, refresh_on_cycles: 2` (
 re-measured there).
 
 **In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
-builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
+builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the library default became `residual`
+on 2026-10-15 (#645, with the adaptive tolerance).
 **pitzDaily opts in (2026-10-09, project owner's decision):** its `case.yaml` carries `stop: residual`
 and `refresh_on_cycles: 2`. ⚠️ So "the shipped `case.yaml`" in any pitzDaily entry dated before
 2026-10-09 means the `lineax` stop at `refresh_on_cycles` 3; `PITZ_FORWARD_STOP=lineax
@@ -258,8 +259,9 @@ went from ~2.8 to ~5.3 s. Compare bfs3d runs only within one commit. The refacto
 structural-pattern products of 868ab80/f7326c1 (on pitzDaily 0.88 -> 1.06 s per split refit), cached
 since 2026-10-13 (`StructuralPatterns`, `solve-amg-multigrid.md`: 0.83 s); the trajectory change is not
 explained by it and is not bisected.
-**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard), the
-cost thresholds' re-calibration, and the project owner's decision.
+**The default moved on 2026-10-15 (#645), with `AdaptiveLinearTolerance` as the forcing safeguard for
+the end-of-march failures below.** Still open: the cost thresholds' re-calibration under the new count,
+and a bfs3d arm with the adaptive tolerance (its file already ran the residual stop).
 
 **The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
 true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
@@ -279,10 +281,22 @@ pass under `lineax`:
   (ramp rung on lineax, a slightly different anchor) it converges in 24, linearly. So the inexact step is
   fragile here near the anchor, not only slow at the end.
 - **Consequence:** flipping the default as built would trade pitzDaily's 1.88x for slower, linear endings
-  on tight-tolerance solves and a lost robustness margin on at least one continuation. Candidate remedies,
-  unbuilt and unmeasured: a terminal forcing safeguard (solve no looser than `½ target / |R_k|`, which
-  tightens only in the last few steps and so avoids what refuted Eisenstat–Walker), and re-solving tighter
-  after a line-search cut.
+  on tight-tolerance solves and a lost robustness margin on at least one continuation.
+- **The remedy, BUILT opt-in 2026-10-15 (#645): `solve.AdaptiveLinearTolerance`** — two rules, one setting
+  (`newton_march(adaptive_tolerance=)`, reachable from every march and a case file's `solver` section):
+  tighten in a tail of full-length steps limited by their own solve (`0.9·ρ²`, floored at
+  `½ target / |R_k|`), and solve the step after a cut-back or a rising residual to 0.1. The other proposed
+  remedy, re-solving the cut-back step tighter, was refuted (ledger: "Re-solving a cut-back step at a
+  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve.md`'s
+  contract entry and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
+  (`LinearSolveRegime.stop` defaulting to `residual`, and the setting at its defaults on every march whose
+  solver is a relative-residual GMRES) passes: 39 of 39** (2026-10-15, `d0871e2` + the two forcings in a
+  scratch worktree, Linux x86_64, 4 cores, jax 0.11.2, 1:01:39). The stop alone failed four
+  (`test_coupled_field_split.py`'s two channel marches, which errored, plus its adjoint test, and the
+  Reynolds-continuation adjoint test). ⚠️ The first forced run, with the
+  reduction re-measured in each step's own scales, still failed the Reynolds test (6.5e-3 at 60 target
+  steps): see `solve.md` for why the reduction is read report to report. Both became the library
+  defaults the same day; bfs3d has no arm with the adaptive tolerance yet.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
@@ -392,6 +406,26 @@ members**, because the preconditioner is ~80 % of each application and does not 
 the preconditioner would be traced and a member too small to fill the device; reopen it there.
 
 ## 10. Nonlinear elimination of the ω stiffness
+
+**⚠️ ITS MOTIVATION IS REFUTED ON pitzDaily (2026-10-14); bfs3d is the deciding check.** The entry below
+reads the census's pure-ω near-null direction as "the cell block is weakly coupled in ω". On pitzDaily `state-00017` (shift 1e-4, 2026-10-14, `cell_block_conditioning.py --case pitzdaily_openfoam`, jax 0.11.2, Linux, 4 cores)
+the same signature appears, and it is a large coupling in the ω ROW to the cell's own pressure and
+velocity (equilibrated ω–p 1348, ω–u −787 in cell 721, against an ω diagonal of 1), not a weak ω column:
+
+| blocks | `σ_min` < 1e-3 | < 1e-2 |
+|---|---|---|
+| as assembled | 6 | 273 |
+| ω row's couplings to the other fields zeroed | **0** | **0** |
+| ω column's couplings zeroed (control) | 6 | 274 |
+
+Over the 200 smallest blocks `σ_min` tracks one over the largest ω-row coupling (log-log correlation
+0.99), and the inverse's largest entry is that coupling's size -- non-normal, not singular. A local ω
+solve with the flow frozen is already well posed, so the elimination below targets nothing; the shift
+not reaching the cells is predicted too (it adds to a diagonal that was never small). **To close or
+reopen it:** run `validation/bfs3d_openfoam/cell_block_conditioning.py N <shift> 0.05 0` on the three
+states in the table below; the `no ω-row` / `no ω-col` columns decide it. Why ∂R_ω/∂p is so large near
+walls is unmeasured (a hypothesis: ω's convective flux through the Rhie--Chow mass flux, where ω is
+large, against a small pressure diagonal).
 
 **What.** Before each global Newton step, run a few cheap local nonlinear solves of the ω equation
 (flow and `k` frozen) in the cells the cell-block SVD flags (`σ_min < 1e-3`, ~1.5 % of bfs3d), then

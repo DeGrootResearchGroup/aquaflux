@@ -84,6 +84,17 @@ or whose blocks are unnamed: `RowScaledNorm` /
     detail should be fed from it and `coupled_residuals` deleted as dominated is an open question, not
     decided here.
 
+## `newton_march(adaptive_tolerance=)` and `StepReport.linear_tolerance` (BUILT 2026-10-15, #645; default)
+
+`AdaptiveLinearTolerance` (the default on every march since 2026-10-15, `DEFAULT_ADAPTIVE_TOLERANCE`; `None` switches it off) varies the relative tolerance each step's linear solve stops at —
+the rule, its measurements and why it is not Eisenstat–Walker are in `solve.md`'s contract entry. On the
+march side: the solver's base tolerance is read and converted to a float64 array leaf once, before the
+first step; each step (and a redo of it) runs `with_relative_tolerance(solver, tolerance)`; after the
+step, the next tolerance is chosen from its `alpha`, its reported residual over the previous report's
+(deliberately across the measure rebuild — see `solve.md`) and the stopping test's norm and target.
+`StepReport.linear_tolerance` is the tolerance the step RAN at (`nan` without the setting), so a replay of
+the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
+
 ## The observed march — newton_march, triggers, controls, logging
 
 - **`ResidualHomotopy` — a continuation walked INSIDE one march, not as a ladder of marches (BUILT

@@ -56,7 +56,8 @@
     pressure is not.
     **⚠️ PARTLY REHABILITATED (2026-08-08): a second, independent measurement puts ω in the same
     place.** The cell-block singular-value decomposition above finds the near-null direction of the
-    worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle. That is
+    worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle (⚠️ which
+    on pitzDaily is a large ω-row coupling to the flow, not an empty ω column -- see the WHICH-row entry). That is
     local block conditioning, not per-field V-cycle smoothing rates — a different quantity by a
     different route — so "ω is the 3D per-field lever, not pressure" now rests on two legs instead of
     one unfalsifiable one. The *factor* that once accompanied it is deleted for want of a configuration; treat
@@ -127,12 +128,18 @@
       all 23040 diagonal 6×6 blocks of the equilibrated cell-major operator at the same state:
       `σ_min` median 2.87e-2, 1st percentile 8.42e-4, minimum 3.21e-4, with **353 cells below 1e-3**
       and condition numbers there of 5e6–9e6. In every one of the twenty worst blocks the near-null
-      right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. So it
-      is the ω *column* that is nearly empty: perturbing ω in such a cell barely changes any of that
-      cell's own six equations, because ω's influence there is carried almost entirely by neighbour
-      transport rather than locally. That is exactly the quantity a cell-centred patch must invert and
-      a global cell-major incomplete-LU sweep never does, which is the cleanest available explanation
-      for why every patch smoother fails on this operator while ILU(0) is untroubled. The affected
+      right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. ⚠️ **The
+      reading first written here -- "the ω column is nearly empty" -- does not follow from a pure-ω
+      singular vector, and on pitzDaily it is wrong.** A block that is the identity plus one large entry
+      in the ω ROW (∂R_ω on the cell's own `p` or `u`) has `σ_min` ≈ one over that entry and a near-null
+      direction along ω, with an ordinary ω diagonal and a stable exact local solve. On pitzDaily `state-00017` (shift 1e-4, 2026-10-14, `cell_block_conditioning.py --case pitzdaily_openfoam`, jax 0.11.2, Linux, 4 cores) the same
+      signature appears (6 cells below 1e-3, pure ω, shift-insensitive), and removing the ω row's
+      couplings to the other fields takes the count below 1e-3 from 6 to **0** (below 1e-2, 273 to **0**)
+      while removing the ω column's changes neither; cell 721's raw ∂R_ω/∂ω is 0.6, its equilibrated
+      ω–p entry 1348. bfs3d has not been re-measured this way (the probe now prints both counts). If it
+      agrees, what a cell-centred patch meets is non-normality -- an error in its local pressure
+      multiplied by ~1e3 into ω -- which a global cell-major incomplete-LU sweep and the block-triangular
+      field split (whose lower block is exactly this coupling) carry without inverting it in isolation. The affected
       cells sit in low-`k` regions (median `k` 0.122 against 0.655 over the mesh) and occur in exact
       spanwise-symmetric pairs, so they are a coherent region of the flow, not scattered noise.
       **⚠️ BUT THE SHIFT DOES NOT CONTROL IT, so this does NOT explain the low-β wall.** Sweeping the
@@ -537,6 +544,28 @@ scored in the row-equilibrated measure the march stops on, rebuilt at the new st
 
 Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
 fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
+
+## Re-solving a cut-back step at a tighter tolerance — DOES NOT RECOVER IT (2026-10-15, #645)
+
+**What was proposed** (`solve-open-directions.md` 6b, as a remedy for the residual stop's erratic
+Reynolds-continuation march): when a step's line search cuts it back, redo that step from the same state
+with the Krylov tolerance tightened tenfold (0.3 → 0.03; floored at 1e-6), keeping the redo if its
+residual is lower. Fired on a step with line-search `alpha < 0.5`.
+
+**Probe** (env-switched prototype in `newton_march`, never committed): the Reynolds-continuation adjoint
+test's forward march (`tests/integration/test_reynolds_continuation.py`, 28×20 channel, `n_points=1`,
+`max_steps` 60, `BlockDiagonal(ScalarTwoLevel, ConvectionTwoLevel)`, default `Convergence`), residual stop at
+0.3; main `a5d61d4`, Linux x86_64, 4 cores, jax 0.11.2. **It still failed at 60 target steps**, alone and
+with the tail rule, like the plain residual stop (4.8e-2). The redo almost never helped: across the ~20
+redone steps the redo's line search cut back to the SAME `alpha` as the original in all but two, and its
+residual moved by at most a few per cent either way (e.g. step 24: `alpha` 0.008, `|R|` 1.517e-1 both
+times). So the cut-back is not the linear solve's error — a tighter solve of the same linearization from
+the same state gives the same direction — and once the march has entered the region where those steps
+happen, repairing one step does not leave it.
+
+**What worked instead:** solving the NEXT step tighter (0.1) — 12 steps, no collapses — which keeps the
+march out of that region rather than repairing a step inside it. Built as `AdaptiveLinearTolerance`'s
+setback rule (`solve.md`).
 
 ## Eisenstat–Walker adaptive forcing terms — NOT WORTH BUILDING (2026-10-08); a looser FIXED term is
 
