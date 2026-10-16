@@ -720,6 +720,34 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
   room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
 
+## `tubular_reactor` — a ten-lamp reactor on a background grid, and its resolution study (2026-10-15/16)
+
+A radiation-only case with no flow mesh: 10 Sozzi lamps (35.4 W each) in a 300 mm vessel, with a
+100-hole, 50 %-open perforated plate at the inlet and walls reflecting 0.1. `G` is gathered at the
+nodes of a Cartesian grid in the water (`run.py`, `TUBULAR_*` settings, outputs in
+`work/runs/<tag>/`). `study.sh` runs the grid and tessellation studies, and `compare.py` compares
+them. Numbers and configuration are in its README. What to know before touching it:
+
+- **Shadows are exact bodies, and the plate is a bespoke `Body` (`geometry.PerforatedPlate`).** A
+  sight line crossing the slab is clear only if its part inside the slab lies in one hole, found by
+  one hexagonal-lattice lookup. ⚠️ **The first version put the 100 holes in an `Outside` as 104 convex
+  regions, and that ran a smoke test to a 54 GB footprint before it was killed.** Its pair test forms
+  intermediates per region at the 4M-pair default. Verified against brute-force hole sampling:
+  1 of 4,000 lines differed, and finer sampling resolved it (a 7 µm graze).
+- **Lamps are emitters only; their shadows are separate exact bodies.** A cylinder plus hemisphere,
+  `TUBULAR_SHRINK` (0.251 mm) inside the sleeve so no facet centroid lies inside. That is fixed
+  rather than derived, so a lamp-tessellation study does not move the shadows.
+- **The lamps are kept out of the radiosity on purpose: the solve is hand-assembled, not
+  `solve_scene`.** `solve_scene` puts every lamp facet into the dense transfer, and 50k lamp facets
+  plus 12k wall triangles cannot be held. Wall triangles at 16k and 18k (20 mm edges, 12-sided
+  holes) did fit, on a 19 GB machine.
+- **Grid results (h = 8/6/4/3 mm):** away from the sleeves the interpolation error falls as h². Within
+  2 mm of a sleeve it is 17-36 % at every spacing (issue #726). ⚠️ **The node-averaged mean G is not a
+  converged volume integral**: it moves non-monotonically, 112.9 / 114.8 / 115.1 / 114.1 W/m².
+- **Figures are drawn by `render.py`**: 0.5 mm pixels masked by the exact water test and interpolated
+  from the nodes, so boundaries are true curves. The plate-plane figures are direct light only and
+  say so on the figure.
+
 ## The aggressive Reynolds continuation does NOT need the complete LU (2026-10-11)
 
 `pitzdaily_openfoam/compare_reynolds_continuation.py` used to say its aggressive Courant control could
