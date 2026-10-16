@@ -797,11 +797,10 @@ _GRADIENTS = {
 if GRADIENT is not None and GRADIENT not in _GRADIENTS:
     raise SystemExit(f"PITZ_GRADIENT={GRADIENT!r} is not one of {sorted(_GRADIENTS)}")
 
-#: ⚠️ UNIFORM PROBING REACH, deliberately, where the sibling case shortens two columns. Its
-#: `(3,3,3,3,2,2)` is a SIX-field layout and was measured on that mesh and those schemes; the analogous
-#: five-field value here is unmeasured, and the record is emphatic that shortening the pressure column
-#: diverged that case at step one. Uniform reach costs more probes and is always correct, so it is what
-#: this case uses until someone measures the shortened one HERE.
+#: Every column PROBED at reach 2 inside the reach-3 pattern (`case.yaml`, with the measurement). The
+#: far couplings are folded onto near entries rather than dropped, which neither block inverse minds
+#: here; the pressure column's failure on the sibling case was a zero-fill factorization's, and no
+#: factorization runs on this case.
 COLUMN_REACH = SOLVER.preconditioner.probe.column_reach
 
 #: A cost cap on the inner loop, so a doomed attempt is cut short rather than run to a stagnation.

@@ -96,7 +96,6 @@ def test_a_row_carries_every_value_exactly(tmp_path):
         drift=0.125,
         inner_iterations=2,
         max_inner_cycles=3,
-        binding_limit=0.5,
         shift=1.5,
         escalations=1,
         diverged_retry=True,
@@ -112,10 +111,9 @@ def test_a_row_carries_every_value_exactly(tmp_path):
     assert float(row["residual_ratio"]) == 2.0e-7 / 3.0
     assert row["diverged_retry"] == "1" and row["escalations"] == "1"
     assert int(row["restart_cycles"]) == report.restart_cycles
-    assert {name: row[name] for name in ("alpha", "drift", "binding_limit", "shift")} == {
+    assert {name: row[name] for name in ("alpha", "drift", "shift")} == {
         "alpha": "0.25",
         "drift": "0.125",
-        "binding_limit": "0.5",
         "shift": "1.5",
     }
 

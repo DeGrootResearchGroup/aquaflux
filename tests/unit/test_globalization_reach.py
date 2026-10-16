@@ -9,8 +9,8 @@ flow-only or scalar paths at all (issue #372). Nothing about those settings is a
 turbulence or of coupling -- they describe how a march damps -- so the gap was drift, not design, and
 it was invisible to review because no single builder looked wrong.
 
-**What this does NOT claim.** The problem-specific step fields -- ``step_limit``, ``step_projection``,
-``krylov_solver``, ``residual_norm``, ``jacobian_residual`` -- are not settings of the globalization,
+**What this does NOT claim.** The problem-specific step fields -- ``step_projection``, ``krylov_solver``,
+``residual_norm``, ``jacobian_residual`` -- are not settings of the globalization,
 and the flow-only and scalar builders still do not expose them. Nor can any builder be given a
 non-default acceptance rule or relaxation schedule: those are flattened to ``divergence_cap`` and
 ``beta0``/``exponent``/``beta_floor``.
@@ -69,7 +69,6 @@ ASKED = Globalization(
     escalation_factor=3.5,
     divergence_cap=25.0,
     line_search=7,
-    grow=2,
     line_search_growth=RelaxedFarFromRoot(),
 )
 
@@ -87,7 +86,6 @@ SHIPPED = Globalization(
     escalation_factor=2.0,
     divergence_cap=10.0,
     line_search=0,
-    grow=0,
     line_search_growth=MonotoneLineSearch(),
 )
 COUPLED_LINE_SEARCH = 10
@@ -134,7 +132,6 @@ def _assert_carries(step, expected: Globalization, *, dual_time: bool = False) -
     assert step.escalation_factor == expected.escalation_factor
     assert isinstance(step.acceptance, DivergenceGuard)
     assert step.acceptance.divergence_cap == expected.divergence_cap
-    assert step.grow == expected.grow
     assert step.line_search_growth == expected.line_search_growth
 
 
@@ -352,7 +349,7 @@ def test_the_coupled_builders_forward_every_field(case, dual_time: bool) -> None
 
 @pytest.mark.parametrize(
     "field",
-    ["max_escalations", "escalation_factor", "divergence_cap", "grow", "line_search_growth"],
+    ["max_escalations", "escalation_factor", "divergence_cap", "line_search_growth"],
 )
 def test_a_dual_time_step_refuses_a_setting_it_has_no_field_for(case, field: str) -> None:
     """Refused rather than dropped: a setting that reaches nothing looks exactly like no setting."""

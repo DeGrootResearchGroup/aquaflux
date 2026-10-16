@@ -31,8 +31,8 @@ the march is measuring some other configuration (the carried-protocol trap).
 Prediction per state, printed beside every measurement: with ``lambda`` fitted from the control's own
 contraction ``rho_c`` at ``beta_c`` (``lambda = beta_c (1 / rho_c - 1)``), the contraction at ``beta`` is
 ``beta / (lambda + beta)``. A measured ratio far below the prediction at small ``beta`` is Newton taking
-over (quadratic, not a fixed rate); one far above it says something other than the shift -- a limiter
-binding, a stale or failing inverse, the inner loop's own tolerance -- is holding the step.
+over (quadratic, not a fixed rate); one far above it says something other than the shift -- a stale or
+failing inverse, the inner loop's own tolerance -- is holding the step.
 
 Usage
 -----
@@ -146,7 +146,7 @@ def main() -> None:
 
     header = (
         f"{'state':>5} {'arm':>16} {'beta':>7} | {'ratio':>9} {'predict':>8} {'inner':>5} "
-        f"{'cycles':>6} {'max':>4} {'alpha':>6} {'limit':>6} {'met':>3} {'s':>6}"
+        f"{'cycles':>6} {'max':>4} {'alpha':>6} {'met':>3} {'s':>6}"
     )
     for k in states:
         phi_n = jnp.asarray(replay.states[k]["state"])
@@ -210,7 +210,7 @@ def main() -> None:
                         f"{k:5d} {floor + '/' + inner:>16} {beta:7.4g} | {ratio:9.4f} {predicted:8.4f} "
                         f"{int(outcome.inner_iterations):5d} {int(outcome.raw_cycles):6d} "
                         f"{int(outcome.max_inner_cycles):4d} {float(outcome.alpha):6.3f} "
-                        f"{float(outcome.binding_limit):6.3f} {'yes' if bool(outcome.reached_target) else 'no':>3} "
+                        f"{'yes' if bool(outcome.reached_target) else 'no':>3} "
                         f"{seconds:6.1f}",
                         flush=True,
                     )

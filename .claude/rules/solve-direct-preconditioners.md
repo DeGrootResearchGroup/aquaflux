@@ -324,7 +324,55 @@ coloured probe still depends on it (as the complete LU did until it was deleted,
       small term. The recorded "16 vs 4: ~2.2 GB vs ~0.7 GB" was measured against the old allocations and
       **no longer describes this code**; re-measure before using it.
 
-    - **⚠️⚠️ PER-COLUMN PROBING REACH — shipped at `(3,3,3,3,2,2)`; `p` MUST stay at reach 3.**
+    - **✅ CURRENT (2026-10-14): pitzDaily probes EVERY column at reach 2 inside its reach-3 pattern
+      (`column_reach: [2, 2, 2, 2, 2]`); bfs3d ships a uniform reach 3 (since #712), and measured the same
+      colouring as a 34 % loss (below).** Everything in the
+      bullet below is the bfs3d history under a zero-fill incomplete factorization, which neither case
+      runs any more. On pitzDaily (`compare.py` / `case.yaml` shipped otherwise, one run each, 4-core Linux,
+      jax 0.11.2; mid-span `x_r/h` 8.0686 and 18 steps in every arm):
+
+      | probe colouring / pattern | restart cycles | final `\|R\|` | probe per refit | solve |
+      |---|---|---|---|---|
+      | reach 3 / 3 (was shipped) | 123 | 9.07e-06 | 4.3–5.8 s | 599 s ¹ |
+      | **reach 2 / 3 (now shipped)** | 123 | 9.57e-06 | 2.5–3.4 s | 573 s ¹ |
+      | reach 4 / 4 (exact for this residual) | 123 | 4.62e-06 | void ² | void ² |
+      | reach 2 / 4 | 121 | 9.12e-06 | 2.6–3.3 s | 600 s ³ |
+
+      ¹ `main` `403af71d`; ² contended by a test run; ³ `main` `a5d61d49`, where the reach-3/3 march took 543 s
+      — so a reach-4 pattern is ~10 % dearer overall (each refit's refactor ~1.2 → ~2 s). The folded mass
+      is ~4e-4 of the Jacobian's norm (distance-3 entries ~48 % of the pattern's positions). Subtracting
+      the previous refit's far values from the folded near entries was tried statically and is NOT worth
+      building: between refits the far values change about as much as they are large, so the correction
+      cut the per-block error by at most ~2× and in some blocks not at all.
+      **At ZERO shift — the adjoint's operator — the shortened probe costs 7 % forward and nothing
+      transposed** (`zero_shift_arms.py` at the converged root `state-00018` of the shipped march, operator
+      probed exact at uniform reach 3, preconditioner as the case configures it, GMRES restart 30 to 1e-8 on
+      the true residual, same machine): uniform 262 / 283 applies (forward / transposed), reach-2 colouring
+      280 / 284, both converged. ⚠️ The harness's `splitfloor` arm fails identically in both (621 applies,
+      true 3e-2 to 1e-1): `compare.PC_BETA_FLOOR` is `None` since #712, so that arm is built at an unset
+      shift and measures nothing about a floor.
+      **⚠️ bfs3d does NOT take it: the same colouring costs that case 34 % of its wall (measured
+      2026-10-15 by the project owner, PR #722).** `validation/bfs3d_openfoam/compare.py`, shipped
+      `case.yaml`, the arm `BFS3D_COLUMN_REACH=2,2,2,2,2,2` against the unset uniform reach 3, both on
+      `77b03c18`; Apple M3 Pro, 11 cores, macOS, jax 0.10.2, one run each, machine idle:
+
+      | probe colouring (pattern reach 3) | steps | restart cycles | final `\|R\|` | refit (probe / refactor) | solve |
+      |---|---|---|---|---|---|
+      | uniform reach 3 (shipped) | 18 | 137 | 5.1e-06 | 11.9–12.7 s (8.2–8.5 / 3.6–4.2) | 522 s |
+      | reach 2 | 21 | 216 | 5.0e-06 | 6.0–6.7 s (3.4–3.6 / 2.4–3.0) | 697 s |
+
+      Same `x_r/h` 8.361. The probe halves, but the march takes 3 more steps and 58 % more cycles. Noise
+      reference: `main` `a5d61d49` ran the shipped arm in 529 s (1.3 % apart). At zero shift
+      (`zero_shift_adjoint.py`, the reach-3 march's `state-00018`, operator probed at uniform reach 3,
+      restart 30 to 1e-8 on the true residual) it is nearly free: 373 / 403 applies (forward / transposed)
+      uniform against 393 / 418, all converged. So the reach-2 colouring is a **per-case** choice and the
+      far mass it folds is what decides it: `probe_reach_audit.py` finds bfs3d's p, k and omega carrying
+      1.1e-3 / 6.7e-5 / 3.9e-5 of their norm beyond reach 2, against ~4e-4 folded on pitzDaily.
+      Untested: shortening only some columns on bfs3d (the old `(3,3,3,3,2,2)`, or velocities alone).
+      **The pattern stays at reach 3 for the reason the bullet below gives** — the coarse space reads it;
+      only the colouring is shortened. Harnesses: `validation/pitzdaily_openfoam/compare.py` (the arms are
+      `case.yaml` edits; a reach-4 pattern is `PITZ_STENCIL_REACH=4`).
+    - **⚠️⚠️ PER-COLUMN PROBING REACH — bfs3d's history (shipped `(3,3,3,3,2,2)` until #712); `p` had to stay at reach 3.**
       `(3,3,3,2,2,2)` diverges this case on its first step (issue #191), and the cause is not the reach's
       accuracy — the matrix is exact to the floating-point floor — but the *sparsity* the shortening
       leaves behind. Keeping those positions as stored zeros does cure the divergence and is **not

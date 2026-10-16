@@ -431,67 +431,6 @@ class CoefficientDriftTrigger(eqx.Module):
         return history[-1].drift >= self.threshold
 
 
-def _limit_collapsing(
-    previous: StepReport | None, report: StepReport, progress: float = 1e-3
-) -> bool:
-    """Whether this step continues a constraint-bound sequence that is buying nothing.
-
-    True when the step's length was decided by an injected constraint (``binding_limit < 1``), the cap
-    is no wider than the step before it, and the residual **changed** by less than the fraction
-    ``progress`` -- in either direction. One such step is ordinary -- a capped step is a legitimate
-    short step, and a pseudo-transient path is allowed to be non-monotone -- so this is a per-step
-    predicate that a caller counts, never a verdict on its own.
-
-    **The failure it names.** A fraction-to-the-boundary rule takes ``tau`` of the distance to the
-    constraint, so a step that runs into it leaves the binding entry at ``1 - tau`` of its value: at
-    ``tau = 0.99`` the next step's room is a hundredth of this one's, whether or not anything else
-    changed. Once the direction keeps pointing at the boundary in that entry, the cap collapses
-    geometrically and every step is arithmetically a no-op. Measured on a coupled RANS march: the cap
-    fell by exactly 100x per step from 1.95e-06 to 1.95e-196 over ninety-six consecutive steps, with the
-    residual frozen to every reported digit and the linear solve costing nothing, because there was no
-    step left to take. Nothing in the ordinary stopping tests sees that -- the state is finite, the
-    residual is finite, and the tolerance is simply never reached -- so the march runs its whole budget.
-
-    **Both halves of the residual test were got wrong once each, and the archived march logs are what
-    caught them.** Replaying a candidate predicate over every logged march -- the locked-up ones and the
-    healthy ones together -- is the only cheap way to see a false positive, since a march that recovers
-    looks exactly like one that does not until it does.
-
-    * *Not* "did not fall", strictly. A locked-up step is not a bit-exact no-op: it still moves the
-      state by ``alpha`` times the correction, so at a cap of ~1e-6 the residual genuinely falls, by
-      ~1e-6 relative. A strict test resets on every step and never fires, which is what it did on a
-      march that had otherwise reproduced the lock-up step for step.
-    * *Not* "did not fall by ``progress``" either. That still admits a residual that **rose**, and a
-      rising residual is the signature of a healthy pseudo-transient excursion rather than a stall. On
-      a march that converges, three consecutive steps ran caps of 0.983, 0.928, 0.253 at residuals
-      1.310e-01, 1.335e-01, 1.489e-01 -- climbing from the 1.293e-01 the run of three began at -- and
-      then recovered to 9.241e-02 and converged: a one-sided test ends that rung at its worst moment.
-
-    The failure is a step that changes **nothing**, so the test is two-sided. The two populations sit
-    orders apart: null steps move the residual by ~1e-6 relative, productive ones by percents.
-
-    All three conditions are needed. The residual test alone fires on an ordinary non-monotone pair of
-    steps, and the cap test alone fires wherever a step is legitimately short; the collapse is the
-    conjunction, and requiring the cap to be *narrowing* is what separates it from a march that is
-    working along a constraint and making progress.
-
-    Parameters
-    ----------
-    previous, report : StepReport or None
-        The step before this one (``None`` before the first, which can continue nothing), and this one.
-    progress : float
-        The relative residual change a step must exceed, in either direction, to count as having done
-        something. Default ``1e-3``.
-    """
-    return (
-        previous is not None
-        and report.binding_limit < 1.0
-        and report.binding_limit <= previous.binding_limit
-        and abs(report.residual_norm - previous.residual_norm)
-        <= progress * abs(previous.residual_norm)
-    )
-
-
 @eqx.filter_jit
 def _march_step(
     strategy: NewtonStrategy,
@@ -545,7 +484,6 @@ def newton_march(
     refresh_preconditioner: Callable[..., None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
     retry: RetryPolicy = NO_RETRIES,
-    stop_on_limit_stall: int | None = 3,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -710,15 +648,6 @@ def newton_march(
         original retry). Each escalation re-matches the preconditioner through ``refresh_preconditioner``;
         the divergence retry does not, because the factorization is already fresh at this
         ``(state, β)`` and only the Krylov tolerance is at fault.
-    stop_on_limit_stall : int or None
-        End the segment after this many **consecutive** steps that are constraint-bound, narrowing, and
-        not reducing the residual (see :func:`_limit_collapsing`), default ``3``. That pattern is a
-        fraction-to-the-boundary lock-up, and it does not recover on its own: the cap shrinks by a fixed
-        factor per step for as long as the march is allowed to run, so without this the segment spends
-        its entire ``max_steps`` budget taking arithmetically null steps. Ending it hands the caller a
-        state that is honestly unconverged instead, which the caller's convergence test reports. ``None`` disables
-        the test. The count is deliberately not ``1``: an isolated capped step is an ordinary short step,
-        and a pseudo-transient path is allowed to be non-monotone.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, called immediately before a step is redone. ``reason`` is
         ``"cycles"`` (the cost trigger, and the step was cut short), ``"alpha"`` (the step-length
@@ -826,7 +755,6 @@ def newton_march(
     current = float(measured_norm_0)
     reports: list[StepReport] = []
     triggered = False
-    stalled = 0
     # Whether the step just taken stopped to have its preconditioner re-fitted: the next refresh is then
     # asked for rather than offered, at the iterate that step kept.
     refresh_due = False
@@ -1118,7 +1046,6 @@ def newton_march(
             drift=0.0 if drift_measure is None else float(drift_measure(state)),
             inner_iterations=int(outcome.inner_iterations),
             max_inner_cycles=int(outcome.max_inner_cycles),
-            binding_limit=float(outcome.binding_limit),
             shift=0.0 if step_shift is None else float(step_shift),
             escalations=int(retries),
             diverged_retry=bool(diverged_retry),
@@ -1129,7 +1056,6 @@ def newton_march(
             stopping_norm=stop_norm,
             stopping_ratio=stop_norm / judged_reference() if judged_reference() > 0.0 else 0.0,
         )
-        stalled = stalled + 1 if _limit_collapsing(reports[-1] if reports else None, report) else 0
         reports.append(report)
         if on_residuals is not None:
             terms = named_blocks(active_step.norm(), step_residual, state)
@@ -1143,11 +1069,6 @@ def newton_march(
         # would spend its whole budget stepping a poisoned state. Stop and let the caller's
         # convergence test report the failure, which is where non-convergence is diagnosed.
         if not jnp.isfinite(residual_norm):
-            break
-        # The same argument for a step that is finite but null: a collapsing constraint cap can never
-        # satisfy the tolerance test either, and unlike a stiff region it does not recover, so the rest
-        # of the budget is spent on steps that move nothing. Stop on the same terms.
-        if stop_on_limit_stall is not None and stalled >= stop_on_limit_stall:
             break
         if trigger is not None and not converged_at(stop_norm):
             triggered = trigger.should_refresh(reports)

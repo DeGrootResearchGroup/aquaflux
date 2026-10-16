@@ -27,6 +27,12 @@ Summarize one log, or compare two::
     python3 validation/bfs3d_openfoam/march_log_compare.py march-A.log
     python3 validation/bfs3d_openfoam/march_log_compare.py march-A.log march-B.log
 
+Or set any number of arms side by side, one Markdown row each (steps, restart cycles with the rejected
+attempts' in brackets, the steps that were redone, the final residual, the mid-span reattachment
+length and the elapsed time at the last step)::
+
+    python3 validation/bfs3d_openfoam/march_log_compare.py --table arm-A/march.log arm-B/march.log ...
+
 The comparison prints a per-rung table and then the first step at which the two runs diverge, which
 is the question that matters when two arms are meant to differ in one setting only: a pair that
 separates at step one differs in the operator itself, while a pair that tracks for a whole rung and
@@ -40,13 +46,28 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-#: One row of the ``summary stats`` grid: ``| step | t(s) | beta | in | cyc | R | a_min | flg |``.
-#: The flag cell is optional in the sense of being blank, never absent, so it is matched as a
-#: possibly-empty run of non-``|`` characters and stripped.
+#: One row of the ``summary stats`` grid:
+#: ``| step | t(s) | beta | in | cyc | R | a_min | rho1 | flg |``. The flag cell is optional in the
+#: sense of being blank, never absent, so it is matched as a possibly-empty run of non-``|`` characters
+#: and stripped.
+#:
+#: ⚠️ **The ``rho1`` column (the first full-length trial's residual ratio) is optional here, because logs
+#: written before it existed have eight columns and logs written since have nine.** A pattern written for
+#: one shape matches no row of the other, and the result is not an error but an empty run: this parser
+#: reported ``0`` steps on every log written after the column was added, until it was made optional. So
+#: :func:`main` refuses a log it finds no steps in rather than summarizing nothing.
 _STEP_ROW = re.compile(
     r"^\|\s*(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.eE+-]+)\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|"
-    r"\s*([\d.eE+-]+)\s*\|\s*([\d.eE+-]+)\s*\|\s*([^|]*)\|\s*$"
+    r"\s*([\d.eE+-]+)\s*\|\s*([\d.eE+-]+)\s*\|(?:\s*([\w.+-]+)\s*\|)?\s*([^|]*)\|\s*$"
 )
+#: The head of one attempt's inner-iteration table: ``+- step 8 ---`` or ``+- step 8  attempt 2 ---``.
+_ATTEMPT = re.compile(r"^\s+\+- step (\d+)\b")
+#: One inner-iteration row, ``| inner | cyc | G in | G out | rate | alpha |``; only the cycles are read.
+_INNER_ROW = re.compile(r"^\s+\|\s*\d+\s*\|\s*(\d+)\s*\|")
+#: The line that discards an attempt, e.g. ``-> redo step 6 (attempt 2): alpha, beta -> 0.0123``.
+_REDO = re.compile(r"^\s+-> redo step (\d+)")
+#: The case's reattachment aside, ``| xr/h 8.361  xr/h_full 12.53 ...``: mid-span, then full-span.
+_REATTACHMENT = re.compile(r"\|\s*xr/h ([\d.]+)")
 #: The continuation-rung banner, e.g. ``[point 3/3 (target Re)]``. The label is kept verbatim; it
 #: names the physical rung ("Re/100", "target Re") which is what a reader wants beside the counts.
 _RUNG = re.compile(r"^\[point (\d+)/(\d+) \(([^)]*)\)\]")
@@ -77,6 +98,7 @@ class Step:
     cycles: int
     residual: float
     alpha: float
+    full_step_ratio: float | None
     flags: str
     rung: int
     rung_label: str
@@ -107,6 +129,12 @@ class Run:
     config: dict[str, str]
     pc_seconds: float
     probe_seconds: float
+    #: The step number of every discarded attempt, in log order: a step redone twice appears twice.
+    redone: list[int]
+    #: Restart cycles spent in attempts that were discarded, which the step rows do not count.
+    rejected_cycles: int
+    #: The last mid-span reattachment length the case reported, or ``None`` if it reports none.
+    reattachment: float | None
 
     @property
     def wall(self) -> float:
@@ -145,6 +173,9 @@ def parse(path: Path) -> Run:
     probe_seconds = 0.0
     rung, rung_label = 0, ""
     in_banner = False
+    redone: list[int] = []
+    rejected_cycles = attempt_cycles = 0
+    reattachment = None
 
     for line in path.read_text().splitlines():
         if line.startswith("[configuration]"):
@@ -156,6 +187,23 @@ def parse(path: Path) -> Run:
             elif ":" in line:
                 key, _, value = line.strip().partition(":")
                 config[key.strip()] = value.strip()
+
+        if _ATTEMPT.match(line):
+            attempt_cycles = 0
+            continue
+        inner = _INNER_ROW.match(line)
+        if inner:
+            attempt_cycles += int(inner.group(1))
+            continue
+        redo = _REDO.match(line)
+        if redo:
+            redone.append(int(redo.group(1)))
+            rejected_cycles += attempt_cycles
+            attempt_cycles = 0
+            continue
+        found = _REATTACHMENT.search(line)
+        if found:
+            reattachment = float(found.group(1))
 
         banner = _RUNG.match(line)
         if banner:
@@ -183,7 +231,8 @@ def parse(path: Path) -> Run:
                     cycles=int(row.group(5)),
                     residual=float(row.group(6)),
                     alpha=float(row.group(7)),
-                    flags=row.group(8).strip(),
+                    full_step_ratio=float(row.group(8)) if row.group(8) else None,
+                    flags=row.group(9).strip(),
                     rung=rung,
                     rung_label=rung_label,
                 )
@@ -194,6 +243,9 @@ def parse(path: Path) -> Run:
         config=config,
         pc_seconds=pc_seconds,
         probe_seconds=probe_seconds,
+        redone=redone,
+        rejected_cycles=rejected_cycles,
+        reattachment=reattachment,
     )
 
 
@@ -269,14 +321,41 @@ def compare(a: Run, b: Run) -> None:
             )
 
 
+def table(runs: list[Run]) -> None:
+    """Print one Markdown row per run, named by the directory holding its log."""
+    print(
+        "| arm | steps | cycles (incl. rejected) | redone | final R | x_r/h | t(s) at last step |"
+    )
+    print("|---|---|---|---|---|---|---|")
+    for run in runs:
+        last = run.steps[-1]
+        redone = ", ".join(str(step) for step in run.redone) or "none"
+        reattachment = "--" if run.reattachment is None else f"{run.reattachment:.3f}"
+        print(
+            f"| {run.path.parent.name} | {len(run.steps)} | "
+            f"{run.cycles} ({run.cycles + run.rejected_cycles}) | {redone} | "
+            f"{last.residual:.3e} | {reattachment} | {last.elapsed:.0f} |"
+        )
+
+
 def main() -> None:
-    paths = [Path(arg) for arg in sys.argv[1:]]
+    arguments = sys.argv[1:]
+    as_table = "--table" in arguments
+    paths = [Path(arg) for arg in arguments if arg != "--table"]
     if not paths:
         raise SystemExit(__doc__)
-    if len(paths) == 1:
-        summarize(parse(paths[0]))
+    runs = [parse(path) for path in paths]
+    empty = [str(run.path) for run in runs if not run.steps]
+    if empty:
+        raise SystemExit(
+            f"no step rows found in {', '.join(empty)}: not a march log, or a format change"
+        )
+    if as_table:
+        table(runs)
+    elif len(runs) == 1:
+        summarize(runs[0])
     else:
-        compare(parse(paths[0]), parse(paths[1]))
+        compare(runs[0], runs[1])
 
 
 if __name__ == "__main__":

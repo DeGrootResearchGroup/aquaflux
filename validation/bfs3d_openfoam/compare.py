@@ -997,11 +997,22 @@ K_WALL_BC = _K_WALL_BCS[K_WALL]
 #: Under pitzDaily's `residual` stop the same pairing took 25 steps and redid three, beating the file's
 #: own schedule under that stop: on this case the pairing goes with the stop, which is why the file now
 #: ships the two together.
+#:
+#: `BFS3D_BETA_MIN` holds the shift higher until the target releases it. With the two `grow` values it
+#: asked whether #712's fast descent to the floor caused that file's retried steps (2026-10-14, the E8
+#: prototype `61331d6` with #712's file, the global k cap of the day, one run each): it does not. `grow`
+#: 2 and 1.5 only moved the retries (23 / 29 steps), and `beta_min` 0.02 removed them at the price of a
+#: release that collapses and re-escalates every time (44 steps against 21). The retries were the
+#: global k cap, since replaced; more viscosity stations removed them too (18, not 15).
 CONTROL = dataclasses.replace(
     FILE_SOLVER.step_control,
     **{
         name: float(os.environ[variable])
-        for name, variable in (("release_floor", "BFS3D_RELEASE_FLOOR"), ("grow", "BFS3D_GROW"))
+        for name, variable in (
+            ("release_floor", "BFS3D_RELEASE_FLOOR"),
+            ("grow", "BFS3D_GROW"),
+            ("beta_min", "BFS3D_BETA_MIN"),
+        )
         if os.environ.get(variable)
     },
 )

@@ -606,10 +606,6 @@ class MarchLogger:
         assert self._step_table is not None
 
         marks = ""
-        # `L`: the step length was set by an injected limit (positivity), not by the descent test --
-        # a different diagnosis from a clipped alpha, and one a reader would otherwise have to guess.
-        if report.binding_limit < 1.0:
-            marks += "L"
         if report.escalations:
             marks += f"e{int(report.escalations)}"
         if report.diverged_retry:
@@ -700,8 +696,6 @@ class MarchLogger:
             # Once a march judges its stop in another measure, R is that measure's; the measure the
             # step was steered in (and the per-equation residuals are terms of) is shown here.
             lines.append(f"steered R {report.residual_norm:.3e}; R is the stopping measure")
-        if report.binding_limit < 1.0:
-            lines.append(f"limit {report.binding_limit:.2e}")
         lines.append(f"cum {self._cumulative_cycles}")
         for line in lines:
             self._write(self._step_table.spanning(line))

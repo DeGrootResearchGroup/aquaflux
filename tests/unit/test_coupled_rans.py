@@ -1964,7 +1964,7 @@ def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -
     """The globalization is not named on ``solve_coupled`` and still arrives at the shared step tail
     unchanged -- it rides ``**strategy_kwargs`` through the preconditioner session.
 
-    ``grow`` used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same
+    A line-search setting used to be declared on ``solve_coupled`` *and* forwarded explicitly, while the very same
     call sites already splatted ``**strategy_kwargs`` into the builder -- so the declaration was
     pure duplication, costing a parameter on an already-wide signature to buy nothing. Deleting it was
     call-for-call identical, and this pins that: it is the only thing standing between the deletion
@@ -1982,7 +1982,7 @@ def test_globalization_knobs_still_reach_the_continuation_builder(monkeypatch) -
         raise _StopBuild
 
     monkeypatch.setattr(coupled_module, "_coupled_step", spy)
-    asked = Globalization(grow=2, beta0=1.5)
+    asked = Globalization(line_search=3, beta0=1.5)
     with pytest.raises(_StopBuild):
         solve_coupled(coupled, globalization=asked)
 

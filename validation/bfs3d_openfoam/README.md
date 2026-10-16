@@ -233,7 +233,16 @@ closure.
   clips, escalations and preconditioner cost for one run, and for two runs the first step at which their
   residuals part. That last number is the check that a pair of arms differs in one thing only; runs that
   should share an operator and separate at step one are not a controlled comparison, however well their
-  totals line up.
+  totals line up. With `--table` it prints one Markdown row per log for any number of arms: steps, restart
+  cycles with the discarded attempts' cycles in brackets, the steps that were redone, the final residual,
+  the mid-span `x_r/h` and the time at the last step. It refuses a log in which it finds no step rows,
+  because the march log gained a column on 2026-10-11 and until 2026-10-14 this script matched no row
+  of any newer log and reported every run as zero steps.
+- `run_arm.sh` — runs one study arm (`compare.py` under the `BFS3D_*` overrides given) through
+  `run_case.sh` and keeps its logs, report and checkpoints under `arms/<arm>/` (git-ignored), with the
+  overrides, commit and exit status in `config.txt`. It waits for the case slot instead of failing when
+  another case holds it, and pauses between arms while `arms/HOLD` exists, so a chain of arms can share
+  the machine with other work. Usage is in its header.
 - `step_policy_replay.py` — pre-screens candidate step-control policies against those same archived logs,
   in milliseconds rather than in 35–50-minute marches. The rule that sets the shift strength β is
   arithmetic over three recorded numbers per step (the accepted step length, the steady residual, and the

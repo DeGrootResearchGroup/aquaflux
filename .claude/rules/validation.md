@@ -207,6 +207,13 @@ cannot be written. The guard is what catches the next module that does branch.
 
 ## ⚠️ Traps when writing a harness (each one produced a wrong result here)
 
+- **⚠️ A LOG PARSER KEYED ON THE TABLE'S SHAPE RETURNS NOTHING, SILENTLY, WHEN THE LOGGER GAINS A
+  COLUMN.** `bfs3d_openfoam/march_log_compare.py` matched the step row by its eight columns; the march
+  log gained `rho1` on 2026-10-11 (`af98897`), and for three days the script summarized every new log as
+  zero steps -- no error, a well-formed table of zeros (found 2026-10-14 when it was asked for a study
+  table). `step_policy_replay.py` reads logs through the same parser. The column is now optional, and the
+  script refuses a log with no step rows. Any reader of the march log should do both: accept the old
+  and the new shape, and treat "found nothing" as an error rather than as an answer.
 - **Build the reference state with `state_from_physical`, NOT `pack_state`.** `pack_state` takes the
   **solved** variables; a case transporting `log(omega)` differs from the physical fields by an
   exponential. Packing physical omega where a log is expected exponentiates ~1e5, and the residual is
@@ -318,6 +325,14 @@ cannot be written. The guard is what catches the next module that does branch.
   `MultipleCorrectionGradient` at a **uniform reach of 3**: under that scheme `probe_reach_audit.py` finds
   p, k and omega carrying 1.1e-3 / 6.7e-5 / 3.9e-5 of their norm beyond reach 2, so no column may be
   shortened. Reach 4 is unaudited (the harness's widest pattern is 3).
+  ⚠️ **"No column may be shortened" was an exact-recovery rule, and pitzDaily now breaks it on purpose
+  (2026-10-14):** it probes every column at reach 2 inside its reach-3 pattern, folding ~4e-4 of the
+  Jacobian's norm onto near entries, and its march is unchanged (18 steps, 123 restart cycles, `x_r/h`
+  8.0686, as uniform reach 3 and reach 4) for a probe 40 % cheaper. The flow block is SIMPLE-smoothed and
+  no factorization runs on that case; the folding that broke bfs3d's `p` column (#191) was a zero-fill
+  factorization's. **bfs3d's answer is no** (2026-10-15, PR #722): the same colouring took it from 18
+  steps / 137 cycles / 522 s to 21 / 216 / 697 s, same `x_r/h` 8.361, so its uniform reach 3 stands
+  (`solve-direct-preconditioners.md` has the table).
 
 ## A validation case can collide with a test tier, or a test tier with another tier (both now closed)
 
@@ -717,6 +732,34 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   3 x 3 pixels change the floor error by nothing to four figures at 64 and 256 directions (only the
   bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
   room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
+
+## `tubular_reactor` — a ten-lamp reactor on a background grid, and its resolution study (2026-10-15/16)
+
+A radiation-only case with no flow mesh: 10 Sozzi lamps (35.4 W each) in a 300 mm vessel, with a
+100-hole, 50 %-open perforated plate at the inlet and walls reflecting 0.1. `G` is gathered at the
+nodes of a Cartesian grid in the water (`run.py`, `TUBULAR_*` settings, outputs in
+`work/runs/<tag>/`). `study.sh` runs the grid and tessellation studies, and `compare.py` compares
+them. Numbers and configuration are in its README. What to know before touching it:
+
+- **Shadows are exact bodies, and the plate is a bespoke `Body` (`geometry.PerforatedPlate`).** A
+  sight line crossing the slab is clear only if its part inside the slab lies in one hole, found by
+  one hexagonal-lattice lookup. ⚠️ **The first version put the 100 holes in an `Outside` as 104 convex
+  regions, and that ran a smoke test to a 54 GB footprint before it was killed.** Its pair test forms
+  intermediates per region at the 4M-pair default. Verified against brute-force hole sampling:
+  1 of 4,000 lines differed, and finer sampling resolved it (a 7 µm graze).
+- **Lamps are emitters only; their shadows are separate exact bodies.** A cylinder plus hemisphere,
+  `TUBULAR_SHRINK` (0.251 mm) inside the sleeve so no facet centroid lies inside. That is fixed
+  rather than derived, so a lamp-tessellation study does not move the shadows.
+- **The lamps are kept out of the radiosity on purpose: the solve is hand-assembled, not
+  `solve_scene`.** `solve_scene` puts every lamp facet into the dense transfer, and 50k lamp facets
+  plus 12k wall triangles cannot be held. Wall triangles at 16k and 18k (20 mm edges, 12-sided
+  holes) did fit, on a 19 GB machine.
+- **Grid results (h = 8/6/4/3 mm):** away from the sleeves the interpolation error falls as h². Within
+  2 mm of a sleeve it is 17-36 % at every spacing (issue #726). ⚠️ **The node-averaged mean G is not a
+  converged volume integral**: it moves non-monotonically, 112.9 / 114.8 / 115.1 / 114.1 W/m².
+- **Figures are drawn by `render.py`**: 0.5 mm pixels masked by the exact water test and interpolated
+  from the nodes, so boundaries are true curves. The plate-plane figures are direct light only and
+  say so on the figure.
 
 ## The aggressive Reynolds continuation does NOT need the complete LU (2026-10-11)
 

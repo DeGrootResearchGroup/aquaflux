@@ -774,7 +774,9 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
                 # Applied in single precision, the case's own since #732.
                 precision="float32",
             ),
-            probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
+            probe=JacobianProbeSpec(
+                stencil_reach=3, column_reach=(2, 2, 2, 2, 2), gradient_sweeps=None
+            ),
         ),
         # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
         # script stopped building its march.

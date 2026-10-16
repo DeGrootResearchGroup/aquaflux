@@ -913,7 +913,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     1.000**, under `zerogradient` (`march-20260810-221936.log` / `march-20260811-003915.log`, both at
     ‖R‖ 1.382e-01). The point about a capped step survives either way; the labelling did not.
   - **⚠️ DO NOT GATE `retry.on_alpha` ON `binding_limit == 1`. It was proposed, built and reverted
-    the same day (2026-08-10).** More damping shrinks the correction, so it *widens*
+    the same day (2026-08-10).** (Moot since 2026-10-14: there is no `binding_limit` and no whole-step
+    cap; kept for anyone restoring one.) More damping shrinks the correction, so it *widens*
     `room = k/|dk|`. The measured evidence is already in this file: the single escalation of an
        entire `bfs3d` march fired at step 51, whose cap was **4.37e-10** — constraint-bound — and it
        was worth **8 steps and 199 s** end to end. Gating `retry.on_alpha` on `binding_limit == 1`
@@ -956,40 +957,21 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - **Nothing in the ordinary stopping tests can see this.** The state is finite, the residual is finite,
     and the tolerance is simply never reached — so the segment spends its whole budget.
   - **⚠️ Extracting this from a march log needs per-step BLOCKS, not two independent `findall`s.** The
-    `limit` line is written only when `binding_limit < 1`, so there are fewer of them than steps (105
+    `limit` line (in a log from before 2026-10-14, when it was removed) is written only when the cap
+    bound, so there are fewer of them than steps (105
     against 108 here) and zipping the two lists silently misaligns them. The first pass at this table
     read step 25's cap as 1.95e-08 instead of 3.76e-03 — a three-step shift, invisible because the
     shifted table is just as smooth. Split on the summary-block delimiter and parse within each block.
 
-  **SHIPPED in response:**
-  1. `newton_march(stop_on_limit_stall=3)` (**a new default-on guard**) ends the segment after three
-     consecutive steps that are constraint-bound, non-widening, and **changed the residual by less
-     than 1e-3 relative, in either direction** (`_limit_collapsing`).
-
-     **⚠️ The residual half of that predicate was wrong twice, and the fix for the first attempt caused
-     the second. Do not re-derive it from the failing run alone.**
-     - *"the residual did not fall"* — **never fires.** A locked-up step is not a bit-exact no-op: it
-       still moves the state by `α·δ`, so at a cap of ~1e-6 the residual genuinely falls, by ~1e-6
-       relative, and the counter resets every step. Shipped, and observed doing nothing on a march that
-       had otherwise reproduced the lock-up step for step (it reached step 31 and was still going).
-     - *"the residual did not fall by 0.1%"* — **fires on a converging rung.** `march-20260810-094635`
-       rung 2 steps 19–21 ran caps 0.983 → 0.928 → 0.253 with the residual climbing
-       1.293e-01 → 1.335e-01 → 1.489e-01, then recovered to 9.241e-02 and converged to 4.994e-06. A
-       *rising* residual means the step did something; a pseudo-transient path is a march in pseudo-time,
-       not a descent method. A one-sided rule ends that rung at its worst moment.
-     - **The failure is a step that changes NOTHING, so the test is two-sided.** The two populations sit
-       orders apart: null steps move the residual by ~1e-6 relative, productive ones by percents.
-
-     **Validated by replaying the predicate over every march log on disk** — `march_stall_replay.py`,
-     kept in `validation/bfs3d_openfoam/`, because a march that recovers looks exactly like one that does
-     not until it does, so a candidate rule cannot be judged on the run that motivated it. Across 11 logs
-     / 22 rungs it fires on exactly the three locked-up rungs (090711 rung 2 at step 21, cutting a
-     73-step stall; 130032 rung 2 at step 29, cutting 96) and on **nothing** that went on to converge —
-     including the shipped `x_r/h` 8.36 baseline rung. Both cases are pinned as unit tests with the real
-     recorded numbers inlined, since the logs themselves are not tracked.
-
-     The cap *narrowing* is the third condition and is what separates a lock-up from a march working
-     productively along a constraint. `None` disables the guard.
+  **SHIPPED in response, and DELETED 2026-10-14 with the cap it guarded:** a stall stop,
+  `newton_march(stop_on_limit_stall=3)` over a predicate `_limit_collapsing` (three consecutive
+  constraint-bound, non-widening steps that moved the residual by under 1e-3 relative **in either
+  direction**), validated by `march_stall_replay.py` over 11 archived logs / 22 rungs. None of the three
+  exists now -- nothing installs a whole-step cap, so nothing can lock up this way. The two traps its
+  predicate taught, if a cap ever returns: "the residual did not fall" never fires (a pinned step still
+  moves the state by `α·δ`, ~1e-6 relative), and a one-sided "did not fall by 0.1%" fires on a rung
+  that recovers (`march-20260810-094635` rung 2 climbed 1.293e-01 → 1.489e-01 under narrowing caps,
+  then converged). Judge any such rule against the runs that recovered, not only the one that stalled.
 
   The march now fails fast and honestly instead of grinding; **what drives `k` to the boundary in those
   cells is still open**, and the global-scalar-cap design (one cell throttling all 23040) is the thing
@@ -1059,7 +1041,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     57, 60, 61, **including α 0.000 at step 61**) and recovers from every one, α returning to 1.000.
   - **A constraint-free α collapse appeared, and nothing reacts to it.** Step 68: α 0.031 with **no `L`
     flag** and 15 cycles (the run's highest) — a poor *direction*, not a clipped step. α 0.031 is above
-    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α or `binding_limit`, and the β-tracking hook re-fits only on a rebind, so no refresh fires. It cost a few steps here, not the run, but it is the
+    `retry.on_alpha` 0.01, no `RefreshTrigger` reads α, and the β-tracking hook re-fits only on a rebind, so no refresh fires. It cost a few steps here, not the run, but it is the
     first live evidence that the refresh gap is a real cost.
   - **⚠️ ONE RUN EACH, and one instrumentation difference:** the archived equilibrated arm ran with
     `BFS3D_DUMP_STEP_LIMIT=0.05/12`, the converged arm with the dumps off. The dump wrapper returns the
@@ -1259,7 +1241,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   needs a code edit.
 
   **⚠️ REFUTED — "rescaling promotes collapsed-`k` rows and inflates their corrections" is FALSE. Do not
-  re-propose it (measured 2026-08-11, `k_row_scale_probe.py`).** The proposed explanation for why the
+  re-propose it (measured 2026-08-11, `k_row_scale_probe.py` -- deleted 2026-10-14: the `step-limit-*`
+  dumps it read went with the global k cap and can no longer be produced).** The proposed explanation for why the
   `equilibrate` flag changes the step length was: symmetric rescaling divides row `i` by `sqrt(A_ii)`; a
   cell whose `k` has collapsed has a tiny diagonal there; so rescaling promotes that row to unit weight
   and un-scaling inflates the correction in exactly the cells the cap (a **minimum** over cells) is
@@ -1361,10 +1344,10 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   attempt to re-take one between the field's addition and this fix would have failed at startup.
 
   **Harnesses kept (all in `validation/bfs3d_openfoam/`):** `trailing_hierarchy_sweep.py` (the block
-  alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated),
-  `k_row_scale_probe.py` (exact `∂R_k/∂k` per cell by one-hot Jacobian-vector product, stratified by
-  `k` — the harness that refuted the row-promotion explanation above, and the cheap way to ask whether
-  any field's rows are what a rescaling promotes).
+  alone, every arm), `cell_block_scaling.py` (per-cell conditioning, raw vs equilibrated).
+  (`k_row_scale_probe.py`, which refuted the row-promotion explanation above, was deleted 2026-10-14 with
+  the step-limit dumps it read; its method -- exact `∂R_k/∂k` per cell by one-hot Jacobian-vector
+  product -- is in git history.)
   `compare.py` gained `BFS3D_TURBULENCE_INVERSE`, `BFS3D_NATIVE_EQUILIBRATE`,
   `BFS3D_DUMP_TRAILING_BLOCK`, a `pbjacobi1` (undamped) smoother arm, march-log **archival**, and a
   banner that records the inverse and all its settings — **including the three knobs that install
@@ -1661,13 +1644,13 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     rung-2 steps 25–29 reproduce that baseline's trajectory exactly (step 25 β 0.4682, ‖R‖ 7.567e-02,
     `a_min` 0.004, cap 3.76e-03; then 1.00e-05 → 1.95e-06 → 1.95e-08 → 1.95e-10). The per-guard
     `array_equal` unit tests said this; a real coupled march now confirms it.
-  - **✅ `stop_on_limit_stall` works, on two independent arms.** The control's rung 2 ends at **15 steps
+  - **✅ `stop_on_limit_stall` worked, on two independent arms** (deleted 2026-10-14 with the cap). The control's rung 2 ends at **15 steps
     instead of the recorded 108**; the zero-gradient arm's at 24. ~90 dead steps saved each time, and the
     run now fails with a `RuntimeError` naming the rung instead of grinding out `MAX_STEPS`.
   - **The dead grind that then moved into `solve_coupled`'s traced finishing solve is CLOSED (2026-09-15):**
     there is no finishing solve any more, so a segment the stall guard ends is judged unconverged and
     raises at once.
-  - The step-limit dumps now carry **β and the anchor** (`cap 2.2923e-06 beta 1.754 anchor yes`), so the
+  - The step-limit dumps (gone with the cap, 2026-10-14) carried **β and the anchor** (`cap 2.2923e-06 beta 1.754 anchor yes`), so the
     falsifier named against the earlier diagnosis is closed: these dumps can be paired with the linear
     system that produced them.
 
