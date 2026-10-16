@@ -62,6 +62,14 @@ of **77-86 ms**, so the preconditioner is ~70 % of an application. The JVP was 4
 the multiple-correction gradient is the likely cause (not measured, and not a lever: that gradient is
 the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve.md`,
 `norm_of_residual`): 804 -> 727 s warm, identical march.
+⚠️ **Every number in this subsection predates the multiple-correction first pass's adjugate inverse
+(2026-10-16, branch `claude/multicorr-adjugate-inverse`), and was taken with a batched LAPACK LU of
+`M1 - B` inside every residual and JVP** -- 6 `getrf` + 12 `trsm` library calls in the compiled
+pitzDaily residual at `44ba609f`. Removing it took the warm pitzDaily residual 29.8 -> 5.3-6.4 ms and the JVP
+45.0 -> 17.2-19.3 ms (`.claude/rules/schemes.md`, multiple-correction section, configuration there).
+So the JVP column above (77-86 ms), the ~70 % preconditioner share it implies, the probe's ~6 s per
+refit, and the 45 -> 77 ms rise are all measured under that call and were not re-run; the rise itself
+remains unexplained, but a JVP that is now ~2.5x cheaper moves the preconditioner's share up, not down.
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's ~6 s is the ~165 JVPs that compute the new
 VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).

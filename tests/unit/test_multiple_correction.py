@@ -521,6 +521,47 @@ def test_a_prescribed_patch_is_left_alone_by_the_boundary_condition_weight() -> 
     assert not jnp.allclose(derived, plain)
 
 
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        perturbed_grid_2d(6, 6, perturb=0.25, seed=5),
+        perturbed_grid_3d(3, 3, 3, perturb=0.3, seed=4),
+    ],
+    ids=["quadrilateral", "hexahedral"],
+)
+def test_the_boundary_condition_first_pass_calls_no_library_factorization(mesh) -> None:
+    """The per-call inverse of ``M1 - B`` is the adjugate, not a batched LU the compiler cannot fuse.
+
+    It runs on every reconstruction a residual assembler asks for, so inside every residual evaluation
+    and every Jacobian--vector product. A batched library inverse there compiles to an LU
+    factorization call per reconstructed field, which cost the pitzDaily residual about four times
+    its time; this pins that it does not come back. It must also still be the inverse: it agrees
+    with a pivoted library inverse to roundoff on these well-conditioned blocks.
+    """
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
+    tangential = displacement - scale(geometry.face.normal, dot(displacement, geometry.face.normal))
+    weight = jnp.where(face_cells.interior[:, None], 0.0, tangential)
+    scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+    m1 = scheme.prepared.m1
+
+    inverse = multiple_correction._boundary_condition_first_pass(m1, weight, face_cells, geometry)
+    reference = jnp.linalg.inv(
+        m1 - multiple_correction.boundary_gradient_block(weight, face_cells, geometry)
+    )
+    np.testing.assert_allclose(np.asarray(inverse), np.asarray(reference), rtol=0, atol=1e-12)
+
+    field = jax.random.normal(jax.random.PRNGKey(4), (mesh.n_cells,))
+    values = jax.random.normal(jax.random.PRNGKey(5), (mesh.n_faces,))
+
+    def reconstruct(phi):
+        return scheme.reconstruct(phi, mesh, geometry, values, boundary_gradient_weight=weight)[0]
+
+    compiled = jax.jit(reconstruct).lower(field).compile().as_text()
+    assert "getrf" not in compiled
+
+
 def test_the_second_pass_reads_the_geometrys_own_first_pass_operator() -> None:
     """The second pass must differentiate through the operator its corrections were probed with.
 

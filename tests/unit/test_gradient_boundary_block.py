@@ -41,7 +41,7 @@ from aquaflux.schemes import (
     boundary_gradient_block,
     contraction_rate,
 )
-from aquaflux.schemes.gradient import CellPreconditioner, InverseVolume, _small_inverse
+from aquaflux.schemes.gradient import CellPreconditioner, InverseVolume, small_inverse
 from aquaflux.vectors import dot, scale
 
 from tests.support.meshes import (
@@ -342,7 +342,7 @@ def test_the_closed_form_inverse_matches_a_library_inverse_and_keeps_the_identit
     """
     matrix = jnp.eye(dim) + 0.3 * jax.random.normal(jax.random.PRNGKey(dim), (64, dim, dim))
     np.testing.assert_allclose(
-        np.asarray(_small_inverse(matrix)), np.asarray(jnp.linalg.inv(matrix)), atol=1e-12
+        np.asarray(small_inverse(matrix)), np.asarray(jnp.linalg.inv(matrix)), atol=1e-12
     )
     identity = jnp.broadcast_to(jnp.eye(dim), (8, dim, dim))
-    assert jnp.array_equal(_small_inverse(identity), identity)
+    assert jnp.array_equal(small_inverse(identity), identity)
