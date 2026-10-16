@@ -1,6 +1,7 @@
 """The residual-only GMRES stop: it meets its tolerance in its measure, and stops as soon as it does."""
 
 import aquaflux  # noqa: F401  (enables x64)
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -37,9 +38,11 @@ def _solve(solver, a, m, b):
     )
 
 
-@pytest.mark.parametrize("rtol", [0.3, 1e-2, 1e-7])
+@pytest.mark.parametrize("rtol", [0.3, 1e-2, 1e-7, 1e-12])
 def test_it_meets_its_tolerance_in_its_own_measure_and_no_further(rtol):
-    # A harder system, so a solve takes more than one restart cycle at the tight tolerance.
+    # A harder system, so a solve takes more than one restart cycle at the tight tolerances. Each cycle
+    # starts from the previous one's Arnoldi residual, and the achieved residual is the TRUE one, so
+    # this also pins that the recurrence has not drifted from b - A x by the tolerance's verdict.
     a, m, weights, b = _problem(0.04)
 
     def norm(v):
@@ -53,12 +56,49 @@ def test_it_meets_its_tolerance_in_its_own_measure_and_no_further(rtol):
     achieved = float(norm(b - jnp.asarray(a) @ x) / norm(b))
     assert achieved <= rtol
     applications, run = (int(v) for v in counted[-1])
-    iterations = applications - run  # each cycle also applies the operator once for its residual
+    iterations = applications - 1  # and one for the true residual its verdict reads
     # It stopped at the first iteration that met the tolerance: one fewer would not have.
     assert run == restart_cycles(int(cycles)) == -(-iterations // 6)
     if iterations > 1:
         cut = _cut_short(a, m, b, norm, iterations - 1, restart=6)
         assert cut > rtol
+
+
+def test_it_applies_the_operator_once_per_krylov_iteration_and_once_for_its_verdict():
+    # Each cycle that falls short starts the next from the Arnoldi residual it already holds; forming
+    # b - A x anew there would cost one more application per cycle, which a solve of several cycles
+    # shows. Only the verdict reads the true residual, one application at the end.
+    a, m, weights, b = _problem(0.04)
+
+    def norm(v):
+        return jnp.linalg.norm(weights * v)
+
+    executed = []
+
+    def operator(v):
+        jax.debug.callback(lambda: executed.append(1))
+        return jnp.asarray(a) @ v
+
+    counted = []
+    solver = residual_stop_gmres(
+        1e-12, norm=norm, restart=6, max_restarts=40, on_solve=lambda i, c: counted.append((i, c))
+    )
+    x, _ = solve_linear(
+        operator,
+        b,
+        solver=solver,
+        preconditioner=lambda v: jnp.asarray(m) @ v,
+        throw=False,
+    )
+    jax.block_until_ready(x)
+    applications, run = (int(v) for v in counted[-1])
+    assert run >= 3
+    # The fewest Krylov iterations that meet the tolerance, by a dense reference that restarts from
+    # the true residual: the solve applied the operator that many times plus once, and reports so.
+    iterations = next(
+        i for i in range(1, 6 * run + 1) if _cut_short(a, m, b, norm, i, restart=6) <= 1e-12
+    )
+    assert len(executed) == applications == iterations + 1
 
 
 def _cut_short(a, m, b, norm, iterations, restart):
