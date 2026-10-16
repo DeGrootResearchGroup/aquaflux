@@ -67,6 +67,7 @@ import numbers
 from typing import ClassVar
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -84,6 +85,7 @@ __all__ = [
     "Outside",
     "Solid",
     "Sphere",
+    "Torus",
     "Union",
 ]
 
@@ -987,6 +989,360 @@ class Box(ConvexSolid):
         edges = jnp.linalg.inv(self.axes)
         reach = jnp.abs(direction @ edges) @ self.half_sizes
         return dot(direction, self.centre) + reach
+
+
+#: Safeguarded Newton steps that place each crossing of a torus's surface. Each starts from the
+#: quadratic model of the surface about the nearest turning point of the line's quartic, inside a
+#: bracket that holds exactly one crossing, and falls back to halving the bracket wherever a
+#: Newton step would leave it.
+_TORUS_ROOT_STEPS = 10
+
+#: A crossing is found once the tube's excess there is within this many units of rounding of
+#: the squares it is made of: closer than that its sign is not decided by the geometry.
+_EXCESS_ROUNDING = 16.0
+
+
+def _cubic_roots(p, q):
+    """The real roots of ``t³ + p t + q``, ascending; a single real root is repeated three times.
+
+    Closed form, then two Newton steps each, a step kept only where it lowers the cubic's value
+    (so a root where two of them meet, and the derivative vanishes, is left where the closed form
+    put it). With one real root the three copies are the same number, which is what lets a caller
+    treat the quartic it came from as having one turning point or three without a branch.
+    """
+    third, half = p / 3.0, q / 2.0
+    discriminant = half**2 + third**3
+    # One real root: Cardano, taking the cube root of the larger-magnitude term so the two terms
+    # are added rather than cancelled.
+    rooted = jnp.sqrt(jnp.maximum(discriminant, 0.0))
+    larger = jnp.cbrt(-half - jnp.where(half >= 0.0, rooted, -rooted))
+    single = jnp.where(larger == 0.0, 0.0, larger - third / jnp.where(larger == 0.0, 1.0, larger))
+    # Three real roots: the trigonometric form, which needs no complex arithmetic.
+    scale = jnp.sqrt(jnp.maximum(-third, 0.0))
+    cube = scale**3
+    angle = jnp.arccos(jnp.clip(-half / jnp.where(cube == 0.0, 1.0, cube), -1.0, 1.0)) / 3.0
+    three = discriminant <= 0.0
+    roots = jnp.stack(
+        [
+            jnp.where(three, 2.0 * scale * jnp.cos(angle - k * 2.0 * jnp.pi / 3.0), single)
+            for k in range(3)
+        ],
+        axis=-1,
+    )
+    p, q = p[..., None], q[..., None]
+    for _ in range(2):
+        value = roots**3 + p * roots + q
+        slope = 3.0 * roots**2 + p
+        stepped = roots - value / jnp.where(slope == 0.0, 1.0, slope)
+        better = jnp.abs(stepped**3 + p * stepped + q) < jnp.abs(value)
+        roots = jnp.where((slope != 0.0) & better, stepped, roots)
+    return jnp.sort(roots, axis=-1)
+
+
+def _bracketed_roots(function, slope, lower, upper, guess, steps, floor):
+    """The one sign change of ``function`` in each bracket ``[lower, upper]``.
+
+    Newton from ``guess``, safeguarded as in Numerical Recipes' ``rtsafe``: the bracket shrinks on
+    whichever side the sign says, and a step is replaced by the bracket's midpoint wherever Newton
+    would leave the bracket **or would not halve the previous step** -- so the bracket at least
+    halves every other step however badly Newton is doing, and Newton's own quadratic convergence
+    takes over wherever it is doing well. The count is fixed, so every line pays the same
+    arithmetic and the whole is one array expression. A bracket stops moving once ``function`` is
+    within ``floor`` of zero there.
+
+    ⚠️ **The halving test is what a line skimming the tube's wall needs.** Running along the wall
+    a fraction of a millimetre away, the function is tiny and nearly flat over a long stretch,
+    and plain Newton bounces from one side of the bracket to the other without converging --
+    leaving a crossing a hundredth of the line's length from where it is. The bracket's ends are
+    accepted as steps, so a converged root, which the bracket has closed onto, is not abandoned.
+    """
+    below = function(lower) < 0.0
+    x = jnp.clip(guess, lower, upper)
+    last = before_last = upper - lower
+    settled = jnp.zeros(x.shape, dtype=bool)
+    for _ in range(steps):
+        value = function(x)
+        same = (value < 0.0) == below
+        lower = jnp.where(same, x, lower)
+        upper = jnp.where(same, upper, x)
+        rate = slope(x)
+        step = value / jnp.where(rate == 0.0, 1.0, rate)
+        newton = x - step
+        usable = (
+            (rate != 0.0)
+            & (newton >= lower)
+            & (newton <= upper)
+            & (2.0 * jnp.abs(step) <= jnp.abs(before_last))
+        )
+        # A value at the rounding floor is a root as found as it can be: stop there, since what
+        # follows is noise, and a bisection from a bracket closed on one side only would walk
+        # away from it.
+        settled = settled | (jnp.abs(value) <= floor)
+        before_last, last = last, jnp.where(usable, step, 0.5 * (upper - lower))
+        x = jnp.where(settled, x, jnp.where(usable, newton, 0.5 * (lower + upper)))
+    return x
+
+
+def _split_along(axis, vector):
+    """The part of ``vector`` perpendicular to the unit ``axis``, and its component along it."""
+    along = dot(vector, axis)
+    return vector - along[..., None] * axis, along
+
+
+@jax.jit
+def _ring_spans(centre, axis, ring, tube, origin, direction):
+    """Where the line is inside the whole ring: two intervals of ``t``, either may be empty.
+
+    The line is reparameterized by arc length ``s`` from its closest approach to the centre,
+    so the quartic ``(|x|² + R² - r²)² - 4 R² rho²`` in ``s`` has no cubic term and its
+    derivative is the depressed cubic ``s³ + p s + q``. A positive quartic means outside the
+    tube: it factors as ``((rho - R)² + z² - r²) ((rho + R)² + z² - r²)`` and the second
+    factor is positive for ``r < R``. So the quartic falls to its lowest turning point
+    ``s1``, rises to ``s2`` and falls again to ``s3`` (or has the one turning point, repeated),
+    and the line is inside around ``s1`` and around ``s3`` where the tube's own excess
+    ``(rho - R)² + z² - r²`` is negative there, as one interval when it is negative at ``s2``.
+
+    Compiled on its own: evaluated eagerly, its few hundred small operations would each be
+    compiled for every new shape of input; inside a caller's own
+    compiled expression it is simply inlined.
+    """
+    offset = origin - centre
+    squared = norm_squared(direction)
+    length = jnp.sqrt(jnp.where(squared == 0.0, 1.0, squared))
+    unit = direction / length[..., None]
+    closest = dot(offset, unit)
+    middle = offset - closest[..., None] * unit
+    middle_radial, middle_along = _split_along(axis, middle)
+    unit_radial, unit_along = _split_along(axis, unit)
+    p = norm_squared(middle) + ring**2 - tube**2 - 2.0 * ring**2 * norm_squared(unit_radial)
+    q = -2.0 * ring**2 * dot(middle_radial, unit_radial)
+    turning = _cubic_roots(p, q)
+
+    middle_radial, middle_along = middle_radial[..., None, :], middle_along[..., None]
+    unit_radial, unit_along = unit_radial[..., None, :], unit_along[..., None]
+
+    def radius_and_height(s):
+        radial = middle_radial + s[..., None] * unit_radial
+        return radial, jnp.sqrt(norm_squared(radial)), middle_along + s * unit_along
+
+    def excess(s):
+        _, rho, height = radius_and_height(s)
+        return (rho - ring) ** 2 + height**2 - tube**2
+
+    def excess_slope(s):
+        radial, rho, height = radius_and_height(s)
+        rate = dot(radial, unit_radial) / jnp.where(rho == 0.0, 1.0, rho)
+        return 2.0 * (rho - ring) * rate + 2.0 * height * unit_along
+
+    _, rho, height = radius_and_height(turning)
+    at_turning = (rho - ring) ** 2 + height**2 - tube**2
+    quartic = at_turning * ((rho + ring) ** 2 + height**2 - tube**2)
+    # The quadratic model of the quartic about each turning point puts a crossing at this
+    # distance from it: exact in the limit of a grazing line, and a start for Newton beside.
+    curvature = 4.0 * (3.0 * turning**2 + p[..., None])
+    half_width = jnp.sqrt(
+        jnp.maximum(-2.0 * quartic / jnp.where(curvature == 0.0, jnp.inf, curvature), 0.0)
+    )
+    inside = at_turning < 0.0
+    merged = inside[..., 1]
+    low_inside = inside[..., 0] | merged
+    high_inside = inside[..., 2] | merged
+
+    # No point of the ring is further from its centre than R + r, so beyond this the line is
+    # outside: no crossing lies beyond it either way.
+    reach = jnp.sqrt(jnp.maximum((ring + tube) ** 2 - norm_squared(middle), 0.0))
+    low, mid, high = turning[..., 0], turning[..., 1], turning[..., 2]
+    # A crossing between two turning points may lie near either -- beside the middle one where
+    # the line leaves the tube close to a place it grazes, with the quadratic model about the low
+    # one no start at all -- so it starts from whichever model leaves the smaller excess.
+    beside = jnp.stack(
+        [
+            low + half_width[..., 0],
+            mid - half_width[..., 1],
+            high - half_width[..., 2],
+            mid + half_width[..., 1],
+        ],
+        axis=-1,
+    )
+    residual = jnp.abs(excess(beside))
+    crossings = _bracketed_roots(
+        excess,
+        excess_slope,
+        jnp.stack([-reach, low, mid, high], axis=-1),
+        jnp.stack([low, mid, high, reach], axis=-1),
+        jnp.stack(
+            [
+                low - half_width[..., 0],
+                jnp.where(residual[..., 0] <= residual[..., 1], beside[..., 0], beside[..., 1]),
+                jnp.where(residual[..., 2] <= residual[..., 3], beside[..., 2], beside[..., 3]),
+                high + half_width[..., 2],
+            ],
+            axis=-1,
+        ),
+        _TORUS_ROOT_STEPS,
+        _EXCESS_ROUNDING * jnp.finfo(float).eps * (ring + tube) ** 2,
+    )
+    enter_low, leave_low, enter_high, leave_high = (crossings[..., k] for k in range(4))
+
+    def as_t(s, keep, empty):
+        return jnp.where(keep, (s - closest) / length, empty)
+
+    first = (
+        as_t(enter_low, low_inside, jnp.inf),
+        as_t(jnp.where(merged, leave_high, leave_low), low_inside, -jnp.inf),
+    )
+    apart = high_inside & ~merged
+    second = (as_t(enter_high, apart, jnp.inf), as_t(leave_high, apart, -jnp.inf))
+    # A segment of no length is a point: inside the ring along the whole line, or nowhere.
+    point = squared == 0.0
+    radial, along = _split_along(axis, offset)
+    here = (jnp.sqrt(norm_squared(radial)) - ring) ** 2 + along**2 <= tube**2
+    first = (
+        jnp.where(point, jnp.where(here, -jnp.inf, jnp.inf), first[0]),
+        jnp.where(point, jnp.where(here, jnp.inf, -jnp.inf), first[1]),
+    )
+    second = (jnp.where(point, jnp.inf, second[0]), jnp.where(point, -jnp.inf, second[1]))
+    return first, second
+
+
+class Torus(Solid):
+    """A solid torus, or a sector of one -- a pipe elbow, a ring baffle, a coiled tube.
+
+    Everything within ``tube_radius`` of a circle of radius ``ring_radius`` about ``axis``. With
+    ``arc`` and ``arc_start`` it is the part swept from the direction ``arc_start`` through the
+    angle ``arc`` about ``axis`` (counterclockwise looking down the axis toward ``centre``, the
+    right-hand rule), cut flat by the two planes through the axis at either end: a 90° elbow is
+    ``arc = pi / 2``.
+
+    **The tube is not convex**: a line can pass through it, cross the hole, and pass through it
+    again, so it reports **two** intervals; a sector is the torus cut by a wedge, which is convex
+    for an arc of at most a half turn and so still leaves two. That is why an arc wider than a
+    half turn is refused -- the wedge would no longer be convex -- and why such a body is written
+    as a :class:`Union` of two sectors instead.
+
+    **Where a line crosses the surface is the root of a quartic, and the quartic is not solved
+    by formula.** A closed-form quartic decides whether a nearly tangent line meets the tube from
+    a discriminant formed by cancellation, which at any precision misreports exactly the lines
+    that graze it -- and reporting a grazing line as a miss lets light through a body that should
+    stop it. Instead the quartic's turning points are found (its derivative is a cubic, solved in
+    closed form), which cut the line into at most four stretches on each of which it is monotone,
+    so each holds at most one crossing. Whether a stretch is inside the tube is then read from
+    the line's distance to the tube's centre circle at the turning point, formed as vector
+    differences the way :class:`Cylinder`'s closest approach is -- so the decision near a tangency
+    is as good as the distance itself -- and each crossing is placed by Newton steps safeguarded
+    by its bracket.
+
+    ⚠️ Requires ``0 < tube_radius < ring_radius``, refused where both are plain numbers: at or past
+    equality the tube meets itself on the axis and the body is not a ring.
+
+    Attributes
+    ----------
+    centre : jnp.ndarray, shape ``(3,)``
+        Centre of the ring.
+    axis : jnp.ndarray, shape ``(3,)``
+        Unit vector along the axis of symmetry, normal to the ring's plane.
+    ring_radius : jnp.ndarray
+        Radius of the circle the tube is centred on -- an elbow's bend radius.
+    tube_radius : jnp.ndarray
+        Radius of the tube -- an elbow's pipe radius.
+    cuts : tuple
+        The two planes bounding a sector, or none for the whole ring.
+    """
+
+    centre: jnp.ndarray
+    axis: jnp.ndarray
+    ring_radius: jnp.ndarray
+    tube_radius: jnp.ndarray
+    cuts: tuple
+
+    def __init__(self, centre, axis, ring_radius, tube_radius, *, arc_start=None, arc=None):
+        self.centre = _point(centre)
+        self.axis = _unit(axis)
+        self.ring_radius = jnp.asarray(ring_radius, dtype=float)
+        self.tube_radius = jnp.asarray(tube_radius, dtype=float)
+        if (
+            isinstance(ring_radius, numbers.Real)
+            and isinstance(tube_radius, numbers.Real)
+            and not 0.0 < tube_radius < ring_radius
+        ):
+            msg = (
+                f"a Torus needs 0 < tube_radius < ring_radius, got tube_radius {tube_radius} and "
+                f"ring_radius {ring_radius}: otherwise the tube meets itself on the axis and the "
+                "body is not a ring"
+            )
+            raise ValueError(msg)
+        if (arc is None) != (arc_start is None):
+            msg = (
+                "a sector of a Torus needs both arc_start (the direction its arc starts from) and "
+                "arc (the angle it sweeps); give neither for the whole ring"
+            )
+            raise ValueError(msg)
+        if arc is None:
+            self.cuts = ()
+            return
+        if isinstance(arc, numbers.Real) and not 0.0 < arc <= np.pi:
+            msg = (
+                f"a Torus sector's arc must lie in (0, pi], got {arc}: past a half turn the wedge "
+                "cutting it is not convex. Write a wider sector as a Union of two."
+            )
+            raise ValueError(msg)
+        start = jnp.broadcast_to(jnp.asarray(arc_start, dtype=float), (3,))
+        start = start - dot(start, self.axis) * self.axis
+        if not isinstance(start, jax.core.Tracer) and float(norm_squared(start)) == 0.0:
+            msg = "a Torus sector's arc_start lies along its axis, so it names no direction"
+            raise ValueError(msg)
+        start = start / jnp.sqrt(norm_squared(start))
+        across = jnp.cross(self.axis, start)
+        end = jnp.cos(arc) * start + jnp.sin(arc) * across
+        self.cuts = (_Plane(self.centre, -across), _Plane(self.centre, jnp.cross(self.axis, end)))
+
+    @property
+    def interval_count(self) -> int:
+        """Two: a line can pass through the tube on either side of the hole."""
+        return 2
+
+    def _split(self, vector):
+        """The part of ``vector`` perpendicular to the axis, and its component along it."""
+        return _split_along(self.axis, vector)
+
+    def signed_distance(self, position) -> jnp.ndarray:
+        """Exact for the whole ring; for a sector the larger of that and the cuts' distances."""
+        position = jnp.asarray(position, dtype=float)
+        radial, along = self._split(position - self.centre)
+        ring = (
+            jnp.sqrt((jnp.sqrt(norm_squared(radial)) - self.ring_radius) ** 2 + along**2)
+            - self.tube_radius
+        )
+        return functools.reduce(
+            jnp.maximum, [ring, *(cut.signed_distance(position) for cut in self.cuts)]
+        )
+
+    def support(self, direction) -> jnp.ndarray:
+        """The whole ring's: the centre circle's reach plus the tube's, exact for the ring.
+
+        A circle of radius ``R`` in the plane normal to the axis reaches ``R`` times the length
+        of the direction's part in that plane, and sweeping a ball over it adds the ball's own
+        reach. A sector reaches no further than the ring it is cut from.
+        """
+        direction = jnp.asarray(direction, dtype=float)
+        radial, _ = self._split(direction)
+        return (
+            dot(direction, self.centre)
+            + self.ring_radius * jnp.sqrt(norm_squared(radial))
+            + self.tube_radius * jnp.sqrt(norm_squared(direction))
+        )
+
+    def intervals(self, origin, direction) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """The tube's two intervals along the line, each cut by the sector's wedge."""
+        origin = jnp.asarray(origin, dtype=float)
+        direction = jnp.asarray(direction, dtype=float)
+        first, second = _ring_spans(
+            self.centre, self.axis, self.ring_radius, self.tube_radius, origin, direction
+        )
+        if self.cuts:
+            wedge = functools.reduce(_intersect, [cut.span(origin, direction) for cut in self.cuts])
+            first, second = _intersect(first, wedge), _intersect(second, wedge)
+        return jnp.stack([first[0], second[0]], axis=-1), jnp.stack([first[1], second[1]], axis=-1)
 
 
 # ---------------------------------------------------------------------------------------------
