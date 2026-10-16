@@ -40,6 +40,7 @@ PUBLIC_SUBPACKAGES = [
     "radiation",
     "case",
     "solids",
+    "octree",
     "io.cad",
 ]
 
@@ -171,6 +172,11 @@ SUBPACKAGE_GROUPS = {
     ],
     "solids": [
         ("Solid bodies, their combinations, and fluid regions", ["bodies"]),
+    ],
+    "octree": [
+        ("Sampling a field adaptively", ["sampling"]),
+        ("The tree and its interpolant", ["tree", "hierarchy"]),
+        ("The region's boundary", ["cuts", "ghosts"]),
     ],
     "turbulence": [
         ("The k-ω SST model", ["sst", "transport", "sources", "strain"]),

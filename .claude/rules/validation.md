@@ -704,6 +704,19 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   is farther from the lamp than the cell. ⚠️ `G_average`'s LR looking right at 3-4 mm is a cancellation (low
   near the sleeve, high in the bulk), not accuracy: its mean dose is 2 % low and its p1 per-particle ratio 0.83.
   ⚠️ Twelve tracker runs at once in Docker's VM killed three (memory); run five at a time. Numbers in its README.
+- **`sozzi_radiation/adaptive_grid.py`: the adaptive octree against uniform grids, no mesh (2026-10-16, #726).**
+  Everything from the drawing; reference = the gather at 14,000 random water points banded by distance from
+  the sleeve (stages `ripple`, `reference`, `grids`, `summary`; `work/adaptive/`). Linux x86_64, 4 cores,
+  jax 0.11.2; lamp 25,876 facets (chord 5e-5, 4 mm); ln G floored at 1 W/m2; standoff 0.5 mm. **The issue's
+  acceptance (4 mm's error everywhere at a fraction of its points) is NOT met**: tolerance 0.05 from a 4 mm
+  start matches 4 mm in every band at 2.3x its samples (250k vs 109k), because the bulk -- most of the water
+  -- needs ~4 mm to reach 4 mm's 0.17 % median. What adaptivity buys is the sleeve layer: tolerance 0.05
+  matches or beats uniform 2 mm within 5 mm (p99 9.0/4.2/1.0 % vs 13/6.3/1.2 %) at 29 % of its samples. The
+  table is in the README. ⚠️ Every number before 2026-10-16 05:50 in that run's logs was taken under an
+  earlier interpolant or standoff (the octree rule records the sequence); only `work/adaptive/*.json` of the
+  05:50 run onward are the README's. ⚠️ Within the 0.5 mm standoff every grid extrapolates (4-13 % median):
+  the gathered field there carries the lamp's facets (relative std ~2 % within 0.1 mm, `ripple`). ⚠️ The
+  dose was not run (needs the uvmesh mesh and tracker, on the author's machine).
 - **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
   984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
   reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256

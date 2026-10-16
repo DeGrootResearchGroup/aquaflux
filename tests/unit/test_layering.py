@@ -13,7 +13,9 @@ before anyone moved a line of it out, because no check looked at how large a phy
   depends on a concrete preconditioner. The same holds for ``solids/``: its bodies were written for the
   radiation model's shadows and lived inside it, and a solid body names no physics, so a computer-aided
   design (CAD) reader or any other consumer can use them only while they import nothing from a physics
-  package.
+  package. ``octree/`` samples a field over a region on an adaptive octree; it was written for the
+  fluence rate, and takes the field as a callable and the region as a solid, so that a sampler of any
+  other field never waits on the radiation package.
 * :func:`test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_in_it` -- a size
   ratchet on the physics packages, with each over-size module's current size as its budget.
 * :func:`test_nothing_below_the_case_layer_imports_it` -- ``case/`` is the opposite end: it composes
@@ -109,6 +111,8 @@ GENERIC_PACKAGES = {
     "one that needs a physics package to be built is not residual-agnostic",
     "solids": "plain geometry, and a solid body that needs a physics package to be described is in "
     "the wrong package",
+    "octree": "adaptive sampling of any field over any region, and a sampler that needs a physics "
+    "package to refine is not sampling any field",
 }
 
 #: The generic packages each generic package is built on. ``solve`` is on nothing, so the march can be

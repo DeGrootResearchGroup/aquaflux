@@ -36,6 +36,7 @@ from aquaflux.radiation import (
     build_visibility,
     direct_irradiance,
     fluence_rate,
+    fluence_rate_at,
     radiosity,
     solve_scene,
     subtriangle_centroids,
@@ -953,3 +954,33 @@ def test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_soli
         ("at the floor point", float(solution.irradiance_direct["floor"][0])),
     ):
         assert landed / unshadowed == pytest.approx(1.0 - projected, abs=4e-3), name
+
+
+def test_fluence_rate_at_is_the_scene_solved_at_those_points_alone() -> None:
+    """The scene's own receivers are dropped and the reflected light is included."""
+    triangles, top = _box_split()
+    lamps = Surfaces.from_triangles(triangles[top], emission=LAMP_EXITANCE)
+    reflectors = Surfaces.from_triangles(
+        triangles[~top], solid_names=("walls",), diffuse_reflectance=REFLECTANCE
+    )
+    points = _inside_points()
+    others = points[:3] + 0.05
+    floor = SurfaceReceivers(
+        points=np.array([[0.5, 0.5, 0.0]]), normals=np.array([[0.0, 0.0, 1.0]])
+    )
+    scene = Scene(
+        lamps=lamps,
+        reflectors=reflectors,
+        volume=VolumeReceivers(points=others),
+        surfaces={"floor": floor},
+        lamp_samples=1,
+        settings=SETTINGS,
+    )
+    expected = solve_scene(
+        Scene(lamps=lamps, reflectors=reflectors, volume=VolumeReceivers(points=points),
+              lamp_samples=1, settings=SETTINGS)
+    )  # fmt: skip
+    got = fluence_rate_at(scene, points)
+    assert got.shape == (len(points),)
+    np.testing.assert_allclose(got, expected.fluence_rate, rtol=1e-12)
+    assert np.min(expected.fluence_rate_reflected / expected.fluence_rate) > 0.3

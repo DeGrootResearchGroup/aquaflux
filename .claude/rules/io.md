@@ -768,3 +768,15 @@ cells, 71872 faces (66368 internal + 5504 boundary), 3D, uncollapsed. No solver 
   *below* the global max of `1.96e-08`, so it is entirely the denominator. Normalize by the domain
   flow rate; report the local ratio only as a distribution, whose *spread* is what would reveal a
   genuine mis-placement (local, hence a cluster) as opposed to diffuse reference error.
+
+## Structure — BUILT (`write_hexahedra`: axis-aligned hexahedra with point data) — 2026-10-16, #726
+
+`io/vtk/writer.py::write_hexahedra(points, corners, path, *, point_fields=, cell_fields=, binary=)`
+writes cells given as eight corners each, numbered **by binary index** (corner `4i+2j+k` at `(i,j,k)`,
+the octree's `CORNERS` order), mapped to VTK's hexahedron order in one place
+(`_BINARY_TO_VTK_HEXAHEDRON = [0, 4, 6, 2, 1, 5, 7, 3]`: bottom ring with its right-hand normal INTO
+the cell, then the top). No `Mesh` is involved — it is how an octree's leaves
+(`aquaflux.octree.SampledField.hexahedra()`) are written. `vtu_parts` gained `point_fields=` (VTK
+`PointData`, shaped by `cell_data_arrays` with the point count). A coarse leaf beside finer ones is
+written with its own eight corners only, so a viewer interpolates it from those (the octree's own
+interpolant is continuous there; the drawing is not). Pinned by `tests/unit/test_vtk_hexahedra.py`.

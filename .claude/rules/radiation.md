@@ -5121,3 +5121,12 @@ are bent too (no straight-through factor left anywhere).
   path; kept as written because the user's 535b0fa run measured it), and the first guess split at the
   pass's start rather than its end (`onto` puts every crossing back on its face before the descent).
 
+
+## `fluence_rate_at(scene, points)`: the scene as a sampler (#726, 2026-10-16)
+
+`scene.py::fluence_rate_at` solves the scene with `points` as its only receivers (its own volume and
+surface receivers dropped) and returns the fluence rate. It is what `aquaflux.octree.sample_adaptively`
+calls once per pass with only that pass's new points (`.claude/rules/octree.md`). ⚠️ A scene that
+exchanges light (reflectors, or a reflecting lamp) re-solves the exchange at every call — fine for
+black walls, wasteful otherwise; a scene object that solves the exchange once and gathers many times is
+not built. Measured use: `validation/sozzi_radiation/adaptive_grid.py` (`.claude/rules/validation.md`).

@@ -69,6 +69,59 @@ The first swap (2026-10-01, the same mesh, flow, tracker and particles) ran DOM 
 (2.2 % against 12.4 %). The snapped-mesh results in the sections below were also computed on
 `8 x 4` and `16 x 8` grids and have not been rerun.
 
+## An adaptive octree against uniform grids, no mesh (2026-10-16, `adaptive_grid.py`, #726)
+
+`adaptive_grid.py` samples aquaflux's G on an octree with `aquaflux.octree.sample_adaptively`: split a
+cell, gather only its new points, compare each with what the coarser tree predicted there (its
+**miss**), split again where a miss exceeds the tolerance. Uniform grids are the same tree never split,
+interpolated the same way, so the comparison isolates the adaptivity. Everything comes from the
+drawing (`SozziTaghipour.step`): the water is the three cylinders less the lamp's cylinder and tip, the
+lamp is the drawing's lamp triangulated at chord 5e-5 m and 4 mm facets (25,876 facets, 35.417 W at
+696.42 W/m2), absorption 35.67 /m, black walls, the fluid the only occluder. The interpolant is of ln G,
+floored at 1 W/m2 (`FLOOR`; at 1e-3 the refinement chased shadow edges in the pipes, which carry almost
+no dose). No sample lies nearer the water's boundary than 0.5 mm (`STANDOFF`, see below).
+
+**Reference**: the gather itself at 14,000 random water points, 2,000 per band of distance from the
+sleeve's true surface. Error = |interpolated / gathered - 1| over points above the floor. Configuration
+for every number here: Linux x86_64, 4 cores, jax 0.11.2, Python 3.13.16, branch
+`claude/aquaflux-issue-726-yq46n4`; each run alone on the machine. Adaptive arms: root cells 16 mm,
+up to 5 halvings (0.5 mm); `_m2` splits every cell to 4 mm first.
+
+| arm | samples | time s | 0-0.5 mm | 0.5-1 mm | 1-2 mm | 2-5 mm | 5-10 mm | 10-30 mm | >30 mm |
+|---|---|---|---|---|---|---|---|---|---|
+| uniform 8 mm | 18,673 | 60 | 13 % / 26 % | 6.9 % / 14 % | 3.1 % / 14 % | 2.1 % / 12 % | 1.3 % / 5.2 % | 0.71 % / 2.3 % | 0.63 % / 4.3 % |
+| uniform 4 mm | 109,400 | 193 | 9.7 % / 40 % | 2.5 % / 30 % | 2.0 % / 23 % | 1.0 % / 13 % | 0.23 % / 1.3 % | 0.17 % / 0.68 % | 0.17 % / 2.4 % |
+| uniform 2 mm | 742,136 | 1233 | 7.1 % / 24 % | 1.2 % / 13 % | 0.81 % / 6.3 % | 0.19 % / 1.2 % | 0.075 % / 0.39 % | 0.045 % / 0.20 % | 0.043 % / 0.94 % |
+| adaptive, tol 0.05 | 216,154 | 334 | 6.6 % / 19 % | 1.5 % / 9.0 % | 0.72 % / 4.2 % | 0.21 % / 1.0 % | 0.12 % / 0.68 % | 0.26 % / 1.2 % | 0.34 % / 2.1 % |
+| adaptive, tol 0.05, from 4 mm | 249,793 | 413 | 6.6 % / 19 % | 1.5 % / 9.0 % | 0.72 % / 4.2 % | 0.21 % / 1.0 % | 0.11 % / 0.68 % | 0.18 % / 0.62 % | 0.15 % / 2.0 % |
+| adaptive, tol 0.02 | 1,201,461 | 1495 | 4.1 % / 14 % | 0.31 % / 3.4 % | 0.13 % / 1.2 % | 0.061 % / 0.41 % | 0.059 % / 0.29 % | 0.12 % / 0.52 % | 0.15 % / 1.9 % |
+
+Each cell is median / 99th percentile. Time is the whole build, almost all of it gathering.
+
+- **Against the issue's acceptance -- the 4 mm grid's error everywhere at a fraction of its points --
+  this is NOT met.** The closest arm, tolerance 0.05 from a 4 mm start, matches or beats 4 mm in every
+  band (bulk 0.18 % against 0.17 % median, 0.62 % against 0.68 % p99) at **2.3 times** its samples. The
+  bulk is the obstacle: at 8 mm it is 0.7 % median against 4 mm's 0.17 %, and it is most of the water,
+  so matching 4 mm there needs ~4 mm there.
+- **What the adaptivity buys is the layer beside the sleeve.** Tolerance 0.05 matches or beats the
+  uniform 2 mm grid within 5 mm of it (p99 9.0 / 4.2 / 1.0 % against 13 / 6.3 / 1.2 % in the 0.5-1,
+  1-2 and 2-5 mm bands) at 29 % of its samples; the 4 mm start adds the 4 mm bulk for 16 % more.
+- **Inside the standoff (0-0.5 mm) every grid extrapolates** -- nothing is sampled there -- and the
+  error is 4-13 % median whatever the grid. That is the price of the standoff, chosen because the
+  gathered field there carries the lamp's triangulation: around the sleeve and along one facet at a
+  fixed distance it varies by a relative std of 1.8-1.9 % within 0.01 mm, 1.2 % at 0.1 mm, 0.74 % at
+  0.5 mm, 0.46 % at 1 mm and 0.16 % at 2 mm (stage `ripple`, `work/adaptive/ripple.json`). With a
+  0.1 mm standoff measured along the edge (and before ghosts were bounded), the 0.05 arm never
+  converged: misses of ~0.5 stayed at
+  the deepest level, 73 % of them at cut points within 0.07 mm of the sleeve, for 540k samples.
+- **Uniform grids' p99 near the sleeve is large** (4 mm: 23-30 % within 2 mm): a coarse cell the sleeve
+  cuts is interpolated from ghost values extrapolated over its whole width. Not investigated further:
+  the adaptive arms refine those cells.
+- Tolerance 0.02 converges (largest miss 1.02, 0.73, 0.55, 0.23, 0.12 per pass) but refines most of the
+  chamber, to 1.2 M samples -- more than uniform 2 mm.
+- **Not done here**: the dose. The tracker needs the uvmesh mesh and flow, which are on the author's
+  machine; `background_grid.py`'s `write` and `compare` stages are the route.
+
 ## aquaflux on a Cartesian background grid, interpolated to the mesh (2026-10-02, `background_grid.py`)
 
 The direct gather costs the same at every receiver, and most of the uvmesh mesh's 1,232,629 cells are
