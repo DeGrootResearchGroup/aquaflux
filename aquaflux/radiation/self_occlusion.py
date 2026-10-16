@@ -143,6 +143,33 @@ class SelfOcclusion(eqx.Module):
         OcclusionField
         """
 
+    def between_facets(self, surfaces, near, needed=None) -> OcclusionField:
+        """How much of each facet the surface's own triangles hide from each other facet.
+
+        The mask of the facet-to-facet transfer: the receivers are the facets' own centroids,
+        each lying on its facet. It is :meth:`field` with those receivers, and that is what a
+        strategy answers unless it can do better -- one whose answer for a pair is not the same
+        in both directions, as a share of a source's view is not, must answer every pair.
+
+        Parameters
+        ----------
+        surfaces : Surfaces
+            The facets, which are the sources, the receivers and the blockers.
+        near : array_like, shape ``(n_facets,)``
+            Each facet's margin, as for :meth:`field`.
+        needed : numpy.ndarray of bool, shape ``(n_facets, n_facets)``, optional
+            Which answers will be read: ``[i, j]`` for what facet ``j`` is hidden from facet ``i``.
+            A strategy may leave any other pair untested and record it clear. Omitted, every
+            pair is needed.
+
+        Returns
+        -------
+        OcclusionField
+            Of shape ``(n_facets, n_facets)``, indexed as :meth:`field`'s.
+        """
+        del needed
+        return self.field(surfaces, surfaces.centroid, near, surfaces.own_faces, None)
+
     def prepared(self, surfaces) -> SelfOcclusion:
         """This strategy with whatever it can work out from ``surfaces`` alone done once.
 
@@ -262,8 +289,15 @@ class RayCastOcclusion(SelfOcclusion):
     each receiver from behind, so this is a large share of the rays. The test is on the sign of
     the receiver's height above the facet's plane, the same quantity the gather's cosine is, and
     a height too close to zero for its sign to be trusted is cast rather than skipped. Receivers
-    on facets -- the surface-to-surface transfer -- are always cast in full: the transfer's
-    weights do not vanish behind a source.
+    on facets are never cut this way: the transfer's weights do not vanish behind a source.
+
+    **Between the facets themselves, each pair is cast once** (:meth:`between_facets`). The ray
+    from ``i``'s centroid to ``j``'s and the ray back are one segment with the same two facets
+    excluded, so they can disagree only where a hit lands within a margin of one end, or by the
+    rounding of the reversed ray. One ray answers both entries, so the mask is exactly
+    symmetric and costs half as many rays. It is cast from the lower-indexed facet, or from the
+    point source where exactly one of the two is one: a point source has no margin, and one lying
+    on a wall would be hit at the far end of a ray aimed at it, where the ray leaving it is not.
     """
 
     pair_limit: int = DEFAULT_PAIR_LIMIT
@@ -281,7 +315,6 @@ class RayCastOcclusion(SelfOcclusion):
         grid = self._triangle_grid(surfaces)
         clear_behind = receiver_facet is None and surfaces.dark_behind
         facing = BackFaces.of(surfaces) if clear_behind else None
-        centroid = np.asarray(surfaces.centroid)
         near = np.asarray(near, dtype=float)
         on_facet = (
             None
@@ -300,32 +333,79 @@ class RayCastOcclusion(SelfOcclusion):
             if len(row) == 0:
                 continue
             on_this_pass = None if on_facet is None else on_facet[start : start + per_pass]
-            if grid is not None:
-                # The grid walk takes every ray of the pass at once; the brute-force test below
-                # forms them a chunk at a time.
-                hit = grid.blocks(
-                    centroid[source],
-                    receivers[row],
-                    near[source],
-                    exclude=_exclusions(source, row, on_this_pass),
-                )
-            else:
-                hit = pairs_are_cut(
-                    receivers,
-                    centroid,
-                    near,
-                    surfaces.vertices,
-                    row,
-                    source,
-                    target=on_this_pass,
-                    work_limit=self.work_limit,
-                )
-            blocked[start + row, source] = np.asarray(hit)
+            blocked[start + row, source] = self._cast(
+                grid, surfaces, receivers, near, row, source, on_this_pass
+            )
         # A bit, kept as one: whoever reads it widens it. One ray can only ever say all or
         # nothing, so no pair it reports is ever an addition of two answers.
         return OcclusionField(
             fraction=jnp.asarray(blocked), overlapping=None, clear_behind=clear_behind
         )
+
+    def between_facets(self, surfaces, near, needed=None) -> OcclusionField:
+        """One ray per pair of facets, answering both directions. See
+        :meth:`SelfOcclusion.between_facets` and the notes on this class for which end it leaves.
+
+        A pair is cast when either of its two answers is needed, and written to both; a pair
+        needed in neither direction is recorded clear.
+        """
+        n_facets = int(surfaces.n_facets)
+        needed = _needed_pairs(needed, n_facets)
+        grid = self._triangle_grid(surfaces)
+        centroid = np.asarray(surfaces.centroid, dtype=float)
+        near = np.asarray(near, dtype=float)
+        point = np.asarray(surfaces.is_point_source, dtype=bool)
+        # Each receiver is its own facet, which its rays ignore as they ignore their source, and
+        # so is a sheet face's twin, the same triangle wound the other way. The origin's twin
+        # needs no index: it lies at the start of the ray, inside the margin.
+        own = surfaces.own_faces
+        blocked = np.zeros((n_facets, n_facets), dtype=bool)
+        per_pass = receivers_per_pass(self.pair_limit, n_facets)
+        for start in range(0, n_facets, per_pass):
+            lower = np.arange(start, min(start + per_pass, n_facets))
+            ask = np.arange(n_facets)[None, :] > lower[:, None]
+            if needed is not None:
+                ask &= needed[lower] | needed[:, lower].T
+            first, second = np.nonzero(ask)
+            if len(first) == 0:
+                continue
+            first = lower[first]
+            from_second = point[second] & ~point[first]
+            origin = np.where(from_second, second, first)
+            target = np.where(from_second, first, second)
+            hit = self._cast(grid, surfaces, centroid, near, target, origin, own)
+            blocked[first, second] = hit
+            blocked[second, first] = hit
+        return OcclusionField(fraction=jnp.asarray(blocked), overlapping=None)
+
+    def _cast(self, grid, surfaces, receivers, near, row, source, on_facet) -> np.ndarray:
+        """Whether the surface's triangles cut each segment from a facet's centroid to a receiver.
+
+        Segment ``k`` runs from facet ``source[k]``'s centroid to ``receivers[row[k]]``, ignoring
+        its source and the facets ``on_facet[row[k]]`` names (``None`` for none).
+        """
+        centroid = np.asarray(surfaces.centroid)
+        if grid is not None:
+            # The grid walk takes every ray of the pass at once; the brute-force test below
+            # forms them a chunk at a time.
+            hit = grid.blocks(
+                centroid[source],
+                receivers[row],
+                near[source],
+                exclude=_exclusions(source, row, on_facet),
+            )
+        else:
+            hit = pairs_are_cut(
+                receivers,
+                centroid,
+                near,
+                surfaces.vertices,
+                row,
+                source,
+                target=on_facet,
+                work_limit=self.work_limit,
+            )
+        return np.asarray(hit, dtype=bool)
 
     def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray:
         """One ray per segment, walked through the grid when there is one.
@@ -364,6 +444,20 @@ class RayCastOcclusion(SelfOcclusion):
         return TriangleGrid.build(
             np.asarray(surfaces.vertices), resolution=None if self.grid is True else self.grid
         )
+
+
+def _needed_pairs(needed, n_facets: int) -> np.ndarray | None:
+    """``needed`` as a boolean ``(n_facets, n_facets)`` array on the host, or ``None`` for all."""
+    if needed is None:
+        return None
+    needed = np.asarray(needed, dtype=bool)
+    if needed.shape != (n_facets, n_facets):
+        msg = (
+            f"needed must say which answers are read for every pair of the {n_facets} facets, "
+            f"shape ({n_facets}, {n_facets}); got {needed.shape}."
+        )
+        raise ValueError(msg)
+    return needed
 
 
 def _exclusions(source: np.ndarray, row: np.ndarray, on_facet) -> np.ndarray:

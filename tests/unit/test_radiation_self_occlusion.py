@@ -7,7 +7,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.gather import direct_fluence_rate
-from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion
+from aquaflux.radiation.self_occlusion import (
+    NoOcclusion,
+    RayCastOcclusion,
+    SilhouetteOcclusion,
+)
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.triangles import _call_shape, _edge_function, segment_is_cut
 from aquaflux.radiation.visibility import build_visibility
@@ -16,6 +20,7 @@ from scipy.spatial import ConvexHull
 
 from tests.unit.radiation_references import (
     L_OUTLINE,
+    baffled_box_with_a_point,
     closed_drum,
     closed_prism,
     cylinder_triangles,
@@ -866,3 +871,134 @@ def test_the_grid_walk_is_handed_one_pass_of_exclusions_at_a_time(monkeypatch):
         [], surfaces, receivers, self_occlusion=RayCastOcclusion(grid=True, pair_limit=pair_limit),
     )  # fmt: skip
     assert len(handed) > 3 and max(handed) <= pair_limit, (len(handed), max(handed))
+
+
+# ---------------------------------------------------------------------------------------
+# Between the facets themselves: one ray a pair
+# ---------------------------------------------------------------------------------------
+
+
+def _baffled_box():
+    vertices, _ = baffled_box_with_a_point()
+    surfaces = Surfaces.from_triangles(vertices, emission=1.0, power=1.0)
+    return surfaces, 1e-6 * np.sqrt(np.asarray(surfaces.area))
+
+
+def _cast_along(surfaces) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Every pair ``i < j``, with the facet its one ray leaves and the facet it is aimed at."""
+    point = np.asarray(surfaces.is_point_source)
+    lower, higher = np.triu_indices(surfaces.n_facets, 1)
+    from_higher = point[higher] & ~point[lower]
+    origin = np.where(from_higher, higher, lower)
+    target = np.where(from_higher, lower, higher)
+    return lower, higher, origin, target
+
+
+@pytest.mark.parametrize("grid", [False, True])
+def test_each_pair_of_facets_is_answered_by_the_one_ray_it_is_cast_along(grid):
+    """Both entries of a pair are the answer of the ray the full mask casts from the pair's
+    origin -- the lower index, or the point source where one of the two is one -- bit for bit.
+
+    The full mask is :meth:`~RayCastOcclusion.field` with the facets as receivers, which casts
+    both directions; its entry ``[target, origin]`` is the ray leaving ``origin``.
+    """
+    surfaces, near = _baffled_box()
+    n = surfaces.n_facets
+    strategy = RayCastOcclusion(grid=grid)
+    full = np.asarray(
+        strategy.field(surfaces, surfaces.centroid, near, np.arange(n), None).fraction
+    )
+    once = np.asarray(strategy.between_facets(surfaces, near).fraction)
+    lower, higher, origin, target = _cast_along(surfaces)
+    expected = full[target, origin]
+    np.testing.assert_array_equal(once[lower, higher], expected)
+    np.testing.assert_array_equal(once[higher, lower], expected)
+    assert not np.diag(once).any()
+    assert 0.05 < expected.mean() < 0.5, f"the baffle must hide some pairs: {expected.mean()}"
+
+
+def _plate(centre, size, facing_up):
+    """One triangle with its centroid at ``centre``, horizontal, facing up or down."""
+    corners = np.array([[-1.0, -1.0, 0.0], [2.0, -1.0, 0.0], [-1.0, 2.0, 0.0]]) * size
+    triangle = corners + np.asarray(centre, dtype=float)
+    return triangle if facing_up else triangle[::-1]
+
+
+@pytest.mark.parametrize("big_first", [True, False])
+def test_where_the_two_directions_disagree_the_lower_index_s_ray_answers_both(big_first):
+    """A blocker inside one end's margin and far outside the other's: the ray from the big
+    facet ignores it and the ray back is stopped by it. Which one answers is the rule."""
+    big = _plate([0.0, 0.0, 0.0], 1.0, facing_up=True)
+    small = _plate([0.0, 0.0, 1.0], 0.1, facing_up=False)
+    speck = _plate([0.0, 0.0, 0.005], 0.05, facing_up=True)
+    pair = [big, small] if big_first else [small, big]
+    surfaces = Surfaces.from_triangles(np.stack([*pair, speck]))
+    # The big facet's margin reaches past the speck; the small one's does not.
+    near = np.array([0.01, 1e-6, 1e-6]) if big_first else np.array([1e-6, 0.01, 1e-6])
+    strategy = RayCastOcclusion()
+    full = np.asarray(
+        strategy.field(surfaces, surfaces.centroid, near, np.arange(3), None).fraction
+    )
+    b, s = (0, 1) if big_first else (1, 0)
+    assert not full[s, b] and full[b, s], "the fixture's two directions must disagree"
+    once = np.asarray(strategy.between_facets(surfaces, near).fraction)
+    from_lower = full[1, 0]
+    assert once[0, 1] == once[1, 0] == from_lower
+
+
+def test_a_point_source_on_a_wall_casts_its_pairs_itself():
+    """A ray aimed at a point lying on a wall ends in the wall's plane, where a hit counts; the
+    ray leaving it starts there, where one does not. So a point source's pair is cast from the
+    point source, though here it is the higher index."""
+    wall = _plate([0.0, 0.0, 0.0], 1.0, facing_up=True)
+    ceiling = _plate([0.0, 0.0, 1.0], 0.1, facing_up=False)
+    lamp = np.array([[0.5, 0.25, 0.0]] * 3)
+    surfaces = Surfaces.from_triangles(np.stack([wall, ceiling, lamp]), power=1.0)
+    near = 1e-6 * np.sqrt(np.asarray(surfaces.area))
+    strategy = RayCastOcclusion()
+    full = np.asarray(
+        strategy.field(surfaces, surfaces.centroid, near, np.arange(3), None).fraction
+    )
+    assert not full[1, 2] and full[2, 1], "the ray aimed at the point source is stopped"
+    once = np.asarray(strategy.between_facets(surfaces, near).fraction)
+    assert not once[1, 2] and not once[2, 1]
+
+
+def test_only_pairs_needed_in_one_direction_or_the_other_are_cast(monkeypatch):
+    """Half the rays with every pair needed; with some, only those needed either way, each
+    written to both entries, and nothing else cast or recorded hidden."""
+    rays = _watch_rays(monkeypatch)
+    surfaces, near = _baffled_box()
+    n = surfaces.n_facets
+    strategy = RayCastOcclusion(pair_limit=4 * n)
+    every = np.asarray(strategy.between_facets(surfaces, near).fraction)
+    assert sum(rays) == n * (n - 1) // 2
+    assert max(rays) <= 4 * n
+
+    needed = np.random.default_rng(5).random((n, n)) < 0.1
+    asked = (needed | needed.T) & ~np.eye(n, dtype=bool)
+    rays.clear()
+    some = np.asarray(strategy.between_facets(surfaces, near, needed).fraction)
+    assert sum(rays) == int(np.triu(asked, 1).sum())
+    np.testing.assert_array_equal(some[asked], every[asked])
+    assert not some[~asked].any()
+    assert every[~asked].any(), "pairs left out must include some the full mask hides"
+
+
+def test_a_strategy_that_answers_by_share_answers_every_pair_between_facets():
+    """The silhouette's share of a source is not the same both ways, so it is not mirrored:
+    between facets it is its field with the facets as receivers, whatever is needed."""
+    surfaces, near = _baffled_box()
+    n = surfaces.n_facets
+    strategy = SilhouetteOcclusion()
+    with pytest.warns(UserWarning, match="free edge"):  # the baffle, left one-sided
+        field = strategy.field(surfaces, surfaces.centroid, near, np.arange(n), None)
+        between = strategy.between_facets(surfaces, near, np.zeros((n, n), dtype=bool))
+    np.testing.assert_array_equal(np.asarray(between.fraction), np.asarray(field.fraction))
+    assert np.any(np.asarray(field.fraction) != np.asarray(field.fraction).T)
+
+
+def test_needed_pairs_of_the_wrong_shape_are_refused():
+    surfaces, near = _baffled_box()
+    with pytest.raises(ValueError, match="every pair of the 117 facets"):
+        RayCastOcclusion().between_facets(surfaces, near, np.ones((3, 3), dtype=bool))

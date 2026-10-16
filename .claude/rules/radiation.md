@@ -310,6 +310,21 @@ fields, so `None` falls through to the ray-test default.
   keeps the clip between facets only.
 - **Exclusion is by index, never by tolerance**, and never by whole solid (a bent duct's blocking wall is
   the emitter's own body).
+- **The facet-to-facet mask casts each pair once, and only where it is read (#529).** `build_transfer`
+  builds it with `visibility.build_facet_visibility(occluders, surfaces, needed=transfer._read_pairs(...))`,
+  which shares `build_visibility`'s private tail (`visibility._assembled`) and asks the strategy
+  `SelfOcclusion.between_facets(surfaces, near, needed)` instead of `field`. The base method is `field`
+  with the centroids as receivers (rows `Surfaces.own_faces`), ignoring `needed` — what
+  `SilhouetteOcclusion` keeps, since its share is not symmetric. `RayCastOcclusion` casts one ray per
+  unordered pair, written to both entries, **from the lower index, or from the point source when exactly
+  one is one** (a point source has margin 0, so one on a wall is hit at the far end of a ray aimed at it
+  but not by the ray leaving it); the areal mask is exactly symmetric. `needed` is `geometric != 0`
+  (exactly) **or** an areal row against a point-source column, which the model's point-source arrivals
+  read through this mask; a pair is cast if needed either way. ⚠️ **So `transfer.visibility`'s own layer
+  is complete only where read**, `False` elsewhere (the `TransferMatrix` docstring says so); build
+  `build_visibility(..., receiver_facet=surfaces.own_faces)` for the whole mask. `row_sum_error` and
+  `reciprocity_residual` read `geometric` only, so they cannot see a mask change. ~2.0x ungridded from
+  casting once, ~2.5x with the cull on a closed box (measured in the log, "THE FACET-TO-FACET MASK").
 - ⚠️ **A ray between two facets needs two exclusions** — the source facet and the target facet (the far
   end is inclusive, so a ray aimed at a centroid hits its own target). `exclude` takes `(n_rays,)` or
   `(n_rays, k)`; `build_visibility` takes `receiver_facet`. Missing it read 120 of 132 visible pairs blocked
@@ -492,7 +507,8 @@ Records: log → "A PASS IS BOUNDED IN RECEIVER-BY-FACET PAIRS…", "A TRACED ST
   cast a pair whose receiver lies certainly behind a `dark_behind` facet (`Profile.dark_behind`,
   `Surfaces.dark_behind`, `BackFaces.behind`; an undecidable height is cast). Such pairs are recorded
   clear (`Visibility.clear_behind`), and a gather through that mask refuses a set whose areal profiles are
-  not all dark behind (`_refuse_light_from_behind`). Receivers on facets are always cast in full.
+  not all dark behind (`_refuse_light_from_behind`). Receivers on facets are never cut by facing (the
+  transfer's weights do not vanish behind a source); the transfer's mask is cut by what it reads (#529, above).
   `SelfOcclusion.prepared(surfaces)` does surface-only work once per stream; `streamed_fluence_rate`
   refuses points inside once and builds passes through `visibility._unchecked_visibility`. ⚠️ A test
   counting mask builds patches `gather._unchecked_visibility`.
@@ -826,7 +842,8 @@ sheet. So topology drives only a **warning** (an undeclared open piece is named 
   `n_facets + len(back_of)` long; the scene splits back faces to their front's set
   (`SceneSolution.reflector_back_of`, `lamp_back_of`).
 - **Two defects fixed by index, not tolerance**: (a) a ray aimed at a face's centroid ends in its twin, so
-  the receiving end excludes the twin too (`build_transfer` passes `(n, 2)` rows `[i, twin(i)]`; mirror
+  the receiving end excludes the twin too (`Surfaces.own_faces`, `(n, 2)` rows `[i, twin(i)]`, the
+  facet mask's and the mirror masks' `receiver_facet`, and the ray test's per-pair exclusion; mirror
   legs exclude a source's twin; the sending end needs nothing — the twin is inside the margin). (b) the
   six-point rule puts receiving points one ulp off the plane and `point_heights` does not snap a rounding
   of the point's construction, so `_row_block` zeroes `F[i, twin(i)]` as it zeroes `F[i, i]`.
