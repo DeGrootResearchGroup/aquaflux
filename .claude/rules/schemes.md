@@ -2003,6 +2003,56 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   reconstructed gradient halo-exchanged once between the two passes — a real gap, but not the
   structural bar the coupled scheme has).
 
+  **✅ THE FIRST PASS'S `(M1 − B)⁻¹` IS THE ADJUGATE, NOT A BATCHED LAPACK LU — ~5× OFF THE pitzDaily
+  RESIDUAL, ~2.5× OFF ITS JVP (2026-10-16, branch `claude/multicorr-adjugate-inverse`).** Assemblers
+  always pass `boundary_gradient_weight`, so `_boundary_condition_first_pass` ran inside every residual
+  and every `jvp`, and its `jnp.linalg.inv` compiled to one `lapack_dgetrf_ffi` + two `lapack_dtrsm_ffi`
+  custom calls per reconstruction that XLA cannot fuse (counted in the compiled pitzDaily coupled
+  residual at `main` `44ba609f`: **6 `getrf` + 12 `trsm`**, 0 after; an earlier count on 2026-10-16 read
+  5 + 10 and was not reconciled) — the
+  #648 problem, fixed then for compact/corrected only. It now calls `small_inverse` (see the #648
+  entry). **`m1_inverse` at bind uses it too, deliberately**: with a zero weight the per-call path then
+  inverts the identical matrix by the identical arithmetic, which is what keeps
+  `test_an_orthogonal_mesh_is_bit_identical_to_ignoring_the_weight[multiple-correction]` and
+  `test_a_prescribed_patch_is_left_alone_by_the_boundary_condition_weight` exact — with LAPACK at bind
+  and the adjugate per call both went red by roundoff. `m2_inverse` (`n_sym × n_sym`, 6×6 in 3D, bind
+  only, `cond(M2)` up to 6.9e2 on tetrahedra) stays `jnp.linalg.inv`. Pinned by
+  `test_the_boundary_condition_first_pass_calls_no_library_factorization` (no `getrf` in the compiled
+  reconstruction; red with the old call restored). Measured pitzDaily `case.yaml`, hybrid initial
+  state, `eqx.filter_jit` of `coupled.residual` and of its `jax.jvp`, min of 9 warm calls, 4-core Linux
+  container, jax 0.11.2, x64, CPU:
+
+  | arm | residual | jvp | `getrf` in residual HLO | ‖R‖ |
+  |---|---|---|---|---|
+  | `jnp.linalg.inv` (before) | 29.8 ms | 45.0 ms | 6 | 2.884371116264e+02 |
+  | `small_inverse` (after, two runs) | 5.3 / 6.4 ms | 17.2 / 19.3 ms | 0 | 2.884371116264e+02 |
+
+  ‖R‖ and ‖J t‖ agree to all 13 printed digits. Standalone on the same shapes (previous measurement,
+  same configuration): `inv` 2.77 ms vs adjugate 0.08 ms at `(12225, 2, 2)`, 8.81 vs 0.94 ms at
+  `(23040, 3, 3)`. bfs3d (3×3 blocks, six reconstructed fields) is unmeasured — its mesh is not in the
+  repository. ⚠️ Every pitzDaily/bfs3d residual, JVP, probe or march timing in these files taken under
+  `MultipleCorrectionGradient` before this predates it and was not re-run.
+
+  **⚠️ ON THE SHIPPED MARCH THE GAIN IS ~2–5 %, NOT THE ~10–14 % THE PER-CALL JVP PROJECTED.**
+  `validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, shipped `case.yaml` and driver
+  defaults, no `PITZ_*` overrides, one run per arm, back to back on the same 4-core / 15 GB Linux
+  container, jax 0.11.2, persistent compile cache warm from earlier in-session runs:
+
+  | arm | solve wall | log `t(s)` at step 1 → 18 | steps / cycles | `x_r/h` | final `R` |
+  |---|---|---|---|---|---|
+  | `main` `44ba609f` | 430 s | 94 → 416 s (322 s) | 18 / 123 | 8.0686 | 9.574e-06 |
+  | this change `5b2c3dd2` | 411 s | 83 → 397 s (314 s) | 18 / 123 | 8.0686 | 9.574e-06 |
+
+  The trajectories are identical row for row (`beta`, inner and cycle counts, `R` to four figures).
+  −19 s overall (−4.4 %), of which 11 s is before the step-1 row (compile and the first step) and
+  8 s (−2.5 %) is steps 2–18. One run per arm with no measured noise floor, so the march-time part is
+  within plausible run-to-run spread. **Why the projection overshot is not established.** One
+  candidate, unchecked: if the Krylov operator is a linearization taken once per step, its matvec is
+  the tangent of `inv` (two batched matrix products, `−A⁻¹ dA A⁻¹`), with no factorization, so the
+  standalone `jax.jvp` timing, which re-runs the primal LU on every call, overstates what each
+  matvec saved. Check the compiled step program's matvec before using the per-call figures to
+  project a march gain again.
+
   **✅✅ `MultipleCorrectionGradient` IS FASTER THAN CORRECTED GREEN--GAUSS ON A REAL MARCH
   (pitzDaily, 2026-08-24)** — a quadratic-exact reconstruction for less than the linear-exact one.
   Same case, same field-split preconditioner, same probe reach 5, same continuation, same commit:
@@ -2647,7 +2697,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   not as a cost, until a repeat says otherwise.
 
   **✅ EXTENDED TO `CompactGreenGauss` AND `CorrectedGreenGauss` (2026-10-09, #648); STILL NOT
-  `HessianCorrectedGradient`.** `B_P` has one home, `schemes.boundary_gradient_block(weight,
+  `HessianCorrectedGradient`** (it ignores the weight; see the last bullet). `B_P` has one home, `schemes.boundary_gradient_block(weight,
   face_cells, geometry)` (`(n_cells, dim, dim)`, per volume, its docstring carrying the affine
   contract); `_boundary_condition_first_pass` calls it, **bit-identical** to before on quad, hex and
   tet fixtures under both closures. Compact solves `(I − B_P) g = raw/V` per cell. Corrected adds
@@ -2677,8 +2727,11 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
     inverted on every residual evaluation and every `jvp`, even where it is exactly zero. A batched
     `jnp.linalg.solve`/`inv` of the `(n, dim, dim)` blocks is a LAPACK call XLA cannot fuse: 5.8 ms
     against 0.43 ms for the adjugate at 13824 3×3 blocks (jax 0.10.2, x64, CPU, one core). Now
-    `_small_inverse` (closed-form 1/2/3-dim adjugate, private to `gradient.py`) and an owner-only scatter
-    (`FaceCellConnectivity.scatter_to_owner`) build it. Measured with/without the weight on orthogonal
+    `small_inverse` (closed-form 1/2/3-dim adjugate in `gradient.py`, imported by
+    `multiple_correction.py` beside `boundary_gradient_block`, not in `schemes.__all__`) and an
+    owner-only scatter (`FaceCellConnectivity.scatter_to_owner`) build it. ⚠️ **The fix stopped at these
+    two schemes for a week: `MultipleCorrectionGradient`'s first pass kept a per-call
+    `jnp.linalg.inv(M1 − B)` until 2026-10-16** — see the multiple-correction section's adjugate entry. Measured with/without the weight on orthogonal
     meshes, min of 15, warm: compact 2D 80×40 0.158/0.141 ms, 3D 24³ ~1.1–1.6×; corrected 2D ~1.2–1.3×,
     3D ~1.4× — noisy single runs in a shared container. **`InverseCellVolume` inverts `I − B` and then
     divides by `V`, in that order**: inverting `V(I − B)` directly broke bit-identity on orthogonal meshes
