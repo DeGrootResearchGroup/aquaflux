@@ -69,7 +69,9 @@ pitzDaily residual at `44ba609f`. Removing it took the warm pitzDaily residual 2
 45.0 -> 17.2-19.3 ms (`.claude/rules/schemes.md`, multiple-correction section, configuration there).
 So the JVP column above (77-86 ms), the ~70 % preconditioner share it implies, the probe's ~6 s per
 refit, and the 45 -> 77 ms rise are all measured under that call and were not re-run; the rise itself
-remains unexplained, but a JVP that is now ~2.5x cheaper moves the preconditioner's share up, not down.
+remains unexplained. The shipped pitzDaily march gained only 430 -> 411 s on identical trajectories
+(one run per arm, same entry), so the per-call JVP saving does NOT carry over to the march in proportion;
+do not re-derive the in-step shares from the 17-19 ms figure without measuring the step program's matvec.
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's ~6 s is the ~165 JVPs that compute the new
 VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).

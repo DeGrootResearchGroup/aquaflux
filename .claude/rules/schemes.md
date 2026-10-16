@@ -2033,6 +2033,26 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   repository. ⚠️ Every pitzDaily/bfs3d residual, JVP, probe or march timing in these files taken under
   `MultipleCorrectionGradient` before this predates it and was not re-run.
 
+  **⚠️ ON THE SHIPPED MARCH THE GAIN IS ~2–5 %, NOT THE ~10–14 % THE PER-CALL JVP PROJECTED.**
+  `validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, shipped `case.yaml` and driver
+  defaults, no `PITZ_*` overrides, one run per arm, back to back on the same 4-core / 15 GB Linux
+  container, jax 0.11.2, persistent compile cache warm from earlier in-session runs:
+
+  | arm | solve wall | log `t(s)` at step 1 → 18 | steps / cycles | `x_r/h` | final `R` |
+  |---|---|---|---|---|---|
+  | `main` `44ba609f` | 430 s | 94 → 416 s (322 s) | 18 / 123 | 8.0686 | 9.574e-06 |
+  | this change `5b2c3dd2` | 411 s | 83 → 397 s (314 s) | 18 / 123 | 8.0686 | 9.574e-06 |
+
+  The trajectories are identical row for row (`beta`, inner and cycle counts, `R` to four figures).
+  −19 s overall (−4.4 %), of which 11 s is before the step-1 row (compile and the first step) and
+  8 s (−2.5 %) is steps 2–18. One run per arm with no measured noise floor, so the march-time part is
+  within plausible run-to-run spread. **Why the projection overshot is not established.** One
+  candidate, unchecked: if the Krylov operator is a linearization taken once per step, its matvec is
+  the tangent of `inv` (two batched matrix products, `−A⁻¹ dA A⁻¹`), with no factorization, so the
+  standalone `jax.jvp` timing, which re-runs the primal LU on every call, overstates what each
+  matvec saved. Check the compiled step program's matvec before using the per-call figures to
+  project a march gain again.
+
   **✅✅ `MultipleCorrectionGradient` IS FASTER THAN CORRECTED GREEN--GAUSS ON A REAL MARCH
   (pitzDaily, 2026-08-24)** — a quadratic-exact reconstruction for less than the linear-exact one.
   Same case, same field-split preconditioner, same probe reach 5, same continuation, same commit:
