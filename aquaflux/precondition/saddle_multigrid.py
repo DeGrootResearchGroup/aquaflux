@@ -40,9 +40,9 @@ from .hierarchy_inverse import HierarchyBlockInverse
 from .multigrid import (
     SmoothedHierarchy,
     StructuralPatterns,
-    _CsrOperator,
     _ones,
     _operator_matvec,
+    _PaddedRowOperator,
     _smoothed_ops,
     _structured,
 )
@@ -71,14 +71,14 @@ class _SimplePieces(eqx.Module):
     """
 
     f_diagonal_inverse: jnp.ndarray  # (n_velocity,) 1 / diag(F)
-    dg: _CsrOperator  # diag(F)^-1 G, the velocity correction operator
-    divergence: _CsrOperator  # D
-    schur: _CsrOperator  # S = C - D diag(F)^-1 G
+    dg: _PaddedRowOperator  # diag(F)^-1 G, the velocity correction operator
+    divergence: _PaddedRowOperator  # D
+    schur: _PaddedRowOperator  # S = C - D diag(F)^-1 G
     schur_diagonal_inverse: jnp.ndarray  # (n_pressure,) 1 / diag(S)
     #: Set when the splitting is a per-cell BLOCK inverse instead of a scalar diagonal; the velocity
     #: predictor then applies this rather than an elementwise multiply. ``None`` keeps the diagonal path,
     #: which stays an elementwise multiply rather than a nine-nonzero-per-row matvec.
-    f_block_inverse: _CsrOperator | None
+    f_block_inverse: _PaddedRowOperator | None
     #: Static: it slices the level vector, so it must be concrete.
     n_velocity: int = eqx.field(static=True)
 
@@ -201,7 +201,7 @@ def _simple_pieces(
         f_inverse_matrix = block_approximate_inverse(
             a[:nv, :nv].tocsr(), n_cells, block_size - 1, frobenius
         )
-        block_inverse = _CsrOperator.from_scipy(f_inverse_matrix)
+        block_inverse = _PaddedRowOperator.from_scipy(f_inverse_matrix)
     else:
         # An explicit diagonal rather than `sp.diags`, whose conversion to compressed rows drops a zero
         # entry and would make the products below value-dependent in pattern.
@@ -256,9 +256,9 @@ def _simple_pieces(
             f_block_inverse=block_inverse,
             n_velocity=nv,
             f_diagonal_inverse=jnp.asarray(f_inverse),
-            dg=_CsrOperator.from_scipy(dg),
-            divergence=_CsrOperator.from_scipy(d_block),
-            schur=_CsrOperator.from_scipy(schur),
+            dg=_PaddedRowOperator.from_scipy(dg),
+            divergence=_PaddedRowOperator.from_scipy(d_block),
+            schur=_PaddedRowOperator.from_scipy(schur),
             schur_diagonal_inverse=jnp.asarray(schur_inverse),
         ),
         schur,
@@ -710,7 +710,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
                 patterns=self._patterns,
             )
         sizes = ", ".join(
-            f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.data.shape[0] / 1e6:.1f}M nnz"
+            f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.nnz / 1e6:.1f}M nnz"
             for n, p in pieces.items()
         )
         # Report the COARSE GRID SIZE and the coarsening ratio beside the level count. A level count

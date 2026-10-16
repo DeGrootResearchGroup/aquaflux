@@ -104,6 +104,7 @@ from .gradient import (
     boundary_gradient_block,
     contract_symmetric,
     expand_symmetric,
+    small_inverse,
     symmetric_components,
 )
 from .interpolation import (
@@ -764,6 +765,9 @@ def _boundary_condition_first_pass(
     **Why it costs nothing.** That dependence is affine, so it moves to the left-hand side as the
     per-cell block :func:`~aquaflux.schemes.boundary_gradient_block` builds, and the pass is
     ``(M1 - B) grad phi = raw`` -- one per-cell inverse, exactly what ``M1`` already was.
+    The inverse is the closed-form adjugate rather than a batched library call, because it runs on
+    every reconstruction and the library call is one the compiler cannot fuse; ``M1 - B`` is
+    well-conditioned (below), which is what makes the unpivoted closed form adequate.
 
     **Why the weight is the condition's and not the owner's whole displacement ``d``.** An earlier
     form used ``w = d``, which reads nothing from the boundary condition, and left ``M1 - B``
@@ -787,7 +791,7 @@ def _boundary_condition_first_pass(
     jnp.ndarray
         ``(M1 - B)^-1``, shape ``(n_cells, dim, dim)``.
     """
-    return jnp.linalg.inv(
+    return small_inverse(
         m1 - boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
     )
 
@@ -1036,7 +1040,9 @@ def _probe_corrections(
     # M1: what the raw sum returns for each coordinate field. Its columns are indexed by the
     # direction probed, its rows by the gradient component returned.
     m1 = jnp.stack([raw(cell_x[:, i], face_x[:, i]) for i in range(dim)], axis=-1)
-    m1_inverse = jnp.linalg.inv(m1)
+    # The same inverse the per-call first pass takes of `M1 - B`, so a zero gradient weight inverts
+    # the identical matrix by the identical arithmetic and reproduces this one bit for bit.
+    m1_inverse = small_inverse(m1)
     if boundary_linearization is None:
         first_pass_inverse = m1_inverse
         value_weight = jnp.zeros(face_cells.n_faces)

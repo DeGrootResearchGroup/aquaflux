@@ -269,14 +269,21 @@ def boundary_gradient_block(
     return jnp.swapaxes(block, 1, 2) / geometry.cell.volume[:, None, None]
 
 
-def _small_inverse(matrix: jnp.ndarray) -> jnp.ndarray:
+def small_inverse(matrix: jnp.ndarray) -> jnp.ndarray:
     """Per-cell inverse of a batch of 1x1, 2x2 or 3x3 matrices, by the adjugate.
 
     Written out because these inverses run inside every reconstruction, so inside every residual
-    evaluation and every Jacobian--vector product: a batched library inverse is one call per cell
-    batch that the compiler cannot fuse with anything around it, while the adjugate is a handful of
-    elementwise products it fuses freely, an order of magnitude cheaper here. Fine for the
-    well-conditioned ``I - B`` blocks it serves; not a general-purpose inverse.
+    evaluation and every Jacobian--vector product: a batched library inverse is a call into a
+    linear-algebra library (an LU factorization and two triangular solves per cell batch) that the
+    compiler cannot fuse with anything around it, while the adjugate is a handful of elementwise
+    products it fuses freely, an order of magnitude cheaper here.
+
+    Fine for the well-conditioned per-cell blocks it serves -- the compact and corrected schemes'
+    ``I - B`` and the multiple-correction first pass's ``M1 - B``, whose condition numbers stay in
+    single digits when ``B`` is built from each boundary condition's own gradient weight. It does no
+    pivoting, so it is **not** a general-purpose inverse: an ill-conditioned block loses accuracy
+    here faster than it would through a pivoted factorization. Its result is not bit-identical to a
+    library inverse; the two agree to roundoff on such blocks.
 
     Parameters
     ----------
@@ -500,7 +507,7 @@ class CompactGreenGauss(GradientScheme):
         if boundary_gradient_weight is None:
             return gradient
         block = boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
-        inverse = _small_inverse(jnp.eye(mesh.dim, dtype=gradient.dtype) - block)
+        inverse = small_inverse(jnp.eye(mesh.dim, dtype=gradient.dtype) - block)
         return jnp.einsum("nij,nj->ni", inverse, gradient)
 
 
@@ -884,7 +891,7 @@ class InverseCellVolume(CellPreconditioner):
         # (V (I - B))^-1 = (I - B)^-1 / V, inverted in that order so that a cell with no such face
         # gets exactly 1/V -- the same scaling as without a block, to the last bit.
         dim = terms.area_vector.shape[-1]
-        inverse = _small_inverse(jnp.eye(dim) - terms.boundary_block)
+        inverse = small_inverse(jnp.eye(dim) - terms.boundary_block)
         return CellBlockJacobi(inverse / terms.volume[:, None, None])
 
 

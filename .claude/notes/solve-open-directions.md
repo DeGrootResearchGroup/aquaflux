@@ -62,6 +62,16 @@ of **77-86 ms**, so the preconditioner is ~70 % of an application. The JVP was 4
 the multiple-correction gradient is the likely cause (not measured, and not a lever: that gradient is
 the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve.md`,
 `norm_of_residual`): 804 -> 727 s warm, identical march.
+⚠️ **Every number in this subsection predates the multiple-correction first pass's adjugate inverse
+(2026-10-16, branch `claude/multicorr-adjugate-inverse`), and was taken with a batched LAPACK LU of
+`M1 - B` inside every residual and JVP** -- 6 `getrf` + 12 `trsm` library calls in the compiled
+pitzDaily residual at `44ba609f`. Removing it took the warm pitzDaily residual 29.8 -> 5.3-6.4 ms and the JVP
+45.0 -> 17.2-19.3 ms (`.claude/rules/schemes.md`, multiple-correction section, configuration there).
+So the JVP column above (77-86 ms), the ~70 % preconditioner share it implies, the probe's ~6 s per
+refit, and the 45 -> 77 ms rise are all measured under that call and were not re-run; the rise itself
+remains unexplained. The shipped pitzDaily march gained only 430 -> 411 s on identical trajectories
+(one run per arm, same entry), so the per-call JVP saving does NOT carry over to the march in proportion;
+do not re-derive the in-step shares from the 17-19 ms figure without measuring the step program's matvec.
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's ~6 s is the ~165 JVPs that compute the new
 VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).
@@ -381,6 +391,29 @@ cycle count.
   On a synthetic matrix of the same shape and density it is 21.1 against 6.4 ms, so it is the kernel,
   not this operator. A gather plus sorted segment sum IS faster in float32 (8.9 against 10.7 ms) but is
   still slower than the float64 CSR kernel, so no CPU kernel choice makes float32 pay here.
+- ⚠️ **The kernel this rests on is gone (2026-10-14):** the level operators are padded-row
+  (`_PaddedRowOperator`), a fused gather-multiply-sum rather than the CSR kernel call, so "no CPU kernel
+  choice makes float32 pay" is unmeasured for the shipped form and the CPU half is open again.
+  `csr_kernel_precision.py` now times the padded-row form beside the CSR one, in both precisions.
+- **On the padded-row form float32 PAYS, and is shippable as `FieldSplit(precision="float32")` (2026-10-16,
+  PR #732, opt-in; `solve-field-split.md` holds the design).** Every number below is one run per arm at a
+  fixed configuration; "pitzDaily march" is the shipped `case.yaml` on `float32-field-split` `d8ca69ab`,
+  4-core Linux container, jax 0.11.2, the two arms back to back, differing only in `PITZ_SPLIT_PRECISION`.
+  - *Kernel, split apply:* pitzDaily at its hybrid start (Linux, best of 15) 52.5 ms against 71-87 ms
+    float64; bfs3d at `state-00018` (Apple M3 Pro, jax 0.10.2, best of 10) **82 ms against 140 ms**, which
+    also beats `main`'s CSR (105-109 ms) -- float32 is the one change found that recovers the Mac's
+    forward loss on wide rows without an XLA flag (see `solve-amg-multigrid.md`'s padded-row entry).
+  - *pitzDaily march:* **405 s against 531 s (-24 %)**, 18 steps / 123 cycles both, the step tables
+    identical to four figures through step 17, final `R` 9.093e-06 against 9.071e-06, `x_r/h` 8.0686 both.
+  - *Adjoint:* a split applied in float32 ARITHMETIC broke the transpose solve (stagnation at rtol 1e-10:
+    it is linear only to ~1e-7); the adjoint now widens the rounded split to float64, and the float32
+    arm then matches the finite difference to 1e-5 on the coupled channel.
+  - *bfs3d march* (shipped `case.yaml`, `7e96745a`, Apple M3 Pro, jax 0.10.2, one run per arm, float64
+    first, idle machine): **498 s against 599 s (-17 %)**, 18 steps / 129 cycles both with identical
+    per-step inner and cycle counts, final `R` 6.185e-07 and `x_r/h` 8.361 both; steps from 5 on are
+    20-35 % faster, step 1 (compilation) level, the refit unchanged (it is float64 work).
+  - **Shipped (2026-10-16, the project owner's decision): both case files set `precision: float32`;
+    the library default stays float64.** This direction's CPU half is closed as a win.
 - **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.

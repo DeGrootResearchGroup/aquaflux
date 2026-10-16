@@ -315,6 +315,15 @@ A {class}`~aquaflux.precondition.MaterializedJacobian` settles everything the in
 and its `inverse` chooses how the materialized matrix is inverted: a
 {class}`~aquaflux.precondition.FieldSplit` for a problem with two groups of fields, such as coupled flow and
 turbulence, or one block inverse over the whole state for a problem with one.
+
+A field split can be applied in single precision, `FieldSplit(..., precision="float32")`. It is
+still fitted in double precision; its arrays are then rounded once and each application runs in
+single precision, which moves fewer bytes per stored entry. The residual, the Krylov solves and the
+stopping test stay in double precision, so the march converges to the same root. The adjoint's
+transpose solve applies the same rounded split in double-precision arithmetic: applied in single
+precision the split is linear only to single-precision rounding, and a transpose solve run to a
+tighter tolerance than that stagnates.
+
 To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with
 {func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,

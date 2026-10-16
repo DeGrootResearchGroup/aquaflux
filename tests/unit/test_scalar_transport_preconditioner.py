@@ -191,20 +191,20 @@ def test_refreshing_an_air_scalar_preconditioner_preserves_its_structure() -> No
     # Diffusion-dominated rather than more convective: the balance has to move, not just the magnitudes.
     rebuilt = _built(ScalarAir(), 1.0, 1e-3)
 
-    cold_shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.hierarchy.levels]
+    cold_shapes = [(lv.n, lv.n_coarse, lv.operator.values.shape) for lv in cold.hierarchy.levels]
     refreshed_shapes = [
-        (lv.n, lv.n_coarse, lv.operator.data.shape) for lv in refreshed.hierarchy.levels
+        (lv.n, lv.n_coarse, lv.operator.values.shape) for lv in refreshed.hierarchy.levels
     ]
     rebuilt_shapes = [
-        (lv.n, lv.n_coarse, lv.operator.data.shape) for lv in rebuilt.hierarchy.levels
+        (lv.n, lv.n_coarse, lv.operator.values.shape) for lv in rebuilt.hierarchy.levels
     ]
 
     assert refreshed_shapes == cold_shapes  # the point: signature preserved
     assert rebuilt_shapes != cold_shapes  # ...and a rebuild genuinely would not preserve it
     # The refresh moved the values to the new operator.
     assert not np.allclose(
-        np.asarray(cold.hierarchy.levels[0].operator.data),
-        np.asarray(refreshed.hierarchy.levels[0].operator.data),
+        np.asarray(cold.hierarchy.levels[0].operator.to_scipy().data),
+        np.asarray(refreshed.hierarchy.levels[0].operator.to_scipy().data),
     )
 
 
@@ -218,11 +218,13 @@ def test_refreshing_a_twolevel_scalar_preconditioner_is_structure_preserving_any
     rebuilt = _built(ScalarTwoLevel(), 0.05, 20.0)
     reused = _built(ScalarTwoLevel(), 0.05, 20.0, reuse=cold)
 
-    shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.hierarchy.levels]
+    shapes = [(lv.n, lv.n_coarse, lv.operator.values.shape) for lv in cold.hierarchy.levels]
     assert [
-        (lv.n, lv.n_coarse, lv.operator.data.shape) for lv in rebuilt.hierarchy.levels
+        (lv.n, lv.n_coarse, lv.operator.values.shape) for lv in rebuilt.hierarchy.levels
     ] == shapes
-    assert [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in reused.hierarchy.levels] == shapes
+    assert [
+        (lv.n, lv.n_coarse, lv.operator.values.shape) for lv in reused.hierarchy.levels
+    ] == shapes
 
 
 def _scaled_transport(gamma_scale, flux_scale, nx=24, ny=12):

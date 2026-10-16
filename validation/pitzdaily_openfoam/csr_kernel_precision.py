@@ -2,10 +2,12 @@
 
 A float32 copy of the field split's flow hierarchy converges the march's systems in exactly the same
 cycles as float64 (``precision_replay_probe.py``) but applies about twice as slowly on CPU. This times the
-cycle's kernels separately on the real hierarchy -- each level's CSR operator product, its per-cell
-block solves, its prolongation, and the coarse dense solve -- and then compares the CSR product against
-the alternative a level could use, a gather and a sorted segment sum, on a synthetic matrix of the same
-size and density, reporting which compiled kernel each lowers to.
+cycle's kernels separately on the real hierarchy -- each level's operator product, its per-cell block
+solves, its prolongation, and the coarse dense solve -- and then compares, on a synthetic matrix of the
+same size and density, the three forms a level's product can take: the padded-row product the levels
+use (a gather, a multiply and a row sum), a compressed-sparse-row (CSR) product through
+``jax.experimental.sparse.BCSR`` (the levels' form until 2026-10-14, which lowers to one sparse kernel
+call), and a gather with a sorted segment sum. The CSR product's line names the compiled kernel.
 
 Usage
 -----
@@ -30,6 +32,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
+from aquaflux.precondition.multigrid import _PaddedRowOperator  # noqa: E402
 from jax.experimental.sparse import BCSR  # noqa: E402
 from precision_replay_probe import _narrowed  # noqa: E402
 from replay import MarchReplay  # noqa: E402
@@ -56,14 +59,14 @@ def _levels():
 
 def _kernels(levels):
     rng = np.random.default_rng(0)
-    csr = jax.jit(lambda op, x: op.apply(x))
+    product = jax.jit(lambda op, x: op.apply(x))
     dense = jax.jit(lambda m, x: m @ x)
     blocks = jax.jit(lambda inverse, y: jnp.einsum("cij,cj->ci", inverse, y))
     for dtype in PRECISIONS:
         cells = []
         for i, level in enumerate(_narrowed(levels, dtype)):
             x = jnp.asarray(rng.standard_normal(level.n), dtype)
-            cells.append(f"L{i} csr {_best(csr, level.operator, x):.2f}")
+            cells.append(f"L{i} operator {_best(product, level.operator, x):.2f}")
             if level.coarse_inv is not None:
                 cells.append(f"L{i} dense {_best(dense, level.coarse_inv, x):.2f}")
             if level.block_inverse is not None:
@@ -80,13 +83,14 @@ def _kernels(levels):
         print(f"{np.dtype(dtype).name} (ms): " + " | ".join(cells), flush=True)
 
 
-def _csr_against_segment_sum(n, per_row):
-    """The CSR product's kernel against a gather and sorted segment sum, at the finest level's shape."""
+def _product_forms(n, per_row):
+    """The three product forms against each other, at the finest level's shape."""
     matrix = sp.random(n, n, density=per_row / n, format="csr", random_state=0) + sp.eye(n)
     matrix = matrix.tocsr()
     matrix.sort_indices()
     rows = jnp.asarray(np.repeat(np.arange(n), np.diff(matrix.indptr)))
     product = jax.jit(lambda d, i, p, x: BCSR((d, i, p), shape=(n, n)) @ x)
+    padded = jax.jit(lambda op, x: op.apply(x))
     segments = jax.jit(
         lambda d, i, r, x: jax.ops.segment_sum(d * x[i], r, num_segments=n, indices_are_sorted=True)
     )
@@ -102,8 +106,10 @@ def _csr_against_segment_sum(n, per_row):
                 if "custom_call_target=" in line
             }
         )
+        operator = _PaddedRowOperator.from_scipy(matrix.astype(np.dtype(dtype)))
         print(
-            f"synthetic {n} x {n}, {matrix.nnz} nnz, {np.dtype(dtype).name}: CSR product "
+            f"synthetic {n} x {n}, {matrix.nnz} nnz, {np.dtype(dtype).name}: padded-row product "
+            f"{_best(padded, operator, x):.2f} ms, CSR product "
             f"{_best(product, data, indices, indptr, x):.2f} ms (kernel {', '.join(targets)}), "
             f"gather + segment sum {_best(segments, data, indices, rows, x):.2f} ms",
             flush=True,
@@ -115,12 +121,12 @@ def main():
     levels = _levels()
     print(
         "levels (n, block, nnz): "
-        + ", ".join(f"({lv.n}, {lv.block_size}, {lv.operator.data.size})" for lv in levels),
+        + ", ".join(f"({lv.n}, {lv.block_size}, {lv.operator.nnz})" for lv in levels),
         flush=True,
     )
     _kernels(levels)
     finest = levels[0]
-    _csr_against_segment_sum(finest.n, round(finest.operator.data.size / finest.n))
+    _product_forms(finest.n, round(finest.operator.nnz / finest.n))
 
 
 if __name__ == "__main__":

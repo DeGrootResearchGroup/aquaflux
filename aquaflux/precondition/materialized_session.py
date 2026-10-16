@@ -513,7 +513,7 @@ class MaterializedSession:
             refitted = self._refresh_hook()(active_step, state, due=due)
             if not (refitted and self._traced):
                 return None
-            split = traced_field_split(self._preconditioner.inverse)
+            split = traced_field_split(self._preconditioner.inverse, self._precision)
             return lambda step: with_traced_split(step, split)
 
         self.refresh_preconditioner = (
@@ -620,13 +620,27 @@ class MaterializedSession:
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
             self._traced = offers_traced_split(self._preconditioner.inverse)
+            if self._precision != "float64" and not self._traced:
+                raise ValueError(
+                    f"FieldSplit(precision={self._precision!r}) needs a split applied on the device, "
+                    "and this one has a block with no traced cycle, so it is applied on the host in "
+                    "double precision."
+                )
         return problem.build_step(state, self._policy(base), bound, VCYCLE_LINEAR_SOLVE)
 
     def _policy(self, base) -> MonolithicFactorShiftPolicy | TracedSplitShiftPolicy:
         """``base`` glued to the fitted inverse, in whichever form the step carries it."""
         if self._traced:
-            return TracedSplitShiftPolicy(base, traced_field_split(self._preconditioner.inverse))
+            return TracedSplitShiftPolicy(
+                base, traced_field_split(self._preconditioner.inverse, self._precision)
+            )
         return MonolithicFactorShiftPolicy(base, self._preconditioner)
+
+    @property
+    def _precision(self) -> str:
+        """The precision the fitted split is applied in; a single block inverse is always double."""
+        inverse = self._spec.inverse
+        return inverse.precision if isinstance(inverse, FieldSplit) else "float64"
 
     def _probe_for(self) -> JacobianProbe:
         if self._probe is None:

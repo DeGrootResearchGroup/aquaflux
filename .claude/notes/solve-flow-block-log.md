@@ -1625,7 +1625,8 @@ incumbent's **2 / 11 s** — a threefold wall-clock gap that is structural for t
 
 ### The sparse matvec is at the limit of what JAX's primitives give — block-CSR REFUTED
 
-The level operators are applied through `_CsrOperator.apply`, a `jax.experimental.sparse.BCSR` product at
+⚠️ **Dated: the level operators are now padded-row (`_PaddedRowOperator`, 2026-10-14), not CSR; see
+`solve-amg-multigrid.md`'s binding decisions.** At the time they were applied through `_CsrOperator.apply`, a `jax.experimental.sparse.BCSR` product at
 **scalar** block size. Since the flow block carries four fields per cell it has genuine 4x4 dense block
 structure, and a true block form stores one column index per **sixteen** nonzeros rather than one per
 nonzero — cutting index traffic from 4 bytes per nonzero to 0.25, about 31 % of total traffic on a kernel
@@ -1644,12 +1645,10 @@ per-edge product buffer. The transposes that the field-major layout `(cell i, fi
 actually require cost a further 27 %. So a block-CSR migration is worth zero at best and -27 % as it would
 have to be built, against a state-layout change across the whole solver.
 
-**The corollary is the useful part: JAX's CSR matvec is not index-bound.** It matches a formulation
-carrying sixteen times less index traffic, so it is near what the primitive can do and there is no easy
-headroom in the kernel. Beating it needs a **fused** custom kernel doing gather → block multiply →
-scatter without materializing between the steps, which is a Pallas or custom-call project — and one whose
-payoff is on an accelerator, where that access pattern is the bottleneck, not on CPU where it would chase
-a fraction of a threefold gap.
+⚠️ **The corollary drawn here — "JAX's CSR matvec is near what the primitive can do, no easy headroom"
+— was wrong: a padded-row (ELLPACK) product in plain `jax.numpy` beat it ~30 % on a whole split apply
+(2026-10-14), because the CSR kernel is one single-threaded call and the padded-row product is a fused,
+threaded loop.** The block-CSR tie above still stands.
 
 ⚠️ **Per-call launch overhead is NOT why the coarse levels look expensive** — measured at about **10 us**
 per matvec, against roughly 144 matvec calls in a V-cycle of ~400 ms, i.e. under 1 %. Nor are the coarse
