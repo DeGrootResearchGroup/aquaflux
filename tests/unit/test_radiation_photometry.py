@@ -622,3 +622,21 @@ def test_a_mirror_image_sends_along_each_reflected_direction_what_the_source_sen
     twice = image.mirrored(jnp.asarray(plane))
     assert twice.handedness == profile.handedness
     np.testing.assert_allclose(twice.up, profile.up, atol=1e-15)
+
+
+def test_rows_far_apart_on_the_axis_are_warned_about_and_read_as_stored():
+    """Every horizontal angle names one direction on the axis, so rows 16 % apart there are not
+    one distribution; the table is kept as measured and the caller is told."""
+    intensity = [[100.0, 50.0], [117.0, 50.0], [100.0, 50.0]]
+    with pytest.warns(UserWarning, match=r"disagree on the axis \(gamma = 0\) by 16\.1%"):
+        photometry = _photometry([0.0, 90.0], [0.0, 90.0, 180.0], intensity)
+    np.testing.assert_array_equal(photometry.intensity, intensity)
+
+
+def test_rows_apart_on_the_axis_by_a_measurement_s_noise_are_not_warned_about(recwarn):
+    """The measured Ushio B1 file's axial values run from 120.24 to 122.92 mW/sr: noise, 2.2 %.
+
+    Its extremes and its first row, so a threshold at the 1 % first proposed for this, which that
+    file would trip, shows here."""
+    _photometry([0.0, 90.0], [0.0, 90.0, 180.0], [[120.242, 5.0], [122.915, 5.0], [121.379, 5.0]])
+    assert not [w for w in recwarn if "disagree on the axis" in str(w.message)]

@@ -319,8 +319,13 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   file integrates to **118.826 mW** (a trapezoid estimate gave 118.6 and was quadrature error).
 - **The radiance is floored at `MIN_COSINE = 1e-3`** (OOR's `IES_MIN_COS`), since a table with light
   at `gamma = 90` would otherwise need unbounded radiance along the facet's plane.
-- ⚠️ **The measured table disagrees with itself at the pole**: `I(0, h)` is 121.38 to 121.77 mW/sr
-  across `h`. A point on the axis reads `h = 0` (as OOR's `hDegFromDir_` does), and within a fraction of
+- ⚠️ **The measured table disagrees with itself at the pole**: `I(0, h)` is **120.24 to 122.92 mW/sr**
+  across its 17 rows, 2.2 % of their mean (read from `ushio_b1.ies` 2026-10-17; the 121.38-121.77
+  once recorded here was wrong, and a warning threshold set from it would have fired on this file).
+  Read as stored, not averaged (#632, decided with the user): `Photometry` warns only when the
+  axial rows spread past `_POLE_SPREAD = 5 %` of their mean, above this file's noise and below an
+  internally inconsistent file's (the issue's synthetic one, 16 %). A point on the axis reads
+  `h = 0` (as OOR's `hDegFromDir_` does), and within a fraction of
   a degree of the axis two neighbouring facets read different rows — a 0.18 % effect that a test at
   `gamma = 0.1 deg` once read as a code error. It is the data.
 - **The transfer refuses it** (`NotImplementedError`): it freezes one `source_cosine` per pair, and an

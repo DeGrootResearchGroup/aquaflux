@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import warnings
 from pathlib import Path
 from typing import ClassVar
 
@@ -57,6 +58,13 @@ __all__ = ["MIN_COSINE", "PhotometricProfile", "Photometry", "read_ies"]
 # along the facet's plane, which no finite radiance from a flat facet can deliver. The same floor
 # of-optical-radiation's iesEmitter applies.
 MIN_COSINE = 1e-3
+
+# How far the rows may disagree on the axis, as a share of their mean, before a table is warned
+# about. On the axis every horizontal angle names the same direction, so a real luminaire has one
+# value there; measured files disagree by noise (the Ushio B1 file's rows run from 120.24 to 122.92
+# mW/sr, 2.2 % of their mean), which is read as stored, but a file far outside that is internally
+# inconsistent and its axial value is then whichever row the direction's rounding selects.
+_POLE_SPREAD = 0.05
 
 # How close a horizontal range must be to a quarter or half turn to declare that symmetry.
 _SYMMETRY_TOLERANCE = 1e-3
@@ -119,9 +127,33 @@ class Photometry:
                 "0 degrees, which is not an LM-63 layout: a quadrant-symmetric table covers 0 to 90"
             )
             raise ValueError(msg)
+        self._warn_if_the_pole_disagrees()
         if self.symmetry == "full" and span > 360.0:
             msg = f"horizontal angles span more than a turn: {self.horizontal[[0, -1]]}"
             raise ValueError(msg)
+
+    def _warn_if_the_pole_disagrees(self) -> None:
+        """Warn when the rows' values on the axis spread by more than :data:`_POLE_SPREAD`.
+
+        The table is read as stored either way: averaging the axis would alter measured data, and
+        a spread at the measurement's own noise is not worth that. A large one means the file
+        does not describe one distribution, which the caller should know.
+        """
+        if self.vertical[0] != 0.0 or len(self.horizontal) < 2:
+            return
+        axis = self.intensity[:, 0]
+        mean = float(np.mean(axis))
+        spread = float(np.max(axis) - np.min(axis))
+        if mean > 0.0 and spread > _POLE_SPREAD * mean:
+            warnings.warn(
+                f"the table's rows disagree on the axis (gamma = 0) by {100 * spread / mean:.3g}% "
+                f"of their mean, from {np.min(axis):.6g} to {np.max(axis):.6g}; every horizontal "
+                "angle names the same direction there, so the file is not one distribution. It is "
+                "read as stored, so the value along the axis is whichever row the direction's "
+                "rounding selects.",
+                UserWarning,
+                stacklevel=3,
+            )
 
     @property
     def symmetry(self) -> str:
