@@ -53,7 +53,7 @@
       entries that could cross zero; the ω step bound added 2026-10-14 now limits what reaches `omega`. The
       near-wall `omega` fixation row `log omega = log omega_wall(k)` hands that straight to `omega`,
       whose log transport exponentiates it — which is how a 12 % gradient difference loses a march.
-      The full trail, with the four-way tables, is in `.claude/rules/schemes.md` under the
+      The full trail, with the four-way tables, is in `.claude/notes/schemes-log.md` under the
       `SkewCorrectedGradient` stall; `validation/pitzdaily_gradient_ab/closure_stall_probe.py`
       re-measures any of it at a saved state.
     - **The Patankar treatment this points at is NOT the flag below.** `explicit_production_limiter`
@@ -2185,8 +2185,8 @@ Many entries below are dated history written against the old API. Read them thro
       the pseudo-timestep while the inner loop stays comfortable and **carries β across refreshes**,
       reaching a developed pitzDaily recirculation in materially fewer outer steps than the residual-keyed
       control, and carrying a full cold ramp to the target Reynolds number (step counts measured on pitzDaily,
-      configuration not recorded — re-measure before relying on them). See the DualTimeStep bullet
-      in `.claude/rules/solve-march.md`.
+      configuration not recorded — re-measure before relying on them). See the `DualTimeControl` bullet
+      under "Step controls" in `.claude/rules/solve-march.md`.
     - **Opt-in `ResidualRatioDualTimeControl`:** ramps β by the steady-residual ratio; safe when that
       residual is a reliable progress signal, but it pins β on the flat `β×travel` pitzDaily plateau
       (the slower arm), so it is not the default.
@@ -2312,7 +2312,7 @@ Many entries below are dated history written against the old API. Read them thro
       gradient, which a boundary closure would otherwise invent from an ω boundary value that is not
       data. The shipped `CorrectedGreenGauss` reconstructs nothing from its own output, so its
       result is unchanged — this is the same latent-trap removal as the entry above, one layer down.
-      See `.claude/rules/schemes.md`'s multiple-correction entry for the seam.
+      See `.claude/rules/schemes.md`'s `ImposedGradient` entry for the seam.
     - Measured inert on pitzDaily (`F1` saturates at the fixed cells); do not cite the fix as a
       convergence or accuracy improvement there: `.claude/notes/turbulence-log.md`, "The imposed wall ω gradient".
     - **Distinction to keep in mind if this is ever extended:** the *point* gradient (right for the

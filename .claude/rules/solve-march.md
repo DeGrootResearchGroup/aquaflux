@@ -228,8 +228,8 @@ built on `newton_march(reference_norm=, damping_reference=)`. Without it a resum
 
 `retry_reason` returns `"diverged" | "alpha" | "cycles"`; `ESCALATING_REASONS = {"diverged", "alpha"}`
 (`retry.py`, read by the march and the log) says which raise β. The tight-Krylov fallback reports
-`"solver"`. (Origin of the split: `solve-amg-multigrid.md`, "the cost guard and the shift escalation are
-now separate responses".)
+`"solver"`. (Origin of the split: `.claude/notes/solve-amg-multigrid-log.md`, "✅ RESOLVED — the cost guard and the shift
+escalation are now separate responses".)
 - **Escalation**: a step that diverges or whose line search collapses (`retry.on_alpha`) is redone from
   the same pre-step state at β × `retry.beta_factor`, up to `retry.max_retries`, before the tight
   `retry.solver` fallback. Escalation leads because, run divergence-first, the tight retry's grind on
@@ -237,7 +237,9 @@ now separate responses".)
   necessity: no cheap static operator property predicted a bad step on bfs3d (log; ledger).
 - **Cost (`"cycles"`)**: `retry.abort_above_cycles` redoes an expensive step **at the same shift**, on a
   re-fitted preconditioner (the march passes `due=True` first). A cycle count says the frozen
-  preconditioner is struggling, not that the step is stiff, so cost must not escalate. ⚠️ **One cost redo
+  preconditioner is struggling, not that the step is stiff, so cost must not escalate (on bfs3d a stiffer
+  operator was not an easier one: 140 applications at β 0.5 against 32 at 0.05). Stiffness is what
+  `on_alpha` measures; `escalates` means `on_alpha is not None`. ⚠️ **One cost redo
   per step** (`redone_on_fresh` in `march.py`): a second at the same shift would repeat it exactly.
 - **Divergence fallback (`retry.solver`)**: redoes a diverged step at the tighter solver, without
   re-refreshing the preconditioner (the failure is an under-converged Krylov solve, not a stale
@@ -333,6 +335,9 @@ now separate responses".)
   also rises with β → 0, more than with staleness on pitzDaily, and a pre-separation refresh was harmful
   (log, "`CycleGrowthTrigger`"). ⚠️ **Zero-count reports are ignored** (a rejected step or a direct
   solver reports `0`; a `0` baseline would latch the trigger on). Its defaults are uncalibrated.
+- ⚠️ **Never nest a refresh condition inside a β gate** while a preconditioner-only `refit_beta_floor` is
+  set: it pins the gate's input below the floor, so the condition is unreachable in the low-shift tail
+  (on bfs3d un-nesting the deleted gates cut a march 480 → 348 cycles).
 - **`refresh.limit` lives on the driver**, keeping the trigger a pure function of one segment's history
   (so `warmup`/`patience` re-apply after a refresh, it unit-tests without a solve, and it calibrates
   offline).
@@ -525,5 +530,8 @@ Pinned by `tests/unit/test_march_log.py`, which reads cells, not substrings.
     so `coupled_residuals` is stateful and takes a `reference_state` seed a per-rung reporter must pass.
     `ν_t` gets `--` residual cells. One extra residual evaluation per step.
   - `"pc"` — a session's `observer=logger.on_refresh` reports each refresh's kind (`full` / `cost` /
-    `none`) and its `RefreshTiming` phases; rendered on the step it preceded, summed across every refresh
-    between two step rows.
+    `none`) and its `RefreshTiming` phases (`solve/refresh_timing.py`: `probe` / `assemble` / `refactor`,
+    any remainder shown as `other`; the probe dominated, ~63 % on bfs3d
+    under the since-deleted monolithic AMG); rendered on the step it preceded,
+    summed across every refresh between two step rows. A log written before 2026-08-17 understates the
+    refresh side.

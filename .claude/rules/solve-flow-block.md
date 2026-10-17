@@ -17,7 +17,7 @@ paths:
 It was chosen for robustness, not speed: incomplete-LU arms were sensitive to elimination order by orders
 of magnitude on this operator, and the traced path is the only one with a GPU route. On a march it was
 measured slower than the (since deleted, #371) PETSc ILU(0) incumbent — 1.26x at matched `inner_tol`
-1e-2 (log: "[from rule] THE TRACED FLOW BLOCK IS STILL NOT FASTER ON A MARCH"); the default accepts that.
+1e-2 (log: "THE TRACED FLOW BLOCK IS STILL NOT FASTER ON A MARCH"); the default accepts that.
 
 **The SIMPLE level's derived pieces are stored on their structural pattern (binding, #290).**
 `saddle_multigrid.py` forms each level's `D⁻¹G` and Schur `C − D (D⁻¹G)` with `_structured(...)`

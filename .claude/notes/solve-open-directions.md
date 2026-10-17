@@ -72,7 +72,7 @@ the production scheme). The two op-by-op rows were removed by compiling them (20
 (2026-10-16, branch `claude/multicorr-adjugate-inverse`), and was taken with a batched LAPACK LU of
 `M1 - B` inside every residual and JVP** -- 6 `getrf` + 12 `trsm` library calls in the compiled
 pitzDaily residual at `44ba609f`. Removing it took the warm pitzDaily residual 29.8 -> 5.3-6.4 ms and the JVP
-45.0 -> 17.2-19.3 ms (`.claude/rules/schemes.md`, multiple-correction section, configuration there).
+45.0 -> 17.2-19.3 ms (`.claude/notes/schemes-log.md`, "Moved → `MultipleCorrectionGradient`: exactness, conditioning, closure table, adjugate timing, stencil reach and reach 4", configuration there).
 So the JVP column above (77-86 ms), the ~70 % preconditioner share it implies, the probe's ~6 s per
 refit, and the 45 -> 77 ms rise are all measured under that call and were not re-run; the rise itself
 remains unexplained. The shipped pitzDaily march gained only 430 -> 411 s on identical trajectories

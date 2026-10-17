@@ -1607,8 +1607,8 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   permanently, whatever gradient was reconstructed, and the double correction was fully live there for
   any closure that reads a boundary value. Both closures now take the owner gradient and the
   owner-centroid→face displacement, and both flow reconstructions run the two-pass shape and pass
-  `boundary_values_at` — see `.claude/rules/flow.md`'s `corr` reconciliation bullet for the shape and
-  the analytical test. **The numbers below are therefore a record of the defect, not of current
+  `boundary_values_at` — see the "Two-pass boundary reconstruction is `schemes.BoundaryClosure.reconstruct`" bullet in
+  `.claude/rules/flow.md` for the shape and the analytical test. **The numbers below are therefore a record of the defect, not of current
   behaviour**; the ratio they establish (a spurious normal derivative four times the real gradient at
   the outlet) is what makes the repair worth its cost, and the closing "1e-4 on this mesh" is why it
   was never *visible* on pitzDaily.
@@ -2974,7 +2974,7 @@ property worth checking on any future change here; a drift that grew with depth 
     `multiple_correction.py` beside `boundary_gradient_block`, not in `schemes.__all__`) and an
     owner-only scatter (`FaceCellConnectivity.scatter_to_owner`) build it. ⚠️ **The fix stopped at these
     two schemes for a week: `MultipleCorrectionGradient`'s first pass kept a per-call
-    `jnp.linalg.inv(M1 − B)` until 2026-10-16** — see the multiple-correction section's adjugate entry. Measured with/without the weight on orthogonal
+    `jnp.linalg.inv(M1 − B)` until 2026-10-16** — see the adjugate entry under "Moved → `MultipleCorrectionGradient`" above. Measured with/without the weight on orthogonal
     meshes, min of 15, warm: compact 2D 80×40 0.158/0.141 ms, 3D 24³ ~1.1–1.6×; corrected 2D ~1.2–1.3×,
     3D ~1.4× — noisy single runs in a shared container. **`InverseCellVolume` inverts `I − B` and then
     divides by `V`, in that order**: inverting `V(I − B)` directly broke bit-identity on orthogonal meshes

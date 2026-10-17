@@ -423,7 +423,7 @@ reordering. A SIMPLE-smoothed hierarchy never eliminates the matrix, so it has n
 measurements. What was closed then was either of them as a default, and the bisect that would say *when* the collapse entered.
 ⚠️ **Consequence for anyone reading an old number: a `petsc`-bundle figure for this case is not
 reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
-merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
+merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/notes/validation-log.md`
 § "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
 
 ## PETSc (monolithic GAMG V-cycle, UMFPACK complete LU) — DELETED as dominated (2026-10-10)
@@ -951,13 +951,13 @@ data model. Each had nothing in `validation/` or any test selecting it.
   `leading_inverse` and `trailing_inverse`. Neither flagship case selected a PETSc split block. On the
   trailing half the traced `jacobi` inverse beat the host GAMG V-cycle in a controlled `bfs3d` pair,
   2124 s / 67 steps against 2893 s / 72 to the same `x_r/h` 8.36 (`zerogradient` k wall, 1e-08
-  positivity floor; `solve-field-split.md`). On the leading half `petsc` stopped marching pitzDaily
+  positivity floor; `solve-field-split-log.md`). On the leading half `petsc` stopped marching pitzDaily
   (§ "Incomplete-LU preconditioning of the pitzDaily flow block") and sat at parity with `hostilu` on
   `bfs3d`; both cases ship `simplesmooth`. The monolithic `MonolithicVCycleInverse` is unaffected.
 - **`flow_first=False` (the turbulence-first split, `_TrailingFirstFieldSplit`) — DELETED, never
   selected.** It tied flow-first on the forward operator (4 cycles each) and lost at the converged
   zero-shift operator, 13 against 11 (PETSc ILU(0) blocks on both halves, `bfs3d`;
-  `solve-field-split.md`).
+  `solve-field-split-log.md`).
 - **Harnesses deleted with them** (recover from git history): `bfs3d_openfoam/turbulence_smoother_sweep.py`
   (every arm a PETSc leading block), `bfs3d_openfoam/rung_hierarchy_reuse.py` (a PETSc leading block; its
   question was GAMG interpolation reuse across rungs), and every split arm of
@@ -1009,7 +1009,7 @@ and binding defaults are in `solve-globalization.md`.
   β 0.5 against 32 at 0.05), so it now only aborts and redoes the step at the same shift
   (`retry.abort_above_cycles`, one redo, on a re-fitted preconditioner); stiffness is escalated on
   `retry.on_alpha` and divergence. Keep `abort_above_cycles < cycle_budget`, or a truncated grind is
-  accepted. Full detail: `solve-amg-multigrid.md`, "the cost guard and the shift escalation are now
+  accepted. Full detail: `solve-amg-multigrid-log.md`, "✅ RESOLVED — the cost guard and the shift escalation are now
   separate responses"; the pre-split design text was deleted from `solve-march.md` (recover from git
   history).
 

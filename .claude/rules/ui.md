@@ -133,7 +133,7 @@ long-lived `sys.executable -m aquaflux serve` process** (`SolverWorker`, see `ca
   `<value> (default)` as placeholder and marked in the dropdown; `"required"`; `OFF` ("Off") when the
   schema marks the field `off`; `NOT_SET` ("Not set") when the default is `None` and unresolved. A
   schema-resolved default (`resolved_default`, from a kind's `unset_resolves_to`) shows like a stated one
-  (see `solve.md`, "Three class-level declarations").
+  (see `solve.md`, the `SettingsMapping.schema()` bullet's three `ClassVar`s).
 - **A setting the case's physics does not read is not offered** (owner). `CaseSchema.reading(document)`
   filters by each field's `scope` and each physics' `reads` (`case/scopes.py`, `case.md`). Choosing a new
   physics (`set_kind` on `scopes_from`) applies `without_unread`; a file opened with an unread setting

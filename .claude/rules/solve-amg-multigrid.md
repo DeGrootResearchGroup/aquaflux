@@ -49,33 +49,7 @@ field split's adjoint gate is `tests/integration/test_coupled_field_split.py`.
 - **A cycle-count threshold encodes which preconditioner is installed** — read a `cycles` retry as a
   statement about the threshold before reading it as one about the step.
 - **Do not instrument a long run with a per-step notification stream** (it took ~70 % CPU from the solve).
-
-### ✅ RESOLVED — the cost guard and the shift escalation are now separate responses (2026-08-17)
-
-This is march behaviour (`solve/retry.py`, `solve/march.py`), recorded here because it is cited by this
-heading. `RetryPolicy.abort_above_cycles` is a cost guard only; `retry_reason` returns
-`"diverged" | "alpha" | "cycles"` and `ESCALATING_REASONS = {"diverged", "alpha"}` (one home, read by the
-march and the log) says which raise the shift. A `"cycles"` retry redoes the step at the same shift on a
-re-fitted preconditioner.
-- **Why cost must not escalate:** a cycle count says the frozen preconditioner is struggling, not that the
-  step is stiff, and on bfs3d a stiffer operator was not an easier one (140 applications at β 0.5 against
-  32 at 0.05). Stiffness is what `on_alpha` measures; `escalates` means `on_alpha is not None`.
-- ⚠️ **The redo is capped at one per step** (`redone_on_fresh` in `march.py`): a second at the same shift
-  would repeat the first exactly.
-- ⚠️ **`cycle_budget` depends on the redo**: it truncates a grinding solve expecting the iterate to be
-  discarded, so keep `abort_above_cycles < cycle_budget` or the truncation is accepted.
-
-### Other live facts first recorded with the monolithic AMG (march code, kept until moved)
-
-- **A preconditioner-only `refit_beta_floor` pins a β gate's input below the floor**, so a refresh
-  condition nested inside a β gate is unreachable in the low-shift tail (on bfs3d un-nesting the gates cut
-  a march 480 → 348 cycles).
-- **`RefreshTiming` (`solve/refresh_timing.py`) reports a refresh's phases** (`probe` / `assemble` /
-  `refactor`), rendered by `MarchLogger` with any remainder as `other`; every refresh between two step rows
-  is summed and a repeated branch marked `Nx`. A refresh-versus-step comparison from a log written before
-  2026-08-17 understates the refresh side. The probe dominates a refresh (~63 % on bfs3d).
-
-Detail for both sections: log, "Condensed out of the rule (2026-10-17)".
+- **March code first recorded here** (cost guard vs shift escalation, `refit_beta_floor` gates, `RefreshTiming`): now `solve-march.md`; originals in the log, "Condensed out of the rule (2026-10-17)".
 
 ## The traced multigrid — in progress
 

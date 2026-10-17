@@ -1377,7 +1377,7 @@ a re-fitted factorization (the dual-time loop's mid-step refresh until 2026-10-1
      `validation/bfs3d_openfoam/trailing_depth_probe.py` on whatever bigger mesh next triggers this.
      **A separate, likely LARGER wall this does not touch:** `FieldSplitPreconditioner` materializes
      the *entire* coupled Jacobian (all fields, reach 3) to slice out this block regardless of its own
-     depth — see the field-split scaling note in `solve-field-split.md`.
+     depth — see "Materialization is still a scaling wall" in `solve-field-split.md`.
 
   **Local PETSc source** for continuing the port (shallow sparse clone, may need re-cloning):
   `src/ksp/pc/impls/gamg/{agg,gamg}.c` and `src/mat/graphops/coarsen/impls/misk/misk.c` — note
@@ -1719,7 +1719,7 @@ a re-fitted factorization (the dual-time loop's mid-step refresh until 2026-10-1
     coupling stays inside it rather than being approximated away outside. And the FC-Jacobi smoother
     inverts each cell's own block (`_cell_block_inverse`) rather than the scalar diagonal, because on
     the coupled scalar pair that coupling exceeds the diagonal.
-    - **The third of those is why the recorded blocker falls.** `solve-field-split.md` records the
+    - **The third of those is why the recorded blocker falls.** `solve-field-split-log.md` records the
       trailing Jacobian slice going **diagonal-negative at level 1**, with smoothed/convection/lAIR all
       refusing to build, and names that — not row density — as "the decisive fact". It is a **point**-
       smoother requirement: `_require_positive_diagonal` demands a positive scalar diagonal, while

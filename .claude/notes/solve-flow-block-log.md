@@ -7,8 +7,8 @@
 > investigation behind the traced `[u, v, w, p]` flow-block preconditioner, including several rounds
 > of "found a win" that a later, tighter measurement qualified or retracted — kept because a
 > wrong-but-plausible finding gets re-derived if the trail that refuted it is deleted rather than
-> archived. See `solve-flow-block.md` for the current, load-bearing status (the traced path is built
-> and differentiable but is not the shipped march default).
+> archived. See `solve-flow-block.md` for the current, load-bearing status (the traced SIMPLE-smoothed
+> hierarchy is now `bfs3d`'s shipped leading-block inverse; some entries below predate that).
 >
 > ⚠️ **2026-09-13 (#371):** `Ilu0`, `IluSmoothedInverse` (`hostilu`), `tools/build_ext.sh`, the PETSc
 > split blocks and the `petsc` / `hostilu` `BFS3D_FLOW_INVERSE` arms were deleted. Every entry below that
@@ -1366,7 +1366,7 @@ real per-level cost is inside the 6 s build above, which is 2× PETSc's 3 s and 
 
 ### ⚠️ THE FORWARD SOLVE'S β = 0 CONTRACTION IS GEOMETRIC, NOT QUADRATIC — still undiagnosed (2026-08-14)
 
-**A root at β = 0 IS reachable — see solve-flow-block.md's *"`jax.grad` RUNS ON THIS CASE"* section, where `rtol` 1e-4 is reached
+**A root at β = 0 IS reachable — see the *"[from rule] ✅ `jax.grad` RUNS ON THIS CASE"* section below, where `rtol` 1e-4 is reached
 and the gradient it yields is validated. What has never been explained is the RATE.** An earlier version
 of this entry concluded the solve "cannot reach a root at any tolerance a gradient would want"; that is
 **false** and is deleted. The rate finding below survives it, and is the part still worth chasing.
@@ -1434,7 +1434,7 @@ It said `jax.grad` had never succeeded, that the transpose solve stagnated even 
 halves of the adjoint were broken, and that two arms (the Krylov settings, and the traced leading inverse)
 remained unrun. The stagnation was a **solver-settings artifact reachable only through an API gap that is
 now closed** (`solve_coupled(adjoint_solver=…)`), the gradient runs and is validated to 1.9e-04, and both
-arms have been run. See solve-flow-block.md's *"`jax.grad` RUNS ON THIS CASE, AND IS VALIDATED"* section for the costs and the
+arms have been run. See the *"[from rule] ✅ `jax.grad` RUNS ON THIS CASE, AND IS VALIDATED"* section below for the costs and the
 traced-versus-PETSc comparison. Three findings from that entry are **not** superseded and are kept here
 because they cost real time to learn:
 

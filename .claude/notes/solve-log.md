@@ -187,7 +187,7 @@ archived march logs and any private notes still use the left column).
     **Outcome on the case it was built for:** with this threaded and a budget large enough not to bind,
     `jax.grad` runs on `bfs3d` for the first time and matches a central finite difference to 1.9e-04 —
     but the passthrough alone was not sufficient, because the transpose solve needs ~1450 preconditioner
-    applications and the first budget allowed ~900. See `solve-flow-block.md`'s *"`jax.grad` RUNS ON THIS
+    applications and the first budget allowed ~900. See `solve-flow-block-log.md`'s *"[from rule] ✅ `jax.grad` RUNS ON THIS
     CASE"* section for the costs, the arms, and the finite-difference trap that a loose root sets.
 
 ## Contracts: `root_adjoint.py` — `default_linear_solver()` restart sweep (2026-10-09, #114)

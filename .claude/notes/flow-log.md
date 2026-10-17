@@ -17,7 +17,7 @@
 
     ⚠️ **On tetrahedra the first version shipped a singular pressure correction** (94 cells at
     `max|M2⁻¹|` 3.1e16 on the 2462-cell duct) and froze the laminar march; the cause was the probe,
-    not the per-field split — see the ⚠️⚠️ note beside the `bind` entry in `.claude/rules/schemes.md`.
+    not the per-field split — see "The boundary-linearization probe" in `.claude/rules/schemes.md`.
 
 ## From "Status — BUILT" → `corr` reconciliation, two passes as `schemes.BoundaryClosure.reconstruct` (#58)
 
