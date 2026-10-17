@@ -1253,3 +1253,53 @@ threshold withholding of the second pass, mixed per-cell schemes, and Betchen's 
 source. The answer was a scheme that chooses its weights (`ProjectedStencilGradient`). Detail:
 `.claude/rules/schemes.md` (`MultipleCorrectionGradient` recommendation) and
 `.claude/notes/schemes-435-tetrahedral-gradient-log.md`.
+
+## A log-space ω shift (dropping the `× ω` coordinate factor) — LOSES THE MARCH (2026-07-25, #33)
+
+Under `LogScalars` the coupled ω shift is `transport_diagonal × ω`, which drags ω's evolving range into the
+damping (15 % of ω cells over-damped >2× at a developed pitzDaily state). Dropping the `× ω` factor collapsed
+that tail and looked transformative per step (up to 11× the single-step reduction at matched median damping),
+but on a cold-IC pitzDaily march at identical settings it reached a far deeper residual with a 3–6× smaller
+recirculation (`x_r/h` 0.05 against 0.6 at equal residual): the bare transport diagonal under-weights the
+near-wall cells (0.54× median against 2.95× with the factor), so the near-wall region is under-damped ~20×.
+The built cure is the factor split instead (#156: rebuild the transport diagonal, carry the coordinate
+factor). Full record: `.claude/notes/turbulence-log.md`, "The ω shift diagonal inherits ω's dynamic range".
+
+## A residual- or β-keyed taper of `turbulence_damping` — DOMINATED BY A CONSTANT RATIO (2026-09-10/11)
+
+Tapering the k/ω shift multiplier from a large value to 1 (keyed on `beta`, on `|R_turb|`, or switched per
+station) was measured on pitzDaily (momentum-only, 16 x 1) against constant ratios: every taper lost to a
+constant `gamma` of 2–3, because every signal a shift policy can read measures progress, and progress
+saturates inside the ramp (the release completes by step 12 or step 6 of 16), and because the damping's cost
+is deferred to the target station rather than removed (the handover residual scales with how hard the ramp
+damped). A β-keyed ratio also forms a positive feedback loop with the retry ladder. The strategies
+(`BetaTaperedDamping`, `ResidualTaperedDamping`) remain built. Full record: `.claude/notes/turbulence-log.md`,
+"ViscosityRampHomotopy — momentum-only scaling and `turbulence_damping`".
+
+## Predicting a dangerous continuation rung from path geometry — REFUTED (2026-09-08)
+
+The ratio `tau = E1/E0` of the first-order-corrected to the plain seed residual (how far the solution path
+stays linear over a rung) ranked pitzDaily's step into the target — the one that diverged at a warm
+`beta_start` of 0.05 — as twice as safe as the step into `Re/10`; `E0` ranks them the same wrong way. Both are
+parameter-space quantities, and what makes a high-Reynolds rung dangerous is state-space stiffness. The third
+refuted predictor of a bad continuation step (after the step-0 static diagnostics and an `alpha`-trend rule):
+adapt the spacing from the previous rung's observed cost. `E0` does predict the next rung's starting residual
+exactly. Full record: `.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies".
+
+## A local (point-implicit / aggregate-block) smoother in place of the Reynolds ladder — REFUTED (2026-09-08)
+
+At pitzDaily's cold hybrid start at the target viscosity, the explicit, row-scaled, per-cell block and
+aggregate-block directions `-D^-1 R` reduced the row-scaled residual by at most 0.26 %, and five damped
+nonlinear sweeps went non-finite at every damping tried; the unreachable state has the LOWER residual than the
+anchor rung's start, so this is a basin question, not a descent question. Not refuted: Mavriplis's
+line-preconditioned blended form, which needs a real line construction. Harness
+`validation/point_implicit_step.py`. Full record: `.claude/notes/turbulence-log.md`, "Reynolds-continuation
+ladder studies".
+
+## A finer Reynolds ladder at the same span — LOSES ~22 % OF WALL (2026-09-08)
+
+pitzDaily, span held at `Re/100`, ratio 3.16 (5 rungs) against 10 (3 rungs): every finer rung is cheaper, but
+the ladder takes 99 steps against 64 because each rung re-walks its own `beta_start`-to-`beta_min` descent;
+the finer ladder buys robustness (0 escalations against 1), not wall. Superseded as a direction by the
+in-march viscosity ramp (`ViscosityRampHomotopy`), which removes the per-rung descent. Full record:
+`.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies".
