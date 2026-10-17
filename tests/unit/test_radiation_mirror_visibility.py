@@ -143,6 +143,18 @@ def test_only_paths_that_meet_the_mirror_are_tested():
     assert not bool(mask.hidden[1, 0])
 
 
+def test_whether_the_surface_can_hide_a_path_is_the_strategy_s_answer_even_with_no_pair_tested():
+    """A mirror no receiver faces tests no pair, which once left ``hidden`` an array of False
+    under a strategy that shadows nothing, where the record of such a strategy is ``None``."""
+    surfaces, mirror = _scene()
+    behind = np.array([[1.0, 0.0, -0.75]])
+    unshadowed = build_mirror_visibility(mirror, [], surfaces, behind, self_occlusion=NoOcclusion())
+    assert unshadowed.hidden is None
+    shadowed = build_mirror_visibility(mirror, [], surfaces, behind)
+    assert shadowed.hidden is not None
+    assert not bool(jnp.any(shadowed.hidden))
+
+
 def test_the_answer_does_not_depend_on_how_the_pairs_are_cut_into_passes():
     rng = np.random.default_rng(0)
     plates = np.concatenate(

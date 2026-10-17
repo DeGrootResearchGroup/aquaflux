@@ -428,9 +428,9 @@ class ShaftCulling(BodyCulling):
     source_clusters : tuple of int
         Sources per cluster at the same levels, with the same trade. As many sizes as
         ``receiver_blocks``.
-    sources : _Groups or None
-        The sources' side of the tiles, formed once by :meth:`prepared`; unset, it is formed by
-        every call. Either way the mask is the same.
+    sources : object or None
+        An internal cache, never given by hand: the sources' side of the tiles, formed once by
+        :meth:`prepared`; unset, it is formed by every call. Either way the mask is the same.
 
     Notes
     -----

@@ -141,6 +141,7 @@ SUBPACKAGE_GROUPS = {
     ],
     "radiation": [
         ("The radiation model", ["model"]),
+        ("A scene of lamps, reflectors and receivers", ["scene"]),
         ("Engineering units", ["units"]),
         (
             "Emitting surfaces",

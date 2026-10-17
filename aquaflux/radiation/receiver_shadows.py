@@ -193,15 +193,15 @@ class StreamedShadows(ReceiverShadows):
         limit = DEFAULT_PAIR_LIMIT if pair_limit is None else pair_limit
         options = dict(self.visibility_options)
         if options.get("self_occlusion") is not None and self.mirrors:
-            # Prepared once for every chunk's mirror masks, as the stream prepares it once for
-            # every chunk's direct mask.
+            # Prepared once, here, for every chunk's mirror masks and handed to the stream too,
+            # whose own preparing then finds the work done rather than doing it a second time.
             options["self_occlusion"] = options["self_occlusion"].prepared(self.geometry)
         return streamed_fluence_rate(
             sets,
             receivers,
             shadow_geometry=self.geometry,
             occluders=self.occluders,
-            visibility_options=self.visibility_options,
+            visibility_options=options,
             absorption=absorption,
             transmittance=transmittance,
             extra=_ChunkMirrors(self.mirrors, self.occluders, self.geometry, options, limit)
