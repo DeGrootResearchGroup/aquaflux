@@ -594,6 +594,13 @@ structure, not the seconds. `norm_squared` delegates to `dot` and inherits it.
   advection, Rhie–Chow, momentum, the SST closure and the sources — so a one-line change reached
   every residual evaluation at once. Open-coded at each call site it would have reached none of
   them.
+- **Guarded since 2026-10-17 by `tests/unit/test_compiled_residual_census.py`** (fast tier, CPU
+  backend only), which compiles the coupled RANS residual and its JVP and ratchets the count of
+  `kind=kCustom` fusions and of those with an empty `outer_dimension_partitions` (2 in the residual,
+  3 in the JVP, jax 0.11.2). Writing `dot` as `jnp.sum(jnp.multiply(a, b), axis=-1)` moves both to 27
+  and 46. ⚠️ **The fixture size is load-bearing:** XLA starts partitioning kernels and emitting
+  `__ynn_fusion`s somewhere between 768 and 1200 cells, so on a 768-cell grid the reverted `dot` changed no count at all. The module fails
+  if its fixture stops seeing partitioned kernels.
 
 **Ragged lists live in one leaf, `aquaflux/ragged.py`** (numpy only, imports nothing from the
 package, listed in `tests/unit/test_layering.py`'s neutral leaves): `rows` gathers chosen rows of a
