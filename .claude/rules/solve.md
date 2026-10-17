@@ -45,67 +45,17 @@ globs name the new files), and the rule-file names were kept so a search for the
 
 ## ⚠️ PETSc is GONE (2026-10-10) — no symbol below that needs it exists
 
-The optional `petsc` extra (`petsc4py`) was removed, and with it everything only it could build:
-`solve/amg_preconditioner.py` (`MonolithicVCyclePreconditioner`, `MonolithicVCycleInverse`, `monolithic_vcycle_inverse`,
-`ShiftedCellMajorOperator`), the `MonolithicVCycle` spec, and `CompleteLu`'s UMFPACK backend
-(`CompleteLu.backend`, `LU_BACKENDS`, `complete_lu_inverse(backend=)`, `CompleteLuPreconditioner.build(backend=)`).
-(The complete LU itself went the next day — see the section below.) The shared base
-`MaterializedJacobianPreconditioner` moved to `precondition/materialized_preconditioner.py` unchanged. Why it was
-dominated: no shipped case or default selected the monolithic V-cycle (both flagship cases run
-`FieldSplit(SimpleSmoothed, JacobiSmoothed)`), and the traced hierarchy was measured to match GAMG on the
-`[k, ω]` block (2 restart cycles each). Every entry in these files that measures a PETSc arm, a GAMG
-option, `MonolithicVCycleInverse._live`, or UMFPACK factor speed is dated history and **cannot be re-run from this tree**;
-`MonolithicFactorShiftPolicy.preconditioner` is now typed `HostPreconditioner`.
+Every PETSc-arm, GAMG-option or UMFPACK measurement in these files is dated history and cannot be re-run from this tree; `MonolithicFactorShiftPolicy.preconditioner` is typed `HostPreconditioner`. Ledger: `.claude/notes/solve-refuted-directions.md`, "PETSc (monolithic GAMG V-cycle, UMFPACK complete LU) — DELETED as dominated (2026-10-10)".
 
 ## ⚠️ The complete LU is GONE (2026-10-11) — the field split is the only materialized coupled inverse
 
-Deleted as dominated: `solve/lu_preconditioner.py` (`CompleteLuPreconditioner`, `CompleteLuInverse`,
-`complete_lu_inverse`), the `CompleteLu` spec (a case file naming `kind: CompleteLu` now reads as an
-unknown kind), `FACTORIZATION_LINEAR_SOLVE` / `_FACTORIZATION_LINEAR_SOLVE`, and the every-step refit
-cadence it alone used (`BetaTrackingRefresh(every_step=)` — the hook now always refits on its first call,
-after a `rebind`, and when the march passes `due` — before the step after one an inner solve's cost ended, #290). `MaterializedJacobian.inverse` is
-`FieldSplit | BlockInverse`; a coupled problem takes the split, a laminar one a bare block inverse.
-`tests/integration/test_coupled_lu.py` and `tests/unit/test_lu_preconditioner.py` went with it; the LU
-tests' assertions were ported onto the split in `tests/integration/test_coupled_field_split.py` first
-(same channel, same tolerances: root vs block-SIMPLE, `jax.grad` vs central FD to `1e-5`, a session
-refitting at the CURRENT β, the β-tracking march, and a differentiable re-fitting march — all pass,
-the FD and session tests mutation-checked).
-**Why it was dominated, and what it was measured against** (see `solve-direct-preconditioners.md` and
-`.claude/notes/solve-refuted-directions.md` for the trail): both flagship case files ship
-`FieldSplit(SimpleSmoothed, JacobiSmoothed)` and nothing shipped selected the LU; the split reaches the
-coupled adjoint's zero-shift operator at adjoint grade (bfs3d `state-00059`: 17 restart cycles to 6.4e-10
-true relative); a laminar flow's `SimpleSmoothed` matched the LU's trajectory (24×16 channel 17 steps / 61
-cycles vs 17 / 51; tetrahedral duct from rest 13 steps each); the LU's fill walls out in 3D. The one claim
-of a regime only it could reach — `compare_reynolds_continuation.py`'s "the aggressive Courant control needs
-the exact LU" — was re-run on the split before deleting and does not hold: the split converges that march
-to the same root (40 steps, `x_r/h` 8.069, no retries; full record in `validation.md`).
+`MaterializedJacobian.inverse` is `FieldSplit | BlockInverse` (a coupled problem takes the split, a laminar one a bare block inverse); a case file naming `kind: CompleteLu` reads as an unknown kind. Ledger: `.claude/notes/solve-refuted-directions.md`, "Complete LU (SciPy SuperLU) — DELETED as dominated (2026-10-11)".
 
 ## ⚠️ "native" was renamed away (2026-08-20) — there is no such symbol
 
-The word meant **two opposite things** and neither described a method:
+The rename table (`NativeHierarchyInverse` → `HierarchyBlockInverse`, `NativeSimpleInverse` → `SimpleSmoothedInverse`, `NodalNativeInverse` → `JacobiSmoothedInverse`, `BFS3D_FLOW_INVERSE=native` → `simplesmooth`, …) is in `.claude/notes/solve-log.md`, "Renamed 2026-08-20". "Traced" (inside JAX) against "host" is the distinction the old word reached for.
 
-- *ours, not PETSc* — `NativeSimpleInverse`, `NodalNativeInverse`, `NativeHierarchyInverse`,
-  `native_saddle_inverse`, `native_nodal_inverse`, `FLOW_INVERSE="native"`;
-- *run the whole solve natively on the host, **in PETSc*** — `MonolithicVCycleInverse(native=True)`,
-  `has_native_solve`, `is_exact_native`, `native_forward_solve`.
-
-The family is now named by its **level smoother**, which is the only thing its members differ in:
-
-| was | is |
-|---|---|
-| `NativeHierarchyInverse` | `HierarchyBlockInverse` |
-| `NativeSimpleInverse` / `native_saddle_inverse` | `SimpleSmoothedInverse` / `simple_smoothed_inverse` — *the factory is now the value object `SimpleSmoothed` (#371)* |
-| `NodalNativeInverse` / `native_nodal_inverse` | `JacobiSmoothedInverse` / `jacobi_smoothed_inverse` — *the factory is now the value object `JacobiSmoothed` (#371); `air_inverse` is `AirReduction`* |
-| `HostVCycleInverse` / `host_ilu_inverse` | `IluSmoothedInverse` / `ilu_smoothed_inverse` — *deleted 2026-09-13 with the ILU(0) kernel, #371; neither name exists* |
-| `MonolithicVCycleInverse(native=)` / `has_native_solve` / `is_exact_native` / `native_forward_solve` | *(deleted 2026-09-13, #371 — there is no host exact forward solve, and none of these four names exists)* |
-| `solve/native_inverse.py` / `solve/host_vcycle.py` | `precondition/hierarchy_inverse.py` / `solve/ilu_inverse.py` (*the latter deleted 2026-09-13, #371*) |
-| `BFS3D_FLOW_INVERSE=native` | `BFS3D_FLOW_INVERSE=simplesmooth` |
-| `BFS3D_TURBULENCE_INVERSE=native` | `BFS3D_TURBULENCE_INVERSE=jacobi` |
-
-Recorded measurements in these files that said "the native arm" now say "the traced arm" — *traced*
-(runs inside JAX, on device) against *host* is the distinction the old word was reaching for, and it
-is the one that matters for a GPU. `hostilu` and `petsc` arm values were unchanged (both arms were removed 2026-09-13, #371): both already say
-what they are. See the shipped `docs/preconditioning.md` for the user-facing description.
+## Settings values — `settings_value.py`, `settings_mapping.py`
 
 **The three value objects share a public base, `BlockInverse` (`block_inverse.py`), which in turn
 derives from `SettingsValue` (`settings_value.py`, #371, 2026-09-14).** `SettingsValue` is the one home
@@ -230,17 +180,7 @@ separately and pinned equal by a test — which is what found that a round-trip 
   linear solve wrapped so its gradient comes from **implicit differentiation**, not by
   unrolling Krylov iterations onto the tape.
 
-> **⚠️ The guard scanned `aquaflux/` ONLY, and the boundary eroded where it did not look (extended
-> 2026-08-15).** `validation/` held **16** deep imports of names `__all__` already advertises —
-> `restart_cycles`, `MonolithicVCyclePreconditioner`, `symmetrically_equilibrate`, the probe-plan types —
-> so "this cannot erode silently" was true of the directory under guard and false next door. Those
-> harnesses are the project's re-adjudication instruments, so a rename inside a preconditioner breaks a
-> *study* rather than a test: the more expensive failure, and the later-discovered one. The rule now
-> enforced over `validation/` is the one needing no API decision — **if the package exports it, import
-> it from the package** — and the harnesses' genuinely-internal reaches are an explicit list
-> (`VALIDATION_INTERNAL_REACHES`) asserted in **both** directions, so an unlisted reach fails and so
-> does a stale entry. Note the guard immediately found four violations an ad-hoc regex sweep had
-> missed, because it parses imports rather than matching lines.
+> `validation/` is under the same import guard: a name the package exports is imported from the package, and the harnesses' genuinely internal reaches are listed in `VALIDATION_INTERNAL_REACHES`, asserted in both directions. History: `.claude/notes/solve-log.md`, "Responsibility / API boundary".
 
 > **`solve/__init__.py` (and `precondition/__init__.py`, since #284 part 1) is the API boundary (binding, #48).** Everything consumable from this
 > package is re-exported there, and **library code imports `from aquaflux.solve import …`, never
@@ -312,46 +252,7 @@ name an old class were taken with the same class under its old name; the rename 
 
 ## ⚠️ RENAMED 2026-09-15 — grep this table before believing an old name is missing
 
-Phase 4 of the Newton-loop unification renamed the solver vocabulary, because four words each meant
-four to seven different things: "forward" named the strategy, the loop, the Krylov settings *and*
-"not differentiable"; "solver" named the nonlinear driver and the linear one; "continuation" named a
-method and any strategy at all. **Every old name below is gone from the tree**, so a search for one
-lands here rather than on nothing — which is the point of keeping the table (issues, PR bodies, the
-archived march logs and any private notes still use the left column).
-
-| was | is | note |
-|---|---|---|
-| `ImplicitNewtonSolver` | `RootSolver` | "implicit" read as implicit time-stepping. **Not** `NewtonSolver`: a class of that name was deleted in #102 and the record of that deletion is still binding, so the name would collide with it |
-| `ForwardStep` | `NewtonStrategy` | the protocol; `ShiftedForwardStep` → `ShiftedNewtonStrategy` |
-| `forward_step.py` | `strategy.py` | the contract module (`NewtonStrategy`, `StepOutcome`, `StepReport`, `StepControl`) |
-| `forward_march` | `newton_march` | there is only one march now (phase 3), and "forward" no longer distinguishes it from anything |
-| `RootSolver.forward_step=` | `RootSolver.strategy=` | it holds a `NewtonStrategy` |
-| `solve_coupled(continuation=)` | `strategy=` | it accepts any strategy, not only a continuation; `**continuation_kwargs` → `**strategy_kwargs` |
-| `ForwardStep.default_solver()` | `NewtonStrategy.linear_solver()` | "solver" alone means the nonlinear driver everywhere else |
-| `RootSolver.solver=` | `linear_solver=` | same reason; `adjoint_solver` was already unambiguous and is unchanged |
-| `PseudoTransientStep.forward_solver=` | `krylov_solver=` | the caller's override for the inner linear solve; `linear_solver()` is the method that resolves it |
-| `coupled_step(forward=)`, `ForwardSolve` | `linear_solve=`, `LinearSolveSettings` | the Krylov settings, which are neither forward-mode nor the march |
-| `precondition_step` | `refresh_preconditioner` | a per-step hook, not a step |
-| `_ForwardSolveRegime`, `_BLOCK_FORWARD`, … | `LinearSolveRegime` (public, `solve/shifted_step.py`; was `_LinearSolveRegime` in `turbulence/coupled.py` until 2026-09-19), `_BLOCK_LINEAR_SOLVE`, … | the regimes of the same inner solve; the per-family constants stay in `turbulence/coupled.py` |
-| `RootSolver(rtol=, atol=)`, `solve_coupled(rtol=, atol=, scaled_norm=)`, `solve_coupled_mass_flow(rtol=, atol=)` | `convergence=Convergence(measure=…, rtol=…, atol=…)` (#370, 2026-09-16) | the measure and its tolerances as one value; `RootSolver` also takes `measures=` for a structured residual |
-| `RelaxationSchedule.relaxation(…)` | `shift_strength(…)` (#373, 2026-09-22) | it returns the shift strength β, which grows with damping, where an under-relaxation factor in `(0, 1]` shrinks with it — the word ran in both directions. The classes keep their names: `SwitchedEvolutionRelaxation` is the literature's |
-| `solve_segregated(rtol=)` | `increment_tol=` (#373, 2026-09-22) | it is a tolerance on the **state increment** (the largest per-field relative change over a sweep), not on a residual, and it sat beside `solve_coupled(rtol=)`, which is one |
-| `ShiftTerm.row_relaxation`, and every `relaxation` parameter carrying `β` (`ShiftTerm.shift`, `make_preconditioner`, `TurbulenceDamping.factor`) | `row_shift_scale`, `shift_strength` (#373, 2026-10-12) | the rest of #373's `relaxation` clash: those parameters carried `β` under the word the segregated loop uses for an under-relaxation factor, which runs the other way. `relaxation` now means only the latter. Retired names are refused by `tests/unit/test_vocabulary.py` |
-| `RetryPolicy.cycles_limit` | `max_retries` (#373, 2026-10-12) | it counted redone steps -- every redo, escalating or not -- not cycles. **Not** `max_escalations`, which was the proposal on the issue: that name is `Globalization`'s cap on the shift escalations *within* one attempt, a different setting that can sit in the same case file |
-| `MomentumContinuity.viscosity` (and `_VelocityGeometry.viscosity`) | `effective_viscosity` (#373, 2026-10-12) | it returns `μ + ρν_t`, while `properties["viscosity"]` -- the word everywhere else -- is the molecular value |
-| `MassFlow.forced(momentum, beta)`, and `beta` for the mass-flow body force in `flow/` prose and locals | `force`, written `f` in formulas (#373, 2026-10-12) | `β` means the pseudo-transient shift strength; the solved body force is a different quantity |
-| `omega` / `pressure_omega` for a smoother's damping weight (`SimpleSmoothed`, `AirReduction`, `ConvectionTwoLevel`, the multigrid cycle functions, `damped_jacobi_solve`) | `smoother_weight` / `pressure_smoother_weight` (#373, 2026-10-12) | `omega` is the SST specific dissipation rate; a case file set both a few lines apart. **A case-file key**: `SimpleSmoothed`'s `omega: 1.0` in both flagship `case.yaml`s is now `smoother_weight: 1.0` |
-| `omega_smooth` (smoothed-aggregation prolongation) | `prolongation_weight` (#373, 2026-10-12) | the same clash; it weights the prolongation smoother, not a level smoother |
-| `mu` for the multigrid cycle index (`SimpleSmoothed`, `SimpleSmoothedInverse`, `_VCycleOps`) | `cycle_index` (#373, 2026-10-12) | `mu` is the dynamic viscosity; 1 is a V-cycle, 2 a W-cycle |
-| `v_cycles` (`BlockDiagonal`, `ScalarTwoLevel`, `ScalarAir`, the velocity blocks, `BlockPreconditioner.build`) | `cycles` (#373, 2026-10-13) | the name every other multigrid value already used for V-cycles per application. **A case-file key** on `BlockDiagonal` and the scalar blocks; no shipped case file set it |
-| `f_iters` / `c_iters` (`AirReduction`, `AirReductionInverse`, `air_multigrid_cycles`) | `f_sweeps` / `c_sweeps` (#373, 2026-10-13) | smoother passes are `sweeps` everywhere else. **A case-file key** on `AirReduction`; no shipped case file set it |
-| `n_group_fields` (`AirReductionInverse`) | `n_fields` (#373, 2026-10-13) | the field count of the block, as every other inverse spells it |
-| `StepReport.cycles`, `StepOutcome.cycles`, and the checkpoint key `"cycles"` | `raw_cycles` (#373, 2026-10-13) | it is lineax's raw count, offset included, beside `restart_cycles` (corrected) and `max_inner_cycles`; `cycles` now means V-cycles. The march-history column follows the field. ⚠️ **Checkpoints written before this carry `cycles`**, and the two harnesses that read the step record (`damping_taper_trace.py`, `endgame_shift_probe.py`) now read `raw_cycles` with no fallback, by the project owner's choice. An inner-iterate checkpoint's `cycles` (offset-corrected, `InnerIterateCheckpointer`) is unchanged, and so are the harnesses that read one (`field_split_probe.py`, `probe_reach_audit.py`, `replay.py`; `singular_cell_probe.py` was deleted 2026-10-14) |
-| `KProduction(explicit_limiter=)` | `explicit_production_limiter` (#373, 2026-10-13) | the name `SSTTurbulence` already gave the same setting |
-| `FacePatches.from_dict(groups)` | `patches` (#373, 2026-10-13) | beside `patch_groups`, `groups` read as groups of patches. `CellZones` keeps the inherited `LabelledGroups.from_dict(groups)`: an override only to rename it would be a forwarding wrapper |
-| `NearWallKClosure.viscosity` | `kinematic_viscosity` (#373, 2026-10-13) | `viscosity` is the molecular DYNAMIC viscosity everywhere else; this one is kinematic. `SSTTurbulence.molecular_viscosity` is kinematic too and keeps its name |
-| `MaterializedJacobian(beta_floor=)`, `beta_tracking_refresh(beta_floor=)` | `refit_beta_floor=` (#373, 2026-09-22); the function itself is now the class `BetaTrackingRefresh` (#661) | the shift the **inverse is re-fitted at**. `Globalization.beta_floor` (the march's own) keeps its name; the step control's `beta_min` is a third floor and is unchanged |
-| `reused_flow_solve(max_steps=)`, `bulk_velocity_flow_solve(max_steps=, solver=)`, `scalar_pseudo_transient_solve(max_steps=, rtol=, atol=, solver=)` | `root_solve=RootSolveSettings(max_steps=…, convergence=…, linear_solver=…, adjoint_solver=…)` (#428, 2026-09-22) | one value on all three, so a setting reachable from one is reachable from all — `adjoint_solver` was reachable from none |
+The table of every old name (`ImplicitNewtonSolver` → `RootSolver`, `ForwardStep` → `NewtonStrategy`, `forward_march` → `newton_march`, `rtol=`/`atol=` → `Convergence`, and #373's `relaxation` / `omega` / `mu` / `v_cycles` / `cycles` / `beta_floor` renames) moved verbatim to `.claude/notes/solve-log.md`, "Renamed 2026-09-15" — grep it before believing an old name is missing. Retired names are refused by `tests/unit/test_vocabulary.py`.
 
 **Deliberately NOT renamed**, so do not "finish the job":
 
@@ -535,18 +436,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `decouple_dof`**, which zeroes an *assembled* row and column and leaves the neighbours' diagonals
     holding the dropped edge's contribution; `flow/initialization.py` uses that one, and the two were
     deliberately not unified (it would change an operator).
-  **Verified value-identical at migration (2026-10-09):** a throwaway pytest plugin wrapped the three
-  hierarchy builders and `scalar_transport_shift_diagonal_parts` in every `aquaflux` module that
-  imports them, and recorded each operator (canonical CSR) and shift pair per test over 16 unit modules
-  (343 tests, `-m "not slow and not validation"`, jax 0.10.2, Linux, Python 3.13); all **1744** arrays
-  were `np.array_equal` before and after. ⚠️ **The comparison's first run caught a behaviour change
-  that no review had:** the first version refused a **scalar** coefficient by shape, which the deleted
-  function had quietly broadcast, and five `test_multigrid.py` equilibration tests that build a chain
-  with `coefficient=2.0` failed — read as missing recordings, not as differing ones, so a comparison
-  that counted only mismatches would have reported clean. A scalar now broadcasts to a uniform array
-  (pinned); an array of the wrong length is still refused. Pinned by `tests/unit/test_convection_diffusion_stencil.py` (hand-written
-  three-cell operator, mutation-checked nine ways — the "drops only owner-side edges" mutation
-  survived until a neighbour-only detach test was added).
+  A scalar coefficient broadcasts to a uniform array; an array of the wrong length is refused. Pinned by `tests/unit/test_convection_diffusion_stencil.py`. Migration verification (value-identical, 2026-10-09): `.claude/notes/solve-log.md`.
 
 - **`state.py` — BUILT (#285): `FieldLayout` is the ONE flat field-major state layout, and nothing
   else may re-derive `f * n_cells + i` (binding).** A coupled state is one flat vector, field-major,
@@ -557,14 +447,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   `GlobalDofs(name, count)` (degrees of freedom attached to no cell — a constraint multiplier). The
   object is mesh-free, array-free, hashable, and a pytree with **zero** leaves, so it rides inside a
   differentiated module or as a static field indifferently.
-  - **Why it exists.** The same concept had **three** implementations in three subpackages —
-    `flow/state.py::BlockStateLayout`, `turbulence/coupled.py::CoupledRANSLayout`, and
-    `precondition/field_split.py::FieldGroups` — each with its own vocabulary, none composing the others,
-    and each of the first two carrying a docstring saying it existed so the arithmetic was not
-    open-coded. `CoupledRANSLayout` said it carried the flow layout "verbatim" and then re-derived
-    `flow_size = (dim + 1) * n_cells` and hand-sliced `pack`/`unpack`; `coupled.py::_k_block`
-    computed a block range a fourth time. Adding an unknown to the flow state meant edits in three
-    packages.
+  - Why it exists (three earlier layouts in three packages): `.claude/notes/solve-log.md`, "`state.py`".
   - **The three are now compositions of the one.** `flow/state.py::flow_state_layout(dim, n_cells)`
     names the flow system's `velocity` / `pressure` blocks; `turbulence/coupled.py::coupled_rans_layout(flow)`
     **nests that layout** as the `flow` block and adds `k` and `omega`, so the flow block's widths are
@@ -609,11 +492,6 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   - **The membership test is the same one `Globalization` uses:** a setting belongs here when its reason
     can be stated without naming the residual. `strategy` (the step a builder exists to construct) and
     `measures` cannot, so they stay with the builder.
-  - **What it replaced.** All three took `max_steps`, two a forward linear solver, one `rtol`/`atol`, and
-    **none** could reach `adjoint_solver` — the setting `solve_coupled` had to grow because its absence
-    makes a transpose solve on a hard case raise an error naming a remedy the entry point cannot reach.
-    The scalar builder's `rtol=1e-10, atol=1e-12` were a second copy of `_ROOT_CONVERGENCE`'s and are gone
-    rather than moved, so the default is declared once.
   - **The driver `solve_coupled` still spells these as keywords** — it runs a solve rather than
     returning one, its surface is what a case file describes (#375), and its
     forward linear solve is reached through `linear_solve=LinearSolveSettings(...)` on the step instead.
@@ -643,35 +521,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `solve_coupled` defaults to `RowScaled()` against `_CoupledMeasures` — bordered by
     `flow.BorderedMeasures` for a held bulk velocity, whose constraint row is scaled by the held speed
     (#541; until then that path defaulted to `Euclidean()` and refused `RowScaled`).
-  - **⚠️ THE FROZEN ROW-SCALED MEASURE WAS DELETED, AND THIS IS WHAT DECIDED IT (measured 2026-09-16).**
-    The default used to freeze the row scales at the step's build state; `scaled_norm=True` rebuilt them.
-    *Cost:* on pitzDaily (12225 cells) at a converged checkpoint (step 31 of a shipped run), commit
-    `e7fa44d`, jax 0.10.2, macOS arm64, an **eager** rebuild (as the march calls it) is **8.2 ms**, a
-    jitted one **0.25 ms**, one coupled residual **8.6 ms**, its jvp **13.9 ms**, against **~19 s** per
-    outer step in that run — ~0.04 % of a step (`validation/pitzdaily_openfoam/measure_rebuild_cost.py`).
-    *Behaviour:* with the rebuild forced on every row-scaled `solve_coupled`, the fast tier (1843) and
-    slow tier (43 of 44) passed; the one failure was
-    `test_the_coupled_adjoint_is_independent_of_the_forward_iteration_count`, whose two arms both took
-    20 steps (17/20 frozen) so its distinct-path guard refused — a fixture, not a gradient. Steps over
-    26 matched tests rose **1213 → 1302 (+7 %)**, both periodic-channel tests ~48 → 72. Scoring each final
-    state in all three measures showed **neither form consistently tighter** (the periodic
-    AMG-independence test stopped *looser* after more steps), so the difference is steering, not
-    stopping bar. These fixtures are small, mildly developed flows and cannot show the recorded
-    developed-flow failure of the frozen form; they show nothing *needs* it. Both flagship cases already
-    rebuilt.
-  - ⚠️ **That measurement predates the linear-solve binding fix above**, so its step counts are for a
-    rebuilt outer measure with a build-time inner stop. The inner stop now follows too; re-measure before
-    quoting counts.
-  - **pitzDaily with the whole change, against a control built from `main` (2026-09-16).** Control:
-    `e7fa44d` in a scratch worktree; arm: this change. Both `validation/pitzdaily_openfoam/compare.py` at
-    its shipped defaults (viscosity ramp 16 stations x 1, momentum-only scaling, turbulence damping 3,
-    dual-time 5 / 0.01, field split `simplesmooth` / `jacobi_smoothed`, stop `rtol=0, atol=1e-5`,
-    row-scaled measure rebuilt per step in both). **Both 31 steps, `x_r/h` 8.0686, final `|R|`
-    7.841e-06 / 7.839e-06, no retries.** The two logs are identical through step 17; from step 18 (the
-    target station) the per-step residuals agree to four figures while the restart cycles differ by ±1–2
-    per step, **194 → 202 in total (+4 %)** — the inner Krylov stop now reading the rebuilt measure
-    instead of the one the step was built with. Wall clock is not quotable: another session loaded the
-    machine during the arm (1-minute load ~10).
+  - **The frozen row-scaled measure was deleted (2026-09-16):** rebuilding the row scales costs a negligible fraction of an outer step and no test needed the frozen form. Measurement and the pitzDaily control run: `.claude/notes/solve-log.md`, "`convergence.py`".
 - **A residual norm read OUTSIDE the compiled step goes through `norm.norm_of_residual` — never
   `measure(residual_fn(state))` written eagerly (binding, 2026-10-14).** `norm_of_residual(measure,
   residual_fn, state)` is an `eqx.filter_jit` program beside `_block_terms`; `newton_march` reads the
@@ -682,12 +532,6 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   It inherits `_march_step`'s two caller obligations: a residual with a stable identity (bound method or
   module) and a measure that changes only in array values (`RowScaledNorm` / `BlockScaledNorm` do; a
   measure built as a fresh `lambda` per call recompiles every call -- correct, but slower than eager).
-  - **Measured, pitzDaily `case.yaml` at `66aec63b` (#715) against this change, back to back, warm
-    compile cache, Linux x86_64, 4 cores, jax 0.11.2, one run each under `py-spy` (25 Hz):** identical
-    step tables (18 steps / 123 cycles, `x_r/h` 8.0686), solve 804 -> **727 s**. By profile bucket: the
-    stopping test 25.3 -> 1.6 s, the driver's references 20.4 -> 7.4 s, and the march log's field
-    extraction (`turbulence.coupled_fields`, compiled in the same change) 34.4 -> 0.3 s; compilation
-    122 -> 124 s.
   - Pinned by `test_the_march_reads_its_norms_through_compiled_programs_not_op_by_op` and its
     `staged_march` twin (`test_newton_march.py`: a second march over the same objects calls the residual
     zero times; each of the six call sites reverted to the eager form fails at least one of them).
@@ -861,17 +705,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     `tight_solver` (the divergence retry) is never varied.
   - `StepReport.linear_tolerance` records the tolerance each step ran at (`nan` without the setting); it
     reaches `StepHistory` automatically.
-  - **Measured on the built setting** (`validation/adaptive_tolerance_probe.py`, whose docstring holds the
-    table; main `a5d61d4` + this change, Linux x86_64, 4 cores, jax 0.11.2, one run per arm; `lineax` /
-    residual stop / residual + adaptive, outer steps): the field-split test file's 20×14 channel at the
-    default `Convergence`, block-diagonal 27 / 41 / **31**, shipped field split 28 / 41 / **30**; the
-    Reynolds-continuation adjoint test's march (`n_points=1`, both rungs on the stop under test) 26 /
-    FAILS at 60 target steps (4.8e-2) / **28** (16 anchor + 12 target). On the env-switched prototype
-    (same base) the target march alone also measured: fixed 0.1 / 0.03 / 0.01 throughout 16 / 13 / 12,
-    tail rule alone 44, tail + setback-to-0.03 24 (so tighter is not monotonically better). Re-solving the cut-back step itself tighter (the other remedy #645 proposed)
-    fails — ledger entry. pitzDaily `case.yaml` (residual stop already shipped): 18 → 21 steps, 123 → 112
-    cycles, 553 → 566 s, same `x_r/h` 8.0686 — a wash there; the setback rule fired on steps 3–18 because
-    a dual-time step's `alpha` is the inner minimum and sits at 0.5 / 0.25 through the ramp.
+  - Measurements of the built setting (`validation/adaptive_tolerance_probe.py`'s docstring holds the table; a wash on pitzDaily): `.claude/notes/solve-log.md`, "`adaptive_tolerance.py`".
   - **The default (2026-10-15, the project owner's request, with the residual stop):** every march
     defaults to `DEFAULT_ADAPTIVE_TOLERANCE` and applies it wherever its solver is a relative-residual
     GMRES; any other solver (a stock or direct one, a `RootSolver`'s default) keeps its own tolerance,
@@ -960,13 +794,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     into `_ResidualAt`, a module for the same reason. Pinned by
     `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt` (renamed
     2026-10-12, #386, when the preconditioner became data and a rebuilt one stopped recompiling).
-  - ⚠️ **That test measured nothing until this change fixed its fixture, and the reason generalizes.**
-    Under a `lax.while_loop` the body is traced whether or not it executes, so the test's later sweeps —
-    which started from the previous sweep's converged state and took **zero** steps — still reported
-    compilations. An eager loop that takes no steps compiles nothing, so both arms collapsed to the same
-    count. The fixture now disturbs the state each sweep so the march actually runs. The general form:
-    **a fixture that reaches a solver in a state with no work to do can pin a compilation property while
-    exercising none of the solve.**
+  - ⚠️ **A fixture that reaches a solver in a state with no work to do can pin a compilation property while exercising none of the solve** (the compile-count test above did, until its fixture disturbed the state each sweep; `.claude/notes/solve-log.md`).
 - **`root_adjoint.py` — BUILT 2026-09-15 (phase 1 of unifying the two Newton loops): the IFT adjoint is
   a standalone step, not a property of the loop.** `root_adjoint(residual_fn, root, theta, *,
   adjoint_solver=None, adjoint_preconditioner=None)` returns `root` unchanged and carries its derivative
@@ -1026,30 +854,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     make `jax.grad` raise while leaving the forward value bit-identical. That is the property the gap
     destroyed, and an accuracy test cannot see it — the default solver returns the right gradient on a
     2D channel whether or not the argument is wired to anything.
-    **Outcome on the case it was built for:** with this threaded and a budget large enough not to bind,
-    `jax.grad` runs on `bfs3d` for the first time and matches a central finite difference to 1.9e-04 —
-    but the passthrough alone was not sufficient, because the transpose solve needs ~1450 preconditioner
-    applications and the first budget allowed ~900. See `solve-flow-block.md`'s *"`jax.grad` RUNS ON THIS
-    CASE"* section for the costs, the arms, and the finite-difference trap that a loose root sets.
-  - **`default_linear_solver()` KEEPS lineax's restart 20 — measured, not overlooked (2026-10-09, #114).**
-    The continuation path's GMRES carries `restart=40, stagnation_iters=40`, and #114 asked whether the
-    adjoint's fallback should too. Swept with `validation/adjoint_gmres_restart.py` (restart 10/20/40/80,
-    `stagnation_iters` 20 throughout, `rtol=atol=1e-10`, forward solve unchanged so every arm differentiates
-    one root; operator applications counted exactly by wrapping the transpose matvec, true residual read
-    after the solve; `81a05c5`, jax 0.11.2, lineax 0.1.1, Linux x86_64, 4 cores). **No restart wins on
-    both operator classes:** on `test_flow_adjoint.py`'s skewed cavity (432–3072 unknowns, block
-    preconditioner transposed) restart 20 has the lowest backward time at every size, 40 is up to 1.7× slower,
-    80 is 1.3–2.1× slower; on `test_coupled_rans.py`'s 28×20 channel (2800 unknowns, `BlockDiagonal`) 40
-    is ~11 % and 80 ~30 % faster than 20 (736 → 698 → 487 applications), and **10 stagnates** — the default
-    sits one halving above failure there. All converged arms agree on the gradient to 4e-11. The table is
-    in the harness docstring. **Why a longer restart costs on an easy solve:** the confirming-cycle cost
-    measurement-discipline item 5 records for the forward solve applies to the adjoint too — restart 80
-    spends exactly `2 (80 + 1) + 1 = 163` applications on every cavity, converging inside one cycle and
-    paying for a second. So restart is a floor on easy solves and pays only on hard ones; an operator that
-    needs a real budget (`bfs3d`, ~1450 applications) passes its own `adjoint_solver`, which no shared
-    default would reach. Re-open only with a new operator class in the sweep, or if the adjoint adopts a
-    residual-only stop (`residual_stop_gmres`, forward-only today), which removes the confirming cycle and
-    would change this trade.
+  - **`default_linear_solver()` keeps lineax's restart 20 (measured 2026-10-09, #114):** no restart wins on both operator classes, and an operator needing a real budget passes its own `adjoint_solver`. Re-open only with a new operator class, or if the adjoint adopts a residual-only stop. Sweep: `validation/adjoint_gmres_restart.py` and `.claude/notes/solve-log.md`.
 
 
 ## Measurement discipline for preconditioner probes (BINDING)
@@ -1076,9 +881,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   of the cycle difference depends on whether you count per solve or per march; and the monolithic run
   contained a single 40-cycle solve where the split's worst was 8, which no average shows.)
 
-  1. **The preconditioned residual `‖Mr‖`.** PETSc's default convergence norm. SOR/Krylov-smoothing
-     report `reason=2` (converged) at a **true** residual of 1.0. Force `KSP_NORM_UNPRECONDITIONED`.
-     A level-ILU "win" was once entirely this artifact.
+  1. **The preconditioned residual `‖Mr‖`** — a stop on it reported converged at a TRUE residual of 1.0 (the deleted PETSc path's default norm), and one level-ILU "win" was entirely this artifact. Read the true residual.
   2. **One-apply contraction `‖M A x − x‖ / ‖x‖ < 1`.** Rejected a candidate on this; it is not a
      convergence criterion for a *Krylov-accelerated* preconditioner. Counter-example from our own
      data: ILU(0) at β=0.02 has a one-apply contraction of **4.5** and still converges in 97 matvecs.
@@ -1135,40 +938,8 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      once the solution's change over the last restart cycle is ≤ `rtol` (in the measure, `‖b‖` scaled to
      one), and its first counted cycle is a start-up pass that reduces nothing. A toy solve whose residual
      was 0.02 after one real cycle still ran another at `rtol = 0.1`, because the solution had moved 0.265.
-     **Measured on pitzDaily (shipped `case.yaml`, 2026-10-08, jax 0.11.2, CPU; `PITZ_FORWARD_RTOL`), the
-     march is not sensitive to tightening and IS to loosening:** `rtol` 0.1 / 0.3 / 0.6 / 0.9 → 245 / 203 /
-     166 / 161 restart cycles, all 31 steps, 98–103 inner solves, `x_r/h` 8.0686. The shipped 0.3 is not
-     changed. On bfs3d (where it was calibrated), under the residual stop at `refresh_on_cycles` 4
-     (2026-10-12, #699, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each), 0.1 / 0.3 / 0.6 took 774 /
-     787 / 590 s at the same `x_r/h`, with one retry at 0.6 only; moving 0.3 is the owner's call (#637).
-     See `solve-refuted-directions.md`'s Eisenstat–Walker entry and the open-directions note's 4b.
-     ⚠️ **What the stop costs, replayed (2026-10-08, `krylov_recycling_probe.py`):** a solve reported as
-     "1 cycle" ran TWO (`restart_cycles` subtracts the start-up pass and the cycle the solution-change
-     test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
-     march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
-     **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
-     iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). **A cycle
-     that falls short hands the next its Arnoldi residual; only the cycle whose recurrence meets the target
-     recomputes `b − A x`, and the verdict reads that** (2026-10-16): a solve applies `A M` once per
-     Krylov iteration plus once at the end. From 2026-10-09 (`6d52eb1`) it recomputed at EVERY cycle end
-     (one more application per non-final cycle); before that it never did. Why the end still pays: on the
-     replayed pitzDaily march the recurrence sits within round-off of `‖b‖` of the true residual, harmless
-     as a restart vector, but at a 1e-10 target it once declared converged a solve 0.13 % above it
-     (open-directions 6b, `arnoldi_drift_probe.py`). On a
-     pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b); on bfs3d (#699,
-     2026-10-12, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each) 810 s at `refresh_on_cycles` 3 and
-     787 s at 4 against the shipped stop's 1197 s, same `x_r/h`, no retry (refresh 2 added one). **Selected by
-     `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`, 2026-10-09)**, so a
-     case file writes `linear_solve: {stop: residual}`; `LinearSolveRegime.solver()` is the ONE place a
-     regime becomes a solver (`shifted_step` calls it), so every march family reaches it. **It is the default
-     since 2026-10-15 (#645, the project owner's request, on a PR for testing bfs3d)**, together with
-     `AdaptiveLinearTolerance`, the forcing safeguard #645 asked for — see its contract entry below. Alone,
-     forced as the default, it failed four slow tests (linear convergence at the end of the march, and one
-     Reynolds-continuation march that goes erratic); with the adaptive tolerance all 39 pass. Its reported
-     count is cycles RUN (one more than `lineax`'s for the same work), so the cost triggers fire at a
-     different difficulty, and `max_restarts` counts cycles under it rather than raw `lineax` steps;
-     `stop: lineax` restores the old rule. **pitzDaily's `case.yaml`
-     opts in** (`stop: residual`, 2026-10-09; `refresh_on_cycles` 2 then, 3 since a cost re-fit ends the step, #290, 2026-10-11 — see `.claude/notes/solve-open-directions.md` 6b). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`.
+     The march is insensitive to tightening the shipped `0.3` and sensitive to loosening it; moving it is the owner's call (#637). Measurements: `.claude/notes/solve-log.md`, "Measurement discipline item 5"; see also `solve-refuted-directions.md`'s Eisenstat–Walker entry.
+     **`residual_stop_gmres` — the DEFAULT stop since 2026-10-15 (#645), with `AdaptiveLinearTolerance`.** It stops on the residual alone, tested every Krylov iteration in the step's measure (`norm=None` binds it, like `relative_residual_gmres`); a cycle that falls short hands the next its Arnoldi residual, and only the cycle whose recurrence meets the target recomputes `b − A x`, which the verdict reads. Selected by `LinearSolveSettings.stop` / `LinearSolveRegime.stop` (`"lineax"` | `"residual"`), and `LinearSolveRegime.solver()` is the ONE place a regime becomes a solver, so every march family reaches it. Its reported count is cycles RUN (one more than `lineax`'s for the same work), so cost triggers fire at a different difficulty and `max_restarts` counts cycles; `stop: lineax` restores the old rule (whose confirming cycle costs `2 (restart + 1) + 1` applications for a "1 cycle" solve). Pinned by `test_the_stop_reaches_the_step_s_solver_with_the_regime_and_the_step_s_measure`. History and measurements: `.claude/notes/solve-log.md`, "what the stop costs"; `.claude/notes/solve-open-directions.md` 6b.
   6. **A probe on a Jacobian sliced with the wrong layout.** `vk_J.npz` and the materialized coupled
      Jacobian are **field-major**: DOF `(cell i, field f)` sits at `f·n_cells + i`, fields ordered
      `[u, v, w, p, k, ω]`. Slicing it cell-major silently yields a *different matrix* that still looks
@@ -1213,18 +984,7 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
   recursion, the static/traced level split, strength-of-connection aggregation, `refresh_air_hierarchy`,
   the degenerate-mesh guard, and the two-level damped-Jacobi convection hierarchy — moved to
   `solve-amg-multigrid.md`'s own "Binding decisions" section in full.**
-- **Where preconditioning must attach — measured, do not repeat the wrong lever.** For the
-  skewed lid-driven cavity (`CorrectedGreenGauss`, `FirstOrderUpwind`) the per-Newton-step cost
-  splits cleanly: the **outer coupled saddle-point GMRES takes 67 steps at 432 dof, 127 at 768
-  dof — growing ~O(N)**, while the **inner gradient `A_g` solve is a flat 4 steps** regardless of
-  mesh (it is volume-dominated and inherently well-conditioned). So the outer block solve is the
-  whole bottleneck. **Preconditioning the *inner gradient* solve was built, measured, and
-  reverted:** an inverse-volume-Jacobi `M≈A_g⁻¹` took the inner solve 4→3 steps and was
-  *net-negative* end-to-end (132 s vs 121 s/step — the extra matvec per iteration outweighs the
-  one iteration saved). This is the same outcome as the block-Jacobi velocity-diagonal experiment
-  (`flow.md`): the cheap diagonal is not the missing physics. The real lever is an **outer**
-  pressure-Schur / SIMPLE-style block preconditioner on the coupled `(u,p)` system, attaching via
-  the `solve_linear(preconditioner=…)` seam.
+- **Where preconditioning must attach:** on the skewed cavity the outer coupled saddle GMRES is the bottleneck (it grows with the mesh; the inner gradient `A_g` solve is a flat few steps), and preconditioning the inner gradient solve was built, measured net-negative, and reverted — do not repeat it. The lever is the outer block preconditioner through `solve_linear(preconditioner=…)`. Measurement: `.claude/notes/solve-log.md`, "where preconditioning must attach".
 - **The "gradient Schur elimination" is already exact and free from AD — it was never a numerical
   gap.** Feeding a gradient scheme (nested `lineax` solve `A_g g = Bφ`) into the flow residual and
   taking `jax.jvp` makes `lineax`'s implicit-diff form the exact Schur complement
