@@ -97,7 +97,7 @@ def _run(arm):
             check=False,
         ).returncode
     record = yaml.safe_load((directory / "results" / "run.yaml").read_text())
-    _, seconds, _, _ = timeline(log.read_text().splitlines())
+    _, seconds, _, _, _ = timeline(log.read_text().splitlines())
     compiled = sum(seconds.values())
     print(
         f"[{arm}] exit {status}, converged {record['converged']}, {record['steps']} steps, "

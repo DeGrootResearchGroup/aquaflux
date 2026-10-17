@@ -695,6 +695,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
     program's one trace** -- warm it first (`_warm_the_march_norm` in `test_newton_march.py`). The
     "one eager residual execution per solve/sweep" floors in `test_root_solver.py` and
     `test_scalar_continuation.py` are now zero.
+  - ⚠️ **Do not extend this to the set-up phases (build, hybrid initialization, the session's shift
+    source) one at a time (measured 2026-10-17, `183e9ffa`).** Their ~980 eager programs are a pool cached
+    per (primitive, shape, dtype) and shared across phases. Jitting `BoundaryClosure.linearization` alone
+    (bit-identical) took the case build from 483 to 411 programs and added 79 to the phases after it.
+    Jitting an arithmetic phase moves rounding at ~1e-16 (XLA contracts multiply-adds in a fused program,
+    with no CPU flag to stop it). Full record in `.claude/notes/solve-refuted-directions.md`, "Compiling
+    the eager set-up phases". The shift source's eager dispatch is still ~2 s per build (pitzDaily),
+    paid at the session's first build and again for the stopping step.
 - **`driver.py` + `shifted_step.py` — BUILT 2026-09-19 (#448, #277): the robust march is residual-agnostic,
   and lives HERE (root `CLAUDE.md`, Principle 3.6).** Both were `turbulence/coupled.py` internals until a
   laminar flow problem found it could not reach them. **`solve.staged_march(residual_fn, state, *, strategy,
