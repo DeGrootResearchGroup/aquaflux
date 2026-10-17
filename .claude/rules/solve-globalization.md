@@ -616,6 +616,32 @@ What to take from it, none of which is specific to that mechanism:
     adjoint unchanged. The flow and scalar paths leave `line_search` unset, so they take the step's own
     `0` and are bit-identical — a default now, not a limit: since #372 either can be handed
     `Globalization(line_search=…)` without constructing the step by hand.
+  - **The line search returns its residual VECTOR, and the dual-time step runs on it (BUILT 2026-10-17,
+    branch `claude/step-program-size`).** `LineSearchStep.residual` is `R(phi)` at the returned iterate,
+    carried through the ladder beside its measure (the last rung walked is the accepted one whenever there
+    is one; the fallback rung's travels with `longest_norm`). **`alpha = 0` is the branch to get right:**
+    the iterate is the start point, which the ladder never evaluated, so the vector is the caller's own
+    `backtracking_line_search(..., residual=R(phi))`, and `None` when the caller passed none (the
+    validation probes; a library caller always passes it — all three strategies do, so they read the
+    search the same way). With no finite rung it is a NaN seed, non-finite like the measure.
+    `DualTimeStep` uses it twice: the carried `G` is the next inner iteration's Newton right-hand side
+    (the anchor's `R(φⁿ)` seeds it, the transient term being zero there), and the step's reported
+    `R(phi_next)` is that `G` less `transient_term(phi_next)` — one subtraction, through the same helper
+    `G` was built with. **Not bit-identical to re-evaluating `R`**: it rounds at the size of
+    `β d (phi − φⁿ)`, which vanishes at the march's root; and the carried right-hand side was evaluated at
+    `phi + alpha delta` inside the ladder rather than at the iterate formed after it, so it may differ by a
+    rounding there too. On the cube root the reported norm matches a fresh `R` to within `8 eps (|R| +
+    |β d Δphi|)`; pitzDaily's march is recorded in `solve-globalization-log.md`. `PseudoTransientStep`
+    and `DampedNewtonStep` gain nothing inside a step (each evaluates `R(phi)` once, at the start); what
+    #649 asks beyond this — carrying the vector ACROSS outer steps through `newton_march`, which would
+    also drop the dual-time anchor's `R(φⁿ)` — is not built. Pinned by
+    `test_the_dual_time_step_evaluates_the_residual_once_per_inner_iteration` (executions counted by a
+    `jax.debug.callback`, Jacobian from an uncounted copy), `..._reports_the_steady_residual_at_the_iterate_it_returns`,
+    `test_a_step_whose_every_inner_search_takes_no_step_reports_the_anchor_s_own_residual`,
+    `test_a_dual_time_march_step_traces_the_residual_only_where_it_must` and the `.residual` assertions
+    in the four line-search fallback tests (`test_newton_march.py`); five of six single-line mutations turn them red. The one
+    surviving mutation (handing the stalled search a wrong `g`) is unreachable through a step: a stalled
+    inner iteration is a fixed point, so the next solve starts where it did and stalls again.
   - **`krylov_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default stops on a
     relative residual in an INJECTED norm (`relative_residual_gmres`, `solve/linear.py`).**
     `linear_solver()` returns the injected `krylov_solver` when set, else the shared restart-40 GMRES.

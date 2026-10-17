@@ -114,6 +114,33 @@ def test_refining_a_set_carrying_radiant_power_is_refused():
         refine_for_receivers(with_point_source, NEAR_RECEIVER)
 
 
+#: A small triangle far beyond the square, which refinement for ``NEAR_RECEIVER`` leaves whole.
+FAR_TRIANGLE = np.array([[[20.0, 0.0, 0.0], [20.1, 0.0, 0.0], [20.0, 0.1, 0.0]]])
+
+
+def test_a_facet_labelled_a_point_source_stays_one_however_large_its_area():
+    """The label is geometry, not something the area implies, so refining must carry it.
+
+    The labelled facet has an area, so re-inferring the labels from the refined areas -- what
+    the refinement once did -- relabels it areal without a word, and it then joins the transfer.
+    It lies after facets that are split, so its index moves and a label carried by position
+    rather than through the refinement's map lands on the wrong facet.
+    """
+    surfaces = Surfaces.from_triangles(np.concatenate([SQUARE, FAR_TRIANGLE]), point_sources=[2])
+    assert float(np.asarray(surfaces.area)[2]) > 0.0, "the fixture must have an area"
+    refined, division = refine_for_receivers(surfaces, NEAR_RECEIVER, max_ratio=0.25)
+    assert refined.n_facets > 3, "the square must have been refined"
+    (child,) = np.flatnonzero(division.origin == 2)
+    assert refined.point_source_index == (int(child),)
+
+
+def test_a_labelled_point_source_wide_enough_to_be_split_is_refused():
+    """A point source has no area to divide among children, so splitting one is refused."""
+    surfaces = Surfaces.from_triangles(SQUARE, point_sources=[1])
+    with pytest.raises(ValueError, match="facet 1 is labelled a point source"):
+        refine_for_receivers(surfaces, NEAR_RECEIVER, max_ratio=0.25)
+
+
 def test_the_distance_is_measured_from_the_nearest_corner_and_not_the_centroid():
     """The case that separates the two measures, which most geometries do not.
 
@@ -148,3 +175,15 @@ def test_a_meaningless_request_is_refused(kwargs, message):
     receivers = kwargs.pop("receivers", NEAR_RECEIVER)
     with pytest.raises(ValueError, match=message):
         subdivide_to_width(SQUARE, receivers, **kwargs)
+
+
+def test_a_degenerate_point_source_may_be_split_and_its_children_stay_point_sources():
+    """A collinear triangle has no area but has a length, so the width criterion can split it;
+    its children have no area either, and each stays a point source."""
+    sliver = np.array([[[0.4, 0.5, 0.1], [0.6, 0.5, 0.1], [0.5, 0.5, 0.1]]])
+    surfaces = Surfaces.from_triangles(np.concatenate([SQUARE, sliver]))
+    assert surfaces.point_source_index == (2,)
+    refined, division = refine_for_receivers(surfaces, NEAR_RECEIVER, max_ratio=0.25)
+    children = np.flatnonzero(division.origin == 2)
+    assert len(children) > 1, "the sliver must have been split"
+    assert refined.point_source_index == tuple(int(child) for child in children)

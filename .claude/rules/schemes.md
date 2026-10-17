@@ -2027,7 +2027,10 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   | `jnp.linalg.inv` (before) | 29.8 ms | 45.0 ms | 6 | 2.884371116264e+02 |
   | `small_inverse` (after, two runs) | 5.3 / 6.4 ms | 17.2 / 19.3 ms | 0 | 2.884371116264e+02 |
 
-  ‖R‖ and ‖J t‖ agree to all 13 printed digits. Standalone on the same shapes (previous measurement,
+  ‖R‖ and ‖J t‖ agree to all 13 printed digits. ⚠️ The `jvp` column is a standalone call, and on
+  glibc each one pays ~11 000 page faults (its 42.8 MiB temporary buffer is above the 32 MiB adaptive
+  mmap cap). The after arm is 9.8–11.1 ms with them removed, and the march never pays them
+  (`discretization.md`, "Single-threaded kernels", 2026-10-17). Standalone on the same shapes (previous measurement,
   same configuration): `inv` 2.77 ms vs adjugate 0.08 ms at `(12225, 2, 2)`, 8.81 vs 0.94 ms at
   `(23040, 3, 3)`. bfs3d (3×3 blocks, six reconstructed fields) is unmeasured — its mesh is not in the
   repository. ⚠️ Every pitzDaily/bfs3d residual, JVP, probe or march timing in these files taken under

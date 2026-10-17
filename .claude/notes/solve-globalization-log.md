@@ -1859,3 +1859,41 @@ the log's `limit` aside and `L` flag) was deleted as unused, with the harnesses 
 (`march_stall_replay.py`, `k_row_scale_probe.py`). The line search's `grow` went with it: the step's `max_alpha = 1.0`
 default had capped its rungs at the full step since 2026-08-15, so it too reached nothing.
 
+
+## The dual-time step's compiled program: five residual copies to three (2026-10-17)
+
+`DualTimeStep` traced the residual five times per `_march_step`: the anchor's `R(φⁿ)`, the Newton
+right-hand side `G(p)` at every inner iteration, the line-search ladder body, `R(phi_next)` at the end for
+the step's measure, and the Krylov solve's JVP. The second and fourth are redundant in arithmetic (the
+right-hand side is the `G` the previous search evaluated at the rung it kept; `R = G − β d (p − φⁿ)`), and
+are gone; the contract is in `solve-globalization.md` ("The line search returns its residual VECTOR").
+
+**Configuration.** pitzDaily, `validation/pitzdaily_openfoam/compare.py`, Linux x86_64 4-core container,
+jax 0.11.2, Python 3.13; main at `183e9ffa` against `183e9ffa` + this change, each from its own worktree
+(`compare.py` puts its OWN repository root first on `sys.path`, so a `PYTHONPATH` pointing at another
+checkout is silently ignored — the first copy-4 arm measured main a second time that way, and served as a
+noise repeat). Compile figures are the `JAX_LOG_COMPILES=1` lines of a two-step run (`case.yaml` with
+`max_steps: 2`, the mesh path absolute) on an empty `AQUAFLUX_COMPILATION_CACHE_DIR`, with
+`XLA_FLAGS=--xla_dump_to=… --xla_dump_hlo_module_re=.*march_step.* --xla_dump_hlo_as_text` on in every arm
+(the dump adds its own writes to every compile). One run per arm.
+
+| arm | trace `_march_step` (s) | lower to MLIR (s) | XLA compile (s) | HLO lines before / after optimization |
+|---|---|---|---|---|
+| main | 10.5 | 3.9 | 27.4 | 85,650 / 102,885 |
+| main, repeat | 11.1 | 3.9 | 27.6 | 85,650 / 102,885 |
+| copy 4 only (`R(phi_next)` from the kept `G`) | 9.6 | 3.7 | 24.4 | 73,438 / 94,910 |
+| copies 4 and 2 (final code) | 7.5 | 3.5 | 21.3 | 60,970 / 84,840 |
+
+So about a fifth off XLA's compile (27.5 → 21.3 s) and about 30 % off tracing (10.8 → 7.5 s), the tracing
+part paid on every run, warm cache or cold. Lowering moved within noise. The two-step tables are identical
+to every printed digit.
+
+**Full march, shipped `case.yaml`, warm cache per arm (each arm's cache filled by its two-step run), back to
+back, one run each:** both **21 steps, 50 inner solves, 106 restart cycles**, the step tables identical to
+every printed digit but `t(s)` (final step-row `R` 2.618e-06, steered 2.258e-06), `x_r/h` **8.0686**, no
+redone step. Solve wall **204 → 195 s**. The run-time saving is one residual evaluation per inner iteration
+and one per outer step, 71 here, plus the shorter tracing; one run per arm does not separate the two.
+
+**Not bit-identical in principle, identical here in what is printed.** The step's `R(phi_next)` rounds at
+the size of the transient term, and the carried right-hand side was evaluated at `phi + alpha delta` inside
+the ladder rather than at the iterate formed after it.

@@ -1089,6 +1089,30 @@ removed that tail.**
   measured there: 33 → 29 steps (open-directions 11a). Reopen only for a march that must keep a long
   linear tail at a floor the release cannot remove.
 
+## Partitioning the single-threaded kernels of the residual / JVP — NOT A LEVER (2026-10-17)
+
+The `dot` precedent (reduction-rooted fusions on one thread, 40 % of a reconstruction) was checked
+across the whole pitzDaily coupled residual and its JVP with `validation/pitzdaily_openfoam/fusion_profile.py`
+(per-kernel solo time on one core plus time alone on 4 cores, joined to the HLO; `main` `183e9ffa`, jax
+0.11.2, 4-core Linux). Unpartitioned kernels are 26 % of the clean JVP's one-core time, spread over 640
+kernels, **the largest 0.9 %**. On 4 cores an unpartitioned kernel is alone in flight for 7 % of the span.
+Respelling the three remaining `__ynn_fusion`s (interpolation skewness `einsum`, strain-rate Frobenius
+sum) through `vectors.dot` / `norm_squared` took them 3 → 0 with no wall gain (the residual got slower), and
+turning the 42 batched `dot`s into multiply-sums changed nothing measurable. Separately, a standalone JVP
+pays ~11 000 page faults per call on glibc (its 42.8 MiB temporary buffer exceeds the 32 MiB dynamic mmap
+cap). Raising the threshold cuts the standalone JVP ~40 % but leaves the march unchanged (183 s against
+180 / 186 s, identical steps). Full tables: `.claude/rules/discretization.md`, "Single-threaded kernels".
+
+## The residual-stop GMRES giving its VERDICT on the Arnoldi residual — UNSAFE at tight targets (2026-10-16)
+
+Dropping every recomputation of `b − A x` from `_ResidualStopGMRES` (restart AND final verdict from the
+recurrence, as it was before 2026-10-09) would save one more application per solve than what shipped. Replayed
+on all 68 systems of a pitzDaily march (`arnoldi_drift_probe.py`), the recurrence's departure from the true
+residual is a round-off of `‖b‖`: no verdict was wrong at targets 0.3, 1e-3 or 1e-6, but at 1e-10 one solve of 32
+was declared converged with its true residual 0.13 % above the target. The class takes any `rtol`, so the
+verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
+`solve-open-directions.md` 6b.
+
 ## A Schubert secant update of the materialized Jacobian between probes — REFUTED (2026-10-17)
 
 **What was proposed** (`solve-open-directions.md` 13): between probes, update the retained unshifted

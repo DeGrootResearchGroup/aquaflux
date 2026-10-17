@@ -126,7 +126,7 @@ class VoxelAbsorption(Absorption):
 
     ⚠️ **The grid does not have to match the flow mesh, and usually should not.** Absorbance
     varies far more smoothly than velocity, and the cost of a segment is set by how many cells it
-    crosses: the traversal runs a fixed ``nx + ny + nz`` steps, because a traced loop cannot have
+    crosses: the traversal runs a fixed ``nx + ny + nz + 1`` steps, because a traced loop cannot have
     a data-dependent length. A coarse absorbance grid over a fine flow mesh is both cheaper and
     no less accurate.
 

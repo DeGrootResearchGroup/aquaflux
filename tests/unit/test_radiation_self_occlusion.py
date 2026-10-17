@@ -586,6 +586,23 @@ def _lamp_in_a_sleeved_box():
 
 
 @pytest.mark.parametrize("grid", [False, True])
+def test_a_mask_built_in_many_passes_is_the_mask_built_in_one(grid):
+    """Every real build is cut into passes, and each pass must write its answers into its own
+    rows: written into the first pass's rows instead, every shadow past the first pass lands on
+    the wrong receiver and the rest read clear -- a brighter field and no error. Counting the rays
+    of each pass cannot see that; comparing the answers can."""
+    surfaces, receivers = _lamp_in_a_sleeved_box()
+    limit = 3 * surfaces.n_facets
+    many = build_visibility(
+        [], surfaces, receivers, self_occlusion=RayCastOcclusion(pair_limit=limit, grid=grid)
+    )
+    one = build_visibility([], surfaces, receivers, self_occlusion=RayCastOcclusion(grid=grid))
+    many_hidden = np.asarray(many.hidden_by_geometry)
+    assert np.any(many_hidden[3:]), "a pass past the first must hold a blocked pair"
+    np.testing.assert_array_equal(many_hidden, np.asarray(one.hidden_by_geometry))
+
+
+@pytest.mark.parametrize("grid", [False, True])
 def test_a_pair_facing_away_is_not_cast_and_the_field_does_not_notice(monkeypatch, grid):
     """For receivers in the volume, a facet turned away from one sends it nothing, so its ray is
     not cast -- and the field through that mask is exactly the field through one cast in full.
