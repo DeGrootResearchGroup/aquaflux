@@ -24,9 +24,19 @@ import subprocess
 import sys
 
 import pytest
-from aquaflux import _cache_eviction_is_supported, _cache_max_bytes
+from aquaflux import (
+    _DEFAULT_CACHE_FLOOR_SECS,
+    _cache_eviction_is_supported,
+    _cache_floor_secs,
+    _cache_max_bytes,
+    _cache_root,
+)
 
 _GIB = 1024**3
+_SUITE_CACHE_SETTINGS = (
+    "AQUAFLUX_COMPILATION_CACHE_DIR",
+    "AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS",
+)
 
 
 def _fresh_import(code: str, env_extra: dict[str, str]) -> str:
@@ -46,7 +56,11 @@ def _fresh_import(code: str, env_extra: dict[str, str]) -> str:
     """
     import os
 
-    env = {**os.environ, **env_extra}
+    # The suite's own cache settings (``tests/conftest.py``) are in this process's environment and
+    # would be inherited, so the child starts from an environment without them: what is under test
+    # is what a solver run, which never sets them, gets from the import.
+    inherited = {k: v for k, v in os.environ.items() if k not in _SUITE_CACHE_SETTINGS}
+    env = {**inherited, **env_extra}
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
@@ -146,3 +160,65 @@ def test_the_cache_can_be_disabled_entirely(tmp_path) -> None:
         },
     )
     assert str(tmp_path) not in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, _DEFAULT_CACHE_FLOOR_SECS),
+        ("", _DEFAULT_CACHE_FLOOR_SECS),
+        ("2", 2.0),
+        ("0.25", 0.25),
+        ("0", 0.0),
+        ("-1", 0.0),  # a negative floor stores everything, as zero does
+        ("two seconds", _DEFAULT_CACHE_FLOOR_SECS),
+    ],
+)
+def test_the_persistence_floor_is_read_in_seconds(raw: str | None, expected: float) -> None:
+    """The floor override is read in seconds; a typo falls back to the default."""
+    assert _cache_floor_secs(raw) == expected
+
+
+def test_a_solver_run_persists_every_compilation_in_the_solver_s_directory(tmp_path) -> None:
+    """With nothing set, the import stores every program, however short, under the cache root.
+
+    The small programs a solve compiles op by op before its first step take 10-40 ms each, so
+    any floor that is not zero leaves most of them recompiling on every run.
+    """
+    code = (
+        "import jax, aquaflux;"
+        "print(jax.config.jax_compilation_cache_dir);"
+        "print(jax.config.jax_persistent_cache_min_compile_time_secs)"
+    )
+    cache_dir, floor = _fresh_import(code, {"XDG_CACHE_HOME": str(tmp_path)}).splitlines()
+    assert cache_dir == str(tmp_path / "aquaflux" / "jax")
+    assert float(floor) == 0.0
+
+
+def test_a_fresh_import_honours_the_floor_override(tmp_path) -> None:
+    """``AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS`` reaches JAX's persistence floor."""
+    code = "import jax, aquaflux; print(jax.config.jax_persistent_cache_min_compile_time_secs)"
+    out = _fresh_import(
+        code,
+        {
+            "AQUAFLUX_COMPILATION_CACHE_DIR": str(tmp_path / "jax"),
+            "AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS": "1.5",
+        },
+    )
+    assert float(out) == 1.5
+
+
+def test_the_suite_keeps_its_compilations_out_of_the_solver_s_cache() -> None:
+    """The tests write to a directory of their own, at a floor that keeps small programs out.
+
+    Thousands of small test programs in the solver's cache would make each of the solver's own
+    writes dearer (a bounded cache rescans its directory per write) and compete with its
+    programs for the size bound.
+    """
+    import os
+
+    import jax
+
+    assert jax.config.jax_compilation_cache_dir == os.environ["AQUAFLUX_COMPILATION_CACHE_DIR"]
+    assert jax.config.jax_compilation_cache_dir != str(_cache_root() / "jax")
+    assert jax.config.jax_persistent_cache_min_compile_time_secs > 0.0

@@ -30,15 +30,16 @@ _jax.config.update("jax_enable_x64", True)
 # recompiled every fresh process and whenever a preconditioner refresh changes an
 # operator shape. XLA can persist those compilations to disk and reuse them across
 # runs, turning a repeated multi-minute cost into a one-time one -- with no effect on
-# results (a cache hit returns the identical executable). Only compilations slower
-# than the threshold below are stored, so the cheap jits that dominate the tests do
-# not fill the cache.
+# results (a cache hit returns the identical executable). Every compilation is
+# stored, however short (see ``_DEFAULT_CACHE_FLOOR_SECS`` below for why).
 #
 # This is process-wide JAX state, so it is a documented side effect of the import.
 # Override the location with ``AQUAFLUX_COMPILATION_CACHE_DIR`` (respecting
 # ``XDG_CACHE_HOME``), or disable it entirely with ``AQUAFLUX_DISABLE_COMPILATION_CACHE=1``
 # (e.g. on a read-only or ephemeral filesystem); set its size bound in gibibytes with
-# ``AQUAFLUX_COMPILATION_CACHE_MAX_GIB`` (negative for no bound). A failure to configure
+# ``AQUAFLUX_COMPILATION_CACHE_MAX_GIB`` (negative for no bound), and the shortest
+# compilation it stores in seconds with ``AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS``.
+# A failure to configure
 # the cache (an unwritable path) is non-fatal: the import proceeds, only without caching.
 
 # Bound the cache so it cannot grow without limit. JAX's default
@@ -79,6 +80,60 @@ def _cache_max_bytes(raw: str | None) -> int:
     return _CACHE_UNBOUNDED if gib < 0 else int(gib * 1024**3)
 
 
+# Store every compilation, however short. Before its first step a solve compiles several
+# hundred small programs op by op (one per primitive, shape and dtype, 10-40 ms each); with a
+# floor above their compile time they are recompiled on every run, warm or cold. Measured
+# 2026-10-17 (jax 0.11.2, CPU, 4-core Linux, one run per arm, process wall clock), a warm
+# start with floor 2.0 against floor 0: pitzDaily two steps 89 s -> 63 s (977 compilations,
+# 26 s, against none: 983 cache hits), the re = 20000 turbulent channel 87 s -> 65 s.
+#
+# The cost is on writes, never on reads: with a size bound set, JAX rescans the whole cache
+# directory on every write to choose what to evict, ~30 microseconds per entry. pitzDaily's
+# cold run leaves 949 entries (12 MB), where a write costs 29 ms; its cold run measured
+# 132 s -> 141 s, the channel's 101 s -> 104 s, and a warm run writes nothing. A small
+# program's key does not depend on the code that called it, so a library change does not
+# re-key it: the entries grow with each new mesh or case (the channel shares 48 of its 590
+# with pitzDaily), not with each run. A study that changes the mesh every run pays the
+# writes every run and gains nothing, so it should set the floor back up (2.0 stores only
+# the expensive solve programs).
+_DEFAULT_CACHE_FLOOR_SECS = 0.0
+
+
+def _cache_floor_secs(raw: str | None) -> float:
+    """Return the persistence floor in seconds for a ``...MIN_COMPILE_SECS`` environment value.
+
+    Parameters
+    ----------
+    raw : str or None
+        The raw environment value, in seconds. ``None``, empty or unparseable selects the
+        default; a negative value is read as zero (store everything).
+
+    Returns
+    -------
+    float
+        The shortest compile time, in seconds, that JAX writes to the persistent cache.
+    """
+    if raw is None or not raw.strip():
+        return _DEFAULT_CACHE_FLOOR_SECS
+    try:
+        secs = float(raw)
+    except ValueError:
+        return _DEFAULT_CACHE_FLOOR_SECS
+    return max(secs, 0.0)
+
+
+def _cache_root() -> _Path:
+    """Return the directory aquaflux keeps its caches under.
+
+    Returns
+    -------
+    pathlib.Path
+        ``$XDG_CACHE_HOME/aquaflux``, or ``~/.cache/aquaflux`` when ``XDG_CACHE_HOME`` is unset.
+    """
+    base = _os.environ.get("XDG_CACHE_HOME") or (_Path.home() / ".cache")
+    return _Path(base) / "aquaflux"
+
+
 def _cache_eviction_is_supported() -> bool:
     """Report whether JAX can enforce a cache size bound in this environment.
 
@@ -98,21 +153,15 @@ def _enable_compilation_cache() -> None:
     """Point JAX's persistent compilation cache at a bounded on-disk location."""
     if _os.environ.get("AQUAFLUX_DISABLE_COMPILATION_CACHE"):
         return
-    cache_dir = _os.environ.get("AQUAFLUX_COMPILATION_CACHE_DIR")
-    if not cache_dir:
-        base = _os.environ.get("XDG_CACHE_HOME") or (_Path.home() / ".cache")
-        cache_dir = str(_Path(base) / "aquaflux" / "jax")
+    cache_dir = _os.environ.get("AQUAFLUX_COMPILATION_CACHE_DIR") or str(_cache_root() / "jax")
     try:
         _Path(cache_dir).mkdir(parents=True, exist_ok=True)
         _jax.config.update("jax_compilation_cache_dir", cache_dir)
-        # Cache only genuinely expensive compilations (the solve steps), not the many
-        # sub-second programs a run compiles op by op, so the cache stays small and useful.
-        # Persisting those too would speed up a warm start, but the size bound below makes every
-        # write scan the whole cache directory (it reads each entry's access time to choose what
-        # to evict), so a write costs time in proportion to the number of entries. A floor of
-        # zero adds thousands of small entries per test run, and the scan then costs more per
-        # write than compiling a small program does.
-        _jax.config.update("jax_persistent_cache_min_compile_time_secs", 2.0)
+        # The floor: by default every compilation is stored (``_DEFAULT_CACHE_FLOOR_SECS``).
+        _jax.config.update(
+            "jax_persistent_cache_min_compile_time_secs",
+            _cache_floor_secs(_os.environ.get("AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS")),
+        )
         # ⚠️ SETTING THE BOUND WITHOUT ``filelock`` DISABLES THE CACHE ENTIRELY, and does it
         # quietly: every read and write then fails with a ``UserWarning`` naming the missing
         # package, the cache stores nothing at all, and the only visible symptom is warning

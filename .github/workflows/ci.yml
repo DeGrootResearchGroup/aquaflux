@@ -222,8 +222,9 @@ jobs:
         # from the log at all.
         #
         # PRESERVING THE JAX PERSISTENT COMPILATION CACHE ACROSS RUNS WOULD BUY NOTHING HERE.
-        # Measured, not assumed, because it is an obvious thing to reach for: `import aquaflux`
-        # enables that cache with a 2.0s `jax_persistent_cache_min_compile_time_secs` floor, and
+        # Measured, not assumed, because it is an obvious thing to reach for: the test suite's
+        # `tests/conftest.py` gives it a cache of its own with a 2.0s
+        # `jax_persistent_cache_min_compile_time_secs` floor (the solver's floor is 0), and
         # the tests that set this tier's wall clock -- the distributed `shard_map` ones, each
         # spawning a fresh interpreter -- compile 7184 separate XLA programs whose LARGEST takes
         # 0.05s. Not one clears the floor, so the cache is still 0 bytes after a full run of them

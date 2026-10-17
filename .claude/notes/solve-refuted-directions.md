@@ -714,9 +714,10 @@ CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
 - **The persistent cache works, including for programs holding the preconditioner's host callback**
   (checked on a toy and on the march step itself, which a warm run took from the cache). The
   "default cache" row above is partly cold only because every library change re-keys its programs.
-  Programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`) are never
-  written, so the small eager programs recompile every run. At `183e9ffa` that is ~977 programs and
-  ~26 s, all before step 1 (a warm two-step run). Lowering the floor to keep them is refuted below.
+  Until 2026-10-17 programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`)
+  were never written, so the small eager programs recompiled every run: ~977 programs and ~26 s, all
+  before step 1. The solver's floor is now 0 and a warm start loads them (entry "Persisting the small
+  programs" below); the test suite keeps 2.0 in a cache of its own.
 - ⚠️ **A trap met while measuring:** "the cache did not serve the march step" was first read as JAX
   refusing to persist host-callback programs. It was a key change from the library moving under the
   cache; a warm run settled it. Read a cache miss against what changed since the cache was written.
@@ -1116,15 +1117,19 @@ was declared converged with its true residual 0.13 % above the target. The class
 verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
 `solve-open-directions.md` 6b.
 
-## Persisting the small programs (persistence floor 0) — NOT SHIPPED (2026-10-17)
+## Persisting the small programs (persistence floor 0) — SHIPPED for the solver, kept out of the tests (2026-10-17)
 
-**What was proposed:** lower `jax_persistent_cache_min_compile_time_secs` from 2.0 to 0, so that the
-~980 small programs pitzDaily compiles op by op before step 1 stop recompiling on every run.
+**What changed:** `jax_persistent_cache_min_compile_time_secs` went from 2.0 to 0 for the solver
+(`_DEFAULT_CACHE_FLOOR_SECS` in `aquaflux/__init__.py`, overridable with
+`AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS`), so the ~980 small programs pitzDaily compiles op by op
+before step 1 load from the cache on a warm start. The test suite keeps the 2.0 floor in a directory of
+its own, `~/.cache/aquaflux/jax-tests` (`tests/conftest.py`). It was first measured and declined the same
+day over the write cost below; separating the test cache and measuring how the solver's entries grow is
+what answered it.
 
-**Configuration:** `main` at `183e9ffa`, jax 0.11.2, CPU, 4-core / 15 GB Linux container. Two-step
-pitzDaily (`case.yaml` with `max_steps: 2` and an absolute mesh path, through `compare.solve_aquaflux`),
-`JAX_LOG_COMPILES=1`, a fresh `AQUAFLUX_COMPILATION_CACHE_DIR` per arm, one run each. Harness: a logging
-handler that records the Python stack at every compile (scratch, not kept).
+**First measurement** (`main` at `183e9ffa`, jax 0.11.2, CPU, 4-core / 15 GB Linux container, two-step
+pitzDaily through `compare.solve_aquaflux` with `case.yaml` at `max_steps: 2` and an absolute mesh path,
+`JAX_LOG_COMPILES=1`, a fresh `AQUAFLUX_COMPILATION_CACHE_DIR` per arm, one run each):
 
 | arm | first step done at | compile events | of which cache hits |
 |---|---|---|---|
@@ -1133,27 +1138,69 @@ handler that records the Python stack at every compile (scratch, not kept).
 | floor 0, cold | 124.2 s | 983 (75.3 s) | 34 |
 | floor 0, warm | **53.7 s** | 983 (6.4 s of reads) | **983** |
 
-The floor-0 cache held 949 entries, 17 MB. A hit still logs `Finished XLA compilation of ...`, carrying the
-read time, right after a `Persistent compilation cache hit` line (at WARNING under `JAX_LOG_COMPILES`).
-`jax_persistent_cache_min_entry_size_bytes` is 0, which on CPU filters nothing.
+**Second measurement** (branch `claude/cache-floor`, same container and jax, through
+`validation/run_case.sh`, the floor set by environment, one run each; "step 1 at" is the march log's
+`t(s)`, which starts after the case build, "process" is the whole run's wall clock):
 
-**Per program** (300 trivial eager programs at distinct shapes, first call each): compile 25 ms,
-compile plus cache write 46 ms, cache hit 4.2 ms, in-memory repeat 0.03 ms. So the warm saving is real
-(about 26 s on pitzDaily's warm start).
+| arm | compilations before step 1 | step 1 at | process |
+|---|---|---|---|
+| pitzDaily floor 2.0, cold | 982 (68.7 s), 1 hit | 102 s | 132 s |
+| pitzDaily floor 2.0, warm | 977 (26.3 s), 6 hits | 64 s | 89 s |
+| pitzDaily floor 0, cold | 949 (80.8 s), 34 hits | 109 s | 141 s |
+| pitzDaily floor 0, warm | **0, 983 hits** | **49 s** | **63 s** |
+| channel re20000 (`aquaflux run`, to convergence) floor 2.0, cold / warm | | | 101 / 87 s |
+| channel re20000 floor 0, cold / warm | | | 104 / **65 s** |
 
-**Why it is not shipped:** with a size bound set (aquaflux sets 10 GiB), JAX's `LRUCache.put` runs
-`_evict_if_needed` on every write. That globs the whole cache directory, stats every entry and reads its
-access-time file, under the inter-process lock. So a write costs time in proportion to the entry count.
-Measured on synthetic 18 KB entries: 27 ms per write at 1000 entries, 141 ms at 5000, 586 ms at 20000 and
-1.4 s at 50000. A read stays at 0.3–0.4 ms. At floor 0 every op-by-op program of every run goes in, and
-the test suite shares the default cache directory: four unit test files (198 tests) wrote 1804 entries,
-so a fast tier writes roughly ten times that, and every library change adds new keys. Within a few runs a
-small program's write costs far more than its 25 ms compile, and an unbounded cache (no scan) is the
-88 GiB growth the bound exists to stop. No floor in between helps: the programs worth persisting compile
-in 10–40 ms, so any floor that admits them admits everything.
+A hit still logs `Finished XLA compilation of ...`, carrying the read time, right after a
+`Persistent compilation cache hit` line (at WARNING under `JAX_LOG_COMPILES`).
+`jax_persistent_cache_min_entry_size_bytes` is 0, which on CPU filters nothing; no other setting excludes
+the small programs. Per program (300 trivial eager programs at distinct shapes): compile 25 ms, compile
+plus write 46 ms, hit 4.2 ms.
 
-**Reopen only if** JAX's eviction stops scanning per write (it is `jax/_src/lru_cache.py`), or the small
-programs go away (the next entry says they cannot be compiled away cheaply).
+**The write cost, which is what declined it first:** with a size bound set (aquaflux sets 10 GiB), JAX's
+`LRUCache.put` runs `_evict_if_needed` on every write, which globs the directory, stats every entry and
+reads its access-time file under the inter-process lock (`jax/_src/lru_cache.py`). Measured on real
+`LRUCache` objects with 18 KB entries: ~30 µs per entry, 32 ms per write at 1000 entries, 153 ms at 5000,
+627 ms at 20000. A read is 0.3 ms at any count, and a warm run writes nothing (the entry count is
+unchanged across it), so the cost falls on cold runs only. pitzDaily's cold run left 949 entries,
+12.1 MB, where a write costs 29 ms (a copy of that cache): that is the +9 s cold row above.
+
+**Why that is acceptable now:**
+- **The test suite no longer writes to the solver's cache.** Four unit test files (198 tests) wrote 1804
+  entries at floor 0, and every library change re-keys a test's own jitted programs. `tests/conftest.py`
+  points the suite (and the interpreters its tests spawn) at `jax-tests` at the 2.0 floor before
+  anything compiles. Six fast-tier files (274 tests, serial, one run each): cache off 156 s; own
+  directory at 2.0, 155 s cold / 166 s warm (stores nothing: no test there compiles for 2 s); at floor 0,
+  **326 s cold / 59 s warm**, 3099 entries. The cold doubling is the per-write rescan (~30 µs × 3099²/2 ≈
+  145 s), and a library change re-keys the tests' own programs, so floor 0 is not for the suite unless
+  the rescan goes. Off would lose the slow tiers' reuse of multi-second programs, so the suite keeps 2.0.
+- **A small program's key does not depend on the code that called it**, because JAX strips debug
+  locations before hashing: the same `multiply`/`add` at the same shape from a different file, function
+  and line is a hit (checked on a four-program probe). So a library change does not re-key them; the
+  count grows with each new mesh or case (the channel added 542 to pitzDaily's 949, sharing 48), not with
+  each run.
+- **Eviction is LRU by access time and does not take a recent large program first** (real `LRUCache`,
+  bound 101 MB: 3000 old 18 KB entries, then a 20 MB entry read once, then 3000 new ones -- the large one
+  and all new ones stayed, 1500 old ones went; a 20 MB entry written before all of them went first). The
+  bound is 10 GiB against ~12 MB of entries per pitzDaily-sized case, so on its own it holds hundreds of
+  cases' small programs; what prunes them in practice is the GiB-sized solve programs each library change
+  writes, which push the oldest entries out.
+
+**⚠️ A cache write can fail, and one test turns that into a failure -- on `main` too.** Under the fast
+tier's shard 2 (`--splits 3 --group 2 -n 2 --dist loadfile`, one XLA thread per worker, empty test cache)
+`test_radiation_refracted.py::test_the_gathers_read_which_corners_have_a_path_from_the_mask_and_warn_only_where_found`
+fails because serializing a `jit_scan` that compiled for over 2 s raises `Failed to materialize symbols`,
+JAX reports it as a `UserWarning`, and the test runs that block under `simplefilter("error")`. Reproduced
+twice on this branch and once on `main` at `3c5b58d6` with a fresh cache directory (2026-10-17, jax
+0.11.2); alone the test passes on both. It is not this change: the suite's floor is 2.0 either way.
+
+**The residual risk, and the override:** nothing bounds the entry count except bytes, and each write
+costs ~30 µs per entry. Ten cases' small programs (~8000 entries) put a write at ~0.25 s, so the first
+run of a new case pays a few minutes of writes once; its warm runs then save ~25 s each. A study that
+changes the mesh every run pays that every run and gains nothing: set
+`AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=2` for it. **Reopen** (raise the default again, or cap the
+entry count at import) if a cold run is found paying more in writes than a few warm starts save, or drop
+the concern if JAX's eviction stops scanning per write.
 
 ## Compiling the eager set-up phases into a few programs — NOT WORTH BUILDING (2026-10-17)
 

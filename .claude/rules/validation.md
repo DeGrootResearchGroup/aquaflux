@@ -470,6 +470,11 @@ to read about.
 - **The compiled ILU(0) kernel was a gitignored artifact** (deleted with it 2026-09-13, #371). A fresh
   worktree silently ran the pure-Python twin, so a `hostilu` timing from before then is only comparable
   if its run log's `host ILU kernel` banner line says `compiled`.
+- **A wall time recorded before 2026-10-17 includes ~25 s of small-program compilation that a warm run
+  no longer pays.** The solver's persistence floor went from 2.0 s to 0 that day, so a warm start now loads
+  the several hundred op-by-op programs it used to recompile (pitzDaily two-step: 89 s -> 63 s, process
+  wall clock). Compare an older timing against a cold run, or subtract that, never against a warm one.
+  `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=2` reproduces the old behaviour.
 - **The JAX compilation cache is shared but keyed on the compiled program.** A branch carrying different
   solver code takes misses in a warm checkout, so the first run on a new branch is partly measuring
   compilation. Nothing in the log distinguishes that from the case being slower.
