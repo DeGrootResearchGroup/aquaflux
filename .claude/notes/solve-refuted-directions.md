@@ -1017,6 +1017,19 @@ and binding defaults are in `solve-globalization.md`.
 used to select — were removed code paths, not refuted directions, and left one-line traps in
 `solve-march.md`; no ledger entry suggested. The Step-0 diagnostic / `beta_rel_change` refutation
 already has ledger coverage, lines ~336 and ~934.)
+- **A floor under β learned from a collapse, or a cap on β's growth rate (a "ceiling") — refuted as repairs for
+  the mid-ramp shift collapse (pitzDaily viscosity ramp inside one march, 2026-09-09).** Once `rebase`
+  removed the ratio rule's spurious brake at station changes, the shift descended unopposed to β ≈ 0.012
+  and the line search collapsed. Both candidate repairs *infer* a property of the shift from the march's
+  behaviour ("a collapse here means β is too small"; "a brake here means the rate is too fast"), and that
+  evidence decays as the state moves: the same march later converged at β = 0.005 (alpha 1.000, 3-5
+  cycles a step) once arrived and settled — a shift fatal at step 13 and comfortable at step 47, so the
+  wall belongs to `(state, β)`, not to β, and a learned floor would forbid the low-shift convergence that
+  finishes the march. The built repair is `ShiftStrengthControl.redamp` (damp by `shift_factor` on the
+  step entering a station, holding the control that step; default `redamping = 2.0`), which infers
+  nothing and measured 40 steps / 261 restart cycles against 36 / 269 for the accidental brake. Detail:
+  `.claude/rules/solve-march.md` (`redamp`); `.claude/notes/solve-march-log.md`, "`redamp` — the spurious
+  brake `rebase` removed was load-bearing" and "`redamp` — the two floors, the `(state, β)` wall, …".
 
 ## A viscosity ramp keyed to the shift (`nu` as a function of `beta`) — CLOSED BEFORE BUILDING (2026-10-11)
 
