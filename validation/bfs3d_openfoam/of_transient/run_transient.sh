@@ -11,8 +11,8 @@
 # to attribute a reattachment difference to physics. Compare the two x_r/h values, not the fields.
 #
 # The mesh, physical properties and boundary conditions are the SAME as of_case -- this script copies
-# them in rather than keeping a second copy, so the transient reference is byte-identical in geometry
-# and setup to the steady case and to what aquaflux imports.
+# them in rather than keeping a second copy, so the transient reference runs on the tracked mesh
+# (../of_case/constant/polyMesh) that the steady case and aquaflux read.
 set -e
 cd "$(dirname "$0")"
 RUNS=../runs
@@ -25,8 +25,9 @@ else
 fi
 
 # One geometry/BC/property definition, shared with the steady case.
-cp ../of_case/system/blockMeshDict system/blockMeshDict
 mkdir -p constant
+rm -rf constant/polyMesh
+cp -r ../of_case/constant/polyMesh constant/polyMesh
 cp ../of_case/constant/momentumTransport ../of_case/constant/physicalProperties constant/
 rm -rf 0 [1-9]* 0.[0-9]* processor* postProcessing log.* 2>/dev/null || true
 cp -r ../of_case/0.orig 0
@@ -39,7 +40,6 @@ if [ "$SOLUTION" != system/fvSolution ]; then
     cp "$SOLUTION" system/fvSolution
 fi
 
-blockMesh > log.blockMesh 2>&1
 foamRun > log.foamRun 2>&1 || true
 
 T=$(foamListTimes -latestTime)

@@ -220,11 +220,14 @@ def test_a_gate_on_a_dependency_ci_does_not_install_is_recorded_as_such(path: st
 #: These are narrower than the module-level gates above -- most remove a single test -- with one
 #: exception worth naming, because it is the same whole-module shape by a different mechanism:
 #: ``integration/test_bfs3d_species.py`` skips every one of its tests through a module-scoped fixture
-#: when the case data is absent, and that data is deliberately not in the repository. It is therefore
+#: when the flow case's converged OpenFOAM fields are absent, and they are not tracked where it reads
+#: them (the mesh is). It is therefore
 #: skipped in the workflow exactly as the solver-library modules are, and it is the only test that
 #: reaches into the validation cases at all.
 CONDITIONALLY_SKIPPED: dict[str, str] = {
-    "integration/test_bfs3d_species.py": "the whole module: the case data is not in the repository",
+    "integration/test_bfs3d_species.py": (
+        "the whole module: the flow case's converged OpenFOAM fields (of_case/2000) are not tracked"
+    ),
     "unit/test_compiled_residual_census.py": (
         "the whole module, on a JAX backend other than the CPU: the compiled program it counts is "
         "the CPU backend's. CI runs on the CPU, so this removes coverage only on a GPU machine"

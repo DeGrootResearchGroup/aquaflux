@@ -421,8 +421,9 @@ float64 vs float32 PC. Pass is cycles within +10 % at lower wall. The real measu
 (next entry).
 
 **Measured on pitzDaily, CPU (2026-10-09) — convergence is unchanged, and the CPU apply is SLOWER.**
-⚠️ A substitution for the pre-registered bfs3d measurement (its mesh is not in this container), made on
-the user's instruction. `precision_replay_probe.py` replays the march's own 75 target-station systems
+⚠️ A substitution for the pre-registered bfs3d measurement, made on the user's instruction, in the belief
+that bfs3d's mesh was not in the repository. It was (tracked since 2026-10-17 at
+`validation/bfs3d_openfoam/of_case/constant/polyMesh`), so the bfs3d measurement can be taken. `precision_replay_probe.py` replays the march's own 75 target-station systems
 (steps 17–31, capture of the shipped `case.yaml`: residual stop, `rtol` 0.3, restart 15, `refresh_on_cycles`
 2, field split `SimpleSmoothed` / `JacobiSmoothed`; jax 0.11.2, CPU, 4-core Linux) with both block
 inverses' V-cycles in float32 — hierarchy, smoothers and right-hand side; the split's coupling product,
@@ -495,7 +496,8 @@ cycle count.
       depends on #721, as its PR said.
     - Counts are deterministic here (the same in all thirteen marches of this record), so one run per arm
       holds for counts. For wall clock, arms C and D lie outside any noise and A against B does not by
-      much. bfs3d's mesh is not in this container, so its figures remain the PRs' own (M3 Pro, jax 0.10.2).
+      much. bfs3d was not re-run here, so its figures remain the PRs' own (M3 Pro, jax 0.10.2); its mesh is
+      tracked (`validation/bfs3d_openfoam/of_case/constant/polyMesh`), so it can be.
 - **(2026-10-09, under the CSR kernel, since superseded by the two bullets above) the CPU half closed nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.

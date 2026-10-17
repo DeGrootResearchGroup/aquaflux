@@ -185,6 +185,22 @@ their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march
   that set one ran the file's solver.
 - `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
 
+## bfs3d's mesh — one tracked copy
+
+- **`validation/bfs3d_openfoam/of_case/constant/polyMesh` is the one copy** (23040 hexahedra), where
+  `blockMesh` writes it, so the flow case owns its geometry and the species case reaches across to it, as
+  #662's dependency edge would. `case.yaml` names it, `compare.MESH` reads it from the file,
+  `run_of.sh` / `run_transient.sh` run on it, and `run_of.sh --blockmesh` regenerates it in place (a
+  regeneration that differs shows in `git status`; on 2026-10-17 its node lines matched the current
+  `blockMeshDict`'s grading to the file's printed precision, 5e-11 m). The OpenFOAM fields are not
+  tracked there; without them `compare.py` marches and skips the comparison.
+- **A shipped case file may name only a tracked path or one declared in
+  `tests/unit/test_shipped_case_paths.py`'s `GENERATED`** (with what writes it), fast tier; the bfs3d
+  mesh once sat at an ignored `runs/kwsst/polyMesh` while tracked twice in `bfs3d_species/`.
+- ⚠️ `bfs3d_species/of_case/` still tracks a run's scratch output against its own `.gitignore` (`2000/`,
+  the frozen flow, its only tracked copy; `2600/s`; `constant/` property copies; `log.foamRun`), and
+  `runs/species/{s,phi}`; its `run_of.sh` deletes `constant/` and `2000/` when it runs.
+
 ## `bfs3d_species` — dependencies
 
 A passive tracer on `bfs3d_openfoam`'s flow (`transport.md` has the design).

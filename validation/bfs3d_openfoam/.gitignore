@@ -1,4 +1,5 @@
-# Regenerable run artifacts; report.md, figures/, and of_case/ (the case template) ARE tracked.
+# Regenerable run artifacts; report.md, figures/, and of_case/ (the case template and the mesh,
+# of_case/constant/polyMesh, which every code reads) ARE tracked.
 # No trailing slash: in a git worktree `runs` is often a symlink to a shared run directory, and
 # git treats a symlink as a file, so a `runs/` rule would not match it and it would get staged.
 runs
@@ -17,12 +18,9 @@ __pycache__/
 # directory, and git treats a symlink as a file, so a `checkpoints/` rule would not match it.
 checkpoints
 *.npz
-of_case/constant/polyMesh/
-# The transient reference: mesh/constant/BCs are copied from of_case at run time (one source of
-# truth), so they are regenerated rather than stored twice; solver log + time dirs are regenerable.
-of_transient/system/blockMeshDict
+# The transient reference: mesh/constant/BCs are copied from of_case at run time, so they are not
+# stored twice; solver log + time dirs are regenerable.
 of_transient/constant/
-of_transient/constant/polyMesh/
 of_transient/0/
 of_transient/[1-9]*/
 of_transient/0.[0-9]*/

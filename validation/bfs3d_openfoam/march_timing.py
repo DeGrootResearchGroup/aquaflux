@@ -1,10 +1,10 @@
 """Time the full continuation march, without the OpenFOAM comparison.
 
-``compare.main`` refuses to run without the transient reference fields, because its job is to *validate*
-against them. A timing question does not need them: what is wanted is the wall clock and the per-step
-record of the march itself, which ``solve_aquaflux`` produces on its own. Keeping this as its own entry
-point means the timing question can be re-asked later without either generating a reference or editing
-the comparison.
+``compare.main`` validates against the OpenFOAM fields when they are present (without them it marches and
+skips the comparison). A timing question needs only the wall clock and the per-step record of the march
+itself, which ``solve_aquaflux`` produces on its own, with this script's settings banner beside it.
+Keeping this as its own entry point means the timing question can be re-asked later without editing the
+comparison.
 
 Reads the same environment the comparison does, so an arm is selected the same way::
 
@@ -29,8 +29,8 @@ HERE = Path(__file__).parent
 
 
 def main() -> None:
-    if not (compare.RUNS / "polyMesh").exists():
-        raise SystemExit(f"mesh not found in {compare.RUNS}; run of_case/run_of.sh first.")
+    if not compare.MESH.exists():
+        raise SystemExit(f"the mesh case.yaml names is not at {compare.MESH}.")
     print(
         f"flow-block inverse: {compare.FLOW_INVERSE}  |  turbulence: {compare.TURBULENCE_INVERSE}  |  "
         f"refresh at {compare.REFRESH_ON_CYCLES} cycles",
