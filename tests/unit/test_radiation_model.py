@@ -20,10 +20,12 @@ from aquaflux.radiation.model import (
 from aquaflux.radiation.profiles import CosinePower, Isotropic, Lambertian
 from aquaflux.radiation.self_occlusion import NoOcclusion, RayCastOcclusion, SilhouetteOcclusion
 from aquaflux.radiation.surfaces import Surfaces
+from aquaflux.radiation.visibility import build_visibility
 from aquaflux.solids import Cylinder
 from aquaflux.solve import relative_residual_gmres
 
 from tests.unit.radiation_references import (
+    baffled_box_with_a_point,
     box,
     closed_drum,
     inward_box,
@@ -1067,3 +1069,44 @@ def test_a_traced_specular_reflectance_is_refused_even_at_zero_without_specular_
     assert float(jax.grad(total)(0.5, 0.0)) > 0.0
     with pytest.raises(TypeError, match="specular_reflectance is traced"):
         jax.grad(total, argnums=1)(0.5, 0.0)
+
+
+def test_the_transfer_casts_one_ray_per_pair_it_reads_and_solves_as_a_full_mask_does(monkeypatch):
+    """The facet-to-facet mask casts a ray only for a pair whose answer is read -- its transfer is
+    non-zero one way or the other, or it joins a facet to a point source -- once for both ways.
+    The solved irradiance, the point source's arrivals included, is the one a mask cast in full
+    in both directions gives.
+    """
+    from aquaflux.radiation import self_occlusion
+
+    rays = []
+    real = self_occlusion.pairs_are_cut
+
+    def watched(receivers, sources, near, vertices, receiver, source, **kwargs):
+        rays.append(len(receiver))
+        return real(receivers, sources, near, vertices, receiver, source, **kwargs)
+
+    monkeypatch.setattr(self_occlusion, "pairs_are_cut", watched)
+    vertices, point = baffled_box_with_a_point()
+    surfaces = Surfaces.from_triangles(
+        vertices, emission=1.0, power=5.0, diffuse_reflectance=0.6
+    )  # fmt: skip
+    model = surface_model(surfaces, self_occlusion=RayCastOcclusion())
+    geometric = np.asarray(model.transfer.geometric)
+    areal = ~np.asarray(surfaces.is_point_source)
+    read = (geometric != 0.0) | (areal[:, None] & ~areal[None, :])
+    either = np.triu(read | read.T, 1)
+    assert 0.5 < either.sum() / np.triu(np.ones_like(read), 1).sum() < 0.95, "some pairs unread"
+    assert sum(rays) == int(either.sum())
+
+    n = surfaces.n_facets
+    full = build_visibility(
+        [], surfaces, surfaces.centroid, receiver_facet=np.arange(n),
+        self_occlusion=RayCastOcclusion(),
+    )  # fmt: skip
+    hidden = np.asarray(full.hidden_by_geometry)
+    assert hidden[areal, point].mean() > 0.1, "the baffle must hide the point source from some"
+    held = eqx.tree_at(lambda m: m.transfer.visibility, model, full)
+    landing, _ = surface_irradiance(model, surfaces)
+    expected, _ = surface_irradiance(held, surfaces)
+    np.testing.assert_array_equal(np.asarray(landing), np.asarray(expected))

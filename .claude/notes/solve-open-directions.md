@@ -14,7 +14,7 @@
 
 ## Where the time is — the reading these entries rest on
 
-The recorded numbers (`solve-march.md`, `solve-refuted-directions.md`):
+The recorded numbers (`solve-march.md`, `solve-march-log.md`, `solve-refuted-directions.md`):
 
 | case | cells | dofs | wall | compile | Krylov matvec |
 |---|---|---|---|---|---|
@@ -45,42 +45,71 @@ number of OUTER steps the target station takes, which its shift floor sets (meas
 
 ---
 
-### Re-measured 2026-10-14 by profile, on the shipped march
+### Re-measured 2026-10-17 by profile, on the shipped march
 
-pitzDaily `case.yaml` at `da37958a`, one cold-cache run under `py-spy` (25 Hz, whole process), Linux
-x86_64, 4 cores, jax 0.11.2; `PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1` (checkpoint writing
-measured at 0.5 s). 18 steps / 123 cycles, `x_r/h` 8.0686, 898 s:
+pitzDaily `case.yaml` at `3c5b58d6` (`main` after #721, #732, #735, #736, #742 and the compiled norm and
+field extraction), Linux x86_64 container, 4 cores, 15 GB, no swap, Python 3.13.16, jax/jaxlib 0.11.2;
+`PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`. **21 steps / 50 inner solves / 106 restart cycles /
+1258 applications of the preconditioned operator / 21 refits (13 `full`, 8 `cost`), final stopping `R`
+2.618e-06, `x_r/h` 8.0686**, identical in every run below. Each column is one run of the whole process
+under `py-spy record --idle --threads -r 25` (main thread only), sorted by
+`validation/pitzdaily_openfoam/profile_buckets.py`, which assigns a stack to the first rule any of its
+frames meets (compilation first, so a refit's first compile counts as compilation):
 
-| bucket | s | share |
+| bucket | cold s | share | warm s | share | was (`da37958a`, cold, 898 s) |
+|---|---|---|---|---|---|
+| the compiled step program (GMRES, preconditioner applies, JVPs) | 106 | 32 % | 110 | 38 % | 417 s, 46 % |
+| compilation and tracing, all phases | 115 | 35 % | 73 | 25 % | 212 s, 24 % |
+| refit: coloured probe (~1.5 s per refit) | 42 | 13 % | 41 | 14 % | 95 s, 11 % |
+| refit: hierarchy refactor (host) and other build, the first fit included | 48 | 14 % | 49 | 17 % | 56 s, 6 % |
+| the step's row-scaled measure rebuilt from each step's state | 2 | 1 % | 2 | 1 % | (not a row) |
+| march-log field extraction | 0 | 0 % | 0 | 0 % | 35 s, 4 %, op by op |
+| the stopping test's residual | 0 | 0 % | 0 | 0 % | 32 s, 4 %, op by op |
+| driver, setup, report | 17 | 5 % | 15 | 5 % | 50 s, 5 % |
+| **whole process** | **329** | | **290** | | 898 |
+
+The march log's solve wall was 320 s cold and 284 s warm under the profiler. Without it, the shipped path
+(`compare.py` with no override) took **249, 227 and 236 s** in three warm runs on the same container,
+spread over 1.5 hours, the first with the capture variables set. So run-to-run spread on this container
+is ~5-10 %, well above the ~1.3 % recorded elsewhere for back-to-back runs, and the profiler adds roughly
+another 10-20 %.
+The application count comes from `PITZ_KRYLOV_STOP=residual`, which goes through `compare.py`'s
+script-only study path (the shipped path reports no count). Its step table was identical to the
+shipped run's, so the count is the shipped march's. The refit seconds are the march log's own `pc`
+lines (warm, shipped path, 21 refits): 61 s, probe 32 s, refactor 27 s.
+**What moved, read from the table:** the compiled step program is now about a quarter of what it was
+(417 -> 110 s, while the march grew from 18 to 21 steps), so a cold run is dominated by compilation and
+by the refits (62 % of the cold process together). A refit's probe is ~1.5 s, against ~6 s before the
+adjugate inverse (#735), which is what a cheaper JVP predicts for ~165 batched JVPs (not separated further).
+
+Inside one Krylov application, timed by `validation/pitzdaily_openfoam/application_cost.py` at the
+first inner system of steps 19, 20 and 21 of that capture (the target station; `replay.py` reproduces
+the march's refits). Each piece is the best of 15 warm calls of its own compiled program, run with
+`MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`. Under the default allocator
+the JVP's 42.8 MiB temporary buffer and the leading cycle's both page-fault on every standalone call
+(11 200 and 9 000 faults), which the step program does not pay; those figures were JVP 22-27 ms and
+split apply 53-61 ms:
+
+| piece | ms | was (`da37958a`) |
 |---|---|---|
-| the compiled step program (GMRES, preconditioner applies, JVPs) | 417 | 46 % |
-| compilation and tracing, all phases (cold cache) | 212 | 24 % |
-| refit: coloured probe (~165 batched JVPs, ~6 s per refit) | 95 | 11 % |
-| refit: hierarchy refactor (host) and other build | 56 | 6 % |
-| march-log field extraction, op by op | 35 | 4 % |
-| the stopping test's residual, op by op | 32 | 4 % |
-| driver, setup, report | 50 | 5 % |
+| field-split apply, float32 (as shipped) | **48-50** | 186-190 (float64, CSR) |
+| -- the `[u, v, p]` SIMPLE-smoothed V-cycle | 36-39 | ~130 |
+| -- the `[k, omega]` Jacobi-smoothed V-cycle | 8-9 | ~55 |
+| -- the coupling product | 1.5-1.9 | ~7 |
+| JVP `J v` | **14-17** | 77-86 (with the batched LU, #735) |
+| the two compiled as one program, `(J + s) M v` | 78-81 (19 000 faults per call under both allocators, not investigated) | -- |
 
-Inside one Krylov application, timed at the target-station states of that capture (steps 13, 15, 18;
-`replay.py` as repaired in #719): field-split apply **186-190 ms** (the `[u, v, p]` SIMPLE-smoothed
-V-cycle ~130 ms, the `[k, omega]` Jacobi-smoothed one ~55 ms, the coupling product ~7 ms) against a JVP
-of **77-86 ms**, so the preconditioner is ~70 % of an application. The JVP was 45 ms on 2026-10-10;
-the multiple-correction gradient is the likely cause (not measured, and not a lever: that gradient is
-the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve.md`,
-`norm_of_residual`): 804 -> 727 s warm, identical march.
-⚠️ **Every number in this subsection predates the multiple-correction first pass's adjugate inverse
-(2026-10-16, branch `claude/multicorr-adjugate-inverse`), and was taken with a batched LAPACK LU of
-`M1 - B` inside every residual and JVP** -- 6 `getrf` + 12 `trsm` library calls in the compiled
-pitzDaily residual at `44ba609f`. Removing it took the warm pitzDaily residual 29.8 -> 5.3-6.4 ms and the JVP
-45.0 -> 17.2-19.3 ms (`.claude/rules/schemes.md`, multiple-correction section, configuration there).
-So the JVP column above (77-86 ms), the ~70 % preconditioner share it implies, the probe's ~6 s per
-refit, and the 45 -> 77 ms rise are all measured under that call and were not re-run; the rise itself
-remains unexplained. The shipped pitzDaily march gained only 430 -> 411 s on identical trajectories
-(one run per arm, same entry), so the per-call JVP saving does NOT carry over to the march in proportion;
-do not re-derive the in-step shares from the 17-19 ms figure without measuring the step program's matvec.
+So **the preconditioner is ~75 % of an application (apply / (apply + JVP), 74-78 %), not ~90 %**. The
+split's cost fell by ~3.8x (padded-row operators, #721, and float32, #732) while the JVP fell by ~5x
+(the adjugate inverse, #735), so the share barely moved from the ~70 % recorded before. It would be
+~93 % only if the split had stayed at its CSR float64 cost: arm C below measures exactly that, 195-200 ms
+against a 14-18 ms JVP. ⚠️ The composite program costs ~15 ms more than its two parts summed and keeps
+faulting with the thresholds raised, so `apply / composite` reads 59-64 %. Which of the two figures the
+step program sees is unmeasured; the step program's own matvec has not been profiled.
+
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
-built once per session and reused by every refit. A refit's ~6 s is the ~165 JVPs that compute the new
-VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).
+built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
+the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).
 
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
@@ -300,8 +329,8 @@ pass under `lineax`:
   tighten in a tail of full-length steps limited by their own solve (`0.9·ρ²`, floored at
   `½ target / |R_k|`), and solve the step after a cut-back or a rising residual to 0.1. The other proposed
   remedy, re-solving the cut-back step tighter, was refuted (ledger: "Re-solving a cut-back step at a
-  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve.md`'s
-  contract entry and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
+  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve-log.md`,
+  "Contracts: `adaptive_tolerance.py` — measured on the built setting (#645)", and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
   (`LinearSolveRegime.stop` defaulting to `residual`, and the setting at its defaults on every march whose
   solver is a relative-residual GMRES) passes: 39 of 39** (2026-10-15, `d0871e2` + the two forcings in a
   scratch worktree, Linux x86_64, 4 cores, jax 0.11.2, 1:01:39). The stop alone failed four
@@ -385,7 +414,7 @@ is the whole game on a GPU; on CPU the gain is smaller but non-zero. A float32 p
 
 **What it does not change.** The preconditioner never enters the state or its gradient; a rounding
 change inside it changes Krylov convergence only. `solve-amg-multigrid.md` already notes the one place
-a float32 hierarchy *forces* a change (the small-block pivoting at §1313): treat that as the checklist.
+a float32 hierarchy *forces* a change (the small-block pivoting, under "The traced multigrid — in progress"): treat that as the checklist.
 
 **Pre-registered measurement.** bfs3d, matched preconditioner at `state-00049`: cycles and apply wall,
 float64 vs float32 PC. Pass is cycles within +10 % at lower wall. The real measurement is on a GPU
@@ -434,7 +463,40 @@ cycle count.
     20-35 % faster, step 1 (compilation) level, the refit unchanged (it is float64 work).
   - **Shipped (2026-10-16, the project owner's decision): both case files set `precision: float32`;
     the library default stays float64.** This direction's CPU half is closed as a win.
-- **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
+  - **The two PRs re-measured together, on `main` after the adjugate inverse (2026-10-17).** Both #721
+    and #732 were already merged when this was run, so this is an ablation on `main` `3c5b58d6`, not a
+    PR-against-base comparison. Arms with #721 removed run in a local worktree of `main` with #721's
+    merge reverted (`git revert -m 1 5cc4bf09`: the library code reverts cleanly, the only conflict is
+    in this file). The float32 arms are the shipped `case.yaml`, and the float64 arms set
+    `PITZ_SPLIT_PRECISION=float64`. Shipped pitzDaily `case.yaml`, warm cache, the Linux container
+    and jax 0.11.2 of the table above. Splits are timed by `application_cost.py` at steps 19-21, faults
+    removed. **Every arm took the identical march: 21 steps / 50 inner solves / 106 cycles / 1258
+    applications / 21 refits, step tables equal in every column but `t(s)`, final `R` 2.618e-06,
+    `x_r/h` 8.0686.** So the comparison is wall clock alone:
+
+    | arm | level operators | split | solve wall | split apply | JVP | M share |
+    |---|---|---|---|---|---|---|
+    | A, both (shipped) | padded-row | float32 | **227-249 s** (3 runs) | 48-50 ms | 14-17 ms | 74-78 % |
+    | B, #721 only | padded-row | float64 | 251-283 s (2 runs) | 66-67 ms | 14-18 ms | 78-82 % |
+    | D, #732 only | CSR | float32 | 786 s (1 run) | 441-451 ms | 13-18 ms | 96-97 % |
+    | C, neither | CSR | float64 | 449 s (1 run) | 195-200 ms | 14-18 ms | 92-93 % |
+
+    - **#721 is the large win: 449 -> 251-283 s (-37 to -44 %) at float64**, split apply 195-200 ->
+      66-67 ms (-66 %). That is about twice the ~30 % its PR measured at the hybrid start. Its one
+      cost visible here is the refit's host refactor, 20 s (CSR) against 27 s (padded) over the 21
+      refits, which is the padded and transposed copies being built.
+    - **#732 is worth ~6-12 % on top of #721** (B 251-283 against A 227-249 s; in a B-between-A
+      bracket of back-to-back runs, 227 / 251 / 236 s), split apply 66-67 -> 48-50 ms. That is above
+      the 3 % tie threshold, but the container's own spread is ~5-10 %, so the size is not pinned
+      closer than that. The PR measured -24 % (531 -> 405 s) at `d8ca69ab`, before the adjugate inverse
+      made the JVP and the probe cheaper, which raised the step program's split share.
+    - **Without #721, float32 LOSES: 449 -> 786 s (+75 %)**, apply 2.2x slower. This is the CSR
+      kernel's float32 penalty recorded above (2026-10-09), now measured over a whole march. So #732
+      depends on #721, as its PR said.
+    - Counts are deterministic here (the same in all thirteen marches of this record), so one run per arm
+      holds for counts. For wall clock, arms C and D lie outside any noise and A against B does not by
+      much. bfs3d's mesh is not in this container, so its figures remain the PRs' own (M3 Pro, jax 0.10.2).
+- **(2026-10-09, under the CSR kernel, since superseded by the two bullets above) the CPU half closed nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.
 
@@ -450,7 +512,7 @@ entry 6 is a JAX solver by necessity; a GPU-friendly smoother (coloured Gauss–
 the operator allows, or more ILU-free sweeps) replaces ILU(0), whose quality the ledger credits to a
 sequential global sweep that does not parallelize.
 
-**Measurement.** Unavailable until a GPU environment exists (`solve-amg-multigrid.md` §1958). Record
+**Measurement.** Unavailable until a GPU environment exists (`solve-amg-multigrid.md`, "Faithful smoothed aggregation — matching PETSc GAMG"). Record
 the first GPU march's step/cycle counts against the CPU march's — counts should match; clocks are the
 result.
 
@@ -542,7 +604,7 @@ cycle at step 18: since #290 the release fires at step 17 of 19, so there is not
 (the replay's 1-8 cycles per step were taken on the 31-step march of 2026-10-10). Ledger entry: "Re-fitting
 at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
 at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
-step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
+step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (git history of `solve-amg-multigrid.md` before 2026-10-17, "Zero-fill is the low-β smoother"); the SIMPLE-smoothed
 hierarchy does not evidently need it. **pitzDaily's file drops the floor** (2026-10-13, owner's decision;
 none is the 1e-4 arm exactly, since the shift never goes below `release_floor`; confirmed by a march of
 the file as committed, whose step table matches the 1e-4 arm's line for line). ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
@@ -606,6 +668,12 @@ bfs3d (since measured, #678: see the top of this entry).
 
 ---
 
+## 13. CLOSED — a Schubert (sparse Broyden) secant update of the materialized Jacobian between probes
+
+Measured 2026-10-17 on the replay and moved to `solve-refuted-directions.md` ("A Schubert secant update
+of the materialized Jacobian"). The updated Jacobian is no closer to a fresh probe than the stale one in
+any block, and the probe it would replace now costs ~1 s, about one refactor.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
@@ -616,7 +684,7 @@ bfs3d (since measured, #678: see the top of this entry).
 - **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry
   was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
   operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
-  identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
+  identical march 9.7 % faster, the knee at 2 (`schemes-log.md`). pitzDaily now ships
   `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d moved to
   `MultipleCorrectionGradient` too (2026-10-13), so it no longer applies to either case. `jacobian_gradient_sweeps` stays a script-only study arm and
   is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better

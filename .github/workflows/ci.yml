@@ -222,9 +222,8 @@ jobs:
         # from the log at all.
         #
         # PRESERVING THE JAX PERSISTENT COMPILATION CACHE ACROSS RUNS WOULD BUY NOTHING HERE.
-        # Measured, not assumed, because it is an obvious thing to reach for: the test suite's
-        # `tests/conftest.py` gives it a cache of its own with a 2.0s
-        # `jax_persistent_cache_min_compile_time_secs` floor (the solver's floor is 0), and
+        # Measured, not assumed, because it is an obvious thing to reach for: `import aquaflux`
+        # enables that cache with a 2.0s `jax_persistent_cache_min_compile_time_secs` floor, and
         # the tests that set this tier's wall clock -- the distributed `shard_map` ones, each
         # spawning a fresh interpreter -- compile 7184 separate XLA programs whose LARGEST takes
         # 0.05s. Not one clears the floor, so the cache is still 0 bytes after a full run of them
@@ -322,11 +321,13 @@ jobs:
   # ceiling). They are homogeneous, so pytest-split's even-by-count partition
   # balances memory as well as time: each of the 6 shards runs ~1/6 of the set in
   # a fresh process (peak a few GB), and `-n 1` keeps a shard from holding several
-  # heavy solves at once. These fast tests are deliberately NOT recorded in
-  # `.test_durations` (only the heterogeneous slow/validation tiers are), so this
-  # partition stays even-by-count -- duration-balancing them could pile many fast
-  # solves into one shard and unbalance memory. The per-shard jobs are not the
-  # required check -- the `fast-gate` aggregator below is.
+  # heavy solves at once. This partition stays even-by-count -- duration-balancing
+  # them could pile many fast solves into one shard and unbalance memory -- so the
+  # run step points pytest-split at a durations file that does not exist. Their
+  # durations ARE recorded in `.test_durations` (by `refresh-fast-durations`
+  # below), but for a different reader: the scoped local run
+  # (`tools/fastgate.sh --changed`) and anyone estimating what a selection costs.
+  # The per-shard jobs are not the required check -- the `fast-gate` aggregator below is.
   integration:
     name: integration tests (py${{ matrix.python-version }} shard ${{ matrix.group }}/6)
     if: >-
@@ -353,9 +354,12 @@ jobs:
 
       - name: Run integration tests shard
         # `-rs` names what was skipped and why -- see the note on the unit job above.
+        # `--durations-path` names a file that does not exist, so the split stays even by count
+        # whatever `.test_durations` records (see the job header).
         run: >-
           pytest tests/integration -m "not slow and not validation" -q -rs -n 1
           --splits 6 --group ${{ matrix.group }}
+          --durations-path "$RUNNER_TEMP/count-split-not-durations.json"
           --durations=15 --timeout=900 --timeout-method=thread --max-worker-restart=0
 
   # ---- Fast-gate aggregator: the single required status check ------------------
@@ -632,6 +636,91 @@ jobs:
           path: durations-unit-${{ matrix.group }}.json
           if-no-files-found: error
 
+  # ---- Refresh of the other fast tests' durations (same triggers) -------------
+  # The fast integration tests, the distributed tests and the browser interface's tests
+  # (tests/ui) balance nothing in CI -- the integration shards split by count on purpose,
+  # the distributed job is unsharded, and no job runs tests/ui -- so nothing needed their
+  # durations until the scoped local run did: what `tools/fastgate.sh --changed` will cost
+  # is the recorded durations of what it selects, and without these three sets about 300
+  # of the fast tier's tests (21 integration modules among them, the heaviest per test)
+  # had none. The commit job below rewrites `.test_durations` whole, so they must be
+  # re-recorded on every refresh or the first one would delete them again.
+  #
+  # Each entry records under the configuration its tests run with elsewhere: the
+  # integration shards at `-n 1` and six even-by-count groups exactly as the integration
+  # job splits them, the distributed tests at the distributed job's `-n 2`, and the
+  # interface tests at `-n 2`, the local fast tier's worker count on a 4-core machine.
+  refresh-fast-durations:
+    name: refresh ${{ matrix.name }} test-durations
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request' && github.event.action == 'labeled'
+          && contains(github.event.pull_request.labels.*.name, 'refresh-durations'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: integration-1
+            select: tests/integration --splits 6 --group 1
+            markers: not slow and not validation
+            workers: 1
+          - name: integration-2
+            select: tests/integration --splits 6 --group 2
+            markers: not slow and not validation
+            workers: 1
+          - name: integration-3
+            select: tests/integration --splits 6 --group 3
+            markers: not slow and not validation
+            workers: 1
+          - name: integration-4
+            select: tests/integration --splits 6 --group 4
+            markers: not slow and not validation
+            workers: 1
+          - name: integration-5
+            select: tests/integration --splits 6 --group 5
+            markers: not slow and not validation
+            workers: 1
+          - name: integration-6
+            select: tests/integration --splits 6 --group 6
+            markers: not slow and not validation
+            workers: 1
+          - name: distributed
+            select: tests/unit
+            markers: distributed and not slow and not validation
+            workers: 2
+          - name: ui
+            select: tests/ui
+            markers: not slow and not validation
+            workers: 2
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package and test dependencies
+        run: pip install -e ".[test]"
+
+      - name: Record these tests' durations
+        # Slow and validation tests are excluded: `refresh-durations` records those, under the
+        # configuration their own shards run with.
+        run: >-
+          pytest ${{ matrix.select }} -m "${{ matrix.markers }}" -q -n ${{ matrix.workers }}
+          --store-durations --durations-path durations-${{ matrix.name }}.json
+          --timeout=900 --timeout-method=thread --max-worker-restart=0
+
+      - name: Upload these durations
+        uses: actions/upload-artifact@v4
+        with:
+          name: durations-${{ matrix.name }}
+          path: durations-${{ matrix.name }}.json
+          if-no-files-found: error
+
   # ---- Commit the refreshed durations (schedule / manual only) ----------------
   # Deliberately NOT run for the `refresh-durations` PR label: on a PR the point is
   # to land the file in that PR, so the artifacts are downloaded and committed by
@@ -643,7 +732,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     # Only proceed on a COMPLETE set (every shard of both refresh jobs ok): the merge below
     # replaces the whole file, so a missing shard would delete its tests' durations.
-    needs: [refresh-durations, refresh-unit-durations]
+    needs: [refresh-durations, refresh-unit-durations, refresh-fast-durations]
     runs-on: ubuntu-latest
     permissions:
       contents: write                 # write .test_durations via the Contents API

@@ -225,6 +225,10 @@ def test_a_gate_on_a_dependency_ci_does_not_install_is_recorded_as_such(path: st
 #: reaches into the validation cases at all.
 CONDITIONALLY_SKIPPED: dict[str, str] = {
     "integration/test_bfs3d_species.py": "the whole module: the case data is not in the repository",
+    "unit/test_compiled_residual_census.py": (
+        "the whole module, on a JAX backend other than the CPU: the compiled program it counts is "
+        "the CPU backend's. CI runs on the CPU, so this removes coverage only on a GPU machine"
+    ),
     "unit/test_openfoam_fields.py": "one ordering case, when the generated grid is already ordered",
     "unit/test_partitioner.py": "the Scotch binding and command-line partitioners",
     "unit/test_sibling_builders.py": "the tool is in the repository, not the installed package",

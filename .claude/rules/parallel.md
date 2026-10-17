@@ -5,361 +5,176 @@ paths:
 
 # Rules — `aquaflux/parallel/` (domain decomposition & the sharded residual)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform *your*
-> understanding — that is its job, and why it loads into your context. Per the root `CLAUDE.md`
-> **Comment Convention**, none of that provenance may reach the shipped surface (`.py`
-> comments/docstrings, `docs/`): cite the *math*, never the reference code, the `.claude/` rules,
-> the design notes, or the author's own papers.
+> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors; none of that may
+> reach the shipped surface (`.py`, `docs/`) — root `CLAUDE.md` Comment Convention.
 
-Distributed-memory execution: split the mesh across devices and evaluate the cell residual with
-`jax.shard_map`, keeping the whole thing differentiable. Governed by the root `CLAUDE.md`
-Engineering Principles.
+Split the mesh across devices and evaluate the cell residual with `jax.shard_map`, differentiably. Dated
+measurements and incident history: `.claude/notes/parallel-log.md`.
 
 ## The binding architectural decision — invert MPI, do not port it
 
-The Fortran precursor is multi-controller MPI: each rank owns cells plus ghosts, issues explicit
-`MPI_Send`/`MPI_Recv` halo exchanges, and needs a **hand-derived transpose of every message-passing
-step** to get an adjoint. We keep the ghost-cell playbook and drop both of its costs.
+The Fortran precursor is multi-controller MPI with explicit halo messages and a hand-derived transpose of
+each for the adjoint. We keep the ghost-cell playbook and drop both costs.
 
-`shard_map` (not `jit` + `NamedSharding`/GSPMD) is the chosen model, and this is **decided, not
-open**. GSPMD is an auto-partitioner tuned for dense/structured arrays; an unstructured FVM
-`segment_sum` over arbitrary face→cell connectivity is exactly the case it degrades to all-to-all or
-full replication. `shard_map` is the MPI-style escape hatch *inside* the compiled, differentiable
-world: we write the per-partition program and name the collectives.
-
-**The differentiability win is the point.** The transpose of a `ppermute` is another `ppermute`; the
-transpose of a `psum` is a broadcast. JAX derives the adjoint of the halo exchange automatically, so
-the distributed solve stays differentiable across partitions with **zero hand-written adjoint
-communication** — the step that is a notorious, error-prone hand-derivation in an MPI adjoint code.
+**`shard_map`, not `jit` + `NamedSharding`/GSPMD — decided.** GSPMD degrades to all-to-all or replication
+on an unstructured `segment_sum`; `shard_map` lets us write the per-partition program and name the
+collectives. **The point is differentiability:** the transpose of `ppermute` is `ppermute`, of `psum` a
+broadcast, so the halo exchange's adjoint is derived automatically — no hand-written adjoint communication.
 
 ## Module layout
 
-- `partitioner.py` — **`Partitioner`** strategy (`partition(mesh, n_parts) -> labels`) over the
-  shared cell graph (`aquaflux.mesh.cell_adjacency_csr`, the same graph the reordering code uses).
-  `BlockPartitioner` (dependency-free default: cut a reverse Cuthill–McKee ordering into balanced
-  contiguous blocks — space-filling-curve style, always valid, perfectly balanced);
-  `ScotchCLIPartitioner` (min-cut via the `gpart` command-line tool — the **cross-platform** Scotch
-  path, `brew install scotch` / the `scotch` package); `ScotchPartitioner` (same via the `scotchpy`
-  binding — pip package `scotchpy64`, **Linux x86_64 wheels only**, so prefer the CLI on macOS).
-- `partition.py` — **`partition_mesh(mesh, labels) -> PartitionedMesh`** and `LocalPartition`. The
-  decomposition wrapper: owned cells plus an appended halo ring, with the local mesh built as an
-  ordinary `Mesh` so every operator/scheme/BC runs on it verbatim.
-- `padding.py` — **`PaddedLayout`** and **`pad_partition`**: uniform per-shard shapes. Deliberately
-  **operator-independent**.
-- `halo.py` — **`HaloExchange`** strategy: `plan(layout) -> HaloPlan` at setup, `fill(owned_local,
-  plan, axis_name)` inside the sharded body with the collective *inside* `fill`.
-  **`AllToAllHaloExchange`** is the default — a neighbour exchange over a single `all_to_all` that
-  moves only the boundary cells each neighbour ghosts, so it distributes memory.
-  **`AllGatherHaloExchange`** stacks every partition's owned values on every device — O(P × owned)
-  per device, so it does not distribute memory; kept as the dead-simple correctness reference the
-  all-to-all is cross-checked against.
-- `distributed.py` — **`build_distributed_residual`** / **`DistributedResidual`**: the `shard_map`
-  driver. Also operator-independent.
+- `partitioner.py` — `Partitioner` (`partition(mesh, n_parts) -> labels`) over `aquaflux.mesh.cell_adjacency_csr`.
+  `BlockPartitioner` (dependency-free default: a reverse Cuthill–McKee ordering cut into balanced
+  contiguous blocks); `ScotchCLIPartitioner` (min-cut via the `gpart` CLI, cross-platform);
+  `ScotchPartitioner` (`scotchpy` binding, pip `scotchpy64`, Linux x86_64 wheels only — prefer the CLI on macOS).
+- `partition.py` — `partition_mesh(mesh, labels) -> PartitionedMesh`, `LocalPartition`: owned cells + an
+  appended halo ring, the local mesh an ordinary `Mesh`.
+- `padding.py` — `PaddedLayout`, `pad_partition`: uniform per-shard shapes; operator-independent.
+- `halo.py` — `HaloExchange` (`plan(layout) -> HaloPlan` at setup; `fill(owned_local, plan, axis_name)` in
+  the sharded body, collective inside `fill`). `AllToAllHaloExchange` (default) moves only ghosted cells
+  per neighbour in one `all_to_all`; `AllGatherHaloExchange` is O(P × owned) per device, kept only as the
+  correctness reference the all-to-all is checked against.
+- `distributed.py` — `build_distributed_residual` / `DistributedResidual`: the `shard_map` driver;
+  operator-independent.
 
 ## Decided: the halo lives in a wrapper, never on `Mesh`
 
-`Mesh` stays a pure contiguous-block container. A partition's *local* mesh — owned cells plus the
-halo ring — **is** an ordinary `Mesh`, so everything runs on it unchanged; who is a ghost, which
-remote cell it mirrors, and the send/recv index lists are a **separate responsibility** and live in
-`PartitionedMesh`/`LocalPartition`. This is what keeps the entire serial path untouched by
-distribution.
+A partition's local mesh (owned + halo) **is** an ordinary `Mesh`, so everything runs on it unchanged;
+ghost identity and send/recv lists live in `PartitionedMesh`/`LocalPartition`. This keeps the serial path
+untouched. Facts the builder depends on:
 
-Three correctness facts the builder depends on:
-
-- **Domain-boundary faces never cross a partition** (a boundary face has `neighbour = -1` and one
-  owner), so a boundary condition lives entirely within one partition. Only *interior* faces become
-  partition-boundary faces.
-- **Geometry is gathered, never recomputed.** A ghost cell's face stencil is incomplete locally, so
-  recomputing its centroid/volume would be wrong. `local_face_geometry` / `local_cell_geometry`
-  gather from the global geometry, which is what buys bit-for-bit agreement with serial.
-- **Global owner/neighbour roles are preserved** by the remap, so owner-outward normals stay
-  consistent — no re-orientation.
-- **A periodic seam keeps its per-face `neighbour_offset`.** Both face renumberings — the
-  partition's face selection and the padded shard's real-then-padding layout — carry it through
-  `mesh.face_cells.gather_neighbour_offset(face_index)` (padding faces take zero). Both used to drop
-  it, which raises nothing: the local mesh's geometry is *gathered*, so no volume looks wrong, and
-  the loss surfaces only as a wrong owner→neighbour displacement inside whichever operator next
-  reads the seam. Pinned by `test_partition.py::test_local_meshes_keep_the_periodic_seam_displacement`
-  and `test_padding.py::test_padding_keeps_the_periodic_seam_displacement`.
-- **Each local mesh carries its own node set.** `partition_mesh` keeps only the nodes the
-  partition's faces touch and remaps the face-node connectivity to local node ids, so a local mesh is
-  a genuinely standalone `Mesh` rather than one holding a copy of the whole global node array. This
-  matters because `node_coords` is a differentiable leaf of the assembler pytree, so it is stacked
-  and shipped to every device; without the remap the global node array would be replicated P times
-  for data the sharded residual never reads (geometry is gathered, not recomputed from nodes). The
-  padded node array is therefore ragged and `pad_partition` pads it to `n_nodes_max` with copies of
-  node 0 (referenced by nothing that matters — the padded face-node incidences all point *at* node 0,
-  so its value is inert; they do not list "no nodes").
+- **Domain-boundary faces never cross a partition** (`neighbour = -1`, one owner), so a BC lives in one
+  partition; only interior faces become partition-boundary faces.
+- **Geometry is gathered, never recomputed** (`local_face_geometry`/`local_cell_geometry`): a ghost's
+  stencil is incomplete locally. This is what buys bit-for-bit agreement with serial.
+- **Global owner/neighbour roles are preserved**, so normals stay owner-outward.
+- ⚠️ **A periodic seam keeps its per-face `neighbour_offset`** through both face renumberings via
+  `mesh.face_cells.gather_neighbour_offset(face_index)` (padding faces take zero). Losing it raises
+  nothing — it shows up only as a wrong displacement inside an operator. Pinned by
+  `test_partition.py::test_local_meshes_keep_the_periodic_seam_displacement` and
+  `test_padding.py::test_padding_keeps_the_periodic_seam_displacement`.
+- **Each local mesh carries only its own nodes** (remapped face-node connectivity). `node_coords` is a
+  differentiable leaf stacked to every device, so the global node array would otherwise be replicated P
+  times for data the sharded residual never reads.
 
 ## Decided: the per-device body runs a real assembler — never a re-implementation
 
-**This is the rule to hold the line on.** An earlier version of `distributed.py` hand-built
-`FaceCellConnectivity` + `MeshGeometry` + `FieldContext` and called `DiffusionFlux` directly — a
-second implementation of `ResidualAssembler`. It drifted silently (the `MaterialModel` →
-`PropertyModel` rename broke it and no test caught it, because there was no shared code path to
-break), it hardcoded one operator, and it substituted a **pre-baked constant per-face
-`boundary_value` array** for the boundary closures — which can only express constant Dirichlet, so
-`Neumann`, `ZeroGradient`, `Convective`, and wall functions were all silently out of reach.
+**Hold the line on this.** A hand-built per-device residual once drifted silently from
+`ResidualAssembler` and could only express constant Dirichlet (history in the log). Now the caller injects
+`assemble(mesh, geometry) -> assembler`, applied once per padded partition; the P assemblers are stacked
+into one pytree with a leading partition axis and passed to `shard_map` sharded; the body refreshes the
+halo and calls `assembler.residual(...)`. `parallel/` names **no** physical operator; its only dependency
+outside `mesh/` is `BoundaryConditions`.
 
-The structure now is: the caller injects `assemble(mesh, geometry) -> assembler`, applied once per
-padded partition; the P assemblers are stacked into one pytree with a leading partition axis and
-passed to `shard_map` as a sharded input; the per-device body refreshes the halo and calls
-`assembler.residual(...)`. `parallel/` therefore names **no** physical operator, and its only
-dependency outside `mesh/` is `BoundaryConditions` (for the patch-binding padding below).
+The injected assembler's contract is three members, all load-bearing: `residual(field, *,
+gradient_hook=None)` (called as `residual(local_field, gradient_hook=hook)` — `TypeError` otherwise), a
+`gradient_scheme` attribute (`None` if no gradient; read at build as `assemblers[0].gradient_scheme`), and
+a mesh-bound `boundary`. Scalar and coupled-flow assemblers both satisfy it.
 
-The contract the injected assembler must satisfy is **three** members — `residual(field, *,
-gradient_hook=None)`, a `gradient_scheme` attribute (`None` when no gradient is reconstructed), and a
-mesh-bound `boundary`. Both the scalar and coupled-flow assemblers already have these. ⚠️ All three
-are load-bearing: an assembler missing `gradient_scheme` raises `AttributeError` at build time
-(`build_distributed_residual` reads `assemblers[0].gradient_scheme`), and one whose `residual` does not
-accept `gradient_hook` raises `TypeError` on the first call (it is invoked as `residual(local_field,
-gradient_hook=hook)`).
-
-**When adding a distributed capability, extend the injected builder or the layout — never add
-physics to `parallel/`.** If you find yourself importing an operator here, the seam is wrong.
+**A distributed capability extends the injected builder or the layout — never add physics to
+`parallel/`.** Importing an operator here means the seam is wrong.
 
 ## Decided: how padding makes shapes uniform
 
-`shard_map` requires identical local shapes on every shard, but partitions differ in cell, ghost,
-and face counts. `PaddedLayout` is the single home for reconciling that, and holds no physics.
+`shard_map` needs identical local shapes; `PaddedLayout` is the one home for reconciling cell, ghost, face
+and node counts. Two reserved slots keep it safe for any operator:
 
-Two reserved slots make the padding safe for *any* operator, which is what lets the layout stay
-operator-independent:
+- **The null cell** (`n_owned_max + n_ghost_max`) owns every padding face, so padding can only scatter into
+  a discarded row.
+- **The null face** (`n_faces_max`) fills padded boundary-patch index lists.
+- **Padding faces carry the reserved `"padding"` patch, not `"boundary"`** (binding). They have
+  `neighbour = -1`; `BoundaryConditions.resolve` refuses uncovered boundary faces except `"padding"`
+  (`.claude/rules/boundary.md`). The name is reserved in `FacePatches.from_dict`; every partition appends
+  it, so the static `names` tuple is uniform. Likewise `FacePatches.patch_types`/`patch_groups`:
+  `partition_mesh` keeps the **global** record (`eqx.tree_at` on `label` only) and `pad_partition` copies
+  it — a per-partition record would make treedefs differ and break stacking.
 
-- **The null cell** (`n_owned_max + n_ghost_max`) is past every partition's real cells. Every
-  padding face names it as owner, so a padding face can only ever scatter into a discarded row.
-- **The null face** (`n_faces_max`) is past every partition's real faces; it is the fill value for
-  padded boundary-patch index lists.
-- **Padding faces are labelled with the reserved `"padding"` patch, NOT `"boundary"` (binding, #354).**
-  They have `neighbour = -1`, so by connectivity they are boundary faces. `BoundaryConditions.resolve`
-  refuses any uncovered boundary face, except those in `"padding"`, and the injected per-partition
-  assembler is built on the padded mesh. Labelling them `"boundary"`, as this code did until the
-  coverage check landed, would make every distributed build raise, or would force callers to put a
-  closure on faces that carry no physics. `pad_partition` appends `"padding"` to the local mesh's
-  patch names; the name is reserved in `FacePatches.from_dict`, so a real patch cannot collide with
-  it. Every partition appends the same name, so the static `names` tuple stays uniform across shards.
-  The same holds for `FacePatches.patch_types` / `patch_groups` (a mesh file's declared types and
-  `inGroups`, #364): `partition_mesh` keeps the **global** record (`eqx.tree_at` on `label` only) and
-  `pad_partition` copies it, so every shard has the same static fields — a per-partition record (a group
-  trimmed to the patches that partition happens to touch) would make the treedefs differ and break the
-  stacking.
+Padding is inert through three independent mechanisms: zero area ⇒ zero flux; null-cell ownership; benign
+geometry (normal along the first axis, face centroid one unit from the null-cell centroid, so the normal
+distance is exactly 1 and nothing divides by zero). Traps that must stay closed:
 
-Padding is inert through **three independent mechanisms** — deliberately belt-and-braces, since the
-layout no longer knows which operator will run: (1) zero area ⇒ zero flux; (2) null-cell ownership
-⇒ even a non-zero flux cannot reach a real row; (3) benign geometry — normal along the first unit
-axis, face centroid one unit along it from the null-cell centroid, so the owner-to-face normal
-distance is exactly `1` and nothing divides by zero.
+- **Padding cells carry unit volume; real cells keep real volumes** (a transient term or volume source
+  would otherwise be silently wrong). Pinned by `test_padding.py::test_real_geometry_survives_padding_unchanged`.
+- **No `NaN` anywhere, including discarded rows** — a `NaN` in a padding row poisons the cotangent of every
+  row sharing its reduction.
+- **Boundary-patch bindings are padded, not labels.** `_uniform_boundary_faces` pads each patch's index
+  array to the max over partitions with the null face. The boundary fold is one scatter over concatenated
+  patch indices, so the null face repeats and which write lands is unspecified — inert, and why `apply`
+  must never pass `unique_indices=True`.
+- **The padded mesh is deliberately not `validate()`-d** (padding faces list no nodes; padding cells touch
+  no face). Do not "fix" this.
+- Ragged face-node array: the first padding face absorbs the padded tail (row pointers stay well-formed),
+  the rest list no nodes; those incidences point at node 0. Ragged node array: padded to `n_nodes_max` with
+  copies of node 0 (finite, inert).
 
-Specific traps that are now closed, and must stay closed:
+## Halo depth — one layer, exchanging derived fields
 
-- **Padding cells carry unit volume; real cells keep their real volumes.** The earlier code gave
-  *every* cell volume `1.0`. Diffusion never reads volume, so it was inert — but the first transient
-  term or volume source would have been silently wrong, with no error and no `NaN`.
-  `tests/unit/test_padding.py::test_real_geometry_survives_padding_unchanged` pins this.
-- **No `NaN` anywhere, including in discarded rows.** A `NaN` in a padding row still poisons the
-  cotangent of every row sharing its reduction, so the gradient breaks even though the value looks
-  fine. Padding geometry is finite and non-degenerate for this reason.
-- **Boundary-patch bindings are padded, not the patch labels.** A named patch holds a different
-  number of faces per partition (possibly zero). `_uniform_boundary_faces` pads each resolved index
-  array to the max over partitions, filling with the null face. This is safe because the boundary
-  fold writes with `.at[faces].set(...)` — the padded entries write a value at a zero-area,
-  null-cell-owned face. Since #113 the fold is **one** scatter over every patch's indices
-  concatenated, so the null face repeats across patches as well as within one and which write lands
-  there is unspecified. That is inert for the same reason. It is also why `apply` must never pass
-  `unique_indices=True` (`.claude/rules/boundary.md`).
-- **The padded mesh is deliberately not `validate()`-d.** Padding faces list no nodes and padding
-  cells are touched by no face; `Mesh.validate()` rejects both, correctly, for a mesh describing
-  real geometry. A padded mesh is device-axis bookkeeping and its geometry is *gathered*, so the
-  node-level invariants do not apply. Do not "fix" this by calling `validate()`.
-- **The face-node array is ragged across partitions**, so it is padded too: the first padding face
-  absorbs the whole padded tail (keeping the row pointers well-formed) and the rest list no nodes.
-- **The node array is ragged across partitions** (each local mesh carries only its own nodes, see the
-  decomposition section), so it is padded to `n_nodes_max` with copies of node 0 — a real, finite
-  point referenced by no padded face.
+**One ghost layer suffices because the gradient and limiter are exchanged, not recomputed.** A face flux
+reads only its two cells' `phi`, `grad`, coefficient and limiter; recomputing a ghost's gradient is what
+would need two layers (the Fortran precursor's reason). So: exchange `phi` → gradient on owned cells →
+exchange gradient → flux. Ghost values are then serial-exact, so the distributed Jacobian equals serial,
+and every exchange is a differentiable collective inside `R(phi)`.
 
-## Halo depth — one layer, exchanging derived fields (built for the gradient)
-
-**One ghost layer suffices — provided the gradient and limiter are *exchanged*, not recomputed.**
-The residual at an owned cell reads, at each face, only quantities at that cell and its immediate
-neighbour: `phi`, `grad`, the coefficient, and (for limited advection) the limiter at the upwind
-cell. The flux never reaches past one layer. The *only* thing that would force a second layer is
-**recomputing** the neighbour's gradient/limiter locally, which needs that neighbour's own stencil —
-two layers out. The Fortran precursor took the second layer for exactly this reason.
-
-aquaflux already materializes the gradient and limiter as per-cell fields before the flux, so it
-exchanges them instead: exchange `phi` → compute `grad`/limiter on **owned** cells (correct: an
-owned cell's stencil is within owned + the one-layer `phi` halo) → exchange `grad`/limiter → flux.
-The ghost values are then bit-for-bit what they would be serially, so the distributed Jacobian
-equals the serial Jacobian. Every exchange is a differentiable collective *inside* `R(phi)`, so the
-AD-linearized limiter and the exact adjoint are preserved automatically.
-
-**The gradient exchange is built.** `ResidualAssembler.residual` takes an optional `gradient_hook`,
-a transform applied to the reconstructed cell gradient before the flux consumes it (identity when
-omitted — the serial path). `DistributedResidual` passes a hook that overwrites each ghost row with
-the value the ghost's owning partition computed, reusing the *same* `HaloExchange` and plan as the
-`phi` fill (`fill` is trailing-axis-generic, so the `(n_cells, dim)` gradient rides through
-unchanged). The exchange runs only when a gradient scheme is actually injected
-(`DistributedResidual.exchange_gradient`, a static flag): on an orthogonal grid the gradient is
-identically zero, so the exchange is skipped rather than moving zeros. Boundary values need **no**
-correction — every boundary face is owned by an interior cell of its own partition, so they read only
-owner-cell gradients, which the ghost exchange never touches.
-
-⚠️ **THE LIBRARY DEFAULT DOES NOT RUN HERE, so a partitioned build must name a scheme (#361,
-2026-09-16).** `MomentumContinuity.build`/`SSTTurbulence.build` default to
-`schemes.DEFAULT_GRADIENT_SCHEME`, a `MultipleCorrectionGradient`, which raises on `operator_hook`
-rather than returning a wrong owned gradient — its two passes need the intermediate gradient
-halo-exchanged once between them, which no seam here supplies (#134). That is loud, not silent, but it
-means the shortest way to write a distributed case is the one that fails.
-
-A **single-pass** gradient scheme (`CompactGreenGauss`) is correct under this one-exchange scheme
-with no extra work: an owned cell's one-shot Green–Gauss gradient is exact once its `phi` halo is
-filled. An **iterative** scheme (`CorrectedGreenGauss`) instead solves a partition-coupled linear
-system `A_g·G = B·φ` for the gradient, whose operator reads ghost gradients on *every* apply, so one
-exchange is not enough — the ghost rows of the iterate must be refreshed before each apply.
-
-**The per-sweep gradient exchange is built** — as the *same* `gradient_hook`, threaded one level
-deeper. `residual` passes its `gradient_hook` into `_gradient` → `GradientScheme.gradients(...,
-operator_hook=…)` → `GradientSolve.solve(..., operator_hook=…)`; the solve wraps its operator so each
-apply first refreshes the iterate's ghost rows (`operator(operator_hook(x))`). Because the hook is
-literally `grad → fill_local(grad[:n_owned_max])`, the identical closure serves all three uses: the
-one-shot final-gradient exchange, and now the per-sweep exchange of the solve unknown. By induction
-the distributed iterate's owned rows equal the serial iterate's at every sweep (same sweep count), so
-the owned gradients are serial-exact. The single-pass scheme ignores `operator_hook`; both are the
-identity serially.
-
-**This requires a reduction-free iterative solve — `SweptGradientSolve`.** Its preconditioned-Richardson
-sweeps `g ← g + P⁻¹(B·φ − A_g·g)` form no global inner product — for any `GradientPreconditioner` `P`,
-all of which are cell-local by construction — so a per-apply ghost exchange makes the
-owned rows exact. `GmresGradientSolve` forms inner products over the whole local vector (which would
-double-count ghost rows and are not `psum`-reduced across partitions), so it **raises** if handed an
-`operator_hook`; a correct distributed GMRES needs owned-only cross-partition inner products (a
-distributed Krylov solver), not built. `HessianCorrectedGradient` also **raises**: its gradient couples
-to the Hessian through nested Schur / inner-`A_HH` solves whose operators read ghost gradients *and*
-ghost Hessians that the outer exchange does not refresh — a correct build would exchange inside each
-nested solve. (Lifting this swept-only limitation — a distributed GMRES + the nested-solve Hessian
-exchanges — is tracked as GitHub issue #134.) The distributed swept solve also drops the sweep's host-side under-resolution diagnostic
-(a faithful global residual norm would need the owned-only reduction the operator-wrapping seam does not
-carry; the sweep count is a static, mesh-property-driven choice regardless).
-
-The limiter `psi` exchange is likewise deferred until advection-with-limiter runs distributed (no
-distributed-advection path yet); it reuses the identical hook mechanism.
-
-## Testing
-
-- `tests/unit/test_partition.py` — the loop-emulated distributed residual matches serial for
-  2/3/4 partitions; the halo plan reproduces a direct global gather; a parameter gradient through
-  the decomposition matches serial; and each local mesh carries only its own nodes, with the remap
-  proved consistent (a local face's nodes dereference to the same coordinates as the global face's).
-- `tests/unit/test_padding.py` — padding in isolation: **no devices, no `shard_map`**. Uniform
-  shapes (cells, faces, face-nodes and nodes), real geometry and nodes preserved (volumes
-  explicitly), padding inert and finite, and the load-bearing one: a residual on a padded local mesh
-  matches the unpadded one row for row.
-- `tests/unit/test_shard_map_smoke.py` — the `shard_map` + `all_gather` mechanism matches a serial
-  reference in **value and gradient** (adjoint exact to 0).
-- `tests/unit/test_distributed.py` — the full sharded residual and its gradient match serial (on the
-  default all-to-all halo). Uses a **mix of boundary closures** (`Dirichlet`, `Neumann`,
-  `ZeroGradient`) precisely because the solution-dependent ones cannot be pre-baked — they only pass
-  if the real closures run per device. Also checks the exchange carries a per-cell **vector** field.
-- `tests/unit/test_halo_all_to_all.py` — the neighbour `all_to_all` halo fills every real owned+ghost
-  row to **bit-for-bit the all-gather values** (scalar and vector), and a full distributed residual
-  on it matches serial in value and gradient. The all-gather exchange is the reference the scaling
-  path is validated against.
-- `tests/unit/test_distributed_gradient.py` — the derived-field halo on a **non-orthogonal** mesh
-  (`columnwise_perturbed_grid_3d` + `CompactGreenGauss`): the sharded residual and its gradient match
-  serial, and a **control** with the gradient exchange forced off does *not* match — proving the
-  ghost-gradient exchange is load-bearing, not incidentally passing.
-- `tests/unit/test_distributed_swept_gradient.py` — the **iterative** gradient scheme on the same
-  skewed mesh (`CorrectedGreenGauss` + `SweptGradientSolve`): the sharded residual and gradient match
-  serial; a **control** that drops only the *per-sweep* exchange (keeping the final gradient exchange)
-  diverges — isolating the per-sweep exchange as load-bearing; and the GMRES gradient solve and
-  `HessianCorrectedGradient` **raise** when asked to run distributed rather than misconverge.
-
-The device tests simulate 4 CPU devices via `--xla_force_host_platform_device_count=4`, which must
-be set **before JAX initializes** — hence the subprocess. Spawning it has exactly one home,
-`tests/support/devices.py` (`run_on_simulated_devices`), and that is not tidiness: `XLA_FLAGS` is a
-single string of several entries, so the device count must be **appended**, and a child that assigns
-it instead drops the test workflow's `--xla_cpu_multi_thread_eigen=false`. The child then starves a
-*different* worker, so nothing about the failure names the file that did it. Which is how it came to
-be fixed in one of five copies (2026-08-22) and left in the other four for three days: the fix was
-made where the symptom appeared, and the copies had no reason to be looked at. Whether a clobbering
-child was co-running at either CI crash below is **not** established — the demonstrated cause there is
-the timeout — but a job-wide flag that four of five children silently discarded is a defect on its own
-terms. `tests/unit/test_simulated_devices.py` pins the append, and fails if the assignment comes back.
-
-⚠️ **These are the most expensive tests in the fast tier, and what they cost is set by the machine,
-not by the test.** Each pays a full `shard_map` compile. Measured 2026-08-25 on macOS arm64, 11 cores,
-jax/jaxlib 0.10.2, x64, `OMP_NUM_THREADS=1` and Eigen multi-threading off, running the file alone at
-system load ~5: **42 s** for `test_distributed_gradient`'s forward check and **17 s** for its control.
-The same two tests on the same commit took **901 s** and **521 s** at system load ~65 (another session
-was saturating the machine) — a run that is void for cost, but the *ratio* is the point: an order of
-magnitude, with no assertion and no log line to say the machine was the cause.
-
-That is what put these tests near the per-test timeout on a hosted runner, where four xdist workers
-and their spawned children shared four cores. Six of them land in **one** worker's initial
-`--dist load` chunk, so they also ran back to back rather than spread out. At the 300 s timeout the
-workflow used until 2026-08-25, one crossed it **twice in three days** — and `--timeout-method=thread`
-cannot interrupt a test, so it *kills the worker*, which xdist reports as `node down: Not properly
-terminated` and `worker 'gwN' crashed while running <test>`, indistinguishable from an OOM kill and
-with no mention of a timeout anywhere.
-
-**⚠️ RAISING THE TIMEOUT TO 900 s DID NOT FIX THIS — it crossed that too.** On 2026-09-09
-`test_distributed_swept_gradient_adjoint_matches_and_unsupported_solves_refuse`, which costs ~241 s
-when the tier is healthy, went silent for **1074 s** and killed its worker, while its neighbours in
-the same run finished at their normal 139–390 s. A timeout is a deadlock guard; it was never the
-thing to tune, because the cost was contention and a bigger allowance just moves where it bites.
-
-**These tests therefore carry `pytestmark = pytest.mark.distributed` and run in their own CI job at
-`-n 2`** — two workers each forking one child is four processes on four cores, where `-n auto`
-alongside the other ~1300 unit tests was eight. Measured on the same eleven tests, isolation is worth
-3–4x per test: the one that died drops to 108 s, and 390 s / 171 s / 142 s become 95 s / 79 s / 42 s.
-Membership is by marker rather than by path, and `tests/unit/test_distributed_marker.py` fails if a
-module importing the spawn helper lacks it, so a new one cannot quietly rejoin the contended job. The
-local fast gate still runs them inline — the split is a property of a 4-core runner, not of the tests.
-
-Before adding another device test, account for its cost. The cheapest lever is fewer subprocesses, but
-each one's peak memory is why the existing checks were split across them in the first place, and
-`-n 2` above is sized to the runner, not to the test count — raising it re-creates the contention.
-
-## Not yet built
-
-The distributed **core is complete and correct**: the decomposition, the owned+halo `PartitionedMesh`,
-uniform-shape padding, the injected-assembler `shard_map` residual, the `all_to_all` halo, the
-partition-local node sets, and the derived-field + per-sweep gradient exchange — all matching serial in
-value *and* adjoint. What remains is optimizations and infrastructure whose value is currently either
-**unrealized** (no consumer to exercise it) or **blocked** (a prerequisite path does not exist), so none
-is a clear next build; each waits on a real need.
-
-1. **Distributed GMRES / Hessian gradient solve** — lift the swept-only limitation of the per-sweep
-   exchange (a distributed Krylov solve with owned-only `psum` inner products, plus the nested-solve
-   exchanges for `HessianCorrectedGradient`). Not a blocker — `SweptGradientSolve` is the scalable
-   production path. Tracked as GitHub issue #134.
-2. **The limiter (`psi`) exchange** for distributed limited advection — reuses the identical
-   `gradient_hook` mechanism; **blocked** until a distributed-advection path exists to exercise it.
-3. **Per-partition reverse Cuthill–McKee** — a contained transform over a built `PartitionedMesh`,
-   reusing `permute_cells` + `ReverseCuthillMcKee`. **Deferred:** its benefits (local matvec locality,
-   AMG coarse space) have no consumer yet — there is no distributed/per-partition preconditioner and no
-   matvec benchmark, and `BlockPartitioner` already RCM-orders globally so its owned blocks are already
-   locally ordered (only a Scotch cut would gain). Revisit when a local preconditioner or a matvec
-   benchmark exists to measure it. Tracked as GitHub issue #135.
-4. **Multi-node** via `jax.distributed.initialize()`. Note the honest gap: multi-host is
-   production-grade on GPU/TPU, but multi-node **CPU** leans on Gloo and is materially slower than
-   MPI — re-verify before committing to a CPU cluster.
+- **Built via `gradient_hook`.** `ResidualAssembler.residual` applies an optional hook to the reconstructed
+  gradient (identity serially). `DistributedResidual` passes one that overwrites ghost rows using the same
+  `HaloExchange` and plan as `phi` (`fill` is trailing-axis generic). It runs only when a gradient scheme is
+  injected (`DistributedResidual.exchange_gradient`, static). Boundary values need no correction (they read
+  owner gradients only).
+- **Iterative gradient schemes get a per-sweep exchange through the same hook**, threaded via
+  `_gradient` → `GradientScheme.gradients(..., operator_hook=…)` → `GradientSolve.solve(..., operator_hook=…)`,
+  which wraps the operator as `operator(operator_hook(x))`. Single-pass `CompactGreenGauss` ignores it;
+  `CorrectedGreenGauss` + `SweptGradientSolve` is serial-exact sweep by sweep.
+- **This requires a reduction-free solve — `SweptGradientSolve`** (preconditioned Richardson with
+  cell-local `GradientPreconditioner`s). `GmresGradientSolve` **raises** on `operator_hook` (its inner
+  products would double-count ghosts and are not `psum`-reduced); `HessianCorrectedGradient` **raises**
+  (nested solves read ghost gradients and Hessians the hook does not refresh). Lifting this is issue #134.
+  The distributed swept solve drops the host-side under-resolution diagnostic (it would need an owned-only
+  reduction).
+- ⚠️ **The library default gradient does not run here — a partitioned build must name a scheme.**
+  `MomentumContinuity.build`/`SSTTurbulence.build` default to `schemes.DEFAULT_GRADIENT_SCHEME`
+  (`MultipleCorrectionGradient`), which raises on `operator_hook`: its two passes need an exchange between
+  them that no seam supplies (#134).
+- The limiter `psi` exchange is deferred until distributed advection exists; it reuses the same hook.
 
 ## Decided: collective pattern is `all_to_all`, not `ppermute`
 
-Measured the partition adjacency the halo must serve. A min-cut (Scotch) partition gives an
-**irregular** neighbour set: on a 40³ cube the number of partitions a given one borders ranges from
-4 to 14 at 32 parts, and is non-uniform. `ppermute` is a one-to-one permutation primitive — a
-general irregular many-to-many exchange would need edge-colouring that (data-dependent) graph into up
-to `max_degree` permutation rounds. `all_to_all` expresses the whole exchange in one collective with
-uniform per-pair buffers, so it handles the irregular set directly; that is why `AllToAllHaloExchange`
-uses it. `ppermute` is only clean for a genuinely structured neighbour set (a Cartesian brick
-decomposition), which the target unstructured regime is not — so it is not pursued.
+A min-cut partition has an irregular, non-uniform neighbour set. `ppermute` would need edge-colouring that
+data-dependent graph into up to `max_degree` rounds; `all_to_all` does the whole exchange in one collective
+with uniform per-pair buffers. `ppermute` only suits a structured (Cartesian brick) decomposition, which is
+not this regime.
+
+## Testing
+
+Serial-equivalence in value **and** gradient is the standard: `test_partition.py` (loop-emulated,
+2/3/4 partitions, node remap), `test_padding.py` (no devices; padded residual matches unpadded row for row),
+`test_shard_map_smoke.py`, `test_distributed.py` (mixed `Dirichlet`/`Neumann`/`ZeroGradient` so pre-baked
+values cannot pass), `test_halo_all_to_all.py` (bit-for-bit vs all-gather), `test_distributed_gradient.py`
+and `test_distributed_swept_gradient.py` (skewed mesh; controls with the gradient / per-sweep exchange
+turned off must **fail**, proving each exchange load-bearing; GMRES and Hessian solves must raise).
+
+- Device tests simulate 4 CPU devices in a subprocess spawned **only** through
+  `tests/support/devices.py::run_on_simulated_devices`. ⚠️ `XLA_FLAGS` must be **appended** to, never
+  assigned (assignment drops the workflow's `--xla_cpu_multi_thread_eigen=false` and starves another
+  worker); pinned by `tests/unit/test_simulated_devices.py`.
+- ⚠️ **They are the fast tier's most expensive tests and their cost is set by machine contention**, not by
+  the test (an order of magnitude with no log line saying so). They carry `pytestmark =
+  pytest.mark.distributed` and run in their own CI job at `-n 2` (see root `CLAUDE.md`, "What a fast-tier
+  test may spend"); `tests/unit/test_distributed_marker.py` enforces the marker. A worker killed with
+  `node down: Not properly terminated` is a timeout under contention, not a crash — raising the timeout
+  does not fix it. Before adding a device test, account for its cost; do not raise `-n`.
+
+## Not yet built (each waits on a real need)
+The core — decomposition, padding, injected-assembler `shard_map` residual, all-to-all halo, local node
+sets, derived-field and per-sweep gradient exchange — matches serial in value and adjoint.
+1. **Distributed GMRES / Hessian gradient solve** (owned-only `psum` inner products + nested-solve
+   exchanges) — issue #134; not a blocker, `SweptGradientSolve` is the production path.
+2. **Limiter `psi` exchange** — blocked on a distributed-advection path.
+3. **Per-partition reverse Cuthill–McKee** (`permute_cells` + `ReverseCuthillMcKee`) — no consumer yet
+  (no per-partition preconditioner or matvec benchmark; `BlockPartitioner` is already RCM-ordered) — #135.
+4. **Multi-node** via `jax.distributed.initialize()`; multi-node CPU leans on Gloo and is materially slower
+   than MPI — re-verify before targeting a CPU cluster.
 
 ## Open questions
-
-- **Load balance vs halo size** in the Scotch objective for the coupled block.
-- **Distributed AMG setup.** The smoothed-aggregation hierarchy is built off-jit from the global
-  connectivity once and frozen, so partitioning does not disturb the *setup*; only the frozen
-  matrix-free V-cycle application runs sharded, and its collectives transpose the same way. A
-  partition-local AMG with a cross-partition smoother is the fallback if that proves insufficient.
+- Load balance vs halo size in the Scotch objective for the coupled block.
+- Distributed AMG: the hierarchy is built off-jit from global connectivity and frozen, so only the
+  matrix-free V-cycle runs sharded; a partition-local AMG with a cross-partition smoother is the fallback.

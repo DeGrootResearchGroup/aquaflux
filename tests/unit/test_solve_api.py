@@ -255,12 +255,22 @@ VALIDATION_INTERNAL_REACHES = {
     "InnerIterateCheckpointer",
     "combine_metrics",
     "in_progress_measure",
+    # The tolerance a configured solver stops at, read and re-set by the pitzDaily replay
+    # (`pitzdaily_openfoam/replay.py`) so each replayed system is solved to the tolerance the march's
+    # adaptive rule gave its own step. A fixed tolerance read 1-2 cycles low on 27 of 50 solves, so
+    # reproducing the march means setting the same field of the same solver, not building a second one.
+    "relative_tolerance",
+    "with_relative_tolerance",
     # The traced form of a fitted host split and the host-callback detector, reached by the two
     # traced-split harnesses: one times the traced split against the host one, the other checks a
     # refit keeps its array shapes. Both measure the object the session itself builds, so they take it
     # from the same function rather than assembling a lookalike.
     "contains_host_callback",
     "traced_field_split",
+    # A step with its traced split swapped for a refitted one, reached by the secant-update probe
+    # (`pitzdaily_openfoam/secant_update_probe.py`) to solve each arm's Jacobian under the same step the
+    # march builds; a step assembled by hand would put the split in one of its two places but not both.
+    "with_traced_split",
 }
 
 

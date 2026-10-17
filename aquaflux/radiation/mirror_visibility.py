@@ -425,25 +425,30 @@ class _Legs:
     def hidden_by(self, strategy: SelfOcclusion, surfaces, facet, receiver_facet):
         """Whether the surface's own triangles stand across either leg, or ``None`` if never.
 
-        The first leg ignores the source facet it leaves; the second the facet its receiver sits
-        on, if any. Neither needs to ignore the mirror: the lift keeps both off its plane.
+        The first leg ignores the source facet it leaves, and its other face where it is a
+        sheet's; the second the facets its receiver sits on, if any. Neither needs to ignore the mirror: the lift keeps both off its plane.
         """
         count = self.count
+        # A sheet's face and its back share a triangle, so a leg ignores both.
         out = strategy.segments_hidden(
             surfaces,
             self.source[:count],
             self.meeting[:count],
             self.near_source[:count],
-            facet[:, None],
+            np.stack([facet, surfaces.twin[facet]], axis=1),
         )
         if out is None:
             return None
-        landing = np.full(count, -1) if receiver_facet is None else receiver_facet
+        landing = (
+            np.full((count, 1), -1)
+            if receiver_facet is None
+            else np.asarray(receiver_facet).reshape(count, -1)
+        )
         back = strategy.segments_hidden(
             surfaces,
             self.meeting[:count],
             self.receiver[:count],
             self.lift[:count],
-            landing[:, None],
+            landing,
         )
         return out | back

@@ -93,7 +93,7 @@ from aquaflux.radiation.quadrature import TriangleQuadrature, triangle_quadratur
 from aquaflux.radiation.self_occlusion import SelfOcclusion
 from aquaflux.radiation.solid_angle import projected_solid_angle
 from aquaflux.radiation.surfaces import Surfaces
-from aquaflux.radiation.visibility import Visibility, build_visibility
+from aquaflux.radiation.visibility import Visibility, build_facet_visibility
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, in_passes
 from aquaflux.vectors import dot
 
@@ -145,7 +145,12 @@ class TransferMatrix(eqx.Module):
         Centroid-to-centroid distance, which is what turns a uniform absorption coefficient into
         a transmittance without re-walking any geometry.
     visibility : Visibility
-        The frozen blocking mask, built for the facet centroids as receivers.
+        The frozen blocking mask, built for the facet centroids as receivers. The surface's own
+        layer is complete only where it is read: wherever :attr:`geometric` is non-zero in either
+        direction, and from every areal facet to every point source, whose light reaches the
+        facets by a gather through this mask. A pair of facets that exchange nothing either way
+        is recorded clear without a test, as is a point source's own row, on which nothing is
+        received.
     specular_solids : tuple of str
         The bodies that reflect specularly, in the order of the specular arrays' first axis.
         Empty for a transfer with no specular reflection, which is then exactly the diffuse one.
@@ -351,6 +356,7 @@ class _Geometry(eqx.Module):
     centroid: jnp.ndarray
     normal: jnp.ndarray
     areal: jnp.ndarray
+    twin: jnp.ndarray
 
 
 #: A projected solid angle, in steradians, below which a pair is left to be zero: one rounding of a
@@ -414,8 +420,12 @@ def _row_block(geometry: _Geometry, sample, weight, index, columns):
     # large. A planar triangle really does see none of itself, so this is the exact value and
     # not a repair. A point source has no surface to receive on and no area to emit from; it
     # reaches the facets through the ordinary gather instead, as an external irradiance.
-    keep = (index[:, None] != columns[None, :]) & (
-        geometry.areal[index][:, None] & geometry.areal[columns][None, :]
+    # A sheet's face and its back are one triangle, so they exchange nothing either; left to the
+    # kernel, a quadrature point a rounding off that triangle reads a whole hemisphere of it.
+    keep = (
+        (index[:, None] != columns[None, :])
+        & (geometry.twin[index][:, None] != columns[None, :])
+        & (geometry.areal[index][:, None] & geometry.areal[columns][None, :])
     )
     geometric = (
         jnp.zeros((index.shape[0], geometry.vertices.shape[0]))
@@ -892,6 +902,7 @@ def build_transfer(
         centroid=jax.lax.stop_gradient(surfaces.centroid),
         normal=jax.lax.stop_gradient(surfaces.normal),
         areal=jnp.asarray(~surfaces.is_point_source),
+        twin=jnp.asarray(surfaces.twin),
     )
     sample = receiver_quadrature.points(geometry.vertices)
     weight = jnp.asarray(receiver_quadrature.weight)
@@ -908,8 +919,9 @@ def build_transfer(
             surfaces=surfaces,
             points=surfaces.centroid,
             # The receivers ARE the facets, so each path's second leg ends on the one it is
-            # aimed at and must ignore it, as the direct mask's rays do.
-            receiver_facet=np.arange(surfaces.n_facets),
+            # aimed at, and on its other face where it is a sheet's, and must ignore both, as
+            # the direct mask's rays do.
+            receiver_facet=surfaces.own_faces,
             # Prepared once here, not once per plane: a grid over the triangles is the same for
             # every mirror. Not at all without a mirror, when no reflected path is masked.
             self_occlusion=(
@@ -926,19 +938,28 @@ def build_transfer(
         geometric=geometric,
         source_cosine=source_cosine,
         separation=separation,
-        visibility=build_visibility(
+        visibility=build_facet_visibility(
             occluders,
             surfaces,
-            surfaces.centroid,
-            # The receivers here ARE the facets, so each ray ends on the one it is aimed at and
-            # must be told to ignore it. Without this every mutually visible pair reads as
-            # blocked and a closed enclosure loses its interreflection entirely.
-            receiver_facet=np.arange(surfaces.n_facets),
+            needed=_read_pairs(geometric, surfaces.is_point_source),
             self_occlusion=self_occlusion,
             **visibility_options,
         ),
         **mirrored,
     )
+
+
+def _read_pairs(geometric, is_point_source) -> np.ndarray:
+    """Which entries of the facet-to-facet mask anything reads, ``[receiver, source]``.
+
+    The direct transfer multiplies the mask by :attr:`TransferMatrix.geometric`, so an entry
+    where that is zero is never seen. Many are, since a facet is evaluated only against the
+    facets in front of its points: every pair of one flat wall, and on a convex lamp nearly all. A point source sends nothing through the transfer,
+    so its column is all zero there; its light lands on the facets by a gather through the same
+    mask (the model's point-source arrivals), which reads that column for every areal facet.
+    """
+    point = np.asarray(is_point_source, dtype=bool)
+    return np.asarray(geometric != 0.0) | (~point[:, None] & point[None, :])
 
 
 def _specular_exchange(surfaces, specular, sample, weight, masks, limit):

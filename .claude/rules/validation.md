@@ -5,827 +5,266 @@ paths:
 
 # Rules — `validation/` (the scientific cases and the study harnesses)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
-
-> **Provenance boundary (binding).** As with every rule file: what you read here informs your
-> understanding, and none of it may reach the shipped surface. See the root `CLAUDE.md`
-> **Comment Convention**.
+> **Provenance boundary (binding).** What you read here informs your understanding; none of it may reach
+> the shipped surface (root `CLAUDE.md`, **Comment Convention**). The dated record behind this file —
+> incidents, measurements, mutation passes — is in `.claude/notes/validation-log.md`.
 
 ## What lives here, and why it is fragile
 
-Two kinds of file, with the same failure mode:
-
 - **Cases** (`*/compare.py`) — a full scientific run against a reference solution. Tens of minutes each.
-- **Harnesses** (everything else) — single-state probes that measure one question and print a table.
-  These are the project's **re-adjudication instruments**: most numbers in the `.claude/rules/solve*.md`
-  files were measured with one, and a finding whose harness no longer runs cannot be re-asked, only cited.
+- **Harnesses** (everything else) — single-state probes that measure one question and print a table. They
+  are the re-adjudication instruments for most numbers in the `solve*.md` rules; a finding whose harness
+  no longer runs can only be cited.
 
-**Nothing in any test tier drives these files.** They are too slow for CI and for the fast gate, so
-the suite is green whether or not a single one of them still works. That is the whole problem this
-file exists to address.
-
-## ⚠️ THE RECORDED FAILURE — one case, three simultaneous breaks, suite green
-
-Found 2026-08-16, all in `validation/pitzdaily_openfoam/compare.py`, none detected by anything:
-
-1. **A settings object was introduced and the case was not updated.** `RefreshPolicy` replaced four
-   loose keyword arguments; the case still passed a bare `refresh_preconditioner` callable, so
-   `solve_coupled` asked a function for `observes` and raised **before the first step**, under every
-   configuration and every preconditioner.
-2. **A guard was tightened onto an object the case does not hand it.** The escalation gate began
-   validating the base step rather than the control's output, and refused to start with a `TypeError`
-   whose own message named `DualTimeStep` as acceptable while rejecting one.
-3. **The case had no `sys.path` bootstrap**, so it could not be launched through
-   `validation/run_case.sh` at all. Its sibling has had one for as long as it has existed.
-
-And beyond outright breakage, the same case had silently fallen a long way **behind**: it still ran a
-single-step pseudo-transient march with no dual-time inner loop, no Courant control, no retry ladder
-and no per-step log, while all of that was built and calibrated on the other case. Under that
-configuration this case is a documented reachability crawl — on the order of eight hundred outer steps
-to develop the recirculation, against a two-hundred step cap — so it could not converge however long
-it was left, and any timing taken from it measured the globalization rather than the thing under study.
-
-## ⚠️ pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT — the default moved to `simplesmooth` (2026-08-22)
-
-Under `PITZ_FLOW_INVERSE=petsc` (the case's default until this date; the arm was removed 2026-09-13, #371) `pitzdaily_openfoam/compare.py`
-collapses at the **first step of the second Reynolds rung**: `alpha` 0, `beta` escalating 0.5 → 2 → 16
-through the whole ladder, the residual rising 1.674e-01 → 5.754e-01 → `inf`. Reproduced three times,
-including on a tree carrying **no local change at all**, with the step tables bit-identical.
-
-**The default is now `simplesmooth`** — the same leading inverse the 3D sibling defaults to, and for
-the same reason: an incomplete factorization's behaviour on this saddle depends on the elimination
-**order** and the **fill**, neither of which is predictable in advance, while a SIMPLE-smoothed
-hierarchy never eliminates the matrix at all. This case's own record already carries the extreme
-version of that sensitivity — a zero-fill factorization going from *amplifying* a residual 5.5× per
-sweep to contracting it, on nothing but a reordering. `petsc` and `hostilu` were both
-removed 2026-09-13 (#371); their recorded measurements stand as history.
-
-**What was ruled out before reaching for a preconditioner swap**, because "the case broke" invites
-blaming whatever merged most recently:
-
-- **Not the four merges of that day.** `|R|` at a fixed saved state is identical to **twelve digits**
-  across `1c3c874 → 2829965 → eeb5c60 → f05eafb → 2c6ffae`, the last digit moving only at the
-  `lax.scan` change that is recorded as not bit-identical. The discretization did not move.
-- **Not the scan specifically.** Reverting it to the Python loop reproduces the collapse unchanged
-  (1.679e-01 against 1.674e-01).
-- **`simplesmooth` marches the same case to the same answer** — `x_r/h` 8.0686, `ux` 0.0191, 404
-  cycles, 711 s — against the last good `petsc` run's 8.0686, 0.0191, 743 s. That agreement is what
-  makes this a swap of preconditioner rather than of result.
-
-⚠️ **WHEN it started is NOT going to be chased, and that is a decision rather than a gap.** The last
-good `petsc` run is 2026-08-17 and the failure is present at every commit from 2026-08-21 onward, so it
-entered somewhere in the ~30 commits between — a bisect of march-hours. **Incomplete-LU preconditioning
-is no longer a direction this project is taking** (2026-08-22, project owner), precisely because its
-behaviour depends on the elimination order and the fill in ways that are hard to predict, so the bisect
-would buy a diagnosis of an arm nothing selects. What the reader needs instead is the consequence:
-**any `petsc`-bundle number recorded for this case is unreproducible on the current tree** — do not
-re-measure against one, and do not read the collapse as evidence about anything other than that
-preconditioner family.
-
-⚠️ **The trailing `[k, omega]` inverse was NOT aligned with the sibling in the same change.** This case
-runs `{max_coarse: 2000, equilibrate: False}` where the 3D one runs `{max_levels: 20, max_coarse: 200,
-strength_threshold: 0.25, aggressive_levels: 0, frozen_coarsening: True}`. That is a genuine open
-question rather than an oversight — the two meshes coarsen at very different rates and this case has
-never been measured at the sibling's settings — but it is the next thing to try if the alignment is
-carried further.
-
-**The leading `SimpleSmoothed` block now sets `frozen_coarsening: true` (2026-10-12, #290, the project
-owner's choice).** At `strength_threshold` 0.25 its coarsening reads values, so unfrozen it re-coarsened
-between checkpoints and each refit would recompile the on-device split. Frozen, the march takes 20 steps
-/ 154 restart cycles against the unfrozen 20 / 140, to the same `x_r/h` 8.0686 (`solve-field-split.md`).
+**Nothing in any test tier runs these files**, so the suite is green whether or not any of them works.
+The recorded instance (2026-08-16, log): one pitzDaily case broken three ways at once — a settings object
+it was not updated for, a tightened guard, no `sys.path` bootstrap — and also fallen far behind its
+sibling's march machinery, all with the suite green.
 
 ## The obligation (binding)
 
-**A change to the library's public surface is not complete until it has been checked against the cases
-that call it.** Concretely, when you change a signature, a default, a settings object, a type, or the
-shape of a seam:
+A change to the library's public surface is not complete until checked against the cases that call it.
+When you change a signature, default, settings object, type or seam:
 
-1. **Run the static guard** — it is in the fast gate and costs milliseconds:
-   `pytest tests/unit/test_validation_api.py`. It checks that every name a case imports still exists
-   and every literal keyword it passes is still accepted — **including keywords passed to a method on
-   an imported class** (`CoupledRANS.build(...)`, `SSTTurbulence.build(...)`, `MomentumContinuity
-   .build(...)`), which is how every case constructs its assemblers — and that no function in a case
-   reads a module global that only one branch of an `if`/`try` binds.
-2. **Then use judgement on what the guard cannot see** (below), and if the change plausibly reaches a
-   case, *run that case* — `validation/run_case.sh <case>` — before considering the change done.
-3. **When you change the march machinery, ask whether the OTHER case should get it too.** Every
-   improvement in this project has been developed on whichever case was in front of someone, and the
-   sibling has repeatedly been left behind. Carrying it across is part of the change, not a follow-up.
+1. **Run the static guard** (fast gate, milliseconds): `pytest tests/unit/test_validation_api.py`. It checks
+   that every name a case imports exists; every literal keyword is accepted, including on a method of an
+   imported class (`CoupledRANS.build(...)`, `SSTTurbulence.build(...)`, `MomentumContinuity.build(...)`);
+   that no case function reads a module global only one branch of an `if`/`try` binds; and that every
+   `__main__` script importing `aquaflux` puts the repository root on `sys.path` first.
+2. **Use judgement on what it cannot see** (below), and if the change plausibly reaches a case, run it —
+   `validation/run_case.sh <case>`.
+3. **When you change the march machinery, carry it to the other step case too.** Improvements have
+   repeatedly landed on one case and left the sibling behind; carrying it across is part of the change.
 
-The `.githooks/pre-commit` reminder raises this whenever a commit touches `aquaflux/`. It does not
-block: whether a given change reaches a case is exactly the judgement a script cannot make.
+The `.githooks/pre-commit` reminder raises this when a commit touches `aquaflux/`; it does not block.
 
-## ⚠️ What the static guard CANNOT catch
+⚠️ Do not edit files under `validation/` while the fast gate runs: `test_validation_api.py` parses every
+case and fails on a half-written file.
 
-`tests/unit/test_validation_api.py` is a static check — it reads the cases with `ast` and never builds
-a mesh. **A green run there does not mean the cases work.**
+## ⚠️ What the static guard cannot catch
 
-✅ **It now also checks the bootstrap (2026-09-24):** every script with a `__main__` entry point that
-imports `aquaflux` must put the repository root on `sys.path` *before* that import
-(`test_every_runnable_case_can_import_the_package_it_runs`). Four scripts failed it —
-`turbulent_channel/compare.py`, `turbulent_channel_openfoam/compare.py`, `continuation_seed_error.py`,
-`point_implicit_step.py` — so **none of them could be launched through `run_case.sh`**, with every check
-here green, although this module's own docstring names a missing bootstrap as a motivating break. Found by
-running a channel study through the runner, not by the guard. All four are fixed.
+- **Attribute access on a returned object** — e.g. a method renamed on an object the case holds
+  (`momentum.velocity_gradient` → `velocity_fields(flow).gradient` broke the OpenFOAM channel comparison
+  after every solve, 2026-09-24).
+- **`instance.method(kw=...)`** on an object the case built — its type is not known statically.
+- **Semantic breaks** — a parameter that now means something else, a moved default, a changed type.
+- **`**kwargs`** — `solve_coupled` forwards `**strategy_kwargs` to its builder. Given an explicit
+  `strategy` or `RefreshPolicy(builder=...)` those keywords are refused by name; a wrong keyword reaching
+  the default builder still raises only at run time.
+- **Behaviour** — a runnable case whose march crawls looks identical to a working one.
 
-It is still blind to:
+Prefer the structural fix to the branch-global guard: have each arm of a case's configuration record its
+settings under one shared name (`LEADING_SETTINGS`) beside the object it built, so the reader never
+branches.
 
-- **A method that no longer exists on an object the case holds.** `turbulent_channel_openfoam/compare.py`
-  called `momentum.velocity_gradient(flow)` after that method became `velocity_fields(flow).gradient`, so
-  its OpenFOAM comparison raised `AttributeError` *after* every solve — found 2026-09-24 by running it.
-  The guard checks imported names and keyword arguments, never attribute access on a returned object.
+## The step cases' preconditioner settings
 
-- **Semantic breaks.** A parameter that still exists and now means something different, a default that
-  moved, a type that changed under an unchanged name. Break 1 above is exactly this, and the guard
-  would **not** have caught it.
-- **Anything behind `**kwargs`.** `solve_coupled` takes `**strategy_kwargs` and forwards them to
-  whichever builder it is given, so every keyword is "accepted" *statically* and none is checked here —
-  and this is the main entry point. ✅ **Narrowed 2026-08-20 (#278): the case where there is no builder
-  to forward to is now a `TypeError` at the call rather than silence.** Given an explicit `strategy`
-  or a `RefreshPolicy(builder=...)`, `preconditioner` / `reference_state` / `**strategy_kwargs` are refused
-  by name instead of dropped — which is how `refresh_preconditioner=` used to vanish on its way to a
-  `RefreshPolicy`. What is still unchecked is a keyword that *does* reach the default builder and is
-  wrong there; that raises at run time, in the builder, not here.
-- **A call on an object the case built itself.** `Class.method(kw=...)` on an *imported* name is
-  resolvable and is checked (see below); `instance.method(kw=...)` is not, because the instance's type
-  is not knowable statically. Most of what a case does after construction is this shape.
-- **Behaviour.** It cannot tell a converging march from one that crawls, which is how a case can be
-  runnable and useless at the same time (the "fallen behind" failure above).
+- **pitzDaily's leading inverse is `simplesmooth`**, as bfs3d's, since 2026-08-22: an incomplete
+  factorization's behaviour on this saddle depends on elimination order and fill, unpredictably.
+  Incomplete-LU preconditioning is no longer a direction the project takes (project owner, 2026-08-22);
+  any `petsc`-bundle number recorded for pitzDaily is unreproducible on the current tree (log).
+- **The trailing `[k, omega]` inverses differ between the cases**: pitzDaily `{max_coarse: 2000,
+  equilibrate: False}`, bfs3d `{max_levels: 20, max_coarse: 200, strength_threshold: 0.25,
+  aggressive_levels: 0, frozen_coarsening: True}`. Open question, never measured at the sibling's
+  settings — the next thing to try if aligning them.
+- **pitzDaily's leading `SimpleSmoothed` sets `frozen_coarsening: true`** (project owner, 2026-10-12,
+  #290): at `strength_threshold` 0.25 its coarsening reads values, so unfrozen each refit recompiles the
+  on-device split (`solve-field-split.md`).
 
-⚠️ **Until 2026-08-21 it was also blind to every constructor call in every case**, because it resolved
-only *bare* imported names and the cases build their assemblers through class methods — so
-`MomentumContinuity.build(...)`, `SSTTurbulence.build(...)` and `CoupledRANS.build(...)` were
-unchecked, and those carry most of the keywords a case passes. Measured at the time: 60 such call
-sites across `validation/`, 28 of them carrying keywords, none of them seen. The guard now resolves
-that form too, and `test_the_checker_reaches_a_call_on_an_imported_CLASS_not_only_a_bare_name` pins
-that it does — the coverage gap sat exactly where the cases spend their configuration, and looked
-identical to coverage that worked.
+## ⚠️ Traps when writing a harness (each produced a wrong result here; detail in the log)
 
-⚠️ **And until 2026-08-25 nothing anywhere could see a case whose DEFAULT configuration does not start.**
-A case settings module configures itself by branching — one block per arm, each binding its own per-arm
-name — and then reads the arms back through a branch of its own. When a rename moves one arm and not the
-other's reader, the surviving branch names a global only the *other* arm binds, and the case dies with a
-`NameError` in the one line whose job is to say what the run is. Three things are quiet about it at once:
-the name **is** bound at module level, so `ruff`'s undefined-name rule is correct to say nothing; the read
-sits in a function body, so even importing the module would not reach it; and no tier runs these files.
-That is how `bfs3d_openfoam/compare.py` spent five days unable to start at its own default —
-`FLOW_INVERSE == 'native'` survived the `native` → `simplesmooth` rename in the banner ternary alone
-(`a2ed044`), so the default arm reached `_HOST_FLOW`, which only the `hostilu` arm defines. The guard now
-reports this shape (`test_the_cases_do_not_read_a_global_that_only_one_branch_binds`), and
-`test_the_branch_checker_separates_a_real_hazard_from_the_idioms_around_it` pins both directions, because
-the idioms it must stay quiet about — a name bound by both arms, an arm that raises instead of binding, a
-helper defined inside the branch that binds it — are what a naive version of this check drowns in.
-**The structural fix is the one to prefer over the guard**: have each arm record its settings under ONE
-shared name (`LEADING_SETTINGS`) beside the object it built, so the reader never branches and the hazard
-cannot be written. The guard is what catches the next module that does branch.
+- **A log parser keyed on the table's shape returns nothing when the logger gains a column.**
+  `bfs3d_openfoam/march_log_compare.py` (also used by `step_policy_replay.py`) accepts the march log with
+  and without `rho1` and refuses a log with no step rows. Any march-log reader must do both.
+- **A persistent-cache hit also logs a `Finished XLA compilation` line**, right after `Persistent
+  compilation cache hit`; `pitzdaily_openfoam/compile_timeline.py` reports hits separately (`timeline`'s
+  fifth element), pinned by `tests/unit/test_compile_timeline.py`.
+- **Build a reference state with `state_from_physical`, not `pack_state`** — `pack_state` takes the solved
+  variables, so physical ω where `log(ω)` is expected gives a silently NaN residual from a finite-looking
+  state, and every factorization then fails in its own misleading idiom. **Assert the starting residual is
+  finite before measuring.** Do not copy a wiring idiom from a test without checking the case matches it.
+- **A pivot census must read the factor, not the operator handed to it** — symmetric equilibration makes
+  the operator's diagonal exactly 1, so `matrix.diagonal()` reports healthy pivots for every arm. Note a
+  host factorization may store a pivot where another stores its reciprocal.
+- **A harness that spawns a child must forward `kill` to it — use `validation/peak_footprint.py`
+  (`run_with_footprint`), never a bare `subprocess.run`.** Otherwise `kill <pid>` leaves the
+  `/usr/bin/time` child and its Python grandchild running, invisible to `run_case.sh --status`. `kill -9`
+  still orphans; after an interrupted run check `pgrep -fl "usr/bin/time"`.
+- **A timer that blocks on its own result also waits for earlier, untimed asynchronous work.** A JAX
+  breakdown is sound only where the work before each timed piece is timed too; time a surprisingly large
+  piece alone before believing it.
+- **On Linux a standalone call whose temporary buffer exceeds 32 MiB page-faults all of it every call**
+  (glibc's mmap threshold); the march does not pay this, so per-call timings overstate it. Report
+  `ru_minflt` per call, or run with `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`
+  and say so (`discretization.md`, "Single-threaded kernels"). Through `mallopt` both are C `int`s: a
+  4 GiB trim threshold wraps to 0.
+- **A harness that builds a step must use the case's own shift settings, and form the shift through
+  `ShiftTerm.shift(beta)`, never `beta * term.diagonal`** — the latter drops `row_shift_scale`, where
+  `turbulence_damping` lives.
+- **A harness that applies the march's preconditioner must apply what the step holds, and take it as an
+  argument of anything it compiles.** A shipped field split is a traced copy taken at each fit; a refit
+  reaches the step only through the replacement `refresh_preconditioner` returns, and a split captured in a
+  closure keeps applying the first fit silently. `pitzdaily_openfoam/replay.py`'s `MarchReplay.refit` does
+  this; `MarchReplay(host=True)` applies the host object for probes that mutate it in place. Probes that
+  need the host inverse read `session.preconditioner.inverse` from `open_session`.
+- **Replay a step at the tolerance the march used.** The march solves a step after a setback to 0.1, not
+  the regime's 0.3 (`AdaptiveLinearTolerance`, library default since #645); `MarchReplay.tolerance`
+  rebuilds it from the checkpointed reports and `march_solver(measure, rtol)` applies it.
+  `krylov_recycling_probe.py`, `precision_replay_probe.py` and `batch_bound_probe.py` still build
+  fixed-tolerance solvers.
+- **A harness that calls `solve_linear` outside a Newton step must bind the measure**
+  (`solve.linear.in_progress_measure(engine.linear_solver(), measure)`); the step's GMRES is built with
+  `norm=None` and raises elsewhere.
+- **Print one line per outer step, flushed; print the operating point (mesh size) before measuring; and
+  print only settings actually in force.**
+- **Do not gate a loaded checkpoint on its own recorded `residual_norm`** — it is in the row-scaled measure
+  the march steered by (default since #370), not a Euclidean one (bfs3d `state-00069`: a factor of 395).
+  Gate against the case's own self-start in one norm.
+- **A saved `.npz` is not necessarily a checkpoint** — a cached self-start is not a converged root. Read
+  what wrote a state before trusting it.
+- ⚠️ **bfs3d's leading coarsening moves under rounding** (`strength_threshold` 0.25 reads values), so a march
+  A/B of two checkouts differing in rounding anywhere upstream of the first fit — a sparse-product storage
+  change, a gradient inverse, a jax upgrade — is not a controlled pair. Compare a preconditioner's cost at
+  one fixed checkpoint (`bfs3d_openfoam/split_apply_timing.py` with `BFS3D_SPLIT_TIMING_STATE`; its level
+  table must agree between runs) and read a march pair's counts as two samples. pitzDaily happened not to
+  move (2026-10-15, PR #721).
+- **A per-column probe reach is licensed by the gradient scheme and the split; re-audit it when either
+  changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships `MultipleCorrectionGradient` at a
+  uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond reach 2, and a reach-2 colouring
+  cost it 18→21 steps / 137→216 cycles (PR #722). pitzDaily deliberately probes every column at reach 2
+  inside its reach-3 pattern: its march is unchanged and the probe 40 % cheaper (2026-10-14).
 
-## Known API gaps these cases exposed
+## Machine contention and run records
 
-- **The k-positivity guard was wired on one builder of four until 2026-08-19 (FIXED).** All builders now
-  route through `_coupled_step`, which installs the per-cell k clip + ω step bound
-  (`_closure_step_projection`; the global cap `positive_k_limit` and the `positivity_floor` /
-  `positivity_projection` keywords, with their `K_POSITIVITY_*` / `POSITIVITY_PROJECTION` harness
-  constants and env vars, were deleted 2026-10-14 — the one knob left is `omega_step_ratio`, overridden by
-  `BFS3D_OMEGA_STEP_RATIO` / `PITZ_OMEGA_STEP_RATIO`, `none` = unbounded);
-  `test_every_continuation_builder_installs_the_same_globalization` fails if one loses it. The confound —
-  a cross-builder comparison between a guarded march and an unguarded one — still applies to archived
-  runs before 2026-08-19.
-- **✅ FIXED 2026-08-20 (#282) — the SAME defect recurred TWICE MORE on the same four builders, with the
-  shared tail already extracted.** `forward_rtol` / `forward_restart` / `forward_max_restarts` were on
-  `coupled_amg_continuation` alone, so the *default* path — what `solve_coupled` builds when nothing is
-  passed — stopped its forward solve on the plain 2-norm that same builder's docstring calls effectively
-  blind to the flow block. And `velocity_shift_parts` was on the two block builders only, absent from
-  exactly the monolithic path it was written for. Both are now on all four, and the stopping *measure*
-  belongs to `_coupled_step` rather than to any builder: it is the march's own progress measure, so a
-  solve cannot converge in a quantity the march does not read. ⚠️ The advice recorded here — that
-  `forward_rtol`/`restart`/`max_restarts` were "reachable via `krylov_solver=`" — was true and a trap:
-  building a solver to move the tolerance silently replaced the *stopping measure* too, a far larger
-  change. Pass the parameter — since #388 that is `linear_solve=LinearSolveSettings(...)`, and a whole solver goes
-  in the same `linear_solve` slot, so the two cannot be given together.
-- **`_mis_aggregate`'s return annotation is stale** — it says `tuple[np.ndarray, int]` and returns
-  three values (labels, roots, count). Cost one debugging cycle.
+- **A test tier and a case must not overlap**: `tools/fastgate.sh` refuses beside a live case (exit 3) and
+  beside another tier (exit 4) — root `CLAUDE.md`, "Use the blessed command". ⚠️ The reverse is still open:
+  **a case cannot see a running tier** (no tier writes a run-file), so run `validation/run_case.sh` only
+  after checking no gate is running.
+- **A contended run is good evidence about counts and worthless about seconds.** Steps, cycles,
+  escalations, line-search clips and the converged root are deterministic; wall clock moved 2.4–4.6x on an
+  identical trajectory, and the cost is mutual (the gate slowed 1.5–2x). Keep its counts, discard its
+  timings, as for a run that spanned a sleep (measurements in the log).
+- **A timing does not travel between checkouts either**: the JAX compilation cache is keyed on the
+  compiled program, so the first run on a new branch partly measures compilation. A cold-cache premium and
+  a contention premium are not separated by any single run.
+- **A case rerun on one mesh can keep its small programs**: `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0
+  validation/run_case.sh ...` stores the ~980 op-by-op programs the 2.0 s default recompiles every run
+  (pitzDaily warm start 89 s -> 63 s, 2026-10-17). Per run only; a mesh-changing study pays and gains nothing.
+- ⚠️ **`pgrep -f "tools/fastgate.sh"` matches its own watcher.** Match the real process with watchers
+  excluded, or read the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, summary on the last
+  line).
+- **Prefer a run's own record to an account of it** — the gate's log, `run_case.sh`'s run-file,
+  `git show --stat <sha>` — over a peer's report, recollection or the process table. A PR's author field
+  identifies the account, not the session; authorship is settled by which worktree holds the code.
 
-## ⚠️ Traps when writing a harness (each one produced a wrong result here)
+## `run_case.sh` — how it reports and stops a run (pinned by `tests/unit/test_run_case.py`)
 
-- **A persistent-cache HIT logs a `Finished XLA compilation` line too**, carrying the read time, right
-  after a `Persistent compilation cache hit` line. `pitzdaily_openfoam/compile_timeline.py` counted those
-  as compilations until 2026-10-17, so a warm run read as compiling every program it loaded; it now reports
-  them separately (`timeline` returns a fifth element, `hits`), pinned by `tests/unit/test_compile_timeline.py`.
-  Its step-row regex was suspected of predating the `t(s)` column and does not: it matches the current
-  rows (checked against a real log the same day).
+- **`--wait` exits with the case's own status** (before 2026-09-22 it exited 0 for crashed cases; a
+  `--wait` status read before then says nothing). The case runs inside a wrapper subshell that writes
+  `run-<stamp>.exit` beside the log and a `[run_case] the case exited with status N` footer; a signal death
+  is `128+N` (OOM SIGKILL → 137). **A missing `.exit` file is failure.** The status lives in a sibling
+  file because `live_pid` deletes the run-file once the pid is dead.
+- **`pid=` is the wrapper's pid.** `kill <pid>` stops the run: the wrapper traps TERM/HUP, forwards them,
+  and re-`wait`s until the case exits. **`kill -9 <pid>` kills only the wrapper and orphans the case.**
+- **Liveness is the pid and its start time** (`pid_started=`, `ps -o lstart=`, compared through
+  `canonical_time` — blanks squeezed and trimmed, since macOS pads `lstart`); a reused pid reads as stale.
+- `caffeinate` watches the wrapper (`-w`); the wrapper's stdio is detached. `--force` skips taking the
+  memory/load readings. `free_gb` reads macOS `vm_stat` or Linux `/proc/meminfo` `MemAvailable`.
+  `AQUAFLUX_CASE_POLL_SECONDS` (default 20) sets the poll interval. `run-*.exit` is gitignored.
 
-- **⚠️ A LOG PARSER KEYED ON THE TABLE'S SHAPE RETURNS NOTHING, SILENTLY, WHEN THE LOGGER GAINS A
-  COLUMN.** `bfs3d_openfoam/march_log_compare.py` matched the step row by its eight columns; the march
-  log gained `rho1` on 2026-10-11 (`af98897`), and for three days the script summarized every new log as
-  zero steps -- no error, a well-formed table of zeros (found 2026-10-14 when it was asked for a study
-  table). `step_policy_replay.py` reads logs through the same parser. The column is now optional, and the
-  script refuses a log with no step rows. Any reader of the march log should do both: accept the old
-  and the new shape, and treat "found nothing" as an error rather than as an answer.
-- **Build the reference state with `state_from_physical`, NOT `pack_state`.** `pack_state` takes the
-  **solved** variables; a case transporting `log(omega)` differs from the physical fields by an
-  exponential. Packing physical omega where a log is expected exponentiates ~1e5, and the residual is
-  **silently NaN** while the state still reads finite. Every factorization then fails in its own idiom
-  — "out of memory", "exactly singular", "SVD did not converge" — and each invites a confident and
-  completely wrong story about the method. This happened, and a whole comparison had to be withdrawn;
-  a recorded mechanism was even fitted to it (`_cell_graph`'s field-scale problem), because NaN
-  comparisons return False and so *look* exactly like a threshold rejecting every edge.
-  **Gate it: assert the starting residual is finite before measuring anything.**
-- **Do not copy a wiring idiom from a test without checking the case matches.** The `pack_state` error
-  above came from `tests/integration/test_coupled_lu.py` (deleted 2026-10-11; its channel fixture lives in
-  `test_coupled_field_split.py` now), where it is correct — that fixture builds `CoupledRANS` with no
-  transform.
-- **⚠️ A PIVOT CENSUS MUST READ THE FACTOR, NOT THE OPERATOR HANDED TO IT.** Every consumer here
-  symmetrically equilibrates before factorizing, which forces the *operator's* diagonal to magnitude
-  exactly 1 — so a census written as `matrix.diagonal()` reports "zero negative pivots, min |pivot|
-  1.00" for every arm at every shift, including arms whose sweep diverges by 1e+59. It looks like a
-  finding ("the pivots are all healthy, so it is not a pivot problem") and it is a measurement of the
-  conditioning transform. This shipped in a sweep on 2026-08-17 and a conclusion was drawn from it
-  before being retracted. Use the factorization's own stored pivots (`Ilu0.pivots` did this until it was deleted, #371); and note
-  a host factorization may store the pivot itself where PETSc stores its **reciprocal**, so a census ported between the two reports the inverse
-  of what it claims.
-- **⚠️ A HARNESS THAT SPAWNS A CHILD MUST FORWARD `kill` TO IT — use `validation/peak_footprint.py`,
-  never a bare `subprocess.run`.** Harnesses that read a peak memory footprint re-execute themselves under
-  `/usr/bin/time -l`. Launched with `subprocess.run`, a plain `kill <pid>` of the parent (what
-  `run_case.sh` documents, and what its wrapper forwards) killed **only the parent**: the `/usr/bin/time`
-  child and its Python grandchild were reparented to launchd and ran on holding several GB, **invisible to
-  `run_case.sh --status`** because the run-file's pid was dead. Observed 2026-09-24 with
-  `sozzi_radiation/model_at_mesh_scale.py`. `run_with_footprint` starts the child in its own session and
-  forwards SIGTERM/SIGHUP/SIGINT to the whole group (SIGINT because a new session also leaves the
-  terminal's foreground group, so Ctrl-C would otherwise stop reaching it), then dies by the same signal;
-  it returns the exit status and the parsed `peak memory footprint`. Verified by killing a parent over a
-  `sleep` child: no survivors, exit 143; with the forward disabled both processes survive. **`kill -9`
-  still orphans** (uncatchable) — stop runs with `kill`. After any interrupted run, check
-  `pgrep -fl "usr/bin/time"` rather than trusting `--status`.
-- **⚠️ A TIMER THAT WAITS ON ITS OWN RESULT ALSO WAITS FOR EARLIER, UNTIMED WORK.** JAX dispatches
-  asynchronously, so a wrapper that calls `jax.block_until_ready` on a piece's output before stopping
-  its clock is charged whatever was dispatched before it and is still running. In
-  `sozzi_radiation/field_cost_breakdown.py` the facet shadow mask read **30 s** — it takes **0.2 s**; the
-  time was the transfer's row blocks, returned un-materialized just before it (2026-09-26, caught by a
-  standalone probe of the mask). A timer breakdown is only sound where the work before each timed piece
-  is timed too; when a small piece reads large, time it alone before believing it.
-- **⚠️ ON LINUX, A STANDALONE CALL OF A PROGRAM WHOSE TEMPORARY BUFFER EXCEEDS 32 MiB PAGE-FAULTS ALL OF
-  IT, EVERY CALL.** glibc's adaptive mmap threshold stops at 32 MiB, so such a buffer is mapped and
-  unmapped per call. pitzDaily's JVP (42.8 MiB) takes ~11 000 minor faults per call, 16.5 ms against
-  9.8–11.1 ms with the threshold raised. Its residual (22.6 MiB) takes none. The march does not pay
-  this (its wall is unchanged with the threshold raised), so a per-call timing taken this way
-  overstates the in-march cost (2026-10-17, `.claude/rules/discretization.md`, "Single-threaded
-  kernels"). Report `resource.getrusage(...).ru_minflt` per call beside any such timing, or run with
-  `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` and say so. ⚠️ Through `mallopt`
-  both are C `int`s: a 4 GiB trim threshold wraps to 0 and multiplies the faults instead.
-- **A harness that builds a step must build it with the case's OWN shift settings, and must form the
-  shift through `ShiftTerm.shift(beta)`, never `beta * term.diagonal`.** `closure_stall_probe.py` did
-  neither until 2026-10-12: it built its engine, capture and march without `turbulence_damping`, and
-  pitzDaily damps the k and omega rows at 3, so every k-row number it produced (#312's included)
-  described a march the case does not run. `beta * term.diagonal` drops `row_shift_scale`, which is where
-  that damping lives, so even an engine built with the setting would have been measured without it.
-- **A harness that applies the march's preconditioner must apply what the STEP holds, and take it as an
-  argument of anything it compiles.** Since #290 a shipped field split is applied as a traced copy
-  (`TracedSplitShiftPolicy.split`) taken at each fit; a refit re-fits the session's host object in place
-  and reaches the step only through the replacement `refresh_preconditioner` returns. `pitzdaily_openfoam/
-  replay.py` still read `policy.preconditioner` (a host-policy field) and so raised `AttributeError` on
-  construction, which broke every probe built on it (`batch_bound_probe.py`, `krylov_recycling_probe.py`,
-  `precision_replay_probe.py`, `csr_kernel_precision.py`, `endgame_shift_probe.py`) with nothing
-  reporting it. Repaired 2026-10-14: `MarchReplay.refit` applies the returned replacement as the march
-  does, and `apply_pc` / `solve` / `preconditioned` compile with the step's policy as an argument, since
-  a split captured in a closure keeps applying the first fit's hierarchies after every refit, silently.
-  `MarchReplay(host=True)` applies the host object instead, for a probe that changes the host inverse in
-  place (`precision_replay_probe.py` swaps its blocks' precision; the traced copy would not see that).
-  Checked on a capture of `main` `da37958a`'s shipped pitzDaily march (18 steps, 4-core Linux, jax
-  0.11.2): all 68 inner solves, steps 1-18 with every station refit, reproduce the recorded counts
-  (`restart_cycles` of the replayed raw count; the inner dump stores the corrected count).
-  `pitzdaily_openfoam/zero_shift_arms.py` and `bfs3d_openfoam/zero_shift_adjoint.py` read
-  `engine.shift_policy.preconditioner.inverse` the same way, inside a `try` that reports a failure as an
-  arm's result, so they printed `BUILD FAILED: AttributeError` as if it were a measurement. They now
-  build through `open_session` and read `session.preconditioner.inverse`, the host object whose
-  `apply(..., transpose=True)` they need (pitzDaily smoke test at a self-start: finite both ways,
-  `w.Mv = v.M^T w` to 3.5e-14).
-- **A harness that calls `solve_linear` outside a Newton step must bind the measure itself**
-  (`solve.linear.in_progress_measure(engine.linear_solver(), measure)`). Since #370 the step's GMRES is
-  built with `norm=None` ("the measure of the step that runs me") and raises when run anywhere else;
-  `closure_stall_probe.py`'s `analyze` mode was broken on main by exactly this until 2026-10-12, and
-  nothing reported it because no tier drives it.
-- **Print one line per outer step, flushed.** A harness that collects reports and prints at the end is
-  indistinguishable from a hung one, and cost thirty minutes of a run that could not have converged.
-- **State the operating point before measuring.** A harness whose banner prints `? cells` is one whose
-  author does not know what it is measuring; the mesh size decided the whole question in that instance.
-- **A setting the banner prints must be a setting that is in force.** Printing an intended value that
-  the builder never received is worse than printing nothing.
-- **⚠️ Do NOT gate a loaded checkpoint on its own recorded `residual_norm`.** That number is whatever
-  measure the march was *steered* by, and both cases march in the row-scaled measure (the default since #370) — a row-equilibrated
-  norm, not a Euclidean one. Comparing the two rejects a perfectly good state: `bfs3d`'s `state-00069`
-  records `2.64e-06` and computes `1.04e-03` under `jnp.linalg.norm`, a factor of **395** that is
-  entirely the change of measure. Gate against the case's **own self-start** in whichever single norm
-  the harness uses — both ends then move together, and a genuine configuration mismatch (which moves the
-  residual by orders) still trips it.
-- **A saved `.npz` is not necessarily a checkpoint.** A self-start cached only so repeated runs skip
-  rebuilding it is not a converged root, and measuring "at the converged root" against it silently answers
-  a different question: the zero-shift coupled Jacobian is nearly singular at a self-start and is not at a
-  root. Read what wrote a state before trusting it.
-- **⚠️ bfs3d's leading coarsening moves under ROUNDING, so a bfs3d march A/B of two checkouts that
-  differ in rounding is not a controlled pair (found 2026-10-15, PR #721).** The `[u, v, w, p]` block
-  coarsens at `strength_threshold` 0.25, reading values. #721 changed only how a sparse product is
-  stored; that moved the hybrid start by ~1e-13 (its potential-flow solve runs multigrid cycles on such
-  operators), and bfs3d's leading
-  hierarchy by tens of aggregates (26252 against 26248 dofs at level 1, 284 against 236 at the bottom;
-  applies 2.5 % apart), so the two marches differed from step 1 (`R` 0.1468 against 0.1474) and took
-  137 against 129 cycles. Built from the SAME state, the two checkouts' hierarchies were identical and
-  their applies agreed to 4e-16. pitzDaily's march happened not to move. **Any change that moves
-  rounding anywhere upstream of the first fit does this** -- a different gradient inverse, a jax upgrade.
-  Compare a preconditioner's cost at one fixed checkpoint
-  (`bfs3d_openfoam/split_apply_timing.py` with `BFS3D_SPLIT_TIMING_STATE`; its level table must agree
-  between the runs), and read a march pair's step and cycle counts as two samples, not as a difference.
-- **A per-column probe reach is licensed by the scheme AND the split, so re-audit it when either changes.**
-  `bfs3d` shipped `COLUMN_REACH = (3,3,3,3,2,2)` under `CorrectedGreenGauss`, licensed for the field split
-  only (a flow-first split never applies `dR_flow/dturb`; a monolithic factorization does, and a short
-  colouring folds far couplings onto near entries rather than dropping them). Since 2026-10-13 it ships
-  `MultipleCorrectionGradient` at a **uniform reach of 3**: under that scheme `probe_reach_audit.py` finds
-  p, k and omega carrying 1.1e-3 / 6.7e-5 / 3.9e-5 of their norm beyond reach 2, so no column may be
-  shortened. Reach 4 is unaudited (the harness's widest pattern is 3).
-  ⚠️ **"No column may be shortened" was an exact-recovery rule, and pitzDaily now breaks it on purpose
-  (2026-10-14):** it probes every column at reach 2 inside its reach-3 pattern, folding ~4e-4 of the
-  Jacobian's norm onto near entries, and its march is unchanged (18 steps, 123 restart cycles, `x_r/h`
-  8.0686, as uniform reach 3 and reach 4) for a probe 40 % cheaper. The flow block is SIMPLE-smoothed and
-  no factorization runs on that case; the folding that broke bfs3d's `p` column (#191) was a zero-fill
-  factorization's. **bfs3d's answer is no** (2026-10-15, PR #722): the same colouring took it from 18
-  steps / 137 cycles / 522 s to 21 / 216 / 697 s, same `x_r/h` 8.361, so its uniform reach 3 stands
-  (`solve-direct-preconditioners.md` has the table).
-
-## A validation case can collide with a test tier, or a test tier with another tier (both now closed)
-
-**The runner's mutual exclusion was originally over *cases* only. `tools/fastgate.sh` is not a case, so
-nothing stopped it starting on top of a running one** — and the fast tier is unambiguously a heavy job
-on this machine. On 2026-09-09 that happened **twice in one evening**, from two different worktrees, one
-minute and four minutes into someone else's case — and the two gates took **17:25** and **13:00** against
-a documented 6:34-8:53 for that tier. Every wall-clock number in a case log overlapping such a window is
-contaminated, and so was the gate's own. **`tools/fastgate.sh` now refuses to start while
-`validation/run_case.sh --running` reports a live case** (exit `3`, `FASTGATE_FORCE=1` to override), so
-this specific collision cannot recur — the numbers above stand as evidence for the cost of contention
-and for why the guard exists, not as an open gap.
-
-**⚠️ The "peaks around 6.4 GB" figure this incident was originally recorded with was RSS, and RSS is
-not what a machine runs out of.** It excludes compressed pages, which is most of a JAX worker's real
-footprint. A footprint re-measurement on the same class of machine (`top -l 1 -o mem -stats
-pid,ppid,mem,cmprs,command`, 2026-09-13, `-n auto` = 11 xdist workers, jax 0.10.2) found the workers
-holding **2.5–5.9 GB each, ~49.5 GB combined**, against a summed RSS at the same instant of only
-**4.45 GB** — an order of magnitude apart, and the reason nothing caught the next collision: on
-2026-09-13 **two fast tiers** started five minutes apart, from two different worktrees, neither
-touching a case, and drove the machine to a hard reset (~100 GB of combined footprint on a 19 GB
-machine). `tools/fastgate.sh` now also holds a machine-wide lock (`~/.cache/aquaflux/fastgate.lock`)
-while any tier runs anywhere on the machine, refusing a second one — from any worktree, any session —
-with the same `FASTGATE_FORCE=1` override and the same CI exemption (exit `4`, distinct from the case
-guard's exit `3`). The case guard above and this lock are two different mutual exclusions: a tier can
-collide with either a case or another tier, and closing one said nothing about the other.
-
-**What contention does and does not move — and this is the useful half, because it needs no clock.** The
-cleanest instance is a matched pair in ONE worktree at ONE commit, differing only in machine load, whose
-two logs align line for line. Both print rung 1's closing row on their own line 738:
-
-    |   28 |    895 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- loaded machine
-    |   28 |    194 | 0.0050 |  1 |   2 | 7.214e-06 | 1.000 |     |     <- quiet machine
-
-**Every column is identical except `t(s)`, which differs 4.6x** — step count, `beta`, inner count, cycles,
-`|R|` to all four figures, `a_min`. The same holds over the **whole** march: both runs finish at
-**69 steps / 417 cycles**, final `|R|` **5.771e-06**, `Ux` in **[-2.694, 10.222]** — every digit — against
-**1325 s and 555 s** of wall clock, a **2.4x** spread on an identical trajectory. (Both on the compiled
-host ILU kernel, per their banners; see the cross-checkout confounds below for why that has to be said.)
-Steps, cycles, escalations, line-search clips and the converged root are deterministic and contention
-cannot move them. Wall clock is a different
-matter: this project already records ~15 % run-to-run spread on an *uncontended* per-application timing,
-and 4.6x is far outside that. **A contended run is still good evidence about counts and worthless about
-seconds** — keep its step and cycle columns, discard its timings, exactly as for a run that spanned a
-machine sleep.
-
-**`895 -> 194` IS an attributable cost, and the attribution is graded.** The loader is known and was read
-from its own log rather than reported: a fast tier in another worktree, `21:55:02 -> 22:12:27`,
-`1045.13s (0:17:25)`, 1498 passed — one minute after the case launched at `21:54:04`. Splitting the slow
-march at its rung boundaries against the quiet one, the ratio tracks **how much of each rung overlapped
-that window**:
-
-| rung | overlap with the gate | slow | quiet | ratio |
-|---|---|---|---|---|
-| 1 | entirely inside it | 499 s | 157 s | **3.2x** |
-| 2 | ~90 %, the gate ends mid-rung | 229 s | 168 s | **1.4x** |
-| 3 | none — it starts after the gate ends | 194 s | 186 s | **1.04x** — *the control* |
-
-**That graded structure is the evidence, not the endpoint ratio, and the control is what makes it one.**
-The ratio reaches unity exactly where the overlap does: 8 s in 190 on a machine with a documented ~15 %
-spread is not a small effect, it is *no* effect. Anyone arguing the slow arm differed in some other way
-now has to explain why that difference confined itself to the two rungs that overlapped a known job.
-(Measuring each rung from the previous rung's last step partitions the march with no gaps; measuring from
-each rung's own first step instead gives 499/157, 215/160, 176/170 — the same three ratios within 2 %, so
-the conclusion does not rest on the convention.)
-
-⚠️ **And the cost is MUTUAL, which is the part that argues for a guard rather than a convention.** The
-gate was slowed by the case as surely as the case was slowed by it: it took **17:25**, and the evening's
-second gate **13:00**, for two jobs that alone are roughly 8-9 minutes each. **Concurrency here is not a
-trade of latency for throughput — it is a loss on both sides**, which matters when arguing for a guard,
-because nobody is giving up throughput they were actually getting.
-
-**It is a measurement, not a shape — the uncontended arm was run the same evening.** Three gates, one
-machine, one night, within 1 % of each other in test count, so composition is not the variable:
-
-| gate | tests | wall | vs clean |
-|---|---|---|---|
-| clean (no case running) | 1494 | **8:44** | — |
-| overlapping a case | 1498 | **17:25** | **2.0x** |
-| overlapping a case | 1482 | **13:00** | **1.5x** |
-
-And the makespan is worse too, which is the part with no counter-argument. The gate alone is 8:44 and that
-case alone is 9:15; **back to back the pair finishes in ~18:00, overlapped the later one finished at
-~22:05** — four minutes later, with *both* jobs individually slowed on the way. There is no throughput
-being bought here to trade latency for. (This supersedes an earlier reading of the 17:25 against the
-tier's documented 6:34-8:53, which was not a fair anchor: different worktree, tier composition and date.
-The three rows above are the comparison that holds.)
-
-**The `--status` line was clean throughout.** At 22:09, mid-slow-arm, the machine sat at load **13.4** with
-**0.73 GB** free while `run_case.sh --status` reported one case and nothing else — because what was
-loading it was a *test tier*, and a test tier is not a case. **That is the whole argument for this
-section**: not that the runner missed something unexplained, but that it is blind to a job class we run
-constantly, and here that job class is named, timed, and measured.
-
-⚠️ **There is currently NO trustworthy wall-clock baseline for pitzDaily from any session.** A figure of
-518 s circulated this evening as "uncontended" and has been withdrawn by the session that produced it: it
-was taken under `run_case.sh`'s guarantee, which establishes only that no other *case* was running and
-says nothing about a test tier or anything else on the machine. Any speedup ratio built on it inherits
-that, so do not quote one. This is the "record what a measurement was taken under" rule biting in its
-sharpest form — the number was not wrong, it was **unfalsifiable**, and it had already been adopted by a
-second session before its author caught it.
-
-⚠️ **A run that changes two variables at once separates neither — and the tempting attribution here is
-wrong twice over.** The contaminated march reached step 1 at `t = 396 s`; a later run reached it at
-**37 s**. That run was quiet **and** cache-warm, against a bad run that was contended **and** cache-cold,
-so the honest statement is *"roughly 10x, cause not isolated"* — **not** "a cold cache costs six minutes",
-which is what both sessions involved were about to write. Isolating it needs a third arm: quiet machine,
-cache deliberately cold. Until someone runs one, quote the pair only with this caveat attached.
-What the same comparison *does* establish, at no cost: step 1's `|R|` is **bit-identical** (`5.668e-02`)
-across the contended and the quiet run — a stronger form of the determinism above than agreement to four
-figures.
-
-⚠️ **Contention is only ONE of the reasons a timing does not travel, and the other two are cross-checkout
-rather than cross-process — the same lesson, three instances, all invisible in the log.** The root
-briefing already records both of the others; what follows is only the connection to this section, so that
-a reader chasing an unexplained wall-clock difference checks all three rather than the one they happened
-to read about.
-
-- **The compiled ILU(0) kernel was a gitignored artifact** (deleted with it 2026-09-13, #371). A fresh
-  worktree silently ran the pure-Python twin, so a `hostilu` timing from before then is only comparable
-  if its run log's `host ILU kernel` banner line says `compiled`.
-- **A wall time recorded before 2026-10-17 includes ~25 s of small-program compilation that a warm run
-  no longer pays.** The solver's persistence floor went from 2.0 s to 0 that day, so a warm start now loads
-  the several hundred op-by-op programs it used to recompile (pitzDaily two-step: 89 s -> 63 s, process
-  wall clock). Compare an older timing against a cold run, or subtract that, never against a warm one.
-  `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=2` reproduces the old behaviour.
-- **The JAX compilation cache is shared but keyed on the compiled program.** A branch carrying different
-  solver code takes misses in a warm checkout, so the first run on a new branch is partly measuring
-  compilation. Nothing in the log distinguishes that from the case being slower.
-
-Together with the step-1 confound above: **a cold-cache premium and a contention premium are two of at
-least three ways the same seconds can go missing, and a single run separates none of them.** A bound of
-roughly 90-360 s has been proposed for the cold-cache half by grading it against the contention ratios;
-it is **not recorded here**, because it assumes single-threaded compilation is starved by a `-n auto`
-tier in the same proportion as the numerics, and that assumption is exactly the one this section declines
-to make elsewhere. The run that would settle it — quiet machine, deliberately cold cache, extension
-built — is cheap and has not been done.
-
-⚠️ **`pgrep -f "tools/fastgate.sh"` DOES NOT TELL YOU WHETHER A GATE IS RUNNING.** It matches any
-*watcher* whose own command line contains that string — an `until ! pgrep -f "tools/fastgate.sh"; do
-sleep` loop matches itself and waits forever — so the poll reports "running" long after the gate exited,
-and a session gating on it will either stall or raise a false alarm at a peer. This is the same
-self-matching trap the root briefing records for a case waiter, one tool along. Match the **real**
-process (`bash tools/fastgate.sh`, or the `python -m pytest` it spawns) with the watcher shells excluded,
-or read the gate's own log — `$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, whose last line is the
-pytest summary. For the record, the gate described above finished at **13:00** for 1482 passed / 1
-skipped, half again the documented 6:34-8:53 range and a further measure of what the collision cost.
-
-**Wherever the gate does not refuse on its own, the check is manual and it is on the person starting the
-*tests*, not the case:** run `validation/run_case.sh --status` before `tools/fastgate.sh`, not only before
-another case. Checking once and launching twice is the specific way this failed — the status was clean
-when the case was queued and stale by the time the gate followed it. **A guard closing this direction has
-been written and is pending review**; when it lands, the manual check still applies under `CI`, under any
-force-override, and in a checkout that predates it.
-
-⚠️ **The reverse direction stays open even then, and it is worth knowing which half is covered.** A guard
-on the gate can ask `run_case.sh` whether a case is live, because a case writes a run-file. Nothing asks
-the question the other way: **a case cannot see a running test tier, because no tier writes a run-file**.
-Both collisions recorded here were gate-after-case, so that half covers every instance actually observed
-— but "case starts on top of a gate" remains available, and closing it means giving the gate a run-file
-of its own, which is a larger change than the one that was asked for.
-
-⚠️ **Do not read this as a knowledge gap to be closed by documentation.** Three sessions on the evening
-this was recorded all knew the one-heavy-job-at-a-time rule and it happened anyway, because the rule is
-enforced for one pair of jobs and merely known for the other. The durable fix is to make the collision
-unavailable rather than better documented — teach the gate to consult the machine-global run-file and
-refuse or warn — and this entry's job is to stop the wall-clock numbers being trusted, never to stand in
-for that. Read it as a record of what happened and what the measurements are worth, not as the remedy.
-
-## ⚠️ `run_case.sh --wait` exited 0 for crashed cases until 2026-09-22 — it now exits with the case's status
-
-**Both `--wait` forms used to exit `0` however the case ended**, because the case runs detached and
-nothing collected its status. Observed 2026-09-22 on `validation/sozzi_radiation/compare_fluence.py`: one
-run died of a `ModuleNotFoundError` (traceback in its log) and another was killed mid-script with **no
-traceback at all** (almost certainly out of memory) — both returned `0`, so `run_case.sh … --wait &&
-next-step` went on after a crash. That is the silent-success class the script exists to remove, sitting
-in the script itself. **Any `--wait` status read before this fix says nothing about the run; read the
-log.**
-
-How it works now, and what not to undo:
-
-- **The case runs inside a wrapper subshell that writes `run-<stamp>.exit` beside the log** (and a
-  `[run_case] the case exited with status N` line at the foot of the log) when the case ends. A signal
-  death is `128+N` — an out-of-memory SIGKILL reads `137 (killed by signal 9)`, the only record such a
-  run leaves. Both waiters print `exit status: N` and exit with it; **a missing `.exit` file is reported
-  as failure**, since "we do not know how it ended" is not success (the wrapper was killed, or the run was
-  launched by the old script).
-- **The status lives in a sibling file, not the run-file**, because `live_pid` deletes the run-file the
-  moment the pid is dead — exactly when a waiter wants the status, and possibly from some other caller's
-  `--status`.
-- **`pid=` in the run-file is now the WRAPPER's pid, not python's.** `kill -0` on it is still the
-  liveness test (a waiter never matches itself), and the wrapper outlives the case by exactly the status
-  write, so a waiter that sees it gone always finds the status on disk. `kill <pid>` still stops the run:
-  the wrapper traps TERM/HUP and **forwards** them to the case, then re-`wait`s until the case itself has
-  exited — `wait` returns early (143) when a trapped signal lands, so without the loop the status of a
-  case that shuts down on SIGTERM with its own code would be misreported. **`kill -9 <pid>` now kills
-  only the wrapper and orphans the case** (and `--status` then reports nothing running); stop a run with a
-  plain `kill`.
-- **`caffeinate` watches the wrapper's pid (`-w`) instead of wrapping the case**, so it is out of the path
-  the status travels. The wrapper's stdio is detached so a caller capturing the launch output does not
-  block for the case's lifetime.
-- **`--force` skips taking the memory/load readings, not only judging them**, so a reading that cannot be
-  taken never blocks a forced launch.
-- **`free_gb` reads Linux too (2026-10-14).** It read only macOS's `vm_stat` (free + inactive pages), so
-  on Linux every UNFORCED launch died in a Python traceback before the case started, and runs here were
-  launched by hand around the runner. It now falls back to `/proc/meminfo`'s `MemAvailable`, the kernel's
-  own estimate of the same thing. Every test above passes `--force`, which is why nothing saw it; the
-  unforced pre-flight is pinned by
-  `test_the_PRE_FLIGHT_reads_free_memory_on_this_platform_and_refuses_below_its_bar` and
-  `test_an_unforced_launch_that_PASSES_the_pre_flight_runs_the_case` (both red with the `vm_stat`-only
-  reading restored, on Linux). Entries elsewhere saying a run went around `run_case.sh` because "it needs
-  `vm_stat`" record how those runs were made, not a limit that still holds.
-- **Liveness is the pid AND its start time (2026-10-12).** The run-file records `pid_started=` (`ps -o
-  lstart=`, spaces squeezed), and `live_pid` treats the run as live only when a process with that pid
-  exists and started then; otherwise the run-file is stale and removed. After a cloud-container
-  restart a finished run's pid belonged to a kernel thread, `kill -0` succeeded, and every launch was
-  refused (`--force` does not skip that refusal). A run-file without `pid_started=` reads as stale.
-  Pinned by `test_a_recorded_pid_now_held_by_ANOTHER_process_is_not_a_running_case` (red with the
-  comparison removed); `test_fastgate.py`'s fake run-file carries the start time too.
-  ⚠️ **Both sides go through `canonical_time` (blanks squeezed AND trimmed), not `tr -s ' '` alone
-  (2026-10-14).** macOS `ps` pads `lstart` to its column width, so `tr -s` kept one trailing blank there
-  and none on Linux. The script matched its own run-files, but the two tests above write the time
-  `split()`-and-joined, so both failed on every Mac while CI (Linux) stayed green. Canonicalizing the
-  *recorded* value too keeps a run-file written before the fix live.
-  `test_a_start_time_is_compared_whatever_its_blanks` pads the time on every platform.
-- `AQUAFLUX_CASE_POLL_SECONDS` (default 20) sets the waiter's poll interval; it exists for the tests. `run-*.exit` is gitignored beside `run-*.log`.
-
-Pinned by `tests/unit/test_run_case.py` (fast tier): exit 3, an uncaught exception, a self-SIGKILL
-(137), a success (0), `--wait` attached to an already-running case, `kill <recorded pid>` reaching a
-case that exits 7 on SIGTERM, and a SIGKILLed wrapper reporting failure. Mutation-checked 2026-09-22:
-restoring the always-0 return in each `--wait` form, dropping the TERM forward, dropping the re-`wait`
-loop, and treating a missing status as success each turn at least one test red.
-
-## ⚠️ A report about a run is not the run's own record (the evening's actual lesson)
-
-**Every correction in the section above was an account being preferred to a record that was already on
-disk.** The pattern is worth more than any of its instances, and it generalizes past machine contention —
-one of these had nothing to do with load:
-
-| got wrong | from | settled by |
-|---|---|---|
-| which job loaded a slow march | a peer's account plus timing structure | the gate's own `$TMPDIR` log |
-| whether a gate was still running | a process-table match | that log's last line |
-| which PR changed which files | a `HEAD..origin/main` range spanning two merges | `git show --stat <sha>` |
-| a wall-clock baseline | the runner's guarantee about *cases* | nothing — it was withdrawn |
-
-**The records were right every time; the accounts were wrong every time.** Three records earned that:
-the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-<stamp>.log`, pytest summary on the last line),
-`run_case.sh`'s run-file, and `git show`. Three sources did not: a peer's report, one's own recollection,
-and the process table.
-
-⚠️ **And a record can be authoritative about the wrong question, which is the failure mode hardest to
-see.** On a machine where every session pushes as the same GitHub account, **a pull request's author field
-does not identify which session wrote it** — three PRs opened that evening by three different sessions all
-report the same author. It arrives from an API rather than from anyone's memory, so it *reads* as a record,
-but it records the account and the question being asked is about the actor. That is circumstantial in
-exactly the way the process table is. What settles authorship is the work itself: which worktree contains
-the code (`grep` for a symbol the change introduces), and which branch has a remote ref at all. Before
-trusting a field, check that it answers the question you are asking and not a neighbouring one.
-
-**This is not a new rule — it is the one `run_case.sh` was built to embody**, and its own header says so:
-the most valuable thing it produces is not the log but that *"is this run mine, and what is it testing?"
-has a written answer*, a question that has been got wrong from the process table alone. Reach for the
-written answer first. The cost of not doing so, measured here, was four wrong claims in one evening
-between two sessions that were each checking the other's work.
-
-## Every case with a case file now SOLVES from it (2026-09-24)
+## Every case with a case file solves from it
 
 The channel harnesses call `checked.solve(coupled)` and hold no solver setting; pitzDaily and bfs3d read
-their march from `case.yaml`'s `solver` section, with each `PITZ_*` / `BFS3D_*` march variable an **edit**
-of it (see `.claude/rules/case.md` → "The case files in the repository"). Two consequences for anyone
-writing a harness:
-- **A module constant a probe imports (`compare.INNER_STEPS`, `compare.CONTROL`, `compare.PRECONDITIONER`,
-  ...) is now read back from the file**, not a literal. Change the value in `case.yaml`, never in the
-  script — bfs3d refuses to import when its reassembled `SOLVER` differs from the file's with no override
-  set, and a fast-tier test imports both scripts that way.
-- **A setting cannot be passed to a case's `solve` as a keyword** — it is refused. A study that varies one
-  edits the spec (`dataclasses.replace`), as the `PITZ_*` overrides do; one that varies something no file
-  can state is a script-only study arm that calls the library itself (pitzDaily's `_solve_study_arm`).
+their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march variable an edit of it
+(`case.md`, "The case files in the repository"). For a harness:
+- **A module constant a probe imports (`compare.INNER_STEPS`, `compare.CONTROL`, ...) is read back from the
+  file.** Change values in `case.yaml`; bfs3d refuses to import when its reassembled `SOLVER` differs from
+  the file's with no override set.
+- **A setting cannot be passed to a case's `solve` as a keyword.** Vary one by editing the spec
+  (`dataclasses.replace`); a study of something no file can state is a script-only arm calling the library
+  (pitzDaily's `_solve_study_arm`).
+- pitzDaily's `PITZ_*` march overrides were inert from #437 (2026-09-24) to 2026-10-08 (pinned since by
+  `test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner`): a pitzDaily arm in that window
+  that set one ran the file's solver.
+- `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
 
-⚠️ **From that change (2026-09-24, #437) until 2026-10-08, pitzDaily's `PITZ_*` MARCH overrides were
-INERT.** `solve_aquaflux` solved `case["spec"].solver` (the file's) while the banner printed the edited
-`SOLVER`, so every override — `BETA_START`, `REFRESH_ON_CYCLES`, `RETRY_ON_CYCLES`, `TURB_DAMPING`,
-`K_POSITIVITY_PROJECTION` (since deleted), `FLOW_SWEEPS`, `FIELD_SPLIT`, `PROBE_GRADIENT_SWEEPS`, `RAMP_*`, the new
-`FORWARD_RTOL` — was reported as in force and ran the file unchanged; the study arms received the same
-unedited solver. Found when three marches at `FORWARD_RTOL` 0.01 / 0.1 / 0.6 came back bit-identical to
-the 0.3 baseline. Fixed (`solver = SOLVER`) and pinned by
-`test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner`, mutation-checked. The
-`stencil_reach` and `gradient_scheme` *arguments* were unaffected. **A pitzDaily arm in that window that
-set a `PITZ_*` march variable is a run of the file's solver**; none is recorded in these files. bfs3d
-reassembles its solver from its constants and was not affected.
+## `bfs3d_species` — dependencies
 
-## The channel studies read case files (2026-09-24) — and their tracked report was stale
+A passive tracer on `bfs3d_openfoam`'s flow (`transport.md` has the design).
+- **It has no mesh or flow of its own.** `of_case/run_of.sh` assembles a scratch case from
+  `bfs3d_openfoam/of_case`; `compare.py` loads that case's `build_case` **by path** (`importlib`), because
+  both cases have a module named `compare`.
+- **Its own-flow arm reads the flow case's rolling checkpoint**, which predates the production limiter
+  defaulting off and so is not a root of today's residual. That does not invalidate the arm: it needs a
+  flux that closes discretely, which `compare.py` measures directly.
+- **`tests/integration/test_bfs3d_species.py` is the one test that reaches into `validation/`**; it skips
+  without the case data and pins sub-patch injection, conservation, boundedness and mixing.
 
-`turbulent_channel` and `turbulent_channel_openfoam` build each configuration from a file under `cases/`
-(see `.claude/rules/case.md`). ⚠️ **`turbulent_channel/report.md` dated from 2026-07-20 and said Re_b =
-240000 "did not converge (issue #99)".** It converges on today's code: Re_tau 4946, u_tau 0.0412 (Dean
-0.0406), kappa 0.382, 116 s — and **`main`'s own hand-built script gives the identical numbers** (run in
-isolation, 121 s), so it was fixed by some solver change since July, not by the case-file switch. The
-regenerated report is committed. The other two rows reproduced exactly (Re_tau 538 / 1093, kappa 0.340 /
-0.361). The OpenFOAM study's aquaflux `low` side reproduces its report exactly (Re_tau 380, u_tau
-0.0569, nu_t/nu 50.4, kappa 0.340); its OpenFOAM results are gitignored and were not on the machine, so
-the full comparison was not rerun. One run each, macOS arm64, 2026-09-24.
+## `ray_effects_room` — aquaflux against discrete ordinates in a far-UVC room
 
-## `bfs3d_species` — the newest case, and what it depends on
+A demonstration case: a 4 x 4 x 3 m room, a Care222 module (`ushio_b1.ies`, MIT licence), a lattice bunny,
+black or 0.5-reflecting walls; aquaflux, of-optical-radiation's discrete ordinates (DOM) and an independent
+brute-force reference (`reference.py`, numpy + Embree, no aquaflux import) on one mesh. Its README carries
+the numbers.
+- **aquaflux's side is case files** (`cases/*.yaml`) run by `run_cases.py` (`RAY_CASES`, `RAY_OVERWRITE=1`)
+  through `run_case.sh` into `work/cases/<name>/`; `figures.py` reads them through `outputs.py` (a numpy VTK
+  decoder independent of the writer); `slices_refined.py` is the one harness left. `work` may be a symlink
+  (`.gitignore` has `/work`). `run_case.sh` records `RAY_` settings (`test_check_env_prefixes.py`).
+- **DOM needs of-optical-radiation's `add-incident-flux-output` branch**; `generate_dom.py` records the
+  commit beside every run, names its Docker containers and stops them on SIGTERM/SIGHUP.
+- **`snappyHexMesh` writes `polyMesh` before the lamp patch is cut** — each meshing step leaves its own
+  completion marker. **The cell count is not `owner.max() + 1`** (top cells may appear only as neighbours);
+  `cells.npz`, written by OpenFOAM, is the authority.
+- ⚠️ **of-optical-radiation's DOM grid is uniform only when `nPhi == nTheta`** (`n x n` gives `2 n^2`
+  directions, matching Fluent's `n/2 x n/2` per octant). Every figure quoted "at 64 / 256 directions"
+  (`8 x 4`, `16 x 8`) is on non-uniform grids, here and in `sozzi_radiation/` before 2026-10-02.
+- **State the error window with the number** — over the central 2 x 2 m the DOM floor error rose with
+  directions, over the whole floor it fell.
+- **Pixels are a run parameter (`bunny:16x8/3x3`) and every record carries them.** No effect measured on
+  this hex-dominant, axis-aligned mesh; untested on tet or polyhedral meshes.
+- `sozzi_radiation/background_grid.py` gathers at Cartesian grid nodes and interpolates; it needs the
+  sleeve's own value (G = 2M at a diffuse emitter's surface) as data. Run at most five tracker runs at once
+  in Docker's VM.
 
-A passive tracer on `bfs3d_openfoam`'s flow (see `.claude/rules/transport.md` for the two-arm design
-and the `Sc_t = 1` choice). Its dependency structure is unusual and is the thing to know:
+## `tubular_reactor` — ten lamps on a background grid
 
-- **It carries NO mesh and NO flow of its own.** `of_case/run_of.sh` assembles a scratch case from
-  `bfs3d_openfoam/of_case`'s `polyMesh` and converged time directory, and `compare.py` loads that
-  case's `build_case` **by path** (`importlib`), because both cases have a module named `compare` and
-  a plain `import compare` resolves by whichever path order happens to be in force.
-- **Its own-flow arm reads the flow case's rolling checkpoint** rather than re-marching. ⚠️ That
-  checkpoint predates the production-limiter default moving OFF, so it is *not* a root of today's
-  coupled residual. This does not invalidate the arm: what a transported scalar needs of a flux is
-  that it close discretely, which `compare.py` measures directly rather than inferring from the
-  state's residual.
-- **`tests/integration/test_bfs3d_species.py` is the one test that reaches into `validation/`.** Every
-  test there skips when the case data is absent, since none of it is in the repository. It pins the
-  properties the comparison rests on — sub-patch injection, conservation on the imported flux,
-  boundedness, mixing — so a break shows up as a failure rather than as a meaningless log.
+Radiation only: 10 Sozzi lamps in a 300 mm vessel, a 100-hole perforated inlet plate, walls reflecting 0.1;
+`G` at Cartesian grid nodes (`run.py`, `TUBULAR_*`, outputs `work/runs/<tag>/`); `study.sh` and `compare.py`
+run and compare the studies; numbers in its README.
+- **The plate is a bespoke exact `Body` (`geometry.PerforatedPlate`)**: a line through the slab is clear only
+  if its in-slab part lies in one hole (one hexagonal-lattice lookup). ⚠️ Modelling the holes as 104 convex
+  regions in an `Outside` reached a 54 GB footprint at the 4M-pair default.
+- **Lamps are emitters only; their shadows are separate exact bodies** shrunk by a fixed `TUBULAR_SHRINK`
+  (0.251 mm), so a lamp-tessellation study does not move the shadows.
+- **The solve is hand-assembled, not `solve_scene`**, because `solve_scene` puts every lamp facet into the
+  dense transfer and 50k lamp facets cannot be held.
+- Within 2 mm of a sleeve the grid-interpolation error is 17–36 % at every spacing (#726), and the
+  node-averaged mean G is not a converged volume integral. `render.py` draws figures from 0.5 mm pixels
+  masked by the exact water test; plate-plane figures are direct light only.
 
-⚠️ **Do not edit files under `validation/` while the fast gate is running.**
-`tests/unit/test_validation_api.py` statically reads every case, so it will parse a half-written file
-and fail for a reason that has nothing to do with the change under test. This happened once and cost a
-28-minute gate run.
+## The aggressive Reynolds continuation does NOT need the complete LU
 
-## `ray_effects_room` — aquaflux against discrete ordinates in a far-UVC room (2026-09-28)
+`pitzdaily_openfoam/compare_reynolds_continuation.py` runs the aggressive `DualTimeControl(beta_start=0.5,
+beta_min=0.005)` continuation on `case.yaml`'s field split with `refresh_on_cycles=2`; it converged to the
+developed reattachment (2026-10-11, measurement in the log), so the complete LU it once claimed to need was
+deleted. ⚠️ The harness puts only its own directory on `sys.path`, so from a second worktree set
+`PYTHONPATH` to that worktree or it runs the editable install's code.
 
-A demonstration case, not a solver study: a 4 x 4 x 3 m room lit by a Care222 module (the
-OSLUV-measured `ushio_b1.ies`, committed with its MIT licence), a Voronoi-lattice bunny hanging in
-it, black walls (and a 0.5-reflecting variant); aquaflux, of-optical-radiation's DOM and an
-independent brute-force reference (`reference.py`, numpy + Embree, no aquaflux import) on one
-snapped mesh. Its README carries every number with its configuration. What to know before touching it:
+## Recovering a converged state (both step cases)
 
-- **DOM needs of-optical-radiation's `add-incident-flux-output` branch** (`qin`, the exact-power
-  `iesEmitter`, no scatter snapshot); `generate_dom.py` records the commit beside every run.
-- **Killing the case must reach Docker.** A `kill` of `generate_dom.py` used to leave its container
-  running on, unseen by `run_case.sh`; containers are now named and stopped from a SIGTERM/SIGHUP
-  handler. The same shape as the `peak_footprint.py` trap above, one tool along.
-- **A mesh directory is not a finished mesh**: `snappyHexMesh` writes `polyMesh` before the lamp
-  patch is cut, so each meshing step leaves its own completion marker.
-- **The cell count is not `owner.max() + 1`**: the highest cells may appear only as a neighbour
-  (2-3 cells short on both meshes); `cells.npz`, written by OpenFOAM itself, is the authority.
-- **aquaflux's side is CASE FILES since 2026-10-05**: `cases/{bunny,empty}_{floor,volume}.yaml`,
-  `bunny_reflecting.yaml` and `bunny_reflecting_coarse.yaml` (0.4 m reflecting triangles), run by
-  `run_cases.py` (`RAY_CASES`, `RAY_OVERWRITE=1`) through `run_case.sh` into `work/cases/<name>/`
-  (`fields.vtu`, `patches.vtm` + `patches/*.vtp`, `run.yaml` with `results`). `aquaflux_floor.py`,
-  `aquaflux_volume.py` and `aquaflux_reflecting.py` are **deleted**; `figures.py` reads the run
-  directories through `outputs.py` (a numpy decoder of the VTK files, independent of the writer);
-  `slices_refined.py` is the one harness left, re-gathering the slice cells of `<mesh>_volume.yaml`'s
-  built scene with the floor case's refined lamp. `work` may be a symlink to the worktree that meshed
-  the rooms (the `.gitignore` entry is `/work`, which matches a link; `work/` did not).
-- **The port reproduces the scripts (2026-10-05/06; `943389aa` + the uncommitted port, jax 0.10.2,
-  CPU, macOS arm64, 11 cores; the deleted scripts' outputs at `8dd4caae` as the comparison).** Floor `E`
-  (bunny, 17,920-facet lamp) to 9.1e-12 of its peak, floor power 0.0994887477227159 W both; empty floor
-  9.1e-12. `bunny_volume` `G` p99 6.8e-10 of max, `volume_integral_G` to 3e-10 relative, but **26 cells
-  move by about one lamp facet's share** (shadow-edge ray decisions: the bunny's fan triangulation
-  differs from the old script's), one near-bunny cell 3.36e-4 -> 0. `bunny_reflecting` is NOT the same
-  configuration and is not a bit-for-bit check: 9,762 coarsened mesh-patch triangles (<= 0.2 m) against
-  2,000 squares, the lamp's own 1,120 facets (the script refined it for the floor and the walls' light),
-  a black lamp window. Under that: room absorbs 113.133 vs 113.129 mW, bunny 5.693 vs 5.697 mW,
-  reflected share of floor power 0.13443 vs 0.13442; reflected `G` p99 2.6 % of its peak, worst 40 %
-  in a cell 6 mm from the floor (0.7 % p99 past 10 cm from the walls). 0.2 -> 0.4 m moves the reflected
-  floor <= 4.5 % of its own peak (the script's squares: 5.1 %). Wall times (`run.yaml` `seconds`, mesh
-  read included): bunny floor 306 s, empty floor 148, bunny volume 805, empty volume 99 and bunny
-  reflecting 5,277 (both shared with unit tests: upper bounds), coarse 2,009 (its tail beside a test tier).
-- **`test_validation_api.py` matched `from aquaflux...` by string prefix**, so a case's sibling
-  module named `aquaflux_floor` was taken for the package and every name imported from it reported
-  missing. It now matches the package or its submodules (`module == "aquaflux"` or
-  `startswith("aquaflux.")`), pinned by `test_a_sibling_module_whose_name_begins_with_aquaflux_is_not_the_package`.
-- **`run_case.sh` records `RAY_` settings** (added to its capture prefixes; `test_check_env_prefixes.py`
-  fails a case whose prefix is missing, which is how this was caught).
-- ⚠️ **of-optical-radiation's DOM grid is uniform only when `nPhi == nTheta`.** It divides the polar angle over
-  the WHOLE sphere into `nTheta` bins of `pi/nTheta` and the azimuth into `2 nPhi` bins of `pi/nPhi` (its tutorial's
-  "polar bins per hemisphere" comment was wrong). `8 x 4` / `16 x 8`, used for every 64- and 256-direction figure
-  below and in `sozzi_radiation/` before 2026-10-02, have polar bins twice the azimuthal; `n x n` gives `2 n^2`
-  directions and matches Fluent's `n/2 x n/2` per octant (6 x 6 = 72 = Fluent 3 x 3). On the Sozzi uvmesh swap the
-  8 x 4 grid's dose shortfall at k = 0.5 was 12.4 %, the uniform 6 x 6's 2.2 %: most of it was the grid's shape.
-  Every figure below quoted "at 64 / 256 directions" is on the non-uniform grids.
-- **`sozzi_radiation/background_grid.py`: aquaflux on a Cartesian grid, interpolated to the mesh (2026-10-02).**
-  Gathering only at 4 mm grid nodes (90,788, 43 s against 714 s at every cell) gives the dose within 0.65 % in
-  LR at every k, **but only with the sleeve's own value as data**: G = 2M at a diffuse emitter's surface
-  (outgoing hemisphere at zero path; the sleeve is convex and the walls black). Without it every variant
-  under-predicts the cells beside the sleeve (median 0.57-0.81 within 1 mm, 8-3 mm), because each wet corner
-  is farther from the lamp than the cell. ⚠️ `G_average`'s LR looking right at 3-4 mm is a cancellation (low
-  near the sleeve, high in the bulk), not accuracy: its mean dose is 2 % low and its p1 per-particle ratio 0.83.
-  ⚠️ Twelve tracker runs at once in Docker's VM killed three (memory); run five at a time. Numbers in its README.
-- **A diffusely reflecting DOM sweep costs 3.3-3.8x a black one** (209 against 63 s at 64 directions,
-  984 against 257 s at 256, 8 ranks) and needs ~60 % more sweeps (57 against 36 at 64), so the
-  reflecting 256 run was stopped. ⚠️ Not quadratic in the directions, as was first said here: 64 -> 256
-  multiplied a reflecting sweep by 4.7 and a black one by 4.1. The likely cost is the `reflective` BC's
-  sum over every direction at each wall face, which is read from its code, not profiled.
-- **The error window decides the trend, so state it with the number.** Over the central 2 x 2 m the
-  DOM floor error ROSE with directions (L2 / peak 0.77 -> 1.76, 64 -> 256); over the whole floor it
-  FELL (2.03 -> 1.07), because at 64 every beam lands outside the window. "More directions made it
-  worse" was put on a slide from the window figure and had to be withdrawn. The README's table is
-  the window; the full-floor figures are in its bullets and in the talk's `export_room_data.py`.
-- **Pixels are a run parameter (`bunny:16x8/3x3`) and every record carries them**; runs before
-  2026-09-29 had 1 x 1 from the template, backfilled into their records and marked so. On this mesh
-  3 x 3 pixels change the floor error by nothing to four figures at 64 and 256 directions (only the
-  bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
-  room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
+Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through
+`StateCheckpointer` + `combine_observers` (`PITZ_CHECKPOINT_KEEP` / `BFS3D_CHECKPOINT_KEEP`, default 3,
+into `<case>/checkpoints/`). Without one, every question about the zero-shift operator — the adjoint's,
+which a march never exercises — costs a re-march. `zero_shift_arms.py` / `zero_shift_adjoint.py` consume
+them.
 
-## `tubular_reactor` — a ten-lamp reactor on a background grid, and its resolution study (2026-10-15/16)
+## Other live traps
 
-A radiation-only case with no flow mesh: 10 Sozzi lamps (35.4 W each) in a 300 mm vessel, with a
-100-hole, 50 %-open perforated plate at the inlet and walls reflecting 0.1. `G` is gathered at the
-nodes of a Cartesian grid in the water (`run.py`, `TUBULAR_*` settings, outputs in
-`work/runs/<tag>/`). `study.sh` runs the grid and tessellation studies, and `compare.py` compares
-them. Numbers and configuration are in its README. What to know before touching it:
-
-- **Shadows are exact bodies, and the plate is a bespoke `Body` (`geometry.PerforatedPlate`).** A
-  sight line crossing the slab is clear only if its part inside the slab lies in one hole, found by
-  one hexagonal-lattice lookup. ⚠️ **The first version put the 100 holes in an `Outside` as 104 convex
-  regions, and that ran a smoke test to a 54 GB footprint before it was killed.** Its pair test forms
-  intermediates per region at the 4M-pair default. Verified against brute-force hole sampling:
-  1 of 4,000 lines differed, and finer sampling resolved it (a 7 µm graze).
-- **Lamps are emitters only; their shadows are separate exact bodies.** A cylinder plus hemisphere,
-  `TUBULAR_SHRINK` (0.251 mm) inside the sleeve so no facet centroid lies inside. That is fixed
-  rather than derived, so a lamp-tessellation study does not move the shadows.
-- **The lamps are kept out of the radiosity on purpose: the solve is hand-assembled, not
-  `solve_scene`.** `solve_scene` puts every lamp facet into the dense transfer, and 50k lamp facets
-  plus 12k wall triangles cannot be held. Wall triangles at 16k and 18k (20 mm edges, 12-sided
-  holes) did fit, on a 19 GB machine.
-- **Grid results (h = 8/6/4/3 mm):** away from the sleeves the interpolation error falls as h². Within
-  2 mm of a sleeve it is 17-36 % at every spacing (issue #726). ⚠️ **The node-averaged mean G is not a
-  converged volume integral**: it moves non-monotonically, 112.9 / 114.8 / 115.1 / 114.1 W/m².
-- **Figures are drawn by `render.py`**: 0.5 mm pixels masked by the exact water test and interpolated
-  from the nodes, so boundaries are true curves. The plate-plane figures are direct light only and
-  say so on the figure.
-
-## The aggressive Reynolds continuation does NOT need the complete LU (2026-10-11)
-
-`pitzdaily_openfoam/compare_reynolds_continuation.py` used to say its aggressive Courant control could
-reach the developed reattachment only with an exact complete-LU preconditioner, re-factored every step,
-because "a block-triangular SIMPLE preconditioner loses diagonal dominance and the step goes non-finite".
-That was the last claimed regime for the LU, so it was re-run on the field split before the LU was deleted.
-**Measured 2026-10-11** (`validation/pitzdaily_openfoam/compare_reynolds_continuation.py` at `10449ed` plus
-the harness changes of the LU-removal PR; Linux x86_64, 4 cores, jax 0.11.2, Python 3.13): the aggressive
-`DualTimeControl(beta_start=0.5, beta_min=0.005)` Reynolds continuation (Re/100, Re/10, target;
-`inner_steps=10`, `inner_tol=1e-3`, intermediate `rtol` 3e-2, target `rtol` 1e-3), preconditioned by
-`case.yaml`'s own `FieldSplit(SimpleSmoothed, JacobiSmoothed)` at `refit_beta_floor` 0.05 with
-`refresh_on_cycles=2`, built at β 0.5: **converged in 40 outer steps / 852 restart cycles, no retries and
-no non-finite step, `x_r/h` 8.069 (OpenFOAM 7.741; `compare.py`'s root 8.0686), peak `nu_t/nu` 416 (423)**.
-Rungs took 12 / 11 / 17 steps. The one hard step was rung 2's last (β 0.009): 133 cycles, inner α 0.016,
-finite, and it met the rung's tolerance. ⚠️ Wall clock (3305 s) is NOT quotable: a unit-test run shared
-the machine for the first ~10 minutes. ⚠️ A first attempt with NO `refresh_on_cycles` (split fitted once
-per rung, never refreshed) was stopped at step 8 with cycles rising 9 → 31 — that configuration is not one
-anything ships, and the LU it was compared with refactored every step, so it was not a fair arm. The LU arm
-itself was not re-run (the harness's claim was recorded without a run log in the repository).
-The harness now runs the split only. Two defects in it predated this and were fixed on the way: its
-step-control wrapper called `float()` on `DualTimeControl`'s carried state, which is a `(β, previous
-|R|)` tuple, so it crashed on its first step on `main`; it now reads the shift off the step with
-`shift_of`. And it does not put its own repository on `sys.path`, so `import aquaflux` resolves to the
-editable install — a run from a second worktree must set `PYTHONPATH` to that worktree, or it silently
-runs the other checkout's code (this happened, mid-edit, and crashed on an import the edit had removed).
-
-## Recovering a converged state (both cases)
-
-Both `compare.py` files take `checkpoint_dir` and write a rolling per-step state through the shared
-`StateCheckpointer` + `combine_observers` (`PITZ_CHECKPOINT_KEEP` / `BFS3D_CHECKPOINT_KEEP`, default 3;
-`main()` writes to `<case>/checkpoints/`). This matters because **a converged state otherwise exists only
-inside the process that computed it** — and the adjoint's operator is the Jacobian at that root, which is
-the one operator a march never exercises, since the continuation ramps the shift and the preconditioner
-is additionally floored. Without a checkpoint, every question about the zero-shift operator costs a full
-re-march to ask. The `zero_shift_arms.py` / `zero_shift_adjoint.py` harnesses are the consumers.
-
-## ⚠️ "Fails locally, green on CI" — the 2026-08-19 case was a SKIP, not a platform
-
-Three slow-tier tests failed locally with `RootSolver did not converge` while `main` was green on GitHub,
-and this section once explained it as a platform difference (arm64/Python 3.13 vs x86_64) with a
-`max_steps` hypothesis. **The real cause was simpler: all three were `pytest.importorskip("petsc4py")`-gated,
-CI did not install PETSc, so CI never ran them** (root `CLAUDE.md`, "CI is not a superset of a local run").
-Two of them (`test_coupled_amg.py`) were deleted with PETSc on 2026-10-10; the third, now
-`test_the_split_continuation_reaches_the_block_preconditioned_root` (renamed when the complete LU it
-compared against was deleted, 2026-10-11), is PETSc-free and runs in CI.
-**The trap that survives: before attributing a local-only failure to your platform, check the CI skip
-counts** — a guard was once reverted on the strength of the platform story.
+- **Before attributing a local-only failure to your platform, check CI's skip counts** (root `CLAUDE.md`,
+  "CI is not a superset of a local run"); a 2026-08-19 "platform difference" was a skipped test.
+- **`_mis_aggregate`'s return annotation is stale**: `tuple[np.ndarray, int]`, but it returns three values
+  (labels, roots, count).
+- Comparisons between archived runs from before 2026-08-19 may pair a k-guarded march with an unguarded
+  one; today every coupled march goes through `_coupled_step`'s per-cell k clip and ω step bound
+  (`omega_step_ratio`, overridden by `BFS3D_OMEGA_STEP_RATIO` / `PITZ_OMEGA_STEP_RATIO`, `none` =
+  unbounded).

@@ -823,11 +823,12 @@ def test_a_tilted_lamp_flush_with_the_water_s_wall_is_lit_as_without_the_water()
     np.testing.assert_allclose(landing((water,)), unbounded, rtol=1e-12)
 
 
-def _scene_with_a_sheet_in_each_set(occlusion) -> Scene:
+def _scene_with_a_sheet_in_each_set(occlusion, sheets=()) -> Scene:
     """A lamp with a baffle among the lamps, and a ceiling with a shelf among the reflectors.
 
-    Each sheet faces away from the point it is meant to shade, so counted from the side it faces it
-    hides nothing, and only its declaration as two-sided darkens that point. The first volume point
+    ``sheets`` are the bodies declared two-sided, each on its own set. Each sheet faces away from
+    the point it is meant to shade, so counted from the side it faces it hides nothing, and only
+    its declaration as two-sided darkens that point. The first volume point
     sits above the baffle, on the far side of it from the lamp, and away from the shelf; the second
     sits under the shelf, which hides the whole ceiling from it, and away from the baffle. The baffle
     is clear of every line from the lamp to the ceiling, so the ceiling is lit either way.
@@ -842,12 +843,14 @@ def _scene_with_a_sheet_in_each_set(occlusion) -> Scene:
         emission=[LAMP_EXITANCE] * 2 + [0.0] * 2,
         solid_id=[0, 0, 1, 1],
         solid_names=("lamp", "baffle"),
+        two_sided=tuple(sheet for sheet in sheets if sheet == "baffle"),
     )
     reflectors = Surfaces.from_triangles(
         np.concatenate([ceiling, shelf]),
         diffuse_reflectance=[REFLECTANCE] * 2 + [0.0] * 2,
         solid_id=[0, 0, 1, 1],
         solid_names=("ceiling", "shelf"),
+        two_sided=tuple(sheet for sheet in sheets if sheet in ("ceiling", "shelf")),
     )
     return Scene(
         lamps=lamps,
@@ -865,14 +868,12 @@ def _scene_with_a_sheet_in_each_set(occlusion) -> Scene:
 def test_a_sheet_declared_two_sided_shades_from_behind_whichever_set_it_belongs_to(
     two_sided, dark
 ) -> None:
-    # The lamp and the ceiling are sheets too, open at every edge; declaring them keeps the build
-    # from warning about them, and changes nothing, since nothing lies behind either.
-    sheets = ("lamp", "ceiling", *two_sided)
+    # The ceiling is a sheet too, open at every edge; declaring it changes nothing, since nothing
+    # lies behind it. The lamp emits, so it cannot be declared, and is open at every edge.
+    sheets = ("ceiling", *two_sided)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        solution = solve_scene(
-            _scene_with_a_sheet_in_each_set(SilhouetteOcclusion(two_sided=sheets))
-        )
+        solution = solve_scene(_scene_with_a_sheet_in_each_set(SilhouetteOcclusion(), sheets))
     # Every build warns about the open sheets of its own set that were left undeclared, and only
     # about those.
     warned = {
@@ -881,8 +882,8 @@ def test_a_sheet_declared_two_sided_shades_from_behind_whichever_set_it_belongs_
         for match in re.findall(r"facet\(s\) of (\[[^\]]*\]) belong", str(w.message))
         for name in ast.literal_eval(match)
     }
-    assert warned == {"baffle", "shelf"} - set(two_sided)
-    clear = solve_scene(_scene_with_a_sheet_in_each_set(NoOcclusion()))
+    assert warned == {"baffle", "shelf", "lamp"} - set(two_sided)
+    clear = solve_scene(_scene_with_a_sheet_in_each_set(NoOcclusion(), sheets))
     # The baffle is among the lamps, so it shades the lamps' light; the shelf is among the
     # reflectors, so it shades theirs. Each point is shaded only by the part its sheet can hide.
     shaded = (solution.fluence_rate_direct[0], solution.fluence_rate_reflected[1])
@@ -898,34 +899,19 @@ def test_a_sheet_declared_two_sided_shades_from_behind_whichever_set_it_belongs_
     np.testing.assert_allclose(solution.radiosity, clear.radiosity, rtol=1e-12)
 
 
-@pytest.mark.parametrize("field", ["self_occlusion", "receiver_occlusion"])
-def test_a_scene_refuses_a_sheet_that_neither_set_has(field) -> None:
+def test_a_scene_refuses_a_lamp_body_declared_a_sheet_that_emits() -> None:
+    """A sheet reflects on both faces but cannot emit from both, which the direct light, gathered
+    from the lamps' front faces, would not model; a baffle among the lamps may be one."""
     scene = _scene_with_a_sheet_in_each_set(NoOcclusion())
-    misspelt = RadiationSettings(**{field: SilhouetteOcclusion(two_sided=("baffle", "shelff"))})
-    with pytest.raises(
-        ValueError,
-        match=r"two_sided names no body of these surfaces: \['shelff'\]; "
-        r"have \['ceiling', 'shelf', 'lamp', 'baffle'\]",
-    ):
-        Scene(lamps=scene.lamps, reflectors=scene.reflectors, settings=misspelt)
-
-
-def test_settings_cut_down_to_a_set_keep_its_own_sheets_and_nothing_else_changes() -> None:
-    settings = RadiationSettings(
-        receiver_quadrature=3,
-        self_occlusion=SilhouetteOcclusion(two_sided=("baffle", "shelf"), cluster_size=8),
-        receiver_occlusion=SilhouetteOcclusion(two_sided=("shelf", "lamp")),
-        gather_pair_limit=1234,
+    emitting = Surfaces.from_triangles(
+        np.asarray(scene.lamps.vertices),
+        emission=np.asarray(scene.lamps.emission),
+        solid_id=np.asarray(scene.lamps.solid_id),
+        solid_names=scene.lamps.solid_names,
+        two_sided=("lamp",),
     )
-    lamps = settings.for_bodies(("lamp", "baffle"))
-    assert lamps.self_occlusion == SilhouetteOcclusion(two_sided=("baffle",), cluster_size=8)
-    assert lamps.receiver_occlusion == SilhouetteOcclusion(two_sided=("lamp",))
-    assert (lamps.receiver_quadrature, lamps.gather_pair_limit) == (3, 1234)
-    walls = settings.for_bodies(("shelf",))
-    assert walls.self_occlusion.two_sided == walls.receiver_occlusion.two_sided == ("shelf",)
-    # A choice that names no bodies is the same choice on every set, and an unset one stays unset.
-    plain = RadiationSettings(self_occlusion=RayCastOcclusion())
-    assert plain.for_bodies(("anything",)) == plain
+    with pytest.raises(ValueError, match=r"two-sided sheet may not carry emission"):
+        Scene(lamps=emitting, reflectors=scene.reflectors)
 
 
 #: A lamp seen obliquely from the origin, behind a baffle that hides its overhead end. Wound to
@@ -953,7 +939,7 @@ def test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_soli
     # One small reflecting facet whose centroid is the origin, sampled once, at that centroid.
     wall = np.array([[[-0.01, -0.01, 0.0], [0.02, -0.01, 0.0], [-0.01, 0.02, 0.0]]])
     reflectors = Surfaces.from_triangles(
-        wall, solid_names=("wall",), diffuse_reflectance=REFLECTANCE
+        wall, solid_names=("wall",), diffuse_reflectance=REFLECTANCE, two_sided=("wall",)
     )
     origin = np.zeros((1, 3))
     solution = solve_scene(
@@ -962,12 +948,10 @@ def test_a_partly_shadowed_lamp_lights_a_wall_by_the_share_of_its_projected_soli
             reflectors=reflectors,
             surfaces={"floor": SurfaceReceivers(origin, UP[None])},
             lamp_samples=1,
-            # Every body is one open sheet; each faces the points it lights or shadows, so this only
-            # says they are meant as sheets.
-            settings=RadiationSettings(
-                receiver_quadrature=1,
-                self_occlusion=SilhouetteOcclusion(two_sided=("lamp", "wall")),
-            ),
+            # Every body is one open sheet, and each faces the points it lights or shadows, so the
+            # wall's declaration only says it is meant as a sheet. The lamp's body emits, so it
+            # cannot be declared, and is warned about.
+            settings=RadiationSettings(receiver_quadrature=1, self_occlusion=SilhouetteOcclusion()),
         )
     )
     unshadowed = float(direct_irradiance(lamps, jnp.asarray(origin), jnp.asarray(UP[None]))[0])
