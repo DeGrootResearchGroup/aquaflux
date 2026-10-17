@@ -1404,3 +1404,14 @@ cycles of fresh), so re-fitting every step stays right; a secant update is just 
 Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against 3.6-4.2 s before the
 adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
 A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.
+
+## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
+
+Factorizing the constant, geometry-only `A_g` of `CorrectedGreenGauss` once (dense, `jit`-ed `jacfwd` +
+`lu_factor`) and applying `A_g⁻¹` by back-substitution is exact, but dense means `O((n·dim)²)` per apply,
+so it lost to the matrix-free `SweptGradientSolve` at every size measured (run per step: N=12 0.27 vs
+0.21 s, N=16 2.0 vs 0.83 s, N=24 24 vs 4.8 s) and was slower than even the iterative baseline by N=32. A
+scalable sparse LU in JAX needs host callbacks (off-GPU). Related: solving `A_g` exactly to remove far
+Jacobian coupling is the wrong lever — the exact solve has *more* mass beyond any distance than the
+truncated sweeps (reach 9–11 against 5). Detail: `.claude/notes/schemes-log.md`, "Moved →
+`SweptGradientSolve`: cost, peel, reach-per-sweep, folding, dense LU".
