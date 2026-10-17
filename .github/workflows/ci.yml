@@ -712,12 +712,26 @@ jobs:
           fi
 
           # Commit ONLY .test_durations onto the branch via the Contents API.
+          # The request body goes in a file (`--input`), not in `-f content=...`:
+          # with the unit tier recorded the file's base64 is several hundred kB,
+          # and Linux refuses any single argument over 128 kB ("Argument list
+          # too long"), so the inline form failed on the first full refresh.
           file_sha="$(gh api "repos/$repo/contents/.test_durations?ref=$branch" --jq .sha)"
+          FILE_SHA="$file_sha" BRANCH="$branch" python - <<'PY'
+          import base64, json, os
+          with open(".test_durations", "rb") as fh:
+              content = base64.b64encode(fh.read()).decode()
+          body = {
+              "message": "ci: refresh .test_durations",
+              "content": content,
+              "branch": os.environ["BRANCH"],
+              "sha": os.environ["FILE_SHA"],
+          }
+          with open("_contents_body.json", "w") as fh:
+              json.dump(body, fh)
+          PY
           gh api -X PUT "repos/$repo/contents/.test_durations" \
-            -f message="ci: refresh .test_durations" \
-            -f content="$(base64 -w0 .test_durations)" \
-            -f branch="$branch" \
-            -f sha="$file_sha" >/dev/null
+            --input _contents_body.json >/dev/null
           echo "Updated $branch with the refreshed durations."
 
           # Open the PR if one isn't already open. Non-fatal if the repo setting
