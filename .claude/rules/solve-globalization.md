@@ -149,7 +149,7 @@ What to take from it, none of which is specific to that mechanism:
   on the linear solve. Holding
   both to one accuracy because one function serves both is a coincidence of implementation, not a
   requirement. The concrete consumer is the gradient reconstruction's sweep count — see
-  `.claude/rules/schemes.md` for what it is worth and where the knee is.
+  `.claude/rules/schemes.md` (measurements in `.claude/notes/schemes-log.md`) for what it is worth and where the knee is.
 
   - **The adjoint is exact BY CONSTRUCTION, not by care, and this is the load-bearing property.**
     `root_adjoint`'s backward rule forms `jax.vjp(residual_fn, …)` at the converged state directly and

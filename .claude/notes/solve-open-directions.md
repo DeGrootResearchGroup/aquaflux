@@ -616,7 +616,7 @@ bfs3d (since measured, #678: see the top of this entry).
 - **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry
   was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
   operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
-  identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
+  identical march 9.7 % faster, the knee at 2 (`schemes-log.md`). pitzDaily now ships
   `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d moved to
   `MultipleCorrectionGradient` too (2026-10-13), so it no longer applies to either case. `jacobian_gradient_sweeps` stays a script-only study arm and
   is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better

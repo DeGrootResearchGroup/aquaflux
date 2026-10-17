@@ -148,7 +148,7 @@ F frozen solver → G drive.
   before the case file existed) and left out of `_CASE_MAPPING` until 2026-10-06, though `schemes.md`
   names it THE scheme for tetrahedral meshes; its `prepared` weight cache is `not_settings`. Checked
   2026-10-06 by two coupled steps on pitzDaily through a case file naming it (finite residual, 3.4e-2).
-  `HessianCorrectedGradient` is still unregistered (dominated on cost per `schemes.md`; not asked for).
+  `HessianCorrectedGradient` is still unregistered (dominated on cost per `schemes.md` / `schemes-log.md`; not asked for).
 - **Every advection scheme is in `numerics` (project owner, 2026-10-06): `momentum_advection` (REQUIRED)
   and `turbulence_advection` (scope `turbulence`: required by RANS, refused by Laminar).**
   `MomentumContinuity.build`'s `advection_scheme=None` means *Stokes flow* — a different problem, not a

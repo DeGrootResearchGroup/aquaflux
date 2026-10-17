@@ -1201,3 +1201,55 @@ vanish as `k → 0`, so a collapsing `k` does not weaken its own equation. Detai
 PETSc orthonormalizes each aggregate's block by QR (unit-2-norm columns where ours are 0/1). Built as
 `orthonormal_prolongation`: bit-identical at two levels, 17–30× worse deeper. Detail in
 `solve-flow-block-log.md`, "Depth, singletons, and the prolongation".
+
+
+## Accelerating the Hessian-corrected (`CoupledBlockSweep`) gradient reconstruction — CLOSED on five routes (2026-08-23)
+
+Measured on the 1.6M-cell UV reactor mesh and pitzDaily, contraction rate of the coupled sweep as
+`CoupledBlockSweep.calibrated` measures it (`local_schur_block=True`, `iters=24`). **Sub-solving either
+block** (k fixed sweeps of `A_gg` and/or `A_HH` in place of the per-cell inverse) saturates by two or three
+inner sweeps and never pays for itself — the local Schur block already inverts each cell's coupled block,
+so what remains of a 0.44–0.54 rate is inter-cell. **Polynomial acceleration / Chebyshev / per-sweep
+relaxation schedules** are all degree-N polynomials with `q(0) = 1`, bounded by one GMRES run on the same
+system: ~2x in residual at k = 10, i.e. about one sweep of thirteen. **Coarse-grid / multigrid**: an ideal
+two-level cycle bought 0.0–1.4 % (the operator is second kind, its rate set by mesh quality, not size;
+those two-level numbers came from a scratchpad harness and are not re-adjudicable). **Over-relaxation** is
+refuted on the reactor (optimum at or just below 1.0). **Replacing the sweep by a local k-exact
+least-squares fit** is a poor bet in the worst cells (Betchen & Straatman 2010, Mavriplis 1993); least
+squares survives only as an unbuilt *preconditioner* idea. Any real gain needs reach, not cell-local
+accuracy. Detail: `.claude/notes/schemes-log.md`, "Responsibility → the UV reactor, and directions closed
+for the coupled sweep (2026-08-23)".
+
+## Krylov (GMRES) outer gradient solve as the default, and solving the full coupled `[g, H]` system — DOMINATED (2026-08-21)
+
+On pitzDaily a GMRES outer solve of the Hessian-corrected reconstruction costs 158.6x the swept
+`CorrectedGreenGauss` baseline on the `jvp` path against 59.9x for a 20-sweep fixed solve at equal
+accuracy: the implicit-function tangent solves a second Schur system per JVP. Fixed sweeps differentiate
+by unrolling at ~1.0x their forward cost. Separately, sweeping the full coupled `[g, H]` system is ~2.5x
+cheaper per unit work than the Schur route but gives up the gradient-sized primary unknown the elimination
+exists for. (GMRES stays available as `GmresGradientSolve` for exactness tests.) Detail:
+`.claude/notes/schemes-log.md`, "Krylov outer cost, the first Betchen A/B, and the sweep-count lever" and
+"The inner `A_HH` solve".
+
+## Mechanisms for the `SkewCorrectedGradient` stall on pitzDaily — three REFUTED before the cause was found (2026-08-24)
+
+Each measured, each left the target-rung stall unchanged to three figures: (i) the wall `omega` gradient
+(imposing the analytical one through `ImposedGradient`, two cold marches); (ii) the correction matrices'
+conditioning (`cond(M2⁻¹)` is *better* under skew); (iii) the closure's double correction on gradient-type
+patches (fixed by `boundary_values_at`, eighteen orders down, march bit-for-bit as stalled). Also refuted: a
+cap on the log-`omega` increment (it penalizes the arms that work). All three missed because they were
+measured at the cold state or on one reconstruction, where the arms are identical. The cause was the
+negative `J_kk` from the `k` production's own `k`-derivative amplifying a reconstruction difference into an
+unbounded upward `dk`, with the step length set by the global k-positivity cap (since deleted, 2026-10-14).
+Detail: `.claude/notes/schemes-log.md`, "`MultipleCorrectionGradient` — the initializer re-bind, and the
+`SkewCorrectedGradient` stall on pitzDaily".
+
+## Repairing `MultipleCorrectionGradient` on tetrahedra under a pressure coupling (#435) — CLOSED (2026-09-23)
+
+On the 2462-cell tetrahedral duct the second pass's weights flip Rhie–Chow damping diagonals and the
+coupled march finds no admissible step. Tried and did not fix it: both corner-cell boundary closures
+(`OwnerGradient`, the `SkewCorrectedGradient` repair), the first pass alone inside Rhie–Chow, ring and
+threshold withholding of the second pass, mixed per-cell schemes, and Betchen's scheme as a calibration
+source. The answer was a scheme that chooses its weights (`ProjectedStencilGradient`). Detail:
+`.claude/rules/schemes.md` (`MultipleCorrectionGradient` recommendation) and
+`.claude/notes/schemes-435-tetrahedral-gradient-log.md`.

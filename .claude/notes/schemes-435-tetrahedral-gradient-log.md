@@ -707,3 +707,97 @@
   pass where `max|M2^-1| > 10` removes all of them. That is a Laplace-operator result; it is **not** what
   stalls the coupled march (the velocity mechanism above is, and limiting on M2 alone left all 43 omega
   diagonals negative). Mesh refinement (to 48005 cells) did not remove either.
+
+## Moved from `schemes.md` (2026-10-17)
+
+> Moved verbatim out of `.claude/rules/schemes.md`'s `MultipleCorrectionGradient` section when that file was split. Same point-in-time caveat as the rest of this log.
+
+  **✅✅ A MARCHABLE MESH WITH THE CELL SHAPE NOW EXISTS — `validation/tetrahedral_gradient_ab/`
+  (2026-09-16, #432) — AND THE LOCAL REPAIR IS CONFIRMED AT THE M2 LEVEL ON IT.** A small gmsh-built
+  tetrahedral duct (2462 cells, `of_case/make_mesh.py`), unstructured (no special construction needed
+  — any tet mesh of a box has cells owning two or more boundary faces at its edges), with **176**
+  such cells. Measured directly (`bound.prepared.m2_inverse`, not the exact-quadratic probe `bind`'s
+  own warning uses, which this file's own earlier entries note cannot see everything):
+
+  | | `fallback=None` | `fallback=SkewCorrectedGradient()` |
+  |---|---|---|
+  | worst corner cell's `max\|M2⁻¹\|` | **3.29e16** | **8.43e3** |
+  | cells above 1e4 | 176 | **0** |
+
+  (1e4 is this report's own reporting threshold, `UNDETERMINED_THRESHOLD` in `compare.py`; the scheme
+  itself repairs a cell only above `_UNDETERMINED_CORRECTION = 1e8`, so a cell between the two is counted
+  here and left unrepaired there. An unreproduced measurement from a review of the #435 investigation
+  below adds that the repair is a TRADE, not a pure gain: the composite correction gain, not `max|M2^-1|`,
+  moves the other way, with cells of gain > 3 going 101 -> 204 and the worst 3.9 -> 3051.)
+
+  ⚠️ **The repaired figure was first recorded here as `10.1`; the run log prints `worst cell 2163 at
+  8.432e+03`.** Twelve orders better than unrepaired, but only just under the 1e4 reporting threshold
+  above, and three orders above the order-unity of a healthy cell — and that residual conditioning is not
+  harmless, per the investigation log linked below. "The repair does exactly what it is supposed to" was
+  true of singularity and false of health.
+
+  ⚠️ **What is still NOT answered: the march itself.** This case cannot currently get a coupled RANS
+  solve started at all, under *either* arm, for reasons that measure out as independent of the defect
+  above (both arms are affected almost identically) — filed separately as **#435** rather than chased
+  further here, because it is a march-robustness question on this specific mesh/BC combination, not a
+  new instance of the corner-cell mechanism:
+  - `hybrid_initialize`'s AMG-preconditioned potential-flow seed stagnates under both arms. Materializing
+    the *exact* reconstruction Jacobian for the same scalar Laplace problem gives condition numbers of
+    **3.3e19** (owner) and **1.7e19** (repaired) — both past float64's solvable range, and close enough
+    to each other (1.9×, against the corner-cell M2's fifteen-order gap above) that this is evidently a
+    *different* ill-conditioning, not the one this section is about.
+  - Hand-built substitute initial conditions (a uniform plug; wall-tapered profiles) either trip their
+    own numerical hazards — a `dist**(1/7)` turbulent-pipe taper's unbounded wall curvature meets the
+    Hessian correction and produces a **1.3e16** velocity gradient at a cell whose own `max|M2⁻¹|` is a
+    healthy 2.94, identically under both arms — or leave the coupled Newton march with `alpha = 0` at
+    every step, at every pseudo-time shift up to the retry ladder's cap, across a Reynolds-number sweep
+    from the target down to 1/10000th of it.
+
+  **THE SECOND PASS FLIPS THE SIGN OF THE RHIE-CHOW DAMPING ON TETRAHEDRA, AND THE FLIPS REPRODUCE A
+  LAMINAR MARCH LADDER FROM GEOMETRY ALONE (#435, `validation/tetrahedral_gradient_ab/rhie_chow_sign_probe.py`).**
+  The pressure block of the flow residual holds, per interior face, the cancelling difference
+  `(p_N - p_P) - interp(grad p) . d` weighted by `A / (d . n)`. With no flow state (unit weights,
+  Dirichlet-zero boundary values), `OwnerGradient` + `SkewCorrectedGradient` fallback, the 2462-tet duct,
+  x64 CPU, the assembled operator's diagonal is negative (damping) everywhere under the first pass
+  alone and positive (anti-damping) in **117 cells** under the full scheme, whose largest eigenvalue
+  is `+11.93` against `+6.5e-4` (18300x). Withholding the second pass (first pass only) on the
+  wall-owning cells and each ring out to `k` (graph distance from a boundary-owning cell; populations
+  [1088, 739, 408, 193, 34]): `k = 0` 8 flipped, `+0.267` (410x); `k = 1` 0 flipped, `+1.55e-2` (24x);
+  `k = 2` `+1.17e-2` (18x); **`k = 3` `+8.3e-4` (1.28x)**; `k = 4` is the first pass. Laminar-duct marches
+  (Re_Dh 50, flow residual only, `solve_flow_march`, complete-LU, original tets) fail on the full scheme
+  and on `k` = 0, 1, 2, and converge on `k` = 3 and on the first pass: every failing configuration
+  is at least 18x the first pass's anti-damping eigenvalue and the only converging one short of it is
+  1.28x. The interventions that also failed leave `max|M2^-1| > 10` withheld 59x, the 176 corner cells
+  withheld 413x and exactly the flipped cells withheld 734x with 9 new flips (the mode migrates). The
+  anti-damping mode of the full operator is concentrated (top cell 72 %, top five 99.9 %) with a
+  Spearman correlation of -0.035 against `max|M2^-1|`. What this does NOT show: that the anti-damping
+  eigenvalue causes the march's failure (only that it orders the outcomes correctly in this ladder);
+  the flow residual's own diagonals (this operator has unit weights and Dirichlet-zero boundary values, so
+  its 117 corroborates the flow residual's ~103 negative pressure diagonals rather than matching them);
+  one mesh.
+
+  Under the per-field consistent-probe binding (#483) and the laminar duct's own pressure conditions
+  (`RC_BINDING=pressure`), the full scheme still flips **24** diagonals with largest eigenvalue `+2.17`,
+  against `+2.9e-4` for the first pass alone -- about fivefold less than the geometry-only binding's
+  `+11.9`, with the mode still on a two-boundary-face corner cell and withholding to ring 3 still the
+  only cure. The binding shrinks the defect; it does not move it.
+
+  **✅ `HessianCorrectedGradient` (Betchen–Straatman) MARCHES THIS MESH — laminar AND coupled RANS —
+  under an averaged Hessian boundary closure (2026-09-22).** Full tables and settings:
+  `validation/tetrahedral_gradient_ab/README.md` § "Betchen's coupled reconstruction on this mesh".
+  Laminar from rest: 13 steps to 5.6e-9 (the same as `CorrectedGreenGauss`); coupled RANS: 9 anchor +
+  16 target steps at `alpha = 1` throughout, where both multiple-correction arms go to `inf` at anchor
+  step 3. On the damping operator it flips **no** diagonal (largest eigenvalue `4.5e-4`, below
+  `CorrectedGreenGauss`'s `9.0e-4`) — and so does every truncation of it down to **one** coupled
+  sweep, so the damping is a property of one local block sweep, not of the global solve; sweeps buy
+  accuracy only (worst quadratic error 0.77 at 1 sweep, 0.32 at 2, 6.8e-4 at the default 20, 6.9e-10 at
+  100). Three things to carry: *(i)* **`OwnerHessian` diverges on this mesh** (1027 flipped
+  diagonals, eigenvalue 5.9e54, at 20 sweeps and at 100) — the paper's own warning (its eqs 28–29) that
+  the owner cell's Hessian can leave the boundary gradient underdetermined, and exactly our two-face
+  tetrahedra; *(ii)* `AveragedInteriorHessian` damps but is **not** exact for quadratics here (stalls at
+  7e-4 however far swept), `AveragedNeighbourHessian` is; *(iii)* the shipped `CorrectedGreenGauss` misses
+  a quadratic's gradient by **7x** at its worst cell on this mesh — the scheme that converges is the least
+  accurate one measured. So #435 is specific to the multiple-correction second pass, not to second-order
+  gradients meeting Rhie–Chow on tets. Not established: cost against a matched control, other meshes,
+  and a scheme that is local, exact for quadratics and damped at once — truncated Betchen has the first
+  and last, the multiple-correction scheme the first two.
