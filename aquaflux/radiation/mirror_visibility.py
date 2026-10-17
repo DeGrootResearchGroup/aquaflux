@@ -266,7 +266,9 @@ def build_mirror_visibility(
     source_height = mirror.heights(centroid[sources])
     rows = np.flatnonzero(receiver_height > 0.0)
     tested = source_height > 0.0
-    hides = True
+    # Decided from the strategy, not from whether a pass happened to test a pair: a mirror no
+    # receiver faces tests nothing, and its mask must still say whether the surface could hide.
+    hides = not isinstance(strategy, NoOcclusion)
     per_pass = receivers_per_pass(pair_limit, max(1, n_sources))
     for start in range(0, len(rows), per_pass):
         local, column = np.nonzero(

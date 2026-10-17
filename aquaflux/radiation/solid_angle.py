@@ -111,7 +111,8 @@ def solid_angle(point: jnp.ndarray, vertices: jnp.ndarray) -> jnp.ndarray:
     Returns
     -------
     jnp.ndarray
-        Solid angle in steradians, shape ``(...)``, in ``[0, 4π]``.
+        Solid angle in steradians, shape ``(...)``, in ``[0, 2π]``: one triangle never subtends
+        more than a hemisphere. (``4π`` is what a closed surface's sum reaches.)
     """
     return jnp.abs(signed_solid_angle(point, vertices))
 

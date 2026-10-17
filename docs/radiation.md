@@ -205,7 +205,9 @@ from a mesh's boundary patch ({func}`~aquaflux.mesh.patch_triangles`), or from a
   {class}`~aquaflux.radiation.PhotometricProfile` for the lamp window's facets. The vertical angle is
   measured from each facet's normal and the horizontal angle round it from a direction `up` you
   choose, so the window's facets must face along the fixture's beam; the table is bilinear between
-  its tabulated directions and completed round the circle by its declared symmetry. The profile
+  its tabulated directions and completed round the circle by the symmetry its horizontal range
+  declares (a range of half a turn — 0 to 180, 90 to 270 or −90 to 90 degrees — is mirrored about
+  the plane through its two ends). The profile
   varies around its axis as well as away from it, which is why a profile is asked about a direction
   and a facet normal rather than a single angle ({class}`~aquaflux.radiation.AxisymmetricProfile`
   is the family that depends on the angle alone). The direct gathers take it; the surface transfer,

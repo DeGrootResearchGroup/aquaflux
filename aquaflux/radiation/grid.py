@@ -10,7 +10,8 @@ a segment walks the voxels it crosses (Amanatides & Woo's 3D-DDA) and tests only
 voxels hold, stopping at the first triangle that blocks it. **Measured on that reactor**
 (``validation/sozzi_radiation/ray_acceleration_probe.py``), a 128-cubed grid holds 9.7
 triangles in the average occupied voxel and a segment enters 65 of them, so it tests **52
-triangles instead of 53,500** -- and, stopping early, reaches a blocker after about **5**.
+triangles instead of 53,500** -- and, stopping early, reaches its first occupied voxel after
+about **5** steps.
 
 ⚠️ **The walk is deliberately NOT a traced kernel, and that is the whole reason it works.** The
 mask is frozen: it is built once from geometry alone, so none of the constraints that shape the

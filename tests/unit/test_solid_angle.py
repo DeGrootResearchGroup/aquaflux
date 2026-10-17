@@ -313,8 +313,14 @@ def test_both_kernels_survive_jit_and_reverse_mode_differentiation():
     point = jnp.asarray([0.5, 0.5, 0.5])
     assert float(jax.jit(brightness)(point)) == pytest.approx(float(brightness(point)), rel=1e-15)
     gradient = jax.grad(brightness)(point)
-    assert jnp.all(jnp.isfinite(gradient))
     assert float(jnp.linalg.norm(gradient)) > 0.0
+    # Finite is the floor, not the test: a gradient severed along the way is a finite zero, and a
+    # wrong one is finite too. Each component against a central difference.
+    step = 1e-6
+    for axis in range(3):
+        offset = jnp.zeros(3).at[axis].set(step)
+        difference = (brightness(point + offset) - brightness(point - offset)) / (2 * step)
+        assert float(gradient[axis]) == pytest.approx(float(difference), rel=1e-6, abs=1e-9)
 
 
 def _padded(loop, width=7):

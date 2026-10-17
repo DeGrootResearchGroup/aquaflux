@@ -55,7 +55,7 @@ right. An angular profile is a distribution normalized to one over the sphere; t
 separately, and :func:`lamp_exitance` spreads a rating over the triangulated area so the model
 radiates exactly the rated power at any refinement.
 
-**What is differentiable.** Emission, point-source power, diffuse reflectance, profile parameters, the
+**What is differentiable.** Emission, point-source power, diffuse and specular reflectance, profile parameters, the
 transmittance of analytic bodies, and the absorption coefficient or graded absorption field —
 through the interreflection solve by its adjoint, not by replaying it. **Exactly zero, by
 construction:** the derivative with respect to where anything stands in the way. Shadows are

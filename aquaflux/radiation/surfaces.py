@@ -197,27 +197,6 @@ class Surfaces(eqx.Module):
         degenerate = twice_area == 0.0
         normal = twice_vector_area / jnp.where(degenerate, 1.0, twice_area)[:, None]
 
-        def in_range(indices, limit, name, what):
-            """Check an index array against a table size, when the values are available.
-
-            Skipped for a traced array rather than forced concrete: the same surface set gets
-            rebuilt inside a traced function whenever its vertices move, and a validation that
-            reads a value would turn a range check into a tracer leak. The indices do not
-            change when geometry does, so the check has already run on the way in.
-
-            ⚠️ The comparison is done in numpy and **not** with ``jnp``. Inside a trace, every
-            ``jnp`` operation is staged out whether or not its inputs are concrete, so
-            ``int(jnp.max(concrete_array))`` raises there while ``int(np.max(...))`` does not.
-            A build-time check written with ``jnp`` works perfectly until the first time the
-            object is rebuilt inside a traced function.
-            """
-            if isinstance(indices, jax.core.Tracer):
-                return
-            largest = int(np.max(np.asarray(indices), initial=-1))
-            if largest >= limit:
-                msg = f"{name} selects {what} {largest} but only {limit} were given"
-                raise ValueError(msg)
-
         def spread(value, name):
             spread_value = jnp.broadcast_to(jnp.asarray(value, dtype=float), (n_facets,))
             if spread_value.shape != (n_facets,):  # pragma: no cover - broadcast_to raises first
@@ -232,7 +211,7 @@ class Surfaces(eqx.Module):
             if solid_id.shape != (n_facets,):
                 msg = f"solid_id must have shape ({n_facets},); got {solid_id.shape}"
                 raise ValueError(msg)
-            in_range(solid_id, len(solid_names), "solid_id", "body")
+            _check_indices(solid_id, len(solid_names), "solid_id", "body")
 
         if profiles is None:
             profiles = (Lambertian(),)
@@ -249,7 +228,7 @@ class Surfaces(eqx.Module):
         if profile_index.shape != (n_facets,):
             msg = f"profile_index must have shape ({n_facets},); got {profile_index.shape}"
             raise ValueError(msg)
-        in_range(profile_index, len(profiles), "profile_index", "profile")
+        _check_indices(profile_index, len(profiles), "profile_index", "profile")
 
         if point_sources is None:
             if isinstance(twice_area, jax.core.Tracer):
@@ -581,12 +560,7 @@ class Surfaces(eqx.Module):
         if index.shape != (self.n_facets,):
             msg = f"profile_index must be ({self.n_facets},); got {index.shape}"
             raise ValueError(msg)
-        if len(catalogue) and (index.min() < 0 or index.max() >= len(catalogue)):
-            msg = (
-                f"profile_index runs from {index.min()} to {index.max()}, outside the "
-                f"{len(catalogue)} profiles given"
-            )
-            raise ValueError(msg)
+        _check_indices(index, len(catalogue), "profile_index", "profile")
         # Replacing the catalogue changes the pytree's structure when its length changes, which
         # is past what tree_at substitutes, so the whole record is rebuilt instead. Every other
         # field is carried across by reference, so the geometry is shared rather than recomputed.
@@ -615,13 +589,56 @@ def _checked_sheets(two_sided, solid_names) -> tuple[str, ...]:
     return two_sided
 
 
+def _check_indices(indices, limit, name, what) -> None:
+    """Refuse an index array that selects outside a table of ``limit`` entries.
+
+    Both ends are checked: a negative index would otherwise select from the end of the table
+    when it is gathered, so a ``-1`` would silently name the last body or profile.
+
+    Skipped for a traced array rather than forced concrete: the same surface set gets rebuilt
+    inside a traced function whenever its vertices move, and a validation that reads a value
+    would turn a range check into a tracer leak. The indices do not change when geometry does,
+    so the check has already run on the way in.
+
+    ⚠️ The comparison is done in numpy and **not** with ``jnp``. Inside a trace, every ``jnp``
+    operation is staged out whether or not its inputs are concrete, so
+    ``int(jnp.max(concrete_array))`` raises there while ``int(np.max(...))`` does not. A
+    build-time check written with ``jnp`` works perfectly until the first time the object is
+    rebuilt inside a traced function.
+
+    Parameters
+    ----------
+    indices : array_like of int, shape (n,)
+        The indices to check.
+    limit : int
+        The number of entries in the table they index.
+    name, what : str
+        The argument's name and what one entry of the table is, for the message.
+
+    Raises
+    ------
+    ValueError
+        If any index is negative or not below ``limit``.
+    """
+    if isinstance(indices, jax.core.Tracer):
+        return
+    values = np.asarray(indices)
+    if values.size == 0:
+        return
+    smallest, largest = int(values.min()), int(values.max())
+    if smallest < 0 or largest >= limit:
+        bad = smallest if smallest < 0 else largest
+        msg = f"{name} selects {what} {bad} but only {limit} were given (0 to {limit - 1})"
+        raise ValueError(msg)
+
+
 def _check_reflectances(diffuse, specular) -> None:
     """Refuse reflectances outside ``[0, 1]``, or a facet that reflects more than arrives.
 
     A facet reflecting more than one in total creates light, and the interreflection solve then
     has no bounded solution: its operator's spectral radius is bounded by the largest total
-    reflectance. Checked only on concrete values, in numpy, for the reason ``in_range`` in
-    :meth:`Surfaces.from_triangles` gives; a traced value has already been checked on its way in
+    reflectance. Checked only on concrete values, in numpy, for the reason ``_check_indices``
+    gives; a traced value has already been checked on its way in
     or is a derivative's perturbation of one that was.
 
     Parameters

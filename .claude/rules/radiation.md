@@ -91,9 +91,9 @@ refinement** — non-convergence, not size, is what identifies a wrong kernel.
    accumulation would grow.
 2. **The contour form is signed and the polygon must be clipped to the receiver's front
    half-space first.** A triangle straddling the plane returns a partially cancelled value and
-   one behind it a negative one. The clip emits a fixed six-vertex loop in which a rejected
-   candidate repeats its predecessor, so the shape is static and the repeats are zero-length
-   edges contributing no angle.
+   one behind it a negative one. The clip (`clipping.clip_to_halfspace(..., 4)`) emits a fixed
+   four-slot loop in which an empty slot repeats the last survivor, so the shape is static and
+   the repeats are zero-length edges contributing no angle.
 3. **Take the magnitude.** The sign of either contour sum records only the order vertices
    happen to be stored in, which for an imported surface file is arbitrary. Orientation is the
    normal's job. The test fixture winds its faces inconsistently on purpose.
@@ -193,6 +193,13 @@ is zero on such a facet, and `from_triangles` guards the division rather than th
 **Power is also extensive, which is why `refine_for_receivers` refuses to carry it.** Emission
 and reflectance are intensive and are inherited unchanged by a facet's children; power would
 have to be divided among them. Refine the areal facets, then add the point sources.
+The point-source **labels** are carried through `division.origin` (#632) — re-inferring them from
+the refined areas relabelled a labelled facet with an area as areal — and a labelled facet wide
+enough to be split is refused. **Both ends of an index are checked** (`surfaces._check_indices`,
+used by `from_triangles` and `with_optics` alike): a `-1` in `solid_id` or `profile_index`
+selected the last body or profile. An ASCII STL triangle before the first `solid` line is refused
+for the same reason (it got `solid_id = -1`). A specular body with no areal facet is refused by
+name, and a specular exchange whose every path is hidden is an empty `(0, n, n)` stack.
 
 ## ⚠️ DETECT THE STL FORMAT BY FILE LENGTH, NOT BY THE LEADING KEYWORD
 
@@ -294,6 +301,17 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   once, at `Photometry.profile`, so the traced code has no symmetry branch. Pinned against an
   independent numpy reading, and cross-checked against the ray-effects reference's own parser to
   **1.4e-15 of the peak** over 20,000 random directions.
+- ⚠️ **The symmetry is read off the horizontal SPAN, not the last angle (#621, 2026-10-16, chosen by
+  the user over refusing such files).** By the last angle, a 90-270 table (LM-63's mirror symmetry
+  about the 90-270 plane) read as a full table closed straight across the missing half, and a
+  -90-90 one as quadrant-symmetric. Now a half-turn span is `bilateral` about the plane through its
+  two ends (`_fold(angle, kind, start)`, images `2 start + 360 - h`), a quarter-turn span must start
+  at 0 (refused otherwise), and `PhotometricProfile.angles` measures `h` from the table's first
+  angle. Every earlier fixture started at 0, which is why dropping that start passed the suite.
+  Pinned by `test_a_half_turn_table_is_mirrored_about_the_plane_through_its_ends` (each layout
+  against the same lobe stored as a full table on the same knots; red for the last-angle rule,
+  the old images, the old fold, and `h` taken from 0) and `test_a_table_it_cannot_read_as_a_distribution_is_refused`
+  (every `Photometry` refusal). OOR's reader is only known to agree for tables starting at 0.
 - **Normalization is closed form and over the FRONT HEMISPHERE** — `front_hemisphere_flux`, the exact
   integral of the bilinear table times `sin gamma` over `[0, 90]` degrees, clamped. That is what a flat
   emitter can radiate, and what OOR's BC normalizes over (its outgoing rays), so both emit exactly `P`.
@@ -301,8 +319,13 @@ it, and the `Profile` methods changed from `(cos_theta)` to `(direction, normal)
   file integrates to **118.826 mW** (a trapezoid estimate gave 118.6 and was quadrature error).
 - **The radiance is floored at `MIN_COSINE = 1e-3`** (OOR's `IES_MIN_COS`), since a table with light
   at `gamma = 90` would otherwise need unbounded radiance along the facet's plane.
-- ⚠️ **The measured table disagrees with itself at the pole**: `I(0, h)` is 121.38 to 121.77 mW/sr
-  across `h`. A point on the axis reads `h = 0` (as OOR's `hDegFromDir_` does), and within a fraction of
+- ⚠️ **The measured table disagrees with itself at the pole**: `I(0, h)` is **120.24 to 122.92 mW/sr**
+  across its 17 rows, 2.2 % of their mean (read from `ushio_b1.ies` 2026-10-17; the 121.38-121.77
+  once recorded here was wrong, and a warning threshold set from it would have fired on this file).
+  Read as stored, not averaged (#632, decided with the user): `Photometry` warns only when the
+  axial rows spread past `_POLE_SPREAD = 5 %` of their mean, above this file's noise and below an
+  internally inconsistent file's (the issue's synthetic one, 16 %). A point on the axis reads
+  `h = 0` (as OOR's `hDegFromDir_` does), and within a fraction of
   a degree of the axis two neighbouring facets read different rows — a 0.18 % effect that a test at
   `gamma = 0.1 deg` once read as a code error. It is the data.
 - **The transfer refuses it** (`NotImplementedError`): it freezes one `source_cosine` per pair, and an
@@ -348,7 +371,7 @@ facet with a sparse store.
   (default 0), both live leaves, on `from_triangles`, `with_optics`, `with_geometry`, `coarsen_surfaces`
   and `refine_for_receivers`. ⚠️ **There is no `reflectance=` keyword any more**; an old call fails with
   a `TypeError`. `_check_reflectances` refuses each outside `[0, 1]` and a facet whose two sum past one
-  (concrete values only, numpy, skipped for tracers — the same rule as `in_range`), from both
+  (concrete values only, numpy, skipped for tracers — the same rule as `surfaces._check_indices`), from both
   `from_triangles` and `with_optics` (which checks the pair as it stands after the replacement).
 - **PR 1's model refused all specular reflectance; since PR 3a it is `transfer._specular_by_solid`
   (there is no `model._without_specular` any more)**, which keeps the two refusals that still apply:
@@ -1434,7 +1457,10 @@ REFINEMENT; the first two converge in the receiver QUADRATURE, which is the knob
   growing, because the facets nearest the lamp close in on it while staying the same size
   relative to their separation. At six points the same scene gives 1.000000 / 1.000212 /
   1.000171 / 1.000120 / 1.000102, improving. Per column, `sum_i A_i F_ij = A_j` is violated by
-  **8.8% / 1.5% / 0.38% / 0.18%** at 1 / 3 / 6 / 12 points.
+  **8.8% / 1.5% / 0.38% / 0.18%** at 1 / 3 / 6 / 12 points — **on cubes**. On `inward_box`
+  stretched to 1 x 1 x 3 the same figure is **35-38% / 14-15% / 4.6-4.8% / 0.99%** (48 and 192
+  facets, `NoOcclusion`; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, 2026-10-16, #631), about
+  ten times larger, and `build_transfer`'s docstring states both.
   ⚠️ **The earlier record here — "1.000112 / 1.000083 / 1.000062 … conservative to one part in ten
   thousand" at the centroid rule — is DELETED, not corrected: it does not reproduce and its
   fixture was not written down.** The measurement above is the lamp-in-a-dark-box fixture, whose

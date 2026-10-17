@@ -807,17 +807,22 @@ def build_transfer(
       what bounds the conditioning and what catches a wrong kernel.
     - **Reciprocity converges in the point count, not in the mesh.** Refining a closed box
       brings each facet's neighbours proportionally closer, so the ratio the error depends on
-      does not change and the residual sits flat under refinement. Measured on boxes of 12 to
-      432 facets, identically at each:
+      does not change and the residual sits flat under refinement. Measured on cubes of 12 to
+      432 facets, identically at each, and on a box stretched to 1 x 1 x 3 (48 and 192
+      facets). **An elongated enclosure is about ten times worse**, which is the shape of a
+      lamp in a long reactor:
 
-      ======  ======  ====================  ==========================================
-      points  degree  reciprocity residual  worst column, ``sum_i A_i F_ij / A_j - 1``
-      ======  ======  ====================  ==========================================
-      1       1       0.2421                8.8%
-      3       2       0.0281                1.5%
-      6       4       0.0078                0.38%
-      12      6       0.0045                0.18%
-      ======  ======  ====================  ==========================================
+      ======  ======  ====================  ==============  ==================
+      points  degree  reciprocity residual  worst column,   worst column,
+                      (cube)                cube            1 x 1 x 3 box
+      ======  ======  ====================  ==============  ==================
+      1       1       0.2421                7.4-8.8%        35-38%
+      3       2       0.0281                1.4-1.5%        14-15%
+      6       4       0.0078                0.38%           4.6-4.8%
+      12      6       0.0045                0.18%           0.99%
+      ======  ======  ====================  ==============  ==================
+
+      (A column is ``sum_i A_i F_ij / A_j - 1``.)
 
     ⚠️ **A finer rule costs far less than its point count**, which is why six is the default
     rather than one. The build is limited by moving geometry through memory, not by evaluating
@@ -969,6 +974,13 @@ def _specular_exchange(surfaces, specular, sample, weight, masks, limit):
     mirrors, point_masks = [], []
     for solid, name in enumerate(specular):
         planes = planar_mirrors(surfaces, [name])
+        if not planes:
+            msg = (
+                f"specular body {name!r} has no planes: only areal facets can be mirrors, and "
+                "it has none (a body of point sources, or of facets with no area). Leave it out "
+                "of the specular bodies."
+            )
+            raise ValueError(msg)
         if len(planes) > limit:
             msg = (
                 f"specular body {name!r} lies in {len(planes)} planes, past the limit of {limit}: "
@@ -1004,10 +1016,16 @@ def _specular_exchange(surfaces, specular, sample, weight, masks, limit):
         geometric.append(total)
         separation.append(jnp.where(carried, length / safe, 0.0))
         cosine.append(jnp.where(carried, angle / safe, 0.0))
+
+    def stacked(arrays):
+        # Every reflected path can be hidden, which leaves no term at all; an empty stack keeps
+        # the arrays' documented shape, ``(n_terms, n, n)``, with no term for assemble to add.
+        return jnp.stack(arrays) if arrays else jnp.zeros((0, n, n))
+
     return {
-        "specular_geometric": jnp.stack(geometric),
-        "specular_separation": jnp.stack(separation),
-        "specular_source_cosine": jnp.stack(cosine),
+        "specular_geometric": stacked(geometric),
+        "specular_separation": stacked(separation),
+        "specular_source_cosine": stacked(cosine),
         "mirrors": tuple(mirrors),
         "specular_solids": specular,
         "specular_terms": tuple(keys),
