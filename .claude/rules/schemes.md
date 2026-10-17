@@ -121,10 +121,12 @@ residual folds it in as the non-orthogonal correction (Gate C:
   through `solve.solve_linear` right-preconditioned;
   ~180× the swept cost per coupled-residual eval on pitzDaily because its tangent solve re-enters on
   every jvp). Exactness unit tests pin `GmresGradientSolve()` explicitly.
-- **`preconditioner`**: `InverseCellVolume` (default, builds `InverseVolume` or
-  `CellBlockJacobi((I−B)⁻¹/V)` when a boundary block is present) or `ExactCellBlock` (per-cell
+- **`preconditioner`** (renamed 2026-10-17; there is no `CellPreconditioner`, `InverseCellVolume` or
+  `ExactCellBlock`: the setting is a `DiagonalBlock`, the applied object a `GradientPreconditioner`):
+  `VolumeDiagonalBlock` (default, builds `InverseVolume` or
+  `CellBlockJacobi((I−B)⁻¹/V)` when a boundary block is present) or `ProbedDiagonalBlock` (per-cell
   probed block). `1/V` diverges on a flattened sliver (error unbounded with aspect ratio);
-  `ExactCellBlock` stays flat at ~3× the cost — the opt-in for slivers, documented in
+  `ProbedDiagonalBlock` stays flat at ~3× the cost — the opt-in for slivers, documented in
   `docs/gradient_reconstruction.md`. Flooring `1/V` is not a substitute.
 - **Each sweep extends the residual's stencil one ring, only on a skewed mesh.** The sweep coupling
   is weighted by the skewness offset `x_f − (x_P + g d)`; skew-free, `A_g` is diagonal and sweeps
@@ -263,7 +265,7 @@ per refinement). The value is affine in the owner gradient, so it moves to the l
   `(I − B_P) g = raw/V`) and `CorrectedGreenGauss` (adds `−V B` to `A_g` via
   `_CorrectedTerms.boundary_block`; `None` keeps the terms geometry-only, which is what `calibrated`
   measures). Both cell preconditioners include it. Orthogonal meshes are bit-identical.
-  `InverseCellVolume` inverts `I − B` then divides by `V`, in that order (bit-identity). The owner-only
+  `VolumeDiagonalBlock` inverts `I − B` then divides by `V`, in that order (bit-identity). The owner-only
   scatter is `FaceCellConnectivity.scatter_to_owner`; `small_inverse` is not in `__all__`.
 - The asymptotic sweep rate does not move (`B_P² = 0` for single-face cells), so geometry-only
   calibration stays valid; a fixed count sees the transient at corner cells, which is why the default

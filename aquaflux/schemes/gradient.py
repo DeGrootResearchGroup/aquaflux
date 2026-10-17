@@ -836,14 +836,14 @@ class GradientSolve(eqx.Module):
         """
 
 
-class CellPreconditioner(eqx.Module):
-    """Strategy: which approximate inverse of ``A_g`` drives the corrected-gradient sweep.
+class DiagonalBlock(eqx.Module):
+    """Strategy: which diagonal block of ``A_g`` the corrected-gradient sweep inverts.
 
-    The sweep converges at a rate set by ``rho(I - P^-1 A_g)``, so this choice decides how many
-    sweeps a given accuracy costs -- and, on a mesh with a degenerate cell, whether the iteration
+    The choice the caller configures; :meth:`build` returns the :class:`GradientPreconditioner` that is
+    applied. The sweep converges at a rate set by ``rho(I - P^-1 A_g)``, so this choice decides how
+    many sweeps a given accuracy costs -- and, on a mesh with a degenerate cell, whether the iteration
     converges at all. A strategy rather than a flag because the options differ in what they compute,
-    not merely in a constant: one reads a per-cell scalar already to hand, the other probes the
-    operator.
+    not merely in a constant: one reads a per-cell scalar already to hand, the other probes the operator.
     """
 
     @abc.abstractmethod
@@ -858,8 +858,8 @@ class CellPreconditioner(eqx.Module):
         """
 
 
-class InverseCellVolume(CellPreconditioner):
-    """``1/V`` per cell -- the default, and the right choice on a mesh of reasonable quality.
+class VolumeDiagonalBlock(DiagonalBlock):
+    """The cell volume as the diagonal block (``1/V`` per cell) -- the default, for a sound mesh.
 
     ``A_g``'s per-cell block is the cell volume less the skewness coupling, so on a well-shaped cell
     this is within the skewness of the true block and the sweep it drives converges quickly. It costs
@@ -876,7 +876,7 @@ class InverseCellVolume(CellPreconditioner):
     ⚠️ **It degrades exactly as the cell does.** The neglected coupling scales with face area while
     the volume does not, so as a cell flattens ``1/V`` stops approximating anything. Measured on a
     single squashed cell, the reconstruction error there grows without bound with the volume ratio:
-    3.6e+04 at a ratio of 2.5e3, 2.9e+12 at 3.6e4, 2.9e+28 at 3.6e8. Prefer :class:`ExactCellBlock`
+    3.6e+04 at a ratio of 2.5e3, 2.9e+12 at 3.6e4, 2.9e+28 at 3.6e8. Prefer :class:`ProbedDiagonalBlock`
     on a mesh carrying such cells, or on any case that diverges.
     """
 
@@ -890,7 +890,7 @@ class InverseCellVolume(CellPreconditioner):
         return CellBlockJacobi(inverse / terms.volume[:, None, None])
 
 
-class ExactCellBlock(CellPreconditioner):
+class ProbedDiagonalBlock(DiagonalBlock):
     """The operator's **true** per-cell block, recovered by probing and inverted per cell.
 
     Costs ``dim`` extra operator applies to extract, plus a small dense inverse per cell, and its
@@ -1953,14 +1953,14 @@ class CorrectedGreenGauss(GradientScheme):
         The strategy applying ``A_g⁻¹`` to solve ``A_g·G = B·φ`` (default
         :class:`SweptGradientSolve`, the scalable unrolled sweep; use :class:`GmresGradientSolve` for
         a mesh skewed enough to need an exact Krylov solve).
-    preconditioner : CellPreconditioner
-        How each cell's rows are scaled in the solve. :class:`InverseCellVolume` (the default) divides
-        them by the cell's volume, which suits a mesh of reasonable quality; :class:`ExactCellBlock`
+    preconditioner : DiagonalBlock
+        How each cell's rows are scaled in the solve. :class:`VolumeDiagonalBlock` (the default) divides
+        them by the cell's volume, which suits a mesh of reasonable quality; :class:`ProbedDiagonalBlock`
         inverts each cell's own block, for a mesh with badly flattened cells.
     """
 
     solver: GradientSolve = eqx.field(default_factory=SweptGradientSolve)
-    preconditioner: CellPreconditioner = eqx.field(default_factory=InverseCellVolume)
+    preconditioner: DiagonalBlock = eqx.field(default_factory=VolumeDiagonalBlock)
 
     @staticmethod
     def terms(
@@ -2033,7 +2033,7 @@ class CorrectedGreenGauss(GradientScheme):
 
     @classmethod
     def system(
-        cls, t: _CorrectedTerms, preconditioner: CellPreconditioner | None = None
+        cls, t: _CorrectedTerms, preconditioner: DiagonalBlock | None = None
     ) -> GradientSystem:
         """The gradient system ``A_g·G = B·φ`` as a solve strategy sees it — operator and preconditioner.
 
@@ -2054,7 +2054,7 @@ class CorrectedGreenGauss(GradientScheme):
             Operator, preconditioner, and the ``(n_cells, dim)`` shape of the gradient.
         """
         n_cells, dim = t.volume.shape[0], t.area_vector.shape[-1]
-        chosen = InverseCellVolume() if preconditioner is None else preconditioner
+        chosen = VolumeDiagonalBlock() if preconditioner is None else preconditioner
         return GradientSystem(chosen.build(t), cls.operator(t), (n_cells, dim))
 
     @classmethod
@@ -2068,7 +2068,7 @@ class CorrectedGreenGauss(GradientScheme):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
-        preconditioner: CellPreconditioner | None = None,
+        preconditioner: DiagonalBlock | None = None,
     ) -> CorrectedGreenGauss:
         """Build this scheme with the sweep count **measured from the mesh** rather than assumed.
 
@@ -2118,7 +2118,7 @@ class CorrectedGreenGauss(GradientScheme):
         >>> scheme.solver.sweeps  # orthogonal: the correction vanishes, one sweep is exact
         1
         """
-        chosen = InverseCellVolume() if preconditioner is None else preconditioner
+        chosen = VolumeDiagonalBlock() if preconditioner is None else preconditioner
         return cls(
             solver=_calibrated_solver(
                 cls.system(cls.terms(mesh, geometry), chosen),

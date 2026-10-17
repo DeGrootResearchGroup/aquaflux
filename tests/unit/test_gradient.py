@@ -33,16 +33,16 @@ from aquaflux.schemes import (
     ContractionRate,
     CorrectedGreenGauss,
     CoupledBlockSweep,
-    ExactCellBlock,
     GmresGradientSolve,
     GradientSystem,
     HessianCorrectedGradient,
-    InverseCellVolume,
     InverseVolume,
     OwnerHessian,
     PackedSystemSolve,
+    ProbedDiagonalBlock,
     SweepCalibration,
     SweptGradientSolve,
+    VolumeDiagonalBlock,
     cell_diagonal_block,
     contraction_rate,
     fastest_boundary_closure,
@@ -1397,10 +1397,10 @@ def _corrected_error(mesh, preconditioner):
 
 def test_inverse_cell_volume_is_the_default() -> None:
     """The cheap preconditioner stays the default -- this option is opt-in, not a migration."""
-    assert isinstance(CorrectedGreenGauss().preconditioner, InverseCellVolume)
+    assert isinstance(CorrectedGreenGauss().preconditioner, VolumeDiagonalBlock)
 
 
-def test_exact_cell_block_bounds_the_error_on_a_sliver_that_1_over_V_does_not() -> None:
+def test_probed_diagonal_block_bounds_the_error_on_a_sliver_that_1_over_V_does_not() -> None:
     """``1/V`` diverges with the volume ratio on a degenerate cell; the true block does not.
 
     This is the reason the option exists. ``A_g``'s per-cell block is the volume less a coupling that
@@ -1412,8 +1412,8 @@ def test_exact_cell_block_bounds_the_error_on_a_sliver_that_1_over_V_does_not() 
     """
     for squash, floor in ((1e-6, 1e6), (1e-8, 1e12)):
         mesh = _sliver_mesh(squash)
-        volume_error, volume = _corrected_error(mesh, InverseCellVolume())
-        block_error, _ = _corrected_error(mesh, ExactCellBlock())
+        volume_error, volume = _corrected_error(mesh, VolumeDiagonalBlock())
+        block_error, _ = _corrected_error(mesh, ProbedDiagonalBlock())
         sliver = volume < 10 * volume.min()
         assert float(volume_error[sliver].max()) > floor  # the default really does diverge here
         assert (
@@ -1421,15 +1421,15 @@ def test_exact_cell_block_bounds_the_error_on_a_sliver_that_1_over_V_does_not() 
         )  # and the block holds it at the scheme's own error
 
 
-def test_exact_cell_block_does_not_change_a_healthy_mesh() -> None:
+def test_probed_diagonal_block_does_not_change_a_healthy_mesh() -> None:
     """On a mesh of reasonable quality the two agree, so this buys robustness and not accuracy.
 
     Pinned because it is what makes the option safe to reach for: a user switching to it on a case
     that diverges must not find their good cells answered differently.
     """
     for mesh in (structured_grid_3d(8, 8, 8), perturbed_grid_3d(8, 8, 8, perturb=0.3, seed=1)):
-        volume_error, _ = _corrected_error(mesh, InverseCellVolume())
-        block_error, _ = _corrected_error(mesh, ExactCellBlock())
+        volume_error, _ = _corrected_error(mesh, VolumeDiagonalBlock())
+        block_error, _ = _corrected_error(mesh, ProbedDiagonalBlock())
         # Compared in AGGREGATE, not cell by cell. At a finite sweep count the two preconditioners
         # produce slightly different iterates while converging to the same solution, so a
         # per-cell equality would pin the iteration path rather than the accuracy, and would fail on
@@ -1445,8 +1445,10 @@ def test_calibration_carries_the_preconditioner_it_measured() -> None:
     that never runs, which is the failure the bundled ``GradientSystem`` exists to prevent.
     """
     mesh = structured_grid_3d(4, 4, 4)
-    scheme = CorrectedGreenGauss.calibrated(mesh, mesh.geometry(), preconditioner=ExactCellBlock())
-    assert isinstance(scheme.preconditioner, ExactCellBlock)
+    scheme = CorrectedGreenGauss.calibrated(
+        mesh, mesh.geometry(), preconditioner=ProbedDiagonalBlock()
+    )
+    assert isinstance(scheme.preconditioner, ProbedDiagonalBlock)
 
 
 def _hessian_error(mesh, *, local_schur_block: bool):

@@ -325,23 +325,23 @@ default can fail outright.
 between speed on a good mesh and robustness on a bad one:
 
 ```python
-from aquaflux.schemes import CorrectedGreenGauss, ExactCellBlock
+from aquaflux.schemes import CorrectedGreenGauss, ProbedDiagonalBlock
 
 scheme = CorrectedGreenGauss()                                 # 1/V -- the default
-scheme = CorrectedGreenGauss(preconditioner=ExactCellBlock())  # the true per-cell block
+scheme = CorrectedGreenGauss(preconditioner=ProbedDiagonalBlock())  # the true per-cell block
 ```
 
-{class}`~aquaflux.schemes.InverseCellVolume` (the default) costs a reciprocal per cell and is
+{class}`~aquaflux.schemes.VolumeDiagonalBlock` (the default) costs a reciprocal per cell and is
 the right choice on a mesh of reasonable quality. Its accuracy rests on the volume being most
 of the operator's diagonal block — and that assumption fails as a cell flattens, because the
 neglected coupling scales with face **area** while the volume does not. On a mesh with a
 near-degenerate cell, `1/V` stops approximating the block at all and the iteration diverges.
 
-{class}`~aquaflux.schemes.ExactCellBlock` recovers the operator's true per-cell block by
+{class}`~aquaflux.schemes.ProbedDiagonalBlock` recovers the operator's true per-cell block by
 probing it, and inverts that. It is insensitive to cell shape. Measured on a grid with one
 cell progressively squashed flat, reconstructing a field whose gradient is known exactly:
 
-| cell volume ratio | `InverseCellVolume` | `ExactCellBlock` |
+| cell volume ratio | `VolumeDiagonalBlock` | `ProbedDiagonalBlock` |
 | --- | --- | --- |
 | 1.9 × 10² | 3.4 × 10⁻² | 3.5 × 10⁻² |
 | 1.9 × 10⁴ | 2.6 × 10² | 1.7 × 10⁻² |
@@ -359,7 +359,7 @@ the sweep count rises.
 
 **When to reach for it.** If your mesh comes from an automatic mesher and has slivers, or if a
 case diverges or produces implausible gradients in a small number of cells, switch to
-`ExactCellBlock`. If your mesh is of good quality, the default is faster and just as accurate.
+`ProbedDiagonalBlock`. If your mesh is of good quality, the default is faster and just as accurate.
 {func}`~aquaflux.mesh.quality.closed_cell_residual` and
 {func}`~aquaflux.mesh.quality.face_planarity` will tell you which kind of mesh you have — and
 note that a mesh whose cells do not *close* is invalid outright, which no preconditioner can
