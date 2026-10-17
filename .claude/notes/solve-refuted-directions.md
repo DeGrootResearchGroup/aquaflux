@@ -1114,6 +1114,8 @@ recorded cycle count. Restart cycles summed:
 | probed two steps back (stale-2) | -- | 148 |
 | stale-2 + two Schubert updates | -- | 142 |
 
+Over the probe's whole range (stale-2 arms on steps 15-21), two updates cost MORE than none: 184 against 175 cycles (2910 against 2744 applications); the column-weighted variant 171, the re-sweep 189. Chains of 3 and 4 updates tie stale (192 / 194, 182 / 182).
+
 **Why it fails:** the relative Frobenius distance of the updated Jacobian from the fresh one, read per
 (row field, column field) block, equals the stale one's to three figures in every block (one step:
 0.003-0.45; worst blocks the k and omega rows' couplings). The Jacobian moves 25-50 % per block between
