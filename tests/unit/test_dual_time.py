@@ -222,6 +222,107 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
     assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
 
 
+def _counted_dual_time_step(line_search: int):
+    """A dual-time step on the cube-root residual, counting each EXECUTION of the residual.
+
+    The count is taken by a ``jax.debug.callback`` inside the residual, so it records evaluations the
+    step actually runs, not traces. The Krylov solve's Jacobian is formed from an uncounted copy of the
+    same residual (``jacobian_residual``), so its matrix-vector products do not enter the count: what
+    is counted is exactly the residual evaluations the step forms itself.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    calls: list[int] = []
+
+    def uncounted(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    def counted(p: jnp.ndarray) -> jnp.ndarray:
+        jax.debug.callback(lambda: calls.append(1), ordered=True)
+        return uncounted(p)
+
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=1.0),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=4,
+        inner_tol=1e-12,
+        line_search=line_search,
+        jacobian_residual=uncounted,
+    )
+    phi0 = jnp.array([1.5, 2.5, 3.5])
+    return step, counted, uncounted, phi0, calls
+
+
+@pytest.mark.parametrize("line_search", [10, 0], ids=["ladder", "full-step"])
+def test_the_dual_time_step_evaluates_the_residual_once_per_inner_iteration(line_search) -> None:
+    """One residual evaluation per inner iteration, plus one at the anchor -- and none at the end.
+
+    Each inner iteration needs ``G`` at its iterate twice over: as the right-hand side of its Newton
+    correction, and at the end to judge the step it took. The second is the first of the next
+    iteration (same point, same function), and the step's steady residual at the iterate it returns
+    is that last ``G`` less the transient term, so neither needs an evaluation of its own. Every inner
+    step here takes the full length (asserted), so its line search walks one rung, and this counts
+    ``1 + n``: a step re-evaluating ``G`` for each right-hand side counts ``1 + 2 n``, one
+    re-evaluating ``R`` at the end ``2 + n``, and one doing both ``2 + 2 n``.
+    """
+    step, counted, uncounted, phi0, calls = _counted_dual_time_step(line_search)
+    outcome = step.stepper()(counted, phi0, jnp.linalg.norm(uncounted(phi0)), step.linear_solver())
+    outcome.phi.block_until_ready()
+    jax.effects_barrier()
+
+    inner = int(outcome.inner_iterations)
+    assert inner == 4  # the loop ran to its cap, so the count below spans several iterations
+    assert float(outcome.alpha) == 1.0  # every rung count is one, which the arithmetic relies on
+    assert len(calls) == 1 + inner
+
+
+def test_the_dual_time_step_reports_the_steady_residual_at_the_iterate_it_returns() -> None:
+    """The reported measure is ``R(phi_next)``, formed from the carried ``G`` rather than evaluated.
+
+    ``R = G - beta d (phi - phi^n)`` holds exactly in arithmetic; in floating point it differs from a
+    fresh evaluation by a rounding of the summed terms, so the bound is a few ulps of
+    ``|R| + |beta d (phi - phi^n)|``. A step that reported ``G`` instead -- the subtraction forgotten --
+    misses by the transient term itself, here of order one, which is ~1e15 times the bound.
+    """
+    step, counted, uncounted, phi0, _calls = _counted_dual_time_step(10)
+    outcome = step.stepper()(counted, phi0, jnp.linalg.norm(uncounted(phi0)), step.linear_solver())
+    fresh = uncounted(outcome.phi)
+    # beta = beta0 (|R| / |R0|) = 1 at the anchor, and the policy's diagonal is one.
+    transient = outcome.phi - phi0
+    bound = 8 * jnp.finfo(fresh.dtype).eps * (jnp.linalg.norm(fresh) + jnp.linalg.norm(transient))
+    assert float(jnp.linalg.norm(transient)) > 0.1  # the step moved, so the two measures differ
+    assert abs(float(outcome.residual_norm) - float(jnp.linalg.norm(fresh))) <= float(bound)
+
+
+def test_a_step_whose_every_inner_search_takes_no_step_reports_the_anchor_s_own_residual() -> None:
+    """With ``alpha = 0`` the carried ``G`` must be the one at the unmoved iterate.
+
+    The line search never evaluates the residual at its start point, so when it takes no step the
+    vector it hands back is the one it was given. Here every rung is finite and every one is an
+    excursion past the fallback ceiling (``R = exp(30 phi) - 1`` from ``phi = -1`` with a weak shift,
+    so the Newton step lands at ``phi ~ 19``), so each inner iteration stalls and the step returns the
+    anchor -- whose steady residual is ``R(phi^n)``. A search that handed back the last rung's vector, or
+    its unfilled seed, would report a residual near ``1e247`` or a NaN.
+    """
+
+    def residual_fn(p: jnp.ndarray) -> jnp.ndarray:
+        return jnp.exp(30.0 * p) - 1.0
+
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=0.05),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=3,
+        line_search=2,
+    )
+    phi0 = jnp.array([-1.0])
+    outcome = step.stepper()(
+        residual_fn, phi0, jnp.linalg.norm(residual_fn(phi0)), step.linear_solver()
+    )
+
+    assert float(outcome.alpha) == 0.0
+    assert jnp.array_equal(outcome.phi, phi0)
+    assert float(outcome.residual_norm) == float(jnp.linalg.norm(residual_fn(phi0)))
+
+
 def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step() -> None:
     """The opt-in inner_observer fires once per inner iteration with its G-norm before/after, cycle
     count and line-search factor -- and setting it leaves the computed step byte-identical."""
