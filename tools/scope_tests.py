@@ -114,8 +114,8 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
     ),
     "tests/unit/test_check_hooks.py": (("tools/check_hooks.sh", ".githooks/*"), "runs the checker"),
     "tests/unit/test_check_rules.py": (
-        ("tools/check_rules.sh", ".claude/rules/*"),
-        "runs the checker",
+        ("tools/check_rules.sh", "tools/rules_budget.py", ".claude/rules/*", "CLAUDE.md"),
+        "runs the checker and the size budget over this repository's guidance files",
     ),
     "tests/unit/test_check_env_prefixes.py": (
         ("tools/check_env_prefixes.py", "validation/*.py", "validation/run_case.sh"),

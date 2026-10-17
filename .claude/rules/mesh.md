@@ -5,480 +5,173 @@ paths:
 
 # Rules — `aquaflux/mesh/`
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
-> *your* understanding — that is its job, and why it loads into your
-> context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
-> reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
-> reference code, the `.claude/` rules, the design notes, or the author's own papers.
->
-> **Also binding here (root `CLAUDE.md` Self-Contained-Docstring Convention).** Mesh code
-> leans hard on ragged **compressed-sparse-row (CSR)** storage — spell that acronym out at
-> first use in each file, then use "CSR". And never let our working-conversation scaffolding
-> reach a docstring: no build-stage labels ("Milestone 0", "Gate B") and no unpinned
-> performance numbers ("million-cell meshes", "builds in seconds") — describe the mechanism
-> instead (e.g. "avoids the per-face Python loop").
+> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors; none of that may
+> reach the shipped surface (`.py`, `docs/`) — root `CLAUDE.md` Comment Convention. Also binding here:
+> spell out **compressed-sparse-row (CSR)** at first use per file, and no build-stage labels or unpinned
+> performance numbers in docstrings (describe the mechanism instead).
 
-Static mesh: connectivity, node coordinates, and derived face/cell geometry. This is
-the substrate the residual assembly scatters over. Governed by the Engineering
-Principles in the root `CLAUDE.md`.
+Static mesh: connectivity, node coordinates, derived face/cell geometry — the substrate the residual
+scatters over. Dated measurements and fix narratives: `.claude/notes/mesh-log.md`.
 
 ## Module layout (mirrors the C++ entity split — do not merge into one file)
-All classes are `equinox.Module`s (fully OO, per CLAUDE Principle 1).
-- `mesh.py` — the `Mesh` container. Stores `node_coords` + two **connectivity objects**
-  (`face_cells`: `FaceCellConnectivity` = owner/neighbour; `face_nodes`: `FaceNodeConnectivity`
-  = ragged CSR node lists) + `cell_zones`/`face_patches`. **The raw index arrays live *inside*
-  those objects** — callers use `mesh.face_cells.owner` / `mesh.face_nodes.offsets` and the
-  gather/scatter operators, never a top-level `mesh.owner` (those delegating properties were
-  deliberately **removed**: one home per array, in `connectivity.py`). Only the synthesized size
-  queries `dim`/`n_cells`/`n_faces`/`n_nodes` remain `Mesh` properties (mesh-level vocabulary, not
-  duplicate array views). `from_faces` / `from_csr` constructors + a `geometry()` method that wires
-  the face/cell computation in dependency order and returns a **`MeshGeometry`** bundle (see below).
-  **`from_csr` is the vectorized constructor**
-  (already-assembled CSR arrays, avoiding the per-face Python loop) — `from_faces` flattens its
-  ragged input and delegates to it, so the zone/patch build + `validate()` live in one place, and
-  generators that know the connectivity as arrays (`structured_grid_2d`/`_3d`) call it directly.
-  **`from_csr` narrows `owner`/`neighbour` to `index_dtype(n_cells)`** (see `connectivity.py`
-  below), only when the input is already integer-typed — a non-integer input must still reach
-  `validate()`'s dtype check unchanged, not be silently rounded into a passing one.
-  **`validate()`'s degenerate-face-node check reuses `face_nodes.face_of_incidence`** instead of
-  recomputing the identical face-per-incidence array from scratch (it used to rebuild it via
-  `np.repeat(np.arange(n_faces), counts)`, immediately before the check that consumes it, when
-  `FaceNodeConnectivity.from_csr` had already built and stored the same array moments earlier).
-  **`geometry()` runs its face/cell arithmetic as one `equinox.filter_jit`-compiled call
-  (`_fused_geometry`), not eagerly.** Eager execution dispatches each of the pipeline's roughly
-  twenty elementwise/gather steps separately, each materializing its own full-size buffer; the 3D
-  centre-fan decomposition runs several incidences per face (a quad face gives four), so the
-  unfused peak is several times the size of the final per-face outputs. The face-node perimeter
-  traversal the pipeline consumes is still enumerated eagerly, once, in `FaceNodeConnectivity.
-  from_csr` (its per-face count is data-dependent); what changed is only the arithmetic that runs
-  over that already-enumerated traversal.
-  - **Measured together, on a synthetic 1,000,000-cell structured hex mesh (4 named wall
-    patches), stage-by-stage peak RSS across `structured_grid_3d` + `Mesh.from_csr` +
-    `geometry()`, one clean process per arm, macOS/arm64, JAX 0.10.2, x64 enabled** (harness not
-    in the repository): mesh construction's own delta **1944.7 MB → 1137.2 MB**, `geometry()`'s
-    own delta **2432.8 MB → 1210.9 MB** (close to an isolated eager-vs-jit comparison of
-    2204.7 MB → 1109.2 MB taken on `geometry()`'s arithmetic alone), cumulative peak through
-    `geometry()` **4521.4 MB → 2492.2 MB**, roughly a 45% cut. ⚠️ The next stage
-    (`SSTTurbulence.build`) is excluded from that cumulative figure on purpose: peak RSS is a
-    process-wide, monotonically-increasing high-water mark, not a per-call measurement, so a
-    "delta after this call" can smear onto whichever call next triggers the allocator to grow —
-    an earlier probe attributed a further +2543 MB to this stage and a same-scale repeat of the
-    identical call sequence reproduced none of it, so that particular attribution is noise, not a
-    real per-stage cost. Only the two figures kept here (mesh construction, `geometry()`) held up
-    across repeats. One run per arm even for those; re-measure before citing a tighter number.
-- `geometry.py` — **`MeshGeometry`**: the bundled `{face: FaceGeometry, cell: CellGeometry}` product
-  `Mesh.geometry()` returns (was a bare 2-tuple). It travels together through every consumer
-  (`ResidualAssembler`, the gradient/interpolation/limiter schemes, `MomentumContinuity`, the
-  preconditioner Schur kernels), so those signatures take **one `geometry` collaborator**, not a
-  loose face+cell pair (Principle 3). **Geometry is *derived on demand*, never stored on `Mesh`**:
-  it is a pure function of the differentiable `node_coords`, so a stored sibling leaf would make
-  `grad` w.r.t. node positions silently skip the node→geometry dependency, and would go stale under
-  `permute_cells` / partitioning. Seams that read **only one** side keep a single-geometry arg
-  (smallest sufficient collaborator): `FaceFluxOperator.face_flux(state, face_geometry)`,
-  `interior_mass_flux(..., face_geometry, ...)`.
-  `PartitionedMesh` gathers a local bundle via `LocalPartition.local_geometry(global_geometry)`.
-- `reorder.py` — cell **renumbering**. `permute_cells(mesh, perm)` is the single canonical
-  "apply a cell relabelling" transform (remaps owner/neighbour values + zone labels →
-  `P·A·Pᵀ`, and carries the periodic `neighbour_offset` across unchanged — faces are neither
-  reordered nor owner/neighbour-swapped, so the per-face translation passes straight through);
-  the `CellReordering` strategy hierarchy chooses the permutation
-  (`IdentityReordering`, `ReverseCuthillMcKee` bandwidth-reduction via scipy,
-  `RandomReordering` for worst-case robustness tests). Build-time preprocessing only — not
-  part of the differentiable solve.
-- `graph.py` — the **cell↔cell connectivity graph** (sparsity pattern of the cell operator), in
-  both sparse forms a consumer needs: `cell_adjacency_coo(mesh)` → scipy **COO** matrix (for SciPy
-  `csgraph` RCM), `cell_adjacency_csr(mesh)` → **CSR** arrays `(offsets, neighbours)` (for a graph
-  partitioner; `= cell_adjacency_coo(...).tocsr()`). Both build on `face_cells.interior_edges()`, which
-  applies the boundary convention once. This is the mesh-level graph *shared by* RCM renumbering
-  (`reorder.py`), graph partitioning (`parallel/partitioner.py`), and aggregation multigrid — so it
-  lives here, not under `reorder.py` where RCM (its first caller) happens to sit, nor under
-  `parallel/` (partitioner imports `cell_adjacency_csr` from `aquaflux.mesh`, which no longer
-  re-exports it from `parallel`). **Build-time only** (eager numpy/scipy, returns a SciPy/numpy
-  graph, never traced): call during preprocessing, not inside `jit`/`grad`. The object owns the
-  *primitive* (`FaceCellConnectivity.interior_edges`); this module only picks the sparse
-  representation each consumer's library wants.
-- `structured.py` — vectorized **structured-grid generators** for axis-aligned boxes:
-  `structured_grid_2d` (quads) / `structured_grid_3d` (hexes), assembled with numpy (no per-face
-  Python loop) via the shared `_FaceFamilyBuilder` and handed to `Mesh.from_csr`. These are clean
-  **orthogonal** generators (a rectangular tank/channel without a mesh file) — the *user-facing*
-  surface. `structured_grid_2d(..., periodic=("x",))` makes the x-axis **streamwise-periodic**: its
-  left/right planes fuse into one interior seam face per row (`nx` x-faces, not `nx+1`; only
-  `bottom`/`top` named) carrying the `neighbour_offset` above — the connectivity a fully-developed
-  channel driven by a uniform body force needs (requires `nx >= 2`). **Grid skewing is
-  deliberately not here.** The `perturb`/`seed` interior-node
-  displacement that breaks a smooth grid's error cancellation for order-of-accuracy studies is a
-  *verification* concern, so it lives in the test suite (`tests/support/meshes.py`:
-  `perturbed_grid_2d`/`_3d`, thin wrappers that displace the clean grid's interior `node_coords`
-  after construction — exactly equivalent to perturbing before, since geometry is derived from
-  `node_coords` on demand). Keep the library generators orthogonal-only; add skew in the test
-  helper, not by re-adding a `perturb` knob here.
-- `collapse.py` — `collapse_extruded_direction(mesh, removed_patch_names)`: the general build-time
-  transform that turns a one-cell-thick **extruded 3D** mesh (a 2D case stored as a slab capped by
-  two planar patches) into a genuine `dim == 2` `Mesh`. Infers the extruded axis from the two named
-  caps, dedups coincident front/back nodes, reduces each extruded side quad to its 2D edge, drops the
-  caps, and carries owner/neighbour + `n_cells` + `cell_zones` through 1:1 while re-indexing the
-  surviving patches and carrying the periodic `neighbour_offset` onto the kept faces (`eqx.tree_at`-free — rebuilds via `Mesh.from_csr`, which validates). It is a
-  **mesh** transform, not an io/OpenFOAM one: the reader (`aquaflux/io/`) only *detects* the `empty`
-  patches and calls it, so the collapse is reusable and unit-tested file-free (collapse
-  `structured_grid_3d(nx, ny, 1)` → matches `structured_grid_2d(nx, ny)`). Build-time only (eager
-  numpy), like `reorder.py`/`graph.py`.
-  - **Both internal per-face Python loops (axis inference, side-quad→edge reduction) are vectorized
-    (issue #112, fixed 2026-09-14) — no per-face loop remains in this module.** Both used to iterate
-    `cap_faces`/`kept_faces` in Python, each doing several numpy calls per face. A shared
-    `ragged.rows` helper (`aquaflux/ragged.py`, the numpy-only leaf shared with `FaceNodeConnectivity.select` and the radiation coarsener; it was `collapse.py`'s private `_ragged_subset`) flattens an arbitrary (non-contiguous) subset of CSR rows the same way
-    `FaceNodeConnectivity.from_csr` flattens every row, so both loops reduce to one vectorized pass:
-    axis inference becomes an unbuffered per-face min/max (`np.minimum.at`/`np.maximum.at`, the same
-    idiom `aquaflux/io/openfoam/cyclic.py::_face_centroids` uses for its per-face vertex-mean sum) and
-    a distinct-axis check; the side-quad reduction becomes a `(row, value)` lexsort whose block
-    boundaries give each face's distinct in-plane node count and values, with no need to preserve
-    perimeter order (an edge is undirected, so which of the two endpoints comes first does not
-    matter). **Measured on a synthetic one-cell-thick structured slab (`structured_grid_3d(n, n, 1)`),
-    same process before/after, macOS/arm64, Python 3.13.4, numpy 2.4.4, one run per size:** end-to-end
-    `collapse_extruded_direction` (not just the two loops — node dedup, `Mesh.from_csr`, and
-    validation are included) went **0.917 s → 0.123 s** at 160,400 3D faces and **3.470 s → 0.509 s**
-    at 640,800 3D faces, a 7–7.5× cut; the acceptance test (`tests/unit/test_collapse.py`) still
-    reproduces `structured_grid_2d` exactly.
-- `face.py` — `FaceGeometry` (result) + the **strategy hierarchy** `FaceGeometryScheme`
-  → `EdgeFaceGeometry` (2D) / `PolygonFaceGeometry` (3D), mirroring the C++ `Face<T,2>` /
-  `Face<T,3>` specialization; selected by `face_geometry_scheme(dim)`.
-- `cell.py` — `CellGeometry` (volume, centroid) with `from_faces(...)` and
-  `approx_centroids(...)`; a single class (the C++ `Cell<T,N>` is dimension-generic, not
-  specialized), computed by the divergence theorem.
-  - **⚠️ `from_faces` accumulates in coordinates local to each cell, not the mesh's raw (global)
-    ones — a numerical-conditioning fix, not a formula change (measured 2026-08-17).** The
-    divergence-theorem sum is exact and origin-independent for the true integral, but each
-    per-face term is `O(|x_ip|)` while a cell's own volume/centroid offset is `O(cell size)`; for
-    a cell small relative to its distance from the origin the sum is near-total cancellation, and
-    the centroid formula (which multiplies the flux by `x_ip` a second time) can lose enough
-    precision to land outside the cell it describes. A real snappyHexMesh CAD mesh whose cells run
-    ~1e-3 m at ~1.7 m from the origin hit this directly: 0.84% of interior faces had a corrupted
-    owner centroid, enough to flip `D_P.n` negative and crash the AMG diagonal-positivity guard,
-    even though the cell's own closed-cell residual and face-normal orientation were both exactly
-    correct — the corruption was purely in the centroid's floating-point conditioning. `from_faces`
-    now takes `approx_centroid` (the same array `approx_centroids` already computes to orient
-    normals, reused rather than recomputed) as the per-cell local reference point: each face's
-    contribution is formed relative to *its own cell's* reference (owner and neighbour use their
-    own, not a shared one), summed, then shifted back by that same reference point. Verified on
-    the same mesh: bad-`D_P.n` faces (interior and boundary) go from 40,915/14,232 to zero: full
-    scale, not a hand-picked example. A synthetic small-far-from-origin cube pins the mechanism
-    (`tests/unit/test_cell_centroid_accurate_far_from_origin`).
+All classes are `equinox.Module`s.
+
+- `mesh.py` — `Mesh`: `node_coords` + `face_cells` (`FaceCellConnectivity`) + `face_nodes`
+  (`FaceNodeConnectivity`, ragged CSR) + `cell_zones`/`face_patches`. **Raw index arrays live inside the
+  connectivity objects** (`mesh.face_cells.owner`, never a `mesh.owner` forwarding property); only the size
+  queries `dim`/`n_cells`/`n_faces`/`n_nodes` are `Mesh` properties.
+  - `from_csr` is the vectorized constructor; `from_faces` flattens and delegates to it, so zone/patch build
+    and `validate()` live in one place. `from_csr` narrows `owner`/`neighbour` to `index_dtype(n_cells)`
+    **only when already integer-typed**, so a non-integer input still reaches `validate()`'s dtype check.
+  - `geometry()` returns a `MeshGeometry` and runs its arithmetic as one `equinox.filter_jit` call
+    (`_fused_geometry`) — eager dispatch materialized a full buffer per step (roughly halved peak memory
+    at scale). The perimeter traversal is still enumerated eagerly once in `FaceNodeConnectivity.from_csr`
+    (data-dependent counts).
+- `geometry.py` — `MeshGeometry` (`{face: FaceGeometry, cell: CellGeometry}`), passed as one `geometry`
+  collaborator; seams reading one side take only that side (`FaceFluxOperator.face_flux(state,
+  face_geometry)`). **Geometry is derived on demand, never stored on `Mesh`**: it is a pure function of the
+  differentiable `node_coords`, so a stored leaf would break `grad` w.r.t. node positions and go stale
+  under `permute_cells`/partitioning. `LocalPartition.local_geometry(global_geometry)` gathers a local bundle.
+- `face.py` — `FaceGeometry` + `FaceGeometryScheme` → `EdgeFaceGeometry` (2D) / `PolygonFaceGeometry`
+  (3D), selected by `face_geometry_scheme(dim)`. `PolygonFaceGeometry.fan_triangles` is the one home of
+  the fan corners (`centre_fan`, `warp_first_moment`, `surface.py` build on it).
+- `cell.py` — `CellGeometry` (volume, centroid) via `from_faces(...)` (divergence theorem,
+  dimension-general) and `approx_centroids(...)`.
+  - ⚠️ **`from_faces` accumulates relative to each cell's own `approx_centroid`, then shifts back** — a
+    conditioning fix: in global coordinates a small cell far from the origin cancels catastrophically and
+    its centroid can land outside the cell (a real snappyHexMesh mesh flipped `D_P·n` negative and crashed
+    the AMG positivity guard). Owner and neighbour each use their own reference. Pinned by
+    `tests/unit/test_mesh.py::test_cell_centroid_accurate_far_from_origin`.
+- `connectivity.py` — the storage-and-movement layer (leaf module; imports only `jax.numpy`/`numpy`/
+  `segment_sum`):
+  - **`FaceCellConnectivity` (`mesh.face_cells`).** Gather is direct indexing with `owner` /
+    `safe_neighbour` (boundary-safe); no `gather_*` wrappers. Scatters: `scatter(owner_contrib,
+    neighbour_contrib)`, `scatter_to_owner`, `scatter_conservative` (owner `+`, neighbour `−`),
+    `scatter_symmetric`, `scatter_max`/`scatter_min`. A boundary face's neighbour-side index is redirected
+    to a trash row (`num_segments = n_cells + 1`, then `[:n_cells]`), so no `jnp.where` mask or identity
+    element is needed. `interior_edges()` applies the boundary convention once for graph builders.
+  - **`interior`, `safe_neighbour` and the trash index are stored fields computed in `__post_init__`**
+    (a recomputed property re-runs inside traced `while_loop` bodies). ⚠️ So they go **stale under pytree
+    surgery that skips `__init__`** (`eqx.tree_at` on `owner`/`neighbour`; `__check_init__` does not help).
+    Change topology only through **`with_topology(owner, neighbour)`** (used by `permute_cells`); never
+    patch `owner`/`neighbour` directly. `n_faces` is derived (`owner.shape[0]`); `n_cells` is stored (not
+    recoverable). `FaceNodeConnectivity` stores its own static `n_faces`.
+  - **Streamwise-periodic seams** carry a per-face `neighbour_offset` (`None` on an ordinary mesh).
+    Displacements gather the neighbour centroid via `fc.neighbour_centroid(cc)`
+    (`cc[safe_neighbour] + neighbour_offset`); values are periodic and gather unchanged — only positions
+    take the offset.
+    - ⚠️ **Every face-renumbering transform must carry it via `gather_neighbour_offset(face_index)`**
+      (`face_index[new] = old`; negative → zero; returns `None` when non-periodic). Dropping it raises
+      nothing and silently un-periodises the seam. All four do, each regression-tested: `permute_cells`,
+      `partition_mesh`, `pad_partition`, `collapse_extruded_direction` (projected onto kept axes). The
+      polyMesh reader fuses `cyclic` pairs before collapsing (`io/openfoam/cyclic.py`), so the collapse path
+      is reachable in production. Fixtures: `tests/unit/test_collapse.py::_periodic_extruded_slab`,
+      `tests/support/polymesh.py` (`cyclic_slab_polymesh_data`, `cyclic_two_cube_polymesh_data`).
+    - ⚠️ **A seam face's node ring belongs to the owner's side.** Listing it for the neighbour cell needs
+      a `−neighbour_offset` translation (`io/vtk/topology._onto_own_side`; `io.md`).
+  - **`FaceNodeConnectivity` (`mesh.face_nodes`)**: `gather_node_coords`, `perimeter_next`,
+    `reduce_to_faces`, `vertex_mean`, `face_of_incidence` (reused by `validate()`), `select(faces)` (a
+    subset's connectivity in the given order, node indices unchanged).
+  - `interior_mask(neighbour)` is the one free-function boundary convention (`neighbour < 0`), for numpy
+    build-time paths with no connectivity object. Owner substitution is not a free function — it is
+    `FaceCellConnectivity.safe_neighbour`.
+- `groups.py` — `LabelledGroups` → `CellZones` / `FacePatches` (design: `docs/mesh_zones_and_patches.md`).
+- `reorder.py` — `permute_cells(mesh, perm)`, the one cell-relabelling transform (`P·A·Pᵀ`; faces neither
+  reordered nor swapped, so `neighbour_offset` passes through), and the `CellReordering` strategies
+  (`IdentityReordering`, `ReverseCuthillMcKee`, `RandomReordering`). Build-time only.
+- `graph.py` — the cell↔cell graph: `cell_adjacency_coo(mesh)` (scipy COO, for `csgraph` RCM) and
+  `cell_adjacency_csr(mesh)` (`(offsets, neighbours)`, for partitioners), both on `interior_edges()`.
+  Shared by reordering, `parallel/partitioner.py` and aggregation multigrid, so it lives here. Build-time,
+  never traced.
+- `structured.py` — `structured_grid_2d`/`_3d` (vectorized via `_FaceFamilyBuilder` → `Mesh.from_csr`),
+  **orthogonal only**. `structured_grid_2d(..., periodic=("x",))` fuses left/right into one seam face per
+  row (`nx >= 2`; only `bottom`/`top` named). **Grid skewing stays in the tests**
+  (`tests/support/meshes.py` `perturbed_grid_2d`/`_3d` displace interior `node_coords` after construction)
+  — do not re-add a `perturb` knob here.
+- `collapse.py` — `collapse_extruded_direction(mesh, removed_patch_names)`: one-cell-thick extruded 3D →
+  genuine `dim == 2` `Mesh` (infer axis from the two caps, dedup nodes, reduce side quads to edges, drop
+  caps, carry owner/neighbour/zones/offsets, rebuild via `from_csr`). A **mesh** transform the OpenFOAM
+  reader calls on `empty` patches; unit-tested file-free (`structured_grid_3d(nx, ny, 1)` → matches
+  `structured_grid_2d`). Fully vectorized (no per-face Python loop) using `aquaflux/ragged.py::rows`.
 - `distance.py` — `distance_to_patches(mesh, geometry, patch_names)`: per-cell distance to the nearest
-  face centroid among named boundary patches — the geometric field the near-wall turbulence closures
-  need, computed once at build time from the static geometry. Nearest-face-*centroid*, an approximation
-  to the true surface distance that is essentially exact for a wall-adjacent cell and loosens far from
-  the wall.
-  - **The nearest-target search DISPATCHES on whether the centroids are concrete or traced (issue #240,
-    fixed 2026-08-19) — a k-d tree for the ordinary eager build, a blocked `jnp` search only as a
-    fallback under differentiation.** The two searches used to be one: a single blocked `jnp` search run
-    unconditionally, on the reasoning that a spatial index needs concrete coordinates and geometry may
-    carry **tracers** (a differentiated build, gradients w.r.t. node positions). That reasoning is still
-    correct for the traced case, but it does not apply to the overwhelmingly common one: an ordinary
-    eager case build never differentiates through mesh construction, so its centroids are concrete and a
-    `scipy.spatial.cKDTree` applies cleanly. `_nearest_squared_distance` checks
-    `isinstance(x, jax.core.Tracer)` on both arrays (`_is_traced`, a local helper — this is a one-line
-    type predicate, not a formula, so it is not shared with the differently-scoped `_is_traced` in
-    `turbulence/coupled.py`) and routes to `_nearest_squared_distance_concrete` (the tree, queried with
-    `workers=-1` for a parallel search) or `_nearest_squared_distance_traced` (the blocked `jnp` search,
-    unchanged in spirit). **Measured on a synthetic 1,000,000-cell mesh with 4 wall patches (40,000
-    combined wall faces), the exact configuration the issue was filed against**: the concrete path took
-    **4.2–4.6 s** end to end through `distance_to_patches` (tree build ~6 ms, parallel query the rest)
-    against the blocked search's **61–77 s** on the same machine — a ~15× cut, and what "minutes at scale"
-    in the issue's own title actually meant. Exact to floating-point rounding against the brute-force
-    form on every case checked, including bit-identical on the standard test mesh (a k-d tree
-    nearest-neighbour query finds the true nearest point by a smarter search, not an approximate one).
-    Pinned by `test_distance.py::test_concrete_search_matches_the_whole_array_form` and
-    `test_concrete_inputs_use_the_kdtree_path_and_traced_inputs_do_not` (the latter pins the *dispatch*,
-    not just the numbers — a regression that swapped the two branches would still pass an
-    equivalence-only test on any input small enough not to time out, since `scipy` would simply never be
-    handed a Tracer to fail loudly on). `jax.grad` alone (no `jit`) is already enough to trigger the
-    traced branch — confirmed directly (`isinstance(x, jax.core.Tracer)` is `True` under a bare
-    `jax.grad`, not only under `jax.jit`) — which is what
-    `test_distance.py::test_distance_is_differentiable_through_node_positions` exercises.
-  - **The traced fallback's blocked search is now run through a single compiled `jax.lax.map` loop,
-    not a Python loop building one XLA program per block and feeding a large `jnp.concatenate`.** The
-    two are numerically identical — each cell's nearest target is independent of every other cell's, so
-    a block boundary reorders and drops nothing (`_nearest_squared_distance_traced` still pads to a whole
-    number of blocks by repeating the last cell, discarded by the final slice) — but a Python loop's
-    per-block trace-and-dispatch, and a concatenate over as many operands as there are blocks, is what
-    the issue's own evidence showed compiling for over 5 minutes when embedded in a larger jitted
-    computation (`[Compiling module jit_concatenate for CPU] Very slow compile? ... 5m5.656426s`).
-    `jax.lax.map` compiles the per-block body once and loops it on-device (built on `scan`), so the
-    compiled program's size no longer grows with the block count — pinned by
-    `test_distance.py::test_block_count_does_not_grow_the_compiled_program`, which checks the jaxpr's
-    own equation count stays flat as the forced block count rises two orders of magnitude. **This does
-    NOT reduce the traced path's raw eager wall-clock time — measured slightly WORSE** (the same
-    1,000,000-cell/4-patch configuration cost ~97–102 s through `jax.lax.map` against the Python loop's
-    61–77 s; block size made no difference across a 64 MB–8 GB sweep, so the traced brute-force search is
-    compute-bound, not dispatch-overhead-bound, at that scale). That regression does not matter in
-    practice: the traced path is reached only by an actually-differentiated build, which is rare and
-    already expensive relative to an ordinary case assembly, and unlike the concrete path it was never
-    the one the issue's "impact" section described as paid "repeatedly" per Reynolds-continuation rung.
-  - **The blocking mechanics themselves — the memory bound, the padding, the working-set sizing — are
-    unchanged from the original fix (measured 2026-08-11) and now apply only to the traced path.**
-    `centroid[:, None, :] - target[None, :, :]` is a dense cell-by-target-face structure: on `bfs3d`
-    (23040 cells, 4736 wall faces) that is 109M entries, and because `norm_squared` materializes its own
-    product under eager JAX ~6.1 GB would be live at once. Blocked at a 64 MB working set it peaks at
-    ~850 MB, an 8.1× cut, computing exactly the same numbers in the same order. That residency figure
-    (and the `jax.live_arrays()` check that nothing leaks beyond it) was taken when this was the only
-    search path there was; it has not been re-measured since the concrete path stopped exercising it, but
-    nothing about the traced path's memory behaviour changed.
-- `surface.py` — `patch_triangles(mesh, geometry, patch_names)` → `PatchTriangles` (`vertices`
-  `(n, 3, 3)`, `patch_id`, `patch_names`, `face`): named **boundary** patches cut into the same
-  centre-fan triangles `face.py` computes face geometry from (one triangle per face-node incidence,
-  via `PolygonFaceGeometry.fan_triangles`, which `centre_fan` and `warp_first_moment` also build on —
-  the fan's corners have one home), each wound so its right-hand normal points **into the domain**,
-  i.e. against the stored owner-outward normal. Orientation is decided from that normal, never from
-  the node order (`test_every_triangle_faces_into_the_domain_whatever_the_node_order` reverses half
-  the rings to prove it). A planar face's triangles sum to exactly its `|S|`; a warped one's to
-  `sum|d_i|`, the planarity metric's numerator. Refused: a 2D mesh, a patch holding interior faces
-  (a baffle has two sides, and which faces the domain is not a property of the face — offering it
-  as a two-sided sheet is not built), and any face **not star-shaped from its vertex mean**, whose
-  fan folds over itself and would cover part of the face twice. That last refusal is a decision,
-  not a gap to fill silently: on the Sozzi snapped mesh (`lampWall` 48,550 faces, `bodyWall`
-  329,028; quads with a few 5-/6-gons and 218 triangles) **no** face folds — the worst fan triangle
-  carries 12% of its face's mean share — so ear clipping was not built; build it the day a real mesh
-  trips the check. ⚠️ **A real mesh has now tripped it**: the snapped Voronoi bunny of
-  `validation/ray_effects_room` has **291** such faces (2026-10-05). For a surface that only BLOCKS, the
-  fold is harmless — the fan still covers the face (signed-area winding argument), some of it twice — so
-  `patch_triangles(..., allow_folded=True)` keeps them, each triangle still wound into the domain;
-  `case.PatchBody` uses it. Emitters and reflectors keep the refusal (an overlap double-counts area).
-  Pinned on the C-shaped face fixture (coverage of every point of the face, every triangle facing in). It lives here and not in `radiation/` because nothing in it is radiation: it is
-  "the mesh's boundary as triangles", and `radiation/` imports no mesh. Supporting it,
-  `FaceNodeConnectivity.select(faces)` returns the connectivity of a face subset in the order given
-  (node indices unchanged), so a few patches of a large mesh are traversed without touching every
-  face.
-- `groups.py` — `LabelledGroups` base → `CellZones` / `FacePatches`. Named **partitions**
-  of cells (zones) and faces (patches) — the SoA analogue of the C++ `MeshObjectGroup`
-  `name→group` maps. See `docs/mesh_zones_and_patches.md` for the full design.
-- `connectivity.py` — **the storage-and-movement layer: the substrate-wide gather/scatter API**
-  (Principle 2). It separates *how node/face/cell values are stored and moved* from *geometry
-  math* and *physics*, so those read as math, not index plumbing.
-  - `FaceCellConnectivity` (obtained as **`mesh.face_cells`**) — the face→cell relation and the
-    operators over it. **Gather is direct indexing** with the public accessors `owner` /
-    `safe_neighbour` (`cell_field[fc.owner]`, `cell_field[fc.safe_neighbour]` — the boundary-safe
-    substitution); that idiom is used throughout, so there are no `gather_owner`/`gather_neighbour`
-    wrapper methods. **`interior` and `safe_neighbour` are stored fields, computed once in
-    `__post_init__`, not properties recomputed on every access (issue #109, fixed 2026-08-18)** — a
-    recomputed property folds away outside a loop but not inside a traced `while_loop` body (a
-    Krylov matvec), where the compare-plus-select used to run on every iteration instead of once.
-    **That caching means they go stale under any pytree surgery that skips `__init__` — `eqx.tree_at`
-    on `owner`/`neighbour` of an existing instance included (issue #268, fixed 2026-09-09).** No
-    runtime hook catches this: JAX pytree unflattening (what `tree_at`/`jit`/`vmap` rebuild a node
-    through) bypasses `__init__`/`__post_init__`, and `eqx.Module.__check_init__` — the hook that
-    looks like a fix — is documented to run only inside `__init__`, so it is bypassed the same way.
-    The fix is structural, not a check: `with_topology(owner, neighbour)` is the one sanctioned way
-    to change an existing relation's topology (it rebuilds through the constructor, carrying
-    `n_cells`/`neighbour_offset` across), and `permute_cells` now calls it instead of hand-rolling the
-    reconstruction — never patch `owner`/`neighbour` on an existing instance directly.
-    `n_faces` is still a **derived** property (`owner.shape[0]`), so it cannot disagree with the
-    arrays it describes — unlike `n_cells`, which is stored because it is *not* recoverable that way
-    (no face need reference the last cell). It is what a consumer sizes a per-face accumulator at
-    without taking the whole `Mesh` (`CellBalance`'s face-flux sum). Note `FaceNodeConnectivity`
-    stores its own `n_faces` as a static field instead — its CSR row count is a construction input,
-    not a length. The *scatter* side is where the class earns its keep:
-    `scatter(owner_contrib, neighbour_contrib)`, `scatter_to_owner(contrib)` (owner only, no zero neighbour array formed or reduced — for what a boundary condition adds to the cell it closes; `schemes.boundary_gradient_block`, #648), `scatter_conservative(flux)` (owner `+`, neighbour
-    `−`; FVM conservation), `scatter_symmetric(contrib)` (both cells `+`; means / symmetric
-    coefficients), and `scatter_max`/`scatter_min` (extremum reductions). **None of the four masks
-    the boundary neighbour side with a `jnp.where` any more (issue #109).** A boundary face's
-    neighbour-side scatter index is redirected to a trash row one past the last real cell — a stored
-    field computed once alongside `interior`/`safe_neighbour` — and every scatter reduces with
-    `num_segments = n_cells + 1` then slices `[:n_cells]` away — the boundary contribution is
-    excluded structurally by which segment it lands in, not by its value, so no identity element
-    (`0`, `∓∞`) and no extra `(n_faces, ...)` masked array are needed. This is the operator behind
-    **every** `gather → compute → scatter` residual term —
-    the mesh geometry (`cell.py`, `quality.py`), the discretization scatter
-    (`CellBalance` delegates its scatter here; flux operators gather owner/neighbour by direct
-    indexing on `owner`/`safe_neighbour`), the gradient schemes, and the coupled flow all compose it.
-    **Streamwise-periodic** meshes carry a per-face `neighbour_offset` (`None` on an ordinary mesh):
-    a displacement-forming operator gathers the neighbour centroid through `fc.neighbour_centroid(cc)`
-    (= `cc[safe_neighbour] + neighbour_offset`) rather than indexing directly, so a periodic seam —
-    one interior face wrapping the last cell to the first with `+L` offset — has the same owner→
-    neighbour delta as an ordinary interior face. *Values* (φ, u, p, gradients) are periodic and
-    gather unchanged; only *positions* take the offset. Existing meshes (offset `None`) are unchanged.
-    **Every mesh transform that renumbers faces must carry the offset across, via
-    `gather_neighbour_offset(face_index)`** — the offsets in a *new* face numbering, where
-    `face_index[new] = old` and a negative entry (a newly introduced face, e.g. a shard's padding
-    face) takes zero; it returns `None` for a non-periodic relation, so an ordinary mesh never gains
-    an array of zeros. Dropping the offset does **not** raise — an absent offset is exactly what an
-    ordinary mesh has — it silently un-periodises the seam, and the divergence-theorem volume of a
-    boundary-column cell collapses. **All four face-renumbering transforms carry it now**, each with
-    its own regression test: `permute_cells` (identity on faces), `partition_mesh` (a row subset),
-    `pad_partition` (real rows then zeros), and `collapse_extruded_direction` (a kept-face subset,
-    then projected onto the surviving axes — `gather_neighbour_offset(kept_faces)[:, kept_axes]`; the
-    dropped component is necessarily zero, since a periodic extruded axis would have no boundary faces
-    to be the caps the collapse removes). That path **is** reachable in production: the polyMesh
-    reader fuses `cyclic` pairs into seam faces *before* it collapses (`io/openfoam/cyclic.py`), so a
-    periodic 2D OpenFOAM case is a periodic 3D mesh first — and a 3D case with a `cyclic` pair stays
-    one. Its test hand-builds a periodic extruded slab
-    (`tests/unit/test_collapse.py::_periodic_extruded_slab`); `tests/support/polymesh.py`'s
-    `cyclic_slab_polymesh_data` / `cyclic_two_cube_polymesh_data` give a real 3D periodic mesh.
-    ⚠️ **A seam face's node ring belongs to the OWNER's side only.** Positions take the offset, and
-    nodes are positions: anything that lists a seam face's nodes for the *neighbour* cell must
-    translate them by `−neighbour_offset` onto that cell's own nodes. The VTK writer did not, raised
-    on every periodic 2D mesh and silently wrote 3D seam cells spanning the period (fixed 2026-10-06,
-    `io/vtk/topology._onto_own_side`; see `io.md`).
-  - `FaceNodeConnectivity` (obtained as **`mesh.face_nodes`**) — the ragged face→node relation:
-    `gather_node_coords`, `perimeter_next`, `reduce_to_faces`, `vertex_mean`, and `select(faces)`
-    for a subset's connectivity; the face-geometry
-    schemes (`face.py`) traverse a polygon through these instead of open-coding CSR arithmetic.
-  - `interior_mask(neighbour)` — the boundary convention (`neighbour < 0` marks a boundary face)
-    as the one free-function **primitive** the classes are built on (`FaceCellConnectivity.interior`),
-    and the form the numpy build-time paths (`mesh.validate`, `reorder.py`, `parallel/`) and
-    gather-only sites (`groups.py` interface detection) use directly on raw arrays where no
-    connectivity object is in hand. The owner-substitution for a gather/scatter-safe neighbour index
-    is **not** a free function — it is `FaceCellConnectivity.safe_neighbour` (owner-substitution is a
-    JAX-class concern; the numpy paths that need a placeholder roll their own `where(interior, nb, 0)`
-    and re-mask, a different idiom).
-  Leaf module (imports only `jax.numpy` / `numpy` / `segment_sum`), so it is safe to import from
-  anywhere including inside the mesh package.
+  face **centroid** of named patches (near-exact at the wall, looser far away), for near-wall closures.
+  - **The search dispatches on concrete vs traced inputs**: concrete → `scipy.spatial.cKDTree`
+    (`_nearest_squared_distance_concrete`, `workers=-1`, exact); traced (any `jax.grad`, not only `jit`)
+    → blocked `jnp` search (`_nearest_squared_distance_traced`) run through one `jax.lax.map`, so the
+    program does not grow with block count, with a bounded working set. Pinned in
+    `tests/unit/test_distance.py`, including the dispatch itself
+    (`test_concrete_inputs_use_the_kdtree_path_and_traced_inputs_do_not`) and the flat program size
+    (`test_block_count_does_not_grow_the_compiled_program`).
+- `surface.py` — `patch_triangles(mesh, geometry, patch_names)` → `PatchTriangles` (`vertices (n,3,3)`,
+  `patch_id`, `patch_names`, `face`): boundary patches cut into the centre-fan triangles, each wound to face
+  **into the domain**, decided from the stored normal, never node order
+  (`test_mesh_patch_triangles.py::test_every_triangle_faces_into_the_domain_whatever_the_node_order`).
+  Refuses 2D meshes, patches holding interior faces (baffles are two-sided), and faces **not star-shaped
+  from their vertex mean** (the fan folds). `allow_folded=True` keeps folded faces for surfaces that only
+  **block** (the fan still covers the face; `case.PatchBody` uses it); emitters/reflectors keep the
+  refusal (overlap double-counts area). Lives here because it is mesh, and `radiation/` imports no mesh.
+  Ear clipping is not built; build it when an emitting mesh trips the check.
+- `quality.py` — `face_planarity`, `centroid_iteration_shift`, `closed_cell_residual`.
 
-Naming note: this is **not** `metrics.py` — "mesh metrics" means quality measures
-(skewness, orthogonality, aspect ratio) in CFD, a different thing. "geometry" is
-reserved for the CAD/domain sense, which aquaflux does not model (meshes arrive from a
-mesh file). Use "face geometry" / "cell geometry".
+Naming: not `metrics.py` (CFD "mesh metrics" are quality measures); say "face geometry"/"cell geometry".
 
-## Binding decisions (all formulas replicate the C++ framework exactly)
-- **Representation is SoA + integer-index connectivity + `segment_sum`**, not the C++
-  pointer graph (the agreed XLA-driven deviation). The *math* is identical; the loop
-  becomes a scatter. Owner/neighbour arrays are sufficient — cell↔face incidence is
-  implicit, so no CSR list is materialized.
-- **Store the primitives, compute the derived vectors inline.** `Mesh`/geometry store
-  only area, centroid, normal (face) and volume, centroid (cell) — the expensive
-  primitives, computed once at build time. The bulky per-face displacement vectors
-  (`x_ip − x_owner`, `x_ip − x_neighbour`) are **not stored** (they cost as much memory
-  as several fields); they are cheap gathers formed inline in the operator, exactly as
-  the C++ `getFlux` does. DRY is satisfied by defining the displacement formula in **one
-  place** (a shared method), not by materializing arrays.
-- **Owner-outward normal convention, fixed once at build (decided deviation from C++ —
-  do not revisit).** Each face's stored normal points out of its owner cell; the neighbour
-  uses `−n`. Orientation is done with the approximate cell centroid (mean of face
-  centroids) — the same flip the C++ `Cell` performs, hoisted to build time and applied to
-  the *stored* normal. **The C++ instead stores the raw node-order normal and trusts the
-  mesh reader to have wound faces owner→neighbour** (the flux uses the raw normal). We
-  deliberately chose to make "normal points owner→neighbour" a **container invariant**
-  rather than an **input precondition** (the deviation audit's "Deviation B", resolved in
-  favour of this option): it makes orientation robust to input node ordering, removes a
-  whole class of silent flipped-normal bugs, and produces identical values to a correctly
-  wound input. Cost: one build-time step the C++ lacks. Keep it.
-- **A neighbour index `< 0` (by convention `−1`) marks a boundary face**; it scatters to
-  the owner only.
-- **2D and 3D both implemented** as `FaceGeometryScheme` strategies (via `face_geometry_scheme(dim)`):
-  - 2D face = edge (`face_nodes` width 2): `area=|d|`, `centroid=midpoint`,
-    `normal=(d_y,−d_x)/|d|`.
-  - 3D face = polygon, **centre fan** (`PolygonFaceGeometry.centre_fan`): triangles
-    `(c, v_i, v_{i+1})` around the perimeter, apex `c` = vertex mean. Vector area
-    `S = Σ ½(v_i−c)×(v_{i+1}−c)` → `area=|S|`, `normal=S/|S|` (**unit**),
-    `centroid=Σ(d_i·n)c_i/|S|` (**signed** projected-area weights — the unsigned `Σ|d_i|c_i/Σ|d_i|`
-    is wrong on a **non-convex** face, where a reflex vertex makes one fan triangle wind against
-    `n`; `Σ|d_i|` is kept only for the planarity metric). Normalization is zero-safe (a degenerate
-    zero-area face yields a zero normal + finite gradient, never a NaN; the magnitudes are
-    `aquaflux.vectors.norm`, which was `face.py`'s private `_safe_magnitude` until #620 moved it there). **Deliberate deviation from the C++ node-0 fan (decided —
-    do not revert):** the C++ used `area=Σ|d_i|` + a *sub-unit* normal that is
-    vertex-order-dependent on **non-planar/warped faces** (common in real hex/polyhedral
-    meshes). The centre fan gives `|S|` + unit normal for any polygon, vertex-order-
-    independent, and generalizes the Fortran's two-diagonal averaging (which recovered the
-    same but only for quads). Planar faces are unchanged.
-  - Face node-lists are stored **ragged (CSR)**: `face_node_offsets` (n_faces+1) +
-    `face_node_indices` (flat). Each face holds exactly its own node count — arbitrary
-    polygons, **no padding, no wasted memory** (the array analogue of the C++ per-face
-    node vector). The 3D path enumerates each face's perimeter edge-triangles across the
-    ragged structure (build-time numpy) and scatters into faces with `segment_sum`. Build
-    meshes with `Mesh.from_faces(coords, [[...],...], owner, neighbour, n_cells)`.
-  - The cell divergence formula is dimension-general (`/dim`, `/(dim+1)`).
+## Binding decisions (formulas replicate the C++ framework)
+- **SoA + integer-index connectivity + `segment_sum`**, not a pointer graph. Owner/neighbour suffice;
+  cell↔face incidence is implicit.
+- **Store primitives, form displacements inline.** Stored: face area/centroid/normal, cell
+  volume/centroid. `x_ip − x_owner`/`x_ip − x_neighbour` are cheap gathers formed in the operator from one
+  shared formula, never materialized.
+- **Owner-outward normal is a container invariant, fixed at build** (decided deviation from C++, which
+  trusts the reader's winding — do not revisit). Orientation uses the approximate cell centroid; robust to
+  node order, identical values for a correctly wound input.
+- **A neighbour index `< 0` (exactly `−1`) marks a boundary face**; it scatters to the owner only.
+- **2D and 3D geometry:**
+  - 2D edge: `area=|d|`, `centroid=midpoint`, `normal=(d_y,−d_x)/|d|`.
+  - 3D polygon, **centre fan** (apex = vertex mean): `S = Σ ½(v_i−c)×(v_{i+1}−c)`, `area=|S|`, unit
+    `normal=S/|S|`, `centroid=Σ(d_i·n)c_i/|S|` (**signed** weights — the unsigned form is wrong on a
+    non-convex face; `Σ|d_i|` is kept only for planarity). Zero-safe via `aquaflux.vectors.norm`.
+    **Deliberate deviation from the C++ node-0 fan (do not revert)**: that gave `Σ|d_i|` and a sub-unit,
+    order-dependent normal on warped faces.
+  - Face node lists are ragged CSR, no padding.
+- **Validation at construction.** `FaceNodeConnectivity.from_csr` checks CSR structure;
+  `Mesh.validate()` (topology only, `O(n)`, called by `from_faces`/`from_csr`) checks finite coordinates,
+  integer dtypes, index ranges, node counts (exactly 2 in 2D, ≥ 3 in 3D), repeated nodes in a face,
+  neighbour sentinel exactly `-1`, self-neighbour, and every cell referenced (`segment_sum` silently drops
+  out-of-range owners). Collinear faces and unclosed cells are geometric — surfaced by
+  `quality.face_planarity` / `quality.closed_cell_residual`. ⚠️ `validate()` must not move into `__init__`
+  (that runs on pytree unflatten under `jit`); a padded partition mesh is deliberately not validated
+  (`parallel.md`).
+- **Named groupings are partitions** (one label per element). Defaults: one `"default"` zone;
+  `"interior"` + `"boundary"` patches; `"padding"` reserved for distributed padding. All three are in
+  `groups.RESERVED_PATCH_NAMES` (the OpenFOAM reader's guard imports it).
+  `FacePatches.uncovered_boundary_faces` backs `BoundaryConditions.resolve`'s coverage refusal
+  (`boundary.md`). Zone interfaces are derived (`CellZones.interface_mask`/`interface_mask_between`) and
+  may also be named as patches (a baffle). Node groups not built; overlapping groups rejected.
+- **`FacePatches` carries what a mesh file declared** — static tuples `patch_types` (`(patch, type)`) and
+  `patch_groups` (`(group, members)`), default `()`, **uninterpreted** by the numerics (the case file
+  resolves groups via `addressed_by`). A group is not a partition, hence a separate record. `__check_init__`
+  refuses unknown members, reserved names, duplicate or empty groups. **A transform removing patches must
+  drop them from both records** — `FacePatches.without(removed)` (used by the collapse); partitioning keeps
+  the global record (`eqx.tree_at` on `label`), padding copies it.
+- **One centre-fan pass, no centroid iteration** — `centroid_iteration_shift` is ~3e-4 even on a violently
+  warped quad. Re-check with it on a representative real mesh before adding iteration.
+- **Cell ordering does not need fixing upstream for AMG**: the smoother and direct coarse solve are
+  permutation-invariant, and the greedy aggregation now visits each level in its own RCM order, so a
+  scrambled numbering builds the same compact aggregates
+  (`tests/unit/test_multigrid.py::test_aggregation_coarse_space_is_ordering_robust`). `reorder.py` remains
+  for matvec locality and partitioning.
 
-- **Meshes are validated at construction; validity is checkable.** Validation is split by
-  ownership: `FaceNodeConnectivity.from_csr` checks the **CSR structure** it owns (row pointers
-  1-D, start at 0, non-decreasing, `offsets[-1] == len(indices)`) so malformed CSR fails there,
-  not deeper in the traversal build; then `Mesh.validate()` (topology-only, `O(n)`, no geometry,
-  called by `from_faces`) does the semantic checks: finite coordinates, integer index dtypes,
-  index ranges, per-face node counts (**exactly 2** in 2D, `>= 3` in 3D), no repeated node within a
-  face (a zero-area/NaN degeneracy), owner/neighbour ranges (neighbour sentinel is **exactly `-1`**),
-  self-neighbour, and **every cell referenced** by a face (an orphan cell would be `0/0`). Both raise
-  a clear `ValueError` rather than letting a bad mesh silently produce wrong volumes/NaNs
-  (`segment_sum` silently *drops* an out-of-range owner). Two defects are deliberately **out of
-  scope** (geometric, not topological): a face whose
-  distinct nodes are collinear (zero area) and duplicate faces / unclosed cells — both surfaced by
-  the *geometry*-level diagnostics `quality.face_planarity` (→ `0`) and `quality.closed_cell_residual`
-  (Σ outward face area-vectors per cell ≈ 0 for a closed mesh; also cross-checks orientation).
-  `validate()` must **not** move into `__init__` — that runs on the pytree-unflatten path under `jit`.
+## Terminology (D / fip / R are renamed, not gone)
+The papers' `D_P,ip`/`D_nb,ip` are `x_ip − x_owner`/`x_ip − x_neighbour`, formed inline in the diffusion
+operator; the skewness correction (the Fortran's `R`) is the tangential projection `dxip − (dxip·n)n`,
+inline; the interpolation factor `f` belongs to the gradient schemes (`schemes/`). The mesh supplies
+primitives only.
 
-- **Named groupings are partitions (`groups.py`) — decided.** `CellZones` (cells) and
-  `FacePatches` (faces) each assign **one** label per element (each cell in one zone, each
-  face in one patch) — a single `int` array, vectorizable, mirroring how the C++ groups
-  were used. Defaults: one `"default"` zone; `"interior"`+`"boundary"` patches. `"padding"` is
-  reserved as well: only a distributed partition's padded mesh carries it, as the label of its inert
-  faces. All three live in `groups.RESERVED_PATCH_NAMES`, and the OpenFOAM reader's collision guard
-  imports that constant rather than keeping its own list. `FacePatches.uncovered_boundary_faces` is
-  what `BoundaryConditions.resolve` uses to refuse a boundary map that leaves a boundary face
-  uncovered (`.claude/rules/boundary.md`). **Zone
-  interfaces are derived** (`CellZones.interface_mask` / `interface_mask_between` from the
-  zone labels + owner/neighbour) **and** may be named as explicit patches — a **baffle** is
-  just a named patch on interior faces. Both coexist (derive by default, name for bespoke
-  treatment). Node groups omitted until needed; overlapping groups rejected. Shared code
-  lives in the `LabelledGroups` base; `CellZones`/`FacePatches` add type-specific helpers.
-- **`FacePatches` also carries what a mesh file DECLARED about its patches (#364, 2026-09-25)** — two
-  static fields, both defaulting to `()` so every builder that never heard of them still constructs:
-  `patch_types` (`(patch, declared type)` pairs — OpenFOAM's `type`) and `patch_groups`
-  (`(group, member patches)`, members in patch order — OpenFOAM's `inGroups`). Carried **uninterpreted**:
-  nothing in the numerics reads them; the case file resolves group names through `addressed_by`. A group
-  is **not** a partition (a patch may be in several), which is why it is a separate record rather than a
-  second `LabelledGroups`. Static tuples, not dicts, because a static field must be hashable (it is part
-  of the treedef). `__check_init__` refuses a type or member naming no named patch, a reserved group
-  name, and a duplicate or empty group — at *every* construction, including the partition/padding paths
-  that build `FacePatches` directly. **A transform that removes patches must drop them from both
-  records** — `FacePatches.without(removed)` does it (and drops a group left empty), used by the 2D
-  collapse; the partition carries the global record with `eqx.tree_at` on `label`, and padding copies it
-  beside its added `padding` name.
-
-- **Warped-face robustness is a measured property (`quality.py`).** `face_planarity(mesh)`
-  = `|S|/Σ|d_i|` (1 = planar) is a near-free warp screen; `centroid_iteration_shift(mesh)`
-  = `|c2−c1|/√area` (a second centre-fan pass using the first centroid as apex) directly
-  measures whether centre iteration would refine the centroid. **Decision: one centre-fan
-  pass, no iteration** — even a violently warped quad shows a shift of ~3×10⁻⁴ and realistic
-  warp ~10⁻¹¹. Re-check on a representative real mesh with `centroid_iteration_shift` before
-  adding iteration; it is a once-per-build cost so thoroughness is cheap.
-
-- **Cell ordering affects AMG convergence through the coarse space — reorder large meshes
-  (`reorder.py`), measured.** The smoothed-aggregation V-cycle *smoother* (Jacobi/Chebyshev)
-  and its direct coarse solve are exactly permutation-invariant, so a symmetric renumbering
-  `P·A·Pᵀ` leaves the *spectrum* untouched. But the **greedy aggregation visits cells in index
-  order**, so the *coarse space it builds* is ordering-dependent: on a model Poisson a
-  spatially-local numbering (natural or RCM) gives compact aggregates and a V-cycle contraction
-  factor ~0.25, while a **scrambled numbering nearly doubles it to ~0.45** (measured; RCM of the
-  scramble restores ~0.28). Consequence: the aggregation-AMG development was done on the
-  already-well-ordered structured grid, so a real mesh arriving in arbitrary order must be
-  **RCM-reordered before the preconditioner is built** — reordering protects convergence, not
-  just matvec locality. It is *not* required for correctness (a bad ordering only slows the
-  inner rate, never breaks it; at small meshes the block-triangular outer count is unchanged),
-  which is why it lives here as a build-time preprocessing step, not in the solve. Guarded by
-  `tests/unit/test_multigrid.py::test_ordering_affects_coarse_space_and_rcm_restores_it` and the
-  flow-level robustness test. (This differs from the classical reason bandwidth reordering
-  matters — Gauss–Seidel / ILU factor ordering — which does not apply to our order-invariant
-  smoother.)
-
-## Terminology alignment with the papers (D / fip / R are renamed, not gone)
-The C++ and DeGroot 2018/2019 use the **same** non-orthogonal diffusion formulation:
-- The papers' `D_P,ip` / `D_nb,ip` (cell-centroid → integration-point displacements)
-  **are** `x_ip − x_owner` / `x_ip − x_neighbour` — formed inline in the diffusion
-  operator, not stored in the mesh.
-- The **skewness / non-orthogonal correction** is the tangential projection
-  `dxip − (dxip·n) n` (the role the Fortran's `R` plays), computed inline.
-- The **inverse-distance interpolation factor `f`** belongs to the *gradient*
-  reconstruction (`schemes/`), not the base mesh.
-So the mesh provides primitives; the diffusion operator forms `D_P,ip`/`D_nb,ip` and the
-tangential correction; the gradient scheme carries `f`.
-
-## Testability seam (satisfied)
-Geometry is computed from hand-built connectivity (no reader), so every formula is unit-
-tested against analytic values on tiny meshes (`tests/unit/test_mesh.py`): 2D unit
-squares, triangle, parallelogram; 3D unit cube, tetrahedron (V=1/6), two adjacent cubes
-(interior-face scatter), triangular prism (mixed tri/quad faces = padding path), and a
-non-unity box [0,2]x[0,3]x[0,4] with distinct side lengths (V=24) that catches
-scale-factor and axis-transposition errors a unit cube would hide. Owner-outward
-orientation is proven robust to node ordering.
+## Testability seam
+Geometry is unit-tested from hand-built connectivity against analytic values (`tests/unit/test_mesh.py`):
+2D squares/triangle/parallelogram; 3D cube, tetrahedron, two cubes, triangular prism (mixed faces), and a
+non-unity `[0,2]×[0,3]×[0,4]` box that catches scale and axis-transposition errors. Orientation is proven
+robust to node order.
 
 ## Golden reference
-C++ `Face_impl.hpp` (2D area/centroid/normal), `Cell_impl.hpp` (divergence-theorem
-volume/centroid + approx-centroid orientation), `FaceConnection.hpp` (owner/neighbour,
-null-`c1` = boundary). Cite the math in comments, not the reference files (CLAUDE
-Comment Convention).
+C++ `Face_impl.hpp`, `Cell_impl.hpp`, `FaceConnection.hpp`. Cite the math in comments, never these files.

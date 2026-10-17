@@ -5,449 +5,166 @@ paths:
 
 # Rules — `aquaflux/discretization/` (the Layer-0 residual substrate)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
-> *your* understanding — that is its job, and why it loads into your
-> context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
-> reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
-> reference code, the `.claude/` rules, the design notes, or the author's own papers.
+> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors; none of that may
+> reach the shipped surface (`.py`, `docs/`) — root `CLAUDE.md` Comment Convention.
 
-The heart of the solver: assemble the discrete cell residual `R(state, params)` and
-let AD produce the Jacobian/adjoint. Governed by the root `CLAUDE.md` Engineering
-Principles.
-
-## Responsibility
-- The **gather → compute → scatter** engine: each `FaceFluxOperator` gathers the owner/neighbour
-  fields it needs, computes its owner-outward face flux, and the assembler scatters the summed flux
-  to owner (and, with sign flip, neighbour); boundary faces scatter to owner only. Neither gather
-  nor scatter is open-coded — both compose `mesh.face_cells`
-  (`aquaflux.mesh.FaceCellConnectivity`, the substrate-wide operator; see the mesh rule): operators
-  gather by **direct indexing** with `face_cells.owner` / `face_cells.safe_neighbour`, and
-  `CellBalance` delegates its scatter to `face_cells.scatter_conservative`. So this module owns
-  the *physics* (the flux operators), not the `segment_sum` mechanics (the role the C++
-  `FaceFluxAccumulator` plays).
-- **No monolithic gathered-state bundle.** Operators are handed a lean shared
-  `FieldContext` (`aquaflux/context.py`, issue #280 step 4 — **hoisted out of this package**, not
-  defined here) — a `MeshContext` (`{face_cells, geometry, properties}`, shared across every field
-  evaluated in one residual) wrapped with one field's own `boundary_values`/`gradient`, only the
-  cross-operator or expensive-to-form-once inputs (the reconstructed gradient is a solve, so it lives
-  here, formed once; `properties` is the evaluated `{name: (n_cells,) array}` property map) — and
-  **each operator gathers its own owner/neighbour fields** from it. `DiffusionFlux(coefficient=…)`
-  names the property it reads (`context.mesh.properties[coefficient]`, default `"diffusivity"`;
-  `"viscosity"` for momentum), so adding coefficients is a `PropertyModel` entry, never a context
-  field — see `.claude/rules/properties.md`. `ResidualAssembler.build` takes a `PropertyModel` (not a
-  raw `gamma` array).
-  A diffusion-only solve therefore never forms an advection limiter, and each operator is
-  self-describing about its inputs (what a declarative/DSL assembler consumes). The old fixed
-  `FaceState` union-of-all-operators bundle + free `gather_face_state` are **deleted** — do not
-  reintroduce a god-bundle that every operator must agree on.
-  **"Self-describing" is now checked, not only asserted (#280 steps 2+3; one shared contract since
-  #362, 2026-10-09).** `requires() -> tuple[str, ...]` (named properties, default `()`) and
-  `uses_gradient() -> bool` (default `False`) live **once**, on `term.py::DeclaredInputs`, which
-  **every** term family inherits: `FaceFluxOperator`, `AdvectionScheme`, `VolumeSource`,
-  `TransientTerm` and the flow's `MomentumSource`. Before #362 each family carried the subset it
-  happened to need (sources had no `uses_gradient`, schemes no `requires`, transient and momentum
-  sources neither). `AdvectionFlux` delegates **both** to its scheme. `ResidualAssembler.build`
-  validates both over **every term it holds — fluxes, sources and the transient** (it was flux-only
-  for `uses_gradient` until #362): `properties.require(*declared_properties(terms))`, and refuses
-  `gradient_scheme=None` when any term's `uses_gradient()` is `True`, naming the term class.
-  `declared_properties` is the one union helper, also called by `MomentumContinuity.build`.
-  - **What `uses_gradient()` means, precisely: on an orthogonal grid, does replacing the gradient by
-    zero change the answer?** Not "reads `context.gradient`" — `DiffusionFlux` reads it and answers
-    `False`. That definition is what makes it testable both ways.
-  - **Declarations are falsified, not trusted — `tests/unit/test_declared_inputs.py`.** It imports
-    the whole package, requires a case in `CASES` for **every concrete `DeclaredInputs` subclass**
-    (a new term without one fails the fast gate; a stale case fails too), and per term checks:
-    evaluates finitely against **exactly** its declared properties (an undeclared read is a
-    `KeyError`); each declared property **NaN-poisoned** makes the answer non-finite (a stale
-    declaration stays finite — NaN, not zero, because a silent zero is the defect being guarded);
-    and `uses_gradient()` equals "a zero gradient changes the answer on an orthogonal grid".
-    Mutation-checked 2026-10-09: emptying `DiffusionFlux.requires`, flipping `LimitedUpwind`'s or
-    `DiffusionFlux`'s `uses_gradient`, and adding a stale `requires` to `UniformBodyForce` each fail
-    it; the assembler-level sweeps (sources, transient, `AdvectionFlux`'s `requires` delegation) are
-    pinned in `test_residual_assembler_validation.py`, each mutation-checked the same way.
-  - ⚠️ **No shipped `VolumeSource` reads `context.gradient`** — the SST sources take their strain
-    rate and `grad k`/`grad ω` as frozen constructor fields — so the widened source sweep has no
-    shipped term to refuse yet. It exists so the first one that does is caught.
-  - **`TransientTerm` declares nothing because it reads nothing** — and it has no accumulation
-    coefficient at all, so `ρ c_p dT/dt` / `d(εRC)/dt` cannot be written (#655). When that lands, its
-    coefficient is a named property declared through `requires()`, and `build` already checks it.
-  ⚠️ **`gradient_scheme=None` means NO reconstruction here and keeps
-  meaning that (#361, 2026-09-16)** — it is a checked state, and the right one for pure diffusion on
-  an orthogonal mesh, so this builder (and `ScalarTransport.build`) deliberately did **not** take the
-  library default that `MomentumContinuity.build`/`SSTTurbulence.build` now carry. One sentinel, one
-  meaning: `None` is never a stand-in for "choose for me". `DiffusionFlux.requires()` returns `(self.coefficient,)`;
-  `AdvectionFlux.uses_gradient()` delegates to its scheme, and `LimitedUpwind.uses_gradient()` is
-  unconditionally `True` (its 2nd-order reconstruction reads the gradient whether or not a limiter
-  is set) — the one scheme for which `gradient_scheme=None` used to silently degrade to first order
-  rather than fail. `DiffusionFlux` deliberately does **not** declare `uses_gradient()`, even though
-  it reads `context.gradient` too: its non-orthogonal correction is *exactly* zero on an orthogonal
-  grid, so a missing gradient scheme there is a graceful degradation (Gate A), not a silent one.
-  Both checks run before construction, so a mis-named coefficient or an ungradiented `LimitedUpwind`
-  is a build-time `ValueError`, never a `KeyError` (or a silently-worse answer) inside a jitted
-  residual.
-  **A third self-describing check closes the same gap for the boundary side (binding, #360):**
-  `BoundaryCondition.requires_coefficient() -> bool` (default `False`, `Neumann`/`Convective`
-  override to `True` — see `.claude/rules/boundary.md`) lets `build` union a flux-type closure's need
-  for the assembler's `coefficient` into the same `properties.require(...)` call `requires()` already
-  drives. Before this, a mistyped `coefficient=` on the assembler read a zero Gamma fallback and
-  NaN'd (a divide) inside the residual rather than failing at build — the same failure shape
-  `requires()`/`uses_gradient()` exist to prevent, just on the boundary closures rather than the
-  flux/source operators.
-  **A fourth checks the closure FAMILY, not what it needs (binding, #355):** `build` calls
-  `refuse_a_closure_that_closes_other_fields(boundary, HOST_EQUATION_FIELD, ...)`, so a multi-field
-  flow bundle handed to this single-field assembler is refused by patch name instead of failing on
-  whichever method it lacks. See `.claude/rules/boundary.md` for why the check sits beside `resolve`
-  rather than inside it.
-  **Why the context moved (binding — do not move it back into this package).** `FieldContext` lives
-  below `schemes/` and `boundary/`, importing only `aquaflux.mesh`, precisely so those two packages
-  could consume it too without a cycle (`discretization` already imports both) — the placement defect
-  issue #280 named ("the context lives in `discretization`, the layers below it cannot take it").
-  **Issue #280 is closed as of this move plus two follow-ups, not fully "all four strategy families
-  unified" as first framed.** `schemes/limiter.py`'s `Limiter.limit(field, context)` migrated onto it
-  (see `.claude/rules/schemes.md`). `schemes/gradient.py`'s `GradientScheme` and
-  `boundary/conditions.py`'s `BoundaryCondition` were evaluated and **deliberately do not** — each has
-  a genuine, documented structural reason (see `.claude/rules/schemes.md`'s `GradientScheme` entry and
-  `.claude/rules/boundary.md`'s matching one) rather than being left undone. Forcing either onto this
-  context would have recreated the union-bundle problem hoisting the context out of this package was
-  meant to avoid.
-- The per-operator closures for Milestone 0: **diffusion** (the DeGroot–Straatman
-  non-orthogonal-corrected flux) and the **transient** term (BDF1 at step 1, BDF2 after).
-- The `VolumeSource` seam (zero for pure diffusion, but wired) — this is where turbulence
-  production/dissipation and aquakin reaction sources attach. **BUILT** (`source.py`): the
-  `VolumeSource` ABC returns the *volume-integrated* source per cell (`∫_cell S dV`, production
-  positive — it bakes in its own volume quadrature, as `DiffusionFlux` bakes in face `area`); the
-  assembler subtracts each from the balance. The full nonlinear source is written into the residual
-  (no Patankar `S_C`/`S_P` split — AD linearizes it, the limiter precedent).
-
-## Status — BUILT (Milestone-0 Stage A)
-- **`face_flux.py` — BUILT.** The face-flux contract, shared by every operator (so `diffusion.py`
-  and `advection.py` depend on it, not on each other): `FaceFluxOperator` (the `face_flux(field,
-  context)` strategy interface). `FieldContext` itself (the shared per-field inputs) is **not**
-  defined here any more — see `aquaflux/context.py` and the Responsibility section above.
-  `FieldContext.mesh.properties` is a `Mapping[str, jnp.ndarray]` carrying the assembler's whole
-  evaluated property map (density, viscosity, conductivity, …), and each operator reads the property
-  it names. That is deliberately **one** context field however many properties exist, so adding a
-  property never changes the context's shape. Keep it single-sourced on the assembler, not baked into
-  `DiffusionFlux` as operator config. (There is no `gamma` field; that is the name to look for if a
-  stale reference turns up.)
-- **`diffusion.py` — BUILT.** `DiffusionFlux` (a `FaceFluxOperator` that gathers phi/grad/gamma/x
-  from the context). Its optional **`boundary_coefficient`** field (`(n_faces,)`, default `None`)
-  overrides the owner-cell `Gamma` **on boundary faces only** — a surface whose effective transport
-  coefficient differs from its owner cell's. `None` and every interior face are untouched, so
-  it is behaviour-neutral wherever not supplied (pinned in `test_diffusion.py`). **Two live consumers,
-  both in the adaptive wall treatment** (see `.claude/rules/turbulence.md`), plus the obvious future
-  ones (contact resistance, surface film): the momentum wall-function eddy viscosity `mu + rho
-  nu_t,wall`, and the k equation's wall-face diffusivity `(1-f)·gamma` faded to zero as the wall cell
-  enters the log layer. That second one is worth noting as a *pattern*: a boundary flux that must
-  vanish smoothly is expressed by fading the **coefficient**, not by making the boundary **face value**
-  approach the owner value — the flux is identical, but a state-dependent face value contributes
-  `d(phi_ip)/d(phi_P)` to the residual's linearization and can drive it past one (measured: the k
-  version diverges), whereas the coefficient carries the same dependence at the *frozen* closure state.
-  Implements the
-  flux-*continuous* DeGroot–Straatman normal
-  derivative: one-sided extrapolation from each cell centroid to the integration point, the
-  common face value eliminated via `Gamma_P dphi/dn = Gamma_N dphi/dn`, giving
-  `[(phi_N − phi_P) + corr_N − corr_P] / denom`, `denom = (D_P·n) − (Gamma_P/Gamma_N)(D_N·n)`.
-  The `corr = grad·tangential(D)` terms and the `Gamma`-jump `denom` are written **into the
-  residual**; AD linearizes them. **Note the construction differs from the over-relaxed
-  area-vector split** (OpenFOAM/Jasak): it decomposes the *centroid-to-face* vector, uses
-  each side's own cell gradient (no gradient interpolation), folds skewness into the same
-  `corr` term, and handles coefficient jumps natively (conjugate-ready for `CellZones`).
-  Verified (`test_diffusion.py`): orthogonal interior/boundary flux vs closed form, the
-  correction is the difference `corr_N − corr_P` (cancels for equal gradients), Laplacian
-  recovered at 2nd order, differentiable.
-  - **The `denom` formula and the operator-diagonal conductance are single-homed here (binding, #154).**
-    `flux_continuous_denominator(dpn, dnn, Γ_P, Γ_N)` = `(D_P·n) − (Γ_P/Γ_N)(D_N·n)` is the one home of
-    the coefficient-jump denominator (`DiffusionFlux` imports it), and
-    `flux_continuous_conductance(Γ, geometry, face_cells)` = `Γ_P A / denom` is the per-face **conductance**
-    — exactly `d(owner-outward flux)/d(phi_P)`, so scattering it to both incident cells reproduces this
-    operator's diagonal, and on an orthogonal graded face it is the harmonic mean `2Γ_PΓ_N/(Γ_P+Γ_N)·A/h`.
-    It is the shared definition every consumer of "the transport operator's viscous/diffusive diagonal"
-    calls — the momentum `a_P` (`flow/rhie_chow.py`), the scalar pseudo-time shift and frozen AMG
-    operators (`turbulence/preconditioner.py`, `flow/block_preconditioner.py`) — so none can drift from
-    the residual flux. Do **not** re-derive a face conductance with an owner/neighbour *arithmetic*
-    interpolation of `Γ`: it agrees only for constant `Γ` and over-counts a graded face by `(1+r)²/(4r)`
-    (`r = Γ_N/Γ_P`), which is what made `a_P` disagree with the operator diagonal under a graded turbulent
-    viscosity (issue #154; the `.claude/rules/flow.md` `a_P` note has the consequences).
-- **`residual.py` — BUILT. Two objects: the CONTEXT half and the BALANCE half (binding — do not
-  re-fuse them).** `ResidualAssembler` (`equinox.Module`, built via `.build()` from an
-  injected `BoundaryConditions({name: closure})` collection, which it binds to the mesh
-  (`boundary.resolve(mesh.face_patches, mesh.face_cells)`, off the jit path, which also refuses a map
-  leaving any boundary face uncovered — `.claude/rules/boundary.md`) and stores as a single `boundary`
-  field)
-  builds the **context**: it reconstructs cell gradients once (injected `GradientScheme`, optional —
-  `None` on orthogonal grids where the correction vanishes), evaluates the per-patch boundary
-  closures, evaluates the `PropertyModel`, and packs a `FieldContext`. **`CellBalance`** then
-  assembles the **balance** from that context: sum the injected `FaceFluxOperator`s,
-  `segment_sum`-scatter (owner `+`, interior neighbour `−`), subtract the `VolumeSource`s, add the
-  transient. `R = accumulation − transport`. The assembler holds a `CellBalance` (field `balance`)
-  and delegates, so `build`/`residual` are unchanged for a scalar equation.
-  - **`CellBalance` stores ONLY its operators** — `flux_operators`, `source_operators`, `transient`.
-    The connectivity, geometry, boundary values, gradient and properties all arrive on the
-    `FieldContext` it is handed, exactly as its operators gather from it. So it needs no mesh to
-    construct and no `BoundaryConditions` to test (`test_cell_balance.py` hands it a hand-made
-    context), and it does not duplicate the geometry leaves the assembler already holds.
-  - **Why split:** the coupled flow needs the balance but *cannot* share the context step.
-    `MomentumContinuity` reconstructs one velocity-gradient **tensor** shared across its components,
-    from vector-valued `FlowBoundary` closures rather than a single-field one — it arrives already
-    holding a context. Its two-pass reconstructions (`_velocity_gradient` / `_pressure_gradient`) are
-    **not** a copy of `_gradient`: both assemblers compose `schemes.BoundaryClosure` (#58), the one
-    home of the leading-order → reconstruct → re-evaluate passes and of the `jvp` weight probes
-    (`linearization`), so `_gradient` and `_build_time_boundary_linearization` are one-liners over it.
-    It therefore drives a `CellBalance` per component directly. That is
-    what let the momentum pressure term stop being hand-added and become an ordinary operator
-    (`flow.PressureForce`); see `.claude/rules/flow.md`.
-  - **⚠️ The flux-operator tuple order IS the summation order, and floating-point addition is not
-    associative.** Reordering a balance's operators perturbs the residual in the last bits — which
-    matters here because archived march trajectories are compared bit-for-bit. The momentum block's
-    order is fixed at `(DiffusionFlux, PressureForce, AdvectionFlux)` to reproduce the arithmetic
-    of the hand-assembled form it replaced; pinned by
-    `test_cell_balance.py::test_operators_are_summed_in_tuple_order`.
-  - **Verified, and the extraction was gated on BIT-IDENTITY rather than on tests passing** (2026-08-15,
-    at the base `efc10e3`): the coupled `bfs3d` residual at `state-00067`, the momentum residual with
-    and without the wall-function eddy viscosity, `mdot` and `a_P` — all bit-unchanged; plus 97 arrays
-    over a 2D/3D × compact/corrected × Stokes/upwind/limited × pin-on/off sweep. Stub-operator scatter
-    is conservative and correctly signed (`test_cell_balance.py`).
-    ⚠️ **Method note for any future bit-identity comparison: include quantities the change should NOT
-    touch.** The first run of that harness showed order-one differences in `mdot` and `a_P`, which this
-    change cannot reach — the cause was `hash()` on strings being randomized per process, so the two
-    runs drew different random states. A residual-only comparison would have read as a real regression.
-  - **`residual(phi, *, gradient_hook=None)` seam.** `gradient_hook` is an optional transform
-    `gradient -> gradient` overwriting ghost rows with the value their owning partition computed
-    (identity when omitted). It exists so the **distributed** residual can correct ghost-cell
-    gradients (a ghost's local stencil is incomplete, so its reconstructed gradient is wrong). It is
-    used at **two depths**: `residual` applies it to the returned gradient *after* reconstruction (so
-    the flux reads exchanged ghost gradients), **and** threads it into `_gradient →
-    GradientScheme.gradients(operator_hook=…) → GradientSolve.solve(operator_hook=…)` so an
-    *iterative* gradient scheme (`CorrectedGreenGauss` with `SweptGradientSolve`) refreshes the ghost
-    rows of its solve unknown before each apply — its operator couples across partitions, so one
-    exchange is not enough. A single-pass scheme ignores the deeper use; boundary values are unaffected
-    either way, because every boundary face is owned by an interior cell of its own partition, so its
-    closures read only owner-cell gradients the ghost exchange leaves untouched. (`SweptGradientSolve`
-    honours `operator_hook`; the reduction-forming `GmresGradientSolve` and the nested-solve
-    `HessianCorrectedGradient` **raise** — see `.claude/rules/parallel.md`.)
-  - **`residual(phi, ..., *, fields=None)` and `gradient(phi, *, fields=None)` (issue #280 step 1).**
-    An optional `Mapping[str, jnp.ndarray]` forwarded verbatim to
-    `PropertyModel.evaluate(cell_zones, fields)` — see `.claude/rules/properties.md`'s `Calculated`
-    stage. **Caller-supplied, not auto-populated:** the assembler never adds its own `phi` to the
-    mapping under a guessed name, so a property reading the very field this equation solves needs
-    that field named explicitly by the caller (`fields={"temperature": phi}`), exactly as it would
-    name another equation's converged field. `None` (the default) evaluates every property against
-    `{}`, identical to every call site before this seam existed — no shipped property reads `fields`
-    yet, so this is pure plumbing until `Calculated` lands.
-- **`transient.py` — BUILT.** `TransientTerm`: BDF1 at step 1 (static `first_step`), BDF2
-  after; carries no physical coefficient. Verified against the closed BDF formulae.
-- **`fixed_value.py` — BUILT (`FixedValueCells` + the injected `FixationRow`).** Replaces a chosen set
-  of cells' residual rows with a strong algebraic constraint (a pinned reference pressure, the
-  near-wall ω fixed to its analytical value) while every other cell keeps its balance. The target is a
-  differentiable leaf. **How the constraint is written is an injected strategy, because it must match
-  the variable being solved (binding).** `DifferenceRow` (`phi − target`, the default) is right when
-  the solved unknown *is* `phi`; `LogRatioRow` (`log(phi/target)`) is its counterpart for a field
-  solved in log form, where it equals `w − log target` and so is **exactly linear in the unknown with
-  derivative 1 at any ratio**. The difference row under a log parametrization is instead exponential
-  in the unknown: its correction `δw = target/phi − 1` overshoots to `phi·e^(r−1)` against a target
-  ratio `r`, which both wrecks the step and (because the row then carries the scale of `phi`) lets a
-  handful of fixation cells dominate the residual norm the whole march is judged by. Same root either
-  way — only the path and the conditioning differ. The turbulence `ScalarVariableTransform` owns the
-  choice (`fixation_row()`), since it is the only object that knows which variable is being stepped;
-  do **not** branch on the transform inside the residual. Measured impact on the coupled RANS case:
-  see `.claude/rules/turbulence.md`.
-  - **A `FixationRow` also reports its own derivative — `jacobian_scale(phi, chain)` (binding).** Given
-    the field's `chain = d(phi)/d(unknown)`, it returns `d(row)/d(unknown)`: `DifferenceRow` → `chain`;
-    `LogRatioRow` → `chain/phi`, hence exactly **1** for a log-solved field. **Why the interface needs
-    it:** a fixation row and a transport row of the same block can differ by orders of magnitude in the
-    solved unknown, so anything rescaling the block *per row* must ask each row rather than apply the
-    block-wide chain factor everywhere. Skipping this was a real regression — the coupled RANS
-    preconditioner rescaled the near-wall ω fixation rows by `1/ω`, giving a `1e-5` eigenvalue cluster
-    that stalled the Krylov solve (27× worse linear residual; see `.claude/rules/turbulence.md`). Pin
-    any implementation against **AD of its own `row`**, which is what keeps the two from drifting.
-- **`source.py` — BUILT.** `VolumeSource` (ABC, `source(field, context) -> (n_cells,)`): a
-  volumetric term produced/consumed *in* the cell rather than across faces (reaction, turbulence
-  production/dissipation). Returns the volume-integrated source (production positive; bakes in its
-  own volume). Reads cell-oriented fields from the shared `FieldContext` (volume, gradient,
-  properties) and holds any frozen coupling field as constructor state, like `AdvectionFlux.mass_flux`.
-  `ResidualAssembler.build(..., source_operators=())` subtracts each; empty ⇒ unchanged. Verified
-  (`test_source.py`): correct sign, summation, additive composition with the flux, volume
-  integration, and differentiability in the field and the source's own coefficient.
-- **`advection.py` — BUILT (upwind + limited 2nd order).** `AdvectionScheme` (interface) →
-  `FirstOrderUpwind`, `LimitedUpwind`; `AdvectionFlux(mass_flux, scheme)` returns the
-  owner-outward flux `mdot_f phi_f`. **The mass flux is always injected — the operator reads
-  `mdot_f`, never builds it.** In the coupled flow it is the Rhie–Chow `mdot` (`flow/momentum.py`
-  computes it via `interior_mass_flux` and feeds the *same* array to both the momentum convection
-  and continuity — the consistency requirement, mirroring the Fortran `calcmdot` → `convectImpl`
-  for U/V/W); a scalar transported by a solved flow must likewise reuse that flow's `mdot`, not
-  rebuild it (rebuilding `(u·n)A` from cell velocities is non-conservative and violates discrete
-  continuity). Because `MomentumContinuity._mass_flux` is private, exposing the converged `mdot`
-  is the seam for the future scalar-transport coupling. `mdot = (u·n)A` for a *prescribed
-  divergence-free* velocity is a **verification-only** helper and now lives in the test support
-  (`tests/support/fields.py::face_mass_flux`), **not** the library — its divergence-free
-  precondition makes it unsafe as a production operator (only uniform / stream-function fields
-  qualify). `FirstOrderUpwind` is **linear** (affine residual → one Newton step) and monotone;
-  verified against the 1-D advection–diffusion exponential
-  (`tests/integration/test_advection_diffusion.py`). `LimitedUpwind` reconstructs
-  `phi_f = phi_C + psi_C ∇φ_C·(x_f − x_C)` from the upwind cell `C`.
-- **Slope limiter — BUILT, but lives in `schemes/` (`aquaflux/schemes/limiter.py`), not here.**
-  `Limiter` (interface) → `VenkatakrishnanLimiter(softening, scale)` is physics-free reconstruction
-  numerics (a **per-cell** slope limiter `psi ∈ [0,1]`, smooth Venkatakrishnan 1993, softened by
-  `eps = softening · scale` — a fraction of the field's reference magnitude, #144; it was
-  `coeff.F90`'s dimensionally inconsistent `eps² = vol K³` until 2026-10-09, see `schemes.md`), so it sits beside the gradient/interpolation schemes — keeping the
-  `discretization → schemes` dependency one-way (a `schemes/` scheme could want limiting; it must
-  not import *up* into `discretization`). ⚠️ **`advection.py` imports `Limiter` at RUN TIME, not under
-  `TYPE_CHECKING` (2026-09-24, #437) — do not move it back.** `LimitedUpwind.limiter` is annotated with
-  it, and the case-file reader's `SettingsMapping` resolves that annotation with `typing.get_type_hints`
-  to decide what a file may put there; under `TYPE_CHECKING` the name does not exist at run time and
-  building the case registry raises `NameError` at import. No cycle: `schemes/` imports nothing from
-  `discretization/`. The limiter is **held by `LimitedUpwind`**
-  (`LimitedUpwind(limiter=…)`, in `advection.py`) and
-  evaluated only when that scheme runs — a diffusion-only or first-order-advection solve never
-  forms it (`psi` is not a shared/gathered field; `limiter=None` gives `psi = 1`, unlimited 2nd
-  order; `psi = 0` = first order). Verified physics-free: `psi → 1` on smooth fields, `< 1` at a
-  jump, in `[0,1]`, differentiable. **The limiter is the first genuinely nonlinear term** (stencil
-  min/max + rational function of `phi`), so the residual now needs the IFT solve.
-- **The AD-linearized-limiter result (`tests/integration/test_limited_advection.py`).** The
-  reference **lags** the limiter (freezes `psi`, adds the limited term as an explicit RHS,
-  `coeff.F90` line 326) and converges only *linearly*. Writing `psi(phi)` into the residual and
-  letting AD linearize it puts the limiter in the Jacobian and recovers **quadratic** Newton
-  convergence (measured: ~3 steps vs the lagged ~5 — under the old `eps² = vol K³` softening at
-  K = 1, 40 cells; the test now runs `softening` 0.05 at scale 1 and still asserts AD < lagged),
-  while staying differentiable (IFT) and giving 2nd-order accuracy — the "after" to the reference's
-  "before". Boundedness: the smooth limiter *damps* over/undershoot rather than strictly eliminating
-  it — the smoothness is what makes it AD-linearizable. (The "~halves it" once recorded here was at
-  K = 0.3 under the old form; the top-hat test now runs `softening` 0.01 and asserts < 0.7×.)
-  - **`AdvectionScheme.with_reference_scale(provider)`** (default: self; `LimitedUpwind` forwards
-    to its limiter) is how an assembler sets a scaled scheme for its field — see `schemes.md`.
-    `ResidualAssembler` does NOT call it: it knows nothing of what its field is, so a caller using
-    the generic assembler with a scale-free Venkatakrishnan limiter gets the limiter's refusal.
-- **Sign convention (binding, matches the C++ `FaceFluxAccumulator`).** Every `FaceFluxOperator`
-  returns the **owner-outward flux of the conserved quantity**; the residual is the finite-volume
-  balance `R = accumulation + Σ scatter(outward flux)` (owner `+`, neighbour `−`). So advection
-  returns `+mdot_f phi_f` and diffusion returns `−Γ(∇φ·n)A` (down-gradient, Fourier). `R` is
-  invariant to this choice vs the earlier `−scatter` form, but the uniform outward-flux
-  convention is what keeps multiple operators composable.
-- **Gate C — PASSED (skewed mesh).** Injecting `CorrectedGreenGauss` into the residual folds
-  the non-orthogonal correction into `R(φ)`; AD puts it in the Jacobian, so Newton is one step
-  and linear-exact on a 25%-skewed grid (`tests/integration/test_skewed_diffusion.py`,
-  `.claude/rules/solve.md`). The residual is **affine in φ** with the gradient scheme injected
-  (the gradient solve and the correction are both linear in φ), which is *why* one step is
-  exact.
-- **Gradient-boundary circularity — RESOLVED for every Green–Gauss scheme but the Hessian-corrected
-  one (#648, 2026-10-09).** A non-Dirichlet boundary value depends on the owner gradient (`corr`), and
-  the reconstruction depends on boundary values. Every shipped closure is **affine** in the owner
-  gradient, `phi_f = phi_f0 + w·∇φ_P`, so the reconstruction is handed `phi_f0` (the closures at zero
-  gradient) and `w` (`BoundaryClosure.gradient_weight`), and `CompactGreenGauss`,
-  `CorrectedGreenGauss` and `MultipleCorrectionGradient` move `w·∇φ_P` to their left-hand side through
-  `schemes.boundary_gradient_block` — so their gradient satisfies the conditions exactly, and Gate C
-  (one Newton step, linear-exact) now holds with Neumann walls on a skewed grid too
-  (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`). The flux still uses the closures evaluated
-  at the reconstructed gradient. `HessianCorrectedGradient` still reconstructs against `phi_f0` alone
-  (the leading-order treatment, exact only for gradient-independent boundary values — orthogonal grids
-  and all-Dirichlet problems); that is #648's open follow-up. See `.claude/rules/schemes.md`.
-
-## ⚠️ Single-threaded kernels in the compiled residual and its JVP are NOT a lever (measured 2026-10-17)
-
-The `dot` entry in the root briefing found a reduction-rooted fusion running on one thread at 40 % of a
-reconstruction's kernel time. This asks the same question of the whole coupled residual and the JVP the
-Krylov matvec and the coloured probe are made of, and the answer is no. Harness:
-`validation/pitzdaily_openfoam/fusion_profile.py`. It joins the compiled HLO (fusion kind,
-`outer_dimension_partitions`, root opcode, bytes touched) to per-kernel times from
-`jax.profiler.trace`. Configuration: `main` `183e9ffa` (adjugate first pass already in), pitzDaily
-`case.yaml`, `hybrid_initialize` state, 61125 unknowns, `jax.jit` over `eqx.partition`ed params,
-4-core Linux x86_64 container, jax/jaxlib 0.11.2, x64, CPU, Python 3.13.
-
-- **The instrument.** The thunk executor runs independent kernels concurrently: on 4 cores the JVP's
-  kernel events sum to ~2× its span, and a lone 0.75 MiB copy reads 550 µs. So per-kernel cost comes
-  from a second pass with every thread pinned to one core, timing only *solo* events (no other kernel
-  overlapping). The compiled program is identical there (315 partitioned fusions either way, since
-  partitioning is decided at compile time). The solo times sum to within ~10 % of the one-core wall.
-  The parallel trace contributes **time alone**: how long each kernel was the only one in flight. That
-  is the only time an unsplit kernel leaves cores idle. **Verified on a known cost:** with
-  `PITZ_FUSION_ARM=lapack` (batched LU restored in the first pass) the 15 custom calls (5 `getrf` + 10
-  `trsm`) are the largest class at 13.2 ms of one-core time, against a 14.7 ms one-core residual
-  delta.
-- **XLA's rule** (`ParallelTaskAssignment`, `xla/service/cpu/parallel_task_assignment.cc`, openxla main
-  read 2026-10-17; the installed jaxlib carries the class and its log strings). A memory-bound kernel
-  (flops/byte ≤ 1) gets `min(ceil(sqrt(cores)), bytes_accessed / 256 KiB)` parts, so **at most 2 on 4
-  cores**, and only once it touches 512 KiB. A compute-bound one gets
-  `min(cores, (flops + 10·bytes) / 1e5)`. Custom fusions, `dot` and custom calls are never split. The
-  56 unsplit ≥ 0.75 MiB `copy`s (each a copy of one shared zero broadcast feeding an in-place
-  scatter-add) are elementwise and above the threshold. That they carry no partitions is *inferred* to
-  be copy insertion running after the pass, not read in the source.
-- **Clean JVP** (page faults removed, see below): 11.1 ms on 4 cores, 33.0 ms on one, so parallel
-  efficiency is 75 %. One-core solo time 32.3 ms over 952 kernels:
-
-  | class | kernels | ms | share |
-  |---|---|---|---|
-  | partitioned (2 ways) | 312 | 23.90 | 73.9 % |
-  | under 512 KiB touched | 537 | 4.05 | 12.5 % |
-  | `dot` (batched 2×2 / 3×1 per cell) | 42 | 2.87 | 8.9 % |
-  | other (the post-pass copies) | 56 | 0.83 | 2.6 % |
-  | `__ynn_fusion` (reduction-rooted) | 3 | 0.64 | 2.0 % |
-  | scatter-rooted | 2 | 0.02 | 0.1 % |
-
-  Unpartitioned: 640 kernels, 8.4 ms (26 %). Half of it sits in the largest 72, and **the largest is
-  0.9 %** of the program (a `__ynn_fusion`, 292 µs). On 4 cores an unpartitioned kernel is alone in
-  flight for **0.88 ms of a 12.7 ms span (7 %)**, spread over 16+ kernels. The residual is the same
-  shape: 28 % unpartitioned over 344 kernels, the largest 1.8 %. **No kernel is worth more than ~1 %,
-  so there is nothing for a local rewrite to hit.** The census's "537 single fusions" is mostly
-  kernels too small to split, and their time is small too.
-- **The precedent's own mechanism was measured anyway, and it lost.** The JVP's three
-  `__ynn_fusion`s are the skewness `einsum("f...j,fj->f...")` in `schemes/interpolation.py`
-  (`interpolate_to_face`) and `jnp.sum(S * S, axis=(-2, -1))` in `turbulence/strain.py`. Respelled as
-  `vectors.dot` / `norm_squared`, the kernel structure moves as predicted: `__ynn_fusion` goes
-  3 → 0 (JVP) and 2 → 0 (residual), with partitioned fusions 312 → 315. But wall time does not
-  follow. Three interleaved pairs, best of 30, mmap threshold raised: residual 5.22 / 5.40 / 5.25 →
-  **6.11 / 5.73 / 5.75 ms (slower)**, JVP 9.83 / 9.86 / 10.23 → 10.08 / 9.92 / 10.39 ms. Results moved
-  by a rounding of the summed terms (2e-17 and 8e-18 of max |value|). **Not shipped.** The precedent's
-  win came from three kernels being 40 % of their program, and these are 2 %. The 42 `dot`s are 36 in
-  `schemes/multiple_correction.py` (`_one_exact`, `reconstruct`) and 6 in `interpolate_to_face`. As
-  elementwise multiply-sums (a monkeypatch, since that file has another owner) they go 42 → 2 while
-  unpartitioned loop fusions only drop 477 → 461, and the JVP wall stays within noise.
-- **⚠️ THE LARGEST THING IN A STANDALONE JVP TIMING ON LINUX IS PAGE FAULTS, AND THE MARCH DOES NOT
-  PAY THEM.** The JVP's temporary buffer is 42.8 MiB, the residual's 22.6 MiB. glibc's mmap threshold
-  adapts upward only to 32 MiB on 64-bit, so the JVP's buffer is `mmap`ed and `munmap`ed on **every
-  call**, about **11 000 minor faults/call** (every page). The residual's buffer is reused (0–354).
-  Fixing the threshold (`MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`, or the
-  harness's `PITZ_FUSION_MMAP_THRESHOLD_MIB`) takes the JVP from **16.5 → 9.8–11.1 ms** with 10–50
-  faults/call and identical results. The residual is unchanged. The faults land in whichever kernel
-  touches a page first, which in the default run inflated the copies (5.8 ms) and the small kernels
-  (11.9 ms) and made unpartitioned look like 44 % of the JVP. **On the shipped march it buys nothing:**
-  `compare.py`, default 183 s (a 212 s first run was a cold compilation cache) against raised
-  thresholds 180 s and 186 s, with identical step tables (21 steps, 106 cycles, `x_r/h` 8.0686,
-  `run_case.sh` records no `MALLOC_` variable). The matvecs run inside the compiled step program,
-  which (inferred) allocates once per step, not once per matvec. So **a per-call JVP time measured
-  standalone on Linux overstates the march's matvec by ~40 % at this size**. Quote it with its fault
-  count, and do not project a march gain from it. macOS's allocator is a different mechanism and was
-  not measured.
+Assemble the discrete cell residual `R(state, params)`; AD produces the Jacobian/adjoint. Dated
+measurements and verification runs: `.claude/notes/discretization-log.md`.
 
 ## Binding decisions
-- **No hand-derived linearization. Ever.** The reference codes carry `coeff0`/`coeff1`
-  (C++) and hand-assembled block coefficients (Fortran); **AD deletes all of it**. Write
-  the **full physical flux** as one residual term — including the non-orthogonal correction
-  **in the residual**, not deferred to an explicit RHS as both references must do. AD then
-  puts the correction *in the matrix*, giving a more accurate operator than either reference.
-  This is a Milestone-0 deliverable, not incidental.
-- **Operators are strategy classes** (CLAUDE Principle 1): each is an `equinox.Module`
-  implementing a common face-flux / volume-source `Protocol`, constructed with its
-  injected schemes, coefficients, and the geometry it reads. Methods are side-effect-free
-  (immutable Module) — required for both `jit`/`grad` and testability.
-- **Operators are injected into the assembly engine, not hard-wired.** The residual
-  assembler is constructed with a list of operator strategy objects; it does not import
-  specific operators. A test can assemble a residual from a single stub operator. (A
-  Layer-0 escape hatch may accept a raw closure, but built-in operators are strategy
-  classes.)
-- **System-first**: the residual is over the whole state vector with a shared DOF
-  layout, never a per-equation matrix. Coupling is inferred by AD from which unknowns a
+- **No hand-derived linearization, ever.** Write the full physical flux — including the non-orthogonal
+  correction — as one residual term; AD puts it in the matrix (both precursors defer it to an explicit RHS).
+- **Operators are injected strategy classes** (`equinox.Module`s, side-effect free); the assembler holds a
+  list of them and imports no specific operator, so a test can assemble from one stub.
+- **System-first**: the residual is over the whole state vector; coupling is inferred by AD from what a
   term reads.
+- **Sign convention**: every `FaceFluxOperator` returns the **owner-outward flux of the conserved
+  quantity**; `R = accumulation + Σ scatter(outward flux)` (owner `+`, neighbour `−`). Advection returns
+  `+mdot_f phi_f`, diffusion `−Γ(∇φ·n)A`.
+- **Compose, do not re-derive**: face geometry from `aquaflux/mesh`, interpolation/gradients/limiters from
+  `aquaflux/schemes`. Gather by direct indexing on `face_cells.owner`/`safe_neighbour`; scatter through
+  `face_cells.scatter_conservative` (in `CellBalance`). This package owns the physics, not `segment_sum`.
+
+## The context and self-describing terms
+- **No monolithic gathered-state bundle.** Operators get a lean `FieldContext` (`aquaflux/context.py`): a
+  shared `MeshContext` (`face_cells`, `geometry`, `properties` — the evaluated `{name: (n_cells,)}` map)
+  plus one field's `boundary_values`/`gradient` (the gradient is a solve, formed once). Each operator
+  gathers its own owner/neighbour fields. Adding a coefficient is a `PropertyModel` entry, never a context
+  field (`.claude/rules/properties.md`); there is no `gamma` field. Do not reintroduce a union bundle.
+- **`FieldContext` lives in `aquaflux/context.py`, not here — do not move it back.** It imports only
+  `aquaflux.mesh`, so `schemes/` and `boundary/` can consume it without a cycle. `Limiter.limit(field,
+  context)` uses it; `GradientScheme` and `BoundaryCondition` deliberately do not (`schemes.md`,
+  `boundary.md` give the reasons).
+- **`term.py::DeclaredInputs`** — `requires() -> tuple[str, ...]` (default `()`) and `uses_gradient() ->
+  bool` (default `False`), inherited by **every** term family: `FaceFluxOperator`, `AdvectionScheme`,
+  `VolumeSource`, `TransientTerm`, flow's `MomentumSource`. `AdvectionFlux` delegates both to its scheme.
+  `ResidualAssembler.build` checks every term (fluxes, sources, transient):
+  `properties.require(*declared_properties(terms))` (`declared_properties` is the one union helper, also
+  used by `MomentumContinuity.build`), and refuses `gradient_scheme=None` when any term `uses_gradient()`,
+  naming it. Both are build-time `ValueError`s, never a `KeyError` inside a jitted residual.
+  - **`uses_gradient()` means: on an orthogonal grid, does a zero gradient change the answer?** So
+    `DiffusionFlux` reads the gradient but answers `False` (its correction vanishes there — graceful
+    degradation); `LimitedUpwind.uses_gradient()` is unconditionally `True`.
+  - `DiffusionFlux.requires()` returns `(self.coefficient,)`.
+  - **Declarations are falsified, not trusted** — `tests/unit/test_declared_inputs.py` requires a `CASES`
+    entry for every concrete `DeclaredInputs` subclass (new term without one fails; stale fails too) and
+    checks: evaluates against exactly its declared properties; each declared property **NaN-poisoned**
+    makes the answer non-finite (NaN, not zero, since a silent zero is the defect); `uses_gradient()`
+    matches the definition above. Assembler-level sweeps: `test_residual_assembler_validation.py`.
+  - ⚠️ No shipped `VolumeSource` reads `context.gradient` (SST sources take frozen fields), so the source
+    sweep has nothing to refuse yet — it exists for the first one that does.
+  - `TransientTerm` declares nothing and has **no accumulation coefficient**, so `ρ c_p dT/dt` /
+    `d(εRC)/dt` cannot be written yet (#655); when it lands, declare the coefficient via `requires()`.
+- ⚠️ **`gradient_scheme=None` means no reconstruction, and only that.** It is right for pure diffusion on
+  orthogonal meshes, so `ResidualAssembler.build` and `ScalarTransport.build` do not take the library
+  default that `MomentumContinuity.build`/`SSTTurbulence.build` carry. `None` never means "choose for me".
+- **Boundary-side checks in `build`:** `BoundaryCondition.requires_coefficient()` (`Neumann`/`Convective`)
+  adds the assembler's `coefficient` to the same `require` call; `refuse_a_closure_that_closes_other_fields(
+  boundary, HOST_EQUATION_FIELD, ...)` refuses a multi-field flow bundle by patch name
+  (`.claude/rules/boundary.md`).
+
+## Modules — BUILT
+- **`face_flux.py`** — `FaceFluxOperator` (`face_flux(field, context)`), the contract `diffusion.py` and
+  `advection.py` both depend on (not on each other).
+- **`diffusion.py` — `DiffusionFlux(coefficient=…)`** reads `context.mesh.properties[coefficient]`
+  (default `"diffusivity"`; `"viscosity"` for momentum). Flux-continuous non-orthogonal normal derivative:
+  one-sided extrapolation from each centroid to the integration point, the face value eliminated via
+  `Γ_P dφ/dn = Γ_N dφ/dn`, giving `[(φ_N − φ_P) + corr_N − corr_P] / denom`,
+  `denom = (D_P·n) − (Γ_P/Γ_N)(D_N·n)`. Unlike the over-relaxed area-vector split (Jasak), it decomposes
+  the centroid-to-face vector, uses each side's own gradient, folds skewness into `corr`, and handles
+  coefficient jumps natively.
+  - **`flux_continuous_denominator` and `flux_continuous_conductance` are the one home (binding, #154).**
+    The conductance `Γ_P A / denom` is exactly `d(owner-outward flux)/d(φ_P)` (harmonic mean on an
+    orthogonal graded face), used by momentum `a_P` (`flow/rhie_chow.py`), the scalar pseudo-time shift and
+    frozen AMG operators (`turbulence/preconditioner.py`, `flow/block_preconditioner.py`). ⚠️ Never
+    re-derive a conductance with an arithmetic `Γ` interpolation: it over-counts a graded face by
+    `(1+r)²/(4r)` (`.claude/rules/flow.md` `a_P` note).
+  - **`boundary_coefficient`** (`(n_faces,)`, default `None`) overrides the owner `Γ` on boundary faces
+    only. Consumers: the momentum wall-function eddy viscosity and the k equation's wall-face diffusivity
+    `(1-f)·γ` (`.claude/rules/turbulence.md`). Pattern: a boundary flux that must vanish smoothly fades the
+    **coefficient**, not the face value — a state-dependent face value enters the linearization and
+    diverged for k.
+- **`residual.py` — two objects, context half and balance half (binding — do not re-fuse).**
+  `ResidualAssembler.build(...)` binds an injected `BoundaryConditions` (`resolve` off the jit path) and
+  builds the **context**: gradients once (injected `GradientScheme`, optional), boundary closures,
+  `PropertyModel`. **`CellBalance`** assembles the **balance**: sum the `FaceFluxOperator`s, scatter, subtract
+  `VolumeSource`s, add the transient (`R = accumulation − transport`). The assembler holds it as `balance`.
+  - `CellBalance` stores **only** `flux_operators`, `source_operators`, `transient`; everything else comes
+    on the context, so it is testable with a hand-made context (`test_cell_balance.py`).
+  - Why split: `MomentumContinuity` builds its own context (one velocity-gradient tensor from `FlowBoundary`
+    closures) and drives a `CellBalance` per component; this is what made the pressure term an ordinary
+    operator (`flow.PressureForce`). Both assemblers compose `schemes.BoundaryClosure` for the two-pass
+    reconstruction and `jvp` weight probes, so `_gradient` and `_build_time_boundary_linearization` are
+    one-liners over it.
+  - ⚠️ **Flux-operator tuple order is the summation order** (float addition is not associative), and
+    archived march trajectories are compared bit-for-bit. Momentum's order is fixed at
+    `(DiffusionFlux, PressureForce, AdvectionFlux)`; pinned by
+    `test_cell_balance.py::test_operators_are_summed_in_tuple_order`.
+  - ⚠️ For any bit-identity comparison, include quantities the change should **not** touch: per-process
+    `hash()` randomization once produced order-one differences that a residual-only check would have read
+    as a regression.
+  - **`residual(phi, *, gradient_hook=None)`** — a `gradient -> gradient` transform for the distributed
+    residual's ghost rows, applied after reconstruction and threaded into
+    `GradientScheme.gradients(operator_hook=…)` → `GradientSolve.solve(operator_hook=…)` for iterative
+    schemes (`.claude/rules/parallel.md`).
+  - **`residual(..., fields=None)` / `gradient(phi, *, fields=None)`** forward a caller-supplied mapping to
+    `PropertyModel.evaluate`; the assembler never inserts its own `phi`. Pure plumbing until `Calculated`
+    lands (`.claude/rules/properties.md`).
+- **`transient.py` — `TransientTerm`**: BDF1 at step 1 (static `first_step`), BDF2 after.
+- **`source.py` — `VolumeSource`** (`source(field, context) -> (n_cells,)`): volume-integrated, production
+  positive, subtracted by the assembler. The full nonlinear source goes in the residual (no Patankar
+  `S_C`/`S_P` split). Frozen coupling fields are constructor state. This is where turbulence production
+  and aquakin reactions attach.
+- **`fixed_value.py` — `FixedValueCells` + injected `FixationRow`**: replaces chosen cells' rows with an
+  algebraic constraint (pinned reference pressure, near-wall ω); the target is a differentiable leaf.
+  - **The row form must match the solved variable (binding).** `DifferenceRow` (`phi − target`) when the
+    unknown is `phi`; `LogRatioRow` (`log(phi/target)`) when it is solved in log form, where it is exactly
+    linear with derivative 1. A difference row under a log unknown is exponential: it overshoots and lets a
+    few fixation cells dominate the residual norm. The turbulence `ScalarVariableTransform.fixation_row()`
+    chooses; do not branch on the transform inside the residual.
+  - **`jacobian_scale(phi, chain)`** returns `d(row)/d(unknown)` (`DifferenceRow` → `chain`; `LogRatioRow`
+    → `chain/phi`). Anything rescaling a block per row must ask each row: rescaling ω fixation rows by
+    `1/ω` once stalled the Krylov solve (`.claude/rules/turbulence.md`). Pin implementations against AD of
+    their own `row`.
+- **`advection.py` — `AdvectionScheme` → `FirstOrderUpwind` (linear, monotone), `LimitedUpwind`
+  (`phi_f = phi_C + psi_C ∇φ_C·(x_f − x_C)` from the upwind cell); `AdvectionFlux(mass_flux, scheme)`.**
+  - **The mass flux is always injected, never built here.** In the coupled flow it is the Rhie–Chow
+    `mdot` (`flow/momentum.py`, via `interior_mass_flux`), the same array feeding momentum convection and
+    continuity; a transported scalar reuses the flow's flux (`.claude/rules/transport.md`).
+    `tests/support/fields.py::face_mass_flux` (`(u·n)A` for prescribed divergence-free fields) is
+    verification-only.
+  - The limiter lives in `schemes/limiter.py` (`VenkatakrishnanLimiter`), held by
+    `LimitedUpwind(limiter=…)` and formed only when that scheme runs (`None` → `psi = 1`). ⚠️
+    **`advection.py` imports `Limiter` at run time, not under `TYPE_CHECKING`** — the case reader's
+    `SettingsMapping` resolves the annotation with `typing.get_type_hints`, and the registry would raise
+    `NameError`. No cycle: `schemes/` imports nothing from `discretization/`.
+  - **The limiter is in the residual and AD linearizes it**, recovering quadratic Newton convergence where
+    the precursor's lagged limiter converges linearly (`tests/integration/test_limited_advection.py`). The
+    smooth limiter damps rather than eliminates over/undershoot — the smoothness is what makes it
+    AD-linearizable.
+  - `AdvectionScheme.with_reference_scale(provider)` sets a scaled scheme's scale (`schemes.md`).
+    `ResidualAssembler` does not call it (it does not know its field); callers must.
+- **Gate C (skewed mesh).** With `CorrectedGreenGauss` injected the residual is affine in φ, so Newton is one
+  step and exact on a 25 %-skewed grid (`tests/integration/test_skewed_diffusion.py`).
+- **Gradient-boundary circularity — resolved for every Green–Gauss scheme but the Hessian-corrected one.**
+  Closures are affine in the owner gradient (`phi_f = phi_f0 + w·∇φ_P`); `CompactGreenGauss`,
+  `CorrectedGreenGauss` and `MultipleCorrectionGradient` move `w·∇φ_P` to their left-hand side via
+  `schemes.boundary_gradient_block`, so Gate C holds with Neumann walls too
+  (`test_gate_c_holds_with_flux_walls_on_a_skewed_mesh`). `HessianCorrectedGradient` still uses `phi_f0`
+  alone (#648 follow-up; `schemes.md`).
+
+## ⚠️ Single-threaded kernels in the compiled residual and its JVP are NOT a lever
+
+Measured 2026-10-17 on pitzDaily (4-core Linux, jax 0.11.2; harness
+`validation/pitzdaily_openfoam/fusion_profile.py`, tables in the log): no kernel is worth more than ~1 % of
+the coupled residual or its JVP, and respelling the reduction-rooted fusions through `vectors.dot` removed
+them without a wall-time gain. Do not pursue per-kernel threading rewrites here.
+- ⚠️ **A standalone JVP timing on Linux is dominated by page faults the march does not pay**: the JVP's
+  ~43 MiB temporary exceeds glibc's adaptive mmap threshold (32 MiB cap), so it is `mmap`ed per call
+  (~11 000 faults). Raising `MALLOC_MMAP_THRESHOLD_`/`MALLOC_TRIM_THRESHOLD_` cut it 16.5 → ~10 ms and
+  changed the shipped march not at all. Quote a standalone JVP time with its fault count and never project a
+  march gain from it.
 
 ## Testability seam
-- The scatter engine must be testable with a hand-made 2–3 cell mesh and a stub
-  closure returning a known flux — assert the `segment_sum` result cell-by-cell.
-- Each operator ships an **order-of-accuracy unit test** on an analytic field
-  (CLAUDE Principle 1), independent of any solve.
-- The AD Jacobian of the diffusion operator is checked against the C++ non-orthogonal
-  diffusion calculator as a golden numerical oracle.
-
-## One-source-of-truth watch
-Face geometry comes from `aquaflux/mesh`; interpolation/gradient come from
-`aquaflux/schemes`. This module **composes** them — it does not re-derive geometry or
-inline a scheme (CLAUDE Principle 2).
+- The scatter engine is testable with a 2–3 cell mesh and a stub closure (assert cell by cell).
+- Each operator ships an order-of-accuracy unit test on an analytic field, independent of any solve.
