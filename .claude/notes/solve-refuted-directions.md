@@ -1112,3 +1112,16 @@ residual is a round-off of `‖b‖`: no verdict was wrong at targets 0.3, 1e-3 
 was declared converged with its true residual 0.13 % above the target. The class takes any `rtol`, so the
 verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
 `solve-open-directions.md` 6b.
+
+## Stage-1 SIMPLE block-diagonal flow preconditioner (damped-Jacobi Schur + `diag(a_P)⁻¹`) — DELETED as dominated
+
+`DampedJacobiSchur` (a fixed damped-Jacobi sweep on the compact Rhie–Chow pressure Laplacian
+`pressure_schur_laplacian`, `c_f = ρ(V/a_P)_f A_f/(d·n)_f`) composed block-diagonally with
+`DiagonalVelocity` (`diag(a_P)⁻¹`), selected by `inner="jacobi"`. It cut outer GMRES ~8–12× against
+unpreconditioned (skewed cavity: 92→11 at 432 dof, 309→25 at 1200; no further configuration recorded),
+but the count still grew with the mesh because a Jacobi inner is not h-independent. The smoothed-AMG
+inner (Stage 2, `SmoothedAmgSchur` + an AMG velocity block, block-triangular) made it obsolete, and it was
+deleted with the `inner=` selector, `AggregationSchur` (`inner="multigrid"`) and the geometric
+coefficient-flow multigrid. The kernels `pressure_schur_laplacian` / `damped_jacobi_solve` remain in
+`flow/preconditioner.py`. Trap: do not reintroduce a non-h-independent inner for the flow block.
+Detail: `.claude/rules/flow.md` ("Structure" and "Stage 2" entries).

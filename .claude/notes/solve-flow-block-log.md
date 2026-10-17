@@ -107,7 +107,7 @@ current, corrected `_coupled_shift_policy`.
 the **pressure prediction** that defines their `R` variants was absent, and so was Algorithm 1's
 closing velocity update. Every arm above is therefore the lower block-triangular pass, which is a
 legitimate preconditioner (Murphy--Golub--Wathen) but not the one the name promised, and the paper puts
-the convergence benefit squarely on the axis that was missing. See `.claude/rules/flow.md` for the
+the convergence benefit squarely on the axis that was missing. See `.claude/notes/flow-log.md` ("MSIMPLE(R) measurements") for the
 conformance write-up and the taxonomy; the option is now `schur_scaling="msimple"` plus a separate
 `composition` ∈ `{"triangular", "simple", "simpler"}`, and MSIMPLER is the pairing
 `schur_scaling="msimple", composition="simpler"`.
@@ -134,7 +134,7 @@ its baseline is 17 cycles, not 6, and the two runs' *ratios* are not comparable 
 
 - **The prediction is worth 45 → 32 (−29 %) at zero shift and 40 → 22 (−45 %) at the march's own
   shift**, bracketing the −33 % measured independently on a flow-only channel
-  (`validation/simple_type_composition.py`; see `.claude/rules/flow.md`). So the missing step was real,
+  (`validation/simple_type_composition.py`; see `.claude/notes/flow-log.md`, "MSIMPLE(R) measurements"). So the missing step was real,
   and it buys on a flagship-scale operator what the paper says it buys.
 - ⚠️ **THE "~8-9x DOMINATED" HEADLINE DOES NOT SURVIVE AT THE OPERATING POINT. At the march's own shift
   MSIMPLER is 22 cycles against the shipped inverse's 19 — within 16 %.** It is still behind, and behind
