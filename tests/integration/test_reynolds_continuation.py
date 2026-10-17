@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import Convergence
+from aquaflux.solve import Convergence, LinearSolveSettings
 from aquaflux.turbulence import (
     BlockDiagonal,
     ScalarTwoLevel,
@@ -30,6 +30,14 @@ from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 from tests.integration.test_coupled_rans import PRECONDITIONER, _channel
 
 MAX_STEPS = 60
+
+# The ramped-gradient test solves each Newton step to a relative residual of 0.1 rather than the coupled
+# regime's base 0.3. Under the residual stop a step really is only as accurate as that tolerance, and at
+# 0.3 the target-Re march on this channel can be thrown out of its convergent basin within a few steps:
+# with a fixed 0.3 it never converges, and with the adaptive tolerance it converges or not according to
+# the machine's rounding. At 0.1 it converges in about a dozen full-length steps with or without the
+# adaptive tolerance, so the test checks the adjoint rather than whether the march happened to land.
+RAMPED_GRADIENT_LINEAR_SOLVE = LinearSolveSettings(rtol=0.1)
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +116,7 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
         channel,
         channel.pack_state(*_hybrid(channel)),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
+        linear_solve=RAMPED_GRADIENT_LINEAR_SOLVE,
     )
 
     def objective(nu_scale, n_points):
@@ -118,6 +127,8 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
             max_steps=MAX_STEPS,
             strategy=continuation,
             preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
+            # The lower-Re points build their own steps, so they take the tolerance here.
+            linear_solve=RAMPED_GRADIENT_LINEAR_SOLVE,
         )
         return jnp.sum(k**2)
 
