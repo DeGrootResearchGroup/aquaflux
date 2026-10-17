@@ -32,6 +32,8 @@ import pathlib
 
 import pytest
 
+from tests.support.tools import load_tool
+
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
 #: Dependency-free leaf modules of the package, which any layer may import.
@@ -61,23 +63,18 @@ BUDGETS = {
 }
 
 
+#: The selector's import walk, so the layering and the scoped test tier read imports one way.
+_scope = load_tool("scope_tests")
+
+
 def _imports(path: pathlib.Path) -> list[tuple[int, str | None, int]]:
     """``(line, module, level)`` for every ``from ... import`` and ``import`` in ``path``."""
-    found = []
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ImportFrom):
-            found.append((node.lineno, node.module, node.level))
-        elif isinstance(node, ast.Import):
-            found.extend((node.lineno, alias.name, 0) for alias in node.names)
-    return found
+    return [(s.line, s.module, s.level) for s in _scope.imports(path)]
 
 
 def _absolute(path: pathlib.Path, module: str | None, level: int) -> list[str]:
     """The dotted parts of the module an import in ``path`` names, relative imports resolved."""
-    if level == 0:
-        return (module or "").split(".")
-    package = ["aquaflux", *path.parent.relative_to(PACKAGE).parts]
-    return [*package[: len(package) - (level - 1)], *(module.split(".") if module else [])]
+    return _scope.absolute(["aquaflux", *path.parent.relative_to(PACKAGE).parts], module, level)
 
 
 #: What may import the case layer: itself, and the command-line entry point, which runs a case file and so
@@ -184,20 +181,18 @@ def _surface_breaches(path: pathlib.Path) -> list[str]:
     own = path.relative_to(PACKAGE).parts
     own_package = own[0] if len(own) > 1 else None
     found = []
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.ImportFrom):
-            targets = [(_absolute(path, node.module, node.level), [a.name for a in node.names])]
-        elif isinstance(node, ast.Import):
-            targets = [(alias.name.split("."), []) for alias in node.names]
+    for statement in _scope.imports(path):
+        if statement.names is not None:
+            targets = [(_absolute(path, statement.module, statement.level), list(statement.names))]
         else:
-            continue
+            targets = [(statement.module.split("."), [])]
         for target, names in targets:
             if target[0] != "aquaflux" or len(target) < 2 or target[1] == own_package:
                 continue
             if not (PACKAGE / target[1]).is_dir():
                 continue  # a neutral leaf module, which has no package surface to go through
             package = _package_of(target)
-            where = f"{path.relative_to(PACKAGE)}:{node.lineno}"
+            where = f"{path.relative_to(PACKAGE)}:{statement.line}"
             if len(package) < len(target):
                 found.append(f"{where} imports from the submodule {'.'.join(target)}")
                 continue

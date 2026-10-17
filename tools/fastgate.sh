@@ -17,11 +17,23 @@
 #   tools/fastgate.sh validation      the validation tier
 #   tools/fastgate.sh all             everything
 #   tools/fastgate.sh <tier> -k name  remaining arguments are passed through to pytest
+#   tools/fastgate.sh <tier> --changed [--base REF]
+#                                     only the test files the change since `git merge-base HEAD REF`
+#                                     (default origin/main) can reach -- see "Scoped runs" below
 #
 # Exits with pytest's status, so it composes in a shell `&&` chain and in a hook. Three statuses are
-# the script's own rather than pytest's: 2 for a tier it does not recognize, 3 for refusing to start
-# beside a running validation case, and 4 for refusing to start beside another running tier (both
-# below).
+# the script's own rather than pytest's: 2 for a tier it does not recognize (or, with --changed, a
+# change it cannot read), 3 for refusing to start beside a running validation case, and 4 for refusing
+# to start beside another running tier (both below).
+#
+# SCOPED RUNS (--changed) are a session's pre-push check, NOT the gate. tools/scope_tests.py selects
+# the test files whose imports reach what the change touched, plus the tests its REACHES table declares
+# reach a changed file some other way, and widens to the whole tier for a changed path it cannot place.
+# The selection, and what selected each file, is printed before anything runs and heads the log, so a
+# run that selected nothing says so rather than passing quietly. Every guard below applies unchanged.
+# A selection holding no test of the tier (`slow --changed` on a change no slow test reaches) is
+# reported as such and exits 0 -- pytest's own "collected nothing" (5) only for a scoped run, where
+# nothing to run is a real answer. Continuous integration runs the whole gate whatever this said.
 #
 # It REFUSES TO START WHILE A VALIDATION CASE IS RUNNING, because the mutual exclusion those cases rely
 # on is over *cases* and a test tier is not one -- so nothing stopped a gate landing on top of a march,
@@ -92,6 +104,21 @@ if [ -z "${CI:-}" ] && [ -z "${FASTGATE_FORCE:-}" ] && [ -x "$RUN_CASE" ]; then
     exit 3
   fi
 fi
+
+# --changed / --base are this script's, not pytest's: taken out wherever they sit, the rest passed on.
+SCOPED=""
+BASE="origin/main"
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --changed) SCOPED=1 ;;
+    --base)    BASE="${2:-}"; shift ;;
+    --base=*)  BASE="${1#--base=}" ;;
+    *)         ARGS+=("$1") ;;
+  esac
+  shift
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
 
 TIER="${1:-fast}"
 [ $# -gt 0 ] && shift
@@ -173,9 +200,36 @@ if [ -z "${CI:-}" ] && [ -z "${FASTGATE_FORCE:-}" ]; then
 fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)
-LOG="${TMPDIR:-/tmp}/aquaflux-tests-${CHECKOUT}-${TIER}-${STAMP}.log"
+LOG="${TMPDIR:-/tmp}/aquaflux-tests-${CHECKOUT}-${TIER}${SCOPED:+-changed}-${STAMP}.log"
 
-printf 'running the %s tier in %s -> %s\n' "$TIER" "$CHECKOUT" "$LOG"
+printf 'running the %s tier%s in %s -> %s\n' "$TIER" "${SCOPED:+ (scoped to the change)}" \
+  "$CHECKOUT" "$LOG"
+
+# --- scope the run to the change -----------------------------------------------------------------
+# The selector's report is written to the log first and then shown, never piped: the log is the record
+# of what this run was asked to cover, and a reader of a scoped log must be able to see that it was one.
+SELECTED=()
+if [ -n "$SCOPED" ]; then
+  SELECTION="${LOG%.log}.selection"
+  # The checkout scoped is the one pytest is about to run in -- the current directory's -- and the
+  # selection is passed to pytest as absolute paths, so a run from a subdirectory finds them too.
+  SCOPE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  if ! python3 "$(dirname "$0")/scope_tests.py" --base "$BASE" --root "$SCOPE_ROOT" \
+      --write "$SELECTION" > "$LOG" 2>&1; then
+    cat "$LOG"
+    printf 'fastgate: cannot scope the run -- see above. Run the whole tier instead.\n' >&2
+    exit 2
+  fi
+  cat "$LOG"
+  case "$(head -1 "$SELECTION")" in
+    none)
+      printf '\nresult: nothing to run -- no test reads anything the change touched.\n'
+      exit 0 ;;
+    some)
+      while IFS= read -r line; do SELECTED+=("$SCOPE_ROOT/$line"); done < <(tail -n +2 "$SELECTION") ;;
+  esac
+  printf '\n' >> "$LOG"
+fi
 
 # Worker processes for the fast tier only -- see the header for why this is not a blanket `-n auto`.
 # A caller who names their own `-n`/`--numprocesses` keeps it; FASTGATE_JOBS=0 opts out entirely.
@@ -205,12 +259,21 @@ fi
 # `${PARALLEL[@]+...}` rather than a bare `"${PARALLEL[@]}"`: under `set -u`, bash 3.2 -- which is
 # what /bin/bash is on macOS -- treats expanding an EMPTY array as an unbound variable and aborts.
 # That would take out precisely the serial tiers, and only on some machines.
+# Appended (`>>`): a scoped run's log already opens with the selection.
 if [ -n "$MARK" ]; then
-  python3 -u -m pytest -q -m "$MARK" ${PARALLEL[@]+"${PARALLEL[@]}"} "$@" > "$LOG" 2>&1
+  python3 -u -m pytest -q -m "$MARK" ${PARALLEL[@]+"${PARALLEL[@]}"} "$@" \
+    ${SELECTED[@]+"${SELECTED[@]}"} >> "$LOG" 2>&1
 else
-  python3 -u -m pytest -q ${PARALLEL[@]+"${PARALLEL[@]}"} "$@" > "$LOG" 2>&1
+  python3 -u -m pytest -q ${PARALLEL[@]+"${PARALLEL[@]}"} "$@" ${SELECTED[@]+"${SELECTED[@]}"} \
+    >> "$LOG" 2>&1
 fi
 STATUS=$?
+
+if [ -n "$SCOPED" ] && [ "$STATUS" -eq 5 ]; then
+  printf '\nresult: the selection holds no test of the %s tier -- nothing to run.\n' "$TIER"
+  printf 'pytest exit 5 (collected nothing), reported as 0 for a scoped run; full log: %s\n' "$LOG"
+  exit 0
+fi
 
 echo
 # The summary is matched by SHAPE, not by position: this suite emits library shutdown output after it,
