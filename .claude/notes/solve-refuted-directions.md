@@ -1415,3 +1415,31 @@ scalable sparse LU in JAX needs host callbacks (off-GPU). Related: solving `A_g`
 Jacobian coupling is the wrong lever — the exact solve has *more* mass beyond any distance than the
 truncated sweeps (reach 9–11 against 5). Detail: `.claude/notes/schemes-log.md`, "Moved →
 `SweptGradientSolve`: cost, peel, reach-per-sweep, folding, dense LU".
+
+## Field-split block smoothers that are not incomplete-LU (Vanka on `[u,v,w,p]`, Chebyshev, flat block Jacobi on `[k,ω]`) — CLOSED (2026-08-09/10)
+
+**What was tried** (`bfs3d`, `field_split_probe.py`'s split arms — deleted #371, in git history; plain
+aggregation, ILU(0)×4 where not overridden, `coarse_eq_limit` 2000, reach 3, GMRES restart 15 to 1e-8 on the
+true residual, right-hand side `−R`, hard iterate β 0.0293 and converged `state-00069` at β = 0):
+*(a)* **Vanka on the four-field saddle** once a field split removed ω from the patch. Patch conditioning
+recovered (worst gain 12.8 against ~3e3 on the six-field block — confirming ω caused the bad patches) but it
+still stalled (2.9e-03 at the 58-cycle cap; multiplicative was worse, 1.55, at 5.6x the time) against the
+ILU(0) split's 11 cycles. Patch relaxation is closed on this operator for a measured reason.
+*(b)* **Chebyshev** fails on both blocks for different reasons: indefiniteness on the saddle and a complex
+(nonsymmetric, advection-dominated) spectrum on `[k,ω]`, where damped Jacobi converges. A hand-bounded or
+complex-spectrum polynomial was not tested. *(c)* **Flat block Jacobi as the whole `[k,ω]` inverse** (no
+hierarchy): 1.14–1.60x the ILU V-cycle's blended cost, and unstable across adjacent states (8.63 → 10.94);
+the coarse grid buys robustness, not average reduction. Not a verdict on block Jacobi as a smoother inside a
+hierarchy. Detail: `solve-field-split-log.md`, "The field split — a saddle plus two transported scalars".
+
+## Three remedies for the escalation cascade after a collapsed positivity cap — REFUTED BY ARCHIVED LOGS (2026-08-11)
+
+**What was proposed** (on the `bfs3d` traced/PETSc trailing-inverse march pair, under the global k cap since
+deleted 2026-10-14): *(a)* stop a retry ladder after N attempts that move nothing — at `march-20260811-161642`
+step 56 the third attempt after two bit-null ones cured the step, so N ≤ 2 stops one short; *(b)* carry a
+decayed fraction of the escalated β — it lands at or below a β just shown to fail and re-pays the escalation;
+*(c)* skip the step control's own backoff after an escalation — across 24 logs the control never backed off
+after a successful escalation, so the two are a serial search, not a redundancy. What survived as a lever
+was the asymmetric return (β recovers at ÷1.5 per step against ×2–×4 up), and the ladder's escape past
+`beta_max`. The futility reading was itself confounded: the escalated attempts ran on a V-cycle fitted at the
+pre-escalation β. Detail: `solve-field-split-log.md`, the 2026-08-11 march-confirmation entry.

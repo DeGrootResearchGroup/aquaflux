@@ -21,6 +21,7 @@ subsystem detail is in the files the Index names. Dated history: `.claude/notes/
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | Full dated flow-block investigation, including qualified/retracted findings |
 | `solve-field-split.md` | `field_split.py`, `traced_field_split.py`, `traced_cycle.py` | The block-triangular field split (saddle plus two transported scalars) |
+| `.claude/notes/solve-field-split-log.md` | *(never auto-loads)* | Dated investigation behind the field split |
 | `solve-globalization.md` | `strategy.py`, `continuation.py`, `step_control.py`, `retry.py`, `relaxation.py`, `line_search_growth.py` | Forward-step architecture, pseudo-transient continuation, line search |
 | `.claude/notes/solve-globalization-log.md` | *(never auto-loads)* | Dated investigation behind the globalization architecture |
 | `solve-march.md` | `march.py`, `march_log.py`, `march_history.py`, `checkpoint.py`, `step_control.py`, `ramp_schedule.py` | The observed march: `newton_march`, triggers, controls, logging, ramp schedules |
