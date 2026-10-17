@@ -1125,3 +1125,23 @@ deleted with the `inner=` selector, `AggregationSchur` (`inner="multigrid"`) and
 coefficient-flow multigrid. The kernels `pressure_schur_laplacian` / `damped_jacobi_solve` remain in
 `flow/preconditioner.py`. Trap: do not reintroduce a non-h-independent inner for the flow block.
 Detail: `.claude/rules/flow.md` ("Structure" and "Stage 2" entries).
+
+## Remedies for a zero-fill incomplete-LU smoother on the coupled saddle — CLOSED (2026-08-16; code deleted 2026-09-13 / 2026-10-10)
+
+Before incomplete-LU preconditioning was closed as a direction (entry above, 2026-08-22), the zero-fill
+smoother inside the then-shipped PETSc GAMG V-cycle was swept on pitzDaily (self-start seed, reach 5,
+ILU(0) ×4, plain aggregation, operator and V-cycle at the same β, GMRES(15) to 1e-6 on the true residual)
+for a remedy, and none spanned the shift range a march crosses: **a factorization shift** (`nonzero` /
+`inblocks` bit-identical to the control; `positive_definite` zeroed the negative pivots but still failed and
+broke the healthy β = 0.05 arm — Chow & Saad's and Chapman–Saad–Wigton's published over-shift behaviour);
+**re-orderings** (`rowlength`/`qmd` rescued β = 0.5 and broke β = 0.05; `rcm` worst of all); **more sweeps**
+(non-monotone, ×16 diverged what ×4 solved); **no equilibration** (neutral); **block ILU(0) at bs = n_fields**
+(identical to point ILU(0) on a dense-cell-block pattern, as Chapman–Saad–Wigton report); **MILU** (not run:
+proven only for symmetric M-matrices and worse than ILU under opposite-signed convection, Elman 1986); and
+**`condest` as an arm selector** (same `condest`, opposite outcomes; no threshold separates arms at β = 0.05).
+Matching the preconditioner's stencil to the operator's (reach 3 vs 5) reversed direction with β. Untested
+when the direction closed: MC64's permutation, HILUCSI-style static deferring of the pressure rows, and a
+first-order-upwind probed operator. Every harness (`ilu0_remedy_sweep.py`, `mc64_precheck.py`, …) was
+deleted 2026-10-02 and PETSc 2026-10-10, so none of this is re-runnable; the full record is in git history
+of `.claude/rules/solve-direct-preconditioners.md` before 2026-10-17. Transferable lesson: a pivot census,
+`condest` and a diagonal-dominance census each failed to track convergence — judge on the true residual.
