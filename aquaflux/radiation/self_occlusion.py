@@ -33,7 +33,6 @@ every gradient.
 from __future__ import annotations
 
 import abc
-import dataclasses
 import warnings
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -162,45 +161,6 @@ class SelfOcclusion(eqx.Module):
         """
         del surfaces
         return self
-
-    def for_bodies(self, names) -> SelfOcclusion:
-        """This strategy as it applies to a surface set holding the bodies ``names``.
-
-        For a caller holding several surface sets under one choice -- a scene's lamps and its
-        reflecting walls -- whose declarations may name a body of any of them: each set's masks
-        are then built by the share that names its own bodies. Unless a strategy names bodies, it
-        is itself.
-
-        Parameters
-        ----------
-        names : sequence of str
-            The set's :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`.
-
-        Returns
-        -------
-        SelfOcclusion
-        """
-        del names
-        return self
-
-    def check_bodies(self, names) -> None:
-        """Refuse a body this strategy names that is not among ``names``.
-
-        Called against every body a strategy could be applied to -- one surface set's, or the union
-        of several sets' -- so that a misspelt name is an error rather than a body silently left
-        out. Unless a strategy names bodies, there is nothing to refuse.
-
-        Parameters
-        ----------
-        names : sequence of str
-            Every body the strategy may name.
-
-        Raises
-        ------
-        ValueError
-            If the strategy names a body not in ``names``.
-        """
-        del names
 
     def segments_hidden(self, surfaces, origin, target, near, exclude) -> np.ndarray | None:
         """Whether the surface's own triangles lie across each of a list of segments.
@@ -466,7 +426,8 @@ class SilhouetteOcclusion(SelfOcclusion):
     on either, since every pair is clipped by the same program and summed in the same order.
 
     **Which blockers count, and why it has to be declared.** A blocker counts only from the
-    side it faces, unless its body is named in :attr:`two_sided`. On a closed, consistently
+    side it faces, unless its body is declared a sheet in the surface set's
+    :attr:`~aquaflux.radiation.surfaces.Surfaces.two_sided`. On a closed, consistently
     wound surface that is exact: a blocked sight line leaves the medium through one face and
     re-enters through another, and only the first faces the receiver, so counting back faces too
     would add the same shadow twice. A zero-thickness sheet -- a baffle given as one layer of
@@ -474,8 +435,10 @@ class SilhouetteOcclusion(SelfOcclusion):
     behind it would hide nothing: light passes straight through it. Topology cannot settle this
     alone (see :func:`~aquaflux.radiation.checks.open_facets`): a sheet welded to a wall all the
     way round looks closed, and a duct exported without its end caps looks like a sheet. So the
-    sheets are named, and any open piece of surface left undeclared is **warned about** when the
-    field is built rather than silently leaking light. The ray test has no such distinction to
+    sheets are named on the surface set, and any open piece of surface left undeclared is
+    **warned about** when the field is built rather than silently leaking light. A set with its
+    back faces appended (:meth:`~aquaflux.radiation.surfaces.Surfaces.with_back_faces`) holds
+    each sheet as two faces, crossed once from either side, so there they count one-sided again. The ray test has no such distinction to
     make -- it asks only whether a segment crosses a triangle -- which is why it needs none.
 
     Attributes
@@ -495,19 +458,12 @@ class SilhouetteOcclusion(SelfOcclusion):
     threads : int
         How many compiled calls of the reject and clip passes run at once, and how many receivers
         ahead the cull works.
-    two_sided : tuple of str
-        Bodies, by their name in :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`, that
-        block from both sides: zero-thickness sheets. Empty by default. Naming a closed body here
-        makes it block twice, which errs dark. Every name must be a body of the surfaces the clip
-        is applied to; where one choice serves several surface sets, it may name a body of any of
-        them, and each set is clipped by :meth:`for_bodies` its own share.
     """
 
     work_chunk: int = 32_768
     pair_limit: int = DEFAULT_PAIR_LIMIT
     cluster_size: int = 32
     threads: int = 4
-    two_sided: tuple[str, ...] = ()
 
     def field(self, surfaces, points, near, receiver_facet, receiver_normal) -> OcclusionField:
         """Clip the survivors. See :meth:`SelfOcclusion.field`."""
@@ -576,37 +532,15 @@ class SilhouetteOcclusion(SelfOcclusion):
             overlapping=jnp.asarray(blockers > 1),
         )
 
-    def for_bodies(self, names) -> SilhouetteOcclusion:
-        """This clip with :attr:`two_sided` cut down to the bodies in ``names``.
-
-        See :meth:`SelfOcclusion.for_bodies`. A body named in :attr:`two_sided` and present in
-        several sets is two-sided in each of them.
-        """
-        names = set(names)
-        return dataclasses.replace(
-            self, two_sided=tuple(name for name in self.two_sided if name in names)
-        )
-
-    def check_bodies(self, names) -> None:
-        """Refuse a name in :attr:`two_sided` that is not among ``names``.
-
-        See :meth:`SelfOcclusion.check_bodies`.
-        """
-        unknown = sorted(set(self.two_sided) - set(names))
-        if unknown:
-            msg = (
-                f"two_sided names no body of these surfaces: {unknown}; have {list(names)}. "
-                "A misspelt sheet would otherwise be counted from one side only, and let light "
-                "through from behind without any error."
-            )
-            raise ValueError(msg)
-
     def _either_side(self, surfaces) -> np.ndarray:
-        """Which facets block from both sides, warning about open pieces nobody declared."""
+        """Which facets block from both sides, warning about open pieces nobody declared.
+
+        A sheet's facet blocks from both sides unless its back face is in the set as a facet of
+        its own, which then blocks from the other side.
+        """
         names = tuple(surfaces.solid_names)
-        self.check_bodies(names)
         solid = np.asarray(surfaces.solid_id)
-        declared = np.isin(solid, [names.index(name) for name in self.two_sided])
+        declared = surfaces.is_sheet & (surfaces.twin < 0)
         undeclared = open_facets(np.asarray(surfaces.vertices)) & ~declared
         if np.any(undeclared):
             bodies = sorted({names[k] for k in np.unique(solid[undeclared])})
@@ -615,8 +549,8 @@ class SilhouetteOcclusion(SelfOcclusion):
                 f"{bodies} belong to pieces of surface with a free edge, and are counted as "
                 "blocking only from the side they face -- right for a solid whose surface was "
                 "left open, wrong for a zero-thickness sheet, which then lets light straight "
-                "through from behind. Name the sheets in `two_sided`, close the surface, or use "
-                "RayCastOcclusion.",
+                "through from behind. Name the sheets in the surface set's `two_sided`, close the "
+                "surface, or use RayCastOcclusion.",
                 stacklevel=3,
             )
         return jnp.asarray(declared)
@@ -842,7 +776,8 @@ def _receiver_frames(n_receivers, facet_normal, receiver_facet, receiver_normal)
     Raises
     ------
     ValueError
-        If a receiver lies on several facets and no ``receiver_normal`` says which way it faces.
+        If a receiver lies on several facets not in one plane and no ``receiver_normal`` says
+        which way it faces.
     """
     own = (
         np.full((n_receivers, 1), -1)
@@ -851,11 +786,16 @@ def _receiver_frames(n_receivers, facet_normal, receiver_facet, receiver_normal)
     )
     if receiver_normal is not None:
         return own, np.ones(n_receivers, dtype=bool), np.asarray(receiver_normal, dtype=float)
-    if own.shape[1] > 1:
+    first = facet_normal[np.maximum(own[:, 0], 0)]
+    named = own[:, 1:] >= 0
+    parallel = np.abs(np.einsum("rkd,rd->rk", facet_normal[np.maximum(own[:, 1:], 0)], first))
+    # A row may name several facets lying in one plane -- a sheet's face and its back, which share
+    # a triangle -- and the receiver then faces the way the first of them does.
+    if np.any(named & (parallel < 1.0 - 1e-9)):
         raise ValueError(
             "SilhouetteOcclusion projects each receiver's share about one normal, but "
-            f"receiver_facet names up to {own.shape[1]} facets per receiver and no "
-            "receiver_normal says which way the receivers face."
+            f"receiver_facet names up to {own.shape[1]} facets per receiver that do not lie in "
+            "one plane, and no receiver_normal says which way the receivers face."
         )
     on_facet = own[:, 0] >= 0
     facing = np.where(on_facet[:, None], facet_normal[np.maximum(own[:, 0], 0)], 0.0)

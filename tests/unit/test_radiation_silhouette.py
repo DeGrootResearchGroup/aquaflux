@@ -482,11 +482,12 @@ def _oblique_set() -> Surfaces:
         solid_id=np.array([0, 1]),
         solid_names=("lamp", "baffle"),
         emission=np.array([1.0, 0.0]),
+        # Only to say the open blocker is meant as a sheet; it faces the receiver anyway.
+        two_sided=("baffle",),
     )
 
 
-#: Two-sided only to say both open triangles are meant as sheets; each faces the receiver anyway.
-OBLIQUE_CLIP = SilhouetteOcclusion(two_sided=("lamp", "baffle"))
+OBLIQUE_CLIP = SilhouetteOcclusion()
 
 
 def _oblique_share(**orientation) -> float:

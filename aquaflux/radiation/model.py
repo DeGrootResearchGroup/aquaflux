@@ -88,7 +88,6 @@ nothing about cells, fluxes or residuals. Keeping that fence one-way is why
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 from collections.abc import Sequence
 
@@ -216,52 +215,6 @@ class RadiationSettings(eqx.Module):
     def _passed(self, **named):
         """Drop the unset entries, so each reaches its own default rather than a copy of it."""
         return {name: value for name, value in named.items() if value is not None}
-
-    def _occlusions(self) -> dict:
-        """The self-occlusion choices that are set, by field name."""
-        return self._passed(
-            self_occlusion=self.self_occlusion, receiver_occlusion=self.receiver_occlusion
-        )
-
-    def for_bodies(self, names) -> RadiationSettings:
-        """These settings as they apply to masks whose sources are a set holding the bodies ``names``.
-
-        For one set of settings serving several surface sets, whose self-occlusion choices may name
-        a body of any of them (a zero-thickness sheet declared two-sided, say): each choice is cut
-        down to the bodies of this set by
-        :meth:`~aquaflux.radiation.self_occlusion.SelfOcclusion.for_bodies`, and nothing else
-        changes.
-
-        Parameters
-        ----------
-        names : sequence of str
-            The set's :attr:`~aquaflux.radiation.surfaces.Surfaces.solid_names`.
-
-        Returns
-        -------
-        RadiationSettings
-        """
-        return dataclasses.replace(
-            self,
-            **{field: choice.for_bodies(names) for field, choice in self._occlusions().items()},
-        )
-
-    def check_bodies(self, names) -> None:
-        """Refuse a body named by a self-occlusion choice that is not among ``names``.
-
-        Parameters
-        ----------
-        names : sequence of str
-            Every body these settings may be applied to: one surface set's, or the union of several.
-
-        Raises
-        ------
-        ValueError
-            If a choice names a body not in ``names`` -- a misspelling, which would otherwise leave
-            that body out without an error.
-        """
-        for choice in self._occlusions().values():
-            choice.check_bodies(names)
 
     def visibility_options(self) -> dict:
         """The subset the facet-to-facet shadow mask reads."""
@@ -407,6 +360,7 @@ def build_radiation_model(
     opaque.
     """
     settings = RadiationSettings() if settings is None else settings
+    surfaces = surfaces.with_back_faces()
     receivers = jnp.asarray(receivers, dtype=float)
     if receivers.ndim != 2 or receivers.shape[1] != 3:
         msg = f"receivers must be (n_receivers, 3); got {receivers.shape}"
@@ -508,6 +462,8 @@ def radiosity(
     external_irradiance : array_like, shape ``(n_facets,)``, optional
         Irradiance on the facets from sources outside this surface set entirely, such as another
         surface set's lamps, obtained from :func:`~aquaflux.radiation.gather.direct_irradiance`.
+        One entry per face: a sheet's back faces follow the set's own facets, as the radiosity's
+        do.
         The set's own point sources are **not** this — they are added automatically.
     solver : lineax.AbstractLinearSolver, optional
         How to solve the system. The default is a matrix-free generalized minimal residual
@@ -517,7 +473,11 @@ def radiosity(
     Returns
     -------
     tuple of (jnp.ndarray, jnp.ndarray)
-        The radiosity per facet in W/m², and the solver's restart-cycle count.
+        The radiosity per facet in W/m², and the solver's restart-cycle count. A set with
+        two-sided sheets (:attr:`~aquaflux.radiation.surfaces.Surfaces.two_sided`) has one entry
+        more per sheet facet, its back face's, after all of its own facets in the order of
+        :attr:`~aquaflux.radiation.surfaces.Surfaces.back_of` of
+        :meth:`~aquaflux.radiation.surfaces.Surfaces.with_back_faces`.
 
         ⚠️ **Cycles, not matrix-vector products** — one cycle is up to the solver's ``restart``
         (120 by default), so a three is some hundreds of products. The count is the *cost* of
@@ -542,6 +502,7 @@ def radiosity(
     by ``1/(rho A)``, and zero reflectance is both the default and the value on every non-lamp
     surface of a real reactor.
     """
+    surfaces = surfaces.with_back_faces()
     solved = _solve(model, surfaces, absorption, transmittance, external_irradiance, solver)
     return solved.outgoing, solved.cycles
 
@@ -644,7 +605,8 @@ def surface_irradiance(
     Returns
     -------
     tuple of (jnp.ndarray, jnp.ndarray)
-        Irradiance per facet in W/m², and the solver's restart-cycle count.
+        Irradiance per facet in W/m², and the solver's restart-cycle count; a sheet's back faces
+        follow the set's own facets, as in :func:`radiosity`.
 
     Raises
     ------
@@ -653,6 +615,7 @@ def surface_irradiance(
     TypeError
         If its vertices are traced.
     """
+    surfaces = surfaces.with_back_faces()
     emission = jnp.asarray(surfaces.emission, dtype=float)
     solved = _solve(model, surfaces, absorption, transmittance, external_irradiance, solver)
     landing = solved.emitted @ emission + solved.reflected @ (solved.outgoing - emission)
@@ -776,6 +739,7 @@ def fluence_rate(
     has no reflecting surface is better served by
     :func:`~aquaflux.radiation.gather.direct_fluence_rate` on its own.
     """
+    surfaces = surfaces.with_back_faces()
     outgoing, cycles = radiosity(
         model,
         surfaces,

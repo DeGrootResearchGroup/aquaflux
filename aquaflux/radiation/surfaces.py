@@ -94,6 +94,24 @@ class Surfaces(eqx.Module):
         Which facets are point sources rather than emitting surfaces — static metadata, not a
         leaf, because it selects a code path. Stored as the indices rather than a mask so that
         the usual case, a handful of lamps among many facets, costs almost nothing to carry.
+    two_sided : tuple of str
+        Bodies, by name, that are zero-thickness sheets: a baffle or a shelf given as one layer of
+        triangles, with the medium on both sides. Such a sheet blocks light from both sides, and
+        reflects and absorbs it on both faces. Static metadata. A sheet may reflect but not emit:
+        its facets carry no emission and no power.
+    back_of : tuple of int
+        Empty on a set as built. On the set :meth:`with_back_faces` returns, the facets after the
+        first ``n_facets - len(back_of)`` are the declared sheets' back faces, and ``back_of[k]``
+        is the front facet the ``k``-th of them is the back of. Static metadata.
+
+    Notes
+    -----
+    **How a sheet's two faces are modelled.** Every facet sends and receives light on its front
+    only, which is right for the surface of a solid. For a sheet, :meth:`with_back_faces` appends
+    each declared areal facet again with its winding reversed -- its back face, a facet of its own
+    with the opposite normal and its own radiosity -- and the radiation model and the scene solve
+    on that set. A face and its back share their triangle, so they exchange nothing and never
+    shadow each other; :attr:`twin` is how that is told apart from a coincidence of geometry.
     """
 
     vertices: jnp.ndarray
@@ -109,6 +127,8 @@ class Surfaces(eqx.Module):
     solid_names: tuple[str, ...] = eqx.field(static=True)
     profiles: tuple[Profile, ...] = ()
     point_source_index: tuple[int, ...] = eqx.field(static=True, default=())
+    two_sided: tuple[str, ...] = eqx.field(static=True, default=())
+    back_of: tuple[int, ...] = eqx.field(static=True, default=())
 
     @classmethod
     def from_triangles(
@@ -124,6 +144,7 @@ class Surfaces(eqx.Module):
         profiles=None,
         profile_index=None,
         point_sources=None,
+        two_sided=(),
     ) -> Surfaces:
         """Build a surface set from triangle vertices, deriving all of its geometry.
 
@@ -148,6 +169,8 @@ class Surfaces(eqx.Module):
             Indices of the facets that are point sources. Defaults to every facet whose
             triangle has no area, which is what they are built as — pass it explicitly only to
             record a different set, never to work around a geometry that came out degenerate.
+        two_sided : sequence of str, optional
+            Bodies that are zero-thickness sheets (see :attr:`two_sided`). None by default.
 
         Returns
         -------
@@ -156,7 +179,8 @@ class Surfaces(eqx.Module):
         Raises
         ------
         ValueError
-            If a reflectance lies outside ``[0, 1]``, or the two sum past one on a facet.
+            If a reflectance lies outside ``[0, 1]``, or the two sum past one on a facet; or if
+            ``two_sided`` names a body the set does not have, or one that emits.
         """
         vertices = jnp.asarray(vertices, dtype=float)
         if vertices.ndim != 3 or vertices.shape[1:] != (3, 3):
@@ -261,6 +285,7 @@ class Surfaces(eqx.Module):
             solid_names=tuple(solid_names),
             profiles=profiles,
             point_source_index=point_sources,
+            two_sided=_checked_sheets(two_sided, solid_names),
         )
 
     @property
@@ -279,6 +304,93 @@ class Surfaces(eqx.Module):
         mask = np.zeros(self.n_facets, dtype=bool)
         mask[list(self.point_source_index)] = True
         return mask
+
+    @property
+    def is_sheet(self) -> np.ndarray:
+        """Boolean mask of the facets of bodies named in :attr:`two_sided`, ``(n_facets,)``."""
+        names = list(self.solid_names)
+        return np.isin(np.asarray(self.solid_id), [names.index(name) for name in self.two_sided])
+
+    @property
+    def twin(self) -> np.ndarray:
+        """Each facet's other face, ``(n_facets,)`` of int, ``-1`` where it has none.
+
+        Only a set from :meth:`with_back_faces` has any: a sheet's front facet names its back
+        face, and the back face its front. Read wherever two facets lying on one triangle must
+        not be taken for two surfaces -- they exchange no light and do not shadow each other.
+        """
+        twin = np.full(self.n_facets, -1, dtype=int)
+        if self.back_of:
+            front = np.asarray(self.back_of, dtype=int)
+            back = np.arange(self.n_facets - len(front), self.n_facets)
+            twin[front], twin[back] = back, front
+        return twin
+
+    def with_back_faces(self) -> Surfaces:
+        """This set with each sheet's back face appended: the set the light is solved on.
+
+        Every areal facet of a body in :attr:`two_sided` is appended once more, its winding
+        reversed: the same triangle, the opposite normal, and every optical property and label
+        copied, so it reflects as its front does. Front facets keep their indices, and the back
+        faces follow in the order of their fronts (:attr:`back_of`). Point sources have no face
+        and are not copied. A set with no sheet, or one that already has its back faces, is
+        returned as it is.
+
+        The optical properties may be traced -- they are gathered, not read -- so this can run
+        inside a derivative with respect to a reflectance.
+
+        Returns
+        -------
+        Surfaces
+
+        Raises
+        ------
+        ValueError
+            If a sheet's facet carries emission or power (concrete values only). A sheet emitting
+            would emit from both faces, which the direct gathers do not model.
+        """
+        if self.back_of or not self.two_sided:
+            return self
+        for name, values in (("emission", self.emission), ("power", self.power)):
+            if isinstance(values, jax.core.Tracer):
+                continue
+            if np.any(np.asarray(values)[self.is_sheet] != 0.0):
+                msg = (
+                    f"a two-sided sheet may not carry {name}: its facets {self.two_sided} would "
+                    "emit from both faces, which the direct gathers do not model. Give a lamp "
+                    "as a body of its own, or leave the sheet one-sided."
+                )
+                raise ValueError(msg)
+        return self._with_backs()
+
+    def _with_backs(self) -> Surfaces:
+        """The back faces appended, with nothing checked: :meth:`with_back_faces` without the
+        refusal, for a set whose emission is a solved radiosity rather than a lamp's."""
+        front = np.flatnonzero(self.is_sheet & ~self.is_point_source)
+        if not len(front):
+            return self
+
+        def joined(values, sign=1.0):
+            values = jnp.asarray(values)
+            return jnp.concatenate([values, sign * values[front]])
+
+        # Two corners swapped reverse the winding; the centroid, area and normal are carried
+        # over rather than recomputed, so a face and its back are the same triangle exactly.
+        vertices = jnp.asarray(self.vertices)
+        return dataclasses.replace(
+            self,
+            vertices=jnp.concatenate([vertices, vertices[front][:, [0, 2, 1]]]),
+            centroid=joined(self.centroid),
+            normal=joined(self.normal, -1.0),
+            area=joined(self.area),
+            solid_id=joined(self.solid_id),
+            emission=joined(self.emission),
+            power=joined(self.power),
+            diffuse_reflectance=joined(self.diffuse_reflectance),
+            specular_reflectance=joined(self.specular_reflectance),
+            profile_index=np.concatenate([self.profile_index, self.profile_index[front]]),
+            back_of=tuple(int(index) for index in front),
+        )
 
     @property
     def dark_behind(self) -> bool:
@@ -315,17 +427,31 @@ class Surfaces(eqx.Module):
                 "with_geometry moves a surface set, it does not rebuild one"
             )
             raise ValueError(msg)
-        return Surfaces.from_triangles(
-            vertices,
-            solid_id=self.solid_id,
+        # A set with back faces is moved by its fronts, and its back faces made again from them:
+        # a back face is its front's triangle, so it moves with it.
+        n = self.n_facets - len(self.back_of)
+        moved = Surfaces.from_triangles(
+            vertices[:n],
+            solid_id=self.solid_id[:n],
             solid_names=self.solid_names,
+            emission=self.emission[:n],
+            power=self.power[:n],
+            diffuse_reflectance=self.diffuse_reflectance[:n],
+            specular_reflectance=self.specular_reflectance[:n],
+            profiles=self.profiles,
+            profile_index=self.profile_index[:n],
+            point_sources=self.point_source_index,
+            two_sided=self.two_sided,
+        )
+        if not self.back_of:
+            return moved
+        # The back faces' own optics are kept: a solved set carries each face's own radiosity.
+        return dataclasses.replace(
+            moved._with_backs(),
             emission=self.emission,
             power=self.power,
             diffuse_reflectance=self.diffuse_reflectance,
             specular_reflectance=self.specular_reflectance,
-            profiles=self.profiles,
-            profile_index=self.profile_index,
-            point_sources=self.point_source_index,
         )
 
     def per_facet(self, by_solid: dict[str, float], default: float | None = None):
@@ -467,6 +593,26 @@ class Surfaces(eqx.Module):
         return dataclasses.replace(
             updated, profiles=catalogue, profile_index=index.astype(np.int32, copy=False)
         )
+
+
+def _checked_sheets(two_sided, solid_names) -> tuple[str, ...]:
+    """``two_sided`` as a tuple, every name a body of ``solid_names``.
+
+    A misspelt sheet would otherwise be one-sided without a word: light would pass through it
+    from behind and be lost from its back face.
+    """
+    if isinstance(two_sided, str):
+        two_sided = (two_sided,)
+    two_sided = tuple(two_sided)
+    unknown = sorted(set(two_sided) - set(solid_names))
+    if unknown:
+        msg = (
+            f"two_sided names no body of this surface set: {unknown}; it has "
+            f"{list(solid_names)}. A misspelt sheet would be one-sided, letting light through "
+            "from behind without any error."
+        )
+        raise ValueError(msg)
+    return two_sided
 
 
 def _check_reflectances(diffuse, specular) -> None:

@@ -684,8 +684,14 @@ attaches to a scalar carried by the converged flow.
 - **Exact energy balance for a non-diffuse source.** A cosine-power source's distribution is
   evaluated along one direction per pair of facets, centroid to centroid; energy is conserved
   exactly only for diffuse sources, and the error shrinks as the surface is refined.
-- **Zero-thickness sheets block from both sides only when declared as such**: see
-  {class}`~aquaflux.radiation.SilhouetteOcclusion` and {class}`~aquaflux.radiation.TriangleBody`.
+- **A zero-thickness sheet is one-sided unless declared.** A baffle or a shelf given as one layer
+  of triangles has the fluid on both sides. Name its body in the surface set's `two_sided`
+  ({class}`~aquaflux.radiation.Surfaces`) and it blocks light from both sides and receives and
+  reflects it on both faces; each facet is then two faces in the surface solve, and the results
+  indexed by facet list the back faces after the set's own facets
+  ({meth}`~aquaflux.radiation.Surfaces.with_back_faces`). A sheet may reflect but not emit.
+  Undeclared, it reflects and absorbs on its front only, and the silhouette clip lets light through
+  it from behind (an open sheet is warned about). See also {class}`~aquaflux.radiation.TriangleBody`.
 
 ## Theory
 

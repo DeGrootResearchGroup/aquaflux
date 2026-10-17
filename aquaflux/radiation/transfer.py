@@ -351,6 +351,7 @@ class _Geometry(eqx.Module):
     centroid: jnp.ndarray
     normal: jnp.ndarray
     areal: jnp.ndarray
+    twin: jnp.ndarray
 
 
 #: A projected solid angle, in steradians, below which a pair is left to be zero: one rounding of a
@@ -414,8 +415,12 @@ def _row_block(geometry: _Geometry, sample, weight, index, columns):
     # large. A planar triangle really does see none of itself, so this is the exact value and
     # not a repair. A point source has no surface to receive on and no area to emit from; it
     # reaches the facets through the ordinary gather instead, as an external irradiance.
-    keep = (index[:, None] != columns[None, :]) & (
-        geometry.areal[index][:, None] & geometry.areal[columns][None, :]
+    # A sheet's face and its back are one triangle, so they exchange nothing either; left to the
+    # kernel, a quadrature point a rounding off that triangle reads a whole hemisphere of it.
+    keep = (
+        (index[:, None] != columns[None, :])
+        & (geometry.twin[index][:, None] != columns[None, :])
+        & (geometry.areal[index][:, None] & geometry.areal[columns][None, :])
     )
     geometric = (
         jnp.zeros((index.shape[0], geometry.vertices.shape[0]))
@@ -887,8 +892,12 @@ def build_transfer(
         centroid=jax.lax.stop_gradient(surfaces.centroid),
         normal=jax.lax.stop_gradient(surfaces.normal),
         areal=jnp.asarray(~surfaces.is_point_source),
+        twin=jnp.asarray(surfaces.twin),
     )
     sample = receiver_quadrature.points(geometry.vertices)
+    # Each receiving facet, and its other face where it is a sheet's: a ray aimed at a facet ends
+    # on both, and must ignore both.
+    own = np.stack([np.arange(surfaces.n_facets), surfaces.twin], axis=1)
     weight = jnp.asarray(receiver_quadrature.weight)
     geometric, source_cosine, separation = _row_blocks(geometry, sample, weight, chunk_size)
     specular = tuple(dict.fromkeys(specular))
@@ -904,7 +913,7 @@ def build_transfer(
             points=surfaces.centroid,
             # The receivers ARE the facets, so each path's second leg ends on the one it is
             # aimed at and must ignore it, as the direct mask's rays do.
-            receiver_facet=np.arange(surfaces.n_facets),
+            receiver_facet=own,
             # Prepared once here, not once per plane: a grid over the triangles is the same for
             # every mirror. Not at all without a mirror, when no reflected path is masked.
             self_occlusion=(
@@ -928,7 +937,7 @@ def build_transfer(
             # The receivers here ARE the facets, so each ray ends on the one it is aimed at and
             # must be told to ignore it. Without this every mutually visible pair reads as
             # blocked and a closed enclosure loses its interreflection entirely.
-            receiver_facet=np.arange(surfaces.n_facets),
+            receiver_facet=own,
             self_occlusion=self_occlusion,
             **visibility_options,
         ),
