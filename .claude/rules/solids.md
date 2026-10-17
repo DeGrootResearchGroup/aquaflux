@@ -120,10 +120,31 @@ their max. Radiation's refracted-path solve (`radiation/refraction.py`) holds a 
 because the max has kinks and its gradient is not a face normal at edges; a crossing whose other columns
 are positive is on a face's extension and is reported absent. Pinned in `tests/unit/test_solids.py`.
 
+## `Torus` (#504)
+
+`Torus(centre, axis, ring_radius, tube_radius, *, arc_start=None, arc=None)`: a whole ring, or the sector
+from `arc_start` through `arc` (radians, right-hand rule about `axis`, `0 < arc <= pi`) cut by two `_Plane`s
+through the axis. A `Solid`, `interval_count == 2` always; `support` is the whole ring's (`c·n + R|n_perp| +
+r|n|`), so the 26 witnesses apply. ⚠️ The angle is `arc`, not `sweep` (smoother passes, Principle 3.7). The
+CAD reader still refuses toroidal faces. Measurements, defects and mutation pass: `.claude/notes/solids-log.md`.
+
+- ⚠️ **The quartic is never solved by formula.** `_ring_spans` (module-level, `jax.jit`ed — eagerly its
+  small operations compile per input shape) reparameterizes the line by arc length from its closest
+  approach to the centre, so the quartic's derivative is a depressed cubic (`_cubic_roots`); its turning
+  points cut the line into stretches holding at most one crossing. **Whether a stretch is inside is read
+  from the tube's excess `(rho - R)^2 + z^2 - r^2` at the turning point, formed from vector differences** —
+  the `_Tube` lesson; a closed-form quartic reads grazing lines as misses.
+- **Crossings: `_bracketed_roots`**, Newton from the quadratic model about the nearest turning point (the
+  middle two take the better of the models about both of theirs), `rtsafe`-safeguarded — bisect wherever
+  Newton would leave the bracket or not halve the step before last — and frozen once the excess is within
+  `_EXCESS_ROUNDING` units of rounding of `(R + r)^2`. `_TORUS_ROOT_STEPS = 10`. ⚠️ Freeze on the excess,
+  never on a step size (a near-double root's step stalls at ~sqrt(eps)); never return "the smallest
+  residual seen" (on a line skimming the wall the residual is tiny far from the root).
+- **Reference: `tests/unit/torus_reference.py`** — the quartic from the stored floats as `Fraction`s, real
+  roots by Sturm sequence. Grazing classification 0 wrong where `numpy.roots` gets dozens wrong
+  (`validation/torus_tangency.py` reproduces both).
+
 ## Not built here, deliberately
-- **Torus** (elbows): its tube is not convex and its ray intersection is a quartic needing care.
-  `Solid.intervals` already returns `interval_count` intervals, so a two-interval torus slots in. A fan of
-  convex wedges is **not** the answer (reintroduces faceting error).
 - **STEP reader** — built in `aquaflux/io/cad/` (OCP), emitting these bodies; nothing of OpenCASCADE enters
   this package (`.claude/rules/io.md`). Each primitive's constructor keywords are its full parameterization.
 - **Trimmed patches** — not supported; the CAD reader describes whole solids (a pipe as its full cylinder

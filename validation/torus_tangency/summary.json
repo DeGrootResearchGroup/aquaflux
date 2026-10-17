@@ -1,0 +1,26 @@
+{
+  "fixed grazing set": {
+    "lines": 168,
+    "meeting the tube": 84,
+    "torus": {
+      "misclassified": 0,
+      "leaks": 0
+    },
+    "numpy.roots": {
+      "misclassified": 47,
+      "leaks": 24
+    }
+  },
+  "random grazing set": {
+    "lines": 3000,
+    "meeting the tube": 1882,
+    "torus": {
+      "misclassified": 0,
+      "leaks": 0
+    },
+    "numpy.roots": {
+      "misclassified": 295,
+      "leaks": 147
+    }
+  }
+}

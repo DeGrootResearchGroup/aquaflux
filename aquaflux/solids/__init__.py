@@ -3,7 +3,7 @@
 A body here answers two questions — does a straight segment pass through it, and is a point
 inside it — by a formula rather than a search, so a whole array of segments is one expression that
 fuses and compiles. The primitives (:class:`HalfSpace`, :class:`Sphere`, :class:`Cylinder`,
-:class:`Cone`, :class:`Box`) combine by constructive solid geometry (:class:`Union`,
+:class:`Cone`, :class:`Box`, :class:`Torus`) combine by constructive solid geometry (:class:`Union`,
 :class:`Intersection`, :class:`Difference`), and :class:`Outside` describes a vessel by the fluid it
 holds, which is usually a handful of convex regions where its wall is awkward to write down.
 
@@ -31,6 +31,7 @@ from aquaflux.solids.bodies import (
     Outside,
     Solid,
     Sphere,
+    Torus,
     Union,
 )
 
@@ -46,5 +47,6 @@ __all__ = [
     "Outside",
     "Solid",
     "Sphere",
+    "Torus",
     "Union",
 ]
