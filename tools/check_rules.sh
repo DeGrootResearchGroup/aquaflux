@@ -70,4 +70,12 @@ if [ "$checked" -eq 0 ]; then
   exit 1
 fi
 
+# Size: each file, and what loads together, within budget (tools/rules_budget.py). Only for a
+# directory laid out as <repo>/.claude/rules, since the budget also reads <repo>/CLAUDE.md and the
+# tracked files the globs select.
+root=$(cd "$dir/../.." && pwd)
+if [ "$(basename "$dir")" = rules ] && [ "$(basename "$(dirname "$dir")")" = .claude ]; then
+  python3 "$(dirname "$0")/rules_budget.py" "$root" || status=1
+fi
+
 exit $status

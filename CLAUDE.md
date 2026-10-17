@@ -69,10 +69,31 @@ Checklist still governs).
 | `.claude/notes/solve-refuted-directions.md` | the cross-cutting ledger of closed/refuted directions — grep it before proposing one |
 | `.claude/notes/solve-open-directions.md` | the backlog of unmeasured solver speed-up directions |
 
-A topic rule holds durable fact (what is built, the shipped default, binding decisions, live traps) and a
-current-status paragraph; a measurement, probe or investigation step goes in its `-log.md`; history of
-deleted code is deleted, leaving one line per transferable trap and a ledger entry. Split a rule file
-whenever an edit leaves it past ~1,800 lines.
+### Writing the design records (binding)
+
+Every rules file is paid for in context by each session that touches its paths, so it holds only what a
+future agent needs to act correctly. `tools/check_rules.sh` (fast tier) fails any rules file or this
+file over **120 KB**, any set of rules that load together over **200 KB**, and any rule whose globs match
+nothing; `tools/rules_budget.py` holds the budget and a shrink-only exception list.
+
+**Where it goes**
+- **Rules file**: current state only — what is built and where, contracts and invariants, the shipped
+  default and why, binding decisions, traps that still apply to live code.
+- **`.claude/notes/<name>-log.md`**: anything dated — measurements, probe and A/B tables, investigation
+  steps, issue narratives, mutation-pass lists. Leave one current-status line in the rule pointing at it.
+- **`.claude/notes/solve-refuted-directions.md`**: one paragraph per closed direction (what, on what
+  case, why it lost, where the detail is), added in the same change that closes it.
+- **Nowhere**: history of deleted code (git has it; keep at most one line per trap that transfers to live
+  code), anything the code or its docstring already says, anything only true of a past commit.
+
+**How to write an entry**
+- Lead with the fact or the rule, add the one-sentence reason, stop. No account of how it was found.
+- A number only when acting on it needs it, with its configuration (case, state, defaults in force, date).
+- Name a test only to locate the pin, not as a list of what was checked.
+- When a fact changes, edit the entry in place; a superseded entry is deleted, never struck through or
+  followed by a correction. State each fact once and point to it elsewhere.
+- Route by the `paths:` glob that covers the file you changed, not by subject.
+- Before adding to a file near its budget, move its dated content to the log first.
 
 ---
 

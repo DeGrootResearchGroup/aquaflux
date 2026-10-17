@@ -85,3 +85,107 @@ def test_this_repository_passes_its_own_check() -> None:
     """
     result = _run()
     assert result.returncode == 0, result.stderr
+
+
+# --- The size budget (tools/rules_budget.py, run by check_rules.sh on <repo>/.claude/rules) ---
+#
+# A file that is merely large still loads; the cost is the context it takes from every session that
+# touches its paths. These arms build a throwaway repository, so the budget is exercised against
+# sizes chosen here rather than against whatever the real files happen to weigh today.
+
+import importlib.util  # noqa: E402
+
+_SPEC = importlib.util.spec_from_file_location(
+    "rules_budget", CHECK_RULES.parent / "rules_budget.py"
+)
+rules_budget = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(rules_budget)
+
+KB = rules_budget.KB
+
+
+def _rule(glob: str, size: int = 1 * KB) -> str:
+    head = f'---\npaths:\n  - "{glob}"\n---\n\n'
+    return head + "x" * max(0, size - len(head))
+
+
+def _repo(tmp_path: Path, rules: dict[str, str], tracked: list[str]) -> Path:
+    (tmp_path / ".claude" / "rules").mkdir(parents=True)
+    (tmp_path / "CLAUDE.md").write_text("# briefing\n")
+    for name, text in rules.items():
+        (tmp_path / ".claude" / "rules" / name).write_text(text)
+    for f in tracked:
+        (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f).write_text("")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    return tmp_path
+
+
+def test_records_within_budget_pass_through_check_rules(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"a.md": _rule("src/**")}, ["src/a.py"])
+    assert _run(root / ".claude" / "rules").returncode == 0
+
+
+def test_a_rules_file_over_the_per_file_budget_fails(tmp_path: Path) -> None:
+    big = rules_budget.FILE_BUDGET + KB
+    root = _repo(tmp_path, {"big.md": _rule("src/**", big)}, ["src/a.py"])
+    result = _run(root / ".claude" / "rules")
+    assert result.returncode == 1
+    assert "big.md" in result.stderr and "budget for one file" in result.stderr
+
+
+def test_claude_md_is_held_to_the_same_per_file_budget(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"a.md": _rule("src/**")}, ["src/a.py"])
+    (root / "CLAUDE.md").write_text("x" * (rules_budget.FILE_BUDGET + KB))
+    assert any("CLAUDE.md" in m for m in rules_budget.check(root))
+
+
+def test_rules_that_load_together_are_held_to_a_combined_budget(tmp_path: Path) -> None:
+    """Each file is under its own budget; one source file loads both, and that sum is over."""
+    each = rules_budget.LOADED_BUDGET // 2 + KB
+    assert each < rules_budget.FILE_BUDGET
+    rules = {"a.md": _rule("src/**", each), "b.md": _rule("src/b.py", each)}
+    root = _repo(tmp_path, rules, ["src/a.py", "src/b.py"])
+    failures = rules_budget.check(root)
+    assert len(failures) == 1
+    assert "src/b.py" in failures[0] and "a.md" in failures[0] and "b.md" in failures[0]
+
+
+def test_a_rules_file_whose_globs_match_nothing_fails(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"a.md": _rule("src/**"), "dead.md": _rule("gone/**")}, ["src/a.py"])
+    failures = rules_budget.check(root)
+    assert len(failures) == 1 and "dead.md" in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("glob", "path", "matches"),
+    [
+        ("aquaflux/solve/**", "aquaflux/solve/x/y.py", True),
+        ("aquaflux/solve/**", "aquaflux/solver.py", False),
+        ("validation/*/case.yaml", "validation/a/case.yaml", True),
+        ("validation/*/case.yaml", "validation/a/b/case.yaml", False),
+        ("aquaflux/solve/march.py", "aquaflux/solve/march_log.py", False),
+    ],
+)
+def test_globs_match_as_the_loader_reads_them(glob: str, path: str, matches: bool) -> None:
+    assert bool(rules_budget._regex(glob).match(path)) is matches
+
+
+def test_the_over_budget_list_is_a_ratchet(tmp_path: Path, monkeypatch) -> None:
+    """A listed file may not grow past its ceiling, and the entry must follow it down."""
+    size = rules_budget.FILE_BUDGET + 20 * KB
+    root = _repo(tmp_path, {"big.md": _rule("src/**", size)}, ["src/a.py"])
+    name = ".claude/rules/big.md"
+
+    monkeypatch.setattr(rules_budget, "OVER_BUDGET", {name: size})
+    assert rules_budget.check(root) == []
+
+    monkeypatch.setattr(rules_budget, "OVER_BUDGET", {name: size - KB})
+    assert "may shrink, never grow" in rules_budget.check(root)[0]
+
+    monkeypatch.setattr(rules_budget, "OVER_BUDGET", {name: size + rules_budget.SLACK + KB})
+    assert "lower its OVER_BUDGET ceiling" in rules_budget.check(root)[0]
+
+    (root / ".claude" / "rules" / "big.md").write_text(_rule("src/**"))
+    assert "back under budget" in rules_budget.check(root)[0]
