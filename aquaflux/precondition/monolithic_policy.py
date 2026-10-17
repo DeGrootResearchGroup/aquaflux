@@ -181,13 +181,21 @@ class _TracedSplitAdjoint(eqx.Module):
 
     The step's adjoint factory is a data field, so this module's arrays are leaves of the step like the
     policy's own; a refit replaces both (:func:`with_traced_split`).
+
+    The adjoint is always preconditioned in double precision. A split stored in single precision is
+    widened here, once per transpose solve, so it applies its rounded entries in double-precision
+    arithmetic: applied in single precision it is linear only to about ``1e-7``, and a transpose solve
+    run to a tighter tolerance than that stagnates against the difference.
     """
 
     split: TracedFieldSplit
 
     def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
         del state  # frozen: the split does not depend on where the adjoint is taken
-        return self.split.matvec()
+        split = self.split
+        if split.precision != "float64":
+            split = split.in_precision("float64")
+        return split.matvec()
 
 
 def with_traced_split(step: NewtonStrategy, split: TracedFieldSplit) -> NewtonStrategy:

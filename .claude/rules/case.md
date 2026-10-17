@@ -290,7 +290,8 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   All three hold a `BulkVelocity` drive (the two marches since #541, by bordering their state); a march
   refuses one only beside a `MaterializedJacobian` preconditioner.
 - **The shared march settings are ONE dataclass, `_March`, that both marches derive from** — `max_steps`,
-  `convergence`, `preconditioner`, `dual_time`, `linear_solve`, `step_control`, `retry` — so a setting added
+  `convergence`, `preconditioner`, `dual_time`, `linear_solve`, `step_control`, `retry`, `adaptive_tolerance`
+  (`solve.AdaptiveLinearTolerance`, 2026-10-15; unset = the library's `DEFAULT_ADAPTIVE_TOLERANCE`, off = both rules `null`) — so a setting added
   there reaches both (Principle 2's sibling rule, at the file surface). `CoupledMarch` adds the closure's:
   `turbulence_damping` (→ `shift=CoupledShiftSettings(turbulence_damping=...)`), `omega_step_ratio`
   (per-cell bound on ω's change per correction; unset = e under log-ω, infinite = unbounded), `continuation`.
@@ -298,7 +299,7 @@ by construction), and not passing `drive` (the only nameable drive is the builde
   the per-cell k clip is now unconditional).
 - **The library's own settings values are read directly** — `Convergence` (+ `RowScaled`/`BlockScaled`/
   `Euclidean`), `DualTimeLoop`, `LinearSolveSettings`, the three dual-time controls (equinox modules are
-  dataclasses; their float fields read), `RetryPolicy`, and every coupled-preconditioner kind via
+  dataclasses; their float fields read), `RetryPolicy`, `AdaptiveLinearTolerance`, and every coupled-preconditioner kind via
   `turbulence.PRECONDITIONER_SPEC_MAPPING.kinds` (made public for this, so a kind added there reaches a
   case file). Case-side values exist only where no library value fits: `ViscosityRamp` (its
   `companion` is a function — `scale: flow|both` names `scale_momentum_only` / `scale_both_blocks` —

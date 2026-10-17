@@ -244,12 +244,16 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
     bound on the linear residual alone, so this solver tests that and nothing else, after every
     iteration, in the same injected measure: ``norm(b - A x) <= rtol norm(b)``.
 
-    Within a cycle the residual is formed from the Arnoldi relation, ``r = V_{j+1} (beta e_1 - H_j y_j)``,
-    so testing it costs no operator application; at the end of each cycle the true residual ``b - A x``
-    is recomputed (one application) and is what the next cycle starts from and the final verdict reads,
-    because the recurrence drifts from it as the basis loses orthogonality. The basis is orthogonalized by classical Gram--Schmidt applied twice,
-    and the small least-squares problem is re-solved at every iteration (its size is at most the restart
-    length, so this is negligible beside one application of the operator).
+    The residual is formed from the Arnoldi relation, ``r = V_{j+1} (beta e_1 - H_j y_j)``, so testing it
+    costs no operator application, and a cycle that ends without meeting the tolerance hands that
+    residual to the next one, as restarted GMRES does (Saad & Schultz 1986). It departs from the true
+    residual ``b - A x`` only as far as the basis loses orthogonality, which classical Gram--Schmidt
+    applied twice keeps to a round-off of ``b`` -- harmless as a starting vector, but not as a verdict
+    on a tolerance near that round-off. So the cycle whose recurrence meets the tolerance recomputes
+    the true residual (one application), and the verdict reads that; should it fall short, the next
+    cycle starts from it. A solve therefore applies the operator once per Krylov iteration, plus once
+    when it finishes. The small least-squares problem is re-solved at every iteration (its size is at
+    most the restart length, so this is negligible beside one application of the operator).
 
     The reported count is the restart cycles RUN, a partial one included, plus ``lineax``'s fixed offset
     of two, so :func:`restart_cycles` reads it as the number of cycles run. That is one MORE than the
@@ -263,8 +267,8 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
     ----------
     on_solve : callable or None
         ``(applications, cycles) -> None``, called on the host after each solve with the operator
-        applications it made (one per Krylov iteration plus one per cycle for its true residual) and
-        the cycles it ran. ``None`` (default) elides it. An observer for
+        applications it made (one per Krylov iteration, plus one for the true residual of the cycle
+        that met the tolerance) and the cycles it ran. ``None`` (default) elides it. An observer for
         studies that count work: the cycle count alone cannot, since a cycle may stop part way.
     """
 
@@ -280,7 +284,7 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
         rows = jnp.arange(size + 1)
 
         def iterate(inner):
-            j, basis, hessenberg, _, _, beta = inner
+            j, basis, hessenberg, _, _, _, beta = inner
             w = operator.mv(basis[j])
             coefficients = jnp.zeros(size + 1, dtype=w.dtype)
             for _ in range(
@@ -299,22 +303,32 @@ class _ResidualStopGMRES(_RelativeResidualGMRES):
             y = jnp.linalg.lstsq(built, rhs)[0]
             residual = (rhs - built @ y) @ basis
             done = (norm(residual) <= target) | (length <= jnp.finfo(w.dtype).eps * beta)
-            return j + 1, basis, hessenberg, y, done, beta
+            return j + 1, basis, hessenberg, y, residual, done, beta
 
         def cycle(outer):
             x, r, cycles, applications, _ = outer
             beta = jnp.linalg.norm(r)
             basis = jnp.zeros((size + 1, r.size), dtype=r.dtype).at[0].set(r / beta)
             hessenberg = jnp.zeros((size + 1, size), dtype=r.dtype)
-            inner = (0, basis, hessenberg, jnp.zeros(size, dtype=r.dtype), jnp.asarray(False), beta)
-            j, basis, hessenberg, y, done, beta = jax.lax.while_loop(
-                lambda inner: (inner[0] < size) & jnp.logical_not(inner[4]), iterate, inner
+            inner = (
+                0,
+                basis,
+                hessenberg,
+                jnp.zeros(size, dtype=r.dtype),
+                r,
+                jnp.asarray(False),
+                beta,
+            )
+            j, basis, _, y, r, done, _ = jax.lax.while_loop(
+                lambda inner: (inner[0] < size) & jnp.logical_not(inner[5]), iterate, inner
             )
             x = x + y @ basis[:size]
-            # The true residual, not the Arnoldi one: the recurrence drifts from b - A x as the basis
-            # loses orthogonality, and near a tight target that drift is the whole residual.
-            r = vector - operator.mv(x)
-            return x, r, cycles + 1, applications + j + 1, done
+            # A cycle that has not met the tolerance hands the next one the Arnoldi residual, as
+            # restarted GMRES does, saving the application that recomputing b - A x would cost. One
+            # that has met it reads the true residual instead, so the verdict never rests on the
+            # recurrence, which departs from b - A x by a round-off of b.
+            r = jax.lax.cond(done, lambda: vector - operator.mv(x), lambda: r)
+            return x, r, cycles + 1, applications + j + done.astype(applications.dtype), done
 
         def keep_going(outer):
             _, r, cycles, _, _ = outer
@@ -370,6 +384,63 @@ def residual_stop_gmres(
         max_steps=max_restarts,
         on_solve=on_solve,
     )
+
+
+def relative_tolerance(solver: lx.AbstractLinearSolver) -> float | None:
+    """The relative-residual tolerance ``solver`` stops at, or ``None`` if it has no such single number.
+
+    Only the relative-residual GMRES family (:func:`relative_residual_gmres`, :func:`residual_stop_gmres`)
+    stops at one; any other solver -- a stock ``lineax`` solver, a direct factorization -- has none a
+    march could vary.
+
+    Parameters
+    ----------
+    solver : lineax.AbstractLinearSolver
+        The linear solver to read.
+
+    Returns
+    -------
+    float or None
+        The tolerance, or ``None``.
+    """
+    if isinstance(solver, _RelativeResidualGMRES):
+        return float(solver.atol)
+    return None
+
+
+def with_relative_tolerance(
+    solver: lx.AbstractLinearSolver, tolerance: float
+) -> lx.AbstractLinearSolver:
+    """``solver`` stopping at the relative-residual tolerance ``tolerance`` instead of its own.
+
+    The tolerance is carried as a 64-bit array rather than a Python float. A solver is an argument of the
+    march's compiled step, where a float is part of the compilation key and an array is not, so a march
+    that changes the tolerance from step to step stays a compilation-cache hit once every value it hands
+    over is made here.
+
+    Parameters
+    ----------
+    solver : lineax.AbstractLinearSolver
+        A relative-residual GMRES (:func:`relative_residual_gmres` or :func:`residual_stop_gmres`).
+    tolerance : float
+        The relative tolerance to stop at.
+
+    Returns
+    -------
+    lineax.AbstractLinearSolver
+        The same solver with ``tolerance`` in place of its own.
+
+    Raises
+    ------
+    TypeError
+        If ``solver`` is not one whose tolerance can be replaced.
+    """
+    if not isinstance(solver, _RelativeResidualGMRES):
+        raise TypeError(
+            f"only a relative-residual GMRES (relative_residual_gmres, residual_stop_gmres) stops at "
+            f"one relative tolerance that can be replaced; got {type(solver).__name__}."
+        )
+    return eqx.tree_at(lambda s: s.atol, solver, jnp.asarray(float(tolerance), dtype=jnp.float64))
 
 
 def in_progress_measure(

@@ -24,7 +24,9 @@ paths:
 
 
 > `StepReport` gained `station` and `arrived` (2026-10-07), set by `newton_march` from its homotopy so a
-> record of a march can mark where a continuation ended — see `solve-march.md`.
+> record of a march can mark where a continuation ended — see `solve-march.md`. It gained
+> `linear_tolerance` (2026-10-15), the relative tolerance the step's linear solve ran at under an
+> `AdaptiveLinearTolerance` (`nan` without one) — see `solve.md`.
 
 ## ⚠️ A DEFECT THAT FIRES FOR THE WRONG REASON CAN BE LOAD-BEARING (binding, measured 2026-09-09)
 

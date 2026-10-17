@@ -305,6 +305,19 @@ cannot be written. The guard is what catches the next module that does branch.
   rebuilding it is not a converged root, and measuring "at the converged root" against it silently answers
   a different question: the zero-shift coupled Jacobian is nearly singular at a self-start and is not at a
   root. Read what wrote a state before trusting it.
+- **⚠️ bfs3d's leading coarsening moves under ROUNDING, so a bfs3d march A/B of two checkouts that
+  differ in rounding is not a controlled pair (found 2026-10-15, PR #721).** The `[u, v, w, p]` block
+  coarsens at `strength_threshold` 0.25, reading values. #721 changed only how a sparse product is
+  stored; that moved the hybrid start by ~1e-13 (its potential-flow solve runs multigrid cycles on such
+  operators), and bfs3d's leading
+  hierarchy by tens of aggregates (26252 against 26248 dofs at level 1, 284 against 236 at the bottom;
+  applies 2.5 % apart), so the two marches differed from step 1 (`R` 0.1468 against 0.1474) and took
+  137 against 129 cycles. Built from the SAME state, the two checkouts' hierarchies were identical and
+  their applies agreed to 4e-16. pitzDaily's march happened not to move. **Any change that moves
+  rounding anywhere upstream of the first fit does this** -- a different gradient inverse, a jax upgrade.
+  Compare a preconditioner's cost at one fixed checkpoint
+  (`bfs3d_openfoam/split_apply_timing.py` with `BFS3D_SPLIT_TIMING_STATE`; its level table must agree
+  between the runs), and read a march pair's step and cycle counts as two samples, not as a difference.
 - **A per-column probe reach is licensed by the scheme AND the split, so re-audit it when either changes.**
   `bfs3d` shipped `COLUMN_REACH = (3,3,3,3,2,2)` under `CorrectedGreenGauss`, licensed for the field split
   only (a flow-first split never applies `dR_flow/dturb`; a monolithic factorization does, and a short
@@ -719,6 +732,34 @@ snapped mesh. Its README carries every number with its configuration. What to kn
   3 x 3 pixels change the floor error by nothing to four figures at 64 and 256 directions (only the
   bunny's snapped cells have faces a bin overhangs). Do not read that as "pixels never matter": the
   room is hex-dominant with axis-aligned faces and bin edges; a tet or polyhedral mesh is untested.
+
+## `tubular_reactor` — a ten-lamp reactor on a background grid, and its resolution study (2026-10-15/16)
+
+A radiation-only case with no flow mesh: 10 Sozzi lamps (35.4 W each) in a 300 mm vessel, with a
+100-hole, 50 %-open perforated plate at the inlet and walls reflecting 0.1. `G` is gathered at the
+nodes of a Cartesian grid in the water (`run.py`, `TUBULAR_*` settings, outputs in
+`work/runs/<tag>/`). `study.sh` runs the grid and tessellation studies, and `compare.py` compares
+them. Numbers and configuration are in its README. What to know before touching it:
+
+- **Shadows are exact bodies, and the plate is a bespoke `Body` (`geometry.PerforatedPlate`).** A
+  sight line crossing the slab is clear only if its part inside the slab lies in one hole, found by
+  one hexagonal-lattice lookup. ⚠️ **The first version put the 100 holes in an `Outside` as 104 convex
+  regions, and that ran a smoke test to a 54 GB footprint before it was killed.** Its pair test forms
+  intermediates per region at the 4M-pair default. Verified against brute-force hole sampling:
+  1 of 4,000 lines differed, and finer sampling resolved it (a 7 µm graze).
+- **Lamps are emitters only; their shadows are separate exact bodies.** A cylinder plus hemisphere,
+  `TUBULAR_SHRINK` (0.251 mm) inside the sleeve so no facet centroid lies inside. That is fixed
+  rather than derived, so a lamp-tessellation study does not move the shadows.
+- **The lamps are kept out of the radiosity on purpose: the solve is hand-assembled, not
+  `solve_scene`.** `solve_scene` puts every lamp facet into the dense transfer, and 50k lamp facets
+  plus 12k wall triangles cannot be held. Wall triangles at 16k and 18k (20 mm edges, 12-sided
+  holes) did fit, on a 19 GB machine.
+- **Grid results (h = 8/6/4/3 mm):** away from the sleeves the interpolation error falls as h². Within
+  2 mm of a sleeve it is 17-36 % at every spacing (issue #726). ⚠️ **The node-averaged mean G is not a
+  converged volume integral**: it moves non-monotonically, 112.9 / 114.8 / 115.1 / 114.1 W/m².
+- **Figures are drawn by `render.py`**: 0.5 mm pixels masked by the exact water test and interpolated
+  from the nodes, so boundaries are true curves. The plate-plane figures are direct light only and
+  say so on the figure.
 
 ## The aggressive Reynolds continuation does NOT need the complete LU (2026-10-11)
 

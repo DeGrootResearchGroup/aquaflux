@@ -37,6 +37,7 @@ from aquaflux.flow import MassFlow, bulk_velocity_flow_solve, reused_flow_solve,
 from aquaflux.precondition import MaterializedJacobian
 from aquaflux.radiation import solve_scene
 from aquaflux.solve import (
+    AdaptiveLinearTolerance,
     Convergence,
     DualTimeLoop,
     LinearSolverSpec,
@@ -231,6 +232,10 @@ class _March(SolverSpec):
         dual-time march).
     retry : RetryPolicy or None
         When and how a bad step is redone; unset, never.
+    adaptive_tolerance : AdaptiveLinearTolerance or None
+        How tightly each step solves its linear system, adapted from how the previous step went; unset,
+        the library's default (``solve.DEFAULT_ADAPTIVE_TOLERANCE``). To solve every step to the regime's
+        own tolerance, set one with both rules off (``after_setback: null, tail_gate: null``).
     """
 
     max_steps: int | None = None
@@ -240,6 +245,7 @@ class _March(SolverSpec):
     linear_solve: LinearSolveSettings | None = None
     step_control: ShiftStrengthControl | None = None
     retry: RetryPolicy | None = None
+    adaptive_tolerance: AdaptiveLinearTolerance | None = None
 
     def _owned(self) -> frozenset[str]:
         """The library solve's keywords that are this solve's settings, set or not.
@@ -257,6 +263,7 @@ class _March(SolverSpec):
             ("linear_solve", LinearSolveSettings),
             ("step_control", ShiftStrengthControl),
             ("retry", RetryPolicy),
+            ("adaptive_tolerance", AdaptiveLinearTolerance),
         ):
             value = getattr(self, name)
             if value is not None and not isinstance(value, family):

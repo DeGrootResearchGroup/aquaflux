@@ -197,6 +197,14 @@ def _solver_with_overrides(solver):
         preconditioner = dataclasses.replace(
             preconditioner, probe=dataclasses.replace(preconditioner.probe, **probe)
         )
+    # The precision the field split is applied in (`PITZ_SPLIT_PRECISION`, `float64` or `float32`);
+    # the residual, the Krylov solves and the adjoint's preconditioner stay in double precision.
+    precision = _environment("SPLIT_PRECISION", str)
+    if precision is not None:
+        preconditioner = dataclasses.replace(
+            preconditioner,
+            inverse=dataclasses.replace(preconditioner.inverse, precision=precision),
+        )
     # The shift the inverse is re-fitted at is `max(beta, refit_beta_floor)` (`PITZ_REFIT_BETA_FLOOR`):
     # below the floor the inverse is fitted at the floor while the march solves at its own shift.
     refit_floor = _environment("REFIT_BETA_FLOOR", float)
@@ -521,8 +529,8 @@ class _KrylovWork:
     """Applications of the preconditioned operator over a march, counted per inner solve.
 
     ``lineax``'s count follows from its cycles (one start-up application, then ``restart + 1`` per
-    cycle); the residual stop reports its own, since it may stop part way through a cycle, and it
-    includes the one application per cycle that recomputes the true residual.
+    cycle); the residual stop reports its own, one per Krylov iteration, since it may stop part way
+    through a cycle.
     """
 
     def __init__(self):
@@ -1242,6 +1250,10 @@ def solve_aquaflux(
             f"{FLOW_INVERSE} {SIMPLE_FLOW}",
         ),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}" if FIELD_SPLIT else "n/a"),
+        (
+            "split precision",
+            SOLVER.preconditioner.inverse.precision if FIELD_SPLIT else "n/a",
+        ),
         ("probe stencil reach", probe.stencil_reach),
         ("gradient scheme", _gradient_scheme_label(case["spec"].numerics.gradient)),
         ("probe gradient sweeps", probe.gradient_sweeps or "full (the scheme's own)"),

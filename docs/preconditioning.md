@@ -315,6 +315,15 @@ A {class}`~aquaflux.precondition.MaterializedJacobian` settles everything the in
 and its `inverse` chooses how the materialized matrix is inverted: a
 {class}`~aquaflux.precondition.FieldSplit` for a problem with two groups of fields, such as coupled flow and
 turbulence, or one block inverse over the whole state for a problem with one.
+
+A field split can be applied in single precision, `FieldSplit(..., precision="float32")`. It is
+still fitted in double precision; its arrays are then rounded once and each application runs in
+single precision, which moves fewer bytes per stored entry. The residual, the Krylov solves and the
+stopping test stay in double precision, so the march converges to the same root. The adjoint's
+transpose solve applies the same rounded split in double-precision arithmetic: applied in single
+precision the split is linear only to single-precision rounding, and a transpose solve run to a
+tighter tolerance than that stagnates.
+
 To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with
 {func}`~aquaflux.turbulence.open_session` and pass that instead; for a differentiated solve,
@@ -568,8 +577,14 @@ It keeps the rest of `lineax`'s rule, though: the residual is tested only at the
 restart cycle, and the solve also runs until its solution has stopped moving over a whole
 cycle, so every solve runs at least two cycles. For a loose forcing term that is most of the
 work. {func}`~aquaflux.solve.residual_stop_gmres` stops the moment the residual meets the
-tolerance, tested after every iteration; a march selects it with
-`linear_solve: {stop: residual}` ({class}`~aquaflux.solve.LinearSolveSettings`).
+tolerance, tested after every iteration. It is what a march's linear solves run unless a case
+sets `linear_solve: {stop: lineax}` ({class}`~aquaflux.solve.LinearSolveSettings`).
+
+Every march also varies that tolerance from step to step
+({class}`~aquaflux.solve.AdaptiveLinearTolerance`): the step after one whose line search cut it back,
+or whose residual rose, is solved to 0.1, and a run of full-length steps that each removed little more
+than the tolerance asked of them -- steps held back by their own linear solve -- is solved more
+tightly, so the end of a march converges faster than linearly.
 
 ## Gradients
 
@@ -592,9 +607,10 @@ nothing after it to correct anything.
 
 Read the **cycle count**, not the wall clock. {func}`~aquaflux.solve.restart_cycles` strips
 the fixed per-solve offset from a raw `lineax` iteration count, which is what makes small
-counts readable. The corrected count is one less than the restart cycles a solve actually
-ran: `lineax` stops only once the solution has stopped moving over a whole cycle, so a solve
-whose residual met its tolerance within the first cycle runs a second and is reported as `1`.
+counts readable. Under the default residual stop it is the restart cycles a solve ran. Under
+`stop: lineax` it is one less: that rule stops only once the solution has stopped moving over a
+whole cycle, so a solve whose residual met its tolerance within the first cycle runs a second and
+is reported as `1`.
 
 From there:
 

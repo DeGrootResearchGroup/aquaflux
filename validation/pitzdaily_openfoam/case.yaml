@@ -76,6 +76,10 @@ solver:
         avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
         frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
+      # Applied in single precision: fitted in double, its arrays rounded once, the residual, Krylov
+      # solves and the adjoint's preconditioner kept in double. Same steps, cycles and root as float64,
+      # faster (pitzDaily march 405 s against 531 s, #732).
+      precision: float32
     # The pattern is reach 3 and every column is PROBED at reach 2 (100 probes against 165). The probe
     # then sums each column's distance-3 couplings (~4e-4 of the Jacobian's norm here) into its near
     # entries; the SIMPLE-smoothed flow block and the Jacobi-smoothed k-omega block take that perturbed

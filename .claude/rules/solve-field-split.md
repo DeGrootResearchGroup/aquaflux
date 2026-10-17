@@ -18,6 +18,43 @@ paths:
 > `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
 
 
+## `FieldSplit(precision="float32")`: the split applied in single precision — BUILT, SHIPPED by both flagship cases (2026-10-16)
+
+**The library default stays `"float64"`; pitzDaily's and bfs3d's `case.yaml` set `precision: float32`**
+(the project owner's decision, #732, after a march A/B on each: same steps, cycles and root, pitzDaily
+-24 % and bfs3d -17 % wall; `.claude/notes/solve-open-directions.md` §7). ⚠️ So every split-apply or
+march timing on either case recorded BEFORE 2026-10-16 was taken in float64; set
+`PITZ_SPLIT_PRECISION` / `BFS3D_SPLIT_PRECISION=float64` to reproduce one. ⚠️ pitzDaily's A/B was
+taken with its probe at uniform reach 3; #722 (merged the same day) moved the case to reach-2 columns
+in a reach-3 pattern, so float32 with that probe is unmarched there.
+
+`FieldSplit.precision` (`"float64"` default | `"float32"`, `SPLIT_PRECISIONS`) reaches the traced split
+through `MaterializedSession._precision` (both places a split is made: the first fit's policy and a
+refit's update). **The fit is unchanged and stays in double precision** — hierarchies, the
+inverted diagonal blocks (inverted once in float64, so the float32 small-block pivoting problem
+`solve-amg-multigrid.md` warns of does not arise), the coupling — and `TracedFieldSplit.in_precision`
+then rounds every floating leaf once. `apply` narrows its input and widens its output, so the residual,
+the Krylov recurrences and the stop stay float64. A host-composed split (a block with no traced cycle)
+refuses float32 at the fit rather than silently running in double.
+- **⚠️ THE ADJOINT IS PRECONDITIONED IN DOUBLE PRECISION, AND IT HAS TO BE.** With the float32 split on
+  both sides, `test_the_split_adjoint_matches_finite_difference[float32]` raised lineax's *"stagnation in
+  an iterative linear solve"* from `root_adjoint`'s transpose solve (rtol/atol 1e-10). A split applied in
+  float32 arithmetic is linear only to ~1e-7, and GMRES assumes a fixed LINEAR preconditioner, so a solve
+  tighter than that cannot converge. The rounded ENTRIES are harmless; the rounded ARITHMETIC is not.
+  `_TracedSplitAdjoint` therefore widens the split (`in_precision("float64")`) once per transpose solve:
+  the same rounded entries, exactly linear again, no second copy held through the march. With that the
+  float32 adjoint matches the finite difference to 1e-5 (channel, slow tier). The forward solve (rtol 0.3)
+  is untouched by this. Pinned by
+  `test_the_adjoint_applies_a_single_precision_split_in_double_and_so_exactly_linearly` (red with the
+  widening removed).
+- Case overrides: `PITZ_SPLIT_PRECISION` / `BFS3D_SPLIT_PRECISION`, both named in the run banner.
+  Measurements and the march A/B are in `.claude/notes/solve-open-directions.md` §7.
+- Pinned by `test_traced_field_split.py` (single-precision leaves, input narrowed, output widened, every
+  arithmetic equation float32, transpose), `test_preconditioner_session.py` (precision reaches the first
+  fit and a refit; host split refuses), the spec mapping tests, and the float32 arms of the slow root and
+  adjoint tests in `tests/integration/test_coupled_field_split.py`. Each of the eight wiring lines was
+  mutation-checked.
+
 ## `TracedFieldSplit`: the composition on device — WIRED into the march (2026-10-12, #290)
 
 `traced_field_split.py` holds `TracedFieldSplit`, `traced_field_split(inverse)` and
@@ -198,7 +235,10 @@ a session refits it at the step's CURRENT shift, and a re-fitting march is diffe
     literature is importing it across a regime boundary.
   - **The measured failure is not a saddle pathology.** The near-null direction of the degenerate cell
     blocks is **pure ω** — nothing on `u,v,w,p,k` — and per-field V-cycle smoothing has pressure *well*
-    handled with ω the outlier. The saddle part of our operator is not what is hurting.
+    handled with ω the outlier. ⚠️ On pitzDaily (2026-10-14) that pure-ω direction comes from a large
+    ω-ROW coupling to the cell's own `p`/`u` (∂R_ω/∂p ≈ 1e3 equilibrated), not from a weak ω diagonal:
+    removing those couplings leaves no near-singular block (`.claude/notes/solve-refuted-directions.md`,
+    the WHICH-row entry). That coupling is the split's lower block, which is one more reason it suits. The saddle part of our operator is not what is hurting.
   **The direction this points at is a FIELD SPLIT that keeps the coupling** — a block-triangular
   preconditioner with the `(u,p)` saddle handled as now and k/ω preconditioned by something suited to
   transport (`scalar_transport_preconditioner` already exists and already serves those blocks in the

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from ..solve import SettingsMapping, SettingsValue
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
@@ -68,6 +68,10 @@ class JacobianProbeSpec(SettingsValue):
             object.__setattr__(self, "column_reach", tuple(int(r) for r in self.column_reach))
 
 
+#: The precisions a field split can be applied in (:attr:`FieldSplit.precision`).
+SPLIT_PRECISIONS = ("float64", "float32")
+
+
 @dataclasses.dataclass(frozen=True)
 class FieldSplit:
     """A block-triangular field split: the problem's leading group of fields first, then the rest.
@@ -86,17 +90,35 @@ class FieldSplit:
     trailing : BlockInverse
         The inverse fitted to the trailing fields (``[k, omega]``), for example
         :class:`~aquaflux.precondition.JacobiSmoothed`.
+    precision : {"float64", "float32"}
+        The floating-point precision the split is applied in. Everything is fitted in double
+        precision -- the hierarchies, the inverted diagonal blocks, the coupling -- and under
+        ``"float32"`` the fitted arrays are then stored in single precision and each application runs
+        in it, its input rounded and its output widened back. The residual, the Krylov recurrences and
+        the stopping test stay in double precision, so the precision changes how fast a solve
+        converges, never what it converges to. A single-precision application moves fewer bytes per
+        stored entry. The adjoint's transpose solve applies the same rounded split in double-precision
+        arithmetic, since one applied in single precision is linear only to about ``1e-7`` and a solve
+        run tighter than that stagnates. Only a split applied on the device (both blocks offering a
+        traced cycle) can take it.
 
     Raises
     ------
     TypeError
         If either inverse is not a :class:`~aquaflux.precondition.BlockInverse`.
+    ValueError
+        If ``precision`` is neither ``"float64"`` nor ``"float32"``.
     """
 
     leading: BlockInverse
     trailing: BlockInverse
+    precision: Literal["float64", "float32"] = "float64"
 
     def __post_init__(self) -> None:
+        if self.precision not in SPLIT_PRECISIONS:
+            raise ValueError(
+                f"FieldSplit.precision must be one of {SPLIT_PRECISIONS}, got {self.precision!r}."
+            )
         for role in ("leading", "trailing"):
             inverse = getattr(self, role)
             if not isinstance(inverse, BlockInverse):

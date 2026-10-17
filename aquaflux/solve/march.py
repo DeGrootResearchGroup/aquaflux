@@ -49,7 +49,9 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 
+from .adaptive_tolerance import DEFAULT_ADAPTIVE_TOLERANCE, AdaptiveLinearTolerance
 from .convergence import MeasureBuilder
+from .linear import relative_tolerance, with_relative_tolerance
 from .norm import named_blocks, norm_of_residual
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
@@ -484,6 +486,7 @@ def newton_march(
     refresh_preconditioner: Callable[..., None] | None = None,
     solver: lx.AbstractLinearSolver | None = None,
     retry: RetryPolicy = NO_RETRIES,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = DEFAULT_ADAPTIVE_TOLERANCE,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -648,6 +651,15 @@ def newton_march(
         original retry). Each escalation re-matches the preconditioner through ``refresh_preconditioner``;
         the divergence retry does not, because the factorization is already fresh at this
         ``(state, β)`` and only the Krylov tolerance is at fault.
+    adaptive_tolerance : AdaptiveLinearTolerance or None
+        Vary the relative tolerance each step's linear solve stops at, from how the previous step went:
+        tighter after a step the line search cut back or whose residual rose, and tighter in a tail of
+        full-length steps limited by their own solve (see :class:`~aquaflux.solve.AdaptiveLinearTolerance`).
+        Each step starts from the base tolerance the march's ``solver`` was built with. Only a
+        relative-residual GMRES has a tolerance to vary; any other solver is solved to its own, whatever
+        this says. A step's reduction is its reported residual over the one reported before it. Default
+        :data:`~aquaflux.solve.DEFAULT_ADAPTIVE_TOLERANCE`; ``None`` solves every step to the solver's own
+        tolerance.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, called immediately before a step is redone. ``reason`` is
         ``"cycles"`` (the cost trigger, and the step was cut short), ``"alpha"`` (the step-length
@@ -696,6 +708,15 @@ def newton_march(
     """
     if solver is None:
         solver = strategy.linear_solver()
+    # The tolerance an adaptive rule varies is the solver's own, carried as an array from the first step
+    # so that every later value is a change of data and the compiled step a cache hit. A solver with no
+    # single relative tolerance (a stock or direct solver) has nothing to vary and keeps its own.
+    base_tolerance = None if adaptive_tolerance is None else relative_tolerance(solver)
+    if base_tolerance is None:
+        adaptive_tolerance = None
+    else:
+        solver = with_relative_tolerance(solver, base_tolerance)
+    tolerance = base_tolerance
     if stopping_step is not None and norm_builder is None:
         raise ValueError(
             "a stopping_step is judged in the measure norm_builder builds from it, so it needs a "
@@ -911,8 +932,9 @@ def newton_march(
                     # search, its inner stop, the residual it reports -- in the previous one's scales.
                     active_step = active_step.with_norm(norm_builder(strategy, state))
         prestep_state = state
+        step_solver = solver if tolerance is None else with_relative_tolerance(solver, tolerance)
         outcome, residual_norm = _march_step(
-            active_step, step_residual, prestep_state, residual_norm_0, solver
+            active_step, step_residual, prestep_state, residual_norm_0, step_solver
         )
         # A step can go bad three ways -- a non-finite / diverging correction, a step length collapsed
         # to `retry.on_alpha`, or a solve truncated by `retry.abort_above_cycles` -- and they DO NOT
@@ -993,7 +1015,7 @@ def newton_march(
                 if update is not None:
                     strategy, active_step = update(strategy), update(active_step)
             outcome, residual_norm = _march_step(
-                active_step, step_residual, prestep_state, residual_norm_0, solver
+                active_step, step_residual, prestep_state, residual_norm_0, step_solver
             )
         # Divergence retry -- the FALLBACK for a non-finite correction β-escalation could not fix. An
         # inexact preconditioner can return a non-finite correction where the loose
@@ -1031,8 +1053,23 @@ def newton_march(
         ):
             control_state = step_control.carry_beta(control_state, float(carried))
         state = outcome.phi
+        previous = current
         current = float(residual_norm)
         stop_norm = judged(active_step, state, step_residual, current)
+        step_tolerance = tolerance
+        if adaptive_tolerance is not None:
+            # The reduction is the march's own, report to report, although the measure is rebuilt each
+            # outer iteration so its two ends are in different scales. That is deliberate and measured: a
+            # residual that rose in the record is the setback signal the rule acts on, and re-measuring
+            # the step's start in its own scales instead hid exactly that rise on a Reynolds-continuation
+            # march, which then failed where this converged.
+            tolerance = adaptive_tolerance.next_tolerance(
+                base_tolerance,
+                alpha=float(outcome.alpha),
+                reduction=current / previous if previous > 0.0 else math.inf,
+                stopping_norm=stop_norm,
+                target=atol + rtol * judged_reference(),
+            )
         refresh_due = bool(outcome.refresh_due)
         # Not every NewtonStrategy carries a relaxation schedule (a plain damped-Newton step has none), and
         # a schedule need not expose a readable beta -- report 0 rather than demanding either.
@@ -1055,6 +1092,7 @@ def newton_march(
             full_step_ratio=float(outcome.full_step_ratio),
             stopping_norm=stop_norm,
             stopping_ratio=stop_norm / judged_reference() if judged_reference() > 0.0 else 0.0,
+            linear_tolerance=math.nan if step_tolerance is None else float(step_tolerance),
         )
         reports.append(report)
         if on_residuals is not None:
