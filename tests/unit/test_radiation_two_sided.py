@@ -241,7 +241,7 @@ def test_an_undeclared_sheet_is_not_the_slab():
 # -- the scene ------------------------------------------------------------------------------------
 
 
-def _shelf_scene(two_sided) -> Scene:
+def _shelf_scene(two_sided, occlusion=None) -> Scene:
     """A lamp on the floor facing up, a reflecting shelf over it facing up, and a point beside the
     lamp below the shelf: the only reflected light that point gets is the shelf's back face's."""
     lamp = rectangle_triangles([0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0])
@@ -252,7 +252,10 @@ def _shelf_scene(two_sided) -> Scene:
             shelf, solid_names=("shelf",), diffuse_reflectance=REFLECTANCE, two_sided=two_sided
         ),
         volume=VolumeReceivers(np.array([[0.3, 0.0, 0.2]])),
-        settings=RadiationSettings(receiver_quadrature=1, self_occlusion=NoOcclusion()),
+        settings=RadiationSettings(
+            receiver_quadrature=1,
+            self_occlusion=NoOcclusion() if occlusion is None else occlusion,
+        ),
     )
 
 
@@ -271,4 +274,25 @@ def test_a_lamp_under_a_shelf_lights_the_room_by_the_shelf_s_back_face():
     area = np.asarray(_shelf_scene(()).reflectors.area)
     assert two_sided.reflector_absorbed_power == pytest.approx(
         (1.0 - REFLECTANCE) * float(landed @ area), rel=1e-12
+    )
+
+
+def test_a_back_face_keeps_its_front_s_body_as_an_integer_label():
+    """Labels are gathered, not computed with: a body index that came back a float would no longer
+    index the body names."""
+    faces = _sheet().with_back_faces()
+    assert np.asarray(faces.solid_id).dtype.kind == "i"
+    np.testing.assert_array_equal(np.asarray(faces.solid_id)[N_WALLS + N_SHEET :], 1)
+
+
+def test_the_lamps_light_on_a_back_face_is_not_shadowed_by_its_own_triangle():
+    """Nothing stands between the lamp, the shelf and the point, so testing the scene's own
+    triangles for shadows changes nothing -- provided a back face's sample points are named as lying
+    on their front's triangle, which a ray from the lamp otherwise ends in, and counts as blocked."""
+    clear = solve_scene(_shelf_scene(("shelf",)))
+    traced = solve_scene(_shelf_scene(("shelf",), RayCastOcclusion()))
+    assert float(clear.reflector_irradiance[2]) > 0.0
+    np.testing.assert_allclose(traced.reflector_irradiance, clear.reflector_irradiance, rtol=1e-12)
+    np.testing.assert_allclose(
+        traced.fluence_rate_reflected, clear.fluence_rate_reflected, rtol=1e-12
     )

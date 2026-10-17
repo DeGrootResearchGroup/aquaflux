@@ -523,17 +523,23 @@ def test_a_receiver_on_no_facet_that_faces_a_way_takes_its_share_of_the_projecte
 def test_a_receiver_on_several_facets_is_measured_about_the_normal_it_is_given():
     """A point on a shared edge lies on two facets, and the clip needs one way to face.
 
-    Named on several facets with no normal it is refused, since nothing says which way it faces;
-    given the normal of the facet it lies on, it reads exactly as named on that facet alone.
+    Named on facets in different planes with no normal it is refused, since nothing says which
+    way it faces. Facets in one plane -- a sheet's face and its back, or a row with one facet and
+    padding -- face the way the first does. Given the normal of the facet it lies on, it reads
+    exactly as named on that facet alone.
     """
     surfaces = _reactor()
     on_wall = 3
     point = np.asarray(surfaces.centroid)[on_wall][None]
     _, alone = _volume_mask(point, receiver_facet=np.array([on_wall]))
     assert ((alone > 0.05) & (alone < 0.95)).any(), "the fixture has moved: nothing partly hidden"
-    rows = np.array([[on_wall, -1]])
+    normal = np.asarray(surfaces.normal)
+    across = int(np.flatnonzero(np.abs(normal @ normal[on_wall]) < 0.5)[0])
     with pytest.raises(ValueError, match="no receiver_normal says"):
-        _volume_mask(point, receiver_facet=rows)
+        _volume_mask(point, receiver_facet=np.array([[on_wall, across]]))
+    rows = np.array([[on_wall, -1]])
+    _, padded = _volume_mask(point, receiver_facet=rows)
+    assert np.array_equal(padded, alone)
     _, given = _volume_mask(
         point, receiver_facet=rows, receiver_normal=np.asarray(surfaces.normal)[on_wall][None]
     )

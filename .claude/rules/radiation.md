@@ -5138,4 +5138,12 @@ sheet twice by hand did not work, for two reasons, and both are what the build n
   cannot -- a fixture degeneracy (the baffle lesson of #537 PR 3b again), not a defect. Undeclared, the
   field below the sheet is 2-6% off the slab under the clip (brighter: light passes through from
   behind).
+- **Mutation pass (11, 10 red, then 11 after a test was added)**: the twin exchange not zeroed, the
+  receiving end not told of the twin, the back face's normal not negated, a faced sheet still counted
+  two-sided, the declaration ignored, the scene's exchange not expanded, the emission refusal, the
+  parallel-rows check, the model build not expanding, the name check. ⚠️ **The back face's own-facet map
+  in the scene (`_Direct.facets_of`) first SURVIVED**: the shelf fixture ran `NoOcclusion`, where a
+  sample point's own triangle cannot shadow it; `test_the_lamps_light_on_a_back_face_is_not_shadowed_by_its_own_triangle`
+  runs the ray test and catches it. **Dismissed, equivalent**: the mirror path's first leg ignoring the
+  source's twin -- it lies at distance 0, inside the margin (the direct rays need no such exclusion).
 

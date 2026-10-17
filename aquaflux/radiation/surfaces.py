@@ -370,9 +370,9 @@ class Surfaces(eqx.Module):
         if not len(front):
             return self
 
-        def joined(values, sign=1.0):
+        def joined(values):
             values = jnp.asarray(values)
-            return jnp.concatenate([values, sign * values[front]])
+            return jnp.concatenate([values, values[front]])
 
         # Two corners swapped reverse the winding; the centroid, area and normal are carried
         # over rather than recomputed, so a face and its back are the same triangle exactly.
@@ -381,7 +381,7 @@ class Surfaces(eqx.Module):
             self,
             vertices=jnp.concatenate([vertices, vertices[front][:, [0, 2, 1]]]),
             centroid=joined(self.centroid),
-            normal=joined(self.normal, -1.0),
+            normal=jnp.concatenate([jnp.asarray(self.normal), -jnp.asarray(self.normal)[front]]),
             area=joined(self.area),
             solid_id=joined(self.solid_id),
             emission=joined(self.emission),
