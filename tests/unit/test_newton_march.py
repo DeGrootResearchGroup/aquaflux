@@ -1617,6 +1617,29 @@ def test_a_march_step_does_not_re_evaluate_the_residual_it_was_just_handed() -> 
         assert len(_TRACES) == 3, f"line_search={line_search} traced {len(_TRACES)} residuals"
 
 
+@pytest.mark.parametrize("line_search", [0, 6], ids=["full-step", "ladder"])
+def test_a_dual_time_march_step_traces_the_residual_only_where_it_must(line_search) -> None:
+    """The dual-time step's compiled program holds three copies of the residual, not five.
+
+    Counted at trace time, so this is the size of what XLA compiles rather than a timing: the anchor's
+    ``R(phi^n)``, the line-search ladder's body, and the Krylov solve's Jacobian--vector product. Two
+    more copies are redundant in arithmetic and pinned out here -- re-evaluating ``G`` at each inner
+    iterate for the Newton right-hand side (the previous iteration's search already evaluated it there)
+    and re-evaluating ``R`` at the returned iterate for the step's measure (it is the kept ``G`` less the
+    transient term). On a coupled problem each copy is a whole residual assembly in the program.
+    """
+    _TRACES.clear()
+    step = DualTimeStep(
+        shift_policy=_UnitShiftPolicy(),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0, exponent=1.0),
+        inner_steps=3,
+        line_search=line_search,
+    )
+    residual = _Cubic(jnp.array([8.0, 27.0]))
+    _march_step(step, residual, jnp.array([1.5, 2.5]), jnp.asarray(10.0), step.linear_solver())
+    assert len(_TRACES) == 3, f"line_search={line_search} traced {len(_TRACES)} residuals"
+
+
 def test_every_strategy_reports_the_measure_at_the_iterate_it_returns() -> None:
     """The contract both drivers now rely on, checked on all three shipped strategies.
 
@@ -1658,13 +1681,17 @@ def test_the_line_search_reports_the_fallback_rungs_own_measure() -> None:
     def residual(p):  # every rung increases the residual, so nothing is admissible
         return p
 
-    step = backtracking_line_search(residual, phi, delta, reference, steps=4)
+    step = backtracking_line_search(
+        residual, phi, delta, reference, steps=4, residual=residual(phi)
+    )
 
     assert (
         float(step.alpha) == 1.0
     )  # the fallback: the longest qualifying rung, capped at the full step
     assert jnp.allclose(step.phi, phi + delta)
     assert jnp.allclose(step.residual_norm, jnp.linalg.norm(residual(step.phi)))
+    # The vector too: the last rung walked was the shortest, so carrying the last one would be wrong.
+    assert jnp.array_equal(step.residual, residual(step.phi))
 
 
 def test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure() -> None:
@@ -1684,9 +1711,12 @@ def test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure() -> None:
     def poisoned(p):
         return jnp.full_like(p, jnp.nan)
 
-    step = backtracking_line_search(poisoned, phi, delta, reference, steps=4)
+    step = backtracking_line_search(poisoned, phi, delta, reference, steps=4, residual=phi)
 
     assert not bool(jnp.isfinite(step.residual_norm))
+    # The vector is non-finite like its measure -- not the caller's (finite) start residual, which
+    # belongs to a point the search did not return.
+    assert not bool(jnp.any(jnp.isfinite(step.residual)))
     assert float(step.alpha) == 0.5**4  # the shortest rung, exactly as before
     # ...and it agrees with what a caller recomputing at that iterate would have found.
     assert not bool(jnp.isfinite(jnp.linalg.norm(poisoned(step.phi))))
@@ -1708,7 +1738,9 @@ def test_the_fallback_refuses_a_rung_that_is_finite_but_an_excursion() -> None:
     unbounded = backtracking_line_search(
         blows_up, phi, delta, reference, steps=4, fallback_growth=jnp.inf
     )
-    bounded = backtracking_line_search(blows_up, phi, delta, reference, steps=4)
+    bounded = backtracking_line_search(
+        blows_up, phi, delta, reference, steps=4, residual=blows_up(phi)
+    )
 
     # Unbounded, the search hands back the longest finite rung however vast its measure.
     assert float(unbounded.alpha) == 1.0
@@ -1718,6 +1750,9 @@ def test_the_fallback_refuses_a_rung_that_is_finite_but_an_excursion() -> None:
     assert float(bounded.alpha) == 0.0
     assert jnp.allclose(bounded.phi, phi)
     assert jnp.allclose(bounded.residual_norm, reference)
+    # No step taken, so the residual at the returned iterate is the caller's, which the ladder never
+    # evaluated -- not the last rung's, whatever that was.
+    assert jnp.array_equal(bounded.residual, blows_up(phi))
 
 
 def test_the_bounded_fallback_prefers_a_shorter_rung_to_no_step() -> None:
@@ -1727,11 +1762,14 @@ def test_the_bounded_fallback_prefers_a_shorter_rung_to_no_step() -> None:
     def steep(p):  # alpha=1 -> 1.2e5 (over a ceiling of 100), alpha=1/2 -> 3.5e2, alpha=1/4 -> ~19
         return jnp.exp(11.7 * p) / jnp.exp(11.7)
 
-    step = backtracking_line_search(steep, phi, delta, reference, steps=6, fallback_growth=100.0)
+    step = backtracking_line_search(
+        steep, phi, delta, reference, steps=6, fallback_growth=100.0, residual=steep(phi)
+    )
 
     assert 0.0 < float(step.alpha) < 1.0  # a real step, shorter than the full one
     assert float(step.residual_norm) <= 100.0 * float(reference)
     assert jnp.allclose(step.residual_norm, jnp.linalg.norm(steep(step.phi)))
+    assert jnp.allclose(step.residual, steep(step.phi))
 
 
 def test_a_healthy_fallback_is_untouched_by_the_ceiling() -> None:

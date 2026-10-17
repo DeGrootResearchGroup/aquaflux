@@ -86,12 +86,21 @@ class LineSearchStep(NamedTuple):
         the ratio of this to the reference says by how much it failed, so its trend over successive
         steps shows the full step becoming acceptable before it is. The ladder starts at the full step,
         so it is always evaluated.
+    residual : jnp.ndarray or None
+        The residual **vector** ``R(phi)`` at :attr:`phi`, whose measure is :attr:`residual_norm`. The
+        ladder evaluated it at the rung it kept, so a caller that needs the residual at the new iterate
+        -- the right-hand side of its next Newton correction, say -- reads it here rather than
+        evaluating the residual again at a point already visited. When the search takes no step
+        (``alpha = 0``) the iterate is the start point, whose residual the ladder never evaluated: it is
+        the one the caller handed in as ``residual``, and ``None`` when the caller handed in none.
+        When no rung was finite it is non-finite, like :attr:`residual_norm`.
     """
 
     phi: jnp.ndarray
     alpha: jnp.ndarray
     residual_norm: jnp.ndarray
     full_step_norm: jnp.ndarray
+    residual: jnp.ndarray | None
 
 
 class StepOutcome(NamedTuple):
@@ -113,8 +122,9 @@ class StepOutcome(NamedTuple):
         rung it settles on is in hand when the step returns; both drivers used to throw it away and
         evaluate the residual again at the same point. A step whose inner loop is judged by a
         *different* measure (a dual-time inner Newton, which converges the shifted ``G`` rather than
-        ``R``) has to form this itself -- there the field costs what the driver used to pay and saves
-        nothing, but it keeps one contract instead of an optional one.
+        ``R``) forms this from the ``G`` its line search kept, by removing the shift term
+        (``R = G - shift (phi - reference)``), which is one subtraction rather than a residual
+        evaluation.
     raw_cycles : jnp.ndarray
         The **raw** solver count summed over the step's inner iterations (lineax's ``num_steps``, with
         its per-solve offset still in). Total cost, and what a summed cost cap is measured against.
