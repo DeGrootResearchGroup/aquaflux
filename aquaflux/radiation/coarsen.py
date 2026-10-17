@@ -969,5 +969,6 @@ def coarsen_surfaces(
         specular_reflectance=specular[body],
         profiles=surfaces.profiles,
         profile_index=profile[body],
+        two_sided=surfaces.two_sided,
     )
     return coarse, coarsening

@@ -234,10 +234,16 @@ class Scene:
     settings : RadiationSettings
         Build-time choices: how the surfaces shadow themselves and the points they light, how the
         bodies' shadows are worked out, and how many pairs a pass may form. Read for every gather and
-        for the surface solve alike, so the two cannot be built differently. A body its
-        self-occlusion names -- a zero-thickness sheet declared two-sided -- may be one of the lamps'
-        or one of the reflectors': each mask is built by :meth:`settings_for` its sources, which
-        keeps only the names of their own bodies.
+        for the surface solve alike, so the two cannot be built differently.
+
+    Notes
+    -----
+    **A zero-thickness sheet** -- a baffle or a shelf, among the reflectors or among the lamps -- is
+    declared on its own surface set (:attr:`~aquaflux.radiation.surfaces.Surfaces.two_sided`). It
+    then blocks the light from both sides, and receives and reflects it on both faces: each of its
+    facets is two faces in the surface solve, and a face's results follow its set's own facets
+    (:attr:`SceneSolution.reflector_back_of`, :attr:`SceneSolution.lamp_back_of`). A sheet may not
+    emit, so a lamp's emitting body is never one.
 
     Raises
     ------
@@ -291,9 +297,8 @@ class Scene:
                 "distinct solid_names, which is how a set of surface points says what it lies on."
             )
         names = (*reflecting, *self.lamps.solid_names)
-        # Once, against every body: each mask sees only its own sources' bodies, so a misspelt name
-        # would otherwise be dropped from every one of them without an error.
-        self.settings.check_bodies(names)
+        # Refuses a sheet among the lamps that emits.
+        self.lamps.with_back_faces()
         unknown = sorted(
             f"{name!r} names {receivers.reflector!r}"
             for name, receivers in self.surfaces.items()
@@ -323,24 +328,6 @@ class Scene:
         """The surrounding medium's absorption: :attr:`absorption`, or that of :attr:`media`."""
         return self.absorption if self.media is None else self.media.absorption
 
-    def settings_for(self, sources: Surfaces) -> RadiationSettings:
-        """:attr:`settings` as they apply to a mask whose sources are ``sources``.
-
-        Cut down by :meth:`~aquaflux.radiation.model.RadiationSettings.for_bodies` to the bodies of
-        ``sources``: the lamps alone hold only the lamps' bodies, so a body of the reflectors that the
-        settings name is a stranger to them.
-
-        Parameters
-        ----------
-        sources : Surfaces
-            The lamps, or the exchanging facets in any of their optical states.
-
-        Returns
-        -------
-        RadiationSettings
-        """
-        return self.settings.for_bodies(sources.solid_names)
-
 
 @dataclasses.dataclass(frozen=True)
 class SceneSolution:
@@ -361,14 +348,23 @@ class SceneSolution:
     irradiance_absorbed : mapping of {str: np.ndarray}
         What each named set of surface points absorbs of the irradiance there, direct and reflected
         together: ``(1 - ρ) E``, by the set's :attr:`SurfaceReceivers.reflectance`, in W/m².
-    radiosity : np.ndarray or None, shape ``(n_reflector_facets,)``
-        What each reflecting facet sends out, in W/m²; ``None`` without reflectors.
-    reflector_irradiance : np.ndarray or None, shape ``(n_reflector_facets,)``
-        What lands on each reflecting facet, in W/m²; ``None`` without reflectors.
-    lamp_irradiance : np.ndarray or None, shape ``(n_lamp_facets,)``
+    radiosity : np.ndarray or None, shape ``(n_reflector_facets + len(reflector_back_of),)``
+        What each reflecting facet sends out, in W/m²; ``None`` without reflectors. The back faces
+        of the reflectors' two-sided sheets follow their own facets.
+    reflector_irradiance : np.ndarray or None, shape ``(n_reflector_facets + len(reflector_back_of),)``
+        What lands on each reflecting facet, and on each back face, in W/m²; ``None`` without
+        reflectors.
+    reflector_back_of : np.ndarray of int or None
+        Which reflector facet each back face after them is the other face of; empty without a
+        sheet, ``None`` without reflectors.
+    lamp_irradiance : np.ndarray or None, shape ``(n_lamp_facets + len(lamp_back_of),)``
         What lands on each lamp facet from the other lamps and from everything that reflects, in
-        W/m²; zero on a point source, which has no surface to land on. ``None`` when nothing
-        exchanges light: no reflectors, and no lamp that reflects.
+        W/m²; zero on a point source, which has no surface to land on. A sheet among the lamps --
+        a baffle in their set -- has its back faces' after them. ``None`` when nothing exchanges
+        light: no reflectors, and no lamp that reflects.
+    lamp_back_of : np.ndarray of int or None
+        Which lamp facet each back face after them is the other face of; ``None`` with
+        :attr:`lamp_irradiance`.
     lamp_absorbed_power : float or None
         What the lamps absorb of :attr:`lamp_irradiance`, ``Σ (1 - ρ) E A`` over their facets, in W;
         ``None`` with it.
@@ -390,7 +386,9 @@ class SceneSolution:
     irradiance_absorbed: Mapping[str, np.ndarray]
     radiosity: np.ndarray | None
     reflector_irradiance: np.ndarray | None
+    reflector_back_of: np.ndarray | None
     lamp_irradiance: np.ndarray | None
+    lamp_back_of: np.ndarray | None
     lamp_absorbed_power: float | None
     reflector_absorbed_power: float | None
     cycles: int | None
@@ -535,7 +533,9 @@ def solve_scene(
         irradiance_absorbed=types.MappingProxyType(absorbed_e),
         radiosity=None if exchanged is None else exchanged.reflector_radiosity,
         reflector_irradiance=None if exchanged is None else exchanged.reflector_irradiance,
+        reflector_back_of=None if exchanged is None else exchanged.reflector_back_of,
         lamp_irradiance=None if exchanged is None else exchanged.lamp_irradiance,
+        lamp_back_of=None if exchanged is None else exchanged.lamp_back_of,
         lamp_absorbed_power=None if exchanged is None else exchanged.lamp_absorbed_power,
         reflector_absorbed_power=None if exchanged is None else exchanged.reflector_absorbed_power,
         cycles=None if exchanged is None else exchanged.cycles,
@@ -554,11 +554,13 @@ class _Exchange:
     Attributes
     ----------
     surfaces : Surfaces
-        The reflectors' facets followed by the lamps' areal facets, with their bodies' names.
+        The reflectors' facets followed by the lamps' areal facets, with their bodies' names, and
+        then the back faces of every two-sided sheet among them
+        (:meth:`~aquaflux.radiation.surfaces.Surfaces.with_back_faces`).
     n_reflector_facets : int
-        How many of the facets are the reflectors'; the rest are the lamps'.
-    lamp_facets : np.ndarray of int, shape ``(n_surfaces - n_reflector_facets,)``
-        Which facet of :attr:`Scene.lamps` each of the rest is.
+        How many of the facets are the reflectors'.
+    lamp_facets : np.ndarray of int
+        Which facet of :attr:`Scene.lamps` each lamp facet after them is; the back faces follow.
     """
 
     surfaces: Surfaces
@@ -580,8 +582,13 @@ class _Exchange:
         ):
             return None
         n_reflector_facets = 0 if reflectors is None else reflectors.n_facets
-        surfaces = _joined(scene, lamp_facets, emitting=False)
+        surfaces = _joined(scene, lamp_facets, emitting=False).with_back_faces()
         return cls(surfaces, n_reflector_facets, lamp_facets)
+
+    @property
+    def n_faces(self) -> int:
+        """How many of the facets are the reflectors' and the lamps' own, before the back faces."""
+        return self.n_reflector_facets + len(self.lamp_facets)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -624,7 +631,9 @@ class _Direct:
         split = exchange.n_reflector_facets
         held = self.n_reflector_facets == split
         reflectors = np.arange(split) if held else np.full(split, -1)
-        return np.concatenate([reflectors, self.n_reflector_facets + exchange.lamp_facets])
+        fronts = np.concatenate([reflectors, self.n_reflector_facets + exchange.lamp_facets])
+        # A back face lies on its front's triangle, which is that triangle's source.
+        return np.concatenate([fronts, fronts[np.asarray(exchange.surfaces.back_of, dtype=int)]])
 
 
 def _joined(scene: Scene, lamp_facets: np.ndarray, *, emitting: bool) -> Surfaces:
@@ -664,6 +673,7 @@ def _joined(scene: Scene, lamp_facets: np.ndarray, *, emitting: bool) -> Surface
         solid_id=joined("solid_id", offset=len(names)),
         solid_names=(*names, *lamps.solid_names),
         diffuse_reflectance=joined("diffuse_reflectance"),
+        two_sided=(*(sheet for piece in pieces for sheet in piece.two_sided), *lamps.two_sided),
         **optics,
     )
 
@@ -675,7 +685,9 @@ class _Exchanged:
     radiosity: np.ndarray
     reflector_radiosity: np.ndarray | None
     reflector_irradiance: np.ndarray | None
+    reflector_back_of: np.ndarray | None
     lamp_irradiance: np.ndarray
+    lamp_back_of: np.ndarray
     lamp_absorbed_power: float
     reflector_absorbed_power: float | None
     cycles: int
@@ -698,12 +710,13 @@ def _solve_exchange(scene: Scene, direct: _Direct, exchange: _Exchange, solver, 
         f"{len(exchange.lamp_facets)} lamp facets; the lamps' light on them at "
         f"{samples.shape[0] * per_facet} points"
     )
-    split = exchange.n_reflector_facets
+    split, fronts = exchange.n_reflector_facets, exchange.n_faces
     external = np.zeros(samples.shape[:2])
     own = direct.facets_of(exchange)
-    # The reflectors' facets and the lamps' apart, so that a part whose facets are not among the
-    # sources is gathered as points on no facet, and keeps the culls that need nothing named.
-    for part in (slice(None, split), slice(split, None)):
+    # The reflectors' facets, the lamps' and the back faces apart, so that a part whose facets are
+    # not among the sources is gathered as points on no facet, and keeps the culls that need
+    # nothing named.
+    for part in (slice(None, split), slice(split, fronts), slice(fronts, None)):
         facets = own[part]
         if not len(facets):
             continue
@@ -716,7 +729,7 @@ def _solve_exchange(scene: Scene, direct: _Direct, exchange: _Exchange, solver, 
         ).reshape(-1, per_facet)
     say("exchange: building the facet-to-facet transfer")
     model = build_radiation_model(
-        np.zeros((0, 3)), surfaces, occluders=scene.occluders, settings=scene.settings_for(surfaces)
+        np.zeros((0, 3)), surfaces, occluders=scene.occluders, settings=scene.settings
     )
     landing, solved_cycles = surface_irradiance(
         model,
@@ -731,17 +744,27 @@ def _solve_exchange(scene: Scene, direct: _Direct, exchange: _Exchange, solver, 
     # What each facet sends out is what it reflects: the lamps' own light is gathered apart.
     reflectance = np.asarray(surfaces.diffuse_reflectance)
     radiosity = reflectance * arriving
-    lamp_irradiance = np.zeros(lamps.n_facets)
-    lamp_irradiance[exchange.lamp_facets] = arriving[split:]
     absorbed = (1.0 - reflectance) * arriving * np.asarray(surfaces.area)
+    # Each back face goes with the set its front is in, after that set's own facets.
+    back_of = np.asarray(surfaces.back_of, dtype=int)
+    backs = fronts + np.arange(len(back_of))
+    on_reflector = back_of < split
+    reflector_faces = np.concatenate([np.arange(split), backs[on_reflector]])
+    lamp_backs = backs[~on_reflector]
+    lamp_irradiance = np.zeros(lamps.n_facets)
+    lamp_irradiance[exchange.lamp_facets] = arriving[split:fronts]
     has_reflectors = scene.reflectors is not None
     return _Exchanged(
         radiosity=radiosity,
-        reflector_radiosity=radiosity[:split] if has_reflectors else None,
-        reflector_irradiance=arriving[:split] if has_reflectors else None,
-        lamp_irradiance=lamp_irradiance,
-        lamp_absorbed_power=float(np.sum(absorbed[split:])),
-        reflector_absorbed_power=float(np.sum(absorbed[:split])) if has_reflectors else None,
+        reflector_radiosity=radiosity[reflector_faces] if has_reflectors else None,
+        reflector_irradiance=arriving[reflector_faces] if has_reflectors else None,
+        reflector_back_of=back_of[on_reflector] if has_reflectors else None,
+        lamp_irradiance=np.concatenate([lamp_irradiance, arriving[lamp_backs]]),
+        lamp_back_of=exchange.lamp_facets[back_of[~on_reflector] - split],
+        lamp_absorbed_power=float(np.sum(absorbed[split:fronts]) + np.sum(absorbed[lamp_backs])),
+        reflector_absorbed_power=float(np.sum(absorbed[reflector_faces]))
+        if has_reflectors
+        else None,
         cycles=cycles,
     )
 
@@ -827,7 +850,7 @@ def _straight_fluence(scene, sources, points, absorption, media) -> np.ndarray:
             (sources,), jnp.asarray(points), absorption=absorption, pair_limit=pair_limit
         )
         return np.asarray(field)
-    options = dict(scene.settings_for(sources).receiver_visibility_options())
+    options = dict(scene.settings.receiver_visibility_options())
     self_occlusion = options.pop("self_occlusion", None)
     if media is not None:
         options["media"] = media
@@ -892,7 +915,7 @@ def _straight_irradiance(scene, sources, points, normals, own, absorption, media
             )
         )
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
-    options = scene.settings_for(sources).receiver_visibility_options()
+    options = scene.settings.receiver_visibility_options()
     out = np.empty(len(points))
     for start in range(0, len(points), per_pass):
         stop = min(start + per_pass, len(points))
@@ -929,7 +952,7 @@ def _refracted(scene: Scene, sources: Surfaces, points, normals, own) -> np.ndar
     Each pass builds its own mask of the paths' legs and drops it.
     """
     pair_limit = _pair_limit(scene.settings)
-    options = scene.settings_for(sources).receiver_visibility_options()
+    options = scene.settings.receiver_visibility_options()
     rim = scene.settings.refraction_options()
     per_pass = receivers_per_pass(pair_limit, sources.n_facets * max(1, len(scene.occluders)))
     out = np.empty(len(points))

@@ -47,7 +47,7 @@ segment-summation family) generalized from a cylinder to arbitrary triangles.
 | `refraction.py` — `Transparent` / `Media` (convex regions with an index and an absorption, nested; `Media.region_of_facets`), `fresnel_transmittance`, `Chain`, `solve_paths` -> `Paths`: the transmitted path between two points by a descent on the optical length (#604 step 2a, 2026-10-08); `Chain.routes`, `straight_reach`, `_only_saddles` / `_shot` and `shooting.py` (a sleeve's wall alone, its saddle paths shot) (#604 step 2b-i) | **BUILT** |
 | `refracted.py` — `refracted_fluence_rate` / `refracted_irradiance` (each triangle's solid angle on its corners' arrival directions) and `build_refracted_visibility` -> `RefractedVisibility` (every leg of the centroid's path; `receiver_facet` excluded on the last leg since 2b-i) (#604 step 2a) | **BUILT** (in the scene's direct light since 2b-i; not yet in the model or the transfer — 2b-ii) |
 | `units.py` — lamp watts to exitance, ultraviolet transmittance to absorbance | **BUILT** |
-| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07); every triangle of the scene shadows the direct AND the reflected light (`_Direct`, #622, 2026-10-10); reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; one `settings` whose `two_sided` may name a body of the lamps or the reflectors (checked once against both, cut per build by `settings_for`, 2026-10-06); what a radiation case file builds (2026-10-05) | **BUILT** |
+| `scene.py` — `Scene` / `solve_scene` / `SceneSolution`: lamps' EMISSION kept out of the transfer (any profile, incl. IES) while their areal facets EXCHANGE reflected light (reflect by `diffuse_reflectance`, shadow, absorb; #604 step 1, 2026-10-07); every triangle of the scene shadows the direct AND the reflected light (`_Direct`, #622, 2026-10-10); reflecting surfaces, bodies, medium, `VolumeReceivers` and named `SurfaceReceivers`; two-sided sheets declared on each set and solved as two faces (TWO-SIDED SHEETS, #689); what a radiation case file builds (2026-10-05) | **BUILT** |
 
 There is no separate optical-depth piece to build: the voxel-grid traversal is `VoxelAbsorption` in
 `absorption.py`, exact along each segment (trilinear field, Simpson per cell).
@@ -902,16 +902,68 @@ configuration against itself.
 
 ## Four closed-form checks added after the fact, and what each one found (2026-09-21)
 
-**Current status.** Four closed-form checks pass (the Bickley functions in absorbing water, Walton's
-obstructed squares, a narrow source's emission transfer, conservation through the adjoint); none found a
-defect in a computed value. Their findings -- a reference for a beam must be per triangle pair; the
-per-facet adjoint column sums are NOT exact on unequal areas -- are in `.claude/notes/radiation-log.md` →
-"Four closed-form checks added after the fact, and what each one found (2026-09-21)". ⚠️
-`SilhouetteOcclusion` counts only blockers facing the receiver, so a lone one-sided sheet seen from
-behind used to hide nothing: `SilhouetteOcclusion(two_sided=(names,))` counts the named bodies from both
-sides (a misspelt name raises; an open piece left undeclared is warned about at build). It is a
-declaration, not topology, by the user's decision (2026-09-21): `checks.open_facets` is wrong both ways
-on real input (a welded sheet reads closed, an uncapped duct reads as a sheet).
+Written to close gaps against the design specification's analytic cases. **None found a defect in
+a computed value**, which is worth stating rather than implying; two found things worth knowing,
+and all four were mutation-checked (seven one-line mutations, each red on its own assertion).
+
+- **Case 6 in absorbing water** (`test_an_infinite_line_in_an_absorbing_medium_gives_the_bickley_functions`):
+  `G = P'/(2 pi r) Ki_1(a r)`, `E = P'/(2 pi r) Ki_2(a r)`. A summed line of isotropic points,
+  spacing `r/50`, optical half-length 35, reproduces both to **<1e-11 at `a r` = 0.5 and 2** —
+  far better than the nominal second order, because a midpoint sum of a smooth integrand decaying
+  along an effectively infinite line converges spectrally. So the tolerance (1e-9) is set by the
+  reference quadrature: `scipy.integrate.quad`'s default `epsabs` of 1.5e-8 would have been the weak
+  link, and the test passes `epsabs=0, epsrel=1e-13`.
+- **Case 8c, Walton's obstructed squares** (`test_an_obstructed_pair_converges_on_the_published_view_factor`):
+  `F = 0.11562061`, the geometry confirmed independently to 0.1156206021 (blocker 0.5 x 0.5,
+  centred, **0.75 from the first plate**; midway gives ~0.0995). Both strategies converge at second
+  order in plate spacing. Errors at 6 / 12 / 24 plates a side, six-point receiver rule: silhouette
+  with the blocker near the source **-1.6e-4 / -4.0e-5 / -1.0e-5**; one ray per pair **1.06e-3 /
+  2.6e-4 / 6.4e-5**. ⚠️ With the blocker near the *receiver* the two strategies agree to 1e-16: the
+  shadow is scaled by 4 and triangle centroids sit at thirds of a cell, so every shadow edge lands on
+  a facet edge and every pair is wholly hidden or wholly clear. A fixture can make the silhouette
+  look binary.
+- **Case 11, the emission transfer** (`test_a_narrow_source_sends_its_emission_where_its_profile_says`):
+  replaced a test that asserted only *not equal to Lambertian*. Against
+  `M A f(theta_e) cos(theta_r)/r^2` summed per triangle pair, **1.8e-7 at width 1e-3, second order,
+  identical at n = 1 and 50**. ⚠️ The reference must be per pair: under a `CosinePower(50)` beam
+  the two receiving triangles of one square differ by 12% at width 1e-2, which a reference at the
+  square's middle reads as a first-order error in the code. ⚠️ A profile carries its constant in
+  **two** methods — the gather reads both, the transfer `radiance_per_exitance_at` — so a
+  mutation of one is invisible to a test of the other path. The contract between them is pinned in
+  `test_radiation_profiles.py`.
+- **Conservation of light through the adjoint** (`test_the_adjoint_conserves_light_through_every_facet`):
+  in a closed box of uniform `rho`, every row of `d(B, H, G)/dM` sums to `1/(1-rho)` (times 4 for
+  `G`), to 1e-14 at `rho = 0.9` — a check on the adjoint with no finite difference. ⚠️ **The
+  per-facet form is NOT exact**: `d(sum A H)/dM_k = A_k/(1-rho)` needs reciprocity, and with the
+  receiver on quadrature and the source in closed form the rows are exact at the columns' expense.
+  On `stretched_box(2)` the column sums are off by up to **4.8%** (reciprocity residual 3.2%),
+  and that per-facet gradient misses by exactly that. Not an adjoint error; do not "fix" the test
+  toward it.
+
+⚠️ **FIXED BY DECLARATION: the silhouette strategy used to ignore a ONE-SIDED sheet from behind.**
+It counts only blockers facing the receiver (`facing` in `SilhouetteOcclusion._per_triangle`), which
+is exact on a closed, consistently wound surface — a blocked sight line enters it through exactly
+one front face — and back faces are excluded because they would double the count. A lone
+zero-thickness sheet, though, has the medium on both sides: seen from behind it hid nothing, and
+Walton's pair with a one-sided blocker read the **unobstructed 0.1998** from one plate, silently.
+The ray test is two-sided and never had the problem. The sheets are declared on the surface set,
+`Surfaces.from_triangles(..., two_sided=(names,))` (since #689; there is no
+`SilhouetteOcclusion.two_sided` any more), and the clip counts their facets from both sides
+(`surfaces.is_sheet & (surfaces.twin < 0)`: on a set whose back faces are appended each face counts
+from its own side); a misspelt name **raises** at `from_triangles` (it would otherwise leak light with
+no error); and any **open piece left undeclared is warned about** at build, naming its bodies. With the blocker declared, the one-sided Walton pair converges
+exactly as a two-sided copy did (−1.6e-4 / −4.0e-5 at 6 / 12 plates a side).
+
+**Why a declaration and not topology** (decided by the user, 2026-09-21, over "automatic by
+topology" and "refuse open surfaces"): `checks.open_facets` marks facets on a connected piece with
+a free edge (pieces joined only across edges used exactly twice), and it is wrong both ways on
+real input. **A sheet welded to the wall all the way round has no free edge** — each rim edge is
+used three times, which neither joins nor opens it — so it reads closed (pinned:
+`test_a_sheet_welded_in_all_the_way_round_reads_as_closed`, 8 non-manifold edges). **A duct
+exported without its end caps reads as a sheet**, and counting its wall from both sides would count
+every exit-and-re-entry twice. So topology drives only the *warning*; the counting follows the
+declaration. Naming a closed body two-sided makes it block twice and errs dark — not detectable,
+because a welded sheet looks closed too.
 
 ## MEASURED: aquaflux against discrete ordinates on the Sozzi reactor (2026-09-22)
 
@@ -1680,18 +1732,84 @@ radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); th
   (2026-10-05)".
 - **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their
   agreement with the scripts they replaced).
-- **Current status.** One `Scene.settings` serves several surface sets: `Scene.__post_init__` runs
-  `settings.check_bodies` once against both sets' names, and every build gets
-  `scene.settings_for(sources)` (each occlusion choice cut to those sources' bodies;
-  `SilhouetteOcclusion` filters `two_sided`). The direct light is gathered from
-  `_Direct.of(scene).surfaces` -- the reflectors' facets, dark, then every lamp facet, point sources kept
-  -- so every triangle of the scene shadows the direct light too (#622); the lamps alone when there are
-  no reflectors or self-occlusion is `NoOcclusion`. `SceneSolution` carries `reflector_absorbed_power`
-  and `irradiance_absorbed`. A facet sends from its front only, in the transfer (`_row_block`) and on the
-  mirror path (`images._exchange_rows`), judged per receiving quadrature point by
-  `clipping.point_heights` (#667). ⚠️ A zero-thickness sheet reflects from its front face only
-  (`two_sided` is about blocking; both faces reflecting is #689). Records, decisions and mutation passes:
-  the log, same heading.
+- ⚠️ **There is no `Scene.settings_for`, `RadiationSettings.for_bodies`/`check_bodies` or
+  `SelfOcclusion.for_bodies`/`check_bodies` any more** (deleted with #689). They existed only to route a
+  `SilhouetteOcclusion.two_sided` naming bodies of several surface sets to each set's builds; the
+  declaration now lives on each `Surfaces` set, which every build carries with it, so nothing needs
+  routing. `_joined` unions the two sets' declarations for the exchange and the direct set.
+- **EVERY TRIANGLE OF THE SCENE SHADOWS THE DIRECT LIGHT TOO (#622, 2026-10-10).** Before, the
+  lamps-only masks' self-occlusion was over the lamps' triangles alone and the reflectors entered only
+  the exchange, so a reflecting wall cut the reflected light and let the lamps' direct light straight
+  through (a 0.2 m Lambertian lamp, a 2 m plate rho 0.5 over it, a point over the plate: `G_direct`
+  0.0125147 with the plate and without it, `RayCastOcclusion`, `b2c003e`). **Chosen with the user
+  (option 1 of the issue) over documenting it and refusing an uncovered reflecting `Wall`.** The
+  direct light is now gathered from `_Direct.of(scene).surfaces`: the reflectors' facets, dark
+  (emission and power zero, a Lambertian profile appended to the lamps' catalogue), then **every** lamp
+  facet in its own order with its optics, point sources kept (`_joined(scene, lamp_facets,
+  emitting=True)`; the exchange is `_joined(..., emitting=False)` over the areal lamp facets -- one
+  concatenation for both). ⚠️ **A shadow geometry separate from the sources is not expressible**: a
+  mask's columns ARE the sources' facets (`streamed_fluence_rate` requires `sets` to share
+  `shadow_geometry`; `build_visibility`'s self-occlusion is over `surfaces`), so the reflectors join
+  the sources rather than lending their triangles to the lamps' mask. That is also what keeps the
+  own-facet exclusion simple: `receiver_facet` indexes the sources, so `_own_facets(direct.surfaces,
+  body, points)` finds a reflector body or a lamp body alike, and the exchange's samples name their
+  facet by `_Direct.facets_of(exchange)` (reflector `j` -> `j`, lamp facet `k` -> `split + k`). The
+  reflector samples now **need** it -- a ray from another facet ends in the sample's own facet -- and
+  a part (reflectors / lamps) whose facets are all `-1` passes `own=None`, keeping the culls that key
+  on `receiver_facet is None`. **The lamps alone** when there are no reflectors or self-occlusion is
+  `NoOcclusion` (dark facets would add only zeros to every gather); with bodies but `NoOcclusion` too.
+  ⚠️ Behaviour change: a `SurfaceReceivers` set on a reflector that does NOT name its body now has its
+  DIRECT part shadowed by its own facet under the ray test, as its reflected part already was.
+  Gate: `test_a_reflector_between_a_lamp_and_a_point_shadows_the_lamp_s_direct_light` (lamp, black
+  plate, reflecting 3x3 ceiling, `RayCastOcclusion`, one sample: fluence, ceiling landing and ceiling
+  points' irradiance equal the model with every facet in one set to 1e-11; >= 5 points wholly
+  shadowed, >= 5 wholly lit). Plus the floor-points test now checks both parts. Cost: the direct pass
+  is `n_points x (n_lamp + n_reflector)` facets wherever self-occlusion is on -- not measured at mesh
+  scale. The `ray_effects_room` cases run `NoOcclusion`, so they take the lamps-alone path and cannot move.
+  Also new on `SceneSolution`: `reflector_absorbed_power` (`sum (1 - rho) H A` over the reflectors,
+  beside `lamp_absorbed_power`, so the books close from the solution alone) and `irradiance_absorbed`
+  (`(1 - rho) E` per `SurfaceReceivers` set, by its `reflectance` -- the field the radiation package
+  carried but never read; the case's `E_absorbed` and `absorbed_power` now read it).
+  **Mutation pass (9 breaks run, 8 red)** (jax 0.10.2, CPU, x64, Linux, 2026-10-10): lamps gathered alone
+  always, reflector samples unnamed, surface points unnamed, lamp samples unnamed, point sources dropped
+  from the direct set (caught only by `test_a_point_source_under_a_reflector_is_shadowed_by_it_and_lights_the_rest_as_a_point`,
+  `P / 4 pi r^2` beside a black plate, 0 over it), absorbed by rho, `irradiance_absorbed` from the direct
+  part only, lamp body ids not offset past the reflectors'. **Dismissed, equivalent**: joining the
+  reflectors under `NoOcclusion` too (adds zeros; the lamps-alone branch is cost only); and a
+  Lambertian reflector profile replaced by the lamps' first (a zero emission weighs nothing; NOT run).
+- **A FACET SENDS FROM ITS FRONT ONLY, IN THE TRANSFER AS IN THE GATHERS (#667, fixed 2026-10-12).**
+  `projected_solid_angle` clips the sending triangle to the RECEIVER's half-space alone, and a
+  Lambertian set's `assemble` applies no source cosine (`reflected, reflected`), so before the fix
+  nothing gated the SENDER's side: a facet sent reflected light out of its back, while every gather
+  (`Lambertian.radiance_per_exitance_at`, zero for `cos <= 0`) did not. Measured on `777156e` (jax
+  0.10.2, CPU, x64, Linux): a 1 m plate at z = 1 facing down, emission 1, under a 1 m plate at z = 2
+  facing down, `receiver_quadrature=1`, either occlusion: the upper plate landed **0.2248 W/m²**; in the
+  #622 fixture with the plate at rho 0.6, the ceiling's solved landing was 0.01153 against 0.00972
+  gathered at the same point. **The same leak was in the specular exchange** (`images._exchange_rows`,
+  found while fixing this): a plate over a floor mirror and facing AWAY from it still sent through it
+  (on `d838f90`: the mirror took 0.0946 W/m² from the plate's back, a receiver above gained 0.0337).
+  - **The fix**: `_row_block` zeroes the term at each receiving QUADRATURE POINT on or behind the
+    sending facet's plane, and `_exchange_rows` at each one on or behind the IMAGE's plane (the image
+    faces as its source does after the reflection, so behind it is "the source faces away from the
+    mirror"). Judged per point, not per receiving facet: a receiving facet can straddle the sender's
+    plane. The side test is `clipping.point_heights` (filtered, an undecidable height is exactly zero
+    and counts as not in front), now also what `back_faces._certainly_behind` uses -- one home.
+  - ⚠️ **Invisible in every closed enclosure whose facets face into it** (no facet sees another's
+    back), which is why no test saw it, and the "model with every facet in one set" reference the
+    scene tests use carried the same leak, so it could not see it either. One existing test DID rely
+    on it: `test_a_body_in_the_way_removes_the_transfer_across_it` had both "facing" plates wound +z, so
+    its only exchange was the lower plate taking light from the upper one's back (sum 0.0 after the
+    fix); its upper plate now faces down. Every other radiation fast-tier test (953) passed unchanged.
+  - A zero-thickness sheet reflects from both faces once declared: TWO-SIDED SHEETS (#689) below.
+  - Tests: `test_a_facet_sends_nothing_out_of_its_back` (both occlusions, front-to-front control),
+    `test_a_receiver_across_the_sender_s_plane_takes_light_only_at_its_points_in_front` (a wall across a
+    small sender's plane against a hand sum over the points above it, strictly between 0 and the
+    ungated sum), `test_a_facet_facing_away_from_the_mirror_sends_nothing_through_it` (both
+    orientations), and in `test_radiation_scene.py`
+    `test_a_reflector_sends_its_light_out_of_its_front_in_the_solve_as_the_gathers_do` (the #622 fixture
+    with a reflecting plate: solved ceiling landing = gathered ceiling irradiance, 1e-11). **Mutation
+    pass (4, all red)**: no gate, the gate judged at the receiving facet's centroid (caught only by the
+    straddling wall), the gate inverted, no gate on the mirror path.
 
 ### #604 STEP 1: LAMPS REFLECT AND SHADOW IN THE EXCHANGE (2026-10-07)
 
@@ -1759,4 +1877,55 @@ u_z` `axial_index`, never `beta` (the vocabulary guard). Full record -- the sadd
 user's four-lamp runs, the backward gather, shooting, cut triangles, continuation, the grid check, tests
 and mutation passes: `.claude/notes/radiation-log.md` → "#604 STEP 2b-i, CONTINUED: BENT ROUTES THROUGH A
 NEIGHBOUR — BUILT, NOT YET MEASURED (2026-10-09)".
+
+## TWO-SIDED SHEETS: A DECLARED SHEET IS TWO FACES IN THE SOLVE (#689, 2026-10-17)
+
+**Decided with the user**: the declaration lives on `Surfaces` (`two_sided`, body names, static), not
+on an occlusion strategy, because it is geometry; back faces are **appended** after the set's own
+facets with a map (`back_of`), not separate `*_back` fields. Found first (posted on #689): supplying the
+sheet twice by hand did not work, for two reasons, and both are what the build now handles by index.
+
+- **`Surfaces.with_back_faces()`** appends each areal facet of a declared body with two corners
+  swapped; centroid, area and the negated normal are **carried over, not recomputed**, so a face and its
+  back are one triangle exactly. `back_of[k]` is the front of the `k`-th back face; `twin` maps both
+  ways (`-1` elsewhere). Idempotent; point sources get no back face. **A sheet may not emit**: concrete
+  emission or power on a declared facet is refused there (and `Scene` asks it of the lamps), because
+  the direct gathers emit from front faces only. `_with_backs` is the unchecked builder, for a solved
+  set whose emission is a radiosity. `with_geometry` on an expanded set moves the fronts and remakes
+  the backs, keeping every face's own optics. `refine_for_receivers` and `coarsen_surfaces` carry the
+  declaration.
+- **Where it is expanded**: `build_radiation_model` and each model entry point (`radiosity`,
+  `surface_irradiance`, `fluence_rate`), and `_Exchange.of` in the scene. `build_transfer` does NOT
+  expand: it builds the set it is given (so the Walton blocker declared a sheet stays one facet,
+  two-sided for blocking). Facet-indexed results are `n_facets + len(back_of)` long; the scene splits
+  back faces to the set their front belongs to (`SceneSolution.reflector_back_of`, `lamp_back_of`).
+- **The two defects, fixed by index, not by tolerance.** (a) A ray aimed at a face's centroid ends in its
+  twin's triangle and the far end is inclusive, so the receiving end excludes the twin too
+  (`build_transfer` passes `(n, 2)` rows `[i, twin(i)]`; mirror legs exclude a source's twin). The
+  sending end needs nothing: the twin is at distance 0, inside the margin. (b) The six-point rule puts
+  receiving points one ulp off the plane (z = 0.5 + 4.4e-16), `point_heights` does not snap a rounding
+  of the POINT's construction, so a point inside its twin read a whole hemisphere and the #667 gate let
+  it through for one orientation: rows of faces turned down summed to **1.3299**, their twins' to 1.
+  `_row_block` now zeroes `F[i, twin(i)]` as it zeroes `F[i, i]`.
+- **`SilhouetteOcclusion._receiver_frames` accepts rows naming several facets in one plane** (a face and
+  its twin are parallel), facing the first's way; rows not in one plane still need `receiver_normal`.
+- **MEASURED against a closed slab** (`tests/unit/test_radiation_two_sided.py`): `inward_box(4)` (96
+  facets, emitting, rho 0.6) round a sheet of 8 triangles at z = 0.5137 (off the box's grid), against
+  the same box round a slab 1e-5 thick whose top and bottom are the two faces; 30 interior points; jax
+  0.10.2, CPU, x64, Linux, 2026-10-17. Silhouette clip: walls, both faces and `G` within **6e-6**.
+  Ray test: walls 8e-5, fronts 9e-6, `G` 2e-4, back faces **1e-3** -- and the 1e-3 is the slab's: the
+  differing pairs are walls straddling the sheet's plane whose centroid ray crosses the slab's top,
+  which a slab's bottom does not actually look through. ⚠️ **On the box's own grid the ray test read 4%
+  off**: 288 wall-wall rays ran exactly along the sheet's rim, which the slab's sides block and a sheet
+  cannot -- a fixture degeneracy (the baffle lesson of #537 PR 3b again), not a defect. Undeclared, the
+  field below the sheet is 2-6% off the slab under the clip (brighter: light passes through from
+  behind).
+- **Mutation pass (11, 10 red, then 11 after a test was added)**: the twin exchange not zeroed, the
+  receiving end not told of the twin, the back face's normal not negated, a faced sheet still counted
+  two-sided, the declaration ignored, the scene's exchange not expanded, the emission refusal, the
+  parallel-rows check, the model build not expanding, the name check. ⚠️ **The back face's own-facet map
+  in the scene (`_Direct.facets_of`) first SURVIVED**: the shelf fixture ran `NoOcclusion`, where a
+  sample point's own triangle cannot shadow it; `test_the_lamps_light_on_a_back_face_is_not_shadowed_by_its_own_triangle`
+  runs the ray test and catches it. **Dismissed, equivalent**: the mirror path's first leg ignoring the
+  source's twin -- it lies at distance 0, inside the margin (the direct rays need no such exclusion).
 
