@@ -85,7 +85,7 @@ or whose blocks are unnamed: `RowScaledNorm` /
 ## `newton_march(adaptive_tolerance=)` and `StepReport.linear_tolerance` (BUILT 2026-10-15, #645; default)
 
 `AdaptiveLinearTolerance` (the default on every march since 2026-10-15, `DEFAULT_ADAPTIVE_TOLERANCE`; `None` switches it off) varies the relative tolerance each step's linear solve stops at —
-the rule, its measurements and why it is not Eisenstat–Walker are in `solve.md`'s contract entry. On the
+the rule, its measurements and why it is not Eisenstat–Walker are in `solve.md`'s contract entry (measurements: `.claude/notes/solve-log.md`, "Contracts: `adaptive_tolerance.py` — measured on the built setting (#645)"). On the
 march side: the solver's base tolerance is read and converted to a float64 array leaf once, before the
 first step; each step (and a redo of it) runs `with_relative_tolerance(solver, tolerance)`; after the
 step, the next tolerance is chosen from its `alpha`, its reported residual over the previous report's
@@ -376,14 +376,14 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     `RetryPolicy.has_diverged` (non-finite, or `> divergence_cap·reference` — default `inf`, i.e. non-finite only,
     because the residual legitimately *rises* during development via `β×travel`, so a tight cap would
     false-fire on the reachability descent). **The preconditioner is NOT re-refreshed on retry** — under a
-    β-tracking refresh (`lu_beta_tracking_refresh`, `.claude/rules/turbulence.md`) the factor is already
+    β-tracking refresh (`lu_beta_tracking_refresh`, since deleted — see the rename table in `.claude/rules/turbulence.md`) the factor is already
     fresh at this `(state, β)`, and re-factoring the deterministic factorization at the same point is a
     no-op; the failure is an under-converged *Krylov* solve, not a stale PC, so only the Krylov tolerance
     is tightened. This is orthogonal to the refresh *gating*: the retry recovers a diverged step whatever
     cadence the preconditioner was refreshed at. One retry: a still-diverged
     step breaks as before. Default a policy with no `retry.solver` is **byte-identical**, and the exact-LU path never
     triggers it. **Why it beats tightening every step:** measured on an aggressive pitzDaily ramp with an
-    inexact monolithic-factorization preconditioner (since deleted; see `solve-direct-preconditioners.md`),
+    inexact monolithic-factorization preconditioner (since deleted; its record is in git history of `solve-direct-preconditioners.md` before 2026-10-17),
     rung-1 steps 1–7 ran on the cheap loose solver and *only* the diverged step 8 retried tight —
     recovering to the exact-LU value (ratio 9.72e-2) and tracking the LU on — instead of paying the tight
     solve on every step. Threaded through `solve_coupled(retry=RetryPolicy(solver=…))`; forward-only (raises under
@@ -964,14 +964,14 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     the anchor's shift diagonal for the whole march (deliberately -- `solve.md`'s `materialized_session`
     entry), so the case was judged in the anchor's row scales, which under-read its residual by
     1.4-4x at bfs3d's end state; `solve_reynolds_ramp` passes the session's
-    `stopping_step(case)`. Measured on both flagship cases (configurations in `turbulence.md`, "#701"):
+    `stopping_step(case)`. Measured on both flagship cases (configurations in `.claude/notes/turbulence-log.md`, "#701 — the arms"):
     pitzDaily 19 / 144 identical to main on every row; bfs3d (its pre-#712 file) identical on every row
     to main's stop, then 2 more steps at `refit_beta_floor` 0.05 (176 against 166 cycles) and 1 without
     (157 against 155), to the same `x_r/h`; on #712's bfs3d file 20 / 134 against main's 19 / 126, the
     same way. **Steering in the stopping measure as well (prototype E8) lost on #712's file under the
     global k cap, and ties under the per-cell clip + omega bound that replaced it** (17 / 133 against merged
-    main's 18 / 137, `turbulence.md`, "#701"), so it is not
-    built; the march steers in the step's own measure (`turbulence.md`, "#701"). Pinned by `test_a_stopping_step_decides_when_the_march_stops_and_the_step_s_measure_how_it_steps`,
+    main's 18 / 137, `.claude/notes/turbulence-log.md`, "#701 — the arms"), so it is not
+    built; the march steers in the step's own measure (`.claude/notes/turbulence-log.md`, "#701 — the arms"). Pinned by `test_a_stopping_step_decides_when_the_march_stops_and_the_step_s_measure_how_it_steps`,
     `..._relative_tolerance_is_relative_to_the_residual_in_its_own_measure`,
     `test_the_staged_march_judges_its_root_in_the_measure_the_march_stopped_by` and
     `..._scales_its_relative_tolerance_by_the_stopping_measure` (`test_newton_march.py`; mutations

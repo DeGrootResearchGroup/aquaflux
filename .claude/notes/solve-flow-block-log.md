@@ -95,7 +95,7 @@ pursuing on the flow block at all") and it answers it: no — not against the cu
 trailing inverse, at the case's own hard state. Do not re-propose `schur_scaling="msimple"` as the
 `bfs3d` leading inverse without a new measurement that changes one of these conditions. **Consequence
 (same day): `_coupled_shift_policy`'s `BlockPreconditioner.build` no longer hardcodes
-`schur_scaling="msimple"`** — combined with the small-fixture check in `.claude/rules/turbulence.md`
+`schur_scaling="msimple"`** — combined with the small-fixture check in `.claude/notes/turbulence-log.md`, "MSIMPLE no longer hardcoded in `_coupled_shift_policy`"
 (dropping it reaches the identical fixed point on every unit/integration fixture that used to pin it),
 this measurement removed the last reason to keep it as anyone's default; see that file's entry for the
 current, corrected `_coupled_shift_policy`.

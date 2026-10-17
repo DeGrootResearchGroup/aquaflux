@@ -666,7 +666,7 @@ first two ways of doing it were wrong.**
 hand-derived occluder does** (`validation/sozzi_radiation/primitive_occlusion.py`, third arm): **0 of
 180,384,000 pairs** masked differently and `G` equal to 0.0 relative at median, p99 and max, on
 24,000 cells drawn from the meshed case's 1,635,909 (19,437 chamber / 2,214 inlet / 2,433 riser, after
-the hand-typed pipes' truncation was fixed — see `.claude/rules/radiation.md`; the first run's population
+the hand-typed pipes' truncation was fixed — see `.claude/notes/radiation-log.md`, "MEASURED: the Sozzi reactor as three cylinders"; the first run's population
 was 22,250 / 640 / 1,200 and also gave 0), the
 case's `lampWall.stl` (7,516 facets), exitance 696.42 W/m², absorption 35.67 /m; jax 0.10.2, CPU, x64,
 macOS arm64, 11 cores, `cadquery-ocp-novtk` 8.0.1.0.0, CPython 3.13. The drawing's cylinders differ

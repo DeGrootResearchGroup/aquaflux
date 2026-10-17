@@ -35,14 +35,14 @@ paths:
 diagnosed as wrong — the diagnosis being right does not make the removal safe, and the failure lands
 one or more steps later, far from the change.
 
-The instance, in full in this file's `redamp` entry and in `.claude/rules/solve-march.md`: a
+The instance, in full in this file's `redamp` entry and in `.claude/notes/solve-march-log.md`, "`redamp` — the spurious brake `rebase` removed was load-bearing": a
 residual-ratio control mis-read a homotopy's station change as divergence and braked. The mis-reading
 was real — a station change raises the residual because the *problem* changed, not because the step
 was wrong — and removing it was correct. It was also the only thing holding the shift out of a regime
 where the frozen preconditioner stops tracking the operator: the shift walked into a wall, the line
 search collapsed to `alpha = 0`, `|R|` rose two orders, and the retry ladder had to escalate to
 recover. (Not "a shift the preconditioner cannot invert" — the preconditioner's own copy of the shift
-is floored separately and never went that low. See the mechanism note in `.claude/rules/solve-march.md`; the measurement is in `.claude/notes/solve-march-log.md`.) **The principled
+is floored separately and never went that low. See the mechanism note in `.claude/rules/solve-march.md`; the measurement is in `.claude/notes/solve-march-log.md`, "`redamp` — the spurious brake `rebase` removed was load-bearing".) **The principled
 replacement had to reproduce the accidental brake's own arithmetic before it worked.**
 
 What to take from it, none of which is specific to that mechanism:
@@ -367,7 +367,7 @@ What to take from it, none of which is specific to that mechanism:
       `grow ** steps_per_station` per station, unopposed, and walks through the level the next station
       can carry. The failure, the four-arm measurement, and why a learned floor under β or a cap on the
       growth rate are both *refuted* alternatives are in `.claude/rules/solve-march.md` under
-      `ResidualHomotopy` / `redamp` (the four-arm table in `.claude/notes/solve-march-log.md`) — read there rather than restating here.
+      `ResidualHomotopy` / `redamp` (the four-arm table in `.claude/notes/solve-march-log.md`, "`ResidualHomotopy` — what it is for, and the four-arm result") — read there rather than restating here.
   - **`release_floor` -- the floor comes off once the march has settled at the target (BUILT 2026-10-10,
     opt-in, `None` by default).** A dual-time step at a fixed shift contracts each error mode by
     `beta / (lambda + beta)`, so a march parked at `beta_min` near its root converges linearly at a rate

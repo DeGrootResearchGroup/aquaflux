@@ -163,7 +163,7 @@
   `schur_scaling="msimple"` as of this date** — it was never necessary at the scale that policy is
   actually used at either: dropping it in favour of `BlockPreconditioner`'s own default reaches the
   identical fixed point on every small (hundreds-of-cells) unit/integration fixture that used to pin it,
-  up to Re 20000 (see `.claude/rules/turbulence.md`'s matching entry for the full list). What survives
+  up to Re 20000 (see `.claude/notes/turbulence-log.md`, "MSIMPLE no longer hardcoded in `_coupled_shift_policy`", for the full list). What survives
   unqualified: MSIMPLE as the better of `BlockPreconditioner`'s own `schur_scaling` options for a
   *standalone flow-only* solve where plain SIMPLE's inner GMRES genuinely stalls
   (`tests/integration/test_channel_high_reynolds.py`, laminar, 384–3072 cells). It is no longer anyone's

@@ -32,7 +32,7 @@
   A lagged `ν_t` would make the whole operator reach 2 and roughly halve the probe, but it is a
   quasi-Newton linearization — and the reach-2 *pattern* is separately measured to break the multigrid
   hierarchy, so it is not a free lever. Harness `validation/bfs3d_openfoam/column_reach_probe.py`; the
-  probe-cost side is in `.claude/rules/solve-direct-preconditioners.md`.
+  probe-cost side is in `.claude/notes/solve-direct-preconditioners-log.md`, "Materialize efficiency".
 
 ### `sources.py` — the `k` row's Jacobian diagonal is negative at near-wall cells (2026-08-24)
 
@@ -559,7 +559,7 @@
     direction keeps demanding a `k` change of ~1e-13 while `k` itself has been ratcheted down to 1e-22
     against a mesh median of 2.97e-02. **The root there is `+1.99e-14` — positive**; the constraint is
     active because the iterate sits eight decades below its own root, not because no root exists. (Full
-    measurement, and the step-length lock-up it causes, in `.claude/rules/solve-amg-multigrid.md`.)
+    measurement, and the step-length lock-up it causes, in `.claude/notes/solve-amg-multigrid-log.md`, "The traced multigrid — in progress".)
 
     **❌ The first suspicion — that a three-wall-face cell takes several times the destruction against
     one cell's worth of production, because the two terms are reduced over a cell's wall faces
@@ -740,7 +740,7 @@
       state, β or preconditioner bundle — re-measure before relying on its size); the right lever is a
       *cheaper* materialize, not a rarer one — hence the `sparse_jacobian` speedups (batched probe,
       gather de-compression, the saturation colouring and the per-column reach; see the
-      materialize-efficiency bullet in `.claude/rules/solve-amg-multigrid.md`), which `coupled_amg_continuation` and the
+      materialize-efficiency bullet in `.claude/rules/solve-direct-preconditioners.md`), which `coupled_amg_continuation` and the
       refresh wire in (built once, reused). **DON'T lower `stencil_reach` to 2 to cheapen it** — reach-2 is
       numerically near-exact at *every* state, but GAMG(reach-2) DIVERGES as a preconditioner. ⚠️ The
       mechanism once given here — the ILU(1) smoother's pattern-dependent fill — **does not survive**:
@@ -771,9 +771,9 @@
       interior faces above 1e-6 relative) — so it changes no `bfs3d` result. ⚠️ **It is NOT inert on
       pitzDaily**, which is skewed enough that reach 3 materializes a measurably wrong matrix there; and
       the cap is a **trade** rather than a free win, since narrowing makes a zero-fill elimination harder
-      (pitzDaily ILU(0) negative pivots 9 → 263 as the sweeps narrow). Both are in
-      `.claude/rules/solve-direct-preconditioners.md`; do not describe this knob as free. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
-      `.claude/rules/schemes.md` and `.claude/rules/solve-direct-preconditioners.md`; harness
+      (pitzDaily ILU(0) negative pivots 9 → 263 as the sweeps narrow). The first is in
+      `.claude/rules/solve-direct-preconditioners.md`, the second in `.claude/notes/solve-amg-multigrid-log.md`, "Narrowing the probe's gradient sweeps"; do not describe this knob as free. Reach/accuracy tables and the refuted "use GMRES instead" alternative are in
+      `.claude/notes/schemes-log.md` ("`narrow_gradient_sweeps`: latent on bfs3d, live on pitzDaily") and `.claude/rules/solve-direct-preconditioners.md`; harness
       `validation/gradient_stencil_reach.py`.
 
       The `assemble` half of the refresh is also precomputed now (`ShiftedCellMajorOperator`), and the
@@ -865,7 +865,7 @@
       archived logs took 1, which read as a regression and cost hours of bisection. It was not: those
       logs were produced on a *different branch*, and the base being worked on carried a
       `COLUMN_REACH` with **pressure at reach 2**, which corrupts that column and poisons the operator
-      the preconditioner is fitted to (since fixed on the case; `.claude/rules/solve-direct-preconditioners.md` carries it).
+      the preconditioner is fitted to (since fixed on the case; `.claude/notes/solve-direct-preconditioners-log.md`, "Per-column probing reach — bfs3d's history", carries it).
       Three arms — the change, the change with the old driver, and the
       **untouched base** — came out identical to the digit, which is what identified the base rather
       than the change; restoring pressure to reach 3 then reproduced the archived trajectory exactly
@@ -912,7 +912,7 @@
     `drift_measure` against the same trigger, needing no new trigger. The threshold is **calibrated on an
     instrumented cold-IC pitzDaily march** (`threshold = 0.1`, firing where the cycle count has just
     doubled off its floor and the bubble has formed) — the table, and the validation that drift really
-    does track cost, are in `.claude/rules/solve-march.md`. One geometry, so re-calibrate by offline replay
+    does track cost, are in `.claude/notes/solve-march-log.md`, "`CoefficientDriftTrigger` — calibration on a cold-IC pitzDaily march" (and the end-to-end entry after it). One geometry, so re-calibrate by offline replay
     on a new case rather than assuming it transfers.
   - **The slope limiter is NOT implicated (measured — do not re-derive this).** pitzDaily is the first
     case that genuinely exercises `LimitedUpwind` (Poiseuille / cavity / smooth channels never activate a
@@ -1526,7 +1526,7 @@
       The safer lever is to make `beta_start` a function of the rung spacing rather than carrying beta
       across a discontinuity — the control can still back off, where a carry starts past the point of no
       return — and `PITZ_BETA_START` is on record as **untried in the low direction** (see
-      `.claude/rules/solve-amg-multigrid.md`, where `beta_start = 4` measured worse than `0.5`).
+      git history of `.claude/rules/solve-amg-multigrid.md` before 2026-10-17, "Ordering, not fill, is what fails zero-fill on `pitzDaily`", where `beta_start = 4` measured worse than `0.5`).
     - **✅ A LOWER STARTING SHIFT ON THE *WARM* RUNGS IS A REAL WIN AT 0.1 AND CATASTROPHIC AT 0.05 — and
       the cliff is PER RUNG, not per case (measured 2026-09-08, pitzDaily).** `beta_start` was one constant
       serving two unlike situations: the lowest rung self-starts from `hybrid_initialize` and genuinely
@@ -1684,7 +1684,7 @@
       four descents instead of two has twice as much to gain from shortening them, and the two were not
       measured together.
     - **Where a 3-rung march's time actually goes (measured, `march-20260825-213445.log`).** Same bundle as
-      the equilibration A/B in `.claude/rules/solve-amg-multigrid.md`: `bfs3d`, `N_POINTS=2`, field split,
+      the equilibration A/B in `.claude/notes/solve-amg-multigrid-log.md`, "The traced multigrid — in progress": `bfs3d`, `N_POINTS=2`, field split,
       ILU(0)x4, probe reach 3/3/3/3/2/2, dual-time `inner_steps`/`inner_tol` 5/0.01, `refresh_on_cycles` 3,
       retry on cycles/alpha 10/0.01, cycle budget 42, forward restart 15, PC beta floor 0.05, stop
       `(rtol, atol) = (0.0, 1e-5)`, k wall `zerogradient`, k positivity floor 1e-8.

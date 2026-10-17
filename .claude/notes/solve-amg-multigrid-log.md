@@ -672,7 +672,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     `wall_shear_rate` area-averages `Σ|S_f|r_f / Σ|S_f|` over them, which is exactly
     `patchFieldsToWallCellField` in OpenFOAM 13's `wallCellWallFunctionFvPatchScalarField`. Nothing is
     summed per face. The ranking most likely reads **stagnation** — three wall faces means the deepest
-    dead zone and so the least production — not double counting. See `.claude/rules/turbulence.md` for
+    dead zone and so the least production — not double counting. See `.claude/notes/turbulence-log.md`, "Near-wall k collapse at trihedral wall corners", for
     the two differences that are real, of which one bears directly on the lever below.
   - **NOT the ill-conditioned cells — the standing hypothesis is refuted at this state.** **Zero**
     singular blocks at every β from 0 to 0.4. The binding cells run cond 3.6e5 … 2.9e7, ranks
@@ -871,7 +871,7 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
   - `test_coupled_rans` + `test_coupled_amg` + `test_coupled_field_split` + `test_reynolds_continuation`
     — 33 tests, 18 of them `slow` — **33 passed**;
   - `test_coupled_lu` + `test_coupled_ilut` (the latter since deleted along with the ILUT it tested;
-    see `solve-direct-preconditioners.md`) — **15 passed**. These two matter and were nearly missed:
+    its record is in git history of `solve-direct-preconditioners.md` before 2026-10-17) — **15 passed**. These two matter and were nearly missed:
     they drive `newton_march` with `step_control` + `refresh_preconditioner`, so they pick up
     `stop_on_limit_stall` exactly as the four above do, and they are in neither the fast gate nor the
     list a first pass would think to run;

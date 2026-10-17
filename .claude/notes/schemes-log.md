@@ -1553,7 +1553,7 @@ discretization at all*. Only the second is safe on a mesh nobody has calibrated.
   search takes full steps into iterates the carried preconditioner solves badly (inner solves pinned at
   12 cycles against 2–5, one attempt at α = 1.000 reaching an inner residual of 2.7e+10), each tripping
   that case's per-solve cycle bailout. Full numbers and configuration in
-  `.claude/rules/solve-amg-multigrid.md`. ⚠️ **All of this table was measured with the global cap and its
+  `.claude/notes/solve-amg-multigrid-log.md`, "The traced multigrid — in progress". ⚠️ **All of this table was measured with the global cap and its
   projection switch, both deleted 2026-10-14**: every coupled step now clips `k` per cell AND bounds ω's
   per-cell change, which removed bfs3d's bad full-length trials (`.claude/notes/solve-globalization-log.md`,
   "bfs3d's retried steps: the global k cap, replaced by a per-cell clip with an omega bound (2026-10-14)").

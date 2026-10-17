@@ -66,7 +66,7 @@
     - **A full re-materialize is a FRACTION of an outer step, not the march's most expensive operation**:
       1.2–1.6 s against ~9 s on pitzDaily, 11.5 s against a ~34 s mean outer step on `bfs3d`.
     - **`24 x 1` beats `4 x 3`** — 191 restart cycles against 261 on pitzDaily (11 arms; the numbers and
-      the mechanism are in `.claude/rules/turbulence.md` under `ViscosityRampHomotopy`).
+      the mechanism are in `.claude/notes/turbulence-log.md`, "ViscosityRampHomotopy — schedule, per-station refresh and the anchor seed").
     - **⚠️ The rebuilds are largely SUBSTITUTIVE, not additive** — the arithmetic "n stations cost n
       rebuilds of pure overhead" double-counts, because the ladder rebuilds too, on
       `refresh_on_cycles`, and does so on nearly every step of its long target rung. Counted from both
@@ -121,7 +121,7 @@
       ramp exactly as asked (102 cycles, matching the constant-ratio arm *to the cycle*) and switching
       the target station's ratio then bought **one** cycle. The target's cost is set by the state the
       ramp hands it, and a harder-damped ramp hands over a worse one. Full data in
-      `.claude/rules/turbulence.md` under `turbulence_damping`. The seam is kept because it is the
+      `.claude/notes/turbulence-log.md`, "ViscosityRampHomotopy — momentum-only scaling and `turbulence_damping`". The seam is kept because it is the
       instrument that established that, and because nothing else can express a per-station setting.
 
 ## Reactive β-escalation — why escalation leads (the reorder, bfs3d)

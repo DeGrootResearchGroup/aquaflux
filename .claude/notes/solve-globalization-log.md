@@ -85,7 +85,7 @@
       - **The single-step sweep rated convective at Co ≈ 1 (0.051 %/s) level with a_P at β = 0.5 (0.056)
         and better than a_P at every β ≥ 1.** The marches say the opposite. That is the **second** time
         in one session that a single-state single-step ‖R‖ measurement chose the wrong winner (the first
-        was the log-space ω shift, `.claude/rules/turbulence.md`). **Treat %/s sweeps as a way to find
+        was the log-space ω shift, `.claude/notes/turbulence-log.md`, "The ω shift diagonal inherits ω's dynamic range"). **Treat %/s sweeps as a way to find
         candidates, never as a way to choose between them** — the choice needs a march judged on physics.
         (The 2026-07-26 re-profile is the **third** instance: the same sweep's `Co ≈ 1` optimum did not
         survive a constant-β march either.)
@@ -160,7 +160,7 @@
 
       Every block descends and the reattachment holds. **So no closure/model work is required to get
       the bubble** — the closure was never the problem (which also confirms the older three-way
-      verification recorded in `.claude/rules/turbulence.md`), and the entire remaining gap is the
+      verification recorded in `.claude/notes/turbulence-log.md`, "pitzDaily reference and the max blend"), and the entire remaining gap is the
       solver's inability to travel from a cold start to a root it is perfectly happy to sit on.
       - **Consequence for what to build:** de-emphasizing ω in the *measure* is now a justified lever
         rather than a guess, because a reachable correct root is known to exist. The target is
@@ -175,7 +175,7 @@
         root, that cannot be confused with a genuine stall: it is the global norm failing to report
         flow convergence. This is the concrete case for per-block reporting (#24) and row
         equilibration (#29).
-      - **A `max` near-wall blend is better on CONVERGENCE, not only on accuracy.** `.claude/rules/turbulence.md`
+      - **A `max` near-wall blend is better on CONVERGENCE, not only on accuracy.** `.claude/notes/turbulence-log.md` ("pitzDaily reference and the max blend")
         justified `p → ∞` on agreement grounds (per-wall-cell `|R_ω|/ω` 3500× smaller) and left the
         default open as "a model decision". This adds an independent argument: from the same start it
         reaches **2× the residual depth** (6.70 vs 13.70) and a **2.8× lower flow residual** in the same
@@ -637,12 +637,12 @@
       - **DELETED — "the low-β wall is the block-SIMPLE preconditioner, and the ILUT breaks it" was
       superseded on both halves.** The remedy is gone: the monolithic ILUT was measured **dominated** and
       removed, and there is no `coupled_ilut_continuation` / `IlutFactors` / `ilut_beta_tracking_refresh`
-      any more (see `solve-direct-preconditioners.md`). The premise is gone too: the shipped AMG
+      any more (record in git history of `solve-direct-preconditioners.md` before 2026-10-17). The premise is gone too: the shipped AMG
       preconditioners solve to **adjoint grade at zero shift**, which is the very regime this entry
       claimed only a complete factorization could reach. The one line worth keeping is the trap: a
       dual-time march driving β low is where a preconditioner's low-shift behaviour is tested, so measure
       there and not at the march's floor. ⚠️ And note what the entry never controlled for — the
-      block-SIMPLE path had **no k-positivity limiter at all** until 2026-08-19 (`turbulence.md`), so an
+      block-SIMPLE path had **no k-positivity limiter at all** until 2026-08-19 (record in git history of `.claude/rules/turbulence.md` before 2026-10-17), so an
       unguarded `k` crossing zero produces exactly the NaN it attributed to conditioning.
       - **Residual FLOOR + over-development past the minimum = loose `inner_tol`, NOT the preconditioner.**
       Even with the ILUT (a flat cycle count — the linear solve is fine), the march bottoms out at a

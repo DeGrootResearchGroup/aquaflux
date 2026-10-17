@@ -844,7 +844,7 @@ border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelo
   test runs at `beta0 = 0.1` for that reason.
 - **On the turbulent channels** the coupled march holds re20000 and does not converge re240000; under
   the default row-scaled measure re20000 is 3-20x slower than under `Euclidean()`, and the slow block is
-  `k`, not the constraint row. The record is in `.claude/rules/turbulence.md` (the bulk-velocity entry)
+  `k`, not the constraint row. The record is in `.claude/notes/turbulence-log.md`, "Held bulk velocity on the law-of-the-wall files",
   and `validation/turbulent_channel/README.md`.
 - **Two-argument residuals for the adjoint**: `BorderedFlowResidual` (flow) and
   `turbulence.coupled._BorderedCoupledResidual` read everything, border vectors included, from `theta`.
@@ -928,7 +928,7 @@ border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelo
   `test_flow_preconditioner.py` pass. (Progression: Schur-AMG-only 9→34 ~√N; +velocity-AMG 7→14 ~O(N^0.3);
   +D-coupling 4→8 ~O(N^0.25).) The tiny residual growth is the 1-cycle-AMG block approximation, not the
   structure. **Two cheaper diagonals were measured and rejected** — velocity block-Jacobi and
-  inverse-volume-Jacobi on the gradient solve; see `solve.md`, do not re-attempt.
+  inverse-volume-Jacobi on the gradient solve; see `.claude/notes/solve-log.md`, "Binding decisions — where preconditioning must attach (skewed cavity)", do not re-attempt.
 - **`FlowBlocks` re-runs its `jvp` per application ON PURPOSE** — `jax.linearize` once per iterate was
   measured and buys nothing inside the Krylov loop (#55; harness `validation/flow_blocks_linearize.py`;
   do not re-attempt without re-running it). Record: `.claude/notes/flow-log.md` § "FlowBlocks linearize".

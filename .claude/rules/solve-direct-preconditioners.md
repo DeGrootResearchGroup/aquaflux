@@ -18,8 +18,8 @@ paths:
 > `FieldSplitPreconditioner` and `MaterializedBlockPreconditioner`) and the coloured-probe Jacobian
 > (`sparse_jacobian.py`). **Every entry below that measures the complete LU, UMFPACK, a PETSc V-cycle or
 > the ILUT is dated history and cannot be re-run from this tree.** Why the LU was dominated, and the
-> evidence, is in `solve.md`'s "complete LU is GONE" section and in
-> `.claude/notes/solve-refuted-directions.md`; the LU tests' assertions live on in
+> evidence, is in
+> `.claude/notes/solve-refuted-directions.md`, "Complete LU (SciPy SuperLU) — DELETED as dominated"; the LU tests' assertions live on in
 > `tests/integration/test_coupled_field_split.py`, ported onto the split.
 
 > ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
@@ -136,8 +136,9 @@ and a bare block inverse).** It originally grew up beside the now-deleted monoli
 block-triangular SIMPLE preconditioner for the coupled saddle, which formed the true Schur coupling
 `B F⁻¹ G` through its incomplete-LU fill rather than approximating it); that preconditioner is gone
 (dominated by the complete LU at 2D and by the algebraic multigrid at 3D, per its own docstring and per
-the "nothing selects the monolithic ILUT or complete LU for the adjoint" finding in
-`solve-amg-multigrid.md`), but the Jacobian-materialization machinery below did not go with it — the
+the "nothing selects the monolithic ILUT or complete LU for the adjoint" finding, deleted with the
+monolithic-AMG record — its zero-shift verdict is the "Adjoint (zero shift)" bullet of
+`.claude/notes/solve-refuted-directions.md`, "Complete LU (SciPy SuperLU)"), but the Jacobian-materialization machinery below did not go with it — the
 coloured probe still depends on it (as the complete LU did until it was deleted, 2026-10-11).
 
 - **`sparse_jacobian.py`** materializes the coupled Jacobian from the *same* residual the solver uses
@@ -318,7 +319,8 @@ coloured probe still depends on it (as the complete LU did until it was deleted,
         the sweeps **for the coloured probe only**, leaving the Krylov matvec the exact jvp of the full
         residual — so the recovered matrix is exact for what it was taken from, and the converged state
         and its adjoint are untouched. `None` (default) is byte-identical. See
-        `.claude/rules/schemes.md` for `narrow_gradient_sweeps` and the reach/accuracy tables.
+        `.claude/rules/schemes.md` for `narrow_gradient_sweeps`, and `.claude/notes/schemes-log.md`,
+        "`narrow_gradient_sweeps`: latent on bfs3d, live on pitzDaily" for the reach/accuracy tables.
       - **⚠️ Do NOT read the cap as "less far coupling".** Measured, the mass beyond a given distance is
         set by the **skewness**, not the sweep count (at 25 % perturbation, `|dR/dφ|` beyond distance 2
         is 9.80e-4 at 2 sweeps and 1.004e-3 at both 4 sweeps and the exact solve). A shorter sweep

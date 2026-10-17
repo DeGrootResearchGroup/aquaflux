@@ -575,7 +575,7 @@ Many entries below are dated history written against the old API. Read them thro
   executes the residual not at all (`[n, 0, 0, 0]`; it was one eager evaluation per sweep).** The property is
   unchanged and pinned by
   `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, whose fixture
-  had to start disturbing the state to keep measuring it (see `solve.md`). ⚠️ **Since the preconditioner
+  had to start disturbing the state to keep measuring it (see `.claude/notes/solve-log.md`, "Contracts: `implicit.py` — the compile-count test that measured nothing"). ⚠️ **Since the preconditioner
   became data (#386) a REBUILT two-level preconditioner is a cache hit too** (its coarsening reads only the
   graph, so the shapes do not move) — carrying it now saves only the ~1 s build, not a recompile; a
   rebuilt lAIR still misses, by shape.
@@ -839,7 +839,7 @@ Many entries below are dated history written against the old API. Read them thro
     then dominates a homogeneous linear row and `k` decays; raising Re reverses both (weight median
     5.6e-20 → 1.9e-10 → 1.000 across the three rungs). **Anchoring a ladder below the Reynolds number at
     which the wall function turns itself on manufactures a near-wall `k` trough.** Full account in
-    `.claude/rules/solve-amg-multigrid.md`.
+    `.claude/notes/solve-amg-multigrid-log.md`, "The traced multigrid — in progress".
 
     **Known residual — the buffer layer.** A wall-function mesh landing at `y+ ≈ 11–16` (the crossover
     itself) is the worst case for any wall function, and the blend smooths it without making it exact:
@@ -1028,7 +1028,7 @@ Many entries below are dated history written against the old API. Read them thro
     norm), the march builds it from `_CoupledMeasures` at each iteration's starting state and hands it to the
     step, and the step's default linear solve stops in it (`relative_residual_gmres(norm=None)`). The builders
     take no measure keyword. **The frozen-at-build-state form, the old default, is deleted** — measured cheap to
-    rebuild and needed by nothing; the evidence is in `solve.md`'s `convergence.py` entry.
+    rebuild and needed by nothing; the evidence is in `.claude/notes/solve-log.md`, "Contracts: `convergence.py` — deleting the frozen row-scaled measure".
     (A held bulk velocity's bordered `[flow, k, ω, β]` state takes the same default since #541: the
     constraint row is scaled by the held speed, `flow.BorderedMeasures`.) **This does not *fix* the forward stall** —
     the pitzDaily march is globalization-bound and plateaus under any measure (the row-scaled measure is the
@@ -1254,7 +1254,7 @@ tuning follow-up noted above.
     `_field_values(coupled, state)` (the assembler an argument, so a read at a new state is a cache hit),
     and are named OUTSIDE it from a tuple -- ⚠️ a dict returned from a compiled program comes back with
     its keys sorted, which would reorder the log's rows. Read once per logged step, it cost 34 s of an
-    800 s pitzDaily march op by op (see `solve.md`, `norm_of_residual`). Pinned by
+    800 s pitzDaily march op by op (see `.claude/notes/solve-log.md`, "Contracts: `norm.norm_of_residual` — measured (#715)"). Pinned by
     `test_coupled_fields_are_each_field_s_own_value_read_through_one_compiled_program`.
     `coupled_residuals` below reads its per-block terms through `_per_block_residual`, compiled the same
     way (its measure is still built per step, a few ms); bfs3d's `compare.py` logs it every step. Pinned by
@@ -1283,7 +1283,7 @@ tuning follow-up noted above.
   station index, and steps must be entered in order (`enter(step, previous)`). The schedule may END the
   ramp on the march's settle (`solve-march.md`, `RampSchedule`); a fixed schedule walks exactly the
   stations it always did. What it removes is measured in
-  `.claude/rules/solve-march.md`'s `ResidualHomotopy` bullet — read the numbers there rather than
+  `.claude/notes/solve-march-log.md`, "`ResidualHomotopy` — what it is for, and the four-arm result" — read the numbers there rather than
   restating them: in one sentence, the ladder converges every seed rung to a bar the next rung's
   viscosity jump undoes by three to four orders of magnitude, and restarts the pseudo-timestep ramp at
   every rung.

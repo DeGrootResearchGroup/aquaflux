@@ -1750,7 +1750,7 @@ the Krylov iteration *applies*.
     and *folds* whatever lies beyond onto near entries, so probing a narrowed residual gives a matrix that
     is **exact for the residual it was taken from** — a stated approximation of the operator instead of a
     corrupted one. Consumed through `JacobianProbe(gradient_sweeps=…)` / the coupled builders'
-    `probe_gradient_sweeps=`; see `.claude/rules/turbulence.md` and `.claude/rules/solve-direct-preconditioners.md`. **Default
+    `probe_gradient_sweeps=`; see `.claude/notes/turbulence-log.md`, "Materialized re-fit", and `.claude/rules/solve-direct-preconditioners.md`. **Default
     `None` everywhere is byte-identical.**
     The skew census showing the trap is live on pitzDaily (reach 5 needed at `sweeps=4`) is in `.claude/notes/schemes-log.md`, "`narrow_gradient_sweeps`: latent on bfs3d, live on pitzDaily".
   - **The `GradientSolve.solve(..., operator_hook=None)` distributed seam.** `operator_hook` is an

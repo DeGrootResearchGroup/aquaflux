@@ -66,8 +66,8 @@ Inside one Krylov application, timed at the target-station states of that captur
 V-cycle ~130 ms, the `[k, omega]` Jacobi-smoothed one ~55 ms, the coupling product ~7 ms) against a JVP
 of **77-86 ms**, so the preconditioner is ~70 % of an application. The JVP was 45 ms on 2026-10-10;
 the multiple-correction gradient is the likely cause (not measured, and not a lever: that gradient is
-the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve.md`,
-`norm_of_residual`): 804 -> 727 s warm, identical march.
+the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve-log.md`,
+"Contracts: `norm.norm_of_residual` — measured (#715)"): 804 -> 727 s warm, identical march.
 ⚠️ **Every number in this subsection predates the multiple-correction first pass's adjugate inverse
 (2026-10-16, branch `claude/multicorr-adjugate-inverse`), and was taken with a batched LAPACK LU of
 `M1 - B` inside every residual and JVP** -- 6 `getrf` + 12 `trsm` library calls in the compiled
@@ -300,8 +300,8 @@ pass under `lineax`:
   tighten in a tail of full-length steps limited by their own solve (`0.9·ρ²`, floored at
   `½ target / |R_k|`), and solve the step after a cut-back or a rising residual to 0.1. The other proposed
   remedy, re-solving the cut-back step tighter, was refuted (ledger: "Re-solving a cut-back step at a
-  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve.md`'s
-  contract entry and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
+  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve-log.md`,
+  "Contracts: `adaptive_tolerance.py` — measured on the built setting (#645)", and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
   (`LinearSolveRegime.stop` defaulting to `residual`, and the setting at its defaults on every march whose
   solver is a relative-residual GMRES) passes: 39 of 39** (2026-10-15, `d0871e2` + the two forcings in a
   scratch worktree, Linux x86_64, 4 cores, jax 0.11.2, 1:01:39). The stop alone failed four
@@ -385,7 +385,7 @@ is the whole game on a GPU; on CPU the gain is smaller but non-zero. A float32 p
 
 **What it does not change.** The preconditioner never enters the state or its gradient; a rounding
 change inside it changes Krylov convergence only. `solve-amg-multigrid.md` already notes the one place
-a float32 hierarchy *forces* a change (the small-block pivoting at §1313): treat that as the checklist.
+a float32 hierarchy *forces* a change (the small-block pivoting, under "The traced multigrid — in progress"): treat that as the checklist.
 
 **Pre-registered measurement.** bfs3d, matched preconditioner at `state-00049`: cycles and apply wall,
 float64 vs float32 PC. Pass is cycles within +10 % at lower wall. The real measurement is on a GPU
@@ -450,7 +450,7 @@ entry 6 is a JAX solver by necessity; a GPU-friendly smoother (coloured Gauss–
 the operator allows, or more ILU-free sweeps) replaces ILU(0), whose quality the ledger credits to a
 sequential global sweep that does not parallelize.
 
-**Measurement.** Unavailable until a GPU environment exists (`solve-amg-multigrid.md` §1958). Record
+**Measurement.** Unavailable until a GPU environment exists (`solve-amg-multigrid.md`, "Faithful smoothed aggregation — matching PETSc GAMG"). Record
 the first GPU march's step/cycle counts against the CPU march's — counts should match; clocks are the
 result.
 
@@ -542,7 +542,7 @@ cycle at step 18: since #290 the release fires at step 17 of 19, so there is not
 (the replay's 1-8 cycles per step were taken on the 31-step march of 2026-10-10). Ledger entry: "Re-fitting
 at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
 at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
-step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
+step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (git history of `solve-amg-multigrid.md` before 2026-10-17, "Zero-fill is the low-β smoother"); the SIMPLE-smoothed
 hierarchy does not evidently need it. **pitzDaily's file drops the floor** (2026-10-13, owner's decision;
 none is the 1e-4 arm exactly, since the shift never goes below `release_floor`; confirmed by a march of
 the file as committed, whose step table matches the 1e-4 arm's line for line). ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps

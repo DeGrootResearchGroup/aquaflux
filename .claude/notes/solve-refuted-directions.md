@@ -515,7 +515,7 @@ iterate, e.g. on hardware where the probe itself changes cost class.
 `ResidualHomotopy` station at `x + dlam·dx/dlam`, `J dx/dlam = -dR/dlam`, rather than at the previous
 state, to cut the "opening residual" a station change creates.
 
-**Already measured once, on the configuration it was proposed for** (`turbulence.md`, 2026-09-08,
+**Already measured once, on the configuration it was proposed for** (`.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies and a literature survey", 2026-09-08,
 `validation/continuation_seed_error.py`): on the decade **ladder** the predictor made the seed 23 % worse
 on bfs3d and helped only on a ladder too fine to afford while β restarted per rung. The item's own
 evidence ("rung 2 opened 6,000× worse") was the ladder's, and pitzDaily no longer runs a ladder.
@@ -1061,7 +1061,7 @@ measured on pitzDaily: it repairs the k row at **`turbulence_damping` 1** (singl
 the shipped case, which damps the closure rows at 3 — a full march is 16 steps / 111 cycles / `x_r/h`
 8.0686 in both arms, and the probe at damping 3 shows every arm already taking a full step to 0.034.
 Deleted rather than kept as an unused option; branch history has it (`probe-312-additive-shift`,
-dda9be7). Full numbers and configuration: `.claude/rules/turbulence.md`, the #312 entry. Re-open only on
+dda9be7). Full numbers and configuration: `.claude/notes/turbulence-log.md`, "#312 — `abs` on the k shift (reverted 2026-08-26) and `|r| + |f|` (inert, 2026-10-12)". Re-open only on
 a case that marches undamped closure rows and shows the near-cancellation in the march.
 
 ## Re-fitting at the released shift (open-directions 11a) — CLOSED ON pitzDaily AND bfs3d (2026-10-13)

@@ -56,7 +56,7 @@
   turbulence damping 3, `MultipleCorrectionGradient` at reach 3, `simplesmooth` / `jacobi_smoothed`,
   `N_POINTS` 2, stop `(0, 1e-5)`): **31 steps / 191 cycles, one line-search clip, `x_r/h` 8.0686,
   `nut` peak 417.98, `ux` 0.0190, final `|R|` 7.815e-06, 305 s**, against the recorded arm at the same
-  configuration (turbulence.md's damping table) of 31 steps / 196 cycles / `x_r/h` 8.0686. Not a true
+  configuration (the damping table in `.claude/notes/turbulence-log.md`, "ViscosityRampHomotopy — momentum-only scaling and `turbulence_damping`") of 31 steps / 196 cycles / `x_r/h` 8.0686. Not a true
   A/B -- the record predates several refactors -- but the root and the step count are unchanged. The old pitzDaily march A/B (skew + projection + `boundary_chain`: 707.6 s / 456 cycles /
   68 steps / `x_r/h` 8.069, against 660.4 s / 467 / 67 / 8.069 without it) was measured under the removed
   extrapolation and does not describe the current code.

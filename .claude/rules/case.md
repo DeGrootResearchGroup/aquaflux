@@ -712,7 +712,7 @@ whose runs write what every run writes. Decisions taken with the owner before bu
   unless listed** — it is not in the scene at all; exact in a convex room, wrong in an L-shaped one;
   documented on the docs page. A REFLECTING wall shadows the lamps' direct light and the reflected light
   through the scene's own triangles whenever self-occlusion is on (#622, 2026-10-10;
-  `.claude/rules/radiation.md` → THE SCENE).
+  `.claude/rules/radiation.md` → THE SCENE; the full record in `.claude/notes/radiation-log.md`).
   `PatchBody` builds with `patch_triangles(..., allow_folded=True)` (`mesh.md`): the snapped bunny has
   **291 faces not star-shaped from their vertex mean**, which the first at-scale run refused.
 - **Receivers** (`Receivers(cells=True, patches=None)`): unset patches = every `Wall` not in a
