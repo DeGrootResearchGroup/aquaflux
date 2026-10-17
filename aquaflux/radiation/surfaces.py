@@ -305,6 +305,16 @@ class Surfaces(eqx.Module):
             twin[front], twin[back] = back, front
         return twin
 
+    @property
+    def own_faces(self) -> np.ndarray:
+        """The faces each facet's centroid lies on, ``(n_facets, 2)`` of int: the facet, then its
+        :attr:`twin` (``-1`` where it has none).
+
+        What a ray aimed at a facet's centroid ends on and must ignore -- the ``receiver_facet``
+        of a mask whose receivers are the facets themselves.
+        """
+        return np.stack([np.arange(self.n_facets), self.twin], axis=1)
+
     def with_back_faces(self) -> Surfaces:
         """This set with each sheet's back face appended: the set the light is solved on.
 
