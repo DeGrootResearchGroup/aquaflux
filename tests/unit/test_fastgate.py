@@ -101,6 +101,9 @@ def _tree(tmp_path: Path, **modules: str) -> Path:
 #: caller.
 _XDIST_MARKERS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT", "PYTEST_XDIST_TESTRUNUID")
 
+#: The gate's own environment overrides, which the gate under test must not inherit from its caller.
+_GATE_OVERRIDES = ("FASTGATE_FORCE", "FASTGATE_JOBS")
+
 
 #: A run-file in the shape `validation/run_case.sh` writes, naming ``pid`` and when it started. Only
 #: those two are read (the rest is echoed back to a human), so a live process of any kind stands in
@@ -149,6 +152,12 @@ def _run(cwd: Path, *args: str, **overrides: str) -> subprocess.CompletedProcess
     }
     for marker in _XDIST_MARKERS:
         environment.pop(marker, None)
+    # The gate's own overrides, for the same reason: a suite run with `FASTGATE_FORCE=1` beside another
+    # tier would otherwise switch off the very refusals these tests check, and `FASTGATE_JOBS` the
+    # parallelism. A test that needs one passes it in `overrides`.
+    for variable in _GATE_OVERRIDES:
+        if variable not in overrides:
+            environment.pop(variable, None)
     return subprocess.run(
         [str(FASTGATE), *args], cwd=cwd, capture_output=True, text=True, env=environment
     )

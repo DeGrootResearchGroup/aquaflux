@@ -149,6 +149,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         ("validation/bfs3d_species/*", "validation/bfs3d_openfoam/*"),
         "imports the species harness from validation/ and reads the OpenFOAM case",
     ),
+    "tests/unit/test_compile_timeline.py": (
+        ("validation/pitzdaily_openfoam/compile_timeline.py",),
+        "loads the compile-timeline harness by path",
+    ),
     "tests/ui/test_case_form.py": (
         ("validation/*.yaml",),
         "builds forms from the shipped case files",
@@ -190,6 +194,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         "`python -m aquaflux` runs __main__, which it imports itself",
     ),
     "tests/ui/test_sources.py": ((), "names `aquaflux` only as a key of a run record"),
+    "tests/unit/test_compiled_residual_census.py": (
+        (),
+        "uses the repository root only as the case directory of a structured grid",
+    ),
 }
 
 #: Paths that no test reads. A change confined to these selects no tests and says so. A path a test
