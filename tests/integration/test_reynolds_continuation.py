@@ -31,13 +31,13 @@ from tests.integration.test_coupled_rans import PRECONDITIONER, _channel
 
 MAX_STEPS = 60
 
-# The ramped-gradient test solves each Newton step to a relative residual of 0.1 rather than the coupled
-# regime's base 0.3. Under the residual stop a step really is only as accurate as that tolerance, and at
-# 0.3 the target-Re march on this channel can be thrown out of its convergent basin within a few steps:
-# with a fixed 0.3 it never converges, and with the adaptive tolerance it converges or not according to
-# the machine's rounding. At 0.1 it converges in about a dozen full-length steps with or without the
-# adaptive tolerance, so the test checks the adjoint rather than whether the march happened to land.
-RAMPED_GRADIENT_LINEAR_SOLVE = LinearSolveSettings(rtol=0.1)
+# The ramped-gradient test stops each linear solve by lineax's own GMRES rule rather than the residual
+# stop. Lineax's rule runs at least two restart cycles and waits until the solution stops moving, so it
+# solves past the regime's base tolerance; under the residual stop each Newton step is only as accurate
+# as that tolerance, and the target-Re march seeded by the lower-Re point on this channel then converges
+# or stalls according to the machine's rounding (a tighter base tolerance alone did not settle it). The
+# adaptive tolerance stays on.
+RAMPED_GRADIENT_LINEAR_SOLVE = LinearSolveSettings(stop="lineax")
 
 
 @pytest.fixture(scope="module")
