@@ -643,6 +643,7 @@ class PseudoTransientStep(ShiftedStep):
                     line_search,
                     norm=norm,
                     growth=growth_factor,
+                    residual=residual,
                 )
                 return _Attempt(
                     candidate=searched.phi,
@@ -996,13 +997,17 @@ class DualTimeStep(ShiftedStep):
             preconditioner = term.make_preconditioner(shift_strength)
             target = inner_tol * reference_norm
 
+            def transient_term(p: jnp.ndarray) -> jnp.ndarray:
+                # β d (p − φⁿ): what the backward-Euler step adds to the steady residual.
+                return shift * (p - reference)
+
             def transient_residual(p: jnp.ndarray) -> jnp.ndarray:
                 # G(p) = R(p) + β d (p − φⁿ): the backward-Euler residual whose root is the implicit
                 # timestep. Its Jacobian is J_R(p) + β d, formed matrix-free below.
-                return residual_fn(p) + shift * (p - reference)
+                return residual_fn(p) + transient_term(p)
 
             def cond(carry: tuple) -> jnp.ndarray:
-                _, inner, gnorm, cycles, min_alpha, max_inner, refresh_due, _ = carry
+                _, _, inner, gnorm, cycles, min_alpha, max_inner, refresh_due, _ = carry
                 # The convergence target is tested FIRST, and that ordering is what makes the cost
                 # bailouts below safe: a solve that was expensive but brought ‖G‖ under the target exits
                 # here with `reached_target` set and is kept, never binned for its cost.
@@ -1042,6 +1047,7 @@ class DualTimeStep(ShiftedStep):
             def body(carry: tuple) -> tuple:
                 (
                     p,
+                    g,
                     inner,
                     gnorm,
                     cycles,
@@ -1050,10 +1056,12 @@ class DualTimeStep(ShiftedStep):
                     refresh_due,
                     first_ratio,
                 ) = carry
+                # `g` is `G(p)`, carried from the previous iteration's line search (or `R(φⁿ)` at the
+                # anchor), so the right-hand side costs no residual evaluation.
                 delta, step_cycles = _shifted_solve(
                     residual_fn,
                     p,
-                    transient_residual(p),
+                    g,
                     shift,
                     preconditioner,
                     solver,
@@ -1067,7 +1075,7 @@ class DualTimeStep(ShiftedStep):
                 if step_projection is not None:
                     delta = step_projection(p, delta)
                 searched = backtracking_line_search(
-                    transient_residual, p, delta, gnorm, line_search, norm=norm
+                    transient_residual, p, delta, gnorm, line_search, norm=norm, residual=g
                 )
                 candidate, alpha = searched.phi, searched.alpha
                 # The search's own measure of `G` at the rung it kept -- the inner loop is judged by
@@ -1106,6 +1114,9 @@ class DualTimeStep(ShiftedStep):
                 )
                 return (
                     candidate,
+                    # `G` at `candidate`, which the search evaluated at the rung it kept (or, with no
+                    # step taken, the `g` it was handed, at the unmoved `p`).
+                    searched.residual,
                     inner + 1,
                     new_gnorm,
                     cycles + step_cycles,
@@ -1122,6 +1133,7 @@ class DualTimeStep(ShiftedStep):
 
             (
                 phi_next,
+                final_g,
                 inner_iterations,
                 final_gnorm,
                 cycles,
@@ -1134,6 +1146,8 @@ class DualTimeStep(ShiftedStep):
                 body,
                 (
                     reference,
+                    # G(φⁿ) = R(φⁿ): the transient term is zero at the anchor.
+                    reference_residual,
                     jnp.asarray(0, dtype=jnp.int32),
                     reference_norm,
                     jnp.asarray(0, dtype=jnp.int32),
@@ -1149,14 +1163,16 @@ class DualTimeStep(ShiftedStep):
             # `cycle_budget` or `inner_steps`. Without it a march escalating on cost alone discards a step
             # that converged expensively, which is pure waste: it throws away a good iterate AND takes a
             # shorter step than the work already earned.
-            # The one member the inner loop cannot supply. It converges the SHIFTED residual `G` at a
-            # held reference, so every measure it formed is of `G`, while the driver judges this step by
-            # the STEADY `R` -- different quantities, and `G(phi_next) != R(phi_next)` whenever the step
-            # moved. So this path forms the measure the two single-step strategies get for free from
-            # their line search: it costs here exactly what the driver used to pay, and saves nothing.
+            # The inner loop converges the SHIFTED residual `G` at a held reference, while the driver
+            # judges this step by the STEADY `R` -- different quantities, and `G(phi_next) != R(phi_next)`
+            # whenever the step moved. But `G` is `R` plus the transient term, and the loop carries the
+            # `G` vector its search kept, so `R(phi_next)` is that vector less the same term: one
+            # subtraction, not a residual evaluation. It differs from a fresh `R(phi_next)` by a rounding
+            # at the size of the transient term, which vanishes as the march reaches its root.
+            steady_residual = final_g - transient_term(phi_next)
             return StepOutcome(
                 phi_next,
-                norm(residual_fn(phi_next)),
+                norm(steady_residual),
                 cycles,
                 alpha,
                 inner_iterations,

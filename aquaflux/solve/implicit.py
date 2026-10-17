@@ -266,6 +266,7 @@ def backtracking_line_search(
     norm=jnp.linalg.norm,
     growth=1.0,
     fallback_growth=100.0,
+    residual=None,
 ):
     """Backtrack the step length: the largest ``alpha`` in ``{1, 1/2, ..., 1/2**steps}`` with
     ``norm(R(phi + alpha delta)) < reference_norm``. When none is admissible it falls back to the
@@ -333,6 +334,11 @@ def backtracking_line_search(
         search judges every block, not only the largest-magnitude one — otherwise a step that lets a
         small-scale block (e.g. ``k`` in a coupled RANS state) blow up is accepted because the norm
         is dominated by another block (``omega``).
+    residual : jnp.ndarray, optional
+        The residual vector ``R(phi)`` at the start point, whose measure is ``reference_norm``. The
+        search never evaluates the residual there, so this is how it can still report the residual at
+        the iterate it returns when it takes no step (``alpha = 0``); a caller that does not need the
+        returned vector may leave it out, and the record's ``residual`` is then ``None``.
 
     Returns
     -------
@@ -347,11 +353,16 @@ def backtracking_line_search(
         way to choosing it — so a caller judging the step by ``norm`` need not evaluate the residual
         again at a point already visited. **Only the ``steps == 0`` path has to form it**, having
         walked no ladder; there it costs exactly what the caller used to pay.
+
+        ``residual`` is the residual vector at that same rung, carried through the ladder beside its
+        measure, so a caller whose next correction needs ``R`` at the new iterate has it without a
+        further evaluation. It is ``None`` only when the caller passed no ``residual`` of its own.
     """
     if steps == 0:
         stepped = phi + delta
-        measure = norm(residual_fn(stepped))
-        return LineSearchStep(stepped, jnp.asarray(1.0), measure, measure)
+        value = residual_fn(stepped)
+        measure = norm(value)
+        return LineSearchStep(stepped, jnp.asarray(1.0), measure, measure, value)
 
     # Walk the ladder from the LONGEST step down and keep the first admissible one -- the largest
     # step the acceptance tolerance allows, not the one that minimizes the residual.
@@ -391,9 +402,12 @@ def backtracking_line_search(
     # Each rung's measure is carried beside its alpha -- both for the accepted rung and for the
     # fallback one, which is a DIFFERENT rung and so needs its own. The two travel together or the
     # returned pair describes two different steps. This is what lets the caller judge the step it
-    # gets without evaluating the residual again at a point the ladder already visited.
+    # gets without evaluating the residual again at a point the ladder already visited. The residual
+    # VECTOR travels the same way, for a caller whose next correction needs it: the fallback rung's
+    # beside its measure, and the last rung walked's, which is the accepted one whenever there is one,
+    # because the walk stops there.
     def cond(carry):
-        index, _, _, found, _, _, _, _, _ = carry
+        index, _, _, found, _, _, _, _, _, _, _ = carry
         return (~found) & (index <= steps)
 
     def body(carry):
@@ -407,9 +421,12 @@ def backtracking_line_search(
             seen_eligible,
             seen_finite,
             full_norm,
+            _,
+            longest_residual,
         ) = carry
         alpha = jnp.asarray(0.5**index)
-        value = norm(residual_fn(phi + alpha * delta))
+        rung_residual = residual_fn(phi + alpha * delta)
+        value = norm(rung_residual)
         finite = jnp.isfinite(value)
         accepted = finite & (value < admissible)
         # The fallback candidate must, unlike the plain finiteness test that used to gate it, also
@@ -427,12 +444,16 @@ def backtracking_line_search(
             seen_finite | finite,
             # Rung 0 is the full step, always evaluated; its measure is kept whatever the test decided.
             jnp.where(index == 0, value, full_norm),
+            rung_residual,
+            jnp.where(first_eligible, rung_residual, longest_residual),
         )
 
     shortest = jnp.asarray(0.5**steps)
     # The seeds are only ever read when the loop found nothing finite at all, in which case every
     # rung's measure was non-finite and so is this one -- which is what the divergence guard is for.
     seed_norm = jnp.asarray(jnp.inf, dtype=jnp.asarray(reference_norm).dtype)
+    # Read only when no rung was finite, like `seed_norm`, and non-finite for the same reason.
+    seed_residual = jnp.full_like(phi, jnp.nan)
     (
         _,
         chosen,
@@ -443,6 +464,8 @@ def backtracking_line_search(
         seen_eligible,
         seen_finite,
         full_norm,
+        last_residual,
+        longest_residual,
     ) = jax.lax.while_loop(
         cond,
         body,
@@ -457,6 +480,8 @@ def backtracking_line_search(
             jnp.asarray(False),
             # Overwritten by the first rung, the full step.
             jnp.full_like(seed_norm, jnp.nan),
+            seed_residual,
+            seed_residual,
         ),
     )
     # Three outcomes, in order of preference. An admissible rung is taken as before. Failing that, the
@@ -471,7 +496,13 @@ def backtracking_line_search(
     measure = jnp.where(
         found, chosen_norm, jnp.where(stalled, jnp.asarray(reference_norm), longest_norm)
     )
-    return LineSearchStep(phi + alpha * delta, alpha, measure, full_norm)
+    # With no step taken the iterate is the start point, whose residual only the caller holds.
+    kept_residual = (
+        None
+        if residual is None
+        else jnp.where(found, last_residual, jnp.where(stalled, residual, longest_residual))
+    )
+    return LineSearchStep(phi + alpha * delta, alpha, measure, full_norm, kept_residual)
 
 
 def _damped_newton_step(
@@ -502,7 +533,7 @@ def _damped_newton_step(
     )
     reference = norm(r)
     searched = backtracking_line_search(
-        residual_fn, phi, delta, reference, line_search_steps, norm=norm
+        residual_fn, phi, delta, reference, line_search_steps, norm=norm, residual=r
     )
     # No inner loop, so nothing could have been cut short and the one solve IS the most expensive one.
     return StepOutcome(
