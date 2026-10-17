@@ -255,6 +255,26 @@ def mid_box_sheet(divisions: int, *, span: float) -> np.ndarray:
     return np.array(triangles)
 
 
+def baffled_box_with_a_point() -> tuple[np.ndarray, int]:
+    """A closed unit box with a baffle part way across it and a point source to one side.
+
+    The baffle shadows part of the box from the rest, and the point source from part of it. The
+    point source sits in the middle of the facet order, so it is the lower index of some of its
+    pairs and the higher of others.
+
+    Returns
+    -------
+    vertices : numpy.ndarray, shape ``(n_facets, 3, 3)``
+    point : int
+        The point source's facet index.
+    """
+    walls = inward_box(3)
+    lamp = np.array([[[0.25, 0.4, 0.55]] * 3])
+    baffle = mid_box_sheet(2, span=0.6)
+    point = len(walls) // 2
+    return np.concatenate([walls[:point], lamp, walls[point:], baffle]), point
+
+
 def box(divisions: int = 2, **optics) -> Surfaces:
     """A closed unit box as a surface set, inward-facing."""
     return Surfaces.from_triangles(inward_box(divisions), **optics)

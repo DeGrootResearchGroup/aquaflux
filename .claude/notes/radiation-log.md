@@ -4907,3 +4907,44 @@ sheet twice by hand did not work, for two reasons, and both are what the build n
   runs the ray test and catches it. **Dismissed, equivalent**: the mirror path's first leg ignoring the
   source's twin -- it lies at distance 0, inside the margin (the direct rays need no such exclusion).
 
+
+## THE FACET-TO-FACET MASK CASTS EACH PAIR ONCE, AND ONLY WHERE IT IS READ (#529, 2026-10-16)
+
+Current state in `.claude/rules/radiation.md`, "The emitting surface occludes too". Measured with
+`validation/radiation_facet_pairs.py`: `radiation_mask_build_cost.py`'s box with a sleeve, every triangle a
+blocker, no point source; arms in one process, warmed, two alternating passes, fastest kept; jax 0.11.2,
+numba 0.68.0, CPU, x64, Linux x86_64, 4 cores, 15 GB, nothing else running; base `1937b3bb` (before #743's
+twin faces, which this scene has none of). "both" is the old `build_visibility` with the facets as
+receivers, "once" every pair once, "read" what `build_transfer` does; read = share of ordered pairs read
+either way. The ungridded 224-1,532 rows are one process; the container restarted during the 2,448 rung,
+which then ran alone in its own process, as did the whole gridded ladder.
+
+| facets | blocked | directions disagree | read | ungridded both / once / read s | gridded both / once / read s |
+|---|---|---|---|---|---|
+| 224 | 0.259 | 0 | 0.713 | 0.30 / 0.14 / 0.10 | 0.05 / 0.02 / 0.02 |
+| 480 | 0.238 | 0 | 0.749 | 2.93 / 1.34 / 1.12 | 0.24 / 0.12 / 0.08 |
+| 832 | 0.220 | 0 | 0.765 | 13.88 / 6.56 / 5.08 | 1.42 / 0.40 / 0.31 |
+| 1,532 | 0.198 | 4 | 0.786 | 83.13 / 41.14 / 33.62 (2.02x / 2.47x) | 5.01 / 1.31 / 0.97 (3.84x / 5.15x) |
+| 2,448 | 0.185 | 0 | 0.796 | 514.18 / 256.19 / 200.57 (2.01x / 2.56x) | 12.08 / 5.15 / 3.44 (2.35x / 3.51x) |
+
+- Ungridded, casting once is the expected 2.0-2.2x; the read-pairs cull adds ~1.2x on a closed box. On a
+  convex lamp alone far more would be skipped (#582 kept 12.8% of the Sozzi lamp's columns), but that
+  scene runs `NoOcclusion` and pays nothing here either way.
+- ⚠️ Gridded, "once" reads 2.0-3.8x, more than half the rays explain; **not decomposed**. The grid walk
+  stops at the first hit, so a ray's cost depends on its direction; casting from the lower index may pick
+  the cheaper end more often on this scene's ordering (walls first, sleeve last). One run each.
+- The 4 disagreeing pairs at 1,532 facets are the 4 the issue counted. The harness asserts every new mask
+  equals the old at the ray it casts, and equals the old mask outright on every read pair where it was
+  symmetric.
+- The issue's proposed check (row-sum and reciprocity gates unaffected) cannot fail: both read `geometric`
+  only. The memory saving it expected was already gone with #525/#526's per-pass exclusions.
+- Tests: `test_each_pair_of_facets_is_answered_by_the_one_ray_it_is_cast_along` (grid on and off),
+  `test_where_the_two_directions_disagree_the_lower_index_s_ray_answers_both`,
+  `test_a_point_source_on_a_wall_casts_its_pairs_itself`, `test_only_pairs_needed_in_one_direction_or_the_other_are_cast`,
+  `test_a_strategy_that_answers_by_share_answers_every_pair_between_facets` (self-occlusion tests), and
+  `test_the_transfer_casts_one_ray_per_pair_it_reads_and_solves_as_a_full_mask_does` (model tests: solved
+  irradiance, point-source arrivals included, bit-identical to the model given the full mask).
+- Mutation pass (10, all red, `PYTHONDONTWRITEBYTECODE=1`, before the rebase onto #743): cast from the
+  higher index, no point-source rule, not mirrored, `needed` read one way only, `needed` ignored, the
+  diagonal cast, the base method asking as volume receivers, the point-source column unread, every pair
+  read, the transfer passing no `needed`.
