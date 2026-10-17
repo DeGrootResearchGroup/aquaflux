@@ -1112,3 +1112,50 @@ residual is a round-off of `‖b‖`: no verdict was wrong at targets 0.3, 1e-3 
 was declared converged with its true residual 0.13 % above the target. The class takes any `rtol`, so the
 verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
 `solve-open-directions.md` 6b.
+
+## A Schubert secant update of the materialized Jacobian between probes — REFUTED (2026-10-17)
+
+**What was proposed** (`solve-open-directions.md` 13): between probes, update the retained unshifted
+host Jacobian with each outer step's own secant pair, `s = x_{k+1} - x_k`, `y = R(x_{k+1}) - R(x_k)`, by
+Schubert's update (Broyden restricted to the fixed pattern, row by row: `J_i += ((y_i - J_i s) /
+(s_i.D s_i)) (D s_i)^T`), then re-apply the shift and refactor the split on its frozen coarsening. No JVP,
+pattern unchanged, so it would replace the coloured probe in a cost re-fit.
+
+**Probe:** `validation/pitzdaily_openfoam/secant_update_probe.py` on a fresh capture of the shipped
+pitzDaily march (`case.yaml` at `5661273a`, `PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`; 21 steps,
+106 restart cycles, `x_r/h` 8.0686, 233 s; Linux x86_64, 4 cores, jax 0.11.2, nothing else running).
+For every inner system of target steps 14-21 the march's float32 field split is re-fitted to each arm's
+Jacobian at the step's own shift (`beta_k d(x_{k-1})`, no refit floor), and solved by the march's
+residual-stop GMRES (restart 15, row-scaled measure) at the tolerance the march's adaptive rule gave that
+step (0.1 after a setback, else 0.3; `MarchReplay.tolerance`). The `marched` arm reproduces every
+recorded cycle count. Restart cycles summed:
+
+| arm | steps 14-21 | steps 15-20 |
+|---|---|---|
+| fresh probe at the step's start (= what the march does) | 40 | 31 |
+| probed one step back (stale-1) | 104 | -- |
+| stale-1 + one Schubert update | 101 | -- |
+| probed two steps back (stale-2) | -- | 148 |
+| stale-2 + two Schubert updates | -- | 142 |
+
+Over the probe's whole range (stale-2 arms on steps 15-21), two updates cost MORE than none: 184 against 175 cycles (2910 against 2744 applications); the column-weighted variant 171, the re-sweep 189. Chains of 3 and 4 updates tie stale (192 / 194, 182 / 182).
+
+**Why it fails:** the relative Frobenius distance of the updated Jacobian from the fresh one, read per
+(row field, column field) block, equals the stale one's to three figures in every block (one step:
+0.003-0.45; worst blocks the k and omega rows' couplings). The Jacobian moves 25-50 % per block between
+consecutive steps of this march (at the shift floor, line search clipped), a change of high rank; one
+secant condition per row recovers about one direction of ~120 stored entries. The variants did not move
+it: the update over every stored entry instead of the entries live at the probe, a per-field column
+weight `D` (the inverse mean square of each field's step), re-sweeping the last two pairs, and chains of
+2-4 updates (in a first run at a fixed 0.3, the chains were sometimes WORSE than stale; totals stale-2
+1526 / Schubert-2 1663 applications).
+
+**And it could not pay anyway:** on current main a probe costs 1.03-1.05 s, the refactor 1.2-1.4 s and
+the update (numpy, 5.66M stored entries, 2.94M nonzero) 0.56 s, and the march already re-fits at every
+station change and on nearly every target step (cost re-fits after each 3-cycle solve). Replacing every
+probe would save ~0.5 s each, <= ~10 s of 233 s. Staleness itself is real (one step stale costs ~2.5x the
+cycles of fresh), so re-fitting every step stays right; a secant update is just not a cheaper fresh probe.
+
+Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against 3.6-4.2 s before the
+adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
+A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.
