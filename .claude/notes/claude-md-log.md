@@ -114,6 +114,12 @@ experiment ("does this solver behaviour need turbulence?") had to be run on a we
 not isolate the variable (#448). The problem had been filed as #277 weeks earlier; the file was ~4000
 lines by the time anything moved out of it, and nothing measured that it was growing.
 
+The size guard first covered only the four physics packages, and the generic ones grew unmeasured the
+same way: on 2026-10-17 `schemes/gradient.py` stood at 3637 lines and `precondition/multigrid.py` at
+3109 with no budget. The guard was extended that day to every module in `aquaflux/`, nested
+subpackages included (the old scan read only each package's top level, so `io/cad/` was invisible to
+it even had `io` been listed).
+
 ## Engineering Principles → 3.7 Vocabulary — the observed failure (#373)
 
 The observed failure (issue #373): the package grew several names per concept and several concepts

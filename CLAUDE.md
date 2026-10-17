@@ -327,10 +327,11 @@ pseudo-transient step, so a control experiment had to run on a weaker driver (#4
   in `solve/` and the specific one becomes a thin configuration of it.
 - **Two mechanical guards in `tests/unit/test_layering.py`, in the always-on gate.** `solve/` imports
   nothing outside itself (no mesh, field or physics import), and `precondition/` imports `solve/` and
-  nothing else; and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500 lines needs
-  a ratchet entry that only ever goes down. (A third guard there is Principle 3's `__all__` rule.)
-  **Tripping the size guard is a prompt to sort the file into generic and physics — not to split it by
-  topic.**
+  nothing else; and **any** module in `aquaflux/` (generic packages and subpackages too) past 1500 lines
+  needs a ratchet entry that only ever goes down. (A third guard there is Principle 3's `__all__` rule.)
+  **Tripping the size guard is a prompt to sort the file, not to split it by topic**: a physics module
+  into generic and physics, a generic one into the jobs it has accreted (host-side setup beside traced
+  code, one strategy family beside another).
 - **Concrete trigger:** *if the docstring of what you add to a physics package needs none of its
   vocabulary, put it in `solve/`; and a second, simpler path written because the robust one "needs
   turbulence" means the robust one has the wrong dependency.*
