@@ -1088,3 +1088,13 @@ removed that tail.**
   `compare`. bfs3d still ships no release, so it keeps a floor tail (33–36 steps). The release is already
   measured there: 33 → 29 steps (open-directions 11a). Reopen only for a march that must keep a long
   linear tail at a floor the release cannot remove.
+
+## The residual-stop GMRES giving its VERDICT on the Arnoldi residual — UNSAFE at tight targets (2026-10-16)
+
+Dropping every recomputation of `b − A x` from `_ResidualStopGMRES` (restart AND final verdict from the
+recurrence, as it was before 2026-10-09) would save one more application per solve than what shipped. Replayed
+on all 68 systems of a pitzDaily march (`arnoldi_drift_probe.py`), the recurrence's departure from the true
+residual is a round-off of `‖b‖`: no verdict was wrong at targets 0.3, 1e-3 or 1e-6, but at 1e-10 one solve of 32
+was declared converged with its true residual 0.13 % above the target. The class takes any `rtol`, so the
+verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
+`solve-open-directions.md` 6b.

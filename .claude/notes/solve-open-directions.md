@@ -185,6 +185,13 @@ Linux, one run each (this case's march is deterministic in its counts):
 that reaches `refresh_on_cycles` ends its step and the re-fit precedes the next one, so the step counts
 above are not comparable with a march on the current tree.
 
+⚠️ **Which solver these applications were counted on.** This table (2026-10-08) and the replay's 514 / 890
+were counted with NO recomputation of `b − A x`: the library's solver restarted from the Arnoldi residual and
+gave its verdict on it. From 2026-10-09 (`6d52eb1`) to 2026-10-16 every cycle end recomputed it, one more
+application per cycle, so every residual-stop march in that window (the `refresh_on_cycles` tables below,
+bfs3d's #699 table, the forced-default tiers) paid that charge; since 2026-10-16 only the final cycle does
+(see the dated entry at the end of 6b).
+
 The control reproduces the shipped march exactly (31 / 99 / 203). The looser corrections cost about one
 inner Newton iteration per step and the cheaper solves pay for it twice over. ⚠️ **Not a pure stop
 effect:** the residual stop reports cycles run where `lineax` reports cycles run minus one, so the
@@ -315,6 +322,49 @@ than 0.3 where it was 18–21 % fewer cycles under `lineax`'s stop, and it is th
 outer steps and a retry (whose tight solve the application count omits). So most of 4b's gain was the
 stop; what is left is modest and comes with the first sign of fragility — 4b (#637) stays deferred, now
 to be measured on top of 6b rather than instead of it.
+
+**✅ The end-of-cycle recomputation charged only at the verdict (2026-10-16).** `_ResidualStopGMRES` recomputed
+`b − A x` at every cycle end (one application of `A M` each, about 0.27 s on pitzDaily). It now hands a cycle
+that falls short the Arnoldi residual, `V (β e₁ − H y)`, and recomputes only when the recurrence says the
+solve has met its target, so the verdict reads the true residual.
+- **The drift, measured first** (`arnoldi_drift_probe.py`): every inner system of a capture of the shipped
+  `case.yaml` (`stop: residual`, `rtol` 0.3, restart 15, `refresh_on_cycles` 3, field split `SimpleSmoothed` /
+  `JacobiSmoothed`; 18 steps, 68 systems, every station refit), solved by GMRES(15) with classical Gram–Schmidt
+  twice, restarting from the recurrence, up to 20 cycles; the true residual formed (uncounted) at each cycle end
+  and where each target is first met; row-scaled measure; `44ba609`, Linux x86_64, 4 cores, jax 0.11.2, 5580 s.
+  `departure` = measure(true − recurrence) / measure(true); `verdict` = measure(true) / target at the stop:
+
+  | target | systems reaching it | worst departure at a cycle end still above it | at its stop | worst verdict |
+  |---|---|---|---|---|
+  | 0.3 | 68 | 1.1e-12 | 2.3e-12 | 0.9996 |
+  | 1e-3 | 65 | 5.2e-10 | 7.8e-10 | 0.9995 |
+  | 1e-6 | 48 | 3.0e-7 | 6.9e-7 | 0.9963 |
+  | 1e-10 | 32 | 3.7e-3 | 7.5e-3 | **1.0013** |
+
+  The absolute departure is a round-off of `‖b‖` throughout, so its relative size grows as the target tightens.
+  As a restart vector it is harmless at every target; as a verdict it is not at 1e-10 (one solve declared
+  converged 0.13 % above its target; the unmet counts are the 20-cycle cap, not drift). Hence the hybrid, not the
+  unconditional restart: one application per solve stays, and no new setting.
+- **Replay check:** on the target station's 16 systems (`krylov_recycling_probe.py`, arms `residual,gmres-15`)
+  the library took exactly the probe's GMRES count plus one, solve for solve (467 against 451), and reproduced
+  every recorded cycle count.
+- **The march** (`PITZ_KRYLOV_STOP=residual` to count, shipped `case.yaml` otherwise, same machine and commit as
+  above, one run each, back to back through `run_case.sh`, nothing else running; this march is deterministic
+  in its counts):
+
+  | | every cycle end (`main`) | final cycle only |
+  |---|---|---|
+  | outer steps / inner solves / restart cycles | 18 / 68 / 123 | 18 / 68 / 123 |
+  | applications of `A M` | 1462 | **1407 (−55 = cycles − solves)** |
+  | solve wall | 463 s | 470 s |
+  | march clock, step 1 → 18 | 380 s | **359 s** |
+  | final `\|R\|` / `x_r/h` / peak `nu_t/nu` | 9.574e-06 / 8.0686 / 418.09 | identical |
+
+  Step tables identical in every column but time. ⚠️ Read the march clock, not the solve wall: step 1 carries the
+  compilation, and the arm on `main`'s code ran second with its program already cached (64 s to step 1 against
+  93 s). The 21 s difference matches 55 applications at about 0.3 s each plus the Gram–Schmidt work, ~4 % of
+  the steady march; one run each, so it is not separable from run-to-run spread on its own — the application
+  count is the evidence.
 
 ## 7. Mixed precision: float64 outside, float32 inside the preconditioner
 

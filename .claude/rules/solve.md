@@ -1147,7 +1147,14 @@ used only by `potential_flow`, where `M` is strong and the operator well-behaved
      test forces), `2 (restart + 1) + 1` applications of `A M`. On pitzDaily's 42 final-station solves the
      march's solver used 2186 applications where a residual-only stop checked every iteration needs 514.
      **`residual_stop_gmres` (BUILT, opt-in, 2026-10-08)** stops on the residual alone, tested every
-     iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). On a
+     iteration in the same measure (`norm=None` binds the step's, like `relative_residual_gmres`). **A cycle
+     that falls short hands the next its Arnoldi residual; only the cycle whose recurrence meets the target
+     recomputes `b − A x`, and the verdict reads that** (2026-10-16): a solve applies `A M` once per
+     Krylov iteration plus once at the end. From 2026-10-09 (`6d52eb1`) it recomputed at EVERY cycle end
+     (one more application per non-final cycle); before that it never did. Why the end still pays: on the
+     replayed pitzDaily march the recurrence sits within round-off of `‖b‖` of the true residual, harmless
+     as a restart vector, but at a 1e-10 target it once declared converged a solve 0.13 % above it
+     (open-directions 6b, `arnoldi_drift_probe.py`). On a
      pitzDaily march it took 693 s against 1306 s to the same root (open-directions 6b); on bfs3d (#699,
      2026-10-12, `46af0749`, Apple M3 Pro, jax 0.10.2, one run each) 810 s at `refresh_on_cycles` 3 and
      787 s at 4 against the shipped stop's 1197 s, same `x_r/h`, no retry (refresh 2 added one). **Selected by
