@@ -15,11 +15,9 @@ paths:
 > Split out of `solve.md` (2026-08-18). See `solve.md` for the package-wide contracts, current
 > configuration, and binding decisions this file assumes.
 >
-> **This file has no `-log.md` sibling yet.** If you are about to push it past ~1,800 lines, split it
-> first: peel the dated/historical content into a new `.claude/notes/solve-march-log.md` (outside the
-> auto-loaded tree — never a `paths:`-less file in `.claude/rules/`, which loads always) and
-> leave a current-status summary here, following the pattern in `solve-flow-block.md` /
-> `solve-flow-block-log.md`. See `solve.md`'s "Where new content goes".
+> **Dated investigation lives in `.claude/notes/solve-march-log.md`** (split out 2026-10-17; outside the auto-loaded tree, so
+> it never auto-loads). This file keeps what is built, the defaults and the binding decisions; a new
+> dated measurement goes in the log, per `solve.md`'s "Where new content goes".
 
 ## `StepHistory` — the per-step record for a program to read (BUILT 2026-10-05)
 
@@ -120,12 +118,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       paces 16 and 24 cost 124 and 118 cycles against the hand-tuned 111, and a 3-step finish 114 -- is
       in `.claude/notes/solve-globalization-log.md` ("Ending the ramp on the settle signal"). **Opt-in;
       pitzDaily's file still ships 12 fixed stations** (111 < 114).
-    - **On bfs3d it does not replace the station count (2026-10-11, #678).** At `grow` 3, release 1e-4,
-      pace 24, `finish` 3 the ramp ended itself after step 9 (settled at step 6, 9 station changes
-      against 13) and cost 187 accepted / 267 all-attempt cycles in 19 steps with five steps redone,
-      against the shipped fixed `grow` 1.5 x 12's 174 / 193 in 28 with one -- better than a fixed 12 at
-      `grow` 3 (214 / 459), worse than the shipped schedule. `rho1` gave no lead on the settle there at
-      either `grow` (above one at `grow` 3, below one from the first floor step at the shipped 1.5). Same log, "bfs3d: the release, `grow` 3 and the settle-ended ramp".
+    - **On bfs3d the settle-ended ramp did not beat the shipped fixed station count (#678);** the measured arms are in `.claude/notes/solve-march-log.md`, "`RampSchedule` / `RampWalk` — on bfs3d it does not replace the station count".
     - Station ids: the fixed walk numbers stations `0..stations` exactly as before (byte-identical
       reports); finishing steps continue from the station the end fired at, so the target's id is not
       `stations` on an ended walk -- only equality between adjacent steps means anything.
@@ -142,80 +135,19 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     `test_each_station_is_entered_with_the_report_of_the_step_before_it` (mutation: handing an older
     report fails it). `None` (the default) is byte-identical and is pinned by a test, since an
   added seam that moves the incumbent path is a defect rather than a feature.
-  - **What it is for, quantified on pitzDaily's shipped Reynolds ladder (2026-09-09, `simplesmooth`
-    flow inverse, `N_POINTS=2`, `RATIO=10`, `BETA_START=0.5`, `beta_min=0.005`, `grow=1.5`,
-    `INNER_STEPS=5`, cold compile cache; 69 outer steps / 417 restart cycles / 1325 s total of which
-    **396 s was XLA compilation before step 1**, so 929 s of marching; `x_r/h` 8.07 vs OpenFOAM 7.74).**
-    Solving each rung as its own march pays two costs a single march does not, and BOTH are visible in
-    that one log:
-      * **Every rung is converged and the next rung's viscosity jump immediately undoes it.** Rung 1
-        spent **12 of its 28 steps** taking `|R|` 4.5e-04 → 7.2e-06; rung 2 opened at 4.5e-02 — **six
-        thousand times worse**. Rung 2 converged to 4.6e-06 and the target opened at 3.0e-03. A seed
-        does not need to be a root, and those polishing steps are discarded work.
-      * **Every rung restarts the pseudo-timestep ramp.** `beta` reopens at `BETA_START` per rung and
-        walks down one `1/grow` notch per **outer step** — `ceil(ln(100)/ln(1.5)) = 12` steps at these
-        values, measured with `a_min = 1.000` on all eleven comfortable ones, i.e. the control had no
-        reason for caution and crawled anyway. Rungs 1/2/3 spent 12/15/16 steps there.
-    Per rung, on the quiet re-run: 28 steps / 123 cycles / 157 s, 21 / 139 / 160 s, 20 / 155 / 170 s.
-    (⚠️ The wall clocks above are from an **uncontended** run; a first attempt at the same march was
-    contended by a parallel test tier and read 1325 s against 555 s for a **bit-identical** trajectory
-    — same 69/417, same final `|R|` 5.771e-06. Counts survive contention; clocks do not.)
-  - **⚠️ THE MEASURED RESULT, four arms, all reaching `x_r/h` 8.0686 and `nu_t` peak 417.8 (2026-09-09,
-    commit 72c9a96, uncontended, warm compile cache, compiled ILU live, `simplesmooth` flow inverse,
-    `PITZ_RAMP_STATIONS=4`, `PITZ_RAMP_STEPS=3`).** Read the **cycle** column: it is the cost measure
-    that survives a bad clock.
-
-    | arm | steps | cycles | wall |
-    |---|---|---|---|
-    | Reynolds ladder (shipped) | 69 | 417 | 555 s |
-    | ramp, station brake left mis-firing | 36 | 269 | 356 s |
-    | ramp, `rebase` only | 50 | 301 | 453 s |
-    | **ramp, `rebase` + `redamp`** | **40** | **261** | **363 s** |
-
-    Against the ladder that is **1.7x steps, 1.60x cycles, 1.53x wall**. The last two rows are the
-    whole argument for `redamp` and are covered in its own entry below.
+  - **Current status:** walking the continuation inside one march (`rebase` + `redamp`) beat pitzDaily's Reynolds ladder of separate marches on steps, restart cycles and wall at the same `x_r/h` (2026-09-09: 40 / 261 / 363 s against 69 / 417 / 555 s). The ladder's per-rung costs and the four-arm table are in `.claude/notes/solve-march-log.md`, "`ResidualHomotopy` — what it is for, and the four-arm result".
   - **⚠️ THE STOPPING TEST IS GATED ON ARRIVAL, and this is the load-bearing correctness property.** A
     small residual at an intermediate station says nothing about the target, so `newton_march` may not
     stop — and `MarchResult.converged` may not be `True` — until `arrived`. Both directions are pinned
     by starting a march **at a station's own exact root**, where the tolerance test passes on step one:
     without the gate it returns there and reports success at a state that does not solve the target.
-  - **⚠️ "A STATION SPANS SEVERAL STEPS ON PURPOSE" IS RETRACTED (2026-09-10). Per-step viscosity is the
-    CHEAPEST schedule measured, on both cases that have run it.** The claim here was that a station
-    change re-points the refresh hook (`amg_beta_tracking_refresh(...).rebind`), whose
-    `BetaTrackingRefresh._full_rebuild_pending` (`forced_full["pending"]` before #661) overrides **both** gates and forces a FULL coloured-probe re-materialize —
-    "the most expensive single operation in the march" — so moving the parameter every step would pay a
-    rebuild per step for a handful of saved steps. The mechanism is real; **every quantitative half of
-    the argument is wrong.**
-    - **A full re-materialize is a FRACTION of an outer step, not the march's most expensive operation**:
-      1.2–1.6 s against ~9 s on pitzDaily, 11.5 s against a ~34 s mean outer step on `bfs3d`.
-    - **`24 x 1` beats `4 x 3`** — 191 restart cycles against 261 on pitzDaily (11 arms; the numbers and
-      the mechanism are in `.claude/rules/turbulence.md` under `ViscosityRampHomotopy`).
-    - **⚠️ The rebuilds are largely SUBSTITUTIVE, not additive** — the arithmetic "n stations cost n
-      rebuilds of pure overhead" double-counts, because the ladder rebuilds too, on
-      `refresh_on_cycles`, and does so on nearly every step of its long target rung. Counted from both
-      `bfs3d` march logs' own `pc …` lines (23040 cells, field split on, `simplesmooth`, column reach
-      3/3/3/3/2/2, ILU(0)/4 sweeps, `REFRESH_ON_CYCLES=3`): the **ladder** did 33 builds / 391 s over 59
-      steps (28 of them cost-triggered inner refreshes), the **ramp** 37 builds / 490 s over 32 steps.
-      Comparable totals per march — the station rebuilds mostly *replace* the cost-triggered ones.
-    `steps_per_station` remains the knob; what it is for is a schedule that has been *measured on its
-    case*, not a standing preference for coarse stations.
+  - **Per-step viscosity (`steps_per_station=1`) is the cheapest schedule measured on both flagship cases;** the earlier claim that a station should span several steps to save re-materializations was retracted. `steps_per_station` remains the knob, set from a schedule measured on its case. Trail: `.claude/notes/solve-march-log.md`, "`ResidualHomotopy` — \"a station spans several steps on purpose\" retracted".
   - **⚠️ `redamp` — RE-DAMP ON ENTERING A STATION, AND THE MARCH BREAKS WITHOUT IT (BUILT 2026-09-09).**
     `ShiftStrengthControl.redamp(state, factor)` multiplies β by `ResidualHomotopy.shift_factor(step)`
     on the step that first faces a new station, and `newton_march` **holds** the control for that step.
     It is the companion of `rebase` and they fire on **adjacent steps for different reasons**: this on
     the entering step, that on the next one, which is the first whose ratio would straddle the boundary.
-    - **⚠️ THE SPURIOUS BRAKE `rebase` REMOVES WAS LOAD-BEARING.** This is the case's instance of a
-      general globalization lesson — *a defect that fires for the wrong reason can be the only thing
-      holding the march out of a bad regime, so fixing it correctly is what breaks the case* — which is
-      stated once, with what to do about it, at the top of `.claude/rules/solve-globalization.md`. The
-      numbers are here; the lesson is there. Before `rebase`, the ratio rule
-      mis-read each station change as divergence and doubled β at two of four changes. That was wrong
-      *and* was the only thing holding β out of a regime where the frozen preconditioner stops tracking
-      the operator. Removing it,
-      β walked 0.5 → 0.148 → 0.044 → **0.013** (`grow ** steps_per_station` = `1.5³` = 3.375 per
-      station, unopposed) into a wall at **β ≈ 0.012**: the line search collapsed to `alpha = 0`, `|R|`
-      went 4.4e-03 → 4.4e-01, and the retry ladder escalated β to ~2 to recover. Cost: 50 steps / 301
-      cycles against 36 / 269 for the march that never went there.
+    - The ratio rule's spurious brake at station changes, which `rebase` removed, had been holding β out of a collapse regime; without `redamp` the march fell into it. Measured march: `.claude/notes/solve-march-log.md`, "`redamp` — the spurious brake `rebase` removed was load-bearing" (the general lesson is at the top of `solve-globalization.md`).
     - **The hold is load-bearing and reproduces the accident's arithmetic exactly.** An entering step
       forgoes its usual `/grow`, so a change is worth `factor * grow`, not `factor` — which is what the
       old brake did, since `_adapt` chose brake *instead of* grow rather than in addition to it. A test
@@ -254,24 +186,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       the floor. `redamp` infers nothing: it damps during exactly the interval in which the problem is
       changing and stops when it stops, so the control is never asked to tell a wrong step from a
       changed problem — it is told, from outside, at the one moment the answer is certain.
-    - **⚠️ Corollary, CORRECTED: the suspicious constant is `PC_BETA_FLOOR`, not `beta_min`.** An
-      earlier draft of this entry said no single `beta_min` could be right here. That was wrong, and it
-      came from conflating the two floors above: `beta_min = 0.005` is demonstrably *fine* — the march
-      converges there, comfortably, at the settled state. What the collapse locates is the level at
-      which the preconditioner **stops following** the operator, and that is `PC_BETA_FLOOR = 0.05`, a
-      value chosen against no recorded evidence on this case. **Measured 2026-10-13 and dropped from
-      pitzDaily's file:** with no refit floor the shipped march takes 19 steps / 144 cycles against 20 /
-      154 at 0.05, same `x_r/h` (`.claude/notes/solve-open-directions.md` 11a). bfs3d dropped it too
-      (2026-10-13, with pitzDaily's other march settings): without it its march took 33 steps / 155 cycles
-      against 36 / 166 (#709).
-      ⚠️ **"Fine" means stable, not fast (measured 2026-10-10).** `beta_min = 0.005` is reached at ramp
-      step 13 and then sets the whole target station's rate: a dual-time step at a fixed shift contracts
-      each mode by `beta / (lambda + beta)`, and on pitzDaily the slowest mode sits at 0.5-0.8 of the
-      floor, so the station converges linearly at 0.55-0.84 per step for 15 steps. From a settled target
-      state (steps 21 and 27) ONE zero-shift step reaches the stopping bar; from the arrival state it does
-      not descend at all. `ShiftStrengthControl.release_floor` (opt-in) releases it after the first
-      full-length step at the floor on the target: 31 -> 22 steps, 161 -> 141 cycles at the same
-      `x_r/h`. See `solve-globalization.md` and `.claude/notes/solve-globalization-log.md`.
+    - **The collapse located the refit floor `PC_BETA_FLOOR`, not `beta_min`;** both flagship case files dropped the refit floor on 2026-10-13, and `beta_min = 0.005` is stable but slow at the target (`ShiftStrengthControl.release_floor`, `solve-globalization.md`). Measurements: `.claude/notes/solve-march-log.md`, "`redamp` — corollary: the refit floor".
     - `shift_factor` defaults to `1.0` on the protocol, so a homotopy indifferent to the shift pays
       nothing and the march is byte-identical to one that never asks.
   - **`station_step(step, station, arrived) -> step` — reshape the STEP for the station, the counterpart
@@ -290,14 +205,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       leaves by value on the static side, so swapping a Python scalar recompiles the whole solve once
       per station — turning the cheapest setting in the march into its dominant cost. That is not
       hypothetical: the same trap, via a `float` molecular viscosity, cost ~10 % of a `bfs3d` march.
-    - **⚠️ ITS FIRST MEASURED VERDICT IS NEGATIVE, AND THE RESULT IS WORTH MORE THAN THE SEAM.** The
-      motivating use — damp a closure block harder while a viscosity ramp walks, release at the target —
-      does not pay, because **the phases are not separable budgets**. The station-keyed arm got its cheap
-      ramp exactly as asked (102 cycles, matching the constant-ratio arm *to the cycle*) and switching
-      the target station's ratio then bought **one** cycle. The target's cost is set by the state the
-      ramp hands it, and a harder-damped ramp hands over a worse one. Full data in
-      `.claude/rules/turbulence.md` under `turbulence_damping`. The seam is kept because it is the
-      instrument that established that, and because nothing else can express a per-station setting.
+    - Its first measured use (damp a closure block harder while a viscosity ramp walks, release at the target) did not pay; the seam is kept as the only way to express a per-station setting. See `.claude/notes/solve-march-log.md`, "`station_step` — its first measured verdict is negative".
   - **The damping anchor `‖R₀‖` is taken at the FIRST STATION, not at the target.** It is the scale the
     first step's inner loop is judged against, so it has to be the problem that step runs; with no
     homotopy it is `residual_fn` and nothing moves. `residual_fn` stays the **target** residual and is
@@ -372,13 +280,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     argument that `RootSolver.solve` does not pass, and the driver that does pass one
     (`solve_coupled`) owns its own convergence test at the end. Chunking a march with `max_steps=1`
     fails independently: it recomputes `residual_norm_0` per chunk, pinning the SER ramp at β₀ forever.
-  - ⚠️ **"The eager march NEVER returns the answer" is DEAD (was: a staged solve ends with a traced
-    `RootSolver.solve` that owns the guard and the result).** Phase 2 removed the finishing
-    solve from `solve_coupled` and phase 3 removed the traced loop entirely: the march's state **is** the
-    answer, and the guard is the driver's explicit test on `MarchResult.converged` before
-    `root_adjoint`. The invariant that survives is the one that mattered — the guard is unconditionally
-    on the path that produces the returned state — but it now has one home *per driver* rather than one
-    home in total.
+  - ⚠️ There is no traced finishing solve: the march's state is the answer, and the root guard is each driver's explicit test on `MarchResult.converged` before `root_adjoint`.
   - **Two reference norms, and conflating them freezes the march (binding).** `residual_norm_0` is
     **segment-local** (recomputed at each `newton_march` entry, handed to `stepper()` for the SER ramp);
     `reference_norm` is **global** (fixed across segments, used for the convergence test and the reported
@@ -489,27 +391,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     (`test_march_retries_a_diverged_step_with_the_tighter_solver`, `test_march_does_not_retry_a_finite_step`).
     On 2D the exact LU is cheaper *and* robust for free, so this is really a 3D-readiness lever (where the
     LU's fill is the wall and the algebraic multigrid is the option).
-  - **⚠️ SUPERSEDED 2026-08-17: THE COST THRESHOLD NO LONGER ESCALATES, and the field is now
-    `retry.abort_above_cycles`; `retry.on_cycles` does not exist. Escalation is `retry.on_alpha` alone —
-    see `solve-amg-multigrid.md`'s "the cost guard and the shift escalation are now separate responses".
-    The entry below describes the design before that split.**
-  - **Reactive β-escalation bailout — the cost threshold ESCALATED β for a bad step, tried BEFORE the tight
-    divergence retry (BUILT).** A step goes bad two ways — a *finite-but-expensive* solve (count `> N`) or a
-    *non-finite* one — and on the stiff low-β saddle **both have the same cheap cure: more damping.** A
-    larger β lifts the correction out of the NaN regime *and* cuts the cycle count (a stronger pseudo-time
-    shift makes the same frozen preconditioner more diagonally dominant), and it is far cheaper than the
-    tight-Krylov divergence retry. So `newton_march(retry=RetryPolicy(on_cycles=N, beta_factor=2.0,
-    max_retries=2))` redoes a step whose count exceeds `N` **or** that diverged (non-finite / over
-    `retry.divergence_cap`) **from the same pre-step state** with β escalated (`×retry.beta_factor`,
-    re-applying `refresh_preconditioner` at the new β so a β-tracking refresh re-shifts), up to
-    `retry.max_retries` times or until it converges/drops below `N`. It reads β off
-    `active_step.relaxation_schedule.beta` (a `ConstantRelaxation` / `DualTimeStep`), so it requires a
-    readable β and is inert on the default switched-evolution schedule. an unset threshold (the default) is
-    **byte-identical** (and a diverged step then falls straight to `retry.solver`, the pre-reorder
-    behaviour). Forward-only; threaded through `solve_coupled(retry=RetryPolicy(on_cycles=…))`. Pinned by
-    `test_newton_march.py` (`test_a_cycle_spike_redoes_the_step_ONCE_and_does_NOT_escalate`,
-    `…_does_not_escalate_below_the_cycle_cap`, `…_escalates_beta_before_the_tight_divergence_retry`,
-    `…_falls_back_to_the_tight_retry_when_escalation_cannot_fix_divergence`).
+  - **Reactive β-escalation (BUILT).** A step whose line search collapses (`retry.on_alpha`) or that diverges is redone from the same pre-step state at β × `retry.beta_factor`, up to `retry.max_retries` times, before the tight `retry.solver` fallback; `retry.abort_above_cycles` redoes an expensive step at the SAME shift. There is no `retry.on_cycles` (the cost threshold stopped escalating 2026-08-17 — `solve-amg-multigrid.md`, "the cost guard and the shift escalation are now separate responses"). The sub-entries below are its live parts.
     - **The escalation must keep `_march_step` a compile-cache HIT (binding — a measured recompile
       hazard).** The retried step redoes the (coupled, minutes-to-compile) `_march_step` at the escalated
       β, so a treedef **or aval** change on that step recompiles the whole solve every retry — which on a
@@ -525,26 +407,8 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       rebuild recompiled on). Note the `retry.solver` (divergence) fallback is a *separate*, one-off
       recompile — a distinct solver object (restart-40 vs the forward restart-15) is a genuinely different
       static key, compiled once and reused; it is not a per-step cost.
-    - **Why escalation leads and `retry.solver` is the FALLBACK (the reorder, measured on `bfs3d`).** The
-      two retries used to run divergence-first: a NaN'd step ran the tight `retry.solver` (a 1e-4 Krylov
-      solve, restart-40) and *then*, seeing its high count, the cycle bailout escalated β. On the 3D march
-      that order was the single worst cost — measured on the cold `bfs3d` cold-continuation, step 28's
-      primary NaN'd (α collapsed), the tight retry ground ~325 matvecs (~40 min) to recover it to finite,
-      and *then* the β-escalation re-damped the same step to a clean ~5-cycle solve — so the entire tight
-      grind was wasted work the escalation superseded. Reordered, the escalation fires first on the NaN,
-      recovers the step cheaply, and the tight `retry.solver` fires only as a **fallback** for a non-finite
-      step escalation could *not* fix — the genuine inexact-preconditioner case (loose Krylov → non-finite δ
-      that a tighter Krylov, not more damping, cures), where the cost threshold is typically `None` anyway so
-      escalation is absent and the divergence retry is the sole, original mechanism.
-    - **The proactive β-mismatch refresh this was once paired with
-      (`amg_beta_tracking_refresh(beta_rel_change=…)`) is DELETED (2026-09-13, #371)**; the bailout
-      escalates β *after* a solve reveals a hard operator. **The bailout is REACTIVE by necessity: a Step-0 diagnostic on `bfs3d`
-      (42-step instrumented capture) showed no cheap STATIC operator property predicts a bad step** — the
-      diagonal-dominance defect of the frozen shifted operator does not separate bad from good (the rung-1
-      trio 10/11/12 have near-identical DD but 302 vs 12 matvecs; the hardness is non-monotone in β and
-      refresh-invariant), so a predict-then-avoid β-chooser was refuted and detect-then-react is the honest
-      design. Refresh for staleness, escalate β for stiffness — a cost spike does not distinguish the two on
-      its own, and neither does any static probe of the operator.
+    - **Escalation leads and `retry.solver` is the FALLBACK:** run divergence-first, the tight retry's grind on `bfs3d` was wasted work the escalation then superseded; the tight solve is kept for a non-finite step escalation cannot fix. Measurement: `.claude/notes/solve-march-log.md`, "Reactive β-escalation — why escalation leads (the reorder, bfs3d)".
+    - **The bailout is reactive by necessity:** on `bfs3d` no cheap static operator property predicted a bad step, so the design is detect-then-react. Refresh for staleness, escalate β for stiffness. Trail: `.claude/notes/solve-march-log.md`, "Reactive β-escalation — the deleted proactive β-mismatch refresh and the Step-0 diagnostic"; ledger: `.claude/notes/solve-refuted-directions.md`.
     - **`DualTimeStep(cycle_budget=…)` makes the escalation CHEAP — cap the primary grind, don't run it to
       completion (BUILT).** The escalation above is reactive-after-the-solve, so its cost is set by how
       expensive the doomed primary is *before* it returns. The dual-time step runs up to `inner_steps` inner
@@ -585,26 +449,11 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       target exits normally with `reached_target` set and is kept. The empirical backing is strong on
       this case — across 64 attempts, **no kept attempt ever had a single inner solve above 10 cycles**,
       while all three discarded ones ran 12/15/43 — so the threshold separates them perfectly.
-      **MEASURED on the next march, and the prediction held where it applied:**
-
-      | step | discarded attempt before | after | cycles saved |
-      |---|---|---|---|
-      | 48 | `[2, 9, 5, 43]` | unchanged | 0 (predicted 0 — the trip is on the last inner) |
-      | 51 | `[2, 12, 4, 4, 4]` | `[2, 12]` | 12 (predicted 12) |
-      | 52 | `[2, 15, 39]` | `[2, 19]` | 35 (predicted 39) |
-
-      Discarded-attempt cycles 141 → 107 (a new retry at step 53 cost 13 of the 47 saved), and the
-      retry region's wall fell **250 s** (step 51 −77 s, step 52 −165 s).
-      **⚠️ MEASURE IT IN WALL, NOT IN THE CYCLE TOTAL.** The march's reported `cyc` is the **accepted**
-      attempt's count only, so discarded work was never in it: total cycles moved 348 → 347 while a real
-      250 s came out. A prediction phrased against the cycle total would read as a total miss.
+      Measured on `bfs3d`, it saved the predicted cycles wherever the trip was not on the last inner: `.claude/notes/solve-march-log.md`, "`DualTimeStep(abort_above_inner_cycles=…)` — measured on the next bfs3d march".
       **⚠️ It is NOT purely a cost change.** `refresh_preconditioner` runs per *attempt*, so truncating a
       discarded attempt changes the refresh sequence and hence the V-cycle the next step sees: the two
       marches agree step-for-step through 52 and then diverge (61 vs 62 steps, same `x_r/h` 8.36, both
       converged). Benign here, but do not describe the abort as trajectory-neutral.
-      A further ~31 cycles are available if the per-solve `stagnation_iters`/`max_restarts` are brought
-      down toward the threshold (still ~4–6× it, which is why one solve can eat the step budget); step 48
-      is the case that needs it, since its trip lands on the last inner where the abort cannot help.
       `None` (default) is byte-identical. Forward-only. Pinned by
       `test_dual_time.py::test_abort_above_inner_cycles_{stops_a_doomed_attempt_early,
       never_bins_an_expensive_success, none_is_the_unbounded_step}` and the `RetryPolicy.with_inner_abort` plumbing
@@ -615,21 +464,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       cheap* and whose *residual is finite* but whose **line search cannot move** is neither, so it was
       accepted as taken, and the only thing raising β was the step control's own backoff — **one doubling
       per outer step, each doubling paying a full step to discover it was not enough.**
-      Caught on the shipped 3D `bfs3d` field-split march (`refresh_on_cycles=3`, ILU(0)×4, plain
-      aggregation, `coarse_eq_limit` 2000, `N_POINTS=2`), target rung, four consecutive steps 51–54:
-
-      | step | β | cyc | R | a_min | flg |
-      |---|---|---|---|---|---|
-      | 51 | 0.0390 | 12 | 7.061e-03 | 0.000 | L |
-      | 52 | 0.0780 | 10 | 6.409e-03 | 0.000 | L |
-      | 53 | 0.1561 | 7 | 8.224e-03 | 0.000 | L |
-      | 54 | 0.3121 | 9 | 6.365e-03 | 0.000 | L |
-      | 55 | 0.6243 | 5 | 5.530e-03 | **1.000** | |
-
-      Step 51's inner table shows what the step row cannot: inner 0 descends (α 0.974, rate 0.779), then
-      **inners 1–4 all report rate 1.000 at α 0.000** — four re-solves from an unchanged iterate,
-      returning it unchanged — with `limit 4.37e-10`, i.e. the **positivity cap**, not the descent test,
-      is what admits nothing. The four steps cost ~233 s to cross half a decade.
+      Caught on the 3D `bfs3d` field-split march: four consecutive target-rung steps at `a_min` 0.000 while the control doubled β once per step. Table: `.claude/notes/solve-march-log.md`, "`retry.on_alpha` / `abort_below_alpha` — the bfs3d steps 51-54 collapse".
       Both halves are now built and are the same predicate in two places, as the cost bailout already is:
       **`newton_march(retry=RetryPolicy(on_alpha=α))`** escalates β (reason `"alpha"` on `on_retry`), and it is pushed
       into **`DualTimeStep.abort_below_alpha`** by `RetryPolicy.with_inner_abort` so the inner loop exits at the
@@ -638,43 +473,12 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       **Both cost and step-length reasons require the target unmet; divergence does not** — a non-finite
       residual is not a result to keep because the loop happened to meet its tolerance. Both `None`
       (default) is byte-identical.
-      **MEASURED END TO END, and ONE retry is worth 8 steps and 199 s.** Same case and configuration as
-      the baseline above (field split, `refresh_on_cycles=3`, ILU(0)×4, plain aggregation,
-      `coarse_eq_limit` 2000, `N_POINTS=2`), `retry.on_alpha = 0.01`:
-
-      | | baseline | with the trigger | |
-      |---|---|---|---|
-      | **wall** | 2161 s | **1959 s** | **−9.3%** |
-      | steps | 66 | 58 | −8 |
-      | Krylov cycles | 324 | 277 | −15% |
-      | mid-span `x_r/h` | 8.361 | **8.361** | identical |
-
-      **The run is its own control, which is what makes the attribution safe:** the two lower rungs come
-      out *identical to the cycle* — Re/100 14 steps / 359 s / 45 cycles in both, Re/10 23 steps / 99
-      cycles, 668 s against 671 s — because the trigger is inert wherever the line search is healthy. The
-      whole difference is the target rung, 29 steps / 1131 s / 180 cycles → **21 / 932 / 133**. The
-      trigger fired **once in the entire march** (step 51, `alpha`, β 0.0390 → 0.0780), and the inner
-      abort cut that attempt from 5 inner iterations / 12 cycles to 2 / 6.
-      **Note the cycle count DOES show this one, unlike the cost abort** — there the wasted work sat in
-      *discarded* attempts, which the total never counted (348 → 347 cycles while 250 s came out); here
-      it sat in **accepted** steps, so both measures agree. Which measure can see a saving depends on
-      whether the work being removed was accepted or discarded, so decide that before quoting either.
+      End to end on `bfs3d` (2026-08-08, `retry.on_alpha = 0.01`) one retry saved 8 steps and ~9% wall at identical `x_r/h`; table and attribution in `.claude/notes/solve-march-log.md`, "`retry.on_alpha` / `abort_below_alpha` — measured end to end".
       **The threshold was calibrated from the baseline's own step table, not chosen:** no productive step
       went below `a_min` 0.191, all four dead ones reported 0.000 (inner collapses at 0.001 and 0.003),
       so 0.01 sits an order of magnitude clear of both. Recalibrate on another case rather than porting
       the number.
-      **Known waste left on the table, as measured under the old mid-step refresh:** the mid-step cost
-      refresh fired in the *same* body call as the collapse, so a doomed attempt paid it (~14.7 s) and the
-      escalated retry then re-matched the preconditioner anyway. ⚠️ **Since 2026-10-10 the shape is
-      different and unmeasured:** an attempt that asks for a re-fit stops there, and the escalated redo
-      takes the re-fit (`due=True`) at the pre-step state and the escalated β — one re-fit, at the operator
-      the redo solves, rather than one mid-attempt plus a gated re-match. While the global k cap existed,
-      suppressing it would have needed to tell a constraint-bound step (where no preconditioner can help)
-      from a non-descending one (where a refresh might be exactly the cure); with the cap and the
-      whole-step-limit seam deleted (2026-10-14) every collapse is the non-descending kind. Measured
-      evidence, under that cap, that the refresh cannot rescue a constraint-bound step: at baseline
-      step 51 the mid-step refresh fired at inner 1 and took the following solves from 5 cycles to 2,
-      while α stayed 0.000 and `‖G‖` did not move for three more iterations.
+      What a doomed attempt's re-fit costs is unmeasured since a cost re-fit ends the step (2026-10-10); the earlier measurement is in `.claude/notes/solve-march-log.md`, "`retry.on_alpha` / `abort_below_alpha` — known waste under the old mid-step refresh".
     - **The escalated β is CARRIED into the control — so a static β floor can be dropped and the *controller*
       decides how low is safe (BUILT).** β is inverse to the pseudo-timestep, so a static `beta_min` is a cap
       on the *largest* timestep the march may take, applied everywhere — which slows convergence in regions
@@ -721,51 +525,13 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       and burn the whole `refresh.limit` in consecutive steps. Same discipline as the segment-local
       `residual_norm_0`. Pinned by
       `test_the_drift_measure_is_rebased_at_every_refresh`.
-    - **CALIBRATED, and the premise validated, on an instrumented cold-IC pitzDaily march (2026-07-25 —
-      this closes #17 for this case).** One logged march with no refresh trigger + `on_step`, which
-      still records drift because `solve_coupled` observes whenever an observer is supplied:
-
-      | step | 5 | 10 | 12 | 14 | **15** | 17 | 19 | 20 | 22 | 23 |
-      |---|---|---|---|---|---|---|---|---|---|---|
-      | drift | 0.038 | 0.057 | 0.073 | 0.092 | **0.106** | 0.137 | 0.172 | 0.189 | 0.226 | 0.243 |
-      | cycles | 10 | 12 | 13 | 17 | **21** | 28 | 45 | 53 | 85 | 84 |
-
-      **The premise holds:** the cycle count sits flat at its 9–13 floor while drift climbs steadily,
-      then rises monotonically with it — so `ν_t` movement is what makes the frozen preconditioner
-      expensive, and drift *leads* cost early (drift is already 5× its step-0 value at step 5 while
-      cycles are still at the floor). `threshold = 0.1` fires at step 15, where cost has just doubled
-      off the floor and the recirculation has formed (`x_r/h` 0.32) — before the steep part
-      (45→53→85) and clear of the pre-separation regime where a rebuild was measured to make things
-      *worse*.
+    - **`threshold = 0.1` (the default) was calibrated on one instrumented cold-IC pitzDaily march (2026-07-25),** where drift leads cost and 0.1 fires after the recirculation forms. Data: `.claude/notes/solve-march-log.md`, "`CoefficientDriftTrigger` — calibration on a cold-IC pitzDaily march".
     - **The shipped default was originally 0.5 and would never have fired on this march** (drift
       reaches only 0.24 by step 23). A "conservative" placeholder chosen by intuition was not
       conservative — it was inert. Trigger numerics must come from a logged march, not from judgement
       about what sounds safe; the replay procedure exists precisely because that judgement is unreliable.
       Calibrated on **one** geometry, so treat 0.1 as a starting point elsewhere, not a constant.
-    - **END-TO-END RESULT at `threshold = 0.1`, `refresh.limit = 8`, against the logged control (same
-      cold IC, same everything, no refresh trigger) — a 5–8× cost win, sustained and repeatable:**
-
-      | global step | 16 | 18 | 20 | 21 | 22 | 23 |
-      |---|---|---|---|---|---|---|
-      | refreshed cycles | 13 | 11 | **10** | 10 | 10 | 11 |
-      | control cycles | 24 | 33 | **53** | 74 | 85 | 84 |
-
-      ~21 s/step versus ~190 s/step, and the refreshed march was simultaneously **ahead on residual**
-      (rel 2.67e-2 vs 3.03e-2 at step 23). Three further observations worth keeping:
-      - **A refresh repays itself inside one step, which is why `refresh.limit` can be generous rather than
-      hoarded.** The absolute figure that used to sit here, and the "~60–240 s recompile" it was contradicting,
-      were both recorded without a configuration and are deleted; the recompile question is settled from the
-      code above — a hierarchy refresh is a jit cache hit.
-      - **It repeats across segments.** Refreshes fired at steps 15 and 30, each time on that segment's
-        *own* drift accumulating from ~0 to 0.10 — the production confirmation of the per-segment
-        re-basing.
-      - **α improved 0.5 → 1.0** across the refresh (see the correction to the "preconditioner cannot
-        change α" claim above).
-    - **What the refresh does NOT fix — state this when reporting it.** The march still grinds: after the
-      second refresh the residual moved ~0.3 %/step (rel ~1.77e-2) with cheap (11-cycle) full (α = 1)
-      steps, and `x_r/h` crept 0.48 → 0.71 against OpenFOAM's 7.74. So the refresh solved the **cost**
-      problem, not the **step-productivity** problem (#22). Its real value beyond the speedup is that the
-      cost confound is now *gone*, so a β/α-control experiment finally measures what it claims to.
+    - End to end on that march the refresh cut per-step cost 5-8x and repeated per segment, but did not fix step productivity — state that when reporting it. See `.claude/notes/solve-march-log.md`, "`CoefficientDriftTrigger` — end-to-end result at `threshold = 0.1`".
   - **`CycleGrowthTrigger` — cost growth is the trigger, the residual is the GATE.** Fires only when: the
     `warmup` is past; `residual_ratio <= max_residual_ratio`; and the last `patience` steps each measured
     `>= growth ×` the segment's **running-minimum** non-zero count. **Why the residual is demoted to a
@@ -791,11 +557,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     and `root_adjoint` attaches the adjoint at the root. `on_step` / `on_checkpoint` therefore report
     without selecting anything — pinned by `test_observing_a_solve_changes_nothing_about_it` (bit-identical
     fields with and without an observer) and `test_the_march_reports_progress_without_a_refresh_trigger`.
-    **History worth keeping:** observation used to select an eager pre-march followed by a traced
-    finishing solve. Gating that on the trigger alone once made an instrumented reference march sit
-    silent for hours; the switch itself then added a step control a dual-time march had not asked for,
-    gave an observed solve a second `max_steps` budget, and dropped a `homotopy` unless something else
-    forced observation — so an instrumented run was not the run under investigation.
+    ⚠️ Trap from the deleted eager pre-march: when observing a solve selects a different path through it, an instrumented run is not the run under investigation.
   - **`checkpoint` is a SECOND seam, separate from `observer` (binding).** `checkpoint(report, state)`
     carries the state; `observer(report)` carries only numbers. Keeping the state off the report history
     is what keeps a `RefreshTrigger` a pure function that can be replayed offline against a logged march
@@ -1232,14 +994,7 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
     `StepControl`, the `StepFn` callable alias and `within_tolerance` are what travel between the Newton
     driver, the eager march, the globalization strategies, the step controls and the retry policy. None
     belongs to any one of them, and every one of them was living wherever it was first written.
-    - **The placement had a cost that came due twice.** `StepControl` was declared in `march.py` with
-      **zero** implementations there, so `step_control.py` had to import `march` — which forbade the
-      reverse, so a defaulting rule about two `solve/` objects could not be written in `solve/` at all
-      and ended up in `turbulence/coupled.py`, a package away. And `implicit.py`, named for the Newton
-      solver, was a de-facto contract module handing the step protocol (then a private
-      `_ForwardStep`, now `NewtonStrategy`), `_within_tolerance` and
-      `backtracking_line_search` across boundaries either privately or absent from `__all__` — which
-      under this package's own boundary rule read as violations.
+    - Why they moved (a contract declared where it had no implementation forced an import cycle): `.claude/notes/solve-march-log.md`, "`solve/strategy.py` — why the forward-step contracts moved".
     - **`strategy.py` is a LEAF and must stay one.** It imports `linear`, `norm` and `relaxation`,
       none of which import it back; `implicit`, `march`, `continuation`, `retry`, `step_control`,
       `march_log` and `checkpoint` all depend on it. Adding an import here that points at any of those

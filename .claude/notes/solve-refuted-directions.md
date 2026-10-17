@@ -1001,6 +1001,22 @@ and binding defaults are in `solve-globalization.md`.
   which is the larger and more load-bearing finding here.** See `solve-globalization-log.md` §
   "THE EQUILIBRATED MEASURE BARELY FALLS ON A MARCH THE EUCLIDEAN NORM LOVES" and the "EUCLIDEAN ‖R‖
   MIS-RANKS STATES" entry immediately after it.
+- **Escalating β on a cost spike (`RetryPolicy.on_cycles` as an escalation trigger) — CLOSED, split
+  2026-08-17; do not re-fuse.** The cost threshold once both stopped the dual-time inner loop and
+  escalated β (×`beta_factor`) for a step whose solve exceeded `N` cycles, tried before the tight
+  divergence retry. A cycle count says the frozen preconditioner is struggling with the operator, not
+  that the step is stiff, and on `bfs3d` a stiffer operator was not an easier one (140 applications at
+  β 0.5 against 32 at 0.05), so it now only aborts and redoes the step at the same shift
+  (`retry.abort_above_cycles`, one redo, on a re-fitted preconditioner); stiffness is escalated on
+  `retry.on_alpha` and divergence. Keep `abort_above_cycles < cycle_budget`, or a truncated grind is
+  accepted. Full detail: `solve-amg-multigrid.md`, "the cost guard and the shift escalation are now
+  separate responses"; the pre-split design text was deleted from `solve-march.md` (recover from git
+  history).
+
+(The other two deletions — the traced finishing solve and the eager pre-march that observation
+used to select — were removed code paths, not refuted directions, and left one-line traps in
+`solve-march.md`; no ledger entry suggested. The Step-0 diagnostic / `beta_rel_change` refutation
+already has ledger coverage, lines ~336 and ~934.)
 
 ## A viscosity ramp keyed to the shift (`nu` as a function of `beta`) — CLOSED BEFORE BUILDING (2026-10-11)
 

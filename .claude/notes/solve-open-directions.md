@@ -14,7 +14,7 @@
 
 ## Where the time is — the reading these entries rest on
 
-The recorded numbers (`solve-march.md`, `solve-refuted-directions.md`):
+The recorded numbers (`solve-march.md`, `solve-march-log.md`, `solve-refuted-directions.md`):
 
 | case | cells | dofs | wall | compile | Krylov matvec |
 |---|---|---|---|---|---|
