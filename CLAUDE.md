@@ -398,11 +398,16 @@ lines by the time anything moved out of it, and nothing measured that it was gro
 - **Two mechanical guards, both in `tests/unit/test_layering.py`, both in the always-on gate.** `solve/`
   imports nothing outside itself (it holds no mesh, field or physics import — that is what lets every
   residual run on it), and `precondition/`, which holds the preconditioners its linear solves take,
-  imports `solve/` and nothing else; and a module in `flow/`, `turbulence/`, `transport/` or `radiation/` past 1500
-  lines needs a ratchet entry that only ever goes down. (A third guard in the same file is about the
+  imports `solve/` and nothing else; and **any module in `aquaflux/`** — physics and generic packages
+  alike, nested subpackages included — past 1500 lines needs a ratchet entry that only ever goes down.
+  (It covered only `flow/`, `turbulence/`, `transport/` and `radiation/` until 2026-10-17, by which
+  time `schemes/gradient.py` and `precondition/multigrid.py` had each passed 3000 lines with nothing
+  measuring it.) (A third guard in the same file is about the
   *surface* rather than the direction — see Principle 3's `__all__` bullet.) **Tripping the size guard is a prompt to sort the
-  file's contents into generic and physics — not to split it by topic**, which moves the problem into
-  smaller files without moving it to the right package.
+  file's contents, not to split it by topic**, which moves the problem into smaller files without moving
+  it to the right place: in a physics package, sort them into generic and physics; in a generic one, into
+  the different jobs it has accreted (host-side setup beside traced code, one strategy family beside
+  another).
 - **Concrete trigger:** *if the docstring of what you are about to add to a physics package cannot be
   written without that package's vocabulary, it is physics and stays; if it can, stop and put it in
   `solve/`. And if you are writing a second, simpler path for a residual because the robust one "needs
