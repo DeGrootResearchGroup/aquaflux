@@ -1161,3 +1161,43 @@ first-order-upwind probed operator. Every harness (`ilu0_remedy_sweep.py`, `mc64
 deleted 2026-10-02 and PETSc 2026-10-10, so none of this is re-runnable; the full record is in git history
 of `.claude/rules/solve-direct-preconditioners.md` before 2026-10-17. Transferable lesson: a pivot census,
 `condest` and a diagonal-dominance census each failed to track convergence — judge on the true residual.
+
+## Static reorderings for a zero-fill ILU smoother (HILUCSI deferring, MC64 permutation, pressure-last) — MEASURED OUT (2026-08-17)
+
+On pitzDaily's `[u, v, p]` block (reach 5, zero-fill `Ilu0`, symmetric equilibration, true-residual GMRES
+to 1e-8 at the self-start and at a converged root, β 0.5 / 0.05 / 0), HILUCSI-style static deferring of
+the smallest-diagonal rows (Chen, Ghai & Jiao, arXiv:1911.10139; criterion taken before equilibration) was
+never better than the mesh's own cell order and clearly worse at 5 %; MC64 symmetrized, permutation only
+(`min_weight_full_bipartite_matching` on `−log|a_ij|`), was a bit-identical no-op because the diagonal is
+already the matched entry, and cost 70–150 s to build (its scaling half is not exposed by `scipy`, so this
+is not a test of MC64). Velocities-first/pressure-last failed at five of six points and pressure-first
+everywhere: pressure-last relies on velocity elimination filling the pressure block with the Schur
+complement, which zero fill discards. Only RCM and ascending row length helped. All of it served the
+`Ilu0` / `hostilu` smoother, deleted 2026-09-13 (#371); re-ask only for a level-of-fill factorization.
+Detail: git history of `.claude/rules/solve-amg-multigrid.md` before 2026-10-17, "Ordering, not fill, is
+what fails zero-fill on `pitzDaily`".
+
+## "Equilibration changes the graph the coarsening sees" — REFUTED (2026-08-12)
+
+Proposed to explain why symmetric equilibration made the traced `[k, ω]` hierarchy worse (5 → 10 cycles):
+the equilibrating sparse product drops explicit zeros (26.8 % of the trailing block's stored entries at
+bfs3d's target-Re cold field). Measured with the real `_cell_graph` / `_aggregation_edges` /
+`_mis_aggregate`, it moves 199 of 644 166 cell-graph edges (0.03 %) and 2300 → 2302 aggregates: the cell
+collapse absorbs it. The live explanation remains the non-equivariant tentative prolongation. Harness
+`validation/bfs3d_openfoam/equilibration_graph_effect.py`; detail in `solve-amg-multigrid-log.md`,
+"Faithful smoothed aggregation — matching PETSc GAMG".
+
+## "Rescaling promotes collapsed-`k` rows and inflates their corrections" — REFUTED (2026-08-11)
+
+Proposed to explain why `equilibrate` changed the step length under the (since deleted) global `k` cap.
+Exact `∂R_k/∂k` per cell by one-hot Jacobian-vector product on bfs3d's rung-2 dumps: across twelve orders of
+magnitude in `k` the diagonal moves ~1.1× and the scale 1.7×, and one cell's diagonal is identical to four
+digits while its `k` varies a millionfold — destruction, transport and the pseudo-transient shift do not
+vanish as `k → 0`, so a collapsing `k` does not weaken its own equation. Detail in
+`solve-amg-multigrid-log.md`, "The traced multigrid — in progress".
+
+## QR-orthonormalized tentative prolongation as a deep-hierarchy fix — REFUTED
+
+PETSc orthonormalizes each aggregate's block by QR (unit-2-norm columns where ours are 0/1). Built as
+`orthonormal_prolongation`: bit-identical at two levels, 17–30× worse deeper. Detail in
+`solve-flow-block-log.md`, "Depth, singletons, and the prolongation".
