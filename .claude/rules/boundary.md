@@ -5,216 +5,93 @@ paths:
 
 # Rules — `aquaflux/boundary/` (weak boundary-face-value closures)
 
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
-> *your* understanding — that is its job, and why it loads into your
-> context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
-> reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
-> reference code, the `.claude/` rules, the design notes, or the author's own papers.
+> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors; none of that may
+> reach the shipped surface (`.py`, `docs/`) — root `CLAUDE.md` Comment Convention.
 
-Patch-based boundary conditions as **weak face-value closures**. Governed by the root
-`CLAUDE.md` Engineering Principles.
+Patch-based boundary conditions as **weak face-value closures**. Dated measurements and investigation
+detail: `.claude/notes/boundary-log.md`.
 
-## Responsibility
-- Per-patch boundary closures that supply a boundary-face value (and its linearization
-  via AD): Dirichlet (constant value), Neumann (constant flux), zero-gradient,
-  convective/Robin. Milestone-0 targets exactly these four (the plane-wall case needs
-  symmetry + convective; the C++ conduction case needs all four).
-- **The named boundary-condition collection** (`collection.py` — `BoundaryConditions`, an
-  `equinox.Module`): a `{patch: closure}` mapping constructed exactly like a `PropertyModel` —
-  `BoundaryConditions({"left": Dirichlet(1.0), "right": ZeroGradient()})` — and handed to an
-  assembler's `build` as the single `boundary` argument (the material-model analogue; **not** a bare
-  dict, and **not** a `.resolve(...)` call at the site). It has a **two-state lifecycle**: constructed
-  *unbound* (it holds patch names + closures, `faces is None`), then **bound to a mesh** by `build`
-  via `boundary.resolve(mesh.face_patches, mesh.face_cells)` → a copy whose `faces` dict carries each patch's
-  boundary-face indices. The name→index lookup is data-dependent (dynamic `jnp.where` shapes), so it
-  **must** run off the jit path — hence resolve-once-and-store rather than the jittable
-  `PropertyModel.evaluate(cell_zones)`-per-call pattern. `apply(face_cells, init, closure)` is the one
-  iterate-over-patches → gather owner → `closure(bc, faces, owner)` fold, run inside the residual
-  (raises if still unbound), writing every patch's values in **one** scatter over the concatenated
-  patch indices (see "One scatter for all patches" below). Owned here so **both** the scalar `ResidualAssembler` and the
-  coupled-flow `MomentumContinuity` carry a single `boundary: BoundaryConditions` field — **not** three
-  parallel `names`/`conditions`/`faces` tuples — and compose `.apply` instead of re-open-coding the
-  loop (the closure differs — a scalar face value vs. a flow velocity/pressure/mass-flux — the
-  iteration does not). `resolve` takes `mesh.face_patches` plus `mesh.face_cells` (the latter only to
-  tell boundary faces from interior ones, for the coverage check below), `apply` takes
-  `mesh.face_cells` (smallest sufficient collaborators, not the whole `Mesh`); the held closures are opaque, so the object is
-  generic over the closure type (single-field `BoundaryCondition` or the multi-field `FlowBoundary`).
-  It is a leaf module (imports only `jax` + the mesh connectivity types), so `discretization` and
-  `flow` both depend on `boundary` one-way.
+## Status — BUILT
 
-## Status — BUILT (`conditions.py`)
-`BoundaryCondition` (interface,
-`face_value(phi_owner, grad_owner, d, normal, gamma_owner, face_centroid)`) → `Dirichlet`,
-`DirichletField` (position-dependent, `field_fn(x_ip)` — for manufactured solutions and
-spatially-varying walls; used by Gate C), `ZeroGradient`, `Neumann`, `Convective`. The four
-weak-flux closures share the tangential
-correction `corr = grad·(d − (d·n)n)` (zero on orthogonal grids). `Convective` holds `h`
-(the Biot number, non-dimensionalized) and `t_inf` as differentiable fields — it is the
-Gate-B sensitivity target — and enforces the Robin balance `Gamma dphi/dn = h(Tinf − phi_ip)`.
-Verified (`test_boundary.py`): each closure vs its closed form on a single face, the Robin
-balance holds, and high-`h` convective → Dirichlet. The closures are consumed by
-`ResidualAssembler` both as the flux's boundary value and as the gradient reconstruction's boundary
-input — the latter as the value at zero gradient plus its gradient weight, which the Green–Gauss
-schemes absorb exactly because each closure is affine in the owner gradient (see
-`schemes.boundary_gradient_block`). **A new closure must stay affine in the owner gradient** or the
-absorbed form becomes a linearization of it.
-
-- **`BoundaryCondition.closes() -> tuple[str, ...]` (binding, #355), the same self-describing shape
-  as `requires_coefficient()` below.** A scalar closure returns `HOST_EQUATION_FIELD` — the empty
-  tuple, meaning "one field, its host equation's". It is **empty on purpose**: the closure is used by
-  whichever equation holds it and does not know that equation's name, so a name written here would be
-  a second copy of something the *assembler* owns and free to disagree with it. `FlowBoundary.closes()`
-  returns `FLOW_FIELDS = ("velocity", "pressure", "mdot")` (`flow/boundary.py`), which is what makes
-  the two families distinguishable at all — nothing about their shapes is.
-  - **The check is `collection.refuse_a_closure_that_closes_other_fields(boundary, closes, caller)`,
-    and it is deliberately NOT inside `resolve`.** `BoundaryConditions` is generic over its closure
-    type — that is what lets it carry a plain per-patch value driven by a caller's own callable, which
-    its own tests exercise — so the arity a given assembler needs is the *assembler's* knowledge, not
-    the collection's. Called by `MomentumContinuity.build` (`FLOW_FIELDS`), `ResidualAssembler.build`,
-    `ScalarTransport.build` and `SSTTurbulence.build` (once per scalar equation, naming which).
-  - **What it replaces:** handing a `Dirichlet` to the flow system raised
-    `AttributeError: 'Dirichlet' object has no attribute 'velocity_face'` — an internal method name,
-    no patch named, and nothing saying the families differ. It now names the patch, what that patch
-    has, what that closes, and what the equation needs. Every wrong patch is reported at once.
-  - An object declaring **nothing** is refused too, not skipped: skipping is how a bare value reaches
-    `apply` and gets folded into the residual as whatever it happens to be.
-- **`BoundaryCondition.requires_coefficient() -> bool` (binding, #360), the same self-describing
-  shape as `DeclaredInputs.requires()`** (the term contract every flux/source/scheme/transient family inherits, #362). Default `False`; `Neumann` and `Convective` override to
-  `True` because they read the assembler's diffusion coefficient as `gamma_owner` in their closed
-  forms (`Dirichlet`/`DirichletField`/`ZeroGradient` never touch it). `ResidualAssembler.build`
-  checks this over every closure in the `boundary` set and, if any is `True`, adds the assembler's
-  `coefficient` to what it requires the `PropertyModel` to supply — the same build-time
-  `properties.require(...)` path `requires()` already drives for flux/source operators. Before this,
-  a mistyped `coefficient=` on the assembler built cleanly and read `Gamma = 0` from the fallback,
-  which is a divide inside both closures' closed forms: the residual came back NaN/inf with no
-  message naming the cause, discoverable only by evaluating it. The fallback itself is unchanged and
-  stays legal — a pure-advection problem with only `Dirichlet`/`ZeroGradient` closures still reads
-  the zero it always did, since neither declares `requires_coefficient()`.
+- **`conditions.py`** — `BoundaryCondition` (`eqx.Module` base; `face_value(phi_owner, grad_owner, d,
+  normal, gamma_owner, face_centroid)`) → `Dirichlet`, `DirichletField` (`field_fn(x_ip)`, for manufactured
+  solutions and varying walls), `ZeroGradient`, `Neumann`, `Convective` (Robin
+  `Gamma dphi/dn = h(Tinf − phi_ip)`, `h`/`t_inf` differentiable). All share the tangential correction
+  `_tangential_correction`: `corr = grad·(d − (d·n)n)` (zero on orthogonal grids).
+- **`collection.py` — `BoundaryConditions`**, a `{patch: closure}` `equinox.Module` built like a
+  `PropertyModel` and passed to an assembler's `build` as the single `boundary` argument (not a bare dict).
+  Two states: constructed **unbound** (`faces is None`), then bound by `build` via
+  `resolve(mesh.face_patches, mesh.face_cells)` to a copy whose `faces` holds each patch's face indices.
+  The lookup has data-dependent shapes, so it **must run off the jit path** (resolve once and store;
+  `resolve` returns early on a bound collection, which keeps it off the trace). `apply(face_cells, init,
+  closure)` is the one patch fold, used by both `ResidualAssembler` and `MomentumContinuity`; the closures
+  are opaque, so it is generic over single-field `BoundaryCondition` and multi-field `FlowBoundary`. A leaf
+  module (imports `jax` + mesh connectivity), so `discretization` and `flow` depend on it one way.
+- Closures feed `ResidualAssembler` both as the flux's boundary value and as the gradient reconstruction's
+  boundary input (value at zero gradient + gradient weight, absorbed by `schemes.boundary_gradient_block`).
+  ⚠️ **A new closure must stay affine in the owner gradient**, or the absorbed form becomes a linearization.
 
 ## Binding decisions
-- **Every prescribed boundary number is a floating ARRAY LEAF, converted at construction (binding,
-  #363).** `Dirichlet.value`, `Neumann.flux`, `Convective.h`/`t_inf` and the flow side's
-  `PressureOutlet.pressure` pass through `conditions.as_float_leaf`
-  (`eqx.field(converter=...)`); `VelocityInlet`/`MovingWall.velocity` pass a constant vector through
-  it too. Position-dependent values (`DirichletField.field_fn`, a velocity profile) go through
-  `conditions.as_position_function`, which keeps an `equinox.Module` as it is (its array fields are
-  leaves) and wraps a plain function in the static `conditions.StaticFunction`.
-  - **Why, measured before the change.** `field_fn` and both `velocity` fields were
-    `eqx.field(static=True)`, and the four numeric fields were annotated `float`. The issue said the
-    result was a "silently zero" gradient. **That is only one of the three paths, and the others need
-    to be known:**
-    - An **eager residual** gradient worked regardless, through the value closed over at
-      construction.
-    - A gradient **through `RootSolver`** (the assembler carried as `theta`) **raised**
-      `UnexpectedTracerError`, for both the inlet velocity and a `DirichletField` coefficient.
-    - `eqx.filter_grad` with respect to an assembler returned **no cotangent** for the static fields
-      *and* for a `float`-valued `PressureOutlet`. That was the genuinely silent one.
-  - **The old reason for `static=True` was false.** The comment said a `jnp` array "would not
-    concretize under jit"; a non-static array velocity worked under `filter_jit` and through the solve,
-    with the gradient matching finite differences to 4e-11.
-  - **⚠️ Do NOT simply drop `static=True` on a field that may hold a plain function.** A function
-    leaf makes even a *forward* `RootSolver.solve` raise "not a valid JAX type" (its
-    `custom_vjp` flattens `theta`), and it breaks the distributed build's
-    `jax.tree.map(jnp.stack, ...)`. Plain function profiles are used widely (Poiseuille, the skewed
-    Couette, the `bfs3d_species` injector), which is what `StaticFunction` preserves. A module profile
-    gives the same behaviour **and** a reachable coefficient.
-  - **Side effect, measured:** a changed inlet value used to recompile a `filter_jit` function taking
-    the assembler (the float sat on the static side); as an array leaf it is a cache hit.
-  - Pinned by `tests/unit/test_boundary_value_leaves.py` (storage and `filter_grad` against each
-    closure's closed form) and `tests/integration/test_boundary_value_gradients.py` (gradients through
-    the solve against finite differences, a function profile's forward solve unchanged, no recompile).
-- **A boundary condition is a special face interpolator** (the C++ face-interpolator
-  model): it returns a face value the flux operator consumes, imposing the BC **weakly**
-  through the boundary-face flux. **Do NOT** use the Fortran strong-absorption-into-the-block
-  approach — the weak closure composes naturally with the Layer-0 face-flux substrate and
-  with AD.
-- **Same interface as an interior face interpolator**, so a boundary patch plugs into
-  gradient reconstruction and the exterior-flux path uniformly (CLAUDE Principle 2 —
-  one interpolation interface, not two). BCs are strategy classes subtyping the
-  face-interpolation `Protocol`.
-- Boundary-condition classes are **constructed with their BC parameters** (value, flux,
-  `h`/`T_inf`, ...) and act on the boundary-cell state + face geometry (CLAUDE
-  Principle 1). Immutable `equinox.Module`s; no global patch registry read inside a
-  method.
-- **`BoundaryCondition` is a single-field closure — the reusable primitive; multi-field bundles
-  COMPOSE it, they do not subtype it.** The coupled-flow `FlowBoundary` (`flow/boundary.py`) is a
-  bundle {velocity closure, pressure closure, mass-flux closure}; its velocity/pressure parts are
-  `Dirichlet`/`ZeroGradient` applied to those fields, but the whole is not a `BoundaryCondition`
-  (three coupled outputs; `mdot` has no single-field analogue). So do **not** add a shared base or
-  make `FlowBoundary` inherit here — the intended coupling is composition (see `.claude/rules/flow.md`).
-  The one place the two must not drift is the tangential-correction formula `_tangential_correction`:
-  keep it single-homed here so any consumer (scalar or flow) reuses it. Since #313 the flow closures
-  carry `corr` as well — `velocity_face` / `pressure_face` take the owner gradient and the
-  owner-centroid→face displacement, and the flow assembler runs the same two-pass fold the scalar path
-  runs, so both consumers reach this formula through the identical route.
-- **`BoundaryCondition.face_value` deliberately does NOT take `aquaflux.context.FieldContext`
-  (decided, issue #280 step 4 — closed as not applicable here).** Its six loose arguments
-  (`phi_owner, grad_owner, d, normal, gamma_owner, face_centroid`) are already-gathered **per-face**
-  scalars/vectors for one patch's own boundary faces, not per-cell arrays plus connectivity — the
-  gathering happens once, centrally, in `ResidualAssembler.boundary_values`'s `closure(bc, faces,
-  owner)` fold (`face_cells.owner[faces]`, `phi[owner]`, ...), which is exactly what keeps every
-  closure here (`Dirichlet`, `ZeroGradient`, `Convective`, `Neumann`) a trivial function of scalars.
-  Handing a closure a `FieldContext` instead would mean it re-derives that gathering itself, for
-  whatever face subset `faces` names — pushing the same indexing logic into every subclass that the
-  central fold exists to avoid, and for no benefit: a closure reads no property and no other field's
-  state, so a context object would carry nothing this signature does not already have. Contrast
-  `discretization/face_flux.py`'s `FaceFluxOperator` and `schemes/limiter.py`'s `Limiter`, both of
-  which gather from the *whole* mesh themselves and so benefit from holding the context that lets
-  them; a boundary closure is handed its slice already gathered, which is a different shape by
-  design, not an oversight to fix later.
-- **Every boundary face must be covered — `resolve` refuses a map that leaves one out (binding, #354).**
-  `apply` folds closures into a zero array, so an omitted patch was a **zero face value**: a Dirichlet
-  condition nobody chose. A case missing a patch built, converged, and was wrong, while a *typo'd*
-  patch name raised. `resolve` now asks `FacePatches.uncovered_boundary_faces(conditions, face_cells)`
-  and raises listing **every** uncovered patch with its face count (fixing one per run would be the
-  same defect one level up). Three rules that are easy to get wrong:
-  - **`"boundary"` is NOT exempt.** It holds boundary faces no named patch claims, which makes it the
-    *most common* omission. The fast-tier census taken before this change found 11 under-covered
-    builds, and 10 were exactly this: `BoundaryConditions({})` on a mesh with no named boundaries.
-    Naming `"boundary"` covers those faces.
-  - **`"interior"` is never reported, and naming it stays legal.** It holds no boundary faces, and
-    `SSTTurbulence`'s wall-distance helper names every patch including it (137 builds in that census).
-    Harmless, because `combine_face_values` ignores interior rows.
-  - **Padding faces are exempt, and that needs their own group.** A distributed partition's padding
-    faces have `neighbour = -1`, and they used to be labelled `"boundary"` "so no closure claims them".
-    The per-partition assembler builds on the padded mesh, so without the reserved `"padding"`
-    group every distributed build would raise (see `.claude/rules/parallel.md`).
-  The check needs concrete labels. It never runs under `jit`, because `resolve` returns early on an
-  already-bound collection, the same property that keeps the `nonzero` lookup off the trace.
 
-- **One scatter for all patches (binding, #113).** `apply` evaluates each closure separately (they
-  differ) but writes them all with one `init.at[concat(faces)].set(concat(values))`, each value
-  `broadcast_to` its patch's shape first (a closure may return one value for its whole patch, which a
-  per-patch `.set` broadcast silently). Do not go back to one `.at[faces].set` per patch: each write
-  depends on the previous one's result, so P patches gave P scatters that run one after another and a
-  program that grew with P. The concatenation happens inside `apply`, not in `resolve`, so the
-  per-patch `faces` dict stays the only stored form; `parallel/distributed.py` rewrites that dict when
-  it pads, and a second stored copy would have to be kept in step with it.
-  - **Patches are disjoint (one label per face), so one write equals the sequential ones.** The one
-    exception is distributed padding: `_uniform_boundary_faces` fills every patch's padded tail with
-    the null face, so it repeats, within a patch and across patches. Which repeated write lands there
-    is unspecified and immaterial (zero area, null-cell owner). That is why `unique_indices=True` is
-    **not** passed. It would be wrong under padding.
-  - **Measured** (`validation/boundary_scatter_cost.py`, 2026-10-09, jax 0.11.2, CPU, Linux x86_64 cloud
-    container, 4 cores, persistent compilation cache off, best of 3 after `jax.clear_caches()`, one
-    run per arm, nothing else running). Scalar diffusion, 64 x 64 grid, boundary split into P patches:
-    lowered scatters in the residual went from 12 / 36 / 132 (P = 4 / 16 / 64) to **6 at every P**, and
-    in its Jacobian-vector product (jvp) from 16 / 64 / 256 to **8**. At P = 64 compile time went
-    0.435 → 0.353 s (residual) and 0.327 → 0.205 s (jvp). Trace time did not move, because every
-    closure is still traced on its own. pitzDaily coupled RANS (4 patches, `case.yaml`, hybrid initial
-    condition): lowered scatters 608 → 380 (residual) and 998 → 656 (jvp). Compile went 3.70 → 3.21 s
-    and 6.35 → 5.70 s, trace about unchanged (2.0 s and 2.9 → 2.5 s). Residual and jvp were
-    **bit-identical** to the per-patch fold's. Execution time was not measured.
-  - Pinned by `tests/unit/test_boundary_collection.py`: one `scatter` in the fold's jaxpr
-    (`test_apply_writes_every_patch_in_one_scatter`), interleaved unequal patches
-    (`..._when_patches_interleave`, the only fixture that catches faces and values concatenated in
-    different orders), a broadcast closure value, and an empty collection.
+- **A BC is a special face interpolator imposed weakly** through the boundary-face flux (the C++
+  face-interpolator model). Do **not** use the Fortran strong absorption into the block; the weak closure
+  composes with the face-flux substrate and AD. Closures are immutable modules constructed with their
+  parameters; no global patch registry.
+- **`BoundaryCondition` is a single-field closure; multi-field bundles compose it, never subtype it.**
+  `FlowBoundary` (`flow/boundary.py`) bundles velocity/pressure/`mdot` closures and is not a
+  `BoundaryCondition` — no shared base (`.claude/rules/flow.md`). `_tangential_correction` stays
+  single-homed here; the flow closures (`velocity_face`/`pressure_face`) take the owner gradient and
+  displacement and reach it through the same two-pass fold.
+- **`closes() -> tuple[str, ...]`** declares which fields a closure closes. Scalar closures return
+  `HOST_EQUATION_FIELD` (empty on purpose: the closure does not know its host equation's name, and a name
+  here could disagree with the assembler's); `FlowBoundary.closes()` returns `FLOW_FIELDS = ("velocity",
+  "pressure", "mdot")`. The check is `collection.refuse_a_closure_that_closes_other_fields(boundary,
+  closes, caller)`, **deliberately not inside `resolve`** (the collection is generic; arity is the
+  assembler's knowledge). Called by `MomentumContinuity.build`, `ResidualAssembler.build`,
+  `ScalarTransport.build` and `SSTTurbulence.build` (per scalar equation). It names every wrong patch at
+  once, and refuses an object declaring nothing rather than skipping it.
+- **`requires_coefficient() -> bool`** — `True` on `Neumann` and `Convective` (they read `gamma_owner`).
+  `ResidualAssembler.build` then adds its `coefficient` to what the `PropertyModel` must `require`, so a
+  mistyped `coefficient=` fails at build instead of reading `Gamma = 0` and dividing to NaN/inf. The zero
+  fallback stays legal for closures that do not declare it.
+- **`face_value` deliberately does not take a `FieldContext`.** It receives per-face values already
+  gathered once by the central fold (`ResidualAssembler.boundary_values`); a context would make every
+  closure re-derive that gathering. Unlike `FaceFluxOperator`/`Limiter`, which gather from the whole mesh.
+- **Every prescribed boundary number is a floating array leaf, converted at construction.**
+  `Dirichlet.value`, `Neumann.flux`, `Convective.h`/`t_inf`, `PressureOutlet.pressure` and constant
+  `VelocityInlet`/`MovingWall.velocity` go through `conditions.as_float_leaf`
+  (`eqx.field(converter=...)`). Position-dependent values go through `conditions.as_position_function`:
+  an `equinox.Module` is kept (its array fields are leaves, so differentiable); a plain function is wrapped
+  in the static `StaticFunction`. Static/float values gave no cotangent under `eqx.filter_grad`, raised
+  through `RootSolver`, and recompiled per value.
+  - ⚠️ **Do not just drop `static=True` on a field that may hold a plain function**: a function leaf makes
+    even a forward `RootSolver.solve` raise "not a valid JAX type" (its `custom_vjp` flattens `theta`) and
+    breaks the distributed `jax.tree.map(jnp.stack, ...)`. Plain-function profiles are common (Poiseuille,
+    skewed Couette, the `bfs3d_species` injector).
+  - Pinned by `tests/unit/test_boundary_value_leaves.py` and
+    `tests/integration/test_boundary_value_gradients.py`.
+- **Every boundary face must be covered — `resolve` refuses a map that leaves one out.** `apply` folds
+  into zeros, so an omitted patch would be an unchosen zero Dirichlet value. `resolve` asks
+  `FacePatches.uncovered_boundary_faces(conditions, face_cells)` and lists **every** uncovered patch with
+  its face count.
+  - `"boundary"` (faces no named patch claims) is **not** exempt — it is the most common omission; name it.
+  - `"interior"` is never reported and naming it is legal (`combine_face_values` ignores interior rows).
+  - Distributed padding faces live in the reserved `"padding"` group and are exempt
+    (`.claude/rules/parallel.md`).
+- **One scatter for all patches.** `apply` evaluates each closure separately but writes all with one
+  `init.at[concat(faces)].set(concat(values))`, each value `broadcast_to` its patch shape first. Do not go
+  back to per-patch `.set`: P sequential scatters and a program growing with P. Concatenate inside `apply`,
+  not in `resolve` — `parallel/distributed.py` rewrites the per-patch `faces` dict when it pads, and a
+  second stored copy would drift.
+  - Patches are disjoint, except distributed padding: `_uniform_boundary_faces` fills every padded tail
+    with the null face, which repeats. ⚠️ So `unique_indices=True` must **not** be passed.
+  - Pinned by `tests/unit/test_boundary_collection.py` (`test_apply_writes_every_patch_in_one_scatter`;
+    the interleaved-unequal-patches fixture is the only one that catches a faces/values order mismatch).
 
 ## Testability seam
-Each BC closure is unit-tested on a single boundary face with a known cell value and
-geometry, asserting the returned face value against the closed form (e.g. Robin blend
-`1/(1 + h/k·d)`). No mesh, no solve.
+Each closure is unit-tested on a single face with known cell value and geometry against its closed form
+(`tests/unit/test_boundary.py`); no mesh, no solve.
 
 ## Open design question
-How patches are declared in the eventual DSL is deferred; the *runtime* closure model
-(weak, face-value) is decided now and is what this module implements.
+How patches are declared in the eventual DSL is deferred; the runtime closure model (weak, face-value) is
+decided.

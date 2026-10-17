@@ -5,150 +5,83 @@ paths:
 
 # Rules — `aquaflux/transport/` (scalar transport by a converged flow)
 
-> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors and the project's
-> own history to inform *your* understanding. Per the root `CLAUDE.md` **Comment Convention**, none
-> of that may reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never
-> the reference code, the `.claude/` rules, the design notes, or the author's own papers.
+> **Provenance boundary (binding).** This file may cite the C++/Fortran precursors and project history;
+> none of that may reach the shipped surface (`.py`, `docs/`) — root `CLAUDE.md` Comment Convention.
 
-The equation the project exists to answer questions about — what a tracer, a reagent or a
-contaminant does in a reactor — solved on the flow the coupled block produces. This is also the
+A tracer, reagent or contaminant transported by the flow the coupled block produces. This is the
 **aquakin coupling seam**: a reaction network attaches as `VolumeSource` terms.
 
 ## Status — BUILT (steady and transient single scalar)
 
-- **`scalar.py` — `ScalarTransport`, `effective_diffusivity`, `DIFFUSIVITY`.** A configured scalar
-  transport equation. `build(mesh, geometry, diffusivity, boundary, advection_scheme, *,
-  gradient_scheme, sources, transient)` fixes the configuration; `residual(flux)` returns the
-  residual function for a particular flow. `build` refuses a boundary collection holding anything but
-  single-field closures (`refuse_a_closure_that_closes_other_fields`, #355), so a flow bundle is named
-  by patch rather than failing later on a method it lacks. It composes `AdvectionFlux` + `DiffusionFlux` +
-  the injected `VolumeSource`s + the optional `TransientTerm` through the ordinary
-  `ResidualAssembler` — it adds no numerics of its own, only the composition and the two
-  conventions below.
-
-- **`prescribed_range(boundary, geometry)` sizes a scaled advection (2026-10-09, #144).**
-  `ScalarTransport.build` sets `advection_scheme.with_reference_scale(...)` from the range
-  `max − min` of every value a `Dirichlet` / `DirichletField` patch prescribes (a `DirichletField`
-  read at the face centroids — the `bfs3d_species` injector gives `[0, INJECTED_VALUE]`), falling back to
-  the largest prescribed magnitude when there is a single level (one inlet concentration). Nothing
-  prescribed → a scaled scheme is refused, others build. ⚠️ **A temperature prescribed at one level
-  only** gets its absolute level (e.g. 300 K) as the scale, which is wrong for the variation; such a
-  case should state the limiter's scale. Range, not level, is why 290/300 K gives 10 K
-  (`test_a_scalar_s_scale_is_the_range_its_boundaries_prescribe`).
+- **`scalar.py` — `ScalarTransport`, `effective_diffusivity`, `DIFFUSIVITY`.** `build(mesh, geometry,
+  diffusivity, boundary, advection_scheme, *, gradient_scheme, sources, transient)` fixes the
+  configuration; `residual(flux)` returns the residual for one flow. It composes `AdvectionFlux` +
+  `DiffusionFlux` + `VolumeSource`s + optional `TransientTerm` through `ResidualAssembler` and adds no
+  numerics. `build` refuses multi-field closures (`refuse_a_closure_that_closes_other_fields`), so a flow
+  bundle is named by patch rather than failing later.
+- **`prescribed_range(boundary, geometry)` sizes a scaled advection scheme.** `build` sets
+  `advection_scheme.with_reference_scale(...)` from `max − min` over every `Dirichlet`/`DirichletField`
+  value (the latter read at face centroids), falling back to the largest magnitude when there is one level;
+  nothing prescribed → a scaled scheme is refused. ⚠️ A temperature prescribed at one level gets its
+  absolute level (e.g. 300 K) as the scale, which is wrong for the variation — such a case should state the
+  limiter's scale.
+- **`initialization.py` — `hybrid_initialize(transport)`**: the harmonic interpolant (`flow.laplace_field`)
+  of the boundary values, reconstructed with the scalar's own `gradient_scheme`, so it stays in the
+  prescribed range. With no `Dirichlet`/`DirichletField` patch it starts at **zero** rather than through a
+  singular pure-Neumann solve. A transport solve on the potential-flow flux would be a better start; not built.
 
 ## Binding decisions
 
-- **The scalar advects on the flow's OWN Rhie–Chow flux, never on a rebuilt one.** `residual(flux)`
-  takes it; the caller forms it as `flow.volume_flux(momentum.mass_flux(state), rho)`. Rebuilding
-  `(u·n)A` from cell velocities satisfies no discrete continuity, so a uniform tracer would not stay
-  uniform. `tests/support/fields.py::face_mass_flux` exists for *prescribed divergence-free*
-  verification fields only and is deliberately not in the library.
+- **The scalar advects on the flow's own Rhie–Chow flux, never a rebuilt one.** Callers pass
+  `flow.volume_flux(momentum.mass_flux(state), rho)`. `(u·n)A` from cell velocities satisfies no discrete
+  continuity, so a uniform tracer would not stay uniform. `tests/support/fields.py::face_mass_flux` is for
+  prescribed divergence-free verification fields only and stays out of the library.
+- **A concentration rides the volumetric flux.** It is per unit volume, so its balance
+  `∂C/∂t + ∇·(uC) = ∇·(D∇C) + S` has no fluid density. `flow.volume_flux` is the one conversion (also used
+  by `SSTTurbulence._volume_flux`).
+  - ⚠️ Do not carry the k/ω "exact for constant density" caveat across: k and ω are per unit mass, so
+    their conservative form carries ρ; a concentration has none to divide out. What does need uniform ρ,
+    for both, is the discrete guarantee that a uniform field is preserved (`Σ ṁ_f = 0` ⇒ `Σ Q_f = 0`).
+- **`effective_diffusivity(D, ν_t, turbulent_number)` = `D + ν_t/Sc_t`, deliberately not shared with the
+  k/ω diffusivity.** Species (Schmidt) and energy (Prandtl) share it; the k/ω coefficient is an F₁-blended
+  closure constant, and unifying would remove no decision from either caller. `turbulent_number` defaults
+  to `0.7`, a modelling choice — a result sensitive to it must state the value.
+- **A sub-patch injection is a `DirichletField` on the existing patch, never a new patch.** Splitting a
+  patch changes the `polyMesh` and invalidates every checkpoint and measurement on the old one.
+  - ⚠️ The injection geometry is differentiable only if the injector is an `equinox.Module` (its array
+    fields are leaves). `validation/bfs3d_species`'s `injected_value` is a plain function, accepted but
+    static, so its geometry is not yet a parameter.
 
-- **A concentration rides the VOLUMETRIC flux, and this is not a stylistic choice.** A species
-  concentration is per unit **volume** (`kg/m³`, `mol/m³`), so its balance is
-  `∂C/∂t + ∇·(uC) = ∇·(D∇C) + S` — a mass balance on the species, with **no fluid density in it**,
-  already in conservative form as written. `flow.volume_flux(mdot, rho)` is the one definition of the
-  conversion (`.claude/rules/flow.md`); `SSTTurbulence._volume_flux` calls it too.
-  - ⚠️ **Do NOT carry the k/ω "exact for constant density" caveat across to a concentration.** That
-    caveat is about `k` and `ω` being per-unit-**mass** quantities: their conservative form is
-    `∂(ρk)/∂t + ∇·(ρu k) = …` and dividing ρ out to reach the kinematic form is what needs ρ uniform.
-    A concentration has no ρ to divide out. The two equations look alike and their density
-    assumptions are not the same.
-  - **What does depend on constant density, for both:** the *discrete* guarantee that a uniform field
-    is preserved. Continuity closes on `Σ ṁ_f = 0`, so `Σ Q_f = 0` follows only while ρ is uniform.
-    That is a note for whenever variable density lands, not a restriction on the equation.
+## Testing
+`tests/integration/test_scalar_transport.py`: order of accuracy (1-D advection–diffusion exponential),
+conservation, uniform-field preservation, boundedness under sub-patch injection, flux magnitude vs the
+inlet's volumetric rate.
+⚠️ Uniform-field preservation is blind to a mis-scaled flux (any divergence-free flux preserves it, and
+ρ-scaling keeps it divergence-free) — that is why the flux-magnitude test exists. **Use `rho ≠ 1`** in any
+test meant to tell mass and volume flux apart; at `rho = 1` they are identical. These tests use 998.
 
-- **`effective_diffusivity(D, ν_t, turbulent_number)` = `D + ν_t/Sc_t` — and it is deliberately NOT
-  shared with the k/ω diffusivity.** Species (Schmidt) and energy (Prandtl) are genuinely the same
-  relation and share this one home. The k/ω form is `ν + blend(F₁, σ₁, σ₂)·ν_t`, whose coefficient is
-  an F₁-blended **model constant** of the closure, not a turbulent number. They agree only in having
-  the shape `molecular + coefficient·ν_t`; unifying them would take "the coefficient multiplying
-  `ν_t`" as an argument, which removes no decision from either caller and would contort the SST side.
-  `turbulent_number` defaults to `0.7` — a **modelling choice**, so any result sensitive to it must
-  say which value it was taken at.
-
-- **A sub-patch injection is a `DirichletField` on the EXISTING patch, never a new patch.** An
-  injector covering part of an inlet is a boundary *value* that varies with the face centroid, not a
-  topology change. Splitting a patch in the mesh generator would produce a different `polyMesh` and
-  invalidate every checkpoint and measurement taken on the old one — on `bfs3d` that is `state-00067`
-  and effectively the whole design record.
-  - ⚠️ **The injection geometry is differentiable only if the injector is an `equinox.Module`.**
-    `DirichletField.field_fn` stopped being a static field (#363): a module's array fields are leaves,
-    so an injector written as a module with its centre and width as fields gives the optimization
-    demo ("where should the injector go to maximize mixing") a gradient. `validation/bfs3d_species`'s
-    `injected_value` is still a **plain function**, which is accepted but held static, so its
-    geometry is not a parameter until it is rewritten as a module.
-
-## Initial condition — `hybrid_initialize(transport)` (2026-09-19)
-
-`transport/initialization.py` registers `ScalarTransport` with `aquaflux.initialization.hybrid_initialize`:
-the harmonic interpolant (`flow.laplace_field`) of the scalar's boundary values, reconstructed with the
-scalar's OWN `gradient_scheme`, so by the maximum principle it stays inside the prescribed boundary range.
-A scalar with no `Dirichlet` / `DirichletField` patch starts at **zero** rather than through a singular
-pure-Neumann solve (a prescribed flux makes that solve return a meaningless field; pinned by a test that
-uses one). It is deliberately the cheap, flow-independent start; a better one — the linear transport solve
-on the potential-flow flux — is not built.
-
-## Testability seam
-
-`tests/integration/test_scalar_transport.py` — order of accuracy against the 1-D
-advection–diffusion exponential, discrete conservation, uniform-field preservation, boundedness
-under a sub-patch injection, and the flux magnitude against the inlet's known volumetric rate.
-
-⚠️ **The flux-magnitude test is separate from the uniform-field one on purpose, and the reason
-generalizes.** A uniform field is preserved by *any* divergence-free flux, and scaling a flux by a
-constant density leaves it divergence-free — so uniform-field preservation is **completely blind** to
-a mis-scaled flux. Verified by mutation: feeding the mass flux where the volumetric one belongs left
-the uniform result unchanged to 1e-10, while the inlet-flow-rate test fails it by 997×. Two further
-consequences worth carrying:
-- **Set `rho ≠ 1` in any test that means to discriminate the two fluxes.** At `rho = 1` they are
-  numerically identical and every such test is vacuous. These use water, 998.
-- **Mutation-check a test that claims to catch a specific error** — feed it the wrong quantity and
-  confirm it fails. Both of the above were found that way, after the tests were green.
-
-## The cross-code case — `validation/bfs3d_species` (aquaflux side BUILT)
-
-A passive tracer on the 3D backward-facing step, compared against an OpenFOAM `scalarTransport` run.
-Three things about it are worth carrying, because each was a decision rather than a detail:
-
-- **Two arms, under DIFFERENT names, because the FLOW does not agree between the codes** (`x_r/h`
-  8.36 vs 7.24). A species comparison on each code's own flow is dominated by the flow difference and
-  can attribute nothing. So: a **same-flux** arm (both codes on OpenFOAM's own `phi` *and* its `nut`,
-  isolating the scalar discretization) and an **own-flow** arm (each on its own, the honest end-to-end
-  number). They differ *only* in the flux and `ν_t`, so their difference is the flow's contribution.
-- **`Sc_t = 1` there, not the 0.7 default.** OpenFOAM's `scalarTransport` with no `D` entry uses the
-  momentum transport model's `ν + ν_t`, so matching it means `turbulent_number=1.0`. Every number the
-  case reports is a number at `Sc_t = 1` — which is exactly the "say which value it was taken at"
-  obligation above, discharged.
-- **The injector has ONE definition** (`injector.injected_value`), from which the OpenFOAM case's
-  inlet values are *generated* as an explicit `nonuniform List<scalar>`. Two implementations of one
-  profile would drift, and a drifted injector is indistinguishable from a transport discrepancy. Its
-  edges are tapered rather than sharp: at a jump the leading cross-code difference is limiter
-  tie-breaking at one cell, not the transport being measured.
-
-⚠️ **A steady tracer at this Reynolds number NEEDS a preconditioner** — measured, not anticipated. An
-unpreconditioned solve does not converge: away from the shear layer `ν_t` falls to `~4e-11`, so `Γ` is
-essentially molecular and the cell Péclet number reaches order `10³`. The fix is to reuse
-`turbulence.scalar_transport_preconditioner` (the frozen convection-diffusion V-cycle already built
-for k/ω), which then converges in 10 s at 23040 cells to `|Σ R| = 8.2e-15`.
-- 📌 **That function's home is a placement smell now that it has a second, non-turbulence consumer.**
-  It is generic scalar transport living in `aquaflux/turbulence/preconditioner.py` because that is
-  where the first caller was. Moving it to `aquaflux/transport/` would be the honest placement; it is
-  a public-API change touching the flagship turbulence path, so it has NOT been done — it is recorded
-  here rather than silently carried.
+## The cross-code case — `validation/bfs3d_species`
+Passive tracer on the 3D backward-facing step vs OpenFOAM `scalarTransport`.
+- **Two arms under different names**, because the flow differs between codes (`x_r/h` 8.36 vs 7.24): a
+  **same-flux** arm (both on OpenFOAM's `phi` and `nut`, isolating the scalar discretization) and an
+  **own-flow** arm (end to end). Their difference is the flow's contribution.
+- **`Sc_t = 1`** (`turbulent_number=1.0`) to match `scalarTransport`'s `ν + ν_t` with no `D` entry; every
+  number the case reports is at `Sc_t = 1`.
+- **One injector definition** (`injector.injected_value`); the OpenFOAM inlet values are generated from it
+  as a `nonuniform List<scalar>`. Edges are tapered so the comparison is not dominated by limiter
+  tie-breaking at a jump.
+- ⚠️ **A steady tracer here needs a preconditioner**: away from the shear layer `ν_t ~ 4e-11`, cell Péclet
+  ~10³, and an unpreconditioned solve does not converge. It reuses
+  `turbulence.scalar_transport_preconditioner` (frozen convection-diffusion V-cycle).
+  - 📌 Placement smell, recorded not fixed: that generic function lives in
+    `aquaflux/turbulence/preconditioner.py` because k/ω was its first caller; moving it to `transport/` is
+    a public-API change on the turbulence path and has not been done.
 
 ## Not yet built
-
-- **Multi-species / reacting systems (the aquakin coupling).** A reaction network couples N species
-  tightly, so it wants one `(n_cells × n_species)` residual rather than N scalar ones; the present
-  `VolumeSource` seam carries other fields as frozen constructor state, which is a *lagged* coupling.
-  ✅ **The prerequisite is met (#285): the flat multi-block layout has one home,
-  `solve/state.py::FieldLayout`** — named, variable-length blocks over a field-major vector, of which
-  `flow_state_layout` and `coupled_rans_layout` are now compositions rather than the two hand-rolled
-  versions this line used to warn about. A species system declares `CellFields("species", n_species)`
-  (or one block per species) and gets its packing, its block slices and its share of a block-wise
-  residual measure from the same object; it does not add a third layout.
-- **Residence-time distribution.** A transient tracer pulse on a frozen steady flow. Reachable now —
-  `TransientTerm` is wired — and it does **not** need transient momentum, which is a separate and
-  much larger piece (it needs a transient-consistent Rhie–Chow; see `.claude/rules/flow.md`).
-- **Energy.** The same equation with `Pr_t`; `effective_diffusivity` already covers the closure.
+- **Multi-species / reacting systems (aquakin).** Wants one `(n_cells × n_species)` residual; the present
+  `VolumeSource` seam carries other fields as frozen constructor state (a lagged coupling). Use
+  `solve/state.py::FieldLayout` (e.g. `CellFields("species", n_species)`) for packing, block slices and
+  block-wise measures — do not add another layout.
+- **Residence-time distribution** — a transient pulse on a frozen steady flow; reachable now
+  (`TransientTerm` is wired) and needs no transient momentum.
+- **Energy** — the same equation with `Pr_t`; `effective_diffusivity` already covers it.
