@@ -207,6 +207,13 @@ cannot be written. The guard is what catches the next module that does branch.
 
 ## ⚠️ Traps when writing a harness (each one produced a wrong result here)
 
+- **A persistent-cache HIT logs a `Finished XLA compilation` line too**, carrying the read time, right
+  after a `Persistent compilation cache hit` line. `pitzdaily_openfoam/compile_timeline.py` counted those
+  as compilations until 2026-10-17, so a warm run read as compiling every program it loaded; it now reports
+  them separately (`timeline` returns a fifth element, `hits`), pinned by `tests/unit/test_compile_timeline.py`.
+  Its step-row regex was suspected of predating the `t(s)` column and does not: it matches the current
+  rows (checked against a real log the same day).
+
 - **⚠️ A LOG PARSER KEYED ON THE TABLE'S SHAPE RETURNS NOTHING, SILENTLY, WHEN THE LOGGER GAINS A
   COLUMN.** `bfs3d_openfoam/march_log_compare.py` matched the step row by its eight columns; the march
   log gained `rho1` on 2026-10-11 (`af98897`), and for three days the script summarized every new log as
