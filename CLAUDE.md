@@ -106,7 +106,9 @@ findable in one place rather than reconstructed from three sections hundreds of 
 
 **While working**
 2. Run long solves with `validation/run_case.sh <script.py>`; run tests with `tools/fastgate.sh`
-   (*Use the blessed command*). One case at a time — these are memory-bound.
+   (*Use the blessed command*). One case at a time — these are memory-bound. Before a push from a
+   small container, `tools/fastgate.sh --changed` runs the tests the change can reach; CI still runs
+   the whole gate (*Scoped runs*).
 3. Record what every measurement was taken under: defaults in force, state, operating point
    (*Record what a measurement was taken under*). A number without its configuration cannot be
    falsified later, which is worse than being wrong.
@@ -576,7 +578,8 @@ outside the `test` extra is skipped in CI and runs only where it is installed. *
 and passes in CI, check the skip counts before blaming your machine.**
 
 `fastgate.sh` wraps `pytest -q -m <tier>`, writing the run to a file and reporting pytest's **own** exit
-status (its behaviour, including the guards below, is pinned by `tests/unit/test_fastgate.py`). Invoke
+status (its behaviour, including the guards below and the scoped `--changed` form, is pinned by
+`tests/unit/test_fastgate.py`). Invoke
 `pytest` directly only for something the wrapper does not pass through — that also skips the case guard
 — and never through a pipe: the suite prints shutdown chatter *after* the summary, so `| tail -n` hides
 the result and returns `tail`'s `0`. ⚠️ **The pipe rule applies to `fastgate.sh` itself, and knowing the
@@ -592,6 +595,33 @@ pins **one BLAS/XLA (and Numba) thread per worker**. `FASTGATE_JOBS=<n>` sets th
 `FASTGATE_JOBS=0` (or your own `-n`) opts out — do that when bisecting. ⚠️ **Judge memory from the
 footprint (compressed pages included), never RSS**, which undercounted a fast tier's ~50 GB footprint
 tenfold (measurements in `.claude/notes/claude-md-log.md`).
+
+### Scoped runs (`--changed`) are a pre-push check, not the gate (binding)
+
+**`tools/fastgate.sh --changed` runs the tests whose imports reach what you changed, plus the declared
+reaches. CI's full fast gate stays the required check, and a green `--changed` run says nothing about
+tests outside its printed selection. If your change touches a shared leaf, the selection widens to most
+of the suite. That is correct, so don't work around it.** It exists because the whole fast tier takes on
+the order of two hours on two workers in a 4-core container. It takes any tier, so `slow --changed` /
+`validation --changed` is the cheap answer to Post-Change Checklist item 3.
+
+`tools/scope_tests.py` is its one home (`test_layering.py` reads imports through its walk):
+- **By import, names followed to their definition**: `from aquaflux.solve import X` depends on the
+  submodule defining `X` (re-exports followed through each `__init__`), that `__init__`'s own code and
+  every ancestor `__init__` — not every submodule the `__init__` loads. Imports inside functions count,
+  and so do those of a child program a test holds in a string; a `conftest.py` reaches the tests below it.
+- **By declaration**: `REACHES` lists each test module, or `tests/support` helper (charged to its
+  importers), that reaches a file without importing it. `tests/unit/test_scope_reaches.py` fails on a test
+  that builds a path from `__file__`, names a repository path, starts a subprocess, touches `sys.path` or
+  imports by name without an entry, and on a declared glob matching no file — declared, not discovered.
+- **Widening**: a changed path neither rule places selects the WHOLE tier and is named. Only
+  `REACHES_NO_TEST` paths and modules nothing imports select nothing, and the run says so in words.
+
+The selection, with what selected each file, is printed and heads the log. Exit 5 (no test of the tier
+in the selection) is reported as `0`, for scoped runs only; a change it cannot read exits `2`. **Blind
+to**: an import-time error in a submodule that breaks every importer of its package when nothing
+importing its own names is selected, and a reach the census does not recognize — CI's gate covers both.
+Measured cost: `.claude/notes/claude-md-log.md`, "Scoped runs".
 
 ### What a fast-tier test may spend (binding)
 
@@ -763,6 +793,7 @@ Four operations have one correct invocation. Use it.
 | run a validation case or any long solve | `validation/run_case.sh <script.py> [--wait]` |
 | see what a long run is doing | `validation/run_case.sh --status` · `tail -f <its log>` |
 | run a test tier | `tools/fastgate.sh [fast \| slow \| validation \| all]` |
+| run only the tests a change can reach, before a push | `tools/fastgate.sh [tier] --changed [--base REF]` |
 | build the Sphinx docs locally, the same strict way CI does | `tools/build_docs.sh` |
 
 Each exists because the hand-rolled version fails *silently*: `pytest … | tail -n` reports `tail`'s `0`
@@ -1091,6 +1122,7 @@ After **every code change**, before considering the task complete, review and ac
    (`tools/fastgate.sh validation`, `tools/fastgate.sh slow`) or apply `full-ci` to the PR. The trap is a
    call path reached only through a validation-marked test: grep for the changed symbol across
    `-m slow`/`-m validation` tests and run the ones that hit it.
+   `tools/fastgate.sh slow --changed` / `validation --changed` answer "could it reach them" mechanically.
 
    **⚠️ The unit, slow and validation shards are balanced by `.test_durations`; a stale or missing one
    silently unbalances them** (`pytest-split` falls back to a count split, so adding any test can push the
@@ -1098,7 +1130,9 @@ After **every code change**, before considering the task complete, review and ac
    cron (plus `workflow_dispatch`, registered from the default branch only) re-records it in a
    metadata-only PR; label a PR **`refresh-durations`** to record it on that branch. The weekly merge
    rewrites the whole file, so **every tier that splits by it needs its own refresh job** (hence
-   `refresh-unit-durations`). The fast integration tier is deliberately count-split (homogeneous tests).
+   `refresh-unit-durations`). The fast integration tier is deliberately count-split (homogeneous tests):
+   its job points pytest-split at a missing file, while `refresh-fast-durations` still records it, the
+   distributed and the `tests/ui` tests, for what a scoped run costs.
 
 4. **Documentation sync (binding — this is how the docs stop drifting).** A code change is **not
    complete** until every file that *describes* the changed code is updated in the **same change**.

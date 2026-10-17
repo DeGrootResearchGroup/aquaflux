@@ -776,3 +776,23 @@ hardcoded transient diffusion, no DSL.
   and 46. ⚠️ **The fixture size is load-bearing:** XLA starts partitioning kernels and emitting
   `__ynn_fusion`s somewhere between 768 and 1200 cells, so on a 768-cell grid the reverted `dot` changed no count at all. The module fails
   if its fixture stops seeing partitioned kernels.
+
+## Testing Architecture → Scoped runs — measured cost (2026-10-17)
+
+Measured in a 4-core / 15 GB Linux cloud container, Python 3.13, jax 0.10.2, `FASTGATE_JOBS=2`. Each
+diff is a one-line comment appended to one module, run as `tools/fastgate.sh fast --changed --base HEAD`
+from a separate worktree, one after another.
+
+| change in | test files selected | tests | wall |
+|---|---|---|---|
+| `aquaflux/precondition/sparse_jacobian.py` | 53 of 240 | 1033 passed | 20:32 |
+| `aquaflux/schemes/multiple_correction.py` | 77 of 240 | 1288 passed | 37:09 ¹ |
+| `aquaflux/vectors.py` | (being measured) | | |
+
+¹ A one-worker scoped run of about 50 s overlapped this run's last minute, so the figure may be slightly
+high.
+
+The selection is mostly not the module's own tests: `sparse_jacobian` reaches `field_split` and the
+block preconditioner, and through them the coupled RANS and march tests, which hold most of the cost.
+Before the run, an estimate from `.test_durations` (recorded sum / 2 workers) gave ~13 min for
+`sparse_jacobian`; the gap is the fast integration tests, which had no recorded durations then.

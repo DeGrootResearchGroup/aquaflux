@@ -101,6 +101,9 @@ def _tree(tmp_path: Path, **modules: str) -> Path:
 #: caller.
 _XDIST_MARKERS = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT", "PYTEST_XDIST_TESTRUNUID")
 
+#: The gate's own environment overrides, which the gate under test must not inherit from its caller.
+_GATE_OVERRIDES = ("FASTGATE_FORCE", "FASTGATE_JOBS")
+
 
 #: A run-file in the shape `validation/run_case.sh` writes, naming ``pid`` and when it started. Only
 #: those two are read (the rest is echoed back to a human), so a live process of any kind stands in
@@ -149,6 +152,12 @@ def _run(cwd: Path, *args: str, **overrides: str) -> subprocess.CompletedProcess
     }
     for marker in _XDIST_MARKERS:
         environment.pop(marker, None)
+    # The gate's own overrides, for the same reason: a suite run with `FASTGATE_FORCE=1` beside another
+    # tier would otherwise switch off the very refusals these tests check, and `FASTGATE_JOBS` the
+    # parallelism. A test that needs one passes it in `overrides`.
+    for variable in _GATE_OVERRIDES:
+        if variable not in overrides:
+            environment.pop(variable, None)
     return subprocess.run(
         [str(FASTGATE), *args], cwd=cwd, capture_output=True, text=True, env=environment
     )
@@ -516,3 +525,148 @@ def test_a_tier_releases_its_own_lock_when_it_finishes(tmp_path: Path) -> None:
     assert first.returncode == 0 and "1 passed" in first.stdout
     assert second.returncode == 0 and "1 passed" in second.stdout
     assert not (lock_dir / "fastgate.lock").exists()
+
+
+# --- scoped runs (--changed) -----------------------------------------------------------------------
+
+#: A test module that names ``module`` in an import the selector reads but that never runs -- so the
+#: synthetic package need not be importable -- and records that it ran.
+_SCOPED_PROBE = """
+import os, pathlib
+
+def _reaches():
+    from aquaflux.{module} import thing
+
+def test_{module}_ran():
+    pathlib.Path(os.environ["FASTGATE_RAN"], "{module}").write_text("")
+    {body}
+"""
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _scoped_checkout(tmp_path: Path, failing: bool = False) -> tuple[Path, Path]:
+    """A git checkout with a two-module package and one test of each, branched from ``main``.
+
+    Returns the checkout and the directory each test that runs leaves its name in.
+    """
+    root = tmp_path / "checkout"
+    for relative, source in {
+        "aquaflux/__init__.py": "",
+        "aquaflux/a.py": "thing = 1\n",
+        "aquaflux/b.py": "thing = 2\n",
+        "tests/test_a.py": _SCOPED_PROBE.format(
+            module="a", body="assert False, 'a deliberate failure'" if failing else "pass"
+        ),
+        "tests/test_b.py": _SCOPED_PROBE.format(module="b", body="pass"),
+    }.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(source)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", ".")
+    _git(root, "commit", "-qm", "base")
+    _git(root, "checkout", "-qb", "work")
+    ran = tmp_path / "ran"
+    ran.mkdir()
+    return root, ran
+
+
+def _scoped(root: Path, ran: Path, *args: str, **overrides: str):
+    return _run(root, *args, "--changed", "--base", "main", FASTGATE_RAN=str(ran), **overrides)
+
+
+def test_a_scoped_run_runs_only_what_the_change_reaches_and_says_why(tmp_path: Path) -> None:
+    root, ran = _scoped_checkout(tmp_path)
+    (root / "aquaflux/a.py").write_text("thing = 3\n")
+
+    result = _scoped(root, ran, "fast")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(p.name for p in ran.iterdir()) == ["a"]
+    assert "scope: 1 of 2 test files selected" in result.stdout
+    assert "tests/test_a.py  imports aquaflux.a" in result.stdout
+    log = Path(result.stdout.split(" -> ")[1].splitlines()[0])
+    assert "-changed-" in log.name  # a scoped log is recognizable as one
+    assert log.read_text().startswith("scope: ")  # and opens with what it was asked to cover
+
+
+def test_a_scoped_run_keeps_a_FAILING_status(tmp_path: Path) -> None:
+    root, ran = _scoped_checkout(tmp_path, failing=True)
+    (root / "aquaflux/a.py").write_text("thing = 3\n")
+
+    result = _scoped(root, ran, "fast")
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAILED (pytest exit 1)" in result.stdout
+
+
+def test_a_path_it_cannot_place_WIDENS_the_run_to_the_whole_tier(tmp_path: Path) -> None:
+    root, ran = _scoped_checkout(tmp_path)
+    (root / "aquaflux/a.py").write_text("thing = 3\n")
+    (root / "build.cfg").write_text("")  # untracked, and no test declares reading it
+
+    result = _scoped(root, ran, "fast")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(p.name for p in ran.iterdir()) == ["a", "b"]
+    assert "widened by build.cfg" in result.stdout
+
+
+def test_a_change_no_test_reads_runs_nothing_and_SAYS_so(tmp_path: Path) -> None:
+    root, ran = _scoped_checkout(tmp_path)
+    (root / "docs").mkdir()
+    (root / "docs/page.md").write_text("")
+
+    result = _scoped(root, ran, "fast")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert list(ran.iterdir()) == []
+    assert "nothing to run" in result.stdout
+    assert "NO test files selected" in result.stdout
+
+
+def test_a_selection_holding_no_test_of_the_tier_is_reported_not_failed(tmp_path: Path) -> None:
+    # `slow --changed` on a change no slow test reaches: pytest collects nothing (exit 5).
+    root, ran = _scoped_checkout(tmp_path)
+    (root / "aquaflux/a.py").write_text("thing = 3\n")
+
+    result = _scoped(root, ran, "slow")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "holds no test of the slow tier" in result.stdout
+
+
+def test_a_change_it_cannot_read_is_refused_rather_than_run_as_nothing(tmp_path: Path) -> None:
+    root, ran = _scoped_checkout(tmp_path)
+
+    result = _run(root, "fast", "--changed", "--base", "no-such-ref", FASTGATE_RAN=str(ran))
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cannot scope the run" in result.stderr
+    assert list(ran.iterdir()) == []
+
+
+def test_a_scoped_run_is_held_by_the_case_guard_and_the_tier_lock(tmp_path: Path) -> None:
+    root, ran = _scoped_checkout(tmp_path)
+    (root / "aquaflux/a.py").write_text("thing = 3\n")
+    with subprocess.Popen(["sleep", "60"]) as other:
+        try:
+            locked = _scoped(root, ran, "fast", **_lock_held_by(tmp_path / "lock", other.pid))
+        finally:
+            other.terminate()
+
+    with subprocess.Popen(["sleep", "60"]) as case:
+        try:
+            beside_case = _scoped(root, ran, "fast", **_case_running(tmp_path, case.pid))
+        finally:
+            case.terminate()
+
+    assert locked.returncode == 4, locked.stdout + locked.stderr
+    assert beside_case.returncode == 3, beside_case.stdout + beside_case.stderr
+    assert list(ran.iterdir()) == []
