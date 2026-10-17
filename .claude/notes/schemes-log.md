@@ -3499,3 +3499,17 @@ property worth checking on any future change here; a drift that grew with depth 
   N=24 24 vs 4.8 s) and crosses over to *slower than even the iterative baseline* by N=32. A scalable
   sparse LU in JAX needs host callbacks (off-GPU), so the matrix-free swept apply is the right sparse
   realization, not a factorization.
+
+## Compiled-residual census (2026-10-17)
+
+  **✅ GUARDED ON THE WHOLE RESIDUAL, not only on the scheme (2026-10-17):
+  `tests/unit/test_compiled_residual_census.py`** (fast tier, CPU backend only, declared in the skip
+  census) compiles the coupled RANS residual and its JVP on a 60×40 structured channel with pitzDaily's
+  numerics, built through `aquaflux.case`, and pins **zero** `lapack_*` custom calls in both. The
+  test above pins this scheme's own reconstruction, while the census covers anything that reaches a residual. With
+  `jnp.linalg.inv` restored at `_boundary_condition_first_pass` the census reads **5 `getrf` + 10
+  `trsm`** in each program (one per reconstructed field: u, v, p, k, ω), the same split as the
+  unreconciled 2026-10-16 count above; why pitzDaily's compiled residual has 6 + 12 is still not
+  established. The same module ratchets the custom-fusion
+  count for the `vectors.dot` class (root `CLAUDE.md`). jax 0.11.2, Linux x86_64, 4 cores.
+

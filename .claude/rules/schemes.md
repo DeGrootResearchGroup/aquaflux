@@ -235,6 +235,10 @@ closure); exactly linear in the field (tangent is an unrolled apply).
   pitzDaily residual (pinned by `test_the_boundary_condition_first_pass_calls_no_library_factorization`).
   `m1_inverse` at bind uses it too so the zero-weight path is bit-identical; `m2_inverse` (bind only)
   stays `jnp.linalg.inv`. ⚠️ pitzDaily/bfs3d timings under this scheme before 2026-10-16 predate it.
+- **The whole residual is guarded too**: `tests/unit/test_compiled_residual_census.py` (fast tier, CPU
+  only) pins zero `lapack_*` custom calls in the compiled coupled RANS residual and its JVP; restoring
+  `jnp.linalg.inv` in the first pass reads 5 `getrf` + 10 `trsm` there (one per reconstructed field).
+  Measurement: `.claude/notes/schemes-log.md`, "Compiled-residual census (2026-10-17)".
 - ⚠️ A conditioning figure (`cond(M2)`) is per mesh — it runs from ~3 to 3.6e17 at unrepaired corner
   cells; never carry "well conditioned" as a property of the method.
 - A design trap found here: a defaulted `eqx.field` on an abstract base makes every subclass field

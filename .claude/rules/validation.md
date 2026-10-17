@@ -76,6 +76,9 @@ branches.
 - **A log parser keyed on the table's shape returns nothing when the logger gains a column.**
   `bfs3d_openfoam/march_log_compare.py` (also used by `step_policy_replay.py`) accepts the march log with
   and without `rho1` and refuses a log with no step rows. Any march-log reader must do both.
+- **A persistent-cache hit also logs a `Finished XLA compilation` line**, right after `Persistent
+  compilation cache hit`; `pitzdaily_openfoam/compile_timeline.py` reports hits separately (`timeline`'s
+  fifth element), pinned by `tests/unit/test_compile_timeline.py`.
 - **Build a reference state with `state_from_physical`, not `pack_state`** — `pack_state` takes the solved
   variables, so physical ω where `log(ω)` is expected gives a silently NaN residual from a finite-looking
   state, and every factorization then fails in its own misleading idiom. **Assert the starting residual is

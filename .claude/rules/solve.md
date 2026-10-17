@@ -238,6 +238,10 @@ defect — fix it in the same change.
   only in array values (a fresh `lambda` measure recompiles every call). ⚠️ A test counting a march's
   traces as its step's compiles must warm this program first (`_warm_the_march_norm` in
   `test_newton_march.py`).
+  ⚠️ **Do not jit the eager set-up phases (build, hybrid initialization, the shift source) one at a
+  time**: their ~980 eager programs are one pool cached per (primitive, shape, dtype) across phases, so
+  jitting one moves programs to the next, and jitting arithmetic moves rounding at ~1e-16. Ledger:
+  "Compiling the eager set-up phases into a few programs".
 
 - **`driver.py` + `shifted_step.py` — the robust march is residual-agnostic and lives here** (#448;
   Principle 3.6). **`solve.staged_march(residual_fn, state, *, strategy, source, refresh, convergence,

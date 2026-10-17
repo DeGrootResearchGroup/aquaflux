@@ -766,3 +766,13 @@ hardcoded transient diffusion, no DSL.
   point callers at the real object. (E.g. a `PseudoTransientStep` *is* the `NewtonStrategy`, so a
   `PseudoTransientContinuation` class that only delegated `stepper`/`linear_solver`/… was removed in
   favour of a `momentum_continuation` factory returning the engine directly.)
+
+## Architecture → `dot`: the compiled-residual census guard (2026-10-17)
+
+- **Guarded since 2026-10-17 by `tests/unit/test_compiled_residual_census.py`** (fast tier, CPU
+  backend only), which compiles the coupled RANS residual and its JVP and ratchets the count of
+  `kind=kCustom` fusions and of those with an empty `outer_dimension_partitions` (2 in the residual,
+  3 in the JVP, jax 0.11.2). Writing `dot` as `jnp.sum(jnp.multiply(a, b), axis=-1)` moves both to 27
+  and 46. ⚠️ **The fixture size is load-bearing:** XLA starts partitioning kernels and emitting
+  `__ynn_fusion`s somewhere between 768 and 1200 cells, so on a 768-cell grid the reverted `dot` changed no count at all. The module fails
+  if its fixture stops seeing partitioned kernels.

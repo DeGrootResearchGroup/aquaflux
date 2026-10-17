@@ -106,7 +106,12 @@ def _enable_compilation_cache() -> None:
         _Path(cache_dir).mkdir(parents=True, exist_ok=True)
         _jax.config.update("jax_compilation_cache_dir", cache_dir)
         # Cache only genuinely expensive compilations (the solve steps), not the many
-        # sub-second jits, so the cache stays small and useful.
+        # sub-second programs a run compiles op by op, so the cache stays small and useful.
+        # Persisting those too would speed up a warm start, but the size bound below makes every
+        # write scan the whole cache directory (it reads each entry's access time to choose what
+        # to evict), so a write costs time in proportion to the number of entries. A floor of
+        # zero adds thousands of small entries per test run, and the scan then costs more per
+        # write than compiling a small program does.
         _jax.config.update("jax_persistent_cache_min_compile_time_secs", 2.0)
         # ⚠️ SETTING THE BOUND WITHOUT ``filelock`` DISABLES THE CACHE ENTIRELY, and does it
         # quietly: every read and write then fails with a ``UserWarning`` naming the missing
