@@ -1455,3 +1455,17 @@ far values change about as much as they are large, so the correction cut the per
 shortened probe already marches identically (18 steps, 123 restart cycles), so there was nothing to
 recover. Detail: `.claude/notes/solve-direct-preconditioners-log.md`, "Probe colouring reach 2 —
 pitzDaily and bfs3d (2026-10-14/15)".
+
+## Residual- and cycle-count refresh triggers for the coupled march — CLOSED (dominated by ν_t drift)
+
+- **What:** re-freezing the coupled march's k/ω preconditioners when a residual threshold
+  (`refresh_rtol`) or the restart-cycle count (`CycleGrowthTrigger`) said they were stale. **Case:**
+  pitzDaily cold-IC coupled march (2026-07/08). **Why it lost:** cost rises with the SER `β` ramp as
+  well as with preconditioner staleness — on a separating flow by more — so a cost signal cannot
+  separate the two; the per-step cycle count exploded identically in two arms of very different step
+  boldness (monotone 10→12→21→53→119, relaxed 15→27→40→134), i.e. it tracked flow development. The
+  cycle trigger also needed a residual gate and `patience`. The shipped trigger is the drift of `ν_t`
+  since the freeze state (`CoefficientDriftTrigger` on `eddy_viscosity_drift`), the coefficient the
+  frozen operators are assembled from. **Detail:** `.claude/notes/turbulence-log.md`, "Segmented
+  refresh, the carried shift factor (#156), and refresh under `jax.grad`".
+
