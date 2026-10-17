@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.initialization import hybrid_initialize
-from aquaflux.solve import Convergence
+from aquaflux.solve import Convergence, LinearSolveSettings
 from aquaflux.turbulence import (
     BlockDiagonal,
     ScalarTwoLevel,
@@ -30,6 +30,14 @@ from aquaflux.turbulence.coupled import CoupledRANS, solve_coupled
 from tests.integration.test_coupled_rans import PRECONDITIONER, _channel
 
 MAX_STEPS = 60
+
+# The ramped-gradient test stops each linear solve by lineax's own GMRES rule rather than the residual
+# stop. Lineax's rule runs at least two restart cycles and waits until the solution stops moving, so it
+# solves past the regime's base tolerance; under the residual stop each Newton step is only as accurate
+# as that tolerance, and the target-Re march seeded by the lower-Re point on this channel then converges
+# or stalls according to the machine's rounding (a tighter base tolerance alone did not settle it). The
+# adaptive tolerance stays on.
+RAMPED_GRADIENT_LINEAR_SOLVE = LinearSolveSettings(stop="lineax")
 
 
 @pytest.fixture(scope="module")
@@ -108,6 +116,7 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
         channel,
         channel.pack_state(*_hybrid(channel)),
         preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
+        linear_solve=RAMPED_GRADIENT_LINEAR_SOLVE,
     )
 
     def objective(nu_scale, n_points):
@@ -118,6 +127,8 @@ def test_adjoint_matches_a_direct_solve_and_is_point_count_independent(channel) 
             max_steps=MAX_STEPS,
             strategy=continuation,
             preconditioner=BlockDiagonal(scalar=ScalarTwoLevel(), **PRECONDITIONER),
+            # The lower-Re points build their own steps, so they take the tolerance here.
+            linear_solve=RAMPED_GRADIENT_LINEAR_SOLVE,
         )
         return jnp.sum(k**2)
 

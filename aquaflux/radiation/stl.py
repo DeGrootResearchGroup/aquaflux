@@ -144,6 +144,15 @@ def _read_ascii(raw: bytes, source: Path) -> TriangleSoup:
     starts = np.array([match.start() for match in solid_matches])
     first_vertex = np.array([match.start() for match in vertex_matches[::3]], dtype=np.int64)
     solid_id = (np.searchsorted(starts, first_vertex, side="right") - 1).astype(np.int32)
+    orphans = np.flatnonzero(solid_id < 0)
+    if orphans.size:
+        # Such a triangle belongs to no body, and an index of -1 would be read downstream as
+        # the last body in the file.
+        msg = (
+            f"{source}: {orphans.size} triangle(s) appear before the first `solid` line "
+            f"(the first is triangle {int(orphans[0])}), so they belong to no body"
+        )
+        raise ValueError(msg)
 
     return TriangleSoup(
         vertices=vertices,
@@ -170,7 +179,8 @@ def read_stl(path) -> TriangleSoup:
     Raises
     ------
     ValueError
-        If the file is empty, truncated, or holds no recognizable triangles.
+        If the file is empty, truncated, holds no recognizable triangles, or (ASCII) holds a
+        triangle before its first `solid` line, which would belong to no body.
     """
     source = Path(path)
     raw = source.read_bytes()

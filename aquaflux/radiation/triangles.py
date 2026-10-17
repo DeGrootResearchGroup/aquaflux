@@ -207,13 +207,9 @@ def segment_is_cut(origin, target, vertices, min_distance, *, exclude=None, work
         How many ray-by-triangle entries one block may cover. It bounds the working set of a
         single pass, and the default keeps one pass near 32 MB of entries.
 
-        It used to be the one knob that mattered, because each pass materialized that many
-        entries and throughput fell off a cliff when they stopped fitting — 42-57 Mtest/s from
-        0.5 MB through 134 MB of intermediate, against **2.4** at 537 MB, twenty times slower
-        (2048 triangles, double precision, an eleven-core machine with 19 GB). Now that the
-        block is a traced kernel the compiler fuses the intermediate away, so the cliff is not
-        reached. **The bound is kept as a bound**, not as a tuning knob: it is what guarantees a
-        working set whatever the compiler decides to do with a given shape.
+        The block is a traced kernel whose intermediate the compiler fuses away, so the bound
+        is not a tuning knob: it is what guarantees a working set whatever the compiler decides
+        to do with a given shape.
 
         Both axes are cut to honour it, **triangles first**: each call takes as many triangles
         as the bound allows -- the whole set, for any mesh this pass can afford -- and as many

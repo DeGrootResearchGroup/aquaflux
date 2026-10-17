@@ -23,7 +23,13 @@ The recorded numbers (`solve-march.md`, `solve-refuted-directions.md`):
 
 The matvec actually run is `jax.jvp` through the full residual, which reconstructs nine gradients per
 evaluation on pitzDaily. Measured 2026-10-07 on pitzDaily (4-core Linux, jax 0.11.2): the jvp is 44 ms,
-while a SciPy matvec on the materialized `J` (7.4M nnz, ~120 per row) is 6.5 ms, about 7× cheaper. bfs3d's
+while a SciPy matvec on the materialized `J` (7.4M nnz, ~120 per row) is 6.5 ms, about 7× cheaper.
+⚠️ **That 44 ms predates the adjugate first pass (2026-10-16), and it is a standalone call that pays
+~11 000 page faults** (re-measured 2026-10-17, `main` `183e9ffa`, same container class). The standalone
+jvp is now **16.5 ms** with the glibc default allocator, and **9.8–11.1 ms** with the faults removed,
+which is the cost a matvec inside the compiled step program sees (the march's wall does not move when
+they are removed). The "7× cheaper" ratio is therefore now nearer 1.5–2.5×. See
+`.claude/rules/discretization.md`, "Single-threaded kernels". bfs3d's
 `J` is 47.2M structural nnz (~340 per row). The matrix is not used for the matvec because *materializing*
 it costs 165–564 batched JVPs (`sparse_jacobian.py`, coloured probing), which is why the preconditioner is
 refreshed only every few steps — and the ledger already found that **staleness, not hard operators, is the
@@ -599,6 +605,12 @@ to the shift, not to the viscosity), and not a viscosity keyed to `beta` (refute
 bfs3d (since measured, #678: see the top of this entry).
 
 ---
+
+## 13. CLOSED — a Schubert (sparse Broyden) secant update of the materialized Jacobian between probes
+
+Measured 2026-10-17 on the replay and moved to `solve-refuted-directions.md` ("A Schubert secant update
+of the materialized Jacobian"). The updated Jacobian is no closer to a fresh probe than the stale one in
+any block, and the probe it would replace now costs ~1 s, about one refactor.
 
 ## Smaller housekeeping
 

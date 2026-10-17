@@ -351,6 +351,7 @@ class _Geometry(eqx.Module):
     centroid: jnp.ndarray
     normal: jnp.ndarray
     areal: jnp.ndarray
+    twin: jnp.ndarray
 
 
 #: A projected solid angle, in steradians, below which a pair is left to be zero: one rounding of a
@@ -414,8 +415,12 @@ def _row_block(geometry: _Geometry, sample, weight, index, columns):
     # large. A planar triangle really does see none of itself, so this is the exact value and
     # not a repair. A point source has no surface to receive on and no area to emit from; it
     # reaches the facets through the ordinary gather instead, as an external irradiance.
-    keep = (index[:, None] != columns[None, :]) & (
-        geometry.areal[index][:, None] & geometry.areal[columns][None, :]
+    # A sheet's face and its back are one triangle, so they exchange nothing either; left to the
+    # kernel, a quadrature point a rounding off that triangle reads a whole hemisphere of it.
+    keep = (
+        (index[:, None] != columns[None, :])
+        & (geometry.twin[index][:, None] != columns[None, :])
+        & (geometry.areal[index][:, None] & geometry.areal[columns][None, :])
     )
     geometric = (
         jnp.zeros((index.shape[0], geometry.vertices.shape[0]))
@@ -802,17 +807,22 @@ def build_transfer(
       what bounds the conditioning and what catches a wrong kernel.
     - **Reciprocity converges in the point count, not in the mesh.** Refining a closed box
       brings each facet's neighbours proportionally closer, so the ratio the error depends on
-      does not change and the residual sits flat under refinement. Measured on boxes of 12 to
-      432 facets, identically at each:
+      does not change and the residual sits flat under refinement. Measured on cubes of 12 to
+      432 facets, identically at each, and on a box stretched to 1 x 1 x 3 (48 and 192
+      facets). **An elongated enclosure is about ten times worse**, which is the shape of a
+      lamp in a long reactor:
 
-      ======  ======  ====================  ==========================================
-      points  degree  reciprocity residual  worst column, ``sum_i A_i F_ij / A_j - 1``
-      ======  ======  ====================  ==========================================
-      1       1       0.2421                8.8%
-      3       2       0.0281                1.5%
-      6       4       0.0078                0.38%
-      12      6       0.0045                0.18%
-      ======  ======  ====================  ==========================================
+      ======  ======  ====================  ==============  ==================
+      points  degree  reciprocity residual  worst column,   worst column,
+                      (cube)                cube            1 x 1 x 3 box
+      ======  ======  ====================  ==============  ==================
+      1       1       0.2421                7.4-8.8%        35-38%
+      3       2       0.0281                1.4-1.5%        14-15%
+      6       4       0.0078                0.38%           4.6-4.8%
+      12      6       0.0045                0.18%           0.99%
+      ======  ======  ====================  ==============  ==================
+
+      (A column is ``sum_i A_i F_ij / A_j - 1``.)
 
     ⚠️ **A finer rule costs far less than its point count**, which is why six is the default
     rather than one. The build is limited by moving geometry through memory, not by evaluating
@@ -887,8 +897,12 @@ def build_transfer(
         centroid=jax.lax.stop_gradient(surfaces.centroid),
         normal=jax.lax.stop_gradient(surfaces.normal),
         areal=jnp.asarray(~surfaces.is_point_source),
+        twin=jnp.asarray(surfaces.twin),
     )
     sample = receiver_quadrature.points(geometry.vertices)
+    # Each receiving facet, and its other face where it is a sheet's: a ray aimed at a facet ends
+    # on both, and must ignore both.
+    own = np.stack([np.arange(surfaces.n_facets), surfaces.twin], axis=1)
     weight = jnp.asarray(receiver_quadrature.weight)
     geometric, source_cosine, separation = _row_blocks(geometry, sample, weight, chunk_size)
     specular = tuple(dict.fromkeys(specular))
@@ -904,7 +918,7 @@ def build_transfer(
             points=surfaces.centroid,
             # The receivers ARE the facets, so each path's second leg ends on the one it is
             # aimed at and must ignore it, as the direct mask's rays do.
-            receiver_facet=np.arange(surfaces.n_facets),
+            receiver_facet=own,
             # Prepared once here, not once per plane: a grid over the triangles is the same for
             # every mirror. Not at all without a mirror, when no reflected path is masked.
             self_occlusion=(
@@ -928,7 +942,7 @@ def build_transfer(
             # The receivers here ARE the facets, so each ray ends on the one it is aimed at and
             # must be told to ignore it. Without this every mutually visible pair reads as
             # blocked and a closed enclosure loses its interreflection entirely.
-            receiver_facet=np.arange(surfaces.n_facets),
+            receiver_facet=own,
             self_occlusion=self_occlusion,
             **visibility_options,
         ),
@@ -960,6 +974,13 @@ def _specular_exchange(surfaces, specular, sample, weight, masks, limit):
     mirrors, point_masks = [], []
     for solid, name in enumerate(specular):
         planes = planar_mirrors(surfaces, [name])
+        if not planes:
+            msg = (
+                f"specular body {name!r} has no planes: only areal facets can be mirrors, and "
+                "it has none (a body of point sources, or of facets with no area). Leave it out "
+                "of the specular bodies."
+            )
+            raise ValueError(msg)
         if len(planes) > limit:
             msg = (
                 f"specular body {name!r} lies in {len(planes)} planes, past the limit of {limit}: "
@@ -995,10 +1016,16 @@ def _specular_exchange(surfaces, specular, sample, weight, masks, limit):
         geometric.append(total)
         separation.append(jnp.where(carried, length / safe, 0.0))
         cosine.append(jnp.where(carried, angle / safe, 0.0))
+
+    def stacked(arrays):
+        # Every reflected path can be hidden, which leaves no term at all; an empty stack keeps
+        # the arrays' documented shape, ``(n_terms, n, n)``, with no term for assemble to add.
+        return jnp.stack(arrays) if arrays else jnp.zeros((0, n, n))
+
     return {
-        "specular_geometric": jnp.stack(geometric),
-        "specular_separation": jnp.stack(separation),
-        "specular_source_cosine": jnp.stack(cosine),
+        "specular_geometric": stacked(geometric),
+        "specular_separation": stacked(separation),
+        "specular_source_cosine": stacked(cosine),
         "mirrors": tuple(mirrors),
         "specular_solids": specular,
         "specular_terms": tuple(keys),

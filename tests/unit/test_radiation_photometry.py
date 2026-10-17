@@ -156,7 +156,7 @@ def test_a_file_it_cannot_read_faithfully_is_refused(tmp_path, text, match):
     ("horizontal", "kind"),
     [([0.0], "rotational"), ([0, 30, 60, 90], "quadrant"), ([0, 60, 120, 180], "bilateral")],
 )
-def test_a_partial_table_is_completed_by_the_symmetry_its_last_angle_declares(
+def test_a_partial_table_is_completed_by_the_symmetry_its_range_declares(
     tmp_path, horizontal, kind
 ):
     """The completed circle interpolates to the value the LM-63 fold rule gives, everywhere.
@@ -177,6 +177,105 @@ def test_a_partial_table_is_completed_by_the_symmetry_its_last_angle_declares(
     columns = np.stack([np.interp(gamma, vertical, row) for row in full_table])
     ours = np.array([np.interp(hh, full_h, columns[:, k]) for k, hh in enumerate(h)])
     np.testing.assert_allclose(ours, _bilinear_reference(photometry, gamma, h), rtol=1e-12)
+
+
+def _mirrored_lobe(h_deg, plane_deg):
+    """Rows of a table mirror-symmetric about the plane through ``plane_deg`` and that plus 180.
+
+    A function of the angle from the plane, so it reads the same at ``plane + x`` and
+    ``plane - x``; each row also varies with ``gamma``, so a fold onto the wrong row shows.
+    """
+    angle = np.radians(np.asarray(h_deg, dtype=float) - plane_deg)
+    vertical = np.radians([0.0, 30.0, 60.0, 90.0])
+    return (5.0 + 3.0 * np.sin(angle) ** 2 + np.cos(angle))[:, None] * np.cos(vertical)[None] + 0.2
+
+
+@pytest.mark.parametrize(
+    ("stored", "plane"),
+    [
+        (np.arange(0, 181, 30.0), 0.0),
+        (np.arange(90, 271, 30.0), 90.0),
+        (np.arange(-90, 91, 30.0), 90.0),
+    ],
+    ids=["0-180", "90-270", "-90-90"],
+)
+def test_a_half_turn_table_is_mirrored_about_the_plane_through_its_ends(tmp_path, stored, plane):
+    """A half-turn table read through the profile equals the same lobe stored as a full table.
+
+    LM-63 lays a mirror-symmetric luminaire out over any half turn -- 0 to 180, 90 to 270, and
+    -90 to 90 are all used -- with the mirror plane through the two ends. The reference is the
+    whole circle tabulated on the same knots, so both interpolants are the same piecewise-linear
+    function and agree to rounding wherever the fold is right. A table classified by its last
+    angle alone reads 90-270 as a full table, closed across the missing half, and -90 to 90 as
+    quadrant-symmetric; a horizontal angle taken from 0 instead of the table's first angle reads
+    past the end of a table that starts below it.
+    """
+    vertical = [0.0, 30.0, 60.0, 90.0]
+    half = read_ies(
+        _write(tmp_path, _ies(vertical, stored, _mirrored_lobe(stored, plane)), "half.ies")
+    )
+    circle = np.arange(0, 361, 30.0)
+    full = read_ies(
+        _write(tmp_path, _ies(vertical, circle, _mirrored_lobe(circle, plane)), "full.ies")
+    )
+    assert half.symmetry == "bilateral" and full.symmetry == "full"
+    assert half.front_hemisphere_flux() == pytest.approx(full.front_hemisphere_flux(), rel=1e-12)
+
+    up, normal = jnp.array([0.0, 0.0, 1.0]), jnp.array([1.0, 0.0, 0.0])
+    rng = np.random.default_rng(4)
+    raw = rng.normal(size=(400, 3))
+    raw[:, 0] = np.abs(raw[:, 0])
+    directions = jnp.asarray(raw / np.linalg.norm(raw, axis=1, keepdims=True))
+    np.testing.assert_allclose(
+        half.profile(up).intensity_fraction(directions, normal),
+        full.profile(up).intensity_fraction(directions, normal),
+        rtol=1e-12,
+        atol=1e-15,
+    )
+
+
+def _photometry(vertical, horizontal, intensity=None):
+    vertical, horizontal = np.asarray(vertical, float), np.asarray(horizontal, float)
+    if intensity is None:
+        intensity = np.ones((len(horizontal), len(vertical)))
+    return Photometry(
+        vertical=vertical,
+        horizontal=horizontal,
+        intensity=np.asarray(intensity, float),
+        keywords={},
+        opening=(0.0, 0.0, 0.0),
+        opening_unit="metres",
+    )
+
+
+@pytest.mark.parametrize(
+    ("vertical", "horizontal", "intensity", "match"),
+    [
+        ([0.0], [0.0], None, "at least two vertical angles"),
+        ([0.0, 90.0], [], np.ones((0, 2)), "at least one horizontal angle"),
+        ([0.0, 90.0, 60.0], [0.0], None, "strictly ascending"),
+        ([0.0, 90.0], [0.0, 90.0, 45.0], None, "strictly ascending"),
+        ([0.0, 90.0], [0.0, 90.0], np.ones((2, 3)), r"intensity has shape \(2, 3\)"),
+        ([-5.0, 90.0], [0.0], None, r"must lie in \[0, 180\]"),
+        ([0.0, 90.0], [0.0, 200.0, 400.0], None, "span more than a turn"),
+        ([0.0, 90.0], [90.0, 180.0], None, "quarter turn not starting at 0"),
+    ],
+    ids=[
+        "one-vertical",
+        "no-horizontal",
+        "vertical-order",
+        "horizontal-order",
+        "shape",
+        "vertical-range",
+        "over-a-turn",
+        "offset-quadrant",
+    ],
+)
+def test_a_table_it_cannot_read_as_a_distribution_is_refused(
+    vertical, horizontal, intensity, match
+):
+    with pytest.raises(ValueError, match=match):
+        _photometry(vertical, horizontal, intensity)
 
 
 def test_a_quadrant_table_mirrors_into_the_second_quadrant(tmp_path):
@@ -523,3 +622,21 @@ def test_a_mirror_image_sends_along_each_reflected_direction_what_the_source_sen
     twice = image.mirrored(jnp.asarray(plane))
     assert twice.handedness == profile.handedness
     np.testing.assert_allclose(twice.up, profile.up, atol=1e-15)
+
+
+def test_rows_far_apart_on_the_axis_are_warned_about_and_read_as_stored():
+    """Every horizontal angle names one direction on the axis, so rows 16 % apart there are not
+    one distribution; the table is kept as measured and the caller is told."""
+    intensity = [[100.0, 50.0], [117.0, 50.0], [100.0, 50.0]]
+    with pytest.warns(UserWarning, match=r"disagree on the axis \(gamma = 0\) by 16\.1%"):
+        photometry = _photometry([0.0, 90.0], [0.0, 90.0, 180.0], intensity)
+    np.testing.assert_array_equal(photometry.intensity, intensity)
+
+
+def test_rows_apart_on_the_axis_by_a_measurement_s_noise_are_not_warned_about(recwarn):
+    """The measured Ushio B1 file's axial values run from 120.24 to 122.92 mW/sr: noise, 2.2 %.
+
+    Its extremes and its first row, so a threshold at the 1 % first proposed for this, which that
+    file would trip, shows here."""
+    _photometry([0.0, 90.0], [0.0, 90.0, 180.0], [[120.242, 5.0], [122.915, 5.0], [121.379, 5.0]])
+    assert not [w for w in recwarn if "disagree on the axis" in str(w.message)]

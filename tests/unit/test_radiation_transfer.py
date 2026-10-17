@@ -652,12 +652,12 @@ WALTON_OBSTRUCTED_SQUARES = 0.11562061
 SHEETS = ("plates", "blocker")
 
 
-def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
+def _obstructed_squares(n: int, strategy, sheets=SHEETS) -> tuple[float, float]:
     """``F_12`` and ``F_21`` for Walton's obstructed pair, each plate meshed ``n x n``.
 
     The blocker is a single one-sided sheet, as a baffle usually is in a surface file. The
     plates and the blocker are all zero-thickness sheets, and named so, which the silhouette
-    clip needs in order to count a sheet seen from behind.
+    clip needs in order to count a sheet seen from behind; ``sheets`` is what the set declares.
     """
     blocker = rectangle_triangles([0.0, 0.0, 0.25], [0.25, 0.0, 0.0], [0.0, 0.25, 0.0])
     surfaces = Surfaces.from_triangles(
@@ -665,6 +665,7 @@ def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
         diffuse_reflectance=0.0,
         solid_id=[0] * (4 * n * n) + [1] * len(blocker),
         solid_names=SHEETS,
+        two_sided=sheets,
     )
     matrix, _ = build_transfer(surfaces, self_occlusion=strategy).assemble(surfaces)
     matrix, area = np.asarray(matrix), np.asarray(surfaces.area)
@@ -678,7 +679,7 @@ def _obstructed_squares(n: int, strategy) -> tuple[float, float]:
 
 @pytest.mark.parametrize(
     "strategy",
-    [RayCastOcclusion(), SilhouetteOcclusion(two_sided=SHEETS)],
+    [RayCastOcclusion(), SilhouetteOcclusion()],
     ids=["ray", "silhouette"],
 )
 def test_an_obstructed_pair_converges_on_the_published_view_factor(strategy):
@@ -713,9 +714,9 @@ def test_an_undeclared_sheet_is_warned_about_and_hides_nothing_from_behind():
     faces. So the build must say so, naming the bodies whose pieces have a free edge.
     """
     with pytest.warns(UserWarning, match=r"free edge.*two_sided") as caught:
-        behind, facing = _obstructed_squares(6, SilhouetteOcclusion())
+        behind, facing = _obstructed_squares(6, SilhouetteOcclusion(), sheets=())
     assert "'blocker'" in str(caught[0].message) and "'plates'" in str(caught[0].message)
-    clear, _ = _obstructed_squares(6, NoOcclusion())
+    clear, _ = _obstructed_squares(6, NoOcclusion(), sheets=())
     assert behind == pytest.approx(clear, rel=1e-12)
     assert facing == pytest.approx(WALTON_OBSTRUCTED_SQUARES, abs=2e-3)
 
@@ -723,12 +724,12 @@ def test_an_undeclared_sheet_is_warned_about_and_hides_nothing_from_behind():
 def test_declaring_every_sheet_silences_the_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _obstructed_squares(2, SilhouetteOcclusion(two_sided=SHEETS))
+        _obstructed_squares(2, SilhouetteOcclusion())
 
 
 def test_a_misspelt_sheet_is_refused_rather_than_left_one_sided():
     with pytest.raises(ValueError, match=r"two_sided names no body.*\['blokcer'\]"):
-        _obstructed_squares(2, SilhouetteOcclusion(two_sided=("plates", "blokcer")))
+        _obstructed_squares(2, SilhouetteOcclusion(), sheets=("plates", "blokcer"))
 
 
 # ---------------------------------------------------------------------------------------

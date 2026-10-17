@@ -266,7 +266,9 @@ def build_mirror_visibility(
     source_height = mirror.heights(centroid[sources])
     rows = np.flatnonzero(receiver_height > 0.0)
     tested = source_height > 0.0
-    hides = True
+    # Decided from the strategy, not from whether a pass happened to test a pair: a mirror no
+    # receiver faces tests nothing, and its mask must still say whether the surface could hide.
+    hides = not isinstance(strategy, NoOcclusion)
     per_pass = receivers_per_pass(pair_limit, max(1, n_sources))
     for start in range(0, len(rows), per_pass):
         local, column = np.nonzero(
@@ -423,25 +425,30 @@ class _Legs:
     def hidden_by(self, strategy: SelfOcclusion, surfaces, facet, receiver_facet):
         """Whether the surface's own triangles stand across either leg, or ``None`` if never.
 
-        The first leg ignores the source facet it leaves; the second the facet its receiver sits
-        on, if any. Neither needs to ignore the mirror: the lift keeps both off its plane.
+        The first leg ignores the source facet it leaves, and its other face where it is a
+        sheet's; the second the facets its receiver sits on, if any. Neither needs to ignore the mirror: the lift keeps both off its plane.
         """
         count = self.count
+        # A sheet's face and its back share a triangle, so a leg ignores both.
         out = strategy.segments_hidden(
             surfaces,
             self.source[:count],
             self.meeting[:count],
             self.near_source[:count],
-            facet[:, None],
+            np.stack([facet, surfaces.twin[facet]], axis=1),
         )
         if out is None:
             return None
-        landing = np.full(count, -1) if receiver_facet is None else receiver_facet
+        landing = (
+            np.full((count, 1), -1)
+            if receiver_facet is None
+            else np.asarray(receiver_facet).reshape(count, -1)
+        )
         back = strategy.segments_hidden(
             surfaces,
             self.meeting[:count],
             self.receiver[:count],
             self.lift[:count],
-            landing[:, None],
+            landing,
         )
         return out | back

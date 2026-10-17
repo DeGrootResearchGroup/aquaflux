@@ -898,12 +898,16 @@ the rule over the reports reproduces it (pinned). `tight_solver` is untouched.
       finite rung *at all* is a third case and is deliberately unchanged: it still reports a non-finite
       measure, because the divergence guard, the acceptance policy and the convergence guard all test
       that number with `isfinite`.
-      **`DualTimeStep` forms it rather than inheriting it**, which is correct rather than an oversight:
-      its inner loop converges the *shifted* `G` at a held reference, so every measure it formed is of
-      `G`, while the driver judges the step by the steady `R`, and `G(phi_next) != R(phi_next)` whenever
-      the step moved. There it costs exactly what the driver used to pay and saves nothing — the price
-      of one contract instead of an optional one. Its inner loop does collect the saving internally:
-      `new_gnorm` comes from the search rather than from a second `norm(transient_residual(...))`.
+      **`DualTimeStep` forms it from the `G` VECTOR its last search kept (since 2026-10-17)**: its inner
+      loop converges the *shifted* `G` at a held reference while the driver judges the step by the
+      steady `R`, and `G(phi_next) != R(phi_next)` whenever the step moved, but `R = G − β d (phi − φⁿ)`,
+      so the measure is one subtraction (`transient_term`, the same expression `G` was built with). It
+      used to evaluate `R(phi_next)` afresh ("costs what the driver used to pay and saves nothing" —
+      no longer true). The same carried vector is each inner iteration's Newton right-hand side, so a
+      dual-time `_march_step` traces the residual **3 times** (the anchor's `R(φⁿ)`, the ladder body, the
+      Krylov JVP), not 5 — pinned by `test_a_dual_time_march_step_traces_the_residual_only_where_it_must`;
+      the contract and the pitzDaily compile measurement are in `solve-globalization.md` ("The line search
+      returns its residual VECTOR").
     - **`reached_target`** — did the step run to its OWN stopping criterion, or was it cut short? A
       cost-only escalation cannot tell an expensive success from a grind and **discards the success**:
       measured, an inner loop that reached `‖G‖ = 3.0e-6` against a `1.0e-5` target was thrown away for

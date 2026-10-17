@@ -122,6 +122,13 @@ def test_a_large_binary_file_round_trips(tmp_path):
             "unparsable vertex coordinate",
         ),
         ("vertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n", "no `solid` declaration"),
+        # A triangle before every `solid` line belongs to no body; its index would otherwise be
+        # -1, which a per-body lookup reads as the file's last body.
+        (
+            f"{TRIANGLE.format(nx=0, ny=0, nz=1)}\nsolid wall\n"
+            f"{TRIANGLE.format(nx=0, ny=0, nz=1)}\nendsolid wall\n",
+            r"1 triangle\(s\) appear before the first `solid` line \(the first is triangle 0\)",
+        ),
     ],
 )
 def test_a_malformed_file_is_refused_with_a_message_naming_the_problem(tmp_path, body, message):
