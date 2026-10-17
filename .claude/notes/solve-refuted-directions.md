@@ -920,7 +920,7 @@ data model. Each had nothing in `validation/` or any test selecting it.
   `RefreshPolicy(builder=...)` that re-factored the complete LU in place at a FIXED `lu_beta`. On a
   dual-time march that is exactly the shift mismatch the tracking hook removes: an LU frozen at
   β = 0.05 needs 25 / 111 / 217 / 474 GMRES iterations at β = 0.1 / 0.5 / 1 / 2 against 1 matched, and
-  NaN'd on a cold pitzDaily ramp (`solve-direct-preconditioners.md`). Its only remaining regime — a
+  NaN'd on a cold pitzDaily ramp (git history of `.claude/rules/solve-direct-preconditioners.md` before 2026-10-17). Its only remaining regime — a
   single-step SER march with an LU and a drift trigger — was never selected or measured.
 - **`host_exact_forward_solve` — DELETED, never selected.** PETSc GMRES driving the monolithic V-cycle
   over a shell of the exact Jacobian-vector product, instead of the JAX-side Krylov with the V-cycle as
@@ -1303,3 +1303,44 @@ the ladder takes 99 steps against 64 because each rung re-walks its own `beta_st
 the finer ladder buys robustness (0 escalations against 1), not wall. Superseded as a direction by the
 in-march viscosity ramp (`ViscosityRampHomotopy`), which removes the per-rung descent. Full record:
 `.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies".
+
+## Array (numpy-pass) DDA walk of the triangle grid — DELETED as dominated (2026-09-26)
+
+`TriangleGrid.blocks` first walked rays through the voxel grid as whole-array numpy passes over the live
+rays (`_Rays`, `_indexed_pair_is_cut`, a per-step `reduceat`), with the triangle test traced. Profiled on a
+51,200-triangle cylindrical wall (200,000 rays, jax 0.10.2, CPU, x64, Linux x86_64, 4 cores) the traced
+test was only 6-47 % of the walk; the rest was host bookkeeping at ~150-180 ns per ray per voxel step, so a
+finer grid was SLOWER on it (fewer tests, more steps). Replaced by one compiled Numba loop per ray
+(`grid_walk.walk_to_first_hit`), which measured 16.9-37.3x faster on two scenes at three grids each and
+13.8-21.9x through the user-facing paths, with identical answers (`validation/radiation_grid_walk.py` at
+`d9fc017`). Lesson that transfers: a per-item loop whose value is the work it SKIPS wants compiled host
+code — a traced loop pays its worst case for every item, and numpy passes pay per step for every item
+still in flight. Recover the code from git history before 2026-09-26.
+
+## A second cluster level in the silhouette cone cull (`ClusterHierarchy`) — MEASURED SLOWER, not shipped (2026-09-26, #555)
+
+On top of `FacetClusters` (one level of 32-facet Morton runs, 1.24x at 3,184 facets), a hierarchy of
+sizes (32, 8) cut from one Morton order, with the same pairwise cluster test at every level and only
+surviving pairs expanded. It kept exactly the dense cull's pair set and cut the member test 3.93M → 1.15M
+pairs (3.4x), but the whole cull went only ~41 → ~33 ms a receiver serially, and at the default 4 threads
+the build got SLOWER (155-160 s against one level's 141-142 s at 3,184 facets; 4-core Linux container,
+jax 0.10.2): each receiver made twice as many small compiled calls, and the waits on their results
+contended with the reject and clip passes beside them. Fewer member tests are not worth more dispatches;
+anyone retrying depth must fuse the levels into one compiled call per receiver (or batch across
+receivers). Code never merged.
+
+## Other radiation directions closed — moved to `.claude/notes/radiation-log.md`, not deleted
+
+- Receiver quadrature of visibility / source pixelation for the binary occlusion mask (2-4x for 4-16x the
+  rays) — "MEASURED AND REJECTED: two candidate fixes for the occlusion mask ...".
+- Two frozen `log cos` moments for a non-Lambertian profile — documented, not built (#447 item 1).
+- Cubic Morton cells for elongated lamps (#574) — measured at mesh scale, reverted.
+- A per-body culling ladder; testing the finest tiles as a flat pair list; the tile index innermost (#554
+  phase B).
+- Walk-from-the-nearer-end and empty-space skipping for the grid walk (#503).
+- Compaction of the cluster cull on the device; other cluster sizes (#555).
+- Merging coplanar triangles into convex patches for the silhouette clip (#474).
+- Capping the transfer build's row blocks by `PASS_PAIRS` (withdrawn); a streamed pass sized separately
+  from the traced chunk (no faster).
+- Shooting the gap routes through a neighbour sleeve (misses their steep paths); stopping a vmapped path
+  search early / lower caps / seeding corners from the centroid path (#604 step 2b-i).
