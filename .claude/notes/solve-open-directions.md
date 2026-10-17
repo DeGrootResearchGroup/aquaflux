@@ -550,6 +550,12 @@ bfs3d (since measured, #678: see the top of this entry).
 
 ---
 
+## 13. CLOSED — a Schubert (sparse Broyden) secant update of the materialized Jacobian between probes
+
+Measured 2026-10-17 on the replay and moved to `solve-refuted-directions.md` ("A Schubert secant update
+of the materialized Jacobian"). The updated Jacobian is no closer to a fresh probe than the stale one in
+any block, and the probe it would replace now costs ~1 s, about one refactor.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the

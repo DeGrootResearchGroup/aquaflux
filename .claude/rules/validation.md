@@ -272,6 +272,12 @@ cannot be written. The guard is what catches the next module that does branch.
   reporting it. Repaired 2026-10-14: `MarchReplay.refit` applies the returned replacement as the march
   does, and `apply_pc` / `solve` / `preconditioned` compile with the step's policy as an argument, since
   a split captured in a closure keeps applying the first fit's hierarchies after every refit, silently.
+  ⚠️ **Since #645 (2026-10-16) the march solves a step after a setback to 0.1, not the regime's 0.3**
+  (`AdaptiveLinearTolerance`, the library default). A replay at a fixed 0.3 read 27 of 50 solves 1-2
+  cycles low (found 2026-10-17). `System.rtol` now carries the tolerance the march's rule gave that step,
+  rebuilt from the checkpointed reports (`MarchReplay.tolerance`), and `march_solver(measure, rtol)`
+  applies it; with it all 50 solves of a `5661273a` capture reproduce. `krylov_recycling_probe.py`,
+  `precision_replay_probe.py` and `batch_bound_probe.py` still build fixed-tolerance solvers.
   `MarchReplay(host=True)` applies the host object instead, for a probe that changes the host inverse in
   place (`precision_replay_probe.py` swaps its blocks' precision; the traced copy would not see that).
   Checked on a capture of `main` `da37958a`'s shipped pitzDaily march (18 steps, 4-core Linux, jax
