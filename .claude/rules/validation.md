@@ -256,6 +256,15 @@ cannot be written. The guard is what catches the next module that does branch.
   time was the transfer's row blocks, returned un-materialized just before it (2026-09-26, caught by a
   standalone probe of the mask). A timer breakdown is only sound where the work before each timed piece
   is timed too; when a small piece reads large, time it alone before believing it.
+- **⚠️ ON LINUX, A STANDALONE CALL OF A PROGRAM WHOSE TEMPORARY BUFFER EXCEEDS 32 MiB PAGE-FAULTS ALL OF
+  IT, EVERY CALL.** glibc's adaptive mmap threshold stops at 32 MiB, so such a buffer is mapped and
+  unmapped per call. pitzDaily's JVP (42.8 MiB) takes ~11 000 minor faults per call, 16.5 ms against
+  9.8–11.1 ms with the threshold raised. Its residual (22.6 MiB) takes none. The march does not pay
+  this (its wall is unchanged with the threshold raised), so a per-call timing taken this way
+  overstates the in-march cost (2026-10-17, `.claude/rules/discretization.md`, "Single-threaded
+  kernels"). Report `resource.getrusage(...).ru_minflt` per call beside any such timing, or run with
+  `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` and say so. ⚠️ Through `mallopt`
+  both are C `int`s: a 4 GiB trim threshold wraps to 0 and multiplies the faults instead.
 - **A harness that builds a step must build it with the case's OWN shift settings, and must form the
   shift through `ShiftTerm.shift(beta)`, never `beta * term.diagonal`.** `closure_stall_probe.py` did
   neither until 2026-10-12: it built its engine, capture and march without `turbulence_damping`, and
