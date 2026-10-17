@@ -3806,3 +3806,1104 @@ light refracted and the walls' light not.
   rather than across the bisector (with one path through a region, any start inside it reaches that
   path; kept as written because the user's 535b0fa run measured it), and the first guess split at the
   pass's start rather than its end (`onto` puts every crossing back on its face before the descent).
+
+
+---
+
+# Rule text moved verbatim at the 2026-10-17 condensing pass
+
+> These sections stood in `.claude/rules/radiation.md` until 2026-10-17, when the rule was condensed to
+> current state. Each is reproduced verbatim under its original heading (prefixed `[rule text]`), so
+> measurements, mutation passes, test inventories and narratives stay greppable. The condensed rule keeps
+> the contract and the live traps; "above"/"below" inside an entry refer to the rule's order then.
+
+## [rule text] ⚠️ THERE ARE TWO SOLID-ANGLE KERNELS AND THEY ARE NOT INTERCHANGEABLE
+
+This is the defect that recurred through five drafts of the design, and it recurs because the
+wrong answer is *clean* rather than noisy.
+
+- `solid_angle` — the plain solid angle `Ω`. For **fluence rate**, which carries no receiver
+  cosine because the receiver is a point in a volume, not a surface.
+- `projected_solid_angle` — `∫cos θ dω`. For **irradiance** and for every surface-to-surface
+  transfer factor, because an oblique surface intercepts less.
+
+**There is a third NAME and it is not a third quantity.** `signed_solid_angle` is the same
+integral as `solid_angle` with the sign of the vertex winding kept instead of discarded, and
+`solid_angle` is now literally its magnitude. On a single triangle that sign is meaningless — it
+records the order an exporter happened to write three vertices in — which is exactly why the
+public kernel drops it. It means something only summed over a **consistently wound, closed**
+surface, where it gives the winding number; see the enclosure section below. Do not reach for it
+anywhere else.
+
+No scalar converts the two quantities into one another: the obliquity varies across the emitter. Used in the
+wrong place, `Ω/π` makes every row of a transfer matrix sum to **exactly 2.000000000000** at
+every refinement, so the spectral radius of a reflection system becomes `2ρ` — the Neumann
+series diverges above `ρ = 0.5` and `I − ρF` is indefinite at 0.9. That reads as a different
+problem being solved correctly, which is why review after review passed it. Measured against
+an independent view-factor implementation on a general-position pair, the error is 42% / 25% /
+11% at separations of a quarter, a half and one emitter width, and **it does not shrink under
+refinement** — non-convergence, not size, is what identifies a wrong kernel.
+
+## [rule text] Four implementation details that are load-bearing, each measured
+
+1. **Every angle is `arctan2`, never `arccos` and never a sum of interior angles.** For the
+   plain solid angle, summing interior angles is the small difference of large quantities for
+   a small triangle — which is what a refined facet at a distance is. For the contour form,
+   `arccos(u·u')` is ill-conditioned as its argument approaches one, which is what consecutive
+   edges of a refined mesh look like: the enclosure sum comes out wrong by ~1.3e-8, **flat in
+   refinement**, against 0–5.7e-16 for the tangent form. Flatness is the diagnostic — an
+   accumulation would grow.
+2. **The contour form is signed and the polygon must be clipped to the receiver's front
+   half-space first.** A triangle straddling the plane returns a partially cancelled value and
+   one behind it a negative one. The clip (`clipping.clip_to_halfspace(..., 4)`) emits a fixed
+   four-slot loop in which an empty slot repeats the last survivor, so the shape is static and
+   the repeats are zero-length edges contributing no angle.
+3. **Take the magnitude.** The sign of either contour sum records only the order vertices
+   happen to be stored in, which for an imported surface file is arbitrary. Orientation is the
+   normal's job. The test fixture winds its faces inconsistently on purpose.
+4. **Guard the square root *inside* the root, not after it.** `v / where(zero, 1, sqrt(sq))`
+   keeps the forward value finite and still yields a **NaN gradient**, because reverse mode
+   visits `d/dx sqrt(x)` at zero and the unselected branch's NaN propagates through the
+   selection. Write `sqrt(where(zero, 1, sq))`. Zero-length edges are the *normal* case here,
+   not a degenerate one — the clip manufactures three of them for every fully visible triangle
+   — so this is on the main path, and the whole project is gradients.
+   ⚠️ **It recurred three more times (#620)** -- through `**` (`profiles._forward_power` now substitutes
+   the base inside the power), an unguarded `sqrt(dot(...))` in both absorptions (now
+   `aquaflux.vectors.norm`) and `arctan2(0, 0)` in `PhotometricProfile.angles` -- so the rule covers any
+   primitive with an infinite or `0/0` slope where the selection discards its value. ⚠️ A Lambertian
+   fixture cannot see a NaN direction. Fixes, tests and mutation pass: `.claude/notes/radiation-log.md` →
+   "Four implementation details that are load-bearing, each measured".
+
+## [rule text] ⚠️ THE VERTEX-DEGENERACY GUARD IS FOR THE GRADIENT; THE VALUE NEEDS NO HELP
+
+`solid_angle` ends with `where(any(degenerate), 0.0, omega)` for a receiver sitting exactly on a
+vertex. **A mutation deleting that line passed the whole suite**, and the reason is instructive:
+with one direction zeroed the numerator is zero and the denominator is `1 + b·c`, which for unit
+vectors cannot be negative, so `arctan2(0, non-negative)` is zero and the forward value is right
+either way. The test that existed read only the value.
+
+The derivative is not right either way. Unguarded, `d/dp` of that zero comes back **(0, 0, −2)** —
+finite, plausible, and fictitious. That is strictly worse than a NaN, which at least announces
+itself, and the gather is differentiated with respect to vertex positions whenever a study moves a
+lamp, so one degenerate pair anywhere in a scene contributes a spurious term to the whole
+derivative. `test_the_vertex_guard_is_there_for_the_GRADIENT_the_value_needs_no_help` pins both
+kernels. This is the same lesson as the `sqrt`-guard detail above, arriving from the other side:
+there, guarding after the root left a NaN gradient; here, not guarding at all leaves a *clean* one.
+
+## [rule text] Testing
+
+`tests/unit/test_solid_angle.py`, with references in `tests/unit/radiation_references.py`.
+Every reference comes from outside the kernels: two closed forms, plus recorded values from
+**pyviewfactor** (MIT), an independent contour-integral implementation checked against the
+closed form to 3.5e-16 before being trusted.
+
+⚠️ **The oracle's values are recorded, not imported.** A test behind an optional import is
+skipped silently and a skip is indistinguishable from a pass — the trap
+`tests/unit/test_optional_dependency_skips.py` exists to police. Regenerate with
+`pip install pyviewfactor` when the geometry changes; do not turn it into a dependency.
+
+⚠️ **On-axis tests cannot see a missing receiver cosine**, because on axis the cosine is one.
+Any new case must include an off-axis or oblique configuration — the perpendicular-squares
+test sweeps obliquity across its whole range for exactly this reason.
+
+All five mutations of the kernels were verified to fail the suite: `arctan2`→`arccos`, drop
+the clip, drop either magnitude, and return the plain solid angle from the projected function.
+
+## [rule text] The clamp is a GATE, not a factor — and the difference is a factor of two or a zero
+
+A facet cannot illuminate what is behind it. Measured on a Lambertian tube at `d/R = 2`, where
+the closed form is `G = (4B/pi) arcsin(R/d) = 2`:
+
+| formulation | result |
+|---|---|
+| clamp as a gate (what is built) | **1.99978** |
+| absolute value of the cosine | 3.99941 — exactly double |
+| no clamp at all | 3.99941 — same, because the gate is what was removed |
+| signed cosine as a *multiplier* | **1.5e-4** — the two sides cancel |
+
+The last row is why the sign is a gate. A near-zero field looks like an empty scene rather than
+like a physics error, so it is the failure mode least likely to be noticed.
+
+A convex emitting body needs no occluder: the clamp *is* its visibility condition, exactly. The
+cylinder case tests that and **does not test occlusion**.
+
+## [rule text] Optical depth: exact, not marched — and three details make it so
+
+`UniformAbsorption` is `tau = a r`, which is the field's own standard treatment rather than a
+simplification. `VoxelAbsorption` carries a graded coefficient and walks the grid.
+
+**Walking the cells is not ray marching.** Marching takes fixed steps and holds the coefficient
+constant across each, which systematically overestimates the surviving fraction by Jensen's
+inequality and shrinks only as the step does. Walking the real boundaries finds every crossing,
+leaving only the field's own representation error — and it deletes a convergence parameter,
+since there is no step size to choose.
+
+Three details, each of which cost a debugging round to find:
+
+1. **⚠️ CUT ON THE SAMPLE PLANES, NOT THE CELL FACES.** They are half a cell apart. The
+   interpolated field is a separate cubic between neighbouring samples, so a piece that
+   straddles a sample plane straddles a kink and no quadrature rule saves it. Measured on a
+   linear field with a known closed form: **0.43% wrong** cutting on faces, **exact** cutting on
+   sample planes. That size of error is the worst kind — large enough to matter, small enough to
+   read as discretization.
+2. **⚠️ GENERATE CUTS ONLY AT PLANES THAT CARRY SAMPLES, AT BOTH ENDS.** Beyond the outermost
+   sample the field is clamped and has no further kinks. Cutting on the infinite lattice spends
+   the fixed step budget outside the grid, and a segment reaching well past the grid exhausts it
+   and **silently loses its tail** — which reads as weaker absorption, not as a bug. Both ends
+   matter: a segment starting far outside meets its first real plane a long way in.
+3. **Simpson's rule per piece, and it is exact.** A trilinear field along a straight line is a
+   cubic in the path parameter, and Simpson integrates cubics exactly. So the optical depth is
+   the exact integral of the interpolated field, not a quadrature of it — verified to 1e-12
+   against fine quadrature of the same interpolant, for segments inside, straddling, outside,
+   axis-aligned, reversed and degenerate.
+
+**Interpolate, never nearest-cell.** A nearest-cell lookup is piecewise constant in position, so
+its derivative is zero almost everywhere and undefined on the faces — a staircase in a path the
+module promises gradients through. Outside the samples the value is **clamped**, so a segment
+straying past the edge attenuates like the water at the edge rather than like vacuum.
+
+**No clamp on the optical depth.** In double precision `exp(-tau)` reaches zero near `tau = 745`,
+where zero is correct and is what is returned. A clamp would buy nothing and would flatten
+`dG/da` across a whole region.
+
+**The absorbance grid need not match the flow mesh, and usually should not.** A segment's cost is
+the fixed `nx + ny + nz + 1` steps, so a coarse absorbance grid over a fine flow mesh is cheaper
+and no less accurate — absorbance varies far more smoothly than velocity. Since #528 that is its
+cost in time and, under a gradient, in memory (a carry a step); its forward memory is flat in the
+grid (see the #528 section).
+
+⚠️ **Attenuation is taken along the facet CENTROID's path.** A facet wide enough for its far
+corner to sit at a different optical depth is attenuated as though it were not. Same remedy as
+for the emission assumption: the refinement criterion. On the Beer–Lambert slab a uniform disc is
+**2% wrong** near the axis and no extra radius fixes it; refining against the probes brings it
+under 2e-3.
+
+## [rule text] ⚠️ A RAY BETWEEN TWO FACETS NEEDS **TWO** EXCLUSIONS, AND THE MISSING ONE SHIPPED
+
+`segment_is_cut` excluded only the **source** facet. The far end of a segment has no margin —
+`offset_scale` guards the origin, nothing guards the target — so a ray aimed at a *facet centroid*
+ends exactly in that facet's plane and the hit at `distance == 1` counted. `build_transfer`'s
+receivers **are** the facet centroids, so at the shipped default (the ray mask on) every
+mutually visible pair read as blocked: measured on a closed box, **120 of 132 off-diagonal pairs**,
+and on two bare plates facing each other across empty space, all of them. A closed enclosure came
+back with `B = M` — ten times too dark at `rho = 0.9`, and shaped like a field rather than an
+error. `exclude` now takes `(n_rays,)` or `(n_rays, k)`, and `build_visibility` takes
+`receiver_facet` for the case where each receiver sits on a facet.
+
+Why nothing caught it (every transfer fixture switched the mask off) and the convex-emitter consistency
+check: `.claude/notes/radiation-log.md` → "⚠️ A RAY BETWEEN TWO FACETS NEEDS **TWO** EXCLUSIONS, AND THE
+MISSING ONE SHIPPED". ⚠️ `row_sum_error` is blind to the visibility mask by construction (the mask is
+applied in `TransferMatrix.assemble`): a green row sum is no evidence about the mask.
+
+`test_a_closed_box_reaches_its_closed_form_AT_THE_DEFAULT_SETTINGS` is the regression, and it is
+deliberately the one test in that file that does *not* switch the mask off.
+
+**The mask must change no number on a convex enclosure, and that is asserted bit-identically.**
+Re-measured after the fix on boxes of 12, 48 and 192 facets: row-sum error, reciprocity residual
+and the solved `B` agree to the last bit with `self_occlusion` on and off. That is what licenses
+every other measurement in the subsystem, all of which were taken with it off.
+
+⚠️ **A mutation pass that restores files with `mv` can report a false RED.** `mv` preserves the
+source's mtime and `.pyc` validation is mtime-and-size with **one-second** granularity, so a fast
+mutate-test-restore cycle can leave the *mutated* bytecode in play for the next run. That produced
+ten spurious failures here and cost an hour chasing a bug that was not in the code. Run mutation
+passes with `PYTHONDONTWRITEBYTECODE=1`.
+
+## [rule text] ⚠️ THE MEMORY OF ONE PASS WAS THE WHOLE PERFORMANCE STORY, BECAUSE THE PASS RAN EAGERLY
+
+**Current status.** The per-block kernel `_block_is_cut` is traced, so the rays-by-triangles intermediate
+is fused away (6.6-8.3x, bit-identical, #462); history and tables: `.claude/notes/radiation-log.md` → "⚠️
+THE MEMORY OF ONE PASS WAS THE WHOLE PERFORMANCE STORY, BECAUSE THE PASS RAN EAGERLY".
+
+**`work_limit` bounds rays x triangles per compiled call, and the call takes TRIANGLES FIRST**
+(`_call_shape` in `triangles.py`): as many triangles as the bound allows — the whole set, for any
+mesh this pass can afford — and as many rays as then fit. The triangle block is the reuse factor
+(each ray's origin, direction, margin and exclusions are streamed once per call and tested against
+every triangle in it), so the order is not cosmetic.
+
+Rays first was the shipped call order and was the whole of an apparent "throughput falls with the mesh"
+finding; with triangles first, a `work_limit` above 4M makes whole builds slower and one below it is flat
+(#526). Chunks shorter than the full one are padded to a power of two. ⚠️ A rule tuned under one
+execution model is a hypothesis under the next. Record in the log, same heading.
+
+## [rule text] Watertight intersection, and one piece of the published algorithm deliberately dropped
+
+Woop, Benthin & Wald (*JCGT* 2(1), 2013) rather than Möller-Trumbore. Measured on a closed hull
+with rays from inside aimed at every vertex and edge midpoint: **Möller-Trumbore leaks 6 of 268,
+the watertight form leaks 0.** A leak is a pinhole through a closed surface — the ray escapes
+because neither of the two triangles sharing the feature claims it.
+
+⚠️ **THE WATERTIGHT GUARANTEE RESTS ON EXACT ARITHMETIC THAT A COMPILER IS FREE TO BREAK, AND IT
+DID.** Two triangles sharing an edge evaluate the same edge function with the two operand pairs
+swapped, and a ray through that edge is claimed by exactly one of them only while the two results
+are **exact negatives**. Written as `a * b - c * d` that holds one operation at a time — floating
+multiplication commutes bit for bit, so the two are `fl(P) - fl(Q)` and `fl(Q) - fl(P)`. It does
+**not** hold once the expression is compiled: XLA contracts it into a fused multiply-add, which
+keeps one product at full precision and rounds the other, so the two triangles keep *different*
+products exact. Measured on 200,000 random operand quadruples, the plain difference and its swap
+are not exact negatives on **a third** of them — and tracing the ray-test kernel on that form
+reopened **6 of 268** leaks on the closed-hull fixture, which is precisely the Möller-Trumbore
+failure count the watertight form exists to beat.
+
+Three things about this are worth carrying to any other exact-arithmetic predicate here:
+
+- **It is invisible in the source and invisible eagerly.** The shipped code was watertight only
+  because nothing had traced it; the guarantee was an accident of the call site, exactly like the
+  throughput above. A caller wrapping the build in `jit` would have silently lost it.
+- **Neither an XLA flag nor `lax.optimization_barrier` prevents it.** `xla_allow_excess_precision`
+  and `xla_cpu_enable_fast_math` change nothing in either direction, and the barrier does not
+  survive compilation — `fma` is still in the compiled HLO and the violation count is unchanged to
+  the last item. Do not reach for a flag; fix the arithmetic.
+- **The fix is to average the expression with the negation of its own swap**
+  (`_edge_function`): whatever the compiler does to `a - b` it does to `b - a` up to an exact sign,
+  because IEEE subtraction is antisymmetric however its operands were formed. That is exactly
+  antisymmetric compiled *and* bit-identical to the one-operation-at-a-time value, for two extra
+  multiplies and a subtraction per edge — which does not show up against the edge test at all
+  (6.6-8.3x still, measured with it in place). Pinned by
+  `test_the_edge_function_survives_being_compiled`, which also asserts the plain difference still
+  *fails*, so the fixture cannot quietly stop proving anything.
+
+The leak sweep (`validation/radiation_watertight_sweep.py`: 8,764 rays, 0 leaks eager and traced; 124
+with the plain difference, all compiled; the shear and the contour form's cross product need no exact
+cancellation) and three traps met measuring it (aim points snapped to a tolerance; `cylinder_triangles`
+does not close -- build closed bodies from one vertex table; swapping a module global does not invalidate
+a compiled version): `.claude/notes/radiation-log.md` → "Watertight intersection, and one piece of the
+published algorithm deliberately dropped".
+
+⚠️ **THE DISCRIMINATOR IS WHETHER THE CANCELLATION FEEDS A DISCRETE PREDICATE.** The contour form
+is built on the same difference of products, but a last-bit change there moves an *angle* by a
+last bit. The inside test feeds it to a sign test that decides which of two triangles claims a
+ray, and a discrete predicate has no small errors — it is right or it is a pinhole. Apply this
+test before assuming the next exact-arithmetic site here is safe or unsafe.
+
+
+⚠️ **The published swap of `kx`/`ky` when the chosen axis is negative is omitted on purpose, and
+this was measured, not assumed.** It keeps the coordinate system right-handed; flipping handedness
+negates `u`, `v`, `w` and the determinant *together*, and both places they are used here are
+invariant to that — the inside test accepts all-non-negative or all-non-positive, and the distance
+divides by the same determinant. Over 20000 rays against 300 triangles the swap changes no hit and
+moves no distance by more than 0.0. It is needed when the determinant's sign drives back-face
+culling; this module culls with the facet normal instead. It was carried at first, and its mutation
+was the one that came back green — the right conclusion there was to delete the code, not to add a
+test for behaviour that does not exist.
+
+## [rule text] The surface system: what is exact, what is not, and by how much
+
+`(I - diag(rho) F) B = M + rho * ((F^M - F) M + H_external)`, solved matrix-free. **The bounce
+count is not a parameter** — the inverse is the infinite bounce sum. Verified against an explicit
+Neumann series: 200 terms agree to 1e-10, one term is wrong by more than 100%.
+
+**Exact, and gate on these:**
+
+- **Row sums are 1 to about 1e-15** at every refinement. That is what bounds `spec(rho F)` by the
+  largest reflectance and makes the system well conditioned. `row_sum_error` reports it.
+- **`B = M/(1-rho)` on a uniform closed box, to 1e-12, at rho = 0.9** — where a single bounce
+  gives 1.9 against 10, so nothing that truncates can pass.
+- **A Lambertian source's energy balances exactly** — total landing equals total leaving,
+  1.000000 at every refinement.
+
+⚠️ **NOT exact — say the number rather than the assumption. None of these converges under mesh
+REFINEMENT; the first two converge in the receiver QUADRATURE, which is the knob that exists.**
+
+- **Reciprocity** is the quadrature error on the receiving facet, and nothing else. Refinement
+  does not touch it: shrinking a closed box's facets brings their neighbours proportionally
+  closer, so the ratio the error depends on never changes and `reciprocity_residual` reads the
+  same at 12, 48, 192 and 432 facets. It falls with the point count instead — **0.2421 / 0.0281 /
+  0.0078 / 0.0045 at 1 / 3 / 6 / 12 points**, the same four numbers at every refinement. Six is
+  the shipped default. Still a **diagnostic, not a gate**.
+- **Global energy conservation follows reciprocity, and at one point per receiver it GETS WORSE
+  as the mesh is refined.** On a small lamp in a large box (4 emitting facets of `inward_box(d)`,
+  reflectance 0.9) absorbed/emitted measures 1.000000 / 0.999868 / **0.982769 / 0.975625 /
+  0.973077** at 12 / 48 / 192 / 432 / 768 facets: 2.7% of the lamp's output lost and still
+  growing, because the facets nearest the lamp close in on it while staying the same size
+  relative to their separation. At six points the same scene gives 1.000000 / 1.000212 /
+  1.000171 / 1.000120 / 1.000102, improving. Per column, `sum_i A_i F_ij = A_j` is violated by
+  **8.8% / 1.5% / 0.38% / 0.18%** at 1 / 3 / 6 / 12 points — **on cubes**. On `inward_box`
+  stretched to 1 x 1 x 3 the same figure is **35-38% / 14-15% / 4.6-4.8% / 0.99%** (48 and 192
+  facets, `NoOcclusion`; jax 0.10.2, CPU, x64, Linux x86_64, 4 cores, 2026-10-16, #631), about
+  ten times larger, and `build_transfer`'s docstring states both.
+  ⚠️ **The earlier record here — "1.000112 / 1.000083 / 1.000062 … conservative to one part in ten
+  thousand" at the centroid rule — is DELETED, not corrected: it does not reproduce and its
+  fixture was not written down.** The measurement above is the lamp-in-a-dark-box fixture, whose
+  first two entries match it exactly and whose remainder does not. The likely reason is the one
+  already on record two sections down: **a box in which every facet emits balances to 1.000000 at
+  every mesh and every rule**, because each facet's error is its neighbour's and they cancel
+  identically — so an all-emitting fixture cannot see this defect at all.
+- **A non-Lambertian source's energy still does not balance, and the receiver quadrature does not
+  help** — the error is source-side, its profile being evaluated at the single centroid-to-centroid
+  direction, which must stay outside the frozen build to keep its parameters differentiable. At
+  six points a cosine-power exponent of 8 gives 1.086 / 0.978 / 0.982 / 0.987 at 12 / 48 / 192 /
+  432 facets against 1.145 / 0.970 / 0.970 / 0.977 at one point, and the two agree to three
+  figures from three points upward. This one *does* shrink with refinement, since more directions
+  get sampled.
+
+⚠️ **`reciprocity_residual` is normalized by the LARGEST entry, not per pair.** Two facets of the
+same flat wall transfer nothing and hold values around 1e-18; a per-pair relative measure turns
+that rounding noise into a residual of 0.97 while those pairs carry, measured, 0.0000 of the total
+transfer. The first version did exactly that and reported ~1.0 on a healthy matrix.
+
+## [rule text] ⚠️ `geometric[i, j]` IS THE FORM FACTOR *FROM* `i` *TO* `j`, SO THE AREA MULTIPLIES THE ROW
+
+`build_transfer` evaluates `projected_solid_angle` over facet `j` from points on facet `i`, which
+is `F_{i->j}`. It is used as the weight with which `j`'s radiosity lights `i` — and that is the
+same number, not a second one reached through reciprocity: the irradiance at a point `x` is
+`sum_j B_j F_{dA_x -> A_j}` by definition. Reciprocity pairs `A_i F_ij` with `A_j F_ji`.
+
+**The shipped `reciprocity_residual` weighted the COLUMN, and no test could see it**, because
+every fixture in the suite was a subdivided cube, where all facets share one area and the two
+expressions are identical. Measured once a fixture had unequal areas: on a box stretched to
+1x1x3, the row weighting reads 0.2124 / 0.0930 / 0.0318 / 0.0072 across the four rules while the
+column weighting reads 0.9596 / 0.9179 / 0.8983 / 0.8912 — large and flat. On two squares of area
+1 and 100 a hundred widths apart, 0.0022 against 0.9999. `stretched_box` in the tests exists for
+this; reach for it whenever a claim involves an area.
+
+## [rule text] The receiver quadrature: why ONE side of the double integral is exact and the other is not
+
+A transfer factor is a double area integral. The source half is closed form
+(`projected_solid_angle`); the receiver half is quadrature (`quadrature.py`, six points by
+default). That asymmetry is deliberate and is the better of the two available trades:
+
+- **Source exact + receiver quadrature** — row sums exact to 1e-15 at every rule, reciprocity
+  O(quadrature error). Each quadrature point sees a whole closed enclosure so its own row sums to
+  one, and the weights sum to one.
+- **Both by the same quadrature** — reciprocity exact *by construction* (the double sum is
+  manifestly symmetric), row sums only approximate.
+
+The row sum is what bounds `spec(rho F)` and what catches a wrong kernel, so it is the one to keep
+exact. Do not "finish the job" by quadraturing the source too.
+
+A finer rule costs far less than its point count (six points 1.15-1.72x the one-point build):
+`.claude/notes/radiation-log.md` → "The receiver quadrature: why ONE side of the double integral is exact
+and the other is not".
+
+⚠️ **Polynomial degree does not order the rules by accuracy here.** The integrand goes like
+`1/r^2` and is nearly singular between facets sharing an edge, which is where the error lives and
+what a polynomial rule is worst at. The 7-point degree-5 rule measures **0.0169 against the
+6-point degree-4 rule's 0.0078** — it spends nearly a quarter of its weight at the centroid — so
+it is deleted from the catalogue rather than offered. The 4-point degree-3 rule is absent too: its
+centroid weight is negative, which can drive a transfer factor below zero.
+
+**Not integrated over the receiver, and necessarily so:** the centroid separation carrying
+absorption, the source cosine carrying a non-Lambertian profile, and the occlusion mask. All three
+multiply the geometric term elementwise so they can stay live and differentiable; moving them
+inside the quadrature would put them back in the frozen `n^2` build. In a scene with partial
+shadowing, or a medium absorbing appreciably over a facet's own width, those are the coarse
+approximations — not the receiver rule. Tracked as
+<https://github.com/DeGrootResearchGroup/aquaflux/issues/447>, which carries the measured
+cosine-power numbers and says what has to be measured before the occlusion half is designed.
+
+## [rule text] ⚠️ THE STOPPING RULE IS CHOSEN, NOT DEFAULTED
+
+A componentwise relative test asks every residual entry to fall below `rtol` times *its own*
+right-hand side. Most facets do not emit — a lamp is a handful among walls — so most of that side
+is exactly zero and the demand becomes unsatisfiable. Measured on a lamp-in-a-dark-box fixture:
+stock `lx.GMRES(rtol=1e-10, atol=0.0)` **fails outright**, while the global relative test
+converges in 3 restart cycles.
+
+⚠️ What that does *not* show: the same stock solver with a **non-zero** `atol` agrees to 4e-14 on
+the same scene. The componentwise rule is then quietly an absolute tolerance — wrong in a way that
+scales with the problem rather than one that raises. Only the degenerate case is pinned.
+
+**Every fixture that emits everywhere is the wrong shape for this class of question.** The
+lamp-in-a-dark-box fixture exists because the all-emitting boxes could not see the defect at all.
+
+## [rule text] The frozen/live split, and the two ways it has been got wrong
+
+Frozen at build: the projected solid angles, the source-side cosines, the centroid separations,
+the occlusion mask — all `n^2`. Live per call: reflectance, emission, power, profile parameters,
+occluder transmittance, absorption coefficient.
+
+Both failures leave a finite, plausible number behind rather than a NaN or a zero:
+
+- freezing the whole of `F` costs a few percent of `dG/da`;
+- freezing the visibility inside the geometry term costs about two thirds of `dG/dt`.
+
+The rule: **anything promised a gradient is computed OUTSIDE the frozen arrays**, as an
+elementwise multiply against them. ⚠️ **That rule is what makes the one-point factors one-point,
+and it does not force the frozen side to be a single number.** A frozen array may hold whatever
+*geometry* a live factor needs, so long as the live parameter stays outside it — which is how a
+non-Lambertian profile's bias could be removed by freezing two moments of `log cos` per pair
+instead of one cosine, with the exponent still live. Measured and decided against building, for
+reasons recorded in the one-point-factors section below; the point here is that "live" constrains
+what the frozen array may *depend on*, not how wide it may be. A uniform absorption coefficient goes through
+`exp(-a * frozen_separation)` in closed form, so no geometry is revisited; any other `Absorption`
+re-walks every pair on every call, which is correct and costs the `n^2` build again.
+
+**The adjoint is an implicit solve, not the iteration replayed.** Pinned by varying the restart
+length — 2 against 120 gives 47 cycles against 3 on the same problem — and asserting the
+gradients agree to 1e-8. The step counts are asserted to differ, or the test compares a
+configuration against itself.
+
+## [rule text] Four closed-form checks added after the fact, and what each one found (2026-09-21)
+
+Written to close gaps against the design specification's analytic cases. **None found a defect in
+a computed value**, which is worth stating rather than implying; two found things worth knowing,
+and all four were mutation-checked (seven one-line mutations, each red on its own assertion).
+
+- **Case 6 in absorbing water** (`test_an_infinite_line_in_an_absorbing_medium_gives_the_bickley_functions`):
+  `G = P'/(2 pi r) Ki_1(a r)`, `E = P'/(2 pi r) Ki_2(a r)`. A summed line of isotropic points,
+  spacing `r/50`, optical half-length 35, reproduces both to **<1e-11 at `a r` = 0.5 and 2** —
+  far better than the nominal second order, because a midpoint sum of a smooth integrand decaying
+  along an effectively infinite line converges spectrally. So the tolerance (1e-9) is set by the
+  reference quadrature: `scipy.integrate.quad`'s default `epsabs` of 1.5e-8 would have been the weak
+  link, and the test passes `epsabs=0, epsrel=1e-13`.
+- **Case 8c, Walton's obstructed squares** (`test_an_obstructed_pair_converges_on_the_published_view_factor`):
+  `F = 0.11562061`, the geometry confirmed independently to 0.1156206021 (blocker 0.5 x 0.5,
+  centred, **0.75 from the first plate**; midway gives ~0.0995). Both strategies converge at second
+  order in plate spacing. Errors at 6 / 12 / 24 plates a side, six-point receiver rule: silhouette
+  with the blocker near the source **-1.6e-4 / -4.0e-5 / -1.0e-5**; one ray per pair **1.06e-3 /
+  2.6e-4 / 6.4e-5**. ⚠️ With the blocker near the *receiver* the two strategies agree to 1e-16: the
+  shadow is scaled by 4 and triangle centroids sit at thirds of a cell, so every shadow edge lands on
+  a facet edge and every pair is wholly hidden or wholly clear. A fixture can make the silhouette
+  look binary.
+- **Case 11, the emission transfer** (`test_a_narrow_source_sends_its_emission_where_its_profile_says`):
+  replaced a test that asserted only *not equal to Lambertian*. Against
+  `M A f(theta_e) cos(theta_r)/r^2` summed per triangle pair, **1.8e-7 at width 1e-3, second order,
+  identical at n = 1 and 50**. ⚠️ The reference must be per pair: under a `CosinePower(50)` beam
+  the two receiving triangles of one square differ by 12% at width 1e-2, which a reference at the
+  square's middle reads as a first-order error in the code. ⚠️ A profile carries its constant in
+  **two** methods — the gather reads both, the transfer `radiance_per_exitance_at` — so a
+  mutation of one is invisible to a test of the other path. The contract between them is pinned in
+  `test_radiation_profiles.py`.
+- **Conservation of light through the adjoint** (`test_the_adjoint_conserves_light_through_every_facet`):
+  in a closed box of uniform `rho`, every row of `d(B, H, G)/dM` sums to `1/(1-rho)` (times 4 for
+  `G`), to 1e-14 at `rho = 0.9` — a check on the adjoint with no finite difference. ⚠️ **The
+  per-facet form is NOT exact**: `d(sum A H)/dM_k = A_k/(1-rho)` needs reciprocity, and with the
+  receiver on quadrature and the source in closed form the rows are exact at the columns' expense.
+  On `stretched_box(2)` the column sums are off by up to **4.8%** (reciprocity residual 3.2%),
+  and that per-facet gradient misses by exactly that. Not an adjoint error; do not "fix" the test
+  toward it.
+
+⚠️ **FIXED BY DECLARATION: the silhouette strategy used to ignore a ONE-SIDED sheet from behind.**
+It counts only blockers facing the receiver (`facing` in `SilhouetteOcclusion._per_triangle`), which
+is exact on a closed, consistently wound surface — a blocked sight line enters it through exactly
+one front face — and back faces are excluded because they would double the count. A lone
+zero-thickness sheet, though, has the medium on both sides: seen from behind it hid nothing, and
+Walton's pair with a one-sided blocker read the **unobstructed 0.1998** from one plate, silently.
+The ray test is two-sided and never had the problem. The sheets are declared on the surface set,
+`Surfaces.from_triangles(..., two_sided=(names,))` (since #689; there is no
+`SilhouetteOcclusion.two_sided` any more), and the clip counts their facets from both sides
+(`surfaces.is_sheet & (surfaces.twin < 0)`: on a set whose back faces are appended each face counts
+from its own side); a misspelt name **raises** at `from_triangles` (it would otherwise leak light with
+no error); and any **open piece left undeclared is warned about** at build, naming its bodies. With the blocker declared, the one-sided Walton pair converges
+exactly as a two-sided copy did (−1.6e-4 / −4.0e-5 at 6 / 12 plates a side).
+
+**Why a declaration and not topology** (decided by the user, 2026-09-21, over "automatic by
+topology" and "refuse open surfaces"): `checks.open_facets` marks facets on a connected piece with
+a free edge (pieces joined only across edges used exactly twice), and it is wrong both ways on
+real input. **A sheet welded to the wall all the way round has no free edge** — each rim edge is
+used three times, which neither joins nor opens it — so it reads closed (pinned:
+`test_a_sheet_welded_in_all_the_way_round_reads_as_closed`, 8 non-manifold edges). **A duct
+exported without its end caps reads as a sheet**, and counting its wall from both sides would count
+every exit-and-re-entry twice. So topology drives only the *warning*; the counting follows the
+declaration. Naming a closed body two-sided makes it block twice and errs dark — not detectable,
+because a welded sheet looks closed too.
+
+## [rule text] The public surface: `model.py`, and the four assembly steps that are easy to omit
+
+`build_radiation_model(receivers, surfaces, occluders=..., settings=...)` freezes everything a
+scene's *shape* decides — the `n^2` transfer, its facet-side shadow mask, and a second mask for
+the receivers — and the three entry points read off it:
+
+```
+B, cycles = radiosity(model, surfaces)            # what each facet sends out   (n_facets,)
+H, cycles = surface_irradiance(model, surfaces)   # what lands on each facet    (n_facets,)
+G, cycles = fluence_rate(model, surfaces)         # the volume field            (n_receivers,)
+```
+
+Each returns the solver's restart-cycle count alongside its field: a field is not evidence of
+anything until the solve behind it is known to have converged.
+
+**It takes an array of receiver positions, not a `Mesh`.** Nothing here reads anything else from
+one, and keeping the fence one-way is what stops radiation from growing a dependency on cells,
+fluxes or residuals. Injecting `G` into a transport equation is the *consumer's* job, through the
+transport package's own volume-source seam.
+
+Four steps the assembly does that are each invisible when left out:
+
+1. **Point sources are fed in as an arrival, not through the transfer matrix.** A zero-area facet
+   has no area to emit from and no surface to receive on, so it is absent from `F` entirely. Omit
+   the extra gather and a lamp-lit enclosure comes back dark — which is a field, not an error.
+2. **The reflected part is re-gathered as LAMBERTIAN**, whatever the source emitted like, because
+   that is what diffuse reflection means. Re-gathering it with the source's own distribution is
+   wrong by a quarter to nearly a factor of two on a cosine-power-8 box, and destroys the
+   uniformity the enclosure should have.
+3. **The facets' own emission is subtracted before that second gather** — `outgoing - emission`,
+   not `outgoing` — or every source radiates twice.
+4. **Both shadow masks are built against the same bodies, in one call.** Built separately, the
+   volume is lit through a sleeve the surface solve correctly treated as opaque.
+
+**`RadiationSettings` fields are all `None` by default, and unset means ABSENT rather than
+copied.** `_passed` drops them so each default stays written down once, beside its own reasoning.
+A settings object carrying its own copy of a default silently keeps using the old number the day
+the real one moves. Membership test: a setting whose reason can be stated without naming a lamp,
+a wall or a medium belongs here; anything else is physics and belongs on `Surfaces` or an
+`Absorption`.
+
+⚠️ **The surface set passed at call time must be the build's geometry, and every call checks**
+(`RadiationModel.geometry`, a SHA-256 of the vertices plus the point-source labels, checked in
+`radiosity`; exact, not toleranced -- `with_optics` carries the build's own vertex array). **Traced
+vertices are refused at every call** (`TypeError`, since 2026-09-29): the facet-to-facet transfer is
+frozen too, so a traced lamp reached the direct gather only and its derivative was wrong (-3.54 against
++4.08 W/m² per m by a finite difference over rebuilt models). Position derivatives are
+`direct_fluence_rate` / `direct_irradiance`'s; a model may still be BUILT from traced vertices (its
+fingerprint is then `None`). Record and tests: `.claude/notes/radiation-log.md` → "The public surface:
+`model.py`, and the four assembly steps that are easy to omit".
+
+## [rule text] `G = 4B` — the closed form that pins the whole assembly at once
+
+A closed Lambertian enclosure at uniform radiosity `B` has radiance `B/pi` in every direction, so
+at **any** interior point `G = 4 pi (B/pi) = 4B`, with no dependence on position. Two fixtures use
+it, and between them they cover every step above:
+
+- uniform emission `M` and reflectance `rho`: `B = M/(1-rho)`, so `G = 4M/(1-rho)` — exact to
+  1e-12 at `rho = 0`, 0.5 and 0.9. Drop the reflected gather and it returns `4M`, a tenth of the
+  answer at 0.9.
+- **cosine-power sources with zero emission, lit only by an `external_irradiance` `E`**: every
+  watt present has been reflected once, so the enclosure is Lambertian again whatever its
+  emitters are, `B = rho E/(1-rho)` and `G = 4B` still holds exactly. This is the fixture that
+  catches step 2, and it is the only one that can: with Lambertian emitters the two distributions
+  coincide and the bug is invisible.
+
+**A point source in a dark box conserves energy only approximately, and the number is the
+source-side one-point error again** — the lamp's direction to each wall facet is evaluated at
+that facet's centroid. Absorbed over emitted, lamp at the centre of `inward_box(d)`, reflectance
+0.9 on the walls: **1.413436 / 1.030131 / 1.010384 / 1.004639** at 12 / 48 / 192 / 432 wall
+facets. It shrinks with refinement, unlike the reciprocity error, because refining samples more
+directions. With `rho = 0` the same fixture gives `G = P/(4 pi r^2)` exactly.
+
+Two mutations of `model.py` / `gather.py` survive and were dismissed (the reflected set's zero power; the
+chunk remainder, which needs a receiver count the chunk does not divide -- 37 in
+`test_chunking_changes_nothing_about_the_answer`): `.claude/notes/radiation-log.md` → "`G = 4B` — the
+closed form that pins the whole assembly at once".
+
+## [rule text] Documentation
+
+The package **is** in `docs/conf.py`'s `PUBLIC_SUBPACKAGES`, with a `SUBPACKAGE_GROUPS` entry
+keyed on the modules its names are *defined* in — `model` first, then the pieces it composes.
+Listing a subpackage publishes the whole of its `__all__`, so that list is the editorial
+decision. It was reviewed at this point and kept entire: every export is something a user can
+legitimately reach for, including the two solid-angle kernels, whose warning that they are **not
+interchangeable** is worth publishing rather than hiding.
+
+**UV disinfection of AIR is in scope as well as water** (project owner, 2026-09-29). Write the
+medium as "the medium" / "the fluid" (water or air) in the guide, the CAD page and the package's
+docstrings, and name water only where the content is genuinely water's: the UVT conversion
+(`absorption_from_uvt` and its 5.129 /m), Bolton's quartz-sleeve error figures, and the
+Sozzi & Taghipour (2006) case. Leaving `absorption` out is the non-absorbing medium, which the guide
+offers for air at 254 nm.
+
+**The user guide is `docs/radiation.md`** (in the Guide toctree beside `cad_geometry.md`, which it
+links to rather than repeats: CAD import, the mesh-patch lamp, streaming and culling timings on the
+Sozzi mesh live there). ⚠️ **It restates defaults and measurements by value**, so a change to any of
+these makes it false and must update it in the same change: the six-point `receiver_quadrature`,
+`refine_for_receivers`' `max_ratio=0.25`, the GMRES global relative `1e-10`, `RayCastOcclusion` as
+the self-occlusion default and `ShaftCulling` as the culling default, opaque as the transmittance
+default, GMRES restart 120, point sources Isotropic-only (`check_profiles`), the 2.6%-at-eight-sectors inscribed-area undershoot, 95% UVT = 5.129 /m, and the Sozzi
+figures (0.09% volume mean; 0.36-1.65 / 0.886-1.076 at 64 / 256 directions, non-uniform 8 x 4 / 16 x 8 grids; 0.44% median lamp
+discretization; dose mean 0.3%, log reduction within 1.1%, DOM-64 short by 23% at k = 0.5). Its
+quick start — `G = 80` in a 6x6x6 box mesh's own patches at `M = 10, rho = 0.5` — was run
+(2026-09-28, and again 2026-09-29 after it became the quick start) and holds to rounding.
+**A new-user review (an independent agent with only the published pages and docstrings,
+2026-09-29) drove a second pass**: the runnable example moved first, the STL-units trap
+(`read_stl` does not scale; millimetre drawings are common), an Air disinfection section,
+irradiance at arbitrary oriented points *with* reflection (two `direct_irradiance` gathers, one of
+`B - M` as Lambertian — checked `E = B` in a glowing box), a point-source snippet, one-line call
+forms for the diagnostics, the closed-enclosure qualifier on the row sums, and the lamp-position
+derivative (now refused through the model; see "The surface set passed at call time"). Every new
+snippet was run. Its **Theory** section writes out every equation the code
+evaluates — the direct gather, both solid-angle kernels, `surviving_fraction`, the voxel walk,
+`F^geo`/`F`/`F^M`, the eliminated system, the two-gather `G`, the adjoint — and was checked
+(2026-09-29, 3x3x3 box of its own patches, CosinePower(4) lid so `F^M != F`, uniform `a = 2`)
+against `radiosity` / `surface_irradiance` / `fluence_rate` to 1e-16 relative, and `F^geo` rows
+against its stated six-point formula to 4e-17. A change to any of those formulas must update it.
+
+## [rule text] The winding number answers "is this cell inside the metal", and it is exact
+
+`enclosure_winding(vertices, points)` sums the **signed** solid angle of every facet at each point
+and divides by `4π`. On a closed, consistently wound surface that is `±1` inside and `0` outside,
+the overall sign set by whether the file is wound outward or inward — so `check_points_outside`
+tests the **magnitude** against 0.5, a threshold with nothing behind it to tune because the
+quantity it cuts takes only two values.
+
+Measured on a unit box at 12, 48 and 192 facets, at x = 0.999 (a thousandth of a box-width from a
+wall): **87 / 0 / 0 ulp from `1` eagerly and 25 / 0 / 0 compiled**, and at most 2 ulp at two further
+interior points (`validation/radiation_enclosure_winding.py`, 2026-09-26; ~2e-14 at worst). Outside,
+the drum in the same harness read at most 2.1e-14 eagerly — and exactly `0.0` now outside a closed
+piece's box, where it is no longer summed (next section). ⚠️ **The record used to say "`1.0` to the
+last bit"; re-measured under #530 that does not hold even eagerly** on the 12-facet box — the claim
+was unfalsifiable (no harness) and is replaced, not annotated. There is no near-field regime where
+it degrades, which is what disqualifies the two obvious alternatives:
+
+| test | why not |
+|---|---|
+| ray parity (odd crossings = inside) | only meaningful on a genuinely **closed** surface, and this package deliberately does not require watertightness. On an open one it returns a clean, wrong bit. |
+| nearest-triangle signed distance | the pseudonormal problem — unreliable near edges and creases, which is what a reactor corner is made of. |
+| **winding number** | exact, and on an open surface it lands *between* the two answers rather than guessing. |
+
+⚠️ **An open surface reads ~0.45 just off a bare disc, and that is the feature.** Open surfaces are
+legal here, so `check_points_outside` **warns** rather than raising when nothing is enclosed but
+the largest winding is above 0.01: a clean pass from a surface with no inside establishes less than
+it reads as, and refusing would reject a geometry the rest of the package accepts.
+
+⚠️ **An inconsistently wound closed surface is NOT detected as such — it reads as an open one.** A
+capped cylinder with one cap reversed measures **0.858 and 0.951 at two interior points**: not 1,
+not 0, and *different at each point*, which is the tell, since a real winding number is constant
+over a region. Run `check_winding` first; this check cannot substitute for it and does not try.
+
+**Cost is `n_points × n_facets`**, the same product the receiver visibility build already pays, so
+it is affordable but not free — which is why `build_radiation_model` does **not** call it. Analytic
+occluder bodies do refuse interior points at the visibility build, because `Body.contains` is
+O(1) per point; a triangle soup has no such shortcut. Wiring it into the model by default would
+change a shipped behaviour and roughly double that build, so it is an explicit call.
+
+## [rule text] The two engineering-unit conversions, and the numbers that make them worth having
+
+`units.py` exists because both conversions were being done by hand at every call site and both are
+wrong in ways that produce a plausible field.
+
+**`absorption_from_uvt(uvt)` — ultraviolet transmittance (%, through 1 cm) to a NAPIERIAN
+coefficient per METRE.** That is what `exp(-a r)` and metres-based geometry want. Two other
+conventions are in circulation and both are silently wrong here: a *decadic* coefficient (paired
+with `10^(-A r)`) is smaller by `ln 10`, and a per-*centimetre* one by a hundred. A 95% UVT water
+is **5.129 /m** napierian, **2.228 /m** decadic, **0.05129 /cm**.
+
+⚠️ **A fraction passed as a percentage is refused, and it is the one mistake a range check cannot
+catch** — `0.95` is a legal percentage. Read as written it gives **466 /m** against 95% UVT's
+**5.13**, ninety times apart, and the field is dark rather than erroneous. The cost is that a
+genuine sub-1% water cannot be expressed; that is outside the range ultraviolet reactors are built
+for, and Beer's law inverts in one line by hand. Note the guard is over the **whole array**, since
+a single fraction hidden among percentages is how this arrives.
+
+**`lamp_exitance(surfaces, {"lamp": watts})` divides by the TRIANGULATION's area, not the shape's.**
+`sum(M A)` over the body then equals its rating exactly at any refinement, because the same areas
+appear on both sides. Dividing by the analytic `π d L` does not: an inscribed triangulation of a
+0.0115 m × 0.4 m sleeve undershoots it by **2.55% / 0.64% / 0.16% / 0.04%** at 8 / 16 / 32 / 64
+sectors, so a hand-computed exitance makes the model radiate that much less than the lamp — always
+in the same direction, and reported nowhere. `Surfaces.area_by_solid` is the one home for the
+per-body total, so a helper and a user's own report cannot disagree about how big the lamp is.
+
+⚠️ **Which body gets the rating is a modelling decision no signature can make.** A lamp is rated at
+its envelope; the geometry in a model is usually the quartz sleeve, which is larger. Both readings
+are legal and they differ by the area ratio.
+
+## [rule text] A TRACED STEP IS BOUNDED BY CACHE, NOT ONLY BY MEMORY: `work.PASS_PAIRS` (#577, 2026-09-27)
+
+`work.in_passes` forms at most **`PASS_PAIRS = 2^16`** receiver-by-facet pairs a step, however high
+`pair_limit` is. `pair_limit` is still the memory bound (and still sets the streamed chunk and every
+host pass); `PASS_PAIRS` is the traced loop's speed bound. Answers do not change — each receiver's
+row is formed from its own inputs either way — and every checksum below agreed across bounds.
+Reaches every `in_passes` consumer: the areal segments, the point sources, `direct_irradiance` and the
+graded-medium transfer walk.
+
+**Why.** The compiled gather body writes each per-pair intermediate out and reads it back. On this
+machine the per-pair rate is ~23-26M pairs/s while a step forms up to ~230k pairs and falls to
+~12-15M pairs/s past ~300k (one segment kernel, 2,400-facet lists, blocks of 8: 12 blocks 24.6M/s,
+16 blocks 13.3M/s). **Pinned to one core the cliff is still there** (4 blocks 16.2M/s, 8+ blocks
+~7.9M/s), so it is the working set against a core's cache (2 MB L2 each here), not threading.
+
+**Current status.** #577 was filed on the wrong mechanism: on a 4-core Linux box padding and call count
+were worth ~10 % and the step size ~1.5x; on the 11-core Mac the bound barely matters (2.50-2.59 s from
+32k to 4M) and 2^16 stands. The transfer build does NOT take this bound (a cap was built and withdrawn;
+re-measure on the current build before capping it). ⚠️ A patched bound in one process measures nothing
+after its first arm -- `_segment_part` is cached under `_Labels` and `pair_limit`, which do not carry it;
+run each bound in its own process. Tables: `.claude/notes/radiation-log.md` → "A TRACED STEP IS BOUNDED
+BY CACHE, NOT ONLY BY MEMORY: `work.PASS_PAIRS` (#577, 2026-09-27)".
+
+**Pinned by** `test_a_step_forms_no_more_than_the_pass_bound_under_a_higher_limit`
+(`test_radiation_work.py`: scan length 6 for 12 points at a bound of 4 pairs and a limit of 8, and a
+lower limit still winning); reverting the `min(pair_limit, PASS_PAIRS)` turns it red.
+
+## [rule text] GRID ACCELERATION: BUILT as `TriangleGrid` — a compiled host walk, off by default
+
+`RayCastOcclusion` tests every ray against every triangle, which a reactor puts out of reach:
+1.6M cells, 7,516 lamp facets and 53,500 wall triangles is **6.6e14** intersections, weeks at
+the measured 120-150 Mtest/s. `grid.py` registers each triangle in the voxels its bounding box (a rounding wider)
+spans and walks each segment through them (Amanatides & Woo's 3D-DDA), testing only what those
+voxels hold and stopping at the first blocker. Selected with `RayCastOcclusion(grid=True)`, an
+integer, or a per-axis triple; **`False` is the default** — it changes cost, not answers, and
+the answers are what the shipped path is trusted for.
+
+The probe that sized the grid on the Sozzi wall (~52 triangles tested per ray at 128³ against 53,500; the
+specification's ~20 was optimistic): `.claude/notes/radiation-log.md` → "GRID ACCELERATION: BUILT as
+`TriangleGrid` — a compiled host walk, off by default".
+
+⚠️ **A TRACED walk is not merely slower here, it is WORSE THAN THE BRUTE FORCE IT REPLACES, and
+that is why this is host code.** Under `jax` the trip count and the per-voxel triangle count must
+both be static, so every ray pays the longest walk against the fullest voxel whether or not it
+finds anything: 183 steps x 36 triangles = **6,588 tests a ray** at 128³, against 53,500 for the
+brute force — an 8x saving, not 1,000x, and none of the early exit. The mask is frozen and built
+from geometry alone, so nothing about it has to be traceable. **Reach for a host implementation
+whenever a structure's whole value is in the work it SKIPS** — tracing prices the work skipped at the
+same rate as the work done. ⚠️ **And "host" must mean compiled host code, not numpy passes**: the array
+walk that stood here priced every step instead (THE COMPILED WALK, below).
+
+**One predicate, two implementations.** `_counts_as_hit` holds the window-and-exclusion rule
+(`distance > near`, `distance <= 1.0` inclusive at the far end, triangle not excluded) for
+`_block_is_cut`, with the geometry in `_watertight_hit`. ⚠️ **The grid walk carries its own copy of
+both** (`grid_walk._cuts`), because a Numba loop cannot call a traced function — there is no
+`_pair_is_cut` any more. The grid's tests compare the two against each other at every resolution, and a
+change to one must be made to the other.
+
+The exactness tests (bit equality with `segment_is_cut` at several resolutions, a closed drum that must
+not leak) and their mutation pass are recorded in the log, same heading.
+
+**Current status.** Three defects survived the grid's first, single-shaped test suite (a margin read as a
+share rather than a length; an unbounded candidate expansion; voxels sized from the box's volume rather
+than the triangles' area). On the real reactor (`validation/sozzi_radiation/grid_mask_check.py`) the
+triangulated wall's mask differs from the analytic cylinders only in the inscribed-polygon sliver at the
+pipe rims, chamber cells identically; the whole Sozzi field with the triangulated wall costs ~10-12x the
+cylinders'. Primitives remain the path a real reactor should take; the grid is the fallback for geometry
+that exists only as triangles (#501). Record in the log, same heading. ⚠️ A suite whose fixtures are one
+shape of input repeated cannot tell a correct implementation from broken ones.
+
+### THE COMPILED WALK: one Numba loop per ray, the only walk (2026-09-26)
+
+
+**What it is.** `TriangleGrid.blocks` hands the live rays' DDA state (`_enters_grid`, `_walk_state`)
+to `grid_walk.walk_to_first_hit`, a `numba.njit(parallel=True)` loop, one ray per `prange` iteration,
+walked to its first hit or its end, the first axis winning a tie, capped at `sum(resolution) + 3` steps
+(a DDA visits at most `nx + ny + nz - 2`). Each ray's axis permutation and shear (`_ray_frame`) is
+formed once per ray, not per triangle. No pair array is formed, so **`blocks` takes no `work_limit`**,
+and `RayCastOcclusion.work_limit` now bounds only the every-triangle path. **Numba is a core dependency**
+(`numba>=0.61`, the first with Python 3.13 wheels), decided by the project owner over keeping it
+optional; the array walk was deleted as dominated (it lost at every grid and scene measured).
+⚠️ **The first call of a process compiles the loop, ~2 s.** Not cached to disk (`cache=True` would
+write beside the installed package).
+
+⚠️ **The intersection test is a SECOND IMPLEMENTATION of `_watertight_hit` + `_counts_as_hit`**,
+because a Numba loop cannot call a traced JAX function and the dense `_block_is_cut` path still needs
+the traced one. Every contract test in `test_radiation_grid.py` compares the walk against
+`segment_is_cut`, which is what keeps them one predicate; a change to one must be made to the other.
+
+
+Resolution re-asked under the compiled walk, the remaining per-ray cost, and the walk's tests and
+mutation pass (the averaged edge function stays although Numba did not fuse the products):
+`.claude/notes/radiation-log.md` → "THE COMPILED WALK: one Numba loop per ray, the only walk
+(2026-09-26)".
+
+**`NUMBA_NUM_THREADS=1`** is now set beside `OMP_NUM_THREADS` in `tools/fastgate.sh`'s parallel tier and
+in CI's environment, so xdist workers do not each start a pool the size of the machine.
+
+## [rule text] THE WALK'S COST: TRIANGLES TESTED IN NARROW PASSAGES, AND THE VOXELS' SHAPE (#503, 2026-09-27)
+
+**Current status.** Measured for #503 (`grid_walk_direction.py`): walking from the nearer end is worth
+nothing (0.95-1.06x); empty space is not the cost (a segment down a pipe tests the wall's triangles in
+every voxel it crosses); refining near-cubic voxels is flat -- but the voxels' SHAPE moves it, which set
+the default below. Empty-space skipping is not built. Tables: `.claude/notes/radiation-log.md` → "THE
+WALK'S COST: TRIANGLES TESTED IN NARROW PASSAGES, AND THE VOXELS' SHAPE (#503, 2026-09-27)".
+
+**THE NEW DEFAULT (`grid._resolution`)**: equal voxel counts per axis — each voxel in the proportions
+of the triangles' bounding box, edges capped at `_MAX_ASPECT = 32` to one another (the Sozzi box is
+19:1) — and `_VOXEL_BUDGET = 4` times the voxels of the near-cubic grid at `_TARGET_PER_VOXEL`
+(`_near_cubic`, still sized from the triangles' AREA). An axis that would get under one voxel gets one
+and the others share the count (a flat surface is one voxel thick). **The derivation**: steps along an
+axis go as the segment's travel there over the edge, so at a fixed voxel count steps are fewest with
+edges proportional to that travel; a mask pairs every receiver with every facet, so segments spread
+like the box. ⚠️ **Where it can mislead**: the box is the triangles', not the segments' — a flat floor
+lit from above, a vessel off the axes (whose box is near-cubic, so the rule degrades toward the old
+one). Speed only: the grid never decides what counts as a hit, and `resolution=` overrides it.
+The default against the old rule across scenes (1.33x and 1.79x) and at mesh scale (1.27x on the whole
+Sozzi field), and the tests and mutation pass, are in the log, same heading.
+
+**The occupancy grid did NOT follow** (`TriangleBody.occupancy`, above): it stays 4x a near-cubic grid,
+so certification on the Sozzi wall is unchanged and the mesh-scale run below isolates the walk.
+
+## [rule text] A PASS IS BOUNDED IN RECEIVER-BY-FACET PAIRS, NOT RECEIVERS (#509, 2026-09-24)
+
+`pair_limit` (default `work.DEFAULT_PAIR_LIMIT`, 4,000,000) bounds every loop that visits
+receivers: the gather's traced chunks (`direct_fluence_rate`, `direct_irradiance`), the streamed
+path's per-pass mask, `build_visibility`'s body test, `RayCastOcclusion`'s passes and
+`enclosure_winding`. **One helper, `work.receivers_per_pass(pair_limit, per_receiver)`, turns it into
+a receiver count** — `checks.py` used to hand-write the same division. `RadiationSettings.
+gather_chunk_size` is now `gather_pair_limit`. ⚠️ **There is no `chunk_size` on any of these any
+more**: renamed rather than reinterpreted, so an old caller fails with a `TypeError` instead of
+silently getting a different chunk. `work_limit` keeps its meaning — rays × triangles in the
+intersection test — which is a different unit. **The transfer build's `chunk_size` (receiving facets,
+default 256) was deliberately left**: it has the same shape of trap, but an `n^2` transfer at a
+facet count where it would bite is unaffordable anyway.
+
+**Current status.** A receiver count left a pass's size to the facet count (a ~9 GB pass killed a run
+silently); a whole-problem `ones((n_receivers, n_facets))` formed before chunking was removed in the same
+change (pinned by `test_a_scene_with_nothing_in_the_way_forms_no_array_the_size_of_the_problem`). The 4M
+default is measured (`validation/radiation_gather_pair_limit.py`). A gradient is bounded too:
+`work.in_passes` wraps its scan body in `jax.checkpoint(prevent_cse=False)`, flat in the receiver count
+(#523). #524: `summed_fluence_rate(sets, ...)` forms the geometric pass once from the first set and
+weights it per set (sets with different concrete vertices are refused); the surviving fraction is formed
+per chunk from the mask's own layers (`_shadow_rows`, sliced inside the checkpoint);
+`direct_irradiance(..., point_sources_only=True)` visits no areal facet; `surface_irradiance` reuses
+`radiosity`'s `_solve`. ⚠️ A translation test on a uniformly emitting closed box reads zero to rounding:
+emit unevenly. Record and tables: `.claude/notes/radiation-log.md` → "A PASS IS BOUNDED IN
+RECEIVER-BY-FACET PAIRS, NOT RECEIVERS (#509, 2026-09-24)".
+
+## [rule text] ANALYTIC OCCLUSION: BUILT as `SilhouetteOcclusion` — exact per blocker, once six defects were out
+
+Neither sampling treatment above moves the worst pair, because both sample a step function. The
+clip does not sample: it cuts the source's angular extent by the blocker's silhouette and takes the
+covered share in closed form — the classical analytic form factor, Nishita and Nakamae (1983), then
+Baum, Rushmeier and Winget (*Computer Graphics* 23(3), 1989). It is **selectable beside the ray
+mask, not a replacement for it** (`RadiationSettings(self_occlusion=SilhouetteOcclusion())`), and
+the ray mask stays the default: neither dominates, because the clip over-counts overlapping
+silhouettes (below) and costs more.
+
+**What makes it expressible as a traced program**, each property load-bearing:
+
+- **The contour form is signed and additive over loops** (`_signed_loop_solid_angle`; the magnitude
+  is taken only at the end of `projected_solid_angle`). A triangle split four ways sums to the whole
+  at 0.00e+00, so the visible region is *whole minus covered* and is never constructed.
+- **The covered region is convex, so its vertex count is static.** Cutting by one half-space adds
+  at most one vertex; compaction is by a **rank** (the running survivor count), so widths run
+  `4, 5, 6, 7, 8` — the blocker is first cut to the near side of the source's plane, which can
+  make it a quadrilateral and adds the fourth edge.
+- **Direction space**, not the source's plane: no perspective divide, no infinity for a straddler.
+- **Every sign read is decidable** — `clipping.py`, below. Without it the answer depended on the
+  compiler.
+
+**Two measured facts make STL geometry work:** a tiling sums exactly (a blocker split 4/16/64 ways
+matches the whole at 1e-16 — a triangulated surface *is* a tiling), and **only front-facing
+triangles are summed** (on a closed 384-triangle tube, summing every triangle gives exactly 2.0 —
+the far wall counted too; front-facing gives 1.33e-15 against dense truth).
+
+### VOLUME RECEIVERS: the share of the PLAIN solid angle (#479, 2026-09-25)
+
+A receiver on a facet takes its share of the *projected* solid angle `∫ cos θ dω` (what an irradiance
+weights by); **a point in the fluid, which has no normal, takes its share of the plain solid angle
+`∫ dω`** (what the fluence-rate gather weights by, `radiance × solid_angle`). `receiver_normal=None` is
+how a volume receiver says so, all the way down: `source_view`, `covered_by`, `covered_fraction` and
+`may_occlude` accept it, and `SilhouetteOcclusion.field` treats a receiver with **no
+`receiver_normal` and no facet** (`receiver_facet=None`, or `-1` in its row) as a volume point (it used to
+raise for both). ⚠️ **"On no facet" is NOT "no normal"** — see ORIENTED RECEIVERS ON NO FACET below.
+One choice, `silhouette._measure`, picks the integral for the whole, the covered part and the blocker-extent clamp together, so a share cannot be
+taken of one measure against another.
+
+- **Current status.** `build_visibility(..., receiver_normal=(n, 3))` (2026-10-06) says which way a
+  receiver faces, independent of where it lies (`receiver_facet`); it reaches every
+  `SelfOcclusion.field(surfaces, points, near, receiver_facet, receiver_normal)` (only the silhouette
+  reads it), is normalized and refused on a wrong shape or a zero / non-finite length, and takes
+  precedence over the facet's normal. With a normal the silhouette accepts `(n, k)` facet rows; without
+  one, `k > 1` is refused. `clear_behind` / `BackFaces` still key on `receiver_facet is None`,
+  deliberately. A volume point pads the source with a repeated corner instead of clipping, and its
+  unprojected integral is `solid_angle._signed_loop_area`. Contract, tests, and the volume-mask
+  measurement (the clip ~30x better than the ray mask at the worst edge cell, at 15-30x its cost, all
+  before #527): `.claude/notes/radiation-log.md` → "VOLUME RECEIVERS: the share of the PLAIN solid angle
+  (#479, 2026-09-25)".
+
+**Where it over-counts:** only where two front-facing silhouettes overlap in angle -- each blocker is
+clipped against the source, not against what is still unblocked, so areas add (a multi-lamp bundle with
+one sleeve behind another; a serpentine channel); it errs dark. One sleeve, wall or declared baffle
+between two facets, a bent duct, a convex vessel and disjoint cones are exact. `overlapping` means only
+"more than one blocker contributed". The exact repair, depth-sorted clipping against the remaining
+region, has no static vertex count. **Current status (decided: documented, not fixed; the precise
+detector and the correction are #477).** On a two-lamp reactor the over-count is rare (1.0-1.5 % of
+flagged pairs), one-sided (dark) and on the field ~8x smaller than the ray mask's own error;
+`overlapping` flags nearly every hidden pair on a meshed body, so it says almost nothing as a detector.
+The six degenerate-geometry defects that "it is exact" hid on a mesh are each guarded and pinned: the
+depth cut (the blocker cut to the near side of the source's plane), the cull's source-plane offset
+(`decidable_heights(..., through=)`), the extent clamp, `angular_cone`'s `unusable` (an unusable cone
+overlaps everything), the `in_front` / `edge_on` guards, and `_EXTENT_FLOOR` (1e-12 sr) for a source seen
+edge-on. ⚠️ A binomial error bar is zero at a share of exactly 0 or 1: use Agresti-Coull. ⚠️ A fix that
+makes an intermediate right can expose a downstream quantity that was only right by accident. Records:
+`.claude/notes/radiation-log.md` → "MEASURED (#472): the over-count on a two-lamp reactor is rare and
+small — and `overlapping` is nearly useless" and the "IT IS EXACT" subsection after it.
+
+## [rule text] ⚠️ THE SIGN TESTS: TWO FILTERS, EACH LOAD-BEARING, AND THE SMALL FIXTURE COULD NOT TELL
+
+After the six, 4 of the 80-facet reactor's 6400 pairs still moved with the chunk size, by up to
+0.21. The cause: a height zero in exact arithmetic computes as ~1e-19 of noise whose **sign is set by
+how XLA fuses the multiplies and adds** — which changes with batch shape, with whether the code is
+compiled at all, and **with the presence of an arithmetically dead term**: adding `0.0 * bound` to
+the unfiltered return made a lost occluder reappear in every context. Without the filters, whether
+a real shadow is found depends on incidental compiler decisions.
+
+`clipping.py` holds two filters, each the first stage of a Shewchuk (1997) filtered predicate
+(bound the rounding error from the magnitudes summed, `_SLACK = 16` units of roundoff; trust the
+sign only outside it):
+
+- **`decidable_heights`** snaps an undecidable height to **exactly zero** — and **no exact
+  arithmetic stage is needed**, which is what makes it cheap: zero is a *correct and consistent*
+  answer for a clip (the kept half-space is closed; an edge with a zero at one end does not cross,
+  its crossing *is* that endpoint). A triangulation must pick a side; a clip need not.
+- **`spanning_plane`** snaps a plane through two directions indistinguishable in direction to the
+  zero vector, making that stage the no-op it should be. It replaced an exact-equality test on the
+  two corners (`corner[k] == corner[k+1]`), which cannot see a crossing computed at the end of its
+  edge as `a + 1.0 * (b - a)` — `b` to within a rounding, not bit for bit.
+
+The measured truth table (364-facet sleeved box: only both filters together give 0 wrong pairs, and at 80
+and 156 facets every filtered row was identical -- a fixture too small to contain the degeneracy says
+nothing, and chunk invariance alone is the wrong acceptance test), the per-call-site mutation analysis,
+why the ray test's antisymmetric edge function is not needed here, the move of `projected_solid_angle`
+onto `clipping.py`, and that `validation/radiation_analytic_occlusion.py` still carries the PROTOTYPE
+clip: `.claude/notes/radiation-log.md` → "⚠️ THE SIGN TESTS: TWO FILTERS, EACH LOAD-BEARING, AND THE
+SMALL FIXTURE COULD NOT TELL".
+
+**`dG/d(occluder geometry)` is still exactly zero** with either strategy: the fraction is computed
+on the host and frozen, off the tape. A continuous fraction *could* make baffle and sleeve placement
+differentiable, but only by putting the clip live on the tape — not built, and its cost would be the
+whole build per gradient.
+
+## [rule text] THE SCENE: LAMPS KEPT OUT OF THE TRANSFER, AS A LIBRARY FUNCTION (2026-10-05)
+
+`scene.py` makes the recipe `aquaflux_reflecting.py` hand-assembled (and this file documented under
+"the transfer refuses it ... keep the lamp out of the surface set") the library's: `solve_scene(Scene(
+lamps, reflectors, occluders, absorption, volume, surfaces, lamp_samples, settings))`. It is what a
+radiation **case file** builds (`.claude/rules/case.md` → Radiation cases); the old scripts are deleted.
+
+- **Steps**: `check_profiles(lamps)`; with reflectors, the lamps' `direct_irradiance` at
+  `subtriangle_centroids(reflector vertices, lamp_samples)` (the `k^2` equal-area sub-triangle centroids,
+  default `DEFAULT_LAMP_SAMPLES = 4`), averaged per facet, is the `external_irradiance` of ONE
+  `surface_irradiance` solve on a model built with **zero receivers** (`np.zeros((0, 3))` works); the
+  radiosity is then `emission + rho H` (reflectors must not emit — refused — so `rho H`), re-gathered as a
+  Lambertian set. Volume: `G_direct` and `G_reflected` by `streamed_fluence_rate` when anything can shadow
+  (a body, or self-occlusion not `NoOcclusion`), else `summed_fluence_rate`. Surfaces: `direct_irradiance`
+  through a mask built per pass of `receivers_per_pass(pair_limit, n_facets x n_bodies)` points.
+  `medium_absorbed_power = sum(a(x) G V)` via the new **`Absorption.sample(position)`** (abstract;
+  `UniformAbsorption` broadcasts, `VoxelAbsorption` already had it).
+- **Gate**: `test_a_lamp_kept_out_of_the_transfer_lights_the_box_as_the_model_does_with_it_inside` — a
+  Lambertian lamp kept out equals the model with it inside to 1e-11 (fluence and radiosity) at ONE
+  receiver point per facet and ONE lamp sample, where both evaluate the same projected solid angles; the
+  reflected share is > 30 %, so the agreement is not the direct light's. Plus: `lamp_samples` 8 is within
+  5 % of `lamp_samples` 1's error against the 12-point transfer (lamp light averaged, not sampled once),
+  wall irradiance = a direct gather of the solved radiosity, pass size changes nothing (1e-13) with a
+  sphere shadowing, medium power, sub-triangle centroids.
+- **Current status.** A point on a reflecting surface IS lit by its own facet unless that facet is left
+  out: off an axis-aligned plane the corner heights round either way, the clip keeps the in-plane
+  triangle and the kernel returns the hemisphere. **Fix (2026-10-07): the receiver's own facets are
+  excluded as SOURCES**, `direct_irradiance(..., receiver_facet=)` (`(n_points,)` or `(n_points, k)`
+  rows, `-1` padding) -- the transfer's `F_ii = 0` in the gather; offsetting points in front was rejected
+  (it couples a scene-scale constant to the clip's rounding tolerance). The ray test needs the facet too:
+  `SurfaceReceivers.reflector` names the body and `_own_facets` passes **every** facet of it the point
+  lies on (a face centre is the apex of all its fan triangles). Record and tests:
+  `.claude/notes/radiation-log.md` → "THE SCENE: LAMPS KEPT OUT OF THE TRANSFER, AS A LIBRARY FUNCTION
+  (2026-10-05)".
+- **Measured at mesh scale** — see `validation/ray_effects_room/README.md` (the case files and their
+  agreement with the scripts they replaced).
+- ⚠️ **There is no `Scene.settings_for`, `RadiationSettings.for_bodies`/`check_bodies` or
+  `SelfOcclusion.for_bodies`/`check_bodies` any more** (deleted with #689). They existed only to route a
+  `SilhouetteOcclusion.two_sided` naming bodies of several surface sets to each set's builds; the
+  declaration now lives on each `Surfaces` set, which every build carries with it, so nothing needs
+  routing. `_joined` unions the two sets' declarations for the exchange and the direct set.
+- **EVERY TRIANGLE OF THE SCENE SHADOWS THE DIRECT LIGHT TOO (#622, 2026-10-10).** Before, the
+  lamps-only masks' self-occlusion was over the lamps' triangles alone and the reflectors entered only
+  the exchange, so a reflecting wall cut the reflected light and let the lamps' direct light straight
+  through (a 0.2 m Lambertian lamp, a 2 m plate rho 0.5 over it, a point over the plate: `G_direct`
+  0.0125147 with the plate and without it, `RayCastOcclusion`, `b2c003e`). **Chosen with the user
+  (option 1 of the issue) over documenting it and refusing an uncovered reflecting `Wall`.** The
+  direct light is now gathered from `_Direct.of(scene).surfaces`: the reflectors' facets, dark
+  (emission and power zero, a Lambertian profile appended to the lamps' catalogue), then **every** lamp
+  facet in its own order with its optics, point sources kept (`_joined(scene, lamp_facets,
+  emitting=True)`; the exchange is `_joined(..., emitting=False)` over the areal lamp facets -- one
+  concatenation for both). ⚠️ **A shadow geometry separate from the sources is not expressible**: a
+  mask's columns ARE the sources' facets (`streamed_fluence_rate` requires `sets` to share
+  `shadow_geometry`; `build_visibility`'s self-occlusion is over `surfaces`), so the reflectors join
+  the sources rather than lending their triangles to the lamps' mask. That is also what keeps the
+  own-facet exclusion simple: `receiver_facet` indexes the sources, so `_own_facets(direct.surfaces,
+  body, points)` finds a reflector body or a lamp body alike, and the exchange's samples name their
+  facet by `_Direct.facets_of(exchange)` (reflector `j` -> `j`, lamp facet `k` -> `split + k`). The
+  reflector samples now **need** it -- a ray from another facet ends in the sample's own facet -- and
+  a part (reflectors / lamps) whose facets are all `-1` passes `own=None`, keeping the culls that key
+  on `receiver_facet is None`. **The lamps alone** when there are no reflectors or self-occlusion is
+  `NoOcclusion` (dark facets would add only zeros to every gather); with bodies but `NoOcclusion` too.
+  ⚠️ Behaviour change: a `SurfaceReceivers` set on a reflector that does NOT name its body now has its
+  DIRECT part shadowed by its own facet under the ray test, as its reflected part already was.
+  Gate: `test_a_reflector_between_a_lamp_and_a_point_shadows_the_lamp_s_direct_light` (lamp, black
+  plate, reflecting 3x3 ceiling, `RayCastOcclusion`, one sample: fluence, ceiling landing and ceiling
+  points' irradiance equal the model with every facet in one set to 1e-11; >= 5 points wholly
+  shadowed, >= 5 wholly lit). Plus the floor-points test now checks both parts. Cost: the direct pass
+  is `n_points x (n_lamp + n_reflector)` facets wherever self-occlusion is on -- not measured at mesh
+  scale. The `ray_effects_room` cases run `NoOcclusion`, so they take the lamps-alone path and cannot move.
+  Also new on `SceneSolution`: `reflector_absorbed_power` (`sum (1 - rho) H A` over the reflectors,
+  beside `lamp_absorbed_power`, so the books close from the solution alone) and `irradiance_absorbed`
+  (`(1 - rho) E` per `SurfaceReceivers` set, by its `reflectance` -- the field the radiation package
+  carried but never read; the case's `E_absorbed` and `absorbed_power` now read it).
+  **Mutation pass (9 breaks run, 8 red)** (jax 0.10.2, CPU, x64, Linux, 2026-10-10): lamps gathered alone
+  always, reflector samples unnamed, surface points unnamed, lamp samples unnamed, point sources dropped
+  from the direct set (caught only by `test_a_point_source_under_a_reflector_is_shadowed_by_it_and_lights_the_rest_as_a_point`,
+  `P / 4 pi r^2` beside a black plate, 0 over it), absorbed by rho, `irradiance_absorbed` from the direct
+  part only, lamp body ids not offset past the reflectors'. **Dismissed, equivalent**: joining the
+  reflectors under `NoOcclusion` too (adds zeros; the lamps-alone branch is cost only); and a
+  Lambertian reflector profile replaced by the lamps' first (a zero emission weighs nothing; NOT run).
+- **A FACET SENDS FROM ITS FRONT ONLY, IN THE TRANSFER AS IN THE GATHERS (#667, fixed 2026-10-12).**
+  `projected_solid_angle` clips the sending triangle to the RECEIVER's half-space alone, and a
+  Lambertian set's `assemble` applies no source cosine (`reflected, reflected`), so before the fix
+  nothing gated the SENDER's side: a facet sent reflected light out of its back, while every gather
+  (`Lambertian.radiance_per_exitance_at`, zero for `cos <= 0`) did not. Measured on `777156e` (jax
+  0.10.2, CPU, x64, Linux): a 1 m plate at z = 1 facing down, emission 1, under a 1 m plate at z = 2
+  facing down, `receiver_quadrature=1`, either occlusion: the upper plate landed **0.2248 W/m²**; in the
+  #622 fixture with the plate at rho 0.6, the ceiling's solved landing was 0.01153 against 0.00972
+  gathered at the same point. **The same leak was in the specular exchange** (`images._exchange_rows`,
+  found while fixing this): a plate over a floor mirror and facing AWAY from it still sent through it
+  (on `d838f90`: the mirror took 0.0946 W/m² from the plate's back, a receiver above gained 0.0337).
+  - **The fix**: `_row_block` zeroes the term at each receiving QUADRATURE POINT on or behind the
+    sending facet's plane, and `_exchange_rows` at each one on or behind the IMAGE's plane (the image
+    faces as its source does after the reflection, so behind it is "the source faces away from the
+    mirror"). Judged per point, not per receiving facet: a receiving facet can straddle the sender's
+    plane. The side test is `clipping.point_heights` (filtered, an undecidable height is exactly zero
+    and counts as not in front), now also what `back_faces._certainly_behind` uses -- one home.
+  - ⚠️ **Invisible in every closed enclosure whose facets face into it** (no facet sees another's
+    back), which is why no test saw it, and the "model with every facet in one set" reference the
+    scene tests use carried the same leak, so it could not see it either. One existing test DID rely
+    on it: `test_a_body_in_the_way_removes_the_transfer_across_it` had both "facing" plates wound +z, so
+    its only exchange was the lower plate taking light from the upper one's back (sum 0.0 after the
+    fix); its upper plate now faces down. Every other radiation fast-tier test (953) passed unchanged.
+  - A zero-thickness sheet reflects from both faces once declared: TWO-SIDED SHEETS (#689) below.
+  - Tests: `test_a_facet_sends_nothing_out_of_its_back` (both occlusions, front-to-front control),
+    `test_a_receiver_across_the_sender_s_plane_takes_light_only_at_its_points_in_front` (a wall across a
+    small sender's plane against a hand sum over the points above it, strictly between 0 and the
+    ungated sum), `test_a_facet_facing_away_from_the_mirror_sends_nothing_through_it` (both
+    orientations), and in `test_radiation_scene.py`
+    `test_a_reflector_sends_its_light_out_of_its_front_in_the_solve_as_the_gathers_do` (the #622 fixture
+    with a reflecting plate: solved ceiling landing = gathered ceiling irradiance, 1e-11). **Mutation
+    pass (4, all red)**: no gate, the gate judged at the receiving facet's centroid (caught only by the
+    straddling wall), the gate inverted, no gate on the mirror path.
+
+## [rule text] TWO-SIDED SHEETS: A DECLARED SHEET IS TWO FACES IN THE SOLVE (#689, 2026-10-17)
+
+**Decided with the user**: the declaration lives on `Surfaces` (`two_sided`, body names, static), not
+on an occlusion strategy, because it is geometry; back faces are **appended** after the set's own
+facets with a map (`back_of`), not separate `*_back` fields. Found first (posted on #689): supplying the
+sheet twice by hand did not work, for two reasons, and both are what the build now handles by index.
+
+- **`Surfaces.with_back_faces()`** appends each areal facet of a declared body with two corners
+  swapped; centroid, area and the negated normal are **carried over, not recomputed**, so a face and its
+  back are one triangle exactly. `back_of[k]` is the front of the `k`-th back face; `twin` maps both
+  ways (`-1` elsewhere). Idempotent; point sources get no back face. **A sheet may not emit**: concrete
+  emission or power on a declared facet is refused there (and `Scene` asks it of the lamps), because
+  the direct gathers emit from front faces only. `_with_backs` is the unchecked builder, for a solved
+  set whose emission is a radiosity. `with_geometry` on an expanded set moves the fronts and remakes
+  the backs, keeping every face's own optics. `refine_for_receivers` and `coarsen_surfaces` carry the
+  declaration.
+- **Where it is expanded**: `build_radiation_model` and each model entry point (`radiosity`,
+  `surface_irradiance`, `fluence_rate`), and `_Exchange.of` in the scene. `build_transfer` does NOT
+  expand: it builds the set it is given (so the Walton blocker declared a sheet stays one facet,
+  two-sided for blocking). Facet-indexed results are `n_facets + len(back_of)` long; the scene splits
+  back faces to the set their front belongs to (`SceneSolution.reflector_back_of`, `lamp_back_of`).
+- **The two defects, fixed by index, not by tolerance.** (a) A ray aimed at a face's centroid ends in its
+  twin's triangle and the far end is inclusive, so the receiving end excludes the twin too
+  (`build_transfer` passes `(n, 2)` rows `[i, twin(i)]`; mirror legs exclude a source's twin). The
+  sending end needs nothing: the twin is at distance 0, inside the margin. (b) The six-point rule puts
+  receiving points one ulp off the plane (z = 0.5 + 4.4e-16), `point_heights` does not snap a rounding
+  of the POINT's construction, so a point inside its twin read a whole hemisphere and the #667 gate let
+  it through for one orientation: rows of faces turned down summed to **1.3299**, their twins' to 1.
+  `_row_block` now zeroes `F[i, twin(i)]` as it zeroes `F[i, i]`.
+- **`SilhouetteOcclusion._receiver_frames` accepts rows naming several facets in one plane** (a face and
+  its twin are parallel), facing the first's way; rows not in one plane still need `receiver_normal`.
+- **MEASURED against a closed slab** (`tests/unit/test_radiation_two_sided.py`): `inward_box(4)` (96
+  facets, emitting, rho 0.6) round a sheet of 8 triangles at z = 0.5137 (off the box's grid), against
+  the same box round a slab 1e-5 thick whose top and bottom are the two faces; 30 interior points; jax
+  0.10.2, CPU, x64, Linux, 2026-10-17. Silhouette clip: walls, both faces and `G` within **6e-6**.
+  Ray test: walls 8e-5, fronts 9e-6, `G` 2e-4, back faces **1e-3** -- and the 1e-3 is the slab's: the
+  differing pairs are walls straddling the sheet's plane whose centroid ray crosses the slab's top,
+  which a slab's bottom does not actually look through. ⚠️ **On the box's own grid the ray test read 4%
+  off**: 288 wall-wall rays ran exactly along the sheet's rim, which the slab's sides block and a sheet
+  cannot -- a fixture degeneracy (the baffle lesson of #537 PR 3b again), not a defect. Undeclared, the
+  field below the sheet is 2-6% off the slab under the clip (brighter: light passes through from
+  behind).
+- **Mutation pass (11, 10 red, then 11 after a test was added)**: the twin exchange not zeroed, the
+  receiving end not told of the twin, the back face's normal not negated, a faced sheet still counted
+  two-sided, the declaration ignored, the scene's exchange not expanded, the emission refusal, the
+  parallel-rows check, the model build not expanding, the name check. ⚠️ **The back face's own-facet map
+  in the scene (`_Direct.facets_of`) first SURVIVED**: the shelf fixture ran `NoOcclusion`, where a
+  sample point's own triangle cannot shadow it; `test_the_lamps_light_on_a_back_face_is_not_shadowed_by_its_own_triangle`
+  runs the ray test and catches it. **Dismissed, equivalent**: the mirror path's first leg ignoring the
+  source's twin -- it lies at distance 0, inside the margin (the direct rays need no such exclusion).
+
