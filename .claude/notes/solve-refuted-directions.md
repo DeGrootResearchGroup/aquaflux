@@ -708,12 +708,15 @@ CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
   thresholded coarsening, which is documented) and one 7.1 s recompile of `batched_jacobian_matvec` at
   step 9, whose signature differs from step 1's only in one argument being committed to the device
   rather than uncommitted. So overlapping a next station's compile hides at most ~38 s (5 % of a cold
-  run) and nothing on a warm one.
+  run) and nothing on a warm one. ⚠️ **Neither per-step cost reproduces at `183e9ffa` (2026-10-17):** the
+  shipped march compiles nothing at all between steps 1 and 21, and `batched_jacobian_matvec` once
+  (entry "Persisting the small programs" below).
 - **The persistent cache works, including for programs holding the preconditioner's host callback**
   (checked on a toy and on the march step itself, which a warm run took from the cache). The
   "default cache" row above is partly cold only because every library change re-keys its programs.
   Programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`) are never
-  written, so ~1700 small ones (~30 s) recompile every run.
+  written, so the small eager programs recompile every run. At `183e9ffa` that is ~977 programs and
+  ~26 s, all before step 1 (a warm two-step run). Lowering the floor to keep them is refuted below.
 - ⚠️ **A trap met while measuring:** "the cache did not serve the march step" was first read as JAX
   refusing to persist host-callback programs. It was a key change from the library moving under the
   cache; a warm run settled it. Read a cache miss against what changed since the cache was written.
@@ -1112,3 +1115,124 @@ residual is a round-off of `‖b‖`: no verdict was wrong at targets 0.3, 1e-3 
 was declared converged with its true residual 0.13 % above the target. The class takes any `rtol`, so the
 verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
 `solve-open-directions.md` 6b.
+
+## Persisting the small programs (persistence floor 0) — NOT SHIPPED (2026-10-17)
+
+**What was proposed:** lower `jax_persistent_cache_min_compile_time_secs` from 2.0 to 0, so that the
+~980 small programs pitzDaily compiles op by op before step 1 stop recompiling on every run.
+
+**Configuration:** `main` at `183e9ffa`, jax 0.11.2, CPU, 4-core / 15 GB Linux container. Two-step
+pitzDaily (`case.yaml` with `max_steps: 2` and an absolute mesh path, through `compare.solve_aquaflux`),
+`JAX_LOG_COMPILES=1`, a fresh `AQUAFLUX_COMPILATION_CACHE_DIR` per arm, one run each. Harness: a logging
+handler that records the Python stack at every compile (scratch, not kept).
+
+| arm | first step done at | compile events | of which cache hits |
+|---|---|---|---|
+| floor 2.0, cold | 124–128 s (two runs) | 983 (70–72 s) | 1 |
+| floor 2.0, warm | 79.4 s | 983 (28.7 s) | 6 |
+| floor 0, cold | 124.2 s | 983 (75.3 s) | 34 |
+| floor 0, warm | **53.7 s** | 983 (6.4 s of reads) | **983** |
+
+The floor-0 cache held 949 entries, 17 MB. A hit still logs `Finished XLA compilation of ...`, carrying the
+read time, right after a `Persistent compilation cache hit` line (at WARNING under `JAX_LOG_COMPILES`).
+`jax_persistent_cache_min_entry_size_bytes` is 0, which on CPU filters nothing.
+
+**Per program** (300 trivial eager programs at distinct shapes, first call each): compile 25 ms,
+compile plus cache write 46 ms, cache hit 4.2 ms, in-memory repeat 0.03 ms. So the warm saving is real
+(about 26 s on pitzDaily's warm start).
+
+**Why it is not shipped:** with a size bound set (aquaflux sets 10 GiB), JAX's `LRUCache.put` runs
+`_evict_if_needed` on every write. That globs the whole cache directory, stats every entry and reads its
+access-time file, under the inter-process lock. So a write costs time in proportion to the entry count.
+Measured on synthetic 18 KB entries: 27 ms per write at 1000 entries, 141 ms at 5000, 586 ms at 20000 and
+1.4 s at 50000. A read stays at 0.3–0.4 ms. At floor 0 every op-by-op program of every run goes in, and
+the test suite shares the default cache directory: four unit test files (198 tests) wrote 1804 entries,
+so a fast tier writes roughly ten times that, and every library change adds new keys. Within a few runs a
+small program's write costs far more than its 25 ms compile, and an unbounded cache (no scan) is the
+88 GiB growth the bound exists to stop. No floor in between helps: the programs worth persisting compile
+in 10–40 ms, so any floor that admits them admits everything.
+
+**Reopen only if** JAX's eviction stops scanning per write (it is `jax/_src/lru_cache.py`), or the small
+programs go away (the next entry says they cannot be compiled away cheaply).
+
+## Compiling the eager set-up phases into a few programs — NOT WORTH BUILDING (2026-10-17)
+
+**What was proposed:** compile the op-by-op phases before step 1 as a few `eqx.filter_jit` programs, the
+way `norm_of_residual` was done.
+
+**Where the programs come from** (same configuration as the entry above, cold, stack-attributed;
+978 programs under 1 s, 24.0 s): the case build ~485 (`MomentumContinuity.build` 331, of which
+`BoundaryClosure.linearization` 140 and the multiple-correction bind 85; `SSTTurbulence.build` and the
+wall-distance gradient ~100; patch-index set-up ~55); the hybrid initialization 136 (the potential-flow
+Laplace solve 83); the session's first build ~330 (the shift source `_monolithic_shift_source` 209, the
+fit 74, the float32 traced split 44). Between steps of a full march: none (21 steps, `183e9ffa`). A
+snapshot harness timed the phases on their own: case build 483 programs / 13.5 s compile / 18.7 s wall,
+initialization 138 / 5.8 s / 14.1 s, shift source 210 / 6.3 s / 8.9 s, and a second shift source with the
+eager caches warm 0 programs / **2.0 s wall** (pure dispatch).
+
+**Why it loses, two independent reasons:**
+- **A compiled phase is not bit-identical to its eager run when it does arithmetic.** XLA contracts
+  multiply-adds inside one fused program, which a chain of separate eager programs cannot, and the CPU
+  backend has no flag to turn that off (its `xla_cpu_*` options cover fast-math and dot/conv strictness,
+  not contraction). Jitting the shift source's closure fields and mass flux moved 7 of 14 leaves at
+  ~1e-16 relative over thousands of cells; its `J·1` products moved by 7e-17. Rounding upstream of the
+  first fit moves bfs3d's thresholded coarsening (`validation.md`, PR #721), so such a change makes the
+  next bfs3d A/B uncontrolled.
+- **Compiling a phase that IS exact relocates its programs instead of removing them.** Eager programs are
+  cached per (primitive, shape, dtype) and shared by every later eager phase. `BoundaryClosure.linearization`
+  (0/1 tangents through affine maps) jits bit-identically on all 139 snapshotted arrays. It took the
+  case build from 483 to 411 programs, but the initialization rose 138 → 182 and the shift source
+  210 → 245. Over the two-step run that is 983 compiles against 989, with the first step done at
+  128.0 / 124.4 s against 131.5 / 121.9 s (two cold runs per arm).
+
+A gain needs most of the build, initialization and shift source compiled together. That is a large
+refactor through host code (numpy index set-up, scipy hierarchies, `float()` branches), and every
+arithmetic part of it moves rounding. **Reopen** for a residual-agnostic reason to restructure those
+builders anyway, or if a bit-identity requirement is waived.
+
+## A Schubert secant update of the materialized Jacobian between probes — REFUTED (2026-10-17)
+
+**What was proposed** (`solve-open-directions.md` 13): between probes, update the retained unshifted
+host Jacobian with each outer step's own secant pair, `s = x_{k+1} - x_k`, `y = R(x_{k+1}) - R(x_k)`, by
+Schubert's update (Broyden restricted to the fixed pattern, row by row: `J_i += ((y_i - J_i s) /
+(s_i.D s_i)) (D s_i)^T`), then re-apply the shift and refactor the split on its frozen coarsening. No JVP,
+pattern unchanged, so it would replace the coloured probe in a cost re-fit.
+
+**Probe:** `validation/pitzdaily_openfoam/secant_update_probe.py` on a fresh capture of the shipped
+pitzDaily march (`case.yaml` at `5661273a`, `PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`; 21 steps,
+106 restart cycles, `x_r/h` 8.0686, 233 s; Linux x86_64, 4 cores, jax 0.11.2, nothing else running).
+For every inner system of target steps 14-21 the march's float32 field split is re-fitted to each arm's
+Jacobian at the step's own shift (`beta_k d(x_{k-1})`, no refit floor), and solved by the march's
+residual-stop GMRES (restart 15, row-scaled measure) at the tolerance the march's adaptive rule gave that
+step (0.1 after a setback, else 0.3; `MarchReplay.tolerance`). The `marched` arm reproduces every
+recorded cycle count. Restart cycles summed:
+
+| arm | steps 14-21 | steps 15-20 |
+|---|---|---|
+| fresh probe at the step's start (= what the march does) | 40 | 31 |
+| probed one step back (stale-1) | 104 | -- |
+| stale-1 + one Schubert update | 101 | -- |
+| probed two steps back (stale-2) | -- | 148 |
+| stale-2 + two Schubert updates | -- | 142 |
+
+Over the probe's whole range (stale-2 arms on steps 15-21), two updates cost MORE than none: 184 against 175 cycles (2910 against 2744 applications); the column-weighted variant 171, the re-sweep 189. Chains of 3 and 4 updates tie stale (192 / 194, 182 / 182).
+
+**Why it fails:** the relative Frobenius distance of the updated Jacobian from the fresh one, read per
+(row field, column field) block, equals the stale one's to three figures in every block (one step:
+0.003-0.45; worst blocks the k and omega rows' couplings). The Jacobian moves 25-50 % per block between
+consecutive steps of this march (at the shift floor, line search clipped), a change of high rank; one
+secant condition per row recovers about one direction of ~120 stored entries. The variants did not move
+it: the update over every stored entry instead of the entries live at the probe, a per-field column
+weight `D` (the inverse mean square of each field's step), re-sweeping the last two pairs, and chains of
+2-4 updates (in a first run at a fixed 0.3, the chains were sometimes WORSE than stale; totals stale-2
+1526 / Schubert-2 1663 applications).
+
+**And it could not pay anyway:** on current main a probe costs 1.03-1.05 s, the refactor 1.2-1.4 s and
+the update (numpy, 5.66M stored entries, 2.94M nonzero) 0.56 s, and the march already re-fits at every
+station change and on nearly every target step (cost re-fits after each 3-cycle solve). Replacing every
+probe would save ~0.5 s each, <= ~10 s of 233 s. Staleness itself is real (one step stale costs ~2.5x the
+cycles of fresh), so re-fitting every step stays right; a secant update is just not a cheaper fresh probe.
+
+Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against 3.6-4.2 s before the
+adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
+A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.

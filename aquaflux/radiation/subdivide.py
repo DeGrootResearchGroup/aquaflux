@@ -253,6 +253,7 @@ def refine_for_receivers(
         specular_reflectance=np.asarray(surfaces.specular_reflectance)[inherited],
         profiles=surfaces.profiles,
         profile_index=np.asarray(surfaces.profile_index)[inherited],
+        two_sided=surfaces.two_sided,
         point_sources=np.flatnonzero(labelled),
     )
     return refined, division
