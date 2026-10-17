@@ -482,6 +482,12 @@ consecutive points is a local patch; the radiation package cuts every grouping o
 lamp so their facets stop facing one way, which left more pairs undecided and slowed the transfer build
 (#574, `.claude/notes/radiation-log.md`, "ONE MORTON ORDERING, PER-AXIS CELLS").
 
+**Once-per-process warnings live in one leaf, `aquaflux/warn_once.py`** (standard library only, a
+neutral leaf): `warn_once(kind, message)` emits the first warning of each kind in the process;
+`forget_warnings(*kinds)` resets it for tests. ⚠️ **One record per kind, never one flag for all**: a
+shared flag let a routine repair report silence a graver one. Name a kind after its module
+(`"multiple_correction.repaired"`); Python's `"once"` filter keys on the message, so it is no substitute.
+
 **Frozen preconditioner operators are assembled in one place, `aquaflux/precondition/frozen_operator.py`.**
 `ConvectionDiffusionStencil` is the one description of the frozen, first-order-upwind
 convection–diffusion operator that the pressure Schur, both velocity blocks and the k/ω transport

@@ -36,6 +36,7 @@ from aquaflux.schemes import (
 from aquaflux.schemes.gradient import expand_symmetric
 from aquaflux.schemes.interpolation import non_orthogonal_correction
 from aquaflux.vectors import dot, scale
+from aquaflux.warn_once import forget_warnings
 
 from tests.support.meshes import (
     perturbed_grid_2d,
@@ -1273,7 +1274,7 @@ def test_a_repair_report_does_not_silence_a_later_graver_one() -> None:
     correction had been left singular -- which is how a stalled march on a real duct printed nothing.
     """
     mesh, geometry, linearization = _zero_gradient_tetrahedra()
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(mesh, geometry)
@@ -1382,7 +1383,7 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
     only the pair discriminates: a detector that fired on every tetrahedral mesh, or on every owner
     closure, would be useless -- it is the combination that is broken.
     """
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(boundary_closure=closure, fallback=None).bind(
@@ -1397,7 +1398,7 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
 def test_the_underdetermined_warning_is_emitted_once_per_process() -> None:
     """It reports a fixed property of the geometry, and a scheme is bound on every assembler."""
     mesh = QUADRATIC_MESHES[2]
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)
     counts = []
     for _ in range(2):
@@ -1487,7 +1488,7 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
 
 def test_the_repair_says_so_rather_than_silently_changing_the_closure() -> None:
     """Asking for the repair and getting a different closure on some cells has to be visible."""
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
@@ -1509,7 +1510,7 @@ def test_the_default_leaves_undetermined_cells_unrepaired_and_names_the_opt_in()
     mesh with a corner tetrahedron. The warning is what makes the unrepaired state visible and names
     the opt-in, rather than requiring a reader to already know it exists.
     """
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         scheme = MultipleCorrectionGradient().bind(  # fallback=None, the default

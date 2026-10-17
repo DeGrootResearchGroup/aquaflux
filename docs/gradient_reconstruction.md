@@ -172,7 +172,7 @@ scheme = HessianCorrectedGradient(boundary_closure=AveragedNeighbourHessian())
 
 It costs sweeps rather than accuracy. Averaging couples each cell's Hessian to its
 neighbours', and the per-cell preconditioner cannot represent that coupling, so the Hessian
-system converges more slowly: calibrated to a tolerance of `1e-10`, the inner sweep count
+system converges more slowly: calibrated on its own to a tolerance of `1e-10`, its sweep count
 rises from 8 to 23 — roughly `2.3x` the work, and it does not shrink on a larger mesh.
 
 Its `weight` is what that cost trades against, and it trades well. The closure carries
@@ -180,7 +180,7 @@ Its `weight` is what that cost trades against, and it trades well. The closure c
 weighted averages summing to one, so the blend is exact for a quadratic at **every** weight,
 and only the strength of the decoupling changes:
 
-| `weight` | condition number, tetrahedral | inner sweeps | quadratic at default sweeps |
+| `weight` | condition number, tetrahedral | Hessian-system sweeps | quadratic at default sweeps |
 |---|---|---|---|
 | 1.0 (default) | 8.4 | 23 | 5.1e-07 |
 | 0.4 | 35.7 | 15 | 2.1e-09 |
@@ -209,12 +209,11 @@ against the closure that was chosen — which is what passing it to
 {meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated` does.
 
 ```{tip}
-If you are using this closure, pair it with {class}`~aquaflux.schemes.CoupledBlockSweep`
-rather than a larger inner sweep count. The nested solve re-converges the Hessian from zero on
-every outer step, which is exactly what this closure makes expensive; sweeping both blocks
-together keeps the Hessian between steps and never pays that. At matched accuracy on a
-tetrahedral mesh it reached the same result for about a twelfth of the work, and a better one
-than the nested solve reached at nine times the cost.
+This closure makes the Hessian system the expensive one to converge, which is what the default
+{class}`~aquaflux.schemes.CoupledBlockSweep` is built for: it sweeps both blocks together and
+carries the Hessian from one sweep to the next, so it never re-converges it from zero. Measured on
+a tetrahedral mesh against a solve that did, it reached the same accuracy for about a twelfth of
+the work.
 ```
 
 ```{warning}
@@ -274,8 +273,7 @@ from aquaflux.schemes import CorrectedGreenGauss, GmresGradientSolve, SweptGradi
 CorrectedGreenGauss(solver=SweptGradientSolve(sweeps=8))   # more sweeps for a skewed mesh
 CorrectedGreenGauss(solver=GmresGradientSolve())           # exact, for a reference value
 
-# The Hessian-corrected scheme has two systems and takes a strategy for each.
-HessianCorrectedGradient(hessian_solver=GmresGradientSolve())   # exact inner, to calibrate against
+# The Hessian-corrected scheme takes one strategy for its two systems (see below).
 ```
 
 ### Preconditioning, and why it is a separate choice
@@ -380,57 +378,30 @@ a scheme carries exactly one and the settings that belong to a path travel with 
 
 ```python
 from aquaflux.schemes import (
-    CoupledBlockSweep, GmresGradientSolve, HessianCorrectedGradient,
-    NestedHessianSolve, PackedSystemSolve, SweptGradientSolve,
+    CoupledBlockSweep, GmresGradientSolve, HessianCorrectedGradient, PackedSystemSolve,
 )
 
 HessianCorrectedGradient()                                       # the coupled sweep, by default
 HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=30))
 
-HessianCorrectedGradient(hessian_solve=NestedHessianSolve(
-    solver=SweptGradientSolve(sweeps=20),
-    hessian_solver=GmresGradientSolve(),
-))
-
-HessianCorrectedGradient(hessian_solve=PackedSystemSolve())      # the un-eliminated system
+# the un-eliminated system solved exactly -- the reference, not a production path
+HessianCorrectedGradient(hessian_solve=PackedSystemSolve(solver=GmresGradientSolve()))
 ```
 
 {class}`~aquaflux.schemes.CoupledBlockSweep` sweeps the two blocks alternately, carrying the
-Hessian from one sweep to the next. {class}`~aquaflux.schemes.NestedHessianSolve` eliminates the
-Hessian and re-converges it from zero inside every apply of the outer solve, discarding what the
-previous apply found. {class}`~aquaflux.schemes.PackedSystemSolve` solves the un-eliminated
-system whole, which is how the elimination is checked rather than a production path.
+Hessian from one sweep to the next. {class}`~aquaflux.schemes.PackedSystemSolve` solves the
+un-eliminated system whole; with a Krylov solver it is exact to that solver's tolerance and has no
+sweep count of its own, which makes it the reference a sweep count is checked against.
 
-The default is the coupled sweep: it matches the nested pair's accuracy at a fraction of the
-face-kernel passes — 40 against 220 for the `20` / `20+10` pair — and the gap widens with mesh
-skewness, 1.4x at 30 % perturbation, 1.8x at 40 %, and up to 12x under
-{class}`~aquaflux.schemes.AveragedNeighbourHessian`, whose Hessian system is the expensive one to
-re-converge.
+{meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated` sizes the coupled sweep it returns.
 
-```{note}
-The nested path is *faster* on an orthogonal mesh, where the outer solve is nearly trivial and
-there is nothing to save by carrying the Hessian. That is also a mesh on which this scheme has
-no accuracy advantage worth its cost, so it is not a reason to choose it.
-```
-
-{meth}`~aquaflux.schemes.HessianCorrectedGradient.calibrated` sizes whichever path it returns —
-the coupled sweep by default, or the nested pair with `coupled=False`.
-
-It converges to the same answer — its fixed point is the same Schur system, which follows from the
-two updates rather than being a numerical coincidence. Measured on an 8000-cell grid with **both**
-solves calibrated to the same tolerance:
-
-| mesh | | forward | tangent | error |
-| --- | --- | --- | --- | --- |
-| orthogonal | nested, 5 × 1 | **25 ms** | 28 ms | 3.4 × 10⁻⁶ |
-| orthogonal | coupled, 6 sweeps | 28 ms | 28 ms | **5.0 × 10⁻⁷** |
-| 30% perturbed | nested, 6 × 4 | 37 ms | 47 ms | 5.2 × 10⁻⁶ |
-| 30% perturbed | coupled, 7 sweeps | **31 ms** | **31 ms** | **1.1 × 10⁻⁶** |
-
-So on a skewed mesh it is about 1.2× faster to evaluate, 1.5× faster to differentiate, and five
-times more accurate at the same requested tolerance. On a near-orthogonal mesh, where the nested
-outer solve is already nearly trivial, it is slightly *slower* — the advantage grows with
-non-orthogonality, which is the regime this scheme exists for.
+The coupled sweep converges to the exact answer — its fixed point is the Schur reduction of the
+un-eliminated system, which follows from the two updates rather than being a numerical coincidence.
+Against an earlier arrangement that eliminated the Hessian and re-converged it from zero inside every
+outer apply, both calibrated to the same tolerance on an 8000-cell grid, it was about 1.2× faster to
+evaluate on a 30 %-perturbed mesh, 1.5× faster to differentiate, and five times more accurate; that
+arrangement was faster only on an orthogonal mesh, where this scheme has no accuracy advantage worth
+its cost.
 
 It reaches better accuracy than asked because its rate is measured on the gradient and Hessian
 together, and the Hessian's error dominates that estimate while the gradient's falls faster.
@@ -495,9 +466,8 @@ For the same reason, do not bind outside a region being differentiated with resp
 positions — differentiation with respect to the *field* is unaffected.
 ```
 
-`sweeps` here is **not** the nested solve's outer count and must be calibrated on its own — a
-coupled sweep costs two face passes where a nested outer sweep costs eleven, so more of them buy
-less each. Calibrating it is also the single largest saving available in this scheme: the sweeps
+`sweeps` is a property of the mesh and should be calibrated — one coupled sweep costs two face
+passes. Calibrating it is also the single largest saving available in this scheme: the sweeps
 are the great majority of a reconstruction's cost, and a count chosen for exactness on quadratic
 fields is far tighter than a flow solve needs. {meth}`~aquaflux.schemes.CoupledBlockSweep.calibrated` measures it from the
 mesh, exactly as the other two schemes' factories do:
@@ -516,10 +486,8 @@ and it also means a count calibrated on a small test mesh does not transfer to a
 
 For the corrected gradient, the default of four sweeps reaches the exactly-solved gradient to
 well within discretization error on mildly non-orthogonal meshes, and a strongly skewed mesh
-wants more. For the Hessian-corrected scheme, the inner Hessian solve contracts geometrically
-at a rate set by skewness alone: measured on a heavily skewed hexahedral grid, the
-reconstruction's departure from exactness for a quadratic falls by about two and a half orders
-per two sweeps, reaching the exactly-solved answer to machine precision at the default of ten.
+wants more. For the Hessian-corrected scheme, the coupled sweep contracts geometrically at a
+rate set by the mesh, so its count is likewise a mesh property.
 
 The way to check a mesh you have not used before is to compare against an exact solve of the
 same system, which is what `GmresGradientSolve` provides:
@@ -527,7 +495,7 @@ same system, which is what `GmresGradientSolve` provides:
 ```python
 approx = HessianCorrectedGradient().gradients(phi, mesh, geometry, boundary_values)
 exact = HessianCorrectedGradient(
-    hessian_solver=GmresGradientSolve()
+    hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())
 ).gradients(phi, mesh, geometry, boundary_values)
 ```
 

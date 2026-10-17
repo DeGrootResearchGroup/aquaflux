@@ -40,7 +40,7 @@ from tests.support.tools import load_tool
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
 #: Dependency-free leaf modules of the package, which any layer may import.
-NEUTRAL_LEAVES = ("morton", "ragged", "text_table", "vectors")
+NEUTRAL_LEAVES = ("morton", "ragged", "text_table", "vectors", "warn_once")
 
 #: The packages that hold a specific physical model rather than machinery. A module here that grows large
 #: is the place residual-agnostic code hides, because it was written for the first consumer.
@@ -73,8 +73,8 @@ BUDGETS = {
     # Several gradient-scheme families -- compact and corrected Green--Gauss, the Hessian-corrected
     # gradient with its Hessian solves and boundary closures -- beside the machinery that solves for a
     # gradient: the gradient and cell preconditioners, the swept and Krylov gradient solves, and the
-    # sweep-count calibration.
-    "schemes/gradient.py": 3637,
+    # sweep-count calibration. Lowered from 3637 when the nested Hessian solve was deleted.
+    "schemes/gradient.py": 3444,
     # The body contract and every solid in one module: the interval constraints the convex primitives
     # are built from, the primitives, the torus with its quartic root-finding (cubic resolvent,
     # bracketed polish) beside them, and the constructive combinations and ``Outside``. The torus pushed
