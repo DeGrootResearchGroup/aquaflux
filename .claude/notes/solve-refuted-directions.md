@@ -1443,3 +1443,15 @@ after a successful escalation, so the two are a serial search, not a redundancy.
 was the asymmetric return (β recovers at ÷1.5 per step against ×2–×4 up), and the ladder's escape past
 `beta_max`. The futility reading was itself confounded: the escalated attempts ran on a V-cycle fitted at the
 pre-escalation β. Detail: `solve-field-split-log.md`, the 2026-08-11 march-confirmation entry.
+
+## Correcting a short probe's folded entries by the previous refit's far values — NOT WORTH BUILDING (2026-10-14)
+
+When a column is probed at a shorter reach than the materialized pattern, the colouring folds the
+far couplings onto near entries. Subtracting the previous refit's far values (from a full-reach probe)
+from those folded near entries was tried statically on pitzDaily (reach-2 colouring inside a reach-3
+pattern, shipped `case.yaml`, `compare.py` checkpoints, 4-core Linux, jax 0.11.2): between refits the
+far values change about as much as they are large, so the correction cut the per-block error by at most
+~2x and in some blocks not at all. The folded mass there is ~4e-4 of the Jacobian's norm and the
+shortened probe already marches identically (18 steps, 123 restart cycles), so there was nothing to
+recover. Detail: `.claude/notes/solve-direct-preconditioners-log.md`, "Probe colouring reach 2 —
+pitzDaily and bfs3d (2026-10-14/15)".
