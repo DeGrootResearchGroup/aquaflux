@@ -95,7 +95,9 @@ bare block inverse).
   de-compression" and "The gather map's build peak".
   - **Batch size:** `PROBE_BATCH_SIZE = 8` (`materialized_session.py`), where processor time bottomed on
     bfs3d (2026-08-11). The probe's memory barely scales with it, so auto-sizing the batch to free memory
-    is not worth building; a run's memory ceiling is set by building the case, not by probing it.
+    is not worth building. On bfs3d a run's memory ceiling is set by the fits and re-fits of the materialized
+    Jacobian and the compiled step, not by building the case (0.84 GiB; the whole march peaks at 12.1 GiB,
+    2026-10-17, Linux): log, "Where a run's memory goes".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
     gather** (`structure=`) are what the materialized path passes. The full pattern (no `eliminate_zeros`)
     is a superset of the live nonzeros at any state, so the structure never moves cold→developed — that

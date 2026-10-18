@@ -350,12 +350,36 @@
 
 ### Where a run's memory goes
 
-      **⚠️ WHERE THE MEMORY ACTUALLY GOES, measured by attribution rather than assumed:** peak RSS is
-      149 MB after imports, **6889 MB after `build_case`**, 7154 MB after the colouring and plan, 8359 MB
-      after the gather map. So the case assembly is ~6.7 GB, the gather map ~1.2 GB, and a whole
-      materialize 0.4 GB. **A run's memory ceiling is set by building the case, not by probing it** — the
-      probe is now a rounding error against it, and an initial reading that blamed the structure build was
-      wrong.
+      **bfs3d by stage, 2026-10-17** (`validation/bfs3d_openfoam/memory_by_stage.py`, one process, Linux
+      `VmRSS`/`VmHWM` plus a 20 ms sampler for each stage's own peak; commit `9efc5759` plus this branch's
+      uncommitted mesh move, no solver code changed; jax 0.11.2, 4-core Xeon 2.1 GHz, 15 GiB, no swap, glibc
+      allocator defaults, compilation cache cold; shipped `case.yaml`). GiB:
+
+      | stage | stage peak | RSS after | ΔRSS | HWM |
+      |---|---|---|---|---|
+      | imports | 0.43 | 0.43 | +0.42 | 0.43 |
+      | mesh read (23040 cells) | 0.46 | 0.46 | +0.03 | 0.47 |
+      | geometry | 0.53 | 0.50 | +0.04 | 0.54 |
+      | case build (its own mesh + geometry, blocked wall distance) | 0.84 | 0.83 | +0.32 | 0.84 |
+      | `hybrid_initialize` | 1.53 | 1.49 | +0.66 | 1.53 |
+      | first residual, compiled and run | 1.62 | 1.59 | +0.10 | 1.62 |
+      | first JVP, compiled and run | 1.83 | 1.80 | +0.21 | 1.83 |
+      | freed, then the march's own build + initialization to its first fit | 1.71 | 1.65 | +0.23 | 1.83 |
+      | probe plan, colouring and gather map | **3.19** | 2.06 | +0.40 | 3.19 |
+      | fit 1 (probe responses + block inverses) | **5.67** | 4.56 | +2.50 | 5.67 |
+      | from the first fit to the first re-fit | 6.00 | 5.90 | +1.34 | 6.00 |
+      | re-fit 1 (β 0.5) | 8.61 | 6.94 | +1.04 | 8.64 |
+      | step 1 (march step compiled) | 9.71 | 8.76 | +1.82 | 9.71 |
+      | re-fit 2 (β 0.167) | 11.28 | 9.52 | +0.76 | 11.28 |
+      | step 2 | 10.40 | 9.45 | −0.07 | 11.28 |
+      | re-fit 3 (β 0.0556) | 11.73 | 9.81 | +0.36 | 11.74 |
+      | step 3 | 10.56 | 9.60 | −0.21 | 11.74 |
+
+      The case build is 0.84 GiB (the PETSc-era ~6.7 GB is gone); **the ceiling is set by the materialized
+      Jacobian's fits and re-fits and the compiled march step**, each re-fit transiently ~1.5–2.7 GiB above
+      the resident set, which grew by a smaller amount per re-fit (+1.04, +0.76, +0.36). The whole shipped
+      march (29 steps, 29 re-fits) peaked at **12.1 GiB** (`VmHWM` of the case process, sampled every 15 s):
+      it fits 15 GiB with ~3 GiB to spare, and two of it would not.
 
 ## Condensed out of the rule (2026-10-17)
 
