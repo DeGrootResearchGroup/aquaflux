@@ -342,7 +342,10 @@ fi
   # mesh had to be hunted for across checkouts before the run could be repeated. PROFILE_, CONSISTENCY_,
   # FLOW_ and TAPER_ were missing the same way until 2026-09-15 -- tools/check_env_prefixes.py now
   # gates on this list falling behind the prefixes actually read under validation/ again.
-  env | grep -E '^(BFS3D|PITZ|UV|AQUAFLUX|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET|SOZZI|RC|REF|BV|BP|BL|RADIATION|RAY|SLEEVE|CHANNEL|TRACED|VBR|REFIT|REPLAY|TUBULAR|TORUS|MALLOC)_' | sort | sed 's/^/env: /' || true
+  # LD_PRELOAD and GLIBC_TUNABLES are the allocator's other two settings beside MALLOC_*: a replacement
+  # allocator moves a standalone program's timing by up to a third (its large temporaries stop being
+  # mapped afresh every call), so a timing taken under one must say so.
+  env | grep -E '^((BFS3D|PITZ|UV|AQUAFLUX|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET|SOZZI|RC|REF|BV|BP|BL|RADIATION|RAY|SLEEVE|CHANNEL|TRACED|VBR|REFIT|REPLAY|TUBULAR|TORUS|MALLOC)_|(LD_PRELOAD|GLIBC_TUNABLES)(=|$))' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
 echo "launched pid $PID"

@@ -96,16 +96,24 @@ branches.
 - **A timer that blocks on its own result also waits for earlier, untimed asynchronous work.** A JAX
   breakdown is sound only where the work before each timed piece is timed too; time a surprisingly large
   piece alone before believing it.
-- **On Linux a call whose temporary buffer exceeds 32 MiB page-faults all of it every call** (glibc's
-  mmap threshold), and **XLA allocates on worker threads, whose glibc arenas `mmap` anything over 64 MiB
-  whatever the threshold**. Inside a Krylov solve it is paid once per solve; **bfs3d's re-fit probe pays it
-  per batched JVP**: 15M minor faults and 38.4 s of a 58.3 s re-fit at glibc defaults, 36.5 s with
-  `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`, 28.8 s (0.15M faults, re-fit
-  38.6 s) with `MALLOC_ARENA_MAX=1` as well (`refit_profile.py`, `state-00029`, 2026-10-18, 4-core Linux,
-  jax 0.11.2; table in `.claude/notes/validation-log.md`). ⚠️ That setting killed a whole bfs3d march: one arena with no
-  trim keeps what it frees, 12.3 GiB resident by step 2 against 9.5 GiB, and the 15 GiB container restarted
-  (inferred; no OOM record survived). Report `ru_minflt` with any Linux timing and name the allocator
-  settings. Through `mallopt` both thresholds are C `int`s: a 4 GiB trim threshold wraps to 0.
+- **On Linux a standalone call whose temporary buffer exceeds 32 MiB page-faults all of it every call**
+  (glibc's adaptive mmap threshold); a Krylov iteration inside the step does not pay this (its loop
+  allocates once per solve), so per-call timings overstate it; **bfs3d's re-fit probe does pay it, per
+  batched JVP**: 15M minor faults and 38.4 of a 58.3 s re-fit at glibc defaults, 36.5 s with the
+  thresholds below, 28.8 s (0.15M faults, re-fit 38.6 s) with `MALLOC_ARENA_MAX=1` as well
+  (`refit_profile.py`, `state-00029`, 4-core Linux, jax 0.11.2; `.claude/notes/validation-log.md`). Report `ru_minflt` per call.
+  `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` removes it **only up to 64 MiB**:
+  XLA allocates on worker threads, whose arenas are 64 MiB heaps, so a larger buffer (the whole
+  `(J + s) M v` program's, ~74 MiB on pitzDaily) is mapped per call regardless. To remove all of it run
+  under jemalloc (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+  MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`) or `MALLOC_ARENA_MAX=1`, and say so; `run_case.sh`
+  records all three. ⚠️ **Both keep freed memory, so both raise the footprint: never run a bfs3d march
+  under them on a 15 GB machine.** `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
+  resident by step 2 against 9.5 GiB at defaults, and the container restarted (bfs3d session,
+  2026-10-18, branch `claude/bfs3d-mesh-home`); safe for fixed-state probes only. Compare a standalone piece with an in-loop one by the MEAN of as many calls as a solve
+  makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB
+  trim threshold wraps to 0. Measurements: `.claude/notes/solve-open-directions.md`, "Inside the step
+  program (2026-10-18)".
 - **A harness that builds a step must use the case's own shift settings, and form the shift through
   `ShiftTerm.shift(beta)`, never `beta * term.diagonal`** — the latter drops `row_shift_scale`, where
   `turbulence_damping` lives.
@@ -155,6 +163,9 @@ branches.
 - **A timing does not travel between checkouts either**: the JAX compilation cache is keyed on the
   compiled program, so the first run on a new branch partly measures compilation. A cold-cache premium and
   a contention premium are not separated by any single run.
+- **A case rerun on one mesh can keep its small programs**: `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0
+  validation/run_case.sh ...` stores the ~980 op-by-op programs the 2.0 s default recompiles every run
+  (pitzDaily warm start 89 s -> 63 s, 2026-10-17). Per run only; a mesh-changing study pays and gains nothing.
 - ⚠️ **`pgrep -f "tools/fastgate.sh"` matches its own watcher.** Match the real process with watchers
   excluded, or read the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, summary on the last
   line).

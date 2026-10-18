@@ -714,7 +714,7 @@ CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
   "default cache" row above is partly cold only because every library change re-keys its programs.
   Programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`) are never
   written, so the small eager programs recompile every run. At `183e9ffa` that is ~977 programs and
-  ~26 s, all before step 1 (a warm two-step run). Lowering the floor to keep them is refuted below.
+  ~26 s, all before step 1 (a warm two-step run). Keeping them is opt-in per run (entry below).
 - ⚠️ **A trap met while measuring:** "the cache did not serve the march step" was first read as JAX
   refusing to persist host-callback programs. It was a key change from the library moving under the
   cache; a warm run settled it. Read a cache miss against what changed since the cache was written.
@@ -1359,7 +1359,7 @@ receivers). Code never merged.
 - Shooting the gap routes through a neighbour sleeve (misses their steep paths); stopping a vmapped path
   search early / lower caps / seeding corners from the centroid path (#604 step 2b-i).
 
-## Persisting the small programs (persistence floor 0) — NOT SHIPPED (2026-10-17)
+## Persisting the small programs (persistence floor 0) — OPT-IN, NOT THE DEFAULT (2026-10-17)
 
 **What was proposed:** lower `jax_persistent_cache_min_compile_time_secs` from 2.0 to 0, so that the
 ~980 small programs pitzDaily compiles op by op before step 1 stop recompiling on every run.
@@ -1384,7 +1384,28 @@ read time, right after a `Persistent compilation cache hit` line (at WARNING und
 compile plus cache write 46 ms, cache hit 4.2 ms, in-memory repeat 0.03 ms. So the warm saving is real
 (about 26 s on pitzDaily's warm start).
 
-**Why it is not shipped:** with a size bound set (aquaflux sets 10 GiB), JAX's `LRUCache.put` runs
+**What shipped instead:** the floor stays 2.0 by default and a run opts in with
+`AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0` (`aquaflux/__init__.py`, `_cache_floor_secs`), for a case
+run repeatedly on one mesh. Set it per run, not in a shell profile, or the test suite stores its small
+programs too. A second measurement (branch `claude/cache-floor`, same container and jax, through
+`validation/run_case.sh`, process wall clock, one run each) agrees with the table above: pitzDaily
+two-step floor 2.0 / 0 cold 132 / 141 s, warm 89 / **63 s** (977 compilations, 26.3 s, before step 1
+against none, 983 hits; the march log's step 1 at 64 / 49 s); the re20000 channel through `aquaflux run`
+cold 101 / 104 s, warm 87 / **65 s**. A warm run writes nothing (entry count unchanged across it).
+- **Keys ignore the calling code**: JAX strips debug locations before hashing, so the same eager
+  primitive at the same shape from another file and line is a hit (four-program probe). Entries grow per
+  new mesh or case (the channel's 590 share 48 with pitzDaily's 949, 12 MB), not per run or library change.
+- **Rescan cost on real `LRUCache` objects**: ~30 µs per entry per write (32 ms at 1000, 153 ms at 5000,
+  627 ms at 20000; 29 ms on a copy of pitzDaily's 949-entry cache); read 0.3 ms.
+- **Eviction is LRU by access time**: with a 101 MB bound, 3000 old 18 KB entries, a 20 MB entry read once,
+  then 3000 new ones kept the large entry and every new one and evicted 1500 old ones; a 20 MB entry
+  written before them all went first. At 10 GiB the bound holds hundreds of cases' small programs, so it
+  does not limit their count; the GiB-sized solve programs each library change writes are what age them out.
+- **The test suite at floor 0** (six fast-tier files, 274 tests, serial, its own directory, one run each):
+  326 s cold / 59 s warm with 3099 entries, against 155 s / 166 s at 2.0 and 156 s with the cache off.
+  The cold doubling is the per-write rescan (~30 µs × 3099²/2 ≈ 145 s).
+
+**Why it is not the default:** with a size bound set (aquaflux sets 10 GiB), JAX's `LRUCache.put` runs
 `_evict_if_needed` on every write. That globs the whole cache directory, stats every entry and reads its
 access-time file, under the inter-process lock. So a write costs time in proportion to the entry count.
 Measured on synthetic 18 KB entries: 27 ms per write at 1000 entries, 141 ms at 5000, 586 ms at 20000 and
@@ -1395,7 +1416,7 @@ small program's write costs far more than its 25 ms compile, and an unbounded ca
 88 GiB growth the bound exists to stop. No floor in between helps: the programs worth persisting compile
 in 10–40 ms, so any floor that admits them admits everything.
 
-**Reopen only if** JAX's eviction stops scanning per write (it is `jax/_src/lru_cache.py`), or the small
+**Make it the default only if** JAX's eviction stops scanning per write (it is `jax/_src/lru_cache.py`), or the small
 programs go away (the next entry says they cannot be compiled away cheaply).
 
 ## Compiling the eager set-up phases into a few programs — NOT WORTH BUILDING (2026-10-17)
@@ -1479,6 +1500,39 @@ cycles of fresh), so re-fitting every step stays right; a secant update is just 
 Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against 3.6-4.2 s before the
 adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
 A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.
+
+## Cheaper GMRES bookkeeping in `_ResidualStopGMRES` — NOT WORTH BUILDING (2026-10-18)
+
+The candidates were to row-scale the system up front so the measured stop is the Euclidean norm of the
+small Hessenberg residual (no full-length residual vector per iteration), to form the classical
+Gram--Schmidt projections in one pass over the built rows, and to replace the per-iteration `lstsq` by a
+Givens recurrence. On pitzDaily's captured target-station systems (`main` `9efc5759`, 4-core Linux,
+jax 0.11.2, restart 15, row-scaled measure), the solve run with a free diagonal stand-in for the operator,
+at a fixed 60-iteration budget, costs **0.83-1.32 ms per iteration** against ~50 ms for a whole
+application inside the same loop, so all of the bookkeeping together is ~2 % (~1.3 s of a ~175 s march),
+below the container's 5-10 % run-to-run spread, and each candidate removes only part of it. Instrument:
+`validation/pitzdaily_openfoam/krylov_overhead.py`; table in `solve-open-directions.md`, "Inside the step
+program (2026-10-18)". Re-open only if the operator becomes an order of magnitude cheaper (or the restart
+length much longer).
+
+## The coloured probe as one compiled loop over its chunks — NO GAIN on pitzDaily (2026-10-18)
+
+The idea: a refit's probe calls `batched_jacobian_matvec` once per chunk of 8, and each call's temporary
+is mapped afresh and faulted (on glibc above 64 MiB no threshold stops it: XLA allocates on worker threads,
+whose arenas are 64 MiB heaps), so one `fori_loop` program over the chunks, seeds in and responses out by
+host callbacks, allocates once and keeps the one-chunk memory bound. Measured on pitzDaily's step-21 state
+(`validation/pitzdaily_openfoam/probe_loop_probe.py`, `main` `9efc5759`, 4-core Linux, jax 0.11.2, 100
+probes / 13 chunks, best of 5): faults per chunk fall 38 600 -> ~5 100, but the time does not move (three
+default-allocator runs: shipped 0.95-1.10 s, looped 0.90-1.09 s). The faults DO cost the shipped probe
+~0.3 s (0.67-0.72 s with `MALLOC_ARENA_MAX=1` and the thresholds raised, 0 faults); the loop gives that
+back because the same vmapped JVP runs slower inside a compiled loop than as separate calls (fault-free
+0.84-0.85 s against 0.60-0.69 s with no host work in either), and the looped responses differ from the
+shipped ones at 1.3e-12. jaxlib 0.11.2's XLA flags offer no CPU temporary-buffer or preallocation setting,
+so on CPU the remedy for the faults is the process allocator, which the user owns (`MALLOC_ARENA_MAX=1`
+with both thresholds, or jemalloc with decay off). ⚠️ Both keep freed memory: the single-arena setting
+took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted. Untested on bfs3d, whose probe faults ~210 000 times
+per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
+the in-loop JVP penalty measures smaller than that.
 
 ## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
 

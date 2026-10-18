@@ -24,7 +24,12 @@ import subprocess
 import sys
 
 import pytest
-from aquaflux import _cache_eviction_is_supported, _cache_max_bytes
+from aquaflux import (
+    _DEFAULT_CACHE_FLOOR_SECS,
+    _cache_eviction_is_supported,
+    _cache_floor_secs,
+    _cache_max_bytes,
+)
 
 _GIB = 1024**3
 
@@ -46,7 +51,11 @@ def _fresh_import(code: str, env_extra: dict[str, str]) -> str:
     """
     import os
 
-    env = {**os.environ, **env_extra}
+    # A floor set in the caller's environment would decide what the tests of the default read.
+    inherited = {
+        k: v for k, v in os.environ.items() if k != "AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS"
+    }
+    env = {**inherited, **env_extra}
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
@@ -146,3 +155,44 @@ def test_the_cache_can_be_disabled_entirely(tmp_path) -> None:
         },
     )
     assert str(tmp_path) not in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, _DEFAULT_CACHE_FLOOR_SECS),
+        ("", _DEFAULT_CACHE_FLOOR_SECS),
+        ("2", 2.0),
+        ("0.25", 0.25),
+        ("0", 0.0),
+        ("-1", 0.0),  # a negative floor stores everything, as zero does
+        ("two seconds", _DEFAULT_CACHE_FLOOR_SECS),
+    ],
+)
+def test_the_persistence_floor_is_read_in_seconds(raw: str | None, expected: float) -> None:
+    """The floor override is read in seconds; a typo falls back to the default."""
+    assert _cache_floor_secs(raw) == expected
+
+
+def test_by_default_only_expensive_compilations_are_stored(tmp_path) -> None:
+    """With nothing set, the floor stays at two seconds: persisting the small programs is opt-in.
+
+    Storing every program makes each later write rescan a directory of hundreds of entries per
+    mesh, which only a case run repeatedly on one mesh pays back.
+    """
+    code = "import jax, aquaflux; print(jax.config.jax_persistent_cache_min_compile_time_secs)"
+    out = _fresh_import(code, {"AQUAFLUX_COMPILATION_CACHE_DIR": str(tmp_path / "jax")})
+    assert float(out) == 2.0
+
+
+def test_a_fresh_import_honours_the_floor_override(tmp_path) -> None:
+    """``AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0`` opts a run in to storing every program."""
+    code = "import jax, aquaflux; print(jax.config.jax_persistent_cache_min_compile_time_secs)"
+    out = _fresh_import(
+        code,
+        {
+            "AQUAFLUX_COMPILATION_CACHE_DIR": str(tmp_path / "jax"),
+            "AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS": "0",
+        },
+    )
+    assert float(out) == 0.0

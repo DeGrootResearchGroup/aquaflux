@@ -115,15 +115,66 @@ split apply 53-61 ms:
 | -- the `[k, omega]` Jacobi-smoothed V-cycle | 8-9 | ~55 |
 | -- the coupling product | 1.5-1.9 | ~7 |
 | JVP `J v` | **14-17** | 77-86 (with the batched LU, #735) |
-| the two compiled as one program, `(J + s) M v` | 78-81 (19 000 faults per call under both allocators, not investigated) | -- |
+| the two compiled as one program, `(J + s) M v` | 78-81 (19 000 faults per call under both settings: a ~74 MiB buffer, see below) | -- |
 
 So **the preconditioner is ~75 % of an application (apply / (apply + JVP), 74-78 %), not ~90 %**. The
 split's cost fell by ~3.8x (padded-row operators, #721, and float32, #732) while the JVP fell by ~5x
 (the adjugate inverse, #735), so the share barely moved from the ~70 % recorded before. It would be
 ~93 % only if the split had stayed at its CSR float64 cost: arm C below measures exactly that, 195-200 ms
-against a 14-18 ms JVP. ⚠️ The composite program costs ~15 ms more than its two parts summed and keeps
-faulting with the thresholds raised, so `apply / composite` reads 59-64 %. Which of the two figures the
-step program sees is unmeasured; the step program's own matvec has not been profiled.
+against a 14-18 ms JVP. The composite's extra ~15 ms is its allocator, not its work (next section).
+
+### Inside the step program (2026-10-18): no unaccounted cost; the composite's excess was the allocator
+
+Same case, counts and capture as above, at `main` `9efc5759`, on a DIFFERENT 4-core Linux container
+(Xeon @ 2.10 GHz, 15 GB, glibc 2.39, jax 0.11.2), where every piece runs ~1.4x faster than in the table
+above, so compare only within this section. Warm cache throughout. Instruments:
+`validation/pitzdaily_openfoam/step_program_timing.py` (the march with its compiled step wrapped by a
+blocking timer, under `PITZ_KRYLOV_STOP=residual`; compile-free calls only) and `krylov_overhead.py` (the
+step's own `solve_linear` over `residual_stop_gmres`, restart 15, row-scaled measure, on the first inner
+system of steps 19-21; budgeted arms run exactly 60 iterations; best of 7). jemalloc is Ubuntu's
+`libjemalloc.so.2` with `MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`.
+
+| ms per application | default glibc | jemalloc |
+|---|---|---|
+| the step program, per application its solves made (20 compile-free calls, 1247 applications) | **60.1, 56.8, 57.3** (3 marches) | 58.0 |
+| -- its minor faults | ~41 000 per CALL (558-623 per application) | 40 per application |
+| the march's own solve at the march's tolerance (`krylov_overhead` `march`) | 48-53 | 46-53 |
+| -- GMRES bookkeeping per iteration (diagonal stand-in operator) | **0.83-1.26** | 0.84-1.32 |
+| -- JVP per iteration (identity arm minus stand-in) | 8.4-10.6 | 9.1-11.3 |
+| -- preconditioner per iteration (full minus identity; `s M` arm minus stand-in) | 37-45; 31-39 | 34-45; 30-35 |
+| standalone `(J + s) M v`, mean of 60 back-to-back calls | 63-65 (19 145 faults per call) | **41-47** (0) |
+| standalone `M v`, `J v`, same statistic | 34-44, 12-22 | 32-33, 11-12 |
+| standalone, best single call (`application_cost.py`): apply, JVP, composite | 39-44, 15-18, 58-63 | 28-29, 10, 37-46 |
+
+What this settles:
+- **A Krylov iteration inside the loop costs what the standalone composite costs once allocation is taken
+  out** (46-53 against 41-47 under jemalloc). The "15-25 ms unaccounted" was two artefacts: the standalone
+  composite maps a ~74 MiB temporary afresh on every call (19 145 faults), and best-of-15 single calls
+  understate a mean (`M v` best 28-29, mean 32-33). The step's loop allocates once per SOLVE, so its
+  faults are per call, not per application, and jemalloc removing them changes the in-loop time by nothing
+  measurable.
+- **Why the thresholds did not remove the composite's faults**: XLA allocates on its worker threads, whose
+  glibc arenas are heaps of at most 64 MiB (`HEAP_MAX_SIZE`), so a larger request is `mmap`ed whatever
+  `MALLOC_MMAP_THRESHOLD_` says. Reproduced with bare `malloc`/`free` from a Python thread: 43 MiB faults
+  every call by default and not with the thresholds raised; 80 MiB faults every call (20 481) with them
+  raised, and not under `MALLOC_ARENA_MAX=1` or jemalloc. (On the main thread a 1 GiB threshold DOES
+  apply in glibc 2.39; the 32 MiB cap bounds only the adaptive threshold.)
+- **GMRES bookkeeping is ~2 % of an application** (0.8-1.3 ms against ~50), so idea 2b (row scaling up
+  front, one projection pass, Givens) is bounded at ~1.3 s per march and was not built (ledger:
+  "Cheaper GMRES bookkeeping in `_ResidualStopGMRES`").
+- **The step program's application (57-60 ms) is ~7-10 ms above its solves' (48-53)**: the line search's
+  residuals and measures, the per-solve `x = M y` and the inner loop's own residuals, spread over the
+  applications. Not decomposed further; at ~10 s per march it is the only residue left in this bucket.
+- **The allocator does not move the march.** Shipped `compare.py`, warm, identical step tables and
+  `x_r/h` 8.0686: default 206 s (its step 1 took 68 s against 47-49 in every other run, an outlier) and
+  176 s; jemalloc 179 and 169 s. Summed over the 21 refits, the coloured probe took 21.9-24.4 s by default
+  and 16.5-18.7 s under jemalloc (its batched-JVP program's temporaries stop faulting), the host refactor
+  20.4-21.9 s against 22.7-23.5 s, so the refits gain ~3-4 s net, inside the 5-10 % spread. Not made a
+  `run_case.sh` default: it would buy ~2 % and make every timing incomparable with the record.
+  `run_case.sh` records `LD_PRELOAD` and `GLIBC_TUNABLES` beside `MALLOC_*` since this change.
+  ⚠️ An allocator that keeps freed memory raises the footprint: `MALLOC_ARENA_MAX=1` with both thresholds
+  took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and its 15 GB container
+  restarted, so on bfs3d such a setting is for fixed-state probes, not marches.
 
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
