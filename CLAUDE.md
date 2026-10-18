@@ -596,7 +596,7 @@ read as green this way). **Redirect (`> file`) and read the script's own exit st
 its last few lines.**
 
 **The fast tier runs across worker processes; the `slow` and `validation` tiers do not** — a memory
-decision (a bfs3d march peaks at ~11 GiB on Linux, each copy of its Jacobian 0.41 GiB; CI shards the heavy tiers at `-n 1`). The
+decision (a bfs3d march peaks at ~8.5 GiB on Linux, each copy of its Jacobian 0.41 GiB; CI shards the heavy tiers at `-n 1`). The
 fast tier distributes by **file** (`--dist loadfile`: module fixtures built once, file order kept) and
 pins **one BLAS/XLA (and Numba) thread per worker**. `FASTGATE_JOBS=<n>` sets the worker count;
 `FASTGATE_JOBS=0` (or your own `-n`) opts out — do that when bisecting. ⚠️ **Judge memory from the
@@ -834,8 +834,8 @@ than halved a tier's peak footprint (history in `.claude/notes/claude-md-log.md`
 - **A run that spanned a machine sleep is void for cost.** It converges correctly, but the wall-clock
   column silently absorbed the sleep. `run_case.sh` holds the machine awake; if a sleep happened anyway,
   keep its step and cycle counts and discard its timings.
-- **Sweep in one process, not N.** These jobs are memory-bound (a bfs3d march peaks at ~11 GiB, set by
-  the re-fits and the traced split's copies), so spare cores are not a reason to parallelize. Loop over β in one process, `del` the
+- **Sweep in one process, not N.** These jobs are memory-bound (a bfs3d march peaks at ~8.5 GiB, set by
+  its re-fits), so spare cores are not a reason to parallelize. Loop over β in one process, `del` the
   big arrays between iterations, and load a cached factor from disk rather than re-materializing it.
   Concurrent probes have exhausted this machine and suspended every application on it, including the
   driving session.

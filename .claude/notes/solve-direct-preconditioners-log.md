@@ -419,6 +419,14 @@
         10.9 -> 8.4 GiB. Cumulative over the main baseline: **11.91 -> 8.47 GiB** (2 steps). What sets
         the peak now is the first re-fit's leading-block re-fit, where the entry maps (#757) are built
         (host transient 4.8 GiB over 2.6), and the step program's ~1 GiB of temporaries.
+      - **Whole shipped march, branch against `main` (`fe772f59`)**, `run_case.sh`, `VmHWM` sampled every 15 s:
+        step tables identical (shift, inner, cycles, `R`, `a_min`, `rho1`, flags) through all 34 steps both
+        reached; peak **8.54 GiB against 12.21 GiB**; 3439 s against 3636 s to step 34; re-fits 31, mean
+        42.7 s (probe 32.6, refactor 10.0) against 47.4 s (33.8 / 12.2). Both died at step 35 on the same
+        singular `[k, omega]` cell block (`validation-log.md`, "The shipped bfs3d march fails at step 35").
+      - **pitzDaily, branch against `main`**: step tables identical, 21 steps / 106 cycles / `R` 2.618e-06;
+        warm-cache wall 173 s against 181 s; peak `VmHWM` 3.17 against 3.16 GiB (its peak is not set by
+        these copies).
 
 ## Condensed out of the rule (2026-10-17)
 

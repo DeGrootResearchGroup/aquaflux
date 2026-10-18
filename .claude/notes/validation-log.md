@@ -820,3 +820,14 @@ re-fits 45.8 s and 42.4 s (probe 28.8 / 28.1 s) at steps 1–2 against 63.8 / 61
 12.3 GiB resident by step 2 (9.5 GiB at defaults), and the container restarted at ~00:42 with no exit
 record and no surviving kernel log. Inferred cause: one arena with a 2 GiB trim threshold retains freed
 memory. Unmeasured: the single arena with the default trim threshold, and jemalloc with decay disabled.
+
+## The shipped bfs3d march fails at step 35 on `fe772f59` (2026-10-18)
+
+`validation/run_case.sh validation/bfs3d_openfoam/compare.py`, shipped `case.yaml`, glibc defaults, 4-core
+Xeon, 15.7 GiB, jax 0.11.2; on `main` at `fe772f59` and on `claude/bfs3d-memory` (identical step tables
+through step 34). Both raise at the re-fit before step 35, in the trailing `[k, omega]` block:
+`SmoothedHierarchy.refit (level 0): block smoothing needs every cell block invertible, but 1 of 23040 are
+singular`, with `R` 4.557e-04 (target 1e-05) and the shift at its 0.005 floor. The last recorded
+convergence (`b1648725`, 2026-10-17: 29 steps, `x_r/h` 8.3611) predates #757 and #761; which of the commits
+between moved the trajectory onto the singular block is not bisected. Logs: `march.log` of each run (not
+kept in the repository).

@@ -205,6 +205,13 @@ their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march
   that set one ran the file's solver.
 - `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
 
+## ⚠️ The shipped bfs3d march does not converge on `fe772f59`
+
+It dies at the re-fit before step 35 on a singular `[k, omega]` cell block (1 of 23040), on `main` and on
+the memory branch alike (identical step tables): `.claude/notes/validation-log.md`, "The shipped bfs3d march
+fails at step 35". The last converged record predates #757 and #761; not bisected. A bfs3d A/B taken now
+compares marches that end there.
+
 ## bfs3d's mesh — one tracked copy
 
 - **`validation/bfs3d_openfoam/of_case/constant/polyMesh` is the one copy** (23040 hexahedra), where
