@@ -20,10 +20,12 @@ author's private working notes). When a rule would otherwise point at an externa
 the fact instead.
 
 ⚠️ **`paths:` is mandatory on every file under `.claude/rules/`: an absent one scopes the file to
-everything, not to nothing.** Three reference-only files without it once loaded ~285 KB into every
-session before the first tool call, and nothing reported it. **Reference-only material goes in
-`.claude/notes/`** (tracked, greppable, read on demand). `tools/check_rules.sh` reports any rules file
+everything, not to nothing**, and nothing reports what it costs (why: "Preamble: the unscoped-files incident").
+**Reference-only material goes in `.claude/notes/`** (tracked, greppable, read on demand). `tools/check_rules.sh` reports any rules file
 missing `paths:`, and `tests/unit/test_check_rules.py` runs it in the fast tier.
+
+**A `(why: "<heading>")` pointer in this file names a heading in `.claude/notes/claude-md-log.md`**, which
+holds verbatim the incident or measurement behind the rule beside it.
 
 When you change a subsystem, the matching rule below is the authoritative
 guidance for it — keep it updated as part of the change (this file's Post-Change
@@ -40,17 +42,18 @@ Checklist still governs).
 | `.claude/rules/schemes.md` | `aquaflux/schemes/**` | first-class swappable numerics: face interpolation, gradient reconstruction, non-orthogonal correction |
 | `.claude/rules/boundary.md` | `aquaflux/boundary/**` | weak boundary-face-value closures (BC = special face interpolator); the shared per-patch fold |
 | `.claude/rules/properties.md` | `aquaflux/properties/**` | physical property model (density/viscosity/conductivity): `Property` (constant / per-zone / calculated) collected in a `PropertyModel`, decoupled from the numerics |
-| `.claude/rules/solve.md` | `aquaflux/solve/**`, `aquaflux/precondition/**` | **the residual-agnostic layer every residual runs on** (Principle 3.6): the staged driver, the shifted-step assembly, measures, Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk; and **`precondition/`**, the preconditioners those linear solves take (frozen operators, multigrid, block inverses, the field split, the materialized Jacobian), a separate package since #284 that imports `solve/` and nothing else. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
+| `.claude/rules/solve.md` | `aquaflux/solve/**`, `aquaflux/precondition/**` | **the residual-agnostic layer every residual runs on** (Principle 3.6): the staged driver, shifted-step assembly, measures, Newton, the linear solve with implicit differentiation; and `precondition/`, the preconditioners those solves take (imports `solve/` and nothing else). Split into narrower-scoped `solve-*.md` siblings — see `solve.md`'s own index |
 | `.claude/rules/flow.md` | `aquaflux/flow/**` | coupled p–U block: momentum (reusing advection/diffusion) + Rhie–Chow continuity, differentiated `a_P` (frozen only in the preconditioner), monolithic AD-Jacobian solve |
 | `.claude/rules/turbulence.md` | `aquaflux/turbulence/**` | k–ω SST closure + the segregated flow–turbulence loop: segregated forward / coupled adjoint, outer-loop globalization, positivity-floor adjoint honesty |
 | `.claude/rules/transport.md` | `aquaflux/transport/**` | scalar transport by a converged flow (species, temperature, tracers): why a concentration rides the *volumetric* flux, the effective-diffusivity convention, sub-patch injection without a mesh change — the aquakin reaction seam |
-| `.claude/rules/io.md` | `aquaflux/io/**` | mesh import, **CAD import** (STEP through OpenCASCADE/OCP into exact `solids` bodies checked against the drawing by boundary distance, and size-bounded emitting triangles — the only kernel import is `io/cad/kernel.py`), **and field export**: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard; the OpenFOAM field writer that inherits dimensions and `boundaryField` from a template so its output restarts; the VTK XML `.vtu`/`.pvd` writer (arbitrary polygon/polyhedron cells, appended-binary) and why its face winding is re-derived rather than taken as stored; the boundary-patch writer (`patches.vtm` + one `.vtp` per patch, a layout the browser viewer depends on) |
+| `.claude/rules/io.md` | `aquaflux/io/**` | mesh import (`MeshReader`, the OpenFOAM polyMesh reader, empty-patch 2D collapse), CAD import (STEP through OCP into exact `solids` bodies; the only kernel import is `io/cad/kernel.py`), and field export (OpenFOAM fields that restart, VTK `.vtu`/`.pvd`, the `patches.vtm` boundary-patch layout the browser viewer depends on) |
 | `.claude/rules/validation.md` | `validation/**` | the scientific cases and study harnesses: why no test tier drives them, the obligation to check an API change against them, what the static guard catches and what it cannot, and the harness traps that have produced wrong results |
 | `.claude/rules/parallel.md` | `aquaflux/parallel/**` | distributed memory: graph partitioners, the `PartitionedMesh` owned+halo decomposition, uniform-shape padding, and the `shard_map` residual that runs an *injected* assembler per device (never a re-implementation) |
-| `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour; the scene (`solve_scene`: lamps' emission kept out of the transfer, their facets reflecting and shadowing in it) a radiation case file builds; transparent solids (`refraction.py`, `refracted.py`: Fresnel, the refracted path by a descent on the optical length, the refracted direct gather, a scene's lamps' light routed by medium, through one pass-through region per path) |
-| `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract (`blocks`/`contains`/`traceable`), analytic primitives, constructive solid geometry over line intervals, `Outside` (a vessel as the fluid it holds), the grazing-robust cylinder discriminant; generic geometry, held to the same import-nothing rule as `solve/` — what a CAD model is read into and what radiation shadows with |
-| `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (top-level package, `ui` extra; Setup / Run / Results sections; Setup edits case files through one long-lived `aquaflux serve` process, Run starts `aquaflux run` as its own process and follows the history it writes): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam (`RunDirectory` reads what `run.yaml` lists, `VtkFiles`), the render-free `Pipeline` and its large-mesh policy (surface/slice/threshold only, cached by dependency), and the trame page |
-| `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case described in one YAML file: the `CaseSpec` core plus the physics (laminar, RANS, or radiation — lamps, reflecting walls, surfaces from CAD/STL/mesh) and drive discriminators, one physical kind per boundary patch or patch group (closures and wall set derived, never restated), the fluid stated once with exactly one viscosity, why the YAML parse is 1.2 and refuses duplicate keys, how the build derives each equation's closures, the wall set and one property model (bit-identical to the hand-built drivers, and the float-leaf trap that almost hid a recompile), the solver section (four solves, the library's own settings values read directly, a script may observe a solve but never configure it), `aquaflux run` with its outputs section and run records, the `initial` section (`Checkpoint`: a restart from an earlier run's physical-field files with a mesh-checked header, carrying the stopped march's history (`solve.Resumption`: reference residual, damping anchor, step-control shift) when the problem and measure are unchanged; `Fields`: an OpenFOAM time directory, pressure per unit density both ways; the ramp's refusal), and what is not built yet |
+| `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the solid-angle kernels and why they are not interchangeable, the load-bearing numerical details, the `F_ii = 0` convention; the scene (`solve_scene`) and transparent solids (refraction) |
+| `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract, analytic primitives, constructive solid geometry, `Outside`; generic geometry, held to the same import-nothing rule as `solve/` |
+| `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (`ui` extra; Setup / Run / Results): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam, the render-free `Pipeline` and its large-mesh policy, the trame page |
+| `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case in one YAML file: the `CaseSpec` core, physics and drive, one physical kind per boundary patch, the fluid stated once, the YAML 1.2 parse, the build, the solver section, `aquaflux run` and its run records, the `initial` section (`Checkpoint`, `Fields`) |
+| `.claude/rules/docs.md` | `docs/**`, `tools/build_docs.sh`, `.readthedocs.yaml` | the Sphinx site: the API page generated from each documented subpackage's `__all__`, `SUBPACKAGE_GROUPS`, the docstring layouts that break a `-W` build, extension dependencies, the shipped-surface rules for `docs/` |
 
 **Reference-only notes (`.claude/notes/`, tracked, never auto-load — read deliberately before re-investigating a subsystem):**
 
@@ -64,6 +67,7 @@ Checklist still governs).
 | `.claude/notes/solve-refuted-directions.md` | the cross-cutting ledger of closed/refuted directions — grep it before proposing one |
 | `.claude/notes/solve-open-directions.md` | the backlog of unmeasured solver speed-up directions |
 | `.claude/notes/claude-md-log.md` | this file's rules (the incidents and measurements behind them) |
+| `.claude/notes/module-review-rubric.md` | not a log: the two-pass Module Review Rubric, read when a review is asked for |
 | `.claude/notes/{case,validation,io,mesh,discretization,parallel,ui,solids,boundary,solve-field-split}-log.md` | the matching rule |
 
 ### Writing the design records (binding)
@@ -207,13 +211,11 @@ replicate that.**
   (construct its strategy, pick its default). **A keyword that exists on one sibling and not the other is
   a defect the day it is added, not a property of that path.** The surfaces drift because nothing compares
   them and **no single commit looks wrong**, so every check scoped to "your change" — including the
-  Post-Change Checklist and Stale-Record Check — is blind to it by construction. It has happened six times
-  (history in `.claude/notes/claude-md-log.md`); the costliest was a k-positivity limit, the fix for a
-  march going non-finite, wired on one of four coupled-step builders and reaching none of the others.
-  - **⚠️ Extracting the shared tail fixes the bodies and hides the surfaces.** After four coupled tails
-    became one `_coupled_step`, their hand-copied public surfaces drifted twice more while
-    `tools/sibling_builders.py` reported clean. **When you extract a shared tail, audit the surfaces above
-    it in the same change**, and trust a check's silence only once you have confirmed it can see the case.
+  Post-Change Checklist and Stale-Record Check — is blind to it by construction. (why: "Engineering Principles 2: the sibling-builder count"; the six
+  instances are under "Engineering Principles → 2. One source of truth".)
+  - **⚠️ Extracting the shared tail fixes the bodies and hides the surfaces.** **When you extract a shared tail, audit the surfaces above
+    it in the same change**, and trust a check's silence only once you have confirmed it can see the case
+    (why: "Engineering Principles 2: the shared-tail drift").
   - **For a shared *surface*, the durable repair is a shared object**: when several builders' keywords
     are one *configuration* rather than one *namespace*, make them one value object (`Globalization` in
     `solve/continuation.py`), so a new setting reaches every builder by construction. **Give it unset
@@ -287,10 +289,8 @@ coverage — without saying so and getting agreement first.** Narrowing scope is
 widening it: "the simpler version for now", "Phase 1 / Phase 2", and a cheaper approximation of an agreed
 design are all scope changes.
 
-It is about the *evidence* that follows. The observed failure: an agreed residual measure (scales rebuilt
-every outer iteration) was built with scales frozen at the initial condition, called "Phase 1" rather
-than flagged, and the measurement taken under it was reported as a failure of the *formula* — it was a
-property of the unapproved substitution.
+It is about the *evidence* that follows: a measurement taken under an unflagged substitution gets read
+as a finding about the agreed design (why: "Engineering Principles 3.5: the observed failure").
 
 - **Flag the deviation at the point of deviation**, plainly: "you agreed X; I am about to do Y instead,
   because Z — is that acceptable?" Not buried in scoping language ("for now", "as a first cut").
@@ -303,10 +303,8 @@ property of the unapproved substitution.
 
 ### 3.6 Layering — generic machinery goes in the generic layer, not the first physics package that needed it (binding)
 
-The observed failure: the staged solve driver, preconditioner sessions, shifted-step assembly, residual
-measures and Krylov settings were written **inside `turbulence/coupled.py`** because turbulence first
-needed a robust march. None mentions turbulence, yet a **laminar** problem was left with only a bare
-pseudo-transient step, so a control experiment had to run on a weaker driver (#448).
+Generic machinery written inside the first physics package that needed it leaves every other residual
+on a weaker path (why: "Engineering Principles 3.6: the observed failure", #448).
 
 - **The placement test, applied when you write the code.** Describe the function in one sentence. If it
   needs a physics word — `k`, `ω`, `ν_t`, a closure, a wall function, "coupled RANS" — it is physics. If
@@ -338,10 +336,8 @@ pseudo-transient step, so a control experiment had to run on a weaker driver (#4
 
 ### 3.7 Vocabulary — one word, one meaning (binding)
 
-The observed failure (#373): several names per concept and several concepts per name — `relaxation` for
-both an under-relaxation factor (damps *less* as it grows) and the shift strength `β` (damps *more*),
-`rtol` on a residual in one solve and on the state increment in another, `omega` for the SST field and a
-smoother weight. A settings field is read straight from a case file, so **its name is a user-facing key**.
+Several names per concept, or several concepts per name, make a reader invert a quantity (why: "Engineering Principles 3.7: the observed failure",
+#373). A settings field is read straight from a case file, so **its name is a user-facing key**.
 
 - **Before naming a parameter, field or method, grep the package for the word.** If it already means
   something else anywhere, pick another name, even for a local, private use.
@@ -412,10 +408,10 @@ old one.**
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | traced, shared with aquakin |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
-| Compiled host loops | **Numba** | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and as numpy passes it pays per step for every item still in flight; a host loop can also fuse several whole-array passes into one threaded loop. Used in `aquaflux/radiation/` (`grid_walk.py`, `back_faces.py`, `transfer._any_in_front`, `grid._unions_held`; see `.claude/rules/radiation.md`). A core dependency since 2026-09-26, by the project owner's decision over keeping it optional. |
+| Compiled host loops | **Numba** | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and a host loop can also fuse several whole-array passes into one threaded loop. Used in `aquaflux/radiation/` (see `.claude/rules/radiation.md`). A core dependency, by the project owner's decision over keeping it optional. |
 | Browser interface (optional) | **PyVista/VTK + trame + plotly** (`aquaflux_ui`, `ui` extra) | a local browser interface needing no JavaScript toolchain: VTK renders locally and trame streams images, so a large mesh never reaches the browser. A separate top-level package that imports neither aquaflux nor JAX (`import aquaflux` enables x64), asking the solver through an `aquaflux serve` process (`.claude/rules/ui.md`) |
 | Case file | **PyYAML** (`aquaflux/case/`) | a case's mesh, physics, boundaries, (for a flow) fluid and numerics, and solver in one YAML document, read by YAML 1.2 rules for plain values (PyYAML's 1.1 rules read `1e-5` as a string and `no` as a boolean) and validated per position by `solve.SettingsMapping` — so no pydantic. The equation DSL (YAML → AST emitting terms) is different and is still the **last** layer, not built |
-| Bounded compilation cache | **filelock** (`aquaflux/__init__.py`) | `import aquaflux` points JAX's persistent compilation cache at `~/.cache/aquaflux/jax` and **bounds it**: JAX's default max size `-1` means *no eviction*, so the cache only grows (one checkout reached 88 GiB). A byte bound turns eviction on, and JAX locks through `filelock` to do it. **⚠️ A bound without `filelock` disables the cache entirely** (every read/write fails with a `UserWarning`), so the package checks and degrades to merely unbounded. Override with `AQUAFLUX_COMPILATION_CACHE_MAX_GIB` (negative for no bound), `AQUAFLUX_COMPILATION_CACHE_DIR`, or `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`. The 2.0 s persistence floor stays the default; `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0` opts one run in to persisting the ~980 small op-by-op programs (pitzDaily warm start 89 s → 63 s), for a case rerun on one mesh — with a bound every write rescans the cache directory, ~30 µs per entry (ledger: "Persisting the small programs"). |
+| Bounded compilation cache | **filelock** (`aquaflux/__init__.py`) | `import aquaflux` points JAX's persistent compilation cache at `~/.cache/aquaflux/jax` and **bounds it** (JAX's default max size `-1` never evicts). **⚠️ A bound without `filelock` disables the cache entirely**, so the package checks and degrades to merely unbounded. Override with `AQUAFLUX_COMPILATION_CACHE_MAX_GIB` (negative for no bound), `AQUAFLUX_COMPILATION_CACHE_DIR`, or `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`. The 2.0 s persistence floor stays the default; `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0` opts one run in to persisting the small op-by-op programs, for a case rerun on one mesh (with a bound every write rescans the cache directory). Measurements: `.claude/notes/claude-md-log.md`, "Technology Stack: the Numba and cache rows" and the ledger, "Persisting the small programs". |
 
 The coupled-block preconditioner is the **top research risk**. The first build-on candidate to evaluate
 is `jaxamg` — do not assume it; verify its adjoint is implicit-diff and that it preconditions a *block*
@@ -456,8 +452,7 @@ gives one home to change. Rank-3 tensor algebra (Hessian outer products, `einsum
 
 **⚠️ `dot` is deliberately not spelled `jnp.sum(a * b, axis=-1)` — do not "simplify" it back.** It
 multiplies, then sums the components **explicitly**, because on CPU a fusion rooted at a reduction runs
-single-threaded; this made the coupled RANS residual ~1.7× faster (2026-08-21; measurement in
-`.claude/notes/claude-md-log.md`). `norm_squared` inherits it.
+single-threaded (why: "Architecture: the dot speed-up"). `norm_squared` inherits it.
 - **Multiply first, unroll only the sum** (indexing unbroadcast operands breaks a trailing axis of 1),
   and **⚠️ form the product with `jnp.multiply`, not `*`** (two NumPy operands would return an `ndarray`
   without `.at[]`). Both pinned by unit tests.
@@ -469,18 +464,13 @@ single-threaded; this made the coupled RANS residual ~1.7× faster (2026-08-21; 
   fixture size is load-bearing: XLA partitions kernels only above roughly 768–1200 cells, and the module
   fails if its fixture stops seeing partitioned kernels.
 
-**Ragged lists live in one leaf, `aquaflux/ragged.py`** (numpy only, a neutral leaf in
-`tests/unit/test_layering.py`): `rows` gathers chosen rows of a compressed-sparse-row (CSR) list, `group`
-builds one from integer keys, `pairs_within_groups` forms the per-group Cartesian product in flat form.
-Used by the mesh's face-subset code (`FaceNodeConnectivity.select`, `collapse.py`) and the radiation
-coarsener. Reach for it before writing `np.repeat(..., counts)` index arithmetic.
+**Ragged lists live in one leaf, `aquaflux/ragged.py`** (numpy only; `rows`, `group`,
+`pairs_within_groups`). Reach for it before writing `np.repeat(..., counts)` index arithmetic.
 
-**Points are ordered along a space-filling curve in one leaf, `aquaflux/morton.py`** (numpy only, a
-neutral leaf): `morton_order(points)` sorts points along a Morton (Z-order) curve, so any run of
-consecutive points is a local patch; the radiation package cuts every grouping of points from it.
-⚠️ **Each axis is scaled to its own extent, deliberately**: cubic cells wrap groups around a long thin
-lamp so their facets stop facing one way, which left more pairs undecided and slowed the transfer build
-(#574, `.claude/notes/radiation-log.md`, "ONE MORTON ORDERING, PER-AXIS CELLS").
+**Points are ordered along a Morton (Z-order) curve in one leaf, `aquaflux/morton.py`** (numpy only);
+the radiation package cuts every grouping of points from it. ⚠️ **Each axis is scaled to its own extent,
+deliberately — do not make the cells cubic** (#574, `.claude/notes/radiation-log.md`, "ONE MORTON
+ORDERING, PER-AXIS CELLS").
 
 **Once-per-process warnings live in one leaf, `aquaflux/warn_once.py`** (standard library only, a
 neutral leaf): `warn_once(kind, message)` emits the first warning of each kind in the process;
@@ -488,13 +478,9 @@ neutral leaf): `warn_once(kind, message)` emits the first warning of each kind i
 shared flag let a routine repair report silence a graver one. Name a kind after its module
 (`"multiple_correction.repaired"`); Python's `"once"` filter keys on the message, so it is no substitute.
 
-**Frozen preconditioner operators are assembled in one place, `aquaflux/precondition/frozen_operator.py`.**
-`ConvectionDiffusionStencil` is the one description of the frozen, first-order-upwind
-convection–diffusion operator that the pressure Schur, both velocity blocks and the k/ω transport
-preconditioners coarsen, assembled off the jit path as a `scipy.sparse` matrix; it sits beside
-`precondition/multigrid.py`, whose builders know nothing about meshes. First-order upwinding is the
-**preconditioner's** choice, not the model's (it gives an M-matrix aggregation can coarsen). Detail in
-`.claude/rules/solve.md`.
+**Frozen preconditioner operators are assembled in one place, `aquaflux/precondition/frozen_operator.py`**
+(`ConvectionDiffusionStencil`, off the jit path). First-order upwinding is the **preconditioner's**
+choice, not the model's (it gives an M-matrix aggregation can coarsen). Detail in `.claude/rules/solve.md`.
 
 ```
 Mesh (SoA topology) + FaceGeometry/CellGeometry            (classes)
@@ -542,10 +528,9 @@ the code works. This applies equally to your own tests and to one an agent hands
 to "add a test" tends to return something green against the code as it stands, without checking it
 would go red against a plausible wrong version.
 
-(A mutation pass on `aquaflux/mesh/collapse.py`, #396, found 6 of 16 one-line bugs undetected: three real
-gaps, three unreachable — detail in `.claude/notes/claude-md-log.md`.) **Chasing every undetected mutation
+**Chasing every undetected mutation
 is the same failure as never checking, spent the other way**: judge each on whether the path is reachable
-and the behaviours distinguishable, and record which mutations were dismissed and why.
+and the behaviours distinguishable, and record which mutations were dismissed and why (why: "Testing Architecture: the mutation-pass summary").
 
 **How to check a test can fail:** comment out, invert, or disable the line of production code the test
 pins, rerun *only* that test (or its file), confirm it goes red, then restore the line exactly. It costs
@@ -570,15 +555,13 @@ complete, and before reporting "N passed" as evidence a change is correct.
 **When reviewing coverage — yours or an agent's — ask per new test: what specific wrong answer does this
 catch, and did I verify that it would?**
 
-**⚠️ The same defect in a measurement script has no runner to notice it.** A printed
-`closure: 5.01 = 5.01 (must agree)` over a 2x2 of measurements agreed for *any* four numbers (both paths
-are `D/A`). **A tautology dressed as an assertion is worse than the bare quantity.**
+**⚠️ The same defect in a measurement script has no runner to notice it. A tautology dressed as an
+assertion is worse than the bare quantity** (why: "Testing Architecture: the closure tautology").
 - **Concrete trigger:** *before writing `must`, `expected`, `should equal` or a tick beside a computed
   pair — in a script, a log line, or a commit message — ask what inputs would make it disagree. If none
   would, it is a derived quantity and must be labelled as one.*
 - **A number that matches what you already believe is the least reliable kind of agreement.** Decompose it
-  before stopping (a gap of exactly 1.37x, read as a known 1.37x machine spread, was 1.12x × 1.22x of two
-  other effects).
+  before stopping (why: "Testing Architecture: the 1.37x decomposition").
 
 **⚠️ CI is not a superset of a local run, and `importorskip` is why**: a module gated on a dependency
 outside the `test` extra is skipped in CI and runs only where it is installed. **When a test fails locally
@@ -591,8 +574,7 @@ status (its behaviour, including the guards below and the scoped `--changed` for
 — and never through a pipe: the suite prints shutdown chatter *after* the summary, so `| tail -n` hides
 the result and returns `tail`'s `0`. ⚠️ **The pipe rule applies to `fastgate.sh` itself, and knowing the
 rule is not what protects you**: `tools/fastgate.sh … | tail -4` returns `0` *and* crops the
-`FAILED (pytest exit N)` block, leaving a `full log:` line that reads like a pass (a 21-failure run was
-read as green this way). **Redirect (`> file`) and read the script's own exit status; never judge it by
+`FAILED (pytest exit N)` block, leaving a `full log:` line that reads like a pass (why: "Testing Architecture: the cropped fastgate run"). **Redirect (`> file`) and read the script's own exit status; never judge it by
 its last few lines.**
 
 **The fast tier runs across worker processes; the `slow` and `validation` tiers do not** — a memory
@@ -686,8 +668,7 @@ it, or drop a heavy solve into the always-on gate). The ini form is load-bearing
   flows through `solve()` without error and without NaNs.
   ⚠️ **"Without NaNs" is the floor, not the test.** `0.0` is finite, so an adjoint severed anywhere — a
   stray `stop_gradient`, a closure that stopped carrying its dependence — passes a finiteness assertion
-  (wrapping `nut_wall`'s return in `stop_gradient` left all of `tests/unit/test_turbulence_boundary.py`
-  green, including `..._is_differentiable_in_k`). **Compare the gradient against a finite difference
+  (why: "Testing Architecture: the severed nut_wall adjoint"). **Compare the gradient against a finite difference
   wherever the cost allows; where it does not, at minimum assert it is non-zero.**
 - **AD-exact-linearization (skewed mesh):** on a non-orthogonal mesh, the linear problem converges in one
   Newton step (Gate C) — the concrete improvement over the reference.
@@ -803,27 +784,19 @@ Four operations have one correct invocation. Use it.
 | run only the tests a change can reach, before a push | `tools/fastgate.sh [tier] --changed [--base REF]` |
 | build the Sphinx docs locally, the same strict way CI does | `tools/build_docs.sh` |
 
-Each exists because the hand-rolled version fails *silently*: `pytest … | tail -n` reports `tail`'s `0`
-whatever pytest did; a case launched with a bare `python … &` dies with its parent, or outlives a
-cancellation you believe succeeded; `pgrep -f <script>` matches the watcher's own command line, so a
-waiter waits on itself forever; a hand-rolled `sphinx-build` that skips deleting the gitignored
-`docs/generated`/`docs/api.md`/`docs/_build` reports a build clean about the *previous* set of pages.
-Every one has happened here and cost hours.
+Each exists because the hand-rolled version fails *silently* (how each one fails: "Development workflow: how each hand-rolled command fails").
 
 `run_case.sh` gives unbuffered output **redirected, never piped**, to a timestamped log; the machine held
 awake; a free-memory and load pre-flight; a refusal to start a second case; a run-file recording pid,
 worktree, branch, commit and case settings; and, under `--wait`, the case's **own** exit status. Its most
-valuable output is that **"is this run mine, and what is it testing?" has a written answer** — a question
-that has been got wrong from the process table alone.
+valuable output is that **"is this run mine, and what is it testing?" has a written answer**.
 
 **⚠️ `tools/fastgate.sh` refuses to start beside a running case (exit `3`) or beside another tier from
 any worktree or session (exit `4`; a machine-wide lockfile under `~/.cache/aquaflux/`, location
 overridable with `FASTGATE_LOCK_DIR`).** `FASTGATE_FORCE=1` overrides both; neither applies under `CI`.
-Both exist because *knowing* the one-heavy-job rule did not prevent collisions, which slow **both** jobs
-and once forced a hard reset. The case guard asks `validation/run_case.sh --running` rather than reading
+Both exist because *knowing* the one-heavy-job rule does not prevent collisions (why: "Development workflow: the collisions behind the fastgate guards"). The case guard asks `validation/run_case.sh --running` rather than reading
 the run-file, so its format and `kill -0` liveness rule keep one home. `tests/conftest.py` calls
-`jax.clear_caches()` after every module, since a worker otherwise keeps every compiled executable; it more
-than halved a tier's peak footprint (history in `.claude/notes/claude-md-log.md`).
+`jax.clear_caches()` after every module, since a worker otherwise keeps every compiled executable.
 
 ### What no runner can enforce (binding)
 
@@ -846,9 +819,7 @@ than halved a tier's peak footprint (history in `.claude/notes/claude-md-log.md`
 ### Measure the quantity you will be judged by (binding)
 
 **The number a run is steered/watched by and the number it is finally judged by must come from one
-definition.** The observed failure: a validation case's live reattachment length used the full span
-(set in 3D by a side-wall corner separation) while the final comparison used a mid-span slab — same name,
-two quantities ~40% apart, and a whole run's reasoning done against the wrong one.
+definition.** (why: "Development workflow: the two reattachment lengths".)
 
 So a scalar a case exposes for a solver to be watched by must be **the same callable** the final report
 uses. A genuinely wanted diagnostic variant is reported under a **different name**, alongside.
@@ -859,9 +830,8 @@ uses. A genuinely wanted diagnostic variant is reported under a **different name
 defaults that were active, the state, and the operating point. A number without its configuration
 expires silently the moment any of them changes, and you cannot tell that it has.**
 
-Three solve findings recorded no smoother or aggregation; both defaults moved, inverting conclusions, and
-the scratchpad harnesses were gone — leaving them **unfalsifiable**, worse than wrong (a wrong finding
-gets corrected, an unfalsifiable one gets cited). **Keep the probe in the repository**: it is the
+A finding whose configuration and harness are gone is **unfalsifiable**, worse than wrong (a wrong
+finding gets corrected, an unfalsifiable one gets cited; why: "Development workflow: the three unfalsifiable findings"). **Keep the probe in the repository**: it is the
 difference between a finding that can be re-asked and one that can only be cited.
 
 - **Name the defaults in force.** Not "21 iterations" but "21 iterations at ILU(1), 2 sweeps, smoothed
@@ -910,90 +880,24 @@ coincidence** (an absolute path outside this checkout).
 
 ### Documentation
 
-User-facing docs live in `docs/` as a **Sphinx site in MyST Markdown** (`pydata-sphinx-theme`, autodoc +
-napoleon), with an API page (`docs/api.md`) **generated at build time** from each documented
-subpackage's `__all__` (`conf.py` `_write_api_page` / `PUBLIC_SUBPACKAGES`). Read the Docs builds it with
-`fail_on_warning: true`, so every cross-reference must resolve and every page sit in a toctree. **Build
-locally with `tools/build_docs.sh`** — the same `sphinx-build -b html -W docs docs/_build/html` Read the
-Docs and CI run, after deleting the gitignored build artifacts, in a cached environment
-(`~/.cache/aquaflux/build-venv`) because a PEP-668 system Python refuses `pip install -e ".[docs]"`.
-**CI builds the docs on every PR** (the required `fast gate` depends on it); still run
-`tools/build_docs.sh` when you touch a documented docstring, a `docs/` page, or a cross-reference.
-
-**Publishing a subpackage means publishing its whole `__all__`** — the export list *is* the editorial
-decision; to keep a name off the site, take it out of `__all__`. Page grouping is `SUBPACKAGE_GROUPS`,
-keyed on the module each name is **defined** in; extend it when a subpackage grows a module (`-W` will not
-tell you). Three traps:
-
-- **A multi-name parameter entry must sit on ONE line** (`beta0, exponent, beta_floor`); a wrapped name
-  line, or prose after the last entry of a `Parameters` section, gives the `Field list ends without a
-  blank line` / `Unexpected indentation` / `Block quote ends without a blank line` triple. Put such prose
-  above `Parameters` or in its own section.
-- **A field whose default is a plain function is documented by that function's docstring**
-  (`residual_norm = field(default=jnp.linalg.norm)`); `conf.py`'s `_skip_borrowed_member_doc` drops class
-  members that are routines defined outside `aquaflux`; document such fields in the class's `Attributes`.
-- **Delete `docs/generated/`, `docs/api.md` and `docs/_build/` between probe builds**
-  (`rm -rf docs/generated docs/api.md docs/_build`); leftover stubs make a run clean only about the
-  previous set of pages.
-
-**A Sphinx extension enabled in `conf.py` must be matched by a dependency in the `docs` extra** (MyST
-`linkify` needs `myst-parser[linkify]`; without it *every* page fails). Verify in a **clean** environment.
-
+User-facing docs are a **Sphinx site in MyST Markdown** under `docs/`, built with `-W` by Read the Docs
+and by CI on every PR (the required `fast gate` depends on it). **Build locally with
+`tools/build_docs.sh`** when you touch a documented docstring, a `docs/` page, or a cross-reference.
 The docs are the **shipped surface**, so the Comment Convention and the Claude-Facing-File Reference Ban
-apply: no references to the precursor codebases, the Claude-facing files (`CLAUDE.md` / `.claude/`), the
-internal design notes, or the author's own papers, and no roadmap/build-stage labels ("Milestone 0",
-"BUILT"). The annotated `package_structure.md` file tree is internal, stays in `docs/`, and is listed in
-`conf.py` `exclude_patterns` so it never reaches the built site.
+apply. The rest (what publishing a subpackage means, `SUBPACKAGE_GROUPS`, the docstring traps that break
+`-W`, extension dependencies, the excluded `package_structure.md`) is `.claude/rules/docs.md`, which
+loads for `docs/**`; **read it before editing a documented docstring outside `docs/`**, which it cannot
+glob.
 
 ---
 
 ## Module Review Rubric
 
-When asked to review a module (or auditing one before commit), run **two passes**. The second is the one
-that gets skipped, and it catches structural problems a per-file checklist is blind to — a shared type in
-the wrong module, a bundle that unions every consumer's needs, a decomposition that won't survive the
-next feature. It needs **fresh eyes** (see "How to run it").
-
-### Pass 1 — Local smells (per file)
-The Engineering Principles as a checklist, plus correctness and user-facing clarity:
-- **Testability (Principle 1):** can each unit be tested in isolation with small inputs, no global
-  state? Is there an operator-level test (order-of-accuracy on an analytic field)? Can each test actually
-  fail — checked against a broken version of the code, not just read ("A test that cannot fail is not a test")?
-- **Duplication (Principle 2):** logic implemented more than once; copy-paste-modify; a formula that
-  should be imported from its one home.
-- **Encapsulation (Principle 3):** raw arrays passed instead of the object; a whole `Mesh` where
-  `face_cells` suffices; duplicate accessors; god-methods; inlined formulas that have a home.
-- **Vocabulary (Principle 3.7):** a name that already means something else in the package, a quantity
-  whose name runs opposite to a neighbour's, a count that does not name its unit, or a concept spelled
-  differently from its siblings.
-- **Correctness & clarity:** errors/edge cases; anything a user would find hard to understand or misuse.
-
-### Pass 2 — Decomposition & extensibility (step back; question the structure)
-Do not evaluate the code *within* the existing structure — question the structure itself:
-- **Placement / cohesion.** Is each type/function in the right module, each module one responsibility?
-  *Smell:* a type used mainly by module B living in module A because it was first written there (e.g. a
-  face-flux state/interface in `diffusion.py`). **Sharpest form: generic machinery in a physics package**
-  — a driver, step assembly, measure or settings value naming no physics, living in `turbulence/` because
-  turbulence was first (Principle 3.6).
-- **God-objects / union bundles.** A structure that unions every consumer's needs — coupling unrelated
-  consumers, growing with each operator, needing placeholder defaults (`psi = ones`)? A "context/state"
-  object carrying fields only one consumer reads?
-- **Dependency direction.** Sibling modules importing each other for shared types (they should share a
-  base/contract module)? An import that invites a cycle?
-- **Extensibility against the stated direction.** As the system grows (YAML/DSL-driven assembly; N
-  operators / schemes / BCs; a properties model), what will bloat, need placeholder defaults, or need
-  re-cutting? Is each strategy **self-describing about its own inputs** so a declarative assembler can
-  gather per active term?
-- **Self-justification.** For each shared type, state *why* it lives where it does. "That is where it was
-  first written" means it is probably misplaced.
-
-### How to run it
-Run **both** passes. Pass 2 needs **fresh eyes**: spawn a reviewer (agent) not anchored on the current
-structure, and prompt it with these Pass-2 dimensions **explicitly** — a generic "find issues" prompt
-reverts to local-smell matching. Scope each review to a named module (or a small set), evaluate against
-the future direction, and **verify each finding yourself** before acting (agents surface
-plausible-but-wrong structural claims too). A finding is real only if you can name the concrete failure
-it causes now or the concrete bloat/re-cut it forces later.
+**When asked to review a module (or auditing one before commit), read
+`.claude/notes/module-review-rubric.md` first and run both of its passes**: Pass 1, the local smells (the
+Engineering Principles as a checklist); Pass 2, decomposition and extensibility, which needs **fresh
+eyes** — a reviewer agent prompted with the Pass-2 dimensions explicitly — and **verify each finding
+yourself** before acting.
 
 ---
 
@@ -1006,8 +910,7 @@ renamed, a default you moved, a measurement taken under the configuration you ch
 test suite fails when they rot.
 
 **It is the most expensive recurring defect in this project**: stale facts lifted from these files by
-grep have been asserted as current and passed into sub-agent briefs, and a binding decision once stated
-`NewtonSolver` was deleted 34 lines above an entry using it as live.
+grep have been asserted as current and passed into sub-agent briefs (why: "Stale-Record Check: the NewtonSolver entry").
 
 **Run this before every commit that renames, deletes, moves, or re-values anything:**
 
@@ -1087,7 +990,7 @@ After **every code change**, before considering the task complete, review and ac
      them, don't skim. Third-party author-year citations like "Ghia et al. (1982)" won't trip it.)
    - **README / docs surface:** when you touch `README.md` or anything under `docs/`, this grep must also
      come back **empty** (`package_structure.md` is excluded — a build-excluded internal catalogue, per
-     the Documentation section):
+     `.claude/rules/docs.md`):
      ```
      grep -rniE "\.claude|claude\.md" README.md docs --exclude=package_structure.md
      ```
@@ -1150,16 +1053,13 @@ After **every code change**, before considering the task complete, review and ac
    - **The docstrings and comments in the `.py` files** — in the code you changed *and in every other
      module that describes the same behaviour*. In-code prose is the first thing a reader trusts, and only
      this item covers it. **Grep for the claim, not only for the symbol** — this drift renames nothing, so
-     the identifier grep is blind to it (a switch from left- to right-preconditioning in
-     `solve/linear.py` alone left four other modules calling it a "left preconditioner" for two weeks).
+     the identifier grep is blind to it (why: "Post-Change Checklist 4: the preconditioning-side drift").
    - **The matching `.claude/rules/*.md`** — the per-subsystem design record: binding decisions,
      interfaces, class/function names, file paths, and `BUILT` / `Not yet built` status. Inline the fact
      rather than pointing at any private note.
      ⚠️ **"Matching" means the rule whose `paths:` glob covers the file you edited — check the
      frontmatter, do not go by subject.** A rule that does not glob the file it governs never auto-loads
-     for the person editing it, so binding prose put there is invisible exactly when it is needed (two
-     sessions once recorded `solve/step_control.py` changes, one a binding class contract, in a rule that
-     did not glob it, and both passed this checklist as written). Read the **frontmatter**:
+     for the person editing it, so binding prose put there is invisible exactly when it is needed (why: "Post-Change Checklist 4: the wrongly routed binding prose"). Read the **frontmatter**:
 
      ```
      for f in .claude/rules/*.md; do sed -n '/^paths:/,/^---/p' "$f" | grep -q "<file you edited>" && echo "$f"; done

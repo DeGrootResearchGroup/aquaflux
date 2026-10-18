@@ -802,3 +802,165 @@ The selection is mostly not the module's own tests: `sparse_jacobian` reaches `f
 block preconditioner, and through them the coupled RANS and march tests, which hold most of the cost.
 Before the run, an estimate from `.test_durations` (recorded sum / 2 workers) gave ~13 min for
 `sparse_jacobian`; the gap is the fast integration tests, which had no recorded durations then.
+
+## Moved 2026-10-18 — Preamble: the unscoped-files incident
+
+everything, not to nothing.** Three reference-only files without it once loaded ~285 KB into every
+session before the first tool call, and nothing reported it. **Reference-only material goes in
+`.claude/notes/`**
+
+## Moved 2026-10-18 — Index: the full rule-file descriptions
+
+| `.claude/rules/solve.md` | `aquaflux/solve/**`, `aquaflux/precondition/**` | **the residual-agnostic layer every residual runs on** (Principle 3.6): the staged driver, the shifted-step assembly, measures, Newton on the residual, linear solve with implicit differentiation / `custom_vjp`, the preconditioner risk; and **`precondition/`**, the preconditioners those linear solves take (frozen operators, multigrid, block inverses, the field split, the materialized Jacobian), a separate package since #284 that imports `solve/` and nothing else. Split by subsystem into narrower-scoped siblings (`solve-direct-preconditioners.md`, `solve-amg-multigrid.md`, `solve-flow-block.md`, `solve-field-split.md`, `solve-globalization.md`, `solve-march.md`, plus reference-only `-log.md`/`solve-refuted-directions.md` files in `.claude/notes/`) — see `solve.md`'s own "Index — where the detail lives" |
+
+| `.claude/rules/io.md` | `aquaflux/io/**` | mesh import, **CAD import** (STEP through OpenCASCADE/OCP into exact `solids` bodies checked against the drawing by boundary distance, and size-bounded emitting triangles — the only kernel import is `io/cad/kernel.py`), **and field export**: the `MeshReader` strategy + the OpenFOAM polyMesh reader (ASCII); parse→assemble→collapse seams, empty-patch 2D collapse (a `mesh/` transform), reserved-name guard; the OpenFOAM field writer that inherits dimensions and `boundaryField` from a template so its output restarts; the VTK XML `.vtu`/`.pvd` writer (arbitrary polygon/polyhedron cells, appended-binary) and why its face winding is re-derived rather than taken as stored; the boundary-patch writer (`patches.vtm` + one `.vtp` per patch, a layout the browser viewer depends on) |
+
+| `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the two closed-form solid-angle kernels and why they are not interchangeable, the `arctan2`/clip/magnitude/safe-root details that are load-bearing, and the `F_ii = 0` convention callers must honour; the scene (`solve_scene`: lamps' emission kept out of the transfer, their facets reflecting and shadowing in it) a radiation case file builds; transparent solids (`refraction.py`, `refracted.py`: Fresnel, the refracted path by a descent on the optical length, the refracted direct gather, a scene's lamps' light routed by medium, through one pass-through region per path) |
+
+| `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract (`blocks`/`contains`/`traceable`), analytic primitives, constructive solid geometry over line intervals, `Outside` (a vessel as the fluid it holds), the grazing-robust cylinder discriminant; generic geometry, held to the same import-nothing rule as `solve/` — what a CAD model is read into and what radiation shadows with |
+
+| `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (top-level package, `ui` extra; Setup / Run / Results sections; Setup edits case files through one long-lived `aquaflux serve` process, Run starts `aquaflux run` as its own process and follows the history it writes): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam (`RunDirectory` reads what `run.yaml` lists, `VtkFiles`), the render-free `Pipeline` and its large-mesh policy (surface/slice/threshold only, cached by dependency), and the trame page |
+
+| `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case described in one YAML file: the `CaseSpec` core plus the physics (laminar, RANS, or radiation — lamps, reflecting walls, surfaces from CAD/STL/mesh) and drive discriminators, one physical kind per boundary patch or patch group (closures and wall set derived, never restated), the fluid stated once with exactly one viscosity, why the YAML parse is 1.2 and refuses duplicate keys, how the build derives each equation's closures, the wall set and one property model (bit-identical to the hand-built drivers, and the float-leaf trap that almost hid a recompile), the solver section (four solves, the library's own settings values read directly, a script may observe a solve but never configure it), `aquaflux run` with its outputs section and run records, the `initial` section (`Checkpoint`: a restart from an earlier run's physical-field files with a mesh-checked header, carrying the stopped march's history (`solve.Resumption`: reference residual, damping anchor, step-control shift) when the problem and measure are unchanged; `Fields`: an OpenFOAM time directory, pressure per unit density both ways; the ramp's refusal), and what is not built yet |
+
+## Moved 2026-10-18 — Engineering Principles 2: the sibling-builder count
+
+ It has happened six times
+  (history in `.claude/notes/claude-md-log.md`); the costliest was a k-positivity limit, the fix for a
+  march going non-finite, wired on one of four coupled-step builders and reaching none of the others.
+
+## Moved 2026-10-18 — Engineering Principles 2: the shared-tail drift
+
+ After four coupled tails
+    became one `_coupled_step`, their hand-copied public surfaces drifted twice more while
+    `tools/sibling_builders.py` reported clean.
+
+## Moved 2026-10-18 — Engineering Principles 3.5: the observed failure
+
+It is about the *evidence* that follows. The observed failure: an agreed residual measure (scales rebuilt
+every outer iteration) was built with scales frozen at the initial condition, called "Phase 1" rather
+than flagged, and the measurement taken under it was reported as a failure of the *formula* — it was a
+property of the unapproved substitution.
+
+## Moved 2026-10-18 — Engineering Principles 3.6: the observed failure
+
+The observed failure: the staged solve driver, preconditioner sessions, shifted-step assembly, residual
+measures and Krylov settings were written **inside `turbulence/coupled.py`** because turbulence first
+needed a robust march. None mentions turbulence, yet a **laminar** problem was left with only a bare
+pseudo-transient step, so a control experiment had to run on a weaker driver (#448).
+
+## Moved 2026-10-18 — Engineering Principles 3.7: the observed failure
+
+The observed failure (#373): several names per concept and several concepts per name — `relaxation` for
+both an under-relaxation factor (damps *less* as it grows) and the shift strength `β` (damps *more*),
+`rtol` on a residual in one solve and on the state increment in another, `omega` for the SST field and a
+smoother weight.
+
+## Moved 2026-10-18 — Technology Stack: the Numba and cache rows
+
+| Compiled host loops | **Numba** | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and as numpy passes it pays per step for every item still in flight; a host loop can also fuse several whole-array passes into one threaded loop. Used in `aquaflux/radiation/` (`grid_walk.py`, `back_faces.py`, `transfer._any_in_front`, `grid._unions_held`; see `.claude/rules/radiation.md`). A core dependency since 2026-09-26, by the project owner's decision over keeping it optional. |
+
+| Bounded compilation cache | **filelock** (`aquaflux/__init__.py`) | `import aquaflux` points JAX's persistent compilation cache at `~/.cache/aquaflux/jax` and **bounds it**: JAX's default max size `-1` means *no eviction*, so the cache only grows (one checkout reached 88 GiB). A byte bound turns eviction on, and JAX locks through `filelock` to do it. **⚠️ A bound without `filelock` disables the cache entirely** (every read/write fails with a `UserWarning`), so the package checks and degrades to merely unbounded. Override with `AQUAFLUX_COMPILATION_CACHE_MAX_GIB` (negative for no bound), `AQUAFLUX_COMPILATION_CACHE_DIR`, or `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`. The 2.0 s persistence floor stays the default; `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0` opts one run in to persisting the ~980 small op-by-op programs (pitzDaily warm start 89 s → 63 s), for a case rerun on one mesh — with a bound every write rescans the cache directory, ~30 µs per entry (ledger: "Persisting the small programs"). |
+
+## Moved 2026-10-18 — Architecture: the dot speed-up
+
+single-threaded; this made the coupled RANS residual ~1.7× faster (2026-08-21; measurement in
+`.claude/notes/claude-md-log.md`). `norm_squared` inherits it.
+
+## Moved 2026-10-18 — Architecture: the leaf modules in full
+
+**Ragged lists live in one leaf, `aquaflux/ragged.py`** (numpy only, a neutral leaf in
+`tests/unit/test_layering.py`): `rows` gathers chosen rows of a compressed-sparse-row (CSR) list, `group`
+builds one from integer keys, `pairs_within_groups` forms the per-group Cartesian product in flat form.
+Used by the mesh's face-subset code (`FaceNodeConnectivity.select`, `collapse.py`) and the radiation
+coarsener. Reach for it before writing `np.repeat(..., counts)` index arithmetic.
+
+**Points are ordered along a space-filling curve in one leaf, `aquaflux/morton.py`** (numpy only, a
+neutral leaf): `morton_order(points)` sorts points along a Morton (Z-order) curve, so any run of
+consecutive points is a local patch; the radiation package cuts every grouping of points from it.
+⚠️ **Each axis is scaled to its own extent, deliberately**: cubic cells wrap groups around a long thin
+lamp so their facets stop facing one way, which left more pairs undecided and slowed the transfer build
+(#574, `.claude/notes/radiation-log.md`, "ONE MORTON ORDERING, PER-AXIS CELLS").
+
+**Frozen preconditioner operators are assembled in one place, `aquaflux/precondition/frozen_operator.py`.**
+`ConvectionDiffusionStencil` is the one description of the frozen, first-order-upwind
+convection–diffusion operator that the pressure Schur, both velocity blocks and the k/ω transport
+preconditioners coarsen, assembled off the jit path as a `scipy.sparse` matrix; it sits beside
+`precondition/multigrid.py`, whose builders know nothing about meshes. First-order upwinding is the
+**preconditioner's** choice, not the model's (it gives an M-matrix aggregation can coarsen). Detail in
+`.claude/rules/solve.md`.
+
+## Moved 2026-10-18 — Testing Architecture: the mutation-pass summary
+
+(A mutation pass on `aquaflux/mesh/collapse.py`, #396, found 6 of 16 one-line bugs undetected: three real
+gaps, three unreachable — detail in `.claude/notes/claude-md-log.md`.) **Chasing every undetected mutation
+
+## Moved 2026-10-18 — Testing Architecture: the closure tautology
+
+**⚠️ The same defect in a measurement script has no runner to notice it.** A printed
+`closure: 5.01 = 5.01 (must agree)` over a 2x2 of measurements agreed for *any* four numbers (both paths
+are `D/A`). **A tautology dressed as an assertion is worse than the bare quantity.**
+
+## Moved 2026-10-18 — Testing Architecture: the 1.37x decomposition
+
+  before stopping (a gap of exactly 1.37x, read as a known 1.37x machine spread, was 1.12x × 1.22x of two
+  other effects).
+
+## Moved 2026-10-18 — Testing Architecture: the cropped fastgate run
+
+leaving a `full log:` line that reads like a pass (a 21-failure run was
+read as green this way).
+
+## Moved 2026-10-18 — Testing Architecture: the severed nut_wall adjoint
+
+passes a finiteness assertion
+  (wrapping `nut_wall`'s return in `stop_gradient` left all of `tests/unit/test_turbulence_boundary.py`
+  green, including `..._is_differentiable_in_k`).
+
+## Moved 2026-10-18 — Development workflow: how each hand-rolled command fails
+
+Each exists because the hand-rolled version fails *silently*: `pytest … | tail -n` reports `tail`'s `0`
+whatever pytest did; a case launched with a bare `python … &` dies with its parent, or outlives a
+cancellation you believe succeeded; `pgrep -f <script>` matches the watcher's own command line, so a
+waiter waits on itself forever; a hand-rolled `sphinx-build` that skips deleting the gitignored
+`docs/generated`/`docs/api.md`/`docs/_build` reports a build clean about the *previous* set of pages.
+Every one has happened here and cost hours.
+
+ — a question
+that has been got wrong from the process table alone.
+
+## Moved 2026-10-18 — Development workflow: the collisions behind the fastgate guards
+
+Both exist because *knowing* the one-heavy-job rule did not prevent collisions, which slow **both** jobs
+and once forced a hard reset.
+
+since a worker otherwise keeps every compiled executable; it more
+than halved a tier's peak footprint (history in `.claude/notes/claude-md-log.md`).
+
+## Moved 2026-10-18 — Development workflow: the two reattachment lengths
+
+ The observed failure: a validation case's live reattachment length used the full span
+(set in 3D by a side-wall corner separation) while the final comparison used a mid-span slab — same name,
+two quantities ~40% apart, and a whole run's reasoning done against the wrong one.
+
+## Moved 2026-10-18 — Development workflow: the three unfalsifiable findings
+
+Three solve findings recorded no smoother or aggregation; both defaults moved, inverting conclusions, and
+the scratchpad harnesses were gone — leaving them **unfalsifiable**, worse than wrong (a wrong finding
+gets corrected, an unfalsifiable one gets cited).
+
+## Moved 2026-10-18 — Stale-Record Check: the NewtonSolver entry
+
+grep have been asserted as current and passed into sub-agent briefs, and a binding decision once stated
+`NewtonSolver` was deleted 34 lines above an entry using it as live.
+
+## Moved 2026-10-18 — Post-Change Checklist 4: the preconditioning-side drift
+
+the identifier grep is blind to it (a switch from left- to right-preconditioning in
+     `solve/linear.py` alone left four other modules calling it a "left preconditioner" for two weeks).
+
+## Moved 2026-10-18 — Post-Change Checklist 4: the wrongly routed binding prose
+
+invisible exactly when it is needed (two
+     sessions once recorded `solve/step_control.py` changes, one a binding class contract, in a rule that
+     did not glob it, and both passed this checklist as written).
