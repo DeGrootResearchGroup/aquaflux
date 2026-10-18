@@ -51,6 +51,7 @@ cfd/                                  # repo root
 │   ├── vectors.py                    # leaf: per-element vector algebra — dot / norm_squared / scale (buries axis/[:,None] bookkeeping; imported everywhere)
 │   ├── context.py                    # leaf: MeshContext (face_cells/geometry/properties) + FieldContext (mesh + one field's boundary_values/gradient) — below schemes/boundary so both can take it without a cycle
 │   ├── text_table.py                 # fixed-width ASCII tables for solver reports
+│   ├── warn_once.py                  # leaf: warn_once / forget_warnings — a diagnostic said once per process per kind
 │   │
 │   ├── mesh/                         # Mesh container + face/cell geometry + connectivity (2D and 3D)
 │   │   ├── mesh.py                   #   Mesh(eqx.Module): SoA coords + connectivity objects + zones/patches; from_faces(), from_csr() (vectorized, no per-face Python loop), validate(), geometry() → MeshGeometry
