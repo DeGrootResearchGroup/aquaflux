@@ -73,9 +73,19 @@ Checklist still governs).
 ### Writing the design records (binding)
 
 Every rules file is paid for in context by each session that touches its paths, so it holds only what a
-future agent needs to act correctly. `tools/check_rules.sh` (fast tier) fails any rules file or this
-file over **120 KB**, any set of rules that load together over **200 KB**, and any rule whose globs match
-nothing; `tools/rules_budget.py` holds the budget and a shrink-only exception list.
+future agent needs to act correctly. `tools/check_rules.sh` (fast tier) fails any rules file over
+**120 KB**, any set of rules that load together over **200 KB**, any rule whose globs match nothing, and
+this file over its own ceiling; `tools/rules_budget.py` holds the budgets and the shrink-only lists.
+
+**This file loads into every session, so it may not regrow (binding).** It holds only what a task that
+touches none of the subsystems still needs: the binding rules, their concrete triggers, and the commands
+and paths the checklists run. Before adding a line, ask whether a session working in an unrelated
+package needs it; if it is about one subsystem, it goes in the rule whose `paths:` covers that
+subsystem. An incident, measurement or example goes in `.claude/notes/claude-md-log.md`, leaving the
+rule and a `(why: "<heading>")` pointer; a new entry is a rule plus at most one sentence of reason.
+`ROOT_CEILING` in `tools/rules_budget.py` caps this file a little above its size and must be lowered as
+the file shrinks. **When an addition would cross it, move something out in the same change — never
+raise the ceiling** without the project owner's agreement.
 
 **Where it goes**
 - **Rules file**: current state only — what is built and where, contracts and invariants, the shipped
