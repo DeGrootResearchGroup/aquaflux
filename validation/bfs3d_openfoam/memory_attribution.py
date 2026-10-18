@@ -570,6 +570,7 @@ def _instrument(recorder: Recorder, compare) -> dict:
         census=-1,
     )
     wrap(sparse_jacobian, "materialize_block_jacobian", "probe (materialize)")
+    wrap(sparse_jacobian, "materialize_blocks", "probe (into the split's blocks)")
     wrap(sparse_jacobian, "shifted_jacobian", "shift (copy + setdiag)")
     wrap(field_split.FieldGroups, "blocks", "block cut (four slices)", census=1)
     wrap(hierarchy_inverse.HierarchyBlockInverse, "__init__", "block inverse build")

@@ -286,7 +286,7 @@ defect — fix it in the same change.
   problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse, one
   refresh hook, each made at most once, so every step carries identical static objects. It is written
   against the ABC **`MaterializedProblem`** (`assembler`, `layout`, `with_assembler`,
-  `probe(settings, active_rows)`, `groups()` — `None` ⇒ one group, `bind_march` (where a residual
+  `probe(settings, groups)`, `groups()` — `None` ⇒ one group, `bind_march` (where a residual
   validates early), `shift_source`, `build_step(state, policy, march, base_regime)`); the session hands
   it the glued shift policy, so no problem chooses the preconditioner's form. Implementations:
   `turbulence._CoupledProblem`, `flow._FlowProblem`. `FieldSplit` is refused for one group, a bare

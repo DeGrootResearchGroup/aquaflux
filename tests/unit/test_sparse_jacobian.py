@@ -15,6 +15,7 @@ from aquaflux.precondition.sparse_jacobian import (
     column_probe_plan,
     jacobian_relative_error,
     materialize_block_jacobian,
+    materialize_blocks,
     shifted_jacobian,
 )
 
@@ -635,3 +636,48 @@ def test_the_shift_does_not_modify_its_input() -> None:
     before = a.diagonal().copy()
     shifted_jacobian(a, np.arange(6.0))
     assert np.array_equal(a.diagonal(), before)
+
+
+@pytest.mark.parametrize("leading_fields", [1, 3])
+def test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix(leading_fields):
+    """Probed straight into a block-major layout, the blocks are the whole matrix's blocks, entry for entry.
+
+    The layout replaces the whole matrix, its shifted copy and the cut a field split used to make, so
+    it must reproduce all three exactly: the same structure (explicit zeros included), the same values,
+    the shift on the same diagonal entries -- and the blocks must be views of one array, or the copies
+    it exists to remove are back. Two partitions, one with a single leading field.
+    """
+    from aquaflux.precondition import FieldGroups
+
+    rng = np.random.default_rng(3)
+    n, nvar = 12, 5
+    k, colouring = _random_block_matrix(n, nvar, 2, rng)
+    k.data[::7] = 0.0  # stored zeros must survive as stored entries
+    groups = FieldGroups.by_counts(n, leading_fields, nvar - leading_fields)
+    plan = ColumnProbePlan.uniform(colouring, nvar, active_rows=groups.active_rows())
+    matvec = _matvec_of(k)
+    whole = materialize_block_jacobian(
+        matvec, plan, structure=block_stencil_gather_map(plan), probe_batch_size=4
+    )
+    probed = materialize_blocks(
+        matvec,
+        plan,
+        structure=block_stencil_gather_map(plan, leading_fields=leading_fields),
+        probe_batch_size=4,
+    )
+    shift = rng.uniform(1.0, 2.0, nvar * n)
+
+    for label, expected, got in (
+        ("unshifted", groups.blocks(whole), probed.blocks()),
+        ("shifted", groups.blocks(shifted_jacobian(whole, shift)), None),
+    ):
+        if got is None:
+            probed.add_shift(shift)
+            got = probed.blocks()
+        for want, have in zip(expected, got, strict=True):
+            assert have.shape == want.shape, label
+            assert np.array_equal(have.indptr, want.indptr), label
+            assert np.array_equal(have.indices, want.indices), label
+            assert np.array_equal(have.data, want.data), label
+    assert all(np.shares_memory(block.data, probed.data) for block in got if block.nnz)
+    assert got[1].nnz == 0  # the triangle a split never reads is not stored

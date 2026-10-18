@@ -393,15 +393,16 @@ class MaterializedProblem(abc.ABC):
         """This problem on another companion assembler of the same case."""
 
     @abc.abstractmethod
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         """The coloured probe for this problem's graph.
 
         Parameters
         ----------
         settings : dict
             The spec's set probe fields (``stencil_reach``, ``column_reach``, ``gradient_sweeps``).
-        active_rows : np.ndarray or None
-            Field-pair blocks a split never reads, or ``None`` to want every block.
+        groups : FieldGroups or None
+            The partition of the field split the probe feeds, or ``None`` for a probe of the whole
+            matrix (see :meth:`~aquaflux.precondition.JacobianProbe.build`).
         """
 
     @abc.abstractmethod
@@ -691,10 +692,9 @@ class MaterializedSession:
         if self._probe is None:
             self._probe = self._problem.probe(
                 self._spec.probe.settings(),
-                # A split never reads the leading-by-trailing triangle, so its probe need not store it.
-                self._problem.groups().active_rows()
-                if isinstance(self._spec.inverse, FieldSplit)
-                else None,
+                # A probe feeding a split stores neither the triangle the split never reads nor the whole
+                # matrix: its entries are laid out by the split's blocks.
+                self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None,
             )
         return self._probe
 

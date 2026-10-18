@@ -87,6 +87,13 @@ bare block inverse).
   so colourings differ from a full-scan argmax but stay valid (`test_saturation_colouring_*`). Colour
   counts and the bucket-queue crossover (slower than the scan below ~100k–200k cells, faster above):
   log, "Saturation colouring and its bucket queue".
+- **A probe feeding a field split is laid out by the split's blocks** (`block_stencil_gather_map(plan,
+  leading_fields=)` -> `ProbeGather.layout`, a `BlockLayout`; `materialize_blocks` -> `ProbedBlocks`):
+  one block-major value array, each block a CSR view of its slice (assigned, not passed to scipy's
+  constructor, which copies a view), the shift added in place at the stored diagonal (refused if one is
+  missing). `materialize_block_jacobian` refuses such a structure; `refresh_in_place` takes the block
+  path when `structure.layout` is set and calls `_refactor_blocks`, which only `FieldSplitPreconditioner`
+  implements.
 - **A materialize holds the matrix plus one chunk.** Seeds are filled one chunk at a time into a reused
   buffer (`ColumnProbePlan.seed_block(start, stop, out=)`, one shape, so the batched map compiles once),
   and `ProbeGather` scatters each chunk's responses as they are computed; out-of-reach entries need no

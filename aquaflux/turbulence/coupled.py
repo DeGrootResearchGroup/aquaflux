@@ -1710,7 +1710,7 @@ def coupled_jacobian_probe(
     column_reach: Sequence[int] | None = None,
     gradient_sweeps: int | None = None,
     *,
-    active_rows: np.ndarray | None = None,
+    groups: FieldGroups | None = None,
     production_viscosity_frozen: bool = False,
 ) -> JacobianProbe:
     """The coupled RANS Jacobian's coloured probe: its mesh graph, its layout and its stand-in.
@@ -1728,8 +1728,8 @@ def coupled_jacobian_probe(
     gradient_sweeps : int, optional
         Probe a copy of the residual whose corrected-gradient solve is capped at this many Richardson
         sweeps, rather than the residual itself. ``None`` (default) probes the residual as it stands.
-    active_rows : np.ndarray, optional
-        Exclude field-pair blocks from the materialized pattern; see
+    groups : FieldGroups, optional
+        The partition of the field split the probe feeds; see
         :meth:`~aquaflux.precondition.JacobianProbe.build`.
     production_viscosity_frozen : bool
         Materialize the Jacobian of the **frozen-production** copy
@@ -1747,7 +1747,7 @@ def coupled_jacobian_probe(
         coupled.layout.n_fields,
         stencil_reach,
         column_reach,
-        active_rows=active_rows,
+        groups=groups,
         narrowing=_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen),
     )
 
@@ -2196,11 +2196,11 @@ class _CoupledProblem(MaterializedProblem):
     def with_assembler(self, assembler: CoupledRANS) -> _CoupledProblem:
         return dataclasses.replace(self, coupled=assembler)
 
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         return coupled_jacobian_probe(
             self.coupled,
             **settings,
-            active_rows=active_rows,
+            groups=groups,
             # The preconditioner must be assembled from the operator the Krylov solve applies.
             production_viscosity_frozen=self.production_viscosity,
         )

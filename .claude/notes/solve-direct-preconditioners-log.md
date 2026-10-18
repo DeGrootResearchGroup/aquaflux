@@ -414,6 +414,11 @@
         fit-time index generation the stale split pinned: what was left of "lever 2"). Both steps ran with
         nothing applying a released array. Cumulative over the main baseline: 11.91 -> 9.42 GiB peak,
         10.58 -> 7.14 GiB steady.
+      - **The split's probe laid out by its blocks** (no whole CSR, shifted copy or cut): HWM 9.42 ->
+        **8.47 GiB**; held host 3.12 -> 2.74 GiB (the block-cut entry maps are gone); re-fit 2's own peak
+        10.9 -> 8.4 GiB. Cumulative over the main baseline: **11.91 -> 8.47 GiB** (2 steps). What sets
+        the peak now is the first re-fit's leading-block re-fit, where the entry maps (#757) are built
+        (host transient 4.8 GiB over 2.6), and the step program's ~1 GiB of temporaries.
 
 ## Condensed out of the rule (2026-10-17)
 

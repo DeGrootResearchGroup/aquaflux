@@ -42,17 +42,27 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
 - **Refresh**: `FieldSplitInverse.refactor_block` makes the split a `RefactorableInverse`;
   `FieldSplitPreconditioner` inherits `MaterializedJacobianPreconditioner.refresh_in_place`
   (`materialized_preconditioner.py`). A block inverse without `refactor_block` is refused with a
-  `TypeError` before either block is touched. A refit cuts the operator into blocks by gathers the split
-  holds between refits (`FieldGroups.blocks(matrix, maps)`, `self._maps`, an `EntryMaps`), and
-  `traced_field_split` packs the coupling through the same maps (`FieldSplitInverse.padded_coupling()`);
-  both are bit-identical to slicing and `from_scipy` (`solve-amg-multigrid.md`, "entry maps").
+  `TypeError` before either block is touched. **A session's split never sees the whole matrix**: its
+  probe is laid out by the split's blocks (`JacobianProbe.build(groups=)`, `sparse_jacobian.BlockLayout`),
+  so a fit and every refit probe one block-major value array, add the shift on its stored diagonal in
+  place (`ProbedBlocks.add_shift`) and hand the blocks, views of that array, to
+  `FieldSplitInverse.refactor_blocks` / `_field_split_of_blocks` — no whole CSR, shifted copy or cut
+  (bfs3d 2-step peak 9.42 -> 8.47 GiB, held host 3.12 -> 2.74 GiB without the cut's maps, 2026-10-18).
+  `_set_coupling` copies the coupling block, which would otherwise pin the whole array. `refactor_block`
+  (a whole operator, for other callers) still cuts by held gathers (`FieldGroups.blocks(matrix, maps)`),
+  and `traced_field_split` packs the coupling through the split's maps
+  (`FieldSplitInverse.padded_coupling()`); all bit-identical to slicing and `from_scipy`
+  (`solve-amg-multigrid.md`, "entry maps"). Pinned by
+  `test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix`.
 - **Transpose is closed-form** (reverse the block solves, use `Cᵀ`), so the adjoint is served. `Cᵀ` is
   formed on first use (`_transposed_coupling`) and dropped by `_set_coupling`, the one place a coupling is
   stored; do not re-derive it per apply (`A.T` on CSR is a CSC view that converts on every product).
 - **Only the dropped triangle is not materialized.** `FieldGroups.active_rows()` gives the
   `(n_fields, n_fields)` table of field-pair blocks to keep; `column_probe_plan(active_rows=)`
-  (`sparse_jacobian.py`) filters the pattern before the gather map is built, and
-  `coupled_jacobian_probe(..., active_rows=)` threads it. `None` is byte-identical to the full pattern.
+  (`sparse_jacobian.py`) filters the pattern before the gather map is built; a probe takes the split's
+  `FieldGroups` (`JacobianProbe.build(groups=)`, `coupled_jacobian_probe(..., groups=)`,
+  `MaterializedProblem.probe(settings, groups)`), which gives both this table and the block layout.
+  `None` is byte-identical to the full pattern.
   On `bfs3d` this cut stored `nnz` 47.2M → 36.7M (−22 %) with `apply` unchanged forward and transpose.
   `active_rows` (a static per-field-pair table) and `in_reach` (a per-entry reach question) are separate
   mechanisms; keep them so.

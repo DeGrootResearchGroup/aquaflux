@@ -23,7 +23,7 @@ from .host_preconditioner import HostPreconditioner, require_refactorable
 from .phase_timer import PhaseTimer
 
 if TYPE_CHECKING:
-    from .sparse_jacobian import ProbeGather
+    from .sparse_jacobian import ProbedBlocks, ProbeGather
 
 
 class MaterializedJacobianPreconditioner(HostPreconditioner):
@@ -58,6 +58,36 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
             probe_batch_size=probe_batch_size,
             structure=structure,
         ).tocsr()
+
+    @staticmethod
+    def _probed_blocks(
+        matvec: Callable[[jnp.ndarray], jnp.ndarray],
+        plan,
+        batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None,
+        probe_batch_size: int | None,
+        structure: ProbeGather,
+    ) -> ProbedBlocks:
+        """The coupled Jacobian **without** the shift, probed into ``structure``'s block layout.
+
+        The same probe as :meth:`_materialize_jacobian`, into one block-major value array whose blocks
+        are views (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`), so a field split
+        is fitted without the whole matrix, its shifted copy or a cut of it ever being formed.
+        """
+        from .sparse_jacobian import materialize_blocks
+
+        return materialize_blocks(
+            matvec,
+            plan,
+            structure=structure,
+            batched_matvec=batched_matvec,
+            probe_batch_size=probe_batch_size,
+        )
+
+    def _refactor_blocks(self, blocks: tuple[sp.csr_matrix, ...]) -> None:
+        """Re-fit the inverse to an operator probed into blocks; only a field split can take one."""
+        raise TypeError(
+            f"a probe laid out block by block feeds a field split only, not a {type(self).__name__}."
+        )
 
     @staticmethod
     def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
@@ -109,6 +139,16 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         """
         inverse = require_refactorable(self.inverse, f"this {type(self).__name__}")
         timer = PhaseTimer()
+        if structure is not None and structure.layout is not None:
+            # Probed into blocks: the shift is added in place on values this refresh owns, and the
+            # blocks go straight to the inverse, so the whole matrix is never formed.
+            probed = self._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
+            timer.lap("probe")
+            probed.add_shift(shift_diagonal)
+            timer.lap("assemble")
+            self._refactor_blocks(probed.blocks())
+            timer.lap("refactor")
+            return timer.phases()
         jacobian = self._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
