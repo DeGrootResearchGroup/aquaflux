@@ -150,6 +150,9 @@ branches.
 - **A timing does not travel between checkouts either**: the JAX compilation cache is keyed on the
   compiled program, so the first run on a new branch partly measures compilation. A cold-cache premium and
   a contention premium are not separated by any single run.
+- **A case rerun on one mesh can keep its small programs**: `AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0
+  validation/run_case.sh ...` stores the ~980 op-by-op programs the 2.0 s default recompiles every run
+  (pitzDaily warm start 89 s -> 63 s, 2026-10-17). Per run only; a mesh-changing study pays and gains nothing.
 - ⚠️ **`pgrep -f "tools/fastgate.sh"` matches its own watcher.** Match the real process with watchers
   excluded, or read the gate's log (`$TMPDIR/aquaflux-tests-<worktree>-fast-*.log`, summary on the last
   line).
