@@ -1510,7 +1510,8 @@ back because the same vmapped JVP runs slower inside a compiled loop than as sep
 0.84-0.85 s against 0.60-0.69 s with no host work in either), and the looped responses differ from the
 shipped ones at 1.3e-12. jaxlib 0.11.2's XLA flags offer no CPU temporary-buffer or preallocation setting,
 so on CPU the remedy for the faults is the process allocator, which the user owns (`MALLOC_ARENA_MAX=1`
-with both thresholds, or jemalloc with decay off). Untested on bfs3d, whose probe faults ~210 000 times
+with both thresholds, or jemalloc with decay off). ⚠️ Both keep freed memory: the single-arena setting
+took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted. Untested on bfs3d, whose probe faults ~210 000 times
 per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
 the in-loop JVP penalty measures smaller than that.
 

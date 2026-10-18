@@ -154,6 +154,9 @@ What this settles:
   20.4-21.9 s against 22.7-23.5 s, so the refits gain ~3-4 s net, inside the 5-10 % spread. Not made a
   `run_case.sh` default: it would buy ~2 % and make every timing incomparable with the record.
   `run_case.sh` records `LD_PRELOAD` and `GLIBC_TUNABLES` beside `MALLOC_*` since this change.
+  ⚠️ An allocator that keeps freed memory raises the footprint: `MALLOC_ARENA_MAX=1` with both thresholds
+  took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and its 15 GB container
+  restarted, so on bfs3d such a setting is for fixed-state probes, not marches.
 
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
