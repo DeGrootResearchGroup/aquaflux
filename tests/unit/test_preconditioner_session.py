@@ -144,6 +144,50 @@ def _materialized_step_held_on(coupled, anchor, state, loop, beta=0.125):
     return session, held if update is None else update(held)
 
 
+def test_a_traced_split_step_is_one_compiled_program_across_refits_and_stations() -> None:
+    """A cost refit and a station change each hand the march a step it has already compiled.
+
+    The march compiles its step against the WHOLE step, static fields included, so what a refit or a
+    re-pointing hands back must differ from the held step in array values only: a static value moved by
+    a refit (a precision, a level count, a hook rebuilt) recompiles the coupled solve once per refit, and
+    one moved by a station once per station. Measured on the shipped pitzDaily march (21 refits, 12
+    stations), nothing compiles after step 1, which is what this pins on a small case. The traced
+    program takes the whole step as an argument, as the march's own does, and applies what a Krylov
+    iteration and the adjoint apply.
+    """
+    mesh, target = _cavity(viscosity=jnp.asarray(RHO * NU))  # an array leaf; a float is static
+    state = _healthy_state(mesh, target)
+    split = FieldSplit(
+        SimpleSmoothed(frozen_coarsening=True, max_coarse=10), JacobiSmoothed(max_coarse=10)
+    )
+    loop = DualTimeLoop(inner_steps=3, refresh_on_cycles=3)
+    traces: list[None] = []
+
+    @eqx.filter_jit
+    def apply(step, state):
+        traces.append(None)
+        term = step.shift_policy.shift_term(state)
+        shifted = term.make_preconditioner(step.relaxation_schedule.beta)(state)
+        return shifted + step.adjoint_preconditioner_factory(state)(state)
+
+    session = open_session(MaterializedJacobian(split), target)
+    session.rebind(target.with_scaled_molecular_viscosity(100.0))
+    held = eqx.tree_at(
+        lambda s: s.relaxation_schedule,
+        session.build(state, dual_time=loop),
+        ConstantRelaxation(jnp.asarray(0.5)),
+    )
+    held = session.refresh_preconditioner(held, state)(held)  # the forced first fit
+    first = apply(held, state)
+    held = session.refresh_preconditioner(held, state * 1.05, due=True)(held)  # a cost refit
+    for scale in (10.0, 1.0):  # two stations, the second the target
+        session.rebind(target.with_scaled_molecular_viscosity(scale))
+        held = session.refresh_preconditioner(held, state)(held)
+    last = apply(held, state)
+    assert not jnp.allclose(last, first)  # the refits reached the step
+    assert len(traces) == 1
+
+
 def _base_diagonal(step, state):
     return step.shift_policy.base.shift_term(state).diagonal
 

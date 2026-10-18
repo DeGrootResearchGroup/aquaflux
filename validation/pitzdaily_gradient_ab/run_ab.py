@@ -62,13 +62,13 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.schemes import (  # noqa: E402
     CorrectedGreenGauss,
+    CoupledBlockSweep,
     GmresGradientSolve,
     HessianCorrectedGradient,
     MultipleCorrectionGradient,
-    NestedHessianSolve,
     OwnerGradient,
+    PackedSystemSolve,
     SkewCorrectedGradient,
-    SweptGradientSolve,
 )
 from aquaflux.solve import LinearSolveSettings, Convergence, DualTimeLoop, MarchLogger
 from aquaflux.precondition import JacobiSmoothed, SimpleSmoothed
@@ -158,54 +158,18 @@ def arm_preconditioner(reach: int, gradient_sweeps: int | None = None) -> Materi
     )
 
 
-#: The Betchen arm's two sweep counts. **Fixed sweeps on BOTH systems, not the class's Krylov default**,
-#: and the reason is cost on the path a march actually pays. Profiled on this mesh (jitted, warm, min of
-#: 7), per reconstruction against corrected Green-Gauss as 1.0x:
-#:
-#:     outer swept-10 / inner 10   fwd 33.3x   jvp 31.5x   jvp/fwd 1.0x
-#:     outer GMRES    / inner 10   fwd 92.9x   jvp 158.6x  jvp/fwd 1.8x   <- the class default
-#:
-#: A Krylov outer solve is differentiated by the implicit function theorem, so **every Jacobian-vector
-#: product solves an entire second Schur system**, each with its own inner solve inside every iteration
-#: -- that is the 1.8x, on top of an already dearer forward pass. A fixed sweep differentiates by
-#: unrolling and costs 1.0x. Since a march pays a jvp per Krylov iteration, the swept outer is ~5x
-#: cheaper there and reaches the same gradient to 1e-12.
-#:
-#: Cost is linear in the outer count and the inner solve dominates each outer sweep, so 5/5 is roughly a
-#: quarter of 10/10. What that trades away is exactness: the inner count sets how faithfully the applied
-#: operator matches the true Schur complement, and the outer count how far that system is solved.
-#: ``run_ab.py --check-accuracy`` (or ``PITZ_AB_CHECK=1``) measures the pair against an exactly-solved
-#: reconstruction on this mesh before the comparison is trusted.
-OUTER_SWEEPS = int(os.environ.get("PITZ_AB_OUTER_SWEEPS", "5"))
-INNER_SWEEPS = int(os.environ.get("PITZ_AB_INNER_SWEEPS", "5"))
-
 #: The Betchen arm runs the scheme's **shipped defaults**, because the question this case answers is
-#: what a user gets rather than what one historical pairing cost. Since 2026-08-23 that means the
-#: coupled block sweep, the six-component Hessian and the Schur-block preconditioner — none of which
-#: the counts above describe.
+#: what a user gets rather than what one historical pairing cost: the coupled block sweep, the
+#: six-component Hessian and the Schur-block preconditioner.
 #:
-#: ⚠️ **Every figure published from this case before that date was measured on the NESTED path at
-#: `OUTER_SWEEPS`/`INNER_SWEEPS`**, which `PITZ_AB_NESTED=1` still selects. Quote a number from this
-#: case only alongside which of the two it came from; they are different amounts of work, not two
-#: measurements of one thing.
-NESTED = os.environ.get("PITZ_AB_NESTED", "") not in ("", "0")
-BETCHEN = (
-    HessianCorrectedGradient(
-        hessian_solve=NestedHessianSolve(
-            solver=SweptGradientSolve(sweeps=OUTER_SWEEPS, warn_tol=None),
-            hessian_solver=SweptGradientSolve(sweeps=INNER_SWEEPS, warn_tol=None),
-        )
-    )
-    if NESTED
-    else HessianCorrectedGradient()
-)
+#: ⚠️ **Every figure published from this case before 2026-08-23 was measured on the NESTED path** (an
+#: outer Schur sweep with an inner Hessian sweep inside each apply, at outer 5 / inner 5 unless set
+#: otherwise). That path was deleted on 2026-10-17 as dominated by the coupled sweep, so those figures
+#: cannot be re-measured here; quote one only alongside that configuration.
+BETCHEN = HessianCorrectedGradient()
 BETCHEN_LABEL = (
-    f"HessianCorrectedGradient (nested, outer swept-{OUTER_SWEEPS} / inner swept-{INNER_SWEEPS})"
-    if NESTED
-    else (
-        "HessianCorrectedGradient (shipped defaults: coupled sweep "
-        f"{BETCHEN.hessian_solve.sweeps}, six-component Hessian, Schur block)"
-    )
+    "HessianCorrectedGradient (shipped defaults: coupled sweep "
+    f"{BETCHEN.hessian_solve.sweeps}, six-component Hessian, Schur block)"
 )
 
 #: Which boundary closure the multiple-correction arm uses for the GRADIENT on boundary faces.
@@ -513,13 +477,13 @@ def reach_sweep() -> None:
 
 
 def check_accuracy() -> None:
-    """Is the chosen sweep pair still reconstructing the Betchen gradient, or a cheaper approximation?
+    """Is the shipped sweep count still reconstructing the Betchen gradient, or a cheaper approximation?
 
-    Both counts trade exactness for speed, and a fixed sweep carries no convergence test, so this is
-    the check that keeps the A/B honest: a cheaper arm that is quietly a *different* reconstruction
-    would show up as a scheme difference that is really a solver truncation. Measured against an
-    exactly-solved reconstruction of the same system on this mesh, on a quadratic -- the field the
-    scheme is defined to reproduce exactly, so any departure is the solve and not the discretization.
+    A fixed sweep carries no convergence test, so this is the check that keeps the A/B honest: a
+    cheaper arm that is quietly a *different* reconstruction would show up as a scheme difference that
+    is really a solver truncation. Measured against an exactly-solved reconstruction of the same
+    system on this mesh, on a quadratic -- the field the scheme is defined to reproduce exactly, so any
+    departure is the solve and not the discretization.
     """
     case = compare.build_case()
     mesh, geom = case["momentum"].mesh, case["geom"]
@@ -534,31 +498,28 @@ def check_accuracy() -> None:
     phi, bv = jnp.asarray(quad(x)), jnp.asarray(quad(xf))
     exact = np.asarray(
         HessianCorrectedGradient(
-            hessian_solve=NestedHessianSolve(hessian_solver=GmresGradientSolve())
+            hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())
         ).gradients(phi, mesh, geom, bv)
     )
     scale = max(float(np.abs(exact).max()), 1e-300)
-    print("Betchen sweep pair vs an exactly-solved reconstruction (quadratic field):", flush=True)
-    for outer, inner in ((OUTER_SWEEPS, INNER_SWEEPS), (10, 10), (20, 10)):
+    print("Betchen coupled sweep vs an exactly-solved reconstruction (quadratic field):", flush=True)
+    shipped = BETCHEN.hessian_solve.sweeps
+    for sweeps in sorted({max(shipped // 2, 1), shipped, 2 * shipped}):
         got = np.asarray(
-            HessianCorrectedGradient(
-                hessian_solve=NestedHessianSolve(
-                    solver=SweptGradientSolve(sweeps=outer, warn_tol=None),
-                    hessian_solver=SweptGradientSolve(sweeps=inner, warn_tol=None),
-                )
-            ).gradients(phi, mesh, geom, bv)
+            HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=sweeps)).gradients(
+                phi, mesh, geom, bv
+            )
         )
-        mark = "  <- this run" if (outer, inner) == (OUTER_SWEEPS, INNER_SWEEPS) else ""
+        mark = "  <- this run" if sweeps == shipped else ""
         print(
-            f"  outer {outer:>2} / inner {inner:>2}: relative departure "
-            f"{np.abs(got - exact).max() / scale:.3e}{mark}",
+            f"  {sweeps:>2} sweeps: relative departure {np.abs(got - exact).max() / scale:.3e}{mark}",
             flush=True,
         )
     corrected = np.asarray(CorrectedGreenGauss().gradients(phi, mesh, geom, bv))
     print(
         f"  for scale, CorrectedGreenGauss departs by "
         f"{np.abs(corrected - exact).max() / scale:.3e} -- the difference the A/B is measuring, so "
-        f"the pair above must be well below it.",
+        f"the count above must be well below it.",
         flush=True,
     )
 

@@ -1,29 +1,21 @@
-"""How many inner sweeps does the Hessian-corrected gradient need *on this mesh*?
+"""How many coupled sweeps does the Hessian-corrected gradient need *on this mesh*?
 
-``HessianCorrectedGradient`` eliminates the Hessian and solves the remaining system for the gradient,
-applying the eliminated Hessian block's inverse by a fixed number of block-Jacobi Richardson sweeps.
-A fixed count carries no convergence test, so on a mesh skewed beyond what the default was calibrated
-against the reconstruction quietly stops being exact for quadratic fields -- which is the entire
-reason to choose this scheme over a corrected Green-Gauss one. The count needed is set by the mesh's
-skewness and not by its size, so it cannot be inferred from a small test mesh and has to be measured
-on the real one. That is what this script does.
+``HessianCorrectedGradient`` solves its gradient and Hessian systems together by a fixed number of
+coupled block sweeps. A fixed count carries no convergence test, so on a mesh skewed beyond what the
+default was calibrated against the reconstruction quietly stops being exact for quadratic fields --
+which is the entire reason to choose this scheme over a corrected Green-Gauss one. The count needed is
+set by the mesh's skewness and not by its size, so it cannot be inferred from a small test mesh and has
+to be measured on the real one. That is what this script does.
 
-It uses only the public reconstruction API: the same field is reconstructed at a ladder of inner
-sweep counts and compared against a reference solve of the same system, so the difference reported is
-the inner iteration's own truncation and nothing else. Two references are available -- a long fixed
-sweep (cheap, the default) and an exact Krylov solve (``--exact``, slower but independent of the
-iteration being calibrated). The long-sweep reference is self-checked against a longer one, so a
-reference that is itself under-resolved shows up rather than flattering every arm below it.
-
-The outer system is calibrated the same way. It is well enough conditioned to be swept rather than
-Krylov-solved, and a swept outer solve is what removes the last inner product from the scheme -- the
-configuration worth having where reductions are expensive. Whether it converges in a practical number
-of sweeps on a given mesh is again a mesh property, so it is measured rather than assumed.
+It uses only the public reconstruction API: the same field is reconstructed at a ladder of sweep counts
+and compared both against the analytic gradient and against an exact solve of the same system (the
+un-eliminated gradient-and-Hessian system solved by GMRES), so the departure from the latter is the
+sweep's own truncation and nothing else.
 
 Usage
 -----
     python3 validation/uvreactor_openfoam/gradient_sweep_calibration.py <path-to-polyMesh-dir>
-        [--exact] [--cells N] [--outer-sweeps N]
+        [--rate] [--spectrum]
 
 Scale
 -----
@@ -33,10 +25,8 @@ intermediates, so at a few million faces each is gigabytes on its own; the banne
 and every arm prints peak resident memory beside its wall clock, so a run heading for trouble says so
 before it gets there rather than being killed without explanation.
 
-``UV_INNER_LADDER`` (default ``2,4,6,8,10,12,16``) and ``UV_REFERENCE_SWEEPS`` (default 24) shorten
-the ladder when a full sweep is more than a node can hold -- each rung is one more full
-reconstruction. ``--exact`` swaps the long-sweep reference for a Krylov solve, considerably dearer at
-scale; prefer the default reference unless its own self-check reports it unconverged.
+``UV_SWEEP_LADDER`` (default ``10,20,30,40``) shortens the ladder when a full sweep is more than a node
+can hold -- each rung is one more full reconstruction, and the exact reference is the dearest arm.
 """
 
 from __future__ import annotations
@@ -62,42 +52,21 @@ from aquaflux.mesh.quality import face_planarity  # noqa: E402
 from aquaflux.schemes import (  # noqa: E402
     AveragedNeighbourHessian,
     CorrectedGreenGauss,
+    CoupledBlockSweep,
     GmresGradientSolve,
     HessianCorrectedGradient,
-    NestedHessianSolve,
     OwnerHessian,
-    SweptGradientSolve,
+    PackedSystemSolve,
 )
 from aquaflux.schemes.gradient import contraction_rate  # noqa: E402
 from aquaflux.schemes.interpolation import interpolation_factor  # noqa: E402
 from aquaflux.vectors import norm_squared  # noqa: E402
 
-INNER_LADDER = tuple(
-    int(n) for n in os.environ.get("UV_INNER_LADDER", "2,4,6,8,10,12,16").split(",")
-)
-REFERENCE_SWEEPS = int(os.environ.get("UV_REFERENCE_SWEEPS", "24"))
-# The self-check needs a LONGER sweep than the reference, and on a large mesh that is the arm most
-# likely to be unaffordable -- the unrolled sweep has a memory cliff in the sweep count (measured on
-# a 1.6M-cell mesh: every rung to 12 fits in 12 GB, 16 is killed outright). Overridable so a run can
-# keep the reference it can afford instead of losing the whole calibration to the check above it.
-REFERENCE_CHECK_SWEEPS = int(os.environ.get("UV_REFERENCE_CHECK", REFERENCE_SWEEPS + 8))
-# Whether the outer preconditioner is built from the Schur complement's block or `A_gg`'s.
-# Exposed because the two differ only on a mesh with cells no small fixture reproduces.
-LOCAL_SCHUR_BLOCK = os.environ.get("UV_LOCAL_SCHUR", "1") != "0"
-OUTER_LADDER = tuple(int(n) for n in os.environ.get("UV_OUTER_LADDER", "3,5,10,20").split(","))
-# The outer arms hold the INNER count fixed, because cost here is the product of the two -- the inner
-# solve runs once per outer operator apply -- so sweeping one with the other at its default measures
-# a program several times larger than anything worth shipping, and walks into the memory cliff on a
-# large mesh. Calibrate the inner ladder first and pin its answer here.
-OUTER_INNER_SWEEPS = int(os.environ.get("UV_OUTER_INNER", "6"))
-# Betchen and Straatman solve this reconstruction by UNDER-RELAXED block-Jacobi, and state that on an
-# arbitrary grid a relaxation strictly inside (0, 1] is needed for convergence at all -- they run 0.8.
-# So the relaxation is part of what has to be calibrated per mesh, not a constant: swept alongside the
-# sweep count, because the two trade against each other (heavier damping needs more sweeps).
-OUTER_RELAXATIONS = tuple(float(x) for x in os.environ.get("UV_OUTER_RELAX", "1.0").split(","))
+#: The coupled sweep counts the ladder reconstructs at.
+SWEEP_LADDER = tuple(int(n) for n in os.environ.get("UV_SWEEP_LADDER", "10,20,30,40").split(","))
 #: Relaxations to measure the COUPLED sweep's contraction rate at, under ``--rate``. A rate is one
 #: cheap measurement where an accuracy rung is a full reconstruction, so a ladder here is affordable
-#: on a mesh where the ladder above is not. Over-relaxation has an interior optimum on well-shaped
+#: on a mesh where the accuracy ladder is not. Over-relaxation has an interior optimum on well-shaped
 #: cells and moves back toward 1.0 as they degrade, so the point of measuring it here is to find out
 #: which regime this mesh is in -- not to confirm a value found on a synthetic one.
 RATE_RELAXATIONS = tuple(
@@ -476,17 +445,6 @@ def main() -> None:
         default=os.environ.get("UV_RATE", "") not in ("", "0"),
         help="measure the coupled sweep's contraction rate and stop (cheap; skips the ladders)",
     )
-    parser.add_argument(
-        "--exact",
-        action="store_true",
-        help="reference the inner ladder against an exact Krylov solve instead of a long sweep",
-    )
-    parser.add_argument(
-        "--outer-sweeps",
-        type=int,
-        default=int(os.environ["UV_OUTER_SWEEPS"]) if os.environ.get("UV_OUTER_SWEEPS") else None,
-        help="calibrate the swept OUTER solve up to this many sweeps (default: skip)",
-    )
     args = parser.parse_args()
     if args.mesh is None:
         raise SystemExit("no mesh: pass a polyMesh directory, or set UV_MESH")
@@ -521,176 +479,61 @@ def main() -> None:
 
     field, bvals, analytic = probe_field(geometry)
 
-    # ORDER: the ladder runs CHEAPEST-FIRST and the reference runs LAST, which is the opposite of
-    # how this reads. The reference is the single most expensive arm -- it is the longest sweep by
-    # construction -- so running it first means a node that cannot afford it reports NOTHING, having
-    # spent the whole run proving only that the reference is too big. Measured here: a 24-sweep
-    # reference on a 1.6M-cell mesh was killed during compilation, discarding a ladder that would
-    # every one have fitted. Ladder gradients are (n_cells, dim) and cost ~39 MB each, so holding
-    # them all to compare at the end is free next to one more reconstruction.
-    print("\ninner (Hessian) solve -- reconstruction vs a converged reference", flush=True)
-    print("  inner sweeps (cheapest first; the reference runs last)", flush=True)
-    # The ladder below calibrates the NESTED arrangement's inner solve, so the count to mark is that
-    # arrangement's own default -- not the scheme's, whose default is now the coupled sweep and whose
-    # count means something different.
-    default_sweeps = NestedHessianSolve().hessian_solver.sweeps
+    # ORDER: the ladder runs CHEAPEST-FIRST and the exact reference runs LAST, which is the opposite
+    # of how this reads. The reference is the single most expensive arm, so running it first means a
+    # node that cannot afford it reports NOTHING, having spent the whole run proving only that the
+    # reference is too big. Ladder gradients are (n_cells, dim), so holding them all to compare at the
+    # end is free next to one more reconstruction.
+    print("\ncoupled sweeps -- reconstruction, cheapest first", flush=True)
+    default_sweeps = HessianCorrectedGradient().hessian_solve.sweeps
     measured: list[tuple[int, np.ndarray]] = []
-    for sweeps in sorted(INNER_LADDER):
+    for sweeps in sorted(SWEEP_LADDER):
         gradient = reconstruct(
-            HessianCorrectedGradient(
-                hessian_solve=NestedHessianSolve(
-                    hessian_solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None)
-                )
-            ),
+            HessianCorrectedGradient(hessian_solve=CoupledBlockSweep(sweeps=sweeps)),
             field,
             mesh,
             geometry,
             bvals,
-            f"inner sweeps = {sweeps}"
+            f"coupled sweeps = {sweeps}"
             + ("   <- shipped default" if sweeps == default_sweeps else ""),
         )
         # Reported against the previous rung as we go, so a run that dies later still shows where
         # the iteration was settling. This is a self-consistency measure, not an accuracy one: it
-        # says the sweeps stopped moving, which a stalled iteration also satisfies. The reference
-        # below is what turns it into an accuracy statement.
+        # says the sweeps stopped moving, which a stalled iteration also satisfies. The exact
+        # reference below is what turns it into an accuracy statement.
         if measured:
             prev_sweeps, prev = measured[-1]
             step = float(np.abs(gradient - prev).max()) / max(float(np.abs(gradient).max()), 1e-300)
             print(f"      moved {step:.3e} since {prev_sweeps} sweeps", flush=True)
         measured.append((sweeps, gradient))
 
-    # AGAINST THE ANALYTIC GRADIENT, which needs no reference and so cannot be quietly wrong.
-    # Everything else here is a solve compared with a solve, and when two solves disagree -- on this
-    # mesh the outer sweep and an exact Krylov solve differ by 3.6e-01 -- no such comparison can say
-    # which one is at fault. The scheme is defined to reconstruct a quadratic exactly, so a departure
-    # here is real error whatever produced it. ⚠️ On WARPED faces it is NOT solver error: on a warped
-    # 8^3 grid at planarity 0.89 a fully converged solve reconstructs this field to only 1.0e-01,
-    # because the derivation assumes a constant normal per face. Read this beside the planarity census.
+    # AGAINST THE ANALYTIC GRADIENT, which needs no reference and so cannot be quietly wrong. The
+    # scheme is defined to reconstruct a quadratic exactly, so a departure here is real error whatever
+    # produced it. ⚠️ On WARPED faces it is NOT solver error: on a warped 8^3 grid at planarity 0.89 a
+    # fully converged solve reconstructs this field to only 1.0e-01, because the derivation assumes a
+    # constant normal per face. Read this beside the planarity census.
     print("\n  every arm against the ANALYTIC gradient (relative: median / p99 / max)", flush=True)
     for sweeps, gradient in measured:
         med, p99, worst = gradient_error(gradient, analytic)
         print(
-            f"    inner sweeps = {sweeps:<3d} vs analytic = {med:.3e} / {p99:.3e} / {worst:.3e}",
+            f"    coupled sweeps = {sweeps:<3d} vs analytic = {med:.3e} / {p99:.3e} / {worst:.3e}",
             flush=True,
         )
 
-    print("\n  the reference, and the ladder measured against it", flush=True)
-    if args.exact:
-        reference_scheme = HessianCorrectedGradient(
-            hessian_solve=NestedHessianSolve(hessian_solver=GmresGradientSolve())
-        )
-        reference_label = "reference: exact Krylov inner"
-    else:
-        reference_scheme = HessianCorrectedGradient(
-            hessian_solve=NestedHessianSolve(
-                hessian_solver=SweptGradientSolve(sweeps=REFERENCE_SWEEPS, warn_tol=None)
-            )
-        )
-        reference_label = f"reference: {REFERENCE_SWEEPS} inner sweeps"
-    reference = reconstruct(reference_scheme, field, mesh, geometry, bvals, reference_label)
-    scale = max(float(np.abs(reference).max()), 1e-300)
-
-    if not args.exact:
-        # A fixed-sweep reference that is itself under-resolved would flatter every arm below it, so
-        # it is checked against a longer one before anything is measured against it.
-        longer = reconstruct(
-            HessianCorrectedGradient(
-                hessian_solve=NestedHessianSolve(
-                    hessian_solver=SweptGradientSolve(sweeps=REFERENCE_CHECK_SWEEPS, warn_tol=None)
-                )
-            ),
-            field,
-            mesh,
-            geometry,
-            bvals,
-            f"reference self-check: {REFERENCE_CHECK_SWEEPS} sweeps",
-        )
-        drift = float(np.abs(longer - reference).max()) / scale
-        # Graded against what the ladder is actually READ at, not against machine precision. A
-        # fixed-sweep reference is never exact, so a machine-precision test reports NOT CONVERGED on
-        # every real mesh and sends the reader to the far dearer Krylov reference for nothing --
-        # measured here at a drift of 4e-09, which resolves every rung this ladder reports. What
-        # matters is whether the reference's own error is small beside the departures being read
-        # off it, so the verdict names the resolution it buys and lets the reader judge.
-        if drift < 1e-13:
-            verdict = "exact to machine precision"
-        elif drift < 1e-6:
-            verdict = f"fine -- resolves departures down to ~{max(drift * 10, 1e-15):.0e}"
-        else:
-            verdict = "TOO COARSE for this ladder -- raise UV_REFERENCE_SWEEPS, or use --exact"
-        print(f"    reference self-check drift = {drift:.3e}  ({verdict})", flush=True)
-
-    print("\n  inner sweeps -> relative departure from the reference gradient", flush=True)
-    for sweeps, gradient in measured:
-        error = float(np.abs(gradient - reference).max()) / scale
-        print(f"    inner sweeps = {sweeps:<3d} relative departure = {error:.3e}", flush=True)
-
-    if args.outer_sweeps:
-        print(
-            "\nouter (Schur) solve -- swept against an exact Krylov solve, at a pinned inner count",
-            flush=True,
-        )
-        # The reference is an EXPLICIT Krylov outer solve. It cannot be the constructor default:
-        # the default outer solver is a 20-sweep Richardson, so referencing the ladder against
-        # `HessianCorrectedGradient()` would compare the swept solve against itself and report a
-        # departure of zero at 20 sweeps -- an arm that grades its own homework.
-        inner = SweptGradientSolve(sweeps=OUTER_INNER_SWEEPS, warn_tol=None)
-        krylov = reconstruct(
-            HessianCorrectedGradient(
-                hessian_solve=NestedHessianSolve(solver=GmresGradientSolve(), hessian_solver=inner)
-            ),
-            field,
-            mesh,
-            geometry,
-            bvals,
-            f"outer: Krylov (exact), inner {OUTER_INNER_SWEEPS}",
-        )
-        arms = [
-            (sweeps, relax)
-            for relax in OUTER_RELAXATIONS
-            for sweeps in OUTER_LADDER
-            if sweeps <= args.outer_sweeps
-        ]
-        for sweeps, relax in arms:
-            gradient = reconstruct(
-                HessianCorrectedGradient(
-                    hessian_solve=NestedHessianSolve(
-                        solver=SweptGradientSolve(sweeps=sweeps, warn_tol=None, relaxation=relax),
-                        hessian_solver=inner,
-                    )
-                ),
-                field,
-                mesh,
-                geometry,
-                bvals,
-                f"outer {sweeps:<3d} relax {relax:<4.2f} (inner {OUTER_INNER_SWEEPS})",
-            )
-            error = float(np.abs(gradient - krylov).max()) / max(
-                float(np.abs(krylov).max()), 1e-300
-            )
-            print(f"      relative departure from Krylov = {error:.3e}", flush=True)
-
-    # ⚠️ AGAINST AN EXACT GRADIENT, NOT AGAINST THE LADDER'S REFERENCE. The reference above is built
-    # with the OUTER solver left at its default, and the outer solve is the half of this scheme that
-    # can fail to converge -- measured on a 1.6M-cell mesh at 3.6e-01 from exact after 20 sweeps,
-    # oscillating rather than settling. Referencing the replaced scheme against that would report the
-    # outer solve's own error as though it were the accuracy difference between the two schemes, and
-    # the difference this comparison exists to measure is the one an exact solve would give.
     print("\nis the scheme worth it -- both measured against an EXACT gradient", flush=True)
     exact = reconstruct(
-        HessianCorrectedGradient(
-            hessian_solve=NestedHessianSolve(
-                solver=GmresGradientSolve(),
-                hessian_solver=SweptGradientSolve(sweeps=REFERENCE_SWEEPS, warn_tol=None),
-            )
-        ),
+        HessianCorrectedGradient(hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())),
         field,
         mesh,
         geometry,
         bvals,
-        f"exact: Krylov outer, inner {REFERENCE_SWEEPS}",
+        "exact: the un-eliminated system by GMRES",
     )
     exact_scale = max(float(np.abs(exact).max()), 1e-300)
+    print("\n  coupled sweeps -> relative departure from the exact gradient", flush=True)
+    for sweeps, gradient in measured:
+        error = float(np.abs(gradient - exact).max()) / exact_scale
+        print(f"    coupled sweeps = {sweeps:<3d} relative departure = {error:.3e}", flush=True)
 
     shipped = reconstruct(
         HessianCorrectedGradient(),
