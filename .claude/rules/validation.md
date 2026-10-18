@@ -98,7 +98,10 @@ branches.
   piece alone before believing it.
 - **On Linux a standalone call whose temporary buffer exceeds 32 MiB page-faults all of it every call**
   (glibc's adaptive mmap threshold); a Krylov iteration inside the step does not pay this (its loop
-  allocates once per solve), so per-call timings overstate it. Report `ru_minflt` per call.
+  allocates once per solve), so per-call timings overstate it; **bfs3d's re-fit probe does pay it, per
+  batched JVP**: 15M minor faults and 38.4 of a 58.3 s re-fit at glibc defaults, 36.5 s with the
+  thresholds below, 28.8 s (0.15M faults, re-fit 38.6 s) with `MALLOC_ARENA_MAX=1` as well
+  (`refit_profile.py`, `state-00029`, 4-core Linux, jax 0.11.2; `.claude/notes/validation-log.md`). Report `ru_minflt` per call.
   `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` removes it **only up to 64 MiB**:
   XLA allocates on worker threads, whose arenas are 64 MiB heaps, so a larger buffer (the whole
   `(J + s) M v` program's, ~74 MiB on pitzDaily) is mapped per call regardless. To remove all of it run
@@ -200,6 +203,22 @@ their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march
   `test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner`): a pitzDaily arm in that window
   that set one ran the file's solver.
 - `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
+
+## bfs3d's mesh — one tracked copy
+
+- **`validation/bfs3d_openfoam/of_case/constant/polyMesh` is the one copy** (23040 hexahedra), where
+  `blockMesh` writes it, so the flow case owns its geometry and the species case reaches across to it, as
+  #662's dependency edge would. `case.yaml` names it, `compare.MESH` reads it from the file,
+  `run_of.sh` / `run_transient.sh` run on it, and `run_of.sh --blockmesh` regenerates it in place (a
+  regeneration that differs shows in `git status`; on 2026-10-17 its node lines matched the current
+  `blockMeshDict`'s grading to the file's printed precision, 5e-11 m). The OpenFOAM fields are not
+  tracked there; without them `compare.py` marches and skips the comparison.
+- **A shipped case file may name only a tracked path or one declared in
+  `tests/unit/test_shipped_case_paths.py`'s `GENERATED`** (with what writes it), fast tier; the bfs3d
+  mesh once sat at an ignored `runs/kwsst/polyMesh` while tracked twice in `bfs3d_species/`.
+- ⚠️ `bfs3d_species/of_case/` still tracks a run's scratch output against its own `.gitignore` (`2000/`,
+  the frozen flow, its only tracked copy; `2600/s`; `constant/` property copies; `log.foamRun`), and
+  `runs/species/{s,phi}`; its `run_of.sh` deletes `constant/` and `2000/` when it runs.
 
 ## `bfs3d_species` — dependencies
 

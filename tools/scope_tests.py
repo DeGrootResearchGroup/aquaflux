@@ -125,6 +125,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
     "tests/unit/test_scope_tests.py": (("tools/scope_tests.py",), "loads the selector"),
     # -- tests that read case files and data under validation/
     "tests/unit/test_case_file.py": (("validation/*.yaml",), "reads the shipped case files"),
+    "tests/unit/test_shipped_case_paths.py": (
+        ("validation/*",),
+        "reads the shipped case files and checks the git index for every path they name",
+    ),
     "tests/unit/test_case_solver.py": (
         ("validation/*",),
         "reads the shipped case files and runs harnesses in their case directories",

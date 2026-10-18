@@ -95,7 +95,9 @@ bare block inverse).
   de-compression" and "The gather map's build peak".
   - **Batch size:** `PROBE_BATCH_SIZE = 8` (`materialized_session.py`), where processor time bottomed on
     bfs3d (2026-08-11). The probe's memory barely scales with it, so auto-sizing the batch to free memory
-    is not worth building; a run's memory ceiling is set by building the case, not by probing it.
+    is not worth building. On bfs3d a run's memory ceiling is set by the fits and re-fits of the materialized
+    Jacobian and the compiled step, not by building the case (0.84 GiB; the whole march peaks at 12.1 GiB,
+    2026-10-17, Linux): log, "Where a run's memory goes".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
     gather** (`structure=`) are what the materialized path passes. The full pattern (no `eliminate_zeros`)
     is a superset of the live nonzeros at any state, so the structure never moves cold→developed — that
@@ -111,6 +113,11 @@ bare block inverse).
   |---|---|---|---|---|---|
   | uniform reach 3 (shipped) | 18 | 137 | 5.1e-06 | 11.9–12.7 s (8.2–8.5 / 3.6–4.2) | 522 s |
   | reach 2 | 21 | 216 | 5.0e-06 | 6.0–6.7 s (3.4–3.6 / 2.4–3.0) | 697 s |
+
+  The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
+  cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor
+  16.9–20.5) / 3155 s, `x_r/h` 8.3611, peak 12.1 GiB — a different march (rounding), the same root; the
+  re-fit is 58 % of it. Why it is slow there: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container".
 
   What decides it is the far mass the colouring folds (`probe_reach_audit.py`: bfs3d's p carries 1.1e-3 of
   its norm beyond reach 2, against ~4e-4 folded on pitzDaily). Untested: shortening only some of bfs3d's

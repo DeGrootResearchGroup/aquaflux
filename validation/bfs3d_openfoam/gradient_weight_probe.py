@@ -36,13 +36,13 @@ from aquaflux.io import read_openfoam
 from aquaflux.schemes import BoundaryLinearization, ProjectedStencilGradient
 from aquaflux.schemes.interpolation import interpolation_factor
 from aquaflux.schemes.projected_stencil import _ILL_CONDITIONED, build_stencil, polynomial_basis
-from compare import RUNS
+from compare import MESH
 
 BLENDS = [float(b) for b in os.environ.get("BFS3D_BLENDS", "0,0.25,0.5,0.75,1").split(",")]
 
 
 def main() -> None:
-    mesh = read_openfoam(RUNS / "polyMesh")
+    mesh = read_openfoam(MESH)
     geometry = mesh.geometry()
     n, dim = mesh.n_cells, mesh.dim
     face_cells = mesh.face_cells

@@ -255,6 +255,9 @@ VALIDATION_INTERNAL_REACHES = {
     "InnerIterateCheckpointer",
     "combine_metrics",
     "in_progress_measure",
+    # The re-fit hook, whose re-materialize the bfs3d memory census (`bfs3d_openfoam/memory_by_stage.py`)
+    # wraps to read the resident set around each re-fit of the shipped march without restating it.
+    "BetaTrackingRefresh",
     # The tolerance a configured solver stops at, read and re-set by the pitzDaily replay
     # (`pitzdaily_openfoam/replay.py`) so each replayed system is solved to the tolerance the march's
     # adaptive rule gave its own step. A fixed tolerance read 1-2 cycles low on 27 of 50 solves, so

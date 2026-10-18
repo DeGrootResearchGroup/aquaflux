@@ -8,7 +8,8 @@
 
 mesh:
   kind: OpenFOAMMesh
-  path: runs/kwsst/polyMesh
+  # Tracked, where OpenFOAM's blockMesh writes it (of_case/run_of.sh); the species case reads it too.
+  path: of_case/constant/polyMesh
 
 fluid:
   density: 1.0

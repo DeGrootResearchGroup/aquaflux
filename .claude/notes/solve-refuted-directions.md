@@ -1114,8 +1114,8 @@ removed that tail.**
 - **Superseded bound:** the 2026-10-08 replay of the 31-step march (no release) gave ~3–4 steps and ~7 %
   of cycles over its fifteen-step tail. That tail was the floor's linear rate, and `release_floor` is the
   cheaper cure for it. The 2026-10-08 table is on #639.
-- **bfs3d was not replayed.** Its mesh is not in the cloud container, and the harness imports pitzDaily's
-  `compare`. bfs3d still ships no release, so it keeps a floor tail (33–36 steps). The release is already
+- **bfs3d was not replayed**: the harness imports pitzDaily's `compare` (bfs3d's mesh is tracked, at
+  `validation/bfs3d_openfoam/of_case/constant/polyMesh`). bfs3d still ships no release, so it keeps a floor tail (33–36 steps). The release is already
   measured there: 33 → 29 steps (open-directions 11a). Reopen only for a march that must keep a long
   linear tail at a floor the release cannot remove.
 

@@ -324,7 +324,9 @@ There is no per-class `relocated`/`rebased_path`. `CaseFile.check` refuses a mis
 - **`validation/bfs3d_openfoam/case.yaml` states bfs3d at its driver's defaults; bfs3d solves with its
   solver section** but assembles the problem by hand (the parity reference). `BFS3D_*` variables override
   constants that default to the file; the module refuses to import if, with none set, `SOLVER` differs from
-  `FILE_SOLVER`. `BFS3D_RAMP=off` is its one script-only arm.
+  `FILE_SOLVER`. `BFS3D_RAMP=off` is its one script-only arm. Its mesh is the tracked `of_case/constant/polyMesh`
+  (`validation.md`, "bfs3d's mesh"); every path a shipped case file names is tracked or declared
+  generated (`tests/unit/test_shipped_case_paths.py`).
 - Both pinned by `test_each_step_case_script_runs_its_files_solver_when_no_override_is_set`.
 - **`validation/turbulent_channel/cases/re{20000,45000,240000}.yaml` and
   `validation/turbulent_channel_openfoam/cases/{low,high}.yaml`** each state ν to the last bit and a

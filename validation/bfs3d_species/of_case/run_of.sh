@@ -49,7 +49,6 @@ cp "$T"/s "$DST"/
 # The flux the tracer actually rode, copied beside it so the comparison can assert it is the same
 # field aquaflux was handed rather than assuming it.
 cp "$START"/phi "$DST"/
-cp -r constant/polyMesh "$DST"/polyMesh 2>/dev/null || true
 
 echo "bfs3d species: latestTime=$T  $(grep -c 'Solving for s' log.foamRun || echo 0) tracer solves" \
     | tee "$RUNS/summary.txt"

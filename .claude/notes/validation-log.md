@@ -776,3 +776,47 @@ Two of them (`test_coupled_amg.py`) were deleted with PETSc on 2026-10-10; the t
 compared against was deleted, 2026-10-11), is PETSc-free and runs in CI.
 **The trap that survives: before attributing a local-only failure to your platform, check the CI skip
 counts** — a guard was once reverted on the strength of the platform story.
+
+## bfs3d on a 4-core Linux container: the march, the re-fit's cost, and the allocator (2026-10-17/18)
+
+Container: 4-core Intel Xeon @ 2.1 GHz, 15 GiB, no swap; jax 0.11.2; commit `b1648725`; compilation
+cache cold for the march. Shipped `case.yaml` throughout.
+
+**The march** (`validation/run_case.sh validation/bfs3d_openfoam/compare.py --wait`, glibc defaults, no
+OpenFOAM fields present, so the comparison was skipped): 29 steps, 48 inner solves, 173 restart cycles
+(none rejected), 29 re-fits (13 full, 16 cost), final `R` 3.69e-06, mid-span `x_r/h` **8.3611**,
+solve 3155 s (3178 s with set-up), peak `VmHWM` 12.1 GiB. Re-fits 1844 s of it (probe 1247 s, refactor
+543 s), each 56–64 s; steps without their re-fit ~20 s. Against the M3 Pro record (18 / 137 / 5.1e-06 /
+522 s, jax 0.10.2) the counts differ as expected (rounding moves the leading coarsening); the root agrees.
+The case process used ~2.1 of 4 cores, 21 % of CPU in the kernel, ~146k minor faults/s.
+
+**One re-fit at `checkpoints/state-00029`, β 0.005, mean of 3** (`validation/refit_profile.py`):
+
+| allocator | probe | assemble | slice | leading | trailing | whole | faults |
+|---|---|---|---|---|---|---|---|
+| glibc defaults | 38.35 s (2.88 cores) | 1.77 | 3.24 | 13.83 | 1.05 | 58.29 s | 15.9M |
+| mmap 1 GiB + trim 2^31−1 | 36.54 | 0.19 | 1.00 | 8.14 | 0.97 | 46.87 | 15.1M |
+| … + `MALLOC_ARENA_MAX=1` | **28.75** | 0.16 | 0.80 | 7.94 | 0.95 | **38.63** | 0.15M |
+| jemalloc `LD_PRELOAD`, default decay | 37.38 | 0.86 | 3.34 | 13.23 | 1.30 | 56.17 | 11.6M |
+
+The thresholds cure the host refactor's faults; the probe's batched JVP runs on XLA worker threads, whose
+arenas `mmap` above 64 MiB regardless, until one arena is forced. jemalloc with decay disabled
+(`MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`, which the pitzDaily session found removes the faults
+there) was not run on bfs3d.
+
+**pitzDaily on the same machine, hybrid start, β 0.005**: whole re-fit 2.87 s (probe 1.54 s, 100 probes)
+at defaults, 2.66 s (probe 1.40 s) single-arena. **Batched JVP per tangent, single-arena, best of 5**
+(`REFIT_JVP_BATCHES`): pitzDaily 22.3 / 13.0 / 8.5 / 8.4 / 7.6 ms at batch 1 / 2 / 4 / 8 / 16; bfs3d
+68.8 / 77.8 / 54.2 / 44.8 / 53.5 ms (batch 16: 388k faults per call even single-arena). So on this machine
+bfs3d's probe is ~25× pitzDaily's: 5.76× the probes (576 against 100) times ~5.3× per tangent at batch 8
+for 2.26× the unknowns. ⚠️ Not reconciled: the M3 Pro records imply ~14 ms per bfs3d tangent (8.2–8.5 s /
+576) against ~25–34 ms for pitzDaily's (2.5–3.4 s / 100), while here pitzDaily's probe is faster than the
+Mac's and bfs3d's 3.5–4.6× slower. The records' configurations (jax 0.10.2, commits) differ from this
+run's; a kernel profile of bfs3d's JVP (`pitzdaily_openfoam/fusion_profile.py` is pitzDaily-only) is the
+next instrument.
+
+**The single-arena march arm died**: `MALLOC_ARENA_MAX=1` plus both thresholds, otherwise identical;
+re-fits 45.8 s and 42.4 s (probe 28.8 / 28.1 s) at steps 1–2 against 63.8 / 61.7 s at defaults, but
+12.3 GiB resident by step 2 (9.5 GiB at defaults), and the container restarted at ~00:42 with no exit
+record and no surviving kernel log. Inferred cause: one arena with a 2 GiB trim threshold retains freed
+memory. Unmeasured: the single arena with the default trim threshold, and jemalloc with decay disabled.
