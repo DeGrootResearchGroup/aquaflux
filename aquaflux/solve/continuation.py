@@ -595,9 +595,8 @@ class PseudoTransientStep(ShiftedStep):
         ) -> StepOutcome:
             # The linear solve stops in the measure this step is judged by, not one fixed at configuration.
             solver = in_progress_measure(solver, norm)
-            # `residual` is `R(phi)`, handed in by the march (the previous step's last residual), so the
-            # step evaluates none at `phi`; a policy that tapers its shift on how far the state is from a
-            # root reads the same vector.
+            # `residual` is `R(phi)`, handed in by the march; a policy that tapers its shift on how far
+            # the state is from a root reads the same vector.
             residual_norm = norm(residual)
             term = policy.shift_term(phi, residual)  # base diagonal + β -> M, from the same iterate
             # The injected schedule sets the base shift strength for this step's first attempt (SER by
@@ -695,7 +694,6 @@ class PseudoTransientStep(ShiftedStep):
                     jnp.where(accept, trial.cycles, best_cycles),
                     jnp.where(accept, trial.alpha, best_alpha),
                     jnp.where(accept, trial.full_step_ratio, best_ratio),
-                    # And the residual vector with its measure, for the march to hand the next step.
                     jnp.where(accept, trial.residual, best_residual),
                 )
 
@@ -724,17 +722,8 @@ class PseudoTransientStep(ShiftedStep):
                 residual,
             )
 
-            (
-                _,
-                phi_next,
-                next_norm,
-                _,
-                _,
-                step_cycles,
-                step_alpha,
-                step_ratio,
-                next_residual,
-            ) = jax.lax.while_loop(cond, body, start)
+            final = jax.lax.while_loop(cond, body, start)
+            _, phi_next, next_norm, _, _, step_cycles, step_alpha, step_ratio, next_residual = final
             # A single-step pseudo-transient attempt has no inner Newton loop; report 1 inner iteration
             # so a consumer can offset-correct the raw solver count uniformly with the dual-time path.
             # A single damped step has no inner loop, so nothing could have been cut short and the
@@ -965,8 +954,8 @@ class DualTimeStep(ShiftedStep):
     def stepper(self) -> StepFn:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
 
-        ``(residual_fn, φ, R(φ), ‖R₀‖, solver) -> StepOutcome``. The reference
-        ``φⁿ`` is ``φ``, and ``R(φ)`` the residual the march holds there (the previous step's last); ``raw_cycles`` is the **summed** raw solver count over the inner Newton iterations
+        ``(residual_fn, φ, R(φ), ‖R₀‖, solver) -> StepOutcome``. The reference ``φⁿ`` is ``φ``, whose
+        residual the march hands in; ``raw_cycles`` is the **summed** raw solver count over the inner Newton iterations
         and ``inner_iterations`` is that count (so a consumer can recover the per-solve cost); ``alpha``
         is the **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
         when the implicit step had to be clipped, and ``0`` if any inner step failed to reduce ``‖G‖`` —
@@ -1001,9 +990,7 @@ class DualTimeStep(ShiftedStep):
             reference = phi  # φⁿ, held across the inner loop
             # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.
-            # `R(φⁿ)` is handed in by the march -- the previous step ended at `φⁿ` holding it -- so the
-            # step evaluates no residual at its anchor.
-            reference_residual = residual
+            reference_residual = residual  # handed in: the previous step ended at φⁿ holding it
             reference_norm = norm(reference_residual)
             shift_strength = schedule.shift_strength(reference_norm, residual_norm_0)
             # Hand the policy the residual just computed rather than letting it re-derive R(φⁿ): a
