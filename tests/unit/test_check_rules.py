@@ -111,7 +111,7 @@ def _rule(glob: str, size: int = 1 * KB) -> str:
 
 def _repo(tmp_path: Path, rules: dict[str, str], tracked: list[str]) -> Path:
     (tmp_path / ".claude" / "rules").mkdir(parents=True)
-    (tmp_path / "CLAUDE.md").write_text("# briefing\n")
+    (tmp_path / "CLAUDE.md").write_text("x" * (rules_budget.ROOT_CEILING - KB))
     for name, text in rules.items():
         (tmp_path / ".claude" / "rules" / name).write_text(text)
     for f in tracked:
@@ -135,10 +135,36 @@ def test_a_rules_file_over_the_per_file_budget_fails(tmp_path: Path) -> None:
     assert "big.md" in result.stderr and "budget for one file" in result.stderr
 
 
-def test_claude_md_is_held_to_the_same_per_file_budget(tmp_path: Path) -> None:
+PRE_TRIM_CLAUDE_MD = 94_665  # bytes, when the narratives still sat in it (2026-10-18)
+
+
+def _briefing_failures(tmp_path: Path, size: int) -> list[str]:
     root = _repo(tmp_path, {"a.md": _rule("src/**")}, ["src/a.py"])
-    (root / "CLAUDE.md").write_text("x" * (rules_budget.FILE_BUDGET + KB))
-    assert any("CLAUDE.md" in m for m in rules_budget.check(root))
+    (root / "CLAUDE.md").write_text("x" * size)
+    return rules_budget.check(root)
+
+
+def test_claude_md_at_its_pre_trim_size_fails(tmp_path: Path) -> None:
+    """The file may not regrow to what it weighed before its narratives moved to the note."""
+    failures = _briefing_failures(tmp_path, PRE_TRIM_CLAUDE_MD)
+    assert len(failures) == 1 and "over its ROOT_CEILING" in failures[0]
+
+
+def test_claude_md_ceiling_is_a_ratchet(tmp_path: Path) -> None:
+    """At the ceiling it passes, one byte over it fails, and far under it the ceiling must follow."""
+    ceiling = rules_budget.ROOT_CEILING
+    assert ceiling < rules_budget.FILE_BUDGET
+    assert _briefing_failures(tmp_path / "at", ceiling) == []
+    over = _briefing_failures(tmp_path / "over", ceiling + 1)
+    assert len(over) == 1 and "Never raise the ceiling" in over[0]
+    under = _briefing_failures(tmp_path / "under", ceiling - rules_budget.ROOT_SLACK - 1)
+    assert len(under) == 1 and "lower ROOT_CEILING" in under[0]
+
+
+def test_this_repositorys_claude_md_sits_just_under_its_ceiling() -> None:
+    """The real file is within its ceiling, and the ceiling has been lowered to follow it."""
+    size = (CHECK_RULES.parents[1] / "CLAUDE.md").stat().st_size
+    assert rules_budget.ROOT_CEILING - rules_budget.ROOT_SLACK <= size <= rules_budget.ROOT_CEILING
 
 
 def test_rules_that_load_together_are_held_to_a_combined_budget(tmp_path: Path) -> None:
