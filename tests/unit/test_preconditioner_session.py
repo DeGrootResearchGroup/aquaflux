@@ -420,6 +420,49 @@ def test_a_split_of_two_traced_blocks_is_carried_in_the_step_and_each_refit_hand
     )
 
 
+def _same_arrays(first, second) -> bool:
+    """Whether two pytrees hold the very same array objects, leaf for leaf (not merely equal values).
+
+    Identity of the arrays, not of the modules: ``equinox.tree_at`` rebuilds a module it inserts, so
+    two steps sharing one split hold equal-but-distinct split objects over the same buffers.
+    """
+    first, second = jax.tree.leaves(first), jax.tree.leaves(second)
+    return len(first) == len(second) and all(a is b for a, b in zip(first, second, strict=True))
+
+
+def test_every_step_built_from_one_fit_carries_the_one_traced_split_it_made(case) -> None:
+    """A traced split is a copy of the whole fitted hierarchy, so the session makes one per fit.
+
+    Every step built from a fit -- a later build, and the stopping step, which is read only for its
+    measure -- must carry that one split's arrays rather than a fresh copy, or each would keep its own
+    copy alive as long as it is held; on a three-dimensional case each copy costs most of a gigabyte.
+    After a re-fit the session's stopping step is re-pointed at the new split as the march's step is,
+    so no step the session holds keeps the old one alive.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session, held = _materialized_step_held_on(target, anchor, state, loop)
+    split = held.shift_policy.split
+    assert _same_arrays(
+        session.refresh(state * 1.01, held, dual_time=loop).shift_policy.split, split
+    )
+    # Built (and cached) after that build, as a march's stopping test builds it, so the re-fit below
+    # meets it in the session's cache.
+    stopping = session.stopping_step(target)
+    assert _same_arrays(stopping(held).shift_policy.split, split)
+
+    update = session.refresh_preconditioner(held, state * 1.05, due=True)
+    assert update is not None
+    refitted = update(held).shift_policy.split
+    assert not _same_arrays(refitted, split)
+    # The stopping step lends the held step its own policy and adjoint factory, so these are the
+    # stopping step's split, not the held step's.
+    judged = stopping(held)
+    assert _same_arrays(judged.shift_policy.split, refitted)
+    assert _same_arrays(judged.adjoint_preconditioner_factory.split, refitted)
+
+
 class _HostOnly:
     """A block inverse with the host interface and no traced cycle, as a factorization would be."""
 

@@ -36,7 +36,7 @@ from .monolithic_policy import (
     TracedSplitShiftPolicy,
     with_traced_split,
 )
-from .traced_field_split import offers_traced_split, traced_field_split
+from .traced_field_split import TracedFieldSplit, offers_traced_split, traced_field_split
 
 __all__ = [
     "BUILD_BETA",
@@ -426,8 +426,11 @@ class MaterializedSession:
     through a :class:`~aquaflux.precondition.monolithic_policy.TracedSplitShiftPolicy`, so a Krylov iteration
     emits no host callback. The host split is still what is fitted and re-fitted; after each re-fit the
     hook hands the march a step carrying the traced form of the re-fitted split
-    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). That is a compilation-cache hit only
-    while the two hierarchies keep their array shapes across a re-fit, so a block whose coarsening reads
+    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). The traced form is taken
+    once per fit and shared by every step the session builds, the stopping steps included: each is a
+    copy of the whole hierarchy in the split's precision, so a copy per step would keep one alive per
+    step held. Swapping in a re-fitted split is a compilation-cache hit only while the two hierarchies
+    keep their array shapes across a re-fit, so a block whose coarsening reads
     operator values must freeze it (``frozen_coarsening``) or pour it into a fixed ladder
     (``shape_headroom``); otherwise every re-fit recompiles the step. Any other inverse is applied
     through a host callback and re-fitted in place.
@@ -500,6 +503,10 @@ class MaterializedSession:
         self._preconditioner: object | None = None
         # Whether the fitted inverse is carried in the step in its traced form; decided at the fit.
         self._traced = False
+        # The traced form of the fitted split, taken once per fit and carried by every step built from
+        # it. Each traced form is a copy of the whole hierarchy in the split's precision, so a step
+        # holding its own would keep one such copy alive per step built, for as long as that step is.
+        self._split: TracedFieldSplit | None = None
         # What the last build was made at and with, for building a step on another problem alike.
         self._reference_state: jnp.ndarray | None = None
         self._march: dict = {}
@@ -513,7 +520,15 @@ class MaterializedSession:
             refitted = self._refresh_hook()(active_step, state, due=due)
             if not (refitted and self._traced):
                 return None
-            split = traced_field_split(self._preconditioner.inverse, self._precision)
+            # Dropped before the new one is taken, so the session never holds two; the steps the march
+            # holds keep the old one only until the update below replaces it in them.
+            self._split = None
+            self._split = split = traced_field_split(self._preconditioner.inverse, self._precision)
+            # The stopping steps share it too: they are read for their measure alone, and otherwise
+            # each would keep the fit it was built at alive for the rest of the build.
+            self._stopping_steps = {
+                key: with_traced_split(step, split) for key, step in self._stopping_steps.items()
+            }
             return lambda step: with_traced_split(step, split)
 
         self.refresh_preconditioner = (
@@ -620,6 +635,8 @@ class MaterializedSession:
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
             self._traced = offers_traced_split(self._preconditioner.inverse)
+            if self._traced:
+                self._split = traced_field_split(self._preconditioner.inverse, self._precision)
             if self._precision != "float64" and not self._traced:
                 raise ValueError(
                     f"FieldSplit(precision={self._precision!r}) needs a split applied on the device, "
@@ -631,9 +648,7 @@ class MaterializedSession:
     def _policy(self, base) -> MonolithicFactorShiftPolicy | TracedSplitShiftPolicy:
         """``base`` glued to the fitted inverse, in whichever form the step carries it."""
         if self._traced:
-            return TracedSplitShiftPolicy(
-                base, traced_field_split(self._preconditioner.inverse, self._precision)
-            )
+            return TracedSplitShiftPolicy(base, self._split)
         return MonolithicFactorShiftPolicy(base, self._preconditioner)
 
     @property

@@ -27,9 +27,7 @@ Run it through the case runner, alone::
     validation/run_case.sh validation/bfs3d_openfoam/memory_attribution.py --wait
 
 It writes a Markdown table to the log and the full record, every census included, to
-``memory_attribution.json`` beside this file (``BFS3D_MEMORY_RECORD`` overrides the path). If the
-gitignored ``runs/kwsst/polyMesh`` is absent it reads the tracked copy of the same mesh,
-``validation/bfs3d_species/of_case/constant/polyMesh`` (or ``BFS3D_MEMORY_MESH``).
+``memory_attribution.json`` beside this file (``BFS3D_MEMORY_RECORD`` overrides the path).
 
 ``tracemalloc`` costs time and some memory of its own (reported per stage as ``tracer``), so wall times
 here are not march timings and the resident figures sit slightly above an untraced run's.
@@ -74,8 +72,10 @@ TRANSPARENT = (
 COLLECT = os.environ.get("BFS3D_MEMORY_COLLECT", "0") == "1"
 #: ``0`` takes no census at all (a census walks every Python object, minutes per call late in a run).
 CENSUS = os.environ.get("BFS3D_MEMORY_CENSUS", "1") == "1"
+#: A class name whose live instances are traced back to their holders at each step's end (for a copy
+#: that should be gone, say), as referrer chains printed to the log; unset traces nothing.
+HOLDERS = os.environ.get("BFS3D_MEMORY_HOLDERS", "")
 RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.json"))
-TRACKED_MESH = ROOT / "validation" / "bfs3d_species" / "of_case" / "constant"
 GIB = 2**30
 
 
@@ -653,6 +653,70 @@ def _program_sizes(captured: dict, case) -> dict[str, dict]:
     return sizes
 
 
+def _holders(class_name: str, depth: int = 7) -> list[str]:
+    """Each live instance of ``class_name``, as the chain of objects holding it (first referrer each hop).
+
+    A running function holding it is named (``frames ...``) and the chain goes on through its other
+    holders; a module dictionary ends a chain, and the lists this function builds are left out.
+    """
+    import types
+
+    objects = gc.get_objects()
+    found = [o for o in objects if type(o).__name__ == class_name]
+    module_dicts = {id(m.__dict__): m.__name__ for m in list(sys.modules.values()) if m}
+    ignore = {id(objects), id(found)}
+    chains = []
+    for target in found:
+        chain, current, seen = [], target, {id(target)}
+        for _ in range(depth):
+            referrers = gc.get_referrers(current)
+            ignore.add(id(referrers))
+            holders = [h for h in referrers if id(h) not in ignore and id(h) not in seen]
+            ignore.add(id(holders))
+            if not holders:
+                chain.append("(no Python holder)")
+                break
+            frames = [h for h in holders if isinstance(h, types.FrameType)]
+            if frames:
+                chain.append("frames " + ", ".join(f.f_code.co_name for f in frames))
+                holders = [h for h in holders if not isinstance(h, types.FrameType)]
+                if not holders:
+                    break
+            holder = holders[0]
+            seen.add(id(holder))
+            if id(holder) in module_dicts:
+                chain.append(f"module {module_dicts[id(holder)]}")
+                break
+            label = type(holder).__qualname__
+            if isinstance(holder, types.FunctionType | types.CellType):
+                label += f"[{getattr(holder, '__qualname__', '')}]"
+            others = sorted({type(h).__qualname__ for h in holders[1:]})
+            chain.append(f"{label}" + (f" (also {', '.join(others)})" if others else ""))
+            current = holder
+        chains.append(" <- ".join(chain))
+    return chains
+
+
+def _stack_steps() -> list[str]:
+    """Every running function's local that is a step carrying a traced split, with that split's identity.
+
+    A running function's locals are invisible to ``gc.get_referrers``; this names them, so a step a
+    driver keeps across re-fits shows beside the one the march is applying.
+    """
+    lines = []
+    frame = sys._getframe(1)
+    while frame is not None:
+        for name, value in frame.f_locals.items():
+            split = getattr(getattr(value, "shift_policy", None), "split", None)
+            if split is not None:
+                import jax
+
+                leaf = jax.tree.leaves(split)[0]
+                lines.append(f"frame {frame.f_code.co_name}:{name} holds a split at {id(leaf):#x}")
+        frame = frame.f_back
+    return lines
+
+
 class _Stop(Exception):
     """Raised by the step observer once the measured steps are done."""
 
@@ -673,9 +737,7 @@ def main() -> None:
         import compare  # imports aquaflux (x64) and reads case.yaml
         import jax
 
-    if not (compare.RUNS / "polyMesh").exists():
-        compare.RUNS = Path(os.environ.get("BFS3D_MEMORY_MESH", TRACKED_MESH))
-    header["mesh"] = str(compare.RUNS / "polyMesh")
+    header["mesh"] = str(compare.MESH)
     header["jax"] = jax.__version__
     print(f"jax {jax.__version__}, mesh {header['mesh']}", flush=True)
 
@@ -686,6 +748,11 @@ def main() -> None:
         steps.append(1)
         with recorder.stage(f"step {len(steps)} ends (census)", census=True):
             pass
+        if HOLDERS:
+            for chain in _holders(HOLDERS):
+                print(f"    {HOLDERS} held by: {chain}", flush=True)
+            for line in _stack_steps():
+                print(f"    {line}", flush=True)
         if len(steps) == STEPS - 1:
             captured["want_step"] = True
         if len(steps) >= STEPS:

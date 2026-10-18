@@ -112,8 +112,11 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
 
 **How it is wired.**
 1. `MaterializedSession._build` fits the host `FieldSplitPreconditioner`, then, if
-   `offers_traced_split(...)`, uses `TracedSplitShiftPolicy(base, traced_field_split(inverse))`
-   (`monolithic_policy.py`) instead of `MonolithicFactorShiftPolicy`. The problem's
+   `offers_traced_split(...)`, uses `TracedSplitShiftPolicy(base, session._split)`
+   (`monolithic_policy.py`) instead of `MonolithicFactorShiftPolicy`. **One traced split per fit**: the
+   session takes it once at the fit and after each re-fit, and every step it builds (the stopping step
+   included, re-pointed at each re-fit) carries those arrays — a split per step kept a copy of the whole
+   hierarchy alive per held step (`solve.md`, `materialized_session`). The problem's
    `build_step(state, policy, march, base_regime)` receives the glued policy. `session.preconditioner`
    is the host object either way.
 2. **A re-fit is a new step, not a mutation.** `BetaTrackingRefresh` re-fits in place and returns whether

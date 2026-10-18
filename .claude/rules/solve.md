@@ -297,6 +297,15 @@ defect — fix it in the same change.
     argument), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `VCYCLE_LINEAR_SOLVE`; the specs
     (`MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` (extend its
     kinds rather than restate them). `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
+  - **One traced split per fit, shared by every step the session builds (binding).** `_split` is taken
+    at the fit and replaced after each re-fit, which also re-points the cached stopping steps
+    (`with_traced_split`), so no held step pins an old copy; each copy is a whole hierarchy in the
+    split's precision (0.63 GiB float32 plus the int32 indices it pins on bfs3d). A per-step split held
+    three copies at once and cost 1.1 GiB of the 2-step peak (`memory_attribution.py`, 2026-10-18; log,
+    "bfs3d memory by owner"). Pinned by
+    `test_every_step_built_from_one_fit_carries_the_one_traced_split_it_made` (array identity, since
+    `eqx.tree_at` rebuilds the module it inserts). A caller that keeps a built step for its shift policy
+    should keep `step.shift_policy.base` (bfs3d's residual reporter does).
   - **A re-pointed session re-fits the inverse and deliberately keeps the held step's shift (#701)** —
     the step control adapts the shift strength on the premise that the diagonal it scales is fixed, and
     every variant changing it mid-march lost (`.claude/notes/turbulence-log.md`, "#701 — the arms").

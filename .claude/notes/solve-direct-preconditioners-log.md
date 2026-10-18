@@ -381,6 +381,32 @@
       march (29 steps, 29 re-fits) peaked at **12.1 GiB** (`VmHWM` of the case process, sampled every 15 s):
       it fits 15 GiB with ~3 GiB to spare, and two of it would not.
 
+### bfs3d memory by owner (2026-10-18)
+
+      `validation/bfs3d_openfoam/memory_attribution.py` (per stage: `VmRSS`/`VmHWM`, a 20 ms sampled peak,
+      `tracemalloc` current and peak, JAX live arrays by dtype, smaps, glibc `mallinfo2`; censuses naming
+      every array over 1 MiB). 4-core Xeon 2.1 GHz, 15.7 GiB, no swap, jax 0.11.2, glibc defaults, shipped
+      `case.yaml`, 2-step marches (`BFS3D_MEMORY_STEPS=2`), warm compilation cache.
+
+      - **Before #757 (`cf80be32`)**, HWM 10.90 GiB, set inside each re-fit's leading-block re-fit and
+        rising per re-fit. At re-fit 2: device 4.9 GiB (float64 hierarchy 1.23 — `values` and the stored
+        transpose `t_values` both float64 — three float32 traced splits at 0.63 each, int32 indices 1.82
+        including a generation built per re-fit); host transient 3.8 GiB at peak over a 1.6 baseline
+        (probed CSR, shifted copy and the four cut blocks at 0.41 GiB each, plus the re-fit's products);
+        the rest runtime, the step program's 984 MiB of temporaries, allocator retention. One full CSR copy
+        is 36.7M stored entries: 280 MiB float64 values + 140 MiB int32 indices. `ProbeGather` keeps
+        3 x 140 MiB; its build's transient (~1.1 GiB) and the case build (0.87 GiB) are below the peak.
+        Compiled code is ~20 MiB. A `gc.collect()` at every stage freed nothing: every copy is held.
+      - **After #757 (`fe772f59`)**, HWM **11.91 GiB**: the held entry maps add ~1.5 GiB of host memory
+        (traced host after step 1 3.07 against 1.57) and the first re-fit's host transient peaks at 5.9 GiB;
+        int32 no longer grows per re-fit except one generation (the first re-fit's held layouts beside the
+        fit's `from_scipy` packing).
+      - **One traced split per fit** (`MaterializedSession._split`): HWM 11.91 -> **10.81 GiB**, steady
+        device 4.10 -> 3.48 GiB. Two float32 splits remain: the march's current one and the fit-time one,
+        held by `solve.staged_march`'s local `strategy` (the step it built, kept for the whole segment;
+        found by scanning stack locals, since a running frame's locals are invisible to
+        `gc.get_referrers`) and, until 2026-10-18, by `compare.py`'s per-rung residual reporter.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the

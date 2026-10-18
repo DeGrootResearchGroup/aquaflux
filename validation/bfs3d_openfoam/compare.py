@@ -62,6 +62,7 @@ import os
 import re
 import sys
 import time
+import types
 from pathlib import Path
 
 # Running a script puts the SCRIPT's directory on `sys.path`, not the working directory, so
@@ -1421,7 +1422,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
         # its per-equation rows would not add up to the residual reported beside them.
-        rung_residuals.append(coupled_residuals(rung["companion"], step, rung["seed_state"]))
+        # Handed the step's base shift policy, not the step: the row scales are all it reads, and the
+        # step also carries the fitted preconditioner, a copy of the whole hierarchy that this reporter
+        # would otherwise keep alive for the rest of the rung after every re-fit had replaced it.
+        policy = types.SimpleNamespace(shift_policy=step.shift_policy.base)
+        rung_residuals.append(coupled_residuals(rung["companion"], policy, rung["seed_state"]))
         return step
 
     session_options = dict(
