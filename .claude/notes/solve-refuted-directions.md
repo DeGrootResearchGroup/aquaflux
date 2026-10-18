@@ -1122,7 +1122,7 @@ removed that tail.**
 ## Partitioning the single-threaded kernels of the residual / JVP — NOT A LEVER (2026-10-17)
 
 The `dot` precedent (reduction-rooted fusions on one thread, 40 % of a reconstruction) was checked
-across the whole pitzDaily coupled residual and its JVP with `validation/pitzdaily_openfoam/fusion_profile.py`
+across the whole pitzDaily coupled residual and its JVP with `validation/fusion_profile.py` (`FUSION_CASE=pitzdaily`)
 (per-kernel solo time on one core plus time alone on 4 cores, joined to the HLO; `main` `183e9ffa`, jax
 0.11.2, 4-core Linux). Unpartitioned kernels are 26 % of the clean JVP's one-core time, spread over 640
 kernels, **the largest 0.9 %**. On 4 cores an unpartitioned kernel is alone in flight for 7 % of the span.
@@ -1529,10 +1529,29 @@ back because the same vmapped JVP runs slower inside a compiled loop than as sep
 0.84-0.85 s against 0.60-0.69 s with no host work in either), and the looped responses differ from the
 shipped ones at 1.3e-12. jaxlib 0.11.2's XLA flags offer no CPU temporary-buffer or preallocation setting,
 so on CPU the remedy for the faults is the process allocator, which the user owns (`MALLOC_ARENA_MAX=1`
-with both thresholds, or jemalloc with decay off). ⚠️ Both keep freed memory: the single-arena setting
+with both thresholds, jemalloc with decay off, or `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, the one that
+keeps returning freed memory: bfs3d re-fit 48.7 → 39.7 s at an unchanged footprint, `validation-log.md`,
+"Why bfs3d's probe tangent costs 5.5× pitzDaily's"). ⚠️ The first two keep freed memory: the single-arena setting
 took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted. Untested on bfs3d, whose probe faults ~210 000 times
 per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
 the in-loop JVP penalty measures smaller than that.
+
+## Overlapping the probe's host de-compression with the next chunk — NO GAIN on bfs3d (2026-10-18)
+
+The idea: between batched calls the probe fills the next chunk's seeds and scatters the last chunk's
+responses into the matrix on one core (bfs3d: 0.12-0.17 s and 2.5-3.1 s of a ~36 s probe per re-fit), so
+starting chunk `k + 1` before scattering chunk `k` (one call in flight, two seed buffers) should hide them.
+Two traps, then the measurement. **Dispatching ahead does nothing as written**: `batched_jacobian_matvec`
+is an `eqx.filter_jit`, which blocks on its result after every call so it can report an `error_if` by
+name (a plain `jax.jit` of the same function returns in ~1.3 ms, the `filter_jit` after ~420 ms). With the
+call on one worker thread the scatter does run beside the next chunk (2.2 cores during it), and **a
+transfer may alias the host buffer** (`jax.device_put` of a large aligned array does on the CPU backend;
+`jnp.asarray` copies today), so the seeds need two buffers. Measured: bfs3d `state-00032`, β 0.005,
+`refit_profile.py`, glibc defaults, 4-core Linux, jax 0.11.2, `fe772f59`, mean of 3 re-fits: probe 36.2 s
+against 34.9 / 36.0 / 37.0 s for the serial loop in three runs. The JVP is memory-bound (~23 GB/s, 2-way
+partitioned kernels), so the concurrent scatter slows it by what it saves. Built with a test and
+reverted (branch `claude/bfs3d-probe-linux`). Re-open only on a machine where the probe is not
+bandwidth-bound, and then through a worker thread, not by dropping `filter_jit`.
 
 ## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
 

@@ -101,14 +101,22 @@ branches.
   allocates once per solve), so per-call timings overstate it; **bfs3d's re-fit probe does pay it, per
   batched JVP**: 15M minor faults and 38.4 of a 58.3 s re-fit at glibc defaults, 36.5 s with the
   thresholds below, 28.8 s (0.15M faults, re-fit 38.6 s) with `MALLOC_ARENA_MAX=1` as well
-  (`refit_profile.py`, `state-00029`, 4-core Linux, jax 0.11.2; `.claude/notes/validation-log.md`). Report `ru_minflt` per call.
+  (`refit_profile.py`, `state-00029`, 4-core Linux, jax 0.11.2; `.claude/notes/validation-log.md`). Report
+  `ru_minflt` per call, and the resident high-water mark beside every allocator arm (`refit_profile.py`
+  prints both).
   `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` removes it **only up to 64 MiB**:
   XLA allocates on worker threads, whose arenas are 64 MiB heaps, so a larger buffer (the whole
   `(J + s) M v` program's, ~74 MiB on pitzDaily) is mapped per call regardless. To remove all of it run
   under jemalloc (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-  MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`) or `MALLOC_ARENA_MAX=1`, and say so; `run_case.sh`
-  records all three. ⚠️ **Both keep freed memory, so both raise the footprint: never run a bfs3d march
-  under them on a 15 GB machine.** `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
+  MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`) or `MALLOC_ARENA_MAX=1` **with** both thresholds
+  (the single arena alone removes nothing: above the adaptive 32 MiB ceiling the buffer is still mapped
+  per call), and say so; `run_case.sh` records all of them. ⚠️ **Both keep freed memory, so both raise
+  the footprint: never run a bfs3d march under them on a 15 GB machine** (jemalloc: VmHWM 13.2 GiB after
+  one bfs3d re-fit against 10.9 at defaults, 2026-10-18). **`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
+  removes the faults without keeping memory** (glibc asks for transparent huge pages on its mapped
+  chunks; needs THP `madvise` or `always`): bfs3d probe faults 15M → 66k, re-fit 48.7 → 39.7 s, VmHWM
+  10.98 against 10.86 GiB (`state-00032`); not yet run on a march, and not a `run_case.sh` default. The retention that rules the others out:
+  `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
   resident by step 2 against 9.5 GiB at defaults, and the container restarted (bfs3d session,
   2026-10-18, branch `claude/bfs3d-mesh-home`); safe for fixed-state probes only. Compare a standalone piece with an in-loop one by the MEAN of as many calls as a solve
   makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB

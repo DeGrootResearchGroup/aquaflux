@@ -809,14 +809,84 @@ at defaults, 2.66 s (probe 1.40 s) single-arena. **Batched JVP per tangent, sing
 (`REFIT_JVP_BATCHES`): pitzDaily 22.3 / 13.0 / 8.5 / 8.4 / 7.6 ms at batch 1 / 2 / 4 / 8 / 16; bfs3d
 68.8 / 77.8 / 54.2 / 44.8 / 53.5 ms (batch 16: 388k faults per call even single-arena). So on this machine
 bfs3d's probe is ~25× pitzDaily's: 5.76× the probes (576 against 100) times ~5.3× per tangent at batch 8
-for 2.26× the unknowns. ⚠️ Not reconciled: the M3 Pro records imply ~14 ms per bfs3d tangent (8.2–8.5 s /
-576) against ~25–34 ms for pitzDaily's (2.5–3.4 s / 100), while here pitzDaily's probe is faster than the
-Mac's and bfs3d's 3.5–4.6× slower. The records' configurations (jax 0.10.2, commits) differ from this
-run's; a kernel profile of bfs3d's JVP (`pitzdaily_openfoam/fusion_profile.py` is pitzDaily-only) is the
-next instrument.
+for 2.26× the unknowns. Why: next subsection ("Why bfs3d's probe tangent costs 5.5× pitzDaily's").
 
 **The single-arena march arm died**: `MALLOC_ARENA_MAX=1` plus both thresholds, otherwise identical;
 re-fits 45.8 s and 42.4 s (probe 28.8 / 28.1 s) at steps 1–2 against 63.8 / 61.7 s at defaults, but
 12.3 GiB resident by step 2 (9.5 GiB at defaults), and the container restarted at ~00:42 with no exit
 record and no surviving kernel log. Inferred cause: one arena with a 2 GiB trim threshold retains freed
-memory. Unmeasured: the single arena with the default trim threshold, and jemalloc with decay disabled.
+memory. Both arms left unmeasured there are measured below.
+
+### Why bfs3d's probe tangent costs 5.5× pitzDaily's, and what moves it (2026-10-18)
+
+Same machine class (another 4-core Xeon @ 2.1 GHz container, 15 GiB, no swap, 4 KiB pages, transparent
+huge pages `madvise`, L3 260 MiB shared with the host), jax 0.11.2, glibc 2.39, `main` `fe772f59` (the
+library unchanged by this work), cold-then-warm cache. bfs3d at `state-00032` of the march below (β
+0.005, uniform reach 3, 576 probes, batch 8); pitzDaily at its hybrid start (reach 2, 100 probes).
+Instruments: `validation/fusion_profile.py` (`FUSION_PROGRAMS=probe`: the session's own probe residual
+through `batched_jacobian_matvec`, seeded with the plan's first colours) and `validation/refit_profile.py`.
+
+**The probe's batched program, batch 8** (`fusion_profile.py`, best of 15 untraced calls):
+
+| | pitzDaily | bfs3d | ratio |
+|---|---|---|---|
+| unknowns | 61125 | 138240 | 2.26 |
+| per call, 4 cores / one core | 77.5 / 227 ms | 426 / 1278 ms | 5.5 / 5.6 |
+| per tangent, 4 cores | 9.7 ms | 53.2 ms | 5.5 |
+| compiled temporary buffer (faulted afresh every call at glibc defaults) | 151 MiB | 816 MiB | 5.4 |
+| bytes touched per call (operands + outputs, summed over kernels) | 2.2 GB | 9.9 GB | 4.4 |
+| time in partitioned kernels | 78 % | 89 % | |
+| parallel efficiency (one-core / (4 x four-core)) | 73 % | 75 % | |
+
+No custom calls in either program, so no `lapack_*`. The time is in copy/bitcast, scatter and gather loop
+fusions over `[71872 faces, 8 tangents, (3, 3)]` arrays (bfs3d top kernel: a `select` over
+`f64[8, 71872]`, 4.4 %; no kernel above 5 %). Every partitioned kernel has 2 parts: the CPU backend gives a
+memory-bound kernel `ceil(sqrt(cores))` = 2 on 4 cores, so ~3 cores is what the program can use by
+construction (`XLA_FLAGS` was unset; `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` unset; cpuset 0-3; the work
+runs on the 4 `tf_XLAEigen` threads: 97-102 processor-seconds per re-fit there against ~20 on the Python
+threads). So the 5.5x is: **4.4x the bytes** (1.95x per unknown: 3D gradients and 3x3 blocks on 2.9x the
+faces) **times ~1.25x lower throughput**, ~23 GB/s, plausibly the 816 MiB temporary spilling the L3
+that pitzDaily's 151 MiB fits, plus faulting it in. Not fewer threads (the efficiency is the same) and not a
+serial host step (below).
+
+**Allocation, separated** (`refit_profile.py`, `state-00032`, β 0.005, mean of 3 re-fits; per-tangent
+batch sweep best of 5; one process per arm, back to back; VmHWM includes the sweep's batch-16 program):
+
+| arm | probe | re-fit | probe faults | per tangent at batch 1/2/3/4/6/8/12/16 (ms) | VmHWM / VmRSS after |
+|---|---|---|---|---|---|
+| glibc defaults | 36.0 s | 48.7 s | 15.06M | 127/94/95/70/61/**52**/60/56 | 10.86 / 8.31 GiB |
+| mmap 1 GiB + trim 2^31-1 | 36.0 | 42.3 | 15.06M | 112/87/89/76/63/59/62/52 | 12.13 / 11.33 |
+| `MALLOC_ARENA_MAX=1`, default trim | 37.3 | 49.8 | 15.05M | 109/91/87/69/82/59/65/58 | 10.88 / 8.11 |
+| jemalloc, `dirty_decay_ms:-1,muzzy_decay_ms:-1` | **26.7** | **33.9** | 3k | 79/68/50/52/51/**38**/42/42 | **13.22 / 13.18** |
+| `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` | **29.6** | **39.7** | 66k | 91/66/56/50/51/**42.5**/55/43 | **10.98 / 8.28** |
+
+- **Faulting is ~a quarter of the probe here** (36.0 → 26.7 s with none). It is the whole temporary,
+  every call: faults per call grow ~26k (100 MiB) per tangent on ~26k.
+- **A single arena alone does nothing**: above glibc's adaptive mmap ceiling (32 MiB) the temporary is
+  mapped per call whatever the arena count; #758's fault-free single arena came from the raised thresholds
+  with it, and that combination is what retained memory. The thresholds alone cure the host refactor's
+  faults (leading refactor 9.2 → 5.1 s) and keep ~3 GiB more resident.
+- **jemalloc with decay off is the fastest and unusable for a march here**: +2.4 GiB high-water and +4.9
+  GiB resident after one re-fit, on a march that already peaks at 12 GiB at defaults.
+- **`glibc.malloc.hugetlb=1` is the footprint-neutral one**: glibc `madvise`s its mapped chunks for
+  transparent huge pages, so the temporary faults in 2 MiB pages (66k faults per re-fit), and freed memory
+  is still returned. Re-fit −18 %, probe −18 %, VmHWM and VmRSS within 1 % of defaults. Not measured on a
+  march (the arm below ran at defaults) and not a `run_case.sh` default (it would make timings
+  incomparable with the record); it is the owner's choice for this machine class. It needs THP `madvise`
+  or `always`; under `never` it does nothing.
+- **Batch 8 is the optimum in every arm** (non-power-of-two batches are erratic: 3, 6, 12), so
+  `PROBE_BATCH_SIZE` stands on this machine for this case, as it did on the M3 Pro (2026-08-11): no
+  evidence it is a machine property. #758's batch 2 slower than batch 1 (77.8 against 68.8 ms, single
+  arena with both thresholds) did not recur in any arm here (batch 2 is 66-94 ms against 79-127).
+- **The host steps between chunks** (fill seeds 0.12-0.17 s, scatter 2.5-3.1 s per re-fit, one core)
+  are ~8 % of the probe, and overlapping them with the next chunk bought nothing (ledger:
+  `solve-refuted-directions.md`, "Overlapping the probe's host de-compression with the next chunk").
+
+**The M3 Pro figure cannot be reconciled from here, and the sentence that is true is this**: the record's
+~14 ms per bfs3d tangent is the whole probe's wall (8.2-8.5 s, host scatter included) over 576 probes at
+jax 0.10.2, commit `77b03c18`, on an 11-core machine with 16 KiB pages and several times this container's
+memory bandwidth; here the same quantity is 62 ms (36 s / 576), of which ~8 % is the host scatter and
+~25 % faulting, and the remaining ~40 ms a memory-bound program at ~23 GB/s. Nobody has profiled the
+program on the Mac, so bandwidth, page size and the jax version are not separated. The record's pitzDaily
+M3 figure (2.5-3.4 s / 100 probes, against 9.7 ms per tangent here) is a whole re-fit's probe line, not a
+per-tangent measurement, and is not comparable either.

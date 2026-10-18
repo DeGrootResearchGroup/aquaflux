@@ -98,8 +98,14 @@ bare block inverse).
   and peaks above any single materialize. Measurements: log, "Chunked seeds and per-chunk
   de-compression" and "The gather map's build peak".
   - **Batch size:** `PROBE_BATCH_SIZE = 8` (`materialized_session.py`), where processor time bottomed on
-    bfs3d (2026-08-11). The probe's memory barely scales with it, so auto-sizing the batch to free memory
-    is not worth building. On bfs3d a run's memory ceiling is set by the fits and re-fits of the materialized
+    bfs3d (M3 Pro, 2026-08-11) and where the per-tangent time bottoms on bfs3d on a 4-core Linux
+    container in every allocator arm (2026-10-18, `refit_profile.py` `REFIT_JVP_BATCHES`; table in
+    `.claude/notes/validation-log.md`, "Why bfs3d's probe tangent costs 5.5× pitzDaily's"): no evidence
+    the optimum is a machine property. The 2026-08 sweep's peak grew ~2.5 MB per unit of batch, so
+    auto-sizing the batch to free memory was judged not worth building; that reading predates a census
+    of the compiled program, whose temporary is ~100 MiB per tangent plus ~100 MiB on bfs3d (816 MiB at
+    8, Linux, 2026-10-18), transient per call and faulted in afresh at glibc defaults. A run's peak at
+    batch 16 against 8 is unmeasured. On bfs3d a run's memory ceiling is set by the fits and re-fits of the materialized
     Jacobian and the compiled step, not by building the case (0.84 GiB; the whole march peaks at 12.1 GiB,
     2026-10-17, Linux): log, "Where a run's memory goes".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
@@ -121,7 +127,11 @@ bare block inverse).
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor
   16.9–20.5) / 3155 s, `x_r/h` 8.3611, peak 12.1 GiB — a different march (rounding), the same root; the
-  re-fit is 58 % of it. Why it is slow there: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container".
+  re-fit is 58 % of it. Why the probe is slow there: its batched JVP touches 4.4x pitzDaily's bytes per
+  tangent at ~23 GB/s on 2-way-partitioned kernels, and faults its 816 MiB temporary in afresh every call
+  (~a quarter of the probe); `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` removes the faults at an unchanged
+  footprint (re-fit 48.7 → 39.7 s at `state-00032`), the retaining allocators are not usable for a march
+  in 15 GiB: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container" and the subsection after it.
 
   What decides it is the far mass the colouring folds (`probe_reach_audit.py`: bfs3d's p carries 1.1e-3 of
   its norm beyond reach 2, against ~4e-4 folded on pitzDaily). Untested: shortening only some of bfs3d's

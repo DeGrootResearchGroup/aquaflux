@@ -49,7 +49,7 @@ linearization and can drive it past one).
 The `dot` entry in the root briefing found a reduction-rooted fusion running on one thread at 40 % of a
 reconstruction's kernel time. This asks the same question of the whole coupled residual and the JVP the
 Krylov matvec and the coloured probe are made of, and the answer is no. Harness:
-`validation/pitzdaily_openfoam/fusion_profile.py`. It joins the compiled HLO (fusion kind,
+`validation/fusion_profile.py` (`FUSION_CASE=pitzdaily`). It joins the compiled HLO (fusion kind,
 `outer_dimension_partitions`, root opcode, bytes touched) to per-kernel times from
 `jax.profiler.trace`. Configuration: `main` `183e9ffa` (adjugate first pass already in), pitzDaily
 `case.yaml`, `hybrid_initialize` state, 61125 unknowns, `jax.jit` over `eqx.partition`ed params,
@@ -62,7 +62,7 @@ Krylov matvec and the coloured probe are made of, and the answer is no. Harness:
   partitioning is decided at compile time). The solo times sum to within ~10 % of the one-core wall.
   The parallel trace contributes **time alone**: how long each kernel was the only one in flight. That
   is the only time an unsplit kernel leaves cores idle. **Verified on a known cost:** with
-  `PITZ_FUSION_ARM=lapack` (batched LU restored in the first pass) the 15 custom calls (5 `getrf` + 10
+  `FUSION_ARM=lapack` (batched LU restored in the first pass) the 15 custom calls (5 `getrf` + 10
   `trsm`) are the largest class at 13.2 ms of one-core time, against a 14.7 ms one-core residual
   delta.
 - **XLA's rule** (`ParallelTaskAssignment`, `xla/service/cpu/parallel_task_assignment.cc`, openxla main
@@ -108,7 +108,7 @@ Krylov matvec and the coloured probe are made of, and the answer is no. Harness:
   adapts upward only to 32 MiB on 64-bit, so the JVP's buffer is `mmap`ed and `munmap`ed on **every
   call**, about **11 000 minor faults/call** (every page). The residual's buffer is reused (0–354).
   Fixing the threshold (`MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`, or the
-  harness's `PITZ_FUSION_MMAP_THRESHOLD_MIB`) takes the JVP from **16.5 → 9.8–11.1 ms** with 10–50
+  harness's `FUSION_MMAP_THRESHOLD_MIB`) takes the JVP from **16.5 → 9.8–11.1 ms** with 10–50
   faults/call and identical results. The residual is unchanged. The faults land in whichever kernel
   touches a page first, which in the default run inflated the copies (5.8 ms) and the small kernels
   (11.9 ms) and made unpartitioned look like 44 % of the JVP. **On the shipped march it buys nothing:**
