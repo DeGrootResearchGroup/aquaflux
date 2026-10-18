@@ -42,7 +42,10 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
 - **Refresh**: `FieldSplitInverse.refactor_block` makes the split a `RefactorableInverse`;
   `FieldSplitPreconditioner` inherits `MaterializedJacobianPreconditioner.refresh_in_place`
   (`materialized_preconditioner.py`). A block inverse without `refactor_block` is refused with a
-  `TypeError` before either block is touched.
+  `TypeError` before either block is touched. A refit cuts the operator into blocks by gathers the split
+  holds between refits (`FieldGroups.blocks(matrix, maps)`, `self._maps`, an `EntryMaps`), and
+  `traced_field_split` packs the coupling through the same maps (`FieldSplitInverse.padded_coupling()`);
+  both are bit-identical to slicing and `from_scipy` (`solve-amg-multigrid.md`, "entry maps").
 - **Transpose is closed-form** (reverse the block solves, use `Cᵀ`), so the adjoint is served. `Cᵀ` is
   formed on first use (`_transposed_coupling`) and dropped by `_set_coupling`, the one place a coupling is
   stored; do not re-derive it per apply (`A.T` on CSR is a CSC view that converts on every product).

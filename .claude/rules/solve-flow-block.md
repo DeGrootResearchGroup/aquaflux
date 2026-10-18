@@ -25,7 +25,10 @@ measured slower than the (since deleted, #371) PETSc ILU(0) incumbent — 1.26x 
 than a `diags` product. A plain `scipy` product drops entries that come out exactly zero, so stored
 counts moved with the values and recompiled the coupled step on a refit. Do not "simplify" either back.
 The patterns are kept between refits by `StructuralPatterns` (`_simple_pieces(patterns=)`); see
-`solve-amg-multigrid.md`'s Galerkin-shape entry.
+`solve-amg-multigrid.md`'s Galerkin-shape entry. With `patterns` given, `_simple_pieces` also cuts the
+four blocks out of the level operator and packs every piece through the held entry maps
+(`patterns.maps`, `solve-amg-multigrid.md`), bit-identical to slicing and `from_scipy`; the two products
+stay `scipy` products on their structural patterns (they are bilinear in the values).
 
 ## Defaults and why
 

@@ -178,6 +178,8 @@ cfd/                                  # repo root
 │   │   ├── materialized_spec.py      #   MaterializedJacobian / FieldSplit / JacobianProbeSpec: a materialized preconditioner as a value (and its mapping)
 │   │   ├── materialized_session.py   #   MaterializedSession over a MaterializedProblem: one probe, one inverse and one refresh hook per march
 │   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy: a base shift policy paired with a frozen monolithic inverse
+│   │   ├── padded_rows.py            #   _PaddedRowOperator: the padded-row (ELLPACK) level operator and its held packing
+│   │   ├── entry_map.py              #   EntryMap / EntryMaps: a refit's fixed-pattern sparse operations as fixed linear maps of the values
 │   │   └── phase_timer.py            #   PhaseTimer: a refresh split into named, consecutive timed phases
 │   │
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)

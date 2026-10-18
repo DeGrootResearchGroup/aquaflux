@@ -2,11 +2,15 @@
 paths:
   - "aquaflux/precondition/multigrid.py"
   - "aquaflux/precondition/hierarchy_inverse.py"
+  - "aquaflux/precondition/entry_map.py"
+  - "aquaflux/precondition/padded_rows.py"
 ---
 
 # Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
 
-This file governs the traced multigrid (`precondition/multigrid.py`, `precondition/hierarchy_inverse.py`).
+This file governs the traced multigrid (`precondition/multigrid.py`, `precondition/hierarchy_inverse.py`)
+the padded-row level operator (`precondition/padded_rows.py`) and the entry maps a refit applies
+(`precondition/entry_map.py`).
 Package-wide contracts are in `solve.md`; the materialized base `MaterializedJacobianPreconditioner` is in
 `solve-direct-preconditioners.md`. Dated measurements and investigation behind every entry are in
 `.claude/notes/solve-amg-multigrid-log.md` (never auto-loads).
@@ -155,7 +159,9 @@ path.
 
 ## Binding decisions — `precondition/multigrid.py`
 
-- **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`.** `columns` / `values` are
+- **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
+  `_padded_rows`, the one slot rule, and `_PaddedLayout`/`_padded_operator`; moved out of `multigrid.py`
+  to keep it under its size budget, 2026-10-18). `columns` / `values` are
   `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (a
   gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
   padded-row level operator — measurements".
@@ -222,9 +228,52 @@ path.
     its `indptr` and `indices` are exactly equal (compared, not checksummed — a hit skips the subset check).
     Each `HierarchyBlockInverse` owns one (`self._patterns`) and passes it to
     `SmoothedHierarchy.refit(a, patterns=)` and `_simple_pieces(patterns=)`. A hierarchy build does not use
-    it. Pinned by `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold` and
+    it. Its patterns now serve only the bilinear SIMPLE pieces (`D⁻¹G`, Schur); a refit's Galerkin products
+    go through its `maps` (next bullet). Pinned by
+    `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold` and
     `test_a_structure_reuses_positions_only_for_identical_stored_entries`; refit cost harness
     `validation/refit_cost_probe.py`.
+  - **A refit's index work is held as entry maps (`entry_map.py`, 2026-10-17).** On a
+    pattern that does not move, every sparse operation a refit performs that is linear in one varying
+    operand is a fixed map `out_t = Σ w_tj a_j`: `EntryMap` stores it as (source entry, target slot,
+    weight) and applies it as one gather/multiply/`bincount`. Two builders: `EntryMap.gathering(pattern,
+    operation)` runs an entry-moving operation once over `SparsePattern.numbered()` (cuts, transposes,
+    `_padded_rows`, `_cell_blocks` -- so each operation's index rule keeps its one home), and
+    `EntryMap.product(L, pattern, R)` gives `M -> L M R` for fixed `L`, `R` onto the product's structural
+    pattern (the same set `_galerkin_coarse` stores on). `EntryMaps` (held as `StructuralPatterns.maps`, and
+    by `FieldSplitInverse._maps`) keys one map per slot and rebuilds it when the operand's pattern, or a
+    fixed operand's pattern or values, moved; `EntryMap.apply` itself refuses an operand of another pattern.
+    Wired: `SmoothedHierarchy.refit` (Galerkin via `_galerkin_coarse(patterns=)`, level packing via
+    `_PaddedLayout`/`_padded_operator` in `padded_rows.py`, cell blocks via `_cell_block_inverse(patterns=)`, now computed once
+    per level), `_simple_pieces` (the four block cuts and every packing), `FieldGroups.blocks(maps=)` and
+    `FieldSplitInverse.padded_coupling()` (`traced_field_split`). Not mapped, because bilinear in the
+    values or not a sparse operation: `D⁻¹G`, the Schur, `d_inv @ a` for the spectral estimate, the coarse
+    LU, the Frobenius diagonals.
+    - **Why it is linear on both shipped blocks:** both run `prolongation_smoothing: "none"` (the class
+      default; neither case file sets it), so `P` is the aggregates' 0/1 indicator, and a refit reuses the
+      held `P` in any case. A smoothed `P` would still give a linear map at refit (the refit freezes `P`);
+      only a rebuild re-smooths it.
+    - ⚠️ **Not bit-identical to the product path**: the map sums each coarse entry's terms in another
+      order. On pitzDaily's captured refits the leaves differ by at most ~3e-14 of their largest entry
+      (the coupling and every gather are bit-identical); the tests bound each Galerkin entry by
+      `2 · n_terms · eps · Σ|w_j a_j|`. Two map paths (a held map, a map built afresh) agree exactly, which
+      is what `test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_computing_them_would`
+      now pins. Pinned by `tests/unit/test_entry_map.py` (mutation-checked) and
+      `test_blocks_cut_by_held_maps_are_the_slices_bit_for_bit`.
+    - **Cost**: the first refit builds the maps (~1.5-2.5 s on pitzDaily, most of it the Galerkin
+      pairing, whose `_pairs` takes a lookup path when each fine row meets at most one transfer entry);
+      each later refit's refactor ~0.5-0.7 s against ~0.9-1.1 s. ⚠️ **They are held for the session:
+      ~0.2 GB more host memory on pitzDaily** (held caches 62 -> 276 MB, peak 1.20 -> 1.41 GB in the
+      standalone harness), proportional to stored entries, so roughly 1.4 GB on bfs3d's split by scaling
+      (unmeasured). Index arrays are int32, all-ones weights and in-order sources/targets are not stored,
+      and the numbered pattern is not kept -- keep it so. Measurements and the per-part profile: log,
+      "Refit by entry maps (2026-10-17)"; harness `validation/pitzdaily_openfoam/refit_profile.py`.
+- **A coarsening that reads no values is refitted, not re-aggregated** (`HierarchyBlockInverse.
+  refactor_block`, `_coarsening_reads_values()`): at `strength_threshold` 0, `prolongation_smoothing`
+  `"none"` and no `shape_headroom`, a rebuild provably reproduces the held aggregates and `P`, so the
+  refresh refits whether or not `frozen_coarsening` is set. pitzDaily's trailing `JacobiSmoothed` is this
+  case (it re-aggregated at every refit before). The refit equals a fresh build to the rounding above.
+  Pinned by `test_a_coarsening_that_reads_no_values_is_refitted_rather_than_aggregated_again`.
   - **Strength-of-connection aggregation is opt-in (`strength_threshold`) and makes aggregation
     value-dependent** (it forfeits the free refresh): edges kept iff `|A_ij| ≥ θ·max_k|A_ik|` from either
     endpoint (`_aggregation_edges`). It keeps a V-cycle contracting on anisotropic operators (flat 3 cycles

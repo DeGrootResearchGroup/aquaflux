@@ -54,11 +54,12 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.linalg as sla
 import scipy.sparse as sp
-from jax.custom_derivatives import linear_call
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
+from .entry_map import EntryMap, EntryMaps
 from .frozen_operator import symmetrically_equilibrate
+from .padded_rows import _padded_operator, _PaddedRowOperator
 
 
 def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
@@ -231,7 +232,29 @@ def aggregate_size_histogram(aggregate: np.ndarray, n_coarse_cells: int) -> dict
     }
 
 
-def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operator") -> np.ndarray:
+def _cell_blocks(a: sp.csr_matrix, block_size: int) -> np.ndarray:
+    """Each cell's own dense ``block_size × block_size`` block of a field-major operator, ``(n_cells, b, b)``.
+
+    Cell ``i``'s degrees of freedom are ``{f * n_cells + i}``; an entry the operator does not store is
+    zero. It only moves entries, so on a fixed pattern it is an :class:`EntryMap` gather
+    (:func:`_cell_block_inverse`'s ``patterns``).
+    """
+    n_cells = a.shape[0] // block_size
+    rows = np.arange(n_cells)
+    blocks = np.empty((n_cells, block_size, block_size))
+    for f in range(block_size):
+        for g in range(block_size):
+            blocks[:, f, g] = np.asarray(a[f * n_cells + rows, g * n_cells + rows]).ravel()
+    return blocks
+
+
+def _cell_block_inverse(
+    a: sp.csr_matrix,
+    block_size: int,
+    where: str = "operator",
+    patterns: StructuralPatterns | None = None,
+    slot: Hashable = "cell blocks",
+) -> np.ndarray:
     """The inverse of each cell's own dense ``block_size × block_size`` block, shape ``(n_cells, b, b)``.
 
     What a **block** smoother inverts, in place of the scalar diagonal a point smoother uses. The
@@ -279,6 +302,11 @@ def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operato
         so this runs on the fine operator and on every Galerkin coarse one, and "4 of 23040 are
         singular" sent three separate attempts hunting a fine-grid state that was never degenerate.
         Say which level.
+    patterns : StructuralPatterns, optional
+        Where the gather of the cell blocks out of ``a`` is kept between refits, under ``slot``.
+        ``None`` samples the blocks afresh.
+    slot : hashable
+        Which operator this is, when ``patterns`` is given.
 
     Raises
     ------
@@ -287,11 +315,15 @@ def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operato
         distinct from a merely indefinite one, and not something a different smoother would rescue.
     """
     n_cells = a.shape[0] // block_size
-    rows = np.arange(n_cells)
-    blocks = np.empty((n_cells, block_size, block_size))
-    for f in range(block_size):
-        for g in range(block_size):
-            blocks[:, f, g] = np.asarray(a[f * n_cells + rows, g * n_cells + rows]).ravel()
+    if patterns is None:
+        blocks = _cell_blocks(a, block_size)
+    else:
+        blocks = patterns.maps.held(
+            slot,
+            a,
+            lambda pattern: EntryMap.gathering(pattern, lambda m: _cell_blocks(m, block_size)),
+        ).apply(a)
+        blocks = blocks.reshape(n_cells, block_size, block_size)
     # Hadamard: |det| <= prod ||row_i||, so the ratio is how near rank-deficiency the block is given
     # its own row sizes -- invariant under rescaling any row or column, which the Frobenius form is not.
     # A structurally empty row makes the bound zero, and the comparison below can then never fire, so
@@ -308,7 +340,7 @@ def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operato
 
 
 def _block_diagonal_inverse_operator(
-    a: sp.csr_matrix, block_size: int, where: str = "operator"
+    a: sp.csr_matrix, block_size: int, where: str = "operator", inverse: np.ndarray | None = None
 ) -> sp.csr_matrix:
     """The block-diagonal inverse as a sparse operator, for the build-time spectral estimate.
 
@@ -319,9 +351,11 @@ def _block_diagonal_inverse_operator(
     within-cell coupling the block inverse exists to capture.
 
     Field-major, so cell ``i``'s degrees of freedom are ``{f * n_cells + i}`` and the assembled operator
-    is block-diagonal in the *cell* sense while being scattered in index space.
+    is block-diagonal in the *cell* sense while being scattered in index space. ``inverse`` is
+    :func:`_cell_block_inverse` of ``a`` when the caller already holds it.
     """
-    inverse = _cell_block_inverse(a, block_size, where)
+    if inverse is None:
+        inverse = _cell_block_inverse(a, block_size, where)
     n_cells = inverse.shape[0]
     cells = np.arange(n_cells)
     rows = np.concatenate(
@@ -796,9 +830,11 @@ class SmoothedHierarchy(eqx.Module):
         a : scipy.sparse matrix
             The new fine operator, of the shape this hierarchy was built at.
         patterns : StructuralPatterns, optional
-            Where each level's Galerkin pattern is kept between refits. The prolongations are this
-            hierarchy's, so on a fine operator with an unchanged pattern every level's pattern is too,
-            and only the first refit pays to compute them. ``None`` computes them every time.
+            Where each level's index work is kept between refits: the map from the fine operator's
+            values to each Galerkin product's (the prolongations are this hierarchy's, so the product
+            is a fixed linear function of the values), each level's padded-row packing, and the gather
+            of its cell blocks. On a fine operator with an unchanged pattern only the first refit builds
+            them. ``None`` computes every product and packing afresh.
 
         Returns
         -------
@@ -822,23 +858,34 @@ class SmoothedHierarchy(eqx.Module):
         levels: list[_SparseLevel] = []
         for depth, level in enumerate(self.levels):
             context = f"SmoothedHierarchy.refit (level {depth})"
-            d_inv = _diagonal_inverse_operator(a, level.block_size, context)
+            block_inverse = (
+                None
+                if level.block_size == 1
+                else _cell_block_inverse(a, level.block_size, context, patterns, ("cells", depth))
+            )
+            d_inv = _diagonal_inverse_operator(a, level.block_size, context, block_inverse)
             lam = _spectral_radius(d_inv @ a)
+            built = {
+                "block_size": level.block_size,
+                "block_inverse": block_inverse,
+                "patterns": patterns,
+                "slot": ("level", depth),
+            }
             if level.coarse_inv is None:
                 prolongation = level.prolongation_scipy()
-                levels.append(
-                    _sparse_level(a, lam, None, prolongation, level.n_coarse, level.block_size)
-                )
+                levels.append(_sparse_level(a, lam, None, prolongation, level.n_coarse, **built))
                 csr = prolongation.tocsr()
                 a = _galerkin_coarse(csr.T.tocsr(), a, csr, patterns, ("galerkin", depth))
             else:
-                levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, level.block_size))
+                levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, **built))
         return SmoothedHierarchy(
             tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
         )
 
 
-def _diagonal_inverse_operator(a: sp.csr_matrix, block_size: int, context: str) -> sp.spmatrix:
+def _diagonal_inverse_operator(
+    a: sp.csr_matrix, block_size: int, context: str, block_inverse: np.ndarray | None = None
+) -> sp.spmatrix:
     """``D⁻¹`` for a level: the reciprocal scalar diagonal, or each cell's inverted dense block.
 
     A nodal level inverts cell blocks rather than the scalar diagonal, so the scalar-positivity
@@ -853,6 +900,8 @@ def _diagonal_inverse_operator(a: sp.csr_matrix, block_size: int, context: str) 
         Degrees of freedom per cell; ``1`` selects the scalar path.
     context : str
         Where the failure happened, for the diagnostic a bad diagonal raises.
+    block_inverse : np.ndarray, optional
+        :func:`_cell_block_inverse` of ``a``, when the caller already holds it (a nodal level only).
 
     Returns
     -------
@@ -862,7 +911,7 @@ def _diagonal_inverse_operator(a: sp.csr_matrix, block_size: int, context: str) 
     if block_size == 1:
         _require_positive_diagonal(a.diagonal(), context)
         return sp.diags(1.0 / a.diagonal())
-    return _block_diagonal_inverse_operator(a, block_size, context)
+    return _block_diagonal_inverse_operator(a, block_size, context, block_inverse)
 
 
 def _sparse_level(
@@ -874,12 +923,18 @@ def _sparse_level(
     block_size: int = 1,
     width: int | None = None,
     transpose_width: int | None = None,
+    *,
+    block_inverse: np.ndarray | None = None,
+    patterns: StructuralPatterns | None = None,
+    slot: Hashable = "level",
 ) -> _SparseLevel:
     """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays.
 
     ``width`` pads the operator's rows to a fixed number of slots (see
     :meth:`_PaddedRowOperator.from_scipy`), which is what keeps a budgeted rebuild a compilation-cache
-    hit.
+    hit. ``block_inverse`` is :func:`_cell_block_inverse` of ``a`` when the caller already holds it, and
+    ``patterns`` keeps the operator's padded-row packing between refits under ``slot``
+    (:func:`_padded_operator`).
     """
     p_frow = p_ccol = p_val = None
     if prolongation is not None:
@@ -888,7 +943,9 @@ def _sparse_level(
         p_val = jnp.asarray(prolongation.data)
     return _SparseLevel(
         n=a.shape[0],
-        operator=_PaddedRowOperator.from_scipy(a, width, transpose_width),
+        operator=_padded_operator(
+            a, width, transpose_width, None if patterns is None else patterns.maps, slot
+        ),
         diagonal=jnp.asarray(a.diagonal()),
         lam_max=jnp.asarray(float(lam_max)),
         coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
@@ -897,7 +954,11 @@ def _sparse_level(
         p_val=p_val,
         n_coarse=n_coarse,
         block_inverse=(
-            None if block_size == 1 else jnp.asarray(_cell_block_inverse(a, block_size))
+            None
+            if block_size == 1
+            else jnp.asarray(
+                _cell_block_inverse(a, block_size) if block_inverse is None else block_inverse
+            )
         ),
         block_size=block_size,
     )
@@ -1373,181 +1434,6 @@ def build_smoothed_hierarchy(
         strength_threshold=strength_threshold,
         stats=stats,
     )
-
-
-class _PaddedRowOperator(eqx.Module):
-    """A frozen level operator with every row padded to one width, owning its own matvec.
-
-    Stored in padded-row form (the ELLPACK layout): two ``(n_rows, width)`` arrays holding each row's
-    column indices and entries, rows shorter than ``width`` filled with zero-valued slots. The product
-    is then a gather of ``x`` at the stored columns, a multiply, and a sum along each row, each step
-    split across threads by the compiler. (The gather is written out to memory before the row sum
-    reads it back; the two are not fused into one loop.)
-
-    **The transpose is stored too.** ``A^T`` is kept in the same padded form (``t_columns``,
-    ``t_values``), and :meth:`apply` tells ``jax.linear_transpose`` to apply it as a forward product.
-    Derived automatically, the transpose of a gather is a scatter-add into every slot, which runs on
-    one thread and collides on its outputs; the adjoint's transpose solve applies every level operator
-    that way, so it paid a scatter per product. The cost is a second copy of the operator's storage.
-
-    **Why not compressed-sparse-row (CSR).** A CSR product in JAX lowers to one dedicated sparse kernel
-    call, which runs on one thread and does not fuse with the arithmetic around it. Measured on a
-    coupled flow block's saddle hierarchy (pitzDaily, 12225 cells, the shipped field split at its hybrid
-    start, 4-core Linux, jax 0.11.2): the finest level operator (36675 rows, 2.68M entries) took 6.5 ms
-    as CSR against 4.4–5.2 ms padded, the Schur complement (12225 rows, 0.99M entries) 6.3 ms against
-    1.8–2.0 ms, and one whole application of the field split 174 ms against 128 ms, equal to 1.2e-15.
-
-    **What the padding costs.** A row is as wide as the widest row of its operator, so the storage is
-    ``n_rows * width`` rather than the entry count. On a cell-graph operator every row of the fine
-    level has nearly the same width (3-5 % padding on that hierarchy, 11 % on a 3D hexahedral one);
-    aggregation's coarse levels vary more (up to 1.95x on the 2D hierarchy and 6.6x on the deepest
-    levels of the 3D one) but are small, so a whole 3D field split stores 1.3x its entries. An operator
-    with a few very wide rows -- a dense constraint row -- would pay that width on every row, and this
-    form is the wrong one for it.
-
-    Kept as its own object rather than loose arrays on each level because both level kinds carry one
-    and both apply it the same way; the arrays never travel without each other.
-
-    The arrays are all **traced** leaves and only ``shape`` is static, so re-deriving a hierarchy at a
-    new operator on the same graph leaves every shape untouched -- the compiled V-cycle is a cache hit
-    rather than a retrace, which is what makes a mid-march preconditioner refresh affordable.
-    """
-
-    columns: jnp.ndarray  # (n_rows, width) column of each slot; a padding slot holds column 0
-    values: jnp.ndarray  # (n_rows, width) the entries; a padding slot holds zero
-    row_lengths: (
-        jnp.ndarray
-    )  # (n_rows,) stored entries in each row; the slots after them are padding
-    shape: tuple[int, int] = eqx.field(static=True)
-    t_columns: jnp.ndarray  # (n_cols, transpose_width) the same, for A^T
-    t_values: jnp.ndarray  # (n_cols, transpose_width)
-
-    @classmethod
-    def from_scipy(
-        cls, a: sp.spmatrix, width: int | None = None, transpose_width: int | None = None
-    ) -> _PaddedRowOperator:
-        """Freeze an assembled ``scipy`` matrix, each row's entries in ascending column order.
-
-        Every stored entry is kept, an explicit zero included: :meth:`to_scipy` returns the same
-        sparsity, which the structural patterns of a refit are computed from.
-
-        Parameters
-        ----------
-        a : scipy.sparse matrix
-            The operator to freeze.
-        width : int, optional
-            Pad every row to exactly this many slots, so an operator whose sparsity depends on a
-            coarsening keeps a **fixed shape** across rebuilds and the compiled cycle stays a cache hit.
-            ``None`` pads to the widest row of ``a``.
-        transpose_width : int, optional
-            The same for the stored ``A^T``: slots per column of ``a``. ``None`` pads to the widest
-            column.
-
-        Returns
-        -------
-        _PaddedRowOperator
-            The frozen operator.
-
-        Raises
-        ------
-        ValueError
-            If a row of ``a`` has more entries than ``width``, or a column more than
-            ``transpose_width``. This is a **checked overflow, never a silent truncation** -- dropping entries would corrupt the Galerkin operator with no bound on
-            the error, so the budget must be raised instead.
-        """
-        a = sp.csr_matrix(a)
-        columns, values, lengths = _padded_rows(a, width, "row")
-        t_columns, t_values, _ = _padded_rows(sp.csr_matrix(a.T), transpose_width, "column")
-        return cls(
-            columns=jnp.asarray(columns),
-            values=jnp.asarray(values),
-            row_lengths=jnp.asarray(lengths.astype(np.int32)),
-            shape=a.shape,
-            t_columns=jnp.asarray(t_columns),
-            t_values=jnp.asarray(t_values),
-        )
-
-    @property
-    def width(self) -> int:
-        """Slots per row: the widest row, or the budget the operator was padded to."""
-        return int(self.values.shape[1])
-
-    @property
-    def transpose_width(self) -> int:
-        """Slots per row of the stored transpose: the widest column, or its budget."""
-        return int(self.t_values.shape[1])
-
-    @property
-    def nnz(self) -> int:
-        """Stored entries, padding slots excluded."""
-        return int(np.sum(np.asarray(self.row_lengths)))
-
-    def apply(self, x: jnp.ndarray) -> jnp.ndarray:
-        """``A x``. Linear; transposed, it applies the stored ``A^T`` as a forward product.
-
-        Works under ``jax.jit``, forward- and reverse-mode differentiation and
-        ``jax.linear_transpose``, but not under ``jax.vmap``: the rule that hands the transpose to
-        ``A^T`` has no batching rule.
-        """
-        return linear_call(
-            _padded_product,
-            _padded_product_transposed,
-            (self.columns, self.values, self.t_columns, self.t_values),
-            x,
-        )
-
-    def to_scipy(self) -> sp.csr_matrix:
-        """The exact inverse of :meth:`from_scipy`: this operator as a host ``scipy`` CSR matrix.
-
-        The one place a traced level's operator is read back onto the host -- a march refresh
-        re-deriving a hierarchy at a new operator, a SIMPLE-smoothed level forming its Schur pieces --
-        so every such consumer shares one conversion. Padding slots are dropped; stored zeros are not.
-        """
-        lengths = np.asarray(self.row_lengths)
-        stored = np.arange(self.width)[None, :] < lengths[:, None]
-        indptr = np.concatenate([[0], np.cumsum(lengths)])
-        return sp.csr_matrix(
-            (np.asarray(self.values)[stored], np.asarray(self.columns)[stored], indptr),
-            shape=self.shape,
-        )
-
-    @property
-    def diagonal(self) -> jnp.ndarray:
-        """The operator's diagonal, read off the stored entries (a padding slot holds zero)."""
-        rows = jnp.arange(self.shape[0])[:, None]
-        return jnp.sum(jnp.where(self.columns == rows, self.values, 0.0), axis=1)
-
-
-def _padded_rows(a: sp.csr_matrix, width: int | None, what: str):
-    """``a``'s rows as ``(columns, values, lengths)``, each row padded to ``width`` slots."""
-    a.sort_indices()
-    lengths = np.diff(a.indptr)
-    widest = int(lengths.max()) if lengths.size else 0
-    if width is None:
-        width = max(widest, 1)
-    elif widest > width:
-        raise ValueError(
-            f"operator has a {what} of {widest} entries, wider than the {width} budgeted for this "
-            f"level. Raise the budget (see SmoothedHierarchy.shape_budget's headroom); entries are "
-            f"never dropped to fit."
-        )
-    rows = np.repeat(np.arange(a.shape[0]), lengths)
-    slots = np.arange(a.nnz) - a.indptr[rows]
-    columns = np.zeros((a.shape[0], width), dtype=np.int32)
-    values = np.zeros((a.shape[0], width), dtype=a.dtype)
-    columns[rows, slots] = a.indices
-    values[rows, slots] = a.data
-    return columns, values, lengths
-
-
-def _padded_product(arrays, x: jnp.ndarray) -> jnp.ndarray:
-    columns, values, _, _ = arrays
-    return jnp.sum(values * x[columns], axis=1)
-
-
-def _padded_product_transposed(arrays, y: jnp.ndarray) -> jnp.ndarray:
-    _, _, t_columns, t_values = arrays
-    return jnp.sum(t_values * y[t_columns], axis=1)
 
 
 def _coo_apply(
@@ -2494,10 +2380,16 @@ class StructuralPatterns:
 
     One entry per ``slot`` (a call site and level), replaced when the operands change, so it holds at
     most one pattern per computed operator. A host object, never a leaf of a traced hierarchy.
+
+    ``maps`` holds the same owner's entry maps (:class:`~aquaflux.precondition.entry_map.EntryMaps`):
+    the fixed linear maps from an operand's values to a result's, for the operations that are linear in
+    one varying operand (a Galerkin product with frozen transfers, a sub-block, a padded-row packing).
+    Those need no structural pattern of their own, since a map lands on its product's.
     """
 
     def __init__(self) -> None:
         self._entries: dict[Hashable, tuple[tuple, _Structure]] = {}
+        self.maps = EntryMaps()
 
     def onto(
         self,
@@ -2570,8 +2462,10 @@ def _galerkin_coarse(
     restriction, a, prolongation : scipy.sparse.csr_matrix
         The restriction ``R``, the level operator ``A`` and the prolongation ``P``.
     patterns : StructuralPatterns, optional
-        Reuse the structural pattern computed at an earlier call on operands with the same patterns,
-        under ``slot``. ``None`` computes it.
+        Form the product by the held map from ``a``'s values to the coarse operator's, under ``slot``
+        (:meth:`~aquaflux.precondition.entry_map.EntryMaps.product`): with ``R`` and ``P`` fixed it is a
+        linear function of those values, landing on the same structural pattern. Equal to the product
+        computed here to rounding (the terms are summed in another order). ``None`` computes it.
     slot : hashable
         Which coarse operator this is, when ``patterns`` is given.
 
@@ -2580,6 +2474,8 @@ def _galerkin_coarse(
     scipy.sparse.csr_matrix
         The coarse operator, shape ``(R.shape[0], P.shape[1])``.
     """
+    if patterns is not None:
+        return patterns.maps.product(slot, restriction, a, prolongation)
     return _structured(
         restriction @ a @ prolongation,
         (restriction, a, prolongation),
