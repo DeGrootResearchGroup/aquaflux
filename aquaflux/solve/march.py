@@ -52,7 +52,7 @@ import lineax as lx
 from .adaptive_tolerance import DEFAULT_ADAPTIVE_TOLERANCE, AdaptiveLinearTolerance
 from .convergence import MeasureBuilder
 from .linear import relative_tolerance, with_relative_tolerance
-from .norm import named_blocks, norm_of_residual
+from .norm import named_blocks, norm_of, norm_of_residual
 from .retry import ESCALATING_REASONS, NO_RETRIES, RetryPolicy
 from .root_adjoint import stop_array_gradients
 from .strategy import (
@@ -258,6 +258,11 @@ class ResidualHomotopy(Protocol):
         station compare equal. The march asks it of the step just entered and records the answer on that
         step's report (:attr:`~aquaflux.solve.StepReport.station`), and compares a step with the ones
         before it through those reports -- so an implementation need not remember past steps.
+
+        **Equal stations must mean one residual function.** The march carries the residual vector a
+        step ends at into the next step, and evaluates it afresh only when the station changes; two
+        adjacent steps reporting one station but driving different residuals would have the second
+        start from the first's residual.
         """
 
 
@@ -438,6 +443,7 @@ def _march_step(
     strategy: NewtonStrategy,
     residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
     phi: jnp.ndarray,
+    residual: jnp.ndarray,
     residual_norm_0: jnp.ndarray,
     solver: lx.AbstractLinearSolver,
 ) -> tuple[StepOutcome, jnp.ndarray]:
@@ -461,8 +467,15 @@ def _march_step(
     which is this march's measure: when ``norm_builder`` is given, `newton_march` rebuilds the *step's*
     ``residual_norm`` at each outer iteration, so the search, the acceptance test and the reported norm
     are one measure by construction -- that is the invariant this relies on.
+
+    The residual **vector** at ``phi`` is an argument for the same reason: the previous step returned it
+    (:attr:`StepOutcome.residual`), so evaluating it again here, at the start of the step, would repeat
+    one residual evaluation per outer step and carry one more copy of the residual in this program. It
+    is an array of ``phi``'s shape on every call, the first included -- the march takes the opening one
+    from the evaluation that gives it the starting norm -- so the first step and the rest are one
+    compiled program, not two.
     """
-    outcome = strategy.stepper()(residual_fn, phi, residual_norm_0, solver)
+    outcome = strategy.stepper()(residual_fn, phi, residual, residual_norm_0, solver)
     return outcome, outcome.residual_norm
 
 
@@ -616,6 +629,10 @@ def newton_march(
         The damping anchor ``‖R₀‖`` is taken at the **first station** rather than at the target, since
         it is the scale the first step's inner loop is judged against; with no homotopy that is
         ``residual_fn`` and nothing changes.
+
+        The march carries each step's residual vector into the next step and evaluates the residual
+        afresh only on a step whose :meth:`~ResidualHomotopy.station` differs from the previous one's,
+        so steps reporting one station must drive one residual function.
     station_step : callable, optional
         ``(step, station, arrived) -> step``, letting the caller reshape the Newton step for the
         station it is about to run -- the counterpart, on the *step*, of what a homotopy does to the
@@ -678,8 +695,8 @@ def newton_march(
         combination is the report's ``residual_norm`` -- so a record of the march can say which
         equation is holding it up. Called only when that measure names its blocks
         (:func:`~aquaflux.solve.norm.named_blocks`); a plain Euclidean measure has nothing to split.
-        Costs one residual evaluation per step, at the station the step drove; ``None`` (default)
-        costs nothing.
+        The terms are read from the residual vector the step returned, at the station it drove, so this
+        costs no residual evaluation, only the split; ``None`` (default) costs nothing.
     stopping_step : callable, optional
         ``step -> step``, the step whose measure the **stopping test** reads, from ``norm_builder``, once
         the march drives the target problem; every step is still steered, line-searched and reported in
@@ -687,8 +704,9 @@ def newton_march(
         continuation that holds its first station's shift diagonal, from which a row-scaled measure
         takes its row scales -- so that the target is judged in its own scales without changing a step
         (a session that offers it is a :class:`~aquaflux.solve.StoppingStepSource`). The tolerance is
-        then ``atol + rtol * stopping_reference``. Costs a measure build and a residual evaluation per
-        step once arrived. Needs ``norm_builder``. ``None`` (default) stops in the step's own measure.
+        then ``atol + rtol * stopping_reference``. Costs a measure build per step once arrived; the
+        measure is applied to the residual vector the step returned, so no residual is evaluated for
+        it. Needs ``norm_builder``. ``None`` (default) stops in the step's own measure.
     stopping_reference : float, optional
         The reference residual a ``stopping_step``'s tolerance is relative to, in its measure; by
         default ``residual_fn`` at ``phi0``, measured there. A driver marching in segments passes the one
@@ -732,7 +750,10 @@ def newton_march(
     # starting strength and freezing the march.
     # The anchor is the scale the FIRST step's inner loop is judged against, so it is taken at the
     # station that step actually runs. With no homotopy that is `residual_fn` and this is unchanged.
-    measured_norm_0 = norm_of_residual(
+    # The residual VECTOR at the state about to be stepped comes from the same evaluation, and is then
+    # carried from step to step (each step returns the one at the state it reached), so no step
+    # evaluates the residual where the march already holds it.
+    measured_norm_0, residual = norm_of_residual(
         norm, residual_fn if homotopy is None else homotopy.enter(0, None), phi0
     )
     residual_norm_0 = (
@@ -744,9 +765,12 @@ def newton_march(
         stop_reference = reference
     elif stopping_reference is not None:
         stop_reference = float(stopping_reference)
+    elif homotopy is None:
+        stop_reference = float(norm_of(norm_builder(stopping_step(strategy), phi0), residual))
     else:
+        # The stopping test judges the target, and the vector in hand is the first station's.
         stop_reference = float(
-            norm_of_residual(norm_builder(stopping_step(strategy), phi0), residual_fn, phi0)
+            norm_of_residual(norm_builder(stopping_step(strategy), phi0), residual_fn, phi0)[0]
         )
 
     # Both thresholds are knowable INSIDE a step -- the cost one the moment a solve returns, the
@@ -809,14 +833,17 @@ def newton_march(
     # homotopy it is True throughout and the stopping test is unchanged.
     arrived = homotopy is None
 
-    def judged(step: NewtonStrategy, phi: jnp.ndarray, residual: Callable, steered: float) -> float:
+    def judged(
+        step: NewtonStrategy, phi: jnp.ndarray, residual: jnp.ndarray, steered: float
+    ) -> float:
         # The residual norm the stopping test reads: the step's own (`steered`), or -- once arrived --
-        # the one `stopping_step` measures the target in.
+        # the one `stopping_step` measures the target in, of the residual `residual` at `phi` (arrived,
+        # the station is the target, so the carried vector is the target's).
         if stopping_step is None or not arrived:
             return steered
-        return float(norm_of_residual(norm_builder(stopping_step(step), phi), residual, phi))
+        return float(norm_of(norm_builder(stopping_step(step), phi), residual))
 
-    stop_norm = judged(strategy, phi0, residual_fn, current)
+    stop_norm = judged(strategy, phi0, residual, current)
 
     # A non-finite residual at the state the march is handed stops it before it steps: the step's
     # linear solve would be asked to factor a NaN/inf right-hand side and raise from inside the Krylov
@@ -835,6 +862,18 @@ def newton_march(
         if homotopy is not None:
             step_residual = homotopy.enter(len(reports), reports[-1] if reports else None)
             arrived = homotopy.arrived(len(reports))
+        # Whether this step enters a new station: a change of problem, which is what the re-damping,
+        # the control's hold and the residual's re-evaluation below each respond to.
+        entering = (
+            homotopy is not None
+            and bool(reports)
+            and homotopy.station(len(reports)) != reports[-1].station
+        )
+        if entering:
+            # The vector carried from the last step is the residual of the station that step drove. A
+            # new station is a new residual function, so its residual at this state is evaluated once,
+            # here; within a station adjacent steps drive one residual and the vector carries over.
+            _, residual = norm_of_residual(norm, step_residual, state)
         # A step control reshapes the base step from the previous report (None runs it unchanged, so
         # the loop is byte-identical). It threads its own state; the march stays ignorant of β.
         active_step = strategy
@@ -864,11 +903,6 @@ def newton_march(
         # residual did. Without the re-damping the shift walks straight through the level the new
         # station can carry: measured on a pitzDaily ramp, into a line-search collapse and a
         # two-order residual excursion the retry ladder then had to climb back out of.
-        entering = (
-            homotopy is not None
-            and reports
-            and homotopy.station(len(reports)) != reports[-1].station
-        )
         previous_report = reports[-1] if reports else None
         if entering and isinstance(step_control, ShiftCarryingControl):
             factor = float(homotopy.shift_factor(len(reports)))
@@ -931,10 +965,17 @@ def newton_march(
                     # as updated: otherwise the step that enters a new problem is judged -- its line
                     # search, its inner stop, the residual it reports -- in the previous one's scales.
                     active_step = active_step.with_norm(norm_builder(strategy, state))
-        prestep_state = state
+        # Every attempt at this step -- the first, an escalated or cost redo, the tight-solver retry --
+        # starts from the same state on the same residual, so the same vector is the one each is handed.
+        prestep_state, prestep_residual = state, residual
         step_solver = solver if tolerance is None else with_relative_tolerance(solver, tolerance)
         outcome, residual_norm = _march_step(
-            active_step, step_residual, prestep_state, residual_norm_0, step_solver
+            active_step,
+            step_residual,
+            prestep_state,
+            prestep_residual,
+            residual_norm_0,
+            step_solver,
         )
         # A step can go bad three ways -- a non-finite / diverging correction, a step length collapsed
         # to `retry.on_alpha`, or a solve truncated by `retry.abort_above_cycles` -- and they DO NOT
@@ -959,7 +1000,7 @@ def newton_march(
             (reason := retry.retry_reason(outcome, residual_norm, reference)) is not None
             and retries < retry.max_retries
             and not converged_at(
-                judged(active_step, outcome.phi, step_residual, float(residual_norm))
+                judged(active_step, outcome.phi, outcome.residual, float(residual_norm))
             )
         ):
             escalating = reason in ESCALATING_REASONS
@@ -1015,7 +1056,12 @@ def newton_march(
                 if update is not None:
                     strategy, active_step = update(strategy), update(active_step)
             outcome, residual_norm = _march_step(
-                active_step, step_residual, prestep_state, residual_norm_0, step_solver
+                active_step,
+                step_residual,
+                prestep_state,
+                prestep_residual,
+                residual_norm_0,
+                step_solver,
             )
         # Divergence retry -- the FALLBACK for a non-finite correction β-escalation could not fix. An
         # inexact preconditioner can return a non-finite correction where the loose
@@ -1035,7 +1081,12 @@ def newton_march(
                 # `NewtonStrategy` in full. Unchanged beta here in any case; nothing escalated.
                 on_retry("solver", retries + 1, float(shift_of(active_step) or 0.0))
             outcome, residual_norm = _march_step(
-                active_step, step_residual, prestep_state, residual_norm_0, tight_solver
+                active_step,
+                step_residual,
+                prestep_state,
+                prestep_residual,
+                residual_norm_0,
+                tight_solver,
             )
         # Carry an escalated β forward into the control. The escalation raised β because the control had
         # driven it too low for this operator; without carrying that back, the next `next_step` recomputes
@@ -1052,10 +1103,10 @@ def newton_march(
             and (carried := shift_of(active_step)) is not None
         ):
             control_state = step_control.carry_beta(control_state, float(carried))
-        state = outcome.phi
+        state, residual = outcome.phi, outcome.residual
         previous = current
         current = float(residual_norm)
-        stop_norm = judged(active_step, state, step_residual, current)
+        stop_norm = judged(active_step, state, residual, current)
         step_tolerance = tolerance
         if adaptive_tolerance is not None:
             # The reduction is the march's own, report to report, although the measure is rebuilt each
@@ -1096,7 +1147,7 @@ def newton_march(
         )
         reports.append(report)
         if on_residuals is not None:
-            terms = named_blocks(active_step.norm(), step_residual, state)
+            terms = named_blocks(active_step.norm(), residual)
             if terms is not None:
                 on_residuals(terms)
         if observer is not None:

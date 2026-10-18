@@ -257,29 +257,25 @@ class NamedBlockMeasure(Protocol):
         ...
 
 
-def named_blocks(
-    measure: object, residual_fn: Callable[[jnp.ndarray], jnp.ndarray], state: jnp.ndarray
-) -> dict[str, float] | None:
-    """Each named equation's term of ``measure`` at ``state``, or ``None`` when its blocks are unnamed.
+def named_blocks(measure: object, residual: jnp.ndarray) -> dict[str, float] | None:
+    """Each named equation's term of ``measure`` in ``residual``, or ``None`` when its blocks are unnamed.
 
     A block-structured measure combines one term per block into the scalar a march steers by; this
     reads those terms under the names the measure gives its blocks, so a record of the march can say
     which equation is holding the residual up. A measure with no named blocks -- a plain Euclidean
     norm, or blocks that do not hold one equation each -- has nothing to report, and costs nothing.
 
-    The residual and its terms are evaluated in one compiled call, so a march that reports them pays
-    one residual evaluation per step rather than one dispatch per array operation.
+    It takes the residual **vector** rather than evaluating one: a march reports the terms at the state
+    its step just reached, whose residual the step returned, so reporting them costs no residual
+    evaluation. The terms are formed in one compiled call rather than one dispatch per array operation.
 
     Parameters
     ----------
     measure : ResidualNorm
         The measure, as a march holds it; reported only when it is a :class:`NamedBlockMeasure` whose
         blocks are named.
-    residual_fn : callable
-        ``state -> R(state)``, shape ``(n,)``; a bound method of a module, so its arrays are traced
-        rather than compiled in.
-    state : jnp.ndarray
-        Where to evaluate it, shape ``(n,)``.
+    residual : jnp.ndarray
+        The residual to split, shape ``(n,)``.
 
     Returns
     -------
@@ -288,27 +284,31 @@ def named_blocks(
     """
     if not isinstance(measure, NamedBlockMeasure) or not measure.names:
         return None
-    terms = _block_terms(measure, residual_fn, state)
+    terms = _block_terms(measure, residual)
     return dict(zip(measure.names, (float(value) for value in terms), strict=True))
 
 
 @eqx.filter_jit
-def _block_terms(measure, residual_fn, state):
-    """The measure's per-block terms of ``residual_fn(state)``, compiled once per block structure."""
-    return measure.per_block(residual_fn(state))
+def _block_terms(measure, residual):
+    """The measure's per-block terms of ``residual``, compiled once per block structure."""
+    return measure.per_block(residual)
 
 
 @eqx.filter_jit
 def norm_of_residual(measure, residual_fn, state):
-    """``measure(residual_fn(state))`` as one compiled program.
+    """``measure(residual_fn(state))`` as one compiled program, and the residual it measured.
 
     The march reads a residual norm outside its compiled step at several points: the reference it damps
-    against, the reference a relative tolerance is scaled by, and, when it stops in another measure than
-    it steps in, that measure at every step. Run op by op, each costs one dispatch per operation of the
-    residual, which on a coupled problem is far more than the evaluation itself. Compiled here, it costs
-    one compilation per measure structure and residual, after which a call with new values is a cache
-    hit -- provided ``residual_fn`` keeps one identity (a bound method or a module, as the march step
-    already requires) and ``measure`` changes only in its array values.
+    against, the reference a relative tolerance is scaled by, and the final norm a driver judges a root
+    by. Run op by op, each costs one dispatch per operation of the residual, which on a coupled problem
+    is far more than the evaluation itself. Compiled here, it costs one compilation per measure
+    structure and residual, after which a call with new values is a cache hit -- provided
+    ``residual_fn`` keeps one identity (a bound method or a module, as the march step already requires)
+    and ``measure`` changes only in its array values.
+
+    The residual vector comes back with its norm because the march's first step needs it: a step is
+    handed the residual at the state it starts from, and this is the evaluation that has it. A caller
+    that wants only the norm discards the vector.
 
     Parameters
     ----------
@@ -321,10 +321,36 @@ def norm_of_residual(measure, residual_fn, state):
 
     Returns
     -------
+    norm : jnp.ndarray
+        The norm, a scalar.
+    residual : jnp.ndarray
+        ``residual_fn(state)``, shape ``(n,)``.
+    """
+    residual = residual_fn(state)
+    return measure(residual), residual
+
+
+@eqx.filter_jit
+def norm_of(measure, residual):
+    """``measure(residual)`` as one compiled program, for a residual already in hand.
+
+    The counterpart of :func:`norm_of_residual` when the vector was carried rather than evaluated: the
+    march judges each step's stop in a second measure at the residual the step returned, which needs no
+    evaluation, only the measure -- and a measure run op by op still costs a dispatch per operation.
+
+    Parameters
+    ----------
+    measure : callable
+        The norm, ``residual -> scalar``.
+    residual : jnp.ndarray
+        The residual, shape ``(n,)``.
+
+    Returns
+    -------
     jnp.ndarray
         The norm, a scalar.
     """
-    return measure(residual_fn(state))
+    return measure(residual)
 
 
 def _check_names(names: tuple[str, ...], sizes: tuple[int, ...]) -> None:

@@ -56,13 +56,17 @@ def _newton_steps_taken(solver, residual_fn, phi0, theta):
     )
     norm_fn = solver.strategy.norm()
     convergence = solver.convergence.filled_from(_ROOT_CONVERGENCE)
-    residual_norm_0 = norm_fn(residual_fn(phi0, theta))
+    residual = residual_fn(phi0, theta)
+    residual_norm_0 = norm_fn(residual)
     phi, residual_norm, step = phi0, residual_norm_0, 0
     while step < solver.max_steps and not within_tolerance(
         residual_norm, residual_norm_0, convergence.rtol, convergence.atol
     ):
-        outcome = strategy_step(lambda p: residual_fn(p, theta), phi, residual_norm_0, lin_solver)
-        phi, residual_norm = outcome.phi, outcome.residual_norm
+        # The residual each step ends at is the one the next starts from, as in the march.
+        outcome = strategy_step(
+            lambda p: residual_fn(p, theta), phi, residual, residual_norm_0, lin_solver
+        )
+        phi, residual_norm, residual = outcome.phi, outcome.residual_norm, outcome.residual
         step += 1
     return step, phi
 

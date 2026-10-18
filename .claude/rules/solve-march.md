@@ -54,13 +54,14 @@ while a step is under way, fill in the row it then writes and are reset after it
 - **`on_residuals({equation: term})`** is called after each step, before `observer` and `checkpoint`,
   with each named block's term of the measure the step was judged in (`active_step.norm()`) at the
   station residual it drove — the terms whose Euclidean combination is `residual_norm` (pinned to
-  `rel=1e-12`). From `solve.norm.named_blocks(measure, residual_fn, state)` (one compiled call per block
-  structure, `_block_terms`). Skipped unless the measure is a `NamedBlockMeasure` (`norm.py`,
-  `runtime_checkable`: `names` + `per_block`) with named blocks. Only the two row-scaled builders name
-  them: `coupled_scaled_norm` (`turbulence/measures.py`, `coupled_equation_names`) and
-  `FlowMeasures.row_scaled` (`flow.flow_equation_names`); the block-scaled coupled measure stays unnamed.
-  One residual evaluation per step; nothing when `None`. Threaded through `staged_march`,
-  `solve_coupled`, `solve_flow_march`; `solve_reynolds_ramp` reaches it through `**solve_kwargs`.
+  `rel=1e-12`). From `solve.norm.named_blocks(measure, residual)` on the residual vector the step
+  returned (one compiled call per block structure, `_block_terms`; no residual evaluation). Skipped
+  unless the measure is a `NamedBlockMeasure` (`norm.py`, `runtime_checkable`: `names` + `per_block`)
+  with named blocks. Only the two row-scaled builders name them: `coupled_scaled_norm`
+  (`turbulence/measures.py`, `coupled_equation_names`) and `FlowMeasures.row_scaled`
+  (`flow.flow_equation_names`); the block-scaled coupled measure stays unnamed. Nothing when `None`.
+  Threaded through `staged_march`, `solve_coupled`, `solve_flow_march`; `solve_reynolds_ramp` reaches it
+  through `**solve_kwargs`.
 - **Open question:** this overlaps `turbulence.coupled_residuals` + `MarchLogger(detail={"residuals"})`,
   which re-derives the same per-block numbers from outside the march (stateful, coupled RANS only; its
   one caller is `validation/bfs3d_openfoam/compare.py`). Whether to feed the logger from the hook and
@@ -179,6 +180,29 @@ quantities (iterate, residual, β), and those come apart from the station index 
   recompile) and a bound module method rather than a fresh `lambda` (hashed by identity). Pinned by a
   trace-counting test: assert further steps add no traces, not that the total is 1 (the residual is
   traced several times within one step).
+- **The residual vector is carried from step to step, never re-evaluated at a state the march holds it
+  for (#649).** `_march_step(strategy, residual_fn, phi, residual, residual_norm_0, solver)`: `residual`
+  is `R(phi)`, handed to `stepper()` (the `StepFn` contract in `strategy.py`; no strategy evaluates the
+  residual at its own start). The opening vector comes from the `norm_of_residual` call that gives
+  `‖R₀‖`, so the first step and the rest are **one compiled signature** (an array of `phi`'s shape every
+  call; a `None` first call would compile a second program). Each step's `StepOutcome.residual` is the
+  next step's. Where it must not be reused:
+  - **A homotopy station change** re-evaluates once (`norm_of_residual` at the state, the new station's
+    residual), on the step where `station` differs from the previous report's. ⚠️ So `ResidualHomotopy`
+    carries a contract: **adjacent steps reporting one station drive one residual function**
+    (`ViscosityRampHomotopy` rebuilds its assembler only on a station change, so it holds).
+  - **Every retry** (escalation, cost redo, tight-solver fallback) starts from `prestep_state`, so it is
+    handed `prestep_residual`, not the failed attempt's `outcome.residual`.
+  - A refresh update, a `norm_builder` swap or a `station_step` reshape changes the step, not `R`, so the
+    vector stands. `on_residuals` (`named_blocks`) and the `stopping_step` judgement (`norm.norm_of`, a
+    compiled measure of a vector) read it too; only `stop_reference` under a homotopy still evaluates
+    (the target at `phi0`, which the first station's vector is not).
+  Precision: a dual-time step's carried `R = G − β d (phi − φⁿ)` differs from a fresh evaluation by
+  rounding at the size of the summed terms (`G` is evaluated fresh at `phi_next` each step, so nothing
+  accumulates across steps); it reaches the next step's shift policy, SER ratio and inner target, so a
+  trajectory may move by rounding. Pinned by the `test_newton_march.py` block after "The residual vector
+  carried from one outer step into the next" (execution counts `1 + Σ inner` for all three strategies,
+  station change, retry, `alpha = 0`, compile once). Measured cost: log, "#649".
 - **Nothing in the refresh machinery reads the line-search α.** The post-step `RefreshTrigger`s read
   cycles/residual ratio (`CycleGrowthTrigger`) or `ν_t` drift (`CoefficientDriftTrigger`); the
   per-attempt `refresh_preconditioner` re-fits on first call, after `rebind`, and when the march passes
@@ -391,8 +415,8 @@ Needs `norm_builder`; refused beside a `resume`.
 ### `StepOutcome` — the strategy's return is a record
 
 `StepOutcome(phi, residual_norm, raw_cycles, alpha, inner_iterations, reached_target, max_inner_cycles,
-full_step_ratio, refresh_due)` — a `NamedTuple` built in tests by one `_outcome` helper; never unpack it
-positionally (an inserted field once silently shifted a test's unpack).
+full_step_ratio, refresh_due, residual)` — a `NamedTuple` built in tests by one `_outcome` helper; never
+unpack it positionally (an inserted field once silently shifted a test's unpack).
 - **`residual_norm`** is `norm(R(phi))` at the returned iterate in the step's own measure, taken from the
   line search rather than recomputed. **It rests on one invariant: the step's measure and the driver's
   are the same object** (the march takes its measure from `strategy.norm()` and rebuilds the step's via
@@ -402,6 +426,9 @@ positionally (an inserted field once silently shifted a test's unpack).
   `DualTimeStep` forms it from the `G` vector its last search kept, `R = G − β d (phi − φⁿ)`
   (`transient_term`); contract in `solve-globalization.md` ("The line search returns its residual
   VECTOR").
+- **`residual`** — the vector `R(phi)` whose measure is `residual_norm`, which the march hands the next
+  step ("The residual vector is carried", under `march.py`). A step that did not move returns the vector
+  it was handed, exactly.
 - **`reached_target`** — did the step meet its own stopping criterion. A cost redo fires only when
   `max_inner_cycles > retry.abort_above_cycles` and not `reached_target`.
 - **`max_inner_cycles`** — the offset-corrected cost of the step's costliest single solve; `cycle_budget`

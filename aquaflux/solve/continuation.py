@@ -127,7 +127,7 @@ def _shifted_solve(residual_fn, phi, rhs, shift, preconditioner, solver, jacobia
 class _Attempt(NamedTuple):
     """One shifted solve, line-searched and measured — everything a step learns for one ``β``.
 
-    These five values are produced together by a single (expensive) shifted linear solve and are
+    These six values are produced together by a single (expensive) shifted linear solve and are
     consumed together by the accept/reject decision, so they travel as one record rather than as a
     loose tuple.
 
@@ -144,6 +144,8 @@ class _Attempt(NamedTuple):
     full_step_ratio : jnp.ndarray
         The full-length trial's measure over the reference it was judged against — a scalar (see
         :attr:`~aquaflux.solve.StepOutcome.full_step_ratio`).
+    residual : jnp.ndarray
+        The residual vector at :attr:`candidate`, whose measure is :attr:`residual_norm`, shape ``(n,)``.
     """
 
     candidate: jnp.ndarray
@@ -151,6 +153,7 @@ class _Attempt(NamedTuple):
     cycles: jnp.ndarray
     alpha: jnp.ndarray
     full_step_ratio: jnp.ndarray
+    residual: jnp.ndarray
 
 
 class ShiftTerm(NamedTuple):
@@ -543,7 +546,7 @@ class PseudoTransientStep(ShiftedStep):
     def stepper(self) -> StepFn:
         """The accepted shifted-Newton step and its linear solve's cycle count.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. ``raw_cycles`` is the
+        ``(residual_fn, φ, R(φ), ‖R₀‖, solver) -> StepOutcome``. ``raw_cycles`` is the
         raw solver count of the **accepted** attempt's shifted linear solve — the cost of the step that
         was actually taken, not the sum over rejected escalation attempts; ``inner_iterations`` is ``1``
         (a single-step attempt has no inner loop); ``alpha`` is that attempt's
@@ -586,15 +589,16 @@ class PseudoTransientStep(ShiftedStep):
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
             phi: jnp.ndarray,
+            residual: jnp.ndarray,
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
         ) -> StepOutcome:
             # The linear solve stops in the measure this step is judged by, not one fixed at configuration.
             solver = in_progress_measure(solver, norm)
-            residual = residual_fn(phi)
+            # `residual` is `R(phi)`, handed in by the march (the previous step's last residual), so the
+            # step evaluates none at `phi`; a policy that tapers its shift on how far the state is from a
+            # root reads the same vector.
             residual_norm = norm(residual)
-            # `residual` is `R(phi)`, computed just above: a policy that tapers its shift on how far
-            # the state is from a root reads it here rather than evaluating the residual twice.
             term = policy.shift_term(phi, residual)  # base diagonal + β -> M, from the same iterate
             # The injected schedule sets the base shift strength for this step's first attempt (SER by
             # default: strong damping while ‖R‖ is large, easing to zero at the root). Escalation below
@@ -651,6 +655,7 @@ class PseudoTransientStep(ShiftedStep):
                     cycles=cycles,
                     alpha=searched.alpha,
                     full_step_ratio=searched.full_step_norm / residual_norm,
+                    residual=searched.residual,
                 )
 
             # Escalate the damping on a rejected attempt, taking the first the acceptance policy
@@ -661,7 +666,7 @@ class PseudoTransientStep(ShiftedStep):
             # exits as soon as an attempt is accepted, so a healthy first attempt costs a single solve;
             # only a rejected step pays for extra, more-damped attempts.
             def cond(state: tuple) -> jnp.ndarray:
-                _, _, _, attempts, accepted, _, _, _ = state
+                _, _, _, attempts, accepted, _, _, _, _ = state
                 return (~accepted) & (attempts <= max_escalations)
 
             def record(state: tuple, trial: _Attempt, accept: jnp.ndarray) -> tuple:
@@ -675,6 +680,7 @@ class PseudoTransientStep(ShiftedStep):
                     best_cycles,
                     best_alpha,
                     best_ratio,
+                    best_residual,
                 ) = state
                 return (
                     shift_strength * escalation_factor,
@@ -689,6 +695,8 @@ class PseudoTransientStep(ShiftedStep):
                     jnp.where(accept, trial.cycles, best_cycles),
                     jnp.where(accept, trial.alpha, best_alpha),
                     jnp.where(accept, trial.full_step_ratio, best_ratio),
+                    # And the residual vector with its measure, for the march to hand the next step.
+                    jnp.where(accept, trial.residual, best_residual),
                 )
 
             def body(state: tuple) -> tuple:
@@ -700,8 +708,8 @@ class PseudoTransientStep(ShiftedStep):
                 return record(state, trial, accept)
 
             # The escalation carry for a step that has not yet solved anything. A fully-rejected step
-            # returns `phi` untouched, so its measure is `phi`'s own -- which the caller measured
-            # before the step and handed in as `residual_norm`.
+            # returns `phi` untouched, so its measure and residual are `phi`'s own -- the vector the
+            # march handed in, and its measure.
             start = (
                 base_shift_strength,
                 phi,
@@ -713,11 +721,20 @@ class PseudoTransientStep(ShiftedStep):
                 jnp.asarray(
                     jnp.nan
                 ),  # a fully-rejected step measured no accepted full-length trial
+                residual,
             )
 
-            _, phi_next, next_norm, _, _, step_cycles, step_alpha, step_ratio = jax.lax.while_loop(
-                cond, body, start
-            )
+            (
+                _,
+                phi_next,
+                next_norm,
+                _,
+                _,
+                step_cycles,
+                step_alpha,
+                step_ratio,
+                next_residual,
+            ) = jax.lax.while_loop(cond, body, start)
             # A single-step pseudo-transient attempt has no inner Newton loop; report 1 inner iteration
             # so a consumer can offset-correct the raw solver count uniformly with the dual-time path.
             # A single damped step has no inner loop, so nothing could have been cut short and the
@@ -732,6 +749,7 @@ class PseudoTransientStep(ShiftedStep):
                 corrected_cycles(step_cycles),
                 step_ratio,
                 jnp.asarray(False),
+                next_residual,
             )
 
         return step
@@ -947,8 +965,8 @@ class DualTimeStep(ShiftedStep):
     def stepper(self) -> StepFn:
         """One backward-Euler outer timestep: the inner-converged iterate and its total solve cost.
 
-        ``(residual_fn, φ, ‖R₀‖, solver) -> StepOutcome``. The reference
-        ``φⁿ`` is ``φ``; ``raw_cycles`` is the **summed** raw solver count over the inner Newton iterations
+        ``(residual_fn, φ, R(φ), ‖R₀‖, solver) -> StepOutcome``. The reference
+        ``φⁿ`` is ``φ``, and ``R(φ)`` the residual the march holds there (the previous step's last); ``raw_cycles`` is the **summed** raw solver count over the inner Newton iterations
         and ``inner_iterations`` is that count (so a consumer can recover the per-solve cost); ``alpha``
         is the **smallest** inner line-search factor (``1`` when every inner step took the full length, smaller
         when the implicit step had to be clipped, and ``0`` if any inner step failed to reduce ``‖G‖`` —
@@ -974,6 +992,7 @@ class DualTimeStep(ShiftedStep):
         def step(
             residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
             phi: jnp.ndarray,
+            residual: jnp.ndarray,
             residual_norm_0: jnp.ndarray,
             solver: lx.AbstractLinearSolver,
         ) -> StepOutcome:
@@ -982,7 +1001,9 @@ class DualTimeStep(ShiftedStep):
             reference = phi  # φⁿ, held across the inner loop
             # ‖R(φⁿ)‖ = ‖G(φⁿ)‖: the transient term β d (φ − φⁿ) is zero at the anchor, so the honest
             # steady residual at the anchor and the inner loop's starting G-norm are the same number.
-            reference_residual = residual_fn(reference)
+            # `R(φⁿ)` is handed in by the march -- the previous step ended at `φⁿ` holding it -- so the
+            # step evaluates no residual at its anchor.
+            reference_residual = residual
             reference_norm = norm(reference_residual)
             shift_strength = schedule.shift_strength(reference_norm, residual_norm_0)
             # Hand the policy the residual just computed rather than letting it re-derive R(φⁿ): a
@@ -1168,7 +1189,9 @@ class DualTimeStep(ShiftedStep):
             # whenever the step moved. But `G` is `R` plus the transient term, and the loop carries the
             # `G` vector its search kept, so `R(phi_next)` is that vector less the same term: one
             # subtraction, not a residual evaluation. It differs from a fresh `R(phi_next)` by a rounding
-            # at the size of the transient term, which vanishes as the march reaches its root.
+            # at the size of the transient term, which vanishes as the march reaches its root. When no
+            # inner step moved the iterate, `final_g` is the anchor's `R(φⁿ)` and the term is zero, so
+            # the step hands back exactly the residual it was given.
             steady_residual = final_g - transient_term(phi_next)
             return StepOutcome(
                 phi_next,
@@ -1180,6 +1203,7 @@ class DualTimeStep(ShiftedStep):
                 max_inner,
                 full_step_ratio,
                 refresh_due,
+                steady_residual,
             )
 
         return step

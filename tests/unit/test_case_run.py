@@ -331,7 +331,8 @@ def test_a_march_hands_each_step_and_retry_to_the_log_and_to_the_recorder() -> N
 
 
 def test_the_per_equation_residuals_are_asked_for_only_when_a_recorder_keeps_them() -> None:
-    # Each costs a residual evaluation per step, so a march without a taker must not be handed the hook.
+    # Each costs a split of the residual and a host read per step, so a march without a taker must not
+    # be handed the hook.
     seen = []
     assert "on_residuals" not in FlowMarch().observers_for(_Logger(), None)
     assert "on_residuals" not in FlowMarch().observers_for(

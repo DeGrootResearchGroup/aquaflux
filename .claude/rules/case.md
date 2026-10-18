@@ -240,7 +240,8 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `results/history.csv`** (project owner). `history` is `solve.StepHistory` (`solve-march.md`); `log` and
   `history` may not name the same file. `SolverSpec.observers_for(logger, recorder)` takes a
   `solve.MarchRecorder` and reads its hooks as attributes; the runner's `_StepCount` forwards to recorders.
-  `on_residuals` is wired only when a recorder takes it (each costs a residual evaluation per step).
+  `on_residuals` is wired only when a recorder takes it (each costs a block split of the step's carried
+  residual and a host read per step, not a residual evaluation).
 - **Writers are the library's**: `Vtk` → `write_vtu`; `OpenFOAMTime` → `write_openfoam_time` (into the named
   OpenFOAM case; only for an `OpenFOAMMesh`; `case` required because the mesh path need not be a
   `constant/polyMesh` layout; `time` a quoted string; `fields` selects by name); `PatchVtk` → `write_patches`.

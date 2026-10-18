@@ -103,8 +103,8 @@ class SolverSpec(abc.ABC):
             Writes one row per outer step.
         recorder : MarchRecorder or None
             Records each step for a program to read; its ``on_residuals`` is ``None`` when nothing wants
-            the per-equation residuals (each costs a residual evaluation per step). ``None`` for no
-            recorder.
+            the per-equation residuals (each costs a split of the step's residual into its blocks and a
+            read back to the host, per step). ``None`` for no recorder.
 
         Returns
         -------
