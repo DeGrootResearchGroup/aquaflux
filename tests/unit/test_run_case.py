@@ -272,3 +272,22 @@ def test_an_unforced_launch_that_PASSES_the_pre_flight_runs_the_case(tmp_path: P
     )
     assert result.returncode == 3, result.stdout + result.stderr
     assert "exit status: 3" in result.stdout
+
+
+def test_the_run_file_records_the_ALLOCATOR_settings_beside_the_case_settings(
+    tmp_path: Path,
+) -> None:
+    """A replacement allocator or a glibc tunable moves a standalone timing by up to a third, so a run
+    taken under one must say so -- and an unrelated variable sharing a prefix word must not ride along."""
+    tunables = "glibc.malloc.trim_threshold=2147483647"
+    result = _run(
+        tmp_path,
+        str(_script(tmp_path, "case", "print('fine')\n")),
+        "--force",
+        "--wait",
+        env={"GLIBC_TUNABLES": tunables, "MALLOC_ARENA_MAX": "4", "LD_BIND_NOW": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"env: GLIBC_TUNABLES={tunables}" in result.stdout
+    assert "env: MALLOC_ARENA_MAX=4" in result.stdout
+    assert "LD_BIND_NOW" not in result.stdout

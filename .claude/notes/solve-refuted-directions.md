@@ -1482,6 +1482,20 @@ Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against
 adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
 A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.
 
+## Cheaper GMRES bookkeeping in `_ResidualStopGMRES` — NOT WORTH BUILDING (2026-10-18)
+
+The candidates were to row-scale the system up front so the measured stop is the Euclidean norm of the
+small Hessenberg residual (no full-length residual vector per iteration), to form the classical
+Gram--Schmidt projections in one pass over the built rows, and to replace the per-iteration `lstsq` by a
+Givens recurrence. On pitzDaily's captured target-station systems (`main` `9efc5759`, 4-core Linux,
+jax 0.11.2, restart 15, row-scaled measure), the solve run with a free diagonal stand-in for the operator,
+at a fixed 60-iteration budget, costs **0.83-1.32 ms per iteration** against ~50 ms for a whole
+application inside the same loop, so all of the bookkeeping together is ~2 % (~1.3 s of a ~175 s march),
+below the container's 5-10 % run-to-run spread, and each candidate removes only part of it. Instrument:
+`validation/pitzdaily_openfoam/krylov_overhead.py`; table in `solve-open-directions.md`, "Inside the step
+program (2026-10-18)". Re-open only if the operator becomes an order of magnitude cheaper (or the restart
+length much longer).
+
 ## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
 
 Factorizing the constant, geometry-only `A_g` of `CorrectedGreenGauss` once (dense, `jit`-ed `jacfwd` +

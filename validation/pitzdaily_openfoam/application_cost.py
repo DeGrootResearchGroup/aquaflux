@@ -16,10 +16,16 @@ calls of each compiled piece:
 * ``operator``  -- the whole application ``(J + s) M v`` compiled as one program, which is what a
   Krylov iteration inside the step pays; ``operator - apply`` is the in-program JVP-plus-shift share.
 
-Beside each timing it reports the minor page faults one call takes: on Linux a standalone call of a
-program whose temporary buffer exceeds glibc's 32 MiB adaptive mmap threshold faults all of it every
-call, which a call inside the compiled step does not pay. Set ``MALLOC_MMAP_THRESHOLD_`` and
-``MALLOC_TRIM_THRESHOLD_`` to remove them, and say so beside the result.
+Beside each timing it reports the minor page faults one call takes: on Linux glibc maps a standalone
+call's temporary buffer afresh, and faults all of it, on every call once it exceeds the 32 MiB adaptive
+mmap threshold, which a Krylov iteration inside the compiled step does not pay (the loop's buffers are
+allocated once per solve). ``MALLOC_MMAP_THRESHOLD_`` and ``MALLOC_TRIM_THRESHOLD_`` remove it only up to
+64 MiB: XLA allocates on its worker threads, whose glibc arenas are heaps of at most 64 MiB, so a larger
+buffer (the whole operator's, ~74 MiB) is mapped per call whatever the threshold. Run under jemalloc
+(``LD_PRELOAD=libjemalloc.so.2 MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1``) or with
+``MALLOC_ARENA_MAX=1`` to remove all of them, and say so beside the result. Each figure is the best single
+call; ``krylov_overhead.py`` reports the mean of as many calls as a solve makes, the figure to compare with
+a Krylov iteration.
 
 Settings: ``PITZ_COST_STEPS`` (comma-separated one-based steps, default the last three captured),
 ``PITZ_COST_REPEATS`` (default 15). The replay starts at the target station, as ``replay.py`` requires.
@@ -102,7 +108,11 @@ def main():
     print(replay.describe(), flush=True)
     print(
         f"[configuration] aquaflux {Path(aquaflux.__file__).parents[1]}, {os.cpu_count()} cpus, "
-        f"best of {REPEATS}; MALLOC_MMAP_THRESHOLD_={os.environ.get('MALLOC_MMAP_THRESHOLD_', 'unset')}",
+        f"best of {REPEATS}; "
+        + ", ".join(
+            f"{k}={os.environ.get(k, 'unset')}"
+            for k in ("MALLOC_MMAP_THRESHOLD_", "MALLOC_ARENA_MAX", "LD_PRELOAD")
+        ),
         flush=True,
     )
     last = max(replay.states)

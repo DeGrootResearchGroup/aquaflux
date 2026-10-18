@@ -231,7 +231,11 @@ cannot be written. The guard is what catches the next module that does branch.
   overstates the in-march cost (2026-10-17, `.claude/rules/discretization.md`, "Single-threaded
   kernels"). Report `resource.getrusage(...).ru_minflt` per call beside any such timing, or run with
   `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` and say so. ⚠️ Through `mallopt`
-  both are C `int`s: a 4 GiB trim threshold wraps to 0 and multiplies the faults instead.
+  both are C `int`s: a 4 GiB trim threshold wraps to 0 and multiplies the faults instead. ⚠️ (2026-10-18)
+  The raised thresholds stop at 64 MiB for a buffer allocated on an XLA worker thread (a non-main arena's
+  heap is at most 64 MiB, so a larger request is always `mmap`ed): the composite `(J + s) M v` program's
+  ~74 MiB buffer kept its 19 145 faults per call with them set, and lost them under jemalloc or
+  `MALLOC_ARENA_MAX=1` (`solve-open-directions.md`, "Inside the step program (2026-10-18)").
 - **A harness that builds a step must build it with the case's OWN shift settings, and must form the
   shift through `ShiftTerm.shift(beta)`, never `beta * term.diagonal`.** `closure_stall_probe.py` did
   neither until 2026-10-12: it built its engine, capture and march without `turbulence_damping`, and
