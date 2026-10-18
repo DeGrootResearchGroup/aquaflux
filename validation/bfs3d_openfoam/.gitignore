@@ -18,6 +18,8 @@ __pycache__/
 # directory, and git treats a symlink as a file, so a `checkpoints/` rule would not match it.
 checkpoints
 *.npz
+# memory_attribution.py's record (rewritten by every run).
+memory_attribution.json
 # The transient reference: mesh/constant/BCs are copied from of_case at run time, so they are not
 # stored twice; solver log + time dirs are regenerable.
 of_transient/constant/
