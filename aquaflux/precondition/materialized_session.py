@@ -726,5 +726,8 @@ class MaterializedSession:
 
     def _block_inverse(self, role: str) -> Callable:
         spec: BlockInverse = getattr(self._spec.inverse, role)
-        factory = spec.bound(report=self._reports[role]) if role in self._reports else spec
+        # A block applied in single precision is held in it too, where its family can be: otherwise a
+        # double copy of its hierarchy would sit beside the single one the step applies, unread.
+        stored = self._precision if spec._stores_precision else "float64"
+        factory = spec.bound(report=self._reports.get(role), stored_precision=stored)
         return factory if self._inverse_wrapper is None else self._inverse_wrapper(role, factory)

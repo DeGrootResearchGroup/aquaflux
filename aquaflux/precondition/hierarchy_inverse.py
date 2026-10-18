@@ -44,7 +44,7 @@ from .multigrid import (
     StructuralPatterns,
     build_convection_hierarchy,
 )
-from .traced_cycle import TracedCycle
+from .traced_cycle import TracedCycle, in_precision
 
 
 @dataclasses.dataclass(frozen=True)
@@ -108,6 +108,13 @@ class HierarchyBlockInverse:
     report : callable, optional
         Where the build record goes. ``None`` is silent; a case passes ``print``. A library object must
         not write to stdout on its own.
+    stored_precision : {"float64", "float32"}
+        The floating-point type the hierarchy is **held** in between refreshes. Each fit and refit is
+        computed in double precision and then rounded once to this type (the prolongation values
+        excepted, which a refit reads back). ``"float32"`` is for an inverse applied in single precision
+        anyway (a field split with ``precision="float32"``): its traced cycle then needs no second,
+        narrowed copy of the hierarchy beside a double one nothing applies. :meth:`apply` always runs in
+        double precision, on the rounded entries.
     """
 
     def __init__(
@@ -121,7 +128,13 @@ class HierarchyBlockInverse:
         frozen_coarsening: bool = False,
         shape_headroom: float | None = None,
         report: Callable[[str], None] | None = None,
+        stored_precision: str = "float64",
     ) -> None:
+        if stored_precision not in ("float64", "float32"):
+            raise ValueError(
+                f"stored_precision must be 'float64' or 'float32', got {stored_precision!r}."
+            )
+        self._stored_precision = stored_precision
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
         self._report = report if report is not None else lambda _message: None
@@ -221,6 +234,11 @@ class HierarchyBlockInverse:
     def _after_coarsening(self) -> None:
         """Re-derive whatever the smoother reads off the hierarchy, and drop the stale transpose."""
         self._extras = self.derive_extras(self._hierarchy)
+        if self._stored_precision != "float64":
+            # After the extras: they are derived from the double-precision levels, and only then is
+            # either rounded, so a narrowed hierarchy holds exactly what narrowing it later would.
+            self._hierarchy = self._hierarchy.in_precision(self._stored_precision)
+            self._extras = in_precision(self._extras, self._stored_precision)
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose
         # -- only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per
         # arm for something most callers never touch. Dropped rather than kept here, because it
@@ -245,7 +263,12 @@ class HierarchyBlockInverse:
         )
 
     def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
-        """The cycle over what this inverse currently holds, traced in and not captured."""
+        """The cycle over what this inverse currently holds, traced in and not captured.
+
+        Applied in double precision whatever the hierarchy is held in: a double residual promotes every
+        operation on single-precision entries, so this is an exactly linear map, as a transpose solve run
+        tightly needs.
+        """
         return self.traced_cycle()(residual)
 
     def refactor_block(self, block: sp.spmatrix) -> None:

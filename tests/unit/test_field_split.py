@@ -500,3 +500,62 @@ def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
     refreshed = inverse.apply(r)
     assert np.all(np.isfinite(refreshed))
     assert not np.allclose(refreshed, x), "the refresh did not change the preconditioner"
+
+
+def _stored_pairs(narrow, wide):
+    """The two inverses' traced-cycle leaves side by side, with whether each is a prolongation value."""
+    narrow_leaves = jax.tree_util.tree_leaves_with_path(narrow.traced_cycle().state)
+    wide_leaves = jax.tree.leaves(wide.traced_cycle().state)
+    assert len(narrow_leaves) == len(wide_leaves)
+    return [
+        ("p_val" in jax.tree_util.keystr(path), n, w)
+        for (path, n), w in zip(narrow_leaves, wide_leaves, strict=True)
+    ]
+
+
+@pytest.mark.parametrize("family", ["jacobi", "simple"])
+def test_an_inverse_held_in_single_precision_holds_its_double_fit_rounded_once(family) -> None:
+    """``stored_precision="float32"`` keeps one hierarchy, rounded once, and still re-fits as a double one.
+
+    A split applied in single precision used to hold the double hierarchy and narrow a copy of it for
+    the step, so two hierarchies were alive where one is read. Held narrow, every floating entry must be
+    the double fit's entry rounded once -- exactly what narrowing it later gave -- except the
+    prolongation values, which a frozen refit reads back and so must stay double, or every refit after
+    the first would drift. Both are checked after a refit too, and the host apply must stay an exactly
+    linear map (a cycle run in single precision is linear only to ~1e-7).
+    """
+    from tests.unit.test_saddle_multigrid import _saddle
+
+    if family == "jacobi":
+        a, n_fields, build = _nodal_block(), 2, JacobiSmoothedInverse
+    else:
+        a, n_fields, build = _saddle(), 4, SimpleSmoothedInverse
+    settings = {"strength_threshold": 0.25, "max_levels": 4, "max_coarse": 40}
+    settings["frozen_coarsening"] = True
+    wide = build(a, n_fields, **settings)
+    narrow = build(a, n_fields, **settings, stored_precision="float32")
+
+    for refit in (False, True):
+        if refit:
+            developed = (a * 1.9).tocsr()
+            developed.setdiag(developed.diagonal() * 1.1)
+            wide.refactor_block(developed)
+            narrow.refactor_block(developed)
+        pairs = _stored_pairs(narrow, wide)
+        assert any(is_p for is_p, _, _ in pairs), "the fixture must have a prolongation to keep"
+        for is_prolongation, held, double in pairs:
+            if not jax.numpy.issubdtype(double.dtype, jax.numpy.floating):
+                assert np.array_equal(held, double)
+            elif is_prolongation:
+                assert held.dtype == double.dtype == np.float64
+                assert np.array_equal(held, double)
+            else:
+                assert held.dtype == np.float32
+                assert np.array_equal(held, double.astype(np.float32))
+
+    rng = np.random.default_rng(1)
+    first, second = rng.standard_normal(a.shape[0]), rng.standard_normal(a.shape[0])
+    together = narrow.apply(first + 2.0 * second)
+    apart = narrow.apply(first) + 2.0 * narrow.apply(second)
+    assert np.allclose(together, apart, rtol=1e-12, atol=1e-12 * np.abs(apart).max())
+    assert together.dtype == np.float64

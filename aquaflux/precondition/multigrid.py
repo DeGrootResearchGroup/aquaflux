@@ -60,6 +60,7 @@ from scipy.sparse.csgraph import reverse_cuthill_mckee
 from .entry_map import EntryMap, EntryMaps
 from .frozen_operator import symmetrically_equilibrate
 from .padded_rows import _padded_operator, _PaddedRowOperator
+from .traced_cycle import in_precision
 
 
 def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
@@ -745,6 +746,32 @@ class SmoothedHierarchy(eqx.Module):
 
     levels: tuple[_SparseLevel, ...]
     equilibration: jnp.ndarray | None = None  # (n,) diag(D), or None for an unscaled hierarchy
+
+    def in_precision(self, precision: str) -> SmoothedHierarchy:
+        """This hierarchy with its floating-point arrays cast to ``precision``, prolongation values kept.
+
+        The prolongation values stay as they are because :meth:`refit` reads them back to form the next
+        Galerkin operators: rounding them would change every refit after the first. Everything else is
+        rounded once, exactly as a traced split applied in ``precision`` rounds it, so a hierarchy held in
+        single precision and one narrowed when it is applied hold the same entries.
+
+        Parameters
+        ----------
+        precision : {"float64", "float32"}
+            The floating-point type of every array but the prolongation values.
+        """
+        levels = tuple(
+            eqx.tree_at(
+                lambda cast: cast.p_val,
+                in_precision(level, precision),
+                level.p_val,
+                is_leaf=lambda leaf: leaf is None,
+            )
+            for level in self.levels
+        )
+        return SmoothedHierarchy(
+            levels=levels, equilibration=in_precision(self.equilibration, precision)
+        )
 
     def fixed_cycle_solve(self, b: jnp.ndarray, cycles: int, ops: _VCycleOps) -> jnp.ndarray:
         """``cycles`` V-cycles for ``A x = b``, undoing any equilibration around the solve.

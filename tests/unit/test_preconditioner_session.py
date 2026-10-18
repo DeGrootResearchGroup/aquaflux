@@ -527,6 +527,35 @@ def test_a_single_precision_split_reaches_the_step_and_a_host_split_refuses_it(c
         session.build(state, dual_time=DualTimeLoop(inner_steps=3))
 
 
+def test_a_single_precision_split_applies_the_hierarchies_its_inverses_hold_not_a_copy(
+    case,
+) -> None:
+    """With ``precision="float32"`` each block inverse holds its hierarchy narrow, and the step uses it.
+
+    The split's hierarchies are the inverses' own arrays, so no double-precision hierarchy is held
+    beside the single one the step applies -- at the fit and after a re-fit. Only the prolongation
+    values, which a refit reads back in double, are narrowed into a copy of their own.
+    """
+    coupled, state = case
+    single = dataclasses.replace(_SPLIT, precision="float32")
+    session = open_session(MaterializedJacobian(single), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    # The forced first fit, then an asked-for re-fit; each split checked before the next re-fit.
+    for at, due in ((state, False), (state * 1.05, True)):
+        split = session.refresh_preconditioner(active, at, due=due)(active).shift_policy.split
+        inverse = session.preconditioner.inverse
+        for applied, held in (
+            (split.leading_cycle, inverse.leading.traced_cycle()),
+            (split.trailing_cycle, inverse.trailing.traced_cycle()),
+        ):
+            pairs = list(zip(jax.tree.leaves(applied), jax.tree.leaves(held), strict=True))
+            floating = [(a, h) for a, h in pairs if jnp.issubdtype(h.dtype, jnp.floating)]
+            narrow = [(a, h) for a, h in floating if h.dtype == jnp.float32]
+            assert len(narrow) > len(floating) // 2, "the inverse holds its hierarchy in double"
+            assert all(a is h for a, h in narrow), "the step applies a copy of the held hierarchy"
+
+
 def test_the_session_probe_follows_the_operator_stand_in(case) -> None:
     coupled, state = case
     session = open_session(

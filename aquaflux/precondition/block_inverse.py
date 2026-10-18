@@ -47,6 +47,8 @@ class BlockInverse(SettingsValue, abc.ABC):
 
     #: Whether the inverse class accepts a ``report`` sink for its build record.
     _reports = True
+    #: Whether the inverse class can hold its hierarchy in single precision (``stored_precision``).
+    _stores_precision = True
 
     @property
     @abc.abstractmethod
@@ -62,9 +64,15 @@ class BlockInverse(SettingsValue, abc.ABC):
         return self.unset_resolves_to[0]
 
     def _build(
-        self, block: sp.spmatrix, n_fields: int, report: Callable[[str], None] | None
+        self,
+        block: sp.spmatrix,
+        n_fields: int,
+        report: Callable[[str], None] | None,
+        stored_precision: str = "float64",
     ) -> RefactorableInverse:
         extra = {} if report is None else {"report": report}
+        if stored_precision != "float64":
+            extra["stored_precision"] = stored_precision
         return self._inverse_class()(block, n_fields, **self.settings(), **extra)
 
     def __call__(self, block: sp.spmatrix, n_fields: int) -> RefactorableInverse:
@@ -85,14 +93,20 @@ class BlockInverse(SettingsValue, abc.ABC):
         return self._build(block, n_fields, None)
 
     def bound(
-        self, *, report: Callable[[str], None] | None
+        self,
+        *,
+        report: Callable[[str], None] | None = None,
+        stored_precision: str = "float64",
     ) -> Callable[[sp.spmatrix, int], RefactorableInverse]:
-        """The same factory with the inverse's build record sent to ``report``.
+        """The same factory with the inverse's build record sent to ``report``, held in ``stored_precision``.
 
         Parameters
         ----------
         report : callable or None
             Where the build record goes; ``None`` keeps the inverse silent.
+        stored_precision : {"float64", "float32"}
+            The precision the inverse holds its hierarchy in between refreshes (see
+            :class:`~aquaflux.precondition.HierarchyBlockInverse`).
 
         Returns
         -------
@@ -102,16 +116,22 @@ class BlockInverse(SettingsValue, abc.ABC):
         Raises
         ------
         TypeError
-            If ``report`` is given for an inverse family that keeps no build record.
+            If ``report`` is given for an inverse family that keeps no build record, or a single
+            ``stored_precision`` for one that holds its hierarchy only in double precision.
         """
         if report is not None and not self._reports:
             raise TypeError(
                 f"{type(self).__name__} builds an inverse that keeps no build record, so there is "
                 "nothing to send to `report`."
             )
+        if stored_precision != "float64" and not self._stores_precision:
+            raise TypeError(
+                f"{type(self).__name__} builds an inverse that holds its hierarchy in double precision "
+                f"only, so it cannot be stored in {stored_precision!r}."
+            )
 
         def build(block: sp.spmatrix, n_fields: int) -> RefactorableInverse:
-            return self._build(block, n_fields, report)
+            return self._build(block, n_fields, report, stored_precision)
 
         return build
 
@@ -196,6 +216,7 @@ class AirReduction(BlockInverse):
     """
 
     _reports = False
+    _stores_precision = False
 
     cycles: int | None = None
     f_sweeps: int | None = None
