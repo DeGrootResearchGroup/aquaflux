@@ -97,10 +97,20 @@ branches.
   breakdown is sound only where the work before each timed piece is timed too; time a surprisingly large
   piece alone before believing it.
 - **On Linux a standalone call whose temporary buffer exceeds 32 MiB page-faults all of it every call**
-  (glibc's mmap threshold); the march does not pay this, so per-call timings overstate it. Report
-  `ru_minflt` per call, or run with `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`
-  and say so (`discretization.md`, "Single-threaded kernels"). Through `mallopt` both are C `int`s: a
-  4 GiB trim threshold wraps to 0.
+  (glibc's adaptive mmap threshold); a Krylov iteration inside the step does not pay this (its loop
+  allocates once per solve), so per-call timings overstate it. Report `ru_minflt` per call.
+  `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` removes it **only up to 64 MiB**:
+  XLA allocates on worker threads, whose arenas are 64 MiB heaps, so a larger buffer (the whole
+  `(J + s) M v` program's, ~74 MiB on pitzDaily) is mapped per call regardless. To remove all of it run
+  under jemalloc (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
+  MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`) or `MALLOC_ARENA_MAX=1`, and say so; `run_case.sh`
+  records all three. ⚠️ **Both keep freed memory, so both raise the footprint: never run a bfs3d march
+  under them on a 15 GB machine.** `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
+  resident by step 2 against 9.5 GiB at defaults, and the container restarted (bfs3d session,
+  2026-10-18, branch `claude/bfs3d-mesh-home`); safe for fixed-state probes only. Compare a standalone piece with an in-loop one by the MEAN of as many calls as a solve
+  makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB
+  trim threshold wraps to 0. Measurements: `.claude/notes/solve-open-directions.md`, "Inside the step
+  program (2026-10-18)".
 - **A harness that builds a step must use the case's own shift settings, and form the shift through
   `ShiftTerm.shift(beta)`, never `beta * term.diagonal`** — the latter drops `row_shift_scale`, where
   `turbulence_damping` lives.

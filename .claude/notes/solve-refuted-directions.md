@@ -1501,6 +1501,39 @@ Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against
 adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
 A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.
 
+## Cheaper GMRES bookkeeping in `_ResidualStopGMRES` — NOT WORTH BUILDING (2026-10-18)
+
+The candidates were to row-scale the system up front so the measured stop is the Euclidean norm of the
+small Hessenberg residual (no full-length residual vector per iteration), to form the classical
+Gram--Schmidt projections in one pass over the built rows, and to replace the per-iteration `lstsq` by a
+Givens recurrence. On pitzDaily's captured target-station systems (`main` `9efc5759`, 4-core Linux,
+jax 0.11.2, restart 15, row-scaled measure), the solve run with a free diagonal stand-in for the operator,
+at a fixed 60-iteration budget, costs **0.83-1.32 ms per iteration** against ~50 ms for a whole
+application inside the same loop, so all of the bookkeeping together is ~2 % (~1.3 s of a ~175 s march),
+below the container's 5-10 % run-to-run spread, and each candidate removes only part of it. Instrument:
+`validation/pitzdaily_openfoam/krylov_overhead.py`; table in `solve-open-directions.md`, "Inside the step
+program (2026-10-18)". Re-open only if the operator becomes an order of magnitude cheaper (or the restart
+length much longer).
+
+## The coloured probe as one compiled loop over its chunks — NO GAIN on pitzDaily (2026-10-18)
+
+The idea: a refit's probe calls `batched_jacobian_matvec` once per chunk of 8, and each call's temporary
+is mapped afresh and faulted (on glibc above 64 MiB no threshold stops it: XLA allocates on worker threads,
+whose arenas are 64 MiB heaps), so one `fori_loop` program over the chunks, seeds in and responses out by
+host callbacks, allocates once and keeps the one-chunk memory bound. Measured on pitzDaily's step-21 state
+(`validation/pitzdaily_openfoam/probe_loop_probe.py`, `main` `9efc5759`, 4-core Linux, jax 0.11.2, 100
+probes / 13 chunks, best of 5): faults per chunk fall 38 600 -> ~5 100, but the time does not move (three
+default-allocator runs: shipped 0.95-1.10 s, looped 0.90-1.09 s). The faults DO cost the shipped probe
+~0.3 s (0.67-0.72 s with `MALLOC_ARENA_MAX=1` and the thresholds raised, 0 faults); the loop gives that
+back because the same vmapped JVP runs slower inside a compiled loop than as separate calls (fault-free
+0.84-0.85 s against 0.60-0.69 s with no host work in either), and the looped responses differ from the
+shipped ones at 1.3e-12. jaxlib 0.11.2's XLA flags offer no CPU temporary-buffer or preallocation setting,
+so on CPU the remedy for the faults is the process allocator, which the user owns (`MALLOC_ARENA_MAX=1`
+with both thresholds, or jemalloc with decay off). ⚠️ Both keep freed memory: the single-arena setting
+took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted. Untested on bfs3d, whose probe faults ~210 000 times
+per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
+the in-loop JVP penalty measures smaller than that.
+
 ## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
 
 Factorizing the constant, geometry-only `A_g` of `CorrectedGreenGauss` once (dense, `jit`-ed `jacfwd` +
