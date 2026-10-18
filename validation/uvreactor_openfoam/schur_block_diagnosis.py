@@ -44,7 +44,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.io import read_openfoam  # noqa: E402
 from aquaflux.mesh.quality import closed_cell_residual, face_planarity  # noqa: E402
-from aquaflux.schemes import HessianCorrectedGradient, NestedHessianSolve, SweptGradientSolve  # noqa: E402
+from aquaflux.schemes import HessianCorrectedGradient, SweptGradientSolve  # noqa: E402
 from aquaflux.schemes.gradient import cell_diagonal_block  # noqa: E402,F401
 
 INNER = int(os.environ.get("UV_INNER", "12"))
@@ -203,11 +203,12 @@ def main() -> None:
 
     inner = SweptGradientSolve(sweeps=INNER, warn_tol=None)
     errors = {}
+    # The shipped coupled sweep under each outer preconditioner. ⚠️ The figures in this module's
+    # docstring were measured on the nested path (an outer Schur sweep with an inner Hessian sweep of
+    # `INNER` inside each apply), deleted since as dominated, so this arm does not reproduce them.
     for label, flag in (("schur", True), ("a_gg", False)):
         grad = np.asarray(
-            HessianCorrectedGradient(
-                hessian_solve=NestedHessianSolve(hessian_solver=inner), local_schur_block=flag
-            ).gradients(field, mesh, geom, bvals)
+            HessianCorrectedGradient(local_schur_block=flag).gradients(field, mesh, geom, bvals)
         )
         errors[label] = np.linalg.norm(grad - exact, axis=-1) / np.linalg.norm(exact, axis=-1)
         print(

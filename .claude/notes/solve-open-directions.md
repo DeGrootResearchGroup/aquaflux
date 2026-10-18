@@ -68,6 +68,24 @@ frames meets (compilation first, so a refit's first compile counts as compilatio
 | driver, setup, report | 17 | 5 % | 15 | 5 % | 50 s, 5 % |
 | **whole process** | **329** | | **290** | | 898 |
 
+**What the compile row contains (2026-10-17, `9efc5759`, same container and settings, shipped path, two
+warm runs logged with `JAX_LOG_COMPILES=1` and read by `compile_timeline.py`'s `breakdown`, one warm run
+under the profiler):** all of it is before step 1. **After step 1 the march compiles, reads from the
+cache, traces and lowers nothing** -- 0 programs across the 21 refits (13 `full`, 8 `cost`) and the 12
+stations, cold and warm, with or without the capture variables; only the 3 tiny post-march reads follow.
+Before step 1, warm: 977 small programs compiled (26.2 s; the persistence floor's, owned elsewhere), 6
+programs read from the cache (3.9 s, `_march_step` 2.25 s), tracing 15.4 s (`_march_step` 7.5,
+`batched_jacobian_matvec` 2.6, three initialization `newton_step`s 2.0, `norm_of_residual` 1.6,
+`_eddy_viscosity_drift` 0.7, `_field_values` 0.6) and lowering 7.5 s (`_march_step` 4.0) -- 53 s, every
+program traced once. Under the profiler the bucket read 47 s (attached ~10 s after launch); the 17.6 s it
+put under `newton_march`'s step call is step 1's own trace, lowering and cache read. So the "~35 s
+unexplained" read off the 73 s warm column is not recompiles, and did not reproduce: what remains is the
+small programs and tracing the five large ones, neither per refit nor per station. The pin that a refit
+and a station hand the march an already-compiled step:
+`test_a_traced_split_step_is_one_compiled_program_across_refits_and_stations`
+(`tests/unit/test_preconditioner_session.py`). Warm walls in those runs: 224 s (log on), 238 s (profiled),
+218 s (log on, capture variables set), all 21 steps to `R` 2.618e-06.
+
 The march log's solve wall was 320 s cold and 284 s warm under the profiler. Without it, the shipped path
 (`compare.py` with no override) took **249, 227 and 236 s** in three warm runs on the same container,
 spread over 1.5 hours, the first with the capture variables set. So run-to-run spread on this container
@@ -729,7 +747,8 @@ any block, and the probe it would replace now costs ~1 s, about one refactor.
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
   ledger ("Compiling the next station ahead of time"). The 396 s quoted here first is gone: a cold
-  pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
+  pitzDaily run compiles before step 1 only, and a station change or a refit compiles nothing
+  (2026-10-17, `9efc5759`; the compile row's paragraph under "Re-measured 2026-10-17 by profile").
 - **First-order seed for the second-order residual — CLOSED (2026-10-10), even at best.** See the
   ledger ("Seeding the second-order march from a first-order solve").
 - **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry

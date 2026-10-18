@@ -117,13 +117,16 @@ residual folds it in as the non-orthogonal correction (Gate C:
 `tests/integration/test_skewed_diffusion.py`). `CompactGreenGauss` is the one-shot sum
 (inconsistent on irregular grids, by design of the test).
 - **`solver`**: `SweptGradientSolve(sweeps=4, relaxation=1.0)` (default; matrix-free preconditioned
-  Richardson, unrolled under AD, no nested Krylov) or `GmresGradientSolve` (exact, implicit-diff;
+  Richardson, unrolled under AD, no nested Krylov) or `GmresGradientSolve` (exact, implicit-diff,
+  through `solve.solve_linear` right-preconditioned;
   ~180× the swept cost per coupled-residual eval on pitzDaily because its tangent solve re-enters on
   every jvp). Exactness unit tests pin `GmresGradientSolve()` explicitly.
-- **`preconditioner`**: `InverseCellVolume` (default, builds `InverseVolume` or
-  `CellBlockJacobi((I−B)⁻¹/V)` when a boundary block is present) or `ExactCellBlock` (per-cell
+- **`preconditioner`** (renamed 2026-10-17; there is no `CellPreconditioner`, `InverseCellVolume` or
+  `ExactCellBlock`: the setting is a `DiagonalBlock`, the applied object a `GradientPreconditioner`):
+  `VolumeDiagonalBlock` (default, builds `InverseVolume` or
+  `CellBlockJacobi((I−B)⁻¹/V)` when a boundary block is present) or `ProbedDiagonalBlock` (per-cell
   probed block). `1/V` diverges on a flattened sliver (error unbounded with aspect ratio);
-  `ExactCellBlock` stays flat at ~3× the cost — the opt-in for slivers, documented in
+  `ProbedDiagonalBlock` stays flat at ~3× the cost — the opt-in for slivers, documented in
   `docs/gradient_reconstruction.md`. Flooring `1/V` is not a substitute.
 - **Each sweep extends the residual's stencil one ring, only on a skewed mesh.** The sweep coupling
   is weighted by the skewness offset `x_f − (x_P + g d)`; skew-free, `A_g` is diagonal and sweeps
@@ -175,7 +178,7 @@ measures; `contraction_rate(system, iters=24, …) -> ContractionRate` is a Gelf
 `ρ(I − P⁻¹A)` in one jitted loop (`settling_ratio` is its self-check; `annihilated` flags a probe
 annihilated by arithmetic); `SweepCalibration(tol=1e-4, iters=24, floor=1, cap=64, seed=0)` converts
 (`sweeps_for`). Factories `CorrectedGreenGauss.calibrated`, `HessianCorrectedGradient.calibrated`,
-`CoupledBlockSweep.calibrated`, `NestedHessianSolve.calibrated`, `AveragedNeighbourHessian.calibrated`;
+`CoupledBlockSweep.calibrated`, `AveragedNeighbourHessian.calibrated`;
 the calibrated `SweptGradientSolve` is constructed only in `_calibrated_solver`. Opt-in — no default
 changed; each case's count is in its README.
 - Traced geometry raises a named `ValueError` (calibrate outside the differentiated region).
@@ -222,8 +225,9 @@ closure); exactly linear in the field (tangent is an unrolled apply).
   carries the effective closure so `reconstruct` applies what was probed. **`fallback` defaults to
   `None`** (warns naming the count and the opt-in) because the skew closure can destabilize a coupled
   march at an unconverged iterate and no case has both the cell shape and a working march; whether the
-  repair is safe in a march is open (#435). Warnings go through `_warn_once` keyed per kind, so a mild
-  report cannot silence a graver one.
+  repair is safe in a march is open (#435). Warnings go through the package leaf
+  `aquaflux/warn_once.py` (`warn_once`, one record per kind, `forget_warnings` for tests), so a mild
+  report cannot silence a graver one; `projected_stencil.py` and `gradient.py` use it too.
 - ⚠️ **Not for tetrahedra under a pressure coupling (decided 2026-09-23, #435)**: its second-pass
   weights run ~2900× a damping reference and flip Rhie–Chow damping diagonals; the duct march finds no
   admissible step. Closures, first-pass-only Rhie–Chow, ring/threshold withholding, mixed per-cell
@@ -261,7 +265,7 @@ per refinement). The value is affine in the owner gradient, so it moves to the l
   `(I − B_P) g = raw/V`) and `CorrectedGreenGauss` (adds `−V B` to `A_g` via
   `_CorrectedTerms.boundary_block`; `None` keeps the terms geometry-only, which is what `calibrated`
   measures). Both cell preconditioners include it. Orthogonal meshes are bit-identical.
-  `InverseCellVolume` inverts `I − B` then divides by `V`, in that order (bit-identity). The owner-only
+  `VolumeDiagonalBlock` inverts `I − B` then divides by `V`, in that order (bit-identity). The owner-only
   scatter is `FaceCellConnectivity.scatter_to_owner`; `small_inverse` is not in `__all__`.
 - The asymptotic sweep rate does not move (`B_P² = 0` for single-face cells), so geometry-only
   calibration stays valid; a fixed count sees the transient at corner cells, which is why the default
@@ -327,10 +331,17 @@ reconstruction (no hand-derived coefficient matrices). Exact for quadratics on i
 `MultipleCorrectionGradient`; unregistered in the case file.
 - **`hessian_solve` is one injected strategy**, which makes conflicting solve settings
   unrepresentable: `CoupledBlockSweep(sweeps=20, relaxation=1.0)` (default; alternating Gauss–Seidel
-  sweeps of both blocks, 2 face passes per sweep, fixed point provably the Schur solution),
-  `NestedHessianSolve(solver, hessian_solver)` (Schur outer + inner `A_HH`, swept 20/10), or
-  `PackedSystemSolve(solver)` (no elimination). There is no `solver`/`hessian_solver`/`schur`/
-  `coupled_sweep` field on the scheme itself any more.
+  sweeps of both blocks, 2 face passes per sweep, fixed point provably the Schur solution) or
+  `PackedSystemSolve(solver)` (no elimination; with `GmresGradientSolve` it is **the exact reference**
+  the tests, harnesses and docs check a sweep count against, which is why it is public). There is no
+  `solver`/`hessian_solver`/`schur`/`coupled_sweep` field on the scheme itself any more.
+- ⚠️ **`NestedHessianSolve` is deleted (2026-10-17); there is no such class**, nor
+  `calibrated(coupled=...)`. It was dominated by the coupled sweep (1.4x–12x its cost, faster only on
+  an orthogonal mesh) and kept only as a comparison control; its harness arms went with it. Every
+  "nested" measurement in `.claude/notes/schemes-log.md` describes that path and cannot be re-measured
+  from the tree. **`_HessianSystems.outer` is kept** though no package code calls it: it is the true
+  Schur operator `local_schur_block` approximates, read by `schur_block_diagnosis.py` and
+  `gradient_reconstruction_profile.py`.
 - **The Hessian is solved as `n_sym` symmetric components**, the surplus equations reduced by
   `(A_P E)ᵀ` (Betchen–Straatman Eq. 16–17, via `contract_symmetric`'s adjoint identity) and **row-scaled
   by `1/vol`** (otherwise the reduced block is `~vol²` and every volume-scaled consumer degrades). The
