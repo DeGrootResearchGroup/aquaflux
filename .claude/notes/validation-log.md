@@ -890,3 +890,49 @@ memory bandwidth; here the same quantity is 62 ms (36 s / 576), of which ~8 % is
 program on the Mac, so bandwidth, page size and the jax version are not separated. The record's pitzDaily
 M3 figure (2.5-3.4 s / 100 probes, against 9.7 ms per tangent here) is a whole re-fit's probe line, not a
 per-tangent measurement, and is not comparable either.
+
+### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18)
+
+Same container and configuration as the subsection above (`main` `fe772f59`; this branch changes only
+harnesses), `validation/run_case.sh validation/bfs3d_openfoam/compare.py`, shipped `case.yaml` but for the
+variable named, glibc defaults unless named, one run per arm, back to back, nothing else running, cache warm
+after the first. #758's run (`b1648725`, before #757's entry maps and #761) could not serve as the baseline;
+it was re-run. Peak is `VmHWM` sampled every 20 s (the first arm was sampled only at step 1, the second not
+at all). Cycles count accepted steps' rows (the log's `cum`).
+
+| arm | steps | inner solves | cycles | redone | re-fits (full / cost) | re-fit s (probe / refactor) | solve | final `R` | `x_r/h` | peak |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `refresh_on_cycles` 3 (shipped) | **failed at step 35** | 60 | 302 | 2 | 13 / 22 | 1710 (1237 / 427) | 3911 s to the failure | 4.56e-04 | (8.361 at step 34) | >= 12.05 GiB |
+| 4 | 31 | 64 | 325 | 6 | 13 / 23 | 1779 (1284 / 438) | 4388 s | 7.89e-07 | 8.3611 | not sampled |
+| **5** | **19** | 48 | 233 | 0 | 13 / 6 | 944 (663 / 248) | **2439 s** | 2.15e-06 | 8.3611 | 12.63 GiB |
+| 5, `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` | 19 | 48 | 233 | 0 | 13 / 6 | 736 (530 / 202) | **2180 s** | 2.15e-06 | 8.3611 | 12.15 GiB |
+| 3, `BFS3D_RAMP_STATIONS=8` | stalled; stopped at step 29 | 58 | 195 | 9 | 9 / 24 | 1645 (1188 / 408) | — | 2.49e-03 | — | 12.28 GiB |
+
+- **All arms share steps 1-5 exactly** (only `t(s)` differs), so the march's counts are deterministic here and
+  the arms part where the threshold first changes a decision (step 6 for 4, step 9 for 5). The two arms at
+  cadence 5 have identical step tables, so the huge-page row is a controlled pair with the row above it.
+- **On this machine a re-fit costs ~2.5 steps** (46-53 s against ~20 s), and the threshold that skips the most
+  re-fits won by 1.8x over 4. Single samples of trajectories the threshold itself moves, so this ranks the
+  three samples, not the thresholds; on the M3 Pro (re-fit ~ one step) 3 and 4 were inside its spread
+  (`solve-open-directions.md`, the cadence table).
+- **The huge-page setting on a whole march**: solve -11 %, re-fits -22 %, peak 0.48 GiB *lower*, every count
+  identical. The setting a march on this machine class can use; not a `run_case.sh` default (it would make
+  timings incomparable with the record) -- the owner's call.
+- **Fewer stations (8) stalled**: `R` flat at 2.49e-03 from step 26 while the step control doubled the shift
+  per step to 4.55 at step 29, line-search steps 0.001-0.008; stopped by hand.
+
+**Why the shipped arm failed, and the 8-station arm stalled: one cell's `k`.** The shipped arm's step-35 cost
+re-fit raised `SmoothedHierarchy.refit (level 0): ... 1 of 23040 [cell blocks] are singular` in the trailing
+`[k, ω]` hierarchy; the same state refuses the first fit as well (`refit_profile.py` at `state-00034`, the
+build at β 2.0), so it is the operator, not the entry-map re-fit. Cell 12107 had `k` 2.1e-17 → 1.1e-17 → 8.0e-18
+over steps 32-34 (five other cells also below 1e-12, none as low); there `∂R_ω/∂k` is -9.5e14 and its block is
+`[[1.48e-05, 2.5e-23], [-9.47e14, 0.645]]`: lower-triangular, determinant 9.5e-06, invertible, but its
+Hadamard ratio `|det| / prod(row norms)` is 6.8e-16, under `_cell_block_inverse`'s 1e-12 cut. That ratio is
+invariant to row scaling but **not to column scaling**, contrary to its comment there (measuring `k` in other
+units moves it by the same factor). The 8-station arm's stall had the mirror cell 3667 at `k` 5.5e-20 (across
+the span: both at x = 0.0897 m, ~9h downstream, 0.4-1.8 mm below the upper wall and 1.8 mm from a side wall).
+The converged arms kept `k` ~0.72 in cell 12107 and a minimum of 1.7e-05. Not changed here (out of this
+work's scope): whether the guard should be column-scale invariant, and whether that corner's `k` should be
+kept from collapsing, are the owner's. To re-adjudicate, re-run the shipped arm: two marches at one setting gave identical step
+tables here (the cadence-5 pair), and `refit_profile.py` with `REFIT_STATE` at its `state-00034`
+reproduces the refusal.
