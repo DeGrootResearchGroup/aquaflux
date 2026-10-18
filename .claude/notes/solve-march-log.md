@@ -646,3 +646,29 @@
     brakes on a rising residual at α = 1, brakes on an inner clip, holds in the band, carries β). The ratio
     thresholds are march-calibrated numbers — set them from a logged march, not intuition (the 3D
     development overshoot shows ratios ~1.14).
+
+
+## #649 — the residual vector carried across outer steps (2026-10-18)
+
+The contract is in `solve-march.md` ("The residual vector is carried from step to step"). **Configuration:**
+pitzDaily, `validation/pitzdaily_openfoam/compare.py`, Linux x86_64 container, 4 cores, 15 GB, Python 3.13.16,
+jax 0.11.2; `main` at `cf80be32` (from its own worktree) against `cf80be32` + this change, one run per arm,
+back to back, nothing else running. Compile figures: the `JAX_LOG_COMPILES=1` lines of a two-step run
+(`case.yaml` with `max_steps: 2`) on an empty `AQUAFLUX_COMPILATION_CACHE_DIR`, with
+`XLA_FLAGS=--xla_dump_to=… --xla_dump_hlo_module_re=.*march_step.* --xla_dump_hlo_as_text` in both arms.
+
+| arm | trace `_march_step` (s) | lower to MLIR (s) | XLA compile (s) | HLO lines before / after optimization |
+|---|---|---|---|---|
+| main | 7.7 | 3.8 | 23.1 | 60,970 / 84,840 |
+| carried vector | 6.2 | 3.1 | 19.0 | 48,377 / 76,597 |
+
+`_march_step` compiled once in each arm; the two-step step and inner tables are identical. The removed copy is
+the dual-time anchor's `R(φⁿ)`: 12,593 HLO lines before optimization, about a fifth of the program.
+
+**Full march, shipped `case.yaml`, warm cache per arm (each filled by its two-step run):** both **21 steps, 50
+inner solves, 106 restart cycles**, the step tables identical in every column but `t(s)`, final `R` 2.618e-06,
+`x_r/h` **8.0686**, no redone step, no `_march_step` compile after step 1. Solve wall **212 → 201 s**, inside
+this container's 5-10 % spread, so not evidence on its own. Run-time saving: the step's anchor evaluation on the
+9 steps after arrival (the 12 ramp steps each enter a station, so the march re-evaluates there), plus the
+`stopping_step` judgement's evaluation on those 9 steps. What does not separate: the shorter trace (~1.5 s) from
+the evaluations saved (~8 ms each).
