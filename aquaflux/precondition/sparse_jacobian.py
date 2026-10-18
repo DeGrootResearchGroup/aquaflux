@@ -770,7 +770,8 @@ def materialize_block_jacobian(
     structure : ProbeGather, optional
         A precomputed :func:`block_stencil_gather_map` for this plan. When given, each chunk's responses
         are scattered into the **fixed full-pattern** CSR as they are computed and then dropped -- so the
-        materialize never holds more than one chunk, and ``eliminate_zeros`` is **not** applied, so the
+        materialize never holds more than two chunks (the one being scattered and the one computing),
+        and ``eliminate_zeros`` is **not** applied, so the
         structure stays fixed -- which an in-place multigrid refactor needs.
 
         **A stored exactly-zero entry is a fill slot for any incomplete factorization, so it must not reach
@@ -793,9 +794,10 @@ def materialize_block_jacobian(
 
     # One seed per (field, colour): a one in field `b` of every cell of that field's colour. These probes
     # are independent directional derivatives sharing the fixed linearization, so they can be batched.
-    # The seeds are built one chunk at a time into a reused buffer rather than all at once: the full set
-    # is `n_probes * nf` floats -- hundreds of megabytes on a three-dimensional coupled case, and held
+    # The seeds are built one chunk at a time into two reused buffers rather than all at once: the full
+    # set is `n_probes * nf` floats -- hundreds of megabytes on a three-dimensional coupled case, and held
     # for the whole materialize -- while a chunk is a few, and rebuilding an indicator vector is cheap.
+    # (Two, so the next chunk's seeds can be filled while the previous chunk computes.)
     n_probes = plan.n_probes
     chunk = n_probes if probe_batch_size is None else max(1, probe_batch_size)
 
@@ -806,21 +808,14 @@ def materialize_block_jacobian(
         data = np.zeros(
             structure.nnz
         )  # zero: entries outside their column's reach are never written
-        block = np.zeros((chunk, nf))
-        for start in range(0, n_probes, chunk):
-            m = min(chunk, n_probes - start)
-            plan.seed_block(start, start + m, out=block)
-            responses = _probe_chunk(matvec, batched_matvec, block, m)
+        for start, m, responses in _probe_responses(matvec, batched_matvec, plan, chunk):
             structure.scatter(data, responses, start, m)
         return sp.csr_matrix((data, structure.indices, structure.indptr), shape=(nf, nf))
 
     probes = [plan.probe(index) for index in range(n_probes)]
     responses = np.empty((n_probes, nf), dtype=np.float64)
-    block = np.zeros((chunk, nf))
-    for start in range(0, n_probes, chunk):
-        m = min(chunk, n_probes - start)
-        plan.seed_block(start, start + m, out=block)
-        responses[start : start + m] = _probe_chunk(matvec, batched_matvec, block, m)[:m]
+    for start, m, chunk_responses in _probe_responses(matvec, batched_matvec, plan, chunk):
+        responses[start : start + m] = chunk_responses[:m]
 
     # De-compress by scatter: each probe's response holds column `b` of every block in its colour's share.
     # The share is per (field, colour), since each column field carries its own colouring -- and only
@@ -848,18 +843,46 @@ def materialize_block_jacobian(
     return jacobian
 
 
-def _probe_chunk(matvec, batched_matvec, block, count):
-    """This chunk's probe responses, shape ``(rows, n_fields * n_cells)``.
+def _probe_responses(matvec, batched_matvec, plan, chunk):
+    """Each chunk's probe responses in probe order, as ``(start, count, responses)``.
 
-    One batched call when ``batched_matvec`` is given -- the buffer keeps a single shape across every
-    chunk, so it compiles once and a padded final chunk needs no special case -- otherwise a plain loop
-    over the chunk's rows, which any ``matvec`` supports including a non-vectorizable NumPy one.
+    ``responses`` has shape ``(rows, n_fields * n_cells)``; rows beyond ``count`` are the padding of a
+    final short chunk. With ``batched_matvec`` each chunk is one batched call -- the seed buffer keeps a
+    single shape across every chunk, so it compiles once -- otherwise a plain loop over the chunk's rows,
+    which any ``matvec`` supports, including a non-vectorizable NumPy one.
+
+    **The host work runs while the next chunk computes.** A batched call returns as soon as it is
+    dispatched, so the next chunk's seeds are filled while the previous chunk is still running, and the
+    previous chunk's responses are handed to the caller (to de-compress) only after the next chunk has
+    been dispatched. The two host steps then overlap the device's work instead of idling it between
+    chunks. Only one call is ever in flight -- each is dispatched after its predecessor's responses have
+    been collected -- so the program's temporary buffers are never held twice, and the seeds alternate
+    between two buffers so a running call's input is never overwritten. The responses, and the order the
+    caller receives them in, are those of the plain chunk-by-chunk loop.
     """
-    if batched_matvec is not None:
-        return np.asarray(batched_matvec(jnp.asarray(block)), dtype=np.float64)
-    return np.stack(
-        [np.asarray(matvec(jnp.asarray(block[row])), dtype=np.float64) for row in range(count)]
-    )
+    nf = plan.n_fields * plan.n_cells
+    buffers = (np.zeros((chunk, nf)), np.zeros((chunk, nf)))
+    pending = None  # (start, count, the dispatched result) of the chunk still running
+    for index, start in enumerate(range(0, plan.n_probes, chunk)):
+        count = min(chunk, plan.n_probes - start)
+        block = plan.seed_block(start, start + count, out=buffers[index % 2])
+        finished = None
+        if pending is not None:
+            finished = (*pending[:2], np.asarray(pending[2], dtype=np.float64))
+        if batched_matvec is not None:
+            dispatched = batched_matvec(jnp.asarray(block))
+        else:
+            dispatched = np.stack(
+                [
+                    np.asarray(matvec(jnp.asarray(block[row])), dtype=np.float64)
+                    for row in range(count)
+                ]
+            )
+        pending = (start, count, dispatched)
+        if finished is not None:
+            yield finished
+    if pending is not None:
+        yield (*pending[:2], np.asarray(pending[2], dtype=np.float64))
 
 
 def jacobian_relative_error(

@@ -503,6 +503,74 @@ def test_gather_de_compression_matches_the_scatter_loop():
     assert abs(loop2 - gathered2).max() < 1e-14
 
 
+class _DeferredBatch:
+    """A batched product that, like an asynchronous dispatch, reads its seeds only when collected.
+
+    Holds a reference to the seed buffer it was called with, not a copy, so a caller that refills that
+    buffer before collecting the result gets the product of the WRONG seeds -- which an asynchronous call
+    that aliases its input would do on real hardware. It logs each call and collection, and reports how
+    many calls were outstanding at once.
+    """
+
+    def __init__(self, dense, events):
+        self.dense, self.events, self.outstanding, self.most_outstanding = dense, events, 0, 0
+
+    def __call__(self, seeds):
+        index = sum(1 for event in self.events if event[0] == "dispatch")
+        self.events.append(("dispatch", index))
+        self.outstanding += 1
+        self.most_outstanding = max(self.most_outstanding, self.outstanding)
+        owner = self
+
+        class _Result:
+            def __array__(self, dtype=None, copy=None):
+                owner.events.append(("collect", index))
+                owner.outstanding -= 1
+                return np.asarray(seeds) @ owner.dense.T
+
+        return _Result()
+
+
+def test_the_probe_dispatches_the_next_chunk_before_de_compressing_the_last_and_keeps_its_seeds(
+    monkeypatch,
+):
+    """The host de-compression overlaps the next chunk's computation, without corrupting either.
+
+    Pins three things against a stub whose products read their seeds only when collected, behind a
+    host-to-device transfer that aliases the host buffer (as ``jax.device_put`` does on the CPU backend
+    for a large aligned array): the matrix is exact (a single reused seed buffer would hand a pending
+    call the next chunk's seeds); chunk ``k + 1`` is dispatched before chunk ``k`` is scattered (the
+    overlap); and no two calls are ever outstanding (each holds the program's temporaries, so two in
+    flight would double the peak).
+    """
+    import aquaflux.precondition.sparse_jacobian as sparse_jacobian
+
+    monkeypatch.setattr(sparse_jacobian.jnp, "asarray", lambda array: array)
+    n, nvar, reach = 12, 3, 2
+    k, colouring = _random_block_matrix(n, nvar, reach, np.random.default_rng(6))
+    plan = ColumnProbePlan.uniform(colouring, nvar)
+    structure = block_stencil_gather_map(plan)
+    events: list[tuple[str, int]] = []
+    batched = _DeferredBatch(k.toarray(), events)
+    scatter = structure.scatter
+
+    def logged_scatter(data, responses, start, count):
+        events.append(("scatter", start // 2))
+        scatter(data, responses, start, count)
+
+    structure.scatter = logged_scatter
+    loop = materialize_block_jacobian(_matvec_of(k), plan)
+    gathered = materialize_block_jacobian(
+        _matvec_of(k), plan, batched_matvec=batched, probe_batch_size=2, structure=structure
+    )
+    assert abs(loop - gathered).max() < 1e-14
+    n_chunks = -(-plan.n_probes // 2)
+    assert n_chunks >= 3  # so the overlap has interior chunks to show
+    for chunk in range(n_chunks - 1):
+        assert events.index(("dispatch", chunk + 1)) < events.index(("scatter", chunk))
+    assert batched.most_outstanding == 1
+
+
 def test_jacobian_relative_error_flags_too_small_a_reach():
     rng = np.random.default_rng(2)
     n, nvar = 12, 2
