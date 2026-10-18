@@ -3,12 +3,14 @@ paths:
   - "aquaflux/precondition/multigrid.py"
   - "aquaflux/precondition/hierarchy_inverse.py"
   - "aquaflux/precondition/entry_map.py"
+  - "aquaflux/precondition/padded_rows.py"
 ---
 
 # Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
 
 This file governs the traced multigrid (`precondition/multigrid.py`, `precondition/hierarchy_inverse.py`)
-and the entry maps a refit applies (`precondition/entry_map.py`).
+the padded-row level operator (`precondition/padded_rows.py`) and the entry maps a refit applies
+(`precondition/entry_map.py`).
 Package-wide contracts are in `solve.md`; the materialized base `MaterializedJacobianPreconditioner` is in
 `solve-direct-preconditioners.md`. Dated measurements and investigation behind every entry are in
 `.claude/notes/solve-amg-multigrid-log.md` (never auto-loads).
@@ -157,7 +159,9 @@ path.
 
 ## Binding decisions — `precondition/multigrid.py`
 
-- **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`.** `columns` / `values` are
+- **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
+  `_padded_rows`, the one slot rule, and `_PaddedLayout`/`_padded_operator`; moved out of `multigrid.py`
+  to keep it under its size budget, 2026-10-18). `columns` / `values` are
   `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (a
   gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
   padded-row level operator — measurements".
@@ -240,7 +244,7 @@ path.
     by `FieldSplitInverse._maps`) keys one map per slot and rebuilds it when the operand's pattern, or a
     fixed operand's pattern or values, moved; `EntryMap.apply` itself refuses an operand of another pattern.
     Wired: `SmoothedHierarchy.refit` (Galerkin via `_galerkin_coarse(patterns=)`, level packing via
-    `_PaddedLayout`/`_padded_operator`, cell blocks via `_cell_block_inverse(patterns=)`, now computed once
+    `_PaddedLayout`/`_padded_operator` in `padded_rows.py`, cell blocks via `_cell_block_inverse(patterns=)`, now computed once
     per level), `_simple_pieces` (the four block cuts and every packing), `FieldGroups.blocks(maps=)` and
     `FieldSplitInverse.padded_coupling()` (`traced_field_split`). Not mapped, because bilinear in the
     values or not a sparse operation: `D⁻¹G`, the Schur, `d_inv @ a` for the spectral estimate, the coarse

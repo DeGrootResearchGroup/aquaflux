@@ -35,7 +35,6 @@ from aquaflux.precondition.multigrid import (
     _one_point_interpolation,
     _ones,
     _onto_pattern,
-    _PaddedRowOperator,
     _reattach_to_adjacent_root,
     _restriction_neighbourhoods,
     _rs_split,
@@ -50,6 +49,7 @@ from aquaflux.precondition.multigrid import (
     refresh_air_hierarchy,
     smoothed_multigrid_cycles,
 )
+from aquaflux.precondition.padded_rows import _PaddedRowOperator
 
 
 def _poisson(n):

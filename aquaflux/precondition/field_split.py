@@ -56,13 +56,12 @@ from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
-    _padded_operator,
-    _PaddedRowOperator,
     air_multigrid_cycles,
     build_air_hierarchy,
     convection_multigrid_cycles,
     refresh_air_hierarchy,
 )
+from .padded_rows import _padded_operator, _PaddedRowOperator
 from .traced_cycle import TracedCycle
 
 __all__ = [

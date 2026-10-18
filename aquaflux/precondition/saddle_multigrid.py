@@ -42,11 +42,10 @@ from .multigrid import (
     StructuralPatterns,
     _ones,
     _operator_matvec,
-    _padded_operator,
-    _PaddedRowOperator,
     _smoothed_ops,
     _structured,
 )
+from .padded_rows import _padded_operator, _PaddedRowOperator
 
 __all__ = ["SimpleSmoothedInverse", "block_approximate_inverse"]
 

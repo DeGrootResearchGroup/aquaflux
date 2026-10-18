@@ -21,7 +21,7 @@ from aquaflux.precondition import (
 )
 from aquaflux.precondition.entry_map import EntryMaps
 from aquaflux.precondition.field_split import FieldGroups, FieldSplitInverse
-from aquaflux.precondition.multigrid import _PaddedRowOperator
+from aquaflux.precondition.padded_rows import _PaddedRowOperator
 from aquaflux.solve import CellFields, FieldLayout, GlobalDofs, SubLayout
 
 

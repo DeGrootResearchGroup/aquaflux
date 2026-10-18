@@ -24,11 +24,9 @@ from aquaflux.precondition.multigrid import (
     _galerkin_coarse,
     _ones,
     _onto_pattern,
-    _padded_operator,
-    _padded_rows,
-    _PaddedRowOperator,
     build_convection_hierarchy,
 )
+from aquaflux.precondition.padded_rows import _padded_operator, _padded_rows, _PaddedRowOperator
 
 EPS = np.finfo(np.float64).eps
 

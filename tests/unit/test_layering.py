@@ -69,7 +69,7 @@ BUDGETS = {
     # lAIR -- in one module: the host-side coarsening (orderings, aggregation, strength and splitting,
     # structural patterns, Galerkin products) beside the traced levels, smoothers and cycle drivers
     # applied under jit. That is two jobs, on either side of the build-once, apply-traced seam.
-    "precondition/multigrid.py": 3109,
+    "precondition/multigrid.py": 3005,
     # Several gradient-scheme families -- compact and corrected Green--Gauss, the Hessian-corrected
     # gradient with its Hessian solves and boundary closures -- beside the machinery that solves for a
     # gradient: the gradient and cell preconditioners, the swept and Krylov gradient solves, and the

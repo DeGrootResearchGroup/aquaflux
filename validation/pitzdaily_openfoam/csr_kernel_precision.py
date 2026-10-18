@@ -32,7 +32,7 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
-from aquaflux.precondition.multigrid import _PaddedRowOperator  # noqa: E402
+from aquaflux.precondition.padded_rows import _PaddedRowOperator  # noqa: E402
 from jax.experimental.sparse import BCSR  # noqa: E402
 from precision_replay_probe import _narrowed  # noqa: E402
 from replay import MarchReplay  # noqa: E402
