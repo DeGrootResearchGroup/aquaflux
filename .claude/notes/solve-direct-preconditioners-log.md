@@ -406,6 +406,14 @@
         held by `solve.staged_march`'s local `strategy` (the step it built, kept for the whole segment;
         found by scanning stack locals, since a running frame's locals are invisible to
         `gc.get_referrers`) and, until 2026-10-18, by `compare.py`'s per-rung residual reporter.
+      - **Hierarchies held at the split's precision** (`stored_precision`): HWM 10.82 -> **10.15 GiB**,
+        steady resident 9.38 -> 8.19 GiB, device float64 1.23 -> 0.15 GiB. The peak falls less than the
+        steady state because each re-fit still forms its new hierarchy in float64 before rounding it.
+      - **A re-fit releases the superseded split** (`_release_superseded`): HWM 10.15 -> **9.42 GiB**,
+        steady resident 8.19 -> 7.14 GiB, device float32 1.25 -> 0.63 and int32 0.99 -> 0.65 GiB (the
+        fit-time index generation the stale split pinned: what was left of "lever 2"). Both steps ran with
+        nothing applying a released array. Cumulative over the main baseline: 11.91 -> 9.42 GiB peak,
+        10.58 -> 7.14 GiB steady.
 
 ## Condensed out of the rule (2026-10-17)
 

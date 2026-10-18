@@ -126,16 +126,21 @@ def main() -> None:
     hook = session._refresh_hook()  # the one β-tracking refresh every step built here shares
     shipped_floor = hook._refit_beta_floor
 
-    # One step object per inner setting; the shift rides as a dynamic leaf, so every β is a cache hit.
-    # The file's own setting is always built: the control is the march's step whatever arms are run.
-    steps = {}
-    for name in dict.fromkeys(("shipped", *INNER)):
+    # One step per inner setting, derived from the replay's step as it stands, so it carries the
+    # preconditioner the last re-fit made: a traced split is data in the step, and a re-fit releases the
+    # one it replaces. The shift rides as a dynamic leaf, so every β is a cache hit. The file's own setting
+    # is always among them: the control is the march's step whatever arms are run.
+    def step_for(name):
         inner_steps, inner_tol = inner_values[name]
-        march = dict(replay.march)
-        march["dual_time"] = dataclasses.replace(
-            march["dual_time"], inner_steps=inner_steps, inner_tol=inner_tol
-        )
-        steps[name] = session.build(replay.seed, **march)
+        return dataclasses.replace(replay.step, inner_steps=inner_steps, inner_tol=inner_tol)
+
+    def refreshed(arm, phi):
+        """``arm`` after the session's re-fit at ``phi``, which the replay's own step follows too."""
+        update = session.refresh_preconditioner(arm, phi)
+        if update is None:
+            return arm
+        replay.step = update(replay.step)
+        return update(arm)
 
     def controlled(step, beta, measure):
         return eqx.tree_at(
@@ -163,21 +168,18 @@ def main() -> None:
         # measure BEFORE the step's own pre-step refresh -- so at the arrival step it is built on the
         # ramp's last inverse, and the arrival's full re-fit at the target follows it.
         hook._refit_beta_floor = shipped_floor
-        step = steps["shipped"]
         if k == replay.stations:
             for _ in replay.systems(k, k):  # the ramp's last step, a station change itself
                 pass
-            measure = coupled_scaled_norm(coupled, step.shift_policy, phi_n)
+            measure = coupled_scaled_norm(coupled, step_for("shipped").shift_policy, phi_n)
             replay.refit(coupled, beta_c, phi_n)
         else:
             for _ in replay.systems(replay.stations + 1, k):
                 pass
-            measure = coupled_scaled_norm(coupled, step.shift_policy, phi_n)
+            measure = coupled_scaled_norm(coupled, step_for("shipped").shift_policy, phi_n)
         reference_norm = measured(measure, residual_fn(phi_n))
-        session.refresh_preconditioner(
-            controlled(step, beta_c, measure), phi_n
-        )  # binds the hook's step
-        outcome, seconds = take(controlled(step, beta_c, measure), phi_n, reference_norm)
+        control = refreshed(controlled(step_for("shipped"), beta_c, measure), phi_n)
+        outcome, seconds = take(control, phi_n, reference_norm)
         rho_c = float(outcome.residual_norm) / float(reference_norm)
         recorded = float(record["residual_norm"]) / float(reference_norm)
         print(
@@ -201,12 +203,10 @@ def main() -> None:
         print(header, flush=True)
         for floor in FLOORS:
             for inner in INNER:
-                step = steps[inner]
                 for beta in BETAS:
                     hook._refit_beta_floor = floor_values[floor]
-                    arm = controlled(step, beta, measure)
                     hook.rebind(coupled)  # force the next refresh to be a full re-fit at this state
-                    session.refresh_preconditioner(arm, phi_n)
+                    arm = refreshed(controlled(step_for(inner), beta, measure), phi_n)
                     outcome, seconds = take(arm, phi_n, reference_norm)
                     ratio = float(outcome.residual_norm) / float(reference_norm)
                     predicted = beta / (lam + beta)

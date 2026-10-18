@@ -167,6 +167,37 @@ def _is_traced(pytree: object) -> bool:
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
 
 
+def _release_superseded(superseded, current, inverse) -> None:
+    """Free the arrays only a superseded traced split holds, once a re-fit has replaced it.
+
+    Every step the session hands out is re-pointed at the re-fitted split (the march applies the update
+    this hook returns; the session re-points its own stopping steps), so the superseded split's arrays
+    are dead by contract. They are still referenced, though: a march's caller holds the step it started
+    the march with for as long as the march runs (``solve.staged_march`` keeps the step it built as the
+    argument of ``newton_march``, and a caller always holds its arguments for the call), and on a
+    three-dimensional case that pins a whole hierarchy -- most of a gigabyte -- for the rest of the
+    march. Freeing them here is what reclaims it; the alternative is a march that takes its starting
+    step through a hand-off its caller does not keep, a change to the march's interface. A step kept
+    across a re-fit and then applied fails loudly (JAX refuses a deleted array) rather than applying a
+    stale preconditioner.
+
+    Arrays the re-fitted split or the inverse still holds -- a frozen coarsening's index arrays, which a
+    re-fit reuses, or a hierarchy shared with a split applied in its own precision -- are kept.
+    """
+    if superseded is None:
+        return
+    held = {id(leaf) for leaf in jax.tree.leaves(current)}
+    held.update(id(leaf) for leaf in jax.tree.leaves(_held_state(inverse)))
+    for leaf in jax.tree.leaves(superseded):
+        if isinstance(leaf, jax.Array) and id(leaf) not in held and not leaf.is_deleted():
+            leaf.delete()
+
+
+def _held_state(inverse) -> list:
+    """The traced state each block of a split currently holds, for :func:`_release_superseded`."""
+    return [block.traced_cycle().state for block in (inverse.leading, inverse.trailing)]
+
+
 class BetaTrackingRefresh:
     """The ``refresh_preconditioner`` hook that re-fits a monolithic inverse as the shift strength moves.
 
@@ -520,15 +551,14 @@ class MaterializedSession:
             refitted = self._refresh_hook()(active_step, state, due=due)
             if not (refitted and self._traced):
                 return None
-            # Dropped before the new one is taken, so the session never holds two; the steps the march
-            # holds keep the old one only until the update below replaces it in them.
-            self._split = None
+            superseded, self._split = self._split, None
             self._split = split = traced_field_split(self._preconditioner.inverse, self._precision)
             # The stopping steps share it too: they are read for their measure alone, and otherwise
             # each would keep the fit it was built at alive for the rest of the build.
             self._stopping_steps = {
                 key: with_traced_split(step, split) for key, step in self._stopping_steps.items()
             }
+            _release_superseded(superseded, split, self._preconditioner.inverse)
             return lambda step: with_traced_split(step, split)
 
         self.refresh_preconditioner = (

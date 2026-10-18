@@ -119,8 +119,9 @@ branches.
   `turbulence_damping` lives.
 - **A harness that applies the march's preconditioner must apply what the step holds, and take it as an
   argument of anything it compiles.** A shipped field split is a traced copy taken at each fit; a refit
-  reaches the step only through the replacement `refresh_preconditioner` returns, and a split captured in a
-  closure keeps applying the first fit silently. `pitzdaily_openfoam/replay.py`'s `MarchReplay.refit` does
+  reaches the step only through the replacement `refresh_preconditioner` returns. A split kept across a
+  re-fit is released by it (since 2026-10-18), so applying it raises rather than silently applying the
+  first fit; before that it applied the stale one with no error. `pitzdaily_openfoam/replay.py`'s `MarchReplay.refit` does
   this; `MarchReplay(host=True)` applies the host object for probes that mutate it in place. Probes that
   need the host inverse read `session.preconditioner.inverse` from `open_session`.
 - **Replay a step at the tolerance the march used.** The march solves a step after a setback to 0.1, not

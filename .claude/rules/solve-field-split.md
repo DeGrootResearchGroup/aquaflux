@@ -122,7 +122,8 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
 2. **A re-fit is a new step, not a mutation.** `BetaTrackingRefresh` re-fits in place and returns whether
    it did; the session returns an update `step -> with_traced_split(step, split)`, which `newton_march`
    applies to both `strategy` and `active_step`, and reports on `MarchResult.strategy` for the next
-   segment and the adjoint.
+   segment and the adjoint. The superseded split's own arrays are released (`solve.md`,
+   `materialized_session`), so a step kept across a re-fit raises if applied.
 3. **The split rides in two places, both data**: the policy and the adjoint factory (`_TracedSplitAdjoint`;
    the step's `adjoint_preconditioner_factory` is a data field). `with_traced_split` replaces both in one
    `tree_at`. ⚠️ Updating only the policy leaves the adjoint on the starting split.
@@ -132,6 +133,17 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
    `validation/traced_split_refresh_shapes.py` checks it: 0 moved signatures, 1 trace across 40 builds.
 
 ## `FieldSplit(precision="float32")`: the split applied in single precision
+
+**The block inverses hold their hierarchies in the split's precision** (`HierarchyBlockInverse(stored_
+precision=)`, passed by the session through `BlockInverse.bound(stored_precision=)` where the family's
+`_stores_precision` allows; lAIR does not, and stays double). Each fit and refit is computed in float64
+and rounded once after `derive_extras`, prolongation values excepted (a frozen refit reads them back, and
+the held Galerkin maps key on them), so the split shares the inverse's arrays and applies exactly what
+narrowing a double hierarchy gave. Host `apply` stays double (a float64 residual promotes every operation;
+an explicit widening was measured bit-identical and deleted). bfs3d 2-step peak 10.82 -> 10.15 GiB, steady
+device float64 1.23 -> 0.15 GiB (2026-10-18; `solve-direct-preconditioners-log.md`, "bfs3d memory by
+owner"). Pinned by `test_an_inverse_held_in_single_precision_holds_its_double_fit_rounded_once` and
+`test_a_single_precision_split_applies_the_hierarchies_its_inverses_hold_not_a_copy`.
 
 The library default is `"float64"`; pitzDaily's and bfs3d's `case.yaml` set `precision: float32` (owner's
 decision, #732: same steps, cycles and root; pitzDaily −24 %, bfs3d −17 % wall;
