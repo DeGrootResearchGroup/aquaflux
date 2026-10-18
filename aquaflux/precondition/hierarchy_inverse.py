@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -61,6 +62,29 @@ class _HierarchyStep:
     def __call__(self, state, residual: jnp.ndarray) -> jnp.ndarray:
         hierarchy, extras = state
         return self.cycle(hierarchy, extras, residual, self.smoother)
+
+
+def _narrowed(hierarchy: SmoothedHierarchy, precision: str) -> SmoothedHierarchy:
+    """``hierarchy`` with its floating-point arrays cast to ``precision``, prolongation values kept.
+
+    The prolongation values stay as they are because a frozen-coarsening refit
+    (:meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit`) reads them back to form the next
+    Galerkin operators: rounding them would change every refit after the first. Everything else is
+    rounded once, exactly as a traced split applied in ``precision`` rounds it, so a hierarchy held in
+    single precision and one narrowed when it is applied hold the same entries.
+    """
+    levels = tuple(
+        eqx.tree_at(
+            lambda cast: cast.p_val,
+            in_precision(level, precision),
+            level.p_val,
+            is_leaf=lambda leaf: leaf is None,
+        )
+        for level in hierarchy.levels
+    )
+    return SmoothedHierarchy(
+        levels=levels, equilibration=in_precision(hierarchy.equilibration, precision)
+    )
 
 
 class HierarchyBlockInverse:
@@ -237,7 +261,7 @@ class HierarchyBlockInverse:
         if self._stored_precision != "float64":
             # After the extras: they are derived from the double-precision levels, and only then is
             # either rounded, so a narrowed hierarchy holds exactly what narrowing it later would.
-            self._hierarchy = self._hierarchy.in_precision(self._stored_precision)
+            self._hierarchy = _narrowed(self._hierarchy, self._stored_precision)
             self._extras = in_precision(self._extras, self._stored_precision)
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose
         # -- only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per
