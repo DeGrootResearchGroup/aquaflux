@@ -703,14 +703,12 @@ CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
 | default cache, first run after `main` moved | 64.4 s | 37.8 s | 99 s | 736 s |
 | default cache, warm (stopped after step 1) | — | — | 62 s | — |
 
-- **A station change is already a cache hit.** After step 1, steps compile 0.4–2 s each, almost all of
-  it small eager programs; the exceptions are the flow V-cycle (~0.4 s whenever a refresh moves the
-  thresholded coarsening, which is documented) and one 7.1 s recompile of `batched_jacobian_matvec` at
-  step 9, whose signature differs from step 1's only in one argument being committed to the device
-  rather than uncommitted. So overlapping a next station's compile hides at most ~38 s (5 % of a cold
-  run) and nothing on a warm one. ⚠️ **Neither per-step cost reproduces at `183e9ffa` (2026-10-17):** the
-  shipped march compiles nothing at all between steps 1 and 21, and `batched_jacobian_matvec` once
-  (entry "Persisting the small programs" below).
+- **A station change is already a cache hit, and so is a refit.** At `9efc5759` (2026-10-17, same
+  container, jax 0.11.2, cold and warm, logged with `JAX_LOG_COMPILES=1`) the shipped march compiles,
+  reads, traces and lowers nothing between step 1 and step 21 -- across its 21 refits and 12 stations --
+  and `batched_jacobian_matvec` once. The 0.4–2 s per step and the 7.1 s step-9 recompile
+  measured 2026-10-10 on an earlier tree no longer occur. So there is no next station's compile to
+  overlap; what a run compiles is all before step 1 (`solve-open-directions.md`, the compile row).
 - **The persistent cache works, including for programs holding the preconditioner's host callback**
   (checked on a toy and on the march step itself, which a warm run took from the cache). The
   "default cache" row above is partly cold only because every library change re-keys its programs.

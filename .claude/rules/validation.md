@@ -78,7 +78,10 @@ branches.
   and without `rho1` and refuses a log with no step rows. Any march-log reader must do both.
 - **A persistent-cache hit also logs a `Finished XLA compilation` line**, right after `Persistent
   compilation cache hit`; `pitzdaily_openfoam/compile_timeline.py` reports hits separately (`timeline`'s
-  fifth element), pinned by `tests/unit/test_compile_timeline.py`.
+  fifth element), pinned by `tests/unit/test_compile_timeline.py`. Its `breakdown` splits each step at its
+  first inner row (`step N set-up` holds the station change, the due refit and the step's dispatch) and
+  at each redo, and sums tracing and lowering apart, since a cache hit still pays both; it needs the
+  march logged with `"inner"` detail (pitzDaily's is) to see the split.
 - **Build a reference state with `state_from_physical`, not `pack_state`** — `pack_state` takes the solved
   variables, so physical ω where `log(ω)` is expected gives a silently NaN residual from a finite-looking
   state, and every factorization then fails in its own misleading idiom. **Assert the starting residual is
