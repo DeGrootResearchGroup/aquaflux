@@ -93,11 +93,16 @@ branches.
 - **A timer that blocks on its own result also waits for earlier, untimed asynchronous work.** A JAX
   breakdown is sound only where the work before each timed piece is timed too; time a surprisingly large
   piece alone before believing it.
-- **On Linux a standalone call whose temporary buffer exceeds 32 MiB page-faults all of it every call**
-  (glibc's mmap threshold); the march does not pay this, so per-call timings overstate it. Report
-  `ru_minflt` per call, or run with `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`
-  and say so (`discretization.md`, "Single-threaded kernels"). Through `mallopt` both are C `int`s: a
-  4 GiB trim threshold wraps to 0.
+- **On Linux a call whose temporary buffer exceeds 32 MiB page-faults all of it every call** (glibc's
+  mmap threshold), and **XLA allocates on worker threads, whose glibc arenas `mmap` anything over 64 MiB
+  whatever the threshold**. Inside a Krylov solve it is paid once per solve; **bfs3d's re-fit probe pays it
+  per batched JVP**: 15M minor faults and 38.4 s of a 58.3 s re-fit at glibc defaults, 36.5 s with
+  `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`, 28.8 s (0.15M faults, re-fit
+  38.6 s) with `MALLOC_ARENA_MAX=1` as well (`refit_profile.py`, `state-00029`, 2026-10-18, 4-core Linux,
+  jax 0.11.2; table in `.claude/notes/validation-log.md`). ⚠️ That setting killed a whole bfs3d march: one arena with no
+  trim keeps what it frees, 12.3 GiB resident by step 2 against 9.5 GiB, and the 15 GiB container restarted
+  (inferred; no OOM record survived). Report `ru_minflt` with any Linux timing and name the allocator
+  settings. Through `mallopt` both thresholds are C `int`s: a 4 GiB trim threshold wraps to 0.
 - **A harness that builds a step must use the case's own shift settings, and form the shift through
   `ShiftTerm.shift(beta)`, never `beta * term.diagonal`** — the latter drops `row_shift_scale`, where
   `turbulence_damping` lives.
