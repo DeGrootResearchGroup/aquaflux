@@ -1496,6 +1496,24 @@ below the container's 5-10 % run-to-run spread, and each candidate removes only 
 program (2026-10-18)". Re-open only if the operator becomes an order of magnitude cheaper (or the restart
 length much longer).
 
+## The coloured probe as one compiled loop over its chunks — NO GAIN on pitzDaily (2026-10-18)
+
+The idea: a refit's probe calls `batched_jacobian_matvec` once per chunk of 8, and each call's temporary
+is mapped afresh and faulted (on glibc above 64 MiB no threshold stops it: XLA allocates on worker threads,
+whose arenas are 64 MiB heaps), so one `fori_loop` program over the chunks, seeds in and responses out by
+host callbacks, allocates once and keeps the one-chunk memory bound. Measured on pitzDaily's step-21 state
+(`validation/pitzdaily_openfoam/probe_loop_probe.py`, `main` `9efc5759`, 4-core Linux, jax 0.11.2, 100
+probes / 13 chunks, best of 5): faults per chunk fall 38 600 -> ~5 100, but the time does not move (three
+default-allocator runs: shipped 0.95-1.10 s, looped 0.90-1.09 s). The faults DO cost the shipped probe
+~0.3 s (0.67-0.72 s with `MALLOC_ARENA_MAX=1` and the thresholds raised, 0 faults); the loop gives that
+back because the same vmapped JVP runs slower inside a compiled loop than as separate calls (fault-free
+0.84-0.85 s against 0.60-0.69 s with no host work in either), and the looped responses differ from the
+shipped ones at 1.3e-12. jaxlib 0.11.2's XLA flags offer no CPU temporary-buffer or preallocation setting,
+so on CPU the remedy for the faults is the process allocator, which the user owns (`MALLOC_ARENA_MAX=1`
+with both thresholds, or jemalloc with decay off). Untested on bfs3d, whose probe faults ~210 000 times
+per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
+the in-loop JVP penalty measures smaller than that.
+
 ## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
 
 Factorizing the constant, geometry-only `A_g` of `CorrectedGreenGauss` once (dense, `jit`-ed `jacfwd` +
