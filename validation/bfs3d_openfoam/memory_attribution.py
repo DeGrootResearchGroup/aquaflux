@@ -72,6 +72,8 @@ TRANSPARENT = (
 #: Collect cyclic garbage at the end of every stage, recording the device and resident bytes it frees.
 #: An arm, not a reading: it changes what the rest of the run holds.
 COLLECT = os.environ.get("BFS3D_MEMORY_COLLECT", "0") == "1"
+#: ``0`` takes no census at all (a census walks every Python object, minutes per call late in a run).
+CENSUS = os.environ.get("BFS3D_MEMORY_CENSUS", "1") == "1"
 RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.json"))
 TRACKED_MESH = ROOT / "validation" / "bfs3d_species" / "of_case" / "constant"
 GIB = 2**30
@@ -363,6 +365,8 @@ class Recorder:
     @contextlib.contextmanager
     def stage(self, label: str, *, census: bool = False):
         import jax
+
+        census = census and CENSUS
 
         if self._stack:  # hand the parent the peak so far before this stage resets it
             parent = self._stack[-1]
