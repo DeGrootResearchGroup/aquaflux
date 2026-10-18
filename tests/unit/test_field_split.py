@@ -19,7 +19,9 @@ from aquaflux.precondition import (
     JacobiSmoothedInverse,
     SimpleSmoothedInverse,
 )
+from aquaflux.precondition.entry_map import EntryMaps
 from aquaflux.precondition.field_split import FieldGroups, FieldSplitInverse
+from aquaflux.precondition.multigrid import _PaddedRowOperator
 from aquaflux.solve import CellFields, FieldLayout, GlobalDofs, SubLayout
 
 
@@ -281,6 +283,38 @@ class TestBlockTriangularAlgebra:
             as_matrix(split_for(developed, groups), groups.n_dofs, transpose=True),
             atol=1e-12,
         )
+
+    def test_blocks_cut_by_held_maps_are_the_slices_bit_for_bit(self, groups, operator):
+        """A refit cuts its operator into blocks by gathers held between refits; at new values on the
+        same pattern each must be exactly the slice it replaces (a gather does no arithmetic), and the
+        packed coupling exactly the coupling packed afresh."""
+
+        class Refittable(ExactInverse):
+            def refactor_block(self, block):
+                self._inverse = np.linalg.inv(np.asarray(block.toarray(), dtype=np.float64))
+
+        base = sp.csr_matrix(operator)
+        leading, _, trailing_by_leading, trailing = groups.blocks(base)
+        split = FieldSplitInverse(
+            Refittable(leading.toarray()),
+            Refittable(trailing.toarray()),
+            trailing_by_leading,
+            groups,
+        )
+        maps = EntryMaps()
+        for scale in (1.0, -2.5):
+            values = base.data * scale + 0.1 * np.arange(base.nnz)
+            matrix = sp.csr_matrix((values, base.indices, base.indptr), shape=base.shape)
+            for got, want in zip(groups.blocks(matrix, maps), groups.blocks(matrix), strict=True):
+                assert np.array_equal(got.indptr, want.indptr)
+                assert np.array_equal(got.indices, want.indices)
+                assert np.array_equal(got.data, want.data)
+            split.refactor_block(matrix)
+            packed = _PaddedRowOperator.from_scipy(groups.blocks(matrix)[2])
+            for got, want in zip(
+                jax.tree.leaves(split.padded_coupling()), jax.tree.leaves(packed), strict=True
+            ):
+                assert np.array_equal(np.asarray(got), np.asarray(want))
 
     def test_a_refit_with_a_block_that_cannot_refit_changes_nothing(self, groups, operator):
         """The refusal comes before either block is touched, so a split is never left half re-fitted."""

@@ -1,0 +1,454 @@
+"""Fixed linear maps between the stored values of sparse operators whose patterns do not move.
+
+A preconditioner refit re-derives a hierarchy at a new operator whose sparsity pattern is the one it
+was built at: the probe fills a fixed pattern, and a frozen coarsening keeps every prolongation. Every
+sparse operation the refit performs -- cutting a block out of a matrix, transposing it, packing it into
+padded rows, forming a Galerkin product ``R A P`` with ``R`` and ``P`` held fixed -- is then a fixed
+linear function of the operand's stored values, ``out_t = sum_j w_tj a_j``, and only the values change.
+
+:class:`EntryMap` stores that function once as three flat arrays (source entry, target slot, weight), so
+each refit applies it as one gather, multiply and sum in place of the sparse operation's own index work
+(the search, the sort, the symbolic product). Where the result lands -- a compressed-sparse-row (CSR)
+matrix, padded rows, a dense per-cell block -- is the caller's; the map is the same.
+
+:class:`EntryMaps` keeps the maps one owner needs between refits, keyed by call site, rebuilding a map
+only when an operand's pattern (or a fixed operand's values) has moved.
+
+Host numpy and scipy only, off the jit path.
+"""
+
+from __future__ import annotations
+
+import weakref
+from collections.abc import Callable, Hashable
+
+import numpy as np
+import scipy.sparse as sp
+
+from aquaflux.ragged import pairs_within_groups
+
+__all__ = ["EntryMap", "EntryMaps", "SparsePattern"]
+
+
+class SparsePattern:
+    """A CSR sparsity pattern -- shape, row pointers, column indices -- that operands are checked against.
+
+    The check is an exact comparison of the stored index arrays, so it accepts only an operand storing
+    the same entries in the same order: anything else would put each value in the wrong slot. It
+    remembers the last index arrays it accepted, so an operand built on those very arrays (the output of
+    another map, which shares its pattern's arrays) passes by identity without comparing again.
+    """
+
+    def __init__(self, matrix: sp.spmatrix) -> None:
+        matrix = sp.csr_matrix(matrix)
+        self.shape: tuple[int, int] = matrix.shape
+        # Copies: an operand sorted in place later must not change the pattern held here.
+        self.indptr = matrix.indptr.copy()
+        self.indices = matrix.indices.copy()
+        # Weak references: remembering an operand's arrays must not keep them alive.
+        self._accepted = (weakref.ref(self.indptr), weakref.ref(self.indices))
+
+    @property
+    def nnz(self) -> int:
+        """Stored entries."""
+        return int(self.indices.size)
+
+    def matches(self, matrix: sp.csr_matrix) -> bool:
+        """Whether ``matrix`` stores exactly this pattern's entries, in this pattern's order."""
+        if matrix.shape != self.shape or matrix.nnz != self.nnz:
+            return False
+        if matrix.indptr is self._accepted[0]() and matrix.indices is self._accepted[1]():
+            return True
+        if np.array_equal(matrix.indptr, self.indptr) and np.array_equal(
+            matrix.indices, self.indices
+        ):
+            self._accepted = (weakref.ref(matrix.indptr), weakref.ref(matrix.indices))
+            return True
+        return False
+
+    def csr(self, values: np.ndarray) -> sp.csr_matrix:
+        """``values`` on this pattern, sharing its index arrays (so a later check passes by identity)."""
+        return sp.csr_matrix((values, self.indices, self.indptr), shape=self.shape, copy=False)
+
+    def numbered(self) -> sp.csr_matrix:
+        """This pattern with entry ``j`` holding the value ``j + 1``: a sparse operation over it reports,
+        in each output slot, which entry landed there (``0`` where none did).
+
+        A fresh matrix on its own index arrays each call, so an operation that sorts it in place leaves
+        the pattern held here untouched. Not kept: it is needed only while a map is built, and held it
+        would cost more than the map.
+        """
+        return sp.csr_matrix(
+            (np.arange(1, self.nnz + 1, dtype=np.float64), self.indices.copy(), self.indptr.copy()),
+            shape=self.shape,
+        )
+
+
+class EntryMap:
+    """``out = bincount(target, weight * values[source], n_out)``: a fixed linear map of stored values.
+
+    Built once from the pattern of the operand it reads (:class:`SparsePattern`); :meth:`apply` refuses
+    an operand whose pattern differs, rather than putting its values in the wrong slots. ``landing`` is
+    the CSR pattern of the output when the output is a sparse matrix (:meth:`csr`); a caller packing the
+    output into another layout reads the flat values from :meth:`apply`.
+
+    Two builders cover what a refit does. :meth:`gathering` turns any sparse operation that only moves
+    entries -- a sub-block, a transpose, a padded-row packing -- into its map by running the operation
+    once on a numbered copy of the pattern. :meth:`product` gives the map ``M -> L M R`` for fixed ``L``
+    and ``R``, landing on the structural pattern of the product (every entry the operands' patterns can
+    produce, so none is dropped for coming out exactly zero).
+
+    Attributes
+    ----------
+    pattern : SparsePattern
+        The pattern of the operand the map reads.
+    source, target : np.ndarray of int, shape ``(n_terms,)``
+        For each term, the operand entry it reads and the output slot it adds into.
+    weight : np.ndarray or None, shape ``(n_terms,)``
+        Each term's factor; ``None`` when every factor is one (a gather, or a product through 0/1
+        transfers).
+    distinct : bool
+        The builder's statement that no two terms share a target, so an unweighted map is applied as an
+        indexed copy rather than a sum. Not checked: a map stating it falsely keeps only one term per slot.
+    n_out : int
+        Output slots; a slot no term reaches is zero.
+    landing : SparsePattern or None
+        The output's CSR pattern, ``n_out`` entries, when the output is a sparse matrix.
+    """
+
+    def __init__(
+        self,
+        pattern: SparsePattern,
+        source: np.ndarray,
+        target: np.ndarray,
+        n_out: int,
+        *,
+        weight: np.ndarray | None = None,
+        landing: SparsePattern | None = None,
+        distinct: bool = False,
+    ) -> None:
+        if landing is not None and landing.nnz != n_out:
+            raise ValueError(
+                f"a landing pattern of {landing.nnz} entries cannot hold {n_out} slots."
+            )
+        # The smallest index type that holds every entry and slot: a map is held for a session, and its
+        # index arrays are most of its memory.
+        index = np.int32 if max(pattern.nnz, int(n_out)) < np.iinfo(np.int32).max else np.int64
+        self.pattern = pattern
+        self._source = np.asarray(source, dtype=index)
+        self._target = np.asarray(target, dtype=index)
+        if weight is not None and np.all(np.asarray(weight) == 1.0):
+            weight = None  # a product through 0/1 transfers sums the entries unweighted
+        self.weight = None if weight is None else np.asarray(weight, dtype=np.float64)
+        self.n_out = int(n_out)
+        self.landing = landing
+        self.distinct = distinct
+        # A gather whose terms reach distinct slots is a plain indexed copy, and one that fills every
+        # slot is a single gather in slot order; anything else sums.
+        self._scatter = distinct and self.weight is None
+        self._slot_ordered = self._scatter and self._target.size == self.n_out
+        if self._slot_ordered:
+            # Every slot filled once: held as the source of each slot in order, the targets dropped.
+            self._source = self._source[np.argsort(self._target, kind="stable")]
+            self._target = None
+        # A map reading every entry once, in storage order, holds no source either.
+        if self._source.size == pattern.nnz and np.array_equal(
+            self._source, np.arange(pattern.nnz, dtype=index)
+        ):
+            self._source = None
+
+    @classmethod
+    def gathering(
+        cls,
+        pattern: SparsePattern,
+        operation: Callable[[sp.csr_matrix], sp.spmatrix | np.ndarray],
+    ) -> EntryMap:
+        """The map of a sparse operation that only moves entries (never combines two into one slot).
+
+        Parameters
+        ----------
+        pattern : SparsePattern
+            The pattern of the operand the operation will be applied to.
+        operation : callable
+            ``matrix -> result``, a sparse matrix (the map then lands on its pattern) or a dense array
+            (the map fills it flat, in C order). It must keep every value it is given unchanged and add
+            none together -- slicing, transposing, sampling and padding all do. A slot holding no entry
+            stays zero.
+
+        Returns
+        -------
+        EntryMap
+            The map, built from one run of ``operation`` on the numbered pattern.
+        """
+        result = operation(pattern.numbered())
+        if sp.issparse(result):
+            result = sp.csr_matrix(result)
+            return cls.placing(pattern, result.data, landing=SparsePattern(result))
+        return cls.placing(pattern, result)
+
+    @classmethod
+    def placing(
+        cls, pattern: SparsePattern, numbers: np.ndarray, landing: SparsePattern | None = None
+    ) -> EntryMap:
+        """The gather that fills each output slot with the operand entry ``numbers`` names there.
+
+        ``numbers`` is the output of an entry-moving operation run over :meth:`SparsePattern.numbered`:
+        ``j + 1`` where entry ``j`` landed, ``0`` where none did. :meth:`gathering` runs the operation;
+        a caller that runs it anyway for another output of the same pass passes its result here.
+
+        Parameters
+        ----------
+        pattern : SparsePattern
+            The operand's pattern.
+        numbers : np.ndarray
+            The numbered output, any shape; read flat, in C order.
+        landing : SparsePattern, optional
+            The output's CSR pattern, when the output is a sparse matrix.
+
+        Returns
+        -------
+        EntryMap
+            The gather.
+
+        Raises
+        ------
+        ValueError
+            If ``numbers`` is not a set of entry numbers -- the operation combined or rescaled entries.
+        """
+        numbers = np.asarray(numbers, dtype=np.float64).ravel()
+        if np.any(numbers != np.round(numbers)) or np.any((numbers < 0) | (numbers > pattern.nnz)):
+            raise ValueError(
+                "the operation combined or rescaled entries; only an operation that moves entries "
+                "unchanged has a gathering map."
+            )
+        filled = np.flatnonzero(numbers)
+        return cls(
+            pattern,
+            numbers[filled].astype(np.int64) - 1,
+            filled,
+            numbers.size,
+            landing=landing,
+            distinct=True,
+        )
+
+    @classmethod
+    def product(
+        cls, left: sp.spmatrix | None, pattern: SparsePattern, right: sp.spmatrix | None
+    ) -> EntryMap:
+        """The map ``M -> L M R`` for fixed ``L`` and ``R``, onto the product's structural pattern.
+
+        A term per triple of stored entries ``(L_ki, M_ij, R_jl)``, weighted ``L_ki R_jl`` and summed into
+        ``(k, l)``. The landing pattern is every ``(k, l)`` such a triple reaches, sorted -- the pattern of
+        the same product taken over all-ones operands, so it depends on the three patterns alone and an
+        exactly-zero result keeps its slot.
+
+        Parameters
+        ----------
+        left : scipy.sparse matrix or None
+            ``L``, shape ``(n_rows, M.shape[0])``; ``None`` for the identity.
+        pattern : SparsePattern
+            The pattern of ``M``, the operand whose values vary.
+        right : scipy.sparse matrix or None
+            ``R``, shape ``(M.shape[1], n_columns)``; ``None`` for the identity.
+
+        Returns
+        -------
+        EntryMap
+            The map, landing on the product's structural pattern.
+        """
+        n_rows_m, n_columns_m = pattern.shape
+        entry_row = np.repeat(np.arange(n_rows_m), np.diff(pattern.indptr))
+        source = np.arange(pattern.nnz)
+        row, column, weight = entry_row, pattern.indices.astype(np.int64), np.ones(pattern.nnz)
+        n_rows, n_columns = n_rows_m, n_columns_m
+        if left is not None:
+            left = sp.coo_matrix(left)
+            if left.shape[1] != n_rows_m:
+                raise ValueError(f"L is {left.shape}, but M has {n_rows_m} rows.")
+            # Pair each term with every L entry in the column its row names. The terms are the long
+            # list, so they go first: the pairing sorts only its second list.
+            index_t, index_l = _pairs(row, left.col, n_rows_m)
+            source, column = source[index_t], column[index_t]
+            row, weight = left.row[index_l].astype(np.int64), weight[index_t] * left.data[index_l]
+            n_rows = left.shape[0]
+        if right is not None:
+            right = sp.coo_matrix(right)
+            if right.shape[0] != n_columns_m:
+                raise ValueError(f"R is {right.shape}, but M has {n_columns_m} columns.")
+            index_t, index_r = _pairs(column, right.row, n_columns_m)
+            source, row = source[index_t], row[index_t]
+            column, weight = (
+                right.col[index_r].astype(np.int64),
+                weight[index_t] * right.data[index_r],
+            )
+            n_columns = right.shape[1]
+        keys, target = np.unique(row * n_columns + column, return_inverse=True)
+        counts = np.bincount(keys // n_columns, minlength=n_rows)
+        indptr = np.concatenate([[0], np.cumsum(counts)])
+        landing = SparsePattern(
+            sp.csr_matrix(
+                (np.zeros(keys.size), (keys % n_columns).astype(np.int32), indptr),
+                shape=(n_rows, n_columns),
+            )
+        )
+        return cls(pattern, source, target, keys.size, weight=weight, landing=landing)
+
+    @property
+    def source(self) -> np.ndarray:
+        """Each term's operand entry, shape ``(n_terms,)``."""
+        return np.arange(self.pattern.nnz) if self._source is None else self._source
+
+    @property
+    def target(self) -> np.ndarray:
+        """Each term's output slot, shape ``(n_terms,)``."""
+        return np.arange(self.n_out) if self._target is None else self._target
+
+    def apply(self, matrix: sp.spmatrix) -> np.ndarray:
+        """The output values for ``matrix``, flat, shape ``(n_out,)``.
+
+        Raises
+        ------
+        ValueError
+            If ``matrix`` does not store exactly the pattern this map was built for.
+        """
+        matrix = sp.csr_matrix(matrix)
+        if not self.pattern.matches(matrix):
+            raise ValueError(
+                f"this map was built for a {self.pattern.shape} operator storing {self.pattern.nnz} "
+                f"entries; a {matrix.shape} operator storing {matrix.nnz} entries in another pattern "
+                "would put its values in the wrong slots. Build a map for the new structure."
+            )
+        values = matrix.data.copy() if self._source is None else matrix.data[self._source]
+        if self._slot_ordered:
+            return values
+        if self._scatter:
+            out = np.zeros(self.n_out, dtype=np.float64)
+            out[self._target] = values
+            return out
+        if self.weight is not None:
+            values = values * self.weight
+        return np.bincount(self._target, weights=values, minlength=self.n_out)
+
+    def csr(self, matrix: sp.spmatrix) -> sp.csr_matrix:
+        """The output as a CSR matrix on :attr:`landing`, sharing its index arrays."""
+        if self.landing is None:
+            raise ValueError("this map's output is not a sparse matrix; read it with `apply`.")
+        return self.landing.csr(self.apply(matrix))
+
+
+class EntryMaps:
+    """The entry maps one owner reuses across refits, one per call site, rebuilt when an operand moves.
+
+    Each ``slot`` names a call site (``("galerkin", 0)``). A map is reused while its operand still stores
+    the pattern it was built for and any fixed operands it was built from are unchanged in pattern and
+    value; otherwise it is rebuilt and replaced. Patterns are shared between the maps reading one
+    operand, so a pattern compared once in a refit passes by identity at every other map that reads it.
+    A host object, never a leaf of a traced hierarchy.
+    """
+
+    def __init__(self) -> None:
+        self._maps: dict[Hashable, tuple[tuple, object]] = {}
+        self._patterns: list[SparsePattern] = []
+
+    def pattern_of(self, matrix: sp.csr_matrix) -> SparsePattern:
+        """The held pattern ``matrix`` stores, or a new one held from now on."""
+        for pattern in self._patterns:
+            if pattern.matches(matrix):
+                return pattern
+        pattern = SparsePattern(matrix)
+        # Bounded: a long-lived owner whose operands keep moving holds only the recent patterns.
+        self._patterns = [*self._patterns[-15:], pattern]
+        return pattern
+
+    def held(
+        self,
+        slot: Hashable,
+        matrix: sp.csr_matrix,
+        build: Callable[[SparsePattern], object],
+        fixed: tuple[sp.spmatrix | None, ...] = (),
+    ):
+        """What ``build`` made for this slot, reused while ``matrix``'s pattern and ``fixed`` hold.
+
+        Parameters
+        ----------
+        slot : hashable
+            The call site.
+        matrix : scipy.sparse.csr_matrix
+            The operand whose values vary.
+        build : callable
+            ``pattern -> object`` holding one or more maps over ``matrix``'s pattern.
+        fixed : tuple of scipy.sparse matrix or None
+            Operands whose values the maps bake in; a change to any of them rebuilds.
+
+        Returns
+        -------
+        object
+            The held or newly built object.
+        """
+        key = tuple(_fixed_key(operand) for operand in fixed)
+        entry = self._maps.get(slot)
+        if entry is not None and entry[0][0].matches(matrix) and _keys_equal(entry[0][1], key):
+            return entry[1]
+        pattern = self.pattern_of(matrix)
+        built = build(pattern)
+        self._maps[slot] = ((pattern, key), built)
+        return built
+
+    def csr(
+        self,
+        slot: Hashable,
+        matrix: sp.csr_matrix,
+        operation: Callable[[sp.csr_matrix], sp.spmatrix],
+    ) -> sp.csr_matrix:
+        """``operation(matrix)`` for an operation that only moves entries, by its held map."""
+        return self.held(slot, matrix, lambda p: EntryMap.gathering(p, operation)).csr(matrix)
+
+    def product(
+        self,
+        slot: Hashable,
+        left: sp.spmatrix | None,
+        matrix: sp.csr_matrix,
+        right: sp.spmatrix | None,
+    ) -> sp.csr_matrix:
+        """``left @ matrix @ right`` on its structural pattern, by its held map."""
+        held = self.held(
+            slot, matrix, lambda p: EntryMap.product(left, p, right), fixed=(left, right)
+        )
+        return held.csr(matrix)
+
+
+def _pairs(terms: np.ndarray, fixed: np.ndarray, n_groups: int) -> tuple[np.ndarray, np.ndarray]:
+    """Every pairing of a term with a fixed-operand entry of the same group (``pairs_within_groups``).
+
+    A prolongation built from aggregates has at most one entry in each fine row, so most products pair
+    each term with at most one entry; then the pairing is a lookup of that entry, done here without the
+    general expansion.
+    """
+    counts = np.bincount(fixed, minlength=n_groups)
+    if counts.max(initial=0) > 1:
+        return pairs_within_groups(terms, fixed, n_groups)
+    entry_of_group = np.full(n_groups, -1, dtype=np.int64)
+    entry_of_group[fixed] = np.arange(fixed.size)
+    index_fixed = entry_of_group[terms]
+    index_terms = np.flatnonzero(index_fixed >= 0)
+    return index_terms, index_fixed[index_terms]
+
+
+def _fixed_key(operand: sp.spmatrix | None):
+    if operand is None:
+        return None
+    operand = sp.csr_matrix(operand)
+    return (operand.shape, operand.indptr.copy(), operand.indices.copy(), operand.data.copy())
+
+
+def _keys_equal(held: tuple, given: tuple) -> bool:
+    if len(held) != len(given):
+        return False
+    for a, b in zip(held, given, strict=True):
+        if a is None or b is None:
+            if a is not b:
+                return False
+            continue
+        if a[0] != b[0] or not all(np.array_equal(x, y) for x, y in zip(a[1:], b[1:], strict=True)):
+            return False
+    return True

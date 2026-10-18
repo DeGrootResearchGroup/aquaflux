@@ -265,6 +265,12 @@ class HierarchyBlockInverse:
         either the level sizes are compared against the previous build so a retrace is reported with a
         reason attached rather than being silent.
 
+        **Where a rebuild would reproduce the coarsening exactly, this refits instead** -- at no strength
+        threshold, with an unsmoothed prolongation and no shape ladder (:meth:`_coarsening_reads_values`).
+        The aggregates and the prolongation are then functions of the pattern alone, so re-aggregating
+        returns the hierarchy already held, and the refit re-derives the same values without the
+        aggregation.
+
         Parameters
         ----------
         block : scipy.sparse matrix
@@ -281,7 +287,7 @@ class HierarchyBlockInverse:
             raise ValueError(
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
             )
-        if self._frozen_coarsening:
+        if self._frozen_coarsening or not self._coarsening_reads_values():
             self._hierarchy = self._hierarchy.refit(matrix, patterns=self._patterns)
             self._after_coarsening()
             return
@@ -293,6 +299,22 @@ class HierarchyBlockInverse:
                 f"      refresh moved the coarsening: levels {before} -> {after} "
                 f"(the jitted cycle retraces; the strength threshold reads values)",
             )
+
+    def _coarsening_reads_values(self) -> bool:
+        """Whether rebuilding at a new operator of the same pattern could change the coarsening.
+
+        It cannot when nothing that builds the transfers reads a value: no strength threshold (the
+        aggregation then sees the pattern alone, :func:`~aquaflux.precondition.multigrid._aggregation_edges`),
+        an unsmoothed prolongation (the aggregates' indicator, not a relaxation of the operator) and no
+        shape ladder (a budgeted build pads, which a refit does not reproduce). Equilibration rescales
+        values only, so it does not enter.
+        """
+        settings = self._build_settings
+        return (
+            settings["strength_threshold"] > 0.0
+            or settings.get("prolongation_smoothing") != "none"
+            or self._shape_headroom is not None
+        )
 
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""

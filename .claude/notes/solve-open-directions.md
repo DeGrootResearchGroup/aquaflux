@@ -61,7 +61,7 @@ frames meets (compilation first, so a refit's first compile counts as compilatio
 | the compiled step program (GMRES, preconditioner applies, JVPs) | 106 | 32 % | 110 | 38 % | 417 s, 46 % |
 | compilation and tracing, all phases | 115 | 35 % | 73 | 25 % | 212 s, 24 % |
 | refit: coloured probe (~1.5 s per refit) | 42 | 13 % | 41 | 14 % | 95 s, 11 % |
-| refit: hierarchy refactor (host) and other build, the first fit included | 48 | 14 % | 49 | 17 % | 56 s, 6 % |
+| refit: hierarchy refactor (host) and other build, the first fit included (predates the entry maps, below) | 48 | 14 % | 49 | 17 % | 56 s, 6 % |
 | the step's row-scaled measure rebuilt from each step's state | 2 | 1 % | 2 | 1 % | (not a row) |
 | march-log field extraction | 0 | 0 % | 0 | 0 % | 35 s, 4 %, op by op |
 | the stopping test's residual | 0 | 0 % | 0 | 0 % | 32 s, 4 %, op by op |
@@ -106,6 +106,13 @@ split's cost fell by ~3.8x (padded-row operators, #721, and float32, #732) while
 against a 14-18 ms JVP. ⚠️ The composite program costs ~15 ms more than its two parts summed and keeps
 faulting with the thresholds raised, so `apply / composite` reads 59-64 %. Which of the two figures the
 step program sees is unmeasured; the step program's own matvec has not been profiled.
+
+**The refactor after the entry maps (2026-10-17, `solve-amg-multigrid-log.md` "Refit by entry maps").**
+Not re-profiled by bucket. The march log's `pc` lines, same case and counts, on a different 4-core
+container from the table's (base `main` 9efc5759): refactor 22.7 / 21.4 s on `main` (two warm runs)
+against 14.8 s with the maps as committed (15.2-17.0 s in two runs of an earlier version), the first
+refit paying ~1.5-2.5 s more to build them and every later one ~0.5-0.7 s against ~0.9-1.1 s, for
+~0.2 GB more host memory. The refactor row above predates this.
 
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is

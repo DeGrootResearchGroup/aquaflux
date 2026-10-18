@@ -216,7 +216,7 @@ def traced_field_split(inverse: FieldSplitInverse, precision: str = "float64") -
     split = TracedFieldSplit(
         leading_cycle=inverse.leading.traced_cycle(),
         trailing_cycle=inverse.trailing.traced_cycle(),
-        coupling=_PaddedRowOperator.from_scipy(inverse.coupling),
+        coupling=inverse.padded_coupling(),
         groups=inverse.groups,
     )
     return split if precision == "float64" else split.in_precision(precision)

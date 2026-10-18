@@ -49,12 +49,15 @@ import numpy as np
 import scipy.sparse as sp
 
 from ..solve import FieldLayout
+from .entry_map import EntryMaps
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import FrozenInverse, release, require_refactorable
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
+    _padded_operator,
+    _PaddedRowOperator,
     air_multigrid_cycles,
     build_air_hierarchy,
     convection_multigrid_cycles,
@@ -205,7 +208,7 @@ class FieldGroups:
         return slice(self.n_leading_dofs, self.n_dofs)
 
     def blocks(
-        self, matrix: sp.spmatrix
+        self, matrix: sp.spmatrix, maps: EntryMaps | None = None
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, sp.csr_matrix, sp.csr_matrix]:
         """The operator's four blocks under this partition.
 
@@ -213,6 +216,9 @@ class FieldGroups:
         ----------
         matrix : scipy.sparse matrix
             The assembled field-major operator, shape ``(n_dofs, n_dofs)``.
+        maps : EntryMaps, optional
+            Where the gather of each block out of ``matrix`` is kept, for an owner that cuts blocks out
+            of operators of one pattern again and again (a refit). ``None`` slices afresh.
 
         Returns
         -------
@@ -231,12 +237,13 @@ class FieldGroups:
                 f"matrix is {matrix.shape}, but this partition describes "
                 f"{(self.n_dofs, self.n_dofs)} ({self.n_fields} fields over {self.n_cells} cells)."
             )
-        lead, trail = self.leading, self.trailing
-        return (
-            matrix[lead, :][:, lead],
-            matrix[lead, :][:, trail],
-            matrix[trail, :][:, lead],
-            matrix[trail, :][:, trail],
+        cuts = ((self.leading, self.leading), (self.leading, self.trailing))
+        cuts += ((self.trailing, self.leading), (self.trailing, self.trailing))
+        if maps is None:
+            return tuple(matrix[rows, columns] for rows, columns in cuts)
+        return tuple(
+            maps.csr(("block", position), matrix, lambda m, r=rows, c=columns: m[r, c])
+            for position, (rows, columns) in enumerate(cuts)
         )
 
     def active_rows(self) -> np.ndarray:
@@ -329,6 +336,8 @@ class FieldSplitInverse:
         self._trailing = trailing
         self._set_coupling(coupling)
         self._groups = groups
+        # The gathers that cut a refit's operator into blocks, kept between refits.
+        self._maps = EntryMaps()
 
     def _set_coupling(self, coupling: sp.spmatrix) -> None:
         """Store the retained coupling block, discarding any transpose cached for the previous one."""
@@ -369,6 +378,14 @@ class FieldSplitInverse:
     def coupling(self) -> sp.csr_matrix:
         """The retained trailing-by-leading block, shape ``(n_trailing_dofs, n_leading_dofs)``."""
         return self._coupling
+
+    def padded_coupling(self) -> _PaddedRowOperator:
+        """The retained coupling in padded-row form, for a split composed on device.
+
+        Its packing is a fixed gather on the coupling's pattern, held between refits with the gathers
+        that cut the blocks, so a refit's re-composition moves only values.
+        """
+        return _padded_operator(self._coupling, maps=self._maps, slot="coupling")
 
     @property
     def n_dofs(self) -> int:
@@ -428,7 +445,7 @@ class FieldSplitInverse:
             If a block inverse offers no ``refactor_block`` (an injected inverse need not be refreshable
             at all). Both are checked before either is re-fitted, so a refusal leaves the split as it was.
         """
-        blocks = self._groups.blocks(block)
+        blocks = self._groups.blocks(block, self._maps)
         leading = require_refactorable(self._leading, "this field split's leading block")
         trailing = require_refactorable(self._trailing, "this field split's trailing block")
         leading.refactor_block(blocks[0])

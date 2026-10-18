@@ -1836,3 +1836,64 @@ a re-fitted factorization (the dual-time loop's mid-step refresh until 2026-10-1
   preconditioner) still use two levels; the deep-and-untresholded damped-Jacobi build that motivated this
   bullet was dominated on both ends (worse than two-level shallow, worse than lAIR deep) and was the sole
   source of the non-contractive-smoother defect.
+
+### Refit by entry maps (2026-10-17)
+
+**Configuration.** pitzDaily `case.yaml` as shipped (leading `SimpleSmoothed`, strength 0.25,
+`frozen_coarsening: true`, `prolongation_smoothing` unset = `"none"`; trailing `JacobiSmoothed`
+`{max_coarse: 2000, equilibrate: false}` = strength 0, `"none"`, not frozen; `precision: float32`), base
+`main` 9efc5759, Linux x86_64 container, 4 cores, 15 GB, Python 3.13.16, jax 0.11.2, scipy 1.18.1.
+Matrices: the shifted field-major Jacobian of the first fit and of the first three refits of a shipped
+march, captured by `validation/pitzdaily_openfoam/refit_profile.py` (`PITZ_REFIT_MODE=capture`; 61125
+dofs, 5 658 485 stored entries); the split refitted to them standalone (`PITZ_REFIT_MODE=profile`).
+
+**Settled from the code first.** Both shipped blocks have an unsmoothed `P` (0/1 aggregate indicator), so
+each Galerkin product is a fixed linear map of the fine values; the SIMPLE pieces `D⁻¹G` and the Schur are
+bilinear. The trailing block was not frozen and re-ran its whole aggregation at every refit, although at
+strength 0 the aggregation reads only the pattern.
+
+**Where one refit spent its time before** (refit-1, cProfile, cumulative per part, 0.95 s profiled;
+0.82-0.87 s unprofiled, best/median of 3): padded-row packing (`from_scipy`/`_padded_rows`, both layouts)
+0.31 s; the trailing rebuild 0.21 s (aggregation and its products; `_mis_aggregate` itself 0.01 s);
+SIMPLE pieces 0.29 s (of which cuts ~0.05, products ~0.05, packing ~0.1); `FieldGroups.blocks` slicing
+0.10 s; Galerkin products 0.06 s; spectral estimates 0.06 s; cell-block extraction and inversion 0.07 s
+(each level's blocks extracted and inverted twice); coarse LU 0.02 s. **The products were ~15 % of it;
+the index work (packing, cuts, transposes) and the redundant re-aggregation were most of it**, so the map
+was built for gathers as well as products.
+
+**After** (same matrices): refit-1 0.62 s profiled (map applies 0.20 s in all, SIMPLE pieces 0.22 s,
+spectral 0.05 s, coarse LU 0.04 s, `blocks` 0.06 s); unprofiled 0.51-0.58 s best, 0.55-0.69 s median over 5.
+First refit (builds every map): 2.7-3.1 s standalone against ~1.0-1.2 s. Hierarchies equal the product
+refit's to at most ~3e-14 of each leaf's largest entry (77/112 leading and 16/22 trailing leaves
+bit-identical); coupling and all gathers bit-identical; every array shape equal (no recompile).
+`traced_field_split(…, "float32")` per refit 0.12 s -> 0.07 s (the coupling packing, 1.79M entries).
+
+**March** (`validation/run_case.sh validation/pitzdaily_openfoam/compare.py`, warm cache, one at a time,
+the step table identical in every column but `t(s)` across all four, 21 steps / 106 restart cycles /
+final R 2.618e-06 / `x_r/h` 8.0686; refits 21, 13 `full` + 8 `cost`; `pc` sums from the log's own lines):
+
+| run | refactor s | probe s | pc total s | solve wall s | refactor per refit |
+|---|---|---|---|---|---|
+| main, warm 1 | 22.7 | 26.2 | 50.5 | 206 | 1.7, then 0.9-1.6 |
+| main, warm 2 | 21.4 | 25.3 | 48.3 | 195 | 1.5, then 0.9-1.4 |
+| entry maps (int64 maps), 1 | 17.0 | 26.7 | 44.7 | 199 | 4.0, then 0.5-0.8 |
+| entry maps (int64 maps), 2 | 15.2 | 24.5 | 41.3 | 187 | 3.7, then 0.5-0.8 |
+| entry maps, as committed | 14.8 | 23.5 | 40.1 | 178 | 2.9, then 0.5-0.7 |
+
+(The cold first run on `main` in this container: refactor 23.9 s, solve 227 s.) Refactor −6 to −8 s
+(−30 %), the first refit +1.4-2.3 s for the maps. Solve wall within this container's 5-10 % spread (and
+it drifted down across the session on both arms); not claimed.
+
+**Memory.** As first written the held maps were 836 MB on pitzDaily (int64 source, target and slot
+order, every numbered pattern kept, all-ones weights stored); trimmed to int32, no in-order arrays, no
+unit weights, no kept numbering: 227 MB of maps, held caches 62 MB on `main` against 276 MB, peak RSS of
+the standalone harness (fit plus three refits) 1.20 GB against 1.41 GB. Scales with stored entries.
+
+**Gates on this change.** `tools/fastgate.sh --changed`: 1324 passed, 1 worker lost in
+`test_hybrid_initialize.py` (`node down: Not properly terminated`; the file passes alone, 6 passed in
+57 s). `tools/fastgate.sh slow --changed`: 41 passed (48 min). Both on the int64 version; the trimmed one
+re-ran the 17 directly affected files (260 passed) and their 8 slow tests.
+**Left on the table:** the map build (the Galerkin pairing and the numbered cuts of the 5.7M-entry
+operator); the bilinear SIMPLE products and the `d_inv @ a` product of each spectral estimate (unread by
+both shipped smoothers: neither SIMPLE nor undamped Jacobi reads `lam_max`); the readback of each leading
+level (`to_scipy`) in `derive_extras`. bfs3d not measured (its mesh is not on these containers).

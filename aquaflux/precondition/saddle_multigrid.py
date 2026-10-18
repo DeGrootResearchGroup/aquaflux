@@ -42,6 +42,7 @@ from .multigrid import (
     StructuralPatterns,
     _ones,
     _operator_matvec,
+    _padded_operator,
     _PaddedRowOperator,
     _smoothed_ops,
     _structured,
@@ -164,8 +165,9 @@ def _simple_pieces(
     closures, none of which a coarse level has.
 
     ``patterns``, when given, keeps the structural patterns of ``D⁻¹G`` and the Schur complement
-    between calls on a level whose blocks store the same entries (:class:`StructuralPatterns`), so a
-    re-fit on a frozen coarsening computes each once.
+    between calls on a level whose blocks store the same entries (:class:`StructuralPatterns`), with the
+    gathers that cut the four blocks out of ``a`` and the padded-row packings of the pieces, so a re-fit
+    on a frozen coarsening computes each once.
 
     Returns
     -------
@@ -179,16 +181,28 @@ def _simple_pieces(
     """
     n_cells = a.shape[0] // block_size
     nv = (block_size - 1) * n_cells
+    velocity, pressure = slice(None, nv), slice(nv, None)
+
+    def block(name: str, rows: slice, columns: slice) -> sp.csr_matrix:
+        if patterns is None:
+            return a[rows, columns].tocsr()
+        return patterns.maps.csr((name, a.shape[0]), a, lambda m: m[rows, columns])
+
+    def padded(name: str, matrix: sp.spmatrix) -> _PaddedRowOperator:
+        maps = None if patterns is None else patterns.maps
+        return _padded_operator(matrix, maps=maps, slot=(name, a.shape[0]))
+
+    f_block = block("velocity", velocity, velocity)
     # The approximate velocity inverse the whole relaxation is built on. Jacobi (`1 / F_ii`) is what
     # this smoother used when it amplified; the Frobenius-optimal diagonal is the same object with a
     # derived per-row relaxation, and an under-relaxed sweep is exactly what an amplifying one is
     # missing -- so the change is qualitative rather than a matter of degree: under Jacobi more sweeps
     # make the residual worse, under this one they make it better.
     f_inverse = _diagonal_approximate_inverse(
-        a[:nv, :nv].tocsr(), frobenius, row_sum=simplec, label=" (velocity)"
+        f_block, frobenius, row_sum=simplec, label=" (velocity)"
     )
-    g_block = a[:nv, nv:].tocsr()
-    d_block = a[nv:, :nv].tocsr()
+    g_block = block("gradient", velocity, pressure)
+    d_block = block("divergence", pressure, velocity)
     if block_splitting and simplec:
         # The block inverse overrides the diagonal entirely, so a SIMPLEC diagonal built alongside it is
         # computed, reported, and never applied -- an arm whose name claims a splitting it does not run.
@@ -198,10 +212,8 @@ def _simple_pieces(
             "choose one."
         )
     if block_splitting:
-        f_inverse_matrix = block_approximate_inverse(
-            a[:nv, :nv].tocsr(), n_cells, block_size - 1, frobenius
-        )
-        block_inverse = _PaddedRowOperator.from_scipy(f_inverse_matrix)
+        f_inverse_matrix = block_approximate_inverse(f_block, n_cells, block_size - 1, frobenius)
+        block_inverse = padded("velocity inverse", f_inverse_matrix)
     else:
         # An explicit diagonal rather than `sp.diags`, whose conversion to compressed rows drops a zero
         # entry and would make the products below value-dependent in pattern.
@@ -219,7 +231,7 @@ def _simple_pieces(
         patterns,
         ("dg", a.shape[0]),
     )
-    c_block = a[nv:, nv:]
+    c_block = block("pressure", pressure, pressure)
     schur = _structured(
         c_block - d_block @ dg,
         (c_block, d_block, dg),
@@ -256,9 +268,9 @@ def _simple_pieces(
             f_block_inverse=block_inverse,
             n_velocity=nv,
             f_diagonal_inverse=jnp.asarray(f_inverse),
-            dg=_PaddedRowOperator.from_scipy(dg),
-            divergence=_PaddedRowOperator.from_scipy(d_block),
-            schur=_PaddedRowOperator.from_scipy(schur),
+            dg=padded("dg", dg),
+            divergence=padded("divergence", d_block),
+            schur=padded("schur", schur),
             schur_diagonal_inverse=jnp.asarray(schur_inverse),
         ),
         schur,
