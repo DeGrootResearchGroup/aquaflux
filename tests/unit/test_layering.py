@@ -1,4 +1,4 @@
-"""The package's layering: what may import what, and how large a physics module may grow.
+"""The package's layering: what may import what, and how large a module may grow.
 
 Two failures this pins, both of which happened. The staged solve driver, the preconditioner sessions, the
 shifted-step tail and the residual measures were written for the k--omega SST solve, inside
@@ -6,6 +6,8 @@ shifted-step tail and the residual measures were written for the k--omega SST so
 them, so it could not be marched by the machinery a turbulent one is, and a control experiment that
 asked whether a solver behaviour needs turbulence had nothing to run. The file reached ~4000 lines
 before anyone moved a line of it out, because no check looked at how large a physics module had become.
+The generic packages had the same blind spot later: ``schemes/gradient.py`` and
+``precondition/multigrid.py`` each passed 3000 lines with nothing measuring that they were growing.
 
 * :func:`test_a_generic_package_imports_nothing_outside_itself` -- ``solve/`` is the residual-agnostic
   layer. It holds no mesh, field or physics import, which is what lets every residual run on it.
@@ -14,8 +16,9 @@ before anyone moved a line of it out, because no check looked at how large a phy
   radiation model's shadows and lived inside it, and a solid body names no physics, so a computer-aided
   design (CAD) reader or any other consumer can use them only while they import nothing from a physics
   package.
-* :func:`test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_in_it` -- a size
-  ratchet on the physics packages, with each over-size module's current size as its budget.
+* :func:`test_a_module_stays_below_the_size_at_which_misplaced_code_hides_in_it` -- a size ratchet on
+  every module of the package, physics and generic alike, with each over-size module's current size as
+  its budget.
 * :func:`test_nothing_below_the_case_layer_imports_it` -- ``case/`` is the opposite end: it composes
   every physics package into a described case, so a package it composes that imported it back would
   make the description a dependency of the thing described.
@@ -37,14 +40,16 @@ from tests.support.tools import load_tool
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
 #: Dependency-free leaf modules of the package, which any layer may import.
-NEUTRAL_LEAVES = ("morton", "ragged", "text_table", "vectors")
+NEUTRAL_LEAVES = ("morton", "ragged", "text_table", "vectors", "warn_once")
 
 #: The packages that hold a specific physical model rather than machinery. A module here that grows large
 #: is the place residual-agnostic code hides, because it was written for the first consumer.
 PHYSICS_PACKAGES = ("flow", "turbulence", "transport", "radiation")
 
-#: The size past which a physics module must justify itself. Tripping it is a prompt to ask which of the
-#: module's contents would be identical for another residual, and to move those to ``solve/``.
+#: The size past which a module must justify itself. Tripping it is a prompt to sort the module's
+#: contents, not to split it by topic: in a physics package, ask which of them would be identical for
+#: another residual and move those to ``solve/``; in a generic one, ask which of them do a different job
+#: (host-side setup beside traced code, one strategy family beside another) and give each its own module.
 LINE_LIMIT = 1500
 
 #: Modules over the limit, each with the size it may not exceed. **A ratchet, not a licence**: a budget
@@ -60,6 +65,21 @@ BUDGETS = {
     # What stays of the session and the probe are their RANS adapters (``_CoupledProblem``,
     # ``_CoupledNarrowing``) and the block-diagonal session, a preconditioner family of its own.
     "turbulence/coupled.py": 2927,
+    # Every algebraic multigrid family -- smoothed aggregation, its two-level convection variant and
+    # lAIR -- in one module: the host-side coarsening (orderings, aggregation, strength and splitting,
+    # structural patterns, Galerkin products) beside the traced levels, smoothers and cycle drivers
+    # applied under jit. That is two jobs, on either side of the build-once, apply-traced seam.
+    "precondition/multigrid.py": 3109,
+    # Several gradient-scheme families -- compact and corrected Green--Gauss, the Hessian-corrected
+    # gradient with its Hessian solves and boundary closures -- beside the machinery that solves for a
+    # gradient: the gradient and cell preconditioners, the swept and Krylov gradient solves, and the
+    # sweep-count calibration. Lowered from 3637 when the nested Hessian solve was deleted.
+    "schemes/gradient.py": 3444,
+    # The body contract and every solid in one module: the interval constraints the convex primitives
+    # are built from, the primitives, the torus with its quartic root-finding (cubic resolvent,
+    # bracketed polish) beside them, and the constructive combinations and ``Outside``. The torus pushed
+    # it over: its root-finding is numerics no other primitive uses.
+    "solids/bodies.py": 1660,
 }
 
 
@@ -135,18 +155,31 @@ def test_a_generic_package_imports_nothing_outside_itself(package: str) -> None:
     )
 
 
-def test_a_physics_module_stays_below_the_size_at_which_generic_machinery_hides_in_it() -> None:
+def test_a_module_stays_below_the_size_at_which_misplaced_code_hides_in_it() -> None:
     over = {}
-    for package in PHYSICS_PACKAGES:
-        for path in sorted((PACKAGE / package).glob("*.py")):
-            lines = len(path.read_text().splitlines())
-            if lines > LINE_LIMIT:
-                over[f"{package}/{path.name}"] = lines
+    for path in sorted(PACKAGE.rglob("*.py")):
+        lines = len(path.read_text().splitlines())
+        if lines > LINE_LIMIT:
+            over[path.relative_to(PACKAGE).as_posix()] = lines
     unbudgeted = {name: n for name, n in over.items() if name not in BUDGETS}
+    physics = sorted(name for name in unbudgeted if name.split("/")[0] in PHYSICS_PACKAGES)
+    generic = sorted(name for name in unbudgeted if name not in physics)
     assert not unbudgeted, (
-        f"{sorted(unbudgeted)} exceed {LINE_LIMIT} lines. Before splitting them by topic, ask which of "
-        "their contents would be identical for another residual (a driver, a step assembly, a measure, a "
-        "settings value): those belong in solve/, where every residual reaches them."
+        f"{sorted(unbudgeted)} exceed {LINE_LIMIT} lines. Before splitting them by topic, sort their "
+        "contents."
+        + (
+            f" In {physics}, ask which would be identical for another residual (a driver, a step "
+            "assembly, a measure, a settings value): those belong in solve/, where every residual "
+            "reaches them."
+            if physics
+            else ""
+        )
+        + (
+            f" In {generic}, ask which do a different job from the rest (host-side setup beside traced "
+            "code, one strategy family beside another): each such job belongs in a module of its own."
+            if generic
+            else ""
+        )
     )
     grown = {name: (n, BUDGETS[name]) for name, n in over.items() if n > BUDGETS[name]}
     assert not grown, f"{grown} grew past their budget; move code out instead of raising it."

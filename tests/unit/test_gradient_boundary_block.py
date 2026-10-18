@@ -32,16 +32,16 @@ from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CompactGreenGauss,
     CorrectedGreenGauss,
-    ExactCellBlock,
     GmresGradientSolve,
     GradientScheme,
-    InverseCellVolume,
     MultipleCorrectionGradient,
+    ProbedDiagonalBlock,
     SweptGradientSolve,
+    VolumeDiagonalBlock,
     boundary_gradient_block,
     contraction_rate,
 )
-from aquaflux.schemes.gradient import CellPreconditioner, InverseVolume, small_inverse
+from aquaflux.schemes.gradient import DiagonalBlock, InverseVolume, small_inverse
 from aquaflux.vectors import dot, scale
 
 from tests.support.meshes import (
@@ -65,7 +65,7 @@ class _Blind(GradientScheme):
         return self.inner._reconstruct_gradient(field, mesh, geometry, boundary_values, **kwargs)
 
 
-class _PlainVolume(CellPreconditioner):
+class _PlainVolume(DiagonalBlock):
     """``1/V`` whatever the operator holds per cell -- the preconditioner before the block existed."""
 
     def build(self, terms):
@@ -207,7 +207,7 @@ def test_tetrahedra_with_two_flux_faces_reconstruct_exactly(kind) -> None:
     [
         CompactGreenGauss(),
         CorrectedGreenGauss(),
-        CorrectedGreenGauss(preconditioner=ExactCellBlock()),
+        CorrectedGreenGauss(preconditioner=ProbedDiagonalBlock()),
         MultipleCorrectionGradient(),
     ],
     ids=["compact", "corrected", "corrected-exact-block", "multiple-correction"],
@@ -276,8 +276,8 @@ def test_both_cell_preconditioners_invert_the_boundary_block() -> None:
         result = _assembler(mesh, conditions, scheme).gradient(field)
         return float(jnp.linalg.norm(result - reference) / jnp.linalg.norm(reference))
 
-    assert one_sweep(InverseCellVolume()) < 1e-13
-    assert one_sweep(ExactCellBlock()) < 1e-13
+    assert one_sweep(VolumeDiagonalBlock()) < 1e-13
+    assert one_sweep(ProbedDiagonalBlock()) < 1e-13
     assert one_sweep(_PlainVolume()) > 1e-2
 
 
