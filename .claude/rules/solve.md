@@ -232,8 +232,10 @@ defect — fix it in the same change.
 
 - **A residual norm read outside the compiled step goes through `norm.norm_of_residual(measure,
   residual_fn, state)` — never `measure(residual_fn(state))` eagerly (binding).** It is an
-  `eqx.filter_jit` program; `newton_march` and `staged_march` read every reference, stopping and final
-  norm through it (eager, each was one dispatch per residual operation — seconds on a coupled problem).
+  `eqx.filter_jit` program returning `(norm, residual)` (the march keeps the vector for its first step);
+  `newton_march` and `staged_march` read every reference and final norm through it (eager, each was one
+  dispatch per residual operation — seconds on a coupled problem). A norm of a vector already in hand
+  (the march's per-step stopping norm) is `norm.norm_of(measure, residual)`, compiled likewise.
   It inherits `_march_step`'s obligations: a residual with stable identity and a measure that changes
   only in array values (a fresh `lambda` measure recompiles every call). ⚠️ A test counting a march's
   traces as its step's compiles must warm this program first (`_warm_the_march_norm` in

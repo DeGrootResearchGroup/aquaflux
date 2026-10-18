@@ -506,7 +506,7 @@ def backtracking_line_search(
 
 
 def _damped_newton_step(
-    residual_fn, phi, solver, preconditioner, line_search_steps, norm=jnp.linalg.norm
+    residual_fn, phi, residual, solver, preconditioner, line_search_steps, norm=jnp.linalg.norm
 ):
     """One Newton step with a monotone backtracking line search on the residual norm.
 
@@ -517,7 +517,9 @@ def _damped_newton_step(
     is kept unchanged whenever it already reduces the residual, so a well-behaved iterate (near the
     root, or a linear residual) is unaffected. The search only reshapes the forward path; the IFT
     adjoint depends solely on the converged state, so it stays gradient-transparent. ``norm`` is the
-    residual measure the search is judged by (default Euclidean).
+    residual measure the search is judged by (default Euclidean). ``residual`` is ``R(phi)``, the
+    right-hand side of the correction as the caller holds it, so the step evaluates no residual at
+    ``phi`` of its own.
 
     Returns a :class:`~aquaflux.solve.StepOutcome` carrying the stepped iterate, the measure at it,
     the raw solver count of the one linear solve behind it, the line-search factor,
@@ -529,7 +531,7 @@ def _damped_newton_step(
     step adds no residual evaluation of its own.
     """
     delta, r, cycles = newton_correction(
-        residual_fn, phi, solver=solver, preconditioner=preconditioner
+        residual_fn, phi, solver=solver, preconditioner=preconditioner, residual=residual
     )
     reference = norm(r)
     searched = backtracking_line_search(
@@ -546,6 +548,7 @@ def _damped_newton_step(
         _corrected(cycles),
         searched.full_step_norm / reference,
         jnp.asarray(False),
+        searched.residual,
     )
 
 
@@ -587,18 +590,18 @@ class DampedNewtonStep(eqx.Module):
     residual_norm: ResidualNorm = eqx.field(default=jnp.linalg.norm)
 
     def stepper(self) -> StepFn:
-        """The line-searched Newton step ``(residual_fn, phi, ‖R₀‖, solver) -> StepOutcome``."""
+        """The line-searched Newton step ``(residual_fn, phi, R(phi), ‖R₀‖, solver) -> StepOutcome``."""
         preconditioner = self.preconditioner
         line_search = self.line_search
         norm = self.residual_norm
 
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             solver = in_progress_measure(solver, norm)
             # The starting norm is unused: each step's line search is decided from the residual at
             # the current iterate, not the initial one.
             del residual_norm_0
             return _damped_newton_step(
-                residual_fn, phi, solver, preconditioner, line_search, norm=norm
+                residual_fn, phi, residual, solver, preconditioner, line_search, norm=norm
             )
 
         return step

@@ -182,7 +182,7 @@ def test_inexact_newton_matches_tight_solve_with_fewer_matvecs() -> None:
     phi = assembler.initial_state()
     residual_norm_0 = jnp.linalg.norm(assembler.residual(phi))
     for _ in range(2):
-        phi = step(assembler.residual, phi, residual_norm_0, tight).phi
+        phi = step(assembler.residual, phi, assembler.residual(phi), residual_norm_0, tight).phi
     apply_m = precond(phi)
     residual = assembler.residual(phi)
     operator = lx.FunctionLinearOperator(

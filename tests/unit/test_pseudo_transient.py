@@ -89,9 +89,9 @@ class _BlockDampedShiftPolicy(eqx.Module):
 def test_the_step_hands_the_policy_the_residual_it_just_computed() -> None:
     """Why the protocol grew an argument rather than a policy re-deriving ``R(phi)`` itself.
 
-    The step evaluates the residual on the line before it asks for the shift, so a policy whose shift
-    depends on how far the state is from a root reads it for free; deriving the same quantity a second
-    time inside the policy would be one value computed in two places.
+    The step holds the residual at its iterate before it asks for the shift (the march hands it in), so
+    a policy whose shift depends on how far the state is from a root reads it for free; deriving the
+    same quantity a second time inside the policy would be one value computed in two places.
     """
     theta = jnp.array([8.0, 27.0])
     seen: list = []
@@ -107,7 +107,11 @@ def test_the_step_hands_the_policy_the_residual_it_just_computed() -> None:
     # One step, driven directly: a whole march runs inside a `while_loop`, where a recorded array is a
     # tracer that cannot be read afterwards.
     step.stepper()(
-        residual_theta, phi0, jnp.linalg.norm(residual_theta(phi0)), step.linear_solver()
+        residual_theta,
+        phi0,
+        residual_theta(phi0),
+        jnp.linalg.norm(residual_theta(phi0)),
+        step.linear_solver(),
     )
 
     assert seen, "the policy was never asked for a shift"
@@ -391,7 +395,7 @@ def test_the_pseudo_transient_step_reports_its_full_step_ratio() -> None:
         return _residual(p, theta)
 
     reference = jnp.linalg.norm(residual(phi))
-    outcome = step.stepper()(residual, phi, reference, step.linear_solver())
+    outcome = step.stepper()(residual, phi, residual(phi), reference, step.linear_solver())
 
     delta = -residual(phi) / (3.0 * phi**2 + beta * strength)
     expected = float(jnp.linalg.norm(residual(phi + delta)) / reference)
@@ -491,7 +495,7 @@ def test_stepper_returns_the_step_and_its_linear_solve_cycle_count() -> None:
     def residual_fn(phi):
         return _residual(phi, theta)
 
-    outcome = step.stepper()(residual_fn, phi0, residual_norm_0, solver)
+    outcome = step.stepper()(residual_fn, phi0, residual_fn(phi0), residual_norm_0, solver)
     phi_next, cycles, alpha = outcome.phi, outcome.raw_cycles, outcome.alpha
 
     # A real shifted solve was taken: the iterate moved, and stayed finite. Deliberately not a

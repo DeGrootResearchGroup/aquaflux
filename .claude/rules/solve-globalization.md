@@ -237,9 +237,15 @@ All three keep `release`; only `resumed_at` starts a state without one.
   `backtracking_line_search(..., residual=R(phi))` (`None` if none was passed; all three strategies pass
   it); with no finite rung it is a NaN seed. `DualTimeStep` carries `G` as the next inner right-hand side
   and reports `R(phi_next) = G − transient_term(phi_next)`. Not bit-identical to re-evaluating `R`
-  (rounds at the size of `β d (phi − φⁿ)`, zero at the root). Carrying the vector across outer steps
-  (#649) is not built. Pinned by `test_the_dual_time_step_evaluates_the_residual_once_per_inner_iteration`
-  and siblings in `test_newton_march.py`.
+  (rounds at the size of `β d (phi − φⁿ)`, zero at the root).
+- **A step is handed `R(phi)` and must not evaluate it (`StepFn` = `(residual_fn, phi, residual,
+  residual_norm_0, solver)`, #649).** The march carries each step's `StepOutcome.residual` into the next
+  (`solve-march.md`); `DampedNewtonStep` passes it to `newton_correction(residual=)`,
+  `PseudoTransientStep` uses it as the right-hand side and the policy's residual (and returns it from a
+  fully rejected step), `DualTimeStep` as its anchor's `R(φⁿ)`. A caller driving `stepper()` directly
+  (tests, `validation/` probes) passes `residual_fn(phi)`. Pinned by
+  `test_the_dual_time_step_evaluates_the_residual_once_per_inner_iteration` (`n`, not `1 + n`) and the
+  trace counts in `test_newton_march.py` (two residual copies per compiled step on every strategy).
 
 ### The linear solve and the residual measure
 

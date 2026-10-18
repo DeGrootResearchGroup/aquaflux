@@ -218,15 +218,15 @@ def test_named_blocks_are_the_terms_the_measure_combines() -> None:
         ),
         BlockScaledNorm((2, 2), (2.0, 4.0), names=("u", "p")),
     ):  # fmt: skip
-        terms = named_blocks(measure, lambda state: state, residual)
+        terms = named_blocks(measure, residual)
         assert list(terms) == ["u", "p"]
         np.testing.assert_allclose(list(terms.values()), measure.per_block(residual))
         assert float(np.linalg.norm(list(terms.values()))) == pytest.approx(
             float(measure(residual))
         )
     # A measure whose blocks are unnamed, or a plain norm, has none to report.
-    assert named_blocks(BlockScaledNorm((2, 2), (1.0, 1.0)), lambda s: s, residual) is None
-    assert named_blocks(jnp.linalg.norm, lambda s: s, residual) is None
+    assert named_blocks(BlockScaledNorm((2, 2), (1.0, 1.0)), residual) is None
+    assert named_blocks(jnp.linalg.norm, residual) is None
 
 
 class _ThirdMeasure:
@@ -249,6 +249,6 @@ def test_the_report_reaches_any_named_block_measure_and_nothing_that_only_looks_
     assert isinstance(RowScaledNorm((2,), jnp.ones(2), jnp.ones(1)), NamedBlockMeasure)
     assert not isinstance(jnp.linalg.norm, NamedBlockMeasure)
     residual = jnp.array([-3.0, 4.0])
-    assert named_blocks(_ThirdMeasure(), lambda state: state, residual) == {"k": 3.0, "omega": 4.0}
+    assert named_blocks(_ThirdMeasure(), residual) == {"k": 3.0, "omega": 4.0}
     assert not isinstance(_NamesOnly(), NamedBlockMeasure)
-    assert named_blocks(_NamesOnly(), lambda state: state, residual) is None
+    assert named_blocks(_NamesOnly(), residual) is None

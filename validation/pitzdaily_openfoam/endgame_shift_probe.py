@@ -79,8 +79,12 @@ TIGHT_INNER_STEPS, TIGHT_INNER_TOL = 12, 1e-4
 
 @eqx.filter_jit
 def one_step(strategy, residual_fn, phi, residual_norm_0, solver):
-    """One outer step, compiled as the march compiles it (strategy and residual as arguments)."""
-    return strategy.stepper()(residual_fn, phi, residual_norm_0, solver)
+    """One outer step, compiled as the march compiles it (strategy and residual as arguments).
+
+    The march hands a step the residual at its start, carried from the previous step; a probe of one
+    step from a stored state has no previous step, so the residual is evaluated here.
+    """
+    return strategy.stepper()(residual_fn, phi, residual_fn(phi), residual_norm_0, solver)
 
 
 @eqx.filter_jit

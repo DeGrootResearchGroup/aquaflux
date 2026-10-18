@@ -86,6 +86,8 @@ and a station hand the march an already-compiled step:
 (`tests/unit/test_preconditioner_session.py`). Warm walls in those runs: 224 s (log on), 238 s (profiled),
 218 s (log on, capture variables set), all 21 steps to `R` 2.618e-06.
 
+**Since #649 (2026-10-18)** `_march_step` traces in 6.2 s and compiles in 19.0 s from cold (7.7 / 23.1 s at `cf80be32`; HLO 60,970 → 48,377 lines): the step is handed the residual at its start, so the dual-time anchor's `R(φⁿ)` copy is gone. Configuration and the full-march pair: `solve-march-log.md`, "#649".
+
 The march log's solve wall was 320 s cold and 284 s warm under the profiler. Without it, the shipped path
 (`compare.py` with no override) took **249, 227 and 236 s** in three warm runs on the same container,
 spread over 1.5 hours, the first with the capture variables set. So run-to-run spread on this container

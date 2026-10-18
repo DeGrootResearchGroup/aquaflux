@@ -335,7 +335,7 @@ def staged_march(
     # target, measured once here, out of reach); a `RowScaled` one re-reads the step it is handed.
     norm_builder = convergence.measure._builder(measures, state)
     reference_norm = (
-        float(norm_of_residual(norm_builder(strategy, state), residual_fn, state))
+        float(norm_of_residual(norm_builder(strategy, state), residual_fn, state)[0])
         if resume is None
         else float(resume.reference_residual)
     )
@@ -349,7 +349,7 @@ def staged_march(
         None
         if stopping_step is None
         else float(
-            norm_of_residual(norm_builder(stopping_step(strategy), state), residual_fn, state)
+            norm_of_residual(norm_builder(stopping_step(strategy), state), residual_fn, state)[0]
         )
     )
     # `refresh.limit` refreshes means `refresh.segments` segments: the segment *after* the last refresh
@@ -408,7 +408,8 @@ def staged_march(
 
     # Judge convergence in the measure the march stopped by, built at the state reached.
     judged = strategy if stopping_step is None else stopping_step(strategy)
-    residual_norm = float(norm_of_residual(norm_builder(judged, state), residual_fn, state))
+    residual_norm, _ = norm_of_residual(norm_builder(judged, state), residual_fn, state)
+    residual_norm = float(residual_norm)
     target = convergence.atol + convergence.rtol * (
         reference_norm if stopping_reference is None else stopping_reference
     )
