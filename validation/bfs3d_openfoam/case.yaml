@@ -65,7 +65,10 @@ solver:
     # near zero makes the float32 split wrong by order one around it and the step's direction rounding-
     # decided (bfs3d 38 -> 21 steps, pitzDaily unchanged at 21; 2026-10-18).
     pivot_floor: {kind: PivotFloor, threshold: 0.15}
-  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 3}
+  # A solve reaching four restart cycles ends its step and re-fits the preconditioner: with the pivot floor
+  # four beat three on both machines measured, one run each (2026-10-19: 17 steps / 475 s against 21 / 531 s
+  # on an 11-core laptop, 17 / 1860 s against 32 / 3141 s on a 4-core Linux container).
+  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 4}
   # Each inner solve stops the moment its residual meets the tolerance, as on pitzDaily.
   linear_solve: {kind: LinearSolveSettings, rtol: 0.3, restart: 15, max_restarts: 14, stop: residual}
   # pitzDaily's step control: the shift falls three times per comfortable step, and is released below

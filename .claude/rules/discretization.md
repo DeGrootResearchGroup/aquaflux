@@ -156,7 +156,7 @@ measurements and verification runs: `.claude/notes/discretization-log.md`.
 ## ⚠️ Single-threaded kernels in the compiled residual and its JVP are NOT a lever
 
 Measured 2026-10-17 on pitzDaily (4-core Linux, jax 0.11.2; harness
-`validation/pitzdaily_openfoam/fusion_profile.py`, tables in the log): no kernel is worth more than ~1 % of
+`validation/fusion_profile.py` (`FUSION_CASE=pitzdaily`), tables in the log): no kernel is worth more than ~1 % of
 the coupled residual or its JVP, and respelling the reduction-rooted fusions through `vectors.dot` removed
 them without a wall-time gain. Do not pursue per-kernel threading rewrites here.
 - ⚠️ **A standalone JVP timing on Linux is dominated by page faults the march does not pay**: the JVP's

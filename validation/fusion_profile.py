@@ -1,9 +1,10 @@
-"""Where the compiled residual and its Jacobian-vector product spend their time, kernel by kernel.
+"""Where a step case's compiled residual, its Jacobian-vector product and the probe's batched product spend their time, kernel by kernel.
 
-The Krylov matvec of the coupled march is ``jax.jvp`` of the coupled residual, and the probe that
-refits the preconditioner is a batch of the same products, so the compiled JVP is the program whose
-kernels matter. This builds the pitzDaily case at its hybrid start, compiles the residual and the JVP
-with ``jax.jit``, and joins two things per kernel:
+The Krylov matvec of the coupled march is ``jax.jvp`` of the coupled residual, and the coloured probe
+that refits the preconditioner is a batch of the same products (``batched_jacobian_matvec`` over the
+probe's own, possibly narrowed, residual), so those compiled programs are the ones whose kernels matter.
+This builds a step case (``FUSION_CASE``: ``pitzdaily`` or ``bfs3d``, by its own ``build_case``) at a state,
+compiles each program with ``jax.jit``, and joins two things per kernel:
 
 * **the compiled HLO** -- each entry-computation instruction's name, fusion kind, whether the CPU
   backend split it across threads (an ``outer_dimension_partitions`` backend config), its output
@@ -22,30 +23,34 @@ flight. That is the serialized path, and the only time a kernel left on one thre
 cores idle, so it bounds what splitting that kernel could buy.
 
 It reports the time in partitioned against unpartitioned kernels, the unpartitioned ones classified by
-why the backend left them on one thread, how concentrated that time is, and the top kernels by one-core
-time and by time alone.
+why the backend left them on one thread, the time by the opcode at each kernel's root (so two cases'
+programs can be compared by kind of work), how concentrated that time is, and the top kernels by
+one-core time and by time alone.
 
 The backend's rule (``ParallelTaskAssignment`` in the CPU compiler): a memory-bound kernel (flops per
 byte at most 1) is split into ``min(ceil(sqrt(cores)), bytes / 256 KiB)`` parts, a compute-bound one
 into ``min(cores, (flops + 10 bytes) / 100000)``; custom fusions are never split. A kernel touching
 under 512 KiB is therefore never split, whatever its root.
 
-``PITZ_FUSION_ARM=lapack`` restores the batched LU inverse of the multiple-correction first pass that
-the closed-form adjugate replaced, as a check that the instrument attributes a known cost: that arm
-must show its custom calls (``not a loop kernel (custom-call)``) carrying about the one-core difference
+``FUSION_ARM=lapack`` restores the batched LU inverse of the multiple-correction first pass that the
+closed-form adjugate replaced, as a check that the instrument attributes a known cost: that arm must
+show its custom calls (``not a loop kernel (custom-call)``) carrying about the one-core difference
 between the two arms.
 
 Usage
 -----
-    validation/run_case.sh validation/pitzdaily_openfoam/fusion_profile.py --wait
-    PITZ_FUSION_ARM=lapack validation/run_case.sh validation/pitzdaily_openfoam/fusion_profile.py --wait
+    FUSION_CASE=pitzdaily validation/run_case.sh validation/fusion_profile.py --wait
+    FUSION_CASE=bfs3d FUSION_PROGRAMS=probe validation/run_case.sh validation/fusion_profile.py --wait
 
-Environment: ``PITZ_FUSION_CALLS`` traced calls (default 10), ``PITZ_FUSION_REPEATS`` untraced timing
-calls (default 15), ``PITZ_FUSION_TOP`` rows in each table (default 25), and
-``PITZ_FUSION_MMAP_THRESHOLD_MIB`` to fix glibc's mmap threshold (see ``_raise_mmap_threshold``):
-every timing here is of one program called on its own, and on Linux a program whose temporary buffer
-exceeds 32 MiB is page-faulted afresh on every such call -- the JVP is, the residual is not. The
-per-call page-fault count is printed so that cost is visible rather than folded into the kernels.
+Environment: ``FUSION_CASE`` (default ``pitzdaily``); ``FUSION_PROGRAMS``, a comma list of ``residual``,
+``jvp`` and ``probe`` (default all three); ``FUSION_BATCH``, the probe's batch (default the library's
+``PROBE_BATCH_SIZE``), seeded with the probe's own first colours; ``FUSION_STATE``, a ``.npz`` holding
+``state`` (default the hybrid start); ``FUSION_CALLS`` traced calls (default 10), ``FUSION_REPEATS``
+untraced timing calls (default 15), ``FUSION_TOP`` rows in each table (default 25), and
+``FUSION_MMAP_THRESHOLD_MIB`` to fix glibc's mmap threshold (see ``_raise_mmap_threshold``): every timing
+here is of one program called on its own, and on Linux a program whose temporary buffer exceeds 32 MiB
+is page-faulted afresh on every such call -- the JVPs are, the residual is not. The per-call page-fault
+count is printed so that cost is visible rather than folded into the kernels.
 """
 
 from __future__ import annotations
@@ -65,21 +70,31 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(HERE.parent))
+sys.path.insert(0, str(HERE))
 
 import aquaflux  # noqa: E402,F401  (enables x64)
 import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-from aquaflux.case import read_case  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
+from aquaflux.precondition.materialized_session import (  # noqa: E402
+    PROBE_BATCH_SIZE,
+    batched_jacobian_matvec,
+)
+from aquaflux.turbulence import open_session  # noqa: E402
+from step_cases import load_case  # noqa: E402
 
-ARM = os.environ.get("PITZ_FUSION_ARM", "main")
-CALLS = int(os.environ.get("PITZ_FUSION_CALLS", "10"))
-REPEATS = int(os.environ.get("PITZ_FUSION_REPEATS", "15"))
-TOP = int(os.environ.get("PITZ_FUSION_TOP", "25"))
-MMAP_THRESHOLD_MIB = os.environ.get("PITZ_FUSION_MMAP_THRESHOLD_MIB")
+CASE = os.environ.get("FUSION_CASE", "pitzdaily")
+PROGRAMS = os.environ.get("FUSION_PROGRAMS", "residual,jvp,probe").split(",")
+BATCH = int(os.environ.get("FUSION_BATCH", PROBE_BATCH_SIZE))
+STATE = os.environ.get("FUSION_STATE")
+ARM = os.environ.get("FUSION_ARM", "main")
+CALLS = int(os.environ.get("FUSION_CALLS", "10"))
+REPEATS = int(os.environ.get("FUSION_REPEATS", "15"))
+TOP = int(os.environ.get("FUSION_TOP", "25"))
+MMAP_THRESHOLD_MIB = os.environ.get("FUSION_MMAP_THRESHOLD_MIB")
 
 #: ``mallopt`` parameters (glibc ``malloc.h``).
 _M_TRIM_THRESHOLD, _M_MMAP_THRESHOLD = -1, -3
@@ -107,7 +122,7 @@ def _raise_mmap_threshold(mib):
     # which returns every freed page to the kernel and multiplies the faults instead).
     threshold = int(mib) << 20
     if not 0 < threshold < 2**31:
-        raise SystemExit("PITZ_FUSION_MMAP_THRESHOLD_MIB must be between 1 and 2047")
+        raise SystemExit("FUSION_MMAP_THRESHOLD_MIB must be between 1 and 2047")
     libc = ctypes.CDLL("libc.so.6")
     if not (
         libc.mallopt(_M_MMAP_THRESHOLD, threshold) and libc.mallopt(_M_TRIM_THRESHOLD, 2**31 - 1)
@@ -315,7 +330,7 @@ def _concentration(times, fraction):
     return len(times)
 
 
-def _report(label, fn, args, module):
+def _report(label, fn, args, module, tangents=1):
     compiled = fn.lower(*args).compile()
     kernels = _parse(compiled.as_text())
     temp = compiled.memory_analysis().temp_size_in_bytes / 2**20
@@ -338,7 +353,7 @@ def _report(label, fn, args, module):
             k.time = float(np.median(samples[k.name]))
         elif k.opcode not in _FREE:
             unmeasured.append(k)
-    print(f"\n=== {label} ({ARM} arm) ===", flush=True)
+    print(f"\n=== {label} ({ARM} arm, {CASE}) ===", flush=True)
     print(f"temporary buffer {temp:.1f} MiB; {faults:.0f} minor page faults per call")
     print(
         f"untraced wall, best of {REPEATS}: {wall:.2f} ms on {len(cores)} cores, {serial_wall:.2f} ms on one "
@@ -374,6 +389,24 @@ def _report(label, fn, args, module):
             f"{cls:34s} {len(members):7d} {t / 1e3:8.2f} {t / total:6.1%} "
             f"{_concentration([k.time for k in members], 0.5):7d} "
             f"{sum(k.elements for k in members) / 1e6:9.2f}M"
+        )
+    if tangents > 1:
+        print(
+            f"per tangent ({tangents} per call): {wall / tangents:.2f} ms on {len(cores)} cores, "
+            f"{serial_wall / tangents:.2f} ms on one core, {total / 1e3 / tangents:.2f} ms solo kernel time"
+        )
+    roots = collections.defaultdict(list)
+    for k in kernels:
+        roots[k.root.split("(")[0] if k.opcode == "fusion" else k.opcode].append(k)
+    print(
+        f"\n{'root opcode':24s} {'kernels':>7s} {'ms/call':>8s} {'share':>6s} {'split':>6s} {'MiB touched':>11s}"
+    )
+    for root, members in sorted(roots.items(), key=lambda kv: -sum(k.time for k in kv[1])):
+        t = sum(k.time for k in members)
+        split = sum(k.time for k in members if k.partitions > 1)
+        print(
+            f"{root[:24]:24s} {len(members):7d} {t / 1e3:8.2f} {t / total:6.1%} "
+            f"{split / max(t, 1e-9):6.0%} {sum(k.bytes for k in members) / 2**20:11.1f}"
         )
     for k in kernels:
         k.alone = sum(r[4].get(k.name, 0.0) for r in parallel) / len(parallel)
@@ -412,26 +445,49 @@ def _report(label, fn, args, module):
     return kernels
 
 
+def _state(coupled):
+    """The state to profile at: ``FUSION_STATE``'s, or the hybrid start; refused unless its residual is finite."""
+    if STATE:
+        with np.load(STATE) as data:
+            state = jnp.asarray(data["state"])
+    else:
+        state = coupled.state_from_physical(*hybrid_initialize(coupled))
+    if not bool(jnp.all(jnp.isfinite(coupled.residual(state)))):
+        raise SystemExit(
+            "the residual at this state is not finite; nothing here would mean anything"
+        )
+    return state
+
+
 def main():
     if MMAP_THRESHOLD_MIB is not None:
         _raise_mmap_threshold(MMAP_THRESHOLD_MIB)
     if ARM == "lapack":
         _restore_lapack_first_pass()
     elif ARM != "main":
-        raise SystemExit(f"PITZ_FUSION_ARM must be 'main' or 'lapack', not {ARM!r}")
+        raise SystemExit(f"FUSION_ARM must be 'main' or 'lapack', not {ARM!r}")
+    unknown = set(PROGRAMS) - {"residual", "jvp", "probe"}
+    if unknown:
+        raise SystemExit(f"FUSION_PROGRAMS names no such program: {sorted(unknown)}")
     print(
-        f"jax {jax.__version__}, backend {jax.default_backend()}, {os.cpu_count()} cores, "
-        f"mmap threshold {MMAP_THRESHOLD_MIB or 'glibc default'} MiB",
+        f"[configuration] case {CASE}, state {STATE or 'the hybrid start'}, programs "
+        f"{','.join(PROGRAMS)}, probe batch {BATCH}; jax {jax.__version__}, backend "
+        f"{jax.default_backend()}, {os.cpu_count()} cores ({len(os.sched_getaffinity(0))} usable), "
+        f"mmap threshold {MMAP_THRESHOLD_MIB or 'glibc default'} MiB, allocator settings "
+        + (
+            " ".join(
+                f"{name}={os.environ[name]}"
+                for name in sorted(os.environ)
+                if name.startswith("MALLOC_") or name in ("LD_PRELOAD", "XLA_FLAGS")
+            )
+            or "none"
+        ),
         flush=True,
     )
-    coupled = read_case(HERE / "case.yaml").check().build()
-    flow, k, omega = hybrid_initialize(coupled)
-    state = coupled.state_from_physical(flow, k, omega)
-    if not bool(jnp.all(jnp.isfinite(coupled.residual(state)))):
-        raise SystemExit(
-            "the residual at the hybrid start is not finite; nothing here would mean anything"
-        )
-    tangent = jnp.asarray(np.random.default_rng(0).standard_normal(state.size))
+    case = load_case(CASE)
+    coupled = case.build_case()["coupled"]
+    state = _state(coupled)
+    print(f"{state.size} unknowns", flush=True)
     params, static = eqx.partition(coupled, eqx.is_array)
 
     def residual(p, s):
@@ -440,9 +496,35 @@ def main():
     def product(p, s, t):
         return jax.jvp(lambda x: eqx.combine(p, static).residual(x), (s,), (t,))[1]
 
-    print(f"{state.size} unknowns", flush=True)
-    _report("residual", jax.jit(residual), (params, state), "jit_residual")
-    _report("JVP", jax.jit(product), (params, state, tangent), "jit_product")
+    if "residual" in PROGRAMS:
+        _report("residual", jax.jit(residual), (params, state), "jit_residual")
+    if "jvp" in PROGRAMS:
+        tangent = jnp.asarray(np.random.default_rng(0).standard_normal(state.size))
+        _report("JVP", jax.jit(product), (params, state, tangent), "jit_product")
+    if "probe" in PROGRAMS:
+        # The probe's own program: the session's probe residual (narrowed as the case's probe spec says),
+        # the library's batched product, and seeds that are the plan's first colours.
+        session = open_session(case.SOLVER.settings()["preconditioner"], coupled)
+        probe = session._probe_for()
+        plan = probe.plan
+        print(f"{plan.n_cells} cells, {plan.n_fields} fields, {plan.n_probes} probes", flush=True)
+        probed_params, probed_static = eqx.partition(
+            probe.narrow(session.problem.assembler), eqx.is_array
+        )
+        seeds = jnp.asarray(
+            plan.seed_block(0, min(BATCH, plan.n_probes), out=np.zeros((BATCH, state.size)))
+        )
+
+        def probe_batch(p, s, block):
+            return batched_jacobian_matvec(eqx.combine(p, probed_static), s, block)
+
+        _report(
+            f"probe's batched JVP, batch {BATCH}",
+            jax.jit(probe_batch),
+            (probed_params, jax.lax.stop_gradient(state), seeds),
+            "jit_probe_batch",
+            tangents=BATCH,
+        )
 
 
 if __name__ == "__main__":

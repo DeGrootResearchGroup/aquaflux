@@ -669,9 +669,9 @@ TRAILING_INVERSE = (
 #: hierarchy smoothed by a zero-fill incomplete LU) -- were removed with the library's PETSc split blocks
 #: and its ILU(0) kernel (#371); `BFS3D_FLOW_INVERSE` set to anything else now refuses to start.
 #:
-#: `BFS3D_REFRESH_ON_CYCLES`: the file's `3` was re-measured under the residual stop (2026-10-12, at
-#: `46af0749`, corrected Green-Gauss, `grow` 1.5, one run each): 2 / 3 / 4 took 814 / 810 / 787 s, 34 /
-#: 30 / 30 steps, and 2 added a retry. 3 and 4 are not separable on single runs; 2 loses.
+#: `BFS3D_REFRESH_ON_CYCLES`: the file's `4` (since 2026-10-19; `3` before) was measured with the pivot
+#: floor, one run each: 3 / 4 / 5 took 531 / 475 / 497 s (21 / 17 / 17 steps) on an 11-core laptop and
+#: 3141 / 1860 / 3693 s (32 / 17 / 28 steps) on a 4-core Linux container, where a re-fit costs ~2.5 steps.
 def _flush_print(message: str) -> None:
     """Send a preconditioner's build record to the run log, flushed so it lands in order.
 
@@ -929,8 +929,8 @@ INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # also keeps the inner loop's progress, where the old reaction -- abort and escalate beta -- threw away
 # the work and the pseudo-timestep together. (Until #290 the re-fit happened mid-step instead.)
 #
-# ⚠️ THE DEFAULT IS 3, AND IT USED TO BE 0. Every recorded measurement on this case was taken
-# cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
+# ⚠️ THE FILE'S VALUE IS 4 (3 UNTIL 2026-10-19), AND IT USED TO BE 0. Every measurement recorded on this
+# case before 2026-10-19 was taken cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
 # identical arm, so `0` selected a configuration that is 1.85x slower and that nothing uses. Leaving it
 # as the default meant every A/B launched without the environment variable silently measured the refresh
 # TRIGGER instead of the thing under test -- which happened, to two preconditioner arms in one session,
