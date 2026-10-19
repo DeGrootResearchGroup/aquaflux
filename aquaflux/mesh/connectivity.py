@@ -548,6 +548,27 @@ class FaceNodeConnectivity(eqx.Module):
         )
         return FaceNodeConnectivity.from_csr(np.concatenate([[0], np.cumsum(counts)]), nodes)
 
+    def edges(self) -> tuple[np.ndarray, np.ndarray]:
+        """The mesh's edges, each once, and the edge each incidence starts along its face.
+
+        An edge is two nodes adjacent around some face's perimeter; faces sharing it name it in
+        either direction, and it is counted once. A build-time operation (numpy).
+
+        Returns
+        -------
+        edge_nodes : np.ndarray of int, shape ``(n_edges, 2)``
+            Each edge's two nodes, the smaller first; rows in ascending order.
+        incidence_edge : np.ndarray of int, shape ``(n_incidences,)``
+            For each incidence, the edge from its node to the next node around the same face.
+        """
+        start = np.asarray(self.face_node_indices, dtype=np.int64)
+        end = start[np.asarray(self.next_incidence)]
+        low, high = np.minimum(start, end), np.maximum(start, end)
+        bound = int(high.max()) + 1 if high.size else 1
+        keys, incidence_edge = np.unique(low * bound + high, return_inverse=True)
+        edge_nodes = np.stack([keys // bound, keys % bound], axis=1)
+        return edge_nodes, incidence_edge.reshape(-1)
+
     def gather_node_coords(self, node_coords: jnp.ndarray) -> jnp.ndarray:
         """Node coordinates for every incidence, in CSR order, shape ``(n_incidences, dim)``."""
         return node_coords[self.face_node_indices]

@@ -1,0 +1,154 @@
+"""How the polyhedral dual of Netgen tetrahedra scales, and how non-convex its cells get.
+
+Three solids, written by OCP and meshed by Netgen in its child process: a cylinder (curved walls,
+convex edges); a box with a lamp-like cylindrical hole through it (a gently concave curved wall);
+and an L-shaped block (one sharp concave edge, which the dual refuses until such cells are split,
+so its line reports the refusal). For
+each ``maxh`` the harness prints the point count, the time to build the dual, its worst cell
+closure, its volume against the tetrahedra's, and a convexity measure: for every dual cell, the
+largest distance by which one of its own vertices lies outside the plane of one of its faces
+(planes through each face's centroid, normal to its area vector), relative to the cell's size
+(the cube root of its volume). Zero for a convex cell with planar faces; the faces of a dual of
+tetrahedra are not planar, so a small positive value is the face warp, not a fold. Reported
+separately for the cells whose point lies on the hole's wall.
+
+Run in an environment with ``cadquery-ocp-novtk`` and ``netgen-mesher``::
+
+    python validation/meshing_dual/dual_scale_convexity.py 0.02 0.01 0.006
+"""
+
+from __future__ import annotations
+
+import math
+import pathlib
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+import numpy as np
+from aquaflux.mesh import Mesh, closed_cell_residual
+from aquaflux.meshing import NetgenProcess, PolyhedralDual
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+from OCP.BRepTools import BRepTools
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+DUAL = PolyhedralDual(feature_angle=math.radians(45))
+
+
+def _solids(directory: pathlib.Path) -> dict[str, pathlib.Path]:
+    shapes = {
+        "cylinder": BRepPrimAPI_MakeCylinder(0.05, 0.3).Shape(),
+        "sleeve": BRepAlgoAPI_Cut(
+            BRepPrimAPI_MakeBox(gp_Pnt(-0.05, -0.05, 0), 0.1, 0.1, 0.2).Shape(),
+            BRepPrimAPI_MakeCylinder(
+                gp_Ax2(gp_Pnt(0, 0, -0.01), gp_Dir(0, 0, 1)), 0.01, 0.22
+            ).Shape(),
+        ).Shape(),
+        "L": BRepAlgoAPI_Fuse(
+            BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.2, 0.1, 0.1).Shape(),
+            BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0.1), 0.1, 0.1, 0.1).Shape(),
+        ).Shape(),
+    }
+    paths = {}
+    for name, shape in shapes.items():
+        paths[name] = directory / f"{name}.brep"
+        BRepTools.Write_s(shape, str(paths[name]))
+    return paths
+
+
+def _tetrahedra_as_mesh(points: np.ndarray, tetrahedra: np.ndarray) -> Mesh:
+    """A face-based mesh of tetrahedra, every boundary face in one patch ``walls``.
+
+    A harness-local construction: each tetrahedron's four triangles, matched by their sorted node
+    triple; a triangle seen twice is interior.
+    """
+    faces = np.concatenate([tetrahedra[:, [1, 2, 3]], tetrahedra[:, [0, 3, 2]],
+                            tetrahedra[:, [0, 1, 3]], tetrahedra[:, [0, 2, 1]]])  # fmt: skip
+    cell = np.tile(np.arange(len(tetrahedra)), 4)
+    keys = np.sort(faces, axis=1)
+    order = np.lexsort(keys.T[::-1])
+    keys, faces, cell = keys[order], faces[order], cell[order]
+    first = np.concatenate([[True], np.any(keys[1:] != keys[:-1], axis=1)])
+    start = np.flatnonzero(first)
+    count = np.diff(np.concatenate([start, [len(keys)]]))
+    owner = cell[start]
+    neighbour = np.where(count == 2, cell[np.minimum(start + 1, len(cell) - 1)], -1)
+    rings = faces[start]
+    return Mesh.from_csr(
+        points,
+        np.arange(len(rings) + 1) * 3,
+        rings.reshape(-1),
+        owner,
+        neighbour,
+        len(tetrahedra),
+        face_patches={"walls": np.flatnonzero(neighbour < 0)},
+    )
+
+
+def _non_convexity(dual: Mesh) -> np.ndarray:
+    """Per cell: the largest excursion of its vertices outside its faces' planes, over its size."""
+    geometry = dual.geometry()
+    coords = np.asarray(dual.node_coords)
+    normal = np.asarray(geometry.face.normal)
+    centroid = np.asarray(geometry.face.centroid)
+    owner = np.asarray(dual.face_cells.owner)
+    neighbour = np.asarray(dual.face_cells.neighbour)
+    offsets = np.asarray(dual.face_nodes.offsets)
+    nodes = np.asarray(dual.face_nodes.face_node_indices)
+    cell_nodes = [set() for _ in range(dual.n_cells)]
+    for face in range(dual.n_faces):
+        ring = nodes[offsets[face] : offsets[face + 1]].tolist()
+        cell_nodes[owner[face]].update(ring)
+        if neighbour[face] >= 0:
+            cell_nodes[neighbour[face]].update(ring)
+    worst = np.zeros(dual.n_cells)
+    for face in range(dual.n_faces):
+        for cell, sign in ((owner[face], 1.0), (neighbour[face], -1.0)):
+            if cell < 0:
+                continue
+            vertices = coords[list(cell_nodes[cell])]
+            excursion = sign * (vertices - centroid[face]) @ normal[face]
+            worst[cell] = max(worst[cell], float(excursion.max()))
+    return worst / np.cbrt(np.asarray(geometry.cell.volume))
+
+
+def main(sizes: list[float]) -> None:
+    netgen = NetgenProcess()
+    with tempfile.TemporaryDirectory() as directory:
+        for name, path in _solids(pathlib.Path(directory)).items():
+            for maxh in sizes:
+                surface = netgen.triangulate(path, max_size=maxh)
+                filled = netgen.fill(surface.points, surface.triangles, max_size=maxh)
+                primal = _tetrahedra_as_mesh(filled.points, filled.tetrahedra)
+                start = time.perf_counter()
+                try:
+                    dual = DUAL.build(primal)
+                except NotImplementedError as refusal:
+                    print(
+                        f"{name:8s} maxh={maxh:<6g} points={primal.n_nodes:8d} refused: {refusal}"
+                    )
+                    continue
+                built = time.perf_counter() - start
+                volume = np.asarray(dual.geometry().cell.volume)
+                tets = np.asarray(primal.geometry().cell.volume).sum()
+                closure = float(np.max(np.asarray(closed_cell_residual(dual))))
+                line = (
+                    f"{name:8s} maxh={maxh:<6g} points={primal.n_nodes:8d} "
+                    f"tets={primal.n_cells:9d} dual faces={dual.n_faces:9d} build={built:7.2f}s "
+                    f"closure={closure:.1e} volume err={abs(volume.sum() / tets - 1):.1e}"
+                )
+                if primal.n_nodes <= 60000:
+                    bad = _non_convexity(dual)
+                    line += f" non-convexity p50={np.median(bad):.3f} max={bad.max():.3f}"
+                    if name == "sleeve":
+                        points = np.asarray(primal.node_coords)
+                        near = np.hypot(points[:, 0], points[:, 1]) < 0.0105
+                        line += f" | on the hole ({near.sum()} cells) max={bad[near].max():.3f}"
+                print(line, flush=True)
+
+
+if __name__ == "__main__":
+    main([float(size) for size in sys.argv[1:]])
