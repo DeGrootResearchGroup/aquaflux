@@ -112,6 +112,10 @@ All classes are `equinox.Module`s.
   refusal (overlap double-counts area). Lives here because it is mesh, and `radiation/` imports no mesh.
   Ear clipping is not built; build it when an emitting mesh trips the check.
 - `quality.py` — `face_planarity`, `centroid_iteration_shift`, `closed_cell_residual`.
+- `winding.py` — `stored_ring_is_outward(mesh)`: which way each stored ring runs relative to its owner,
+  recovered from the face-geometry strategy's own flip (a mesh orients the normal, never the ring). The one
+  home for every writer that gives ring direction a meaning (VTK polyhedra, the polyMesh writer). Pinned
+  against an independent Newell-normal test (`tests/unit/test_mesh_winding.py`).
 
 Naming: not `metrics.py` (CFD "mesh metrics" are quality measures); say "face geometry"/"cell geometry".
 

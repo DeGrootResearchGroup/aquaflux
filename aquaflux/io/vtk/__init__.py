@@ -21,7 +21,6 @@ from .topology import (
     VTK_POLYHEDRON,
     VtkCells,
     build_vtk_cells,
-    stored_ring_is_outward,
 )
 from .writer import write_pvd, write_vtu
 from .xml import CellField, cell_data_arrays, pvd_document, vtu_parts
@@ -36,7 +35,6 @@ __all__ = [
     "build_vtk_cells",
     "cell_data_arrays",
     "pvd_document",
-    "stored_ring_is_outward",
     "vtm_document",
     "vtp_parts",
     "vtu_parts",

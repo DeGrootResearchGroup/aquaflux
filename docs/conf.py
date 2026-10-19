@@ -71,7 +71,7 @@ SUBPACKAGE_GROUPS = {
         ("Cell zones and face patches", ["groups"]),
         ("Building and transforming a mesh", ["structured", "collapse", "reorder"]),
         ("Boundary patches as surfaces", ["surface"]),
-        ("Quality and connectivity diagnostics", ["quality", "distance", "graph"]),
+        ("Quality and connectivity diagnostics", ["quality", "distance", "graph", "winding"]),
     ],
     "solve": [
         ("The coupled state's layout", ["state"]),

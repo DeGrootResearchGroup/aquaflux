@@ -12,7 +12,7 @@ paths:
 
 Reading external formats into a `Mesh`, and writing computed fields back out — into the case they came from
 or as a file for a viewer. `io` owns file-format concerns only; `aquaflux/mesh/` owns representation. Mesh
-*writing* is deferred.
+*writing* is the polyMesh writer below.
 
 ## Responsibility and dependency direction
 
@@ -63,6 +63,42 @@ Three pure seams so most logic tests without a filesystem:
 - **Cell indices are OpenFOAM's**: `assemble` derives them from the labels it reads and the collapse keeps
   cells at their indices. **Faces are not**: the collapse renumbers them, and cyclic fusion drops the donor
   side's.
+
+## OpenFOAM polyMesh writer (ASCII) — built
+
+`io/writer.py` — **`MeshWriter`** (`equinox.Module`, abstract `write(mesh) -> Path`), the counterpart of
+`MeshReader`. `io/openfoam/`:
+- `disassembler.py` — **`disassemble(mesh) -> PolyMeshData`**, the pure inverse of `assemble`: interior faces
+  first in **upper-triangular order** (owner < neighbour, sorted by owner then neighbour), then each named
+  patch as one contiguous block in the mesh's patch order (a patch keeps its faces' stored order); every ring
+  re-wound owner-outward (`reverse = stored_ring_is_outward(mesh) == swap`, through
+  `ragged.rows(..., reverse)`); a patch without a declared type is written `patch`
+  (`DEFAULT_PATCH_TYPE`); groups become `inGroups`; one `cellZone` per non-default zone.
+- `mesh_writer.py` — pure `format_points` / `format_faces` / `format_labels` / `format_boundary` /
+  `format_cell_zones` / `format_polymesh`, and `OpenFOAMWriter(MeshWriter)` + `write_openfoam(mesh, case)`,
+  the only file I/O, into `<case>/constant/polyMesh`.
+- **The header is `foamfile.format_header` + `SEPARATOR`, shared with the field writer** — one banner.
+
+### Binding decisions
+- **Cells are never renumbered**, only faces, so a field written with `write_openfoam_time` against the
+  written mesh needs no permutation; `read_openfoam` returns the cells in the same order (pinned by
+  `test_the_mesh_reads_back_with_its_cells_in_place`).
+- **Points are written at `repr` precision** (shortest exact decimal), so they read back bit-identical.
+- **Refused before anything is written**: a 2D mesh (no extrusion is built), a periodic mesh or a
+  `cyclic`-typed patch (no `cyclic` pairs are written), a boundary face in no named patch (the format has no
+  unnamed boundary), a named patch holding interior faces (a baffle is a `faceZone`, not written).
+- ⚠️ **`overwrite=True` deletes every file in `MESH_FILES` first**, zones included, so a stale `cellZones`
+  can never be read against the new mesh's labels; without it a polyMesh holding any of them is refused.
+- Tests: `tests/unit/test_openfoam_mesh_writer.py` checks order and winding as properties of the output on
+  meshes restated with shuffled faces, reversed rings and swapped owners (`tests/support/meshes.restated`),
+  winding by an independent Newell-normal test (`newell_outward`), not a hand-written array; and a
+  **fixed point**: `tests/fixtures/polymesh_3d_blockmesh/` (OpenFOAM 13 `blockMesh` output, its
+  `blockMeshDict` beside it) is written back array for array.
+- **Verified by OpenFOAM's `checkMesh`** (2026-10-19, `openfoam13` in Docker, `-allGeometry -allTopology`):
+  upper-triangular ordering OK on every written test mesh; a writer with the winding fix removed fails 9
+  checks (67 incorrectly oriented faces) and one with the sort removed fails "not in upper triangular
+  order" (log). ⚠️ "Cells with small determinant" on the tet and hexahedron-beside-a-prism fixtures is
+  a property of cells made mostly of boundary faces, not of the writer.
 
 ## Reading fields — `io/openfoam/fields.py`
 
@@ -150,7 +186,7 @@ reconstructs connectivity (pure numpy), `xml` serializes, `writer` opens files. 
   recognized (widening was not agreed). Why: the viewer's cost — at 1M cells, file 70 vs 198 MB, peak memory
   393 vs 1074 MB, `extract_surface` 0.06 vs 1.13 s (2026-10-05, VTK 9.7.1, macOS arm64; log).
 - ⚠️ **Winding: a stored ring is not owner-outward.** `Mesh.from_faces` accepts either direction and orients
-  the normal separately (roughly half of a generated grid's rings are inward). `topology.stored_ring_is_outward`
+  the normal separately (roughly half of a generated grid's rings are inward). `aquaflux.mesh.stored_ring_is_outward` (`mesh/winding.py`, shared with the polyMesh writer)
   recovers each ring's direction with the mesh's own face-geometry strategy, and an entry is reversed exactly
   when that disagrees with the side listing it. Pinned by a per-face Newell-normal test and by byte-identical
   output with every ring reversed — not by a hand-written expected array.
@@ -249,8 +285,8 @@ chord=, facet_size=)` (an emitting surface).
 
 ## Deferred (additive; no seam changes)
 
-Binary polyMesh; `faceZones`/`pointZones`; `.gz` and multi-region cases; mesh writing (a `MeshWriter`
-counterpart to `MeshReader`); other formats as `MeshReader` subclasses under `io/<format>/`; `.pvtu` for
+Binary polyMesh; `faceZones`/`pointZones` (reading, and writing baffles as `faceZones`); writing `cyclic`
+pairs and 2D extrusions; `.gz` and multi-region cases; other formats as `MeshReader` subclasses under `io/<format>/`; `.pvtu` for
 `parallel/PartitionedMesh` (`xml.cell_data_arrays` already yields what a `.pvtu` declares).
 
 ## Tests

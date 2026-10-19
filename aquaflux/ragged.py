@@ -23,7 +23,7 @@ __all__ = ["group", "pairs_within_groups", "rows"]
 
 
 def rows(
-    offsets: np.ndarray, items: np.ndarray, selected: np.ndarray
+    offsets: np.ndarray, items: np.ndarray, selected: np.ndarray, reverse: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The items of some rows of a CSR list, concatenated in the order the rows are selected.
 
@@ -35,6 +35,8 @@ def rows(
         The flat items.
     selected : np.ndarray of int, shape ``(n_selected,)``
         Rows to gather; need not be sorted, contiguous or distinct.
+    reverse : np.ndarray of bool, shape ``(n_selected,)``, optional
+        Selected rows whose items are gathered last to first. Default: none.
 
     Returns
     -------
@@ -47,6 +49,9 @@ def rows(
     total = int(counts.sum())
     row = np.repeat(np.arange(selected.size), counts)
     position = np.arange(total) - np.repeat(np.cumsum(counts) - counts, counts)
+    if reverse is not None:
+        flipped = np.asarray(reverse, dtype=bool)[row]
+        position = np.where(flipped, counts[row] - 1 - position, position)
     return items[np.repeat(offsets[selected], counts) + position], row, counts
 
 

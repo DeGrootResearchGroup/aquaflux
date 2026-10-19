@@ -191,7 +191,7 @@ assumes a stored ring is owner-outward, and **a `Mesh` explicitly declines to pr
 (pitzDaily read through the OpenFOAM reader is 12448 of 24730, because the `empty`-patch collapse
 rebuilds the faces and does not preserve OpenFOAM's own convention.)
 
-So the rule is the **composition of two facts**: `topology.stored_ring_is_outward` recovers the
+So the rule is the **composition of two facts**: `stored_ring_is_outward` (then in `io/vtk/topology.py`, in `aquaflux/mesh/winding.py` since 2026-10-19) recovers the
 ring's own direction — by running the mesh's *own* face-geometry strategy
 (`unoriented_geometry` → `orient_owner_outward`) rather than re-deriving the orientation test — and
 the entry reverses exactly when that disagrees with the side listing it. Pinned two ways:
@@ -324,7 +324,7 @@ default (`boundary_patches(mesh)`), with or without fields — the layout was **
 because the `aquaflux_viz` viewer reads it** (`fields.vtu` + `patches.vtm` in a run directory); a change to
 it is a change to that contract. Serialization reuses `xml.py`'s `_Arrays` (appended raw, `UInt64`
 headers), `_narrowed` and `cell_data_arrays` (2-component vectors padded on the trailing axis, as the
-`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `topology.stored_ring_is_outward`
+`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `stored_ring_is_outward` (then in `io/vtk/topology.py`, in `aquaflux/mesh/winding.py` since 2026-10-19)
 decides per face, reversed rings read back to front (the `.vtu` writer's lesson — a `Mesh` does not promise
 the stored winding). A field of the wrong length is refused naming the patch. It is a `case.PatchVtk`
 field writer (`case.md`). This module does not touch `topology.py` beyond importing
@@ -595,3 +595,17 @@ cells, 71872 faces (66368 internal + 5504 boundary), 3D, uncollapsed. No solver 
   *below* the global max of `1.96e-08`, so it is entirely the denominator. Normalize by the domain
   flow rate; report the local ratio only as a distribution, whose *spread* is what would reveal a
   genuine mis-placement (local, hence a cluster) as opposed to diffuse reference error.
+
+## 2026-10-19 — polyMesh writer checked by OpenFOAM's checkMesh
+
+`openfoam13:latest` in Docker, `checkMesh -allGeometry -allTopology`, on the writer-test meshes written by
+`write_openfoam` after `restated` (seed 11: shuffled faces, half the rings reversed, half the interior
+owners swapped). box (12 cells), skewed box (18), labelled box (12, zones and groups): Mesh OK.
+tetrahedra (48) and hexahedron beside a prism (2): upper-triangular ordering OK, max cell openness
+4.6e-17 and 0, non-orthogonality max 39.1 and 11.3, and one failed check each, "Cells with small
+determinant (< 0.001)", 12 of 48 and 2 of 2 cells -- cells bounded mostly by boundary faces. Controls on
+the skewed box: winding fix removed (`reverse = zeros`) failed 9 checks (17 open cells, 11 negative
+volumes, 22 non-orthogonality errors, 67 incorrectly oriented faces); sort removed failed "Faces not in
+upper triangular order". The blockMesh fixture (two graded blocks, 42 cells) is Mesh OK, and
+`disassemble(read_openfoam(fixture))` equals the fixture's parsed arrays exactly.
+

@@ -6,7 +6,11 @@ that serialize what was computed on it. Every reader implements the format-agnos
 :class:`MeshReader` contract (``read() -> Mesh``); the first is the OpenFOAM polyMesh reader, exposed
 as :class:`OpenFOAMReader` and the :func:`read_openfoam` convenience.
 
-The export half has two destinations, for two different purposes. :func:`write_openfoam_time` writes
+A mesh goes out the way it came in: every writer implements the :class:`MeshWriter` contract
+(``write(mesh)``), and :class:`OpenFOAMWriter` / :func:`write_openfoam` write a polyMesh that
+:func:`read_openfoam` reads back with the same cells in the same order.
+
+The field export has two destinations, for two different purposes. :func:`write_openfoam_time` writes
 cell fields back into the case they were read from, as an ordinary time directory -- so a solved
 state can be viewed beside the solution it is validated against, post-processed with the same tools,
 or used to restart a run, and :func:`read_openfoam_time` is its inverse, reading a time directory's
@@ -25,28 +29,34 @@ from __future__ import annotations
 from .openfoam import (
     FieldTemplate,
     OpenFOAMReader,
+    OpenFOAMWriter,
     infer_extruded_axis,
     read_field_template,
     read_openfoam,
     read_openfoam_time,
     read_surface_scalar_field,
     read_volume_scalar_field,
+    write_openfoam,
     write_openfoam_field,
     write_openfoam_time,
 )
 from .reader import MeshReader
+from .writer import MeshWriter
 from .vtk import write_patches, write_pvd, write_vtu
 
 __all__ = [
     "FieldTemplate",
     "MeshReader",
+    "MeshWriter",
     "OpenFOAMReader",
+    "OpenFOAMWriter",
     "infer_extruded_axis",
     "read_field_template",
     "read_openfoam",
     "read_openfoam_time",
     "read_surface_scalar_field",
     "read_volume_scalar_field",
+    "write_openfoam",
     "write_openfoam_field",
     "write_openfoam_time",
     "write_patches",

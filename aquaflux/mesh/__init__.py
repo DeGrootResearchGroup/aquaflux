@@ -37,6 +37,7 @@ from .reorder import (
 )
 from .structured import graded_nodes, structured_grid_2d, structured_grid_3d
 from .surface import PatchTriangles, patch_triangles
+from .winding import stored_ring_is_outward
 
 __all__ = [
     "PADDING_PATCH",
@@ -71,6 +72,7 @@ __all__ = [
     "interior_mask",
     "patch_triangles",
     "permute_cells",
+    "stored_ring_is_outward",
     "structured_grid_2d",
     "structured_grid_3d",
 ]

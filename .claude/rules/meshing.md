@@ -102,7 +102,8 @@ seams are exactly where its mesh fails, below).
   and adjacency, face-tagged triangulation, closest-point projection and normals. Reading edge topology
   for features is allowed (project owner, 2026-10-19); recognizing a solid from edge types still is not
   (`io.md`).
-- **The polyMesh writer belongs in `io/openfoam/`** (the deferred `MeshWriter`), not in `meshing/`.
+- **The polyMesh writer lives in `io/openfoam/`** (`OpenFOAMWriter`, `write_openfoam`; `io.md`), not in
+  `meshing/`; the mesher hands it a `Mesh`.
 
 ## Components to build
 

@@ -20,13 +20,13 @@ from aquaflux.io.vtk.topology import (
     VTK_POLYGON,
     VTK_POLYHEDRON,
     build_vtk_cells,
-    stored_ring_is_outward,
 )
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
 
 from tests.support.meshes import (
     hexahedron_beside_a_prism,
     perturbed_grid_3d,
+    restated,
     tetrahedral_grid_3d,
 )
 from tests.support.polymesh import cyclic_slab_polymesh_data, cyclic_two_cube_polymesh_data
@@ -66,21 +66,6 @@ def _signed_area(points):
     """A planar polygon's signed area in the xy plane; positive when wound counter-clockwise."""
     x, y = points[:, 0], points[:, 1]
     return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
-
-
-def _reversed_rings(mesh):
-    """The same mesh with every face's node ring stored backwards -- the same faces, wound away."""
-    offsets = np.asarray(mesh.face_nodes.offsets)
-    indices = np.asarray(mesh.face_nodes.face_node_indices)
-    flipped = np.concatenate([indices[start:end][::-1] for start, end in pairwise(offsets)])
-    return Mesh.from_csr(
-        mesh.node_coords,
-        offsets,
-        flipped,
-        mesh.face_cells.owner,
-        mesh.face_cells.neighbour,
-        mesh.n_cells,
-    )
 
 
 def _hexahedra(cells):
@@ -231,13 +216,6 @@ def test_a_shared_face_is_listed_in_opposite_directions_by_its_two_cells():
     np.testing.assert_array_equal(np.roll(reversed_b, -roll), a)
 
 
-def test_a_structured_grid_stores_rings_in_both_directions():
-    # The premise the winding rule rests on: "as stored" is not a synonym for "owner-outward", so a
-    # writer that kept every owner-listed ring as it found it would emit inward faces on the rest.
-    stored = stored_ring_is_outward(structured_grid_3d(2, 2, 2))
-    assert 0 < int(np.count_nonzero(stored)) < stored.size
-
-
 @pytest.mark.parametrize(
     "mesh",
     [
@@ -250,7 +228,7 @@ def test_a_structured_grid_stores_rings_in_both_directions():
 def test_the_output_is_invariant_to_the_direction_the_rings_are_stored_in(mesh):
     # Reversing every stored ring describes the identical mesh, so the reconstruction -- which
     # re-derives each ring's direction rather than trusting it -- must produce identical arrays.
-    flipped = build_vtk_cells(_reversed_rings(mesh))
+    flipped = build_vtk_cells(restated(mesh, reverse=np.ones(mesh.n_faces, dtype=bool)))
     original = build_vtk_cells(mesh)
     np.testing.assert_array_equal(original.connectivity, flipped.connectivity)
     np.testing.assert_array_equal(original.offsets, flipped.offsets)

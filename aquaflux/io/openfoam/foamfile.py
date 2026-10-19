@@ -20,6 +20,62 @@ _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 
 
+# The banner every file in the format carries. The editor mode marker the format normally puts
+# on the first line is dropped: it is a syntax-highlighting hint for one editor, nothing reads
+# it back, and it names a language this repository keeps out of its own sources.
+_BANNER = r"""/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM
+   \\    /   O peration     |
+    \\  /    A nd           |
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/"""
+
+#: The rule the format puts after a file's header and again at its end.
+SEPARATOR = "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //"
+
+
+def format_header(
+    class_name: str, location: str, object_name: str, *, note: str | None = None
+) -> list[str]:
+    """The lines that open every written file: the banner, the ``FoamFile`` header and the rule.
+
+    The reading half of this envelope is :func:`parse_foamfile`; every writer opens its files with
+    this, so the files they write share one header.
+
+    Parameters
+    ----------
+    class_name : str
+        The ``class`` entry, which tells a reader what the payload is (``volScalarField``,
+        ``faceList``, ``polyBoundaryMesh``, ...).
+    location : str
+        The directory the file sits in, relative to the case (``"0"``, ``"constant/polyMesh"``).
+    object_name : str
+        The ``object`` entry: the name the file is looked up by, and so its file name.
+    note : str, optional
+        A ``note`` entry, written quoted. OpenFOAM's own ``owner`` file carries the mesh's sizes
+        there.
+
+    Returns
+    -------
+    list of str
+        One line per entry, without trailing newlines.
+    """
+    lines = [
+        _BANNER,
+        "FoamFile",
+        "{",
+        "    format      ascii;",
+        f"    class       {class_name};",
+    ]
+    if note is not None:
+        lines.append(f'    note        "{note}";')
+    lines.extend(
+        [f'    location    "{location}";', f"    object      {object_name};", "}", SEPARATOR]
+    )
+    return lines
+
+
 class FoamFile(NamedTuple):
     """A comment-stripped OpenFOAM file split into its header dictionary and payload body.
 
