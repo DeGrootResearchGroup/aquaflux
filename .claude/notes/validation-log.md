@@ -934,11 +934,12 @@ over steps 32-34 (five other cells also below 1e-12, none as low); there `âˆ‚R_Ï
 `[[1.48e-05, 2.5e-23], [-9.47e14, 0.645]]`: lower-triangular, determinant 9.5e-06, invertible, but its
 Hadamard ratio `|det| / prod(row norms)` is 6.8e-16, under `_cell_block_inverse`'s 1e-12 cut. That ratio is
 invariant to row scaling but **not to column scaling**, contrary to its comment there (measuring `k` in other
-units moves it by the same factor). The 8-station arm's stall had the mirror cell 3667 at `k` 5.5e-20 (across
+units moves it by the same factor). **Since 2026-10-19 the guard is `_block_singularity`, invariant under both,
+and passes this block (~1.0); `state-00034` then fits and re-fits** (`refit_profile.py`, 51.6 s); the rest of
+this paragraph is the record before that change. The 8-station arm's stall had the mirror cell 3667 at `k` 5.5e-20 (across
 the span: both at x = 0.0897 m, ~9h downstream, 0.4-1.8 mm below the upper wall and 1.8 mm from a side wall).
 The converged arms kept `k` ~0.72 in cell 12107 and a minimum of 1.7e-05. Not changed here (out of this
-work's scope): whether the guard should be column-scale invariant, and whether that corner's `k` should be
-kept from collapsing, are the owner's. To re-adjudicate, re-run the shipped arm: two marches at one setting gave identical step
+work's scope): whether that corner's `k` should be kept from collapsing is the owner's. To re-adjudicate, re-run the shipped arm: two marches at one setting gave identical step
 tables here (the cadence-5 pair), and `refit_profile.py` with `REFIT_STATE` at its `state-00034`
 reproduces the refusal. **The pivot floor does not cure it**: the same `state-00034` still raises the
 guard on `main` `f7fcb6f2` with `PivotFloor(0.15)` in force (2026-10-19, `refit_profile.py`, the first fit
