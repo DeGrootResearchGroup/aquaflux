@@ -70,9 +70,15 @@ decision. The march failures this section once chased belonged to the global `k`
   undamped Richardson level smoother (`spectral_damping=False`: `D⁻¹A` has a unit diagonal, so
   `omega/lam_max` can only under-relax — 10 → 2 cycles); a row-walk level operator instead of a COO
   scatter (now `_PaddedRowOperator`, below); and a correct singularity guard (below).
-- **`_cell_block_inverse`'s singularity test uses the row-norm (Hadamard) bound `|det| ≤ ∏‖rowᵢ‖`**, which
-  is invariant under row/column rescaling; a Frobenius bar is not and wrongly refused coupled `[k, ω]`
-  blocks whose rows differ by ~1e8. A structurally empty row is named explicitly.
+- **`_cell_block_inverse`'s singularity test is `_block_singularity`: `|det B|` over the largest
+  `∏ᵢ |B[i, σ(i)]|` among permutations σ, invariant under any row or column scaling** (the fields' units
+  are arbitrary); refused below 1e-12. Both earlier bars refused invertible `[k, ω]` blocks mid-march: a
+  Frobenius bar (rows ~1e8 apart), and a row-norm (Hadamard) bound, invariant under row scaling only, on
+  a bfs3d corner cell at `k` ~1e-17 (lower-triangular, det 9.5e-06, ratio 6.8e-16; 2026-10-19). A block
+  with no nonzero permutation product (an empty row) scores 0. Cost `b!` passes over the blocks, fine for
+  a cell's fields. Pinned by `test_block_singularity_is_unmoved_by_scaling_any_row_or_column` and
+  `test_an_invertible_block_with_a_vanishing_variable_is_not_refused`. It decides invertibility only;
+  such a block's inverse is ~1e20 in places, which a float32 split then has to carry.
 - **Equilibration** (symmetric `D B D`) improves median per-cell block conditioning, so it is kept, but:
   it cannot change whether a block is singular (`det B̂ = 0 ⟺ det B = 0`); it does not help the worst
   cells (it moves the imbalance into the off-diagonal); and it is a similarity transform, so the spectral

@@ -312,7 +312,8 @@ it, which `cycle_budget` depends on. That is why what shipped splits the two rat
     defaults it on because "the per-cell block solve is not otherwise safe" — raw, 4 of 23040 cell blocks
     were flagged singular. That count came from the **Frobenius** guard (`|det| < 1e-12·‖B‖_F`), which is
     not invariant under row scaling and is **the guard that was found wrong and replaced** by the
-    Hadamard row-norm bound, which is invariant. The default is **unchanged pending a decision**; flipping
+    Hadamard row-norm bound, invariant under row scaling only (itself replaced on 2026-10-19 by
+    `_block_singularity`, invariant under row and column scaling). The default is **unchanged pending a decision**; flipping
     it is a shipped-default change.
 
   **✅ THE FLOOR RESCUES A CONFIGURATION THAT PREVIOUSLY DIED — which is the real case for it, not the

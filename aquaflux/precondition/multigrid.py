@@ -44,6 +44,7 @@ diagonal rescaling in the apply.
 from __future__ import annotations
 
 import heapq
+import itertools
 import warnings
 import zlib
 from collections.abc import Callable, Hashable, Sequence
@@ -248,6 +249,22 @@ def _cell_blocks(a: sp.csr_matrix, block_size: int) -> np.ndarray:
     return blocks
 
 
+def _block_singularity(blocks: np.ndarray) -> np.ndarray:
+    """How near each square block is to singular, independent of its rows' and columns' scales, ``(n,)``.
+
+    ``|det B|`` over the largest ``prod_i |B[i, s(i)]|`` among the permutations ``s``: scaling a row or a
+    column multiplies the determinant and every such product by the same factor, so the measure is
+    invariant under both, as the variables' units are arbitrary. It is ``1`` for a diagonal or
+    triangular block with a nonzero diagonal and ``0`` for a singular one, or for a block with no nonzero
+    product along any permutation (structurally singular). ``b!`` passes for ``(n, b, b)`` blocks.
+    """
+    n, b, _ = blocks.shape
+    magnitude, rows, largest = np.abs(blocks), np.arange(b), np.zeros(n)
+    for permutation in itertools.permutations(range(b)):
+        largest = np.maximum(largest, np.prod(magnitude[:, rows, list(permutation)], axis=1))
+    return np.divide(np.abs(np.linalg.det(blocks)), largest, out=np.zeros(n), where=largest > 0.0)
+
+
 def _cell_block_inverse(
     a: sp.csr_matrix,
     block_size: int,
@@ -268,28 +285,16 @@ def _cell_block_inverse(
 
     Field-major, so a cell's degrees of freedom are strided by ``n_cells`` rather than contiguous.
 
-    **Singularity is judged against the product of the block's ROW NORMS, not against its Frobenius
-    norm — and the difference is not pedantry.** Hadamard's inequality bounds ``|det| <= prod ||row_i||``
-    with equality when the rows are orthogonal, so that ratio is how close a block is to rank-deficient
-    *given the size of its rows*, and it is invariant under rescaling either a row or a column. A
-    ``||B||_F ** b`` denominator is only equivalent when the rows have comparable magnitude, and it is
-    dominated by the largest of them when they do not.
+    **Singularity is judged by :func:`_block_singularity`, which no row or column scaling moves**, as the
+    fields' units are arbitrary. Two earlier bars lacked that and each refused an invertible block
+    mid-march: a Frobenius-normalized determinant (rows 1.5e8 apart), and a row-norm (Hadamard) bound
+    ``|det| / prod ||row_i||``, invariant under row scaling only, on a corner cell with ``k`` ~1e-17:
 
-    On the coupled turbulence pair they do not. A degenerate-looking cell there reads
+        [[ 1.48e-05,  2.5e-23],       determinant 9.5e-06, Hadamard ratio 6.8e-16,
+         [-9.47e+14,  6.45e-01]]      this measure ~1.0
 
-        [[ 8.8e-06,  1.7e-12],        row norms 8.8e-06 and 1.4e+03,
-         [-1.3e+03,  1.5e-01]]        a ratio of 1.5e+08
-
-    whose determinant is 1.35e-06 against a Frobenius-squared norm of 1.6e+06 — so the older test put
-    the bar at 1.6e-06, just above the determinant, and **refused a block that is not singular at all**:
-    the same block scores 1.2e-04 on the row-norm bound, eight orders clear. That false refusal aborted
-    a march at a mid-march refresh, and rescaling does not avoid it (equilibration moves the imbalance
-    from the rows into the subdiagonal and the Frobenius test misfires identically).
-
-    Note the block is genuinely **ill conditioned** — around 1e12 here, so its inverse is large — and
-    that is a real question about whether a cell-local method should invert it exactly. It is a
-    different question from whether the block is invertible, which it is, and it is not this guard's to
-    answer.
+    Such a block is **ill conditioned** (its inverse is large); whether a cell-local method should invert
+    it exactly is a real question, but not whether it is invertible, and not this guard's to answer.
 
     Parameters
     ----------
@@ -324,12 +329,7 @@ def _cell_block_inverse(
             lambda pattern: EntryMap.gathering(pattern, lambda m: _cell_blocks(m, block_size)),
         ).apply(a)
         blocks = blocks.reshape(n_cells, block_size, block_size)
-    # Hadamard: |det| <= prod ||row_i||, so the ratio is how near rank-deficiency the block is given
-    # its own row sizes -- invariant under rescaling any row or column, which the Frobenius form is not.
-    # A structurally empty row makes the bound zero, and the comparison below can then never fire, so
-    # that case is named rather than left to arithmetic.
-    bound = np.prod(np.linalg.norm(blocks, axis=2), axis=1)
-    singular = (bound == 0.0) | (np.abs(np.linalg.det(blocks)) < 1e-12 * bound)
+    singular = _block_singularity(blocks) < 1e-12
     if singular.any():
         raise ValueError(
             f"{where}: block smoothing needs every cell block invertible, but {int(singular.sum())} "

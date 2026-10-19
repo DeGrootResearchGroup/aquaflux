@@ -675,9 +675,8 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
 
     **``equilibrate`` rescales each cell block to a unit-magnitude diagonal**, which leaves the per-cell
     block triangular with a determinant of exactly one, so the block solve cannot meet a singular block.
-    It is **not** what keeps the build safe, though: the singularity test is a row-norm (Hadamard)
-    determinant bound, which is invariant under rescaling any row or column, so it reaches the same
-    verdict either way.
+    It is **not** what keeps the build safe, though: the singularity test is invariant under rescaling
+    any row or column of a block, so it reaches the same verdict either way.
 
     **It is not a free choice on a marched solve, and better conditioning is not the deciding property.**
     Rescaling is close to a similarity transform on the Jacobi-preconditioned operator, so the smoother
