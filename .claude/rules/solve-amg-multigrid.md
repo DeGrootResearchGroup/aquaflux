@@ -159,6 +159,16 @@ path.
 
 ## Binding decisions — `precondition/multigrid.py`
 
+- **A hierarchy may be held narrow: `hierarchy_inverse._narrowed(hierarchy, precision)` rounds every
+  floating array except the prolongation values**, which `SmoothedHierarchy.refit` reads back
+  (`prolongation_scipy`) and the held Galerkin maps key on; rounding them would make every refit after the
+  first differ. `HierarchyBlockInverse(stored_precision="float32")` applies it after `derive_extras` on
+  every fit and refit (the extras are derived from the double levels first). It lives beside its one
+  user, not on `SmoothedHierarchy`, because `multigrid.py` is held at its size ratchet. The cast helper is
+  `traced_cycle.in_precision`, shared with `TracedFieldSplit.in_precision`; a leaf already in the target
+  type is returned as the same array. Why and measurements: `solve-field-split.md`, "the split applied in
+  single precision".
+
 - **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
   `_padded_rows`, the one slot rule, and `_PaddedLayout`/`_padded_operator`; moved out of `multigrid.py`
   to keep it under its size budget, 2026-10-18). `columns` / `values` are

@@ -817,6 +817,50 @@ re-fits 45.8 s and 42.4 s (probe 28.8 / 28.1 s) at steps 1–2 against 63.8 / 61
 record and no surviving kernel log. Inferred cause: one arena with a 2 GiB trim threshold retains freed
 memory. Both arms left unmeasured there are measured below.
 
+## The shipped bfs3d march fails at step 35 on `fe772f59` (2026-10-18)
+
+`validation/run_case.sh validation/bfs3d_openfoam/compare.py`, shipped `case.yaml`, glibc defaults, 4-core
+Xeon, 15.7 GiB, jax 0.11.2; on `main` at `fe772f59` and on `claude/bfs3d-memory` (identical step tables
+through step 34). Both raise at the re-fit before step 35, in the trailing `[k, omega]` block:
+`SmoothedHierarchy.refit (level 0): block smoothing needs every cell block invertible, but 1 of 23040 are
+singular`, with `R` 4.557e-04 (target 1e-05) and the shift at its 0.005 floor. The last recorded
+convergence (`b1648725`, 2026-10-17: 29 steps, `x_r/h` 8.3611) predates #757 and #761; which of the commits
+between moved the trajectory onto the singular block is not bisected. Logs: `march.log` of each run (not
+kept in the repository).
+
+## bfs3d with the pivot floor, by machine (2026-10-19)
+
+Shipped `case.yaml` (`PivotFloor(0.15)`, float32 split, `simplesmooth` leading, uniform reach 3), no
+OpenFOAM reference present, `validation/run_case.sh validation/bfs3d_openfoam/compare.py`, warm-ish cache.
+Container: Linux x86_64, 4 cores, 15 GB, jax 0.12.0, numpy 2.5.3, scipy 1.18.1.
+
+| checkout | steps | cycles | `x_r/h` | peak `VmHWM` (15 s samples) |
+|---|---|---|---|---|
+| #766 head `1e69b4ab` (main's march: the production freeze it deleted before landing was off) | 39 | 254 | 8.361 | 12.15 GiB |
+| #763 merged with it (`_fitted_shift` on both re-fit paths) | 39 | 254 | 8.361 | 8.85 GiB |
+
+The two step tables are identical on every row but the time column. The owner's machine gave 21 steps /
+115 cycles for the same floor (solve-log, "Near-zero pivots and the float32 split"). The container march
+has 14–16-cycle solves with `a_min` 0.125–0.25 at steps 12, 14, 19, 20, 23, 28 — the float32-stall
+signature `solve.md` flags for a healthy negative pivot — but no probe was run to confirm it. Platform
+and jax version were not separated (the container's earlier marches ran jax 0.11.2). The #766 run's wall
+clock (3777 s) overlapped a 4-minute unit-test run and is void; the merged run's is 3568 s.
+
+Two arms on the same container, both at `refresh_on_cycles` 3, each stopped once it had answered:
+- **jax 0.10.2** (the owner's version; a separate venv, numpy pinned to 2.5.3, `main` `f7fcb6f2`): step 1
+  `R` 1.469e-01 against 1.473e-01 under 0.12.0, the paths apart from step 4 (6 cycles against 5); at step
+  17 `R` 7.95e-03 with capped solves at 13, 15 and 17. Not the cause.
+- **float64 split** (`BFS3D_SPLIT_PRECISION=float64`, #763 at `4cfc758d`, jax 0.12.0): the float32 table
+  to every printed digit through step 12, whose solve stops at `max_restarts` 14 (`a_min` 0.25) in both.
+  The capped solve is not float32 rounding. `pivot_floor_probe.py` at step 12 was killed out of memory in
+  float64 (2 GB of captured constants) and not run to completion in float32.
+#768's cadence 4 then gave 17 steps on both the owner's laptop and a 4-core container.
+
+**At the shipped cadence 4** (same container, jax 0.12.0, glibc defaults, nothing else running, one run
+each): `main` `1b68caf6` and #763 at `6161f715` give identical step tables (17 steps, 143 cycles, `x_r/h`
+8.361); peak `VmHWM` 12.25 against 8.46 GiB (15 s samples), solve 1601 against 1526 s.
+
+
 ### Why bfs3d's probe tangent costs 5.5× pitzDaily's, and what moves it (2026-10-18)
 
 Same machine class (another 4-core Xeon @ 2.1 GHz container, 15 GiB, no swap, 4 KiB pages, transparent

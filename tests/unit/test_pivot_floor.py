@@ -231,13 +231,16 @@ def test_a_coupled_refit_floors_only_k_rows_and_leaves_the_operator_exact(
     ``sign(p) d - p`` added there and nothing elsewhere, and the step keeps differentiating the residual."""
     _, coupled, state = case
     fitted: list[np.ndarray] = []
-    original = MaterializedJacobianPreconditioner._shifted
+    original = MaterializedJacobianPreconditioner._fitted_shift
 
-    def recording(jacobian, shift_diagonal):
-        fitted.append((np.asarray(jacobian.diagonal()), np.asarray(shift_diagonal)))
-        return original(jacobian, shift_diagonal)
+    def recording(shift_diagonal, jacobian_diagonal, diagonal_correction):
+        fitted_shift = original(shift_diagonal, jacobian_diagonal, diagonal_correction)
+        fitted.append((np.asarray(jacobian_diagonal()), np.asarray(fitted_shift)))
+        return fitted_shift
 
-    monkeypatch.setattr(MaterializedJacobianPreconditioner, "_shifted", staticmethod(recording))
+    monkeypatch.setattr(
+        MaterializedJacobianPreconditioner, "_fitted_shift", staticmethod(recording)
+    )
     # A wide band at a small shift, so the healthy cavity has k pivots inside it.
     session = open_session(MaterializedJacobian(_SPLIT, pivot_floor=PivotFloor(0.9)), coupled)
     step = session.build(state, dual_time=DualTimeLoop(inner_steps=3))

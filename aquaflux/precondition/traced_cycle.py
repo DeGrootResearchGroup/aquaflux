@@ -20,9 +20,33 @@ from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 
 __all__ = ["OffersTracedCycle", "TracedCycle"]
+
+
+def in_precision(tree, precision: str):
+    """``tree`` with every floating-point array leaf cast to ``precision``; other leaves unchanged.
+
+    A leaf already in ``precision`` is returned as the same array, not a copy, so narrowing something
+    already narrow costs nothing.
+
+    Parameters
+    ----------
+    tree : pytree
+        Any pytree, such as a hierarchy or a traced split.
+    precision : {"float64", "float32"}
+        The floating-point type to cast to.
+    """
+    return jax.tree.map(
+        lambda leaf: (
+            leaf.astype(precision)
+            if eqx.is_array(leaf) and jnp.issubdtype(leaf.dtype, jnp.floating)
+            else leaf
+        ),
+        tree,
+    )
 
 
 class TracedCycle(eqx.Module):

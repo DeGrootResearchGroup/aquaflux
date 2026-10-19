@@ -63,7 +63,11 @@ table for the old continuation builders is in `turbulence.md`.
 - **`refresh_in_place(..., diagonal_correction=)`**: a callback given the unshifted Jacobian's diagonal
   that returns a per-row amount added to the shift before the fit (or `None`); it changes the fit only,
   never the operator solved. One user: the pivot floor (`solve.md`, `PivotFloor`). Default `None` is
-  byte-identical.
+  byte-identical. **Both re-fit paths add the shift through `_fitted_shift`** (the whole matrix, and a
+  field split probed straight into its blocks, which never forms it and reads the diagonal through
+  `ProbedBlocks.diagonal()`); a test observes the fit by spying on it. ⚠️ A correction wired on the
+  whole-matrix path alone silently never reaches a field split, the only inverse the step cases ship
+  (#763 merging #766). Pinned by `test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path`.
 - **`refresh_in_place` returns one shape across the family**: the `("probe", s), ("assemble", s),
   ("refactor", s)` tuple. Every refreshed preconditioner is a `MaterializedJacobianPreconditioner`, so the
   session passes `batched_matvec`, `probe_batch_size` and `structure` unconditionally.
@@ -91,6 +95,13 @@ bare block inverse).
   so colourings differ from a full-scan argmax but stay valid (`test_saturation_colouring_*`). Colour
   counts and the bucket-queue crossover (slower than the scan below ~100k–200k cells, faster above):
   log, "Saturation colouring and its bucket queue".
+- **A probe feeding a field split is laid out by the split's blocks** (`block_stencil_gather_map(plan,
+  leading_fields=)` -> `ProbeGather.layout`, a `BlockLayout`; `materialize_blocks` -> `ProbedBlocks`):
+  one block-major value array, each block a CSR view of its slice (assigned, not passed to scipy's
+  constructor, which copies a view), the shift added in place at the stored diagonal (refused if one is
+  missing). `materialize_block_jacobian` refuses such a structure; `refresh_in_place` takes the block
+  path when `structure.layout` is set and calls `_refactor_blocks`, which only `FieldSplitPreconditioner`
+  implements.
 - **A materialize holds the matrix plus one chunk.** Seeds are filled one chunk at a time into a reused
   buffer (`ColumnProbePlan.seed_block(start, stop, out=)`, one shape, so the batched map compiles once),
   and `ProbeGather` scatters each chunk's responses as they are computed; out-of-reach entries need no
@@ -106,8 +117,9 @@ bare block inverse).
     of the compiled program, whose temporary is ~100 MiB per tangent plus ~100 MiB on bfs3d (816 MiB at
     8, Linux, 2026-10-18), transient per call and faulted in afresh at glibc defaults. A run's peak at
     batch 16 against 8 is unmeasured. On bfs3d a run's memory ceiling is set by the fits and re-fits of the materialized
-    Jacobian and the compiled step, not by building the case (0.84 GiB; the whole march peaks at 12.1 GiB,
-    2026-10-17, Linux): log, "Where a run's memory goes".
+    Jacobian and the compiled step, not by building the case (0.84 GiB): 8.46 GiB over the shipped 17-step
+    march against 12.25 GiB on `main` `1b68caf6`, identical step tables (2026-10-19, 4-core Linux, jax
+    0.12.0): log, "bfs3d memory by owner" and "Where a run's memory goes".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
     gather** (`structure=`) are what the materialized path passes. The full pattern (no `eliminate_zeros`)
     is a superset of the live nonzeros at any state, so the structure never moves cold→developed — that

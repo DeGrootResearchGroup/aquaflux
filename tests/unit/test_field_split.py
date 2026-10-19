@@ -500,3 +500,129 @@ def test_air_block_inverse_applies_transposes_and_refreshes_in_place() -> None:
     refreshed = inverse.apply(r)
     assert np.all(np.isfinite(refreshed))
     assert not np.allclose(refreshed, x), "the refresh did not change the preconditioner"
+
+
+def _stored_pairs(narrow, wide):
+    """The two inverses' traced-cycle leaves side by side, with whether each is a prolongation value."""
+    narrow_leaves = jax.tree_util.tree_leaves_with_path(narrow.traced_cycle().state)
+    wide_leaves = jax.tree.leaves(wide.traced_cycle().state)
+    assert len(narrow_leaves) == len(wide_leaves)
+    return [
+        ("p_val" in jax.tree_util.keystr(path), n, w)
+        for (path, n), w in zip(narrow_leaves, wide_leaves, strict=True)
+    ]
+
+
+@pytest.mark.parametrize("family", ["jacobi", "simple"])
+def test_an_inverse_held_in_single_precision_holds_its_double_fit_rounded_once(family) -> None:
+    """``stored_precision="float32"`` keeps one hierarchy, rounded once, and still re-fits as a double one.
+
+    A split applied in single precision used to hold the double hierarchy and narrow a copy of it for
+    the step, so two hierarchies were alive where one is read. Held narrow, every floating entry must be
+    the double fit's entry rounded once -- exactly what narrowing it later gave -- except the
+    prolongation values, which a frozen refit reads back and so must stay double, or every refit after
+    the first would drift. Both are checked after a refit too, and the host apply must stay an exactly
+    linear map (a cycle run in single precision is linear only to ~1e-7).
+    """
+    from tests.unit.test_saddle_multigrid import _saddle
+
+    if family == "jacobi":
+        a, n_fields, build = _nodal_block(), 2, JacobiSmoothedInverse
+    else:
+        a, n_fields, build = _saddle(), 4, SimpleSmoothedInverse
+    settings = {"strength_threshold": 0.25, "max_levels": 4, "max_coarse": 40}
+    settings["frozen_coarsening"] = True
+    wide = build(a, n_fields, **settings)
+    narrow = build(a, n_fields, **settings, stored_precision="float32")
+
+    for refit in (False, True):
+        if refit:
+            developed = (a * 1.9).tocsr()
+            developed.setdiag(developed.diagonal() * 1.1)
+            wide.refactor_block(developed)
+            narrow.refactor_block(developed)
+        pairs = _stored_pairs(narrow, wide)
+        assert any(is_p for is_p, _, _ in pairs), "the fixture must have a prolongation to keep"
+        for is_prolongation, held, double in pairs:
+            if not jax.numpy.issubdtype(double.dtype, jax.numpy.floating):
+                assert np.array_equal(held, double)
+            elif is_prolongation:
+                assert held.dtype == double.dtype == np.float64
+                assert np.array_equal(held, double)
+            else:
+                assert held.dtype == np.float32
+                assert np.array_equal(held, double.astype(np.float32))
+
+    rng = np.random.default_rng(1)
+    first, second = rng.standard_normal(a.shape[0]), rng.standard_normal(a.shape[0])
+    together = narrow.apply(first + 2.0 * second)
+    apart = narrow.apply(first) + 2.0 * narrow.apply(second)
+    assert np.allclose(together, apart, rtol=1e-12, atol=1e-12 * np.abs(apart).max())
+    assert together.dtype == np.float64
+
+
+class _RecordingInverse(ExactInverse):
+    """An exact block inverse that also records the block it was last fitted to."""
+
+    def refactor_block(self, block: sp.csr_matrix) -> None:
+        self.fitted = block.toarray()
+        self._inverse = np.linalg.inv(self.fitted)
+
+
+@pytest.mark.parametrize("probe", ["whole matrix", "into blocks"])
+def test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path(
+    probe, groups, operator, monkeypatch
+) -> None:
+    """A re-fit's ``diagonal_correction`` (a pivot floor, a stand-in operator's diagonal) is fitted.
+
+    A field split probed into its blocks never forms the whole matrix, so it takes a different path
+    through the re-fit from the one that adds a correction to the whole matrix's shift. Each path must
+    hand the correction the unshifted Jacobian's diagonal and fit Jacobian + shift + correction; a path
+    that dropped the correction would fit Jacobian + shift with no error.
+    """
+    from types import SimpleNamespace
+
+    from aquaflux.precondition.field_split import FieldSplitPreconditioner
+    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+
+    jacobian = sp.csr_matrix(operator)
+    leading, _, trailing_by_leading, trailing = groups.blocks(jacobian)
+    split = FieldSplitInverse(
+        _RecordingInverse(leading.toarray()),
+        _RecordingInverse(trailing.toarray()),
+        trailing_by_leading,
+        groups,
+    )
+    preconditioner = FieldSplitPreconditioner(split, groups)
+    if probe == "into blocks":
+        layout, order = BlockLayout.of(jacobian, groups.n_leading_dofs)
+        monkeypatch.setattr(
+            FieldSplitPreconditioner,
+            "_probed_blocks",
+            staticmethod(lambda *_args: ProbedBlocks(jacobian.data[order].copy(), layout)),
+        )
+        structure = SimpleNamespace(layout=layout)
+    else:
+        monkeypatch.setattr(
+            FieldSplitPreconditioner, "_materialize_jacobian", staticmethod(lambda *_args: jacobian)
+        )
+        structure = None
+    rng = np.random.default_rng(7)
+    shift = rng.uniform(1.0, 2.0, groups.n_dofs)
+    correction = rng.uniform(3.0, 5.0, groups.n_dofs)
+    seen = []
+
+    def diagonal_correction(jacobian_diagonal):
+        seen.append(np.array(jacobian_diagonal))
+        return correction
+
+    preconditioner.refresh_in_place(
+        None, None, shift, structure=structure, diagonal_correction=diagonal_correction
+    )
+
+    np.testing.assert_array_equal(seen[0], operator.diagonal())
+    want_leading, _, _, want_trailing = groups.blocks(
+        sp.csr_matrix(operator + np.diag(shift + correction))
+    )
+    np.testing.assert_allclose(split._leading.fitted, want_leading.toarray(), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(split._trailing.fitted, want_trailing.toarray(), rtol=0, atol=1e-12)

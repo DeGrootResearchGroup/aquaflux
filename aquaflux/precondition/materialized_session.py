@@ -37,7 +37,7 @@ from .monolithic_policy import (
     with_traced_split,
 )
 from .pivot_floor import PivotFloor
-from .traced_field_split import offers_traced_split, traced_field_split
+from .traced_field_split import TracedFieldSplit, offers_traced_split, traced_field_split
 
 __all__ = [
     "BUILD_BETA",
@@ -181,6 +181,37 @@ def _is_traced(pytree: object) -> bool:
     means the caller has wrapped the solve in ``jax.grad`` / ``jvp`` / ``vmap``.
     """
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
+
+
+def _release_superseded(superseded, current, inverse) -> None:
+    """Free the arrays only a superseded traced split holds, once a re-fit has replaced it.
+
+    Every step the session hands out is re-pointed at the re-fitted split (the march applies the update
+    this hook returns; the session re-points its own stopping steps), so the superseded split's arrays
+    are dead by contract. They are still referenced, though: a march's caller holds the step it started
+    the march with for as long as the march runs (``solve.staged_march`` keeps the step it built as the
+    argument of ``newton_march``, and a caller always holds its arguments for the call), and on a
+    three-dimensional case that pins a whole hierarchy -- most of a gigabyte -- for the rest of the
+    march. Freeing them here is what reclaims it; the alternative is a march that takes its starting
+    step through a hand-off its caller does not keep, a change to the march's interface. A step kept
+    across a re-fit and then applied fails loudly (JAX refuses a deleted array) rather than applying a
+    stale preconditioner.
+
+    Arrays the re-fitted split or the inverse still holds -- a frozen coarsening's index arrays, which a
+    re-fit reuses, or a hierarchy shared with a split applied in its own precision -- are kept.
+    """
+    if superseded is None:
+        return
+    held = {id(leaf) for leaf in jax.tree.leaves(current)}
+    held.update(id(leaf) for leaf in jax.tree.leaves(_held_state(inverse)))
+    for leaf in jax.tree.leaves(superseded):
+        if isinstance(leaf, jax.Array) and id(leaf) not in held and not leaf.is_deleted():
+            leaf.delete()
+
+
+def _held_state(inverse) -> list:
+    """The traced state each block of a split currently holds, for :func:`_release_superseded`."""
+    return [block.traced_cycle().state for block in (inverse.leading, inverse.trailing)]
 
 
 class BetaTrackingRefresh:
@@ -408,15 +439,16 @@ class MaterializedProblem(abc.ABC):
         """This problem on another companion assembler of the same case."""
 
     @abc.abstractmethod
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         """The coloured probe for this problem's graph.
 
         Parameters
         ----------
         settings : dict
             The spec's set probe fields (``stencil_reach``, ``column_reach``, ``gradient_sweeps``).
-        active_rows : np.ndarray or None
-            Field-pair blocks a split never reads, or ``None`` to want every block.
+        groups : FieldGroups or None
+            The partition of the field split the probe feeds, or ``None`` for a probe of the whole
+            matrix (see :meth:`~aquaflux.precondition.JacobianProbe.build`).
         """
 
     @abc.abstractmethod
@@ -472,8 +504,11 @@ class MaterializedSession:
     through a :class:`~aquaflux.precondition.monolithic_policy.TracedSplitShiftPolicy`, so a Krylov iteration
     emits no host callback. The host split is still what is fitted and re-fitted; after each re-fit the
     hook hands the march a step carrying the traced form of the re-fitted split
-    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). That is a compilation-cache hit only
-    while the two hierarchies keep their array shapes across a re-fit, so a block whose coarsening reads
+    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). The traced form is taken
+    once per fit and shared by every step the session builds, the stopping steps included: each is a
+    copy of the whole hierarchy in the split's precision, so a copy per step would keep one alive per
+    step held. Swapping in a re-fitted split is a compilation-cache hit only while the two hierarchies
+    keep their array shapes across a re-fit, so a block whose coarsening reads
     operator values must freeze it (``frozen_coarsening``) or pour it into a fixed ladder
     (``shape_headroom``); otherwise every re-fit recompiles the step. Any other inverse is applied
     through a host callback and re-fitted in place.
@@ -552,6 +587,10 @@ class MaterializedSession:
         self._preconditioner: object | None = None
         # Whether the fitted inverse is carried in the step in its traced form; decided at the fit.
         self._traced = False
+        # The traced form of the fitted split, taken once per fit and carried by every step built from
+        # it. Each traced form is a copy of the whole hierarchy in the split's precision, so a step
+        # holding its own would keep one such copy alive per step built, for as long as that step is.
+        self._split: TracedFieldSplit | None = None
         # What the last build was made at and with, for building a step on another problem alike.
         self._reference_state: jnp.ndarray | None = None
         self._march: dict = {}
@@ -565,7 +604,14 @@ class MaterializedSession:
             refitted = self._refresh_hook()(active_step, state, due=due)
             if not (refitted and self._traced):
                 return None
-            split = traced_field_split(self._preconditioner.inverse, self._precision)
+            superseded, self._split = self._split, None
+            self._split = split = traced_field_split(self._preconditioner.inverse, self._precision)
+            # The stopping steps share it too: they are read for their measure alone, and otherwise
+            # each would keep the fit it was built at alive for the rest of the build.
+            self._stopping_steps = {
+                key: with_traced_split(step, split) for key, step in self._stopping_steps.items()
+            }
+            _release_superseded(superseded, split, self._preconditioner.inverse)
             return lambda step: with_traced_split(step, split)
 
         self.refresh_preconditioner = (
@@ -672,6 +718,8 @@ class MaterializedSession:
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
             self._traced = offers_traced_split(self._preconditioner.inverse)
+            if self._traced:
+                self._split = traced_field_split(self._preconditioner.inverse, self._precision)
             if self._precision != "float64" and not self._traced:
                 raise ValueError(
                     f"FieldSplit(precision={self._precision!r}) needs a split applied on the device, "
@@ -683,9 +731,7 @@ class MaterializedSession:
     def _policy(self, base) -> MonolithicFactorShiftPolicy | TracedSplitShiftPolicy:
         """``base`` glued to the fitted inverse, in whichever form the step carries it."""
         if self._traced:
-            return TracedSplitShiftPolicy(
-                base, traced_field_split(self._preconditioner.inverse, self._precision)
-            )
+            return TracedSplitShiftPolicy(base, self._split)
         return MonolithicFactorShiftPolicy(base, self._preconditioner)
 
     @property
@@ -698,10 +744,9 @@ class MaterializedSession:
         if self._probe is None:
             self._probe = self._problem.probe(
                 self._spec.probe.settings(),
-                # A split never reads the leading-by-trailing triangle, so its probe need not store it.
-                self._problem.groups().active_rows()
-                if isinstance(self._spec.inverse, FieldSplit)
-                else None,
+                # A probe feeding a split stores neither the triangle the split never reads nor the whole
+                # matrix: its entries are laid out by the split's blocks.
+                self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None,
             )
         return self._probe
 
@@ -775,5 +820,8 @@ class MaterializedSession:
 
     def _block_inverse(self, role: str) -> Callable:
         spec: BlockInverse = getattr(self._spec.inverse, role)
-        factory = spec.bound(report=self._reports[role]) if role in self._reports else spec
+        # A block applied in single precision is held in it too, where its family can be: otherwise a
+        # double copy of its hierarchy would sit beside the single one the step applies, unread.
+        stored = self._precision if spec._stores_precision else "float64"
+        factory = spec.bound(report=self._reports.get(role), stored_precision=stored)
         return factory if self._inverse_wrapper is None else self._inverse_wrapper(role, factory)

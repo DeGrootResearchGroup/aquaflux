@@ -20,7 +20,6 @@ from collections.abc import Callable, Mapping
 
 import jax.numpy as jnp
 import lineax as lx
-import numpy as np
 
 from aquaflux.precondition import (
     FieldGroups,
@@ -249,7 +248,7 @@ class _FlowProblem(MaterializedProblem):
     def with_assembler(self, assembler: MomentumContinuity) -> _FlowProblem:
         return dataclasses.replace(self, momentum=assembler)
 
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         settings = dict(settings)
         sweeps = settings.pop("gradient_sweeps", None)
         return JacobianProbe.build(
@@ -257,7 +256,7 @@ class _FlowProblem(MaterializedProblem):
             self.momentum.mesh.n_cells,
             self.momentum.layout.n_fields,
             **settings,
-            active_rows=active_rows,
+            groups=groups,
             narrowing=None if sweeps is None else _GradientSweepCap(sweeps),
         )
 

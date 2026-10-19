@@ -537,7 +537,9 @@ def _saturation_colouring(conflict: sp.csr_matrix, n: int) -> np.ndarray:
     return colour
 
 
-def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
+def block_stencil_gather_map(
+    plan: ColumnProbePlan, leading_fields: int | None = None
+) -> ProbeGather:
     """Precompute the fixed field-major CSR structure and a gather map from the probe responses to it.
 
     The sparsity pattern and the coloured probes are fixed (they depend only on the mesh graph), so the
@@ -558,15 +560,23 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
     ``responses[probe_base[b] + colour[b][j]][a n + i]``, i.e. flat index
     ``(probe_base[b] + colour[b][j]) * (n_fields n) + row_dof``.
 
+    With ``leading_fields`` the matrix is never laid out whole: the entries are ordered block by block
+    over the partition of the fields into the first ``leading_fields`` and the rest (each block in its
+    own CSR order), so the four blocks a field split consumes are slices of one value array
+    (:func:`materialize_blocks`) rather than cut out of a full matrix and its shifted copy.
+
     Parameters
     ----------
     plan : ColumnProbePlan
         The assembly pattern and the colouring probing each column field.
+    leading_fields : int, optional
+        Partition the stored entries into blocks at this many leading fields (see above). ``None``
+        (default) keeps the whole matrix's CSR order.
 
     Returns
     -------
     ProbeGather
-        The fixed CSR structure and the de-compression, chunk by chunk.
+        The fixed CSR structure (or block layout) and the de-compression, chunk by chunk.
     """
     n = plan.n_cells
     n_fields = plan.n_fields
@@ -629,7 +639,110 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
         raise ValueError(
             "block_stencil_gather_map: duplicate (row, col) in the pattern (bad colouring)."
         )
-    return ProbeGather(csr.indptr, csr.indices, csr.data, zero_slot, nf)
+    if leading_fields is None:
+        return ProbeGather(csr.indptr, csr.indices, csr.data, zero_slot, nf)
+    layout, order = BlockLayout.of(csr, leading_fields * n)
+    return ProbeGather(None, None, csr.data[order], zero_slot, nf, layout=layout)
+
+
+class BlockLayout:
+    """Where a two-group partition's four blocks lie in one block-major value array.
+
+    The stored entries of a field-major matrix are ordered leading-by-leading, leading-by-trailing,
+    trailing-by-leading, trailing-by-trailing, each block's entries in that block's own compressed-sparse-
+    row (CSR) order, so each block is a contiguous slice of the values and a matrix over that slice needs
+    no copy. The structure of each block is held here; only the values change from one materialize to
+    the next.
+
+    Attributes
+    ----------
+    leading_dofs : int
+        The degrees of freedom of the leading group (the partition point).
+    n_dofs : int
+        The degrees of freedom of the whole matrix.
+    """
+
+    def __init__(
+        self,
+        leading_dofs: int,
+        n_dofs: int,
+        blocks: tuple[tuple[int, int, np.ndarray, np.ndarray], ...],
+        diagonal: np.ndarray,
+    ) -> None:
+        self.leading_dofs = leading_dofs
+        self.n_dofs = n_dofs
+        # Per block: (start, stop) of its slice of the values, and its CSR row pointers and columns.
+        self._blocks = blocks
+        # Position of each degree of freedom's diagonal entry in the values, shape (n_dofs,).
+        self._diagonal = diagonal
+
+    @classmethod
+    def of(cls, csr: sp.csr_matrix, leading_dofs: int) -> tuple[BlockLayout, np.ndarray]:
+        """The layout of ``csr``'s stored entries, and the order taking CSR positions to block-major ones.
+
+        Raises
+        ------
+        ValueError
+            If a diagonal entry is not stored: the shift is added in place on the stored diagonal, so a
+            missing one would have nowhere to go.
+        """
+        n_dofs = csr.shape[0]
+        index_dtype = _index_dtype(max(n_dofs, csr.nnz))
+        rows = np.repeat(np.arange(n_dofs, dtype=index_dtype), np.diff(csr.indptr))
+        cols = csr.indices
+        key = (rows >= leading_dofs).astype(np.int8) * 2 + (cols >= leading_dofs)
+        # A stable order keeps each block's entries in the CSR order they had in the whole matrix.
+        order = np.argsort(key, kind="stable")
+        bounds = np.concatenate([[0], np.cumsum(np.bincount(key, minlength=4))])
+        offsets = (0, leading_dofs)
+        blocks = []
+        diagonal = np.full(n_dofs, -1, dtype=index_dtype)
+        for block in range(4):
+            start, stop = int(bounds[block]), int(bounds[block + 1])
+            taken = order[start:stop]
+            row0, col0 = offsets[block // 2], offsets[block % 2]
+            n_rows = (leading_dofs, n_dofs - leading_dofs)[block // 2]
+            block_rows = rows[taken] - index_dtype(row0)
+            indptr = np.concatenate(
+                [[0], np.cumsum(np.bincount(block_rows, minlength=n_rows))]
+            ).astype(index_dtype)
+            indices = (cols[taken] - index_dtype(col0)).astype(index_dtype, copy=False)
+            blocks.append((start, stop, indptr, indices))
+            if block in (0, 3):
+                on_diagonal = np.flatnonzero(block_rows == indices)
+                diagonal[block_rows[on_diagonal] + row0] = start + on_diagonal
+        if (diagonal < 0).any():
+            raise ValueError(
+                "BlockLayout: the pattern stores no diagonal entry for some degree of freedom, so the "
+                "shift has nowhere to be added."
+            )
+        return cls(leading_dofs, n_dofs, tuple(blocks), diagonal), order
+
+    def blocks(self, data: np.ndarray) -> tuple[sp.csr_matrix, ...]:
+        """The four blocks over ``data``, as matrices sharing its memory (no copy).
+
+        Returns
+        -------
+        tuple of scipy.sparse.csr_matrix
+            ``(A_ll, A_lt, A_tl, A_tt)``, as :meth:`~aquaflux.precondition.FieldGroups.blocks` orders them.
+        """
+        sizes = (self.leading_dofs, self.n_dofs - self.leading_dofs)
+        blocks = []
+        for block, (start, stop, indptr, indices) in enumerate(self._blocks):
+            # Assigned, not passed to the constructor: scipy copies a ``data`` that is a view of a larger
+            # array, which would bring back exactly the copy this layout exists to remove.
+            matrix = sp.csr_matrix((sizes[block // 2], sizes[block % 2]))
+            matrix.indptr, matrix.indices, matrix.data = indptr, indices, data[start:stop]
+            blocks.append(matrix)
+        return tuple(blocks)
+
+    def diagonal(self, data: np.ndarray) -> np.ndarray:
+        """The stored diagonal of ``data`` in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+        return data[self._diagonal]
+
+    def add_to_diagonal(self, data: np.ndarray, shift_diagonal: np.ndarray) -> None:
+        """Add ``shift_diagonal`` (shape ``(n_dofs,)``) to the stored diagonal of ``data``, in place."""
+        data[self._diagonal] += np.asarray(shift_diagonal, dtype=np.float64)
 
 
 class ProbeGather:
@@ -652,23 +765,30 @@ class ProbeGather:
 
     Attributes
     ----------
-    indptr, indices : np.ndarray
-        The fixed CSR structure of the ``(n_fields n, n_fields n)`` Jacobian.
+    indptr, indices : np.ndarray or None
+        The fixed CSR structure of the ``(n_fields n, n_fields n)`` Jacobian; ``None`` when the entries
+        are laid out by ``layout`` instead.
+    layout : BlockLayout or None
+        The block-major layout of the entries over a two-group partition, or ``None`` for the whole
+        matrix's CSR order.
     nnz : int
         Stored entries, including the explicit zeros the full pattern keeps.
     """
 
     def __init__(
         self,
-        indptr: np.ndarray,
-        indices: np.ndarray,
+        indptr: np.ndarray | None,
+        indices: np.ndarray | None,
         gather_map: np.ndarray,
         zero_slot: int,
         nf: int,
+        *,
+        layout: BlockLayout | None = None,
     ) -> None:
         self.indptr = indptr
         self.indices = indices
-        self.nnz = int(indices.shape[0])
+        self.layout = layout
+        self.nnz = int(gather_map.shape[0])
         self._nf = nf
         # Narrowed as each array is formed rather than at the end, so the wide form is never one of the
         # several live at once. A source index is bounded by `zero_slot`, a position by the entry count.
@@ -800,18 +920,11 @@ def materialize_block_jacobian(
     chunk = n_probes if probe_batch_size is None else max(1, probe_batch_size)
 
     if structure is not None:
-        # De-compress AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed CSR
-        # and then dropped, so the only large array live at once is the matrix being built. Holding
-        # every response instead costs `n_probes * nf` floats -- comparable to the matrix itself.
-        data = np.zeros(
-            structure.nnz
-        )  # zero: entries outside their column's reach are never written
-        block = np.zeros((chunk, nf))
-        for start in range(0, n_probes, chunk):
-            m = min(chunk, n_probes - start)
-            plan.seed_block(start, start + m, out=block)
-            responses = _probe_chunk(matvec, batched_matvec, block, m)
-            structure.scatter(data, responses, start, m)
+        if structure.layout is not None:
+            raise ValueError(
+                "this structure lays its entries out block by block; materialize_blocks recovers it."
+            )
+        data = _probed_values(matvec, plan, batched_matvec, chunk, structure)
         return sp.csr_matrix((data, structure.indices, structure.indptr), shape=(nf, nf))
 
     probes = [plan.probe(index) for index in range(n_probes)]
@@ -846,6 +959,94 @@ def materialize_block_jacobian(
     )
     jacobian.eliminate_zeros()
     return jacobian
+
+
+def _probed_values(matvec, plan, batched_matvec, chunk: int, structure: ProbeGather) -> np.ndarray:
+    """Every stored entry's value, in ``structure``'s order, by probing ``chunk`` seeds at a time.
+
+    De-compressed AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed values
+    and then dropped, so the only large array live at once is the values being built. Holding every
+    response instead costs ``n_probes * nf`` floats -- comparable to the matrix itself.
+    """
+    nf = plan.n_fields * plan.n_cells
+    data = np.zeros(structure.nnz)  # zero: entries outside their column's reach are never written
+    block = np.zeros((chunk, nf))
+    for start in range(0, plan.n_probes, chunk):
+        m = min(chunk, plan.n_probes - start)
+        plan.seed_block(start, start + m, out=block)
+        responses = _probe_chunk(matvec, batched_matvec, block, m)
+        structure.scatter(data, responses, start, m)
+    return data
+
+
+def materialize_blocks(
+    matvec: Callable[[jnp.ndarray], jnp.ndarray],
+    plan: ColumnProbePlan,
+    *,
+    structure: ProbeGather,
+    batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+    probe_batch_size: int | None = None,
+) -> ProbedBlocks:
+    """The block Jacobian of ``matvec`` over ``structure``'s partition, by the same coloured probing.
+
+    The counterpart of :func:`materialize_block_jacobian` for a structure built with
+    ``leading_fields`` (:func:`block_stencil_gather_map`): the probes fill one block-major value array,
+    and the four blocks are matrices over slices of it. Entry for entry, the blocks are those
+    :meth:`~aquaflux.precondition.FieldGroups.blocks` cuts from the whole matrix, explicit zeros included.
+
+    Parameters
+    ----------
+    matvec, plan, batched_matvec, probe_batch_size
+        As :func:`materialize_block_jacobian` takes them.
+    structure : ProbeGather
+        A structure with a :class:`BlockLayout`.
+
+    Returns
+    -------
+    ProbedBlocks
+        The values and their blocks.
+    """
+    if structure.layout is None:
+        raise ValueError(
+            "this structure has no block layout; materialize_block_jacobian recovers it."
+        )
+    chunk = plan.n_probes if probe_batch_size is None else max(1, probe_batch_size)
+    return ProbedBlocks(
+        _probed_values(matvec, plan, batched_matvec, chunk, structure), structure.layout
+    )
+
+
+class ProbedBlocks:
+    """One materialize's values over a :class:`BlockLayout`: the blocks, and the shift added in place.
+
+    Attributes
+    ----------
+    data : np.ndarray
+        The values, block-major, shape ``(nnz,)``.
+    layout : BlockLayout
+        Where each block lies in them.
+    """
+
+    def __init__(self, data: np.ndarray, layout: BlockLayout) -> None:
+        self.data = data
+        self.layout = layout
+
+    def blocks(self) -> tuple[sp.csr_matrix, ...]:
+        """``(A_ll, A_lt, A_tl, A_tt)`` over :attr:`data`, sharing its memory."""
+        return self.layout.blocks(self.data)
+
+    def diagonal(self) -> np.ndarray:
+        """The Jacobian's diagonal in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+        return self.layout.diagonal(self.data)
+
+    def add_shift(self, shift_diagonal: np.ndarray) -> None:
+        """Add the pseudo-transient shift to the diagonal, in place.
+
+        The in-place counterpart of :func:`shifted_jacobian`, for values this materialize owns: the
+        whole matrix is never formed, so there is no input to keep unmodified, and every diagonal entry
+        is stored (:meth:`BlockLayout.of` refuses a pattern without one), so no entry is created.
+        """
+        self.layout.add_to_diagonal(self.data, shift_diagonal)
 
 
 def _probe_chunk(matvec, batched_matvec, block, count):

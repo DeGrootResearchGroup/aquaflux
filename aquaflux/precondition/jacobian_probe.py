@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -23,6 +24,9 @@ from .sparse_jacobian import (
     block_stencil_gather_map,
     column_probe_plan,
 )
+
+if TYPE_CHECKING:
+    from .field_split import FieldGroups
 
 __all__ = ["JacobianProbe", "jacobian_probe_plan"]
 
@@ -126,7 +130,7 @@ class JacobianProbe:
         stencil_reach: int = 3,
         column_reach: Sequence[int] | None = None,
         *,
-        active_rows: np.ndarray | None = None,
+        groups: FieldGroups | None = None,
         narrowing: Callable | None = None,
     ) -> JacobianProbe:
         """Colour the cell graph at these reaches and precompute the de-compression for it.
@@ -147,12 +151,14 @@ class JacobianProbe:
             pattern stays at ``stencil_reach``. Exact only for a column that genuinely carries nothing
             further out; measure it for the case rather than assuming it. ``None`` (default) probes
             every column at ``stencil_reach``.
-        active_rows : np.ndarray, optional
-            Exclude field-pair blocks from the materialized pattern entirely -- for a probe built
-            specifically to feed one consumer that is known never to read some sub-block of the
-            Jacobian, such as a :class:`~aquaflux.precondition.FieldSplitInverse`'s dropped triangle
-            (:meth:`~aquaflux.precondition.FieldGroups.active_rows`). ``None`` (default, and the only
-            sound choice for a probe that might be shared with a monolithic consumer) wants every block.
+        groups : FieldGroups, optional
+            The partition of a field split this probe feeds and nothing else. Its dropped triangle
+            (:meth:`~aquaflux.precondition.FieldGroups.active_rows`) is left out of the pattern, and the
+            entries are laid out block by block over the partition, so a materialize yields the split's
+            blocks directly and the whole matrix is never formed
+            (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`). ``None`` (default, and
+            the only sound choice for a probe a monolithic consumer reads) keeps every block, in the whole
+            matrix's order.
         narrowing : callable, optional
             The assembler stand-in; see the class.
 
@@ -162,9 +168,15 @@ class JacobianProbe:
             The shared probe.
         """
         plan = jacobian_probe_plan(
-            face_cells, n_cells, n_fields, stencil_reach, column_reach, active_rows
+            face_cells,
+            n_cells,
+            n_fields,
+            stencil_reach,
+            column_reach,
+            None if groups is None else groups.active_rows(),
         )
-        return cls(plan, block_stencil_gather_map(plan), narrowing)
+        leading = None if groups is None else groups.n_leading_fields
+        return cls(plan, block_stencil_gather_map(plan, leading_fields=leading), narrowing)
 
     def narrow(self, assembler):
         """The assembler this probe differentiates -- ``assembler``, or its stand-in.

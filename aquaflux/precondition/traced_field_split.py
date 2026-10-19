@@ -48,7 +48,7 @@ import jax.numpy as jnp
 
 from .field_split import FieldGroups, FieldSplitInverse
 from .padded_rows import _PaddedRowOperator
-from .traced_cycle import OffersTracedCycle, TracedCycle
+from .traced_cycle import OffersTracedCycle, TracedCycle, in_precision
 
 __all__ = ["TracedFieldSplit", "offers_traced_split", "traced_field_split"]
 
@@ -92,15 +92,7 @@ class TracedFieldSplit(eqx.Module):
         narrowed split back gives the same rounded entries applied in double precision, which is an
         exactly linear map again -- what a transpose solve run to a tight tolerance needs.
         """
-        cast = jax.tree.map(
-            lambda leaf: (
-                leaf.astype(precision)
-                if eqx.is_array(leaf) and jnp.issubdtype(leaf.dtype, jnp.floating)
-                else leaf
-            ),
-            self,
-        )
-        return dataclasses.replace(cast, precision=precision)
+        return dataclasses.replace(in_precision(self, precision), precision=precision)
 
     @property
     def n_dofs(self) -> int:

@@ -403,21 +403,68 @@ def test_a_split_of_two_traced_blocks_is_carried_in_the_step_and_each_refit_hand
     assert not contains_host_callback(step.shift_policy.split.matvec(), jnp.zeros(n))
 
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
-    assert session.refresh_preconditioner(active, state) is not None  # the forced first fit
+    first = session.refresh_preconditioner(active, state)  # the forced first fit
+    assert first is not None
+    active = first(active)  # as the march does: the build's split is released by the re-fit
     assert session.refresh_preconditioner(active, state) is None  # offered, nothing re-fitted
 
+    r = jax.random.normal(jax.random.PRNGKey(0), (n,))
+    # Applied before the re-fit: the re-fit releases the arrays only the superseded split holds.
+    before = active.shift_policy.split.apply(r)
     update = session.refresh_preconditioner(active, state * 1.05, due=True)
     assert update is not None
     refitted = update(active)
-    r = jax.random.normal(jax.random.PRNGKey(0), (n,))
     host = session.preconditioner.inverse.apply(jnp.asarray(r))
     applied = refitted.shift_policy.split.apply(r)
     assert jnp.allclose(applied, host, rtol=1e-12, atol=1e-14)
-    assert not jnp.allclose(applied, active.shift_policy.split.apply(r))
+    assert not jnp.allclose(applied, before)
     assert jnp.array_equal(refitted.adjoint_preconditioner_factory(state)(r), applied)
     assert jax.tree.structure(eqx.filter(refitted, eqx.is_array)) == jax.tree.structure(
         eqx.filter(active, eqx.is_array)
     )
+
+
+def _same_arrays(first, second) -> bool:
+    """Whether two pytrees hold the very same array objects, leaf for leaf (not merely equal values).
+
+    Identity of the arrays, not of the modules: ``equinox.tree_at`` rebuilds a module it inserts, so
+    two steps sharing one split hold equal-but-distinct split objects over the same buffers.
+    """
+    first, second = jax.tree.leaves(first), jax.tree.leaves(second)
+    return len(first) == len(second) and all(a is b for a, b in zip(first, second, strict=True))
+
+
+def test_every_step_built_from_one_fit_carries_the_one_traced_split_it_made(case) -> None:
+    """A traced split is a copy of the whole fitted hierarchy, so the session makes one per fit.
+
+    Every step built from a fit -- a later build, and the stopping step, which is read only for its
+    measure -- must carry that one split's arrays rather than a fresh copy, or each would keep its own
+    copy alive as long as it is held; on a three-dimensional case each copy costs most of a gigabyte.
+    After a re-fit the session's stopping step is re-pointed at the new split as the march's step is,
+    so no step the session holds keeps the old one alive.
+    """
+    target, state = case
+    anchor = target.with_scaled_molecular_viscosity(100.0)
+    loop = DualTimeLoop(inner_steps=3)
+    session, held = _materialized_step_held_on(target, anchor, state, loop)
+    split = held.shift_policy.split
+    assert _same_arrays(
+        session.refresh(state * 1.01, held, dual_time=loop).shift_policy.split, split
+    )
+    # Built (and cached) after that build, as a march's stopping test builds it, so the re-fit below
+    # meets it in the session's cache.
+    stopping = session.stopping_step(target)
+    assert _same_arrays(stopping(held).shift_policy.split, split)
+
+    update = session.refresh_preconditioner(held, state * 1.05, due=True)
+    assert update is not None
+    refitted = update(held).shift_policy.split
+    assert not _same_arrays(refitted, split)
+    # The stopping step lends the held step its own policy and adjoint factory, so these are the
+    # stopping step's split, not the held step's.
+    judged = stopping(held)
+    assert _same_arrays(judged.shift_policy.split, refitted)
+    assert _same_arrays(judged.adjoint_preconditioner_factory.split, refitted)
 
 
 class _HostOnly:
@@ -482,6 +529,64 @@ def test_a_single_precision_split_reaches_the_step_and_a_host_split_refuses_it(c
     session = open_session(MaterializedJacobian(single), coupled, inverse_wrapper=host_trailing)
     with pytest.raises(ValueError, match="no traced cycle, so it is applied on the host"):
         session.build(state, dual_time=DualTimeLoop(inner_steps=3))
+
+
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_a_re_fit_releases_the_arrays_only_the_superseded_split_held(case, precision) -> None:
+    """A re-fit frees what only the split it replaced held, and nothing the new split or inverse uses.
+
+    The step a march's caller started the march with keeps the first split referenced for the whole
+    march, so without the release that copy of a hierarchy stays resident. What the new split shares
+    with the old (a frozen coarsening's index arrays) and what the inverse holds must survive, or the
+    march's own step would fail on its next apply.
+    """
+    coupled, state = case
+    spec = dataclasses.replace(_SPLIT, precision=precision)
+    session = open_session(MaterializedJacobian(spec), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    old = session.refresh_preconditioner(active, state)(active)  # the forced first fit
+    superseded = jax.tree.leaves(old.shift_policy.split)
+    new = session.refresh_preconditioner(old, state * 1.05, due=True)(old)
+    current = {id(leaf) for leaf in jax.tree.leaves(new.shift_policy.split)}
+    shared = [leaf for leaf in superseded if id(leaf) in current]
+    only_old = [leaf for leaf in superseded if id(leaf) not in current]
+    assert only_old and all(leaf.is_deleted() for leaf in only_old)
+    assert shared and not any(leaf.is_deleted() for leaf in shared)
+    r = jax.random.normal(jax.random.PRNGKey(1), (state.shape[0],))
+    assert bool(jnp.all(jnp.isfinite(new.shift_policy.split.apply(r))))
+    assert bool(jnp.all(jnp.isfinite(session.preconditioner.inverse.apply(r))))
+    with pytest.raises(RuntimeError, match="deleted"):
+        old.shift_policy.split.apply(r)
+
+
+def test_a_single_precision_split_applies_the_hierarchies_its_inverses_hold_not_a_copy(
+    case,
+) -> None:
+    """With ``precision="float32"`` each block inverse holds its hierarchy narrow, and the step uses it.
+
+    The split's hierarchies are the inverses' own arrays, so no double-precision hierarchy is held
+    beside the single one the step applies -- at the fit and after a re-fit. Only the prolongation
+    values, which a refit reads back in double, are narrowed into a copy of their own.
+    """
+    coupled, state = case
+    single = dataclasses.replace(_SPLIT, precision="float32")
+    session = open_session(MaterializedJacobian(single), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    # The forced first fit, then an asked-for re-fit; each split checked before the next re-fit.
+    for at, due in ((state, False), (state * 1.05, True)):
+        split = session.refresh_preconditioner(active, at, due=due)(active).shift_policy.split
+        inverse = session.preconditioner.inverse
+        for applied, held in (
+            (split.leading_cycle, inverse.leading.traced_cycle()),
+            (split.trailing_cycle, inverse.trailing.traced_cycle()),
+        ):
+            pairs = list(zip(jax.tree.leaves(applied), jax.tree.leaves(held), strict=True))
+            floating = [(a, h) for a, h in pairs if jnp.issubdtype(h.dtype, jnp.floating)]
+            narrow = [(a, h) for a, h in floating if h.dtype == jnp.float32]
+            assert len(narrow) > len(floating) // 2, "the inverse holds its hierarchy in double"
+            assert all(a is h for a, h in narrow), "the step applies a copy of the held hierarchy"
 
 
 def test_the_session_probe_follows_the_operator_stand_in(case) -> None:

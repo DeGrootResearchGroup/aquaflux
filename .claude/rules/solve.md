@@ -86,6 +86,9 @@ Old names are in `.claude/notes/solve-log.md` ("Renamed 2026-08-20", "Renamed 20
 
 ## Settings values — `settings_value.py`, `settings_mapping.py`
 
+- **`BlockInverse.bound(*, report=None, stored_precision="float64")`** binds a block-inverse factory;
+  `_reports` / `_stores_precision` say which a family accepts (lAIR takes neither), and asking for one it
+  cannot is a `TypeError`. The session passes the split's precision as `stored_precision` where allowed.
 - **`SettingsValue`** is the one home of "a frozen dataclass whose `None` fields are unset and whose
   `settings()` are the set ones"; `BlockInverse` (`block_inverse.py`, public so a configuration can
   require a value rather than a callable) and the specs in `turbulence/preconditioner_spec.py` derive
@@ -284,7 +287,7 @@ defect — fix it in the same change.
   problem, …)` is the lifecycle of a materialized-Jacobian preconditioner: one probe, one inverse, one
   refresh hook, each made at most once, so every step carries identical static objects. It is written
   against the ABC **`MaterializedProblem`** (`assembler`, `layout`, `with_assembler`,
-  `probe(settings, active_rows)`, `groups()` — `None` ⇒ one group, `bind_march` (where a residual
+  `probe(settings, groups)`, `groups()` — `None` ⇒ one group, `bind_march` (where a residual
   validates early), `shift_source`, `build_step(state, policy, march, base_regime)`); the session hands
   it the glued shift policy, so no problem chooses the preconditioner's form. Implementations:
   `turbulence._CoupledProblem`, `flow._FlowProblem`. `FieldSplit` is refused for one group, a bare
@@ -298,6 +301,28 @@ defect — fix it in the same change.
     argument), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `VCYCLE_LINEAR_SOLVE`; the specs
     (`MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` (extend its
     kinds rather than restate them). `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
+  - **One traced split per fit, shared by every step the session builds (binding).** `_split` is taken
+    at the fit and replaced after each re-fit, which also re-points the cached stopping steps
+    (`with_traced_split`), so no held step pins an old copy; each copy is a whole hierarchy in the
+    split's precision (0.63 GiB float32 plus the int32 indices it pins on bfs3d). A per-step split held
+    three copies at once and cost 1.1 GiB of the 2-step peak (`memory_attribution.py`, 2026-10-18; log,
+    "bfs3d memory by owner"). Pinned by
+    `test_every_step_built_from_one_fit_carries_the_one_traced_split_it_made` (array identity, since
+    `eqx.tree_at` rebuilds the module it inserts). A caller that keeps a built step for its shift policy
+    should keep `step.shift_policy.base` (bfs3d's residual reporter does).
+  - **A re-fit releases the superseded traced split (binding, the owner's choice of 2026-10-18):**
+    `_release_superseded` calls `Array.delete()` on every leaf of the replaced split that neither the new
+    split nor the inverse's current traced state holds (a frozen coarsening's reused index arrays are
+    shared, so kept). **Why deleted rather than dropped:** `solve.staged_march` builds the step and passes
+    it to `newton_march`, and a caller holds its arguments for the whole call, so the first split stayed
+    resident for the march (~1 GiB on bfs3d, found by a stack-locals scan; `gc.get_referrers` cannot see
+    a running frame's locals). **The alternative not taken (option 3):** have `newton_march` take its
+    starting step through a hand-off its caller does not keep (a one-shot holder it empties), a change to
+    the march's interface; with it the release could go. Consequence of the release: a step kept across
+    a re-fit and then applied raises (`RuntimeError: Array has been deleted`) instead of silently applying
+    a stale preconditioner — apply the update the hook returns (`MarchReplay.refit`,
+    `endgame_shift_probe.py`'s `refreshed`). Pinned by
+    `test_a_re_fit_releases_the_arrays_only_the_superseded_split_held` (both precisions).
   - **A re-pointed session re-fits the inverse and deliberately keeps the held step's shift (#701)** —
     the step control adapts the shift strength on the premise that the diagonal it scales is fixed, and
     every variant changing it mid-march lost (`.claude/notes/turbulence-log.md`, "#701 — the arms").

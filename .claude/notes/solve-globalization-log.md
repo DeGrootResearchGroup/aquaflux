@@ -1226,6 +1226,12 @@ solves), final `|R|` 8.345e-06, `x_r/h` 8.07, no retries, 1036 s. `beta` reaches
 (of a 16-step ramp) and sits there for the whole target station (steps 17-31), where the residual falls
 linearly at 0.55-0.84 per step.
 
+⚠️ **Unverified since 2026-10-18:** until then the probe built its arms' steps once and discarded each
+re-fit's update, so where the split was traced (#290, the same day as this table) its arms applied the
+split from the steps' build, not the re-fit at their own state and shift. Whether this table ran on the
+host split (re-fitted in place, so correct) or the traced one is not recorded; it was not re-run. The
+harness now derives every arm from the replay's current step.
+
 **The probe** (`validation/pitzdaily_openfoam/endgame_shift_probe.py`): ONE outer step from a checkpointed
 state at `beta` 0.005 / 0.0015 / 0.0005 / 0, the inverse re-fitted at that state at `max(beta, 0.05)`
 (`shipped`) or at the shift itself (`tracking`, zero included), under the file's inner loop (5 / 0.01) or a

@@ -128,8 +128,9 @@ branches.
   `turbulence_damping` lives.
 - **A harness that applies the march's preconditioner must apply what the step holds, and take it as an
   argument of anything it compiles.** A shipped field split is a traced copy taken at each fit; a refit
-  reaches the step only through the replacement `refresh_preconditioner` returns, and a split captured in a
-  closure keeps applying the first fit silently. `pitzdaily_openfoam/replay.py`'s `MarchReplay.refit` does
+  reaches the step only through the replacement `refresh_preconditioner` returns. A split kept across a
+  re-fit is released by it (since 2026-10-18), so applying it raises rather than silently applying the
+  first fit; before that it applied the stale one with no error. `pitzdaily_openfoam/replay.py`'s `MarchReplay.refit` does
   this; `MarchReplay(host=True)` applies the host object for probes that mutate it in place. Probes that
   need the host inverse read `session.preconditioner.inverse` from `open_session`.
 - **Replay a step at the tolerance the march used.** The march solves a step after a setback to 0.1, not
@@ -231,6 +232,15 @@ their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march
   `test_a_pitzdaily_march_override_reaches_the_solve_not_only_the_banner`): a pitzDaily arm in that window
   that set one ran the file's solver.
 - `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
+
+## ⚠️ bfs3d at the old `refresh_on_cycles` 3 depended on the machine
+
+With the pivot floor at cadence 3 the march took 21 steps on the owner's laptop and 32 and 39 on two
+4-core Linux containers (`x_r/h` 8.361 throughout), the paths parting at solves stopped by `max_restarts`
+14. Neither the jax version (0.10.2 against 0.12.0 on one container: different from step 1, still capped at
+step 17) nor the split's precision (float64 matched float32 through step 12, the first capped solve
+included) explained it; the file's 4 (#768) gives 17 on both machines measured. Log: "bfs3d with the
+pivot floor, by machine".
 
 ## bfs3d's mesh — one tracked copy
 

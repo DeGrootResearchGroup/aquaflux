@@ -42,17 +42,27 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
 - **Refresh**: `FieldSplitInverse.refactor_block` makes the split a `RefactorableInverse`;
   `FieldSplitPreconditioner` inherits `MaterializedJacobianPreconditioner.refresh_in_place`
   (`materialized_preconditioner.py`). A block inverse without `refactor_block` is refused with a
-  `TypeError` before either block is touched. A refit cuts the operator into blocks by gathers the split
-  holds between refits (`FieldGroups.blocks(matrix, maps)`, `self._maps`, an `EntryMaps`), and
-  `traced_field_split` packs the coupling through the same maps (`FieldSplitInverse.padded_coupling()`);
-  both are bit-identical to slicing and `from_scipy` (`solve-amg-multigrid.md`, "entry maps").
+  `TypeError` before either block is touched. **A session's split never sees the whole matrix**: its
+  probe is laid out by the split's blocks (`JacobianProbe.build(groups=)`, `sparse_jacobian.BlockLayout`),
+  so a fit and every refit probe one block-major value array, add the shift on its stored diagonal in
+  place (`ProbedBlocks.add_shift`) and hand the blocks, views of that array, to
+  `FieldSplitInverse.refactor_blocks` / `_field_split_of_blocks` — no whole CSR, shifted copy or cut
+  (bfs3d 2-step peak 9.42 -> 8.47 GiB, held host 3.12 -> 2.74 GiB without the cut's maps, 2026-10-18).
+  `_set_coupling` copies the coupling block, which would otherwise pin the whole array. `refactor_block`
+  (a whole operator, for other callers) still cuts by held gathers (`FieldGroups.blocks(matrix, maps)`),
+  and `traced_field_split` packs the coupling through the split's maps
+  (`FieldSplitInverse.padded_coupling()`); all bit-identical to slicing and `from_scipy`
+  (`solve-amg-multigrid.md`, "entry maps"). Pinned by
+  `test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix`.
 - **Transpose is closed-form** (reverse the block solves, use `Cᵀ`), so the adjoint is served. `Cᵀ` is
   formed on first use (`_transposed_coupling`) and dropped by `_set_coupling`, the one place a coupling is
   stored; do not re-derive it per apply (`A.T` on CSR is a CSC view that converts on every product).
 - **Only the dropped triangle is not materialized.** `FieldGroups.active_rows()` gives the
   `(n_fields, n_fields)` table of field-pair blocks to keep; `column_probe_plan(active_rows=)`
-  (`sparse_jacobian.py`) filters the pattern before the gather map is built, and
-  `coupled_jacobian_probe(..., active_rows=)` threads it. `None` is byte-identical to the full pattern.
+  (`sparse_jacobian.py`) filters the pattern before the gather map is built; a probe takes the split's
+  `FieldGroups` (`JacobianProbe.build(groups=)`, `coupled_jacobian_probe(..., groups=)`,
+  `MaterializedProblem.probe(settings, groups)`), which gives both this table and the block layout.
+  `None` is byte-identical to the full pattern.
   On `bfs3d` this cut stored `nnz` 47.2M → 36.7M (−22 %) with `apply` unchanged forward and transpose.
   `active_rows` (a static per-field-pair table) and `in_reach` (a per-entry reach question) are separate
   mechanisms; keep them so.
@@ -112,14 +122,18 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
 
 **How it is wired.**
 1. `MaterializedSession._build` fits the host `FieldSplitPreconditioner`, then, if
-   `offers_traced_split(...)`, uses `TracedSplitShiftPolicy(base, traced_field_split(inverse))`
-   (`monolithic_policy.py`) instead of `MonolithicFactorShiftPolicy`. The problem's
+   `offers_traced_split(...)`, uses `TracedSplitShiftPolicy(base, session._split)`
+   (`monolithic_policy.py`) instead of `MonolithicFactorShiftPolicy`. **One traced split per fit**: the
+   session takes it once at the fit and after each re-fit, and every step it builds (the stopping step
+   included, re-pointed at each re-fit) carries those arrays — a split per step kept a copy of the whole
+   hierarchy alive per held step (`solve.md`, `materialized_session`). The problem's
    `build_step(state, policy, march, base_regime)` receives the glued policy. `session.preconditioner`
    is the host object either way.
 2. **A re-fit is a new step, not a mutation.** `BetaTrackingRefresh` re-fits in place and returns whether
    it did; the session returns an update `step -> with_traced_split(step, split)`, which `newton_march`
    applies to both `strategy` and `active_step`, and reports on `MarchResult.strategy` for the next
-   segment and the adjoint.
+   segment and the adjoint. The superseded split's own arrays are released (`solve.md`,
+   `materialized_session`), so a step kept across a re-fit raises if applied.
 3. **The split rides in two places, both data**: the policy and the adjoint factory (`_TracedSplitAdjoint`;
    the step's `adjoint_preconditioner_factory` is a data field). `with_traced_split` replaces both in one
    `tree_at`. ⚠️ Updating only the policy leaves the adjoint on the starting split.
@@ -129,6 +143,17 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
    `validation/traced_split_refresh_shapes.py` checks it: 0 moved signatures, 1 trace across 40 builds.
 
 ## `FieldSplit(precision="float32")`: the split applied in single precision
+
+**The block inverses hold their hierarchies in the split's precision** (`HierarchyBlockInverse(stored_
+precision=)`, passed by the session through `BlockInverse.bound(stored_precision=)` where the family's
+`_stores_precision` allows; lAIR does not, and stays double). Each fit and refit is computed in float64
+and rounded once after `derive_extras`, prolongation values excepted (a frozen refit reads them back, and
+the held Galerkin maps key on them), so the split shares the inverse's arrays and applies exactly what
+narrowing a double hierarchy gave. Host `apply` stays double (a float64 residual promotes every operation;
+an explicit widening was measured bit-identical and deleted). bfs3d 2-step peak 10.82 -> 10.15 GiB, steady
+device float64 1.23 -> 0.15 GiB (2026-10-18; `solve-direct-preconditioners-log.md`, "bfs3d memory by
+owner"). Pinned by `test_an_inverse_held_in_single_precision_holds_its_double_fit_rounded_once` and
+`test_a_single_precision_split_applies_the_hierarchies_its_inverses_hold_not_a_copy`.
 
 The library default is `"float64"`; pitzDaily's and bfs3d's `case.yaml` set `precision: float32` (owner's
 decision, #732: same steps, cycles and root; pitzDaily −24 %, bfs3d −17 % wall;
