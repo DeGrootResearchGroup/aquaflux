@@ -330,13 +330,13 @@ them.
 
 ## Other live traps
 
-- ⚠️ **Without the pivot floor, bfs3d's march at `refresh_on_cycles` 3 failed on a 4-core Linux container
-  (`main` `fe772f59`, 2026-10-18)**: at step 35's re-fit the trailing hierarchy refused one corner cell's
-  `[k, ω]` block as singular (`k` ~1e-17; the block is triangular and invertible, and the guard's Hadamard
-  ratio is not column-scale invariant). With #766's `PivotFloor(0.15)` it converged (32 steps at 3; 17 at
-  the file's 4 since 2026-10-19), by never reaching such a state: the floor does not cure the refusal,
-  which the same state still raises on `main` with the floor on. Detail: `.claude/notes/validation-log.md`,
-  "The re-fit cadence on this machine class, and a corner cell's `k`".
+- ⚠️ **bfs3d's corner `k` can collapse (~1e-17) on some trajectories.** Without the pivot floor the march at
+  `refresh_on_cycles` 3 did so on a 4-core Linux container (`main` `fe772f59`, 2026-10-18) and ended on the
+  trailing hierarchy's singularity guard, which then depended on column scaling; the guard is
+  scale-invariant since 2026-10-19 and passes that invertible block, whose inverse (~1e20) a float32 split
+  must then carry. With #766's `PivotFloor(0.15)` the marches converged (32 steps at 3; 17 at the file's 4)
+  by never reaching such a state: the floor leaves that cell's pivot alone. Detail:
+  `.claude/notes/validation-log.md`, "The re-fit cadence on this machine class, and a corner cell's `k`".
 - **Before attributing a local-only failure to your platform, check CI's skip counts** (root `CLAUDE.md`,
   "CI is not a superset of a local run"); a 2026-08-19 "platform difference" was a skipped test.
 - **`_mis_aggregate`'s return annotation is stale**: `tuple[np.ndarray, int]`, but it returns three values

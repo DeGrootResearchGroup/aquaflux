@@ -640,7 +640,8 @@ by where the diagonal is when the march meets it:
 - **firmly negative:** the clip strips the corner `dk` (−0.49, −0.19, −0.006 at `k` ≈ 1e-16 -- 80 % of the
   direction's norm) and what is left has a *positive* slope in ‖G‖ (×1.000001 at α 1e-6 to ×1.47 at α 1,
   the same at rtol 1e-8); `k` slides ×0.01 a step to 1e-18 and the run ends on the `[k, ω]` block refusal
-  (a false positive of the guard: the block is lower-triangular, det −1.6e-6, its Hadamard ratio ∝ k);
+  (a false positive of the guard: the block is lower-triangular, det −1.6e-6, its Hadamard ratio ∝ k;
+  the guard is scale-invariant since 2026-10-19 and passes such a block);
 - **passing through zero:** cell 12667's shifted diagonal −7.8e-9 at state 18; the solve hits the cycle cap
   with a linear residual 2865× the right-hand side, the junk step is accepted (×54) and the run blows up.
   That linear residual is the float32 split failing at the near-zero pivot (a right-preconditioned GMRES
