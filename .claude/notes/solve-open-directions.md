@@ -367,10 +367,10 @@ Cycle counts are not comparable across stops (see above), so the comparison is w
 
 `x_r/h` 8.361 in all four. bfs3d's `case.yaml` takes the residual stop since 2026-10-13, at `refresh_on_cycles`
 3. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
-nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each; on the M3 Pro,
-where a re-fit costs about one step -- on a 4-core Linux container, where it costs ~2.5, with #766's
-pivot floor 3 / 4 / 5 took 3141 / 1860 / 3693 s (32 / 17 / 28 steps), one sample each: `validation-log.md`,
-"The re-fit cadence on this machine class");
+nothing over 3. **3 and 4 were not separable in that table** (23 s apart, inside the machine's spread for one
+run each, before #766's pivot floor). With the floor (2026-10-19, one sample each per machine), 4 was fastest
+on both machine classes: M3 Pro 531 / 475 / 497 s for 3 / 4 / 5 (21 / 17 / 17 steps), 4-core Linux 3141 /
+1860 / 3693 s (32 / 17 / 28): `validation-log.md`, "The re-fit cadence on this machine class";
 2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
 runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
 never rising. ⚠️ That tail's rate is the floor's (no release in this file), so these runs cannot show the

@@ -970,5 +970,21 @@ defaults; one run per arm, back to back; peak sampled every 20 s.
 - **The floored shipped march takes 32 steps here against 21 on PR #766's machine** (its march table,
   476-501 s per solve), so with the floor rounding still moves the step count between machines; it no longer
   moves it to a failure.
+- **On the M3 Pro (project owner, 2026-10-19, PR #768 comment)**, `main` `a1fd3d1a` (#766's merged library),
+  shipped `case.yaml` with the floor, only `BFS3D_REFRESH_ON_CYCLES` changed, one run each, back to back;
+  ~5.6 GB of swap already in use at the start and the peak not sampled, so its seconds are uncertain:
+
+  | `refresh_on_cycles` | steps | cycles | re-fits (full / cost) | solve | final `R` | `x_r/h` |
+  |---|---|---|---|---|---|---|
+  | 3 (shipped) | 21 | 115 | 13 / 7 | 531 s | 4.99e-08 | 8.3611 |
+  | 4 | 17 | 149 | 13 / 1 | 475 s | 1.76e-06 | 8.3611 |
+  | 5 | 17 | 155 | 13 / 1 | 497 s | 3.18e-07 | 8.3611 |
+
+  4 was fastest there too, by less (0.89x the shipped 3, against 0.59x here): a re-fit costs ~13 s there.
+  Arm 4 took the same path class on both machines (17 steps, 13 / 1 re-fits, 149 against 148 cycles); arm 3
+  repeated #766's own march (21 / 115) against 32 steps here; arm 5 followed arm 4 to step 17 there and took
+  28 steps here, so it is the arm still decided by the machine. The arms part at step 6 there, step 7-8 here.
+  Still one sample per arm per machine: whether 4 wins by re-fitting less or by avoiding a stall is not
+  distinguished.
 - **Without the floor the ranking was 5 < 4 < 3 (failed)**; with it, 4 < 3 < 5. The unfloored ranking was
   rounding's, as PR #766's diagnosis predicts.
