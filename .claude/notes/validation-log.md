@@ -948,6 +948,9 @@ at β 2.0). The cell's `k` pivot is not small against its own pseudo-time diagon
 
 #### With the pivot floor, #766 (2026-10-19)
 
+**`case.yaml` moved `refresh_on_cycles` from 3 to 4 on these and the M3 Pro arms below (project owner,
+2026-10-19).** "Shipped" in this section's tables means 3.
+
 #766's head before merge, `1e69b4ab` (base `main` `de339a1f`; `case.yaml` sets
 `pivot_floor: {kind: PivotFloor, threshold: 0.15}`), run from its own worktree. It merged as `f7fcb6f2`,
 whose only further library change deleted the production freeze, off by default and off in these runs, so

@@ -298,14 +298,15 @@ introduced it, before it merged):
 
 | `case.yaml` with | steps | re-fits | solve | result |
 |---|---|---|---|---|
-| nothing changed (`refresh_on_cycles` 3) | 32 | 31 | 3141 s | converged, `x_r/h` 8.3611 |
-| `BFS3D_REFRESH_ON_CYCLES=4` | 17 | 14 | 1860 s | converged, `x_r/h` 8.3611 |
+| `BFS3D_REFRESH_ON_CYCLES=3` (the file's value until 2026-10-19) | 32 | 31 | 3141 s | converged, `x_r/h` 8.3611 |
+| nothing changed (`refresh_on_cycles` 4) | 17 | 14 | 1860 s | converged, `x_r/h` 8.3611 |
 | `BFS3D_REFRESH_ON_CYCLES=5` | 28 | 21 | 3693 s | converged, `x_r/h` 8.3611 |
 
 Without the floor (`main` `fe772f59`) the same file failed at step 35: one corner cell's `k` fell to
 ~1e-17 and the `[k, ω]` hierarchy refused its block. Each row is a single trajectory, and the refresh
-threshold changes the trajectory, so the rows rank three runs rather than settle the threshold; the floored
-march here takes 32 steps where it took 21 on another machine.
+threshold changes the trajectory, so the rows rank three runs rather than settle the threshold. The file
+moved from 3 to 4 on these runs and the same three on an 11-core laptop, where 4 was also fastest (17 steps,
+475 s, against 21 steps, 531 s at 3).
 
 The march's memory peaks at 12–13 GiB, so on 15 GiB do not run it under an allocator setting that keeps
 freed memory (`MALLOC_ARENA_MAX=1` with raised thresholds, or jemalloc with decay disabled): both raised the
