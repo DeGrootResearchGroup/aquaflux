@@ -856,6 +856,10 @@ Two arms on the same container, both at `refresh_on_cycles` 3, each stopped once
   float64 (2 GB of captured constants) and not run to completion in float32.
 #768's cadence 4 then gave 17 steps on both the owner's laptop and a 4-core container.
 
+**At the shipped cadence 4** (same container, jax 0.12.0, glibc defaults, nothing else running, one run
+each): `main` `1b68caf6` and #763 at `6161f715` give identical step tables (17 steps, 143 cycles, `x_r/h`
+8.361); peak `VmHWM` 12.25 against 8.46 GiB (15 s samples), solve 1601 against 1526 s.
+
 
 ### Why bfs3d's probe tangent costs 5.5× pitzDaily's, and what moves it (2026-10-18)
 

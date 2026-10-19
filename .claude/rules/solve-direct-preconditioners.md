@@ -117,9 +117,9 @@ bare block inverse).
     of the compiled program, whose temporary is ~100 MiB per tangent plus ~100 MiB on bfs3d (816 MiB at
     8, Linux, 2026-10-18), transient per call and faulted in afresh at glibc defaults. A run's peak at
     batch 16 against 8 is unmeasured. On bfs3d a run's memory ceiling is set by the fits and re-fits of the materialized
-    Jacobian and the compiled step, not by building the case (0.84 GiB): 8.85 GiB over a whole march against
-    12.15 GiB on `main` `f7fcb6f2`, identical step tables (2026-10-19, 4-core Linux, jax 0.12.0,
-    `refresh_on_cycles` 3): log, "bfs3d memory by owner" and "Where a run's memory goes".
+    Jacobian and the compiled step, not by building the case (0.84 GiB): 8.46 GiB over the shipped 17-step
+    march against 12.25 GiB on `main` `1b68caf6`, identical step tables (2026-10-19, 4-core Linux, jax
+    0.12.0): log, "bfs3d memory by owner" and "Where a run's memory goes".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
     gather** (`structure=`) are what the materialized path passes. The full pattern (no `eliminate_zeros`)
     is a superset of the live nonzeros at any state, so the structure never moves cold→developed — that
