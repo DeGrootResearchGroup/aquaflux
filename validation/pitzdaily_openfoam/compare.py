@@ -90,7 +90,7 @@ from aquaflux.schemes import (
     SweptGradientSolve,
 )
 from aquaflux.solve import CflResidualDualTimeControl, Convergence, MarchLogger, StateCheckpointer, combine_observers, residual_stop_gmres
-from aquaflux.precondition import FieldSplit
+from aquaflux.precondition import FieldSplit, PivotFloor
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.turbulence import (
     BetaTaperedDamping,
@@ -210,6 +210,14 @@ def _solver_with_overrides(solver):
     refit_floor = _environment("REFIT_BETA_FLOOR", float)
     if refit_floor is not None:
         preconditioner = dataclasses.replace(preconditioner, refit_beta_floor=refit_floor)
+    # Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals
+    # (`PITZ_PIVOT_FLOOR`, the threshold in (0, 1), `none` off; unset keeps the file's).
+    pivot_floor = _environment("PIVOT_FLOOR", str)
+    if pivot_floor is not None:
+        preconditioner = dataclasses.replace(
+            preconditioner,
+            pivot_floor=None if pivot_floor == "none" else PivotFloor(float(pivot_floor)),
+        )
     edits["preconditioner"] = preconditioner
     damping = _environment("TURB_DAMPING", float)
     if damping is not None:
@@ -633,6 +641,7 @@ FIELD_SPLIT = isinstance(SOLVER.preconditioner.inverse, FieldSplit)
 #: one run each, the case file then on `main`): clip alone 18 steps / 133 cycles / 126 s, clip + bound
 #: `e` 18 / 130 / 132 s, `x_r/h` 8.0686 both.
 OMEGA_STEP_RATIO = SOLVER.omega_step_ratio
+PIVOT_FLOOR = SOLVER.preconditioner.pivot_floor
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
 #: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --
@@ -1271,6 +1280,7 @@ def solve_aquaflux(
             if math.isinf(OMEGA_STEP_RATIO)
             else OMEGA_STEP_RATIO,
         ),
+        ("pivot floor", "off" if PIVOT_FLOOR is None else PIVOT_FLOOR.threshold),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("inner dump above", INNER_DUMP_ABOVE or "off"),
     ):

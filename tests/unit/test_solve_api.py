@@ -206,6 +206,9 @@ VALIDATION_INTERNAL_REACHES = {
     # digit for digit is what makes a replayed arm evidence about the march, so it must run the march's
     # step, not a re-implementation of it.
     "_march_step",
+    # The shifted Newton solve one inner iteration makes, re-run by `step_descent_probe.py` to take a
+    # step's first direction loose, tight and clipped, and judge each by its descent in the step's measure.
+    "_shifted_solve",
     # The aggregation's internals, reached by the harness that measured whether equilibration changes
     # the graph the coarsening sees (it does not -- 0.03% of edges). Running the real `_cell_graph` /
     # `_aggregation_edges` / `_mis_aggregate` is the point: a re-implementation would have measured a

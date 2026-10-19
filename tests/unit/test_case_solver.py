@@ -44,6 +44,7 @@ from aquaflux.precondition import (
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
+    PivotFloor,
     SimpleSmoothed,
 )
 from aquaflux.solve import (
@@ -813,6 +814,8 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
             probe=JacobianProbeSpec(
                 stencil_reach=3, column_reach=(2, 2, 2, 2, 2), gradient_sweeps=None
             ),
+            # Near-zero k pivots moved out of the fit, both step cases' since 2026-10-19.
+            pivot_floor=PivotFloor(threshold=0.15),
         ),
         # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
         # script stopped building its march.
@@ -883,6 +886,7 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
                 precision="float32",
             ),
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
+            pivot_floor=PivotFloor(threshold=0.15),
         ),
         "dual_time": DualTimeLoop(
             inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3

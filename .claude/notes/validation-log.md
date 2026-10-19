@@ -831,3 +831,21 @@ singular`, with `R` 4.557e-04 (target 1e-05) and the shift at its 0.005 floor. T
 convergence (`b1648725`, 2026-10-17: 29 steps, `x_r/h` 8.3611) predates #757 and #761; which of the commits
 between moved the trajectory onto the singular block is not bisected. Logs: `march.log` of each run (not
 kept in the repository).
+
+## bfs3d with the pivot floor, by machine (2026-10-19)
+
+Shipped `case.yaml` (`PivotFloor(0.15)`, float32 split, `simplesmooth` leading, uniform reach 3), no
+OpenFOAM reference present, `validation/run_case.sh validation/bfs3d_openfoam/compare.py`, warm-ish cache.
+Container: Linux x86_64, 4 cores, 15 GB, jax 0.12.0, numpy 2.5.3, scipy 1.18.1.
+
+| checkout | steps | cycles | `x_r/h` | peak `VmHWM` (15 s samples) |
+|---|---|---|---|---|
+| #766 head `1e69b4ab` (main's march: the production freeze it deleted before landing was off) | 39 | 254 | 8.361 | 12.15 GiB |
+| #763 merged with it (`_fitted_shift` on both re-fit paths) | 39 | 254 | 8.361 | 8.85 GiB |
+
+The two step tables are identical on every row but the time column. The owner's machine gave 21 steps /
+115 cycles for the same floor (solve-log, "Near-zero pivots and the float32 split"). The container march
+has 14–16-cycle solves with `a_min` 0.125–0.25 at steps 12, 14, 19, 20, 23, 28 — the float32-stall
+signature `solve.md` flags for a healthy negative pivot — but no probe was run to confirm it. Platform
+and jax version were not separated (the container's earlier marches ran jax 0.11.2). The #766 run's wall
+clock (3777 s) overlapped a 4-minute unit-test run and is void; the merged run's is 3568 s.

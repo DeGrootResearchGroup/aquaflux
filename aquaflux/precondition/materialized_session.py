@@ -36,6 +36,7 @@ from .monolithic_policy import (
     TracedSplitShiftPolicy,
     with_traced_split,
 )
+from .pivot_floor import PivotFloor
 from .traced_field_split import TracedFieldSplit, offers_traced_split, traced_field_split
 
 __all__ = [
@@ -155,7 +156,22 @@ def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
     state : jnp.ndarray
         The state the diagonal is taken at.
     """
-    return np.asarray(jax.lax.stop_gradient(base.shift_term(state).shift(beta)))
+    return _frozen_shift_and_scale(base, beta, state)[0]
+
+
+def _frozen_shift_and_scale(base, beta: float, state: jnp.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`frozen_shift_diagonal` and the base diagonal ``d`` it scales, from one shift term.
+
+    The base diagonal is each row's pseudo-time scale independent of ``beta`` -- what a
+    :class:`~aquaflux.precondition.PivotFloor` measures a pivot against -- so it is read off the same
+    term rather than recovered by dividing the shift by ``beta``, which would fold in any per-row factor
+    of ``beta`` the policy applies.
+    """
+    term = base.shift_term(state)
+    return (
+        np.asarray(jax.lax.stop_gradient(term.shift(beta))),
+        np.asarray(jax.lax.stop_gradient(term.diagonal)),
+    )
 
 
 def _is_traced(pytree: object) -> bool:
@@ -233,11 +249,20 @@ class BetaTrackingRefresh:
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
         seconds, and its per-phase costs. ``None`` (default) elides the call.
+    pivot_floor : PivotFloor, optional
+        Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals,
+        measured on the diagonal the fit would otherwise see (the Jacobian's and the shift). It changes the fit only; the operator the steps solve is left as it is. ``None``
+        (default) fits that diagonal unchanged.
+    floorable_rows : np.ndarray, optional
+        Boolean, shape ``(n_dofs,)``: the only rows ``pivot_floor`` may change
+        (:attr:`MaterializedProblem.floorable_fields`). ``None`` (default) lets it change any shifted row.
 
     Attributes
     ----------
     assembler : object
         The assembler this hook currently refreshes for; :meth:`rebind` changes it.
+    floored_rows : np.ndarray
+        The rows ``pivot_floor`` changed at the last re-fit, shape ``(n_floored,)``; empty without one.
     """
 
     def __init__(
@@ -248,8 +273,13 @@ class BetaTrackingRefresh:
         *,
         refit_beta_floor: float = 0.0,
         observer: Callable[[RefreshTiming], None] | None = None,
+        pivot_floor: PivotFloor | None = None,
+        floorable_rows: np.ndarray | None = None,
     ) -> None:
         self._probe = probe
+        self._pivot_floor = pivot_floor
+        self._floorable_rows = floorable_rows
+        self.floored_rows = np.zeros(0, dtype=np.int64)
         self._preconditioner = preconditioner
         self._refit_beta_floor = refit_beta_floor
         self._observer = observer
@@ -341,10 +371,18 @@ class BetaTrackingRefresh:
         compilation key of theirs.
         """
         frozen = jax.lax.stop_gradient(jnp.asarray(state))
-        shift = frozen_shift_diagonal(
+        shift, scale = _frozen_shift_and_scale(
             step.shift_policy.base, max(beta, self._refit_beta_floor), frozen
         )
         probed = self._probed
+        self.floored_rows = np.zeros(0, dtype=np.int64)
+        floor = self._pivot_floor
+
+        def correction(jacobian_diagonal: np.ndarray) -> np.ndarray:
+            change = floor.correction(jacobian_diagonal + shift, scale, rows=self._floorable_rows)
+            self.floored_rows = np.flatnonzero(change)
+            return change
+
         return self._preconditioner.refresh_in_place(
             lambda v: jacobian_matvec(probed, frozen, v),
             self._probe.plan,
@@ -352,6 +390,7 @@ class BetaTrackingRefresh:
             batched_matvec=lambda seeds: batched_jacobian_matvec(probed, frozen, seeds),
             probe_batch_size=PROBE_BATCH_SIZE,
             structure=self._probe.structure,
+            diagonal_correction=None if floor is None else correction,
         )
 
     def _report(
@@ -377,6 +416,13 @@ class MaterializedProblem(abc.ABC):
     Implementations are immutable values: :meth:`with_assembler` returns a new problem rather than
     mutating one, so a session can rebind across continuation rungs without aliasing.
     """
+
+    #: The fields, by layout name, whose shifted diagonal pivot a source term can take through zero: the
+    #: only rows a :class:`~aquaflux.precondition.PivotFloor` may change. A pivot is judged against its
+    #: row's pseudo-time diagonal, and a row whose pivot is merely small beside that diagonal without being
+    #: anywhere near singular (a momentum row) would be changed for nothing. Empty (default): no field,
+    #: and a session refuses a pivot floor for this problem rather than ignore it.
+    floorable_fields: tuple[str, ...] = ()
 
     @property
     @abc.abstractmethod
@@ -523,6 +569,12 @@ class MaterializedSession:
                 "a bare block inverse is fitted to the WHOLE state, which is only meaningful when the "
                 "fields form a single group (a laminar flow); this problem has a leading and a trailing "
                 "group. Wrap block inverses in FieldSplit(leading=..., trailing=...)."
+            )
+        if spec.pivot_floor is not None and not problem.floorable_fields:
+            raise ValueError(
+                f"a pivot floor changes only the rows of the fields a problem names as ones whose pivot can "
+                f"pass through zero, and {type(problem).__name__} names none, so it would change nothing. "
+                "Leave pivot_floor unset for this problem."
             )
         self._spec = spec
         self._problem = problem
@@ -711,9 +763,21 @@ class MaterializedSession:
                 self._probe_for(),
                 self._preconditioner,
                 observer=self._observer,
+                pivot_floor=self._spec.pivot_floor,
+                floorable_rows=self._floorable_row_mask(),
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook
+
+    def _floorable_row_mask(self) -> np.ndarray | None:
+        """Which rows the pivot floor may change, shape ``(n_dofs,)``, or ``None`` without a floor."""
+        if self._spec.pivot_floor is None:
+            return None
+        layout = self._problem.layout
+        rows = np.zeros(layout.size, dtype=bool)
+        for name in self._problem.floorable_fields:
+            rows[layout.slice_of(name)] = True
+        return rows
 
     def _fit(self, state: jnp.ndarray, base) -> object:
         probe = self._probe_for()

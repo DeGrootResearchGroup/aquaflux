@@ -145,10 +145,29 @@ branches.
   one fixed checkpoint (`bfs3d_openfoam/split_apply_timing.py` with `BFS3D_SPLIT_TIMING_STATE`; its level
   table must agree between runs) and read a march pair's counts as two samples. pitzDaily happened not to
   move (2026-10-15, PR #721).
+- ⚠️ **A single bfs3d march is one draw from a wide spread: judge a change on several perturbed draws per
+  arm** (failure count and step spread). A last-bit viscosity change (`1 ± 1e-14`) moves it from ~20 to ~80
+  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, PR #722's reach-2
+  cost, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
+  pivot nears zero make the **float32** field split's `A·M` wrong by order one around them, so the
+  step's solve stalls at its cap and its direction is decided by rounding. `BFS3D_PIVOT_FLOOR=0.15` /
+  `PITZ_PIVOT_FLOOR` (`MaterializedJacobian.pivot_floor`, `solve.md`) removes it: 21 steps both at `1 ± 0`
+  and `1 + 1e-14` (2026-10-18, off 38), pitzDaily unchanged at 21; both case files set it since 2026-10-19, so a pre-2026-10-19 bfs3d step count is unfloored.
+  `pivot_floor_probe.py` reads it at a checkpoint (float32 vs `BFS3D_SPLIT_PRECISION=float64` vs floored);
+  `step_descent_probe.py` and `corner_k_row_probe.py` read the `k` rows. Tables:
+  `.claude/notes/solve-log.md`, "Near-zero pivots and the float32 split (2026-10-18)".
+- **A fixed-state replay must build its step as the viscosity-ramp march does**: the session re-pointed to
+  the anchor companion and the step built at the anchor's seed (the step keeps that shift diagonal and
+  that frozen coarsening for the whole march, #701), then re-pointed to the station
+  (`step_descent_probe.py`, `pivot_floor_probe.py`). A step built on the target replays a different step.
+  At a step decided by rounding even that is not enough: the march hands each step the residual vector the
+  previous one returned (#761), and a freshly evaluated one differs at round-off, which flipped one such
+  step from descent to a tenfold rise. Reproduce such a step from a capture of its `_march_step` arguments,
+  or read it as a spread over perturbed residuals.
 - **A per-column probe reach is licensed by the gradient scheme and the split; re-audit it when either
   changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships `MultipleCorrectionGradient` at a
   uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond reach 2, and a reach-2 colouring
-  cost it 18→21 steps / 137→216 cycles (PR #722). pitzDaily deliberately probes every column at reach 2
+  cost it 18→21 steps / 137→216 cycles (PR #722; one run per arm, so a single draw -- see the ensemble bullet above). pitzDaily deliberately probes every column at reach 2
   inside its reach-3 pattern: its march is unchanged and the probe 40 % cheaper (2026-10-14).
 
 ## Machine contention and run records
@@ -205,12 +224,14 @@ their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march
   that set one ran the file's solver.
 - `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
 
-## ⚠️ The shipped bfs3d march does not converge on `fe772f59`
+## ⚠️ bfs3d's step count depends on the machine, even with the pivot floor
 
-It dies at the re-fit before step 35 on a singular `[k, omega]` cell block (1 of 23040), on `main` and on
-the memory branch alike (identical step tables): `.claude/notes/validation-log.md`, "The shipped bfs3d march
-fails at step 35". The last converged record predates #757 and #761; not bisected. A bfs3d A/B taken now
-compares marches that end there.
+Without the floor (`fe772f59`) the shipped march died at the re-fit before step 35 on a singular
+`[k, omega]` cell block. With `PivotFloor(0.15)` (#766) it converges, but in **21 steps / 115 cycles on the
+owner's machine and 39 / 254 on a 4-core Linux x86_64 container with jax 0.12.0** (`x_r/h` 8.361 both;
+2026-10-19). Main and the #763 memory branch give identical step tables on the container, so the spread is
+platform or jax version, not either change; the two were not separated. Compare bfs3d marches only on one
+machine and one jax version: `.claude/notes/validation-log.md`, "bfs3d with the pivot floor, by machine".
 
 ## bfs3d's mesh — one tracked copy
 

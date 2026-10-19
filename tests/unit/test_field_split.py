@@ -559,3 +559,70 @@ def test_an_inverse_held_in_single_precision_holds_its_double_fit_rounded_once(f
     apart = narrow.apply(first) + 2.0 * narrow.apply(second)
     assert np.allclose(together, apart, rtol=1e-12, atol=1e-12 * np.abs(apart).max())
     assert together.dtype == np.float64
+
+
+class _RecordingInverse(ExactInverse):
+    """An exact block inverse that also records the block it was last fitted to."""
+
+    def refactor_block(self, block: sp.csr_matrix) -> None:
+        self.fitted = block.toarray()
+        self._inverse = np.linalg.inv(self.fitted)
+
+
+@pytest.mark.parametrize("probe", ["whole matrix", "into blocks"])
+def test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path(
+    probe, groups, operator, monkeypatch
+) -> None:
+    """A re-fit's ``diagonal_correction`` (a pivot floor, a stand-in operator's diagonal) is fitted.
+
+    A field split probed into its blocks never forms the whole matrix, so it takes a different path
+    through the re-fit from the one that adds a correction to the whole matrix's shift. Each path must
+    hand the correction the unshifted Jacobian's diagonal and fit Jacobian + shift + correction; a path
+    that dropped the correction would fit Jacobian + shift with no error.
+    """
+    from types import SimpleNamespace
+
+    from aquaflux.precondition.field_split import FieldSplitPreconditioner
+    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+
+    jacobian = sp.csr_matrix(operator)
+    leading, _, trailing_by_leading, trailing = groups.blocks(jacobian)
+    split = FieldSplitInverse(
+        _RecordingInverse(leading.toarray()),
+        _RecordingInverse(trailing.toarray()),
+        trailing_by_leading,
+        groups,
+    )
+    preconditioner = FieldSplitPreconditioner(split, groups)
+    if probe == "into blocks":
+        layout, order = BlockLayout.of(jacobian, groups.n_leading_dofs)
+        monkeypatch.setattr(
+            FieldSplitPreconditioner,
+            "_probed_blocks",
+            staticmethod(lambda *_args: ProbedBlocks(jacobian.data[order].copy(), layout)),
+        )
+        structure = SimpleNamespace(layout=layout)
+    else:
+        monkeypatch.setattr(
+            FieldSplitPreconditioner, "_materialize_jacobian", staticmethod(lambda *_args: jacobian)
+        )
+        structure = None
+    rng = np.random.default_rng(7)
+    shift = rng.uniform(1.0, 2.0, groups.n_dofs)
+    correction = rng.uniform(3.0, 5.0, groups.n_dofs)
+    seen = []
+
+    def diagonal_correction(jacobian_diagonal):
+        seen.append(np.array(jacobian_diagonal))
+        return correction
+
+    preconditioner.refresh_in_place(
+        None, None, shift, structure=structure, diagonal_correction=diagonal_correction
+    )
+
+    np.testing.assert_array_equal(seen[0], operator.diagonal())
+    want_leading, _, _, want_trailing = groups.blocks(
+        sp.csr_matrix(operator + np.diag(shift + correction))
+    )
+    np.testing.assert_allclose(split._leading.fitted, want_leading.toarray(), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(split._trailing.fitted, want_trailing.toarray(), rtol=0, atol=1e-12)

@@ -9,7 +9,8 @@ budget is checked here instead, in the fast tier through ``tools/check_rules.sh`
 
 Three checks:
 
-* **per file** -- ``CLAUDE.md`` and each rules file at most ``FILE_BUDGET`` bytes;
+* **per file** -- each rules file at most ``FILE_BUDGET`` bytes, and ``CLAUDE.md`` at most
+  ``ROOT_CEILING``, a ceiling that may only be lowered;
 * **loaded together** -- for every tracked file, the rules whose globs match it at most
   ``LOADED_BUDGET`` bytes in total (that sum is what a session editing that file pays, on top of
   ``CLAUDE.md``);
@@ -37,6 +38,12 @@ SLACK = 8 * KB
 
 # path relative to the repository root -> ceiling in bytes. Lower a ceiling as the file shrinks.
 OVER_BUDGET: dict[str, int] = {}
+
+# CLAUDE.md loads into every session, so it has a ceiling of its own, far below FILE_BUDGET: set about
+# 2 KB above its size, which leaves room for a one-line record entry but not for a section. It only
+# goes down -- once the file sits more than ROOT_SLACK below it, the ceiling must be lowered to follow.
+ROOT_CEILING = 86_800
+ROOT_SLACK = 4 * KB
 
 WHERE_IT_GOES = (
     "  Dated measurements, probe tables and investigation steps go to the matching\n"
@@ -92,8 +99,21 @@ def check(root: Path) -> list[str]:
     rules = sorted(rules_dir.glob("*.md"))
     failures: list[str] = []
 
-    sized = [root / "CLAUDE.md", *rules] if (root / "CLAUDE.md").exists() else rules
-    for path in sized:
+    briefing = root / "CLAUDE.md"
+    if briefing.exists():
+        size = briefing.stat().st_size
+        if size > ROOT_CEILING:
+            failures.append(
+                f"CLAUDE.md is {size} bytes, over its ROOT_CEILING of {ROOT_CEILING}. It loads into\n"
+                "  every session: move an incident or measurement to .claude/notes/claude-md-log.md, or a\n"
+                "  paragraph about one subsystem to the rule that globs it. Never raise the ceiling."
+            )
+        elif ROOT_CEILING - size > ROOT_SLACK:
+            failures.append(
+                f"CLAUDE.md is {size} bytes: lower ROOT_CEILING (now {ROOT_CEILING}) to about 2 KB "
+                "above it."
+            )
+    for path in rules:
         name = str(path.relative_to(root))
         size = path.stat().st_size
         ceiling = OVER_BUDGET.get(name)

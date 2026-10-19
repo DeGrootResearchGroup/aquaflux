@@ -87,7 +87,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import Convergence, DualTimeLoop, LinearSolveSettings, MarchLogger, RetryPolicy, StateCheckpointer, combine_observers
-from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, PivotFloor, SimpleSmoothed
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
@@ -750,12 +750,24 @@ LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS)
 #: residual, the Krylov solves and the adjoint's preconditioner stay in double precision.
 SPLIT_PRECISION = os.environ.get("BFS3D_SPLIT_PRECISION") or _FILE_INVERSE.precision
 
+#: Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals
+#: (``BFS3D_PIVOT_FLOOR``, the threshold in (0, 1), ``none`` off; unset keeps the file's).
+_pivot_floor = os.environ.get("BFS3D_PIVOT_FLOOR")
+PIVOT_FLOOR = (
+    FILE_SOLVER.preconditioner.pivot_floor
+    if _pivot_floor is None
+    else None
+    if _pivot_floor == "none"
+    else PivotFloor(float(_pivot_floor))
+)
+
 PRECONDITIONER = MaterializedJacobian(
     FieldSplit(LEADING_INVERSE, TRAILING_INVERSE, precision=SPLIT_PRECISION),
     probe=JacobianProbeSpec(
         column_reach=COLUMN_REACH, stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach
     ),
     refit_beta_floor=PC_BETA_FLOOR,
+    pivot_floor=PIVOT_FLOOR,
 )
 
 #: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --
@@ -1363,6 +1375,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if math.isinf(OMEGA_STEP_RATIO)
             else OMEGA_STEP_RATIO,
         ),
+        ("pivot floor", "off" if PIVOT_FLOOR is None else PIVOT_FLOOR.threshold),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
         ("inner forward stop", FORWARD_STOP or "lineax (unset)"),
         # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or

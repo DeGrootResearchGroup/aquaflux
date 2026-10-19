@@ -157,7 +157,8 @@ defect — fix it in the same change.
 | probe column reach | `column_reach=None` (uniform) | uniform (since #712) | `COLUMN_REACH` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `INNER_TOL` |
 | flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
-| field split precision | `FieldSplit.precision="float64"` | **`float32`** (pitzDaily too; the adjoint's preconditioner stays float64) | `SPLIT_PRECISION` |
+| field split precision | `FieldSplit.precision="float64"` | **`float32`** (pitzDaily too; the adjoint's preconditioner stays float64) — ⚠️ breaks at near-zero pivots without the pivot floor (below), which both case files set | `SPLIT_PRECISION` |
+| pivot floor | `MaterializedJacobian.pivot_floor=None` (off) | **`PivotFloor(0.15)`** in both case files (project owner, 2026-10-19; `BFS3D_PIVOT_FLOOR` / `PITZ_PIVOT_FLOOR`, `none` off) | `PIVOT_FLOOR` |
 | trailing hierarchy | `HierarchyBlockInverse`: `max_levels=2, strength_threshold=0.0, aggressive_levels=1` | **`max_levels=20, max_coarse=200, strength_threshold=0.25, aggressive_levels=0, frozen_coarsening=True`** | `JACOBI_TRAILING` |
 
 **The coupled forward solve: one measure, per-family restart regimes.**
@@ -329,6 +330,36 @@ defect — fix it in the same change.
     `solve.StoppingStepSource`, `session.py`): `held -> held.preconditioned_as(step on target)`, built
     once per build, never instrumented by `on_build`; `turbulence.solve_reynolds_ramp` passes it as
     `stopping_step` (`solve-march.md`). Pinned in `test_preconditioner_session.py`.
+  - **`PivotFloor` (`pivot_floor.py`; `MaterializedJacobian.pivot_floor`, off when unset) moves each
+    near-zero shifted pivot out of the fit.** Asked inside `BetaTrackingRefresh._materialize_at` after
+    the probe and before the fit, through `refresh_in_place(diagonal_correction=)` (it sees the Jacobian's
+    diagonal only, so it survives a probe straight into a split's blocks; the initial build `_fit` does not
+    ask, the hook's forced first re-fit does, before any step): a row of a field the problem names (`MaterializedProblem.floorable_fields`,
+    default none) whose pivot `p = J_ii + s_i` has `|p| < threshold · d_i` is fitted at `sign(p) · d_i`, with
+    `d` the base pseudo-time diagonal (`ShiftTerm.diagonal`, read off the same term as the shift, never
+    `shift / β`, which folds in `row_shift_scale`). The operator, the root and the adjoint are untouched;
+    the adjoint's preconditioner sees the floored fit. `BetaTrackingRefresh.floored_rows` holds the rows
+    changed at the last re-fit. A floor on a problem naming no field is refused at open.
+    - **Why:** a near-zero pivot makes the fitted split amplify its rows ~10⁶–10⁷× beyond any other (bfs3d
+      step 19: `|M e|` 2.8e11 on two corner `k` rows, ~1e5 elsewhere). In float64 GMRES copes (`A·M`
+      linear to 1e-12); in **float32** the amplified entries' rounding swamps their neighbours and `A·M`
+      is wrong by 10–900 % within ~3 cells (linear only to ~1e-4 overall), so every solve hits its cap
+      and the direction is decided by rounding — bfs3d's 1e-14 sensitivity. Floored, float32 and float64
+      give the same direction for every perturbation.
+    - **Floor only the fields that can pass through zero.** Applied to every shifted row it changed
+      11 664 rows on bfs3d (11 538 momentum, whose pivots are small beside `d` without being singular)
+      and the solve got worse; the coupled RANS problem names `k` alone. Raise a pivot to the row's scale,
+      not just above zero (raising them to 6 % of `d` made the amplification worse), and keep healthy negative
+      pivots as they are (flooring them all changed 75 rows and every solve hit its cap).
+    - ⚠️ **Open: a healthy negative pivot can still amplify, and the floor leaves it alone.** At bfs3d's
+      step-19 state cell 3068 (`k` pivot −7.4e-5, well outside the band) still has `|M e|` ~7e8 on its `k`
+      row, ~1e3× a typical row, and `A·M` stays linear only to ~1e-4 on random vectors with the floor on.
+      That step converged anyway (7 cycles). **If another case's float32 solve stalls at its cap with the
+      floor on, look here first**: `pivot_floor_probe.py`'s linearity line and the solve's Euclidean residual
+      above 1 are the signature; the candidates are the trailing smoother's 2×2 `[k, ω]` blocks around a
+      negative pivot, or float64 for the trailing block only.
+    - Measurements and the march A/B: `.claude/notes/solve-log.md`, "Near-zero pivots and the float32 split
+      (2026-10-18)". Pinned in `test_pivot_floor.py`.
 
 - **`session.py` — `RebuildingSession` (#386)**, the generic session with nothing to re-fit: steps are
   built whole from `assembler`; `rebind` re-points and marks steps stale; `refresh_preconditioner` makes

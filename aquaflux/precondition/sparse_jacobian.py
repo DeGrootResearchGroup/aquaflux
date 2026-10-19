@@ -736,6 +736,10 @@ class BlockLayout:
             blocks.append(matrix)
         return tuple(blocks)
 
+    def diagonal(self, data: np.ndarray) -> np.ndarray:
+        """The stored diagonal of ``data`` in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+        return data[self._diagonal]
+
     def add_to_diagonal(self, data: np.ndarray, shift_diagonal: np.ndarray) -> None:
         """Add ``shift_diagonal`` (shape ``(n_dofs,)``) to the stored diagonal of ``data``, in place."""
         data[self._diagonal] += np.asarray(shift_diagonal, dtype=np.float64)
@@ -1030,6 +1034,10 @@ class ProbedBlocks:
     def blocks(self) -> tuple[sp.csr_matrix, ...]:
         """``(A_ll, A_lt, A_tl, A_tt)`` over :attr:`data`, sharing its memory."""
         return self.layout.blocks(self.data)
+
+    def diagonal(self) -> np.ndarray:
+        """The Jacobian's diagonal in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+        return self.layout.diagonal(self.data)
 
     def add_shift(self, shift_diagonal: np.ndarray) -> None:
         """Add the pseudo-transient shift to the diagonal, in place.

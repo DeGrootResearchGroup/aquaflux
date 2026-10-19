@@ -1322,10 +1322,10 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99):
 
     **Why per cell, not a cap on the whole step.** The alternative, shortening the whole step by the
     fraction-to-the-boundary rule, takes a minimum over cells, so one cell whose ``k`` is numerically
-    zero sets the step length for all of them. On a 3D backward-facing step that cell is a stagnant
-    side-wall corner -- no shear, so no turbulent-energy production -- and it held the step to 0.001-0.002
-    while every other cell admitted 0.6 or more, which is what made the march redo steps at a larger
-    shift. Clipping per cell leaves that cell to decay alone and lets the rest take the step.
+    zero sets the step length for all of them. On a 3D backward-facing step that cell is a top-wall /
+    side-wall corner whose k-row diagonal production's ``k``-derivative had turned negative, and it held
+    the step to 0.001-0.002 while every other cell admitted 0.6 or more. Clipping per cell lets the rest
+    take the step; the clipped cell shrinks by ``1 - tau`` while its correction points down.
 
     Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
     since a projection there would clip nothing.
@@ -2184,6 +2184,7 @@ class _CoupledProblem(MaterializedProblem):
 
     coupled: CoupledRANS
     production_viscosity: bool
+    floorable_fields = ("k",)  # production, proportional to k through nu_t, can cancel the k pivot
 
     @property
     def assembler(self) -> CoupledRANS:

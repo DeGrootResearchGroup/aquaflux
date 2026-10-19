@@ -39,6 +39,7 @@ from aquaflux.precondition import (
     JacobiSmoothed,
     MaterializedJacobian,
     MaterializedJacobianPreconditioner,
+    PivotFloor,
     SimpleSmoothed,
     field_split_inverse,
 )
@@ -47,7 +48,13 @@ from aquaflux.precondition.materialized_session import (
 )
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DualTimeLoop, relative_residual_gmres, restart_cycles, solve_linear
+from aquaflux.solve import (
+    ConstantRelaxation,
+    DualTimeLoop,
+    relative_residual_gmres,
+    restart_cycles,
+    solve_linear,
+)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
@@ -364,6 +371,42 @@ def test_the_split_adjoint_matches_finite_difference(channel, precision) -> None
         coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split(precision)
     )
     assert (_single_precision_leaves(step) > 0) == (precision == "float32")
+
+    def objective(nu_scale):
+        scaled = _with_scaled_viscosity(coupled, nu_scale)
+        _, k_out, _ = solve_coupled(scaled, flow, k, omega, strategy=step, max_steps=40)
+        return jnp.sum(k_out**2)
+
+    analytic = float(jax.grad(objective)(1.0))
+    eps = 1e-4
+    finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
+    assert analytic != 0.0
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
+
+
+def test_the_adjoint_through_a_pivot_floored_fit_matches_finite_difference(channel) -> None:
+    """A pivot floor changes the inverse the adjoint's transpose solve is preconditioned by, never its answer.
+
+    The floor acts only at a re-fit, so the step is re-fitted here at a small shift, in single precision,
+    with a band wide enough that the channel's start floors some ``k`` rows (asserted, or the test would
+    exercise the unfloored fit); that step's split is the one the transpose solve then applies.
+    """
+    coupled = channel["coupled"]
+    flow, k, omega = channel["start"]
+    state = coupled.pack_state(flow, k, omega)
+    spec = MaterializedJacobian(
+        FieldSplit(SimpleSmoothed(), JacobiSmoothed(), precision="float32"),
+        pivot_floor=PivotFloor(threshold=0.9),
+    )
+    session = open_session(spec, coupled)
+    step = session.build(state)
+    active = eqx.tree_at(
+        lambda s: s.relaxation_schedule, step, ConstantRelaxation(jnp.asarray(1e-3))
+    )
+    update = session.refresh_preconditioner(active, state, due=True)
+    assert session._hook.floored_rows.size > 0
+    step = update(step)
+    assert _single_precision_leaves(step) > 0
 
     def objective(nu_scale):
         scaled = _with_scaled_viscosity(coupled, nu_scale)

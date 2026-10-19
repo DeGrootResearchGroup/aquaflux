@@ -60,6 +60,14 @@ table for the old continuation builders is in `turbulence.md`.
   - Pinned by `test_each_inverse_declares_exactly_the_capabilities_it_has`,
     `test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything` and the split's
     refit/atomicity tests in `test_field_split.py`.
+- **`refresh_in_place(..., diagonal_correction=)`**: a callback given the unshifted Jacobian's diagonal
+  that returns a per-row amount added to the shift before the fit (or `None`); it changes the fit only,
+  never the operator solved. One user: the pivot floor (`solve.md`, `PivotFloor`). Default `None` is
+  byte-identical. **Both re-fit paths add the shift through `_fitted_shift`** (the whole matrix, and a
+  field split probed straight into its blocks, which never forms it and reads the diagonal through
+  `ProbedBlocks.diagonal()`); a test observes the fit by spying on it. ⚠️ A correction wired on the
+  whole-matrix path alone silently never reaches a field split, the only inverse the step cases ship
+  (#763 merging #766). Pinned by `test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path`.
 - **`refresh_in_place` returns one shape across the family**: the `("probe", s), ("assemble", s),
   ("refactor", s)` tuple. Every refreshed preconditioner is a `MaterializedJacobianPreconditioner`, so the
   session passes `batched_matvec`, `probe_batch_size` and `structure` unconditionally.
@@ -114,7 +122,7 @@ bare block inverse).
   pitzDaily probes every column at reach 2 inside a reach-3 pattern (`column_reach: [2, 2, 2, 2, 2]`,
   2026-10-14: same 18 steps / 123 cycles / `x_r/h` 8.0686, probe per refit 4.3–5.8 → 2.5–3.4 s; at zero
   shift 7 % more forward applies, none transposed). bfs3d keeps uniform reach 3 because the same colouring
-  cost it 34 % of its wall (measured by the project owner, PR #722, `validation/bfs3d_openfoam/compare.py`
+  cost it 34 % of its wall in one run per arm -- a single draw from a march whose step count spread 22–82 under last-bit perturbations (2026-10-17/18) (`validation.md`) -- (measured by the project owner, PR #722, `validation/bfs3d_openfoam/compare.py`
   with `BFS3D_COLUMN_REACH=2,2,2,2,2,2`, shipped `case.yaml`, `77b03c18`, Apple M3 Pro, jax 0.10.2):
 
   | probe colouring (pattern reach 3) | steps | restart cycles | final `\|R\|` | refit (probe / refactor) | solve |
