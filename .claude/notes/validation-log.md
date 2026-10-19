@@ -944,10 +944,12 @@ reproduces the refusal. PR #766's `PivotFloor` fits such a pivot at its row's ps
 block the guard sees is no longer near-singular; the floored arms below met no collapse (lowest `k`
 ~1.8e-05). The guard's column-scale dependence is unchanged by it.
 
-#### With the pivot floor, PR #766 head (2026-10-19)
+#### With the pivot floor, #766 (2026-10-19)
 
-PR #766's branch `claude/pivot-floor` at `1e69b4ab` (base `main` `de339a1f`; `case.yaml` sets
-`pivot_floor: {kind: PivotFloor, threshold: 0.15}`), run from its own worktree, otherwise as above; glibc
+#766's head before merge, `1e69b4ab` (base `main` `de339a1f`; `case.yaml` sets
+`pivot_floor: {kind: PivotFloor, threshold: 0.15}`), run from its own worktree. It merged as `f7fcb6f2`,
+whose only further library change deleted the production freeze, off by default and off in these runs, so
+the shipped march is the same path (not re-run on `f7fcb6f2`); otherwise as above; glibc
 defaults; one run per arm, back to back; peak sampled every 20 s.
 
 | `refresh_on_cycles` | steps | inner solves | cycles | redone | re-fits (full / cost) | re-fit s (probe / refactor) | solve | final `R` | `x_r/h` | peak |

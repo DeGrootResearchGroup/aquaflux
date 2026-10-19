@@ -293,7 +293,8 @@ Measured 2026-10-18/19 on a 4-core Xeon container with 15 GiB and no swap, jax 0
 Here a preconditioner re-fit costs 46–53 s against ~20 s for a step without one (on an 11-core laptop it
 costs about one step), and three quarters of the re-fit is the coloured probe.
 
-With the pivot floor in `case.yaml` (`PivotFloor(0.15)`, on the branch that introduces it, `1e69b4ab`):
+With the pivot floor `case.yaml` ships (`PivotFloor(0.15)`; measured at `1e69b4ab`, the change that
+introduced it, before it merged):
 
 | `case.yaml` with | steps | re-fits | solve | result |
 |---|---|---|---|---|
