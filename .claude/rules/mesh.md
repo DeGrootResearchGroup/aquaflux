@@ -71,7 +71,9 @@ All classes are `equinox.Module`s.
       a `−neighbour_offset` translation (`io/vtk/topology._onto_own_side`; `io.md`).
   - **`FaceNodeConnectivity` (`mesh.face_nodes`)**: `gather_node_coords`, `perimeter_next`,
     `reduce_to_faces`, `vertex_mean`, `face_of_incidence` (reused by `validate()`), `select(faces)` (a
-    subset's connectivity in the given order, node indices unchanged).
+    subset's connectivity in the given order, node indices unchanged), `edges()` (each edge once as an
+    ascending node pair, rows sorted, and the edge each incidence starts; integer keys, not a row-wise
+    `np.unique`; pinned against Euler's formula in `tests/unit/test_mesh_edges.py`).
   - `interior_mask(neighbour)` is the one free-function boundary convention (`neighbour < 0`), for numpy
     build-time paths with no connectivity object. Owner substitution is not a free function — it is
     `FaceCellConnectivity.safe_neighbour`.

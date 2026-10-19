@@ -2,6 +2,7 @@
 paths:
   - "aquaflux/meshing/**"
   - "validation/meshing_netgen/**"
+  - "validation/meshing_dual/**"
 ---
 
 # Rules — `aquaflux/meshing/` (mesh generation from CAD)
@@ -11,7 +12,8 @@ paths:
 > **Comment Convention**). The dated record — the research survey, the Netgen probes, their numbers — is in
 > `.claude/notes/meshing-log.md`.
 
-**Status: the Netgen child process is built** (`netgen_process.py`, `_netgen_child.py`); nothing else of the
+**Status: built** — the Netgen child process (`netgen_process.py`, `_netgen_child.py`) and the
+feature-preserving dual (`dual.py`) **except the concave split**, which is refused (below). Nothing else of the
 mesher is. The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/`. The package is not on the published API page (`docs/conf.py`
 `PUBLIC_SUBPACKAGES`) until it has a mesher a user calls.
@@ -64,6 +66,37 @@ seams are exactly where its mesh fails, below).
   face centroids and feature-edge midpoints), and a cell at a concave edge is split into convex pieces
   (the published treatment of concave geometrical edges). Reimplement from the published description; the
   OpenFOAM `polyDualMesh` source is GPL and is not copied.
+
+## The feature-preserving dual (`dual.py`) — built, concave split not yet
+
+`PolyhedralDual(feature_angle, feature_edges=None).build(primal: Mesh) -> Mesh`. Dual cell `i` is primal
+point `i`. Vertices: primal cell centroids, boundary-face centroids, feature-edge midpoints, points on ≥ 2
+feature edges. Each primal edge gives the face between its ends' cells (ring of cell centroids; on the
+boundary closed through its two boundary faces' centroids, and its midpoint if a feature). Each boundary
+point gives its fan of face centroids, cut along feature edges into one face per sector with the point as a
+vertex. Features: fold beyond `feature_angle` (no default), every patch border, named edges. Two numba walks
+(cells around each edge, boundary faces around each point); faces of edges assembled in numpy.
+- **Accepted primal**: 3D, non-periodic, one cell zone, no patch on interior faces, closed manifold
+  boundary, every point on a face. Each refused by name.
+- ⚠️ **Sharp concave folds are refused** (`NotImplementedError`: a boundary edge folding concavely by more
+  than `feature_angle`; sign by `boundary_folds`). **Why, measured** (2026-10-19, Netgen L at maxh 0.02):
+  the dual is topologically closed and its consistently oriented faces sum to zero (≤ 5e-20), but at 3 of
+  581 cells, all on the concave edge, `Mesh.geometry()`'s centroid-based orientation turns exactly one face
+  inward (closure 1e-4 to 4e-4), because the cell wraps around the fold (a vertex a whole cell size outside
+  a face plane). The structured hex L happened to close. **So the concave split is required for
+  correctness, not quality**, and is the next PR; every reactor's pipe junction needs it. A gently concave
+  wall is fine: a lamp-sleeve hole folds concavely ≤ 32° per edge and its duals close (3 sizes, 0 unclosed).
+- **Away from features the dual's boundary runs through face centroids**, inside a curved wall by the chord:
+  dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). Projecting
+  those vertices onto the CAD surface (`CadModel.project`) is the mesher's job.
+- ⚠️ **Memory is the open problem at the 2M target**: the primal held as a full `Mesh` costs ~5 KB per
+  point and the dual's build ~9 KB per point (111k points; log), so 2M points would need ~28 GB. The likely
+  fix is a numpy-only primal (the primal is never solved on) and a leaner assembly; not yet done.
+- **Quality, not correctness, on Netgen duals**: `checkMesh` passes structured and Kuhn-tet duals; Netgen
+  duals pass topology and closure but report concave cells by face planes (1.6–7.7 %), a few low-quality
+  face decompositions and small volume ratios (log). The quality and planarization component is for these.
+- Pinned in `tests/unit/test_meshing_dual.py`; scale and convexity in
+  `validation/meshing_dual/dual_scale_convexity.py` (log).
 
 ## Netgen: in a child process, reached through files (binding)
 
