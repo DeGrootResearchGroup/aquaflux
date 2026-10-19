@@ -23,7 +23,13 @@ Three details are load-bearing, each found by reading a real file:
   of the solid everywhere on that surface. A classifier needs a point that is certainly on the face,
   which a face with a hole does not provide at its parameter midpoint.
 * **Edge types are not read at all.** The kernel reports straight seam lines as spline curves, so
-  nothing here recognizes a solid from its edges; surfaces are reported faithfully.
+  nothing here recognizes a solid from its edges; surfaces are reported faithfully. An edge's
+  *topology* -- which faces it joins, how sharply they fold there -- is read, for meshing; only what
+  kind of curve it is, is not.
+
+Faces, edges and vertices are numbered in **exploration order**: the order a topology explorer first
+visits them in a shape, each counted once. A mesher reading the shape's file numbers faces the same
+way, so the face indices answered here are the ones it reports.
 """
 
 from __future__ import annotations
@@ -32,16 +38,17 @@ import math
 
 import numpy as np
 from OCP.Bnd import Bnd_Box
-from OCP.BRep import BRep_Tool
-from OCP.BRepAdaptor import BRepAdaptor_Surface
-from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse, BRepAlgoAPI_Splitter
+from OCP.BRep import BRep_Builder, BRep_Tool
+from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Curve2d, BRepAdaptor_Surface
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse, BRepAlgoAPI_Splitter
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepBuilderAPI import (
     BRepBuilderAPI_MakeFace,
     BRepBuilderAPI_MakeVertex,
     BRepBuilderAPI_Transform,
 )
-from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+from OCP.BRepExtrema import BRepExtrema_DistShapeShape, BRepExtrema_IsInFace
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepPrimAPI import (
     BRepPrimAPI_MakeCone,
@@ -49,9 +56,17 @@ from OCP.BRepPrimAPI import (
     BRepPrimAPI_MakeSphere,
 )
 from OCP.BRepTools import BRepTools
-from OCP.collections import List_TopoDS_Shape, Sequence_TDF_Label
+from OCP.collections import (
+    IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher,
+    IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher,
+    List_TopoDS_Shape,
+    Sequence_TDF_Label,
+)
+from OCP.GCPnts import GCPnts_AbscissaPoint
 from OCP.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder, GeomAbs_Plane, GeomAbs_Sphere
+from OCP.GeomAPI import GeomAPI_ProjectPointOnSurf
 from OCP.gp import gp_Ax2, gp_Dir, gp_Pln, gp_Pnt, gp_Trsf, gp_Vec
+from OCP.GProp import GProp_GProps
 from OCP.IFSelect import IFSelect_RetDone
 from OCP.ShapeAnalysis import ShapeAnalysis_ShapeTolerance
 from OCP.STEPCAFControl import STEPCAFControl_Reader
@@ -60,6 +75,7 @@ from OCP.TDataStd import TDataStd_Name
 from OCP.TDF import TDF_Label
 from OCP.TDocStd import TDocStd_Document
 from OCP.TopAbs import (
+    TopAbs_EDGE,
     TopAbs_FACE,
     TopAbs_REVERSED,
     TopAbs_SHAPE,
@@ -67,9 +83,9 @@ from OCP.TopAbs import (
     TopAbs_SOLID,
     TopAbs_VERTEX,
 )
-from OCP.TopExp import TopExp_Explorer
+from OCP.TopExp import TopExp, TopExp_Explorer
 from OCP.TopLoc import TopLoc_Location
-from OCP.TopoDS import TopoDS
+from OCP.TopoDS import TopoDS, TopoDS_Compound
 from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
 
 from aquaflux.io.cad.faces import (
@@ -81,6 +97,7 @@ from aquaflux.io.cad.faces import (
     SphereFace,
 )
 from aquaflux.io.cad.placement import Placement
+from aquaflux.io.cad.topology import CadTopology, Projection
 from aquaflux.solids import Cone, Cylinder, Solid, Sphere, Union
 
 __all__ = ["OpenCascade"]
@@ -95,6 +112,13 @@ def _faces(shape) -> list:
     while explorer.More():
         found.append(TopoDS.Face(explorer.Current()))
         explorer.Next()
+    return found
+
+
+def _indexed(shape, kind):
+    """The shape's sub-shapes of one kind, each once, numbered from 1 in exploration order."""
+    found = IndexedMap_TopoDS_Shape_TopTools_ShapeMapHasher()
+    TopExp.MapShapes_s(shape, kind, found)
     return found
 
 
@@ -359,6 +383,195 @@ class OpenCascade:
         return out
 
     # -----------------------------------------------------------------------------------------
+    # Meshing: a region built from solids, its topology, its file, and points moved onto it
+    # -----------------------------------------------------------------------------------------
+
+    def region(self, solids, without):
+        """The union of the kernel solids ``solids``, less the union of ``without``."""
+        shape = self.fuse(list(solids))
+        if not without:
+            return shape
+        arguments, tools = List_TopoDS_Shape(), List_TopoDS_Shape()
+        arguments.Append(shape)
+        for tool in without:
+            tools.Append(tool)
+        cut = BRepAlgoAPI_Cut()
+        cut.SetArguments(arguments)
+        cut.SetTools(tools)
+        cut.Build()
+        return cut.Shape()
+
+    def topology(self, shape) -> CadTopology:
+        """How a shape's faces, edges and vertices connect, each numbered in exploration order."""
+        faces, edges, vertices = (
+            _indexed(shape, kind) for kind in (TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX)
+        )
+        ancestors = IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher()
+        TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, ancestors)
+
+        records, areas = [], []
+        for index in range(1, faces.Size() + 1):
+            face = TopoDS.Face(faces.FindKey(index))
+            records.append(self._describe_face(face))
+            properties = GProp_GProps()
+            BRepGProp.SurfaceProperties_s(face, properties)
+            areas.append(properties.Mass())
+
+        ends, lengths, offsets, members, angles, seams = [], [], [0], [], [], []
+        for index in range(1, edges.Size() + 1):
+            edge = TopoDS.Edge(edges.FindKey(index))
+            ends.append(
+                [
+                    vertices.FindIndex(TopExp.FirstVertex_s(edge)) - 1,
+                    vertices.FindIndex(TopExp.LastVertex_s(edge)) - 1,
+                ]
+            )
+            degenerate = BRep_Tool.Degenerated_s(edge)
+            lengths.append(
+                0.0 if degenerate else GCPnts_AbscissaPoint.Length_s(BRepAdaptor_Curve(edge))
+            )
+            touching = sorted({faces.FindIndex(face) - 1 for face in ancestors.FindFromKey(edge)})
+            members += touching
+            offsets.append(len(members))
+            first = TopoDS.Face(faces.FindKey(touching[0] + 1))
+            seams.append(bool(BRep_Tool.IsClosed_s(edge, first)))
+            if len(touching) == 2 and not degenerate:
+                second = TopoDS.Face(faces.FindKey(touching[1] + 1))
+                angles.append(self._fold(edge, first, second))
+            else:
+                angles.append(math.nan)
+
+        corners = [
+            _coords(BRep_Tool.Pnt_s(TopoDS.Vertex(vertices.FindKey(i))))
+            for i in range(1, vertices.Size() + 1)
+        ]
+        return CadTopology(
+            faces=tuple(records),
+            face_area=np.array(areas),
+            vertices=np.array(corners).reshape(-1, 3),
+            edge_vertices=np.array(ends, dtype=np.int64).reshape(-1, 2),
+            edge_length=np.array(lengths),
+            edge_face_offsets=np.array(offsets, dtype=np.int64),
+            edge_face_indices=np.array(members, dtype=np.int64),
+            edge_angle=np.array(angles),
+            seam=np.array(seams, dtype=bool),
+        )
+
+    def _fold(self, edge, first, second) -> float:
+        """The signed angle between two faces' outward normals at an edge's midpoint.
+
+        Positive where the solid is convex. The direction from the edge into ``first``, along
+        ``first``, is its outward normal crossed with the edge's tangent as ``first`` traverses it
+        (a face lies to the left of its boundary seen from outside); the fold is convex exactly when
+        ``second``'s outward normal points against that direction.
+        """
+        curve = BRepAdaptor_Curve(edge)
+        middle = 0.5 * (curve.FirstParameter() + curve.LastParameter())
+        point, tangent = gp_Pnt(), gp_Vec()
+        curve.D1(middle, point, tangent)
+        normals = []
+        for face in (first, second):
+            uv = BRepAdaptor_Curve2d(edge, face).Value(middle)
+            normals.append(self._outward(BRepAdaptor_Surface(face), face, uv.X(), uv.Y())[1])
+        along = _coords(tangent)
+        # Exploring a face composes its own orientation into its edges', so this is the direction
+        # the face as it sits in the solid traverses the edge.
+        if self._orientation_in(edge, first) == TopAbs_REVERSED:
+            along = -along
+        into_first = np.cross(normals[0], along)
+        magnitude = math.acos(float(np.clip(normals[0] @ normals[1], -1.0, 1.0)))
+        return magnitude if normals[1] @ into_first < 0.0 else -magnitude
+
+    @staticmethod
+    def _orientation_in(edge, face):
+        """How ``face``'s boundary traverses ``edge``: forward or reversed."""
+        explorer = TopExp_Explorer(face, TopAbs_EDGE)
+        while explorer.More():
+            if explorer.Current().IsSame(edge):
+                return explorer.Current().Orientation()
+            explorer.Next()
+        msg = "an edge's face does not list the edge"
+        raise ValueError(msg)
+
+    @staticmethod
+    def write_brep(shape, path) -> None:
+        """Write ``shape`` in the kernel's own boundary-representation (BREP) file format.
+
+        Raises
+        ------
+        OSError
+            If the file cannot be written.
+        """
+        if not BRepTools.Write_s(shape, str(path)):
+            msg = f"could not write {path}"
+            raise OSError(msg)
+
+    def project(self, shape, points, faces=None) -> Projection:
+        """Each point moved to the closest point of ``shape``'s boundary, or of a face of it.
+
+        Parameters
+        ----------
+        points : array-like, shape ``(n, 3)``
+        faces : array-like of int, shape ``(n,)``, optional
+            The face (in exploration order) to move each point onto. Unset, the closest point of the
+            whole boundary.
+        """
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        indexed = _indexed(shape, TopAbs_FACE)
+        # The boundary, not the solid: a point inside a solid is at distance zero from it.
+        boundary = self._boundary(shape)
+        ancestors = None
+        landed = np.empty_like(points)
+        on_face = np.empty(len(points), dtype=np.int64)
+        normals = np.empty_like(points)
+        distance = np.empty(len(points))
+        for i, point in enumerate(points):
+            vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*point)).Vertex()
+            if faces is None:
+                extrema = BRepExtrema_DistShapeShape(vertex, boundary)
+                support = extrema.SupportOnShape2(1)
+                if extrema.SupportTypeShape2(1) == BRepExtrema_IsInFace:
+                    face_index = indexed.FindIndex(support) - 1
+                else:
+                    if ancestors is None:
+                        ancestors = self._faces_around(shape)
+                    face_index = min(
+                        indexed.FindIndex(face) - 1 for face in ancestors.FindFromKey(support)
+                    )
+            else:
+                face_index = int(faces[i])
+                extrema = BRepExtrema_DistShapeShape(vertex, indexed.FindKey(face_index + 1))
+            face = TopoDS.Face(indexed.FindKey(face_index + 1))
+            nearest = extrema.PointOnShape2(1)
+            u, v = GeomAPI_ProjectPointOnSurf(
+                nearest, BRep_Tool.Surface_s(face)
+            ).LowerDistanceParameters()
+            landed[i] = _coords(nearest)
+            on_face[i] = face_index
+            normals[i] = self._outward(BRepAdaptor_Surface(face), face, u, v)[1]
+            distance[i] = extrema.Value()
+        return Projection(points=landed, face=on_face, normal=normals, distance=distance)
+
+    @staticmethod
+    def _boundary(shape):
+        """The shape's boundary shells, as one compound."""
+        compound, builder = TopoDS_Compound(), BRep_Builder()
+        builder.MakeCompound(compound)
+        explorer = TopExp_Explorer(shape, TopAbs_SHELL)
+        while explorer.More():
+            builder.Add(compound, explorer.Current())
+            explorer.Next()
+        return compound
+
+    @staticmethod
+    def _faces_around(shape):
+        """The faces meeting at each edge and at each vertex of ``shape``."""
+        around = IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher()
+        TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, around)
+        TopExp.MapShapesAndAncestors_s(shape, TopAbs_VERTEX, TopAbs_FACE, around)
+        return around
+
+    # -----------------------------------------------------------------------------------------
     # Triangulating
     # -----------------------------------------------------------------------------------------
 
@@ -376,19 +589,35 @@ class OpenCascade:
             family normal to each axis, so every piece fits inside a cube of this side and no
             triangle meshed on it is longer than the cube's diagonal. The kernel's mesher bounds
             only the chord, so without this a straight cylinder comes out as slivers running its
-            whole length. Only the boundary shells are cut — cutting the solid would mesh the
+            whole length. Only the boundary shells are cut -- cutting the solid would mesh the
             cutting planes' interior faces as well.
 
         Returns
         -------
-        np.ndarray, shape ``(n_triangles, 3, 3)``
+        triangles : np.ndarray, shape ``(n_triangles, 3, 3)``
             Triangles of positive area only: a mesher can emit a degenerate one at a pole, and a
             zero-area facet is not a small emitter but a point, which an emitting surface must
             not contain by accident.
+        face : np.ndarray of int, shape ``(n_triangles,)``
+            The face of ``shape``, in exploration order, each triangle lies on -- the face it was
+            cut from, when the surface was cut.
         """
-        surface = shape if facet_size is None else self._cut(shape, facet_size)
+        original = _indexed(shape, TopAbs_FACE)
+        if facet_size is None:
+            surface, origin = shape, None
+        else:
+            surface, splitter = self._cut(shape, facet_size)
+            origin = _indexed(surface, TopAbs_FACE)
+            source = np.full(origin.Size(), -1, dtype=np.int64)
+            for index in range(1, original.Size() + 1):
+                face = original.FindKey(index)
+                pieces = list(splitter.Modified(face)) or [face]
+                for piece in pieces:
+                    position = origin.FindIndex(piece)
+                    if position:
+                        source[position - 1] = index - 1
         BRepMesh_IncrementalMesh(surface, chord, False, angle, True)
-        triangles = []
+        triangles, faces = [], []
         for face in _faces(surface):
             location = TopLoc_Location()
             mesh = BRep_Tool.Triangulation_s(face, location)
@@ -404,16 +633,24 @@ class OpenCascade:
             )
             if face.Orientation() == TopAbs_REVERSED:
                 corners = corners[:, ::-1]
+            index = (original if origin is None else origin).FindIndex(face) - 1
             triangles.append(points[corners])
-        triangles = np.concatenate(triangles)
+            faces.append(np.full(len(corners), index if origin is None else source[index]))
+        triangles, faces = np.concatenate(triangles), np.concatenate(faces)
         doubled = np.linalg.norm(
             np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1
         )
-        return triangles[doubled > 0.0]
+        if np.any(faces < 0):
+            msg = "the CAD kernel cut a face into pieces it could not trace back to the face"
+            raise ValueError(msg)
+        return triangles[doubled > 0.0], faces[doubled > 0.0]
 
     @staticmethod
     def _cut(shape, spacing: float):
-        """The solid's boundary shells, cut by planes normal to each axis ``spacing`` apart."""
+        """The solid's boundary shells, cut by planes normal to each axis ``spacing`` apart.
+
+        Returns the cut shells and the splitter, whose history traces each piece to its face.
+        """
         box = Bnd_Box()
         BRepBndLib.Add_s(shape, box)
         low, high = _coords(box.CornerMin()), _coords(box.CornerMax())
@@ -434,4 +671,4 @@ class OpenCascade:
         splitter.SetArguments(shells)
         splitter.SetTools(tools)
         splitter.Build()
-        return splitter.Shape()
+        return splitter.Shape(), splitter

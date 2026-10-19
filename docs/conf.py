@@ -170,6 +170,7 @@ SUBPACKAGE_GROUPS = {
     "io.cad": [
         ("Reading a drawing", ["model", "placement"]),
         ("Recognizing solids", ["recognize", "faces"]),
+        ("Regions for meshing: topology, triangles, projection", ["topology"]),
     ],
     "solids": [
         ("Solid bodies, their combinations, and fluid regions", ["bodies"]),

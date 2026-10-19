@@ -609,3 +609,17 @@ volumes, 22 non-orthogonality errors, 67 incorrectly oriented faces); sort remov
 upper triangular order". The blockMesh fixture (two graded blocks, 42 cells) is Mesh OK, and
 `disassemble(read_openfoam(fixture))` equals the fixture's parsed arrays exactly.
 
+## 2026-10-19 — CAD regions for a mesher: what the kernel reported
+
+cadquery-ocp-novtk 8.0.1.0.0, macOS arm64. A box fused with a cube on its half (an L) keeps 11 faces (the
+shared plane splits them) and 23 edges: 19 convex, 1 concave (x = 1, z = 1, along y), 3 flat. A first
+version flipped the traversal direction again for a reversed face and gave the plain box six -90 degree
+edges; exploring a face's edges already composes its orientation. Sozzi water (body + pipes - lamp), 9
+faces, 15 edges, 5 seams: concave only at edge 3 (body cylinder r 0.0445 / inlet riser r 0.00955) and
+edge 5 (end plate at x = 0.889 / outlet pipe); the lamp through the x = 0 plate is convex (90 degrees), the
+lamp's cylinder-to-hemisphere edge flat. A point at (0.7, 0.4, 0.9) inside the unit-height box projected
+with `BRepExtrema_DistShapeShape(vertex, solid)` returned distance 0 and the solid as support, hence the
+boundary shells. Face-tagged triangles of the Sozzi water: chord 2e-5, facet 0.03 m, 24384 triangles in
+0.7 s, per-face area within 1.5e-3 of the face's own; facet 5e-3 m took 319 s (the splitter, not the
+mesher).
+
