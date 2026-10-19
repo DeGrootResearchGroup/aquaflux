@@ -1598,3 +1598,38 @@ pitzDaily and bfs3d (2026-10-14/15)".
   frozen operators are assembled from. **Detail:** `.claude/notes/turbulence-log.md`, "Segmented
   refresh, the carried shift factor (#156), and refresh under `jax.grad`".
 
+## Treating bfs3d's march variance with the Krylov tolerance, or production frozen everywhere — REFUTED (2026-10-18)
+
+Both tried against bfs3d's corner `k` collapse (`turbulence.md`; full record in
+`.claude/notes/turbulence-log.md`, "bfs3d's corner `k` collapse (2026-10-18)"). **A tighter forward
+tolerance** (rtol 0.1, 0.03 against the shipped 0.3) still lost arms to the same rounding-level viscosity
+perturbations that broke the shipped tolerance (one failure each of two tried, Apple M3 Pro, `cf80be32`):
+the collapse is in the operator, not the solve. **`jacobian_production_viscosity=True`** (production frozen
+in all 23040 cells) stalled the unperturbed march at ‖R‖ ≈ 0.06 from step 13 (α 0.03–0.06, β to 4): it
+removes a derivative Newton needs everywhere but the corners. What survived is the per-cell freeze
+(`production_freeze.py`), with its inverse fitted to the same operator -- a first prototype at threshold
+0.5 with the inverse left on the exact Jacobian froze 230–850 cells a step and broke a converging march.
+
+
+## Freezing more of the `k` row's `k`-dependence — REFUTED (2026-10-18)
+
+Extensions of the per-cell production freeze, proposed when its library version did not reproduce the
+prototype, each tried at bfs3d's step-19 state (faithful replay, float32 split as shipped, β 0.005, nine
+draws over rounding-level perturbations of the residual) and the second also as a march: freezing `k` in
+the near-wall wall-function production (adds 1e-7–6e-6 to diagonals short by 1e-5–1e-3, fixes none);
+freezing the production cap's `k` (the cap is inactive there); freezing `k` in the `k` diffusivity's
+`nu_t` (7/9 descents by the march's acceptance rule against 5/9 for production alone, then a march that
+crawled to step 28 and diverged after the release to 1e-4); and freezing the strain rate's near-wall `k`
+blend as well (every `k` diagonal positive, yet 2/9 descents). They lost because the failure was not the
+`k` diagonal: the float32 split breaks at near-zero pivots, which the pivot floor below addresses without
+changing the operator. Detail: `.claude/notes/turbulence-log.md`, "Per-cell production freeze (2026-10-18)".
+
+## A pivot floor over every shifted row, or only just above zero — REFUTED (2026-10-18)
+
+The library `PivotFloor` was first written generic over every row that carries a shift. At bfs3d's step-19
+state it changed 11 664 rows, 11 538 of them momentum (a momentum pivot is small beside its pseudo-time
+diagonal without being singular), and the float32 solve ran to its cap with the first descending rung at
+α 1/4, against 7 cycles and a full step with `k` rows alone; problems now name their floored fields
+(`MaterializedProblem.floorable_fields`). Raising near-zero pivots only to ~6 % of their row's scale made the
+amplification worse (1e14 on one row), and also flooring the healthy negative pivots (75 rows) left every
+solve at its cap. Detail: `.claude/notes/solve-log.md`, "Near-zero pivots and the float32 split (2026-10-18)".

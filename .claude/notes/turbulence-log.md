@@ -599,6 +599,93 @@
     double counting — three wall faces means the deepest dead zone, hence the least production — and the
     open question is the one in item 1, not a corner-specific defect in the reduction.
 
+### bfs3d's corner `k` collapse (2026-10-18)
+
+**Configuration** (every number here unless stated): Apple M3 Pro, 11 cores, 19 GB, macOS, jax 0.10.2,
+x64; `validation/bfs3d_openfoam/compare.py` with its shipped `case.yaml` at `main` `cf80be32` (field split
+`SimpleSmoothed` / `JacobiSmoothed` in float32, uniform probe reach 3, residual stop, rtol 0.3 restart 15
+max 14, `CflResidualDualTimeControl` `grow` 3 release 1e-4, 12 × 1 ramp, damping 3, per-cell k clip +
+ω bound e), one run per arm through `run_case.sh`, machine otherwise idle.
+
+**It began as a regression hunt and is not one.** The march took 18 steps / 129 cycles at the #732 merge
+and 37 / 245 on `cf80be32`. Bisected over first-parent merges: the #736 merge already takes another path
+from step 5 (20 / 126); the #742 merge gives 37 / 245. #742 is `450adef3` (the dual-time inner loop carries
+the line search's `G` as its next right-hand side). Reverting only that line at `120428f4` restores 20 / 126
+exactly; reverting the reported steady residual instead changes nothing. The carried vector equals a fresh
+`G(p)` in every branch of the line search by reading, so it differs by rounding only. Logs and patches
+were in the investigating session's scratchpad (not kept).
+
+**The march is chaotic at the shipped settings.** The viscosity scaled by `1 + eps` (a local harness edit,
+`eps` ~1e-14, i.e. a last-bit change):
+
+| forward rtol | eps 0 | +1e-14 | -1e-14 | +3e-14 |
+|---|---|---|---|---|
+| 0.3 (shipped) | 37 steps | 36 | NaN at step 24 | NaN at step 27 |
+| 0.1 | 29 | 25 | singular `[k, ω]` block at step 39 | -- |
+| 0.03 | 28 | singular `[k, ω]` block at step 32 | 48 | -- |
+
+So the tolerance is not the lever, and a single bfs3d march says nothing about a change that moves
+rounding. Every converged arm gives mid-span `x_r/h` 8.361. The amplifier turned out to be the **float32
+field split at near-zero `k` pivots** (`.claude/notes/solve-log.md`, "Near-zero pivots and the float32 split
+(2026-10-18)"): with the preconditioner's pivot floor the march took 21 and 22 steps at eps 0 and +1e-14.
+
+**Mechanism (reproduced digit for digit with checkpoints kept).** In the top-wall / side-wall corner cells
+(x 0.07–0.12 m, the cell layers against both walls, either side wall; e.g. 11467 at (0.0897, 0.0095,
+0.0353), 12667, 12789) `k` falls after the release; below `k` ≈ 0.05–0.09 the exact `J_kk` turns
+negative (cell 11467: +9.7e-6 at state 22, −3.3e-6 at state 23, −4.2e-6 to −6.5e-6 after), the shift
+there is ~3e-5·β (2.2e-6 at β 0.071, 3e-9 at the 1e-4 floor), and `R_k < 0`, so the local Newton
+correction points at negative `k`. Cell 12749 in the 37-step run: `J_kk` −1.7e-6 to −3.1e-6 exact against
++2.0e-6 to +2.6e-6 with production frozen -- the sign flip is production's `k`-derivative. Three outcomes,
+by where the diagonal is when the march meets it:
+- **firmly negative:** the clip strips the corner `dk` (−0.49, −0.19, −0.006 at `k` ≈ 1e-16 -- 80 % of the
+  direction's norm) and what is left has a *positive* slope in ‖G‖ (×1.000001 at α 1e-6 to ×1.47 at α 1,
+  the same at rtol 1e-8); `k` slides ×0.01 a step to 1e-18 and the run ends on the `[k, ω]` block refusal
+  (a false positive of the guard: the block is lower-triangular, det −1.6e-6, its Hadamard ratio ∝ k);
+- **passing through zero:** cell 12667's shifted diagonal −7.8e-9 at state 18; the solve hits the cycle cap
+  with a linear residual 2865× the right-hand side, the junk step is accepted (×54) and the run blows up.
+  That linear residual is the float32 split failing at the near-zero pivot (a right-preconditioned GMRES
+  cannot end above its right-hand side with a fixed linear `M`); see the solve-log entry above;
+- **escalated past ~0.2:** the shift outweighs it and the cells recover in one step -- the 37-step run's
+  stall at steps 25–31 (corner `k` to 7e-31) ends at β 0.32 (`k` back to 1.7e-5), so the cost spread of the
+  converged runs is the same trap, caught late.
+Probes: `validation/bfs3d_openfoam/step_descent_probe.py` (replays a step from its checkpoint and takes its
+first direction raw / clipped / tight, with descent and where the growth lands) and
+`corner_k_row_probe.py` (`J_kk`, its frozen-production value, the shift, `R_k` and the local Newton `dk`
+per checkpoint). Both need the march's checkpoints (`BFS3D_CHECKPOINT_KEEP`) and the perturbation the
+march ran with; the viscosity perturbation itself was a local edit and is not in the harness.
+
+**Refuted on the way:** the global frozen production (`jacobian_production_viscosity=True`) on unperturbed
+bfs3d stalled at ‖R‖ ≈ 0.06 from step 13 with α 0.03–0.06 every step and β escalated to 4 (stopped at step
+31): it removes the derivative in all 23040 cells, where Newton needs it.
+
+### Per-cell production freeze (2026-10-18)
+
+**Configuration:** bfs3d `compare.py`, shipped `case.yaml` (float32 split) at `fe772f59` + this branch, Apple
+M3 Pro, jax 0.10.2, eps 0, one run per arm, threshold 0.1 throughout.
+
+| arm | steps / cycles |
+|---|---|
+| off | 38 / 292 |
+| library (`gain > 0` test, inverse fitted to the stand-in) | 38 / 293 |
+| prototype (any cell meeting the inequality, inverse fitted to the unfrozen Jacobian) | 25 / 170 |
+| library with the prototype's fit | diverged at step 19 (β escalated, then R ×10) |
+| library with the prototype's fit and criterion | 25 / 170, all 25 checkpoint states bit-identical to the prototype's |
+
+- **The library is the prototype modulo those two choices.** With the fit alone switched, states 1–5 were
+  bit-identical; the first difference (7e-6 relative in `k`, at cell 22816) came at step 6, where only the
+  prototype freezes 22816: `J+s` = −8.7e-6 with a gain of ~0, so a ~1e-10 diagonal change moved `k` by
+  1/(J+s) times that. It held at ~1e-5 through step 17, grew 250× at step 18 and to O(1) at 19.
+- **What decided the outcome is the float32 split** (solve-log entry): at that step the solve's direction
+  depends on rounding, so a march-level difference of either choice says nothing about it. At fixed states
+  the matched fit was as good or better (step 19 of the prototype's path: matched avoided the junk step that
+  off and unmatched both took).
+- **Candidate extensions, each refuted at the step-19 state** (ledger, "Freezing more of the `k` row's
+  `k`-dependence"): the wall-function production (gains 1e-7–6e-6 against deficits 1e-5–1e-3), the
+  production cap (inactive), the `k` diffusivity's `nu_t` (march failed after the release), the strain
+  rate's near-wall `k` blend (2/9 descents).
+- Instruments (scratch, not kept): the prototype wrapper, a capture hook for `_march_step`'s arguments and
+  a faithful replay; the faithful build is now `validation/bfs3d_openfoam/pivot_floor_probe.py`'s.
+
 ## The coupled solve — `CoupledRANS` / `solve_coupled`
 
 ### The forward stopping measure — what a reader of older measurements needs (#282)

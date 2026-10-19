@@ -26,6 +26,7 @@ from aquaflux.precondition import (
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
+    PivotFloor,
     SimpleSmoothed,
 )
 from aquaflux.precondition.multigrid import _PROLONGATION_SMOOTHING
@@ -58,6 +59,7 @@ _SPECS = [
     MaterializedJacobian(SimpleSmoothed()),
     MaterializedJacobian(SimpleSmoothed(), build_beta=0.5),
     MaterializedJacobian(SimpleSmoothed(), refit_beta_floor=0.05),
+    MaterializedJacobian(SimpleSmoothed(), pivot_floor=PivotFloor(threshold=0.2)),
     MaterializedJacobian(
         FieldSplit(
             SimpleSmoothed(sweeps=2, strength_threshold=0.25, frozen_coarsening=True),
@@ -111,7 +113,7 @@ def _public_value_classes() -> set[type]:
         and not inspect.isabstract(cls)
     }
     spec_classes = {BlockDiagonal, MaterializedJacobian, FieldSplit}
-    return nested | spec_classes | {JacobianProbeSpec}
+    return nested | spec_classes | {JacobianProbeSpec, PivotFloor}
 
 
 def test_the_mapping_accepts_every_public_value_a_spec_can_hold() -> None:

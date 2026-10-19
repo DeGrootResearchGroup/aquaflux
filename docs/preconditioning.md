@@ -311,6 +311,11 @@ A {class}`~aquaflux.precondition.MaterializedJacobian` settles everything the in
 - `refit_beta_floor` — a lower bound on the shift the inverse is re-fitted at while the march keeps
   solving at its own. It is not the march's own `beta_floor`, which bounds the shift the solve
   runs at.
+- `pivot_floor` — fit the inverse with every near-zero diagonal pivot moved out to its row's own
+  pseudo-time diagonal, keeping its sign ({class}`~aquaflux.precondition.PivotFloor`). Only the rows of
+  fields the problem names are eligible: for coupled turbulence, the `k` rows, whose production can
+  cancel their transport and shift. Like the shift floor it changes what the inverse is fitted to,
+  never what is solved.
 
 and its `inverse` chooses how the materialized matrix is inverted: a
 {class}`~aquaflux.precondition.FieldSplit` for a problem with two groups of fields, such as coupled flow and
@@ -323,6 +328,13 @@ stopping test stay in double precision, so the march converges to the same root.
 transpose solve applies the same rounded split in double-precision arithmetic: applied in single
 precision the split is linear only to single-precision rounding, and a transpose solve run to a
 tighter tolerance than that stagnates.
+
+A row whose shifted pivot is near zero is where single precision can fail: the inverse amplifies that
+row by orders of magnitude beyond the others, and the rounding of the amplified entries swamps the
+ordinary ones beside them, so the preconditioned operator is no longer one fixed linear map near that
+row. The Krylov solve then stalls at its cap and its direction depends on rounding. A `pivot_floor`
+keeps such pivots out of the fit, and with it the single-precision and double-precision applications
+give the same direction.
 
 To share one preconditioner across several solves —
 the rungs of a Reynolds continuation, say — open a session with

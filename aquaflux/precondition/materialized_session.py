@@ -17,6 +17,7 @@ The coupled RANS solve and the laminar flow solve each supply one.
 from __future__ import annotations
 
 import abc
+import dataclasses
 import time
 from collections.abc import Callable
 
@@ -36,6 +37,7 @@ from .monolithic_policy import (
     TracedSplitShiftPolicy,
     with_traced_split,
 )
+from .pivot_floor import PivotFloor
 from .traced_field_split import offers_traced_split, traced_field_split
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
     "BetaTrackingRefresh",
+    "DiagonalStandIn",
     "MaterializedProblem",
     "MaterializedSession",
     "batched_jacobian_matvec",
@@ -155,7 +158,22 @@ def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
     state : jnp.ndarray
         The state the diagonal is taken at.
     """
-    return np.asarray(jax.lax.stop_gradient(base.shift_term(state).shift(beta)))
+    return _frozen_shift_and_scale(base, beta, state)[0]
+
+
+def _frozen_shift_and_scale(base, beta: float, state: jnp.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`frozen_shift_diagonal` and the base diagonal ``d`` it scales, from one shift term.
+
+    The base diagonal is each row's pseudo-time scale independent of ``beta`` -- what a
+    :class:`~aquaflux.precondition.PivotFloor` measures a pivot against -- so it is read off the same
+    term rather than recovered by dividing the shift by ``beta``, which would fold in any per-row factor
+    of ``beta`` the policy applies.
+    """
+    term = base.shift_term(state)
+    return (
+        np.asarray(jax.lax.stop_gradient(term.shift(beta))),
+        np.asarray(jax.lax.stop_gradient(term.diagonal)),
+    )
 
 
 def _is_traced(pytree: object) -> bool:
@@ -165,6 +183,31 @@ def _is_traced(pytree: object) -> bool:
     means the caller has wrapped the solve in ``jax.grad`` / ``jvp`` / ``vmap``.
     """
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class DiagonalStandIn:
+    """A Krylov operator for one re-fit that is the materialized Jacobian plus a diagonal.
+
+    A residual may want its shifted solve to differentiate a stand-in rather than itself -- the residual
+    still decides where the march lands, and the stand-in only the operator that gets it there -- and may
+    choose that stand-in afresh at each re-fit from what the re-fit has just materialized. When the
+    stand-in's Jacobian differs from the residual's by a diagonal, the inverse can be fitted to exactly
+    the operator the Krylov solve applies: the materialized Jacobian, the shift and :attr:`diagonal`.
+
+    Attributes
+    ----------
+    residual : callable
+        ``phi -> R~(phi)``, whose Jacobian-vector product the step's shifted solve takes in place of the
+        residual's (:attr:`~aquaflux.solve.ShiftedStep.jacobian_residual`).
+    diagonal : np.ndarray
+        ``diag(dR~/dphi) - diag(dR/dphi)`` at the re-fit's state, shape ``(n_dofs,)``: what the inverse adds
+        to the materialized Jacobian's diagonal beside the shift. The two Jacobians must agree off the
+        diagonal, or the inverse preconditions a different matrix from the one solved.
+    """
+
+    residual: Callable[[jnp.ndarray], jnp.ndarray]
+    diagonal: np.ndarray
 
 
 class BetaTrackingRefresh:
@@ -202,11 +245,27 @@ class BetaTrackingRefresh:
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
         seconds, and its per-phase costs. ``None`` (default) elides the call.
+    stand_in : callable, optional
+        ``(state, jacobian_diagonal, shift_diagonal) -> DiagonalStandIn | None``, asked at each re-fit,
+        once the Jacobian is materialized, for the operator the next steps' Krylov solves should apply;
+        the inverse is fitted to it. ``None`` (default) asks nothing: the operator is the Jacobian.
+    pivot_floor : PivotFloor, optional
+        Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals,
+        measured on the diagonal the fit would otherwise see (the Jacobian, the shift and any stand-in's
+        diagonal). It changes the fit only; the operator the steps solve is left as it is. ``None``
+        (default) fits that diagonal unchanged.
+    floorable_rows : np.ndarray, optional
+        Boolean, shape ``(n_dofs,)``: the only rows ``pivot_floor`` may change
+        (:attr:`MaterializedProblem.floorable_fields`). ``None`` (default) lets it change any shifted row.
 
     Attributes
     ----------
     assembler : object
         The assembler this hook currently refreshes for; :meth:`rebind` changes it.
+    standing_stand_in : DiagonalStandIn or None
+        What ``stand_in`` returned at the last re-fit, which the inverse now standing was fitted to.
+    floored_rows : np.ndarray
+        The rows ``pivot_floor`` changed at the last re-fit, shape ``(n_floored,)``; empty without one.
     """
 
     def __init__(
@@ -217,8 +276,17 @@ class BetaTrackingRefresh:
         *,
         refit_beta_floor: float = 0.0,
         observer: Callable[[RefreshTiming], None] | None = None,
+        stand_in: Callable[[jnp.ndarray, np.ndarray, np.ndarray], DiagonalStandIn | None]
+        | None = None,
+        pivot_floor: PivotFloor | None = None,
+        floorable_rows: np.ndarray | None = None,
     ) -> None:
         self._probe = probe
+        self._stand_in = stand_in
+        self.standing_stand_in: DiagonalStandIn | None = None
+        self._pivot_floor = pivot_floor
+        self._floorable_rows = floorable_rows
+        self.floored_rows = np.zeros(0, dtype=np.int64)
         self._preconditioner = preconditioner
         self._refit_beta_floor = refit_beta_floor
         self._observer = observer
@@ -310,10 +378,29 @@ class BetaTrackingRefresh:
         compilation key of theirs.
         """
         frozen = jax.lax.stop_gradient(jnp.asarray(state))
-        shift = frozen_shift_diagonal(
+        shift, scale = _frozen_shift_and_scale(
             step.shift_policy.base, max(beta, self._refit_beta_floor), frozen
         )
         probed = self._probed
+        self.standing_stand_in = None
+        self.floored_rows = np.zeros(0, dtype=np.int64)
+
+        def correction(jacobian_diagonal: np.ndarray) -> np.ndarray | None:
+            # The stand-in first -- it is part of the operator the steps solve -- then the floor, which
+            # is measured on everything the fit would otherwise see and changes the fit alone.
+            total = None
+            if self._stand_in is not None:
+                self.standing_stand_in = self._stand_in(frozen, jacobian_diagonal, shift)
+                if self.standing_stand_in is not None:
+                    total = np.asarray(self.standing_stand_in.diagonal)
+            if self._pivot_floor is not None:
+                pivot = jacobian_diagonal + shift + (0.0 if total is None else total)
+                floor = self._pivot_floor.correction(pivot, scale, rows=self._floorable_rows)
+                self.floored_rows = np.flatnonzero(floor)
+                total = floor if total is None else total + floor
+            return total
+
+        corrects = self._stand_in is not None or self._pivot_floor is not None
         return self._preconditioner.refresh_in_place(
             lambda v: jacobian_matvec(probed, frozen, v),
             self._probe.plan,
@@ -321,6 +408,7 @@ class BetaTrackingRefresh:
             batched_matvec=lambda seeds: batched_jacobian_matvec(probed, frozen, seeds),
             probe_batch_size=PROBE_BATCH_SIZE,
             structure=self._probe.structure,
+            diagonal_correction=correction if corrects else None,
         )
 
     def _report(
@@ -346,6 +434,13 @@ class MaterializedProblem(abc.ABC):
     Implementations are immutable values: :meth:`with_assembler` returns a new problem rather than
     mutating one, so a session can rebind across continuation rungs without aliasing.
     """
+
+    #: The fields, by layout name, whose shifted diagonal pivot a source term can take through zero: the
+    #: only rows a :class:`~aquaflux.precondition.PivotFloor` may change. A pivot is judged against its
+    #: row's pseudo-time diagonal, and a row whose pivot is merely small beside that diagonal without being
+    #: anywhere near singular (a momentum row) would be changed for nothing. Empty (default): no field,
+    #: and a session refuses a pivot floor for this problem rather than ignore it.
+    floorable_fields: tuple[str, ...] = ()
 
     @property
     @abc.abstractmethod
@@ -409,6 +504,26 @@ class MaterializedProblem(abc.ABC):
         session chooses between them; the problem never does. ``base_regime`` is the Krylov regime of
         the inverse family; the march's ``linear_solve`` moves it.
         """
+
+    def diagonal_stand_in(
+        self, state: jnp.ndarray, jacobian_diagonal: np.ndarray, shift_diagonal: np.ndarray
+    ) -> DiagonalStandIn | None:
+        """The operator the Krylov solves should apply until the next re-fit, or ``None`` for the Jacobian.
+
+        Asked at every re-fit, after the Jacobian is materialized at ``state`` and before the inverse is
+        fitted, so a residual can choose its stand-in from what the re-fit has just measured. The default
+        is ``None``: the shifted solve differentiates the residual itself.
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The state the re-fit is taken at, shape ``(n_dofs,)``.
+        jacobian_diagonal : np.ndarray
+            The materialized Jacobian's diagonal there, without the shift, shape ``(n_dofs,)``.
+        shift_diagonal : np.ndarray
+            The shift the inverse is fitted with, shape ``(n_dofs,)``.
+        """
+        return None
 
 
 class MaterializedSession:
@@ -489,6 +604,12 @@ class MaterializedSession:
                 "fields form a single group (a laminar flow); this problem has a leading and a trailing "
                 "group. Wrap block inverses in FieldSplit(leading=..., trailing=...)."
             )
+        if spec.pivot_floor is not None and not problem.floorable_fields:
+            raise ValueError(
+                f"a pivot floor changes only the rows of the fields a problem names as ones whose pivot can "
+                f"pass through zero, and {type(problem).__name__} names none, so it would change nothing. "
+                "Leave pivot_floor unset for this problem."
+            )
         self._spec = spec
         self._problem = problem
         self._observer = observer
@@ -510,11 +631,31 @@ class MaterializedSession:
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
         ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
-            refitted = self._refresh_hook()(active_step, state, due=due)
-            if not (refitted and self._traced):
+            hook = self._refresh_hook()
+            if not hook(active_step, state, due=due):
                 return None
-            split = traced_field_split(self._preconditioner.inverse, self._precision)
-            return lambda step: with_traced_split(step, split)
+            stand_in = hook.standing_stand_in
+            if not self._traced and stand_in is None:
+                return None
+            split = (
+                traced_field_split(self._preconditioner.inverse, self._precision)
+                if self._traced
+                else None
+            )
+
+            def update(step: NewtonStrategy) -> NewtonStrategy:
+                if split is not None:
+                    step = with_traced_split(step, split)
+                if stand_in is None:
+                    return step
+                return eqx.tree_at(
+                    lambda s: s.jacobian_residual,
+                    step,
+                    stand_in.residual,
+                    is_leaf=lambda leaf: leaf is None,
+                )
+
+            return update
 
         self.refresh_preconditioner = (
             refresh_preconditioner
@@ -666,9 +807,28 @@ class MaterializedSession:
                 self._probe_for(),
                 self._preconditioner,
                 observer=self._observer,
+                stand_in=self._diagonal_stand_in,
+                pivot_floor=self._spec.pivot_floor,
+                floorable_rows=self._floorable_row_mask(),
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook
+
+    def _floorable_row_mask(self) -> np.ndarray | None:
+        """Which rows the pivot floor may change, shape ``(n_dofs,)``, or ``None`` without a floor."""
+        if self._spec.pivot_floor is None:
+            return None
+        layout = self._problem.layout
+        rows = np.zeros(layout.size, dtype=bool)
+        for name in self._problem.floorable_fields:
+            rows[layout.slice_of(name)] = True
+        return rows
+
+    def _diagonal_stand_in(
+        self, state: jnp.ndarray, jacobian_diagonal: np.ndarray, shift_diagonal: np.ndarray
+    ) -> DiagonalStandIn | None:
+        """The current problem's stand-in -- read at call time, so it follows a :meth:`rebind`."""
+        return self._problem.diagonal_stand_in(state, jacobian_diagonal, shift_diagonal)
 
     def _fit(self, state: jnp.ndarray, base) -> object:
         probe = self._probe_for()

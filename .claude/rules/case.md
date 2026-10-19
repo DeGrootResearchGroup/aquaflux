@@ -185,8 +185,13 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - **The shared march settings are one dataclass, `_March`**: `max_steps`, `convergence`, `preconditioner`,
   `dual_time`, `linear_solve`, `step_control`, `retry`, `adaptive_tolerance` (unset = the library's
   `DEFAULT_ADAPTIVE_TOLERANCE`; off = both rules `null`). `CoupledMarch` adds `turbulence_damping` (→
-  `CoupledShiftSettings`), `omega_step_ratio` (unset = e under log-ω, infinite = unbounded) and
-  `continuation`. A setting added to `_March` reaches both marches.
+  `CoupledShiftSettings`), `omega_step_ratio` (unset = e under log-ω, infinite = unbounded),
+  `continuation` and `production_freeze_threshold` (unset = off; refused at read beside a preconditioner
+  that is not a `MaterializedJacobian`). A setting added to `_March` reaches both marches.
+  - **`production_freeze_threshold` is session-owned**: `CoupledMarch.solve` pops it from the settings and
+    passes it to `open_session` beside the spec, never to the march (where a session would refuse it). It is
+    in `_owned()` and in `unset_means_off`. Neither validation case file sets it; the harnesses reach it by
+    `BFS3D_PRODUCTION_FREEZE` / `PITZ_PRODUCTION_FREEZE`.
 - **The library's settings values are read directly** — `Convergence` (+ `RowScaled`/`BlockScaled`/
   `Euclidean`), `DualTimeLoop`, `LinearSolveSettings`, the dual-time controls, `RetryPolicy`,
   `AdaptiveLinearTolerance`, and every coupled-preconditioner kind via

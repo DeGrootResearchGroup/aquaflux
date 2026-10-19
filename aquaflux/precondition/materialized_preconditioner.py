@@ -81,11 +81,17 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
+        diagonal_correction: Callable[[np.ndarray], np.ndarray | None] | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Re-materialize at a developed state and re-fit the frozen inverse to it, IN PLACE.
 
         The arguments are the build's materialization arguments, evaluated at the developed state. The
         inverse's own configuration is fixed when it is built and cannot be changed by a refresh.
+
+        ``diagonal_correction`` is for a Krylov operator that is not the materialized Jacobian but differs
+        from it by a diagonal: given the unshifted Jacobian's diagonal (shape ``(n_dofs,)``), it returns
+        the per-row amount to add to it, or ``None`` for none. The inverse is then fitted to the operator
+        the Krylov solve actually applies, shift and correction both on the diagonal.
         Because this preconditioner is held as a **static field** of the shift policy and
         :meth:`~aquaflux.precondition.HostPreconditioner.matvec` reads ``self.inverse`` at call time,
         re-fitting the inverse here re-preconditions the **same compiled** Krylov solve.
@@ -113,6 +119,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
         timer.lap("probe")
+        if diagonal_correction is not None:
+            correction = diagonal_correction(np.asarray(jacobian.diagonal()))
+            if correction is not None:
+                shift_diagonal = np.asarray(shift_diagonal) + correction
         shifted = self._shifted(jacobian, shift_diagonal)
         timer.lap("assemble")
         inverse.refactor_block(shifted)

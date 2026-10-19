@@ -359,6 +359,13 @@ class SSTTurbulence(eqx.Module):
         (the convection-diffusion multigrid rescues the exact operator, which then converges
         quadratically), and the coupled path always carries a preconditioner *and* takes gradients,
         which is why the default belongs on the exact operator.
+    production_freeze_mask : jnp.ndarray or None
+        The cells, shape ``(n_cells,)``, whose production eddy viscosity is frozen as
+        :attr:`explicit_production_viscosity` freezes it everywhere: a cell with a positive entry reads
+        ``k`` there through ``stop_gradient``, every other cell reads it live. The value of the residual
+        is the same either way; only its derivative in ``k`` at the masked cells loses the production
+        term. An array leaf, so a copy with another mask is a compilation-cache hit. For a Jacobian
+        stand-in only, for the same reason as the flag. ``None`` (default) freezes nothing.
     """
 
     model: SSTModel
@@ -380,6 +387,7 @@ class SSTTurbulence(eqx.Module):
     omega_gradient_scheme: GradientScheme | None = None
     explicit_production_limiter: bool = eqx.field(static=True, default=False)
     explicit_production_viscosity: bool = eqx.field(static=True, default=False)
+    production_freeze_mask: jnp.ndarray | None = None
 
     @classmethod
     def build(
@@ -1007,7 +1015,8 @@ class SSTTurbulence(eqx.Module):
     def _production_viscosity(self, closure: SSTClosureFields) -> jnp.ndarray:
         """The eddy viscosity the k-production reads, shape ``(n_cells,)``.
 
-        :attr:`explicit_production_viscosity` freezes ``k`` **here and only here** -- in the
+        :attr:`explicit_production_viscosity` (or, per cell, :attr:`production_freeze_mask`) freezes
+        ``k`` **here and only here** -- in the
         ``a_1 k / max(a_1 omega, S F_2)`` that makes production proportional to ``k``. Everything else
         stays live: ``omega``, the strain rate (including its own near-wall ``k`` blend), the k
         diffusivity's ``nu_t``, the destruction, and the momentum closure. So what is removed is the
@@ -1016,15 +1025,18 @@ class SSTTurbulence(eqx.Module):
         The strain rate is taken from the closure rather than recomputed, so the frozen viscosity is
         the same function of the same inputs as the live one but for that one argument.
         """
-        if not self.explicit_production_viscosity:
+        if not self.explicit_production_viscosity and self.production_freeze_mask is None:
             return closure.nu_t
-        return self.model.eddy_viscosity(
+        frozen = self.model.eddy_viscosity(
             jax.lax.stop_gradient(closure.k),
             closure.omega,
             closure.strain_rate,
             self.molecular_viscosity,
             self.wall_distance,
         )
+        if self.explicit_production_viscosity:
+            return frozen
+        return jnp.where(self.production_freeze_mask > 0, frozen, closure.nu_t)
 
     def _near_wall_closure(self, wall_shear_rate: jnp.ndarray) -> NearWallKClosure:
         """The adaptive near-wall k-budget collaborator for this sweep's wall shear rate."""

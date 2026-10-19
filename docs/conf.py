@@ -112,6 +112,7 @@ SUBPACKAGE_GROUPS = {
                 "sparse_jacobian",
                 "jacobian_probe",
                 "materialized_spec",
+                "pivot_floor",
                 "materialized_session",
                 "materialized_preconditioner",
                 "block_preconditioner",
