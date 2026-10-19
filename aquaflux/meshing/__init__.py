@@ -11,7 +11,8 @@ mesher, ``pip install aquaflux[meshing]``; :func:`netgen_available` says whether
 without loading it.
 
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
-per primal point -- keeping the boundary's corners, edges and patch borders sharp.
+per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
+edges and patch borders sharp.
 """
 
 from __future__ import annotations

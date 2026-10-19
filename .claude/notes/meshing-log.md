@@ -121,3 +121,38 @@ cells (by face planes), 6 faces with volume ratio < 0.01; openness 2e-16, non-or
 13.9, face flatness min 0.79. Netgen sleeve box maxh 0.005 (15995 cells) -> failed 2: 258 concave cells,
 1 small volume ratio; non-orthogonality max 51.7 avg 12.2.
 
+
+## 2026-10-19 — the concave cut: closure, placement, scale, checkMesh
+
+`PolyhedralDual(feature_angle=45 degrees)`, macOS arm64, netgen-mesher 6.2.2608, harness
+`validation/meshing_dual/dual_scale_convexity.py` (one patch `walls`); non-convexity as defined there.
+
+**Placement is what closes the Netgen L.** Netgen L at maxh 0.01 (3707 points, 11 on the concave edge):
+cut with the added vertices at face centroids and edge midpoints, 6 cells unclosed (3 points, both pieces
+each, residual 3.7e-5 to 4.8e-5); topology closed (every cell edge used twice), one separating quad per
+point inward by centroid (both piece centroids on one side of a zig-zag quad). With vertices on the
+bisecting plane: 0 unclosed at 0.02 / 0.01 / 0.006 (6 / 11 / 18 extra pieces). Same L at 0.02, uncut, was
+3 unclosed (entry above).
+
+**Harness after the cut** (closure max, worst non-convexity overall | over extra pieces): L 0.02 / 0.01 /
+0.006: 2.7e-19 / 9.8e-20 / 5.8e-20, 0.26 / 0.35 / 0.35 | 0.17 / 0.16; volume error 0 to 2e-16 (flat walls).
+Sozzi water (`read_step` of `SozziTaghipour.step` with the test's placement, region reactor_body +
+pipes less lamp, `CadModel.write_brep`) at 0.02 / 0.01: 10422 / 13273 points, 24 extra pieces each (the
+two junction circles), closure 2.0e-19 / 1.1e-19, non-convexity 0.33 / 0.33 | 0.32 / 0.26, volume 2.5e-2 /
+7.8e-3 under the tets' (curved walls through face centroids). Cylinder and sleeve unchanged (no concave
+fold beyond 45 degrees).
+
+**Structured fixtures** (`structured_grid_3d` / Kuhn `tetrahedral_grid_3d` less a corner): hex Ls exactly
+convex pieces; a three-wall inside corner of hexes 0.097 with each interior hub at the mean of its cut
+vertices, 0.026 with the least-squares hub (spacings 0.5 / 0.4 / 0.6); with cubic cells a centroid lies on
+the bisecting plane (crossing at 0, clipped to 0.1). Kuhn Ls 0.083, the same as an uncut Kuhn cube's warp.
+
+**Cost** (cylinder maxh 0.0025, 111283 points, no concave fold, so the cut does not run; one run each):
+build 3.1 s against 2.7 s before the restructure, peak footprint 1.90 GB against 2.04 GB — not
+distinguishable from run-to-run spread.
+
+**checkMesh** (OpenFOAM 13 in Docker, `-allGeometry -allTopology`): Netgen L maxh 0.01 dual (3718 cells)
+-> failed 1: 57 concave cells by face planes; openness 1.9e-16, non-orthogonality max 46.2 avg 12.0,
+skewness 1.44, 2 faces with concave angles (max 31 degrees). Sozzi 0.01 dual (13297 cells) -> failed 3:
+309 concave cells, 2 faces with low-quality decomposition tets, 1 small volume ratio; openness 2.2e-16,
+non-orthogonality max 47.8 avg 14.2, skewness 1.96. Topology passes on both.

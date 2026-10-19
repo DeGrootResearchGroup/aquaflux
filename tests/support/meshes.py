@@ -278,6 +278,18 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
                         vertices.append(node(*corner))
                     cells.append(vertices)
 
+    return tetrahedral_mesh(coords, cells)
+
+
+def tetrahedral_mesh(points, cells) -> Mesh:
+    """A face-based mesh of tetrahedra given by their four point indices, in any order.
+
+    Parameters
+    ----------
+    points : array-like, shape ``(n_points, 3)``
+    cells : array-like of int, shape ``(n_cells, 4)``
+    """
+    cells = np.asarray(cells).tolist()
     # A triangle is shared by at most two tetrahedra, so the first sighting owns it and the second
     # neighbours it. Keyed on the sorted node triple, which is the face's identity whichever cell
     # names it; the stored order is the owner's, and any order of three nodes is a valid perimeter.
@@ -295,7 +307,11 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
                 neighbour.append(-1)
 
     return Mesh.from_faces(
-        jnp.asarray(coords), faces, jnp.asarray(owner), jnp.asarray(neighbour), len(cells)
+        jnp.asarray(np.asarray(points, dtype=float)),
+        faces,
+        jnp.asarray(owner),
+        jnp.asarray(neighbour),
+        len(cells),
     )
 
 
