@@ -191,7 +191,7 @@ assumes a stored ring is owner-outward, and **a `Mesh` explicitly declines to pr
 (pitzDaily read through the OpenFOAM reader is 12448 of 24730, because the `empty`-patch collapse
 rebuilds the faces and does not preserve OpenFOAM's own convention.)
 
-So the rule is the **composition of two facts**: `topology.stored_ring_is_outward` recovers the
+So the rule is the **composition of two facts**: `stored_ring_is_outward` (then in `io/vtk/topology.py`, in `aquaflux/mesh/winding.py` since 2026-10-19) recovers the
 ring's own direction — by running the mesh's *own* face-geometry strategy
 (`unoriented_geometry` → `orient_owner_outward`) rather than re-deriving the orientation test — and
 the entry reverses exactly when that disagrees with the side listing it. Pinned two ways:
@@ -324,7 +324,7 @@ default (`boundary_patches(mesh)`), with or without fields — the layout was **
 because the `aquaflux_viz` viewer reads it** (`fields.vtu` + `patches.vtm` in a run directory); a change to
 it is a change to that contract. Serialization reuses `xml.py`'s `_Arrays` (appended raw, `UInt64`
 headers), `_narrowed` and `cell_data_arrays` (2-component vectors padded on the trailing axis, as the
-`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `topology.stored_ring_is_outward`
+`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `stored_ring_is_outward` (then in `io/vtk/topology.py`, in `aquaflux/mesh/winding.py` since 2026-10-19)
 decides per face, reversed rings read back to front (the `.vtu` writer's lesson — a `Mesh` does not promise
 the stored winding). A field of the wrong length is refused naming the patch. It is a `case.PatchVtk`
 field writer (`case.md`). This module does not touch `topology.py` beyond importing

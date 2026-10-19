@@ -15,6 +15,8 @@ equivalent to perturbing before it (the topology is unchanged and geometry is de
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
@@ -318,3 +320,87 @@ def hexahedron_beside_a_prism():
     owner = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
     neighbour = [1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
     return Mesh.from_faces(np.asarray(coords, dtype=float), faces, owner, neighbour, 2)
+
+
+def restated(mesh: Mesh, *, order=None, reverse=None, swap=None) -> Mesh:
+    """The same mesh stated differently: faces reordered, rings reversed, interior faces turned over.
+
+    None of the three changes alters the mesh: faces may be stored in any order, a ring describes
+    the same face in either direction, and an interior face is the same face whichever of its two
+    cells is called the owner. So a consumer that re-derives order and orientation instead of
+    trusting how they are stored must give the same answer for the restated mesh as for the
+    original. Zones, patches (moved with their faces), patch types and groups are kept.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        A non-periodic mesh (a seam face's ring belongs to its owner's side, so turning it over would
+        move it).
+    order : array-like of int, shape ``(n_faces,)``, optional
+        The old index of each new face, a permutation. Default: the existing order.
+    reverse : array-like of bool, shape ``(n_faces,)``, optional
+        Faces (by old index) whose node ring is reversed. Default: none.
+    swap : array-like of bool, shape ``(n_faces,)``, optional
+        Faces (by old index) whose owner and neighbour are exchanged; only interior faces may be
+        chosen. Default: none.
+    """
+    if mesh.face_cells.neighbour_offset is not None:
+        raise ValueError("restated needs a non-periodic mesh")
+    n_faces = mesh.n_faces
+    order = np.arange(n_faces) if order is None else np.asarray(order, dtype=np.int64)
+    reverse = np.zeros(n_faces, dtype=bool) if reverse is None else np.asarray(reverse, dtype=bool)
+    swap = np.zeros(n_faces, dtype=bool) if swap is None else np.asarray(swap, dtype=bool)
+    owner = np.asarray(mesh.face_cells.owner).copy()
+    neighbour = np.asarray(mesh.face_cells.neighbour).copy()
+    if np.any(swap & (neighbour < 0)):
+        raise ValueError("only an interior face can be turned over")
+    owner[swap], neighbour[swap] = neighbour[swap], owner[swap]
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    indices = np.asarray(mesh.face_nodes.face_node_indices)
+    rings = [indices[start:end] for start, end in pairwise(offsets)]
+    rings = [rings[f][::-1] if reverse[f] else rings[f] for f in order]
+    new_of_old = np.empty(n_faces, dtype=np.int64)
+    new_of_old[order] = np.arange(n_faces)
+    patches = mesh.face_patches
+    named = [name for name in patches.names if name not in ("interior", "boundary")]
+    zones = mesh.cell_zones
+    return Mesh.from_faces(
+        mesh.node_coords,
+        rings,
+        owner[order],
+        neighbour[order],
+        mesh.n_cells,
+        cell_zones={name: np.asarray(zones.indices(name)) for name in zones.names[1:]},
+        face_patches={
+            name: np.sort(new_of_old[np.asarray(patches.indices(name))]) for name in named
+        },
+        patch_types=dict(patches.patch_types),
+        patch_groups=dict(patches.patch_groups),
+    )
+
+
+def newell_outward(mesh: Mesh) -> np.ndarray:
+    """Whether each stored ring's Newell normal points from its owner's vertex mean toward the face.
+
+    An orientation test that shares nothing with the mesh's own face-geometry strategy (no centre
+    fan, no approximate centroid), for checking code that relies on that strategy. Sound on the
+    convex cells of the test fixtures, where the vertex mean lies inside the cell.
+    """
+    coords = np.asarray(mesh.node_coords)
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    indices = np.asarray(mesh.face_nodes.face_node_indices)
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    rings = [indices[a:b] for a, b in pairwise(offsets)]
+    cell_nodes = [set() for _ in range(mesh.n_cells)]
+    for face, ring in enumerate(rings):
+        cell_nodes[owner[face]].update(ring.tolist())
+        if neighbour[face] >= 0:
+            cell_nodes[neighbour[face]].update(ring.tolist())
+    centre = np.array([coords[sorted(nodes)].mean(axis=0) for nodes in cell_nodes])
+    result = np.empty(len(rings), dtype=bool)
+    for face, ring in enumerate(rings):
+        p = coords[ring]
+        newell = np.cross(p, np.roll(p, -1, axis=0)).sum(axis=0)
+        result[face] = newell @ (p.mean(axis=0) - centre[owner[face]]) > 0.0
+    return result

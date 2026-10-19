@@ -33,8 +33,8 @@ and conflating them writes a mesh whose faces point inward on roughly half the c
    direction around the perimeter and never reorders them; what it orients owner-outward is the
    *normal*, computed from that ring and then flipped, as a separate array. So "as stored" is not a
    synonym for "owner-outward" -- measured on a structured hexahedral grid, 20 of 36 face rings wind
-   owner-outward and the rest do not. :func:`stored_ring_is_outward` recovers which is which, by
-   asking the mesh's own face-geometry strategy for the flip it applies.
+   owner-outward and the rest do not. :func:`~aquaflux.mesh.stored_ring_is_outward` recovers which
+   is which, by asking the mesh's own face-geometry strategy for the flip it applies.
 2. **Owner-outward is neighbour-inward.** Having established the ring's direction relative to the
    owner, a cell listing the face as its *neighbour* needs the opposite one.
 
@@ -63,8 +63,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 from scipy.spatial import cKDTree
 
-from aquaflux.mesh import CellGeometry, face_geometry_scheme, index_dtype
-from aquaflux.vectors import dot
+from aquaflux.mesh import index_dtype, stored_ring_is_outward
 
 if TYPE_CHECKING:  # pragma: no cover
     from aquaflux.mesh import Mesh
@@ -134,38 +133,6 @@ class VtkCells(NamedTuple):
     def n_cells(self) -> int:
         """Number of cells."""
         return self.types.shape[0]
-
-
-def stored_ring_is_outward(mesh: Mesh) -> np.ndarray:
-    """Whether each face's stored node ring already winds outward from its owner cell.
-
-    A mesh does not normalize the direction a face's nodes are listed in: it computes the normal
-    that ring implies and then flips *the normal* to point out of the owner, leaving the ring alone.
-    Recovering the flip is therefore the only way to know which direction the stored ring runs, and
-    it is recovered by running the mesh's own face-geometry strategy rather than by re-deriving the
-    orientation test here.
-
-    Parameters
-    ----------
-    mesh : Mesh
-        The mesh whose face rings are in question.
-
-    Returns
-    -------
-    np.ndarray of bool, shape ``(n_faces,)``
-        ``True`` where the stored ring is owner-outward. A degenerate face, whose ring implies no
-        normal at all, reports ``True``; its winding cannot be determined and does not matter,
-        because a face of zero area bounds no volume.
-    """
-    scheme = face_geometry_scheme(mesh.dim)
-    _, centroid, node_order_normal = scheme.unoriented_geometry(mesh.node_coords, mesh.face_nodes)
-    approx = CellGeometry.approx_centroids(centroid, mesh.face_cells)
-    outward = scheme.orient_owner_outward(
-        node_order_normal, centroid, approx[mesh.face_cells.owner]
-    )
-    # `orient_owner_outward` returns the ring's own normal times +-1, so this projection is
-    # +-|n|^2: its sign is the flip, and nothing else about the magnitude is used.
-    return np.asarray(dot(outward, node_order_normal)) >= 0.0
 
 
 class _CellFaceEntries(NamedTuple):
