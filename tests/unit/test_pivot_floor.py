@@ -2,8 +2,7 @@
 
 What is pinned: which pivots ``PivotFloor`` replaces and with what (its own row's base pseudo-time
 diagonal, sign kept, healthy pivots untouched); that the refresh hook measures pivots on everything the fit
-would otherwise see and against the base diagonal rather than the shift; that it composes after a
-stand-in; that a session changes only the rows its problem names and leaves the step's operator alone; and
+would otherwise see and against the base diagonal rather than the shift; that a session changes only the rows its problem names and leaves the step's operator alone; and
 that the setting is refused where it could act on nothing and survives a case file.
 """
 
@@ -17,7 +16,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.precondition import (
-    DiagonalStandIn,
     FieldSplit,
     JacobianProbe,
     JacobiSmoothed,
@@ -156,24 +154,6 @@ def test_the_hook_fits_near_zero_pivots_at_their_rows_base_diagonal() -> None:
     hook(_step(), jnp.ones(5))
     np.testing.assert_allclose(pc.fitted, [_D, -_D, 3.0, -_D, 0.2])
     np.testing.assert_array_equal(hook.floored_rows, [0, 1, 3])
-
-
-def test_the_floor_is_measured_after_the_stand_in() -> None:
-    """A stand-in that already lifts row 0 well clear of zero leaves nothing for the floor to do there.
-
-    Measured on the Jacobian and shift alone, row 0 (0.1) would be floored on top of the stand-in's 5.0
-    and fitted at 7.0 instead of 5.1.
-    """
-    pc = _FittingPreconditioner(_PIVOTS - _SHIFT)
-    lift = np.array([5.0, 0.0, 0.0, 0.0, 0.0])
-    hook = _hook(
-        pc,
-        pivot_floor=PivotFloor(0.15),
-        stand_in=lambda _state, _jd, _shift: DiagonalStandIn(residual=None, diagonal=lift),
-    )
-    hook(_step(), jnp.ones(5))
-    np.testing.assert_allclose(pc.fitted, [5.1, -_D, 3.0, -_D, _D])
-    np.testing.assert_array_equal(hook.standing_stand_in.diagonal, lift)
 
 
 def test_without_a_floor_the_hook_asks_for_no_correction() -> None:

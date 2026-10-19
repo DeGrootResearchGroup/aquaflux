@@ -77,7 +77,7 @@ def main() -> None:
     seed = anchor.state_from_physical(*hybrid_initialize(anchor))
     settings = solver_spec.settings()
     allowed = inspect.signature(coupled_step).parameters
-    march = {k: v for k, v in settings.items() if k in allowed and k not in ("preconditioner", "production_freeze_threshold")}
+    march = {k: v for k, v in settings.items() if k in allowed and k != "preconditioner"}
     session = open_session(settings["preconditioner"], coupled)
     session.rebind(anchor)
     base = session.build(seed, **march)

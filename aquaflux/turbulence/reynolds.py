@@ -28,7 +28,7 @@ import jax
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.solve import Convergence, RampSchedule, StoppingStepSource
 
-from .coupled import _SESSION_SETTINGS, open_session, solve_coupled
+from .coupled import open_session, solve_coupled
 from .march_settings import merged_march_options
 from .preconditioner_spec import BlockDiagonal, MaterializedJacobian
 
@@ -990,9 +990,9 @@ def _shared_session(
 ) -> object | None:
     """The session several solves should share, or ``None`` when each builds its own.
 
-    A :class:`MaterializedJacobian` spec is opened here -- with the options' own session-owned settings
-    (``jacobian_production_viscosity``, ``production_freeze_threshold``) -- and a session the caller
-    opened is used as given. A :class:`BlockDiagonal` spec, or none, is opened too when ``share_block``, and otherwise
+    A :class:`MaterializedJacobian` spec is opened here -- with the options' own
+    ``jacobian_production_viscosity``, which the session owns -- and a session the caller opened is used
+    as given. A :class:`BlockDiagonal` spec, or none, is opened too when ``share_block``, and otherwise
     left for each solve to build on its own assembler.
     """
     preconditioner = kwargs.get("preconditioner")
@@ -1002,10 +1002,11 @@ def _shared_session(
         preconditioner, BlockDiagonal | MaterializedJacobian
     ):
         return preconditioner
+    production = kwargs.get("jacobian_production_viscosity")
     return open_session(
         preconditioner,
         assembler,
-        **{name: kwargs[name] for name in sorted(_SESSION_SETTINGS & set(kwargs))},
+        **({} if production is None else {"jacobian_production_viscosity": production}),
     )
 
 
@@ -1015,7 +1016,7 @@ def _with_session(kwargs: dict, session: object) -> dict:
     opened_here = preconditioner is None or isinstance(
         preconditioner, BlockDiagonal | MaterializedJacobian
     )
-    owned = _SESSION_SETTINGS if opened_here else frozenset()
+    owned = ("jacobian_production_viscosity",) if opened_here else ()
     return {key: value for key, value in kwargs.items() if key not in owned} | {
         "preconditioner": session
     }

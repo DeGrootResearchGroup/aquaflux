@@ -227,11 +227,6 @@ def _solver_with_overrides(solver):
     omega_ratio = _environment("OMEGA_STEP_RATIO", lambda v: math.inf if v == "none" else float(v))
     if omega_ratio is not None:
         edits["omega_step_ratio"] = omega_ratio
-    # Freeze the k-production's k-derivative in the Krylov operator in the cells whose k row it has all
-    # but cancelled, chosen at each re-fit (`PITZ_PRODUCTION_FREEZE`, a threshold in [0, 1), `none` off).
-    freeze = _environment("PRODUCTION_FREEZE", str)
-    if freeze is not None:
-        edits["production_freeze_threshold"] = None if freeze == "none" else float(freeze)
     control = {
         name: value
         for name, value in (
@@ -646,7 +641,6 @@ FIELD_SPLIT = isinstance(SOLVER.preconditioner.inverse, FieldSplit)
 #: one run each, the case file then on `main`): clip alone 18 steps / 133 cycles / 126 s, clip + bound
 #: `e` 18 / 130 / 132 s, `x_r/h` 8.0686 both.
 OMEGA_STEP_RATIO = SOLVER.omega_step_ratio
-PRODUCTION_FREEZE = SOLVER.production_freeze_threshold
 PIVOT_FLOOR = SOLVER.preconditioner.pivot_floor
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
@@ -1286,7 +1280,6 @@ def solve_aquaflux(
             if math.isinf(OMEGA_STEP_RATIO)
             else OMEGA_STEP_RATIO,
         ),
-        ("production freeze threshold", "off" if PRODUCTION_FREEZE is None else PRODUCTION_FREEZE),
         ("pivot floor", "off" if PIVOT_FLOOR is None else PIVOT_FLOOR.threshold),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("inner dump above", INNER_DUMP_ABOVE or "off"),

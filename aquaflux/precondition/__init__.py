@@ -53,7 +53,7 @@ from .host_preconditioner import (
 )
 from .jacobian_probe import JacobianProbe, jacobian_probe_plan
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
-from .materialized_session import DiagonalStandIn, MaterializedProblem, MaterializedSession
+from .materialized_session import MaterializedProblem, MaterializedSession
 from .materialized_spec import (
     MATERIALIZED_MAPPING,
     FieldSplit,
@@ -85,7 +85,6 @@ __all__ = [
     "AirReduction",
     "BlockInverse",
     "ConvectionDiffusionStencil",
-    "DiagonalStandIn",
     "FieldGroups",
     "FieldSplit",
     "FieldSplitInverse",

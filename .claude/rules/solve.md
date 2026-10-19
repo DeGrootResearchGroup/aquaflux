@@ -305,21 +305,11 @@ defect — fix it in the same change.
     `solve.StoppingStepSource`, `session.py`): `held -> held.preconditioned_as(step on target)`, built
     once per build, never instrumented by `on_build`; `turbulence.solve_reynolds_ramp` passes it as
     `stopping_step` (`solve-march.md`). Pinned in `test_preconditioner_session.py`.
-  - **A problem may hand each re-fit a Krylov operator that is the Jacobian plus a diagonal
-    (`MaterializedProblem.diagonal_stand_in(state, jacobian_diagonal, shift_diagonal) -> DiagonalStandIn |
-    None`, default `None`).** Asked inside `BetaTrackingRefresh._materialize_at` after the probe and before
-    the fit, through `refresh_in_place(diagonal_correction=)`: the inverse is fitted to Jacobian + shift +
-    `DiagonalStandIn.diagonal`, and the session's per-step update installs `DiagonalStandIn.residual` as the
-    step's `jacobian_residual` (`eqx.tree_at`, `is_leaf=None`). The hook keeps it as `standing_stand_in`.
-    The callback sees only the Jacobian's **diagonal**, never the matrix, so it survives a probe that never
-    forms the whole matrix (one probed straight into a split's blocks). The stand-in must
-    differ from the residual's Jacobian **only on the diagonal**, or the fit preconditions another matrix.
-    One user: the coupled RANS per-cell production freeze (`turbulence.md`). The initial build
-    (`_fit`) does not ask; the hook's forced first re-fit does, before any step runs. Pinned in
-    `test_production_freeze.py`.
   - **`PivotFloor` (`pivot_floor.py`; `MaterializedJacobian.pivot_floor`, off when unset) moves each
-    near-zero shifted pivot out of the fit.** Same seam, composed after any stand-in (it is measured on
-    everything the fit would see): a row of a field the problem names (`MaterializedProblem.floorable_fields`,
+    near-zero shifted pivot out of the fit.** Asked inside `BetaTrackingRefresh._materialize_at` after
+    the probe and before the fit, through `refresh_in_place(diagonal_correction=)` (it sees the Jacobian's
+    diagonal only, so it survives a probe straight into a split's blocks; the initial build `_fit` does not
+    ask, the hook's forced first re-fit does, before any step): a row of a field the problem names (`MaterializedProblem.floorable_fields`,
     default none) whose pivot `p = J_ii + s_i` has `|p| < threshold · d_i` is fitted at `sign(p) · d_i`, with
     `d` the base pseudo-time diagonal (`ShiftTerm.diagonal`, read off the same term as the shift, never
     `shift / β`, which folds in `row_shift_scale`). The operator, the root and the adjoint are untouched;

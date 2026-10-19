@@ -385,27 +385,9 @@ Other files point here. If you find one of these names, read it through this tab
   not cure it.** Where the linearization points below zero and the root does not (bfs3d's corners), the cell
   falls through every scale and the clipped direction can stop descending. Log, "bfs3d's corner `k`
   collapse (2026-10-18)".
-- **Per-cell production freeze (`production_freeze.py`; `open_session(production_freeze_threshold=t)`,
-  `CoupledMarch.production_freeze_threshold`, off by default).** At each materialized re-fit
-  (`_CoupledProblem.diagonal_stand_in`, the generic seam in `solve.md`) the cells whose shifted k-row
-  diagonal is below `t` times its value without production's `k`-derivative are frozen
-  (`production_freeze_cells`: `J_kk + s < t (J_kk + gain + s)`, `gain > 0`), read from the materialized
-  diagonal and the fitted shift; the step's Krylov operator becomes `with_frozen_production_cells(coupled,
-  cells).residual` (`SSTTurbulence.production_freeze_mask`, an array leaf), and the inverse is fitted to
-  Jacobian + shift + `gain` on those rows. Exact because each cell's production reads its own `k` only, so
-  the stand-in differs from the Jacobian on the frozen k rows' diagonal alone, by `production_diagonal_gain`
-  (two JVPs with every k entry seeded). Residual, root and adjoint untouched. Refused: beside
-  `BlockDiagonal` (nothing materialized), beside `jacobian_production_viscosity` (already everywhere),
-  beside `jacobian_gradient_sweeps` (the stand-in would discard the narrowing), outside `[0, 1)`.
-  `frozen_production_viscosity` (every cell) lives in the same module. The session-owned settings travel
-  as one set, `_SESSION_OWNED` (`_SESSION_SETTINGS` without `preconditioner`), through `coupled_step`,
-  `solve_coupled`'s source and both Reynolds drivers — add a session setting there, not by name.
-  - ⚠️ **Not established as a remedy, and possibly dominated by the pivot floor.** Given the prototype's
-    two choices (no `gain > 0` test, the inverse fitted to the unfrozen Jacobian) it reproduced the
-    prototype's 25-step bfs3d march bit for bit, but that march's outcome was decided by rounding in a
-    float32 split broken by near-zero `k` pivots; the pivot floor alone, no freeze, converged bfs3d in 21
-    steps at eps 0 and +1e-14. Whether to keep it is open (the project owner's call). 0.1 is the only threshold
-    measured; neither case file sets it. Log, "Per-cell production freeze (2026-10-18)".
+- **There is no per-cell production freeze** (removed 2026-10-19, owner's decision; dominated by the
+  pivot floor): `jacobian_production_viscosity` (every cell) is the only production freeze. Ledger, "Per-cell
+  production freeze — REMOVED (2026-10-19)", says how to reopen it.
 - **Stopping measure (binding).** `solve_coupled(convergence=Convergence(measure=…))` names it:
   `RowScaled()` (default — `coupled_scaled_norm`, rebuilt at every outer iteration), `BlockScaled()`
   (held at the initial state), `Euclidean()`. The march builds it from `_CoupledMeasures` at each

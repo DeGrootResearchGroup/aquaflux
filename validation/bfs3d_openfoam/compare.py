@@ -830,18 +830,6 @@ OMEGA_STEP_RATIO = (
     else float(_omega_step_ratio)
 )
 
-# Freeze the k-production's k-derivative in the Krylov operator in the cells whose k row it has all but
-# cancelled, chosen at each re-fit (`BFS3D_PRODUCTION_FREEZE`, a threshold in [0, 1), `none` for off;
-# unset keeps the file's). The residual and the root are unchanged.
-_production_freeze = os.environ.get("BFS3D_PRODUCTION_FREEZE")
-PRODUCTION_FREEZE = (
-    FILE_SOLVER.production_freeze_threshold
-    if _production_freeze is None
-    else None
-    if _production_freeze == "none"
-    else float(_production_freeze)
-)
-
 
 # The inexact-Newton stop for each inner linear solve, measured in the ROW-SCALED `coupled_scaled_norm`
 # (not the Euclidean one -- the coupled Euclidean residual is ~100% omega, which is why the row-scaled
@@ -1080,7 +1068,6 @@ SOLVER = CoupledMarch(
     ),
     turbulence_damping=TURB_DAMPING,
     omega_step_ratio=OMEGA_STEP_RATIO,
-    production_freeze_threshold=PRODUCTION_FREEZE,
     continuation=ViscosityRamp(
         anchor=SCHEDULE.anchor(N_POINTS) if "BFS3D_N_POINTS" in os.environ else _FILE_RAMP.anchor,
         stations=RAMP_STATIONS,
@@ -1387,7 +1374,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if math.isinf(OMEGA_STEP_RATIO)
             else OMEGA_STEP_RATIO,
         ),
-        ("production freeze threshold", "off" if PRODUCTION_FREEZE is None else PRODUCTION_FREEZE),
         ("pivot floor", "off" if PIVOT_FLOOR is None else PIVOT_FLOOR.threshold),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
         ("inner forward stop", FORWARD_STOP or "lineax (unset)"),

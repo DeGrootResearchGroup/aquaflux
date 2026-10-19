@@ -64,7 +64,7 @@ BUDGETS = {
     # measure with its equation names to ``turbulence/measures.py``.
     # What stays of the session and the probe are their RANS adapters (``_CoupledProblem``,
     # ``_CoupledNarrowing``) and the block-diagonal session, a preconditioner family of its own.
-    "turbulence/coupled.py": 2927,
+    "turbulence/coupled.py": 2917,
     # Every algebraic multigrid family -- smoothed aggregation, its two-level convection variant and
     # lAIR -- in one module: the host-side coarsening (orderings, aggregation, strength and splitting,
     # structural patterns, Galerkin products) beside the traced levels, smoothers and cycle drivers

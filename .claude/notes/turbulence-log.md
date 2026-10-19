@@ -660,6 +660,9 @@ bfs3d stalled at ‖R‖ ≈ 0.06 from step 13 with α 0.03–0.06 every step an
 
 ### Per-cell production freeze (2026-10-18)
 
+Removed 2026-10-19 (the project owner's decision); ledger, "Per-cell production freeze — REMOVED
+(2026-10-19)", has what it was and how to reopen it.
+
 **Configuration:** bfs3d `compare.py`, shipped `case.yaml` (float32 split) at `fe772f59` + this branch, Apple
 M3 Pro, jax 0.10.2, eps 0, one run per arm, threshold 0.1 throughout.
 

@@ -57,7 +57,6 @@ from aquaflux.flow import (
 )
 from aquaflux.initialization import hybrid_initialize
 from aquaflux.precondition import (
-    DiagonalStandIn,
     FieldGroups,
     FieldSplit,
     JacobianProbe,
@@ -126,12 +125,6 @@ from .preconditioner import (
     UnpreconditionedScalars,
 )
 from .preconditioner_spec import BlockDiagonal
-from .production_freeze import (
-    FREEZE_DISCARDS_NARROWING,
-    frozen_production_viscosity,
-    production_freeze_stand_in,
-    refuse_an_unusable_production_freeze,
-)
 from .sources import production_and_limit
 
 if TYPE_CHECKING:
@@ -1330,9 +1323,9 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99):
     **Why per cell, not a cap on the whole step.** The alternative, shortening the whole step by the
     fraction-to-the-boundary rule, takes a minimum over cells, so one cell whose ``k`` is numerically
     zero sets the step length for all of them. On a 3D backward-facing step that cell is a top-wall /
-    side-wall corner whose k-row diagonal production had turned negative (see ``production_freeze``),
-    and it held the step to 0.001-0.002 while every other cell admitted 0.6 or more. Clipping per cell
-    lets the rest take the step; the clipped cell shrinks by ``1 - tau`` while its correction points down.
+    side-wall corner whose k-row diagonal production's ``k``-derivative had turned negative, and it held
+    the step to 0.001-0.002 while every other cell admitted 0.6 or more. Clipping per cell lets the rest
+    take the step; the clipped cell shrinks by ``1 - tau`` while its correction points down.
 
     Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
     since a projection there would clip nothing.
@@ -1759,6 +1752,39 @@ def coupled_jacobian_probe(
     )
 
 
+def frozen_production_viscosity(coupled: CoupledRANS) -> CoupledRANS:
+    """``coupled`` with ``k`` frozen inside the k-production's eddy viscosity.
+
+    The Patankar treatment of the one term that drives the k row's Jacobian diagonal negative:
+    ``nu_t`` is proportional to ``k``, so the production ``nu_t S**2`` is too, and subtracting a
+    source that grows with its own variable puts a negative term on that row's diagonal. See
+    :attr:`~aquaflux.turbulence.SSTTurbulence.explicit_production_viscosity` for what that costs and
+    what freezing it buys.
+
+    ⚠️ **The copy is for a Jacobian stand-in only** -- pass its ``residual`` as the operator a shifted
+    solve differentiates, so the true residual still decides where the march lands and the converged
+    root and its implicit-function-theorem adjoint are untouched. This term is active everywhere, not
+    only where some cap bites, so a *residual* carrying it would make the sensitivity wrong
+    everywhere.
+
+    Parameters
+    ----------
+    coupled : CoupledRANS
+        The assembled coupled system.
+
+    Returns
+    -------
+    CoupledRANS
+        A copy whose turbulence assembler carries the flag. ``coupled`` itself is unchanged.
+    """
+    # `dataclasses.replace`, not `eqx.tree_at`: the flag is a STATIC field, so it lives in the
+    # treedef rather than among the leaves and `tree_at` cannot address it at all.
+    return dataclasses.replace(
+        coupled,
+        turbulence=dataclasses.replace(coupled.turbulence, explicit_production_viscosity=True),
+    )
+
+
 def _probed_assembler(coupled: CoupledRANS, gradient_sweeps: int | None) -> CoupledRANS:
     """``coupled``, or the reduced-sweep copy a preconditioner's coloured probe differentiates.
 
@@ -1990,12 +2016,7 @@ def _monolithic_factor_step(
 
 #: The march keywords a session owns rather than receives per build: the preconditioner is what the
 #: session was opened with, and the operator stand-in must match the probe the session built for it.
-_SESSION_OWNED = frozenset(
-    {"preconditioner", "jacobian_production_viscosity", "production_freeze_threshold"}
-)
-
-#: The session-owned settings a caller may pass beside a preconditioner spec, to open its session with.
-_SESSION_SETTINGS = _SESSION_OWNED - {"preconditioner"}
+_SESSION_OWNED = frozenset({"preconditioner", "jacobian_production_viscosity"})
 
 
 def _resolved_shift(
@@ -2159,14 +2180,10 @@ class _CoupledProblem(MaterializedProblem):
         residual (see :func:`frozen_production_viscosity`). The probe is built from the same stand-in,
         which is why it is fixed here rather than chosen per build: a preconditioner assembled from a
         different matrix than the one the Krylov solve applies preconditions the wrong problem.
-    production_freeze_threshold : float or None
-        Freeze production's ``k``-derivative in the cells :func:`production_freeze_cells` picks at each
-        re-fit (:meth:`diagonal_stand_in`). ``None`` (default) freezes nothing.
     """
 
     coupled: CoupledRANS
     production_viscosity: bool
-    production_freeze_threshold: float | None = None
     floorable_fields = ("k",)  # production, proportional to k through nu_t, can cancel the k pivot
 
     @property
@@ -2195,10 +2212,6 @@ class _CoupledProblem(MaterializedProblem):
 
     def bind_march(self, march: dict) -> dict:
         keywords = _march_keywords(march)
-        if self.production_freeze_threshold is not None and keywords.get(
-            "jacobian_gradient_sweeps"
-        ):
-            raise ValueError(FREEZE_DISCARDS_NARROWING)
         # Before any inverse is fitted: a misconfigured floor is a caller mistake, and the multigrid
         # families import an optional dependency the check must not wait on.
         keywords["step_projection"] = _closure_step_projection(
@@ -2231,23 +2244,12 @@ class _CoupledProblem(MaterializedProblem):
             **keywords,
         )
 
-    def diagonal_stand_in(
-        self, state: jnp.ndarray, jacobian_diagonal: np.ndarray, shift_diagonal: np.ndarray
-    ) -> DiagonalStandIn | None:
-        """Production frozen where the k row needs it (:func:`production_freeze_stand_in`), or ``None``."""
-        if self.production_freeze_threshold is None:
-            return None
-        return production_freeze_stand_in(
-            self.coupled, state, jacobian_diagonal, shift_diagonal, self.production_freeze_threshold
-        )
-
 
 def open_session(
     preconditioner: BlockDiagonal | MaterializedJacobian | None,
     coupled: CoupledRANS,
     *,
     jacobian_production_viscosity: bool = False,
-    production_freeze_threshold: float | None = None,
     observer: Callable[[RefreshTiming], None] | None = None,
     reports: dict[str, Callable[[str], None]] | None = None,
     on_build: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
@@ -2267,10 +2269,6 @@ def open_session(
         residual (see :func:`frozen_production_viscosity`). The session's probe is built from the same
         stand-in, which is why it is fixed here rather than chosen per build: a preconditioner assembled
         from a different matrix than the one the Krylov solve applies preconditions the wrong problem.
-    production_freeze_threshold : float or None
-        Freeze production's ``k``-derivative in the Krylov operator in the cells whose k row needs it,
-        chosen at each re-fit of a :class:`MaterializedJacobian` session, with the inverse fitted to the
-        same operator (:mod:`~aquaflux.turbulence.production_freeze`). ``None`` (default) freezes nothing.
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, told what each refresh of a materialized inverse did and
         what it cost.
@@ -2297,11 +2295,6 @@ def open_session(
         If ``preconditioner`` is not a spec, or a setting is given that the chosen family cannot use.
     """
     spec = BlockDiagonal() if preconditioner is None else preconditioner
-    refuse_an_unusable_production_freeze(
-        production_freeze_threshold,
-        materialized=isinstance(spec, MaterializedJacobian),
-        freezes_everywhere=jacobian_production_viscosity,
-    )
     if isinstance(spec, BlockDiagonal):
         given = [
             name
@@ -2349,7 +2342,7 @@ def open_session(
         getattr(spec.inverse, role).bound(report=sink)  # refuse a family with no record now
     return MaterializedSession(
         spec,
-        _CoupledProblem(coupled, jacobian_production_viscosity, production_freeze_threshold),
+        _CoupledProblem(coupled, jacobian_production_viscosity),
         observer=observer,
         reports=reports,
         on_build=on_build,
@@ -2364,7 +2357,6 @@ def coupled_step(
     *,
     preconditioner: BlockDiagonal | MaterializedJacobian | None = None,
     jacobian_production_viscosity: bool = False,
-    production_freeze_threshold: float | None = None,
     globalization: Globalization = DEFAULT_GLOBALIZATION,
     dual_time: DualTimeLoop | None = None,
     linear_solve: LinearSolveSettings | lx.AbstractLinearSolver | None = None,
@@ -2393,8 +2385,6 @@ def coupled_step(
     jacobian_production_viscosity : bool
         Differentiate the frozen-production stand-in of the residual in the Krylov operator, and
         materialize the preconditioner from the same stand-in.
-    production_freeze_threshold : float or None
-        See :func:`open_session`; it acts only where the session's inverse is re-fitted.
     globalization : Globalization
         How hard the march damps and what it does when a step misbehaves: the switched-evolution
         schedule, the escalation ladder, the divergence guard and the backtracking line search. Only the
@@ -2450,10 +2440,7 @@ def coupled_step(
         it the measure its :class:`~aquaflux.solve.Convergence` names at every outer iteration.
     """
     session = open_session(
-        preconditioner,
-        coupled,
-        jacobian_production_viscosity=jacobian_production_viscosity,
-        production_freeze_threshold=production_freeze_threshold,
+        preconditioner, coupled, jacobian_production_viscosity=jacobian_production_viscosity
     )
     return session._build(
         reference_state,
@@ -2559,9 +2546,8 @@ def _continuation_source(
     configured. ``**kwargs`` is what made it silent, since it accepts every keyword and checks none, and
     that door is the main entry point's.
 
-    A session owns its operator stand-in settings (``jacobian_production_viscosity``,
-    ``production_freeze_threshold``), so they are accepted beside a spec (and passed to the session
-    opened for it) and refused beside a session object. A materialized session brings its own
+    A session owns ``jacobian_production_viscosity``, so it is accepted beside a spec (and passed to the
+    session opened for it) and refused beside a session object. A materialized session brings its own
     per-step refresh hook, so a second one on the ``RefreshPolicy`` is refused rather than letting two
     hooks re-fit one inverse.
     """
@@ -2574,13 +2560,17 @@ def _continuation_source(
     if explicit is not None:
         return explicit
     march = dict(kwargs)
-    owned = {name: march.pop(name) for name in sorted(_SESSION_SETTINGS & set(march))}
+    production = march.pop("jacobian_production_viscosity", None)
     if preconditioner is None or isinstance(preconditioner, BlockDiagonal | MaterializedJacobian):
-        session = open_session(preconditioner, coupled, **owned)
-    elif owned:
+        session = open_session(
+            preconditioner,
+            coupled,
+            **({} if production is None else {"jacobian_production_viscosity": production}),
+        )
+    elif production is not None:
         raise TypeError(
-            f"{sorted(owned)} belong to the preconditioner session, which built its probe and its "
-            "operator from them: pass them to open_session, not beside the session."
+            "jacobian_production_viscosity belongs to the preconditioner session, which built its probe "
+            "from it: pass it to open_session, not beside the session."
         )
     else:
         session = preconditioner
@@ -2825,8 +2815,8 @@ def solve_coupled(
         (:class:`~aquaflux.solve.DualTimeStep`) — an inner Newton loop per outer timestep whose measured
         steady residual is the honest discrete time derivative rather than ``beta x travel``.
         Leaving it unset (the default) is the single-step continuation.
-        ``jacobian_production_viscosity`` and ``production_freeze_threshold`` are accepted here only
-        beside a spec, whose session is built from them.
+        ``jacobian_production_viscosity`` is accepted here only beside a spec, whose session is built
+        from it.
 
         ⚠️ **These, ``preconditioner`` and ``reference_state`` configure the continuation this function builds,
         so they are only accepted when it builds one.** Supply a ``strategy`` or a

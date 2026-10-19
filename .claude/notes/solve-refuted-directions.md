@@ -1633,3 +1633,26 @@ diagonal without being singular), and the float32 solve ran to its cap with the 
 (`MaterializedProblem.floorable_fields`). Raising near-zero pivots only to ~6 % of their row's scale made the
 amplification worse (1e14 on one row), and also flooring the healthy negative pivots (75 rows) left every
 solve at its cap. Detail: `.claude/notes/solve-log.md`, "Near-zero pivots and the float32 split (2026-10-18)".
+
+## Per-cell production freeze — REMOVED (2026-10-19, the project owner's decision)
+
+**What it was:** at each materialized re-fit, freeze `k` inside the k-production's eddy viscosity in the
+Krylov operator (a Jacobian stand-in, never the residual) in the cells whose shifted k-row diagonal
+production had all but cancelled, `J_kk + s < t (J_kk + gain + s)` with `gain > 0` the diagonal the freeze
+adds, `t` 0.1; the inverse was fitted to the stand-in by adding `gain` to its diagonal. Exact as a
+diagonal-only change because each cell's production reads its own `k`. Off by default; built and tested
+(`production_freeze_threshold` on `open_session` / `coupled_step` / `CoupledMarch`, a generic
+`DiagonalStandIn` seam in `precondition/`, `SSTTurbulence.production_freeze_mask`), never shipped.
+
+**Why removed:** it treated a symptom. bfs3d's corner `k` collapse was decided by the float32 field split
+breaking at near-zero `k` pivots; the preconditioner's `PivotFloor` fixes that without touching the
+operator and converged bfs3d in 21 steps at eps 0 and +1e-14, where the freeze's march-level results were
+rounding draws (library 38 steps, its prototype 25, bit-identical given the prototype's two choices).
+Nothing else used the stand-in seam, so it went with it.
+
+**To reopen** (a case whose `k` linearization is wrong in a way no preconditioner can fix): the code is
+in commit `1e69b4ab` on branch `claude/pivot-floor` (PR #766): `aquaflux/turbulence/production_freeze.py`,
+`tests/unit/test_production_freeze.py`, `DiagonalStandIn` / `MaterializedProblem.diagonal_stand_in` in
+`precondition/materialized_session.py`, and the session-owned setting's plumbing in `turbulence/coupled.py`,
+`reynolds.py` and `case/solver.py`. Measurements: `.claude/notes/turbulence-log.md`, "Per-cell production
+freeze (2026-10-18)".

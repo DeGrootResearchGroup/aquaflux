@@ -61,8 +61,9 @@ table for the old continuation builders is in `turbulence.md`.
     `test_destroying_a_preconditioner_releases_its_inverse_when_it_holds_anything` and the split's
     refit/atomicity tests in `test_field_split.py`.
 - **`refresh_in_place(..., diagonal_correction=)`**: a callback given the unshifted Jacobian's diagonal
-  that returns a per-row amount added to the shift before the fit (or `None`), for a Krylov operator that
-  is the Jacobian plus a diagonal (`solve.md`, `DiagonalStandIn`). Default `None` is byte-identical.
+  that returns a per-row amount added to the shift before the fit (or `None`); it changes the fit only,
+  never the operator solved. One user: the pivot floor (`solve.md`, `PivotFloor`). Default `None` is
+  byte-identical.
 - **`refresh_in_place` returns one shape across the family**: the `("probe", s), ("assemble", s),
   ("refactor", s)` tuple. Every refreshed preconditioner is a `MaterializedJacobianPreconditioner`, so the
   session passes `batched_matvec`, `probe_batch_size` and `structure` unconditionally.

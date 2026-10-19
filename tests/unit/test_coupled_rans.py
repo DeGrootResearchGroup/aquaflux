@@ -630,7 +630,7 @@ def test_a_session_owned_setting_and_a_second_refresh_hook_are_refused() -> None
     state = _healthy_state(mesh, coupled)
     flow, k, omega = coupled.physical_fields(state)
     session = open_session(_SPLIT, coupled)
-    with pytest.raises(TypeError, match="belong to the preconditioner session"):
+    with pytest.raises(TypeError, match="belongs to the preconditioner session"):
         solve_coupled(
             coupled, flow, k, omega, preconditioner=session, jacobian_production_viscosity=True
         )

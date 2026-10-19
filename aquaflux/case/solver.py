@@ -503,22 +503,17 @@ class CoupledMarch(_March):
         logarithm).
     continuation : ViscosityRamp or None
         Reach the case's viscosity along a ramp; unset, march at it from the start.
-    production_freeze_threshold : float or None
-        Freeze production's ``k``-derivative in the Krylov operator in the cells where it has all but
-        cancelled the k row's shifted diagonal, chosen afresh at each re-fit of a materialized-Jacobian
-        preconditioner; in ``[0, 1)``. The residual and the converged root are unchanged. Unset, off.
 
     Raises
     ------
     ValueError
         If the case is not Reynolds-averaged, or holds a bulk velocity beside a materialized-Jacobian
-        preconditioner, or sets ``production_freeze_threshold`` beside a preconditioner that is not one.
+        preconditioner.
     """
 
     turbulence_damping: float | None = None
     omega_step_ratio: float | None = None
     continuation: ViscosityRamp | None = None
-    production_freeze_threshold: float | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (solve_coupled,)
@@ -527,18 +522,10 @@ class CoupledMarch(_March):
         "dual_time",
         "retry",
         "continuation",
-        "production_freeze_threshold",
     )
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.production_freeze_threshold is not None and not isinstance(
-            self.preconditioner, MaterializedJacobian
-        ):
-            raise ValueError(
-                "CoupledMarch.production_freeze_threshold chooses its cells from the Jacobian a "
-                "MaterializedJacobian preconditioner probes at each re-fit; set one."
-            )
         if self.continuation is not None and not isinstance(self.continuation, ViscosityRamp):
             raise TypeError(f"CoupledMarch.continuation got {self.continuation!r}.")
         if self.continuation is not None and self.continuation.end is not None:
@@ -549,7 +536,6 @@ class CoupledMarch(_March):
         """The march's keywords and the closure's -- see :meth:`_March._owned`."""
         return super()._owned() | {
             "omega_step_ratio",
-            "production_freeze_threshold",
             "shift",
         }
 
@@ -599,7 +585,6 @@ class CoupledMarch(_March):
         """
         settings = self._march_settings() | _set(
             omega_step_ratio=self.omega_step_ratio,
-            production_freeze_threshold=self.production_freeze_threshold,
         )
         if self.turbulence_damping is not None:
             settings["shift"] = CoupledShiftSettings(turbulence_damping=self.turbulence_damping)
@@ -653,12 +638,8 @@ class CoupledMarch(_March):
             )
         preconditioner = settings.get("preconditioner")
         if isinstance(preconditioner, MaterializedJacobian):
-            # The session owns its operator stand-in, so the setting is the session's, not the march's.
-            owned = _set(
-                production_freeze_threshold=settings.pop("production_freeze_threshold", None)
-            )
             settings["preconditioner"] = open_session(
-                preconditioner, problem, **owned, **dict(session_options or {})
+                preconditioner, problem, **dict(session_options or {})
             )
         elif session_options:
             raise TypeError(

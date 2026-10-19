@@ -102,9 +102,9 @@ def positive_block_projection(
     larger shift. And a floor on the cap's room only postpones that: when the cap binds, the entry takes
     ``phi_new + floor = (1 - tau) (phi + floor)``, so the room shrinks by ``1 - tau`` every step
     whatever the floor is. Clipping per entry removes the coupling instead: the entry still shrinks, by
-    ``1 - tau`` a step while its correction points down, but alone. That shrinking is not a cure. Where the
+    ``1 - tau`` a step while its correction points down, but alone. That shrinking is not a cure: where the
     linearization points below zero for a reason the root does not share, the entry falls through every
-    scale, so the cause has to be removed from the operator, upstream of this clip.
+    scale.
 
     **It remains one search direction.** A per-entry step *length* would make ``phi_i + alpha_i delta_i``
     a different direction at every backtracking rung, so the descent test, the non-descent fallback and

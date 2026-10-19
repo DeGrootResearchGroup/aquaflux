@@ -88,10 +88,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         The arguments are the build's materialization arguments, evaluated at the developed state. The
         inverse's own configuration is fixed when it is built and cannot be changed by a refresh.
 
-        ``diagonal_correction`` is for a Krylov operator that is not the materialized Jacobian but differs
-        from it by a diagonal: given the unshifted Jacobian's diagonal (shape ``(n_dofs,)``), it returns
-        the per-row amount to add to it, or ``None`` for none. The inverse is then fitted to the operator
-        the Krylov solve actually applies, shift and correction both on the diagonal.
+        ``diagonal_correction`` changes only what the inverse is fitted to: given the unshifted Jacobian's
+        diagonal (shape ``(n_dofs,)``), it returns the per-row amount to add beside the shift, or ``None``
+        for none (a :class:`~aquaflux.precondition.PivotFloor` moving near-zero pivots out of the fit). The
+        operator the Krylov solve applies is unchanged.
         Because this preconditioner is held as a **static field** of the shift policy and
         :meth:`~aquaflux.precondition.HostPreconditioner.matvec` reads ``self.inverse`` at call time,
         re-fitting the inverse here re-preconditions the **same compiled** Krylov solve.
