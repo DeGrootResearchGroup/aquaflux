@@ -115,7 +115,7 @@ branches.
   one bfs3d re-fit against 10.9 at defaults, 2026-10-18). **`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
   removes the faults without keeping memory** (glibc asks for transparent huge pages on its mapped
   chunks; needs THP `madvise` or `always`): bfs3d probe faults 15M → 66k, re-fit 48.7 → 39.7 s, VmHWM
-  10.98 against 10.86 GiB (`state-00032`); on a whole march (cadence 5) solve 2439 → 2180 s, peak 12.63 →
+  10.98 against 10.86 GiB (`state-00032`); on a whole march (cadence 5, without the pivot floor) solve 2439 → 2180 s, peak 12.63 →
   12.15 GiB, identical step table. Not a `run_case.sh` default (timings would stop being comparable). The retention that rules the others out:
   `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
   resident by step 2 against 9.5 GiB at defaults, and the container restarted (bfs3d session,
@@ -320,12 +320,12 @@ them.
 
 ## Other live traps
 
-- ⚠️ **The shipped bfs3d march failed on a 4-core Linux container (`main` `fe772f59`, 2026-10-18)**: at
-  step 35's re-fit the trailing hierarchy refused one corner cell's `[k, ω]` block as singular (that cell's
-  `k` had collapsed to ~1e-17; the block is triangular and invertible, the guard's ratio is not
-  column-scale invariant). `refresh_on_cycles` 4 and 5 converged to `x_r/h` 8.3611; 8 stations stalled
-  with the mirror cell's `k` at 5.5e-20. Open: `.claude/notes/validation-log.md`, "The re-fit cadence on
-  this machine class, and a corner cell's `k`".
+- ⚠️ **Without the pivot floor the shipped bfs3d march failed on a 4-core Linux container (`main`
+  `fe772f59`, 2026-10-18)**: at step 35's re-fit the trailing hierarchy refused one corner cell's `[k, ω]`
+  block as singular (`k` ~1e-17; the block is triangular and invertible, and the guard's Hadamard ratio is
+  not column-scale invariant). With PR #766's `PivotFloor(0.15)` (`1e69b4ab`) it converged in 32 steps
+  there (21 on PR #766's machine). Detail: `.claude/notes/validation-log.md`, "The re-fit cadence on this
+  machine class, and a corner cell's `k`".
 - **Before attributing a local-only failure to your platform, check CI's skip counts** (root `CLAUDE.md`,
   "CI is not a superset of a local run"); a 2026-08-19 "platform difference" was a skipped test.
 - **`_mis_aggregate`'s return annotation is stale**: `tuple[np.ndarray, int]`, but it returns three values

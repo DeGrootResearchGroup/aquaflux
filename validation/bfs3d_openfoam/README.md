@@ -289,25 +289,30 @@ under `checkpoints/`, and then `report.md` + `figures/`. Expect hours, not minut
 
 ### Running it on a 4-core Linux container
 
-Measured 2026-10-18 on a 4-core Xeon container with 15 GiB and no swap, jax 0.11.2, `main` `fe772f59`, one
-run per row. Here a preconditioner re-fit costs 46–53 s against ~20 s for a step without one (on an 11-core
-laptop it costs about one step), and three quarters of the re-fit is the coloured probe:
+Measured 2026-10-18/19 on a 4-core Xeon container with 15 GiB and no swap, jax 0.11.2, one run per row.
+Here a preconditioner re-fit costs 46–53 s against ~20 s for a step without one (on an 11-core laptop it
+costs about one step), and three quarters of the re-fit is the coloured probe.
+
+With the pivot floor in `case.yaml` (`PivotFloor(0.15)`, on the branch that introduces it, `1e69b4ab`):
 
 | `case.yaml` with | steps | re-fits | solve | result |
 |---|---|---|---|---|
-| nothing changed (`refresh_on_cycles` 3) | 34 | 35 | 3911 s | **stopped at step 35**: the `[k, ω]` hierarchy refused one corner cell's block, whose `k` had fallen to ~1e-17 |
-| `BFS3D_REFRESH_ON_CYCLES=4` | 31 | 36 | 4388 s | converged, `x_r/h` 8.3611 |
-| `BFS3D_REFRESH_ON_CYCLES=5` | 19 | 19 | 2439 s | converged, `x_r/h` 8.3611 |
-| the same, under `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` | 19 | 19 | 2180 s | identical steps, peak memory 12.15 GiB against 12.63 |
-| `BFS3D_RAMP_STATIONS=8` | 29 | 33 | — | stalled at `R` 2.5e-3 (another corner cell's `k` near zero) and was stopped |
+| nothing changed (`refresh_on_cycles` 3) | 32 | 31 | 3141 s | converged, `x_r/h` 8.3611 |
+| `BFS3D_REFRESH_ON_CYCLES=4` | 17 | 14 | 1860 s | converged, `x_r/h` 8.3611 |
+| `BFS3D_REFRESH_ON_CYCLES=5` | 28 | 21 | 3693 s | converged, `x_r/h` 8.3611 |
+
+Without the floor (`main` `fe772f59`) the same file failed at step 35: one corner cell's `k` fell to
+~1e-17 and the `[k, ω]` hierarchy refused its block. Each row is a single trajectory, and the refresh
+threshold changes the trajectory, so the rows rank three runs rather than settle the threshold; the floored
+march here takes 32 steps where it took 21 on another machine.
 
 The march's memory peaks at 12–13 GiB, so on 15 GiB do not run it under an allocator setting that keeps
 freed memory (`MALLOC_ARENA_MAX=1` with raised thresholds, or jemalloc with decay disabled): both raised the
-footprint by gigabytes. The huge-page setting above does not, and it removes the page faults that are about
-a quarter of the probe's time on this machine (the probe's compiled temporary, ~800 MiB, is otherwise
-faulted in afresh on every batched call). It needs transparent huge pages set to `madvise` or `always`.
-Each row is a single trajectory, and the refresh threshold changes the trajectory, so the rows rank three
-runs rather than settle the threshold.
+footprint by gigabytes. `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` does not, and it removes the page faults that
+are about a quarter of the probe's time on this machine (the probe's compiled temporary, ~800 MiB, is
+otherwise faulted in afresh on every batched call): on a march at `BFS3D_REFRESH_ON_CYCLES=5` without the
+floor it gave an identical step table, solve 2439 → 2180 s and peak 12.63 → 12.15 GiB. It needs transparent
+huge pages set to `madvise` or `always`.
 
 ### Putting a convergence bar on the reference
 

@@ -891,7 +891,14 @@ program on the Mac, so bandwidth, page size and the jax version are not separate
 M3 figure (2.5-3.4 s / 100 probes, against 9.7 ms per tangent here) is a whole re-fit's probe line, not a
 per-tangent measurement, and is not comparable either.
 
-### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18)
+### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18/19)
+
+**Read the second table.** The first was taken without the pivot floor, where (PR #766) a near-zero `k`
+pivot makes the float32 split wrong by order one, every solve near it runs to its cap and rounding decides
+the step's direction: those arms measure where rounding sent each march, not the cadence. The floored
+arms (2026-10-19) are the cadence measurement.
+
+#### Without the pivot floor (2026-10-18)
 
 Same container and configuration as the subsection above (`main` `fe772f59`; this branch changes only
 harnesses), `validation/run_case.sh validation/bfs3d_openfoam/compare.py`, shipped `case.yaml` but for the
@@ -911,11 +918,9 @@ at all). Cycles count accepted steps' rows (the log's `cum`).
 - **All arms share steps 1-5 exactly** (only `t(s)` differs), so the march's counts are deterministic here and
   the arms part where the threshold first changes a decision (step 6 for 4, step 9 for 5). The two arms at
   cadence 5 have identical step tables, so the huge-page row is a controlled pair with the row above it.
-- **On this machine a re-fit costs ~2.5 steps** (46-53 s against ~20 s), and the threshold that skips the most
-  re-fits won by 1.8x over 4. Single samples of trajectories the threshold itself moves, so this ranks the
-  three samples, not the thresholds; on the M3 Pro (re-fit ~ one step) 3 and 4 were inside its spread
-  (`solve-open-directions.md`, the cadence table).
-- **The huge-page setting on a whole march**: solve -11 %, re-fits -22 %, peak 0.48 GiB *lower*, every count
+- **On this machine a re-fit costs ~2.5 steps** (46-53 s against ~20 s without one). The ranking of these
+  arms is rounding's (above); the cadence's is the floored table.
+- **The huge-page setting on a whole march** (unaffected by the floor question: a controlled pair, identical step tables): solve -11 %, re-fits -22 %, peak 0.48 GiB *lower*, every count
   identical. The setting a march on this machine class can use; not a `run_case.sh` default (it would make
   timings incomparable with the record) -- the owner's call.
 - **Fewer stations (8) stalled**: `R` flat at 2.49e-03 from step 26 while the step control doubled the shift
@@ -935,4 +940,31 @@ The converged arms kept `k` ~0.72 in cell 12107 and a minimum of 1.7e-05. Not ch
 work's scope): whether the guard should be column-scale invariant, and whether that corner's `k` should be
 kept from collapsing, are the owner's. To re-adjudicate, re-run the shipped arm: two marches at one setting gave identical step
 tables here (the cadence-5 pair), and `refit_profile.py` with `REFIT_STATE` at its `state-00034`
-reproduces the refusal.
+reproduces the refusal. PR #766's `PivotFloor` fits such a pivot at its row's pseudo-time diagonal, so the
+block the guard sees is no longer near-singular; the floored arms below met no collapse (lowest `k`
+~1.8e-05). The guard's column-scale dependence is unchanged by it.
+
+#### With the pivot floor, PR #766 head (2026-10-19)
+
+PR #766's branch `claude/pivot-floor` at `1e69b4ab` (base `main` `de339a1f`; `case.yaml` sets
+`pivot_floor: {kind: PivotFloor, threshold: 0.15}`), run from its own worktree, otherwise as above; glibc
+defaults; one run per arm, back to back; peak sampled every 20 s.
+
+| `refresh_on_cycles` | steps | inner solves | cycles | redone | re-fits (full / cost) | re-fit s (probe / refactor) | solve | final `R` | `x_r/h` | peak |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 3 (shipped) | 32 | 58 | 209 | 0 | 13 / 18 | 1647 (1176 / 422) | 3141 s | 1.72e-07 | 8.3611 | 11.88 GiB |
+| **4** | **17** | 55 | 148 | 0 | 13 / 1 | 782 (541 / 210) | **1860 s** | 5.30e-06 | 8.3611 | 11.79 GiB |
+| 5 | 28 | 87 | 339 | 4 | 13 / 8 | 1150 (816 / 293) | 3693 s | 6.85e-06 | 8.3611 | 11.96 GiB |
+
+- **All three converge, to the same root.** The shipped march no longer fails on this machine.
+- **4 was the fastest of these three samples (0.59x the shipped 3)**: one cost re-fit against 18, at the
+  price of nothing: fewer steps too (17 against 32). 5 skipped re-fits the march needed: 87 inner solves, 339 cycles, 4 redone steps.
+  The arms share steps 1-6 (the floor moves the residual in the fourth digit from step 5) and part at step 7
+  or 8 where the threshold first changes a decision. Single samples of trajectories the threshold moves:
+  this ranks three runs; what it does not distinguish is whether 4 wins because it re-fits less or because
+  its trajectory happened to avoid the long stall at `R` ~3e-3 that 3 and 5 both went through.
+- **The floored shipped march takes 32 steps here against 21 on PR #766's machine** (its march table,
+  476-501 s per solve), so with the floor rounding still moves the step count between machines; it no longer
+  moves it to a failure.
+- **Without the floor the ranking was 5 < 4 < 3 (failed)**; with it, 4 < 3 < 5. The unfloored ranking was
+  rounding's, as PR #766's diagnosis predicts.

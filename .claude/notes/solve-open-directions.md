@@ -187,7 +187,7 @@ refit paying ~1.5-2.5 s more to build them and every later one ~0.5-0.7 s agains
 
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
-the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 % on pitzDaily; on bfs3d on 4-core Linux, where a re-fit costs ~2.5 steps, 5 took 0.56x the solve of 4, 2026-10-18).
+the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 % on pitzDaily; on bfs3d on 4-core Linux with the pivot floor, where a re-fit costs ~2.5 steps, 4 took 0.59x the solve of 3 and 5 1.18x, one sample each, 2026-10-19).
 
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
@@ -368,9 +368,9 @@ Cycle counts are not comparable across stops (see above), so the comparison is w
 `x_r/h` 8.361 in all four. bfs3d's `case.yaml` takes the residual stop since 2026-10-13, at `refresh_on_cycles`
 3. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
 nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each; on the M3 Pro,
-where a re-fit costs about one step -- on a 4-core Linux container, where it costs ~2.5, the current tree's
-3 failed at step 35, 4 converged in 4388 s and 5 in 2439 s, one sample each: `validation-log.md`, "The
-re-fit cadence on this machine class");
+where a re-fit costs about one step -- on a 4-core Linux container, where it costs ~2.5, with PR #766's
+pivot floor 3 / 4 / 5 took 3141 / 1860 / 3693 s (32 / 17 / 28 steps), one sample each: `validation-log.md`,
+"The re-fit cadence on this machine class");
 2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
 runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
 never rising. ⚠️ That tail's rate is the floor's (no release in this file), so these runs cannot show the
