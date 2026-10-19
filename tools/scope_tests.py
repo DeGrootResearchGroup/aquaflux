@@ -172,6 +172,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
     # -- tests that read the mesh fixtures
     "tests/unit/test_openfoam_fields.py": (("tests/fixtures/*",), "reads a polyMesh fixture"),
     "tests/unit/test_openfoam_reader.py": (("tests/fixtures/*",), "reads the polyMesh fixtures"),
+    "tests/unit/test_openfoam_mesh_writer.py": (
+        ("tests/fixtures/*",),
+        "writes back a polyMesh fixture OpenFOAM generated",
+    ),
     "tests/unit/test_patch_groups.py": (("tests/fixtures/*",), "reads a polyMesh fixture"),
     "tests/integration/test_case_run.py": (
         ("tests/fixtures/*",),

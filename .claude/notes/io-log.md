@@ -595,3 +595,17 @@ cells, 71872 faces (66368 internal + 5504 boundary), 3D, uncollapsed. No solver 
   *below* the global max of `1.96e-08`, so it is entirely the denominator. Normalize by the domain
   flow rate; report the local ratio only as a distribution, whose *spread* is what would reveal a
   genuine mis-placement (local, hence a cluster) as opposed to diffuse reference error.
+
+## 2026-10-19 — polyMesh writer checked by OpenFOAM's checkMesh
+
+`openfoam13:latest` in Docker, `checkMesh -allGeometry -allTopology`, on the writer-test meshes written by
+`write_openfoam` after `restated` (seed 11: shuffled faces, half the rings reversed, half the interior
+owners swapped). box (12 cells), skewed box (18), labelled box (12, zones and groups): Mesh OK.
+tetrahedra (48) and hexahedron beside a prism (2): upper-triangular ordering OK, max cell openness
+4.6e-17 and 0, non-orthogonality max 39.1 and 11.3, and one failed check each, "Cells with small
+determinant (< 0.001)", 12 of 48 and 2 of 2 cells -- cells bounded mostly by boundary faces. Controls on
+the skewed box: winding fix removed (`reverse = zeros`) failed 9 checks (17 open cells, 11 negative
+volumes, 22 non-orthogonality errors, 67 incorrectly oriented faces); sort removed failed "Faces not in
+upper triangular order". The blockMesh fixture (two graded blocks, 42 cells) is Mesh OK, and
+`disassemble(read_openfoam(fixture))` equals the fixture's parsed arrays exactly.
+

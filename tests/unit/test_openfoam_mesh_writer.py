@@ -10,10 +10,11 @@ the existing reader and comparing geometry cell by cell: cells must come back un
 from __future__ import annotations
 
 from itertools import pairwise
+from pathlib import Path
 
 import numpy as np
 import pytest
-from aquaflux.io import read_openfoam, write_openfoam
+from aquaflux.io import OpenFOAMReader, read_openfoam, write_openfoam
 from aquaflux.io.openfoam.assembler import assemble
 from aquaflux.io.openfoam.disassembler import DEFAULT_PATCH_TYPE, disassemble
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
@@ -60,12 +61,18 @@ def _labelled_box() -> Mesh:
     )
 
 
+#: A mesh OpenFOAM's own ``blockMesh`` wrote (two graded blocks, cell zones ``left`` and ``right``, and
+#: ``patch``, ``wall`` and ``symmetry`` patches, from the ``blockMeshDict`` kept beside it), so already in
+#: the format's order and winding: a fixed point the writer must reproduce array for array.
+BLOCKMESH = Path(__file__).resolve().parents[1] / "fixtures" / "polymesh_3d_blockmesh"
+
 MESHES = {
     "box": lambda: structured_grid_3d(3, 2, 2, named_boundaries=True),
     "skewed box": lambda: _with_walls(perturbed_grid_3d(3, 3, 2, perturb=0.25, seed=4)),
     "tetrahedra": lambda: _with_walls(tetrahedral_grid_3d(2, perturb=0.15, seed=5)),
     "hexahedron beside a prism": lambda: _with_walls(hexahedron_beside_a_prism()),
     "labelled box": _labelled_box,
+    "blockMesh output": lambda: read_openfoam(BLOCKMESH),
 }
 
 
@@ -242,3 +249,17 @@ def test_a_patch_holding_interior_faces_is_refused():
     )
     with pytest.raises(ValueError, match=r"\['baffle'\] hold interior faces"):
         disassemble(baffled)
+
+
+def test_a_mesh_openfoam_wrote_is_written_back_array_for_array():
+    expected = OpenFOAMReader(BLOCKMESH).read_polymesh()
+    data = disassemble(read_openfoam(BLOCKMESH))
+    np.testing.assert_array_equal(data.points, expected.points)
+    np.testing.assert_array_equal(data.face_node_offsets, expected.face_node_offsets)
+    np.testing.assert_array_equal(data.face_node_indices, expected.face_node_indices)
+    np.testing.assert_array_equal(data.owner, expected.owner)
+    np.testing.assert_array_equal(data.neighbour_internal, expected.neighbour_internal)
+    assert data.patches == expected.patches
+    assert [z.name for z in data.cell_zones] == [z.name for z in expected.cell_zones]
+    for written, read in zip(data.cell_zones, expected.cell_zones, strict=True):
+        np.testing.assert_array_equal(written.cell_labels, read.cell_labels)

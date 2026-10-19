@@ -185,8 +185,8 @@ def format_polymesh(data: PolyMeshData, n_cells: int) -> dict[str, str]:
         are zones.
     """
     note = (
-        f"nPoints:{data.points.shape[0]}  nCells:{n_cells}  "
-        f"nFaces:{data.owner.shape[0]}  nInternalFaces:{data.neighbour_internal.shape[0]}"
+        f"nPoints: {data.points.shape[0]} nCells: {n_cells} "
+        f"nFaces: {data.owner.shape[0]} nInternalFaces: {data.neighbour_internal.shape[0]}"
     )
     files = {
         "points": format_points(data.points),

@@ -91,7 +91,14 @@ Three pure seams so most logic tests without a filesystem:
   can never be read against the new mesh's labels; without it a polyMesh holding any of them is refused.
 - Tests: `tests/unit/test_openfoam_mesh_writer.py` checks order and winding as properties of the output on
   meshes restated with shuffled faces, reversed rings and swapped owners (`tests/support/meshes.restated`),
-  winding by an independent Newell-normal test (`newell_outward`), not a hand-written array.
+  winding by an independent Newell-normal test (`newell_outward`), not a hand-written array; and a
+  **fixed point**: `tests/fixtures/polymesh_3d_blockmesh/` (OpenFOAM 13 `blockMesh` output, its
+  `blockMeshDict` beside it) is written back array for array.
+- **Verified by OpenFOAM's `checkMesh`** (2026-10-19, `openfoam13` in Docker, `-allGeometry -allTopology`):
+  upper-triangular ordering OK on every written test mesh; a writer with the winding fix removed fails 9
+  checks (67 incorrectly oriented faces) and one with the sort removed fails "not in upper triangular
+  order" (log). ⚠️ "Cells with small determinant" on the tet and hexahedron-beside-a-prism fixtures is
+  a property of cells made mostly of boundary faces, not of the writer.
 
 ## Reading fields — `io/openfoam/fields.py`
 
