@@ -92,8 +92,9 @@ seams are exactly where its mesh fails, below).
 - **What Netgen does for us** (`NetgenProcess`; pinned in `tests/unit/test_meshing_netgen.py`):
   - **`triangulate(shape, max_size=, min_size=, grading=)`**: size-graded triangles on the faces of the one
     solid in a file, **wound outward**, each tagged by its face. ⚠️ **Netgen's face index `k` (one-based) is
-    the `k−1`-th face in OCP's `TopExp_Explorer` order of the same file** — that is the contract the kernel's
-    face IDs must meet. `max_size` is Netgen's target, not a bound (edges reach ~1.7x).
+    the `k−1`-th face in OCP's `TopExp_Explorer` order of the same file** — the contract the kernel's face
+    IDs meet. Pinned end to end by `test_netgen_numbers_a_written_regions_faces_as_its_topology_does`
+    (Sozzi water, `CadModel.write_brep` → Netgen: per-face area, and sampled centroids projected back). `max_size` is Netgen's target, not a bound (edges reach ~1.7x).
   - **`fill(points, triangles, max_size=, grading=)`**: tets filling the region a closed, outward-wound
     surface bounds (holes wound into the hole), **keeping the surface exactly**: its points first, at their
     indices and coordinates. This is the conformal gap fill. Tets are returned positively oriented
@@ -121,10 +122,11 @@ seams are exactly where its mesh fails, below).
 - **`aquaflux/meshing/`, host-side numpy and numba, not JAX.** It depends on `aquaflux.mesh` (it ends at
   `Mesh.from_csr`, which owns validation) and on `aquaflux.io.cad`; nothing imports it back except a case
   `MeshSource` (`aquaflux/case/mesh_source.py`).
-- **CAD access goes through `io/cad/kernel.py`**, which grows what a mesher needs: face and edge topology
-  and adjacency, face-tagged triangulation, closest-point projection and normals. Reading edge topology
-  for features is allowed (project owner, 2026-10-19); recognizing a solid from edge types still is not
-  (`io.md`).
+- **CAD access goes through `io/cad/kernel.py`**, via `CadModel` and a `CadRegion` (`io.md`, "Regions for a
+  mesher"): topology with signed edge folds and adjacency, face-tagged triangulation, the BREP file Netgen
+  reads, closest-point projection with outward normals — all numbered in the exploration order Netgen
+  numbers faces in. Reading edge topology for features is allowed (project owner, 2026-10-19);
+  recognizing a solid from edge types still is not.
 - **The polyMesh writer lives in `io/openfoam/`** (`OpenFOAMWriter`, `write_openfoam`; `io.md`), not in
   `meshing/`; the mesher hands it a `Mesh`.
 

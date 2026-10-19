@@ -222,3 +222,39 @@ def test_a_file_netgen_cannot_read_is_reported(tmp_path):
     missing = tmp_path / "missing.brep"
     with pytest.raises(MeshingError, match="Netgen's triangulate failed"):
         NetgenProcess().triangulate(missing, max_size=0.3)
+
+
+def test_netgen_numbers_a_written_regions_faces_as_its_topology_does(tmp_path):
+    # The contract the mesher rests on: a face index from CadModel.topology is the face Netgen
+    # reports for the file CadModel.write_brep wrote. Checked by area, face by face, on the Sozzi
+    # water, whose nine faces have areas from 2.9e-4 to 0.25 square metres.
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    topology = model.topology(water)
+    surface = NetgenProcess().triangulate(
+        model.write_brep(water, tmp_path / "water.brep"), max_size=0.01
+    )
+    areas = np.bincount(
+        surface.face,
+        weights=0.5 * np.linalg.norm(_normals(surface.points, surface.triangles), axis=1),
+        minlength=topology.n_faces,
+    )
+    # The smallest faces (pipe caps, the lamp's tip) are under-resolved at this size by up to 7 %.
+    np.testing.assert_allclose(areas, topology.face_area, rtol=0.1)
+    # Area cannot tell the two pipe caps apart (they are equal), so locate them too: a triangle's
+    # centroid is nearest the face the triangle lies on.
+    rng = np.random.default_rng(0)
+    sample = np.concatenate(
+        [rng.choice(np.flatnonzero(surface.face == f), 20) for f in range(topology.n_faces)]
+    )
+    centroids = surface.points[surface.triangles[sample]].mean(axis=1)
+    np.testing.assert_array_equal(model.project(water, centroids).face, surface.face[sample])

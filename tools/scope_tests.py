@@ -77,8 +77,9 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         "imports every subpackage by name to enumerate its preconditioners",
     ),
     "tests/unit/test_meshing_netgen.py": (
-        ("aquaflux/meshing/_netgen_child.py",),
-        "runs the Netgen child script by path, in a subprocess the library starts",
+        ("aquaflux/meshing/_netgen_child.py", "validation/uvreactor_openfoam/of_case/*"),
+        "runs the Netgen child script by path, in a subprocess the library starts, on the reactor's "
+        "STEP drawing among others",
     ),
     "tests/unit/test_validation_api.py": (
         ("aquaflux/*", "validation/*"),
@@ -150,6 +151,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         "reads the channel case files",
     ),
     "tests/unit/test_cad_step.py": (
+        ("validation/uvreactor_openfoam/of_case/*",),
+        "reads the reactor's STEP drawing",
+    ),
+    "tests/unit/test_cad_topology.py": (
         ("validation/uvreactor_openfoam/of_case/*",),
         "reads the reactor's STEP drawing",
     ),

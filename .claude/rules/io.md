@@ -280,6 +280,29 @@ chord=, facet_size=)` (an emitting surface).
   Longest-edge bisection and `ShapeUpgrade_*Divide*` were tried and dropped (log). Zero-area triangles are
   dropped (a point source to `radiation.Surfaces`). A reflecting placement keeps triangles outward
   (`BRepBuilderAPI_Transform` reverses faces itself).
+- **Regions for a mesher — built** (`topology.py` records, numpy only; kernel `region`, `topology`,
+  `write_brep`, `project`). `CadRegion(solids, without=())` is a plain value (union of `solids` less the
+  union of `without`); `CadModel` builds and caches its shape, so no kernel object leaves the model, and
+  answers `topology(region) -> CadTopology`, `face_triangles(region, chord=, facet_size=) -> FaceTriangles`,
+  `write_brep(region, path)` and `project(region, points, faces=None) -> Projection`.
+  - **Faces, edges and vertices are numbered in exploration order** (`TopExp.MapShapes_s`, first visit,
+    each once) — the order Netgen numbers the faces of the BREP file in (`meshing.md`). Pinned by
+    `test_the_file_keeps_the_face_order` (re-read file's explorer order) and, for a single solid, by
+    equality with `describe`.
+  - **`edge_angle` is the signed fold, positive convex**: `acos(n1·n2)`, negative when the second face's
+    outward normal points along the direction into the first (`n1 × t`, `t` the edge as the first face's
+    boundary traverses it). ⚠️ **Exploring a face's edges already composes the face's orientation** — a
+    second flip for a reversed face made half a box's edges concave. `nan` on an edge not bounding exactly
+    two faces; `seam` from `BRep_Tool.IsClosed_s` (a seam lists its one face twice among its ancestors, so
+    faces are deduplicated by index). On the Sozzi water (lamp removed) the only concave edges are the two
+    pipe junctions: the inlet riser on the vessel's cylinder, the outlet on its end plate.
+  - **`triangulate` now returns `(triangles, face)`**: a face cut by `facet_size` keeps its index, traced
+    through the splitter's `Modified` history (`_cut` returns the splitter). `CadModel.triangles` keeps
+    its return of triangles only.
+  - ⚠️ **`project` measures to the boundary shells, never the solid**: a point inside a solid is at
+    distance zero from it, and the support returned is the solid, not a face. A point closest to an edge or
+    vertex gets the first face meeting there (exploration order). One kernel query per point (a Python
+    loop) — for boundary nodes, not a volume mesh.
 - The fluid read from the Sozzi drawing shadows exactly as the hand-derived occluder (0 differing pairs,
   2026-09-24; log and `.claude/notes/radiation-log.md`).
 
