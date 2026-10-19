@@ -176,7 +176,7 @@ def main() -> None:
             " ".join(
                 f"{name}={os.environ[name]}"
                 for name in sorted(os.environ)
-                if name.startswith("MALLOC_") or name == "LD_PRELOAD"
+                if name.startswith("MALLOC_") or name in ("LD_PRELOAD", "GLIBC_TUNABLES")
             )
             or "none (glibc defaults)"
         ),
