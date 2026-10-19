@@ -11,8 +11,10 @@ paths:
 > **Comment Convention**). The dated record — the research survey, the Netgen probes, their numbers — is in
 > `.claude/notes/meshing-log.md`.
 
-**Status: nothing built.** The design below was agreed with the project owner on 2026-10-19; the only code
-is the Netgen probe harnesses in `validation/meshing_netgen/`.
+**Status: the Netgen child process is built** (`netgen_process.py`, `_netgen_child.py`); nothing else of the
+mesher is. The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
+`validation/meshing_netgen/`. The package is not on the published API page (`docs/conf.py`
+`PUBLIC_SUBPACKAGES`) until it has a mesher a user calls.
 
 A polyhedral mesher for water-treatment reactors: STEP in, an aquaflux `Mesh` (and an OpenFOAM polyMesh)
 out, with wall-resolved layers that join the bulk **conformally**. Conformity is a requirement here, not a
@@ -72,19 +74,40 @@ seams are exactly where its mesh fails, below).
   cleanly, but only because the first-loaded copy serves both, so OCP would run 7.8.1's inline code: not a
   basis to build on. Pinned by `validation/meshing_netgen/coexistence.py` (macOS arm64; **Linux, where CI
   runs, not yet measured**). Hence:
-  - **one module of `aquaflux/meshing/` imports Netgen, and it runs only as a child process** (the
-    parent never imports it). The rule is the twin of "only `io/cad/kernel.py` imports OCP"; enforce both
-    with a layering test when the package is created.
-  - **Hand-off is by file and arrays**: OCP writes the fluid shape as BREP (or STEP); the child reads it,
-    and returns arrays. An OCCT 8.0.1 BREP or STEP reads correctly in Netgen's 7.8.1.
+  - **`_netgen_child.py` is the one module that imports Netgen, and it runs only as a script, by path,
+    in a fresh interpreter** (`python -P <script> <work dir>`), so it imports neither `aquaflux` nor OCP.
+    `NetgenProcess` (`netgen_process.py`) is the parent side and never imports Netgen;
+    `netgen_available()` finds it with `importlib.util.find_spec`. **Tests must not import Netgen either**
+    (the test process holds OCP), so `tests/unit/test_meshing_netgen.py` gates with a `skipif` on
+    `netgen_available()`, not `importorskip`. All pinned in `tests/unit/test_layering.py`: OCP only in
+    `io/cad/kernel.py`, Netgen only in the child, nothing (package or tests) imports the child, the child
+    imports only the standard library, numpy and Netgen.
+  - **Hand-off is by file and arrays**: `request.json` + `input.npz` in, `result.npz` out, zero-based
+    indices; a failure exits non-zero and `MeshingError` carries the end of Netgen's output. OCP writes
+    the fluid shape as BREP (or STEP); an OCCT 8.0.1 BREP or STEP reads correctly in Netgen's 7.8.1.
+  - The `meshing` extra pins `netgen-mesher==6.2.2608` exactly; the `test` extra carries it, so CI (Linux)
+    runs the parent-with-OCP, child-with-Netgen arrangement on every PR.
 - ⚠️ **Hand Netgen the fluid shape OCP built, never the drawing.** `OCCGeometry` of the Sozzi drawing reads
   only its first solid (the lamp: 1 solid, 3 faces) where `read_step` finds four.
-- **What Netgen does for us** (each pinned by a harness in `validation/meshing_netgen/`):
-  - **Size-graded triangulation of the CAD faces**, each triangle carrying its CAD face index
-    (`MeshingStep.MESHSURFACE`, `Element2D.index`).
-  - **Tet fill of a closed triangle surface that we supply, without changing it**: no supplied point moved,
-    no boundary element added, including a domain with a hole (the gap between two surfaces). This is the
-    conformal gap fill.
+- **What Netgen does for us** (`NetgenProcess`; pinned in `tests/unit/test_meshing_netgen.py`):
+  - **`triangulate(shape, max_size=, min_size=, grading=)`**: size-graded triangles on the faces of the one
+    solid in a file, **wound outward**, each tagged by its face. ⚠️ **Netgen's face index `k` (one-based) is
+    the `k−1`-th face in OCP's `TopExp_Explorer` order of the same file** — that is the contract the kernel's
+    face IDs must meet. `max_size` is Netgen's target, not a bound (edges reach ~1.7x).
+  - **`fill(points, triangles, max_size=, grading=)`**: tets filling the region a closed, outward-wound
+    surface bounds (holes wound into the hole), **keeping the surface exactly**: its points first, at their
+    indices and coordinates. This is the conformal gap fill. Tets are returned positively oriented
+    (Netgen's own come out all negative).
+  - ⚠️ **The child checks the fill, because Netgen can be wrong silently**: given a hole wound out of the
+    hole it fills straight through it, keeping every supplied point and boundary element. So the faces used
+    by one tet must equal the supplied triangles and the tet volume the enclosed volume, else
+    `MeshingError`. **Self-intersection is not detected** (two overlapping closed surfaces are each filled,
+    overlapping).
+  - ⚠️ **A point no triangle uses makes Netgen renumber every point**, so `check_closed_surface` refuses it
+    before the child runs (with: shapes, finite, range, edge used once per direction, closed, positive
+    enclosed volume).
+  - ⚠️ **Netgen's arrays (`Coordinates()`, `Elements*().NumPy()`) are views of its memory**, freed with the
+    mesh: copy before keeping (an `np.asarray` view returned garbage once the mesh was gone).
 - **What it does not**: a supplied **quadrilateral** face, or a surface wound into the domain, is refused
   ("too many attempts"). Supply triangles only, wound counter-clockwise seen from outside the domain; the
   hex core's quadrilaterals are capped with pyramids we build, whose triangular sides Netgen sees.

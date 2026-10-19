@@ -83,6 +83,8 @@ test = [
     "aquaflux[cad]",
     # The browser interface's own tests (tests/ui/) read and pipe real VTK data, so they need it installed.
     "aquaflux[ui]",
+    # The mesher's tests drive Netgen in its child process. It has wheels for every interpreter CI runs.
+    "aquaflux[meshing]",
 ]
 # `docs` is the Sphinx toolchain for the site under `docs/` — MyST Markdown pages,
 # the pydata theme, and the copy-button extension; autodoc imports the package
@@ -109,6 +111,13 @@ docs = [
 # installed beside `cadquery`, which brings the VTK build of the same module. Wheels exist for
 # CPython 3.11-3.14 on Linux, macOS and Windows, and none for 3.10, which is why the floor is 3.11.
 cad = ["cadquery-ocp-novtk==8.0.1.0.0"]
+# `meshing` is the Netgen mesher `aquaflux.meshing` triangulates CAD faces and fills regions with
+# tetrahedra through (LGPL-2.1, used as a separate program). Pinned exactly, like the CAD kernel: its
+# Python interface has changed between releases, and every call to it lives in one script,
+# `aquaflux/meshing/_netgen_child.py`, written against this version. It bundles its own build of the
+# geometry kernel, which cannot share an interpreter with the `cad` extra's, so it is only ever run in a
+# child process. Wheels exist for CPython 3.10-3.14 on Linux x86-64, macOS and Windows.
+meshing = ["netgen-mesher==6.2.2608"]
 # `ui` is the browser interface, `aquaflux-ui` (the `aquaflux_ui` package): VTK through PyVista renders
 # here, trame serves the page and sends it images rather than meshes, plotly draws the convergence
 # history. All have wheels for Linux, macOS and Windows, so it needs no compiler and no JavaScript
