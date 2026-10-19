@@ -324,7 +324,8 @@ them.
   `fe772f59`, 2026-10-18)**: at step 35's re-fit the trailing hierarchy refused one corner cell's `[k, ω]`
   block as singular (`k` ~1e-17; the block is triangular and invertible, and the guard's Hadamard ratio is
   not column-scale invariant). With #766's `PivotFloor(0.15)`, shipped since, it converged in 32 steps
-  there (21 on #766's machine; measured at its pre-merge head `1e69b4ab`). Detail: `.claude/notes/validation-log.md`, "The re-fit cadence on this
+  there (21 on #766's machine; measured at its pre-merge head `1e69b4ab`) — by not reaching such a state:
+  the floor does not cure the refusal, which the same state still raises on `main` with the floor on. Detail: `.claude/notes/validation-log.md`, "The re-fit cadence on this
   machine class, and a corner cell's `k`".
 - **Before attributing a local-only failure to your platform, check CI's skip counts** (root `CLAUDE.md`,
   "CI is not a superset of a local run"); a 2026-08-19 "platform difference" was a skipped test.

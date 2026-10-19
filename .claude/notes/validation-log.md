@@ -940,9 +940,11 @@ The converged arms kept `k` ~0.72 in cell 12107 and a minimum of 1.7e-05. Not ch
 work's scope): whether the guard should be column-scale invariant, and whether that corner's `k` should be
 kept from collapsing, are the owner's. To re-adjudicate, re-run the shipped arm: two marches at one setting gave identical step
 tables here (the cadence-5 pair), and `refit_profile.py` with `REFIT_STATE` at its `state-00034`
-reproduces the refusal. PR #766's `PivotFloor` fits such a pivot at its row's pseudo-time diagonal, so the
-block the guard sees is no longer near-singular; the floored arms below met no collapse (lowest `k`
-~1.8e-05). The guard's column-scale dependence is unchanged by it.
+reproduces the refusal. **The pivot floor does not cure it**: the same `state-00034` still raises the
+guard on `main` `f7fcb6f2` with `PivotFloor(0.15)` in force (2026-10-19, `refit_profile.py`, the first fit
+at β 2.0). The cell's `k` pivot is not small against its own pseudo-time diagonal (`|p|` ~2e-06 against
+`0.15 d` ~1.3e-06 at either β), so the floor leaves it, and the huge `∂R_ω/∂k` keeps the Hadamard ratio
+~1e-15. The floored arms below simply never reached such a state (lowest `k` ~1.8e-05).
 
 #### With the pivot floor, #766 (2026-10-19)
 
