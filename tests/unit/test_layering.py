@@ -22,6 +22,9 @@ The generic packages had the same blind spot later: ``schemes/gradient.py`` and
 * :func:`test_nothing_below_the_case_layer_imports_it` -- ``case/`` is the opposite end: it composes
   every physics package into a described case, so a package it composes that imported it back would
   make the description a dependency of the thing described.
+* :func:`test_each_geometry_kernel_binding_has_one_importer` and its neighbours -- OCP and Netgen
+  each bring their own build of one geometry kernel, and a process that loads both aborts at exit, so
+  each is imported by one module only, and Netgen's only from a script that runs in a child process.
 * :func:`test_one_package_reaches_another_only_through_its_public_surface` -- a package's ``__all__``
   is what other packages may use. Seven imports once reached past it, three of them of private names,
   so each could be renamed inside its own module with nothing in the importing package failing.
@@ -32,6 +35,7 @@ from __future__ import annotations
 import ast
 import functools
 import pathlib
+import sys
 
 import pytest
 
@@ -244,4 +248,98 @@ def test_one_package_reaches_another_only_through_its_public_surface() -> None:
         "(and import it from the package), or move it to the package that needs it; a submodule or a "
         "name outside __all__ can change with nothing in the importing package failing:\n"
         + "\n".join(offenders)
+    )
+
+
+#: Libraries that may each be imported by exactly one module of the package, and which one. OCP and
+#: Netgen each carry their own build of the OpenCASCADE geometry kernel, and a process that loads both
+#: aborts at exit: so OCP stays behind the CAD reader's kernel module, and Netgen behind the script the
+#: mesher runs in a child process, which nothing imports.
+ONE_IMPORTER = {
+    "OCP": "io/cad/kernel.py",
+    "netgen": "meshing/_netgen_child.py",
+    "pyngcore": "meshing/_netgen_child.py",
+}
+
+#: The script the mesher runs in a child interpreter, by path.
+NETGEN_CHILD = ["aquaflux", "meshing", "_netgen_child"]
+
+TESTS = PACKAGE.parent / "tests"
+
+
+def _top_level_imports(path: pathlib.Path) -> list[tuple[int, str]]:
+    """``(line, first dotted part)`` of every absolute import in ``path``."""
+    return [
+        (line, module.split(".")[0])
+        for line, module, level in _imports(path)
+        if level == 0 and module is not None
+    ]
+
+
+def test_each_geometry_kernel_binding_has_one_importer() -> None:
+    offenders = [
+        f"{path.relative_to(PACKAGE)}:{line} imports {name}"
+        for path in sorted(PACKAGE.rglob("*.py"))
+        for line, name in _top_level_imports(path)
+        if name in ONE_IMPORTER and path.relative_to(PACKAGE).as_posix() != ONE_IMPORTER[name]
+    ]
+    assert not offenders, (
+        "OCP and Netgen bring two builds of one geometry kernel, which abort a process that loads "
+        f"both; each stays behind its one importer {ONE_IMPORTER}:\n" + "\n".join(offenders)
+    )
+
+
+def test_no_test_imports_netgen() -> None:
+    # The test process holds OCP, so a test that imported Netgen would abort its worker at exit.
+    offenders = [
+        f"{path.relative_to(TESTS)}:{line} imports {name}"
+        for path in sorted(TESTS.rglob("*.py"))
+        for line, name in _top_level_imports(path)
+        if name in ("netgen", "pyngcore")
+    ]
+    assert not offenders, "drive Netgen through aquaflux.meshing.NetgenProcess:\n" + "\n".join(
+        offenders
+    )
+
+
+def _imported_modules(root: pathlib.Path, path: pathlib.Path) -> list[tuple[int, list[str]]]:
+    """``(line, dotted parts)`` of every module an import in ``path`` could load.
+
+    A ``from a.b import c`` may load the submodule ``a.b.c``, so it yields both ``a.b`` and ``a.b.c``.
+    """
+    found = []
+    for statement in _scope.imports(path):
+        if root == PACKAGE:
+            module = _absolute(path, statement.module, statement.level)
+        else:
+            module = (statement.module or "").split(".")
+        found.append((statement.line, module))
+        found += [(statement.line, [*module, name]) for name in statement.names or ()]
+    return found
+
+
+def test_nothing_imports_the_netgen_child_script() -> None:
+    offenders = [
+        f"{path}:{line}"
+        for root in (PACKAGE, TESTS)
+        for path in sorted(root.rglob("*.py"))
+        for line, module in _imported_modules(root, path)
+        if module[:3] == NETGEN_CHILD
+    ]
+    assert not offenders, (
+        "the Netgen child script runs only as its own process; importing it would load Netgen "
+        "here:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_netgen_child_imports_only_the_standard_library_numpy_and_netgen() -> None:
+    # It runs by path in a fresh interpreter: an import of aquaflux would load the package (and
+    # through it, possibly the CAD kernel) into the very process kept apart from it.
+    allowed = {*sys.stdlib_module_names, "numpy", "netgen", "pyngcore"}
+    child = PACKAGE / "meshing" / "_netgen_child.py"
+    found = {name for _, name in _top_level_imports(child)}
+    relative = [line for line, _, level in _imports(child) if level > 0]
+    assert found, "the scan found no imports in the child script, so it would see nothing"
+    assert not (found - allowed) and not relative, (
+        f"the Netgen child imports {sorted(found - allowed)} (relative at lines {relative})"
     )

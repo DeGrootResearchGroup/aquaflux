@@ -76,6 +76,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         ("aquaflux/*",),
         "imports every subpackage by name to enumerate its preconditioners",
     ),
+    "tests/unit/test_meshing_netgen.py": (
+        ("aquaflux/meshing/_netgen_child.py",),
+        "runs the Netgen child script by path, in a subprocess the library starts",
+    ),
     "tests/unit/test_validation_api.py": (
         ("aquaflux/*", "validation/*"),
         "checks every study harness's imports against the package surface",

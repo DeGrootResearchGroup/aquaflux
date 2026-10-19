@@ -73,3 +73,16 @@ reactor body ∪ inlet pipe ∪ outlet pipe − lamp and writes BREP and STEP; `
 - Supplied-surface fill (unit box, 4 x 4 per face, `maxh=0.3`): all-triangle, wound outward → 267 tets,
   boundary unchanged, 0 supplied points moved; with a box-shaped hole → 1329 tets, likewise unchanged;
   wound inward → refused; top face as quadrilaterals → refused ("Stop meshing since too many attempts").
+
+## 2026-10-19 — Netgen conventions found while building the child process
+
+netgen-mesher 6.2.2608, macOS arm64, BREP files written by OCP 8.0.1 (box `[0,1]x[0,2]x[0,3]`, cylinder
+r 0.5 h 2). Face descriptor index `k` (one-based) is OCP's explorer face `k-1` on both (box faces x=0, x=1,
+y=0, y=2, z=0, z=3; cylinder side, top, bottom). Surface triangles all outward (fraction 1.0 per face).
+Volume tets all negatively oriented (fraction 0.0 positive; sum −6.0 on the box). `Elements2D().NumPy()` /
+`Elements3D().NumPy()` nodes are one-based and equal the per-element loop; `Coordinates()` equals
+`Points()`. Bulk `AddPoints` + `AddElements(dim=2, base=0)` fill of a surface-only point set keeps the
+leading points and the surface; one extra unused point made the leading points differ (renumbered). A hole
+wound out of the hole: 530 tets, volume 1.0 (the hole's 0.027 filled), 192 boundary faces against 240
+supplied, 53 tet centroids inside the hole. Two overlapping outward cubes: filled, both checks passed.
+

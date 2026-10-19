@@ -232,6 +232,11 @@ CONDITIONALLY_SKIPPED: dict[str, str] = {
         "the whole module, on a JAX backend other than the CPU: the compiled program it counts is "
         "the CPU backend's. CI runs on the CPU, so this removes coverage only on a GPU machine"
     ),
+    "unit/test_meshing_netgen.py": (
+        "the whole module, when netgen-mesher (the `meshing` extra) is not installed -- found with "
+        "importlib.util.find_spec, never imported, since Netgen beside OCP in one process aborts it "
+        "at exit -- and its solids when OCP is not. CI installs both through the `test` extra"
+    ),
     "unit/test_openfoam_fields.py": "one ordering case, when the generated grid is already ordered",
     "unit/test_partitioner.py": "the Scotch binding and command-line partitioners",
     "unit/test_sibling_builders.py": "the tool is in the repository, not the installed package",
