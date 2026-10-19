@@ -935,6 +935,42 @@ program on the Mac, so bandwidth, page size and the jax version are not separate
 M3 figure (2.5-3.4 s / 100 probes, against 9.7 ms per tangent here) is a whole re-fit's probe line, not a
 per-tangent measurement, and is not comparable either.
 
+### Huge pages after #763's memory cut (2026-10-19)
+
+#763 changed what the re-fit allocates (the split's probe laid out by its blocks, one traced split per
+fit, superseded splits released), so the huge-page arm above was re-measured on `main` `780728e4`
+(#763 and #771 in). Same container class (4-core Xeon 2.1 GHz, 15.7 GiB, no swap, THP `madvise`), jax
+0.11.2, numpy 2.5.3, scipy 1.18.1, glibc 2.39, nothing else running; each pair back to back, defaults first.
+
+**Fixed state** (`refit_profile.py`, `state-00032`, beta 0.005, mean of 3 re-fits after one warm one):
+
+| arm | re-fit | probe scatter (host) | leading refactor | faults per re-fit | VmHWM / VmRSS after |
+|---|---|---|---|---|---|
+| glibc defaults | 44.60 s | 2.57 s | 9.33 s | 15.58M | 7.57 / 5.97 GiB |
+| `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` | **38.03 s** | 1.20 s | 7.65 s | 84k | 7.56 / 6.01 GiB |
+
+**Whole shipped march** (`validation/run_case.sh validation/bfs3d_openfoam/compare.py`, shipped `case.yaml`:
+`refresh_on_cycles` 4, `PivotFloor(0.15)`, float32 split; peak is `VmHWM` sampled every 15 s):
+
+| arm | steps | cycles | final `R` | `x_r/h` | re-fits (full / cost) | re-fit s (probe) | solve | peak |
+|---|---|---|---|---|---|---|---|---|
+| glibc defaults | 17 | 148 | 5.301e-06 | 8.3611 | 13 / 1 | 693 (518) | 1713 s | 8.47 GiB |
+| `hugetlb=1` | 17 | 148 | 5.301e-06 | 8.3611 | 13 / 1 | 515 (372) | **1414 s** | 8.49 GiB |
+
+- **It holds, and by more than before #763**: an identical step table (`march_log_compare.py`: "the same
+  trajectory for as far as both go"), solve -17 % (was -11 % on the cadence-5 unfloored pair), peak within
+  0.02 GiB. The saving is steady, not a first-run compile effect: every full re-fit after the first is
+  46.9-49.9 s at defaults and 32.7-40.1 s with huge pages (probe 35.4-39.0 against 24.4-30.6 s).
+- **About 120 s of the 299 s falls outside the re-fits** (1689 - 693 = 996 s of step time against
+  1390 - 515 = 875 s), so work in the steps also pays mapped-chunk faults: which program (each solve's
+  set-up, residual evaluations, the line search) is not separated, and it does not contradict the reading
+  that a Krylov iteration within one solve allocates once.
+- **The footprint objection to the retaining allocators is weaker now** (the march peaks at 8.5, not 12.2
+  GiB), but they were not re-measured; jemalloc with decay off added 2.4 GiB of high-water at one re-fit
+  before #763.
+- `refit_profile.py`'s banner printed "glibc defaults" under `GLIBC_TUNABLES` until this change (the fault
+  count shows the setting was in force); it names the variable now.
+
 ### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18/19)
 
 **Read the second table.** The first was taken without the pivot floor, where (PR #766) a near-zero `k`

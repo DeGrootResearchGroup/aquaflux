@@ -308,13 +308,13 @@ threshold changes the trajectory, so the rows rank three runs rather than settle
 moved from 3 to 4 on these runs and the same three on an 11-core laptop, where 4 was also fastest (17 steps,
 475 s, against 21 steps, 531 s at 3).
 
-The march's memory peaks at 12–13 GiB, so on 15 GiB do not run it under an allocator setting that keeps
-freed memory (`MALLOC_ARENA_MAX=1` with raised thresholds, or jemalloc with decay disabled): both raised the
-footprint by gigabytes. `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` does not, and it removes the page faults that
-are about a quarter of the probe's time on this machine (the probe's compiled temporary, ~800 MiB, is
-otherwise faulted in afresh on every batched call): on a march at `BFS3D_REFRESH_ON_CYCLES=5` without the
-floor it gave an identical step table, solve 2439 → 2180 s and peak 12.63 → 12.15 GiB. It needs transparent
-huge pages set to `madvise` or `always`.
+The march's memory peaks at about 8.5 GiB on this machine. Allocator settings that keep freed memory
+(`MALLOC_ARENA_MAX=1` with raised thresholds, or jemalloc with decay disabled) raised the footprint by
+gigabytes when the march peaked at 12 GiB, and have not been measured since. `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
+keeps nothing, and it removes the page faults that cost about a quarter of the probe's time on this machine
+(the probe's compiled temporary, ~800 MiB, is otherwise faulted in afresh on every batched call): on the
+shipped march it gave an identical step table, solve 1713 → 1414 s, and peak 8.47 → 8.49 GiB (`main`
+`780728e4`, 2026-10-19). It needs transparent huge pages set to `madvise` or `always`.
 
 ### Putting a convergence bar on the reference
 

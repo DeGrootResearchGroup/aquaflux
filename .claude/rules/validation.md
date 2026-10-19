@@ -112,11 +112,12 @@ branches.
   (the single arena alone removes nothing: above the adaptive 32 MiB ceiling the buffer is still mapped
   per call), and say so; `run_case.sh` records all of them. ⚠️ **Both keep freed memory, so both raise
   the footprint: never run a bfs3d march under them on a 15 GB machine** (jemalloc: VmHWM 13.2 GiB after
-  one bfs3d re-fit against 10.9 at defaults, 2026-10-18). **`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
+  one bfs3d re-fit against 10.9 at defaults, 2026-10-18, before #763 cut the march to ~8.5 GiB; not re-measured since). **`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
   removes the faults without keeping memory** (glibc asks for transparent huge pages on its mapped
-  chunks; needs THP `madvise` or `always`): bfs3d probe faults 15M → 66k, re-fit 48.7 → 39.7 s, VmHWM
-  10.98 against 10.86 GiB (`state-00032`); on a whole march (cadence 5, without the pivot floor) solve 2439 → 2180 s, peak 12.63 →
-  12.15 GiB, identical step table. Not a `run_case.sh` default (timings would stop being comparable). The retention that rules the others out:
+  chunks; needs THP `madvise` or `always`). After #763 (`main` `780728e4`, 2026-10-19): re-fit 44.6 → 38.0 s,
+  faults 15.6M → 84k, VmHWM 7.57 against 7.56 GiB (`state-00032`); the shipped march (cadence 4, floored)
+  solve 1713 → 1414 s with an identical step table and peak 8.47 against 8.49 GiB. Not a `run_case.sh`
+  default (timings would stop being comparable). The retention that rules the others out:
   `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
   resident by step 2 against 9.5 GiB at defaults, and the container restarted (bfs3d session,
   2026-10-18, branch `claude/bfs3d-mesh-home`); safe for fixed-state probes only. Compare a standalone piece with an in-loop one by the MEAN of as many calls as a solve

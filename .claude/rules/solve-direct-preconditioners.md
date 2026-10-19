@@ -142,8 +142,8 @@ bare block inverse).
   re-fit is 58 % of it. Why the probe is slow there: its batched JVP touches 4.4x pitzDaily's bytes per
   tangent at ~23 GB/s on 2-way-partitioned kernels, and faults its 816 MiB temporary in afresh every call
   (~a quarter of the probe); `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` removes the faults at an unchanged
-  footprint (re-fit 48.7 → 39.7 s at `state-00032`; a cadence-5 march without the pivot floor 2439 → 2180 s, peak 12.63 → 12.15 GiB), the retaining allocators are not usable for a march
-  in 15 GiB: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container" and the subsection after it.
+  footprint (after #763: re-fit 44.6 → 38.0 s at `state-00032`; the shipped march 1713 → 1414 s, peak 8.47 → 8.49 GiB), the retaining allocators were not usable for a march
+  in 15 GiB before #763 and are unmeasured since: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container", its subsections, and "Huge pages after #763's memory cut".
 
   What decides it is the far mass the colouring folds (`probe_reach_audit.py`: bfs3d's p carries 1.1e-3 of
   its norm beyond reach 2, against ~4e-4 folded on pitzDaily). Untested: shortening only some of bfs3d's
