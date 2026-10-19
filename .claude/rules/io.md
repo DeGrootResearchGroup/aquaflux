@@ -234,7 +234,8 @@ chord=, facet_size=)` (an emitting surface).
 - **Kernel details found on the real file**: call `XCAFDoc_DocumentTool.SetLengthUnit_s(doc, 1.0)` before
   transfer, or lengths come out in millimetres (the `xstep.cascade.unit` static does not reach XCAF); take
   `solid_inside` from face orientation, not point classification; never recognize from edge types (seam
-  lines report as B-splines).
+  lines report as B-splines). Reading edge topology is allowed for meshing (feature edges, adjacency;
+  project owner, 2026-10-19): the ban is on recognition. The mesher's kernel needs are in `meshing.md`.
 - **Assemblies**: locations accumulate down the component tree; a part's own name beats its instance's; a
   repeated name gets `[k]`, several solids under one name `.k`.
 - **Triangulation bounds facet size by splitting the boundary shells** (`BRepAlgoAPI_Splitter`) with three

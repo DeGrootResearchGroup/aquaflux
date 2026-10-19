@@ -19,14 +19,19 @@ Usage::
 
 ``REFIT_CASE`` is ``bfs3d`` or ``pitzdaily``; ``REFIT_REPEATS`` re-fits are timed after one untimed warm
 re-fit (default 3); ``REFIT_BETA`` is the shift strength re-fitted at (default 0.005, both cases'
-``beta_min``); ``REFIT_STATE`` is a ``.npz`` holding ``state``; ``REFIT_JVP_BATCHES`` (say ``1,4,8,16``)
+``beta_min``); ``REFIT_STATE`` is a ``.npz`` holding ``state``; ``REFIT_PROBE_BATCH`` re-fits at that probe batch instead of
+the library's ``PROBE_BATCH_SIZE``; ``REFIT_JVP_BATCHES`` (say ``1,4,8,16``)
 also times the probe's batched Jacobian-vector product alone at each batch size, best of five, per
 tangent, which separates the cost of one directional derivative from the number of probes.
+
+The report also splits the probe's host work out of it (filling each chunk's seeds and scattering its
+responses into the matrix), sums the processor time per thread name (which pool kept the cores busy),
+and prints the process's resident high-water mark after the warm re-fit and after the timed ones: an
+allocator setting that retains freed memory shows there as well as in the time.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import resource
 import sys
@@ -34,15 +39,59 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-CASES = {"bfs3d": "bfs3d_openfoam", "pitzdaily": "pitzdaily_openfoam"}
+sys.path.insert(0, str(HERE))
+
+from step_cases import load_case  # noqa: E402
 
 CASE = os.environ.get("REFIT_CASE", "bfs3d")
 REPEATS = int(os.environ.get("REFIT_REPEATS", "3"))
 BETA = float(os.environ.get("REFIT_BETA", "0.005"))
 STATE = os.environ.get("REFIT_STATE")
+#: The probe's batch for the re-fits themselves; unset keeps the library's ``PROBE_BATCH_SIZE``.
+PROBE_BATCH = os.environ.get("REFIT_PROBE_BATCH")
 #: Batch sizes at which to time the probe's batched JVP alone, per tangent; empty skips it.
 JVP_BATCHES = [int(b) for b in os.environ.get("REFIT_JVP_BATCHES", "").split(",") if b]
+
+
+def _thread_cpu() -> dict[str, float]:
+    """Processor seconds used so far by this process's threads, summed per thread name (Linux only).
+
+    The thread name says which pool a thread serves (``tf_foreach`` runs the compiled program's thunks,
+    ``tf_XLAEigen`` its intra-op work, the Python-named rest the interpreter, BLAS and the host
+    refactor), so a difference of two readings says which pool a piece kept busy. Empty where
+    ``/proc/self/task`` does not exist.
+    """
+    tick = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+    out: dict[str, float] = {}
+    try:
+        tasks = os.listdir("/proc/self/task")
+    except OSError:
+        return out
+    for task in tasks:
+        try:
+            with open(f"/proc/self/task/{task}/stat") as handle:
+                stat = handle.read()
+        except OSError:
+            continue  # a thread that exited between the listing and the read
+        name = stat[stat.index("(") + 1 : stat.rindex(")")]
+        fields = stat[stat.rindex(")") + 2 :].split()
+        # utime and stime are fields 14 and 15 of the stat line, so 11 and 12 after the name.
+        name = name.rstrip("0123456789-")
+        out[name] = out.get(name, 0.0) + (int(fields[11]) + int(fields[12])) / tick
+    return out
+
+
+def _high_water_mark() -> str:
+    """This process's resident high-water mark and current resident size, from ``/proc/self/status``."""
+    try:
+        with open("/proc/self/status") as handle:
+            lines = dict(line.split(":", 1) for line in handle if ":" in line)
+    except OSError:
+        return "unavailable"
+    return (
+        f"VmHWM {int(lines['VmHWM'].split()[0]) / 2**20:.2f} GiB, "
+        f"VmRSS {int(lines['VmRSS'].split()[0]) / 2**20:.2f} GiB"
+    )
 
 
 def _clock() -> tuple[float, float, int]:
@@ -73,17 +122,6 @@ class _Pieces:
 
         # ``object.__setattr__`` also reaches a frozen dataclass; the wrapper lives on this instance only.
         object.__setattr__(owner, method, timed)
-
-
-def _case_module():
-    directory = HERE / CASES[CASE]
-    for path in (ROOT, directory):
-        if str(path) not in sys.path:
-            sys.path.insert(0, str(path))
-    spec = importlib.util.spec_from_file_location(f"{CASE}_case", directory / "compare.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _jvp_sweep(session, state) -> None:
@@ -117,7 +155,7 @@ def _jvp_sweep(session, state) -> None:
 
 
 def main() -> None:
-    case = _case_module()
+    case = load_case(CASE)
     import jax
     import jax.numpy as jnp
     import numpy as np
@@ -144,6 +182,12 @@ def main() -> None:
         ),
         flush=True,
     )
+    from aquaflux.precondition import materialized_session
+
+    if PROBE_BATCH:
+        # Read by the session at each fit and re-fit, so setting it before the first build reaches both.
+        materialized_session.PROBE_BATCH_SIZE = int(PROBE_BATCH)
+    print(f"probe batch {materialized_session.PROBE_BATCH_SIZE}", flush=True)
     session = open_session(case.SOLVER.settings()["preconditioner"], coupled)
     wall, cpu, faults = _clock()
     step = session.build(state, dual_time=case.SOLVER.dual_time)
@@ -159,8 +203,11 @@ def main() -> None:
     plan = session._probe_for().plan
     print(f"{plan.n_cells} cells, {plan.n_fields} fields, {plan.n_probes} probes", flush=True)
 
+    probe = session._probe_for()
     pieces = _Pieces()
     pieces.wrap(host, "_materialize_jacobian", "probe (coloured JVPs + gather)")
+    pieces.wrap(probe.plan, "seed_block", "probe: fill the seeds (host)")
+    pieces.wrap(probe.structure, "scatter", "probe: scatter the responses (host)")
     pieces.wrap(host, "_shifted", "assemble the shift")
     pieces.wrap(split._groups, "blocks", "refactor: slice the blocks")
     pieces.wrap(split._leading, "refactor_block", "refactor: leading [u,v,w,p]")
@@ -170,8 +217,10 @@ def main() -> None:
     if JVP_BATCHES:
         _jvp_sweep(session, state)
     hook._materialize_at(step, state, BETA)  # warm: any compile a re-fit triggers is paid here
+    print(f"after the warm re-fit: {_high_water_mark()}", flush=True)
     pieces.rows.clear()
     totals = [0.0, 0.0, 0.0]
+    threads = _thread_cpu()
     for _ in range(REPEATS):
         wall, cpu, faults = _clock()
         hook._materialize_at(step, state, BETA)
@@ -192,6 +241,17 @@ def main() -> None:
         f"| **whole re-fit** | {w / REPEATS:.2f} | {c / w:.2f} | {f / REPEATS / 1e3:.0f}k |",
         flush=True,
     )
+    used = _thread_cpu()
+    by_pool = {name: used[name] - threads.get(name, 0.0) for name in used}
+    print(
+        "processor seconds per re-fit by thread name: "
+        + ", ".join(
+            f"{name} {seconds / REPEATS:.1f}"
+            for name, seconds in sorted(by_pool.items(), key=lambda kv: -kv[1])
+            if seconds > 0
+        )
+    )
+    print(f"after the timed re-fits: {_high_water_mark()}", flush=True)
 
 
 if __name__ == "__main__":

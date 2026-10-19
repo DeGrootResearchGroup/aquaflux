@@ -889,7 +889,7 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
             pivot_floor=PivotFloor(threshold=0.15),
         ),
         "dual_time": DualTimeLoop(
-            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
+            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=4
         ),
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "step_control": CflResidualDualTimeControl(

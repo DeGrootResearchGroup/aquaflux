@@ -101,14 +101,23 @@ branches.
   allocates once per solve), so per-call timings overstate it; **bfs3d's re-fit probe does pay it, per
   batched JVP**: 15M minor faults and 38.4 of a 58.3 s re-fit at glibc defaults, 36.5 s with the
   thresholds below, 28.8 s (0.15M faults, re-fit 38.6 s) with `MALLOC_ARENA_MAX=1` as well
-  (`refit_profile.py`, `state-00029`, 4-core Linux, jax 0.11.2; `.claude/notes/validation-log.md`). Report `ru_minflt` per call.
+  (`refit_profile.py`, `state-00029`, 4-core Linux, jax 0.11.2; `.claude/notes/validation-log.md`). Report
+  `ru_minflt` per call, and the resident high-water mark beside every allocator arm (`refit_profile.py`
+  prints both).
   `MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647` removes it **only up to 64 MiB**:
   XLA allocates on worker threads, whose arenas are 64 MiB heaps, so a larger buffer (the whole
   `(J + s) M v` program's, ~74 MiB on pitzDaily) is mapped per call regardless. To remove all of it run
   under jemalloc (`LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2
-  MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`) or `MALLOC_ARENA_MAX=1`, and say so; `run_case.sh`
-  records all three. ⚠️ **Both keep freed memory, so both raise the footprint: never run a bfs3d march
-  under them on a 15 GB machine.** `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
+  MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`) or `MALLOC_ARENA_MAX=1` **with** both thresholds
+  (the single arena alone removes nothing: above the adaptive 32 MiB ceiling the buffer is still mapped
+  per call), and say so; `run_case.sh` records all of them. ⚠️ **Both keep freed memory, so both raise
+  the footprint: never run a bfs3d march under them on a 15 GB machine** (jemalloc: VmHWM 13.2 GiB after
+  one bfs3d re-fit against 10.9 at defaults, 2026-10-18). **`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`
+  removes the faults without keeping memory** (glibc asks for transparent huge pages on its mapped
+  chunks; needs THP `madvise` or `always`): bfs3d probe faults 15M → 66k, re-fit 48.7 → 39.7 s, VmHWM
+  10.98 against 10.86 GiB (`state-00032`); on a whole march (cadence 5, without the pivot floor) solve 2439 → 2180 s, peak 12.63 →
+  12.15 GiB, identical step table. Not a `run_case.sh` default (timings would stop being comparable). The retention that rules the others out:
+  `MALLOC_ARENA_MAX=1` with both thresholds raised held 12.3 GiB
   resident by step 2 against 9.5 GiB at defaults, and the container restarted (bfs3d session,
   2026-10-18, branch `claude/bfs3d-mesh-home`); safe for fixed-state probes only. Compare a standalone piece with an in-loop one by the MEAN of as many calls as a solve
   makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB
@@ -224,14 +233,14 @@ their march from `case.yaml`'s `solver` section, each `PITZ_*` / `BFS3D_*` march
   that set one ran the file's solver.
 - `turbulent_channel/report.md` was regenerated 2026-09-24; Re_b = 240000 converges on current code.
 
-## ⚠️ bfs3d's step count depends on the machine, even with the pivot floor
+## ⚠️ bfs3d at the old `refresh_on_cycles` 3 depended on the machine
 
-Without the floor (`fe772f59`) the shipped march died at the re-fit before step 35 on a singular
-`[k, omega]` cell block. With `PivotFloor(0.15)` (#766) it converges, but in **21 steps / 115 cycles on the
-owner's machine and 39 / 254 on a 4-core Linux x86_64 container with jax 0.12.0** (`x_r/h` 8.361 both;
-2026-10-19). Main and the #763 memory branch give identical step tables on the container, so the spread is
-platform or jax version, not either change; the two were not separated. Compare bfs3d marches only on one
-machine and one jax version: `.claude/notes/validation-log.md`, "bfs3d with the pivot floor, by machine".
+With the pivot floor at cadence 3 the march took 21 steps on the owner's laptop and 32 and 39 on two
+4-core Linux containers (`x_r/h` 8.361 throughout), the paths parting at solves stopped by `max_restarts`
+14. Neither the jax version (0.10.2 against 0.12.0 on one container: different from step 1, still capped at
+step 17) nor the split's precision (float64 matched float32 through step 12, the first capped solve
+included) explained it; the file's 4 (#768) gives 17 on both machines measured. Log: "bfs3d with the
+pivot floor, by machine".
 
 ## bfs3d's mesh — one tracked copy
 
@@ -321,6 +330,13 @@ them.
 
 ## Other live traps
 
+- ⚠️ **Without the pivot floor, bfs3d's march at `refresh_on_cycles` 3 failed on a 4-core Linux container
+  (`main` `fe772f59`, 2026-10-18)**: at step 35's re-fit the trailing hierarchy refused one corner cell's
+  `[k, ω]` block as singular (`k` ~1e-17; the block is triangular and invertible, and the guard's Hadamard
+  ratio is not column-scale invariant). With #766's `PivotFloor(0.15)` it converged (32 steps at 3; 17 at
+  the file's 4 since 2026-10-19), by never reaching such a state: the floor does not cure the refusal,
+  which the same state still raises on `main` with the floor on. Detail: `.claude/notes/validation-log.md`,
+  "The re-fit cadence on this machine class, and a corner cell's `k`".
 - **Before attributing a local-only failure to your platform, check CI's skip counts** (root `CLAUDE.md`,
   "CI is not a superset of a local run"); a 2026-08-19 "platform difference" was a skipped test.
 - **`_mis_aggregate`'s return annotation is stale**: `tuple[np.ndarray, int]`, but it returns three values
