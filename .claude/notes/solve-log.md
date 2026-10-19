@@ -693,3 +693,72 @@ name an old class were taken with the same class under its old name; the rename 
 - **Gate C (the improvement-over-reference claim):** on a non-orthogonal mesh the AD-exact
   Jacobian must converge the linear problem in **one** Newton step, where the reference
   needed several. Guard this with a test.
+
+## Near-zero pivots and the float32 split (2026-10-18)
+
+**Configuration:** bfs3d `compare.py`, shipped `case.yaml` (field split `SimpleSmoothed` / `JacobiSmoothed`,
+float32, uniform reach 3, residual stop rtol 0.3 restart 15 max 14, `CflResidualDualTimeControl`, 12 × 1
+ramp, damping 3), branch on `de339a1f`, Apple M3 Pro, jax 0.10.2. Fixed-state numbers are at the start of
+step 19 of the 25-step prototype march (`state-00018`, β 0.005), its step rebuilt faithfully (anchor build,
+then re-pointed; `validation.md`'s replay bullet) with the operator the exact Jacobian; the march's own
+step was reproduced bit for bit from a capture of its `_march_step` arguments (738 array leaves equal; its
+carried residual against a fresh one differs by 5.6e-15 relative, enough to flip the step).
+
+**The mechanism.** One fit, applied in both precisions:
+
+| | float64 | float32 |
+|---|---|---|
+| `M` linear to | 2e-15 | 2–4e-6 |
+| `A·M` linear to (random pairs) | 3e-13 – 1e-12 | 3e-5 – 6e-4 |
+| `A·M` error at the near-zero-pivot cells / 1 / 2–3 / 4–8 / further hops (median, worst field) | — | 10–900 % / 1–99 % / 0.1–67 % / ≤ 0.6 % / 1e-7–1e-5 |
+| exact-Jacobian solve | 8 cycles, row-scaled 0.275, step G → 0.585× | 16 (cap), Euclidean 2.96 (> 1: impossible for exact GMRES), row-scaled 31.9, G ×16–335 |
+| over nine rounding perturbations | identical directions | all different; 3 of 5 never descend |
+
+`M` amplifies the near-zero `k` rows (cells 3068/3069: `|M e|` 2.8e11 in `[k, ω]`, against ~1e5 for a
+typical cell; `M`'s output spans 6e6 in `k` and 4e7 in ω); the finest trailing 2×2 block at 3069 (`k`
+diagonal −1.25e-6) has an inverse entry 4.7e6, cond 2.7e7 — the rest of the 1e11 presumably compounds
+through the cycle's sweeps (inferred from the magnitudes, not traced). Float32 keeps seven digits, so the
+ordinary entries summed beside the amplified ones lose theirs (float32 error up to 20× (`k`) and 80× (ω) a
+field's median value near those cells), and `A·M` keeps it as an O(1) error after `A` cancels the
+amplification. The `k` clip then often turns the direction into a non-descent one.
+
+**Floor variants** (scratch probe, `d` here = the row's shift per unit β = 3 × base diagonal for `k`):
+
+| rule | `k` rows changed | float32 solve | step |
+|---|---|---|---|
+| none | 0 | cap, rounding-decided | rises 16–209× |
+| raise to `0.02 d` (just above zero) | 6 | cap, amplification 1e14 | rises |
+| raise to `0.1 d` / `0.5 d` | 752 / 14 516 | cap, float32 = float64 | descends only at α 1/32 / 1/8 |
+| `p < 0.05 d` → `+0.4 d` / `+0.2 d` | 75 | cap | first descent α 1/8 / 1/4 |
+| `\|p\| < 0.05 d` → `+0.4 d` | 71 | 11–14 cycles | full step, G 0.68–0.73× |
+| `\|p\| < 0.05 d` → `sign(p) 0.4 d` | 71 | **7 cycles, row-scaled ≤ 0.3** | **full step, G 0.89–0.90×** |
+
+In base-diagonal terms the last is `|p| < 0.15 d → sign(p) 1.2 d`; the library ships `→ sign(p) d`
+(`PivotFloor(0.15)`), which at the same state gives the same 71 rows, 7–8 cycles and G 0.83–0.87×. Over
+every shifted row instead of `k` it changed 11 664 rows and the solve hit its cap (ledger).
+
+**Marches** (float32 split, no production freeze, one run per arm):
+
+| arm | eps | steps | cycles | retries | solve wall | `x_r/h` |
+|---|---|---|---|---|---|---|
+| off | 0 | 38 | 292 | — | — | — |
+| floor, scratch hook (`k`, `0.15 d → sign(p) 1.2 d`) | 0 | 21 | 120 | 0 | 501 s | 8.3611 |
+| floor, scratch hook | +1e-14 | 22 | 131 | 0 | 482 s | 8.3611 |
+| **library `PivotFloor(0.15)`** (`BFS3D_PIVOT_FLOOR=0.15`) | 0 | **21** | **115** | 0 | 487 s | 8.3611 |
+| **library `PivotFloor(0.15)`** | +1e-14 | **21** | **111** | 0 | 476 s | 8.3611 |
+
+pitzDaily (shipped `case.yaml`, float32, same machine): off 21 steps / 106 cycles / 66 s, `PITZ_PIVOT_FLOOR=0.15`
+21 / 102 / 66 s, `x_r/h` 8.0686 both; the floor acted (the step rows differ from step 4 on).
+
+The scratch-hook pair agree almost row for row through step 16 and part only at step 17 (α 0.031 against
+0.5, same R); the library floor changed 0–219 rows per re-fit, all of them `k` rows.
+
+**The kept probe** (`pivot_floor_probe.py`, `BFS3D_PROBE_STEP=19` on the prototype run's checkpoints, fresh
+residual plus four perturbed, 2026-10-19): float32 unfloored, every solve at the cap with a Euclidean linear
+residual 1.8–7.2× the right-hand side and a rising ladder, each perturbation different; `PivotFloor(0.15)`,
+71 `k` rows, 7 cycles, row-scaled 0.297, step G → 0.87×, identical for all five. ⚠️ `A·M`'s linearity on
+random vectors stays ~1e-4 floored (2.6e-5–1.4e-4, against 8e-5–6e-4 unfloored): the floor removes the
+error near the floored rows (median 9e-3 → 7e-7 within three cells in the scratch probe), not everywhere —
+3068's healthy negative pivot still amplifies its row ~1e8×, and a state where that matters would need more. Instrument kept: `validation/bfs3d_openfoam/
+pivot_floor_probe.py` (the faithful build, `A·M` linearity, the exact-Jacobian solve over perturbed
+residuals; run it under `BFS3D_SPLIT_PRECISION` and `BFS3D_PIVOT_FLOOR`).

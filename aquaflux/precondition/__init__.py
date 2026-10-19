@@ -63,6 +63,7 @@ from .materialized_spec import (
     materialized_spec_to_mapping,
 )
 from .monolithic_policy import MonolithicFactorShiftPolicy
+from .pivot_floor import PivotFloor
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -101,6 +102,7 @@ __all__ = [
     "MaterializedSession",
     "MonolithicFactorShiftPolicy",
     "OffersTracedCycle",
+    "PivotFloor",
     "RefactorableInverse",
     "ReleasableInverse",
     "ScalarBorder",

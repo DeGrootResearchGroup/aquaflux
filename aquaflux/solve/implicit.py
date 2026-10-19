@@ -96,13 +96,15 @@ def positive_block_projection(
 
     **Why per entry rather than a cap on the whole step.** The same rule can instead shorten the whole
     step, to ``tau * min_i (phi_i / -delta_i)``, and that is a minimum over entries: one entry whose value
-    is numerically zero -- and whose own equation is asking it to be zero -- sets the step length for the
+    is numerically zero -- and whose linearization keeps asking for less -- sets the step length for the
     entire state. Measured on a coupled turbulence march, one side-wall corner cell of 23040 held the
     step to 0.001-0.002 while every other cell admitted 0.6 or more; the step was then redone at a
     larger shift. And a floor on the cap's room only postpones that: when the cap binds, the entry takes
     ``phi_new + floor = (1 - tau) (phi + floor)``, so the room shrinks by ``1 - tau`` every step
-    whatever the floor is. Clipping per entry removes the coupling instead -- the dead entry still decays,
-    because that is what its own equation asks, but alone.
+    whatever the floor is. Clipping per entry removes the coupling instead: the entry still shrinks, by
+    ``1 - tau`` a step while its correction points down, but alone. That shrinking is not a cure: where the
+    linearization points below zero for a reason the root does not share, the entry falls through every
+    scale.
 
     **It remains one search direction.** A per-entry step *length* would make ``phi_i + alpha_i delta_i``
     a different direction at every backtracking rung, so the descent test, the non-descent fallback and

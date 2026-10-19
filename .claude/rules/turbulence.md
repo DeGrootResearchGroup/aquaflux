@@ -102,9 +102,14 @@ Other files point here. If you find one of these names, read it through this tab
     ω: `α min(S², 10β*kω/ν_t)` (OpenFOAM's `c1 = 10` form), read from the frozen closure in the
     segregated path and live in the coupled residual. `_EDDY_VISCOSITY_FLOOR` guards `1/ν_t` at the
     `k→0` edge only.
-  - **The near-wall `k` row's Jacobian diagonal is negative** (`P_k ∝ k` through `nu_t`); only the
-    pseudo-time shift keeps it positive, well clear at the shipped `turbulence_damping` 3. Log,
-    "`sources.py` — the `k` row's Jacobian diagonal is negative".
+  - **The near-wall `k` row's Jacobian diagonal can be negative** (`P_k ∝ k` through `nu_t`), and the
+    pseudo-time shift does not always keep it positive: it does on pitzDaily at `turbulence_damping` 3,
+    ⚠️ **not in bfs3d's top-wall / side-wall corner cells once their `k` is small**, where the local shift
+    is too weak below β ≈ 0.2. A shifted `k` pivot near zero breaks a **float32** field split around it;
+    the materialized preconditioner's pivot floor (`solve.md`, `PivotFloor`) is what keeps the march
+    working there, and `_CoupledProblem.floorable_fields = ("k",)` names the rows it may change (a momentum
+    row's pivot is small beside its pseudo-time diagonal without being singular). Log, "`sources.py` —
+    the `k` row's Jacobian diagonal is negative" and "bfs3d's corner `k` collapse (2026-10-18)".
   - ⚠️ **`explicit_production_limiter` defaults to `False` — the exact operator.** `True` freezes the
     cap's `k` in the linearization only; where the cap binds at the root the IFT adjoint then
     linearizes a different residual and the sensitivity is silently wrong. The cap binds at
@@ -376,6 +381,13 @@ Other files point here. If you find one of these names, read it through this tab
   `math.inf` unbounded; finite with direct ω raises). It replaced a global fraction-to-boundary cap that
   one or two corner cells set to ~0.001 (`solve-globalization-log.md`, "bfs3d's retried steps"). Trap
   for any future cap: a projection applied before a limit leaves the limit nothing to bind.
+  ⚠️ **The clip only shrinks a cell whose correction keeps pointing down (by `1 − tau` a step); it does
+  not cure it.** Where the linearization points below zero and the root does not (bfs3d's corners), the cell
+  falls through every scale and the clipped direction can stop descending. Log, "bfs3d's corner `k`
+  collapse (2026-10-18)".
+- **There is no per-cell production freeze** (removed 2026-10-19, owner's decision; dominated by the
+  pivot floor): `jacobian_production_viscosity` (every cell) is the only production freeze. Ledger, "Per-cell
+  production freeze — REMOVED (2026-10-19)", says how to reopen it.
 - **Stopping measure (binding).** `solve_coupled(convergence=Convergence(measure=…))` names it:
   `RowScaled()` (default — `coupled_scaled_norm`, rebuilt at every outer iteration), `BlockScaled()`
   (held at the initial state), `Euclidean()`. The march builds it from `_CoupledMeasures` at each
