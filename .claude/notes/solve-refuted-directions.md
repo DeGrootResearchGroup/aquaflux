@@ -1675,3 +1675,40 @@ in commit `1e69b4ab` on branch `claude/pivot-floor` (PR #766): `aquaflux/turbule
 `precondition/materialized_session.py`, and the session-owned setting's plumbing in `turbulence/coupled.py`,
 `reynolds.py` and `case/solver.py`. Measurements: `.claude/notes/turbulence-log.md`, "Per-cell production
 freeze (2026-10-18)".
+
+## An assembled `[k, ω]` trailing block in place of the probed one — REFUTED (2026-10-19)
+
+**Tried:** a field split's trailing block built from the k/ω frozen convection-diffusion operators the
+scalar AMGs coarsen (first-order upwind at the residual's own `mdot`, lagged diffusivity, `J·1`
+reaction+boundary diagonal clamped ≥ 0, ω wall cells `detached`, carried into the solved variables by
+column chain factor and the fixation rows' own derivative), written into the probed `A_tt` slice's
+stored pattern before the shift and pivot floor, with the k and ω columns left out of the coloured probe
+(their only other entries are `A_lt`, which the split never reads). Arm 2 added each cell's pointwise
+source linearization (live ν_t and F₁ in the cell's own `k`, `ω`; the k–ω cross terms), exact against
+the coupled Jacobian at a uniform at-rest state. **Missing by construction**: ν_t's `k`/`ω` dependence
+inside the diffusion, the cross-diffusion's gradient terms, the fixation rows' `dω_wall/dk`, and the
+wall cells' coupling to their neighbours (detached). The assembly had to be one `eqx.filter_jit`
+program: eager it cost more per refit than the probes saved (pitzDaily probe phase 1.9 → 4.0 s per
+refit).
+
+**Measured** (branch `claude/no-trailing-probe` off `main` `ed2749a7`, 4-core Linux container, jax
+0.12.0, shipped `case.yaml`s with `PITZ_TRAILING_BLOCK` / `BFS3D_TRAILING_BLOCK`, one run per arm,
+warm compile cache for the pitzDaily rows):
+
+| case / arm | steps | inner | restart cycles | refits | probe | solve wall | final R | `x_r/h` |
+|---|---|---|---|---|---|---|---|---|
+| pitzDaily probed (shipped) | 21 | 47 | 102 | 20 | 36.4 s | 266 s | 5.74e-6 | 8.0686 |
+| pitzDaily assembled | 20 | 50 | 110 | 20 | 23.3 s | 260 s | 4.14e-6 | 8.0686 |
+| pitzDaily assembled + sources | 26 | 51 | 146 | 25 | 32.7 s | 333 s | 7.38e-6 | 8.0686 |
+| bfs3d assembled | 46 (capped) | 90 | 512 | 27 | 837 s (~31 s each) | 9069 s, not converged | 5.2e-5 (target 1e-5) | — |
+
+The probe got ~a third cheaper per refit, as planned, but the weaker block cost cycles everywhere: +8 %
+on pitzDaily (wall within this container's 5–10 % noise), and on bfs3d the march stalled from step 34
+at R ≈ 1e-4 → 7e-5 with every solve at its 14-cycle cap, killed at 9069 s against the shipped record of
+17 steps (`.claude/rules/validation.md`, cadence 4; a different commit, but the gap is decisive; the
+shipped arm was not re-run on this tree, by the owner's call). Adding the source coupling made pitzDaily
+worse, so the missing load is in the non-pointwise terms the probe recovers. Not diagnosed which of them
+dominates. The code was deleted (owner's decision); the neutral refactors stayed
+(`turbulence/scalar_variables.py`, `scalar_operator_parts`, `_k_sources` / `_omega_sources`). Re-open
+only with a block that keeps those terms (e.g. the trailing columns probed with their own colouring),
+and judge it by a whole bfs3d march.

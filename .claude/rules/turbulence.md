@@ -158,6 +158,14 @@ Other files point here. If you find one of these names, read it through this tab
   #386 a rebuilt two-level preconditioner is a cache hit too, so carrying saves only the ~1 s build; a
   rebuilt lAIR still misses. Pinned by
   `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`.
+  - The operator is built from `scalar_operator_parts` (state-dependent arrays: conductance, volume
+    flux, `J·1`) and `_stencil_of` / `scalar_transport_operator(mesh, parts, fixed_cells=)` (host
+    assembly); `_scalar_stencil` and the AMG's operator share them. ⚠️ **Do not use it as a field split's
+    `[k, ω]` block in place of the probed one** — measured and refuted, 2026-10-19
+    (`solve-refuted-directions.md`, "An assembled `[k, ω]` trailing block").
+- **`scalar_variables.py`** — `ScalarVariableTransform` / `DirectScalars` / `LogScalars` and
+  `_row_jacobian_scale` (`coupled` re-imports them). `SSTTurbulence._k_sources` / `_omega_sources` are
+  the one home of each equation's source tuple.
 - **`continuation.py`** — `ScalarShiftPolicy` and `scalar_pseudo_transient_solve`: the k/ω solves
   globalized by `solve.PseudoTransientStep` with a transport-diagonal shift (forward-only; its
   `adjoint_solver` is inert).
@@ -287,7 +295,7 @@ Other files point here. If you find one of these names, read it through this tab
   - **The row's derivative must reach the preconditioner too (binding).** `_reparametrized_preconditioner`
     rescales the physical-operator AMG by `1/(dφ/dw)`, valid only for rows assembled in φ.
     `FixationRow.jacobian_scale(phi, chain)` gives each row its own (`LogRatioRow` → exactly 1), and
-    `coupled._row_jacobian_scale` assembles the per-row array; pinned against AD of the row. General
+    `scalar_variables._row_jacobian_scale` assembles the per-row array; pinned against AD of the row. General
     rule: anything that rescales a block **per row** must ask each row for its derivative. Change the
     row and its preconditioner scaling together.
 - ⚠️ **The k shift's reaction diagonal**: `abs` of the net diagonal halves the shift (reverted, #312);

@@ -979,7 +979,6 @@ class SSTTurbulence(eqx.Module):
         diffusivity = self._diffusivity(
             closure.nu_t, closure.f1, self.model.sigma_k1, self.model.sigma_k2
         )
-        near_wall = self._near_wall_closure(closure.wall_shear_rate)
         assembler = self._assembler(
             PropertyModel({"diffusivity": diffusivity}),
             (
@@ -990,19 +989,41 @@ class SSTTurbulence(eqx.Module):
             ),
             self.k_boundary,
             gradient_scheme=self.k_gradient_scheme,
-            source_operators=(
-                KProduction(
-                    self._production_viscosity(closure),
-                    closure.strain_rate,
-                    closure.omega,
-                    self.model,
-                    explicit_production_limiter=self.explicit_production_limiter,
-                    near_wall=near_wall,
-                ),
-                KDestruction(closure.omega, self.model, near_wall=near_wall),
-            ),
+            source_operators=self._k_sources(closure),
         )
         return assembler.residual
+
+    def _k_sources(self, closure: SSTClosureFields) -> tuple:
+        """The k equation's volume sources, read from ``closure``: production and destruction."""
+        near_wall = self._near_wall_closure(closure.wall_shear_rate)
+        return (
+            KProduction(
+                self._production_viscosity(closure),
+                closure.strain_rate,
+                closure.omega,
+                self.model,
+                explicit_production_limiter=self.explicit_production_limiter,
+                near_wall=near_wall,
+            ),
+            KDestruction(closure.omega, self.model, near_wall=near_wall),
+        )
+
+    def _omega_sources(self, closure: SSTClosureFields) -> tuple:
+        """The omega equation's volume sources: production, destruction and cross-diffusion."""
+        return (
+            OmegaProduction(
+                closure.strain_rate,
+                closure.nu_t,
+                closure.k,
+                closure.omega,
+                closure.f1,
+                self.model,
+            ),
+            OmegaDestruction(closure.f1, self.model),
+            OmegaCrossDiffusion(
+                closure.omega, closure.grad_k, closure.grad_omega, closure.f1, self.model
+            ),
+        )
 
     def _production_viscosity(self, closure: SSTClosureFields) -> jnp.ndarray:
         """The eddy viscosity the k-production reads, shape ``(n_cells,)``.
@@ -1092,20 +1113,7 @@ class SSTTurbulence(eqx.Module):
             ),
             self.omega_boundary,
             gradient_scheme=self.omega_gradient_scheme,
-            source_operators=(
-                OmegaProduction(
-                    closure.strain_rate,
-                    closure.nu_t,
-                    closure.k,
-                    closure.omega,
-                    closure.f1,
-                    self.model,
-                ),
-                OmegaDestruction(closure.f1, self.model),
-                OmegaCrossDiffusion(
-                    closure.omega, closure.grad_k, closure.grad_omega, closure.f1, self.model
-                ),
-            ),
+            source_operators=self._omega_sources(closure),
             # The same imposition the closure fields were built with. This equation reconstructs
             # `omega`'s gradient again for the diffusion's non-orthogonal correction, and a
             # reconstruction that is a model quantity in the wall cells is one wherever it is made --

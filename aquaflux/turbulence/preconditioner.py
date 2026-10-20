@@ -28,7 +28,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import equinox as eqx
 import jax
@@ -250,6 +250,97 @@ class UnpreconditionedScalars(ScalarBlock):
 _DEFAULT_SCALAR_BLOCK = ScalarTwoLevel()
 
 
+class ScalarOperatorParts(NamedTuple):
+    """The arrays a frozen scalar transport operator is assembled from, before any host-side assembly.
+
+    Everything about the operator that depends on the state, as JAX arrays (traceable, so it could
+    run inside a compiled program); :func:`scalar_transport_operator` turns it into the operator on
+    the host.
+
+    Attributes
+    ----------
+    conductance : jnp.ndarray
+        The flux-continuous diffusion conductance ``Gamma_P A / denom`` per face, shape ``(n_faces,)``.
+    volume_flux : jnp.ndarray
+        The owner-outward convective volume flux per face, shape ``(n_faces,)``.
+    row_sums : jnp.ndarray
+        ``J . 1`` of the scalar residual, per cell, shape ``(n_cells,)``.
+    """
+
+    conductance: jnp.ndarray
+    volume_flux: jnp.ndarray
+    row_sums: jnp.ndarray
+
+
+def scalar_operator_parts(
+    geometry: MeshGeometry,
+    face_cells,
+    diffusivity: jnp.ndarray,
+    volume_flux: jnp.ndarray,
+    residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
+    reference: jnp.ndarray,
+) -> ScalarOperatorParts:
+    """The state-dependent arrays of the frozen scalar operator.
+
+    The conductance is the one the scalar residual's diffusion flux carries (harmonic-mean limit on a
+    graded ``Gamma``), so the operator cannot drift from it; ``J . 1`` is read from the residual
+    itself, so its sources are never re-implemented here.
+
+    Parameters
+    ----------
+    geometry : MeshGeometry
+        The mesh metrics.
+    face_cells : FaceCellConnectivity
+        The mesh's face-to-cell connectivity.
+    diffusivity, volume_flux, residual_fn, reference
+        As :func:`scalar_transport_preconditioner`.
+
+    Returns
+    -------
+    ScalarOperatorParts
+        Detached from differentiation: the operator only ever preconditions.
+    """
+    gamma = jax.lax.stop_gradient(diffusivity)
+    conductance = flux_continuous_conductance(gamma, geometry, face_cells)
+    _, row_sums = jax.jvp(residual_fn, (reference,), (jnp.ones_like(reference),))
+    return ScalarOperatorParts(
+        *(jax.lax.stop_gradient(part) for part in (conductance, volume_flux, row_sums))
+    )
+
+
+def _stencil_of(mesh: Mesh, parts: ScalarOperatorParts) -> ConvectionDiffusionStencil:
+    """The frozen scalar convection-diffusion-reaction operator, before assembly (no fixed cells).
+
+    Shared by the AMG preconditioner's operator and the pseudo-time shift diagonal: both
+    need the same interior stencil (``viscous + first-order-upwind convection``) and the same
+    reaction-plus-boundary diagonal. Value fixations (e.g. the omega near-wall cells) are *not* applied
+    here -- each consumer imposes its own (the preconditioner detaches them from the aggregation; the
+    shift zeroes them).
+    """
+    owner_e, nb_e, interior_faces = mesh.face_cells.interior_edges()
+    n = mesh.n_cells
+    visc_int = np.asarray(parts.conductance)[interior_faces]
+    mdot_int = np.asarray(parts.volume_flux)[interior_faces]
+    # Reaction + boundary diagonal. The interior stencil (the edges above) carries only the interior
+    # faces, so the true diagonal must be corrected by everything else on it: the local source
+    # linearization and the Dirichlet boundary-face stiffness. That is J . 1 minus the interior
+    # convective imbalance -- a conservative interior operator has zero row sums, but a
+    # boundary-adjacent cell's interior faces do not sum to zero (the boundary face carrying the rest
+    # is absent from the edge list), and J . 1 would otherwise fold that imbalance into the diagonal
+    # (double-counting the boundary flux). Subtracting the interior net outflow removes it exactly.
+    interior_outflow = np.zeros(n)
+    np.add.at(interior_outflow, owner_e, mdot_int)
+    np.add.at(interior_outflow, nb_e, -mdot_int)
+    boundary_diagonal = np.asarray(parts.row_sums) - interior_outflow
+    # Clamp non-negative: any residual anti-diffusive source (e.g. an active production limiter not
+    # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
+    # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian).
+    boundary_diagonal = np.maximum(boundary_diagonal, 0.0)
+    return ConvectionDiffusionStencil(
+        owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
+    )
+
+
 def _scalar_stencil(
     mesh: Mesh,
     geometry: MeshGeometry,
@@ -258,48 +349,11 @@ def _scalar_stencil(
     residual_fn: Callable[[jnp.ndarray], jnp.ndarray],
     reference: jnp.ndarray,
 ) -> ConvectionDiffusionStencil:
-    """The frozen scalar convection-diffusion-reaction operator, before assembly (no fixed cells).
-
-    Shared by the AMG preconditioner and the pseudo-time shift diagonal: both need the same interior
-    stencil (``viscous + first-order-upwind convection``) and the same reaction-plus-boundary diagonal.
-    The preconditioner assembles it; the shift reads its diagonal.
-
-    Its edges carry the flux-continuous diffusion conductance ``Gamma_P A / denom`` and the
-    owner-outward volume flux ``mdot``, and its boundary diagonal is the clamped reaction+boundary
-    diagonal. Value fixations (e.g. the omega near-wall cells) are *not* applied here -- each consumer
-    imposes its own (the preconditioner detaches them from the aggregation; the shift zeroes them).
-    """
-    face_cells = mesh.face_cells
-    owner_e, nb_e, interior_faces = face_cells.interior_edges()
-    n = mesh.n_cells
-
-    # Flux-continuous diffusion conductance Gamma_P * A / denom -- the scalar transport operator's own
-    # diagonal contribution per face (harmonic-mean limit on graded Gamma), the same conductance the
-    # k/omega residual's DiffusionFlux carries, so the shift/operator cannot drift from it.
-    gamma = jax.lax.stop_gradient(diffusivity)
-    viscous = flux_continuous_conductance(gamma, geometry, face_cells)
-    visc_int = np.asarray(jax.lax.stop_gradient(viscous))[interior_faces]
-    mdot_int = np.asarray(jax.lax.stop_gradient(volume_flux))[interior_faces]
-
-    # Reaction + boundary diagonal. The interior stencil (the edges above) carries only the interior
-    # faces, so the true diagonal must be corrected by everything else on it: the local source
-    # linearization and the Dirichlet boundary-face stiffness. That is J . 1 minus the interior
-    # convective imbalance -- a conservative interior operator has zero row sums, but a
-    # boundary-adjacent cell's interior faces do not sum to zero (the boundary face carrying the rest
-    # is absent from the edge list), and J . 1 would otherwise fold that imbalance into the diagonal
-    # (double-counting the boundary flux). Subtracting the interior net outflow removes it exactly.
-    _, j_dot_one = jax.jvp(residual_fn, (reference,), (jnp.ones_like(reference),))
-    interior_outflow = np.zeros(n)
-    np.add.at(interior_outflow, owner_e, mdot_int)
-    np.add.at(interior_outflow, nb_e, -mdot_int)
-    boundary_diagonal = np.asarray(jax.lax.stop_gradient(j_dot_one)) - interior_outflow
-    # Clamp non-negative: any residual anti-diffusive source (e.g. an active production limiter not
-    # already made explicit) would make the operator indefinite and its V-cycle diverge; dropping it
-    # keeps an M-matrix and only softens the preconditioner (it approximates the Jacobian).
-    boundary_diagonal = np.maximum(boundary_diagonal, 0.0)
-    return ConvectionDiffusionStencil(
-        owner_e, nb_e, visc_int, n, flux=mdot_int, boundary_diagonal=boundary_diagonal
+    """:func:`_stencil_of` the parts :func:`scalar_operator_parts` computes, eagerly."""
+    parts = scalar_operator_parts(
+        geometry, mesh.face_cells, diffusivity, volume_flux, residual_fn, reference
     )
+    return _stencil_of(mesh, parts)
 
 
 def scalar_transport_shift_diagonal(
@@ -465,17 +519,47 @@ def scalar_transport_preconditioner(
         )
 
     def operator() -> sp.csr_matrix:
-        stencil = _scalar_stencil(mesh, geometry, diffusivity, volume_flux, residual_fn, reference)
-        if fixed_cells is not None:
-            # Identity rows: the residual there is the value fixation, not a transport balance. A unit
-            # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of
-            # the row forms in use, but a caller rescaling this operator for a reparametrized block
-            # must take each row's own derivative rather than the block-wide chain factor, or these
-            # rows come out mis-scaled by the field itself.
-            stencil = stencil.detached(np.asarray(fixed_cells))
-        return stencil.assemble()
+        parts = scalar_operator_parts(
+            geometry, mesh.face_cells, diffusivity, volume_flux, residual_fn, reference
+        )
+        return scalar_transport_operator(mesh, parts, fixed_cells=fixed_cells)
 
     return scalar._build(operator, reuse)
+
+
+def scalar_transport_operator(
+    mesh: Mesh, parts: ScalarOperatorParts, *, fixed_cells: np.ndarray | None = None
+) -> sp.csr_matrix:
+    """The frozen scalar convection-diffusion-reaction operator, assembled from its parts.
+
+    The matrix :func:`scalar_transport_preconditioner`'s hierarchy coarsens: first-order-upwind
+    convection on the frozen flux, diffusion at the frozen diffusivity, and the clamped reaction plus
+    boundary diagonal read from the residual's own ``J . 1``.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        The transport mesh, read for its interior edges.
+    parts : ScalarOperatorParts
+        The state-dependent arrays, from :func:`scalar_operator_parts`.
+    fixed_cells : np.ndarray, optional
+        As :func:`scalar_transport_preconditioner`: their rows become the identity, detached from every
+        neighbour.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix
+        The operator in the physical field, shape ``(n_cells, n_cells)``.
+    """
+    stencil = _stencil_of(mesh, parts)
+    if fixed_cells is not None:
+        # Identity rows: the residual there is the value fixation, not a transport balance. A unit
+        # diagonal presumes the fixation row has unit derivative in the solved unknown -- true of the
+        # row forms in use, but a caller rescaling this operator for a reparametrized block must take
+        # each row's own derivative rather than the block-wide chain factor, or these rows come out
+        # mis-scaled by the field itself.
+        stencil = stencil.detached(np.asarray(fixed_cells))
+    return stencil.assemble()
 
 
 def _reused_hierarchy(reuse: ScalarTransportPreconditioner, expected: type) -> object:

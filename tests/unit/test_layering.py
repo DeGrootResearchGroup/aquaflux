@@ -65,10 +65,11 @@ BUDGETS = {
     # to ``precondition/``; the mass-flow border -- layout, seed, constraint vectors and bulk-velocity
     # average -- to ``flow/drive.py``, and its bordered residual, shift policy and measures to
     # ``flow/bordered.py`` (which also let the separate mass-flow solve and builder go); the row-scaled
-    # measure with its equation names to ``turbulence/measures.py``.
+    # measure with its equation names to ``turbulence/measures.py``; the scalar-variable transforms to
+    # ``turbulence/scalar_variables.py``.
     # What stays of the session and the probe are their RANS adapters (``_CoupledProblem``,
     # ``_CoupledNarrowing``) and the block-diagonal session, a preconditioner family of its own.
-    "turbulence/coupled.py": 2917,
+    "turbulence/coupled.py": 2793,
     # Every algebraic multigrid family -- smoothed aggregation, its two-level convection variant and
     # lAIR -- in one module: the host-side coarsening (orderings, aggregation, strength and splitting,
     # structural patterns, Galerkin products) beside the traced levels, smoothers and cycle drivers

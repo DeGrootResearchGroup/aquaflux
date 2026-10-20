@@ -353,3 +353,48 @@ def test_unpreconditioned_scalars_build_nothing_and_assemble_no_operator() -> No
 def test_a_scalar_block_given_as_a_string_is_refused() -> None:
     with pytest.raises(TypeError, match="scalar must be a scalar-block value"):
         _built("air", 1.0, 1.0)
+
+
+def test_the_assembled_operator_is_the_jacobian_of_a_first_order_upwind_scalar() -> None:
+    """Where the frozen operator's approximations are all exact -- first-order upwinding, a frozen
+    diffusivity, an orthogonal mesh, a sink linear in the field -- the assembled operator IS the
+    residual's Jacobian, entry for entry, under graded diffusivity and a non-uniform flux."""
+    from aquaflux.discretization import VolumeSource
+    from aquaflux.turbulence.preconditioner import scalar_operator_parts, scalar_transport_operator
+
+    class _LinearSink(VolumeSource):
+        rate: jnp.ndarray
+
+        def source(self, field, context):
+            return -self.rate * field * context.mesh.geometry.cell.volume
+
+    mesh = structured_grid_2d(7, 5, lx=4.0, ly=1.0, named_boundaries=True)
+    geometry = mesh.geometry()
+    x = geometry.cell.centroid[:, 0]
+    gamma = 1e-2 * jnp.exp(2.0 * (x - x.min()) / (x.max() - x.min()))
+    face_x = geometry.face.centroid[:, 0]
+    # A flux that reverses across the domain, so both upwind directions are exercised.
+    volume_flux = (face_x - 2.0) * geometry.face.normal[:, 0] * geometry.face.area
+    rate = 0.5 + jax.random.uniform(jax.random.PRNGKey(3), (mesh.n_cells,))
+    assembler = ResidualAssembler.build(
+        mesh,
+        geometry,
+        PropertyModel({"diffusivity": FieldProperty(gamma)}),
+        (AdvectionFlux(volume_flux, FirstOrderUpwind()), DiffusionFlux()),
+        BoundaryConditions(
+            {
+                "left": Dirichlet(1.0),
+                "right": ZeroGradient(),
+                "bottom": Dirichlet(0.0),
+                "top": Dirichlet(0.0),
+            }
+        ),
+        source_operators=(_LinearSink(rate),),
+    )
+    reference = jnp.linspace(0.0, 1.0, mesh.n_cells)
+    parts = scalar_operator_parts(
+        geometry, mesh.face_cells, gamma, volume_flux, assembler.residual, reference
+    )
+    assembled = scalar_transport_operator(mesh, parts).toarray()
+    jacobian = np.asarray(jax.jacfwd(assembler.residual)(reference))
+    np.testing.assert_allclose(assembled, jacobian, rtol=1e-12, atol=1e-14)

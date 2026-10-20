@@ -180,4 +180,7 @@ excluded, the kept blocks are ~78 % of the full pattern (leading 44 %, trailing 
 cheaper route:** probe `[k,ω]` on its own with a 2-field colouring at reach 2 (k and ω enter pointwise;
 only `ν_t`'s strain-rate dependence needs reach 3), keeping the true k↔ω coupling without materializing
 the leading or coupling blocks. The block-diagonal `BlockDiagonal(ScalarTwoLevel, ...)` path
-materializes nothing but was insufficient on `bfs3d`.
+materializes nothing but was insufficient on `bfs3d`. **Refuted (2026-10-19): assembling `A_tt` from
+the k/ω frozen transport operators and leaving the trailing columns out of the probe** (probe ~⅓
+cheaper; pitzDaily +8 % cycles at equal wall, bfs3d did not converge in 9069 s / 46 steps):
+`solve-refuted-directions.md`, "An assembled `[k, ω]` trailing block".

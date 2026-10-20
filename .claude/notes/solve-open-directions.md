@@ -185,6 +185,10 @@ against 14.8 s with the maps as committed (15.2-17.0 s in two runs of an earlier
 refit paying ~1.5-2.5 s more to build them and every later one ~0.5-0.7 s against ~0.9-1.1 s, for
 ~0.2 GB more host memory. The refactor row above predates this.
 
+**Cutting the probe's trailing columns by assembling `[k, ω]` instead is refuted** (2026-10-19, the probe
+~⅓ cheaper, the march worse on both cases): `solve-refuted-directions.md`, "An assembled `[k, ω]`
+trailing block".
+
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
 the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 % on pitzDaily; on bfs3d on 4-core Linux with the pivot floor, where a re-fit costs ~2.5 steps, 4 took 0.59x the solve of 3 and 5 1.18x, one sample each, 2026-10-19).

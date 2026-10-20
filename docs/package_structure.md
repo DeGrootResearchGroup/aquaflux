@@ -126,12 +126,13 @@ cfd/                                  # repo root
 │   │
 │   ├── turbulence/                   # k–ω SST closure and the flow–turbulence coupling
 │   │   ├── sst.py                    #   SSTModel: the closure constants and the quantities derived directly from them
-│   │   ├── transport.py              #   assembly of the k and ω transport equations on a configured mesh (ScalarVariableTransform → DirectScalars / LogScalars)
+│   │   ├── transport.py              #   assembly of the k and ω transport equations on a configured mesh
 │   │   ├── sources.py                #   the SST source terms as VolumeSource operators: KProduction/KDestruction, OmegaProduction/OmegaDestruction/OmegaCrossDiffusion
 │   │   ├── strain.py                 #   strain_rate_magnitude: the scalar invariant the closure consumes
 │   │   ├── scales.py                 #   turbulence_scales: reference k and ω from the flow's speed and hydraulic length (sizes a scaled k/ω advection)
 │   │   ├── boundary.py               #   wall and inlet values: omega_wall, nut_wall, inlet_k/inlet_omega, wall_y_star, wall_shear_stress (y+-insensitive wall treatment)
 │   │   ├── coupled.py                #   CoupledRANS: the monolithic residual R(u, p, k, ω) + coupled_rans_layout
+│   │   ├── scalar_variables.py       #   ScalarVariableTransform → DirectScalars / LogScalars: the solved k/ω unknown and each row's derivative in it
 │   │   ├── driver.py                 #   solve_segregated: the segregated outer loop coupling the flow solve to the closure
 │   │   ├── continuation.py           #   pseudo-transient continuation for the (k, ω) scalar transport solves
 │   │   ├── reynolds.py               #   solve_reynolds_continuation: reach a high-Reynolds root through easier lower-Re ones
