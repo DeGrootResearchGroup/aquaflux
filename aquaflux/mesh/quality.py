@@ -2,10 +2,11 @@
 warp, non-orthogonality, skewness, cell convexity, and how much a cell's volume depends on how its
 faces are triangulated.
 
-These are run **once** at build time to check a mesh, not inside the solve. They exist to
+These are run at build time to check a mesh, not inside the solve. They exist to
 answer questions like "are my faces warped enough that the centre-fan geometry needs
 iterating?" — cheaply and quantitatively, so robustness is a measured property rather than
-an assumption.
+an assumption. A mesh smoother checks every trial position of its vertices; :class:`MeshQuality`
+finds what the checks need of the connectivity once, so each check costs only its arithmetic.
 
 Non-orthogonality, skewness and the face-centroid concavity test follow the definitions of
 OpenFOAM's ``checkMesh``, so a mesh's numbers can be compared with what that tool reports for it.
@@ -15,13 +16,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import equinox as eqx
 import jax.numpy as jnp
+import numba
 import numpy as np
 
-from aquaflux import ragged
 from aquaflux.vectors import dot, norm, scale
 
 from .face import PolygonFaceGeometry
+from .geometry import MeshGeometry
+from .orientation import ring_signs
 
 if TYPE_CHECKING:
     from .mesh import Mesh
@@ -120,7 +124,7 @@ def face_warp(mesh: Mesh) -> jnp.ndarray:
     if mesh.dim == 2:
         return jnp.zeros(mesh.n_faces)
     face_geometry = mesh.geometry().face
-    lift = _vertex_lift(mesh, face_geometry.normal)
+    lift = _vertex_lift(mesh.face_nodes, mesh.node_coords, face_geometry.normal)
     area = face_geometry.area
     largest = mesh.face_nodes.max_to_faces(jnp.abs(lift))
     return jnp.where(area > 0.0, largest / jnp.sqrt(jnp.where(area > 0.0, area, 1.0)), jnp.inf)
@@ -147,7 +151,9 @@ def triangulation_volume_change(mesh: Mesh) -> jnp.ndarray:
         return jnp.zeros(mesh.n_cells)
     geometry = mesh.geometry()
     face_geometry = geometry.face
-    lift = _vertex_lift(mesh, face_geometry.normal)  # along the owner-outward normal
+    lift = _vertex_lift(
+        mesh.face_nodes, mesh.node_coords, face_geometry.normal
+    )  # along the owner-outward normal
     third_area = face_geometry.area / 3.0
     rise = third_area * mesh.face_nodes.max_to_faces(lift)  # the most a fan can add, owner side
     fall = third_area * mesh.face_nodes.max_to_faces(-lift)  # the most it can remove
@@ -158,22 +164,20 @@ def triangulation_volume_change(mesh: Mesh) -> jnp.ndarray:
     return jnp.maximum(gain, loss) / geometry.cell.volume
 
 
-def _vertex_lift(mesh: Mesh, normal: jnp.ndarray) -> jnp.ndarray:
+@eqx.filter_jit
+def _vertex_lift(face_nodes, node_coords, normal: jnp.ndarray) -> jnp.ndarray:
     """Each face incidence's height ``n . (v - c)`` above its face's vertex-mean plane."""
-    face_nodes = mesh.face_nodes
-    mean = face_nodes.vertex_mean(mesh.node_coords)
+    mean = face_nodes.vertex_mean(node_coords)
     of_face = face_nodes.face_of_incidence
-    return dot(face_nodes.gather_node_coords(mesh.node_coords) - mean[of_face], normal[of_face])
+    return dot(face_nodes.gather_node_coords(node_coords) - mean[of_face], normal[of_face])
 
 
-def _centre_line(mesh: Mesh) -> tuple[jnp.ndarray, jnp.ndarray]:
+def _centre_line(geometry: MeshGeometry, face_cells) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Per face, the owner centroid to the face centroid, and the owner to the neighbour centroid.
 
     On a boundary face the second is the first projected onto the face normal: the line from the
     owner's centroid perpendicular to the face, which is what both checks measure against there.
     """
-    geometry = mesh.geometry()
-    face_cells = mesh.face_cells
     cell_centroid = geometry.cell.centroid
     owner_centroid = cell_centroid[face_cells.owner]
     to_face = geometry.face.centroid - owner_centroid
@@ -197,10 +201,15 @@ def face_non_orthogonality(mesh: Mesh) -> jnp.ndarray:
     jnp.ndarray
         Angle per face in degrees, shape ``(n_faces,)``.
     """
-    to_face, across = _centre_line(mesh)
-    interior = mesh.face_cells.interior[:, None]
-    line = jnp.where(interior, across, to_face)
-    normal = mesh.geometry().face.normal
+    return _non_orthogonality(mesh.geometry(), mesh.face_cells)
+
+
+@eqx.filter_jit
+def _non_orthogonality(geometry: MeshGeometry, face_cells) -> jnp.ndarray:
+    """:func:`face_non_orthogonality` from a geometry already computed."""
+    to_face, across = _centre_line(geometry, face_cells)
+    line = jnp.where(face_cells.interior[:, None], across, to_face)
+    normal = geometry.face.normal
     cosine = dot(line, normal) / jnp.maximum(norm(line), jnp.finfo(line.dtype).tiny)
     return jnp.degrees(jnp.arccos(jnp.clip(cosine, -1.0, 1.0)))
 
@@ -221,19 +230,24 @@ def face_skewness(mesh: Mesh) -> jnp.ndarray:
     jnp.ndarray
         Skewness per face, shape ``(n_faces,)``.
     """
-    to_face, line = _centre_line(mesh)
-    face_geometry = mesh.geometry().face
+    return _skewness(mesh.node_coords, mesh.geometry(), mesh.face_cells, mesh.face_nodes)
+
+
+@eqx.filter_jit
+def _skewness(node_coords, geometry: MeshGeometry, face_cells, face_nodes) -> jnp.ndarray:
+    """:func:`face_skewness` from a geometry already computed at ``node_coords``."""
+    to_face, line = _centre_line(geometry, face_cells)
+    face_geometry = geometry.face
     normal = face_geometry.normal
     tiny = jnp.finfo(line.dtype).tiny
     along = dot(normal, to_face) / jnp.where(dot(normal, line) == 0.0, tiny, dot(normal, line))
     skew = to_face - scale(line, along)
     length = norm(skew)
     direction = scale(skew, 1.0 / jnp.maximum(length, tiny))
-    face_nodes = mesh.face_nodes
     of_face = face_nodes.face_of_incidence
-    offset = face_nodes.gather_node_coords(mesh.node_coords) - face_geometry.centroid[of_face]
+    offset = face_nodes.gather_node_coords(node_coords) - face_geometry.centroid[of_face]
     extent = face_nodes.max_to_faces(jnp.abs(dot(offset, direction[of_face])))
-    floor = jnp.where(mesh.face_cells.interior, 0.2, 0.4) * norm(line)
+    floor = jnp.where(face_cells.interior, 0.2, 0.4) * norm(line)
     return length / jnp.maximum(jnp.maximum(extent, floor), tiny)
 
 
@@ -252,21 +266,8 @@ def cell_non_convexity(mesh: Mesh) -> np.ndarray:
     np.ndarray
         Non-convexity per cell, shape ``(n_cells,)``.
     """
-    geometry = mesh.geometry()
-    coords = np.asarray(mesh.node_coords)
-    normal = np.asarray(geometry.face.normal)
-    centroid = np.asarray(geometry.face.centroid)
-    sides = _CellSides.of(mesh)
-    offsets, vertex = mesh.cell_nodes()
-    vertex_cell = np.repeat(np.arange(mesh.n_cells), np.diff(offsets))
-
-    def excursion(side, other):
-        face = sides.face[side]
-        rise = np.einsum("ij,ij->i", coords[vertex[other]] - centroid[face], normal[face])
-        return sides.sign[side] * rise
-
-    worst = sides.largest(vertex_cell, excursion, mesh.n_cells)
-    return worst / np.asarray(geometry.cell.volume) ** (1.0 / mesh.dim)
+    quality = MeshQuality(mesh)
+    return quality.cell_non_convexity(mesh.node_coords, quality.geometry(mesh.node_coords))
 
 
 def cell_concavity(mesh: Mesh) -> np.ndarray:
@@ -283,63 +284,143 @@ def cell_concavity(mesh: Mesh) -> np.ndarray:
     np.ndarray
         Largest cosine per cell, shape ``(n_cells,)``.
     """
-    geometry = mesh.geometry()
-    normal = np.asarray(geometry.face.normal)
-    centroid = np.asarray(geometry.face.centroid)
-    sides = _CellSides.of(mesh)
-
-    def cosine(side, other):
-        face, towards = sides.face[side], sides.face[other]
-        offset = centroid[towards] - centroid[face]
-        length = np.linalg.norm(offset, axis=1)
-        value = sides.sign[side] * np.einsum("ij,ij->i", offset, normal[face])
-        return np.where(towards == face, -1.0, value / np.where(length > 0.0, length, 1.0))
-
-    return sides.largest(sides.cell, cosine, mesh.n_cells)
+    quality = MeshQuality(mesh)
+    return quality.cell_concavity(quality.geometry(mesh.node_coords))
 
 
-class _CellSides:
-    """Each cell's faces, as (cell, face, outward sign) triples, and maxima over pairs within cells.
+class MeshQuality:
+    """The quality checks of one mesh's connectivity, at whatever node coordinates are given.
 
-    A cell-level check pairs every face of a cell with every vertex (or other face) of the same
-    cell. The pairs are formed a block of cells at a time, so the working set stays bounded on a
-    large mesh.
+    What the checks need of the connectivity -- each cell's faces with the side the cell sees each
+    from, each cell's distinct vertices, and the faces' ring directions the geometry is oriented
+    by -- depends on the topology alone. It is found once, here, so a caller that moves the
+    vertices many times and checks the mesh after each move (a smoother) pays only for the
+    arithmetic. The module's functions of a :class:`~aquaflux.mesh.Mesh` evaluate through one.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        The topology; its node coordinates are not used.
+
+    Examples
+    --------
+    >>> from aquaflux.mesh import MeshQuality, structured_grid_3d
+    >>> mesh = structured_grid_3d(2, 1, 1)
+    >>> quality = MeshQuality(mesh)
+    >>> geometry = quality.geometry(mesh.node_coords)
+    >>> float(quality.face_non_orthogonality(geometry).max())
+    0.0
     """
 
-    _PAIRS_PER_BLOCK = 4_000_000
-
-    def __init__(self, cell: np.ndarray, face: np.ndarray, sign: np.ndarray) -> None:
-        self.cell, self.face, self.sign = cell, face, sign
-
-    @classmethod
-    def of(cls, mesh: Mesh) -> _CellSides:
+    def __init__(self, mesh: Mesh) -> None:
+        self._mesh = mesh
+        self._signs = ring_signs(mesh.face_nodes, mesh.face_cells)
         owner = np.asarray(mesh.face_cells.owner, dtype=np.int64)
         neighbour = np.asarray(mesh.face_cells.neighbour, dtype=np.int64)
         interior = np.flatnonzero(neighbour >= 0)
         cell = np.concatenate([owner, neighbour[interior]])
-        face = np.concatenate([np.arange(owner.size), interior])
-        sign = np.concatenate([np.ones(owner.size), -np.ones(interior.size)])
-        return cls(cell, face, sign)
+        order = np.argsort(cell, kind="stable")
+        # Each cell's sides -- (face, outward sign) -- in compressed-sparse-row (CSR) form.
+        self._side_offsets = np.zeros(mesh.n_cells + 1, dtype=np.int64)
+        np.cumsum(np.bincount(cell, minlength=mesh.n_cells), out=self._side_offsets[1:])
+        self._side_face = np.concatenate([np.arange(owner.size), interior])[order]
+        self._side_sign = np.concatenate([np.ones(owner.size), -np.ones(interior.size)])[order]
+        self._node_offsets, self._nodes = mesh.cell_nodes()
 
-    def largest(self, other_cell: np.ndarray, value, n_cells: int) -> np.ndarray:
-        """Per cell, the largest ``value(side, other)`` over its sides and the items of ``other_cell``.
+    def geometry(self, node_coords: jnp.ndarray) -> MeshGeometry:
+        """The mesh's geometry with its vertices at ``node_coords``, shape ``(n_nodes, dim)``."""
+        moved = eqx.tree_at(lambda m: m.node_coords, self._mesh, jnp.asarray(node_coords))
+        return moved.geometry(self._signs)
 
-        ``other_cell`` labels each of a second list of items with its cell; ``value`` maps arrays of
-        side indices and item indices, paired within cells, to one value per pair.
+    def vertex_heights(self, node_coords: jnp.ndarray, geometry: MeshGeometry) -> jnp.ndarray:
+        """Each face incidence's height above its face's vertex-mean plane, along the face's normal.
+
+        The heights :func:`face_warp` takes the largest of, at ``node_coords``, ``geometry`` being
+        the geometry there; shape ``(n_incidences,)``, in ``face_nodes.face_node_indices`` order.
         """
-        worst = np.full(n_cells, -np.inf)
-        sides_per_cell = np.bincount(self.cell, minlength=n_cells)
-        pairs = np.cumsum(sides_per_cell * np.bincount(other_cell, minlength=n_cells))
-        first = 0
-        while first < n_cells:
-            done = pairs[first - 1] if first else 0
-            stop = int(np.searchsorted(pairs, done + self._PAIRS_PER_BLOCK, side="right"))
-            stop = max(stop, first + 1)
-            side, other = ragged.pairs_within_groups(self.cell, other_cell, n_cells, first, stop)
-            if side.size:
-                # The pairs come in runs of one side each: reduce each run, then scatter the runs.
-                runs = np.flatnonzero(np.diff(side, prepend=-1))
-                largest = np.maximum.reduceat(value(side, other), runs)
-                np.maximum.at(worst, self.cell[side[runs]], largest)
-            first = stop
-        return worst
+        return _vertex_lift(self._mesh.face_nodes, jnp.asarray(node_coords), geometry.face.normal)
+
+    def cell_non_convexity(self, node_coords: jnp.ndarray, geometry: MeshGeometry) -> np.ndarray:
+        """:func:`cell_non_convexity` at ``node_coords``, ``geometry`` being the geometry there."""
+        worst = _largest_excursion(
+            self._side_offsets,
+            self._side_face,
+            self._side_sign,
+            self._node_offsets,
+            self._nodes,
+            np.asarray(node_coords, dtype=np.float64),
+            np.asarray(geometry.face.centroid),
+            np.asarray(geometry.face.normal),
+        )
+        return worst / np.asarray(geometry.cell.volume) ** (1.0 / self._mesh.dim)
+
+    def cell_concavity(self, geometry: MeshGeometry) -> np.ndarray:
+        """:func:`cell_concavity`, ``geometry`` being the mesh's geometry."""
+        return _largest_cosine(
+            self._side_offsets,
+            self._side_face,
+            self._side_sign,
+            np.asarray(geometry.face.centroid),
+            np.asarray(geometry.face.normal),
+        )
+
+    def face_non_orthogonality(self, geometry: MeshGeometry) -> jnp.ndarray:
+        """:func:`face_non_orthogonality`, ``geometry`` being the mesh's geometry."""
+        return _non_orthogonality(geometry, self._mesh.face_cells)
+
+    def face_skewness(self, node_coords: jnp.ndarray, geometry: MeshGeometry) -> jnp.ndarray:
+        """:func:`face_skewness` at ``node_coords``, ``geometry`` being the geometry there."""
+        mesh = self._mesh
+        return _skewness(jnp.asarray(node_coords), geometry, mesh.face_cells, mesh.face_nodes)
+
+
+@numba.njit(parallel=True, cache=True)
+def _largest_excursion(
+    side_offsets, side_face, side_sign, node_offsets, nodes, coords, centre, normal
+):
+    """Per cell, the largest signed height of one of its vertices above one of its faces' planes.
+
+    A NaN height makes its cell's value NaN, as a maximum taken by numpy would.
+    """
+    n_cells, dim = side_offsets.size - 1, coords.shape[1]
+    worst = np.full(n_cells, -np.inf)
+    for c in numba.prange(n_cells):
+        for s in range(side_offsets[c], side_offsets[c + 1]):
+            f = side_face[s]
+            for k in range(node_offsets[c], node_offsets[c + 1]):
+                rise = 0.0
+                for d in range(dim):
+                    rise += (coords[nodes[k], d] - centre[f, d]) * normal[f, d]
+                value = side_sign[s] * rise
+                if value > worst[c] or value != value:
+                    worst[c] = value
+    return worst
+
+
+@numba.njit(parallel=True, cache=True)
+def _largest_cosine(side_offsets, side_face, side_sign, centre, normal):
+    """Per cell, the largest cosine between one face's outward normal and the direction from its
+    centroid to another face's centroid; ``-1`` for a face paired with itself.
+
+    A NaN cosine makes its cell's value NaN, as a maximum taken by numpy would.
+    """
+    n_cells, dim = side_offsets.size - 1, centre.shape[1]
+    worst = np.full(n_cells, -np.inf)
+    for c in numba.prange(n_cells):
+        for s in range(side_offsets[c], side_offsets[c + 1]):
+            face = side_face[s]
+            for t in range(side_offsets[c], side_offsets[c + 1]):
+                towards = side_face[t]
+                if towards == face:
+                    value = -1.0
+                else:
+                    along, length = 0.0, 0.0
+                    for d in range(dim):
+                        offset = centre[towards, d] - centre[face, d]
+                        along += offset * normal[face, d]
+                        length += offset * offset
+                    length = np.sqrt(length)
+                    value = side_sign[s] * along / (length if length > 0.0 else 1.0)
+                if value > worst[c] or value != value:
+                    worst[c] = value
+    return worst

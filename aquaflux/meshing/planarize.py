@@ -49,11 +49,8 @@ from aquaflux.mesh import (
     CONCAVE_COSINE,
     FaceNodeConnectivity,
     Mesh,
+    MeshQuality,
     PolygonFaceGeometry,
-    cell_concavity,
-    cell_non_convexity,
-    face_non_orthogonality,
-    face_skewness,
 )
 from aquaflux.vectors import dot
 
@@ -158,11 +155,12 @@ class FacePlanarizer:
         if movable.shape != (mesh.n_nodes,):
             raise ValueError(f"movable must have shape ({mesh.n_nodes},), got {movable.shape}")
         free = np.flatnonzero(movable)
-        state = _State.at(mesh, np.asarray(mesh.node_coords, dtype=np.float64))
+        quality = MeshQuality(mesh)
+        state = _State.at(mesh, quality, np.asarray(mesh.node_coords, dtype=np.float64))
         guard = _NoWorse(mesh, state)
         warp = _Warp.of(mesh, free)
         start = self.damping * float(np.mean(1.0 / state.area))
-        step = _Step(self, mesh, guard, warp, free, start)
+        step = _Step(self, mesh, quality, guard, warp, free, start)
         history, products, lam = [state.warp], 0, start
         flat = self.flat * state.warp
         converged = state.warp == 0.0
@@ -182,14 +180,9 @@ class FacePlanarizer:
 class _Step:
     """One iteration's guarded Levenberg--Marquardt step, shortened and pinned until it is safe."""
 
-    def __init__(self, planarizer, mesh, guard, warp, free, start) -> None:
-        self._p, self._mesh, self._guard, self._warp, self._free = (
-            planarizer,
-            mesh,
-            guard,
-            warp,
-            free,
-        )
+    def __init__(self, planarizer, mesh, quality, guard, warp, free, start) -> None:
+        self._p, self._mesh, self._quality = planarizer, mesh, quality
+        self._guard, self._warp, self._free = guard, warp, free
         self._cap = planarizer.shortening * start
         self._slot = np.full(mesh.n_nodes, -1)
         self._slot[free] = np.arange(free.size)
@@ -215,7 +208,7 @@ class _Step:
             products += used
             move = np.zeros_like(state.coords)
             move[free] = dx.reshape(-1, 3)
-            candidate = _State.at(self._mesh, state.coords + move)
+            candidate = _State.at(self._mesh, self._quality, state.coords + move)
             worse = self._guard.worsened(candidate)
             if np.any(worse) and lam < self._cap:
                 lam *= p.increase  # a shorter step may keep every bound
@@ -331,21 +324,28 @@ class _State:
         return float(np.sum(self.height**2 / self.area[self.face]))
 
     @classmethod
-    def at(cls, mesh: Mesh, coords: np.ndarray) -> _State:
-        moved = eqx.tree_at(lambda m: m.node_coords, mesh, jnp.asarray(coords))
-        geometry = moved.geometry()
+    def at(cls, mesh: Mesh, quality: MeshQuality, coords: np.ndarray) -> _State:
+        """The state of ``mesh``'s topology with its vertices at ``coords``; ``quality`` checks it."""
+        geometry = quality.geometry(coords)
         face_nodes = mesh.face_nodes
         node = np.asarray(face_nodes.face_node_indices)
         face = np.asarray(face_nodes.face_of_incidence)
         normal = np.asarray(geometry.face.normal)
-        mean = np.asarray(face_nodes.vertex_mean(moved.node_coords))
-        height = np.einsum("ij,ij->i", coords[node] - mean[face], normal[face])
+        height = np.asarray(quality.vertex_heights(coords, geometry))
         cells = np.stack(
-            [cell_non_convexity(moved), cell_concavity(moved), -np.asarray(geometry.cell.volume)],
+            [
+                quality.cell_non_convexity(coords, geometry),
+                quality.cell_concavity(geometry),
+                -np.asarray(geometry.cell.volume),
+            ],
             axis=1,
         )
         faces = np.stack(
-            [np.asarray(face_non_orthogonality(moved)), np.asarray(face_skewness(moved))], axis=1
+            [
+                np.asarray(quality.face_non_orthogonality(geometry)),
+                np.asarray(quality.face_skewness(coords, geometry)),
+            ],
+            axis=1,
         )
         return cls(coords, node, face, normal, np.asarray(geometry.face.area), height, cells, faces)
 

@@ -29,6 +29,7 @@ from .groups import PADDING_PATCH, RESERVED_PATCH_NAMES, CellZones, FacePatches,
 from .mesh import Mesh
 from .quality import (
     CONCAVE_COSINE,
+    MeshQuality,
     cell_concavity,
     cell_non_convexity,
     centroid_iteration_shift,
@@ -67,6 +68,7 @@ __all__ = [
     "LabelledGroups",
     "Mesh",
     "MeshGeometry",
+    "MeshQuality",
     "PatchTriangles",
     "PolygonFaceGeometry",
     "RandomReordering",

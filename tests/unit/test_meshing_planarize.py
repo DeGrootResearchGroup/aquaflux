@@ -4,7 +4,7 @@ A block of hexahedra with its interior nodes displaced has a known flat solution
 duals of perturbed Kuhn tetrahedra the faces cannot all be flattened, and the unguarded iteration
 is known to make a cube's faces more non-orthogonal and skewed, and an L's cut cells less convex:
 those are the fixtures that show each bound holding. The derivatives the steps are solved with are
-checked against finite differences of the warp as the guard computes it, a separate numpy path,
+checked against finite differences of the warp as the guard computes it, a separate path,
 and the preconditioner against the blocks of an explicitly formed frozen-plane Jacobian.
 """
 
@@ -17,6 +17,7 @@ import pytest
 from aquaflux.mesh import (
     CONCAVE_COSINE,
     Mesh,
+    MeshQuality,
     cell_concavity,
     cell_non_convexity,
     closed_cell_residual,
@@ -134,7 +135,7 @@ def _numpy_residual(dual: Mesh, coords: np.ndarray, free: np.ndarray, x: np.ndar
     """Each incidence's height over the root of its face's area, as the guard's state computes it."""
     moved = coords.copy()
     moved[free] = x.reshape(-1, 3)
-    state = _State.at(dual, moved)
+    state = _State.at(dual, MeshQuality(dual), moved)
     return state.height / np.sqrt(state.area[state.face])
 
 
@@ -162,7 +163,7 @@ def test_the_preconditioner_is_the_inverse_of_the_frozen_plane_jacobians_blocks(
     # With each face's plane held, a height depends on its own vertex only, so J^T J's diagonal
     # blocks are formed here column by column from the residual's finite differences.
     dual, free, coords = _small_dual()
-    state = _State.at(dual, coords)
+    state = _State.at(dual, MeshQuality(dual), coords)
     mean = np.asarray(dual.face_nodes.vertex_mean(dual.node_coords))
     slot = np.full(dual.n_nodes, -1)
     slot[free] = np.arange(free.size)

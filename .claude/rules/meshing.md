@@ -356,11 +356,17 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
   sweep's time (90–714 s, 3.7k–16k cells, shared machine), 1.8–10× less total warp, half or fewer of its
   concave cells (L 57→28, Sozzi 309→58, cylinder 1108→66, sleeve 258→30), every p99 lower;
   maxima of warp, non-convexity and triangulation-volume dependence nearly unchanged (within bounds), and
-  **boundary faces untouched** (vertices fixed). The guard's quality evaluations are 45–65 % of the time.
-  Still too slow for the 2M-cell target without reducing those evaluations.
+  **boundary faces untouched** (vertices fixed). Those timings predate the cheaper guard (next item).
+- **The guard evaluates through one `MeshQuality` per pass** (`mesh.md`): the topology's tables and ring
+  signs are found once, and each trial is one `geometry()` plus the four checks. Netgen L 0.01 (shipped
+  defaults, macOS arm64, load ~12 from other sessions, 2026-10-20): evaluations 50.3 → 3.1 s of a pass
+  (0.229 → 0.014 s each, 220 of them), the pass 132 → 101 s; iterations, products and every quality
+  number identical, the warp history equal to 1e-16. **The conjugate-gradient products are now ~87 % of
+  a pass** (5503 at ~16 ms): the next lever. Recomputing only the cells a step touches is not worth
+  building: a step moves 85–100 % of the cells (Kuhn n = 6 dual, every trial) — log.
 - **Open**: sliding boundary vertices along the CAD surface, or splitting faces still warped, for the
-  boundary faces and the maxima; cheaper guard evaluations. Pinned in
-  `tests/unit/test_meshing_planarize.py` (derivatives against finite differences of the guard's numpy warp,
+  boundary faces and the maxima; cheaper conjugate-gradient products. Pinned in
+  `tests/unit/test_meshing_planarize.py` (derivatives against finite differences of the guard's warp,
   the preconditioner against explicit frozen-plane blocks); harness `validation/meshing_dual/planarization.py`.
 
 ## Netgen: in a child process, reached through files (binding)

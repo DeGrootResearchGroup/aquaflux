@@ -459,3 +459,38 @@ an unweighted preconditioner. Green, dismissed: no volume bound (as before: neve
 cell's NaN convexity would pass the others); accepting a safe step that raises the warp (no safe step
 ever raised it on the fixtures; the history is asserted monotone); no λ decrease after a kept step (path
 and cost only: final warp within 10 % either way on three fixtures).
+
+## 2026-10-20 — the planarizer's guard evaluated through one `MeshQuality` per pass
+
+Each trial step used to call the `Mesh`-level quality functions, which between them ran `Mesh.geometry()`
+seven times (each re-running `ring_signs`, a topology-only numba pass) and rebuilt the cell checks'
+(cell, face) and (cell, vertex) pair tables blockwise. `MeshQuality` (`aquaflux/mesh/quality.py`) now
+holds the topology's CSR tables and ring signs, built once; the cell checks are numba kernels looping
+each cell's sides against its nodes (no pair table, so no memory beyond the CSR); the face checks and
+the vertex heights are `filter_jit`ted. Pair tables cached whole were not built: the same speed would
+have cost ~450 pairs per dual cell in int64 (~14 GB at 2M cells).
+
+Results unchanged, measured against the old code on the planarizer's test fixtures (displaced hex
+block, Kuhn cube n 3 at two `min_decrease`, Kuhn L n 4, Kuhn n 6): iterations, conjugate-gradient
+products, `converged` and the final coordinates bit-identical; warp history within 2.4e-16 of its
+start (the heights are now taken in a jitted kernel); the quality functions on the starting mesh within
+2.1e-12 deg (non-orthogonality) and 7e-16 otherwise.
+
+Time split of one pass, `validation/meshing_dual/planarization.py`'s Netgen L at maxh 0.01 (3718 cells,
+shipped defaults, macOS arm64, one run per arm back to back, load 11–16 from other sessions):
+
+| arm | pass | evaluations (220) | CG products (5503) | block inverse |
+|---|---|---|---|---|
+| before | 132.2 s | 50.3 s, 0.229 s each | 73.4 s | 3.9 s |
+| after | 101.3 s | 3.1 s, 0.014 s each | 87.8 s | 4.8 s |
+
+(The products' rise, 13.3 → 16.0 ms each, is the load climbing from 11 to 16 during the run, not the
+change: the product code is untouched.) The harness's own timing, same day: 115.5 → 85.3 s; output
+identical in every printed figure. Kuhn duals (`MeshQuality` alone): 0.074 → 0.009 s per evaluation at
+1331 cells, 0.219 → 0.0107 s at 4913; parallelizing the cell kernels over cells took the latter from
+0.027 to 0.019 s, the jitted heights to 0.011 s.
+
+Direction dismissed: recomputing only the cells and faces whose vertices moved. On the Kuhn n 6 dual
+(343 cells, 153 trials) a trial moves a vertex of 85–100 % of the cells (median 100 %, mean 97 %): every
+dual cell has free vertices and a Levenberg–Marquardt step moves every unpinned one. With evaluations at
+3 % of the pass it could save at most that.
