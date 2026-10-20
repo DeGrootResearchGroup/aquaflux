@@ -49,6 +49,7 @@ from scipy.sparse.csgraph import connected_components
 
 from .elements import HEXAHEDRON_CORNERS
 from .octree import BITS, Octree, RefinementCriterion, cube_samples, point_keys
+from .polygons import PyramidCaps
 
 __all__ = ["HexCore", "OctreeCore"]
 
@@ -127,8 +128,7 @@ class OctreeCore:
     samples: int = 3
 
     def __post_init__(self) -> None:
-        if not 0.0 < self.cap_height < 0.5:
-            raise ValueError(f"cap_height must lie in (0, 1/2), not {self.cap_height}")
+        PyramidCaps.check_height(self.cap_height, "OctreeCore.cap_height")
         if self.clearance < 0.0 or self.samples < 2:
             raise ValueError("clearance must be non-negative and samples at least two")
 
@@ -190,25 +190,15 @@ class OctreeCore:
         tetrahedra = np.column_stack([centre_of[cube[inner & ~quads]], rings[inner & ~quads, :3]])
 
         boundary = rings[_once(rings)]
-        capped = boundary[boundary[:, 3] != _UNUSED]
-        corner = points[capped]
-        normal = np.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0])
-        edge = np.linalg.norm(corner[:, 1] - corner[:, 0], axis=1)
-        height = (self.cap_height * edge / np.linalg.norm(normal, axis=1))[:, None]
-        apex = corner.mean(axis=1) + height * normal
-        apex_index = points.shape[0] + np.arange(capped.shape[0])
-        caps = np.column_stack([capped, apex_index])
-        sides = [
-            np.column_stack([capped[:, (i + 1) % 4], capped[:, i], apex_index]) for i in range(4)
-        ]
+        caps = PyramidCaps.on(points, boundary[boundary[:, 3] != _UNUSED], self.cap_height)
         triangles = boundary[boundary[:, 3] == _UNUSED, :3][:, ::-1]
         return HexCore(
-            points=np.vstack([points, apex]),
+            points=np.vstack([points, caps.apexes]),
             hexahedra=number(faces.hexahedra[whole]),
             pyramids=pyramids,
             tetrahedra=tetrahedra,
-            caps=caps,
-            surface=np.vstack([*sides, triangles]),
+            caps=caps.pyramids,
+            surface=np.vstack([caps.sides, triangles]),
             octree=tree,
             kept=faces.leaves[kept],
         )

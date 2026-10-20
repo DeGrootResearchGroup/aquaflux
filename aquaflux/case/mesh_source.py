@@ -316,6 +316,10 @@ class CadMesh(MeshSource):
     layered : tuple of str
         The patches the layers grow on. Where one meets a patch without layers, the layers slide
         along it. Default: none.
+    mapped : tuple of str
+        The patches whose faces are meshed with structured quadrilaterals rather than triangles,
+        each face a band (a cylinder, a cone, a ring) or four-sided; layered, they carry hexahedra.
+        Default: none.
 
     Raises
     ------
@@ -338,6 +342,7 @@ class CadMesh(MeshSource):
     grading: float | None = None
     layers: PrismLayers | None = None
     layered: tuple[str, ...] = ()
+    mapped: tuple[str, ...] = ()
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -353,6 +358,7 @@ class CadMesh(MeshSource):
                 )
         object.__setattr__(self, "patches", types.MappingProxyType(dict(self.patches)))
         object.__setattr__(self, "layered", tuple(self.layered))
+        object.__setattr__(self, "mapped", tuple(self.mapped))
         if (self.layers is None) != (not self.layered):
             raise ValueError(
                 "a CadMesh grows layers on the patches it names in layered, so it takes both "
@@ -380,5 +386,5 @@ class CadMesh(MeshSource):
         options = {} if self.others is None else {"others": self.others}
         return self.mesher().mesh(
             model, CadRegion(self.solids, self.without), dict(self.patches),
-            layered=self.layered, **options,
+            layered=self.layered, mapped=self.mapped, **options,
         )  # fmt: skip

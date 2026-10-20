@@ -133,6 +133,20 @@ one form each, so they need no `kind`, and the top level is the case itself.
     layered: [walls, lamp]
   ```
 
+  The faces of the patches listed in `mapped` are meshed as structured grids of quadrilaterals
+  rather than triangles ({class}`~aquaflux.meshing.MappedQuads`): each must be a band -- a cylinder
+  or cone round an axis, or a flat ring, bounded by two closed loops -- or four-sided. Layered, such a
+  wall carries hexahedra, so the solver's cells against it are hexahedra too. The lamp's cylinder
+  and the pipes' walls are bands; a lamp's rounded tip is not, so it needs a patch of its own:
+
+  ```yaml
+    patches:
+      lamp: {kind: FacesNear, points: [[0.4, 0.01, 0.0]]}
+      lamp_tip: {kind: FacesNear, points: [[0.81, 0.0, 0.0]]}
+    layered: [walls, lamp, lamp_tip]
+    mapped: [lamp]
+  ```
+
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
 the density, so a file cannot state two viscosities that disagree.

@@ -12,9 +12,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from aquaflux.mesh import Mesh
-from aquaflux.meshing import PrismLayers, element_mesh
+from aquaflux.meshing import Polygons, PrismLayers, element_mesh
 
-from tests.support.meshes import tetrahedral_grid_3d
+from tests.support.meshes import tetrahedral_grid_3d, voxel_surface
 
 
 def _outward_surface(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
@@ -59,11 +59,11 @@ def test_the_duals_layer_boundaries_grow_geometrically_from_the_first_height():
 
 def test_a_cube_layered_all_round_leaves_the_cube_shrunk_by_the_thickness():
     points, triangles = _box(3)
-    grown = LAYERS.extrude(points, triangles, np.ones(len(triangles), dtype=bool))
+    grown = LAYERS.extrude(points, Polygons(triangles), np.ones(len(triangles), dtype=bool))
     thickness = LAYERS.offsets()[-1]
     assert grown.prisms.shape == (len(triangles) * 4, 6)
     assert _shell_volume(grown) == pytest.approx(1.0 - (1.0 - 2 * thickness) ** 3, rel=1e-12)
-    inner = grown.points[np.unique(grown.inner)]
+    inner = grown.points[np.unique(grown.inner.triangles)]
     np.testing.assert_allclose(inner.min(axis=0), thickness, rtol=1e-12)
     np.testing.assert_allclose(inner.max(axis=0), 1.0 - thickness, rtol=1e-12)
     assert grown.sides.shape == (0, 4)
@@ -74,7 +74,7 @@ def test_layers_meeting_a_bare_face_slide_along_it():
     # other five sides only, its top drawn in to meet them.
     points, triangles = _box(3)
     top = np.all(np.isclose(points[triangles][:, :, 2], 1.0), axis=1)
-    grown = LAYERS.extrude(points, triangles, ~top)
+    grown = LAYERS.extrude(points, Polygons(triangles), ~top)
     thickness = LAYERS.offsets()[-1]
     side_points = grown.points[grown.sides]
     np.testing.assert_allclose(side_points[:, :, 2], 1.0, atol=1e-12)
@@ -82,7 +82,7 @@ def test_layers_meeting_a_bare_face_slide_along_it():
     assert _shell_volume(grown) == pytest.approx(
         1.0 - (1.0 - 2 * thickness) ** 2 * (1.0 - thickness), rel=1e-12
     )
-    drawn = grown.points[grown.walls[top]]
+    drawn = grown.points[grown.walls.triangles[top]]
     np.testing.assert_allclose(drawn[:, :, 2], 1.0, atol=1e-12)
     assert drawn[:, :, :2].min() == pytest.approx(thickness)
 
@@ -92,7 +92,7 @@ def test_walls_close_together_share_the_gap():
     # most gap_share of the 0.05 between them. Its middle is far from the slab's thin edges, where
     # the layers are thinned anyway to keep the prisms right side out.
     points, triangles = _box(6, scale=(1.0, 1.0, 0.05))
-    grown = LAYERS.extrude(points, triangles, np.ones(len(triangles), dtype=bool))
+    grown = LAYERS.extrude(points, Polygons(triangles), np.ones(len(triangles), dtype=bool))
     n = len(points)
     lifted = grown.points[n:].reshape(4, n, 3)  # each layer's points, in the surface's order
     middle = np.isclose(points[:, 2], 0.0) & np.all(
@@ -114,10 +114,10 @@ def test_layers_meeting_a_tilted_bare_face_turn_to_slide_along_its_plane():
         np.isclose(points[triangles][:, :, 2], 1.0 + 0.3 * points[triangles][:, :, 0]), axis=1
     )
     top &= np.all(points[triangles][:, :, 2] > 0.5, axis=1)
-    grown = LAYERS.extrude(points, triangles, ~top)
+    grown = LAYERS.extrude(points, Polygons(triangles), ~top)
     sides = grown.points[grown.sides]
     np.testing.assert_allclose(sides[:, :, 2], 1.0 + 0.3 * sides[:, :, 0], atol=1e-12)
-    drawn = grown.points[grown.walls[top]]
+    drawn = grown.points[grown.walls.triangles[top]]
     np.testing.assert_allclose(drawn[:, :, 2], 1.0 + 0.3 * drawn[:, :, 0], atol=1e-12)
 
 
@@ -129,9 +129,11 @@ def test_a_drawn_in_triangle_that_would_turn_over_is_saved_by_thinning():
     top = np.all(np.isclose(points[triangles][:, :, 2], 1.0), axis=1)
     thick = PrismLayers(first_height=0.12, growth=1.2, count=2, max_halvings=0)
     with pytest.raises(ValueError, match="inside out after their layers were thinned 0 times"):
-        thick.extrude(points, triangles, ~top)
-    grown = PrismLayers(first_height=0.12, growth=1.2, count=2).extrude(points, triangles, ~top)
-    c = grown.points[grown.walls[top]]
+        thick.extrude(points, Polygons(triangles), ~top)
+    grown = PrismLayers(first_height=0.12, growth=1.2, count=2).extrude(
+        points, Polygons(triangles), ~top
+    )
+    c = grown.points[grown.walls.triangles[top]]
     normal = np.cross(c[:, 1] - c[:, 0], c[:, 2] - c[:, 0])
     assert np.all(normal[:, 2] > 0.0)
     assert _shell_volume(grown) > 0.0
@@ -178,9 +180,11 @@ def test_a_prism_that_would_turn_over_at_a_concave_edge_is_saved_by_thinning():
     every = np.ones(len(triangles), dtype=bool)
     with pytest.raises(ValueError, match="inside out"):
         PrismLayers(first_height=0.1, growth=1.2, count=2, max_halvings=0).extrude(
-            points, triangles, every
+            points, Polygons(triangles), every
         )
-    grown = PrismLayers(first_height=0.1, growth=1.2, count=2).extrude(points, triangles, every)
+    grown = PrismLayers(first_height=0.1, growth=1.2, count=2).extrude(
+        points, Polygons(triangles), every
+    )
     volume = np.asarray(element_mesh(grown.points, prisms=grown.prisms).geometry().cell.volume)
     assert np.all(volume > 0.0)
 
@@ -192,7 +196,7 @@ def test_a_point_with_nowhere_to_slide_is_refused():
     triangles = np.array([[0, 2, 1], [0, 3, 2], [0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]])
     layered = np.array([True, True, True, False, False, False])
     with pytest.raises(ValueError, match="three or more faces without layers, so cannot slide"):
-        LAYERS.extrude(points, triangles, layered)
+        LAYERS.extrude(points, Polygons(triangles), layered)
 
 
 @pytest.mark.parametrize(
@@ -208,3 +212,79 @@ def test_a_point_with_nowhere_to_slide_is_refused():
 def test_settings_out_of_range_are_refused(settings, message):
     with pytest.raises(ValueError, match=message):
         PrismLayers(**{"first_height": 0.01, "growth": 1.2, "count": 3, **settings})
+
+
+def _cells_volume(extrusion) -> np.ndarray:
+    return np.asarray(
+        element_mesh(extrusion.points, prisms=extrusion.prisms, hexahedra=extrusion.hexahedra)
+        .geometry()
+        .cell.volume
+    )
+
+
+def test_a_cube_of_quadrilaterals_layered_all_round_grows_hexahedra():
+    points, quads = voxel_surface([(0, 0, 0)], 3)
+    faces = Polygons(quads=quads)
+    assert np.all(np.einsum("ij,ij->i", faces.normals(points), faces.centroids(points) - 0.5) > 0)
+    grown = LAYERS.extrude(points, faces, np.ones(faces.n_faces, dtype=bool))
+    thickness = LAYERS.offsets()[-1]
+    assert grown.prisms.shape == (0, 6)
+    assert grown.hexahedra.shape == (len(quads) * 4, 8)
+    volume = _cells_volume(grown)
+    assert np.all(volume > 0.0)
+    assert volume.sum() == pytest.approx(1.0 - (1.0 - 2 * thickness) ** 3, rel=1e-12)
+    top = grown.points[np.unique(grown.inner.quads)]
+    np.testing.assert_allclose(top.min(axis=0), thickness, rtol=1e-12)
+    np.testing.assert_allclose(top.max(axis=0), 1.0 - thickness, rtol=1e-12)
+    assert grown.inner.triangles.shape == (0, 3)
+    # Each moved point's column: the point, then its layers' points straight above it.
+    assert grown.columns.shape == (len(points), 5)
+    np.testing.assert_array_equal(grown.columns[:, 0], np.arange(len(points)))
+
+
+def test_triangles_and_quadrilaterals_layered_together_join_conformally():
+    # The cube's top cut into triangles, its other faces quadrilaterals: prisms over the top,
+    # hexahedra elsewhere, sharing their sides where the top meets the walls.
+    points, quads = voxel_surface([(0, 0, 0)], 3)
+    on_top = np.all(np.isclose(points[quads][:, :, 2], 1.0), axis=1)
+    triangles = np.concatenate([quads[on_top][:, [0, 1, 2]], quads[on_top][:, [0, 2, 3]]])
+    faces = Polygons(triangles, quads[~on_top])
+    grown = LAYERS.extrude(points, faces, np.ones(faces.n_faces, dtype=bool))
+    thickness = LAYERS.offsets()[-1]
+    assert grown.prisms.shape[0] == 4 * len(triangles)
+    assert grown.hexahedra.shape[0] == 4 * np.count_nonzero(~on_top)
+    volume = _cells_volume(grown)  # element_mesh refuses a face of three cells, or a gap
+    assert volume.sum() == pytest.approx(1.0 - (1.0 - 2 * thickness) ** 3, rel=1e-12)
+
+
+def test_quadrilateral_layers_meeting_a_bare_quadrilateral_face_slide_along_it():
+    points, quads = voxel_surface([(0, 0, 0)], 3)
+    top = np.all(np.isclose(points[quads][:, :, 2], 1.0), axis=1)
+    grown = LAYERS.extrude(points, Polygons(quads=quads), ~top)
+    thickness = LAYERS.offsets()[-1]
+    np.testing.assert_allclose(grown.points[grown.sides][:, :, 2], 1.0, atol=1e-12)
+    assert len(grown.sides) == 4 * 3 * 4
+    assert _cells_volume(grown).sum() == pytest.approx(
+        1.0 - (1.0 - 2 * thickness) ** 2 * (1.0 - thickness), rel=1e-12
+    )
+    drawn = grown.points[grown.walls.quads[top]]
+    np.testing.assert_allclose(drawn[:, :, 2], 1.0, atol=1e-12)
+    assert drawn[:, :, :2].min() == pytest.approx(thickness)
+    # The drawn-in quadrilaterals are left for the fill, as the layers' top is.
+    assert grown.inner.quads.shape[0] == len(quads)
+
+
+def test_a_hexahedron_that_would_turn_over_at_a_concave_edge_is_saved_by_thinning():
+    # An L of three cubes of quadrilaterals, its layers thicker than its cells: at the inside edge
+    # the two walls' hexahedra run into each other -- refused with no halving allowed, every one
+    # right side out with it.
+    points, quads = voxel_surface([(0, 0, 0), (1, 0, 0), (0, 0, 1)], 2, size=0.5)
+    every = np.ones(len(quads), dtype=bool)
+    with pytest.raises(ValueError, match="inside out"):
+        PrismLayers(first_height=0.1, growth=1.2, count=2, max_halvings=0).extrude(
+            points, Polygons(quads=quads), every
+        )
+    grown = PrismLayers(first_height=0.1, growth=1.2, count=2).extrude(
+        points, Polygons(quads=quads), every
+    )
+    assert np.all(_cells_volume(grown) > 0.0)

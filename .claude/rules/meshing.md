@@ -15,11 +15,11 @@ paths:
 **Status: phase 1 built** — STEP region → Netgen tets → polyhedral dual → `Mesh` / polyMesh, from a case
 file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
 `element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
-(`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls (`layers.py`)
-and the mesher (`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`)
-and the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file. Face planarization
-(`planarize.py`) is built but not yet called by the mesher. Layers on structured quad surfaces are
-not built.
+(`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls and
+hexahedral layers on walls meshed with structured quadrilaterals (`layers.py`, `mapped.py`,
+`polygons.py`) and the mesher (`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`) and
+the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file.
+Face planarization (`planarize.py`) is built but not yet called by the mesher.
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -102,11 +102,24 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
   - **The added vertices lie on the surface between pieces**, or the separating surface zig-zags along tet
     faces: Netgen L at maxh 0.01, worst non-convexity 0.56 with the cut faces' vertices at face centroids,
     1.1 with the cut edges' hubs at midpoints, 1.23 with both (0.35 placed); under the former centroid
-    orientation the unplaced cut also failed closure. So: a face's vertex where its dual edge crosses
-    the plane `(n_b − n_a)·(x − p) = 0` (fraction kept to [0.1, 0.9] so a centroid on the plane does not
-    give coincident vertices; mean over cutting points); an interior edge's hub the least-squares point
-    on every interface it meets and in the dual face's plane (on the triple line where three pieces meet);
-    a boundary edge's hub on the segment between its two boundary-face centroids, where it crosses.
+    orientation the unplaced cut also failed closure. So: a face's vertex where the segment between its
+    cells' centroids crosses the plane `(n_b − n_a)·(x − p) = 0` (fraction kept to [0.1, 0.9] so a
+    centroid on the plane does not give coincident vertices; mean over cutting points) -- **unless that
+    crossing lies in front of the walls** (depth ≤ 0, i.e. in the solid beyond the corner, as beside a
+    long pipe hexahedron at a junction), then where the dual edge through the face's centroid crosses.
+    ⚠️ Not the bent edge everywhere: it made plain tet duals worse (Sozzi 0.02 worst 0.33 → 1.12; log). An
+    interior edge's hub is the least-squares point on every interface it meets and in the dual face's
+    plane (on the triple line where three pieces meet), **dropping singular values under
+    `_PLANES_APART` (0.05, about 3°)**: neighbouring points of a curved edge carry nearly parallel planes
+    whose exact intersection is far off (131 mm on Sozzi's inlet saddle); a boundary edge's hub on the
+    segment between its two boundary-face centroids, where it crosses.
+  - **Layers' columns are cut with their base point** (`PolyhedralDual(columns=)`: each row a boundary
+    point, then the points grown above it; `CadMesher` passes `LayerExtrusion.columns`). The layer points
+    above a sharp concave edge have dual cells that turn the corner too; uncut, their faces along the
+    corner fold and the cells do not close (Netgen L with layers on every face: 22 unclosed on `main`
+    before this). Each column point is cut by its base point's walls, origin at itself; its pieces follow
+    the base's, by column. Pinned by `test_layers_turning_a_concave_edge_are_cut_up_their_columns` (a voxel
+    L with hexahedral layers and a lattice core, no Netgen).
   - Measured (log): every Netgen L, cylinder, sleeve and Sozzi dual closes; Sozzi's two junctions give 24
     extra pieces; pieces' non-convexity within the uncut cells' range. A face cut around two points of a
     three-wall corner meets two different planes, so that corner is near-convex (≤ 0.05), not exact.
@@ -128,10 +141,13 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 ## The CAD mesher (`cad_mesher.py`) — built
 
-`CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, netgen=NetgenProcess()).mesh(
-model, region, patches=None, others="walls", layered=()) -> Mesh`: `write_brep` → `triangulate`
-(face-tagged) → prism layers on the `layered` patches (below) → `fill` of what is left → `element_mesh`
-(boundary faces in patches by their triangle's CAD face) → `PolyhedralDual.build_traced`
+`CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=0.25,
+netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls", layered=(), mapped=()) -> Mesh`:
+`write_brep` → `triangulate` (face-tagged) → the `mapped` patches' faces remeshed as structured
+quadrilaterals (below) → layers on the `layered` patches (below) → every quadrilateral left for the fill
+capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
+only) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
+patches by their CAD face) → `PolyhedralDual.build_traced` (the layers' columns passed)
 → boundary vertices projected onto the CAD (below), with
 **the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
 (so a CAD edge stays sharp whatever its triangles fold by; pinned by
@@ -168,11 +184,19 @@ or OCP.
   hand assembly); patches take triangles and quadrilaterals by corners. `HEXAHEDRON_CORNERS` (the unit
   cube's corners in hexahedron order) lives here, shared by the blocks and the octree core.
 
-## Prism layers (`layers.py`) — built for triangulated walls
+## Prism layers (`layers.py`) — built, on triangles and quadrilaterals
 
 `PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8).extrude(points,
-triangles, layered) -> LayerExtrusion(points, prisms, inner, walls, sides, side_triangle)`; a case file states
-it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neither).
+faces: Polygons, layered) -> LayerExtrusion(points, prisms, hexahedra, inner, walls, sides, side_face,
+columns)`: one extruder for both kinds, prisms over triangles and hexahedra over quadrilaterals, layer by
+layer in the surface's order; `inner` and `walls` are `Polygons`; `columns` each moved point then its
+layer points. A case file states it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both
+or neither). A surface of both kinds travels as a `Polygons` (`polygons.py`: two arrays, never one padded
+one, so a face is never read with a missing corner; a per-face quantity runs over the triangles first).
+- **Inside-out test per kind**: a prism's three tets of its standard split (as before); a hexahedron's
+  eight corner tetrahedra (each corner and its three edge neighbours), a right cell giving all negative
+  (lower face wound out of the region). Pinned by
+  `test_a_hexahedron_that_would_turn_over_at_a_concave_edge_is_saved_by_thinning`.
 - **Sized for the dual, exactly**: the dual's layer boundaries are the prisms' centroids, at `first_height ·
   Σ growthᵏ`; each prism's top is placed so its centroid is there, so the prisms alternate thicker and
   thinner (the first is `2·first_height`; the second only `2·first_height·(growth − 1)`; the alternation
@@ -200,8 +224,46 @@ it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neithe
 - Measured on Sozzi (log): 46124 cells at maxh 0.02 (10446 bare), 59395 at 0.01 (13297 bare), all closed,
   every boundary vertex on the drawing. ⚠️ Inside the 19 mm pipes the core left after the layers is narrow
   and its polyhedra skewed (images in the log): the pipe O-grid of the block mesher is the answer there.
-- Pinned in `tests/unit/test_meshing_layers.py` (no Netgen) and `test_meshing_netgen.py` (Sozzi, the first
-  height from the true wall).
+- Pinned in `tests/unit/test_meshing_layers.py` (no Netgen; quadrilateral walls from
+  `tests/support/meshes.voxel_surface`) and `test_meshing_netgen.py` (Sozzi, the first height from the true
+  wall).
+
+## Structured quadrilateral walls (`mapped.py`) — built
+
+`MappedQuads(corner_tolerance=1e-9).remesh(points, triangles, face, chosen, vertices, onto) ->
+MappedSurface(points, faces: Polygons, face)`; `CadMesher.mesh(mapped=...)` / `CadMesh.mapped` name the
+patches (agreed with the project owner, 2026-10-20: quads from mapped meshing of chosen CAD faces, one
+extruder for both kinds, pyramid caps to the fill; a block's faces as the source were the alternative
+not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells are hexahedra.
+- **Two shapes, read from the face's own triangles** (boundary edges used once, chained into loops in
+  their winding): **a band** (two loops: a cylinder or cone, a flat ring) -- rows from the loop with more
+  points toward the other, rolled to start across from it, `round(distance / mean spacing)` rows;
+  **four-sided** (one loop, four points within `corner_tolerance` × extent of the drawing's vertices) --
+  a Coons grid of its sides. Anything else (Sozzi's hemispherical lamp tip: one loop, no four corners;
+  the vessel's cylinder: three loops, the riser's hole) is refused by name.
+- **Netgen's edge points, kept**: Netgen cannot be told an edge's count (per-edge `maxh` is a bound; log),
+  so the grid's sides are the triangulation's, which the neighbouring faces share. **Unequal opposite
+  sides**: the grid stops a row short and a strip of triangles (`_zipped`, shorter diagonal first) joins it
+  to the shorter-counted side; a four-sided face with both pairs unequal is refused.
+- New points are interpolated in space and moved onto the face by the injected `onto` (the mesher's
+  `CadModel.project(faces=)`); no surface parameters are read. **Wound by construction** (rows run from a
+  loop, in its winding, into the face), pinned by the outward-normal assertion; a reorientation step was
+  dominated and deleted.
+- Measured on Sozzi (lamp cylinder and both pipes mapped; log): 98.6 / 98.8 % of the lamp's / pipes'
+  wall faces are quadrilaterals of hexahedral dual cells, 28393 hexahedra; the lamp's first dual layer at
+  0.5033 mm (5-95 % 0.5025-0.5040) against 0.5069 (0.5066-0.5087) with triangles. ⚠️ Faces over 80°
+  non-orthogonal: 11 against 2, inside the outlet pipe's entry and at the inlet saddle, where five layers
+  leave the pipe a core of a few millimetres for caps and tets -- the O-grid's case.
+- ⚠️ **Each cap's apex is a dual cell**, squeezed between the hexahedra's top and the fill: ~66 cells under
+  2 mm above the lamp's layers (none with triangle layers), neighbour volume ratio p99 164 against 14.
+  **Measured and rejected (log, five draws each)**: sized caps (tall wrecks the pipes' cores, ~4,800 bad
+  faces), a crevice-angle limit (a trade, not a win), the shortest edge (more small cells by the lamp),
+  a diagonal split of the top quadrilateral with no caps (Netgen's tets on it poor, 86-90° faces).
+  **The constant is the first edge on purpose**: pinned by the mapped test's level first edges and
+  `test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge`. Open: #785.
+- Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, Coons grids with and
+  without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
+  wall face with no vertex on a CAD edge a hexahedron's; Sozzi's lamp and pipes).
 
 ## The block mesher — built as a library (`blocks.py`, `divisions.py`, `surfaces.py`, `lattices.py`, `block_assembly.py`, `block_topologies.py`)
 
@@ -415,7 +477,8 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
     mesh: copy before keeping (an `np.asarray` view returned garbage once the mesh was gone).
 - **What it does not**: a supplied **quadrilateral** face, or a surface wound into the domain, is refused
   ("too many attempts"). Supply triangles only, wound counter-clockwise seen from outside the domain; the
-  hex core's quadrilaterals are capped with pyramids we build, whose triangular sides Netgen sees.
+  hex core's and the layers' quadrilaterals are capped with pyramids we build (`PyramidCaps`, shared),
+  whose triangular sides Netgen sees.
 - **Netgen's own prism layers are not used** (tet/prism only, and little documented); the extruder is ours.
 - **Cost** (2026-10-19, Sozzi fluid, macOS arm64, netgen-mesher 6.2.2608): about 25k tets / 5.7k points per
   second, and `SetNumThreads(4)` changed nothing. A dual cell is one primal point, so a 2M-cell all-tet
@@ -440,9 +503,9 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
 1. **CAD topology** in the kernel, as above (built).
 2. **Feature-preserving dual** (numba), from any conformal primal mesh (built), and the CAD mesher
    around it, its boundary projected onto the drawing (built).
-3. **Prism-layer extruder** (built for triangulated walls, above): smoothed normals, thickness limited by
-   proximity, halving and tapering on collision. Not yet: several normals at convex ridges, layers on
-   structured quad surfaces (the project owner's next step after triangles).
+3. **Prism-layer extruder** (built, above): smoothed normals, thickness limited by proximity, halving and
+   tapering on collision; prisms on triangles, hexahedra on mapped quadrilateral walls. Not yet: several
+   normals at convex ridges.
 4. **Block mesher** in place of blockMesh: transfinite interpolation with projection onto CAD or analytic
    surfaces, carrying the `uvmesh` topologies (four-quadrant annulus with the π/4 offset when a cap joins,
    the five-block cubed-sphere shell, the square-core pipe O-grid — **these built**, with BMB-style block

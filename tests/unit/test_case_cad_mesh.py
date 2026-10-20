@@ -28,6 +28,7 @@ SECTION = {
     },
     "others": "vessel_walls",
     "grading": 0.2,
+    "mapped": ["lamp"],
 }
 
 
@@ -43,6 +44,7 @@ def test_the_section_reads_into_its_selections_and_writes_back_as_given():
         patches={"inlet": FacesNear(((0.0, 0.0, 2.0),)), "lamp": FacesOn(("lamp",))},
         others="vessel_walls",
         grading=0.2,
+        mapped=("lamp",),
     )
     assert _CASE_MAPPING.to_mapping(source) == SECTION
 
