@@ -107,8 +107,9 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
     three-wall corner meets two different planes, so that corner is near-convex (≤ 0.05), not exact.
   - A gently concave wall is not cut: a lamp-sleeve hole folds concavely ≤ 32° per edge and its duals close.
 - **Away from features the dual's boundary runs through face centroids**, inside a curved wall by the chord:
-  dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). Projecting
-  those vertices onto the CAD surface (`CadModel.project`) is the mesher's job.
+  dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). The dual
+  itself does not know the true surface; `build_traced` says where each boundary vertex came from, and
+  `CadMesher` projects them onto the drawing (below).
 - ⚠️ **Memory is the open problem at the 2M target**: the primal held as a full `Mesh` costs ~5 KB per
   point and the dual's build ~9 KB per point (111k points; log), so 2M points would need ~28 GB. The likely
   fix is a numpy-only primal (the primal is never solved on) and a leaner assembly; not yet done.
@@ -124,7 +125,8 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, netgen=NetgenProcess()).mesh(model,
 region, patches=None, others="walls") -> Mesh`: `write_brep` → `triangulate` (face-tagged) → `fill` →
-`tetrahedral_mesh` (boundary faces in patches by their triangle's CAD face) → `PolyhedralDual`, with
+`tetrahedral_mesh` (boundary faces in patches by their triangle's CAD face) → `PolyhedralDual.build_traced`
+→ boundary vertices projected onto the CAD (below), with
 **the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
 (so a CAD edge stays sharp whatever its triangles fold by; pinned by
 `test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by`). Netgen is injected, so
@@ -139,12 +141,22 @@ or OCP.
   selections sharing a face, a selection finding none, a reserved name, or `others` naming a selection
   are refused (names before Netgen runs). The CAD records carry no face names, which is why selection is
   geometric.
-- ⚠️ **Not yet projected onto the CAD**: the dual's boundary vertices are triangle centroids and edge
-  midpoints, so a curved wall's patch area is short by the chord (Sozzi maxh 0.03–0.02: 2.6–4.6 %; log).
-  Projecting them (feature-edge midpoints onto the edge, by alternating projection) needs the dual to
-  say which primal entity each vertex came from — the next step.
+- **Every boundary vertex is projected onto the drawing** (`_onto_the_drawing`), from the dual's
+  `TracedDual` (`vertex_face`: the primal boundary face a vertex is the centroid of; `vertex_edge`: the
+  primal boundary edge a midpoint or a cut's hub stands for): a face centroid onto its triangle's CAD
+  face; an edge vertex onto the CAD face of its two triangles, or, when they lie on two faces, onto the
+  CAD edge between them (`CadModel.project(..., edges=)`), the nearest of several. A primal point is on
+  the drawing already. Sozzi after projection (log): patch areas −0.5 to −1.5 % (flat polygons between
+  surface points, and the inlet/outlet rims' chords), boundary vertices on the drawing to 4e-17,
+  non-convexity unchanged.
+  - ⚠️ **A CAD edge can come in pieces** (Sozzi's inlet rim is two edges): project each candidate from the
+    vertex's own position — chaining them carried a vertex 7 mm to the pieces' shared end (non-convexity
+    1.48). Pinned by `test_a_vertex_on_an_edge_drawn_in_two_pieces_lands_on_the_nearer_piece`.
+  - ⚠️ **Netgen's arrays are int32**: a sorted-triple key of 7k points overflows it, and silently put
+    lamp triangles on the vessel's face. Keys are built in int64.
 - **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
-  whole `aquaflux mesh --case --openfoam`.
+  whole `aquaflux mesh --case --openfoam` before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
+  at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
 - `tetrahedral_mesh(points, tetrahedra, patches=None)` numbers faces in first-sighting order (the test
   fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former hand assembly).
 
@@ -217,7 +229,7 @@ or OCP.
 
 1. **CAD topology** in the kernel, as above (built).
 2. **Feature-preserving dual** (numba), from any conformal primal mesh (built), and the CAD mesher
-   around it (built; boundary projection not yet).
+   around it, its boundary projected onto the drawing (built).
 3. **Prism-layer extruder**: smoothed normals, several normals at convex ridges, shrinking at concave
    corners, thickness limited by proximity, layer collapse or backtracking on collision.
 4. **Block mesher** in place of blockMesh: transfinite interpolation with projection onto CAD or analytic

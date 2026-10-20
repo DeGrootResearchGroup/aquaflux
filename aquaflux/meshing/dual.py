@@ -80,7 +80,7 @@ class PolyhedralDual:
     feature_edges: np.ndarray | None = None
 
     def build(self, primal: Mesh) -> Mesh:
-        """The dual of ``primal``.
+        """The dual of ``primal`` -- the mesh of :meth:`build_traced`.
 
         Parameters
         ----------
@@ -104,6 +104,25 @@ class PolyhedralDual:
         NotImplementedError
             If the primal cells around a point on a sharp concave edge that go to one wall are not
             face-connected there, so would make a dual cell in two parts.
+        """
+        return self.build_traced(primal).mesh
+
+    def build_traced(self, primal: Mesh) -> TracedDual:
+        """The dual of ``primal``, with where each vertex on its boundary came from.
+
+        Parameters
+        ----------
+        primal : Mesh
+            As :meth:`build`.
+
+        Returns
+        -------
+        TracedDual
+
+        Raises
+        ------
+        ValueError, NotImplementedError
+            As :meth:`build`.
         """
         _check_primal(primal)
         tables = _PrimalTables.of(primal)
@@ -132,6 +151,30 @@ class PolyhedralDual:
                 raise ValueError("a named feature edge is not an edge of the primal boundary")
             feature[index] = True
         return feature, concave
+
+
+@dataclasses.dataclass(frozen=True)
+class TracedDual:
+    """A dual mesh, and the primal boundary each of its boundary vertices stands for.
+
+    A vertex on the dual's boundary is a primal boundary face's centroid, the midpoint of a primal
+    boundary edge (or, where a cell is cut into pieces, a point on that edge's two boundary faces'
+    centroids), or a primal boundary point itself. A mesher that knows the true surface the primal
+    boundary approximates moves the first two onto it; a primal point is already there.
+
+    Attributes
+    ----------
+    mesh : Mesh
+        The dual.
+    vertex_face : np.ndarray of int, shape ``(n_vertices,)``
+        The primal boundary face whose centroid each vertex is, or ``-1``.
+    vertex_edge : np.ndarray of int, shape ``(n_vertices, 2)``
+        The two points of the primal boundary edge each vertex stands for (ascending), or ``-1``.
+    """
+
+    mesh: Mesh
+    vertex_face: np.ndarray
+    vertex_edge: np.ndarray
 
 
 def boundary_folds(primal: Mesh, pairs: np.ndarray) -> np.ndarray:
@@ -636,7 +679,7 @@ class _Faces:
 
 def _assemble(
     primal: Mesh, tables: _PrimalTables, walks: _Walks, feature: np.ndarray, pieces: _Pieces
-) -> Mesh:
+) -> TracedDual:
     """Number the dual's vertices, build its faces, and hand them to ``Mesh.from_csr``."""
     on_boundary = tables.boundary_faces[:, 0] >= 0
     # The edges whose faces see a piece: those at a cut point, and those of a face cut between
@@ -663,7 +706,14 @@ def _assemble(
     patch_of = np.concatenate([np.full(plain[0].size, -1), faces.patch])
     patches = primal.face_patches
     named = [name for name in patches.names if name not in _AUTOMATIC]
-    return Mesh.from_csr(
+    n_vertices = vertices.coordinates.shape[0]
+    vertex_face = np.full(n_vertices, -1, dtype=np.int64)
+    bounding = np.flatnonzero(vertices.boundary_face >= 0)
+    vertex_face[vertices.boundary_face[bounding]] = bounding
+    vertex_edge = np.full((n_vertices, 2), -1, dtype=np.int64)
+    halved = np.flatnonzero((vertices.middle >= 0) & on_boundary)
+    vertex_edge[vertices.middle[halved]] = tables.edge_nodes[halved]
+    mesh = Mesh.from_csr(
         vertices.coordinates,
         np.concatenate([[0], np.cumsum(counts)]),
         np.concatenate([plain[1], *faces.rings]),
@@ -674,6 +724,7 @@ def _assemble(
         patch_types=dict(patches.patch_types),
         patch_groups=dict(patches.patch_groups),
     )
+    return TracedDual(mesh, vertex_face, vertex_edge)
 
 
 def _place_cut_faces(primal, pieces, vertices) -> None:

@@ -213,6 +213,46 @@ def test_a_point_nearest_an_edge_takes_the_first_face_meeting_there(model):
     assert projection.distance[0] == pytest.approx(0.5)
 
 
+def test_a_point_is_moved_onto_the_edge_asked_for_and_given_the_first_face_there(model):
+    # The edge where x = 2 meets z = 1, asked for from a point far nearer the face y = 0.
+    topology = model.topology(BOX)
+    planes = [_plane_of(face) for face in topology.faces]
+    right, top = planes.index((0, 2.0, 1)), planes.index((2, 1.0, 1))
+    edge = next(
+        e
+        for e in range(topology.n_edges)
+        if set(topology.faces_of_edge(e).tolist()) == {right, top}
+    )
+    projection = model.project(BOX, [[1.5, 0.3, 0.2]], edges=[edge])
+    np.testing.assert_allclose(projection.points[0], [2.0, 0.3, 1.0], atol=1e-12)
+    assert projection.face[0] == min(right, top)
+    assert projection.distance[0] == pytest.approx(math.hypot(0.5, 0.8))
+
+
+def test_a_point_is_moved_onto_a_circular_edge(model):
+    # The cylinder's top rim: radius 0.5 at z = 1, reached along the point's own direction.
+    topology = model.topology(CYLINDER)
+    rims = [
+        e
+        for e in range(topology.n_edges)
+        if not topology.seam[e]
+        and topology.edge_length[e] > 0
+        and abs(_midpoint(topology, e)[2] - 1.0) < 1e-9
+    ]
+    assert len(rims) == 1
+    projection = model.project(CYLINDER, [[0.3, 0.1, 0.9]], edges=rims)
+    expected = np.array([0.3, 0.1]) / math.hypot(0.3, 0.1) * 0.5
+    np.testing.assert_allclose(projection.points[0], [*expected, 1.0], atol=1e-9)
+
+
+def test_an_edge_index_out_of_range_or_faces_and_edges_together_are_refused(model):
+    n_edges = model.topology(BOX).n_edges
+    with pytest.raises(ValueError, match=rf"edge index is outside \[0, {n_edges}\)"):
+        model.project(BOX, [[0.5, 0.5, 0.5]], edges=[n_edges])
+    with pytest.raises(ValueError, match="onto faces or onto edges, not both"):
+        model.project(BOX, [[0.5, 0.5, 0.5]], faces=[0], edges=[0])
+
+
 def test_near_the_lamp_the_outward_normal_points_into_the_lamp(sozzi):
     # Out of the water is into the lamp sleeve: toward the lamp's axis, the x axis.
     projection = sozzi.project(WATER, [[0.4, 0.0, 0.015]])

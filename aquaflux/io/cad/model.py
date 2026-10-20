@@ -303,7 +303,7 @@ class CadModel:
         self._kernel.write_brep(self._region(region), path)
         return path
 
-    def project(self, region: CadRegion, points, faces=None) -> Projection:
+    def project(self, region: CadRegion, points, faces=None, edges=None) -> Projection:
         """Points moved onto the region's boundary, with the face and outward normal there.
 
         Parameters
@@ -312,25 +312,42 @@ class CadModel:
         points : array-like, shape ``(n, 3)``
         faces : array-like of int, shape ``(n,)``, optional
             The face (as :meth:`topology` numbers them) to move each point onto -- to snap a node
-            to the face it belongs to, whatever face is nearest. Unset, the nearest point of the
+            to the face it belongs to, whatever face is nearest.
+        edges : array-like of int, shape ``(n,)``, optional
+            The edge (as :meth:`topology` numbers them) to move each point onto -- to snap a node
+            to the sharp edge it lies on -- in place of ``faces``. The face reported is the first,
+            in exploration order, that meets the edge. With neither, the nearest point of the
             whole boundary.
 
         Returns
         -------
         Projection
 
+        Raises
+        ------
+        ValueError
+            If both faces and edges are given, or an index is out of range.
+
         Notes
         -----
         One kernel distance query per point, in a Python loop: for snapping the nodes of a
         boundary, not for every node of a volume mesh.
         """
-        if faces is not None:
-            faces = np.asarray(faces, dtype=np.int64).reshape(-1)
-            n_faces = self.topology(region).n_faces
-            if faces.size and (faces.min() < 0 or faces.max() >= n_faces):
-                msg = f"a face index is outside [0, {n_faces})"
+        if faces is not None and edges is not None:
+            raise ValueError("project onto faces or onto edges, not both")
+        topology = None
+        for name, chosen in (("face", faces), ("edge", edges)):
+            if chosen is None:
+                continue
+            topology = topology or self.topology(region)
+            count = topology.n_faces if name == "face" else topology.n_edges
+            chosen = np.asarray(chosen, dtype=np.int64).reshape(-1)
+            if chosen.size and (chosen.min() < 0 or chosen.max() >= count):
+                msg = f"a {name} index is outside [0, {count})"
                 raise ValueError(msg)
-        return self._kernel.project(self._region(region), points, faces)
+        faces = None if faces is None else np.asarray(faces, dtype=np.int64).reshape(-1)
+        edges = None if edges is None else np.asarray(edges, dtype=np.int64).reshape(-1)
+        return self._kernel.project(self._region(region), points, faces, edges)
 
 
 def read_step(path: str | os.PathLike, placement: Placement | None = None, **options) -> CadModel:

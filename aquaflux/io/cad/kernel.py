@@ -506,18 +506,22 @@ class OpenCascade:
             msg = f"could not write {path}"
             raise OSError(msg)
 
-    def project(self, shape, points, faces=None) -> Projection:
-        """Each point moved to the closest point of ``shape``'s boundary, or of a face of it.
+    def project(self, shape, points, faces=None, edges=None) -> Projection:
+        """Each point moved to the closest point of ``shape``'s boundary, or of a face or edge of it.
 
         Parameters
         ----------
         points : array-like, shape ``(n, 3)``
         faces : array-like of int, shape ``(n,)``, optional
-            The face (in exploration order) to move each point onto. Unset, the closest point of the
-            whole boundary.
+            The face (in exploration order) to move each point onto.
+        edges : array-like of int, shape ``(n,)``, optional
+            The edge (in exploration order) to move each point onto, in place of ``faces``; the face
+            reported is the first meeting there. With neither, the closest point of the whole
+            boundary.
         """
         points = np.asarray(points, dtype=float).reshape(-1, 3)
         indexed = _indexed(shape, TopAbs_FACE)
+        indexed_edges = _indexed(shape, TopAbs_EDGE) if edges is not None else None
         # The boundary, not the solid: a point inside a solid is at distance zero from it.
         boundary = self._boundary(shape)
         ancestors = None
@@ -527,7 +531,15 @@ class OpenCascade:
         distance = np.empty(len(points))
         for i, point in enumerate(points):
             vertex = BRepBuilderAPI_MakeVertex(gp_Pnt(*point)).Vertex()
-            if faces is None:
+            if edges is not None:
+                edge = indexed_edges.FindKey(int(edges[i]) + 1)
+                extrema = BRepExtrema_DistShapeShape(vertex, edge)
+                if ancestors is None:
+                    ancestors = self._faces_around(shape)
+                face_index = min(
+                    indexed.FindIndex(face) - 1 for face in ancestors.FindFromKey(edge)
+                )
+            elif faces is None:
                 extrema = BRepExtrema_DistShapeShape(vertex, boundary)
                 support = extrema.SupportOnShape2(1)
                 if extrema.SupportTypeShape2(1) == BRepExtrema_IsInFace:

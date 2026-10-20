@@ -1,10 +1,12 @@
 """A polyhedral mesh of a region of a computer-aided design (CAD) model.
 
-:class:`CadMesher` meshes a region (some solids' union, less others) in four steps: the region is
+:class:`CadMesher` meshes a region (some solids' union, less others) in five steps: the region is
 written as a boundary-representation (BREP) file; Netgen triangulates its faces, each triangle
 tagged by its face, and fills the surface with tetrahedra; the tetrahedra become a mesh whose
-boundary faces are in patches chosen by face (:class:`FaceSelection`); and that mesh's polyhedral
-dual is the result, the region's sharp edges kept as features.
+boundary faces are in patches chosen by face (:class:`FaceSelection`); that mesh's polyhedral dual
+is built, the region's sharp edges kept as features; and the dual's boundary vertices, which sit at
+the triangles' centroids and the midpoints of their edges, are moved onto the region's faces and
+sharp edges.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
+import equinox as eqx
+import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.io.cad import CadModel, CadRegion
@@ -219,15 +223,15 @@ class CadMesher:
                 if np.any(patch_of_face == index)
             },
         )
+        edges = _SurfaceEdges.of(surface)
         feature_pairs = {
             tuple(sorted(topology.faces_of_edge(edge)[:2].tolist()))
             for edge in topology.feature_edges(self.feature_angle)
             if topology.faces_of_edge(edge).size >= 2
         }
-        dual = PolyhedralDual(
-            self.feature_angle, feature_edges=_edges_between(surface, feature_pairs)
-        )
-        return dual.build(primal)
+        dual = PolyhedralDual(self.feature_angle, feature_edges=edges.between(feature_pairs))
+        traced = dual.build_traced(primal)
+        return _onto_the_drawing(traced, primal, surface, edges, model, region, topology)
 
     def _netgen_options(self, **extra) -> dict:
         """The Netgen settings that are set, to pass through."""
@@ -265,18 +269,110 @@ def _patch_of_face(model, region, surface: SurfaceTriangulation, n_faces, patche
     return patch_of_face
 
 
-def _edges_between(surface: SurfaceTriangulation, pairs: set[tuple[int, int]]) -> np.ndarray:
-    """The triangulation's edges between two faces whose pair is in ``pairs``, as point pairs."""
-    triangles = surface.triangles
-    edges = np.stack([triangles, np.roll(triangles, -1, axis=1)], axis=2).reshape(-1, 2)
-    face = np.repeat(surface.face, 3)
-    keys = np.sort(edges, axis=1)
-    order = np.lexsort(keys.T[::-1])
-    keys, face = keys[order], face[order]
-    # A closed surface has each edge on exactly two triangles, so sorted keys come in pairs.
-    first, second = face[0::2], face[1::2]
-    between = first != second
-    bound = int(surface.face.max()) + 1
-    pair_keys = np.array([a * bound + b for a, b in pairs], dtype=np.int64)
-    wanted = np.isin(np.minimum(first, second) * bound + np.maximum(first, second), pair_keys)
-    return keys[0::2][between & wanted]
+@dataclasses.dataclass(frozen=True)
+class _SurfaceEdges:
+    """Each edge of a closed triangulation once, with the faces its two triangles lie on.
+
+    Attributes
+    ----------
+    points : np.ndarray of int, shape ``(n_edges, 2)``
+        The edge's two points, ascending; rows in ascending order.
+    faces : np.ndarray of int, shape ``(n_edges, 2)``
+        The faces of its two triangles, ascending (equal inside a face).
+    """
+
+    points: np.ndarray
+    faces: np.ndarray
+
+    @classmethod
+    def of(cls, surface: SurfaceTriangulation) -> _SurfaceEdges:
+        triangles = np.asarray(surface.triangles, dtype=np.int64)
+        corners = np.stack([triangles, np.roll(triangles, -1, axis=1)], axis=2).reshape(-1, 2)
+        face = np.repeat(surface.face, 3)
+        keys = np.sort(corners, axis=1)
+        order = np.lexsort(keys.T[::-1])
+        keys, face = keys[order], face[order]
+        # A closed surface has each edge on exactly two triangles, so sorted keys come in pairs.
+        pair = np.sort(np.stack([face[0::2], face[1::2]], axis=1), axis=1)
+        return cls(keys[0::2], pair)
+
+    def between(self, pairs: set[tuple[int, int]]) -> np.ndarray:
+        """The edges between two faces whose (ascending) pair is in ``pairs``, as point pairs."""
+        bound = int(self.faces.max()) + 1
+        wanted = np.array([a * bound + b for a, b in pairs], dtype=np.int64)
+        chosen = np.isin(self.faces[:, 0] * bound + self.faces[:, 1], wanted)
+        return self.points[chosen & (self.faces[:, 0] != self.faces[:, 1])]
+
+    def faces_of(self, points: np.ndarray) -> np.ndarray:
+        """The two faces beside each edge given by its points (ascending), shape ``(n, 2)``."""
+        bound = int(self.points.max()) + 1
+        keys = self.points[:, 0] * bound + self.points[:, 1]
+        position = np.searchsorted(keys, points[:, 0] * bound + points[:, 1])
+        return self.faces[position]
+
+
+def _onto_the_drawing(traced, primal, surface, edges, model, region, topology) -> Mesh:
+    """The dual with each boundary vertex the primal boundary approximates moved onto the drawing.
+
+    A boundary face's centroid goes onto the face its triangle lies on; a vertex on a boundary
+    edge, onto the face of its two triangles or, where they lie on two faces, onto the drawing's
+    edge between them (the nearest, where they share several). A primal point is on the drawing
+    already and stays.
+    """
+    coordinates = np.array(traced.mesh.node_coords, dtype=np.float64)
+    of_face = _drawing_faces(primal, surface)
+    at_face = np.flatnonzero(traced.vertex_face >= 0)
+    at_edge = np.flatnonzero(traced.vertex_edge[:, 0] >= 0)
+    beside = edges.faces_of(traced.vertex_edge[at_edge])
+    inside = beside[:, 0] == beside[:, 1]
+    onto_faces = np.concatenate([at_face, at_edge[inside]])
+    landed = model.project(
+        region,
+        coordinates[onto_faces],
+        faces=np.concatenate([of_face[traced.vertex_face[at_face]], beside[inside, 0]]),
+    )
+    coordinates[onto_faces] = landed.points
+    crossing, pairs = at_edge[~inside], beside[~inside]
+    shared = _edges_shared(topology)
+    for pair in np.unique(pairs, axis=0):
+        mine = crossing[np.all(pairs == pair, axis=1)]
+        candidates = shared.get(tuple(pair.tolist()), [])
+        if not candidates:
+            continue  # faces meeting only at a point: the vertex stays on its chord
+        # Each candidate from where the vertex was, not from where an earlier one put it.
+        start, best = coordinates[mine].copy(), np.full(mine.size, np.inf)
+        for candidate in candidates:
+            moved = model.project(region, start, edges=np.full(mine.size, candidate))
+            nearer = moved.distance < best
+            best[nearer] = moved.distance[nearer]
+            coordinates[mine[nearer]] = moved.points[nearer]
+    return eqx.tree_at(lambda mesh: mesh.node_coords, traced.mesh, jnp.asarray(coordinates))
+
+
+def _drawing_faces(primal: Mesh, surface: SurfaceTriangulation) -> np.ndarray:
+    """The drawing's face under each primal boundary face (``-1`` inside), by its triangle."""
+    neighbour = np.asarray(primal.face_cells.neighbour)
+    rings = np.asarray(primal.face_nodes.face_node_indices).reshape(-1, 3)
+    boundary = np.flatnonzero(neighbour < 0)
+    bound = int(surface.triangles.max()) + 1
+
+    def key(triangles):
+        ordered = np.sort(np.asarray(triangles, dtype=np.int64), axis=1)
+        return (ordered[:, 0] * bound + ordered[:, 1]) * bound + ordered[:, 2]
+
+    keys = key(surface.triangles)
+    order = np.argsort(keys)
+    found = order[np.searchsorted(keys[order], key(rings[boundary]))]
+    faces = np.full(primal.n_faces, -1, dtype=np.int64)
+    faces[boundary] = surface.face[found]
+    return faces
+
+
+def _edges_shared(topology) -> dict[tuple[int, int], list[int]]:
+    """The drawing's edges between each pair of faces (ascending), seams and slits left out."""
+    shared: dict[tuple[int, int], list[int]] = {}
+    for edge in range(topology.n_edges):
+        faces = np.unique(topology.faces_of_edge(edge))
+        if faces.size == 2:
+            shared.setdefault(tuple(faces.tolist()), []).append(edge)
+    return shared
