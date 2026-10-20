@@ -344,10 +344,15 @@ this mask; wiring it in is the next PR's.
   warp and of triangulation-volume dependence nearly unchanged, and boundary faces untouched** (by design:
   their vertices are fixed). It is **slow**: linear convergence, 71–118 sweeps, 132 s (3.7k cells) to
   1077 s (16k cells) — not usable at the 2M-cell target as is.
-- **Open, for the project owner (not built)**: (1) a global solve — a local–global (projection + one sparse
-  least-squares for all vertices) or a joint Gauss–Newton over vertices and face planes — in place of the
-  Jacobi sweep, for the cost; (2) sliding boundary vertices along the CAD surface, or splitting faces still
-  warped, for the boundary and the maxima. Pinned in `tests/unit/test_meshing_planarize.py`; harness
+- **Probed, not built: Gauss–Newton on the true warp** (`validation/meshing_dual/planarization_gauss_newton.py`,
+  log 2026-10-20): the warp as a JAX residual (planes included), Levenberg–Marquardt solved by matrix-free
+  CG, the same bounds. On the Netgen L 73 s vs 130 s, total warp 3.8 vs 8.9, and the maxima move (warp
+  0.30 → 0.25, triangulation volume 0.255 → 0.227); worst non-orthogonality 43.2 vs 39.9. ⚠️ **Under the
+  bounds a violating step must be re-solved with the worsened cells' vertices pinned, after first
+  shortening it** (raising λ up to 100× its start) — deleting held vertices from a finished global step,
+  as the sweeps do, stalls (kept share 0.64 → 0.24). The bounds, not the solver, cap each step's length.
+  Not yet measured: a CG preconditioner, the other duals. **Still open**: sliding boundary vertices along
+  the CAD surface, or splitting faces still warped, for the boundary faces. Pinned in `tests/unit/test_meshing_planarize.py`; harness
   `validation/meshing_dual/planarization.py`.
 
 ## Netgen: in a child process, reached through files (binding)

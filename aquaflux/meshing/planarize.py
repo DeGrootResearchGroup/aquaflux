@@ -231,15 +231,25 @@ class _NoWorse:
         step = step.copy()
         while np.any(step):
             trial = _State.at(mesh, state.coords + step)
-            worse = np.any(trial.cell_quality > self._cell_bound, axis=1)
-            bad = np.any(trial.face_quality > self._face_bound, axis=1)
-            neighbour = self._neighbour[bad]
-            worse[self._owner[bad]] = True
-            worse[neighbour[neighbour >= 0]] = True
+            worse = self.worsened(trial)
             if not np.any(worse):
                 return trial
-            held, _, _ = ragged.rows(self._offsets, self._nodes, np.flatnonzero(worse))
+            held = self.vertices_of(worse)
             if not np.any(step[held]):
                 return None  # holding changes nothing more: the step cannot be made safe
             step[held] = 0.0
         return None
+
+    def worsened(self, trial: _State) -> np.ndarray:
+        """The cells ``trial`` breaks a bound in, or that bound a face breaking one; ``(n_cells,)``."""
+        worse = np.any(trial.cell_quality > self._cell_bound, axis=1)
+        bad = np.any(trial.face_quality > self._face_bound, axis=1)
+        neighbour = self._neighbour[bad]
+        worse[self._owner[bad]] = True
+        worse[neighbour[neighbour >= 0]] = True
+        return worse
+
+    def vertices_of(self, cells: np.ndarray) -> np.ndarray:
+        """The vertices of the cells ``cells`` marks."""
+        held, _, _ = ragged.rows(self._offsets, self._nodes, np.flatnonzero(cells))
+        return held

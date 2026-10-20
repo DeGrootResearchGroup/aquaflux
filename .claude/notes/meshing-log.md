@@ -357,3 +357,39 @@ no skewness bound; a bad face holding its owner only (hung the pass until the no
 red since); `movable` ignored; no decrease stop; no flat stop; holding everything. Green, dismissed: no
 volume bound (never bites on the fixtures; kept because an inverted cell's convexity is NaN and passes a
 `>` bound); no halving (no sweep on the fixtures raises the warp; kept as the pass's globalization).
+
+## 2026-10-20 — Gauss–Newton on the true warp against the Jacobi sweeps
+
+Probe `validation/meshing_dual/planarization_gauss_newton.py` (macOS arm64, one run each, machine shared;
+counts deterministic, seconds indicative). Total warp as a JAX residual of the free vertices (planes
+included); Levenberg–Marquardt `(JᵀJ + λI) dx = −Jᵀr` by unpreconditioned CG to 0.1 relative, `J` by
+jvp/vjp; λ₀ = 1e-3·mean(1/area), /3 on success. Judged by `_NoWorse`'s bounds; on a violation λ is raised
+×4 until `--shorten` × λ₀, then the worsened cells' free vertices are pinned and the system re-solved;
+the planarizer's stopping test.
+
+Kuhn dual (`tetrahedral_grid_3d(8, perturb=0.25)`, 729 cells): Jacobi 282 sweeps, 597 evaluations, total
+warp 14.8 → 0.541, 16.8 s. Gauss–Newton: deleting held vertices from a finished step (as the sweeps do)
+stalled at 2.67 in 5 iterations — the kept share of each step fell 0.64 → 0.24; pinning and re-solving,
+by `--shorten`: 1 → 1.25 (13 it, 3.6 s), 10 → 0.93 (6.5 s), **100 → 0.355 (79 it, 231 evaluations,
+1470 CG products, 9.3 s)**, 1000 → 0.54 (155 it, 15.5 s; max warp 0.053 vs Jacobi 0.070). The first
+undamped step alone reaches 1.08 with 8 cells' convexity and 5 faces' skewness over their bounds; one
+face at the start's worst skewness is worsened by every step tried, so pinning is never avoided.
+Handing the result to the sweeps ("gauss-newton+jacobi") added little at 100.
+
+Netgen L maxh 0.01 (3718 cells), `--shorten=100`, against the sweeps (start / Jacobi / Gauss–Newton):
+
+| | start | Jacobi | Gauss–Newton |
+|---|---|---|---|
+| iterations, evaluations, CG products | | 108, 813, 0 | 50, 233, 10175 |
+| time | | 129.8 s | 73.4 s |
+| total warp | 255 | 8.94 | 3.77 |
+| interior warp p99 / max | .161 / .303 | .052 / .303 | .023 / .249 |
+| non-convexity p99 / max | .169 / .349 | .091 / .312 | .069 / .312 |
+| concave cells | 57 | 31 | 28 |
+| triangulation volume p99 / max | .121 / .255 | .058 / .255 | .034 / .227 |
+| non-orth max / avg | 46.2 / 12.0 | 39.9 / 7.6 | 43.2 / 8.0 |
+| skewness | 1.44 | 1.44 | 1.44 |
+
+Not measured: where the Gauss–Newton time goes between the 233 guard evaluations and the 10175 CG
+products (each a host round trip through a jitted `JᵀJv`); a CG preconditioner (the per-vertex 3×3 blocks
+the sweeps already form are the natural one); the other three duals; `--shorten` other than 100 on Netgen.
