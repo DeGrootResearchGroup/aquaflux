@@ -983,7 +983,10 @@ pitzDaily's wall moves little: steps 2–21 save ~14 s, and the first step pays 
 cache, for tracing and lowering five probe programs instead of one, once per process (the AVX branch run
 paid 12 s on a cold cache).
 
-FIELDWISE-BFS3D-MARCHES
+**bfs3d marches: not measured.** The pair (`main`, then the branch, `BFS3D_CHECKPOINT_KEEP=100`) was
+started twice and the container restarted under it both times, at steps 15 and 11 of the `main` run (VmHWM
+9.3 / 8.8 GiB, 6-7 GiB available at the last sample, so not memory); the branch march never started. Its
+`state-00015` checkpoint is the march state checked above. The owner is measuring the pair locally.
 
 ### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18/19)
 

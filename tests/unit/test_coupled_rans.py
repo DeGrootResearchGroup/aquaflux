@@ -1781,8 +1781,7 @@ def test_the_k_positivity_builders_address_the_k_block_and_defer_to_the_transfor
     """
     from types import SimpleNamespace
 
-    from aquaflux.turbulence import positive_k_projection
-    from aquaflux.turbulence.coupled import DirectScalars, LogScalars
+    from aquaflux.turbulence import DirectScalars, LogScalars, positive_k_projection
 
     n, dim = 7, 3
     direct = SimpleNamespace(
@@ -1818,8 +1817,7 @@ def test_omega_step_ratio_bounds_log_omega_per_cell_after_the_k_clip() -> None:
     import math
     from types import SimpleNamespace
 
-    from aquaflux.turbulence import omega_step_bound
-    from aquaflux.turbulence.coupled import DirectScalars, LogScalars
+    from aquaflux.turbulence import DirectScalars, LogScalars, omega_step_bound
 
     n, dim = 4, 2
     layout = coupled_rans_layout(flow_state_layout(dim=dim, n_cells=n))

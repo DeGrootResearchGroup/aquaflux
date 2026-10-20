@@ -241,7 +241,11 @@ VALIDATION_INTERNAL_REACHES = {
     "PROBE_BATCH_SIZE",
     "ColumnProbePlan",
     "ProbeGather",
+    "batched_field_jacobian_matvec",
     "batched_jacobian_matvec",
+    # The one place a fit and a re-fit choose their products, reached by the harness that compares the
+    # per-column-field probe with the whole-state one entry for entry (`fieldwise_probe_identity.py`).
+    "_probe_products",
     "block_stencil_colouring",
     "block_stencil_gather_map",
     "column_probe_plan",

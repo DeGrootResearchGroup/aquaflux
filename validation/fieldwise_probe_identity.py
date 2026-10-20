@@ -47,14 +47,12 @@ import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
+from aquaflux.precondition import materialize_block_jacobian  # noqa: E402
 from aquaflux.precondition.materialized_session import (  # noqa: E402
     PROBE_BATCH_SIZE,
     _probe_products,
 )
-from aquaflux.precondition.sparse_jacobian import (  # noqa: E402
-    block_stencil_gather_map,
-    materialize_block_jacobian,
-)
+from aquaflux.precondition.sparse_jacobian import block_stencil_gather_map  # noqa: E402
 from aquaflux.turbulence import open_session  # noqa: E402
 from step_cases import load_case  # noqa: E402
 
