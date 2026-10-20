@@ -227,3 +227,36 @@ growth=1.2, count=5)` on the Sozzi water's walls and lamp (caps bare), patches a
   the inward normals already lie in the top's plane); no gap limit (red once halving could not rescue it);
   no halving; the prism inversion check off (only on an L's concave edge); no tapering; the column move off
   (the Netgen test).
+
+## 2026-10-19 — the octree hex core: pinches, the Netgen fill, mutations
+
+macOS arm64, one run each, `OctreeCore` defaults (`cap_height` 0.25, `samples` 3), netgen-mesher 6.2.2608.
+
+- **Pinches on a staircase ball** (region: ball r 0.9 at (1, 1, 1) in the box [0, 2]^3; `size` s,
+  `clearance` 0.05, `NearSurface(same ball, s/2)`), candidate cubes → kept:
+
+  | s | candidates | drop every cube at a pinched point | drop the minority fan's cubes, and all but the first face's cube on a crowded edge | one cube per pinched point per round (shipped) |
+  |---|---|---|---|---|
+  | 0.2 | 352 | 128 | 176 | 256 |
+  | 0.15 | 557 | 34 | 149 | 485 |
+  | 0.1 | 1791 | 1756 | 1763 | 1784 |
+
+  The middle rule still cascades because the two rules can pick opposite sides of one pinch, dropping
+  both cubes.
+  Two unit boxes of 0.25 cubes touching along an edge: 5 of 128 dropped, all on the shared edge; two
+  touching at a corner: 1 dropped. Probe: `OctreeCore(s, 0.05, refinements=(NearSurface(ball, s/2),))
+  .mesh(ball, [0]*3, [2]*3)`, counting `kept` (the two rejected columns need `_without_pinches` swapped for them).
+- **Netgen fill and dual** (the pinned test's case: box [0, 1]^3 walls at 8 x 8 squares per face; core
+  `size` 0.1, `clearance` 0.15, `NearSurface(ball r 0.15 at the centre, 0.05)`): 608 cubes (160 of 0.1,
+  448 of 0.05), fill 0.45 s / 3713 tets at `max_size` 0.1, primal 7241 cells of volume 1.0, dual 2037
+  cells in 0.38 s, closure 7e-18, volume 1.0. A staircase core (region a ball r 0.42 at the centre,
+  `clearance` 0.05) in the same box: 472 cubes, 7006 tets, dual closes with volume 1.0 — caps on a
+  staircase are accepted by Netgen.
+- **Mutations, each red**: balance off; balance across faces only; `NearSurface` never refining; no
+  transition cubes; split faces as fans; fans ignoring halved edges; no pinch removal; every cube at a
+  pinch dropped; apex inward; `cap_height` ignored; boundary triangles or cap sides wound outward; no
+  clearance; a wrong hexahedron or pyramid face; hexahedra and pyramids numbered in the other order; every
+  cube a transition cube (red only in the Netgen test: its deep dual cells stop being hexahedra); caps
+  wound outward (Netgen test). **Dismissed, equivalent**: dropping `Octree.leaf_at`'s level check —
+  levels are visited coarsest first, so a wrong match at a coarser level is always overwritten by the
+  true leaf's; kept so the lookup does not depend on that order.

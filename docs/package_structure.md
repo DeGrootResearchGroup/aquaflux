@@ -198,7 +198,9 @@ cfd/                                  # repo root
 │   ├── meshing/                      # mesh generation from CAD (host-side numpy + numba; Netgen only in a child process)
 │   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches) -> Mesh; FaceSelection -> FacesNear / FacesOn
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
-│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, patches) -> Mesh
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches) -> Mesh
+│   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement
+│   │   ├── hex_core.py               #   OctreeCore.mesh(inside, lower, upper) -> HexCore: conformal hex core, pyramid caps
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, triangles, layered) -> LayerExtrusion: prism layers sized for the dual
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
