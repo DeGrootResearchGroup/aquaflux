@@ -17,6 +17,7 @@ from aquaflux.vectors import dot
 
 from .cell import CellGeometry
 from .face import face_geometry_scheme
+from .orientation import owner_outward_normals, ring_signs
 
 if TYPE_CHECKING:  # pragma: no cover
     from .mesh import Mesh
@@ -26,7 +27,7 @@ def stored_ring_is_outward(mesh: Mesh) -> np.ndarray:
     """Whether each face's stored node ring already winds outward from its owner cell.
 
     The flip the mesh applies to the ring's normal is recovered by running the mesh's own
-    face-geometry strategy, rather than by re-deriving the orientation test here.
+    orientation step, rather than by re-deriving it here.
 
     Parameters
     ----------
@@ -42,11 +43,14 @@ def stored_ring_is_outward(mesh: Mesh) -> np.ndarray:
         volume.
     """
     scheme = face_geometry_scheme(mesh.dim)
-    _, centroid, node_order_normal = scheme.unoriented_geometry(mesh.node_coords, mesh.face_nodes)
-    approx = CellGeometry.approx_centroids(centroid, mesh.face_cells)
-    outward = scheme.orient_owner_outward(
-        node_order_normal, centroid, approx[mesh.face_cells.owner]
+    area, centroid, node_order_normal = scheme.unoriented_geometry(
+        mesh.node_coords, mesh.face_nodes
     )
-    # `orient_owner_outward` returns the ring's own normal times +-1, so this projection is
+    approx = CellGeometry.approx_centroids(centroid, mesh.face_cells)
+    outward = owner_outward_normals(
+        scheme, node_order_normal, area, centroid, approx, mesh.face_cells,
+        ring_signs(mesh.face_nodes, mesh.face_cells),
+    )  # fmt: skip
+    # The oriented normal is the ring's own normal times +-1, so this projection is
     # +-|n|^2: its sign is the flip, and nothing else about the magnitude is used.
     return np.asarray(dot(outward, node_order_normal)) >= 0.0

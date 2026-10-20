@@ -41,6 +41,7 @@ PUBLIC_SUBPACKAGES = [
     "case",
     "solids",
     "io.cad",
+    "meshing",
 ]
 
 # How the API reference groups each subpackage, keyed on the module a name is DEFINED in.
@@ -55,6 +56,7 @@ SUBPACKAGE_GROUPS = {
             "The sections of a case",
             [
                 "mesh_source",
+                "drawing",
                 "fluid",
                 "physics",
                 "boundaries",
@@ -65,6 +67,13 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Running a case file", ["run"]),
+    ],
+    "meshing": [
+        ("Meshing a region of a CAD model", ["cad_mesher"]),
+        ("The polyhedral dual", ["dual"]),
+        ("Prism layers", ["layers"]),
+        ("A mesh of tetrahedra and prisms", ["elements"]),
+        ("Netgen, in a child process", ["netgen_process"]),
     ],
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),

@@ -47,7 +47,8 @@ its file alone.**
 | `scopes.py` | `FLOW` / `TURBULENCE` / `RADIATION`, `SCOPES`, the `Scoped` mixin (`setting_scopes`, `required_in_scope`, `settings_in`, `missing_in`) |
 | `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics, drive, pressure datum, sources, solver, initial, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
-| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` |
+| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` / `CadMesh` (a STEP region meshed by `meshing.CadMesher`; patches by `meshing.FacesNear` / `FacesOn`, prism layers by `meshing.PrismLayers` on the patches in `layered`, all read directly) |
+| `drawing.py` | `CadPlacement`, shared by `CadMesh` and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
 | `physics.py` | `Physics` → `_Flow` → `Laminar` / `RANS`, and `Radiation`; flow physics map a march state to named fields (`restart_fields`) and back (`initial_fields`) |
@@ -56,7 +57,7 @@ its file alone.**
 | `kinematic.py` | `kinematic_pressure` / `pressure_from_kinematic` — the one home of OpenFOAM's pressure-per-unit-density factor |
 | `restart_file.py` | `RestartHeader`, `mesh_digest`, `checkpoint_writer`, `read_restart` → `RestartFile` (`resumption`), `refuse_non_finite` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` / `IntensityLength` |
-| `radiation.py` | `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`, `CadPlacement`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers` |
+| `radiation.py` | `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers` |
 | `paths.py` | `named_paths` / `with_paths` / `relocated` (see "Paths") |
 | `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (on `_March`) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for`; `NotConverged` |
 | `outputs.py` | `Outputs`, `RunFields(cells, patches)`, `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`, `Checkpoints` |
@@ -163,6 +164,9 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 ## Periodic channels: mesh source, drive, sources
 
 - **`MeshSource.read(directory) -> Mesh` is the contract** (a generated grid has nothing to read).
+- **`CadMesh` regenerates its mesh on every read** (`check` and `run` included; Sozzi at maxh 0.01 is
+  ~9 s). The user's route to mesh once is `aquaflux mesh OUT --case case.yaml --openfoam`, then an
+  `OpenFOAMMesh` of `OUT`. Its `feature_angle` is in radians, like `CadSurface.angle`.
 - **`StructuredGrid(cells, lengths, periodic, grading)`** builds `structured_grid_2d(named_boundaries=True)`
   (side-named patches minus a periodic axis's two sides); `periodic` supports `x` only; a whole-number float
   cell count is normalized to an int. A 3D `StructuredGrid` is uniform and non-periodic
@@ -227,9 +231,11 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - **Editing commands for the browser interface**: `aquaflux schema` (`case_schema()`), `aquaflux show
   case.yaml` (`{"error", "case"}`; a refused file is still shown), `aquaflux write case.yaml [--relative-to
   DIR]` (validates through `case_spec_from_mapping`; writes nothing when refused; drops comments and
-  default-valued settings), `aquaflux mesh OUT` (the mesh section alone, via `mesh_source_from_mapping`;
-  writes `OUT/mesh.vtu`, prints cells, dim, patches with faces, groups). Pinned by
-  `tests/unit/test_case_editing_commands.py`.
+  default-valued settings), `aquaflux mesh OUT [--case FILE] [--openfoam]` (the mesh section alone, via
+  `mesh_source_from_mapping`, from stdin JSON or from a case file, whose directory is then the base; writes
+  `OUT/mesh.vtu`, with `--openfoam` also `OUT/constant/polyMesh`; prints cells, dim, patches with faces,
+  groups, and `polymesh`). Pinned by `tests/unit/test_case_editing_commands.py`; `--case --openfoam` by
+  `test_meshing_netgen.py` (a Sozzi `CadMesh`, run from another directory).
 - **`aquaflux serve`** answers `SERVED` commands (`schema`/`show`/`write`/`mesh`/`check`/`plan`, never `run`)
   one JSON line per request by calling `main(arguments)` in-process with stdio swapped; an exception or
   `SystemExit` becomes that request's status. ⚠️ **Replies go on a `dup` of fd 1, and fd 1 is then pointed at

@@ -12,11 +12,13 @@ paths:
 > **Comment Convention**). The dated record — the research survey, the Netgen probes, their numbers — is in
 > `.claude/notes/meshing-log.md`.
 
-**Status: built** — the Netgen child process (`netgen_process.py`, `_netgen_child.py`) and the
-feature-preserving dual (`dual.py`) **except the concave split**, which is refused (below). Nothing else of the
-mesher is. The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
-`validation/meshing_netgen/`. The package is not on the published API page (`docs/conf.py`
-`PUBLIC_SUBPACKAGES`) until it has a mesher a user calls.
+**Status: phase 1 built** — STEP region → Netgen tets → polyhedral dual → `Mesh` / polyMesh, from a case
+file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
+`element_mesh` (`elements.py`: tetrahedra and prisms), the feature-preserving dual (`dual.py`, cells at sharp
+concave edges cut into pieces), prism layers on triangulated walls (`layers.py`) and the mesher
+(`cad_mesher.py`). Layers on structured quad surfaces, blocks and the hex core are not built.
+The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
+`validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
 A polyhedral mesher for water-treatment reactors: STEP in, an aquaflux `Mesh` (and an OpenFOAM polyMesh)
 out, with wall-resolved layers that join the bulk **conformally**. Conformity is a requirement here, not a
@@ -67,36 +69,135 @@ seams are exactly where its mesh fails, below).
   (the published treatment of concave geometrical edges). Reimplement from the published description; the
   OpenFOAM `polyDualMesh` source is GPL and is not copied.
 
-## The feature-preserving dual (`dual.py`) — built, concave split not yet
+## The feature-preserving dual (`dual.py`) — built
 
 `PolyhedralDual(feature_angle, feature_edges=None).build(primal: Mesh) -> Mesh`. Dual cell `i` is primal
-point `i`. Vertices: primal cell centroids, boundary-face centroids, feature-edge midpoints, points on ≥ 2
-feature edges. Each primal edge gives the face between its ends' cells (ring of cell centroids; on the
+point `i` (its first piece); the further pieces of cut points follow, by point. Vertices: primal cell
+centroids, boundary-face centroids, feature-edge midpoints, points on ≥ 2 feature edges. Each primal edge gives the face between its ends' cells (ring of cell centroids; on the
 boundary closed through its two boundary faces' centroids, and its midpoint if a feature). Each boundary
 point gives its fan of face centroids, cut along feature edges into one face per sector with the point as a
 vertex. Features: fold beyond `feature_angle` (no default), every patch border, named edges. Two numba walks
 (cells around each edge, boundary faces around each point); faces of edges assembled in numpy.
 - **Accepted primal**: 3D, non-periodic, one cell zone, no patch on interior faces, closed manifold
   boundary, every point on a face. Each refused by name.
-- ⚠️ **Sharp concave folds are refused** (`NotImplementedError`: a boundary edge folding concavely by more
-  than `feature_angle`; sign by `boundary_folds`). **Why, measured** (2026-10-19, Netgen L at maxh 0.02):
-  the dual is topologically closed and its consistently oriented faces sum to zero (≤ 5e-20), but at 3 of
-  581 cells, all on the concave edge, `Mesh.geometry()`'s centroid-based orientation turns exactly one face
-  inward (closure 1e-4 to 4e-4), because the cell wraps around the fold (a vertex a whole cell size outside
-  a face plane). The structured hex L happened to close. **So the concave split is required for
-  correctness, not quality**, and is the next PR; every reactor's pipe junction needs it. A gently concave
-  wall is fine: a lamp-sleeve hole folds concavely ≤ 32° per edge and its duals close (3 sizes, 0 unclosed).
+- **Cells at sharp concave folds are cut into pieces** (`_Pieces`): every point on an edge folding concavely
+  by more than `feature_angle` (sign by `boundary_folds`). **Why, now that the mesh orients faces by
+  shared edges** (`mesh.md`): an uncut cell closes but wraps around the fold — worst non-convexity 1.2 on the
+  Netgen L at maxh 0.01, against 0.35 cut (log). Under the former centroid-based orientation it was a
+  correctness matter: one face per such cell was turned inward. **The rule**: the walls are the feature sectors at the point that touch one of its concave
+  edges, each with its area-weighted normal at the point; each primal cell around the point goes to the
+  wall its centroid lies deepest behind (`argmax -(c - p)·n`), and each wall's cells are one dual cell
+  (face-connected, else `NotImplementedError`). Merging sectors across convex edges is wrong (the L's end
+  corner would not be cut); a depth rule over *all* sectors is wrong (it cuts convex corners, and its
+  pieces at the L's end are not convex).
+  - **Topology** (the barycentric dual, collapsed except where pieces meet): each interior primal face
+    between pieces gets a vertex on its dual edge, inserted into **every** dual face along that edge (also
+    those of edges not at the point, else a hanging vertex closure cannot see); a dual face whose pair of
+    pieces changes around its edge is cut into one face per run, closed through a vertex of the edge; each
+    cut face gives a quad `[p, edge vertex, face vertex, edge vertex]` between the two pieces; boundary
+    fans are also cut where the faces' cells change piece. The point itself becomes a vertex.
+  - **The added vertices lie on the surface between pieces**, or the separating surface zig-zags along tet
+    faces: Netgen L at maxh 0.01, worst non-convexity 0.56 with the cut faces' vertices at face centroids,
+    1.1 with the cut edges' hubs at midpoints, 1.23 with both (0.35 placed); under the former centroid
+    orientation the unplaced cut also failed closure. So: a face's vertex where its dual edge crosses
+    the plane `(n_b − n_a)·(x − p) = 0` (fraction kept to [0.1, 0.9] so a centroid on the plane does not
+    give coincident vertices; mean over cutting points); an interior edge's hub the least-squares point
+    on every interface it meets and in the dual face's plane (on the triple line where three pieces meet);
+    a boundary edge's hub on the segment between its two boundary-face centroids, where it crosses.
+  - Measured (log): every Netgen L, cylinder, sleeve and Sozzi dual closes; Sozzi's two junctions give 24
+    extra pieces; pieces' non-convexity within the uncut cells' range. A face cut around two points of a
+    three-wall corner meets two different planes, so that corner is near-convex (≤ 0.05), not exact.
+  - A gently concave wall is not cut: a lamp-sleeve hole folds concavely ≤ 32° per edge and its duals close.
 - **Away from features the dual's boundary runs through face centroids**, inside a curved wall by the chord:
-  dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). Projecting
-  those vertices onto the CAD surface (`CadModel.project`) is the mesher's job.
+  dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). The dual
+  itself does not know the true surface; `build_traced` says where each boundary vertex came from, and
+  `CadMesher` projects them onto the drawing (below).
 - ⚠️ **Memory is the open problem at the 2M target**: the primal held as a full `Mesh` costs ~5 KB per
   point and the dual's build ~9 KB per point (111k points; log), so 2M points would need ~28 GB. The likely
   fix is a numpy-only primal (the primal is never solved on) and a leaner assembly; not yet done.
 - **Quality, not correctness, on Netgen duals**: `checkMesh` passes structured and Kuhn-tet duals; Netgen
-  duals pass topology and closure but report concave cells by face planes (1.6–7.7 %), a few low-quality
-  face decompositions and small volume ratios (log). The quality and planarization component is for these.
-- Pinned in `tests/unit/test_meshing_dual.py`; scale and convexity in
-  `validation/meshing_dual/dual_scale_convexity.py` (log).
+  duals, cut ones included (L, Sozzi), pass topology and closure but report concave cells by face planes
+  (1.5–7.7 %), a few low-quality face decompositions and small volume ratios (log). The quality and
+  planarization component is for these.
+- Pinned in `tests/unit/test_meshing_dual.py` (the cut on hex and Kuhn Ls and a three-wall corner) and
+  `test_meshing_netgen.py` (a Netgen L, the case placement is for); scale and convexity, Sozzi included,
+  in `validation/meshing_dual/dual_scale_convexity.py` (log).
+
+## The CAD mesher (`cad_mesher.py`) — built
+
+`CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, netgen=NetgenProcess()).mesh(
+model, region, patches=None, others="walls", layered=()) -> Mesh`: `write_brep` → `triangulate`
+(face-tagged) → prism layers on the `layered` patches (below) → `fill` of what is left → `element_mesh`
+(boundary faces in patches by their triangle's CAD face) → `PolyhedralDual.build_traced`
+→ boundary vertices projected onto the CAD (below), with
+**the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
+(so a CAD edge stays sharp whatever its triangles fold by; pinned by
+`test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by`). Netgen is injected, so
+`tests/unit/test_meshing_cad_mesher.py` runs the whole pipeline on a stub cube (Kuhn tets) without Netgen
+or OCP.
+- **Patches are chosen by face selection** (`FaceSelection.faces(RegionFaces) -> face indices`; agreed
+  with the project owner, 2026-10-19, who intends a face picker in the browser interface — a click on a
+  face is a point on it, which is all `FacesNear` stores): `FacesNear(points)` — the face each point projects onto (a pipe's
+  end); `FacesOn(solids, tolerance=None)` — faces whose sample point lies within tolerance (unset 1e-6 of
+  the region's extent) of the solids' boundary (a lamp taken out of the water). A face's sample is the
+  centroid of one of its triangles projected onto it. Faces nobody selects go to `others`; two
+  selections sharing a face, a selection finding none, a reserved name, or `others` naming a selection
+  are refused (names before Netgen runs). The CAD records carry no face names, which is why selection is
+  geometric.
+- **Every boundary vertex is projected onto the drawing** (`_onto_the_drawing`), from the dual's
+  `TracedDual` (`vertex_face`: the primal boundary face a vertex is the centroid of; `vertex_edge`: the
+  primal boundary edge a midpoint or a cut's hub stands for): a face centroid onto its triangle's CAD
+  face; an edge vertex onto the CAD face of its two triangles, or, when they lie on two faces, onto the
+  CAD edge between them (`CadModel.project(..., edges=)`), the nearest of several. A primal point is on
+  the drawing already. Sozzi after projection (log): patch areas −0.5 to −1.5 % (flat polygons between
+  surface points, and the inlet/outlet rims' chords), boundary vertices on the drawing to 4e-17,
+  non-convexity unchanged.
+  - ⚠️ **A CAD edge can come in pieces** (Sozzi's inlet rim is two edges): project each candidate from the
+    vertex's own position — chaining them carried a vertex 7 mm to the pieces' shared end (non-convexity
+    1.48). Pinned by `test_a_vertex_on_an_edge_drawn_in_two_pieces_lands_on_the_nearer_piece`.
+  - ⚠️ **Netgen's arrays are int32**: a sorted-triple key of 7k points overflows it, and silently put
+    lamp triangles on the vessel's face. Keys are built in int64.
+- **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
+  whole `aquaflux mesh --case --openfoam` before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
+  at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
+- `element_mesh(points, tetrahedra=None, prisms=None, patches=None)` numbers faces in first-sighting order,
+  tetrahedra first (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
+  hand assembly); patches take triangles and quadrilaterals by corners.
+
+## Prism layers (`layers.py`) — built for triangulated walls
+
+`PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8).extrude(points,
+triangles, layered) -> LayerExtrusion(points, prisms, inner, walls, sides, side_triangle)`; a case file states
+it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neither).
+- **Sized for the dual, exactly**: the dual's layer boundaries are the prisms' centroids, at `first_height ·
+  Σ growthᵏ`; each prism's top is placed so its centroid is there, so the prisms alternate thicker and
+  thinner (the first is `2·first_height`; the second only `2·first_height·(growth − 1)`; the alternation
+  decays as `growthᵏ`). Hence **`growth > 1` is required** — equal dual layers need zero-height prisms.
+  Flat walls: exact (unit cube, maxh 0.1: 0.005, 0.011, 0.0182, 0.02684, 0.03721 as targeted).
+- **Directions**: angle-weighted mean of the layered triangles' inward normals; stretched by `1/cos` (≤
+  `max_stretch`) so every face at the point is cleared by the full thickness (a cube's shell is exactly the
+  cube shrunk by it). **Where a layered wall meets a bare patch the direction is turned into the bare face's
+  plane** (two bare planes: along their intersection; three: refused), so the prisms' sides lie on the bare
+  face and its triangles are drawn in to the layers' top (`walls`; `sides` are the boundary quads).
+  Deferred: several normals at a sharp convex ridge (one averaged normal shears the prisms there).
+- **Thickness**: limited to `gap_share` of the distance along the direction to the surface (ray cast within
+  2.5 thicknesses), then halved at the points of any inverted prism or turned drawn-in triangle until none
+  is (`max_halvings`), and **tapered**: no point more than 1.5× its thinnest neighbour, iterated to a fixed
+  point. ⚠️ A diffusive smoothing (10 sweeps per pass) thinned a whole slab's middle to 30 % of the gap
+  limit from its edges' halving; the ratio limit is local.
+- **The fill gets only the layers' top plus the bare triangles** (`inner`); `CadMesher._filled` hands Netgen
+  just the points that surface uses (Netgen renumbers otherwise) and maps the tets back.
+- ⚠️ **Projection must follow the layers** (`_Columns`): a wall face's centroid moves onto the CAD by up to the
+  chord's sag (~0.4 mm on the lamp at maxh 0.02), more than a thin first cell; moving it alone inverted cells
+  (39 on Sozzi) and would set the first cell's height from the chord. So each prism centroid above a wall
+  face moves by `1 − (c/t)²` of its displacement (`c` the centroid's height, `t` the layers' thickness).
+  Sozzi at maxh 0.02 (first 0.5 mm, growth 1.2, 5 layers on walls and lamp): first dual layer boundary 0.507
+  / 0.508 mm from the CAD on lamp / vessel; layers 2–3 drift with curvature (−2 % lamp, +6 % vessel; log).
+- Measured on Sozzi (log): 46124 cells at maxh 0.02 (10446 bare), 59395 at 0.01 (13297 bare), all closed,
+  every boundary vertex on the drawing. ⚠️ Inside the 19 mm pipes the core left after the layers is narrow
+  and its polyhedra skewed (images in the log): the pipe O-grid of the block mesher is the answer there.
+- Pinned in `tests/unit/test_meshing_layers.py` (no Netgen) and `test_meshing_netgen.py` (Sozzi, the first
+  height from the true wall).
 
 ## Netgen: in a child process, reached through files (binding)
 
@@ -154,7 +255,7 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 - **`aquaflux/meshing/`, host-side numpy and numba, not JAX.** It depends on `aquaflux.mesh` (it ends at
   `Mesh.from_csr`, which owns validation) and on `aquaflux.io.cad`; nothing imports it back except a case
-  `MeshSource` (`aquaflux/case/mesh_source.py`).
+  `MeshSource` (`CadMesh`, `aquaflux/case/mesh_source.py`) and the test fixtures.
 - **CAD access goes through `io/cad/kernel.py`**, via `CadModel` and a `CadRegion` (`io.md`, "Regions for a
   mesher"): topology with signed edge folds and adjacency, face-tagged triangulation, the BREP file Netgen
   reads, closest-point projection with outward normals — all numbered in the exploration order Netgen
@@ -165,10 +266,12 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 ## Components to build
 
-1. **CAD topology** in the kernel, as above.
-2. **Feature-preserving dual** (numba), from any conformal primal mesh.
-3. **Prism-layer extruder**: smoothed normals, several normals at convex ridges, shrinking at concave
-   corners, thickness limited by proximity, layer collapse or backtracking on collision.
+1. **CAD topology** in the kernel, as above (built).
+2. **Feature-preserving dual** (numba), from any conformal primal mesh (built), and the CAD mesher
+   around it, its boundary projected onto the drawing (built).
+3. **Prism-layer extruder** (built for triangulated walls, above): smoothed normals, thickness limited by
+   proximity, halving and tapering on collision. Not yet: several normals at convex ridges, layers on
+   structured quad surfaces (the project owner's next step after triangles).
 4. **Block mesher** in place of blockMesh: transfinite interpolation with projection onto CAD or analytic
    surfaces, carrying the `uvmesh` topologies (four-quadrant annulus with the π/4 offset when a cap joins,
    the five-block cubed-sphere shell, the square-core pipe O-grid, wall-layer window masking) and pipe
@@ -197,7 +300,7 @@ as the differentiable map from CAD parameters to `node_coords`. Raised with the 
 
 - A curved seam dualized with a near-tangent lip gives inverted faces.
 - At a re-entrant (270°) edge — a pipe meeting the vessel — a 90° feature angle inverts dual cells; 100°
-  fixes it at the cost of cutting genuine 90° edges. The concave-edge split above is the real answer.
+  fixes it at the cost of cutting genuine 90° edges. The concave-edge cut above (built) is the answer.
 - Tet slivers become bad dual faces; Netgen's optimization removed them there.
 - A size jump between nested structured layers skews cells; balance the counts.
 - A layer too thin to contain the near-wall jet left a seam the solve could not settle across

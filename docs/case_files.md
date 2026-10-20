@@ -92,6 +92,46 @@ one form each, so they need no `kind`, and the top level is the case itself.
     grading:
       y: {kind: GeometricGrading, growth: 1.09}
   ```
+- {class}`~aquaflux.case.CadMesh` meshes a region of a STEP drawing as polyhedra: the union of
+  some `solids` less those `without`. Netgen fills the region with tetrahedra no larger than
+  about `max_size`, and the mesh is their polyhedral dual — one cell per tetrahedron point, so
+  the cells are larger than `max_size` — with every edge of the boundary that folds by more than
+  `feature_angle` (in radians) kept sharp. Each of its `patches` is named for the faces of the
+  region a selection chooses: {class}`~aquaflux.meshing.FacesNear`, the face nearest each of some
+  points (a pipe's end), or {class}`~aquaflux.meshing.FacesOn`, the faces lying on some solids'
+  surface (a lamp taken out of the water). The faces no selection chooses make the patch
+  `others`, `walls` unless named. The mesh is generated each time the case is read, which needs
+  `pip install aquaflux[cad,meshing]`; write it once as a polyMesh with
+  `aquaflux mesh out/ --case case.yaml --openfoam` and read that with `OpenFOAMMesh` to mesh only
+  once.
+
+  ```yaml
+  mesh:
+    kind: CadMesh
+    file: reactor.step
+    solids: [reactor_body, inlet_pipe, outlet_pipe]
+    without: [lamp]
+    max_size: 0.02
+    feature_angle: 0.785
+    patches:
+      inlet: {kind: FacesNear, points: [[0.04765, 0.0, 0.8945]]}
+      outlet: {kind: FacesNear, points: [[1.739, 0.0, 0.0]]}
+      lamp: {kind: FacesOn, solids: [lamp]}
+  ```
+
+  Every vertex of the mesh's boundary lies on the drawing: on its faces, and on its sharp edges along
+  them. Between those vertices a boundary face is flat, so a curved wall's patch is a little short of
+  the drawing's area.
+
+  Wall-resolved layers grow from the patches listed in `layered`, sized for the solver's cells: the
+  cells against the wall are `first_height` tall and each layer above is `growth` times the one below
+  ({class}`~aquaflux.meshing.PrismLayers`; `growth` must exceed 1). Where a layered wall meets a patch
+  without layers, such as a pipe's end, the layers slide along it:
+
+  ```yaml
+    layers: {kind: PrismLayers, first_height: 0.0005, growth: 1.2, count: 5}
+    layered: [walls, lamp]
+  ```
 
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
@@ -402,6 +442,7 @@ aquaflux schema                                   # every kind, field and choice
 aquaflux show case.yaml                           # the file as aquaflux reads it, and why it is refused
 aquaflux write copy.yaml --relative-to . < case.json  # check, then write; re-base relative paths
 aquaflux mesh out/ --relative-to . < mesh.json        # read or generate a mesh section, as VTK
+aquaflux mesh out/ --case case.yaml --openfoam       # a case file's mesh, as VTK and out/constant/polyMesh
 ```
 
 `schema` is read off the same definitions a file is checked against, so a program

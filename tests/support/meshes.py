@@ -21,6 +21,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
+from aquaflux.meshing import element_mesh
 
 
 def geometry_invariants(mesh: Mesh) -> dict:
@@ -278,25 +279,7 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
                         vertices.append(node(*corner))
                     cells.append(vertices)
 
-    # A triangle is shared by at most two tetrahedra, so the first sighting owns it and the second
-    # neighbours it. Keyed on the sorted node triple, which is the face's identity whichever cell
-    # names it; the stored order is the owner's, and any order of three nodes is a valid perimeter.
-    faces, owner, neighbour, seen = [], [], [], {}
-    for index, vertices in enumerate(cells):
-        for corner in range(4):
-            triangle = vertices[:corner] + vertices[corner + 1 :]
-            key = tuple(sorted(triangle))
-            if key in seen:
-                neighbour[seen[key]] = index
-            else:
-                seen[key] = len(faces)
-                faces.append(triangle)
-                owner.append(index)
-                neighbour.append(-1)
-
-    return Mesh.from_faces(
-        jnp.asarray(coords), faces, jnp.asarray(owner), jnp.asarray(neighbour), len(cells)
-    )
+    return element_mesh(coords, np.asarray(cells))
 
 
 def hexahedron_beside_a_prism():
@@ -463,3 +446,28 @@ def without_cells(mesh: Mesh, removed, *, patch: str) -> Mesh:
         patch_types=dict(patches.patch_types),
         patch_groups=dict(patches.patch_groups),
     )
+
+
+def worst_excursion(dual: Mesh) -> np.ndarray:
+    """Per cell: how far its farthest vertex lies outside one of its faces, over the cell's size.
+
+    Zero for a convex cell with flat faces; the faces' planes are those the mesh orients.
+    """
+    geometry = dual.geometry()
+    coords = np.asarray(dual.node_coords)
+    normal, centroid = np.asarray(geometry.face.normal), np.asarray(geometry.face.centroid)
+    owner, neighbour = np.asarray(dual.face_cells.owner), np.asarray(dual.face_cells.neighbour)
+    offsets = np.asarray(dual.face_nodes.offsets)
+    nodes = np.asarray(dual.face_nodes.face_node_indices)
+    vertices = [set() for _ in range(dual.n_cells)]
+    for face in range(dual.n_faces):
+        for cell in (owner[face], neighbour[face]):
+            if cell >= 0:
+                vertices[cell].update(nodes[offsets[face] : offsets[face + 1]].tolist())
+    worst = np.zeros(dual.n_cells)
+    for face in range(dual.n_faces):
+        for cell, sign in ((owner[face], 1.0), (neighbour[face], -1.0)):
+            if cell >= 0:
+                rise = sign * (coords[sorted(vertices[cell])] - centroid[face]) @ normal[face]
+                worst[cell] = max(worst[cell], float(rise.max()))
+    return worst / np.cbrt(np.asarray(geometry.cell.volume))

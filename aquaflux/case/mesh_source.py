@@ -1,8 +1,9 @@
 """Where a case's mesh comes from.
 
 A case file names its mesh by source rather than holding it: a mesh file to read
-(:class:`OpenFOAMMesh`), or a structured grid to generate (:class:`StructuredGrid`). Relative paths are
-relative to the directory the case file sits in, so a case and its mesh can be moved together.
+(:class:`OpenFOAMMesh`), a structured grid to generate (:class:`StructuredGrid`), or a region of a STEP
+drawing to mesh as polyhedra (:class:`CadMesh`). Relative paths are relative to the directory the case
+file sits in, so a case and its mesh can be moved together.
 """
 
 from __future__ import annotations
@@ -18,9 +19,20 @@ from typing import ClassVar, Literal
 import numpy as np
 
 from aquaflux.io import OpenFOAMReader
+from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
+from aquaflux.meshing import CadMesher, FaceSelection, NetgenProcess, PrismLayers
 
-__all__ = ["AxisGrading", "GeometricGrading", "MeshSource", "OpenFOAMMesh", "StructuredGrid"]
+from .drawing import CadPlacement
+
+__all__ = [
+    "AxisGrading",
+    "CadMesh",
+    "GeometricGrading",
+    "MeshSource",
+    "OpenFOAMMesh",
+    "StructuredGrid",
+]
 
 #: The axes of a two-dimensional structured grid, in coordinate order.
 _AXES_2D = ("x", "y")
@@ -262,3 +274,111 @@ class StructuredGrid(MeshSource):
         return structured_grid_2d(
             nx, ny, lx, ly, named_boundaries=True, periodic=tuple(self.periodic), **nodes
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class CadMesh(MeshSource):
+    """A region of a STEP drawing, meshed as polyhedra (:class:`~aquaflux.meshing.CadMesher`).
+
+    The region is the union of some solids less others -- the water in a vessel and its pipes, less a
+    lamp sleeve standing in it. Netgen fills it with tetrahedra, and their polyhedral dual is the mesh:
+    one cell per tetrahedron point, so the cells are larger than ``max_size``. Its boundary patches are
+    named for the faces chosen by each selection (:class:`~aquaflux.meshing.FacesNear`, the face
+    nearest a point; :class:`~aquaflux.meshing.FacesOn`, the faces on some solids' surface), and the
+    faces left over make one more patch. The mesh is generated each time the case is read.
+
+    Needs the optional CAD kernel and mesher (``pip install aquaflux[cad,meshing]``).
+
+    Attributes
+    ----------
+    file : str
+        The STEP file, relative to the case file.
+    solids : tuple of str
+        The solids whose union is the region, by name in the drawing.
+    max_size : float
+        The largest tetrahedron edge wanted, in metres.
+    feature_angle : float
+        The fold, in radians, beyond which an edge of the boundary is kept sharp.
+    without : tuple of str
+        The solids taken out of the region. Default: none.
+    patches : mapping of {str: FaceSelection}
+        The boundary patches, each named for the faces its selection chooses. Default: none.
+    others : str or None
+        The patch for the faces no selection chooses; unset, ``walls``.
+    placement : CadPlacement or None
+        Where the drawing sits in the case's frame; unset, where it was drawn.
+    min_size : float or None
+        The smallest triangle wanted, in metres; unset, Netgen's.
+    grading : float or None
+        How fast the size may change between neighbouring cells, in ``(0, 1]``; unset, Netgen's.
+    layers : PrismLayers or None
+        Prism layers grown on the ``layered`` patches, sized for the solver's cells; unset, none.
+    layered : tuple of str
+        The patches the layers grow on. Where one meets a patch without layers, the layers slide
+        along it. Default: none.
+
+    Raises
+    ------
+    ValueError
+        If no solid is named; a size, the angle or the grading is not a positive, finite number; or
+        layers are given without a patch to grow on, or patches are named without layers.
+    """
+
+    path_fields: ClassVar[tuple[str, ...]] = ("file",)
+
+    file: str
+    solids: tuple[str, ...]
+    max_size: float
+    feature_angle: float
+    without: tuple[str, ...] = ()
+    patches: Mapping[str, FaceSelection] = dataclasses.field(default_factory=dict)
+    others: str | None = None
+    placement: CadPlacement | None = None
+    min_size: float | None = None
+    grading: float | None = None
+    layers: PrismLayers | None = None
+    layered: tuple[str, ...] = ()
+
+    #: Where an unset setting takes its default from (read by the case-file schema).
+    unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
+
+    def __post_init__(self) -> None:
+        if not self.solids:
+            raise ValueError("a CadMesh names the solids whose union is the region to mesh.")
+        for name, selection in self.patches.items():
+            if not isinstance(selection, FaceSelection):
+                raise TypeError(
+                    f"CadMesh.patches[{name!r}] must be a face selection such as FacesNear(points) "
+                    f"or FacesOn(solids), got {selection!r}."
+                )
+        object.__setattr__(self, "patches", types.MappingProxyType(dict(self.patches)))
+        object.__setattr__(self, "layered", tuple(self.layered))
+        if (self.layers is None) != (not self.layered):
+            raise ValueError(
+                "a CadMesh grows layers on the patches it names in layered, so it takes both "
+                "layers and layered, or neither."
+            )
+        self.mesher()  # refuses a size, angle or grading out of range
+
+    def mesher(self) -> CadMesher:
+        """The mesher these settings describe."""
+        options = {
+            name: value
+            for name in ("min_size", "grading")
+            if (value := getattr(self, name)) is not None
+        }
+        return CadMesher(
+            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers, **options
+        )
+
+    def read(self, directory: Path) -> Mesh:
+        """The region, read from its drawing and meshed -- see :meth:`MeshSource.read`."""
+        model = read_step(
+            Path(directory) / self.file,
+            None if self.placement is None else self.placement.placement(),
+        )
+        options = {} if self.others is None else {"others": self.others}
+        return self.mesher().mesh(
+            model, CadRegion(self.solids, self.without), dict(self.patches),
+            layered=self.layered, **options,
+        )  # fmt: skip

@@ -3,9 +3,10 @@
 Face geometry specializes by spatial dimension, so it is a strategy hierarchy —
 :class:`EdgeFaceGeometry` (2D) and :class:`PolygonFaceGeometry` (3D), selected by
 :func:`face_geometry_scheme` — each an ``equinox.Module``. A scheme computes the *raw*
-(node-order) area/centroid/normal for all faces at once; the shared, dimension-agnostic
-:meth:`FaceGeometryScheme.orient_owner_outward` fixes the normal to point out of the
-owner cell.
+(node-order) area/centroid/normal for all faces at once; the normal is then turned to point out
+of the owner cell by ``orientation.owner_outward_normals``, which orients each
+cell's faces consistently over the edges they share and turns them out by the cell's volume
+(:meth:`FaceGeometryScheme.orient_owner_outward` is its test for a cell whose faces do not all join).
 
 **2D** — a face is an edge with endpoints ``p0``, ``p1`` and displacement ``d = p1 - p0``:
 
@@ -112,9 +113,9 @@ class FaceGeometryScheme(eqx.Module):
     """Strategy interface for computing face geometry (dimension-specialized).
 
     A scheme returns area and centroid in final form, but a normal whose *sign* follows the
-    node-winding order — the "unoriented" normal. :meth:`orient_owner_outward` then flips it to
-    point out of the owner cell (a separate step because the owner-outward test needs the
-    approximate cell centroids, which in turn need the face centroids computed here first).
+    node-winding order — the "unoriented" normal, turned to point out of the owner cell afterwards
+    (a separate step, because turning it needs the cells' volumes, which need the face geometry
+    computed here first).
     """
 
     @abc.abstractmethod
@@ -126,7 +127,7 @@ class FaceGeometryScheme(eqx.Module):
         """Return ``(area, centroid, node_order_normal)`` for every face.
 
         Area and centroid are final; the normal's sign follows the node-winding order and is
-        fixed to owner-outward by :meth:`orient_owner_outward`.
+        turned owner-outward afterwards (``orientation.owner_outward_normals``).
 
         Parameters
         ----------
@@ -178,11 +179,13 @@ class FaceGeometryScheme(eqx.Module):
         face_centroids: jnp.ndarray,
         owner_approx_centroid: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Flip node-order normals so each points out of its owner cell.
+        """Flip node-order normals so each points away from its owner cell's approximate centroid.
 
-        A normal points out of the owner when the vector from the owner's (approximate)
-        centroid to the face centroid has a non-negative projection onto it. This flip is
-        applied once here so the stored normal is owner-outward. Dimension-agnostic.
+        The orientation of a cell whose faces do not all join at shared edges (see
+        ``orientation.owner_outward_normals``): a normal points out of the owner
+        when the vector from the owner's approximate centroid to the face centroid has a
+        non-negative projection onto it. Right for a convex cell; a cell whose centroid lies
+        beyond one of its own faces gets that face turned inward. Dimension-agnostic.
         """
         outward = face_centroids - owner_approx_centroid
         projection = jnp.sum(outward * node_order_normals, axis=1, keepdims=True)
