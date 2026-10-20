@@ -187,3 +187,33 @@ Netgen L test asserts convexity (< 0.45) in place of closure.
 
 Mutations, each red: always the centroid; no volume sign; no fallback for undetermined cells; the joint
 parity flipped; faces unreached from the first accepted (the hanging-node cube).
+
+## 2026-10-19 — quality metrics against checkMesh
+
+`aquaflux.mesh.quality` (`face_non_orthogonality`, `face_skewness`, `cell_concavity`), macOS arm64, on the
+Netgen duals whose checkMesh output (OpenFOAM 13, Docker) is in `meshing-log.md`, rebuilt by
+`validation/meshing_dual/dual_scale_convexity.py`'s solids and `PolyhedralDual(45 deg)`, unprojected, one patch;
+cell counts identical to the checkMesh runs. Non-orthogonality over interior faces, average as
+`acos(mean cos)`:
+
+| dual | cells | non-orth max / avg (ours) | checkMesh | skewness ours / checkMesh | concave ours / checkMesh |
+|---|---|---|---|---|---|
+| L maxh 0.01 | 3718 | 46.2 / 12.0 | 46.2 / 12.0 | 1.44 / 1.44 | 57 / 57 |
+| Sozzi 0.01 | 13297 | 47.8 / 14.2 | 47.8 / 14.2 | 1.96 / 1.96 | 309 / 309 |
+| cylinder 0.005 | 14426 | 50.1 / 13.9 | 50.1 / 13.9 | 1.51 / — | 1108 / 1108 |
+| sleeve 0.005 | 15995 | 51.7 / 12.2 | 51.7 / 12.2 | 1.24 / — | 258 / 258 |
+
+The mean of the angles reads 10.5 / 12.5 / 12.2 / 10.6: checkMesh averages the cosine. Face flatness min
+(`face_planarity`, apex at the vertex mean) 0.80 on the cylinder against checkMesh's 0.79 (apex at the face
+centroid). The maximum skewness is on an interior face in all four, so the boundary floor `0.4|d|` is not
+checked by these. Not reproduced: the log's "Kuhn tets of the unit cube (n 4, perturb 0.2)" dual (42.6 /
+25.1, skewness 1.12) — today's `tetrahedral_grid_3d(4, perturb=0.2)` (seed 0) dual gives 45.9 / 25.2, 1.07;
+the log does not record the seed or code state, so which differs is not known. Probe scripts are in this
+session's scratchpad (not kept); the harness `validation/meshing_dual/planarization.py` prints the same
+quantities.
+
+Mutations of the metrics, each red: boundary line taken as the interior one; periodic image dropped;
+skewness boundary line = owner to face centroid; interior floor 0.3; boundary floor 0.2; extent dropped;
+warp over area not root area; triangulation change's neighbour sign; gain only (needs faces of 5+ vertices:
+a quadrilateral's heights are symmetric); a half not a third; non-convexity's neighbour sign; concavity
+pairing a face with itself; a block boundary skipping a cell; `cell_nodes` from owners only.

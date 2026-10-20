@@ -32,6 +32,8 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux import ragged
+
 from . import cell, face, groups
 from .connectivity import FaceCellConnectivity, FaceNodeConnectivity, index_dtype, interior_mask
 from .geometry import MeshGeometry
@@ -355,6 +357,31 @@ class Mesh(eqx.Module):
     def n_cells(self) -> int:
         """Number of cells."""
         return self.face_cells.n_cells
+
+    def cell_nodes(self) -> tuple[np.ndarray, np.ndarray]:
+        """Each cell's distinct nodes — those of its faces — as a CSR list (build-time, numpy).
+
+        Returns
+        -------
+        (offsets, nodes)
+            Row pointers of shape ``(n_cells + 1,)`` and the flat node indices, cell ``c``'s being
+            ``nodes[offsets[c]:offsets[c + 1]]``, in ascending order.
+        """
+        owner = np.asarray(self.face_cells.owner, dtype=np.int64)
+        neighbour = np.asarray(self.face_cells.neighbour, dtype=np.int64)
+        interior = np.flatnonzero(neighbour >= 0)
+        cell_of_side = np.concatenate([owner, neighbour[interior]])
+        face_of_side = np.concatenate([np.arange(owner.size), interior])
+        ring_nodes, side, _ = ragged.rows(
+            np.asarray(self.face_nodes.offsets),
+            np.asarray(self.face_nodes.face_node_indices, dtype=np.int64),
+            face_of_side,
+        )
+        # One integer key per (cell, node) pair makes the per-cell de-duplication one global sort.
+        keys = np.unique(cell_of_side[side] * self.n_nodes + ring_nodes)
+        offsets = np.zeros(self.n_cells + 1, dtype=np.int64)
+        np.cumsum(np.bincount(keys // self.n_nodes, minlength=self.n_cells), out=offsets[1:])
+        return offsets, keys % self.n_nodes
 
     def geometry(self) -> MeshGeometry:
         """Compute the derived face and cell geometry (build-time, jit-compiled).

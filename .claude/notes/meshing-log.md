@@ -323,3 +323,139 @@ rotation off by π/4; `around` ignored; `patch_types` dropped by `element_mesh`;
 the pipe tube's inner faces projected; its first-shell radial edges not straight. One survivor was a test
 gap and is fixed: with two side blocks the side's middle node is at the uniform angle, so the radial
 edge was straight either way — the test now uses three and checks the lines are straight.
+
+## 2026-10-19 — face planarization on Netgen duals
+
+`FacePlanarizer()` defaults (min_decrease 1e-3, damping 0.1, max_sweeps 300 in the harness), harness
+`validation/meshing_dual/planarization.py` at base `11323836` plus this change (run before the `flat` stop and
+the no-progress exit were added; neither can trip on these duals), macOS arm64, netgen-mesher 6.2.2608,
+`PolyhedralDual(45 deg)`, unprojected, moved = the primal cell centroids. One run each, machine shared with
+other sessions (timings indicative). Warp = largest vertex height / sqrt(area); tri-volume =
+`triangulation_volume_change`; non-orth over interior faces, average acos(mean cos).
+
+| dual (cells) | sweeps, s | total warp | int warp p99 / max | bnd warp p99 | non-convexity p99 / max | concave | tri-volume p99 / max | non-orth max / avg | skew |
+|---|---|---|---|---|---|---|---|---|---|
+| L 0.01 (3718) | 108, 132 | 255 → 8.9 | .161/.303 → .052/.303 | 0 | .169/.349 → .091/.312 | 57 → 31 | .121/.255 → .058/.255 | 46.2/12.0 → 39.9/7.6 | 1.44 → 1.44 |
+| Sozzi 0.01 (13297) | 71, 360 | 836 → 134 | .165/.332 → .097/.327 | .063 → .063 | .176/.331 → .129/.282 | 309 → 119 | .140/.231 → .112/.215 | 47.8/14.2 → 47.2/11.0 | 1.96 → 1.96 |
+| cylinder 0.005 (14426) | 112, 990 | 1380 → 130 | .194/.419 → .113/.332 | .024 → .024 | .200/.316 → .136/.248 | 1108 → 321 | .155/.305 → .111/.225 | 50.1/13.9 → 47.7/9.5 | 1.51 → 1.51 |
+| sleeve 0.005 (15995) | 118, 1077 | 1200 → 51 | .165/.325 → .068/.290 | .054 → .054 | .168/.293 → .095/.263 | 258 → 59 | .128/.226 → .076/.202 | 51.7/12.2 → 48.3/7.5 | 1.24 → 1.24 |
+
+Closure ≤ 1.1e-19 before and after throughout. Not measured: which faces hold the unchanged maxima (the
+likely reading, faces whose vertices are fixed — on the boundary, at features, between cut pieces — is an
+inference).
+
+Guard variants on the L 0.01 (same harness quantities): no guard but per-cell convexity → total warp
+255 → 6.1 but non-orth max 152.6, skewness 11.2, concave 57 → 65; face bounds per face against its own
+start → 0 sweeps; against the starting mesh's worst face, weight 1/area → the row above; weight 1 → total
+warp (unweighted) 0.0116 → 0.0004, concave 32, non-orth 46.1/7.7. On a Kuhn dual (n 4, perturb 0.2) the
+convexity bound against the previous sweep stalled at total warp 0.79 against 0.033 unguarded (2.17 at
+start); against the start it reaches the unguarded result. Over-relaxing the step (1.5, 2, 3) stopped
+earlier at a higher warp.
+
+Mutations of the planarizer, each red: no convexity bound; no concavity bound; no non-orthogonality bound;
+no skewness bound; a bad face holding its owner only (hung the pass until the no-progress exit was added;
+red since); `movable` ignored; no decrease stop; no flat stop; holding everything. Green, dismissed: no
+volume bound (never bites on the fixtures; kept because an inverted cell's convexity is NaN and passes a
+`>` bound); no halving (no sweep on the fixtures raises the warp; kept as the pass's globalization).
+
+## 2026-10-20 — Gauss–Newton on the true warp against the Jacobi sweeps
+
+Probe `validation/meshing_dual/planarization_gauss_newton.py` (macOS arm64, one run each, machine shared;
+counts deterministic, seconds indicative). Total warp as a JAX residual of the free vertices (planes
+included); Levenberg–Marquardt `(JᵀJ + λI) dx = −Jᵀr` by unpreconditioned CG to 0.1 relative, `J` by
+jvp/vjp; λ₀ = 1e-3·mean(1/area), /3 on success. Judged by `_NoWorse`'s bounds; on a violation λ is raised
+×4 until `--shorten` × λ₀, then the worsened cells' free vertices are pinned and the system re-solved;
+the planarizer's stopping test.
+
+Kuhn dual (`tetrahedral_grid_3d(8, perturb=0.25)`, 729 cells): Jacobi 282 sweeps, 597 evaluations, total
+warp 14.8 → 0.541, 16.8 s. Gauss–Newton: deleting held vertices from a finished step (as the sweeps do)
+stalled at 2.67 in 5 iterations — the kept share of each step fell 0.64 → 0.24; pinning and re-solving,
+by `--shorten`: 1 → 1.25 (13 it, 3.6 s), 10 → 0.93 (6.5 s), **100 → 0.355 (79 it, 231 evaluations,
+1470 CG products, 9.3 s)**, 1000 → 0.54 (155 it, 15.5 s; max warp 0.053 vs Jacobi 0.070). The first
+undamped step alone reaches 1.08 with 8 cells' convexity and 5 faces' skewness over their bounds; one
+face at the start's worst skewness is worsened by every step tried, so pinning is never avoided.
+Handing the result to the sweeps ("gauss-newton+jacobi") added little at 100.
+
+Netgen L maxh 0.01 (3718 cells), `--shorten=100`, against the sweeps (start / Jacobi / Gauss–Newton):
+
+| | start | Jacobi | Gauss–Newton |
+|---|---|---|---|
+| iterations, evaluations, CG products | | 108, 813, 0 | 50, 233, 10175 |
+| time | | 129.8 s | 73.4 s |
+| total warp | 255 | 8.94 | 3.77 |
+| interior warp p99 / max | .161 / .303 | .052 / .303 | .023 / .249 |
+| non-convexity p99 / max | .169 / .349 | .091 / .312 | .069 / .312 |
+| concave cells | 57 | 31 | 28 |
+| triangulation volume p99 / max | .121 / .255 | .058 / .255 | .034 / .227 |
+| non-orth max / avg | 46.2 / 12.0 | 39.9 / 7.6 | 43.2 / 8.0 |
+| skewness | 1.44 | 1.44 | 1.44 |
+
+Not measured: where the Gauss–Newton time goes between the 233 guard evaluations and the 10175 CG
+products (each a host round trip through a jitted `JᵀJv`); a CG preconditioner (the per-vertex 3×3 blocks
+the sweeps already form are the natural one); the other three duals; `--shorten` other than 100 on Netgen.
+
+## 2026-10-20 — Gauss–Newton with a block preconditioner, on all four Netgen duals
+
+Same probe, `--shorten=100`, base `646d1577` plus the preconditioner: CG preconditioned by each free
+vertex's 3×3 block `Σ n nᵀ/area + λI` (the frozen-plane blocks the sweeps solve with; identity on a pinned
+vertex), stopping on the unpreconditioned residual at 0.1 as before. macOS arm64, one run each, machine
+shared (counts deterministic, seconds indicative).
+
+Preconditioner alone, Netgen L 0.01: CG products 10175 → 6332, CG 44.1 → 28.2 s, total 83.0 → 72.0 s,
+total warp 3.77 → 3.41, 50 → 59 iterations, other quality within rounding. Kuhn n 8: 1470 → 1382 products
+(uniform faces; the 1/area spread is what it corrects).
+
+Preconditioned Gauss–Newton against the sweeps (the sweeps' row from the 2026-10-19 entry above, same
+duals and defaults); time split as guard evaluations + CG:
+
+| dual | method | time (eval + CG) | total warp | int warp p99 / max | non-convexity p99 / max | concave | tri-volume p99 / max | non-orth max / avg |
+|---|---|---|---|---|---|---|---|---|
+| L 0.01 (3718) | start | | 255 | .161 / .303 | .169 / .349 | 57 | .121 / .255 | 46.2 / 12.0 |
+| | Jacobi | 132 s | 8.94 | .052 / .303 | .091 / .312 | 31 | .058 / .255 | 39.9 / 7.6 |
+| | GN | 72 s (40 + 28) | 3.41 | .021 / .250 | .068 / .312 | 28 | .030 / .229 | 43.4 / 7.9 |
+| Sozzi 0.01 (13297) | start | | 836 | .165 / .332 | .176 / .331 | 309 | .140 / .231 | 47.8 / 14.2 |
+| | Jacobi | 360 s | 134 | .097 / .327 | .129 / .282 | 119 | .112 / .215 | 47.2 / 11.0 |
+| | GN | 323 s (208 + 96) | 74.5 | .055 / .327 | .103 / .281 | 58 | .105 / .179 | 46.1 / 11.0 |
+| cylinder 0.005 (14426) | start | | 1380 | .194 / .419 | .200 / .316 | 1108 | .155 / .305 | 50.1 / 13.9 |
+| | Jacobi | 990 s | 130 | .113 / .332 | .136 / .248 | 321 | .111 / .225 | 47.7 / 9.5 |
+| | GN | 453 s (227 + 203) | 13.4 | .023 / .303 | .077 / .271 | 64 | .038 / .225 | 47.3 / 8.8 |
+| sleeve 0.005 (15995) | start | | 1200 | .165 / .325 | .168 / .293 | 258 | .128 / .226 | 51.7 / 12.2 |
+| | Jacobi | 1077 s | 50.9 | .068 / .290 | .095 / .263 | 59 | .076 / .202 | 48.3 / 7.5 |
+| | GN | 488 s (277 + 183) | 13.4 | .017 / .325 | .072 / .293 | 29 | .046 / .226 | 51.5 / 7.3 |
+
+Iterations / evaluations / CG products: L 59 / 241 / 6332; Sozzi 43 / 415 / 6758; cylinder 58 / 348 /
+11384; sleeve 50 / 391 / 9700. Boundary warp unchanged in every run (vertices fixed); skewness max
+unchanged but Sozzi 1.96 → 1.95. Closure ≤ 1.2e-19 throughout.
+
+Reading: Gauss–Newton leaves 1.8–10x less total warp and half or fewer of the sweeps' concave cells, with
+every p99 lower, in 0.45–0.9x the time. Its maxima are no better than the sweeps' in general (the
+cylinder's non-convexity .271 vs .248, the sleeve's warp, non-convexity and triangulation maxima at their
+start values); all stay within their bounds. The guard's evaluations are now 45–65 % of the time. Not
+measured: which faces hold the maxima; `--shorten` other than 100 on these four.
+
+## 2026-10-20 — the Gauss–Newton step shipped in `FacePlanarizer`
+
+The probe of the two entries above (`validation/meshing_dual/planarization_gauss_newton.py`, deleted with
+this change; last at commit `1ec54c02`) became `FacePlanarizer`, its defaults those the probe was run at
+(`shortening` 100, the block preconditioner); the Jacobi sweep was deleted. One difference from the probe:
+a step still worsening after its cells are pinned raises λ without releasing the pins. Re-measured with
+`validation/meshing_dual/planarization.py` (shipped defaults, macOS arm64, one run each, machine shared):
+
+| dual (cells) | iterations, CG products | time | total warp | concave | int warp p99 / max | non-convexity p99 / max | tri-volume p99 / max | non-orth max / avg |
+|---|---|---|---|---|---|---|---|---|
+| L 0.01 (3718) | 53, 5503 | 90 s | 255 → 3.44 | 57 → 28 | .021 / .250 | .068 / .312 | .030 / .229 | 43.3 / 7.9 |
+| Sozzi 0.01 (13297) | 43, 6758 | 349 s | 836 → 74.5 | 309 → 58 | .055 / .327 | .103 / .281 | .105 / .179 | 46.1 / 11.0 |
+| cylinder 0.005 (14426) | 58, 11479 | 472 s | 1380 → 13.4 | 1108 → 66 | .023 / .303 | .077 / .271 | .038 / .225 | 47.3 / 8.8 |
+| sleeve 0.005 (15995) | 55, 10799 | 714 s | 1200 → 13.3 | 258 → 30 | .017 / .325 | .072 / .293 | .046 / .226 | 51.6 / 7.4 |
+
+Quality matches the probe's within the pin-handling difference; the sleeve's seconds (714 against the
+probe's 488) are contention, not the change (its products 10799 vs 9700).
+
+Mutations of the shipped solver (`tests/unit/test_meshing_planarize.py`), each red: no convexity, no
+concavity, no non-orthogonality, no skewness bound; a bad face pinning its owner only (the cube's warp
+stops at ~13 % of its start, not 7 %); `movable` ignored; no decrease stop; no flat stop; no shortening;
+no pinning; planes frozen in the residual (normal and area); the vertex mean frozen; no preconditioner;
+an unweighted preconditioner. Green, dismissed: no volume bound (as before: never bites; an inverted
+cell's NaN convexity would pass the others); accepting a safe step that raises the warp (no safe step
+ever raised it on the fixtures; the history is asserted monotone); no λ decrease after a kept step (path
+and cost only: final warp within 10 % either way on three fixtures).

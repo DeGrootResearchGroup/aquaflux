@@ -31,7 +31,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 import numpy as np
 from aquaflux.io.cad import CadRegion, Placement, read_step
-from aquaflux.mesh import Mesh, closed_cell_residual
+from aquaflux.mesh import cell_non_convexity, closed_cell_residual
 from aquaflux.meshing import NetgenProcess, PolyhedralDual, element_mesh
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
@@ -69,33 +69,6 @@ def _solids(directory: pathlib.Path) -> dict[str, pathlib.Path]:
     return paths
 
 
-def _non_convexity(dual: Mesh) -> np.ndarray:
-    """Per cell: the largest excursion of its vertices outside its faces' planes, over its size."""
-    geometry = dual.geometry()
-    coords = np.asarray(dual.node_coords)
-    normal = np.asarray(geometry.face.normal)
-    centroid = np.asarray(geometry.face.centroid)
-    owner = np.asarray(dual.face_cells.owner)
-    neighbour = np.asarray(dual.face_cells.neighbour)
-    offsets = np.asarray(dual.face_nodes.offsets)
-    nodes = np.asarray(dual.face_nodes.face_node_indices)
-    cell_nodes = [set() for _ in range(dual.n_cells)]
-    for face in range(dual.n_faces):
-        ring = nodes[offsets[face] : offsets[face + 1]].tolist()
-        cell_nodes[owner[face]].update(ring)
-        if neighbour[face] >= 0:
-            cell_nodes[neighbour[face]].update(ring)
-    worst = np.zeros(dual.n_cells)
-    for face in range(dual.n_faces):
-        for cell, sign in ((owner[face], 1.0), (neighbour[face], -1.0)):
-            if cell < 0:
-                continue
-            vertices = coords[list(cell_nodes[cell])]
-            excursion = sign * (vertices - centroid[face]) @ normal[face]
-            worst[cell] = max(worst[cell], float(excursion.max()))
-    return worst / np.cbrt(np.asarray(geometry.cell.volume))
-
-
 def main(names: list[str], sizes: list[float]) -> None:
     netgen = NetgenProcess()
     with tempfile.TemporaryDirectory() as directory:
@@ -126,7 +99,7 @@ def main(names: list[str], sizes: list[float]) -> None:
                     f"closure={closure:.1e} volume err={abs(volume.sum() / tets - 1):.1e}"
                 )
                 if primal.n_nodes <= 60000:
-                    bad = _non_convexity(dual)
+                    bad = cell_non_convexity(dual)
                     line += f" non-convexity p50={np.median(bad):.3f} max={bad.max():.3f}"
                     # A cut point's first piece keeps its index; the further pieces follow.
                     cut = dual.n_cells - primal.n_nodes

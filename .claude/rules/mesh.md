@@ -113,7 +113,25 @@ All classes are `equinox.Module`s.
   **block** (the fan still covers the face; `case.PatchBody` uses it); emitters/reflectors keep the
   refusal (overlap double-counts area). Lives here because it is mesh, and `radiation/` imports no mesh.
   Ear clipping is not built; build it when an emitting mesh trips the check.
-- `quality.py` — `face_planarity`, `centroid_iteration_shift`, `closed_cell_residual`.
+- `quality.py` — build-time diagnostics, all functions of a `Mesh`: `closed_cell_residual`, `face_planarity`,
+  `centroid_iteration_shift`, and (2026-10-19) `face_warp` (largest vertex height off the vertex-mean
+  plane / √area — first order in the warp, where `face_planarity` is second order), `triangulation_volume_change`
+  (per cell, the largest relative volume change re-fanning faces from a vertex instead of the vertex mean
+  can make: `S·(v_k − c)/3` per face, exact for any polygon), `face_non_orthogonality` (degrees; boundary
+  from owner centroid to face centroid), `face_skewness`, `cell_non_convexity` (largest vertex excursion
+  beyond a face plane / cell size — formerly `tests/support/meshes.worst_excursion`, deleted) and
+  `cell_concavity` (largest face-centroid cosine; `CONCAVE_COSINE = -1e-6` is checkMesh's threshold).
+  - **Non-orthogonality, skewness and concavity are `checkMesh`'s definitions, checked against its output**
+    on four Netgen duals: maxima, concave counts and averages identical to the printed digits (log).
+    ⚠️ **checkMesh's "average" non-orthogonality is `acos(mean cos)` over interior faces**, not the mean
+    angle (that reads ~1.6° low). Skewness: `|s| / max(extent of the face along s, 0.2|d|)`, boundary
+    `d` the owner's perpendicular and floor `0.4|d|`; the boundary floor is from OpenFOAM's source, not
+    seen binding in a checkMesh maximum.
+  - The cell checks form (side, item) pairs within cells a block at a time (`_CellSides`), so memory is
+    bounded; ~30 ms for both on a 2197-cell Kuhn dual (macOS arm64), most of a planarization evaluation.
+- `Mesh.cell_nodes()` — each cell's distinct nodes as CSR; `FaceNodeConnectivity.max_to_faces` — the
+  per-face max over incidences. (`io/vtk/topology._polyhedron_connectivity` still forms the same set
+  privately; not yet folded onto it.)
 - `orientation.py` — `ring_signs(face_nodes, face_cells) -> RingSigns` (consistent ring directions per
   cell, `determined` per cell) and `owner_outward_normals(...)`, the one orientation step (see Binding
   decisions). `RingSigns` is a pytree, passed into the compiled geometry; it is topology, recomputed
