@@ -346,12 +346,14 @@ this mask; wiring it in is the next PR's.
   1077 s (16k cells) — not usable at the 2M-cell target as is.
 - **Probed, not built: Gauss–Newton on the true warp** (`validation/meshing_dual/planarization_gauss_newton.py`,
   log 2026-10-20): the warp as a JAX residual (planes included), Levenberg–Marquardt solved by matrix-free
-  CG, the same bounds. On the Netgen L 73 s vs 130 s, total warp 3.8 vs 8.9, and the maxima move (warp
-  0.30 → 0.25, triangulation volume 0.255 → 0.227); worst non-orthogonality 43.2 vs 39.9. ⚠️ **Under the
+  CG preconditioned by each vertex's 3×3 frozen-plane block (−38 % CG products on the L), the same bounds.
+  On all four Netgen duals (log 2026-10-20): 0.45–0.9x the sweeps' time, 1.8–10x less total warp, half or
+  fewer of their concave cells (L 28, Sozzi 58, cylinder 64, sleeve 29), every p99 lower; maxima no better
+  in general, all within bounds. The guard's evaluations are now 45–65 % of its time. ⚠️ **Under the
   bounds a violating step must be re-solved with the worsened cells' vertices pinned, after first
   shortening it** (raising λ up to 100× its start) — deleting held vertices from a finished global step,
   as the sweeps do, stalls (kept share 0.64 → 0.24). The bounds, not the solver, cap each step's length.
-  Not yet measured: a CG preconditioner, the other duals. **Still open**: sliding boundary vertices along
+  **Still open**: sliding boundary vertices along
   the CAD surface, or splitting faces still warped, for the boundary faces. Pinned in `tests/unit/test_meshing_planarize.py`; harness
   `validation/meshing_dual/planarization.py`.
 

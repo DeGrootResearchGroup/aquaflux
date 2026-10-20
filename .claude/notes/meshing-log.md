@@ -393,3 +393,42 @@ Netgen L maxh 0.01 (3718 cells), `--shorten=100`, against the sweeps (start / Ja
 Not measured: where the Gauss–Newton time goes between the 233 guard evaluations and the 10175 CG
 products (each a host round trip through a jitted `JᵀJv`); a CG preconditioner (the per-vertex 3×3 blocks
 the sweeps already form are the natural one); the other three duals; `--shorten` other than 100 on Netgen.
+
+## 2026-10-20 — Gauss–Newton with a block preconditioner, on all four Netgen duals
+
+Same probe, `--shorten=100`, base `646d1577` plus the preconditioner: CG preconditioned by each free
+vertex's 3×3 block `Σ n nᵀ/area + λI` (the frozen-plane blocks the sweeps solve with; identity on a pinned
+vertex), stopping on the unpreconditioned residual at 0.1 as before. macOS arm64, one run each, machine
+shared (counts deterministic, seconds indicative).
+
+Preconditioner alone, Netgen L 0.01: CG products 10175 → 6332, CG 44.1 → 28.2 s, total 83.0 → 72.0 s,
+total warp 3.77 → 3.41, 50 → 59 iterations, other quality within rounding. Kuhn n 8: 1470 → 1382 products
+(uniform faces; the 1/area spread is what it corrects).
+
+Preconditioned Gauss–Newton against the sweeps (the sweeps' row from the 2026-10-19 entry above, same
+duals and defaults); time split as guard evaluations + CG:
+
+| dual | method | time (eval + CG) | total warp | int warp p99 / max | non-convexity p99 / max | concave | tri-volume p99 / max | non-orth max / avg |
+|---|---|---|---|---|---|---|---|---|
+| L 0.01 (3718) | start | | 255 | .161 / .303 | .169 / .349 | 57 | .121 / .255 | 46.2 / 12.0 |
+| | Jacobi | 132 s | 8.94 | .052 / .303 | .091 / .312 | 31 | .058 / .255 | 39.9 / 7.6 |
+| | GN | 72 s (40 + 28) | 3.41 | .021 / .250 | .068 / .312 | 28 | .030 / .229 | 43.4 / 7.9 |
+| Sozzi 0.01 (13297) | start | | 836 | .165 / .332 | .176 / .331 | 309 | .140 / .231 | 47.8 / 14.2 |
+| | Jacobi | 360 s | 134 | .097 / .327 | .129 / .282 | 119 | .112 / .215 | 47.2 / 11.0 |
+| | GN | 323 s (208 + 96) | 74.5 | .055 / .327 | .103 / .281 | 58 | .105 / .179 | 46.1 / 11.0 |
+| cylinder 0.005 (14426) | start | | 1380 | .194 / .419 | .200 / .316 | 1108 | .155 / .305 | 50.1 / 13.9 |
+| | Jacobi | 990 s | 130 | .113 / .332 | .136 / .248 | 321 | .111 / .225 | 47.7 / 9.5 |
+| | GN | 453 s (227 + 203) | 13.4 | .023 / .303 | .077 / .271 | 64 | .038 / .225 | 47.3 / 8.8 |
+| sleeve 0.005 (15995) | start | | 1200 | .165 / .325 | .168 / .293 | 258 | .128 / .226 | 51.7 / 12.2 |
+| | Jacobi | 1077 s | 50.9 | .068 / .290 | .095 / .263 | 59 | .076 / .202 | 48.3 / 7.5 |
+| | GN | 488 s (277 + 183) | 13.4 | .017 / .325 | .072 / .293 | 29 | .046 / .226 | 51.5 / 7.3 |
+
+Iterations / evaluations / CG products: L 59 / 241 / 6332; Sozzi 43 / 415 / 6758; cylinder 58 / 348 /
+11384; sleeve 50 / 391 / 9700. Boundary warp unchanged in every run (vertices fixed); skewness max
+unchanged but Sozzi 1.96 → 1.95. Closure ≤ 1.2e-19 throughout.
+
+Reading: Gauss–Newton leaves 1.8–10x less total warp and half or fewer of the sweeps' concave cells, with
+every p99 lower, in 0.45–0.9x the time. Its maxima are no better than the sweeps' in general (the
+cylinder's non-convexity .271 vs .248, the sleeve's warp, non-convexity and triangulation maxima at their
+start values); all stay within their bounds. The guard's evaluations are now 45–65 % of the time. Not
+measured: which faces hold the maxima; `--shorten` other than 100 on these four.
