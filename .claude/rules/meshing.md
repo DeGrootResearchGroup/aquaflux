@@ -17,8 +17,9 @@ file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, 
 `element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
 (`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls (`layers.py`)
 and the mesher (`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`)
-and the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file. Layers on
-structured quad surfaces are not built.
+and the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file. Face planarization
+(`planarize.py`) is built but not yet called by the mesher. Layers on structured quad surfaces are
+not built.
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -119,8 +120,8 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
   fix is a numpy-only primal (the primal is never solved on) and a leaner assembly; not yet done.
 - **Quality, not correctness, on Netgen duals**: `checkMesh` passes structured and Kuhn-tet duals; Netgen
   duals, cut ones included (L, Sozzi), pass topology and closure but report concave cells by face planes
-  (1.5–7.7 %), a few low-quality face decompositions and small volume ratios (log). The quality and
-  planarization component is for these.
+  (1.5–7.7 %), a few low-quality face decompositions and small volume ratios (log). `aquaflux.mesh`'s
+  quality metrics reproduce these checkMesh numbers; planarization (below) is for them.
 - Pinned in `tests/unit/test_meshing_dual.py` (the cut on hex and Kuhn Ls and a three-wall corner) and
   `test_meshing_netgen.py` (a Netgen L, the case placement is for); scale and convexity, Sozzi included,
   in `validation/meshing_dual/dual_scale_convexity.py` (log).
@@ -315,6 +316,40 @@ tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inp
 - **Not yet**: wiring into `CadMesher` / the case file (inside test from the CAD model), snapping nodes
   to walls, and a size field grading the fill from the core's cubes to the wall.
 
+## Face planarization (`planarize.py`) — built, not wired into `CadMesher`
+
+`FacePlanarizer(min_decrease=1e-3, flat=1e-12, damping=0.1, max_sweeps=500, max_halvings=8).planarize(mesh,
+movable) -> Planarization(mesh, warp, converged)`. Moves only the vertices `movable` marks, chosen by the
+caller: **for a dual, the primal cell centroids — the dual's first `primal.n_cells` vertices** (boundary
+vertices, feature points and the cut's vertices between pieces must stay). `TracedDual` does not yet carry
+this mask; wiring it in is the next PR's.
+- **Objective**: total warp `Σ_f Σ_k (n_f·(v_k − c_f))² / area_f` (vertex-mean plane). Each sweep a damped
+  per-vertex least-squares step onto its faces' planes, planes held (Jacobi). Weight `1/area` beat a uniform
+  weight on the L (non-orthogonality max 39.9 vs 46.1 deg).
+- **Stops on a convergence test**: a sweep lowers `E` by less than `min_decrease`, or `E` reaches `flat`
+  of its start (where faces can be made exactly flat `E` falls geometrically and the first test never trips;
+  pinned by the displaced hex block). `max_sweeps` is a bound reported through `converged`.
+- **The guard is load-bearing (binding — do not drop a bound).** Unguarded on the Netgen L the pass cut the
+  warp 98 % but took non-orthogonality to 153 deg and skewness to 11 (vertices dragged to flatten sliver
+  faces carried centroids past faces). A step is kept only where, against the **starting** mesh: no cell
+  less convex (`cell_non_convexity`), none newly concave by checkMesh's test or more so (`cell_concavity`),
+  volume positive, and **no face more non-orthogonal or skewed than the starting mesh's worst face**.
+  Failing cells' free vertices are held and the step retried; a pass that holds nothing new drops the step.
+  ⚠️ Two bounds that look natural block everything: per-cell convexity against the *previous sweep*
+  (stalled at 64 % of the unguarded result on a Kuhn dual) and per-face non-orthogonality against each
+  face's *own* start (0 sweeps on the L). The volume bound never bites on the fixtures but stays: an
+  inverted cell's convexity is NaN, which passes a `>` bound.
+- **Measured (log)**: on Netgen L / Sozzi / cylinder / sleeve duals it halves concave cells or better
+  (L 57→31, Sozzi 309→119, cylinder 1108→321, sleeve 258→59) and lowers interior p99 warp and non-orthogonality, but **leaves the maxima of
+  warp and of triangulation-volume dependence nearly unchanged, and boundary faces untouched** (by design:
+  their vertices are fixed). It is **slow**: linear convergence, 71–118 sweeps, 132 s (3.7k cells) to
+  1077 s (16k cells) — not usable at the 2M-cell target as is.
+- **Open, for the project owner (not built)**: (1) a global solve — a local–global (projection + one sparse
+  least-squares for all vertices) or a joint Gauss–Newton over vertices and face planes — in place of the
+  Jacobi sweep, for the cost; (2) sliding boundary vertices along the CAD surface, or splitting faces still
+  warped, for the boundary and the maxima. Pinned in `tests/unit/test_meshing_planarize.py`; harness
+  `validation/meshing_dual/planarization.py`.
+
 ## Netgen: in a child process, reached through files (binding)
 
 - ⚠️ **Netgen must never be imported into a process that has imported OCP.** The `netgen-mesher` wheel
@@ -395,7 +430,8 @@ tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inp
    preset not) and pipe detection from cylindrical faces (not built).
 5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
    in the primal that the dual turns polyhedral (built as a library, above; not wired in).
-6. **Quality metrics** (non-orthogonality, skewness, convexity) and planarization.
+6. **Quality metrics** (non-orthogonality, skewness, convexity; built in `aquaflux/mesh/quality.py`,
+   `mesh.md`) and planarization (built, above; not yet wired in).
 
 **Phasing**: (1) CAD topology → surface triangulation → polygonal wall mesh → polyhedral core through the
 dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles; (4) octree hex core.

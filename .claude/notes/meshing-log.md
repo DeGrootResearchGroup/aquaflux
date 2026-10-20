@@ -323,3 +323,37 @@ rotation off by π/4; `around` ignored; `patch_types` dropped by `element_mesh`;
 the pipe tube's inner faces projected; its first-shell radial edges not straight. One survivor was a test
 gap and is fixed: with two side blocks the side's middle node is at the uniform angle, so the radial
 edge was straight either way — the test now uses three and checks the lines are straight.
+
+## 2026-10-19 — face planarization on Netgen duals
+
+`FacePlanarizer()` defaults (min_decrease 1e-3, damping 0.1, max_sweeps 300 in the harness), harness
+`validation/meshing_dual/planarization.py` at base `11323836` plus this change (run before the `flat` stop and
+the no-progress exit were added; neither can trip on these duals), macOS arm64, netgen-mesher 6.2.2608,
+`PolyhedralDual(45 deg)`, unprojected, moved = the primal cell centroids. One run each, machine shared with
+other sessions (timings indicative). Warp = largest vertex height / sqrt(area); tri-volume =
+`triangulation_volume_change`; non-orth over interior faces, average acos(mean cos).
+
+| dual (cells) | sweeps, s | total warp | int warp p99 / max | bnd warp p99 | non-convexity p99 / max | concave | tri-volume p99 / max | non-orth max / avg | skew |
+|---|---|---|---|---|---|---|---|---|---|
+| L 0.01 (3718) | 108, 132 | 255 → 8.9 | .161/.303 → .052/.303 | 0 | .169/.349 → .091/.312 | 57 → 31 | .121/.255 → .058/.255 | 46.2/12.0 → 39.9/7.6 | 1.44 → 1.44 |
+| Sozzi 0.01 (13297) | 71, 360 | 836 → 134 | .165/.332 → .097/.327 | .063 → .063 | .176/.331 → .129/.282 | 309 → 119 | .140/.231 → .112/.215 | 47.8/14.2 → 47.2/11.0 | 1.96 → 1.96 |
+| cylinder 0.005 (14426) | 112, 990 | 1380 → 130 | .194/.419 → .113/.332 | .024 → .024 | .200/.316 → .136/.248 | 1108 → 321 | .155/.305 → .111/.225 | 50.1/13.9 → 47.7/9.5 | 1.51 → 1.51 |
+| sleeve 0.005 (15995) | 118, 1077 | 1200 → 51 | .165/.325 → .068/.290 | .054 → .054 | .168/.293 → .095/.263 | 258 → 59 | .128/.226 → .076/.202 | 51.7/12.2 → 48.3/7.5 | 1.24 → 1.24 |
+
+Closure ≤ 1.1e-19 before and after throughout. Not measured: which faces hold the unchanged maxima (the
+likely reading, faces whose vertices are fixed — on the boundary, at features, between cut pieces — is an
+inference).
+
+Guard variants on the L 0.01 (same harness quantities): no guard but per-cell convexity → total warp
+255 → 6.1 but non-orth max 152.6, skewness 11.2, concave 57 → 65; face bounds per face against its own
+start → 0 sweeps; against the starting mesh's worst face, weight 1/area → the row above; weight 1 → total
+warp (unweighted) 0.0116 → 0.0004, concave 32, non-orth 46.1/7.7. On a Kuhn dual (n 4, perturb 0.2) the
+convexity bound against the previous sweep stalled at total warp 0.79 against 0.033 unguarded (2.17 at
+start); against the start it reaches the unguarded result. Over-relaxing the step (1.5, 2, 3) stopped
+earlier at a higher warp.
+
+Mutations of the planarizer, each red: no convexity bound; no concavity bound; no non-orthogonality bound;
+no skewness bound; a bad face holding its owner only (hung the pass until the no-progress exit was added;
+red since); `movable` ignored; no decrease stop; no flat stop; holding everything. Green, dismissed: no
+volume bound (never bites on the fixtures; kept because an inverted cell's convexity is NaN and passes a
+`>` bound); no halving (no sweep on the fixtures raises the warp; kept as the pass's globalization).

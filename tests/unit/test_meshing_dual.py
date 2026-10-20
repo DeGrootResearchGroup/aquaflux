@@ -14,7 +14,13 @@ import math
 import numpy as np
 import pytest
 from aquaflux.io.openfoam.assembler import assemble
-from aquaflux.mesh import Mesh, closed_cell_residual, structured_grid_2d, structured_grid_3d
+from aquaflux.mesh import (
+    Mesh,
+    cell_non_convexity,
+    closed_cell_residual,
+    structured_grid_2d,
+    structured_grid_3d,
+)
 from aquaflux.meshing import PolyhedralDual
 from aquaflux.meshing.dual import _check_connected
 
@@ -23,7 +29,6 @@ from tests.support.meshes import (
     restated,
     tetrahedral_grid_3d,
     without_cells,
-    worst_excursion,
 )
 from tests.support.polymesh import cyclic_two_cube_polymesh_data
 
@@ -253,7 +258,7 @@ def test_a_cell_on_a_sharp_concave_edge_is_cut_into_two_convex_pieces():
         np.isclose(points[:, 0], L_EDGE[0]) & np.isclose(points[:, 2], L_EDGE[1])
     )
     assert on_edge.size == 3 and dual.n_cells == primal.n_nodes + on_edge.size
-    assert float(worst_excursion(dual).max()) < 1e-12
+    assert float(cell_non_convexity(dual).max()) < 1e-12
     np.testing.assert_allclose(np.asarray(dual.geometry().cell.volume).sum(), 1.0, rtol=1e-12)
     _assert_closed(dual)
     _assert_conformal(dual)
@@ -310,7 +315,7 @@ def test_a_concave_corner_of_three_walls_is_cut_into_three_pieces():
     # Nearly convex: a face cut around two points of the corner is crossed by two of the planes
     # between pieces, and its one vertex on that dual edge lies between them. An uncut cell there
     # would wrap round the corner (an excursion near 1).
-    assert float(worst_excursion(dual).max()) < 0.05
+    assert float(cell_non_convexity(dual).max()) < 0.05
     removed = np.prod([1.0, 1.2, 2.4] - corner)
     np.testing.assert_allclose(
         np.asarray(dual.geometry().cell.volume).sum(), 1.0 * 1.2 * 2.4 - removed, rtol=1e-12

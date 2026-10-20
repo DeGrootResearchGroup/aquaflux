@@ -34,7 +34,8 @@ space about a lamp sleeve, and the hemispherical shell about its end.
 
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
 per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
-edges and patch borders sharp.
+edges and patch borders sharp. :class:`FacePlanarizer` moves a mesh's free vertices to flatten its
+faces without making any cell less convex.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ from .layers import LayerExtrusion, PrismLayers
 from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .octree import NearSurface, Octree, RefinementCriterion
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
+from .planarize import FacePlanarizer, Planarization
 
 __all__ = [
     "Annulus",
@@ -72,6 +74,7 @@ __all__ = [
     "Curve",
     "CylinderSurface",
     "CylindricalFrame",
+    "FacePlanarizer",
     "FaceSelection",
     "FacesNear",
     "FacesOn",
@@ -85,6 +88,7 @@ __all__ = [
     "Octree",
     "OctreeCore",
     "PipeOGrid",
+    "Planarization",
     "PlaneSurface",
     "PolyhedralDual",
     "PrismLayers",

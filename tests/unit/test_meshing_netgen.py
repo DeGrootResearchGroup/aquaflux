@@ -267,14 +267,12 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
     # and with the vertices on its cut edges left at their midpoints 1.1. Cut and placed, every
     # cell is within 0.35 of convex.
     pytest.importorskip("OCP")
-    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.mesh import cell_non_convexity, closed_cell_residual
     from aquaflux.meshing import PolyhedralDual, element_mesh
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
     from OCP.BRepTools import BRepTools
     from OCP.gp import gp_Pnt
-
-    from tests.support.meshes import worst_excursion
 
     shape = BRepAlgoAPI_Fuse(
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.2, 0.1, 0.1).Shape(),
@@ -293,7 +291,7 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
     np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
     scale = float(np.max(np.asarray(dual.geometry().face.area)))
     assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
-    assert float(worst_excursion(dual).max()) < 0.45
+    assert float(cell_non_convexity(dual).max()) < 0.45
 
 
 #: The Sozzi water's faces, as its topology numbers them (pinned above by area): the vessel's

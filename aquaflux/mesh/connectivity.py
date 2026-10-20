@@ -581,6 +581,10 @@ class FaceNodeConnectivity(eqx.Module):
         """Sum a per-incidence quantity into per-face totals, shape ``(n_faces, ...)``."""
         return segment_sum(per_incidence, self.face_of_incidence, self.n_faces)
 
+    def max_to_faces(self, per_incidence: jnp.ndarray) -> jnp.ndarray:
+        """The largest of a per-incidence quantity over each face's nodes, shape ``(n_faces, ...)``."""
+        return segment_max(per_incidence, self.face_of_incidence, self.n_faces)
+
     def vertex_mean(self, node_coords: jnp.ndarray) -> jnp.ndarray:
         """Mean of each face's node coordinates, shape ``(n_faces, dim)``."""
         return scale(self.reduce_to_faces(self.gather_node_coords(node_coords)), 1.0 / self.counts)
