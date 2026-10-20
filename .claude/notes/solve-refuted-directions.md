@@ -1515,7 +1515,7 @@ below the container's 5-10 % run-to-run spread, and each candidate removes only 
 program (2026-10-18)". Re-open only if the operator becomes an order of magnitude cheaper (or the restart
 length much longer).
 
-## The coloured probe as one compiled loop over its chunks — NO GAIN on pitzDaily (2026-10-18)
+## The coloured probe as one compiled loop over its chunks — NO GAIN on pitzDaily or bfs3d (2026-10-18/20)
 
 The idea: a refit's probe calls `batched_jacobian_matvec` once per chunk of 8, and each call's temporary
 is mapped afresh and faulted (on glibc above 64 MiB no threshold stops it: XLA allocates on worker threads,
@@ -1532,9 +1532,25 @@ so on CPU the remedy for the faults is the process allocator, which the user own
 with both thresholds, jemalloc with decay off, or `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, the one that
 keeps returning freed memory: bfs3d re-fit 48.7 → 39.7 s at an unchanged footprint, `validation-log.md`,
 "Why bfs3d's probe tangent costs 5.5× pitzDaily's"). ⚠️ The first two keep freed memory: the single-arena setting
-took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted. Untested on bfs3d, whose probe faults ~210 000 times
-per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
-the in-loop JVP penalty measures smaller than that.
+took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted.
+
+**bfs3d (2026-10-20), the same answer**: `validation/probe_loop_profile.py` (case-generic, the session's own
+plan and narrowed assembler, precomputed seeds so no host work in any arm), `state-00032`, `main` after #763
+(`1290aa11`), 4-core Xeon, jax 0.11.2, 576 probes / 72 chunks of 8; mean of 3 passes (2 in the cores run)
+after a warm one, second round of each run:
+
+| arm | glibc defaults | `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` | cores (huge pages) |
+|---|---|---|---|
+| one call per chunk (the session's form) | 33.5 s, 15.1M faults | **26.4-27.1 s**, 0.16M | 3.10 |
+| `fori_loop`, responses out by ordered `io_callback` | 35.4 s, 0.37M | 33.4-34.4 s | 2.94 |
+| `lax.map`, all responses returned | 34.9 s, 0.50M | 33.0-34.1 s | 2.94 |
+| `fori_loop` reduced to a sum (no output) | 33.8 s, 0.35M | 31.6-32.8 s | 3.09 |
+
+Every looped response matches the per-call one to 1.4e-14. The loop removes 98 % of the faults and runs
+~25 % slower than fault-free calls; it is not lost parallelism (cores within 5 %) but more processor time
+(~98 against ~82 processor-seconds per probe): the JVP compiled inside a loop body does more work, even
+with no output. Not diagnosed (the two programs' HLO were not compared). The per-call probe under huge
+pages dominates every loop arm, so on CPU the remedy for the faults stays the allocator.
 
 ## Overlapping the probe's host de-compression with the next chunk — NO GAIN on bfs3d (2026-10-18)
 
