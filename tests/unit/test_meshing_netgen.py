@@ -430,3 +430,66 @@ def test_prism_layers_on_the_sozzi_walls_keep_their_first_height_from_the_true_w
         first = away[(away > 0.0002) & (away < 0.0008)]
         assert first.size > 100, name
         assert float(np.median(first)) == pytest.approx(0.0005, rel=0.03), name
+
+
+def test_the_dual_of_an_octree_core_filled_out_to_a_box_is_closed_and_hexahedral_inside():
+    # A core of 0.1 cubes, 0.05 near a sphere at the centre, kept 0.15 clear of the box's walls;
+    # Netgen fills the gap between its capped surface and the walls, keeping both. The dual of the
+    # whole primal mesh must fill the box exactly, and every point the core's hexahedra surround
+    # on all sides must become a cube of their size (the dual of a block of equal cubes is the
+    # same block shifted half a cube).
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import NearSurface, OctreeCore, PolyhedralDual, element_mesh
+
+    def ball(points):
+        return np.linalg.norm(points - 0.5, axis=1) < 0.15
+
+    def box(points):
+        return np.all((points >= 0.0) & (points <= 1.0), axis=1)
+
+    core = OctreeCore(size=0.1, clearance=0.15, refinements=(NearSurface(ball, 0.05),)).mesh(
+        box, [0, 0, 0], [1, 1, 1]
+    )
+    assert set(np.unique(core.octree.level[core.kept]).tolist()) == {0, 1}
+    wall_points, wall = _box_surface(0.0, 1.0, 8, into_box=False)
+    # The fill wants the surface's own points only; the core's inner points follow its result.
+    on_surface = np.unique(core.surface)
+    number = np.empty(core.points.shape[0], dtype=np.int64)
+    number[on_surface] = len(wall_points) + np.arange(on_surface.size)
+    filled = NetgenProcess().fill(
+        np.vstack([wall_points, core.points[on_surface]]),
+        np.vstack([wall, number[core.surface]]),
+        max_size=0.1,
+    )
+    inner = np.setdiff1d(np.arange(core.points.shape[0]), on_surface)
+    number[inner] = len(filled.points) + np.arange(inner.size)
+    primal = element_mesh(
+        np.vstack([filled.points, core.points[inner]]),
+        tetrahedra=np.vstack([filled.tetrahedra, number[core.tetrahedra]]),
+        hexahedra=number[core.hexahedra],
+        pyramids=number[np.vstack([core.pyramids, core.caps])],
+    )
+    np.testing.assert_allclose(np.asarray(primal.geometry().cell.volume).sum(), 1.0, rtol=1e-12)
+    dual = PolyhedralDual(feature_angle=np.radians(45)).build(primal)
+    assert dual.n_cells == primal.n_nodes  # a box has no concave edge to cut cells at
+    volume = np.asarray(dual.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 1.0, rtol=1e-12)
+    scale = float(np.max(np.asarray(dual.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
+    surrounded = np.bincount(number[core.hexahedra].ravel(), minlength=primal.n_nodes) == 8
+    assert np.count_nonzero(surrounded) > 100
+    size = np.zeros(primal.n_nodes)
+    hexahedra = number[core.hexahedra]
+    size[hexahedra] = np.linalg.norm(
+        primal.node_coords[hexahedra[:, 1]] - primal.node_coords[hexahedra[:, 0]], axis=1
+    )[:, None]
+    np.testing.assert_allclose(volume[surrounded], size[surrounded] ** 3, rtol=1e-12)
+    face_size = np.diff(np.asarray(dual.face_nodes.offsets))
+    faces_of = np.zeros(dual.n_cells, dtype=np.int64)
+    quads_of = np.zeros(dual.n_cells, dtype=np.int64)
+    for side in (dual.face_cells.owner, dual.face_cells.neighbour):
+        side = np.asarray(side)
+        np.add.at(faces_of, side[side >= 0], 1)
+        np.add.at(quads_of, side[side >= 0], face_size[side >= 0] == 4)
+    assert np.all(faces_of[surrounded] == 6) and np.all(quads_of[surrounded] == 6)

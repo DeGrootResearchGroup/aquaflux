@@ -14,9 +14,11 @@ paths:
 
 **Status: phase 1 built** — STEP region → Netgen tets → polyhedral dual → `Mesh` / polyMesh, from a case
 file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
-`element_mesh` (`elements.py`: tetrahedra and prisms), the feature-preserving dual (`dual.py`, cells at sharp
-concave edges cut into pieces), prism layers on triangulated walls (`layers.py`) and the mesher
-(`cad_mesher.py`). Layers on structured quad surfaces, blocks and the hex core are not built.
+`element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
+(`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls (`layers.py`)
+and the mesher (`cad_mesher.py`). The octree hex core is built as a library (`octree.py`, `hex_core.py`)
+but not yet wired into `CadMesher` or the case file. Layers on structured quad surfaces and blocks are not
+built.
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -160,8 +162,8 @@ or OCP.
 - **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
   whole `aquaflux mesh --case --openfoam` before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
   at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
-- `element_mesh(points, tetrahedra=None, prisms=None, patches=None)` numbers faces in first-sighting order,
-  tetrahedra first (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
+- `element_mesh(points, tetrahedra=None, prisms=None, hexahedra=None, pyramids=None, patches=None)`
+  numbers cells in that order and faces in first-sighting order (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
   hand assembly); patches take triangles and quadrilaterals by corners.
 
 ## Prism layers (`layers.py`) — built for triangulated walls
@@ -198,6 +200,56 @@ it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neithe
   and its polyhedra skewed (images in the log): the pipe O-grid of the block mesher is the answer there.
 - Pinned in `tests/unit/test_meshing_layers.py` (no Netgen) and `test_meshing_netgen.py` (Sozzi, the first
   height from the true wall).
+
+## The octree hex core (`octree.py`, `hex_core.py`) — built, not yet wired in
+
+`OctreeCore(size, clearance, refinements=(), cap_height=0.25, samples=3).mesh(inside, lower, upper) ->
+HexCore` (`points`, `hexahedra`, `pyramids`, `tetrahedra`, `caps`, `surface`, `octree`, `kept`). The region
+is an **inside test**, `inside(points (m, 3)) -> bool (m,)`, so an analytic body, a `solids` body
+(`contains`) or later the CAD model all serve. `element_mesh` takes `hexahedra` and `pyramids` beside
+tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inputs unchanged).
+- **The tree** (`Octree`): root cubes **of the target `size`** on a lattice from `lower` covering `upper`
+  (refinement only goes finer); leaves in integer units of the finest cube, named by their lower corner
+  (leaves never overlap), the unit halved when a refinement adds a level. `refined_by(criteria)` splits
+  until no `RefinementCriterion.refines(lower, size)` asks; `NearSurface(inside, size, margin=0,
+  samples=3)` splits cubes whose sample lattice (cube grown by `margin`) is mixed inside/outside.
+  `balanced()` ripples until leaves sharing a face **or part of an edge** are ≤ 1 level apart (vertex
+  contact is not balanced): one finest cell across each of the 18 face and edge directions finds any
+  leaf ≥ 2 levels coarser, because such a leaf covers the whole own-size region across.
+- **Kept**: a leaf whose cube grown by `clearance` has every sample inside (`samples` per edge): exact
+  for a convex region, a sampling otherwise.
+- **Hanging points: resolved by templates, not by Netgen (chosen 2026-10-19).** A cube with a smaller
+  cube's corner at any of its edge midpoints is a *transition cube*, cut into pieces meeting a new point
+  at its centre; each face is one quad (no halved edge), four quads through the face centre (the cube
+  across is split — balance makes its four face-touching children leaves), or a fan of triangles from a
+  face-centre point through corners and halving points (edges halved by a cube sharing only the edge;
+  the same-size cube across builds the same fan). Quad + centre = pyramid, triangle + centre = tet.
+  **Every face is decided from the whole tree, not the kept set**, so any subset of leaves is conformal
+  where its cubes meet; the dual turns these pyramids and tets into polyhedra, so the agreed "no tets or
+  pyramids in the solver's mesh" holds. **Why not the alternative** (drop every cube with a hanging point
+  and let the gap fill tet the holes; reasoned, not tried): a hole one cube thick gets caps from both
+  sides whose apexes nearly meet, and every hole is another closed component for the fill; the templates
+  are local, exact, and testable without Netgen.
+- **Pinches**: cubes touching only along an edge or at a corner give a non-manifold boundary, which
+  neither `fill` nor the dual accepts. `_without_pinches` repeats: find points on an edge of > 2
+  boundary faces or with > 1 fan of faces (joined across edges shared by exactly two), and drop **at
+  most one cube per pinched point per round**, the one with the largest share of its faces exposed,
+  the finer of equals. ⚠️ **Dropping every cube at a pinch cascades** on a staircase ball (557 → 34 cubes;
+  log), and so does dropping each pinch's minority side (557 → 149: two rules can pick opposite sides);
+  the one-per-point rule gives 557 → 485.
+- **Caps**: each boundary quad gets a pyramid outward, apex `cap_height × edge` above its centre. ⚠️
+  **`cap_height` < 1/2**: at a concave right-angled step two caps' sides lean together at 45° from
+  their quads at 1/2 and coincide. `surface` (cap sides + transition cubes' boundary triangles) is wound
+  **into the core** — out of the region left to fill — so beside an outward wall it is a hole for
+  `NetgenProcess.fill`, which wants only the points the triangles use: renumber (as the Netgen test does).
+- Pinned in `tests/unit/test_meshing_octree.py` (balance by brute force over leaf pairs, refinement to
+  size on the sphere), `test_meshing_hex_core.py` (box = its uniform grid; refined core: volume, boundary
+  area = the cube union's by voxels, no point at any cell edge's middle; capped surface closed, one fan per
+  point, encloses −(cubes + caps); edge-touching boxes parted only on the shared edge; hex/pyramid
+  `element_mesh`), and `test_meshing_netgen.py` (core + caps + Netgen fill in a box: dual closed, volume
+  1, each point surrounded by 8 hexes a cube of their size with 6 quad faces).
+- **Not yet**: wiring into `CadMesher` / the case file (inside test from the CAD model), snapping nodes
+  to walls, and a size field grading the fill from the core's cubes to the wall.
 
 ## Netgen: in a child process, reached through files (binding)
 
@@ -276,7 +328,8 @@ it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neithe
    surfaces, carrying the `uvmesh` topologies (four-quadrant annulus with the π/4 offset when a cap joins,
    the five-block cubed-sphere shell, the square-core pipe O-grid, wall-layer window masking) and pipe
    detection from cylindrical faces.
-5. **Octree core**, 2:1 balanced, hanging nodes resolved by the tet-and-dual transition.
+5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
+   in the primal that the dual turns polyhedral (built as a library, above; not wired in).
 6. **Quality metrics** (non-orthogonality, skewness, convexity) and planarization.
 
 **Phasing**: (1) CAD topology → surface triangulation → polygonal wall mesh → polyhedral core through the

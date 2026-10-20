@@ -14,7 +14,12 @@ without loading it.
 Netgen's tetrahedra of it, their boundary in patches chosen by face (:class:`FacesNear`,
 :class:`FacesOn`), turned into their dual. :class:`PrismLayers` grows layers of prisms inward from the wall before the fill, sized for the dual,
 so a wall-resolved mesh's layers join its core conformally. :func:`element_mesh` makes a mesh of
-any tetrahedra and triangular prisms.
+any tetrahedra, triangular prisms, hexahedra and pyramids.
+
+:class:`OctreeCore` builds a core of hexahedra inside a region from a balanced :class:`Octree`,
+refined where asked (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
+tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
+are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
 
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
 per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
@@ -34,18 +39,25 @@ from .netgen_process import (
     netgen_available,
 )
 from .elements import element_mesh
+from .hex_core import HexCore, OctreeCore
 from .layers import LayerExtrusion, PrismLayers
+from .octree import NearSurface, Octree, RefinementCriterion
 
 __all__ = [
     "CadMesher",
     "FaceSelection",
     "FacesNear",
     "FacesOn",
+    "HexCore",
     "LayerExtrusion",
     "MeshingError",
+    "NearSurface",
     "NetgenProcess",
+    "Octree",
+    "OctreeCore",
     "PolyhedralDual",
     "PrismLayers",
+    "RefinementCriterion",
     "RegionFaces",
     "SurfaceTriangulation",
     "TetrahedralMesh",
