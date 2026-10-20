@@ -72,6 +72,8 @@ SUBPACKAGE_GROUPS = {
         ("Meshing a region of a CAD model", ["cad_mesher"]),
         ("The polyhedral dual", ["dual"]),
         ("Prism layers", ["layers"]),
+        ("Structured quadrilaterals on chosen faces", ["mapped"]),
+        ("Surfaces of triangles and quadrilaterals, and pyramid caps", ["polygons"]),
         ("A mesh of tetrahedra, prisms, hexahedra and pyramids", ["elements"]),
         ("An octree hexahedral core", ["octree", "hex_core"]),
         ("Hexahedral blocks", ["blocks", "divisions", "surfaces", "block_assembly"]),

@@ -494,3 +494,63 @@ Direction dismissed: recomputing only the cells and faces whose vertices moved. 
 (343 cells, 153 trials) a trial moves a vertex of 85–100 % of the cells (median 100 %, mean 97 %): every
 dual cell has free vertices and a Levenberg–Marquardt step moves every unpinned one. With evaluations at
 3 % of the pass it could save at most that.
+
+## 2026-10-20 — layers on structured quadrilateral walls, and layers at a sharp concave edge
+
+macOS arm64, netgen-mesher 6.2.2608, Netgen run from a scratch venv through `NetgenProcess(python=)`;
+everything else the repository's environment. Layers `PrismLayers(0.0005, 1.2, 5)` on every Sozzi wall
+unless said.
+
+**Netgen's edge points, not ours.** Probed whether Netgen meshes faces through edge points we place:
+`GenerateMesh(perfstepsend=MESHEDGES)` then a second `GenerateMesh(mesh=..., perfstepsstart=...)` with
+`perfstepsstart=MeshingStep.MESHSURFACE` meshes nothing (0 triangles); the integer `3` resumes at the
+surface step and keeps the 72 edge segments. But an edge's count cannot be set: per-edge `maxh = L/n`
+is an upper bound only (asking a cylinder's rims for 20, 37, 50 segments gave 31, 37, 49). So the mapped
+grid takes Netgen's own edge points from the face's triangles' boundary, and joins opposite sides of
+different counts through one strip of triangles. The kernel's (u, v) evaluation planned for the grid is
+not needed: points are interpolated in space and moved onto the face by `CadModel.project`.
+
+**A defect older than this work: layers at a sharp concave edge do not close.** The L (0.2 x 0.1 x 0.1
+fused with 0.1 x 0.1 x 0.1, STEP in millimetres), maxh 0.02, layers (0.002, 1.2, 3) on all eight faces,
+triangles only, on `main` (d2522fd8): 2 cells of negative volume, 22 unclosed. Sozzi's triangle layers
+closed by luck (its junctions are gentler). Three causes, each found on a cell:
+- *The layer points above the edge are not cut.* Their dual cells turn the corner as the edge point's
+  would uncut: a face of a lifted point's cell, its ring running from one wall's layer cells round to
+  the other's, folded (centre-fan area 0.55-0.83 short of its magnitude sum). Giving every interior face
+  whose dual edge bends by more than the feature angle a vertex at its centroid (tried) cut the
+  unclosed 30 to 14 and was then unneeded: dropped. Cutting the column above each cut point by the same
+  walls (`PolyhedralDual.columns`) closes the L, both triangles and quads.
+- *The straight centroid-to-centroid segment crosses the corner beside a long cell.* At Sozzi's outlet
+  junction a pipe hexahedron (4.9 mm along the pipe) beside an end-plate prism put the cut vertex 0.5 mm
+  into the solid (both walls' depths negative); its piece's volume went negative. The crossing on the
+  dual edge through the face's centroid is in the fluid. Used everywhere, that rule made plain tet duals
+  worse (Sozzi 0.02 worst non-convexity 0.33 → 1.12, L 0.01 0.35 → 0.43), so it is used only where the
+  straight crossing is in front of the walls.
+- *Nearly parallel planes meet far away.* On the inlet saddle two neighbouring column points carry
+  slightly different walls; the least-squares hub on their planes went 131 mm off (`pinv` at rcond
+  1e-8). Dropping singular values under 0.05 (`_PLANES_APART`, about 3°) treats them as one plane.
+Cutting the top row of each column too is fine once the hub is bounded (an early run with the top row
+cut failed on that hub, not on the top row). Each piece red when removed: no columns (fast dual test, the
+two Netgen tests); always straight (the same); always through the face centroid (the Netgen L's
+convexity bound, tightened 0.45 → 0.4 at 0.349); `_PLANES_APART` 1e-8 (the Sozzi mapped test).
+
+**Plain tet duals after the change** (`dual_scale_convexity.py`, worst non-convexity overall | extra
+pieces): L 0.02 / 0.01: 0.26 / 0.349 | 0.160 / 0.188; Sozzi 0.02 / 0.01: 0.333 / 0.331 | 0.303 / 0.282
+(before: 0.26 / 0.35 | 0.17 / 0.16; 0.33 / 0.33 | 0.32 / 0.26). Closure and volume unchanged.
+
+**Sozzi, triangles against mapped lamp cylinder and pipes** (`mapped_layers_sozzi.py`; the lamp's tip and
+the vessel triangulated; "hexahedral walls" the share of a patch's faces that are quadrilaterals of
+hexahedral dual cells; first layer the dual vertices 0.2-0.8 mm from the true lamp wall, 0.1 < x < 0.7):
+
+| maxh, arm | cells | s | hexahedra | hexahedral walls lamp / pipes | first layer on the lamp, median (5-95 %) | non-orthogonality by the lamp max / p99; everywhere max / p99 |
+|---|---|---|---|---|---|---|
+| 0.02 triangles | 46244 | 13.1 | 86 | 0 / 0 | 0.5069 (0.5066-0.5087) | 58.1 / 15.8; 85.3 / 50.6 |
+| 0.02 mapped | 48509 | 13.0 | 28393 | 0.986 / 0.988 | 0.5033 (0.5025-0.5040) | 60.0 / 15.7; 89.8 / 46.2 |
+| 0.01 triangles | 59515 | 16.7 | 85 | 0 / 0 | 0.5069 (0.5066-0.5087) | 51.6 / 15.9; 84.4 / 49.1 |
+| 0.01 mapped | 60985 | 16.1 | 28389 | 0.986 / 0.988 | 0.5033 (0.5025-0.5040) | 59.7 / 14.8; 88.8 / 45.8 |
+
+The lamp's surface is the same at both sizes (its 10 mm radius sets Netgen's size there), hence equal
+lamp numbers. Faces over 80° at 0.02: triangles 2, mapped 11 -- inside the outlet pipe's entry (r ≈ 4 mm,
+x ≈ 888 mm) and at the inlet saddle, where the pipes' five layers leave a core of a few millimetres for
+pyramid caps and tetrahedra. Quality, not correctness: every cell closes. Timings from one run each,
+beside another session's bfs3d case: counts good, seconds indicative.

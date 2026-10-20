@@ -12,9 +12,13 @@ without loading it.
 
 :class:`CadMesher` meshes a region of a CAD model -- some solids' union, less others -- as polyhedra:
 Netgen's tetrahedra of it, their boundary in patches chosen by face (:class:`FacesNear`,
-:class:`FacesOn`), turned into their dual. :class:`PrismLayers` grows layers of prisms inward from the wall before the fill, sized for the dual,
-so a wall-resolved mesh's layers join its core conformally. :func:`element_mesh` makes a mesh of
-any tetrahedra, triangular prisms, hexahedra and pyramids.
+:class:`FacesOn`), turned into their dual. :class:`PrismLayers` grows layers inward from the wall
+before the fill, sized for the dual, so a wall-resolved mesh's layers join its core conformally;
+over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals (a band, such as a
+pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
+of triangles and quadrilaterals between these steps, and :class:`PyramidCaps` caps the
+quadrilaterals a tetrahedral fill meets. :func:`element_mesh` makes a mesh of any tetrahedra,
+triangular prisms, hexahedra and pyramids.
 
 :class:`OctreeCore` builds a core of hexahedra inside a region from a balanced :class:`Octree`,
 refined where asked (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
@@ -58,7 +62,9 @@ from .hex_core import HexCore, OctreeCore
 from .divisions import Graded, cell_counts
 from .layers import LayerExtrusion, PrismLayers
 from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
+from .mapped import MappedQuads, MappedSurface
 from .octree import NearSurface, Octree, RefinementCriterion
+from .polygons import Polygons, PyramidCaps
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 from .planarize import FacePlanarizer, Planarization
 
@@ -82,6 +88,8 @@ __all__ = [
     "HexBlock",
     "HexCore",
     "LayerExtrusion",
+    "MappedQuads",
+    "MappedSurface",
     "MeshingError",
     "NearSurface",
     "NetgenProcess",
@@ -90,8 +98,10 @@ __all__ = [
     "PipeOGrid",
     "Planarization",
     "PlaneSurface",
+    "Polygons",
     "PolyhedralDual",
     "PrismLayers",
+    "PyramidCaps",
     "RefinementCriterion",
     "RegionFaces",
     "SampledCurve",

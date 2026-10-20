@@ -425,3 +425,72 @@ def test_a_named_feature_edge_off_the_boundary_is_refused():
     interior_edge = edge_nodes[inside[edge_nodes].all(axis=1)][:1]
     with pytest.raises(ValueError, match="not an edge of the primal boundary"):
         PolyhedralDual(feature_angle=1.0, feature_edges=interior_edge).build(primal)
+
+
+def _layered_l():
+    """An L of three cubes (edge 1/2), hexahedral layers grown inward from all its walls, and a
+    core of the lattice's hexahedra, its outer points pulled in to the layers' top; with the
+    layers' columns."""
+    from aquaflux.meshing import Polygons, PrismLayers, element_mesh
+
+    from tests.support.meshes import voxel_surface
+
+    voxels, n, size = [(0, 0, 0), (1, 0, 0), (0, 0, 1)], 2, 0.5
+    points, quads = voxel_surface(voxels, n, size)
+    grown = PrismLayers(first_height=0.01, growth=1.25, count=4).extrude(
+        points, Polygons(quads=quads), np.ones(len(quads), dtype=bool)
+    )
+    top = {tuple(np.round(points[row[0]] / size * n).astype(int)): row[-1] for row in grown.columns}
+    lattice, core = {}, []
+    all_points = [grown.points]
+    added = grown.points.shape[0]
+
+    def number(key):
+        nonlocal added
+        if key in top:
+            return top[key]
+        if key not in lattice:
+            lattice[key] = added
+            all_points.append(np.asarray(key, float)[None] / n * size)
+            added += 1
+        return lattice[key]
+
+    corners = [
+        (0, 0, 0),
+        (1, 0, 0),
+        (1, 1, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+        (1, 0, 1),
+        (1, 1, 1),
+        (0, 1, 1),
+    ]
+    for voxel in voxels:
+        for i, j, k in np.ndindex(n, n, n):
+            base = np.asarray(voxel) * n + (i, j, k)
+            core.append([number(tuple(base + c)) for c in corners])
+    primal = element_mesh(np.vstack(all_points), hexahedra=np.vstack([grown.hexahedra, core]))
+    return primal, grown.columns
+
+
+def test_layers_turning_a_concave_edge_are_cut_up_their_columns():
+    # The layer points above the L's inside edge have dual cells that turn its corner too, as the
+    # edge's own points' would uncut: their faces along the corner, drawn round it from one wall's
+    # layer cells to the other's, fold, and the cells do not close. Cut by the same walls, up the
+    # column, every cell closes and the dual fills the L exactly.
+    primal, columns = _layered_l()
+    scale = float(np.max(np.asarray(primal.geometry().face.area)))
+    uncut = SHARP.build(primal)
+    assert float(np.max(np.asarray(closed_cell_residual(uncut)))) > 1e-3 * scale
+    dual = PolyhedralDual(SHARP.feature_angle, columns=columns).build(primal)
+    on_edge = np.flatnonzero(
+        np.isclose(np.asarray(primal.node_coords)[columns[:, 0], 0], 0.5)
+        & np.isclose(np.asarray(primal.node_coords)[columns[:, 0], 2], 0.5)
+    )
+    # Every point of the edge's columns cut in two: the edge's three points and four layers each.
+    assert dual.n_cells == primal.n_nodes + on_edge.size * 5
+    volume = np.asarray(dual.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 3 * 0.5**3, rtol=1e-12)
+    _assert_closed(dual)
+    _assert_conformal(dual)

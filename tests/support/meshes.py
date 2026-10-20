@@ -446,3 +446,39 @@ def without_cells(mesh: Mesh, removed, *, patch: str) -> Mesh:
         patch_types=dict(patches.patch_types),
         patch_groups=dict(patches.patch_groups),
     )
+
+
+def voxel_surface(voxels, n: int, size: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """The boundary of a union of cubes of edge ``size`` at integer corners ``voxels``, each cube
+    face cut into ``n x n`` quadrilaterals wound out of the union, every point used once."""
+    voxels = {tuple(v) for v in voxels}
+    keys, quads = {}, []
+
+    def point(p):
+        key = tuple(np.round(np.asarray(p) * n).astype(int))
+        return keys.setdefault(key, len(keys))
+
+    for voxel in voxels:
+        for axis in range(3):
+            for side in (0, 1):
+                across = list(voxel)
+                across[axis] += 1 if side else -1
+                if tuple(across) in voxels:
+                    continue
+                u, v = [a for a in range(3) if a != axis]
+                for i in range(n):
+                    for j in range(n):
+                        ring = []
+                        for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                            p = np.array(voxel, float)
+                            p[axis] += side
+                            p[u] += (i + di) / n
+                            p[v] += (j + dj) / n
+                            ring.append(point(p))
+                        # (u, v, axis) right-handed when axis follows v cyclically.
+                        right_handed = (axis - v) % 3 == 1
+                        quads.append(ring if right_handed == bool(side) else ring[::-1])
+    points = np.zeros((len(keys), 3))
+    for key, index in keys.items():
+        points[index] = np.asarray(key) / n * size
+    return points, np.array(quads)

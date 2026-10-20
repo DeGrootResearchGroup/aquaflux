@@ -202,12 +202,14 @@ cfd/                                  # repo root
 │   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
 │   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
 │   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
-│   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches) -> Mesh; FaceSelection -> FacesNear / FacesOn
+│   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches, layered, mapped) -> Mesh; FaceSelection -> FacesNear / FacesOn
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
 │   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
 │   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement
 │   │   ├── hex_core.py               #   OctreeCore.mesh(inside, lower, upper) -> HexCore: conformal hex core, pyramid caps
-│   │   ├── layers.py                 #   PrismLayers.extrude(points, triangles, layered) -> LayerExtrusion: prism layers sized for the dual
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
+│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces
+│   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
