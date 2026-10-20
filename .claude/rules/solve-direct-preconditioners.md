@@ -148,7 +148,12 @@ bare block inverse).
     - **Ready for per-column precision, not built:** `FieldwiseMatvec.seed_dtype(field)` (float64 for
       every field today) types each field's seed buffer and the tangents' dtype keys each program; a
       float32 field program must also cast the closed-over state and assembler.
-    - Measurements (probe bytes, temporary, per tangent, re-fit seconds, marches): FIELDWISE-MEASUREMENTS.
+    - **Measured (4-core Xeon, jax 0.12.0, glibc defaults, hybrid start, batch 8):** bfs3d's per-field
+      programs touch 2.8 (p) to 6.9 GB (each velocity) per call against 10.4 for the whole state, mean
+      27.5 ms per tangent against 59.3; a re-fit's probe 43.1 → 18.5 s (β 0.005). pitzDaily 12.1 → 5.5 ms
+      per tangent, probe 1.60 → 0.94 s. The price: ~10 s per process to trace and lower the extra programs
+      (pitzDaily, warm cache), and +0.4 GiB VmHWM after a bfs3d re-fit. Tables and marches:
+      `.claude/notes/validation-log.md`, "One probe program per column field".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
     gather** (`structure=`) are what the materialized path passes. The full pattern (no `eliminate_zeros`)
     is a superset of the live nonzeros at any state, so the structure never moves cold→developed — that

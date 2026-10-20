@@ -967,7 +967,8 @@ VmHWM after the re-fits 8.20 → 8.58 GiB; pitzDaily probe 1.60 → 0.94 s, re-f
 whole-state one on 2–8 % of entries by at most 2.4e-16 of its (row field, column field) block's largest
 entry, none non-finite; under `XLA_FLAGS=--xla_cpu_max_isa=AVX` (no FMA instructions) the two are identical,
 and pitzDaily's equals `main`'s own matrix exactly. The branch's whole-state product (chunks now aligned to
-fields) equals `main`'s bit for bit at default flags. The march state check: FIELDWISE-MARCH-STATE.
+fields) equals `main`'s bit for bit at default flags. At bfs3d's march `state-00015` (β 1e-4, `main`'s shipped march): ≤ 3.6e-16 of the block's largest entry
+at default flags, identical under `max_isa=AVX`.
 
 **pitzDaily marches** (`run_case.sh validation/pitzdaily_openfoam/compare.py`, `PITZ_CHECKPOINT_KEEP=100`):
 
