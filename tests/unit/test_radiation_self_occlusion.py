@@ -699,7 +699,8 @@ def test_a_profile_that_lights_behind_itself_is_refused_through_a_mask_that_did_
 
 def test_a_stream_builds_its_grid_and_refuses_its_scene_once_not_once_a_pass(monkeypatch):
     """What depends on the surface alone is done once per stream, however many passes it has."""
-    from aquaflux.radiation import gather, grid, visibility
+    from aquaflux import triangle_grid as grid
+    from aquaflux.radiation import gather, visibility
 
     builds, refusals = [], []
     real_build, real_refuse = grid.TriangleGrid.build.__func__, gather.refuse_points_inside
@@ -732,7 +733,7 @@ def test_a_stream_builds_its_grid_and_refuses_its_scene_once_not_once_a_pass(mon
 
 def test_a_grid_built_for_other_triangles_is_refused():
     surfaces, receivers = _lamp_in_a_sleeved_box()
-    from aquaflux.radiation.grid import TriangleGrid
+    from aquaflux.triangle_grid import TriangleGrid
 
     other = TriangleGrid.build(np.asarray(surfaces.vertices)[:-1])
     with pytest.raises(ValueError, match="built over other triangles"):

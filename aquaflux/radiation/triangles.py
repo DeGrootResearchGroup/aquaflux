@@ -127,7 +127,7 @@ def _counts_as_hit(distance, meets, near, index, exclude):
     facet's plane is blocked by it, which is why the far end is inclusive), and on a triangle
     the ray was not told to ignore. Shapes broadcast, so ``index`` may be a block's column of
     triangle indices or one index per pair. The triangle grid's compiled walk
-    (:mod:`aquaflux.radiation.grid_walk`) carries its own copy of this rule and of the geometry,
+    (:mod:`aquaflux.triangle_grid_walk`) carries its own copy of this rule and of the geometry,
     since a compiled loop cannot call a traced function; the grid's tests hold the two equal.
     """
     hit = meets & (distance > near) & (distance <= 1.0)

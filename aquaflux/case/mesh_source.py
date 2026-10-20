@@ -21,7 +21,14 @@ import numpy as np
 from aquaflux.io import OpenFOAMReader
 from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
-from aquaflux.meshing import CadMesher, FaceSelection, NetgenProcess, PipeCore, PrismLayers
+from aquaflux.meshing import (
+    CadMesher,
+    FaceSelection,
+    NetgenProcess,
+    OctreeCore,
+    PipeCore,
+    PrismLayers,
+)
 
 from .drawing import CadPlacement
 
@@ -327,12 +334,17 @@ class CadMesh(MeshSource):
     pipe_core : PipeCore or None
         How the pipes' cores are filled; unset, the defaults of
         :class:`~aquaflux.meshing.PipeCore`.
+    core : OctreeCore or None
+        A core of hexahedra from an octree inside the region, kept clear of the walls and of the
+        layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
+        Unset, the core is polyhedral throughout.
 
     Raises
     ------
     ValueError
-        If no solid is named; a size, the angle or the grading is not a positive, finite number; or
-        layers are given without a patch to grow on, or patches are named without layers.
+        If no solid is named; a size, the angle or the grading is not a positive, finite number;
+        layers are given without a patch to grow on, or patches are named without layers; or the
+        core's size is below an unset wall size.
     """
 
     path_fields: ClassVar[tuple[str, ...]] = ("file",)
@@ -352,6 +364,7 @@ class CadMesh(MeshSource):
     mapped: tuple[str, ...] = ()
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
+    core: OctreeCore | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -387,8 +400,9 @@ class CadMesh(MeshSource):
         if self.pipe_core is not None:
             options["pipe_core"] = self.pipe_core
         return CadMesher(
-            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers, **options
-        )
+            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers,
+            core=self.core, **options,
+        )  # fmt: skip
 
     def read(self, directory: Path) -> Mesh:
         """The region, read from its drawing and meshed -- see :meth:`MeshSource.read`."""

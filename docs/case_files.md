@@ -160,6 +160,18 @@ one form each, so they need no `kind`, and the top level is the case itself.
     pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
   ```
 
+  The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
+  ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
+  are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of
+  the layers' top (unset, twice the wall size). The tetrahedra fill the gap, grading from the wall's
+  size to the cubes', and the solver's cells there are polyhedra joining the cubes to the layers. A
+  core needs room: a gap narrower than about twice the clearance plus a wall cube, as round a lamp
+  in a narrow annulus, is left to the tetrahedra, and a region with no such room anywhere is refused.
+
+  ```yaml
+    core: {kind: OctreeCore, size: 0.08}
+  ```
+
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
 the density, so a file cannot state two viscosities that disagree.

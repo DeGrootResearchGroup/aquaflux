@@ -2,11 +2,12 @@
 quadrilaterals capped with pyramids for a tetrahedral fill.
 
 **Which cubes.** An :class:`~aquaflux.meshing.Octree` of root cubes of the core's ``size``
-covers the region's box, is refined by the criteria given, and is balanced, so cubes sharing a face
-or part of an edge differ by at most one level. A leaf is kept when the cube grown by ``clearance``
-on every side lies inside the region -- tested on a lattice of points over the grown cube, so exact
-for a convex region and a sampling otherwise -- which leaves room between the core and the walls for
-the layers and the fill.
+covers the region's box, is refined towards the region's boundary, and is balanced, so cubes
+sharing a face or part of an edge differ by at most one level. A leaf is kept when the region's
+boundary passes nowhere through the cube grown by ``clearance`` on every side and the cube's centre
+lies inside -- asked of a :class:`~aquaflux.meshing.Region`, exactly of a closed triangle surface
+and on a lattice of sample points of an inside test -- which leaves room between the core and the
+walls for the layers and the fill.
 
 **Conformal without hanging points.** A cube whose edge has a smaller cube's corner at its midpoint
 cannot stay a hexahedron: the point would hang on its edge. Such a cube is a *transition cube*, and
@@ -27,8 +28,8 @@ the polyhedral dual of the whole primal mesh turns them into polyhedral cells jo
 hexahedra of different sizes.
 
 **A closed manifold boundary.** Cubes touching only along an edge or at a corner would make the
-core's boundary pinch there, which neither a tetrahedral fill nor the dual accepts; every kept cube
-at such a point is dropped, and the test repeats until none is left.
+core's boundary pinch there, which neither a tetrahedral fill nor the dual accepts; one cube at each
+such point is dropped, and the test repeats until none is left.
 
 **The caps.** Each boundary quadrilateral gets a pyramid built outward, its apex ``cap_height``
 times the quadrilateral's edge above the quadrilateral's centre, so the boundary left for the fill
@@ -41,15 +42,17 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-from collections.abc import Callable, Sequence
+import math
+from collections.abc import Sequence
 
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
 from .elements import HEXAHEDRON_CORNERS
-from .octree import BITS, Octree, RefinementCriterion, cube_samples, point_keys
+from .octree import BITS, NearSurface, Octree, point_keys
 from .polygons import PyramidCaps
+from .regions import ClosedSurface, Region
 
 __all__ = ["HexCore", "OctreeCore"]
 
@@ -57,6 +60,11 @@ __all__ = ["HexCore", "OctreeCore"]
 FACE_RING = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
 
 _UNUSED = -1
+
+#: How many of a closed surface's voxels span a wall cube (:meth:`OctreeCore.within`). A cube is
+#: kept only clear of every voxel the surface reaches, so a cube may be dropped up to a voxel
+#: beyond the clearance; a finer grid costs a register entry per triangle per voxel it spans.
+VOXELS_PER_WALL_CUBE = 4
 
 
 def _decode(keys: np.ndarray) -> np.ndarray:
@@ -104,49 +112,94 @@ class HexCore:
 
 @dataclasses.dataclass(frozen=True)
 class OctreeCore:
-    """Builds a :class:`HexCore` inside a region.
+    """Builds a :class:`HexCore` inside a region: cubes of ``size``, made smaller towards the
+    region's boundary, and kept ``clearance`` from it.
+
+    The root cubes are halved wherever the boundary passes within ``clearance + wall_size`` of
+    them until they are no larger than ``wall_size``, so the cubes facing the gap left between the
+    core and the boundary are the largest ``size / 2**k`` not over ``wall_size``, and balance grades
+    them up to ``size`` away from it.
 
     Attributes
     ----------
     size : float
         The largest cubes' edge: the root cubes of the octree.
-    clearance : float
-        The least distance kept between a cube and the region's boundary.
-    refinements : sequence of RefinementCriterion
-        Where to make the cubes smaller, for example
-        :class:`~aquaflux.meshing.NearSurface`.
-    cap_height : float
-        A cap's height over its quadrilateral's edge, in ``(0, 1/2)``.
-    samples : int
-        Sample points along each edge of a grown cube for the inside test, at least two.
+    wall_size : float or None
+        The edge wanted of the cubes facing the boundary, at most ``size``. Unset, the size the
+        boundary itself is meshed at (``boundary_size`` of :meth:`mesh`).
+    clearance : float or None
+        The least distance kept between a cube and the region's boundary. Unset, twice the wall
+        size.
     """
 
     size: float
-    clearance: float
-    refinements: Sequence[RefinementCriterion] = ()
-    cap_height: float = 0.25
-    samples: int = 3
+    wall_size: float | None = None
+    clearance: float | None = None
 
     def __post_init__(self) -> None:
-        PyramidCaps.check_height(self.cap_height, "OctreeCore.cap_height")
-        if self.clearance < 0.0 or self.samples < 2:
-            raise ValueError("clearance must be non-negative and samples at least two")
+        for name in ("size", "wall_size", "clearance"):
+            value = getattr(self, name)
+            if value is not None and not (math.isfinite(value) and value > 0):
+                raise ValueError(
+                    f"OctreeCore.{name} must be a positive, finite number, got {value!r}."
+                )
+        if self.wall_size is not None and self.wall_size > self.size:
+            raise ValueError(
+                f"OctreeCore.wall_size ({self.wall_size!r}) may not exceed its size ({self.size!r})."
+            )
 
-    def mesh(
-        self,
-        inside: Callable[[np.ndarray], np.ndarray],
-        lower: Sequence[float],
-        upper: Sequence[float],
-    ) -> HexCore:
-        """The core of the region ``inside`` holds, within the box from ``lower`` to ``upper``.
+    def resolved(self, boundary_size: float) -> tuple[float, float]:
+        """The wall size and the clearance, the unset ones from ``boundary_size``.
 
         Parameters
         ----------
-        inside : callable
-            ``inside(points)`` for ``points`` of shape ``(m, 3)`` returns a boolean array of shape
-            ``(m,)``.
+        boundary_size : float
+            The size the region's boundary is meshed at.
+
+        Returns
+        -------
+        wall_size, clearance : float
+
+        Raises
+        ------
+        ValueError
+            If an unset wall size would take a ``boundary_size`` larger than :attr:`size`.
+        """
+        wall = self.wall_size
+        if wall is None:
+            if boundary_size > self.size:
+                raise ValueError(
+                    f"OctreeCore.wall_size is unset, so it is the boundary's size "
+                    f"({boundary_size!r}), which exceeds the core's size ({self.size!r})."
+                )
+            wall = boundary_size
+        return wall, (2.0 * wall if self.clearance is None else self.clearance)
+
+    def mesh(
+        self,
+        region: Region,
+        lower: Sequence[float],
+        upper: Sequence[float],
+        *,
+        cap_height: float,
+        boundary_size: float,
+    ) -> HexCore:
+        """The core of ``region``, within the box from ``lower`` to ``upper``.
+
+        Parameters
+        ----------
+        region : Region
+            The region (see :class:`~aquaflux.meshing.ClosedSurface` and
+            :class:`~aquaflux.meshing.SampledRegion`). A cube is kept where the region's boundary
+            is taken to pass nowhere through the cube grown by the clearance, and its centre lies
+            inside.
         lower, upper : sequence of float, length 3
             A box holding the region.
+        cap_height : float
+            The caps' height over their quadrilaterals' edge, in ``(0, 1/2)`` (see
+            :class:`~aquaflux.meshing.PyramidCaps`).
+        boundary_size : float
+            The size the region's boundary is meshed at, for an unset :attr:`wall_size`.
 
         Returns
         -------
@@ -155,19 +208,61 @@ class OctreeCore:
         Raises
         ------
         ValueError
-            If no cube fits.
+            If a cap would reach the clearance's far side (the clearance is no more than the caps'
+            height over a wall cube), or no cube fits.
         """
-        tree = Octree.lattice(lower, upper, self.size).refined_by(self.refinements).balanced()
-        samples = cube_samples(tree.lower, tree.size, self.samples, self.clearance)
-        within = np.asarray(inside(samples.reshape(-1, 3)), dtype=bool).reshape(samples.shape[:2])
-        candidates = np.flatnonzero(np.all(within, axis=1))
+        PyramidCaps.check_height(cap_height, "the core's cap_height")
+        wall, clearance = self.resolved(boundary_size)
+        if clearance <= cap_height * wall:
+            raise ValueError(
+                f"a cap {cap_height!r} of a wall cube ({wall!r}) high would cross the clearance "
+                f"({clearance!r}) kept from the boundary"
+            )
+        tree = Octree.lattice(lower, upper, self.size)
+        tree = tree.refined_by([NearSurface(region, wall, margin=clearance + wall)]).balanced()
+        grown = tree.lower - clearance
+        clear = ~region.meets(grown, grown + tree.size[:, None] + 2.0 * clearance)
+        candidates = np.flatnonzero(clear)
+        candidates = candidates[
+            region.inside(tree.lower[candidates] + 0.5 * tree.size[candidates, None])
+        ]
         faces = _CubeFaces(tree, candidates)
         kept = _without_pinches(faces)
         if not np.any(kept):
             raise ValueError("no cube fits in the region at this size and clearance")
-        return self._assembled(tree, faces, kept)
+        return self._assembled(tree, faces, kept, cap_height)
 
-    def _assembled(self, tree: Octree, faces: _CubeFaces, kept: np.ndarray) -> HexCore:
+    def within(
+        self, points: np.ndarray, triangles: np.ndarray, *, cap_height: float, boundary_size: float
+    ) -> HexCore:
+        """The core inside a closed triangle surface: :meth:`mesh` of its :class:`ClosedSurface`.
+
+        The surface's voxels are a :data:`VOXELS_PER_WALL_CUBE`-th of the wall size across, which
+        bounds how far beyond the clearance a cube may be dropped for being near the surface.
+
+        Parameters
+        ----------
+        points : np.ndarray, shape ``(n_points, 3)``
+        triangles : np.ndarray of int, shape ``(n_triangles, 3)``
+            The surface, closed and consistently wound.
+        cap_height, boundary_size : float
+            As in :meth:`mesh`.
+
+        Returns
+        -------
+        HexCore
+            Its points numbered on their own, not after ``points``.
+        """
+        wall, _ = self.resolved(boundary_size)
+        region = ClosedSurface.of(points, triangles, wall / VOXELS_PER_WALL_CUBE)
+        used = np.asarray(points, dtype=float)[np.unique(triangles)]
+        return self.mesh(
+            region, used.min(axis=0), used.max(axis=0), cap_height=cap_height,
+            boundary_size=boundary_size,
+        )  # fmt: skip
+
+    @staticmethod
+    def _assembled(tree: Octree, faces: _CubeFaces, kept: np.ndarray, cap_height) -> HexCore:
         """The cells of the kept cubes and the caps on their boundary, numbered compactly."""
         rings, cube = faces.rings[kept[faces.cube]], faces.cube[kept[faces.cube]]
         transition = faces.transition & kept
@@ -190,7 +285,7 @@ class OctreeCore:
         tetrahedra = np.column_stack([centre_of[cube[inner & ~quads]], rings[inner & ~quads, :3]])
 
         boundary = rings[_once(rings)]
-        caps = PyramidCaps.on(points, boundary[boundary[:, 3] != _UNUSED], self.cap_height)
+        caps = PyramidCaps.on(points, boundary[boundary[:, 3] != _UNUSED], cap_height)
         triangles = boundary[boundary[:, 3] == _UNUSED, :3][:, ::-1]
         return HexCore(
             points=np.vstack([points, caps.apexes]),

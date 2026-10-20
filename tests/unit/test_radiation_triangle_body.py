@@ -19,9 +19,9 @@ from aquaflux.radiation import (
     TriangleBody,
     build_visibility,
 )
-from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.triangles import segment_is_cut
 from aquaflux.solids import Box
+from aquaflux.triangle_grid import TriangleGrid
 
 from tests.unit.radiation_references import closed_drum, inward_box
 

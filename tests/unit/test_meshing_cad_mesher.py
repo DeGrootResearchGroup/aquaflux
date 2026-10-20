@@ -21,6 +21,7 @@ from aquaflux.meshing import (
     FacesOn,
     SurfaceTriangulation,
     TetrahedralMesh,
+    check_closed_surface,
 )
 
 from tests.support.meshes import tetrahedral_grid_3d
@@ -305,3 +306,41 @@ def test_a_vertex_on_an_edge_inside_one_face_is_moved_onto_that_face():
     expected = np.count_nonzero(traced.vertex_face >= 0) + in_one_wall
     assert np.count_nonzero(np.isclose(shift, 0.01)) == expected
     assert np.count_nonzero(shift > 1e-12) == expected
+
+
+def test_the_core_is_a_hole_in_the_fills_surface_and_its_cells_are_numbered_after_its_points():
+    # A box of edge 2 meshed at 0.2, a core of 0.5 cubes graded to 0.25 at its walls: the core's
+    # capped surface joins the box's as a hole, the cells it brings fill exactly that hole, and
+    # the tetrahedra round it may be as large as its wall cubes.
+    from aquaflux.meshing import OctreeCore, element_mesh
+
+    from tests.support.meshes import box_surface
+
+    points, surface = box_surface(0.0, 1.0, 8, into_box=False)
+    points = 2.0 * points
+    core = OctreeCore(size=0.5, wall_size=0.25, clearance=0.3)
+    mesher = CadMesher(max_size=0.2, feature_angle=math.radians(45), core=core, netgen=_Netgen())
+    joined, holed, cells = mesher._cored(points, surface)
+    np.testing.assert_array_equal(joined[: len(points)], points)
+    np.testing.assert_array_equal(holed[: len(surface)], surface)
+    used, local = np.unique(holed, return_inverse=True)
+    check_closed_surface(joined[used], local.reshape(-1, 3))
+    corner = joined[holed]
+    left = np.einsum("ij,ij->i", corner[:, 0], np.cross(corner[:, 1], corner[:, 2])).sum() / 6.0
+    filled = element_mesh(
+        joined, tetrahedra=cells.tetrahedra, hexahedra=cells.hexahedra, pyramids=cells.pyramids
+    )
+    volume = float(np.asarray(filled.geometry().cell.volume).sum())
+    assert cells.hexahedra.shape[0] > 0 and 0.0 < left < 8.0
+    np.testing.assert_allclose(volume + left, 8.0, rtol=1e-12)
+    # The cells' outer faces are the hole's triangles, and nothing else.
+    offsets = np.asarray(filled.face_nodes.offsets)
+    nodes = np.asarray(filled.face_nodes.face_node_indices)
+    rings = [
+        nodes[offsets[f] : offsets[f + 1]]
+        for f in np.flatnonzero(np.asarray(filled.face_cells.neighbour) < 0)
+    ]
+    hole = holed[len(surface) :]
+    assert {tuple(sorted(r.tolist())) for r in rings} == {tuple(sorted(r)) for r in hole.tolist()}
+    assert cells.fill_size == 0.25
+    assert CadMesher(max_size=0.2, feature_angle=1.0)._cored(points, surface)[2].fill_size == 0.2

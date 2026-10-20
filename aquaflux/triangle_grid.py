@@ -1,5 +1,10 @@
 """A uniform grid over the blocking triangles, so a segment tests a few of them instead of all.
 
+A leaf of plain geometry, importing nothing of the package, because two packages ask it
+questions: the radiation shadow masks walk segments through it (:meth:`TriangleGrid.blocks`), and
+the mesher asks which boxes a surface could meet (:meth:`TriangleGrid.holds_any`). The account
+below is of the first, which is what shaped the grid.
+
 The shadow mask asks one question per (receiver, facet) pair -- does anything lie across this
 segment -- and answers it by testing every triangle of the surface. That is
 ``n_receivers x n_facets x n_triangles``, which a reactor puts out of reach: 1.6M cells, 7,516
@@ -23,7 +28,7 @@ steps times 36 triangles, **6,588 tests a ray**, worse than the brute force it r
 passes over the rays still in flight -- which this one was -- spends about 150-180 ns per ray per
 voxel step on that bookkeeping (profiled on a 51,200-triangle cylindrical wall), most of its
 time, so refining its grid made it *slower*: fewer triangles tested, more steps taken. Here each
-ray is walked to its first hit by one compiled loop (:mod:`~aquaflux.radiation.grid_walk`), with
+ray is walked to its first hit by one compiled loop (:mod:`~aquaflux.triangle_grid_walk`), with
 its state in registers and nothing formed per step, which measured 17-37x faster on the same
 rays with identical answers.
 
@@ -47,9 +52,9 @@ import dataclasses
 import numba
 import numpy as np
 
-from aquaflux.radiation.grid_walk import walk_to_first_hit
+from aquaflux.triangle_grid_walk import walk_to_first_hit
 
-__all__ = ["TriangleGrid"]
+__all__ = ["MAX_VOXELS", "TriangleGrid", "near_cubic_resolution"]
 
 #: Triangles per occupied voxel of the near-cubic grid a default grid's voxel count is scaled
 #: from (``_VOXEL_BUDGET``), and that a body's occupancy grid is refined from. Refining a
@@ -69,7 +74,7 @@ _MAX_ASPECT = 32.0
 
 #: Never build more voxels than this, whatever the triangle count asks for. The grid's own
 #: memory is one index per voxel plus one entry per (triangle, voxel it spans).
-_MAX_VOXELS = 8_000_000
+MAX_VOXELS = 8_000_000
 
 #: The thickness a flat axis of the grid's box is given, as a share of the box's widest extent
 #: (``_box_and_area``). Thin enough that a segment crossing the plane steps through few extra
@@ -262,7 +267,7 @@ class TriangleGrid:
         The contract is :func:`~aquaflux.radiation.triangles.segment_is_cut`'s, and the answers
         are the same: the grid decides what is *worth* testing, never what counts as a hit. Each
         segment is walked to its first hit, or its end, by
-        :func:`~aquaflux.radiation.grid_walk.walk_to_first_hit`, so nothing the size of the rays
+        :func:`~aquaflux.triangle_grid_walk.walk_to_first_hit`, so nothing the size of the rays
         times the triangles a step visits is ever formed, and no work limit is needed.
 
         Parameters
@@ -425,7 +430,7 @@ def _resolution(extent, area: float, n_triangles: int, resolution) -> np.ndarray
         return counts
     voxels = _VOXEL_BUDGET * float(np.prod(_near_cubic(extent, area, n_triangles), dtype=float))
     counts = _shaped_like(extent, voxels)
-    while np.prod(counts, dtype=float) > _MAX_VOXELS:
+    while np.prod(counts, dtype=float) > MAX_VOXELS:
         counts = np.maximum(counts // 2, 1)
     return counts
 
@@ -434,12 +439,12 @@ def _near_cubic(extent, area: float, n_triangles: int) -> np.ndarray:
     """Voxels per axis of near-cubic voxels holding about ``_TARGET_PER_VOXEL`` triangles.
 
     Sized from the triangles' area (see ``_resolution``), and never more than
-    ``_MAX_VOXELS`` voxels.
+    ``MAX_VOXELS`` voxels.
     """
     wanted = max(n_triangles / _TARGET_PER_VOXEL, 1.0)
     size = float(np.sqrt(max(area, np.finfo(float).tiny) / wanted))
     counts = np.maximum(np.round(extent / max(size, np.finfo(float).tiny)), 1).astype(int)
-    while np.prod(counts, dtype=float) > _MAX_VOXELS:
+    while np.prod(counts, dtype=float) > MAX_VOXELS:
         counts = np.maximum(counts // 2, 1)
     return counts
 
@@ -463,7 +468,7 @@ def _shaped_like(extent, voxels: float) -> np.ndarray:
         free &= counts >= 1.0
 
 
-def _near_cubic_resolution(vertices) -> np.ndarray:
+def near_cubic_resolution(vertices) -> np.ndarray:
     """Voxels per axis of a near-cubic grid over these triangles, about ten in an occupied voxel.
 
     What a grid read for which voxels are occupied, rather than walked, is sized from: a box is
