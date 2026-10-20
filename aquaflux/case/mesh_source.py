@@ -26,6 +26,7 @@ from aquaflux.meshing import (
     FacePlanarizer,
     FaceSelection,
     NetgenProcess,
+    OctreeCore,
     PipeCore,
     PrismLayers,
 )
@@ -339,12 +340,17 @@ class CadMesh(MeshSource):
         convex, or its volume more dependent on how its faces are triangulated, or a face worse,
         than the worst the mesh started with, nor a convex cell concave; unset, the faces are left
         as made.
+    core : OctreeCore or None
+        A core of hexahedra from an octree inside the region, kept clear of the walls and of the
+        layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
+        Unset, the core is polyhedral throughout.
 
     Raises
     ------
     ValueError
-        If no solid is named; a size, the angle or the grading is not a positive, finite number; or
-        layers are given without a patch to grow on, or patches are named without layers.
+        If no solid is named; a size, the angle or the grading is not a positive, finite number;
+        layers are given without a patch to grow on, or patches are named without layers; or the
+        core's size is below an unset wall size.
     """
 
     path_fields: ClassVar[tuple[str, ...]] = ("file",)
@@ -365,6 +371,7 @@ class CadMesh(MeshSource):
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
     planarizer: FacePlanarizer | None = None
+    core: OctreeCore | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -401,7 +408,7 @@ class CadMesh(MeshSource):
             options["pipe_core"] = self.pipe_core
         return CadMesher(
             max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers,
-            planarizer=self.planarizer, **options,
+            planarizer=self.planarizer, core=self.core, **options,
         )  # fmt: skip
 
     def read(self, directory: Path) -> Mesh:

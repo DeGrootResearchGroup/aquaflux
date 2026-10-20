@@ -1,7 +1,7 @@
 """What does the triangle grid's walk cost, and at which grid resolution?
 
 ``TriangleGrid.blocks`` walks each segment through the voxels it crosses, in one compiled loop per
-ray (``aquaflux/radiation/grid_walk.py``), testing the triangles those voxels hold until one blocks
+ray (``aquaflux/triangle_grid_walk.py``), testing the triangles those voxels hold until one blocks
 it. This times that walk on two scenes at the default grid and at multiples of it per axis, and
 checks its answers against testing every triangle (``segment_is_cut``) on a sample of the rays.
 
@@ -46,8 +46,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import aquaflux  # noqa: F401  (enables x64)
-from aquaflux.radiation.grid import TriangleGrid, _near_cubic_resolution
 from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.triangle_grid import TriangleGrid, near_cubic_resolution
 from tests.unit.radiation_references import cylinder_triangles
 
 RAYS = int(os.environ.get("RADIATION_GRID_WALK_RAYS", "200000"))
@@ -130,7 +130,7 @@ def main() -> None:
             )
             for m in MULTIPLES
         }
-        cubic = _near_cubic_resolution(vertices)
+        cubic = near_cubic_resolution(vertices)
         scale = (np.prod(default, dtype=float) / np.prod(cubic, dtype=float)) ** (1.0 / 3.0)
         grids["near-cubic"] = TriangleGrid.build(vertices, resolution=tuple(cubic))
         grids["near-cubic, same voxels"] = TriangleGrid.build(

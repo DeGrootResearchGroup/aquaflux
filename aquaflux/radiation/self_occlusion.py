@@ -45,7 +45,6 @@ import numpy as np
 from aquaflux.radiation.back_faces import BackFaces
 from aquaflux.radiation.checks import open_facets
 from aquaflux.radiation.clusters import FacetClusters
-from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.silhouette import (
     SourceView,
     angular_cone,
@@ -58,6 +57,7 @@ from aquaflux.radiation.silhouette import (
 )
 from aquaflux.radiation.triangles import padded_length, pairs_are_cut, segment_is_cut
 from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT, receivers_per_pass
+from aquaflux.triangle_grid import TriangleGrid
 from aquaflux.vectors import dot
 
 __all__ = [
@@ -254,7 +254,7 @@ class RayCastOcclusion(SelfOcclusion):
     makes this cost ``n_receivers x n_facets x n_triangles``. Set it on anything but a small
     scene: a uniform grid over the triangles turns the per-ray work from the whole surface into
     the few triangles the segment's own voxels hold, for the same answers
-    (:class:`~aquaflux.radiation.grid.TriangleGrid`).
+    (:class:`~aquaflux.triangle_grid.TriangleGrid`).
 
     Attributes
     ----------
@@ -274,7 +274,7 @@ class RayCastOcclusion(SelfOcclusion):
         every triangle, ``True`` sizes the grid from the triangle count, and an integer or a triple
         sets its resolution per axis. It changes the cost, never the answer.
 
-        A built :class:`~aquaflux.radiation.grid.TriangleGrid` is used as it is, and must be of the
+        A built :class:`~aquaflux.triangle_grid.TriangleGrid` is used as it is, and must be of the
         surface's own triangles. The grid is **off by default** because it is a change of cost, not
         of answers, and the answers are what the shipped path is trusted for. A real reactor is
         nonetheless unusable without it.

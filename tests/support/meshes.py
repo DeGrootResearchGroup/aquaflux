@@ -482,3 +482,35 @@ def voxel_surface(voxels, n: int, size: float = 1.0) -> tuple[np.ndarray, np.nda
     for key, index in keys.items():
         points[index] = np.asarray(key) / n * size
     return points, np.array(quads)
+
+
+def box_surface(lo, hi, n, *, into_box, offset=0):
+    """The six faces of the cube ``[lo, hi]^3``, ``n`` x ``n`` squares each split in two.
+
+    Wound out of the cube, or into it with ``into_box`` (the walls of a hole). Point indices start
+    at ``offset``.
+    """
+    ticks = np.linspace(lo, hi, n + 1)
+    points, index, triangles = [], {}, []
+
+    def point(xyz):
+        key = tuple(np.round(xyz, 12))
+        if key not in index:
+            index[key] = offset + len(points)
+            points.append(xyz)
+        return index[key]
+
+    for axis in range(3):
+        a, b = (axis + 1) % 3, (axis + 2) % 3
+        for side in (lo, hi):
+            for i in range(n):
+                for j in range(n):
+                    ring = []
+                    for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                        xyz = np.zeros(3)
+                        xyz[axis], xyz[a], xyz[b] = side, ticks[i + di], ticks[j + dj]
+                        ring.append(point(xyz))
+                    if (side == lo) != into_box:
+                        ring = ring[::-1]
+                    triangles += [ring[:3], [ring[0], ring[2], ring[3]]]
+    return np.array(points), np.array(triangles)

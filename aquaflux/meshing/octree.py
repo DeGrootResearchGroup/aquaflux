@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
-from collections.abc import Callable, Sequence
-from typing import Protocol
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .regions import Region
 
 __all__ = ["NearSurface", "Octree", "RefinementCriterion"]
 
@@ -72,39 +75,30 @@ def cube_samples(lower: np.ndarray, size: np.ndarray, per_edge: int, margin: flo
 
 @dataclasses.dataclass(frozen=True)
 class NearSurface:
-    """Split every cube a surface passes through until it is no larger than ``size``.
-
-    The surface is the boundary of a region given by an inside test. A cube is taken to be cut when
-    its sample points -- a ``samples``-per-edge lattice over the cube grown by ``margin`` on each
-    side -- are some inside and some outside, so a surface passing between samples is missed; a
-    positive margin also refines the cubes within that distance of the surface.
+    """Split every cube a region's boundary passes near until it is no larger than ``size``.
 
     Attributes
     ----------
-    inside : callable
-        ``inside(points)`` for ``points`` of shape ``(m, 3)`` returns a boolean array of shape
-        ``(m,)``.
+    region : Region
+        The region (see :class:`~aquaflux.meshing.ClosedSurface`,
+        :class:`~aquaflux.meshing.SampledRegion`); a cube is split where its boundary is taken to
+        pass through the cube grown by ``margin`` on each side.
     size : float
-        The largest cube kept where the surface passes.
+        The largest cube kept where the boundary passes.
     margin : float
-        How far beyond each cube to look for the surface.
-    samples : int
-        Sample points along each edge, at least two (the corners).
+        How far beyond each cube to look for the boundary.
     """
 
-    inside: Callable[[np.ndarray], np.ndarray]
+    region: Region
     size: float
     margin: float = 0.0
-    samples: int = 3
 
     def refines(self, lower: np.ndarray, size: np.ndarray) -> np.ndarray:
         large = size > self.size * (1.0 + 1e-9)
         refines = np.zeros(size.shape, dtype=bool)
         if np.any(large):
-            points = cube_samples(lower[large], size[large], self.samples, self.margin)
-            inside = np.asarray(self.inside(points.reshape(-1, 3)), dtype=bool)
-            inside = inside.reshape(points.shape[:2])
-            refines[large] = np.any(inside, axis=1) & ~np.all(inside, axis=1)
+            low = lower[large] - self.margin
+            refines[large] = self.region.meets(low, low + size[large, None] + 2.0 * self.margin)
         return refines
 
 

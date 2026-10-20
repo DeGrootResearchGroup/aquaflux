@@ -121,7 +121,7 @@ VOCABULARY: dict[str, Word] = {
         modules={
             "case/solver.py": "the most outer iterations of a solve",
             "flow/march.py": "the most outer iterations of a solve",
-            "radiation/grid_walk.py": "the most cells a ray may cross",
+            "triangle_grid_walk.py": "the most cells a ray may cross",
             "solve/driver.py": "the most outer iterations of a solve",
             "solve/implicit.py": "the most outer iterations of a solve",
             "solve/march.py": "the most outer iterations of a solve",

@@ -4,7 +4,8 @@
 written as a boundary-representation (BREP) file; Netgen triangulates its faces, each triangle
 tagged by its face; the faces chosen are meshed again as structured quadrilaterals; layers are
 grown inward from the walls chosen; each quadrilateral left facing the rest is capped with a
-pyramid, and Netgen fills what is left with tetrahedra; all the cells become a mesh whose boundary
+pyramid; a core of hexahedra may be placed inside, clear of the walls, its own quadrilaterals
+capped too; and Netgen fills what is left with tetrahedra; all the cells become a mesh whose boundary
 faces are in patches chosen by face (:class:`FaceSelection`); that mesh's polyhedral dual is built,
 the region's sharp edges kept as features; the dual's boundary vertices, which sit at the
 boundary faces' centroids and the midpoints of their edges, are moved onto the region's faces and
@@ -30,6 +31,7 @@ from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
 from .dual import PolyhedralDual
 from .elements import element_mesh, face_keys, search_rows
+from .hex_core import OctreeCore
 from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import NetgenProcess, SurfaceTriangulation
@@ -143,9 +145,10 @@ class FacesOn(FaceSelection):
 
 @dataclasses.dataclass(frozen=True)
 class CadMesher:
-    """Mesh a region of a CAD model as polyhedra: the dual of a Netgen tetrahedral fill.
+    """Mesh a region of a CAD model as polyhedra: the dual of a Netgen tetrahedral fill, about an
+    optional core of hexahedra.
 
-    Each cell is the dual cell of one of the tetrahedra's points (cut in pieces at a sharp concave
+    Each cell is the dual cell of one of the primal mesh's points (cut in pieces at a sharp concave
     edge), so the cells come out larger than the tetrahedra; ``max_size`` bounds the tetrahedra.
 
     Attributes
@@ -165,7 +168,7 @@ class CadMesher:
     cap_height : float
         The height of the pyramids that cap each quadrilateral the tetrahedra meet, over the
         quadrilateral's first edge (round a structured grid), in ``(0, 1/2)`` (see
-        :class:`~aquaflux.meshing.PyramidCaps`).
+        :class:`~aquaflux.meshing.PyramidCaps`), the hex core's caps included.
     pipe_core : PipeCore
         How the cores of pipes (see :meth:`mesh`) are filled.
     planarizer : FacePlanarizer or None
@@ -173,6 +176,10 @@ class CadMesher:
         of the primal cells outside the layers: the boundary stays on the drawing, the cut cells'
         pieces keep the surface between them, and the layers keep their heights from the wall.
         Unset, the faces are left as the dual makes them.
+    core : OctreeCore or None
+        A core of hexahedra inside the fill, kept clear of the layers' top and the other walls,
+        its unset wall size ``max_size``; unset, none, and the whole core is the tetrahedra's
+        polyhedral dual.
     netgen : NetgenProcess
         The Netgen it runs.
     """
@@ -185,6 +192,7 @@ class CadMesher:
     cap_height: float = 0.25
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     planarizer: FacePlanarizer | None = None
+    core: OctreeCore | None = None
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
 
     def __post_init__(self) -> None:
@@ -195,6 +203,8 @@ class CadMesher:
                     f"CadMesher.{name} must be a positive, finite number, got {value!r}."
                 )
         PyramidCaps.check_height(self.cap_height, "CadMesher.cap_height")
+        if self.core is not None:
+            self.core.resolved(self.max_size)  # refuses a core smaller than an unset wall size
 
     def mesh(
         self,
@@ -295,19 +305,25 @@ class CadMesher:
         # The tetrahedra meet triangles only: each quadrilateral left for them is capped on their side.
         caps = PyramidCaps.on(points, fill.quads[:, ::-1], self.cap_height)
         points = np.vstack([points, caps.apexes])
-        points, tetrahedra = self._filled(points, np.vstack([fill.triangles, caps.sides]))
+        points, surface, core = self._cored(points, np.vstack([fill.triangles, caps.sides]))
+        points, tetrahedra = self._filled(points, surface, core.fill_size)
+        tetrahedra = np.vstack([tetrahedra, core.tetrahedra])
+        # The layers' hexahedra first, so a column's cells are numbered as the layers grew them.
+        hexahedra = core.hexahedra if hexahedra is None else np.vstack([hexahedra, core.hexahedra])
+        pyramids = np.vstack([caps.pyramids, core.pyramids])
         layered_walls = walls.faces.where(on_layered)
         if len(pipe_faces):
             # An open pipe end's own points inside the layers' ring are left on no cell.
-            cells = [tetrahedra, prisms, hexahedra, caps.pyramids]
+            cells = [tetrahedra, prisms, hexahedra, pyramids]
             points, renumber = _compacted(points, [c for c in cells if c is not None])
-            tetrahedra, prisms, hexahedra = (None if c is None else renumber(c) for c in cells[:3])
-            caps = PyramidCaps(caps.apexes, renumber(caps.pyramids), caps.sides)
+            tetrahedra, prisms, hexahedra, pyramids = (
+                None if c is None else renumber(c) for c in cells
+            )
             boundary = boundary.renumbered(renumber)
             layered_walls = layered_walls.renumbered(renumber(np.arange(walls.points.shape[0])))
             stacked = None if stacked is None else renumber(stacked)
         primal = element_mesh(
-            points, tetrahedra, prisms, hexahedra, caps.pyramids,
+            points, tetrahedra, prisms, hexahedra, pyramids,
             patches=boundary.patches(patch_of_face, names),
         )  # fmt: skip
         columns = None
@@ -354,8 +370,30 @@ class CadMesher:
             lambda points, faces: model.project(region, points, faces=faces).points,
         )  # fmt: skip
 
-    def _filled(self, points: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """``points`` with the fill's new points after them, and the fill's tetrahedra.
+    def _cored(self, points: np.ndarray, surface: np.ndarray):
+        """``points`` and the fill's closed ``surface``, with the hex core inside the surface:
+        its points after ``points``, its capped surface added to the fill's as a hole, and its
+        cells (:class:`_CoreCells`, numbered after ``points``)."""
+        if self.core is None:
+            return points, surface, _CoreCells.none(self.max_size)
+        core = self.core.within(
+            points, surface, cap_height=self.cap_height, boundary_size=self.max_size
+        )
+        wall, _ = self.core.resolved(self.max_size)
+        start = points.shape[0]
+        cells = _CoreCells(
+            tetrahedra=start + core.tetrahedra,
+            hexahedra=start + core.hexahedra,
+            pyramids=start + np.vstack([core.pyramids, core.caps]),
+            fill_size=max(self.max_size, wall),
+        )
+        return np.vstack([points, core.points]), np.vstack([surface, start + core.surface]), cells
+
+    def _filled(
+        self, points: np.ndarray, triangles: np.ndarray, max_size: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """``points`` with the fill's new points after them, and the fill's tetrahedra, none
+        over ``max_size``.
 
         Netgen is given only the points the surface uses (it renumbers when one is not), and its
         tetrahedra are put back in the numbering of ``points``. With no surface left (every cell
@@ -367,7 +405,7 @@ class CadMesher:
         position = np.full(points.shape[0], -1, dtype=np.int64)
         position[used] = np.arange(used.size)
         filled = self.netgen.fill(
-            points[used], position[triangles], max_size=self.max_size, **self._netgen_options()
+            points[used], position[triangles], max_size=max_size, **self._netgen_options()
         )
         added = filled.points[used.size :]
         back = np.concatenate([used, points.shape[0] + np.arange(added.shape[0])])
@@ -377,6 +415,33 @@ class CadMesher:
         """The Netgen settings that are set, to pass through."""
         options = {"grading": self.grading, **extra}
         return {name: value for name, value in options.items() if value is not None}
+
+
+@dataclasses.dataclass(frozen=True)
+class _CoreCells:
+    """The hex core's cells in the mesher's numbering, and the largest tetrahedron the fill
+    around it may have: the core's wall cubes, where they are larger than the mesher's size, so
+    the tetrahedra next to the core are not held below its cubes.
+
+    Attributes
+    ----------
+    tetrahedra : np.ndarray of int, shape ``(n, 4)``
+    hexahedra : np.ndarray of int, shape ``(n, 8)``
+    pyramids : np.ndarray of int, shape ``(n, 5)``
+        The transition cubes' pyramids, then the caps on the core's boundary.
+    fill_size : float
+    """
+
+    tetrahedra: np.ndarray
+    hexahedra: np.ndarray
+    pyramids: np.ndarray
+    fill_size: float
+
+    @classmethod
+    def none(cls, fill_size: float) -> _CoreCells:
+        """No core: no cells, and the fill at ``fill_size``."""
+        empty = np.zeros((0,), np.int64)
+        return cls(empty.reshape(0, 4), empty.reshape(0, 8), empty.reshape(0, 5), fill_size)
 
 
 def _compacted(points: np.ndarray, cells: list[np.ndarray]):

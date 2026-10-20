@@ -8,7 +8,7 @@ from the tree's own neighbour search, so a fault in that search cannot hide a fa
 from __future__ import annotations
 
 import numpy as np
-from aquaflux.meshing import NearSurface, Octree
+from aquaflux.meshing import NearSurface, Octree, SampledRegion
 
 CENTRE, RADIUS = np.array([0.4, 0.4, 0.4]), 0.2
 BOX = 1.5
@@ -37,7 +37,9 @@ def _largest_jumps(tree, rows=256):
 
 
 def _refined():
-    return Octree.lattice([0, 0, 0], [BOX] * 3, ROOT).refined_by([NearSurface(_ball, FINEST)])
+    return Octree.lattice([0, 0, 0], [BOX] * 3, ROOT).refined_by(
+        [NearSurface(SampledRegion(_ball), FINEST)]
+    )
 
 
 def test_refinement_near_a_sphere_reaches_its_size_and_balance_leaves_neighbours_a_level_apart():
