@@ -74,6 +74,8 @@ SUBPACKAGE_GROUPS = {
         ("Prism layers", ["layers"]),
         ("A mesh of tetrahedra, prisms, hexahedra and pyramids", ["elements"]),
         ("An octree hexahedral core", ["octree", "hex_core"]),
+        ("Hexahedral blocks", ["blocks", "divisions", "surfaces", "block_assembly"]),
+        ("Block lattices and round layouts", ["lattices", "block_topologies"]),
         ("Netgen, in a child process", ["netgen_process"]),
     ],
     "mesh": [

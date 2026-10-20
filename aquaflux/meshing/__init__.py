@@ -21,6 +21,17 @@ refined where asked (:class:`NearSurface`): cubes beside smaller ones are cut in
 tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
 are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
 
+:class:`HexBlock` is a curved hexahedron cut into hexahedra by transfinite interpolation from its
+edges (straight, an :class:`Arc`, a :class:`SampledCurve` or any :class:`Curve`) and faces (any
+:class:`Surface`), its cells spread by a count, a :class:`Graded` progression or node fractions, its
+faces optionally projected onto a true surface (:class:`PlaneSurface`, :class:`CylinderSurface`,
+:class:`ConeSurface`, :class:`SphereSurface`, or a face of a CAD model), and movable as a whole
+(:meth:`HexBlock.placed`). A :class:`BlockLattice` lays out a grid of blocks by coordinates in a
+:class:`CartesianFrame` or :class:`CylindricalFrame` and is shaped by editing its arrays.
+:meth:`BlockMesh.assemble` joins blocks sharing faces into one conformal mesh of hexahedra.
+:class:`PipeOGrid`, :class:`Annulus` and :class:`CubedSphereCap` lay out the blocks of a pipe, the
+space about a lamp sleeve, and the hemispherical shell about its end.
+
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
 per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
 edges and patch borders sharp.
@@ -28,6 +39,9 @@ edges and patch borders sharp.
 
 from __future__ import annotations
 
+from .block_assembly import BlockMesh
+from .block_topologies import Annulus, CubedSphereCap, PipeOGrid
+from .blocks import Arc, Curve, HexBlock, SampledCurve, Surface
 from .cad_mesher import CadMesher, FaceSelection, FacesNear, FacesOn, RegionFaces
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
@@ -40,14 +54,29 @@ from .netgen_process import (
 )
 from .elements import element_mesh
 from .hex_core import HexCore, OctreeCore
+from .divisions import Graded, cell_counts
 from .layers import LayerExtrusion, PrismLayers
+from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .octree import NearSurface, Octree, RefinementCriterion
+from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 
 __all__ = [
+    "Annulus",
+    "Arc",
+    "BlockLattice",
+    "BlockMesh",
     "CadMesher",
+    "CartesianFrame",
+    "ConeSurface",
+    "CubedSphereCap",
+    "Curve",
+    "CylinderSurface",
+    "CylindricalFrame",
     "FaceSelection",
     "FacesNear",
     "FacesOn",
+    "Graded",
+    "HexBlock",
     "HexCore",
     "LayerExtrusion",
     "MeshingError",
@@ -55,13 +84,20 @@ __all__ = [
     "NetgenProcess",
     "Octree",
     "OctreeCore",
+    "PipeOGrid",
+    "PlaneSurface",
     "PolyhedralDual",
     "PrismLayers",
     "RefinementCriterion",
     "RegionFaces",
+    "SampledCurve",
+    "SphereSurface",
+    "Straight",
+    "Surface",
     "SurfaceTriangulation",
     "TetrahedralMesh",
     "TracedDual",
+    "cell_counts",
     "check_closed_surface",
     "element_mesh",
     "netgen_available",

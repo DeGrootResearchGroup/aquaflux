@@ -16,9 +16,9 @@ paths:
 file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
 `element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
 (`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls (`layers.py`)
-and the mesher (`cad_mesher.py`). The octree hex core is built as a library (`octree.py`, `hex_core.py`)
-but not yet wired into `CadMesher` or the case file. Layers on structured quad surfaces and blocks are not
-built.
+and the mesher (`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`)
+and the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file. Layers on
+structured quad surfaces are not built.
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -162,9 +162,10 @@ or OCP.
 - **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
   whole `aquaflux mesh --case --openfoam` before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
   at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
-- `element_mesh(points, tetrahedra=None, prisms=None, hexahedra=None, pyramids=None, patches=None)`
-  numbers cells in that order and faces in first-sighting order (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
-  hand assembly); patches take triangles and quadrilaterals by corners.
+- `element_mesh(points, tetrahedra=None, prisms=None, hexahedra=None, pyramids=None, patches=None,
+  patch_types=None)` numbers cells in that order and faces in first-sighting order (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
+  hand assembly); patches take triangles and quadrilaterals by corners. `HEXAHEDRON_CORNERS` (the unit
+  cube's corners in hexahedron order) lives here, shared by the blocks and the octree core.
 
 ## Prism layers (`layers.py`) — built for triangulated walls
 
@@ -200,6 +201,69 @@ it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neithe
   and its polyhedra skewed (images in the log): the pipe O-grid of the block mesher is the answer there.
 - Pinned in `tests/unit/test_meshing_layers.py` (no Netgen) and `test_meshing_netgen.py` (Sozzi, the first
   height from the true wall).
+
+## The block mesher — built as a library (`blocks.py`, `divisions.py`, `surfaces.py`, `lattices.py`, `block_assembly.py`, `block_topologies.py`)
+
+Library code with unit tests (`tests/unit/test_meshing_blocks.py`, `test_meshing_lattices.py`); **not yet
+reached from `CadMesher` or a case file**, no pipe detection, no wall-layer window masking. Its scope
+follows blockmeshbuilder (BMB), the owner's blockMesh front end; the gap list and what was deferred are in
+the log (2026-10-20). Dated numbers in the log.
+- **`HexBlock(corners, divisions, edges=, faces=, projections=, patches=)`**: corners in hexahedron order
+  (`HEXAHEDRON_CORNERS`, right-handed, refused otherwise per cell corner); a division per direction is a count, a
+  `Graded(cells, growth, toward)` (on `graded_nodes`; `scaled` keeps the end-cell ratio) or node fractions;
+  edges keyed by corner pair (either way round), a `Curve` callable (`Arc`, `SampledCurve` by arc length)
+  or `(n+1, 3)` nodes; faces `u-..w+`, a `Surface(s, t)` or nodes, **a given face also gives its four
+  edges** (a clash with a given edge is refused, naming both). Order: edges → each face (given, else 2D
+  transfinite interpolation (TFI) of its edges) → its projection → 3D TFI of the six faces. **One TFI**
+  (`transfinite`, any dimension, weighted by the node fractions) also draws the straight edges.
+  `scaled_counts(factor)` (refused for nodes given as arrays) and `placed(Placement)`.
+- **`placed` takes `io.cad.Placement`** (orthogonal, may reflect): curves and surfaces composed, projections
+  conjugated. ⚠️ **A reflection makes the block left-handed**, so the placed block reads `w` the other way
+  (corners `[4..7, 0..3]`, faces/patches `w±` swapped, `w` division reversed, faces along `w` re-parameterized)
+  — names follow the geometry (a reflected pipe keeps `inlet` at its first height).
+- **A projection moves only a face's nodes off its edges**; the edges must already lie on the surface.
+  Edges of two projected faces are not intersected. Projections (`surfaces.py`): plane, cylinder, cone
+  (nearest point on the infinite cone through two axial circles), sphere.
+- ⚠️ **What a flat or ruled test cannot see.** TFI reproduces any separable field whatever its blend
+  weights, so a box cannot pin the weights — the graded annular sector (exact polar grid) does. TFI of a
+  cylinder or cone face between arcs and straight generators is already on the surface, so the projection
+  is inert there; a twisted ring (helical edges) or a sphere pins it.
+- **`BlockLattice(frame, coordinates, divisions)`**: blocks at the tensor product of three coordinate lists,
+  one division per interval (a list or tuple per interval, anything else repeated — so `cell_counts`
+  returns a list). Shaped by editing arrays in place, BMB's model: `corners` (frame coordinates), `divisions`,
+  `mask`, and `edges` / `projections` / `patches` of shape `(n0+1, n1+1, n2+1, 3)` (entry `[i,j,k,a]` = the
+  edge from node `(i,j,k)` along `a`, or the face normal to `a` at node index `i|j|k` along it).
+  `None` = the frame's default; an edge `Straight()` or a `Curve`; a projection `False` = none.
+  `CartesianFrame`: straight edges, no projections. `CylindricalFrame` `(r, θ, z)`: an edge is the image of
+  the straight coordinate segment (arc, radial or axial line, helix); a face normal to `r` with one radius
+  projects onto that cylinder, one whose radius differs only between its two heights onto that cone;
+  edges turning ≥ 180° and radii ≤ 0 (an axis-collapsed block) are refused.
+- **`BlockMesh.assemble(blocks, tolerance=None, count_factor=1.0)`** identifies points geometrically
+  (`cKDTree`, unset tolerance 1e-6 of the shortest cell edge; two points of one block within it are
+  refused). A block face is either met whole by another (every quadrilateral matched) or boundary; met in
+  part — some quads matched, or none but an interior point shared — is refused. ⚠️ **Blind spot**: two
+  faces overlapping without sharing one point both stay boundary (e.g. an `Annulus` at `azimuth=0` under a
+  cap). `count_factor` scales every block's counts (BMB's `density_scale`). `patches(default_patch=None)`;
+  `mesh(named, default_patch, patch_types)` → `element_mesh(..., patch_types=)`; `Mesh` refuses a type for
+  a patch that does not exist.
+- **Layouts** (about `z`, `heights` = ends plus cuts, a division per shell/segment or one for all):
+  `PipeOGrid(radius, heights, tangential, radial, axial, shells=(), side_blocks=1, core_size=0.5,
+  core_bow=0.0, azimuth=-π/4)` — a Cartesian core lattice plus a cylindrical tube lattice whose inner
+  ring is moved onto the core's boundary (its radial edges `Straight`, its inner faces unprojected, its
+  inner θ-edges the core's own edges); `core_bow` moves each side's middle that fraction of the way to the
+  corners' circle (sides become arcs, nodes at equal angles); `azimuth ≠ −π/4` rotates every block by a
+  `Placement`. Patches `wall`, `inlet`, `outlet`. `Annulus(radii, heights, tangential, radial, axial,
+  around=4, azimuth=0)` — one cylindrical lattice; `inner`, `outer`, `start`, `end`. `CubedSphereCap`
+  (cube top + four upper half-sides projected, equiangular; `inner`, `outer`, `rim`, rim corners at 45°,
+  so `Annulus(azimuth=π/4)` joins it conformally). Tangential counts are counts, not fractions:
+  neighbouring blocks run opposite ways along the core's sides.
+- ⚠️ **The first shell's radial edges must be `Straight`**: with more than two side blocks the core's side
+  nodes (even in length) and the shell's (even in angle) are at different angles, and the frame's edge
+  between them is a curve. With ≤ 2 side blocks the angles coincide and a test cannot see it.
+- **The dual of each layout is closed** and its volume converges at second order (pinned, bowed and
+  multi-block included); the primal's error is exactly the inscribed polygon's area deficit.
+- **Joining blocks to the rest of the primal is open**: Netgen refuses quadrilaterals, so a block region's
+  free quads need pyramids before a tet fill (`element_mesh` takes pyramids).
 
 ## The octree hex core (`octree.py`, `hex_core.py`) — built, not yet wired in
 
@@ -326,8 +390,9 @@ tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inp
    structured quad surfaces (the project owner's next step after triangles).
 4. **Block mesher** in place of blockMesh: transfinite interpolation with projection onto CAD or analytic
    surfaces, carrying the `uvmesh` topologies (four-quadrant annulus with the π/4 offset when a cap joins,
-   the five-block cubed-sphere shell, the square-core pipe O-grid, wall-layer window masking) and pipe
-   detection from cylindrical faces.
+   the five-block cubed-sphere shell, the square-core pipe O-grid — **these built**, with BMB-style block
+   lattices, masking, placement, plane/cone projection and patch types; wall-layer window masking as a
+   preset not) and pipe detection from cylindrical faces (not built).
 5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
    in the primal that the dual turns polyhedral (built as a library, above; not wired in).
 6. **Quality metrics** (non-orthogonality, skewness, convexity) and planarization.
