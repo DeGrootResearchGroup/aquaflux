@@ -114,8 +114,12 @@ All classes are `equinox.Module`s.
   refusal (overlap double-counts area). Lives here because it is mesh, and `radiation/` imports no mesh.
   Ear clipping is not built; build it when an emitting mesh trips the check.
 - `quality.py` — `face_planarity`, `centroid_iteration_shift`, `closed_cell_residual`.
+- `orientation.py` — `ring_signs(face_nodes, face_cells) -> RingSigns` (consistent ring directions per
+  cell, `determined` per cell) and `owner_outward_normals(...)`, the one orientation step (see Binding
+  decisions). `RingSigns` is a pytree, passed into the compiled geometry; it is topology, recomputed
+  per `geometry()` call, never stored on `Mesh`.
 - `winding.py` — `stored_ring_is_outward(mesh)`: which way each stored ring runs relative to its owner,
-  recovered from the face-geometry strategy's own flip (a mesh orients the normal, never the ring). The one
+  recovered from the mesh's own orientation step (a mesh orients the normal, never the ring). The one
   home for every writer that gives ring direction a meaning (VTK polyhedra, the polyMesh writer). Pinned
   against an independent Newell-normal test (`tests/unit/test_mesh_winding.py`).
 
@@ -128,8 +132,17 @@ Naming: not `metrics.py` (CFD "mesh metrics" are quality measures); say "face ge
   volume/centroid. `x_ip − x_owner`/`x_ip − x_neighbour` are cheap gathers formed in the operator from one
   shared formula, never materialized.
 - **Owner-outward normal is a container invariant, fixed at build** (decided deviation from C++, which
-  trusts the reader's winding — do not revisit). Orientation uses the approximate cell centroid; robust to
-  node order, identical values for a correctly wound input.
+  trusts the reader's winding — do not revisit). **Orientation is by shared edges** (project owner,
+  2026-10-19; `orientation.py`): `ring_signs` orients each cell's faces consistently (every edge two of its
+  faces share traversed once each way; in 2D, faces joined at a node), host-side numba, cell by cell; the
+  compiled geometry then turns each cell's faces outward by the sign of its volume
+  (`owner_outward_normals`). Robust to node order **and to non-convexity** — the approximate-centroid test
+  it replaced turned a face inward on any cell whose centroid lies beyond one of its faces: thin prism-layer
+  cells on a curved wall, a dual cell wrapped around a concave fold. A cell whose faces do not all join at
+  shared edges (a hanging node on every edge of a face) or cannot be oriented consistently is
+  *undetermined* and keeps the centroid test; so is a cell on a periodic seam, whose seam ring lies on the
+  owner's side. Identical normals to the centroid test on every repository mesh and on a 1.6M-cell
+  snappyHexMesh mesh of Sozzi; `ring_signs` costs ~1.2 s there, about half of `geometry()` (log).
 - **A neighbour index `< 0` (exactly `−1`) marks a boundary face**; it scatters to the owner only.
 - **2D and 3D geometry:**
   - 2D edge: `area=|d|`, `centroid=midpoint`, `normal=(d_y,−d_x)/|d|`.

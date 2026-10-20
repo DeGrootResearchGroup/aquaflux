@@ -260,10 +260,12 @@ def test_netgen_numbers_a_written_regions_faces_as_its_topology_does(tmp_path):
     np.testing.assert_array_equal(model.project(water, centroids).face, surface.face[sample])
 
 
-def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_and_closes(tmp_path):
-    # The case that needs the cut: on Netgen's tetrahedra of an L, cells around the inside edge,
-    # uncut or cut with their added vertices off the plane between the pieces, were folded enough
-    # that the mesh turned a face of each inward (measured at this size). Every cell must close.
+def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cells(tmp_path):
+    # The case that needs the cut: on Netgen's tetrahedra of an L, a cell around the inside edge,
+    # uncut, wraps round it -- one of its vertices lies 1.2 cell sizes beyond one of its own faces
+    # (at this size). Cut with the vertices between the pieces left at face centroids it is 0.56,
+    # and with the vertices on its cut edges left at their midpoints 1.1. Cut and placed, every
+    # cell is within 0.35 of convex.
     pytest.importorskip("OCP")
     from aquaflux.mesh import closed_cell_residual
     from aquaflux.meshing import PolyhedralDual, tetrahedral_mesh
@@ -271,6 +273,8 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_and_closes(tmp_path):
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
     from OCP.BRepTools import BRepTools
     from OCP.gp import gp_Pnt
+
+    from tests.support.meshes import worst_excursion
 
     shape = BRepAlgoAPI_Fuse(
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.2, 0.1, 0.1).Shape(),
@@ -289,6 +293,7 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_and_closes(tmp_path):
     np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
     scale = float(np.max(np.asarray(dual.geometry().face.area)))
     assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
+    assert float(worst_excursion(dual).max()) < 0.45
 
 
 #: The Sozzi water's faces, as its topology numbers them (pinned above by area): the vessel's

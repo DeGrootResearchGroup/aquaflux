@@ -25,8 +25,8 @@ lose enough precision to land measurably outside the cell it describes. Subtract
 reference point before accumulating and adding it back after keeps every term ``O(cell size)``
 instead, which is the same reason a pyramid decomposition anchored at an interior point is the
 standard way to evaluate this integral rather than one anchored at the origin. The reference
-point used is the cheap :meth:`approx_centroids` estimate already computed to orient face
-normals — reusing it costs nothing extra and needs no new dependency, and the correction is
+point used is the cheap :meth:`approx_centroids` estimate already computed to orient the face
+normals (the reference each cell's volume sign is taken about) — reusing it costs nothing extra and needs no new dependency, and the correction is
 exact regardless of how good an approximation it is: any point works as the local origin, so a
 mediocre proxy only leaves more of the cancellation to the shift-back step, never a wrong answer.
 
@@ -89,7 +89,8 @@ class CellGeometry(eqx.Module):
 
         A cheap centroid estimate, needed twice, for two different reasons. First, to orient face
         normals outward: it needs no normals (avoiding the circular dependency with the exact
-        centroid), so it is computed before them. Second, as the local reference point
+        centroid), so it is computed before them -- the point each cell's volume sign is taken
+        about, and the point a cell whose faces do not all join is oriented away from. Second, as the local reference point
         :meth:`from_faces` recentres around before accumulating the exact centroid — see that
         method for why. Each face contributes its centroid to both incident cells, so the
         accumulation is a symmetric face→cell scatter.

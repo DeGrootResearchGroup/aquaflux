@@ -165,3 +165,25 @@ The test this cited, `test_ordering_affects_coarse_space_and_rcm_restores_it`, n
 aggregation now applies reverse Cuthill–McKee internally per level and
 `tests/unit/test_multigrid.py::test_aggregation_coarse_space_is_ordering_robust` pins that a scramble no
 longer degrades the factor (so no upstream renumbering is needed).
+
+## 2026-10-19 — faces oriented by shared edges, not by the cell centroid
+
+Agreed with the project owner after prism layers on the Sozzi water (first dual cell 0.5 mm, 5 layers)
+left 59 wall cells unclosed under the centroid test: cells 0.24–0.37 mm thick on walls of radius 9.5 mm
+(a 5 mm tile bows ~0.33 mm), at the riser and outlet junctions and the cap rims. Oriented by shared edges,
+every one of them closed to 2.8e-17 of the largest face.
+
+Comparison of the new normals with the centroid test (`ring_signs` time, one run each, macOS arm64):
+pitzDaily (2D, 12225 cells) 0 faces differ, 0 undetermined, 0.08 s; bfs3d (23040) 0 / 0, 0.03 s; the
+periodic turbulent channel (2D, 960) 0 differ, 240 undetermined (the cells on its cyclic seam, which fall
+back to the centroid test); Sozzi snappyHexMesh (1635909 cells, 5249365 faces, refined) 0 / 0, 1.2 s, with
+`geometry()` 1.9–2.1 s in all. A first version sorting all 42M joint rows globally took 9.5–11 s; matching
+joints cell by cell took it to 1.2 s.
+
+The dual's concave cut, re-measured under the new orientation (Netgen L, maxh 0.01, worst non-convexity):
+as built 0.349; vertices between pieces at face centroids 0.559; cut edges' hubs at midpoints 1.106;
+both 1.233; uncut 1.203 — all closed now. So the cut is a quality step, not a correctness one; the
+Netgen L test asserts convexity (< 0.45) in place of closure.
+
+Mutations, each red: always the centroid; no volume sign; no fallback for undetermined cells; the joint
+parity flipped; faces unreached from the first accepted (the hanging-node cube).
