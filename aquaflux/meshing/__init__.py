@@ -22,7 +22,7 @@ edges and patch borders sharp.
 from __future__ import annotations
 
 from .cad_mesher import CadMesher, FaceSelection, FacesNear, FacesOn, RegionFaces
-from .dual import PolyhedralDual
+from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
     MeshingError,
     NetgenProcess,
@@ -44,6 +44,7 @@ __all__ = [
     "RegionFaces",
     "SurfaceTriangulation",
     "TetrahedralMesh",
+    "TracedDual",
     "check_closed_surface",
     "netgen_available",
     "tetrahedral_mesh",

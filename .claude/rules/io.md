@@ -284,7 +284,8 @@ chord=, facet_size=)` (an emitting surface).
   `write_brep`, `project`). `CadRegion(solids, without=())` is a plain value (union of `solids` less the
   union of `without`); `CadModel` builds and caches its shape, so no kernel object leaves the model, and
   answers `topology(region) -> CadTopology`, `face_triangles(region, chord=, facet_size=) -> FaceTriangles`,
-  `write_brep(region, path)` and `project(region, points, faces=None) -> Projection`.
+  `write_brep(region, path)` and `project(region, points, faces=None, edges=None) -> Projection` (onto
+  the boundary, a given face, or a given edge; the face reported for an edge is the first meeting there).
   - **Faces, edges and vertices are numbered in exploration order** (`TopExp.MapShapes_s`, first visit,
     each once) — the order Netgen numbers the faces of the BREP file in (`meshing.md`). Pinned by
     `test_the_file_keeps_the_face_order` (re-read file's explorer order) and, for a single solid, by

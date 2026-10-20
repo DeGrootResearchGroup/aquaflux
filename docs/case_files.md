@@ -119,8 +119,9 @@ one form each, so they need no `kind`, and the top level is the case itself.
       lamp: {kind: FacesOn, solids: [lamp]}
   ```
 
-  Between the triangles' corners the mesh's boundary runs through their centroids, so on a curved
-  wall it lies slightly inside the drawing's surface.
+  Every vertex of the mesh's boundary lies on the drawing: on its faces, and on its sharp edges along
+  them. Between those vertices a boundary face is flat, so a curved wall's patch is a little short of
+  the drawing's area.
 
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from

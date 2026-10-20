@@ -301,8 +301,9 @@ def test_a_case_files_step_mesh_is_written_as_a_polymesh_with_its_patches_on_the
     tmp_path, monkeypatch
 ):
     # The whole path a user takes: a case file's CadMesh section, meshed by `aquaflux mesh --case
-    # --openfoam`, read back from the polyMesh. Every boundary face must lie on a CAD face of its
-    # patch, each patch must hold most of its faces' area, and every cell must close.
+    # --openfoam`, read back from the polyMesh. Every boundary vertex must lie on the drawing, every
+    # boundary face on a CAD face of its patch with nearly all of its faces' area, and every cell
+    # must close.
     pytest.importorskip("OCP")
     import contextlib
     import io
@@ -361,6 +362,12 @@ def test_a_case_files_step_mesh_is_written_as_a_polymesh_with_its_patches_on_the
         mine = np.asarray(mesh.face_patches.indices(name))
         landed = model.project(water, np.asarray(geometry.centroid)[mine]).face
         assert set(landed.tolist()) <= faces, name
-        # The dual's boundary runs through the centroids of the triangles, inside a curved wall.
+        # Flat polygons between points of a curved surface, or of a circular rim: short by little.
         area = float(np.asarray(geometry.area)[mine].sum())
-        assert area == pytest.approx(topology.face_area[sorted(faces)].sum(), rel=0.08), name
+        assert area == pytest.approx(topology.face_area[sorted(faces)].sum(), rel=0.025), name
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    boundary = np.flatnonzero(np.asarray(mesh.face_cells.neighbour) < 0)
+    on_boundary = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in boundary]))
+    off = model.project(water, np.asarray(mesh.node_coords)[on_boundary]).distance
+    assert float(off.max()) < 1e-9

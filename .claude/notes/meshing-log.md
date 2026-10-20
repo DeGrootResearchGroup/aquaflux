@@ -178,3 +178,27 @@ reactor_body + inlet_pipe + outlet_pipe less lamp), feature angle 45 degrees, pa
   `grading`; `--openfoam` writing nothing; `--case` taking paths from the working directory (green until
   the test ran from another directory: from the repository root, the relative path's `..` climbed to `/`
   and found the file anyway).
+
+## 2026-10-19 — the dual's boundary projected onto the drawing
+
+Sozzi water as in the entry above (same patches, feature angle 45 degrees), `CadMesher.mesh`, macOS arm64,
+one run each. Patch areas against the CAD's, before → after projection:
+
+| maxh | inlet | outlet | lamp | walls | time | boundary vertices off the drawing |
+|---|---|---|---|---|---|---|
+| 0.02 | −4.5 % → −1.14 % | −4.5 % → −1.15 % | −4.6 % → −1.54 % | −2.6 % → −0.86 % | 3.8 → 5.6 s | 4.4e-17 |
+| 0.01 (after only) | −1.14 % | −1.15 % | −1.54 % | −0.47 % | 6.8 s | 4.4e-17 |
+
+Closure ≤ 2.0e-19 and every cell volume positive at both. Mesh volume 5.4935e-3 at 0.02
+unprojected; 5.6633e-3 / 5.7329e-3 at 0.02 / 0.01 projected. Non-convexity at 0.02 (harness measure): unprojected p50 0.082 / p99 0.182 / max
+0.333; projected 0.082 / 0.176 / 0.326. The flat inlet and outlet caps stay short by their rims' chords
+(the rim's points are on the circle, the polygon between them is not). No vertex on Sozzi is an edge
+vertex inside one face (89 / 91 edge vertices at maxh 0.03 / 0.02, all between two faces), so that branch
+is pinned on a Kuhn L instead.
+
+Two defects found on the way, both now pinned: sorted-triple keys built in Netgen's int32 overflowed at
+7394 points and put 3,000 lamp triangles on the vessel's face (areas +150 % to +3300 %, volume 50x); and
+chaining the candidate edges of a rim drawn as two edges carried one vertex 7 mm to their shared end (the
+one cell at non-convexity 1.48, inlet area −4.1 %). Mutations, each red: no projection; candidates
+chained; int32 keys; no edge projection; in-face edge vertices left (red only on the Kuhn L test); the
+dual reporting no edge origins; the kernel ignoring `edges`.
