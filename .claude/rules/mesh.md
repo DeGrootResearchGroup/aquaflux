@@ -23,6 +23,8 @@ All classes are `equinox.Module`s.
   - `from_csr` is the vectorized constructor; `from_faces` flattens and delegates to it, so zone/patch build
     and `validate()` live in one place. `from_csr` narrows `owner`/`neighbour` to `index_dtype(n_cells)`
     **only when already integer-typed**, so a non-integer input still reaches `validate()`'s dtype check.
+  - `geometry(signs=None)` takes the faces' `RingSigns` when the caller already has them (they are
+    topology: `MeshQuality` finds them once for many coordinates), else finds them.
   - `geometry()` returns a `MeshGeometry` and runs its arithmetic as one `equinox.filter_jit` call
     (`_fused_geometry`) — eager dispatch materialized a full buffer per step (roughly halved peak memory
     at scale). The perimeter traversal is still enumerated eagerly once in `FaceNodeConnectivity.from_csr`
@@ -127,15 +129,27 @@ All classes are `equinox.Module`s.
     angle (that reads ~1.6° low). Skewness: `|s| / max(extent of the face along s, 0.2|d|)`, boundary
     `d` the owner's perpendicular and floor `0.4|d|`; the boundary floor is from OpenFOAM's source, not
     seen binding in a checkMesh maximum.
-  - The cell checks form (side, item) pairs within cells a block at a time (`_CellSides`), so memory is
-    bounded; ~30 ms for both on a 2197-cell Kuhn dual (macOS arm64), most of a planarization evaluation.
+  - **`MeshQuality(mesh)` is the one implementation of the cell and face checks** (2026-10-20): built
+    once from a topology — each cell's (face, outward sign) sides and distinct nodes as CSR, and the
+    faces' `RingSigns` — it evaluates `geometry(coords)` (through `Mesh.geometry(signs)`),
+    `vertex_heights`, `cell_non_convexity`, `cell_concavity`, `face_non_orthogonality` and
+    `face_skewness` at any node coordinates; the `Mesh`-level functions are thin callers of it, or of
+    the same `filter_jit`ted face kernels. A caller that moves vertices and re-checks (the planarizer)
+    builds one per pass. The cell checks are two numba kernels, parallel over cells, looping each
+    cell's sides against its nodes (or sides): **no pair table is stored**, so memory is the CSR tables
+    alone. ⚠️ **A NaN must win the maximum** (`value > worst or value != value`), as numpy's did: the
+    planarizer's bounds are `>` tests a NaN passes; pinned by
+    `test_a_cell_with_an_undefined_vertex_is_reported_undefined`.
+  - Cost (4913-cell Kuhn dual, macOS arm64, shared machine, 2026-10-20): one planarizer evaluation of
+    all four checks plus geometry 0.011 s, against 0.22 s through the `Mesh` functions, which ran
+    `geometry()` — and so `ring_signs` — seven times per evaluation (`.claude/notes/meshing-log.md`).
 - `Mesh.cell_nodes()` — each cell's distinct nodes as CSR; `FaceNodeConnectivity.max_to_faces` — the
   per-face max over incidences. (`io/vtk/topology._polyhedron_connectivity` still forms the same set
   privately; not yet folded onto it.)
 - `orientation.py` — `ring_signs(face_nodes, face_cells) -> RingSigns` (consistent ring directions per
   cell, `determined` per cell) and `owner_outward_normals(...)`, the one orientation step (see Binding
   decisions). `RingSigns` is a pytree, passed into the compiled geometry; it is topology, recomputed
-  per `geometry()` call, never stored on `Mesh`.
+  per `geometry()` call unless passed in (`MeshQuality` holds one per pass), never stored on `Mesh`.
 - `winding.py` — `stored_ring_is_outward(mesh)`: which way each stored ring runs relative to its owner,
   recovered from the mesh's own orientation step (a mesh orients the normal, never the ring). The one
   home for every writer that gives ring direction a meaning (VTK polyhedra, the polyMesh writer). Pinned

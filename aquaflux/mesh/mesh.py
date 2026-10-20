@@ -383,7 +383,7 @@ class Mesh(eqx.Module):
         np.cumsum(np.bincount(keys // self.n_nodes, minlength=self.n_cells), out=offsets[1:])
         return offsets, keys % self.n_nodes
 
-    def geometry(self) -> MeshGeometry:
+    def geometry(self, signs: RingSigns | None = None) -> MeshGeometry:
         """Compute the derived face and cell geometry (build-time, jit-compiled).
 
         Wires the computation in dependency order: the dimension's face-geometry strategy
@@ -399,6 +399,13 @@ class Mesh(eqx.Module):
         positions correct and avoids a cache going stale under cell renumbering / partitioning
         (see :class:`~aquaflux.mesh.geometry.MeshGeometry`).
 
+        Parameters
+        ----------
+        signs : RingSigns, optional
+            The faces' ring directions, ``ring_signs(self.face_nodes, self.face_cells)``, found
+            when not given. They depend on the connectivity alone, so a caller computing the
+            geometry of one topology at many node positions finds them once and passes them.
+
         Returns
         -------
         MeshGeometry
@@ -406,7 +413,8 @@ class Mesh(eqx.Module):
             (volumes, centroids).
         """
         scheme = face.face_geometry_scheme(self.dim)
-        signs = ring_signs(self.face_nodes, self.face_cells)
+        if signs is None:
+            signs = ring_signs(self.face_nodes, self.face_cells)
         return _fused_geometry(
             scheme, self.node_coords, self.face_nodes, self.face_cells, self.dim, signs
         )

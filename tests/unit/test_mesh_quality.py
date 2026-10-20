@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 from aquaflux.mesh import (
     Mesh,
+    MeshQuality,
     cell_concavity,
     cell_non_convexity,
     face_non_orthogonality,
@@ -233,16 +234,75 @@ def test_the_concavity_cosine_of_a_cube_and_of_an_l():
     assert float(cell_concavity(_l_prism())[0]) == pytest.approx(1 / math.sqrt(2), rel=1e-12)
 
 
-def test_the_cell_checks_are_the_same_formed_a_few_cells_at_a_time(monkeypatch):
-    # A large mesh's cell-face pairs are formed in blocks; a block boundary must lose no pair.
+def _brute_force_cell_checks(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
+    """Non-convexity and concavity cell by cell, each cell's faces and vertices found afresh."""
+    geometry = mesh.geometry()
+    coords = np.asarray(mesh.node_coords)
+    normal, centroid = np.asarray(geometry.face.normal), np.asarray(geometry.face.centroid)
+    size = np.asarray(geometry.cell.volume) ** (1 / 3)
+    owner, neighbour = np.asarray(mesh.face_cells.owner), np.asarray(mesh.face_cells.neighbour)
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    ring = np.asarray(mesh.face_nodes.face_node_indices)
+    convexity, concavity = np.empty(mesh.n_cells), np.empty(mesh.n_cells)
+    for cell in range(mesh.n_cells):
+        faces = np.flatnonzero((owner == cell) | (neighbour == cell))
+        outward = normal[faces] * np.where(owner[faces] == cell, 1.0, -1.0)[:, None]
+        vertices = np.unique(np.concatenate([ring[offsets[f] : offsets[f + 1]] for f in faces]))
+        rise = coords[vertices][None, :, :] - centroid[faces][:, None, :]
+        convexity[cell] = np.max(np.einsum("svd,sd->sv", rise, outward)) / size[cell]
+        offset = centroid[faces][None, :, :] - centroid[faces][:, None, :]
+        length = np.linalg.norm(offset, axis=2)
+        cosine = np.einsum("std,sd->st", offset, outward) / np.where(length > 0, length, 1.0)
+        np.fill_diagonal(cosine, -1.0)
+        concavity[cell] = cosine.max()
+    return convexity, concavity
+
+
+def test_the_cell_checks_pair_each_cell_with_its_own_faces_and_vertices():
+    # Dual cells have from a handful of faces to a few dozen, and are numbered apart from their
+    # faces, so a pairing that strayed into a neighbouring cell's faces or vertices would show.
     primal = tetrahedral_grid_3d(3, perturb=0.2)
     dual = PolyhedralDual(feature_angle=math.radians(45)).build(primal)
-    whole_convexity, whole_concavity = cell_non_convexity(dual), cell_concavity(dual)
-    import aquaflux.mesh.quality as quality
+    convexity, concavity = _brute_force_cell_checks(dual)
+    np.testing.assert_allclose(cell_non_convexity(dual), convexity, rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(cell_concavity(dual), concavity, rtol=1e-12, atol=1e-15)
 
-    monkeypatch.setattr(quality._CellSides, "_PAIRS_PER_BLOCK", 300)
-    np.testing.assert_array_equal(cell_non_convexity(dual), whole_convexity)
-    np.testing.assert_array_equal(cell_concavity(dual), whole_concavity)
+
+def test_a_mesh_quality_checks_the_coordinates_it_is_given_not_its_meshs():
+    # Built once from one mesh, it must agree with the functions of a mesh moved elsewhere.
+    primal = tetrahedral_grid_3d(3, perturb=0.2)
+    dual = PolyhedralDual(feature_angle=math.radians(45)).build(primal)
+    quality = MeshQuality(dual)
+    rng = np.random.default_rng(3)
+    coords = np.asarray(dual.node_coords) + 0.01 * rng.standard_normal((dual.n_nodes, 3))
+    moved = eqx.tree_at(lambda m: m.node_coords, dual, jnp.asarray(coords))
+    geometry = quality.geometry(coords)
+    np.testing.assert_array_equal(np.asarray(geometry.cell.volume), moved.geometry().cell.volume)
+    np.testing.assert_array_equal(
+        quality.cell_non_convexity(coords, geometry), cell_non_convexity(moved)
+    )
+    np.testing.assert_array_equal(quality.cell_concavity(geometry), cell_concavity(moved))
+    np.testing.assert_array_equal(
+        quality.face_non_orthogonality(geometry), face_non_orthogonality(moved)
+    )
+    np.testing.assert_array_equal(quality.face_skewness(coords, geometry), face_skewness(moved))
+    assert float(np.max(np.abs(cell_non_convexity(moved) - cell_non_convexity(dual)))) > 1e-3
+
+
+def test_a_cell_with_an_undefined_vertex_is_reported_undefined():
+    # A NaN must not lose to a finite height in the maximum: a bound on the value would pass it.
+    mesh = structured_grid_3d(2, 1, 1, 2.0, 1.0, 1.0)
+    quality = MeshQuality(mesh)
+    coords = np.asarray(mesh.node_coords).copy()
+    geometry = quality.geometry(coords)
+    coords[0] = np.nan  # in the first box only; the geometry is kept finite
+    convexity = quality.cell_non_convexity(coords, geometry)
+    assert np.isnan(convexity[0]) and np.isfinite(convexity[1])
+    centroid = np.asarray(geometry.face.centroid).copy()
+    centroid[_face_at(mesh, (0.0, 0.5, 0.5))] = np.nan
+    broken = eqx.tree_at(lambda g: g.face.centroid, geometry, jnp.asarray(centroid))
+    concavity = quality.cell_concavity(broken)
+    assert np.isnan(concavity[0]) and np.isfinite(concavity[1])
 
 
 def test_cell_nodes_are_each_cells_distinct_nodes():
