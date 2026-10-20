@@ -56,8 +56,8 @@ __all__ = [
 ]
 
 #: How many coloured tangents share one vmapped jvp pass when materializing a Jacobian. Larger amortizes
-#: dispatch over more probes; the coloured probes run in ``ceil(n_probes / this)`` fused passes instead of
-#: an ``n_probes``-call Python loop.
+#: dispatch over more probes; each column field's coloured probes run in ``ceil(n_colours / this)`` fused
+#: passes instead of one call per probe.
 #:
 #: Measured on the 3D backward-facing step (399 probes; 47.2M structural nonzeros in the fixed sparsity
 #: pattern, of which ~38.7-39.0M are live at any one state), wall / peak against the batch:
