@@ -22,7 +22,10 @@ re-fit (default 3); ``REFIT_BETA`` is the shift strength re-fitted at (default 0
 ``beta_min``); ``REFIT_STATE`` is a ``.npz`` holding ``state``; ``REFIT_PROBE_BATCH`` re-fits at that probe batch instead of
 the library's ``PROBE_BATCH_SIZE``; ``REFIT_JVP_BATCHES`` (say ``1,4,8,16``)
 also times the probe's batched Jacobian-vector product alone at each batch size, best of five, per
-tangent, which separates the cost of one directional derivative from the number of probes.
+tangent, which separates the cost of one directional derivative from the number of probes. That sweep
+times the whole-state product; where the case's problem is probed one column field at a time (both step
+cases are) the re-fits run the per-field programs instead, which ``fusion_profile.py``'s
+``probe-fields`` profiles.
 
 The report also splits the probe's host work out of it (filling each chunk's seeds and scattering its
 responses into the matrix), sums the processor time per thread name (which pool kept the cores busy),
@@ -207,6 +210,9 @@ def main() -> None:
     pieces = _Pieces()
     pieces.wrap(host, "_materialize_jacobian", "probe (coloured JVPs + gather)")
     pieces.wrap(probe.plan, "seed_block", "probe: fill the seeds (host)")
+    pieces.wrap(
+        probe.plan, "field_seeds", "probe: fill the seeds (host)"
+    )  # the per-field programs' seeds
     pieces.wrap(probe.structure, "scatter", "probe: scatter the responses (host)")
     pieces.wrap(host, "_shifted", "assemble the shift")
     pieces.wrap(split._groups, "blocks", "refactor: slice the blocks")

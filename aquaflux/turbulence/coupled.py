@@ -437,7 +437,8 @@ class CoupledRANS(eqx.Module):
         tuple of (SSTClosureFields, MomentumContinuity)
             The closure at these fields, and the flow assembler carrying its eddy viscosity.
         """
-        return _effective_momentum(self.momentum, self.turbulence, flow, k, omega)
+        velocity, _pressure = self.momentum.unpack(flow)
+        return _effective_momentum(self.momentum, self.turbulence, velocity, k, omega)
 
     def residual(self, state: jnp.ndarray) -> jnp.ndarray:
         """The coupled residual ``R(u, p, k, omega)`` for the flat state, same shape as ``state``.
@@ -456,11 +457,78 @@ class CoupledRANS(eqx.Module):
         differentiation supplies the chain-rule Jacobian.
         """
         flow, k, omega = self.physical_fields(state)
-        closure, momentum = self.effective_momentum(flow, k, omega)
+        return self.residual_of(*self.momentum.unpack(flow), k, omega)
+
+    def residual_with_field(
+        self, state: jnp.ndarray, field: int, values: jnp.ndarray
+    ) -> jnp.ndarray:
+        """The residual at ``state`` with one per-cell field replaced by ``values``.
+
+        Equal to :meth:`residual` of the state so modified, but assembled from the separate fields
+        (:meth:`residual_of`), never from a repacked flat state, so ``jax.jvp`` in ``values`` computes
+        only the tangents that field reaches: a pressure, ``k`` or ``omega`` leaves the velocity
+        gradient, and every kernel built on it, a constant of the derivative. A coloured Jacobian probe
+        of one column field differentiates through it.
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The flat coupled state, shape ``((dim + 3) n_cells,)``.
+        field : int
+            Which per-cell field to replace, counted in the flat layout's order
+            ``[vel_0..vel_{dim-1}, pressure, k, omega]``.
+        values : jnp.ndarray
+            Its new values in the **solved** variable, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The flat residual, same shape as ``state``.
+        """
+        flow, k_solved, omega_solved = self.layout.unpack(state)
+        if field < self.layout.field_offset("k"):
+            velocity, pressure = self.momentum.unpack_with_field(flow, field, values)
+        else:
+            velocity, pressure = self.momentum.unpack(flow)
+            if field == self.layout.field_offset("k"):
+                k_solved = values
+            else:
+                omega_solved = values
+        return self.residual_of(
+            velocity,
+            pressure,
+            self.k_transform.to_physical(k_solved),
+            self.omega_transform.to_physical(omega_solved),
+        )
+
+    def residual_of(
+        self, velocity: jnp.ndarray, pressure: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+    ) -> jnp.ndarray:
+        """The coupled residual from the four fields as separate arrays.
+
+        The assembly :meth:`residual` describes, written in fields rather than a flat state so that a
+        derivative in one of them carries no tangent through the others (see
+        :meth:`residual_with_field`).
+
+        Parameters
+        ----------
+        velocity : jnp.ndarray
+            Cell velocity, shape ``(n_cells, dim)``.
+        pressure : jnp.ndarray
+            Cell pressure, shape ``(n_cells,)``.
+        k, omega : jnp.ndarray
+            The **physical** turbulence fields, shape ``(n_cells,)`` each.
+
+        Returns
+        -------
+        jnp.ndarray
+            The flat residual, shape ``((dim + 3) n_cells,)``.
+        """
+        closure, momentum = _effective_momentum(self.momentum, self.turbulence, velocity, k, omega)
 
         # One Rhie--Chow assembly at the re-viscosified state feeds both the flow residual and the
         # mass flux the scalars advect on.
-        fields = momentum.flow_fields(flow)
+        fields = momentum.flow_fields_of(velocity, pressure)
         flow_residual = momentum.residual_from_fields(fields)
         k_residual = self.turbulence.k_residual(fields.mdot, closure)(k)
         # The near-wall omega fixation is written in the *solved* unknown, so under a log
@@ -575,8 +643,8 @@ class LiveViscosityVelocityParts(eqx.Module):
             )
         k = self.k_transform.to_physical(k_solved)
         omega = self.omega_transform.to_physical(omega_solved)
-        _closure, live = _effective_momentum(self.momentum, self.turbulence, flow, k, omega)
-        velocity, _pressure = live.unpack(flow)
+        velocity, _pressure = self.momentum.unpack(flow)
+        _closure, live = _effective_momentum(self.momentum, self.turbulence, velocity, k, omega)
         return live.momentum_matrix_diagonal_parts(velocity)
 
 
@@ -1059,18 +1127,20 @@ class CoupledShiftPolicy(eqx.Module):
 def _effective_momentum(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
-    flow: jnp.ndarray,
+    velocity: jnp.ndarray,
     k: jnp.ndarray,
     omega: jnp.ndarray,
 ) -> tuple[SSTClosureFields, MomentumContinuity]:
-    """The closure at ``(flow, k, omega)`` and ``momentum`` re-viscosified by it.
+    """The closure at ``(velocity, k, omega)`` and ``momentum`` re-viscosified by it.
 
     Free of :class:`CoupledRANS` so the consumer that holds the pair of assemblers without holding the
     coupled one -- :class:`LiveViscosityVelocityParts`, which forms the shift at the current effective
     viscosity -- reaches the same three lines as :meth:`CoupledRANS.effective_momentum` rather than
-    repeating them. ``k`` and ``omega`` are the **physical** fields.
+    repeating them. ``velocity`` is the cell velocity, shape ``(n_cells, dim)``, taken alone so that the
+    closure carries no tangent from a pressure derivative; ``k`` and ``omega`` are the **physical**
+    fields.
     """
-    closure = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega)
+    closure = turbulence.closure_fields(momentum.velocity_fields_of(velocity), k, omega)
     return closure, momentum.with_eddy_viscosity(
         closure.nu_t, turbulence.wall_face_eddy_viscosity(k)
     )
@@ -2185,6 +2255,7 @@ class _CoupledProblem(MaterializedProblem):
     coupled: CoupledRANS
     production_viscosity: bool
     floorable_fields = ("k",)  # production, proportional to k through nu_t, can cancel the k pivot
+    probes_by_field = True  # `CoupledRANS.residual_with_field`, also on every narrowed stand-in
 
     @property
     def assembler(self) -> CoupledRANS:

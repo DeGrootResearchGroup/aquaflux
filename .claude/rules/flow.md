@@ -116,6 +116,15 @@ the pseudo-transient shift strength. `pressure_pin=` / `pressure_pin_value=` →
   `flow_fields` once — separate accessors re-assemble the Rhie–Chow flux each time. `velocity_fields` is
   deliberately the lightweight path (boundary velocity + `_velocity_gradient`, no `a_P`/`mdot`): the eddy
   viscosity is needed before `mdot` exists.
+  - **The fields-based forms are the implementation; the flat ones delegate (2026-10-20).**
+    `flow_fields_of(velocity, pressure)` and `velocity_fields_of(velocity)` do the work, `flow_fields(state)`
+    / `velocity_fields(state)` unpack and call them. `unpack_with_field(state, field, values)` /
+    `residual_with_field(state, field, values)` replace one per-cell field (layout order `[u.., p]`) and
+    assemble from the separate arrays, so `jax.jvp` in that field never forms the others' tangents — the
+    coloured probe's per-field programs (`solve-direct-preconditioners.md`; `_FlowProblem.probes_by_field`).
+    ⚠️ **Never repack fields into a flat state on that path** (`layout.pack`, `concatenate`, `.at[].set` on
+    the flat vector): the repack's derivative hands every field an explicit zero tangent and the pruning is
+    gone, silently. Pinned by `tests/unit/test_fieldwise_probe.py`.
   - **`VelocityFields` (`velocity`, `boundary_velocity`, `gradient`) is nested inside `FlowFields`**, not a
     second view; it is the whole of what the turbulence closure reads (`SSTTurbulence.closure_fields`).
 - **Properties and boundary.** `build(mesh, geom, properties, boundary, *, gradient_scheme=…)`;

@@ -288,7 +288,9 @@ defect — fix it in the same change.
   refresh hook, each made at most once, so every step carries identical static objects. It is written
   against the ABC **`MaterializedProblem`** (`assembler`, `layout`, `with_assembler`,
   `probe(settings, groups)`, `groups()` — `None` ⇒ one group, `bind_march` (where a residual
-  validates early), `shift_source`, `build_step(state, policy, march, base_regime)`); the session hands
+  validates early), `shift_source`, `build_step(state, policy, march, base_regime)`, and the class
+  attributes `floorable_fields` and `probes_by_field` — `True` when the assembler and its narrowed stand-in
+  are a `FieldwiseResidual`, so the probe runs one program per column field); the session hands
   it the glued shift policy, so no problem chooses the preconditioner's form. Implementations:
   `turbulence._CoupledProblem`, `flow._FlowProblem`. `FieldSplit` is refused for one group, a bare
   `BlockInverse` for two.
@@ -297,7 +299,8 @@ defect — fix it in the same change.
     place and returns whether it did; rides in a static field compared by identity (one hook shared
     across rungs is a cache hit). After a traced-split re-fit the session returns
     `with_traced_split(step, …)` for the march to apply. Tests: `tests/unit/test_beta_tracking_refresh.py`.
-  - Also here: `jacobian_matvec`/`batched_jacobian_matvec` (module-level `filter_jit`, assembler an
+  - Also here: `jacobian_matvec`/`batched_jacobian_matvec`/`batched_field_jacobian_matvec` and
+    `_probe_products` (the one place a fit and a re-fit choose their products) (module-level `filter_jit`, assembler an
     argument), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `VCYCLE_LINEAR_SOLVE`; the specs
     (`MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` (extend its
     kinds rather than restate them). `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.

@@ -245,8 +245,60 @@ class ColumnProbePlan:
             out[:] = 0.0
         for row, index in enumerate(range(start, stop)):
             field, colour = self.probe(index)
-            out[row, field * n + np.where(self.colour[field] == colour)[0]] = 1.0
+            out[row, field * n + self._colour_cells(field, colour)] = 1.0
         return out
+
+    def field_seeds(self, start: int, stop: int, out: np.ndarray | None = None) -> np.ndarray:
+        """One column field's seeds for probes ``[start, stop)``, shape ``(rows, n_cells)``.
+
+        The same indicators as :meth:`seed_block`, restricted to the one field every probe in the range
+        reads: what a product differentiating the residual in that field alone takes. Buffer handling
+        as :meth:`seed_block` (``out`` may be longer than the range; it is zeroed first).
+
+        Parameters
+        ----------
+        start, stop : int
+            Half-open range of flat probe indices, all of one column field.
+        out : np.ndarray, optional
+            A buffer of shape ``(rows >= stop - start, n_cells)`` to fill. ``None`` allocates one.
+
+        Returns
+        -------
+        np.ndarray
+            The buffer, filled.
+
+        Raises
+        ------
+        ValueError
+            If the range spans more than one column field.
+        """
+        fields = np.unique(self._probe_field[start:stop])
+        if fields.size > 1:
+            raise ValueError(
+                f"probes [{start}, {stop}) read column fields {fields.tolist()}; one field's seeds "
+                "cannot carry another's."
+            )
+        if out is None:
+            out = np.zeros((stop - start, self.n_cells))
+        else:
+            out[:] = 0.0
+        for row, index in enumerate(range(start, stop)):
+            out[row, self._colour_cells(*self.probe(index))] = 1.0
+        return out
+
+    def field_chunks(self, chunk: int):
+        """The probes in ranges of at most ``chunk``, never spanning two column fields.
+
+        Probes are numbered field by field (:attr:`probe_base`), so each field's run is cut into chunks
+        of its own and a field's last chunk may be short. Yields ``(field, start, count)``.
+        """
+        for field, (base, count) in enumerate(zip(self.probe_base, self.n_colours, strict=True)):
+            for start in range(base, base + count, chunk):
+                yield field, start, min(chunk, base + count - start)
+
+    def _colour_cells(self, field: int, colour: int) -> np.ndarray:
+        """The cells column field ``field`` gives colour ``colour``, shape ``(n_in_colour,)``."""
+        return np.where(self.colour[field] == colour)[0]
 
 
 def column_probe_plan(
@@ -865,10 +917,13 @@ def materialize_block_jacobian(
     be evaluated as one batched directional derivative instead of a Python loop of separate calls. Pass
     ``batched_matvec`` -- a ``(k, nf) -> (k, nf)`` map applying ``matvec`` to ``k`` stacked seeds at once
     (e.g. ``jax.vmap`` of the jvp, **built once and reused** so it compiles a single time) -- to take that
-    path; the responses are bit-identical to the per-probe loop (the same directional derivative per seed),
-    so it is a pure speedup. ``probe_batch_size`` chunks the batch to bound peak memory (``k`` simultaneous
-    tangents); ``None`` evaluates all probes in one batch. Without ``batched_matvec`` the per-probe loop is
-    used, so any ``matvec`` (including a non-``vmap``-able NumPy one) still works.
+    path; the responses are the per-probe loop's to rounding (the same directional derivative per seed,
+    in a program compiled differently), so it is a speedup, not an approximation. A
+    :class:`FieldwiseMatvec` instead takes one column field's seeds at a time and differentiates the
+    residual in that field alone. ``probe_batch_size`` chunks the batch to bound peak memory (``k``
+    simultaneous tangents); a chunk never spans two column fields, and ``None`` evaluates each column
+    field's probes in one batch. Without ``batched_matvec`` the per-probe loop is used, so any ``matvec``
+    (including a non-``vmap``-able NumPy one) still works.
 
     Parameters
     ----------
@@ -880,13 +935,14 @@ def materialize_block_jacobian(
         The assembly pattern and the colouring probing each column field
         (:meth:`ColumnProbePlan.uniform` for one reach throughout, :func:`column_probe_plan` to give
         each column its own).
-    batched_matvec : callable, optional
+    batched_matvec : callable or FieldwiseMatvec, optional
         A batched form of ``matvec``: ``(k, nf) -> (k, nf)`` applying the same directional derivative to
-        ``k`` stacked seeds at once. When given, probing runs batched (a few fused passes) instead of the
-        per-probe loop. Must be built once and reused by the caller so it compiles a single time.
+        ``k`` stacked seeds at once, or a :class:`FieldwiseMatvec` taking ``(field, (k, n_cells))``. When
+        given, probing runs batched (a few fused passes) instead of the per-probe loop. Must be built once
+        and reused by the caller so it compiles a single time.
     probe_batch_size : int, optional
         The batched-path chunk size (number of simultaneous tangents), to bound peak memory. ``None``
-        (default) runs all probes in one batch. Ignored on the per-probe loop.
+        (default) runs each column field's probes in one batch. Ignored on the per-probe loop.
     structure : ProbeGather, optional
         A precomputed :func:`block_stencil_gather_map` for this plan. When given, each chunk's responses
         are scattered into the **fixed full-pattern** CSR as they are computed and then dropped -- so the
@@ -917,23 +973,20 @@ def materialize_block_jacobian(
     # is `n_probes * nf` floats -- hundreds of megabytes on a three-dimensional coupled case, and held
     # for the whole materialize -- while a chunk is a few, and rebuilding an indicator vector is cheap.
     n_probes = plan.n_probes
-    chunk = n_probes if probe_batch_size is None else max(1, probe_batch_size)
+    probing = _ChunkProbe(plan, probe_batch_size, matvec, batched_matvec)
 
     if structure is not None:
         if structure.layout is not None:
             raise ValueError(
                 "this structure lays its entries out block by block; materialize_blocks recovers it."
             )
-        data = _probed_values(matvec, plan, batched_matvec, chunk, structure)
+        data = _probed_values(probing, structure)
         return sp.csr_matrix((data, structure.indices, structure.indptr), shape=(nf, nf))
 
     probes = [plan.probe(index) for index in range(n_probes)]
     responses = np.empty((n_probes, nf), dtype=np.float64)
-    block = np.zeros((chunk, nf))
-    for start in range(0, n_probes, chunk):
-        m = min(chunk, n_probes - start)
-        plan.seed_block(start, start + m, out=block)
-        responses[start : start + m] = _probe_chunk(matvec, batched_matvec, block, m)[:m]
+    for field, start, m in probing.chunks():
+        responses[start : start + m] = probing.responses(field, start, m)[:m]
 
     # De-compress by scatter: each probe's response holds column `b` of every block in its colour's share.
     # The share is per (field, colour), since each column field carries its own colouring -- and only
@@ -961,21 +1014,16 @@ def materialize_block_jacobian(
     return jacobian
 
 
-def _probed_values(matvec, plan, batched_matvec, chunk: int, structure: ProbeGather) -> np.ndarray:
-    """Every stored entry's value, in ``structure``'s order, by probing ``chunk`` seeds at a time.
+def _probed_values(probing: _ChunkProbe, structure: ProbeGather) -> np.ndarray:
+    """Every stored entry's value, in ``structure``'s order, by probing one chunk at a time.
 
     De-compressed AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed values
     and then dropped, so the only large array live at once is the values being built. Holding every
     response instead costs ``n_probes * nf`` floats -- comparable to the matrix itself.
     """
-    nf = plan.n_fields * plan.n_cells
     data = np.zeros(structure.nnz)  # zero: entries outside their column's reach are never written
-    block = np.zeros((chunk, nf))
-    for start in range(0, plan.n_probes, chunk):
-        m = min(chunk, plan.n_probes - start)
-        plan.seed_block(start, start + m, out=block)
-        responses = _probe_chunk(matvec, batched_matvec, block, m)
-        structure.scatter(data, responses, start, m)
+    for field, start, m in probing.chunks():
+        structure.scatter(data, probing.responses(field, start, m), start, m)
     return data
 
 
@@ -1010,9 +1058,9 @@ def materialize_blocks(
         raise ValueError(
             "this structure has no block layout; materialize_block_jacobian recovers it."
         )
-    chunk = plan.n_probes if probe_batch_size is None else max(1, probe_batch_size)
     return ProbedBlocks(
-        _probed_values(matvec, plan, batched_matvec, chunk, structure), structure.layout
+        _probed_values(_ChunkProbe(plan, probe_batch_size, matvec, batched_matvec), structure),
+        structure.layout,
     )
 
 
@@ -1049,18 +1097,86 @@ class ProbedBlocks:
         self.layout.add_to_diagonal(self.data, shift_diagonal)
 
 
-def _probe_chunk(matvec, batched_matvec, block, count):
-    """This chunk's probe responses, shape ``(rows, n_fields * n_cells)``.
+class FieldwiseMatvec:
+    """A batched Jacobian product that takes one column field's seeds at a time.
 
-    One batched call when ``batched_matvec`` is given -- the buffer keeps a single shape across every
-    chunk, so it compiles once and a padded final chunk needs no special case -- otherwise a plain loop
-    over the chunk's rows, which any ``matvec`` supports including a non-vectorizable NumPy one.
+    ``apply(field, seeds)`` returns ``J @ e`` for each row of ``seeds`` embedded in column field
+    ``field`` of an otherwise zero direction: shape ``(k, n_cells) -> (k, n_fields * n_cells)``. Passed
+    as ``batched_matvec``, it makes the probe seed each chunk with that one field
+    (:meth:`ColumnProbePlan.field_seeds`) rather than with the whole state.
+
+    **Why a product would rather be told the field.** A direction given as a whole state, zero outside
+    one field, still carries a tangent into every field: the zeros are values, and every kernel
+    downstream of them runs on them. A product that differentiates the residual in the one field alone
+    leaves the others constants of the derivative, so the work they would have carried is never
+    traced; for a coupled flow residual, a pressure or turbulence column never forms the velocity
+    gradient's tangents at all.
+
+    Attributes
+    ----------
+    apply : callable
+        ``(field, seeds) -> responses`` as above. Must be built once and reused, so each field's
+        program compiles a single time.
     """
-    if batched_matvec is not None:
-        return np.asarray(batched_matvec(jnp.asarray(block)), dtype=np.float64)
-    return np.stack(
-        [np.asarray(matvec(jnp.asarray(block[row])), dtype=np.float64) for row in range(count)]
-    )
+
+    def __init__(self, apply: Callable[[int, jnp.ndarray], jnp.ndarray]) -> None:
+        self.apply = apply
+
+    def __call__(self, field: int, seeds: jnp.ndarray) -> jnp.ndarray:
+        return self.apply(field, seeds)
+
+    def seed_dtype(self, field: int) -> np.dtype:
+        """The floating type ``field``'s seeds are built in: every field's program runs in double."""
+        return np.dtype(np.float64)
+
+
+class _ChunkProbe:
+    """One materialize's probes, a chunk at a time, through whichever product the caller supplied.
+
+    Chunks never span two column fields (:meth:`ColumnProbePlan.field_chunks`), so a
+    :class:`FieldwiseMatvec` can be handed one field's seeds; a whole-state product is seeded with the
+    same chunks laid out over the whole state. Either way the buffer keeps one shape across every chunk
+    of a field, so a batched product compiles once per program and a padded final chunk needs no special
+    case; without a batched product each chunk is a plain loop of ``matvec`` over its rows, which any
+    ``matvec`` supports, including a non-vectorizable NumPy one.
+    """
+
+    def __init__(self, plan: ColumnProbePlan, probe_batch_size, matvec, batched_matvec) -> None:
+        self._plan = plan
+        # Unset: each column field's probes in one batch.
+        self._chunk = max(plan.n_colours) if probe_batch_size is None else max(1, probe_batch_size)
+        self._matvec = matvec
+        self._batched = batched_matvec
+        self._fieldwise = isinstance(batched_matvec, FieldwiseMatvec)
+        self._block: np.ndarray | None = None
+
+    def chunks(self):
+        """``(field, start, count)`` for every chunk, as :meth:`ColumnProbePlan.field_chunks`."""
+        return self._plan.field_chunks(self._chunk)
+
+    def responses(self, field: int, start: int, count: int) -> np.ndarray:
+        """Responses of probes ``[start, start + count)``, shape ``(rows >= count, n_fields * n_cells)``."""
+        plan = self._plan
+        if self._fieldwise:
+            block = self._buffer(plan.n_cells, self._batched.seed_dtype(field))
+            plan.field_seeds(start, start + count, out=block)
+            return np.asarray(self._batched(field, jnp.asarray(block)), dtype=np.float64)
+        block = self._buffer(plan.n_fields * plan.n_cells, np.dtype(np.float64))
+        plan.seed_block(start, start + count, out=block)
+        if self._batched is not None:
+            return np.asarray(self._batched(jnp.asarray(block)), dtype=np.float64)
+        return np.stack(
+            [
+                np.asarray(self._matvec(jnp.asarray(block[row])), dtype=np.float64)
+                for row in range(count)
+            ]
+        )
+
+    def _buffer(self, width: int, dtype: np.dtype) -> np.ndarray:
+        """The reused seed buffer, ``(chunk, width)`` in ``dtype``; reallocated only if either changes."""
+        if self._block is None or self._block.shape[1] != width or self._block.dtype != dtype:
+            self._block = np.zeros((self._chunk, width), dtype=dtype)
+        return self._block
 
 
 def jacobian_relative_error(
