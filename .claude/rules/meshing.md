@@ -130,8 +130,9 @@ region, patches=None, others="walls") -> Mesh`: `write_brep` → `triangulate` (
 `test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by`). Netgen is injected, so
 `tests/unit/test_meshing_cad_mesher.py` runs the whole pipeline on a stub cube (Kuhn tets) without Netgen
 or OCP.
-- **Patches are chosen by face selection** (`FaceSelection.faces(RegionFaces) -> face indices`; my
-  choice, open to the project owner): `FacesNear(points)` — the face each point projects onto (a pipe's
+- **Patches are chosen by face selection** (`FaceSelection.faces(RegionFaces) -> face indices`; agreed
+  with the project owner, 2026-10-19, who intends a face picker in the browser interface — a click on a
+  face is a point on it, which is all `FacesNear` stores): `FacesNear(points)` — the face each point projects onto (a pipe's
   end); `FacesOn(solids, tolerance=None)` — faces whose sample point lies within tolerance (unset 1e-6 of
   the region's extent) of the solids' boundary (a lamp taken out of the water). A face's sample is the
   centroid of one of its triangles projected onto it. Faces nobody selects go to `others`; two
