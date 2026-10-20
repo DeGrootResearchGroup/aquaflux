@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from aquaflux.case import CadMesh, CadPlacement, case_schema, mesh_source_from_mapping, relocated
 from aquaflux.case.spec import _CASE_MAPPING
-from aquaflux.meshing import FacesNear, FacesOn, Graded, PipeCore
+from aquaflux.meshing import FacePlanarizer, FacesNear, FacesOn, Graded, PipeCore
 
 SECTION = {
     "kind": "CadMesh",
@@ -112,3 +112,12 @@ def test_a_patch_that_is_not_a_face_selection_is_refused():
             feature_angle=0.785,
             patches={"inlet": "the pipe's end"},
         )
+
+
+def test_a_planarizer_reads_from_its_kind_and_reaches_the_mesher():
+    section = {**SECTION, "planarizer": {"kind": "FacePlanarizer", "shortening": 10.0}}
+    source = mesh_source_from_mapping(section)
+    assert source.planarizer == FacePlanarizer(shortening=10.0)
+    assert source.mesher().planarizer == FacePlanarizer(shortening=10.0)
+    assert _CASE_MAPPING.to_mapping(source) == section
+    assert mesh_source_from_mapping(SECTION).mesher().planarizer is None

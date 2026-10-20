@@ -624,3 +624,27 @@ centroid x > 0.889 m or z > 0.06 m.
   end faces' triangles did. Mutations, each red: open end faces kept (the stub-cylinder test); the core
   joined one ring point round (radial-line test); the fluid-inside check off; the junction disc wound
   the wrong way and rows not flattened (both the Sozzi pipes test; the latter also the mapped test).
+
+## 2026-10-20 — where the worst faces and cells are after planarization
+
+`validation/meshing_dual/planarization.py` (its "where" lines), shipped `FacePlanarizer()` defaults with the
+cheaper guard (#784), harness duals (unprojected, one patch, feature angle 45 deg, moved = `vertex_cell >= 0`),
+macOS arm64, one run each. Faces: boundary / "by cut" (an interior face with a vertex the cut placed between
+pieces) / "by boundary" (a boundary vertex, none between pieces) / "free" (every vertex movable). Cells:
+cut piece (a vertex between pieces) / wall (a boundary face) / interior. Shares of the worst 1 %, with each
+class's maximum over the mesh:
+
+| dual | interior warp: by cut / by boundary / free | boundary faces' max warp | non-convexity: cut piece / wall / interior | tri-volume: cut piece / wall / interior | pass time |
+|---|---|---|---|---|---|
+| L 0.01 | 11 % (.184) / 41 % (.250) / 48 % (.117) | 0.000 | 50 % (.312) / 47 % (.250) / 3 % (.069) | 55 % (.124) / 39 % (.229) / 5 % (.038) | 42.5 s |
+| Sozzi 0.01 | 3 % (.208) / 30 % (.169) / 67 % (.327) | 0.160 | 38 % (.281) / 47 % (.205) / 16 % (.209) | 9 % (.156) / 87 % (.179) / 4 % (.128) | 131.9 s |
+| cylinder 0.005 | – / 32 % (.149) / 68 % (.303) | 0.026 | – / 40 % (.124) / 60 % (.271) | – / 68 % (.116) / 32 % (.225) | 248.1 s |
+| sleeve 0.005 | – / 41 % (.325) / 59 % (.233) | 0.125 | – / 79 % (.293) / 21 % (.140) | – / 89 % (.226) / 11 % (.110) | 276.6 s |
+
+Quality after the pass identical to the 2026-10-20 shipped-solver entry (the guard change kept results).
+Reading: **most of the worst interior warp is on faces every vertex of which was free** (the worst face of
+Sozzi and the cylinder among them), so a fixed vertex is not what keeps them warped; whether the guard's
+bounds or the competition between neighbouring faces does is not distinguished by this run. **Wall cells
+hold most of the worst triangulation-volume dependence (39–89 %)** and much of the worst non-convexity, so
+sliding boundary vertices along the drawing is a lever for those, on curved walls (the L's walls are flat
+and its boundary faces exactly so); on the L the cut pieces hold the worst non-convexity.

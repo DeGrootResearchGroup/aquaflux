@@ -676,3 +676,47 @@ def test_the_sozzi_pipes_cores_are_structured_o_grids_with_a_junction_at_each_ve
     for name in ("inlet", "outlet"):
         end = float(area[np.asarray(mesh.face_patches.indices(name))].sum())
         assert end == pytest.approx(np.pi * 0.0096**2, rel=0.03), name
+
+
+def test_the_planarizer_in_the_mesher_leaves_the_layers_at_their_heights_from_the_wall():
+    # Layers on the lamp. The flattening pass may move the tetrahedra's centroids only: every dual
+    # vertex inside the layers, and every boundary vertex, must be where the mesher put it without
+    # the pass. Two iterations are enough to show which vertices move.
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.meshing import CadMesher, FacePlanarizer, FacesNear, FacesOn, PrismLayers
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    patches = {
+        "inlet": FacesNear(((0.04765, 0.0, 0.8945),)),
+        "outlet": FacesNear(((1.739, 0.0, 0.0),)),
+        "lamp": FacesOn(("lamp",)),
+    }
+    layers = PrismLayers(first_height=0.0005, growth=1.2, count=5)
+
+    def mesh(planarizer):
+        mesher = CadMesher(max_size=0.03, feature_angle=0.785, layers=layers, planarizer=planarizer)
+        return mesher.mesh(model, water, patches, layered=("lamp",))
+
+    plain, flat = mesh(None), mesh(FacePlanarizer(max_iterations=2))
+    before, after = np.asarray(plain.node_coords), np.asarray(flat.node_coords)
+    moved = np.linalg.norm(after - before, axis=1) > 1e-15
+    # The layers fill the 0.0005 * (1 + 1.2 + ... + 1.2^4) = 3.72 mm round the lamp (radius 10.5 mm).
+    radius = np.hypot(before[:, 1], before[:, 2])
+    lengthwise = (before[:, 0] > 0.1) & (before[:, 0] < 0.7)
+    in_layers = lengthwise & (radius > 0.0105) & (radius < 0.0105 + 0.0037)
+    assert in_layers.sum() > 100
+    assert moved.sum() > 100 and not np.any(moved & in_layers)
+    offsets = np.asarray(plain.face_nodes.offsets)
+    nodes = np.asarray(plain.face_nodes.face_node_indices)
+    boundary = np.flatnonzero(np.asarray(plain.face_cells.neighbour) < 0)
+    on_boundary = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in boundary]))
+    assert not np.any(moved[on_boundary])
+    assert np.all(np.asarray(flat.geometry().cell.volume) > 0.0)

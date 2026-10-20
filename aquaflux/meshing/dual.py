@@ -166,12 +166,16 @@ class PolyhedralDual:
 
 @dataclasses.dataclass(frozen=True)
 class TracedDual:
-    """A dual mesh, and the primal boundary each of its boundary vertices stands for.
+    """A dual mesh, and the primal entity each of its vertices stands for.
 
     A vertex on the dual's boundary is a primal boundary face's centroid, the midpoint of a primal
     boundary edge (or, where a cell is cut into pieces, a point on that edge's two boundary faces'
     centroids), or a primal boundary point itself. A mesher that knows the true surface the primal
-    boundary approximates moves the first two onto it; a primal point is already there.
+    boundary approximates moves the first two onto it; a primal point is already there. Inside, a
+    vertex is a primal cell's centroid, or, where a cell is cut into pieces, a point placed on the
+    surface between two pieces. A cell centroid carries no meaning a small move would lose -- any
+    point inside its primal cell gives the same topology -- so it is what a smoothing or flattening
+    pass may move; the vertices between pieces must stay on that surface.
 
     Attributes
     ----------
@@ -181,11 +185,14 @@ class TracedDual:
         The primal boundary face whose centroid each vertex is, or ``-1``.
     vertex_edge : np.ndarray of int, shape ``(n_vertices, 2)``
         The two points of the primal boundary edge each vertex stands for (ascending), or ``-1``.
+    vertex_cell : np.ndarray of int, shape ``(n_vertices,)``
+        The primal cell whose centroid each vertex is, or ``-1``.
     """
 
     mesh: Mesh
     vertex_face: np.ndarray
     vertex_edge: np.ndarray
+    vertex_cell: np.ndarray
 
 
 def boundary_folds(primal: Mesh, pairs: np.ndarray) -> np.ndarray:
@@ -745,6 +752,9 @@ def _assemble(
     vertex_edge = np.full((n_vertices, 2), -1, dtype=np.int64)
     halved = np.flatnonzero((vertices.middle >= 0) & on_boundary)
     vertex_edge[vertices.middle[halved]] = tables.edge_nodes[halved]
+    # The cell centroids are the first vertices, in the primal's cell order (see _Vertices.of).
+    vertex_cell = np.full(n_vertices, -1, dtype=np.int64)
+    vertex_cell[: primal.n_cells] = np.arange(primal.n_cells)
     mesh = Mesh.from_csr(
         vertices.coordinates,
         np.concatenate([[0], np.cumsum(counts)]),
@@ -756,7 +766,7 @@ def _assemble(
         patch_types=dict(patches.patch_types),
         patch_groups=dict(patches.patch_groups),
     )
-    return TracedDual(mesh, vertex_face, vertex_edge)
+    return TracedDual(mesh, vertex_face, vertex_edge, vertex_cell)
 
 
 def _place_cut_faces(primal, pieces, vertices) -> None:
