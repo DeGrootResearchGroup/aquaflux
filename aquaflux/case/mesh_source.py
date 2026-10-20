@@ -21,7 +21,7 @@ import numpy as np
 from aquaflux.io import OpenFOAMReader
 from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
-from aquaflux.meshing import CadMesher, FaceSelection, NetgenProcess
+from aquaflux.meshing import CadMesher, FaceSelection, NetgenProcess, PrismLayers
 
 from .drawing import CadPlacement
 
@@ -311,11 +311,17 @@ class CadMesh(MeshSource):
         The smallest triangle wanted, in metres; unset, Netgen's.
     grading : float or None
         How fast the size may change between neighbouring cells, in ``(0, 1]``; unset, Netgen's.
+    layers : PrismLayers or None
+        Prism layers grown on the ``layered`` patches, sized for the solver's cells; unset, none.
+    layered : tuple of str
+        The patches the layers grow on. Where one meets a patch without layers, the layers slide
+        along it. Default: none.
 
     Raises
     ------
     ValueError
-        If no solid is named, or a size, the angle or the grading is not a positive, finite number.
+        If no solid is named; a size, the angle or the grading is not a positive, finite number; or
+        layers are given without a patch to grow on, or patches are named without layers.
     """
 
     path_fields: ClassVar[tuple[str, ...]] = ("file",)
@@ -330,6 +336,8 @@ class CadMesh(MeshSource):
     placement: CadPlacement | None = None
     min_size: float | None = None
     grading: float | None = None
+    layers: PrismLayers | None = None
+    layered: tuple[str, ...] = ()
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -344,6 +352,12 @@ class CadMesh(MeshSource):
                     f"or FacesOn(solids), got {selection!r}."
                 )
         object.__setattr__(self, "patches", types.MappingProxyType(dict(self.patches)))
+        object.__setattr__(self, "layered", tuple(self.layered))
+        if (self.layers is None) != (not self.layered):
+            raise ValueError(
+                "a CadMesh grows layers on the patches it names in layered, so it takes both "
+                "layers and layered, or neither."
+            )
         self.mesher()  # refuses a size, angle or grading out of range
 
     def mesher(self) -> CadMesher:
@@ -353,7 +367,9 @@ class CadMesh(MeshSource):
             for name in ("min_size", "grading")
             if (value := getattr(self, name)) is not None
         }
-        return CadMesher(max_size=self.max_size, feature_angle=self.feature_angle, **options)
+        return CadMesher(
+            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers, **options
+        )
 
     def read(self, directory: Path) -> Mesh:
         """The region, read from its drawing and meshed -- see :meth:`MeshSource.read`."""
@@ -363,5 +379,6 @@ class CadMesh(MeshSource):
         )
         options = {} if self.others is None else {"others": self.others}
         return self.mesher().mesh(
-            model, CadRegion(self.solids, self.without), dict(self.patches), **options
-        )
+            model, CadRegion(self.solids, self.without), dict(self.patches),
+            layered=self.layered, **options,
+        )  # fmt: skip

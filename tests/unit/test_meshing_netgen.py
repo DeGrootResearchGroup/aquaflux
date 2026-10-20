@@ -268,7 +268,7 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
     # cell is within 0.35 of convex.
     pytest.importorskip("OCP")
     from aquaflux.mesh import closed_cell_residual
-    from aquaflux.meshing import PolyhedralDual, tetrahedral_mesh
+    from aquaflux.meshing import PolyhedralDual, element_mesh
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
     from OCP.BRepTools import BRepTools
@@ -284,7 +284,7 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
     netgen = NetgenProcess()
     surface = netgen.triangulate(tmp_path / "l.brep", max_size=0.01)
     filled = netgen.fill(surface.points, surface.triangles, max_size=0.01)
-    primal = tetrahedral_mesh(filled.points, filled.tetrahedra)
+    primal = element_mesh(filled.points, filled.tetrahedra)
     dual = PolyhedralDual(feature_angle=np.radians(45)).build(primal)
     on_edge = np.isclose(filled.points[:, 0], 0.1) & np.isclose(filled.points[:, 2], 0.1)
     assert dual.n_cells == primal.n_nodes + np.count_nonzero(on_edge)
@@ -376,3 +376,57 @@ def test_a_case_files_step_mesh_is_written_as_a_polymesh_with_its_patches_on_the
     on_boundary = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in boundary]))
     off = model.project(water, np.asarray(mesh.node_coords)[on_boundary]).distance
     assert float(off.max()) < 1e-9
+
+
+def test_prism_layers_on_the_sozzi_walls_keep_their_first_height_from_the_true_wall():
+    # Layers on the vessel's walls and the lamp, none on the pipes' ends. Every cell must close
+    # with positive volume and every boundary vertex lie on the drawing; and the dual's first layer
+    # boundary -- the centroids of the prisms against the wall, the only dual vertices between
+    # 0.2 and 0.8 mm from it -- must sit at the first height from the true, curved wall, not from
+    # the triangles' chords (which on the lamp lie up to about 0.4 mm inside it at this size).
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, FacesOn, PrismLayers
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    patches = {
+        "inlet": FacesNear(((0.04765, 0.0, 0.8945),)),
+        "outlet": FacesNear(((1.739, 0.0, 0.0),)),
+        "lamp": FacesOn(("lamp",)),
+    }
+    bare = CadMesher(max_size=0.03, feature_angle=0.785).mesh(model, water, patches)
+    layers = PrismLayers(first_height=0.0005, growth=1.2, count=5)
+    mesh = CadMesher(max_size=0.03, feature_angle=0.785, layers=layers).mesh(
+        model, water, patches, layered=("walls", "lamp")
+    )
+    # Five rows of layer points on most of the surface: several times the bare mesh's cells.
+    assert mesh.n_cells > 2 * bare.n_cells
+    geometry = mesh.geometry()
+    assert np.all(np.asarray(geometry.cell.volume) > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    coords = np.asarray(mesh.node_coords)
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    boundary = np.flatnonzero(np.asarray(mesh.face_cells.neighbour) < 0)
+    on_boundary = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in boundary]))
+    assert float(model.project(water, coords[on_boundary]).distance.max()) < 1e-9
+    radius = np.hypot(coords[:, 1], coords[:, 2])
+    along = (coords[:, 0] > 0.1) & (coords[:, 0] < 0.7)
+    # Within a millimetre of the lamp (radius 0.01) or the vessel (0.0445), then by true distance.
+    for name, near in (
+        ("lamp", np.abs(radius - 0.0105) < 0.001),
+        ("vessel", np.abs(radius - 0.044) < 0.001),
+    ):
+        away = model.project(water, coords[along & near]).distance
+        first = away[(away > 0.0002) & (away < 0.0008)]
+        assert first.size > 100, name
+        assert float(np.median(first)) == pytest.approx(0.0005, rel=0.03), name

@@ -202,3 +202,28 @@ chaining the candidate edges of a rim drawn as two edges carried one vertex 7 mm
 one cell at non-convexity 1.48, inlet area −4.1 %). Mutations, each red: no projection; candidates
 chained; int32 keys; no edge projection; in-face edge vertices left (red only on the Kuhn L test); the
 dual reporting no edge origins; the kernel ignoring `edges`.
+
+## 2026-10-19 — prism layers on triangulated walls
+
+macOS arm64, netgen-mesher 6.2.2608, feature angle 45 degrees. `PrismLayers(first_height=0.0005,
+growth=1.2, count=5)` on the Sozzi water's walls and lamp (caps bare), patches as in the phase-1 entry.
+
+- Netgen unit cube, all layered, `first_height 0.005, growth 1.2`: volume exact, closure 7e-18, dual layer
+  boundaries at mid-face 0.005 / 0.011 / 0.0182 / 0.02684 / 0.03721 (targets the same). Cylinder with bare
+  caps: all 190 prism sides on the cap planes, closed.
+- Sozzi maxh 0.02: 46124 cells (10446 bare), 8.4–9.1 s. Under the centroid orientation 59 wall cells
+  unclosed (0.24–0.37 mm thick on radius-9.5 mm walls), closed under orientation by shared edges (#777).
+  Projection of the wall alone then broke 39 cells (one of negative volume): the face centroid moves up to
+  the chord's sag (~0.4 mm on the lamp) past a first dual cell 0.5 mm tall. Moving the prism centroids above
+  it by `1 − (c/t)²` of the displacement: 0 unclosed, min cell volume 6.3e-11. Dual layer boundaries from the
+  CAD, x in (0.1, 0.7), median [min, max] in mm — lamp: 0.507 [0.506, 0.519], 1.088 [1.085, 1.116], 1.791
+  [1.779, 1.846]; vessel: 0.508 [0.505, 0.516], 1.143 [1.133, 1.175], 1.931 [1.904, 2.014]; targets 0.500,
+  1.100, 1.820.
+- Sozzi maxh 0.01: 59395 cells (13297 bare). Images: inside the 19 mm pipes the core left after the layers
+  is narrow and its polyhedra skewed.
+- Thinning: a diffusive smoothing (10 sweeps per halving pass) left a 0.05-thick slab's middle at 0.006
+  where the gap limit allows 0.02; replaced by a ratio limit (1.5 per neighbour, to a fixed point).
+- Mutations, each red: plain geometric tops; no stretch; no sliding (only on a tilted bare top — on a cube
+  the inward normals already lie in the top's plane); no gap limit (red once halving could not rescue it);
+  no halving; the prism inversion check off (only on an L's concave edge); no tapering; the column move off
+  (the Netgen test).

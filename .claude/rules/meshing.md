@@ -14,8 +14,9 @@ paths:
 
 **Status: phase 1 built** — STEP region → Netgen tets → polyhedral dual → `Mesh` / polyMesh, from a case
 file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
-`tetrahedral_mesh` (`tetrahedra.py`), the feature-preserving dual (`dual.py`, cells at sharp concave edges
-cut into pieces) and the mesher (`cad_mesher.py`). Prism layers, blocks and the hex core are not built.
+`element_mesh` (`elements.py`: tetrahedra and prisms), the feature-preserving dual (`dual.py`, cells at sharp
+concave edges cut into pieces), prism layers on triangulated walls (`layers.py`) and the mesher
+(`cad_mesher.py`). Layers on structured quad surfaces, blocks and the hex core are not built.
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -124,9 +125,10 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 ## The CAD mesher (`cad_mesher.py`) — built
 
-`CadMesher(max_size, feature_angle, min_size=None, grading=None, netgen=NetgenProcess()).mesh(model,
-region, patches=None, others="walls") -> Mesh`: `write_brep` → `triangulate` (face-tagged) → `fill` →
-`tetrahedral_mesh` (boundary faces in patches by their triangle's CAD face) → `PolyhedralDual.build_traced`
+`CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, netgen=NetgenProcess()).mesh(
+model, region, patches=None, others="walls", layered=()) -> Mesh`: `write_brep` → `triangulate`
+(face-tagged) → prism layers on the `layered` patches (below) → `fill` of what is left → `element_mesh`
+(boundary faces in patches by their triangle's CAD face) → `PolyhedralDual.build_traced`
 → boundary vertices projected onto the CAD (below), with
 **the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
 (so a CAD edge stays sharp whatever its triangles fold by; pinned by
@@ -158,8 +160,44 @@ or OCP.
 - **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
   whole `aquaflux mesh --case --openfoam` before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
   at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
-- `tetrahedral_mesh(points, tetrahedra, patches=None)` numbers faces in first-sighting order (the test
-  fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former hand assembly).
+- `element_mesh(points, tetrahedra=None, prisms=None, patches=None)` numbers faces in first-sighting order,
+  tetrahedra first (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
+  hand assembly); patches take triangles and quadrilaterals by corners.
+
+## Prism layers (`layers.py`) — built for triangulated walls
+
+`PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8).extrude(points,
+triangles, layered) -> LayerExtrusion(points, prisms, inner, walls, sides, side_triangle)`; a case file states
+it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both or neither).
+- **Sized for the dual, exactly**: the dual's layer boundaries are the prisms' centroids, at `first_height ·
+  Σ growthᵏ`; each prism's top is placed so its centroid is there, so the prisms alternate thicker and
+  thinner (the first is `2·first_height`; the second only `2·first_height·(growth − 1)`; the alternation
+  decays as `growthᵏ`). Hence **`growth > 1` is required** — equal dual layers need zero-height prisms.
+  Flat walls: exact (unit cube, maxh 0.1: 0.005, 0.011, 0.0182, 0.02684, 0.03721 as targeted).
+- **Directions**: angle-weighted mean of the layered triangles' inward normals; stretched by `1/cos` (≤
+  `max_stretch`) so every face at the point is cleared by the full thickness (a cube's shell is exactly the
+  cube shrunk by it). **Where a layered wall meets a bare patch the direction is turned into the bare face's
+  plane** (two bare planes: along their intersection; three: refused), so the prisms' sides lie on the bare
+  face and its triangles are drawn in to the layers' top (`walls`; `sides` are the boundary quads).
+  Deferred: several normals at a sharp convex ridge (one averaged normal shears the prisms there).
+- **Thickness**: limited to `gap_share` of the distance along the direction to the surface (ray cast within
+  2.5 thicknesses), then halved at the points of any inverted prism or turned drawn-in triangle until none
+  is (`max_halvings`), and **tapered**: no point more than 1.5× its thinnest neighbour, iterated to a fixed
+  point. ⚠️ A diffusive smoothing (10 sweeps per pass) thinned a whole slab's middle to 30 % of the gap
+  limit from its edges' halving; the ratio limit is local.
+- **The fill gets only the layers' top plus the bare triangles** (`inner`); `CadMesher._filled` hands Netgen
+  just the points that surface uses (Netgen renumbers otherwise) and maps the tets back.
+- ⚠️ **Projection must follow the layers** (`_Columns`): a wall face's centroid moves onto the CAD by up to the
+  chord's sag (~0.4 mm on the lamp at maxh 0.02), more than a thin first cell; moving it alone inverted cells
+  (39 on Sozzi) and would set the first cell's height from the chord. So each prism centroid above a wall
+  face moves by `1 − (c/t)²` of its displacement (`c` the centroid's height, `t` the layers' thickness).
+  Sozzi at maxh 0.02 (first 0.5 mm, growth 1.2, 5 layers on walls and lamp): first dual layer boundary 0.507
+  / 0.508 mm from the CAD on lamp / vessel; layers 2–3 drift with curvature (−2 % lamp, +6 % vessel; log).
+- Measured on Sozzi (log): 46124 cells at maxh 0.02 (10446 bare), 59395 at 0.01 (13297 bare), all closed,
+  every boundary vertex on the drawing. ⚠️ Inside the 19 mm pipes the core left after the layers is narrow
+  and its polyhedra skewed (images in the log): the pipe O-grid of the block mesher is the answer there.
+- Pinned in `tests/unit/test_meshing_layers.py` (no Netgen) and `test_meshing_netgen.py` (Sozzi, the first
+  height from the true wall).
 
 ## Netgen: in a child process, reached through files (binding)
 
@@ -231,8 +269,9 @@ or OCP.
 1. **CAD topology** in the kernel, as above (built).
 2. **Feature-preserving dual** (numba), from any conformal primal mesh (built), and the CAD mesher
    around it, its boundary projected onto the drawing (built).
-3. **Prism-layer extruder**: smoothed normals, several normals at convex ridges, shrinking at concave
-   corners, thickness limited by proximity, layer collapse or backtracking on collision.
+3. **Prism-layer extruder** (built for triangulated walls, above): smoothed normals, thickness limited by
+   proximity, halving and tapering on collision. Not yet: several normals at convex ridges, layers on
+   structured quad surfaces (the project owner's next step after triangles).
 4. **Block mesher** in place of blockMesh: transfinite interpolation with projection onto CAD or analytic
    surfaces, carrying the `uvmesh` topologies (four-quadrant annulus with the π/4 offset when a cap joins,
    the five-block cubed-sphere shell, the square-core pipe O-grid, wall-layer window masking) and pipe

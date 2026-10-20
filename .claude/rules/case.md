@@ -47,7 +47,7 @@ its file alone.**
 | `scopes.py` | `FLOW` / `TURBULENCE` / `RADIATION`, `SCOPES`, the `Scoped` mixin (`setting_scopes`, `required_in_scope`, `settings_in`, `missing_in`) |
 | `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics, drive, pressure datum, sources, solver, initial, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
-| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` / `CadMesh` (a STEP region meshed by `meshing.CadMesher`; patches by `meshing.FacesNear` / `FacesOn`, read directly) |
+| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` / `CadMesh` (a STEP region meshed by `meshing.CadMesher`; patches by `meshing.FacesNear` / `FacesOn`, prism layers by `meshing.PrismLayers` on the patches in `layered`, all read directly) |
 | `drawing.py` | `CadPlacement`, shared by `CadMesh` and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |

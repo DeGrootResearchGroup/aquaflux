@@ -71,7 +71,8 @@ SUBPACKAGE_GROUPS = {
     "meshing": [
         ("Meshing a region of a CAD model", ["cad_mesher"]),
         ("The polyhedral dual", ["dual"]),
-        ("A mesh of tetrahedra", ["tetrahedra"]),
+        ("Prism layers", ["layers"]),
+        ("A mesh of tetrahedra and prisms", ["elements"]),
         ("Netgen, in a child process", ["netgen_process"]),
     ],
     "mesh": [

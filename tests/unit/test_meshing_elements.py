@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from aquaflux.mesh import closed_cell_residual
-from aquaflux.meshing import tetrahedral_mesh
+from aquaflux.meshing import element_mesh
 
 CUBE = np.array([[x, y, z] for x in (0.0, 1.0) for y in (0.0, 1.0) for z in (0.0, 1.0)])
 # Corner index = 4x + 2y + z. The middle tetrahedron joins the four corners with x + y + z even.
@@ -35,7 +35,7 @@ def _boundary_triangles():
 
 def test_five_tetrahedra_make_a_closed_cube_with_two_triangles_per_wall():
     walls = _walls(CUBE, _boundary_triangles())
-    mesh = tetrahedral_mesh(CUBE, FIVE, walls)
+    mesh = element_mesh(CUBE, FIVE, patches=walls)
     assert (mesh.n_cells, mesh.n_faces) == (5, 16)
     volume = np.asarray(mesh.geometry().cell.volume)
     np.testing.assert_allclose(volume, [1 / 3, 1 / 6, 1 / 6, 1 / 6, 1 / 6], rtol=1e-12)
@@ -49,7 +49,7 @@ def test_five_tetrahedra_make_a_closed_cube_with_two_triangles_per_wall():
 
 
 def test_faces_are_numbered_as_first_seen_and_owned_by_the_first_to_see_them():
-    mesh = tetrahedral_mesh(CUBE, FIVE)
+    mesh = element_mesh(CUBE, FIVE)
     owner, neighbour = np.asarray(mesh.face_cells.owner), np.asarray(mesh.face_cells.neighbour)
     # The middle tetrahedron is listed first, so it owns its four faces, which come first, each
     # shared with one corner tetrahedron, in the order of the corners opposite them.
@@ -64,29 +64,29 @@ def test_a_boundary_face_in_no_patch_is_refused():
     walls = _walls(CUBE, _boundary_triangles())
     walls["x-"] = walls["x-"][:1]
     with pytest.raises(ValueError, match="1 boundary face\\(s\\) in none, 0 in more than one"):
-        tetrahedral_mesh(CUBE, FIVE, walls)
+        element_mesh(CUBE, FIVE, patches=walls)
 
 
 def test_a_boundary_face_in_two_patches_is_refused():
     walls = _walls(CUBE, _boundary_triangles())
     walls["again"] = walls["x-"][::-1, ::-1]  # the same triangles, listed otherwise
     with pytest.raises(ValueError, match="0 boundary face\\(s\\) in none, 2 in more than one"):
-        tetrahedral_mesh(CUBE, FIVE, walls)
+        element_mesh(CUBE, FIVE, patches=walls)
 
 
 def test_a_patch_triangle_inside_the_domain_is_refused():
     walls = _walls(CUBE, _boundary_triangles())
     walls["x-"] = np.vstack([walls["x-"], [[0, 3, 5]]])
-    with pytest.raises(ValueError, match="'x-' holds a triangle that is not a boundary face"):
-        tetrahedral_mesh(CUBE, FIVE, walls)
+    with pytest.raises(ValueError, match="'x-' holds a face that is not a boundary face"):
+        element_mesh(CUBE, FIVE, patches=walls)
 
 
 def test_a_reserved_patch_name_is_refused():
     with pytest.raises(ValueError, match=r"\['boundary'\] are reserved"):
-        tetrahedral_mesh(CUBE, FIVE, {"boundary": _boundary_triangles()})
+        element_mesh(CUBE, FIVE, patches={"boundary": _boundary_triangles()})
 
 
 def test_a_triangle_on_three_tetrahedra_is_refused():
-    with pytest.raises(ValueError, match="1 triangle\\(s\\) are faces of more than two"):
+    with pytest.raises(ValueError, match="1 face\\(s\\) belong to more than two cells"):
         # The corner tetrahedron at (1, 1, 1) twice: its face with the middle one is on three.
-        tetrahedral_mesh(CUBE, np.vstack([FIVE, [[3, 5, 6, 7]]]))
+        element_mesh(CUBE, np.vstack([FIVE, [[3, 5, 6, 7]]]))
