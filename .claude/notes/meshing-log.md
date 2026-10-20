@@ -432,3 +432,30 @@ every p99 lower, in 0.45–0.9x the time. Its maxima are no better than the swee
 cylinder's non-convexity .271 vs .248, the sleeve's warp, non-convexity and triangulation maxima at their
 start values); all stay within their bounds. The guard's evaluations are now 45–65 % of the time. Not
 measured: which faces hold the maxima; `--shorten` other than 100 on these four.
+
+## 2026-10-20 — the Gauss–Newton step shipped in `FacePlanarizer`
+
+The probe of the two entries above (`validation/meshing_dual/planarization_gauss_newton.py`, deleted with
+this change; last at commit `1ec54c02`) became `FacePlanarizer`, its defaults those the probe was run at
+(`shortening` 100, the block preconditioner); the Jacobi sweep was deleted. One difference from the probe:
+a step still worsening after its cells are pinned raises λ without releasing the pins. Re-measured with
+`validation/meshing_dual/planarization.py` (shipped defaults, macOS arm64, one run each, machine shared):
+
+| dual (cells) | iterations, CG products | time | total warp | concave | int warp p99 / max | non-convexity p99 / max | tri-volume p99 / max | non-orth max / avg |
+|---|---|---|---|---|---|---|---|---|
+| L 0.01 (3718) | 53, 5503 | 90 s | 255 → 3.44 | 57 → 28 | .021 / .250 | .068 / .312 | .030 / .229 | 43.3 / 7.9 |
+| Sozzi 0.01 (13297) | 43, 6758 | 349 s | 836 → 74.5 | 309 → 58 | .055 / .327 | .103 / .281 | .105 / .179 | 46.1 / 11.0 |
+| cylinder 0.005 (14426) | 58, 11479 | 472 s | 1380 → 13.4 | 1108 → 66 | .023 / .303 | .077 / .271 | .038 / .225 | 47.3 / 8.8 |
+| sleeve 0.005 (15995) | 55, 10799 | 714 s | 1200 → 13.3 | 258 → 30 | .017 / .325 | .072 / .293 | .046 / .226 | 51.6 / 7.4 |
+
+Quality matches the probe's within the pin-handling difference; the sleeve's seconds (714 against the
+probe's 488) are contention, not the change (its products 10799 vs 9700).
+
+Mutations of the shipped solver (`tests/unit/test_meshing_planarize.py`), each red: no convexity, no
+concavity, no non-orthogonality, no skewness bound; a bad face pinning its owner only (the cube's warp
+stops at ~13 % of its start, not 7 %); `movable` ignored; no decrease stop; no flat stop; no shortening;
+no pinning; planes frozen in the residual (normal and area); the vertex mean frozen; no preconditioner;
+an unweighted preconditioner. Green, dismissed: no volume bound (as before: never bites; an inverted
+cell's NaN convexity would pass the others); accepting a safe step that raises the warp (no safe step
+ever raised it on the fixtures; the history is asserted monotone); no λ decrease after a kept step (path
+and cost only: final warp within 10 % either way on three fixtures).

@@ -15,7 +15,7 @@ Run in an environment with ``cadquery-ocp-novtk`` and ``netgen-mesher``::
 
     python validation/meshing_dual/planarization.py L cylinder 0.01 0.005
 
-Names and sizes as in ``dual_scale_convexity.py``; ``--sweeps N`` caps the sweeps (default 300).
+Names and sizes as in ``dual_scale_convexity.py``; ``--iterations N`` caps the iterations (default 200).
 """
 
 from __future__ import annotations
@@ -62,9 +62,9 @@ def describe(mesh: Mesh) -> str:
     )
 
 
-def main(names: list[str], sizes: list[float], sweeps: int) -> None:
+def main(names: list[str], sizes: list[float], iterations: int) -> None:
     netgen = NetgenProcess()
-    planarizer = FacePlanarizer(max_sweeps=sweeps)
+    planarizer = FacePlanarizer(max_iterations=iterations)
     with tempfile.TemporaryDirectory() as directory:
         for name, path in _solids(pathlib.Path(directory)).items():
             if names and name not in names:
@@ -84,7 +84,8 @@ def main(names: list[str], sizes: list[float], sweeps: int) -> None:
                 result = planarizer.planarize(dual, movable)
                 spent = time.perf_counter() - start
                 print(
-                    f"  sweeps {result.sweeps} converged {result.converged} "
+                    f"  iterations {result.iterations} converged {result.converged} "
+                    f"linear products {result.linear_products} "
                     f"total warp {result.warp[0]:.3g} -> {result.warp[-1]:.3g} in {spent:.1f} s"
                 )
                 print(f"  after:  {describe(result.mesh)}", flush=True)
@@ -92,9 +93,9 @@ def main(names: list[str], sizes: list[float], sweeps: int) -> None:
 
 if __name__ == "__main__":
     arguments = sys.argv[1:]
-    cap = 300
-    if "--sweeps" in arguments:
-        at = arguments.index("--sweeps")
+    cap = 200
+    if "--iterations" in arguments:
+        at = arguments.index("--iterations")
         cap = int(arguments[at + 1])
         del arguments[at : at + 2]
     main(
