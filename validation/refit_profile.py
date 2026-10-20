@@ -209,6 +209,7 @@ def main() -> None:
     probe = session._probe_for()
     pieces = _Pieces()
     pieces.wrap(host, "_materialize_jacobian", "probe (coloured JVPs + gather)")
+    pieces.wrap(host, "_probed_blocks", "probe (coloured JVPs + gather)")  # a field split's probe
     pieces.wrap(probe.plan, "seed_block", "probe: fill the seeds (host)")
     pieces.wrap(
         probe.plan, "field_seeds", "probe: fill the seeds (host)"
