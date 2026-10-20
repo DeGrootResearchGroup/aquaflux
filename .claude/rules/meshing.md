@@ -13,7 +13,7 @@ paths:
 > `.claude/notes/meshing-log.md`.
 
 **Status: built** — the Netgen child process (`netgen_process.py`, `_netgen_child.py`) and the
-feature-preserving dual (`dual.py`) **except the concave split**, which is refused (below). Nothing else of the
+feature-preserving dual (`dual.py`), cells at sharp concave edges cut into pieces. Nothing else of the
 mesher is. The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/`. The package is not on the published API page (`docs/conf.py`
 `PUBLIC_SUBPACKAGES`) until it has a mesher a user calls.
@@ -67,25 +67,44 @@ seams are exactly where its mesh fails, below).
   (the published treatment of concave geometrical edges). Reimplement from the published description; the
   OpenFOAM `polyDualMesh` source is GPL and is not copied.
 
-## The feature-preserving dual (`dual.py`) — built, concave split not yet
+## The feature-preserving dual (`dual.py`) — built
 
 `PolyhedralDual(feature_angle, feature_edges=None).build(primal: Mesh) -> Mesh`. Dual cell `i` is primal
-point `i`. Vertices: primal cell centroids, boundary-face centroids, feature-edge midpoints, points on ≥ 2
-feature edges. Each primal edge gives the face between its ends' cells (ring of cell centroids; on the
+point `i` (its first piece); the further pieces of cut points follow, by point. Vertices: primal cell
+centroids, boundary-face centroids, feature-edge midpoints, points on ≥ 2 feature edges. Each primal edge gives the face between its ends' cells (ring of cell centroids; on the
 boundary closed through its two boundary faces' centroids, and its midpoint if a feature). Each boundary
 point gives its fan of face centroids, cut along feature edges into one face per sector with the point as a
 vertex. Features: fold beyond `feature_angle` (no default), every patch border, named edges. Two numba walks
 (cells around each edge, boundary faces around each point); faces of edges assembled in numpy.
 - **Accepted primal**: 3D, non-periodic, one cell zone, no patch on interior faces, closed manifold
   boundary, every point on a face. Each refused by name.
-- ⚠️ **Sharp concave folds are refused** (`NotImplementedError`: a boundary edge folding concavely by more
-  than `feature_angle`; sign by `boundary_folds`). **Why, measured** (2026-10-19, Netgen L at maxh 0.02):
-  the dual is topologically closed and its consistently oriented faces sum to zero (≤ 5e-20), but at 3 of
-  581 cells, all on the concave edge, `Mesh.geometry()`'s centroid-based orientation turns exactly one face
-  inward (closure 1e-4 to 4e-4), because the cell wraps around the fold (a vertex a whole cell size outside
-  a face plane). The structured hex L happened to close. **So the concave split is required for
-  correctness, not quality**, and is the next PR; every reactor's pipe junction needs it. A gently concave
-  wall is fine: a lamp-sleeve hole folds concavely ≤ 32° per edge and its duals close (3 sizes, 0 unclosed).
+- **Cells at sharp concave folds are cut into pieces** (`_Pieces`): every point on an edge folding concavely
+  by more than `feature_angle` (sign by `boundary_folds`). **Why it is required for correctness, not
+  quality**: uncut, such a cell wraps around the fold, and on Netgen tets `Mesh.geometry()`'s centroid-based
+  orientation turned exactly one face per cell inward (topology closed, consistently oriented faces summing
+  to zero; log). **The rule**: the walls are the feature sectors at the point that touch one of its concave
+  edges, each with its area-weighted normal at the point; each primal cell around the point goes to the
+  wall its centroid lies deepest behind (`argmax -(c - p)·n`), and each wall's cells are one dual cell
+  (face-connected, else `NotImplementedError`). Merging sectors across convex edges is wrong (the L's end
+  corner would not be cut); a depth rule over *all* sectors is wrong (it cuts convex corners, and its
+  pieces at the L's end are not convex).
+  - **Topology** (the barycentric dual, collapsed except where pieces meet): each interior primal face
+    between pieces gets a vertex on its dual edge, inserted into **every** dual face along that edge (also
+    those of edges not at the point, else a hanging vertex closure cannot see); a dual face whose pair of
+    pieces changes around its edge is cut into one face per run, closed through a vertex of the edge; each
+    cut face gives a quad `[p, edge vertex, face vertex, edge vertex]` between the two pieces; boundary
+    fans are also cut where the faces' cells change piece. The point itself becomes a vertex.
+  - ⚠️ **The added vertices must lie on the surface between pieces, or the cut fails the same way.** At
+    face and edge centroids the separating surface zig-zags along tet faces and Netgen L cells still
+    failed closure (maxh 0.01: 6 cells, 3 points, ~4e-5). So: a face's vertex where its dual edge crosses
+    the plane `(n_b − n_a)·(x − p) = 0` (fraction kept to [0.1, 0.9] so a centroid on the plane does not
+    give coincident vertices; mean over cutting points); an interior edge's hub the least-squares point
+    on every interface it meets and in the dual face's plane (on the triple line where three pieces meet);
+    a boundary edge's hub on the segment between its two boundary-face centroids, where it crosses.
+  - Measured (log): every Netgen L, cylinder, sleeve and Sozzi dual closes; Sozzi's two junctions give 24
+    extra pieces; pieces' non-convexity within the uncut cells' range. A face cut around two points of a
+    three-wall corner meets two different planes, so that corner is near-convex (≤ 0.05), not exact.
+  - A gently concave wall is not cut: a lamp-sleeve hole folds concavely ≤ 32° per edge and its duals close.
 - **Away from features the dual's boundary runs through face centroids**, inside a curved wall by the chord:
   dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). Projecting
   those vertices onto the CAD surface (`CadModel.project`) is the mesher's job.
@@ -93,10 +112,12 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
   point and the dual's build ~9 KB per point (111k points; log), so 2M points would need ~28 GB. The likely
   fix is a numpy-only primal (the primal is never solved on) and a leaner assembly; not yet done.
 - **Quality, not correctness, on Netgen duals**: `checkMesh` passes structured and Kuhn-tet duals; Netgen
-  duals pass topology and closure but report concave cells by face planes (1.6–7.7 %), a few low-quality
-  face decompositions and small volume ratios (log). The quality and planarization component is for these.
-- Pinned in `tests/unit/test_meshing_dual.py`; scale and convexity in
-  `validation/meshing_dual/dual_scale_convexity.py` (log).
+  duals, cut ones included (L, Sozzi), pass topology and closure but report concave cells by face planes
+  (1.5–7.7 %), a few low-quality face decompositions and small volume ratios (log). The quality and
+  planarization component is for these.
+- Pinned in `tests/unit/test_meshing_dual.py` (the cut on hex and Kuhn Ls and a three-wall corner) and
+  `test_meshing_netgen.py` (a Netgen L, the case placement is for); scale and convexity, Sozzi included,
+  in `validation/meshing_dual/dual_scale_convexity.py` (log).
 
 ## Netgen: in a child process, reached through files (binding)
 
@@ -197,7 +218,7 @@ as the differentiable map from CAD parameters to `node_coords`. Raised with the 
 
 - A curved seam dualized with a near-tangent lip gives inverted faces.
 - At a re-entrant (270°) edge — a pipe meeting the vessel — a 90° feature angle inverts dual cells; 100°
-  fixes it at the cost of cutting genuine 90° edges. The concave-edge split above is the real answer.
+  fixes it at the cost of cutting genuine 90° edges. The concave-edge cut above (built) is the answer.
 - Tet slivers become bad dual faces; Netgen's optimization removed them there.
 - A size jump between nested structured layers skews cells; balance the counts.
 - A layer too thin to contain the near-wall jet left a seam the solve could not settle across

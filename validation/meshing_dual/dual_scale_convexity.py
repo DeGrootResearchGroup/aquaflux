@@ -1,20 +1,22 @@
 """How the polyhedral dual of Netgen tetrahedra scales, and how non-convex its cells get.
 
-Three solids, written by OCP and meshed by Netgen in its child process: a cylinder (curved walls,
+Four solids, written by OCP and meshed by Netgen in its child process: a cylinder (curved walls,
 convex edges); a box with a lamp-like cylindrical hole through it (a gently concave curved wall);
-and an L-shaped block (one sharp concave edge, which the dual refuses until such cells are split,
-so its line reports the refusal). For
+an L-shaped block (one straight sharp concave edge, whose dual cells are cut into pieces); and the
+Sozzi reactor's water (two pipe junctions: curved sharp concave edges, and the lamp). For
 each ``maxh`` the harness prints the point count, the time to build the dual, its worst cell
 closure, its volume against the tetrahedra's, and a convexity measure: for every dual cell, the
 largest distance by which one of its own vertices lies outside the plane of one of its faces
 (planes through each face's centroid, normal to its area vector), relative to the cell's size
-(the cube root of its volume). Zero for a convex cell with planar faces; the faces of a dual of
+(the cube root of its volume), and separately over the pieces of cut cells. Zero for a convex cell with planar faces; the faces of a dual of
 tetrahedra are not planar, so a small positive value is the face warp, not a fold. Reported
 separately for the cells whose point lies on the hole's wall.
 
 Run in an environment with ``cadquery-ocp-novtk`` and ``netgen-mesher``::
 
     python validation/meshing_dual/dual_scale_convexity.py 0.02 0.01 0.006
+
+``sozzi`` alone, or any subset of the names, may be given first: ``... sozzi 0.02 0.01``.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 import numpy as np
+from aquaflux.io.cad import CadRegion, Placement, read_step
 from aquaflux.mesh import Mesh, closed_cell_residual
 from aquaflux.meshing import NetgenProcess, PolyhedralDual
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
@@ -56,6 +59,13 @@ def _solids(directory: pathlib.Path) -> dict[str, pathlib.Path]:
     for name, shape in shapes.items():
         paths[name] = directory / f"{name}.brep"
         BRepTools.Write_s(shape, str(paths[name]))
+    drawing = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    paths["sozzi"] = model.write_brep(water, directory / "sozzi.brep")
     return paths
 
 
@@ -115,10 +125,12 @@ def _non_convexity(dual: Mesh) -> np.ndarray:
     return worst / np.cbrt(np.asarray(geometry.cell.volume))
 
 
-def main(sizes: list[float]) -> None:
+def main(names: list[str], sizes: list[float]) -> None:
     netgen = NetgenProcess()
     with tempfile.TemporaryDirectory() as directory:
         for name, path in _solids(pathlib.Path(directory)).items():
+            if names and name not in names:
+                continue
             for maxh in sizes:
                 surface = netgen.triangulate(path, max_size=maxh)
                 filled = netgen.fill(surface.points, surface.triangles, max_size=maxh)
@@ -126,7 +138,7 @@ def main(sizes: list[float]) -> None:
                 start = time.perf_counter()
                 try:
                     dual = DUAL.build(primal)
-                except NotImplementedError as refusal:
+                except (NotImplementedError, ValueError) as refusal:
                     print(
                         f"{name:8s} maxh={maxh:<6g} points={primal.n_nodes:8d} refused: {refusal}"
                     )
@@ -143,12 +155,20 @@ def main(sizes: list[float]) -> None:
                 if primal.n_nodes <= 60000:
                     bad = _non_convexity(dual)
                     line += f" non-convexity p50={np.median(bad):.3f} max={bad.max():.3f}"
+                    # A cut point's first piece keeps its index; the further pieces follow.
+                    cut = dual.n_cells - primal.n_nodes
+                    if cut:
+                        line += f" | {cut} extra piece(s), max={bad[primal.n_nodes :].max():.3f}"
                     if name == "sleeve":
                         points = np.asarray(primal.node_coords)
                         near = np.hypot(points[:, 0], points[:, 1]) < 0.0105
-                        line += f" | on the hole ({near.sum()} cells) max={bad[near].max():.3f}"
+                        line += f" | on the hole ({near.sum()} cells) max={bad[: primal.n_nodes][near].max():.3f}"
                 print(line, flush=True)
 
 
 if __name__ == "__main__":
-    main([float(size) for size in sys.argv[1:]])
+    arguments = sys.argv[1:]
+    main(
+        [a for a in arguments if not a[0].isdigit()],
+        [float(a) for a in arguments if a[0].isdigit()],
+    )

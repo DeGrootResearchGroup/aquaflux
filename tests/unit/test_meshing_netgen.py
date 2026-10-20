@@ -258,3 +258,36 @@ def test_netgen_numbers_a_written_regions_faces_as_its_topology_does(tmp_path):
     )
     centroids = surface.points[surface.triangles[sample]].mean(axis=1)
     np.testing.assert_array_equal(model.project(water, centroids).face, surface.face[sample])
+
+
+def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_and_closes(tmp_path):
+    # The case that needs the cut: on Netgen's tetrahedra of an L, cells around the inside edge,
+    # uncut or cut with their added vertices off the plane between the pieces, were folded enough
+    # that the mesh turned a face of each inward (measured at this size). Every cell must close.
+    pytest.importorskip("OCP")
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import PolyhedralDual
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.BRepTools import BRepTools
+    from OCP.gp import gp_Pnt
+
+    from tests.support.meshes import tetrahedral_mesh
+
+    shape = BRepAlgoAPI_Fuse(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.2, 0.1, 0.1).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0.1), 0.1, 0.1, 0.1).Shape(),
+    ).Shape()
+    BRepTools.Write_s(shape, str(tmp_path / "l.brep"))
+    netgen = NetgenProcess()
+    surface = netgen.triangulate(tmp_path / "l.brep", max_size=0.01)
+    filled = netgen.fill(surface.points, surface.triangles, max_size=0.01)
+    primal = tetrahedral_mesh(filled.points, filled.tetrahedra)
+    dual = PolyhedralDual(feature_angle=np.radians(45)).build(primal)
+    on_edge = np.isclose(filled.points[:, 0], 0.1) & np.isclose(filled.points[:, 2], 0.1)
+    assert dual.n_cells == primal.n_nodes + np.count_nonzero(on_edge)
+    volume = np.asarray(dual.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
+    scale = float(np.max(np.asarray(dual.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
