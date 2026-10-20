@@ -15,7 +15,7 @@ import abc
 import dataclasses
 import math
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import equinox as eqx
@@ -26,8 +26,9 @@ from aquaflux.io.cad import CadModel, CadRegion
 from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
 from .dual import PolyhedralDual
+from .elements import element_mesh, face_keys, search_rows
+from .layers import PrismLayers
 from .netgen_process import NetgenProcess, SurfaceTriangulation
-from .tetrahedra import tetrahedral_mesh
 
 __all__ = ["CadMesher", "FaceSelection", "FacesNear", "FacesOn", "RegionFaces"]
 
@@ -151,6 +152,8 @@ class CadMesher:
         The smallest triangle wanted; unset, Netgen's.
     grading : float or None
         How fast the size may change between neighbours, in ``(0, 1]``; unset, Netgen's.
+    layers : PrismLayers or None
+        The prism layers grown on the patches :meth:`mesh` is asked to layer; unset, none.
     netgen : NetgenProcess
         The Netgen it runs.
     """
@@ -159,6 +162,7 @@ class CadMesher:
     feature_angle: float
     min_size: float | None = None
     grading: float | None = None
+    layers: PrismLayers | None = None
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
 
     def __post_init__(self) -> None:
@@ -175,6 +179,7 @@ class CadMesher:
         region: CadRegion,
         patches: Mapping[str, FaceSelection] | None = None,
         others: str = "walls",
+        layered: Sequence[str] = (),
     ) -> Mesh:
         """The polyhedral mesh of ``region``.
 
@@ -186,6 +191,9 @@ class CadMesher:
             The boundary patches named for the faces selected.
         others : str
             The patch for the faces no selection names.
+        layered : sequence of str
+            The patches :attr:`layers` are grown on; where one meets a patch without layers, the
+            layers slide along it.
 
         Returns
         -------
@@ -195,13 +203,22 @@ class CadMesher:
         Raises
         ------
         ValueError
-            If a patch name is reserved or given twice, a selection finds no face, or two
-            selections share one.
+            If a patch name is reserved or given twice, a selection finds no face, two selections
+            share one, or a layered patch is not a patch or is named without :attr:`layers`.
         MeshingError
             If Netgen fails.
         """
         patches = dict(patches or {})
+        names = [*patches, others]
         _check_names(patches, others)
+        layered = list(layered)
+        if layered and self.layers is None:
+            raise ValueError("patches are named to be layered, but the mesher has no layers")
+        unknown = sorted(set(layered) - set(names))
+        if unknown:
+            raise ValueError(
+                f"layered patch(es) {unknown} are not patches; the patches are {names}"
+            )
         topology = model.topology(region)
         with tempfile.TemporaryDirectory() as directory:
             surface = self.netgen.triangulate(
@@ -210,20 +227,27 @@ class CadMesher:
                 **self._netgen_options(min_size=self.min_size),
             )
         patch_of_face = _patch_of_face(model, region, surface, topology.n_faces, patches, others)
-        filled = self.netgen.fill(
-            surface.points, surface.triangles, max_size=self.max_size, **self._netgen_options()
+        on_layered = np.isin(patch_of_face[surface.face], [names.index(n) for n in layered])
+        if on_layered.any():
+            grown = self.layers.extrude(surface.points, surface.triangles, on_layered)
+            points, tetrahedra = self._filled(grown.points, grown.inner)
+            prisms = grown.prisms
+            boundary = _Boundary(
+                grown.walls, surface.face, grown.sides, surface.face[grown.side_triangle]
+            )
+        else:
+            points, tetrahedra = self._filled(surface.points, surface.triangles)
+            prisms = None
+            boundary = _Boundary(surface.triangles, surface.face)
+        primal = element_mesh(
+            points, tetrahedra, prisms, patches=boundary.patches(patch_of_face, names)
         )
-        names = [*patches, others]
-        primal = tetrahedral_mesh(
-            filled.points,
-            filled.tetrahedra,
-            {
-                name: surface.triangles[patch_of_face[surface.face] == index]
-                for index, name in enumerate(names)
-                if np.any(patch_of_face == index)
-            },
-        )
-        edges = _SurfaceEdges.of(surface)
+        columns = None
+        if prisms is not None:
+            columns = _Columns.of(
+                primal, surface.triangles[on_layered], tetrahedra.shape[0], self.layers
+            )
+        edges = _SurfaceEdges.of(boundary)
         feature_pairs = {
             tuple(sorted(topology.faces_of_edge(edge)[:2].tolist()))
             for edge in topology.feature_edges(self.feature_angle)
@@ -231,7 +255,23 @@ class CadMesher:
         }
         dual = PolyhedralDual(self.feature_angle, feature_edges=edges.between(feature_pairs))
         traced = dual.build_traced(primal)
-        return _onto_the_drawing(traced, primal, surface, edges, model, region, topology)
+        return _onto_the_drawing(traced, primal, boundary, edges, model, region, topology, columns)
+
+    def _filled(self, points: np.ndarray, triangles: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``points`` with the fill's new points after them, and the fill's tetrahedra.
+
+        Netgen is given only the points the surface uses (it renumbers when one is not), and its
+        tetrahedra are put back in the numbering of ``points``.
+        """
+        used = np.unique(triangles)
+        position = np.full(points.shape[0], -1, dtype=np.int64)
+        position[used] = np.arange(used.size)
+        filled = self.netgen.fill(
+            points[used], position[triangles], max_size=self.max_size, **self._netgen_options()
+        )
+        added = filled.points[used.size :]
+        back = np.concatenate([used, points.shape[0] + np.arange(added.shape[0])])
+        return np.vstack([points, added]), back[filled.tetrahedra]
 
     def _netgen_options(self, **extra) -> dict:
         """The Netgen settings that are set, to pass through."""
@@ -270,29 +310,60 @@ def _patch_of_face(model, region, surface: SurfaceTriangulation, n_faces, patche
 
 
 @dataclasses.dataclass(frozen=True)
+class _Boundary:
+    """The primal's boundary faces, triangles and quadrilaterals, with the drawing's face under each.
+
+    The quadrilaterals are prisms' sides lying on a face without layers.
+    """
+
+    triangles: np.ndarray
+    triangle_face: np.ndarray
+    quads: np.ndarray = dataclasses.field(default_factory=lambda: np.zeros((0, 4), np.int64))
+    quad_face: np.ndarray = dataclasses.field(default_factory=lambda: np.zeros(0, np.int64))
+
+    def rings(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Each kind of face with the drawing's faces under it."""
+        return [(np.asarray(self.triangles, np.int64), np.asarray(self.triangle_face, np.int64)),
+                (np.asarray(self.quads, np.int64), np.asarray(self.quad_face, np.int64))]  # fmt: skip
+
+    def patches(self, patch_of_face: np.ndarray, names: list[str]) -> dict[str, list[np.ndarray]]:
+        """The faces of each patch that has any, by the patch of the drawing's face under each."""
+        found = {}
+        for index, name in enumerate(names):
+            mine = [faces[patch_of_face[under] == index] for faces, under in self.rings()]
+            if any(len(part) for part in mine):
+                found[name] = mine
+        return found
+
+
+@dataclasses.dataclass(frozen=True)
 class _SurfaceEdges:
-    """Each edge of a closed triangulation once, with the faces its two triangles lie on.
+    """Each edge of a closed boundary once, with the drawing's faces of the two faces beside it.
 
     Attributes
     ----------
     points : np.ndarray of int, shape ``(n_edges, 2)``
         The edge's two points, ascending; rows in ascending order.
     faces : np.ndarray of int, shape ``(n_edges, 2)``
-        The faces of its two triangles, ascending (equal inside a face).
+        The drawing's faces under the two faces beside it, ascending (equal inside a face).
     """
 
     points: np.ndarray
     faces: np.ndarray
 
     @classmethod
-    def of(cls, surface: SurfaceTriangulation) -> _SurfaceEdges:
-        triangles = np.asarray(surface.triangles, dtype=np.int64)
-        corners = np.stack([triangles, np.roll(triangles, -1, axis=1)], axis=2).reshape(-1, 2)
-        face = np.repeat(surface.face, 3)
+    def of(cls, boundary: _Boundary) -> _SurfaceEdges:
+        corners, face = [], []
+        for rings, under in boundary.rings():
+            if not len(rings):
+                continue
+            corners.append(np.stack([rings, np.roll(rings, -1, axis=1)], axis=2).reshape(-1, 2))
+            face.append(np.repeat(under, rings.shape[1]))
+        corners, face = np.concatenate(corners), np.concatenate(face)
         keys = np.sort(corners, axis=1)
         order = np.lexsort(keys.T[::-1])
         keys, face = keys[order], face[order]
-        # A closed surface has each edge on exactly two triangles, so sorted keys come in pairs.
+        # A closed boundary has each edge on exactly two faces, so sorted keys come in pairs.
         pair = np.sort(np.stack([face[0::2], face[1::2]], axis=1), axis=1)
         return cls(keys[0::2], pair)
 
@@ -311,16 +382,20 @@ class _SurfaceEdges:
         return self.faces[position]
 
 
-def _onto_the_drawing(traced, primal, surface, edges, model, region, topology) -> Mesh:
+def _onto_the_drawing(
+    traced, primal, boundary, edges, model, region, topology, columns=None
+) -> Mesh:
     """The dual with each boundary vertex the primal boundary approximates moved onto the drawing.
 
     A boundary face's centroid goes onto the face its triangle lies on; a vertex on a boundary
     edge, onto the face of its two triangles or, where they lie on two faces, onto the drawing's
     edge between them (the nearest, where they share several). A primal point is on the drawing
-    already and stays.
+    already and stays. Above a layered wall face, the prisms' centroids -- the dual's vertices in
+    the layers -- move with the face's centroid, by ``columns.weight`` of its displacement, so the
+    dual's layers keep their heights from the true wall rather than from the triangle's chord.
     """
     coordinates = np.array(traced.mesh.node_coords, dtype=np.float64)
-    of_face = _drawing_faces(primal, surface)
+    of_face = _drawing_faces(primal, boundary)
     at_face = np.flatnonzero(traced.vertex_face >= 0)
     at_edge = np.flatnonzero(traced.vertex_edge[:, 0] >= 0)
     beside = edges.faces_of(traced.vertex_edge[at_edge])
@@ -331,6 +406,12 @@ def _onto_the_drawing(traced, primal, surface, edges, model, region, topology) -
         coordinates[onto_faces],
         faces=np.concatenate([of_face[traced.vertex_face[at_face]], beside[inside, 0]]),
     )
+    if columns is not None:
+        moved = landed.points[: at_face.size] - coordinates[at_face]
+        column = columns.of_face[traced.vertex_face[at_face]]
+        layered = column >= 0
+        for k, weight in enumerate(columns.weight):
+            coordinates[columns.cells[column[layered], k]] += weight * moved[layered]
     coordinates[onto_faces] = landed.points
     crossing, pairs = at_edge[~inside], beside[~inside]
     shared = _edges_shared(topology)
@@ -349,22 +430,76 @@ def _onto_the_drawing(traced, primal, surface, edges, model, region, topology) -
     return eqx.tree_at(lambda mesh: mesh.node_coords, traced.mesh, jnp.asarray(coordinates))
 
 
-def _drawing_faces(primal: Mesh, surface: SurfaceTriangulation) -> np.ndarray:
-    """The drawing's face under each primal boundary face (``-1`` inside), by its triangle."""
-    neighbour = np.asarray(primal.face_cells.neighbour)
-    rings = np.asarray(primal.face_nodes.face_node_indices).reshape(-1, 3)
-    boundary = np.flatnonzero(neighbour < 0)
-    bound = int(surface.triangles.max()) + 1
+@dataclasses.dataclass(frozen=True)
+class _Columns:
+    """The prisms above each layered wall face, and how much of the face's move each follows.
 
-    def key(triangles):
-        ordered = np.sort(np.asarray(triangles, dtype=np.int64), axis=1)
-        return (ordered[:, 0] * bound + ordered[:, 1]) * bound + ordered[:, 2]
+    Attributes
+    ----------
+    of_face : np.ndarray of int, shape ``(n_faces,)``
+        The column of each primal face that is a layered wall triangle, else ``-1``.
+    cells : np.ndarray of int, shape ``(n_columns, n_layers)``
+        The primal cell of each prism of each column, wall first.
+    weight : np.ndarray, shape ``(n_layers,)``
+        The share of the wall face's move each prism's centroid takes: ``1 - (c / t) ** 2`` for a
+        centroid ``c`` above the wall in layers ``t`` thick, so the layers next to the wall move
+        nearly with it and the top of the layers, which the tetrahedra meet, barely at all.
+    """
 
-    keys = key(surface.triangles)
-    order = np.argsort(keys)
-    found = order[np.searchsorted(keys[order], key(rings[boundary]))]
+    of_face: np.ndarray
+    cells: np.ndarray
+    weight: np.ndarray
+
+    @classmethod
+    def of(cls, primal, walls, n_tetrahedra, layers) -> _Columns:
+        """The columns over ``walls`` (the layered triangles, in the order the prisms were grown),
+        whose prisms are the cells after the ``n_tetrahedra`` tetrahedra, layer by layer."""
+        n_columns, n_layers = walls.shape[0], layers.count
+        cells = n_tetrahedra + np.arange(n_layers * n_columns).reshape(n_layers, n_columns).T
+        neighbour = np.asarray(primal.face_cells.neighbour)
+        on_boundary = np.flatnonzero(neighbour < 0)
+        rings = _boundary_rings(primal, on_boundary)
+        keys = face_keys(rings, primal.n_nodes)
+        order = np.lexsort(keys.T[::-1])
+        padded = np.full((n_columns, 4), -1, dtype=np.int64)
+        padded[:, :3] = walls
+        found = order[search_rows(keys[order], face_keys(padded, primal.n_nodes))]
+        of_face = np.full(primal.n_faces, -1, dtype=np.int64)
+        of_face[on_boundary[found]] = np.arange(n_columns)
+        tops = layers.offsets()
+        centroids = 0.5 * (np.concatenate([[0.0], tops[:-1]]) + tops)
+        return cls(of_face, cells, 1.0 - (centroids / tops[-1]) ** 2)
+
+
+def _boundary_rings(primal: Mesh, faces: np.ndarray) -> np.ndarray:
+    """The rings of some primal faces, padded to four corners with ``-1``."""
+    offsets = np.asarray(primal.face_nodes.offsets)
+    nodes = np.asarray(primal.face_nodes.face_node_indices, dtype=np.int64)
+    count = offsets[faces + 1] - offsets[faces]
+    rings = np.full((faces.size, 4), -1, dtype=np.int64)
+    for size in (3, 4):
+        chosen = np.flatnonzero(count == size)
+        rows = offsets[faces[chosen]][:, None] + np.arange(size)
+        rings[chosen, :size] = nodes[rows]
+    return rings
+
+
+def _drawing_faces(primal: Mesh, boundary: _Boundary) -> np.ndarray:
+    """The drawing's face under each primal boundary face (``-1`` inside), matched by corners."""
+    on_boundary = np.flatnonzero(np.asarray(primal.face_cells.neighbour) < 0)
+    rings = _boundary_rings(primal, on_boundary)
+    n_points = primal.n_nodes
+    given, under = [], []
+    for faces, face in boundary.rings():
+        padded = np.full((faces.shape[0], 4), -1, dtype=np.int64)
+        padded[:, : faces.shape[1]] = faces
+        given.append(face_keys(padded, n_points))
+        under.append(face)
+    given, under = np.concatenate(given), np.concatenate(under)
+    order = np.lexsort(given.T[::-1])
+    found = order[search_rows(given[order], face_keys(rings, n_points))]
     faces = np.full(primal.n_faces, -1, dtype=np.int64)
-    faces[boundary] = surface.face[found]
+    faces[on_boundary] = under[found]
     return faces
 
 

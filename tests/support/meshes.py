@@ -21,7 +21,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
-from aquaflux.meshing import tetrahedral_mesh
+from aquaflux.meshing import element_mesh
 
 
 def geometry_invariants(mesh: Mesh) -> dict:
@@ -279,7 +279,7 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
                         vertices.append(node(*corner))
                     cells.append(vertices)
 
-    return tetrahedral_mesh(coords, np.asarray(cells))
+    return element_mesh(coords, np.asarray(cells))
 
 
 def hexahedron_beside_a_prism():

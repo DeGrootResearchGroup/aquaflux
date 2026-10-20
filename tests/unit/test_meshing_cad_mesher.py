@@ -119,13 +119,27 @@ class _Netgen:
         self.calls = 0
 
     def triangulate(self, shape, **options):
+        # As Netgen does: the surface's own points only, every one used by a triangle.
         self.calls += 1
-        face = _wall(self.points[self.triangles].mean(axis=1))
-        return SurfaceTriangulation(self.points, self.triangles, face)
+        used, triangles = np.unique(self.triangles, return_inverse=True)
+        triangles = triangles.reshape(-1, 3)
+        face = _wall(self.points[used][triangles].mean(axis=1))
+        return SurfaceTriangulation(self.points[used], triangles, face)
 
     def fill(self, points, triangles, **options):
+        # As Netgen does: the given points first, in their order, then the points it adds.
         self.calls += 1
-        return TetrahedralMesh(self.points, self.tetrahedra)
+        points = np.asarray(points)
+        given = {tuple(p): i for i, p in enumerate(points.round(12).tolist())}
+        number = np.empty(len(self.points), dtype=np.int64)
+        added = []
+        for i, p in enumerate(self.points.round(12).tolist()):
+            if tuple(p) in given:
+                number[i] = given[tuple(p)]
+            else:
+                number[i] = len(points) + len(added)
+                added.append(self.points[i])
+        return TetrahedralMesh(np.vstack([points, *added]), number[self.tetrahedra])
 
 
 def _areas(mesh) -> dict[str, float]:
@@ -247,7 +261,7 @@ def test_a_vertex_on_an_edge_inside_one_face_is_moved_onto_that_face():
     # -- each boundary-face centroid and each such vertex -- moves by exactly that.
     from aquaflux.mesh import Mesh
     from aquaflux.meshing import PolyhedralDual
-    from aquaflux.meshing.cad_mesher import _onto_the_drawing, _SurfaceEdges
+    from aquaflux.meshing.cad_mesher import _Boundary, _onto_the_drawing, _SurfaceEdges
 
     from tests.unit.test_meshing_dual import _cube_walls, _without_corner
 
@@ -267,7 +281,7 @@ def test_a_vertex_on_an_edge_inside_one_face_is_moved_onto_that_face():
     axis = np.argmax(np.all(np.isclose(corners, corners[:, :1]), axis=1), axis=1)
     level = np.round(corners[np.arange(len(axis)), 0, axis], 9)
     walls, face = np.unique(np.stack([axis, level], axis=1), axis=0, return_inverse=True)
-    surface = SurfaceTriangulation(points, triangles, face.reshape(-1))
+    boundary = _Boundary(triangles, face.reshape(-1))
 
     class _Drawing:
         def project(self, region, points, faces=None, edges=None):
@@ -280,12 +294,12 @@ def test_a_vertex_on_an_edge_inside_one_face_is_moved_onto_that_face():
         n_edges = 0
 
     moved = _onto_the_drawing(
-        traced, primal, surface, _SurfaceEdges.of(surface), _Drawing(), REGION, _NoEdges()
+        traced, primal, boundary, _SurfaceEdges.of(boundary), _Drawing(), REGION, _NoEdges()
     )
     shift = np.linalg.norm(
         np.asarray(moved.node_coords) - np.asarray(traced.mesh.node_coords), axis=1
     )
-    beside = _SurfaceEdges.of(surface).faces_of(traced.vertex_edge[traced.vertex_edge[:, 0] >= 0])
+    beside = _SurfaceEdges.of(boundary).faces_of(traced.vertex_edge[traced.vertex_edge[:, 0] >= 0])
     in_one_wall = int(np.count_nonzero(beside[:, 0] == beside[:, 1]))
     assert in_one_wall > 0
     expected = np.count_nonzero(traced.vertex_face >= 0) + in_one_wall

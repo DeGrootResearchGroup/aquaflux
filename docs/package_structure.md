@@ -198,7 +198,8 @@ cfd/                                  # repo root
 │   ├── meshing/                      # mesh generation from CAD (host-side numpy + numba; Netgen only in a child process)
 │   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches) -> Mesh; FaceSelection -> FacesNear / FacesOn
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
-│   │   ├── tetrahedra.py             #   tetrahedral_mesh(points, tetrahedra, patches) -> Mesh
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, patches) -> Mesh
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, triangles, layered) -> LayerExtrusion: prism layers sized for the dual
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)

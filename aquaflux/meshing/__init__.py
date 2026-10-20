@@ -12,7 +12,9 @@ without loading it.
 
 :class:`CadMesher` meshes a region of a CAD model -- some solids' union, less others -- as polyhedra:
 Netgen's tetrahedra of it, their boundary in patches chosen by face (:class:`FacesNear`,
-:class:`FacesOn`), turned into their dual. :func:`tetrahedral_mesh` makes a mesh of any tetrahedra.
+:class:`FacesOn`), turned into their dual. :class:`PrismLayers` grows layers of prisms inward from the wall before the fill, sized for the dual,
+so a wall-resolved mesh's layers join its core conformally. :func:`element_mesh` makes a mesh of
+any tetrahedra and triangular prisms.
 
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
 per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
@@ -31,21 +33,24 @@ from .netgen_process import (
     check_closed_surface,
     netgen_available,
 )
-from .tetrahedra import tetrahedral_mesh
+from .elements import element_mesh
+from .layers import LayerExtrusion, PrismLayers
 
 __all__ = [
     "CadMesher",
     "FaceSelection",
     "FacesNear",
     "FacesOn",
+    "LayerExtrusion",
     "MeshingError",
     "NetgenProcess",
     "PolyhedralDual",
+    "PrismLayers",
     "RegionFaces",
     "SurfaceTriangulation",
     "TetrahedralMesh",
     "TracedDual",
     "check_closed_surface",
+    "element_mesh",
     "netgen_available",
-    "tetrahedral_mesh",
 ]

@@ -123,6 +123,16 @@ one form each, so they need no `kind`, and the top level is the case itself.
   them. Between those vertices a boundary face is flat, so a curved wall's patch is a little short of
   the drawing's area.
 
+  Wall-resolved layers grow from the patches listed in `layered`, sized for the solver's cells: the
+  cells against the wall are `first_height` tall and each layer above is `growth` times the one below
+  ({class}`~aquaflux.meshing.PrismLayers`; `growth` must exceed 1). Where a layered wall meets a patch
+  without layers, such as a pipe's end, the layers slide along it:
+
+  ```yaml
+    layers: {kind: PrismLayers, first_height: 0.0005, growth: 1.2, count: 5}
+    layered: [walls, lamp]
+  ```
+
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
 the density, so a file cannot state two viscosities that disagree.

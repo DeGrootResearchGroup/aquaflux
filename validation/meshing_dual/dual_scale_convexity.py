@@ -32,7 +32,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import numpy as np
 from aquaflux.io.cad import CadRegion, Placement, read_step
 from aquaflux.mesh import Mesh, closed_cell_residual
-from aquaflux.meshing import NetgenProcess, PolyhedralDual, tetrahedral_mesh
+from aquaflux.meshing import NetgenProcess, PolyhedralDual, element_mesh
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
 from OCP.BRepTools import BRepTools
@@ -105,8 +105,8 @@ def main(names: list[str], sizes: list[float]) -> None:
             for maxh in sizes:
                 surface = netgen.triangulate(path, max_size=maxh)
                 filled = netgen.fill(surface.points, surface.triangles, max_size=maxh)
-                primal = tetrahedral_mesh(
-                    filled.points, filled.tetrahedra, {"walls": surface.triangles}
+                primal = element_mesh(
+                    filled.points, filled.tetrahedra, patches={"walls": surface.triangles}
                 )
                 start = time.perf_counter()
                 try:
