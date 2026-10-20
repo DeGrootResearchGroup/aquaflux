@@ -15,6 +15,11 @@ __all__ = ["element_mesh"]
 _TETRAHEDRON = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]]
 #: A prism's faces: its two triangles, then its three quadrilateral sides, each ring in order.
 _PRISM = [[0, 1, 2], [3, 4, 5], [0, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5]]
+#: A hexahedron's corners as the corners of the unit cube, in the order its corners are given: one
+#: quadrilateral ``(0,0,0), (1,0,0), (1,1,0), (0,1,0)``, then the opposite one corner over corner.
+HEXAHEDRON_CORNERS = np.array(
+    [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]
+)
 #: A hexahedron's faces: its two given quadrilaterals, then its four sides, each ring in order.
 _HEXAHEDRON = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]]
 #: A pyramid's faces: its quadrilateral, then its four triangles, each ring in order.
@@ -28,6 +33,7 @@ def element_mesh(
     hexahedra: np.ndarray | None = None,
     pyramids: np.ndarray | None = None,
     patches: Mapping[str, np.ndarray | Sequence[np.ndarray]] | None = None,
+    patch_types: Mapping[str, str] | None = None,
 ) -> Mesh:
     """The face-based mesh of tetrahedra, prisms, hexahedra and pyramids, each face once, its
     boundary in named patches.
@@ -57,6 +63,9 @@ def element_mesh(
         The boundary faces in each patch, as corners -- triangles ``(n, 3)``, quadrilaterals
         ``(n, 4)``, or a sequence of such arrays -- in any order. Given, every boundary face must be
         in exactly one; unset, the boundary is left unnamed.
+    patch_types : mapping of {str: str}, optional
+        A type for named patches (``wall``, ``patch``, ``symmetry``, ...), carried on the mesh's
+        patches uninterpreted, as a mesh file's declared types are.
 
     Returns
     -------
@@ -119,6 +128,7 @@ def element_mesh(
         neighbour,
         n_cells,
         face_patches=face_patches,
+        patch_types=patch_types,
     )
 
 

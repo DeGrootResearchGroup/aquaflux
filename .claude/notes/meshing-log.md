@@ -260,3 +260,66 @@ macOS arm64, one run each, `OctreeCore` defaults (`cap_height` 0.25, `samples` 3
   wound outward (Netgen test). **Dismissed, equivalent**: dropping `Octree.leaf_at`'s level check —
   levels are visited coarsest first, so a wrong match at a coarser level is always overwritten by the
   true leaf's; kept so the lookup does not depend on that order.
+
+## 2026-10-19 — the block mesher's core: TFI blocks, assembly, round layouts
+
+Built `blocks.py` (`HexBlock`, `transfinite`, `Arc`, `SampledCurve`, `CylinderSurface`, `SphereSurface`),
+`block_assembly.py` (`BlockMesh`), `block_topologies.py` (`PipeOGrid`, `Annulus`, `CubedSphereCap`), and
+`element_mesh` hexahedra and pyramids. Volume errors relative to the exact solid, `PolyhedralDual` at
+feature angle 45°, macOS arm64, one run each (whole assemble + mesh + dual ≤ 0.6 s each):
+
+| layout (counts: tangential n, radial, axial/polar) | n = 4 primal / dual | n = 8 | n = 16 |
+|---|---|---|---|
+| `PipeOGrid(0.3, 1.2, n, n/2, n/2)` | −2.55e-2 / −5.79e-2 | −6.41e-3 / −1.54e-2 | −1.61e-3 / −3.93e-3 |
+| `Annulus(0.2, 0.5, 0.8, n, n/2, 2)` | −2.55e-2 / −5.79e-2 | −6.41e-3 / −1.47e-2 | −1.61e-3 / −3.70e-3 |
+| `CubedSphereCap(0.2, 0.5, n, n/2, 2)` | −6.55e-2 / −1.45e-1 | −1.69e-2 / −4.02e-2 | −4.25e-3 / −1.04e-2 |
+
+Second order throughout. The pipe's and annulus's primal errors are exactly the inscribed 4n-gon's
+deficit, `1 − sin(2π/4n)/(2π/4n)` (2.550e-2 at the 16-gon), an independent check. The dual sits inside the
+primal by the boundary-centroid chord, about 2.3x the primal's error. Every dual closes (≤ 1e-16) with
+positive volumes; the cap joined to an `Annulus(azimuth=π/4)` shares the rim's `4n(radial+1)` points.
+
+Mutation pass (each red): blend weights uniform instead of the fractions (only the graded annular sector
+sees it — survived the box tests, so that test was added); straight edges at uniform fractions or wrong
+corners; an arc turned the other way; a reversed edge not re-parameterized; the polyline by index not
+length (survived until the legs were made unequal); projection skipped; the handedness check off; an edge
+not checked against its corners; a given face ignored; the face/edge clash check off; a hexahedron or
+pyramid face ring wrong; no point identified; the interior-point rule of the partial-join check off; the
+unnamed-patch check off; the pipe wall off its radius; pipe ends' patches swapped; an annulus arc dropped;
+the cap's outer projection dropped. Two survivors were themselves defects found: the corner placement
+loop in `HexBlock.points` was dead (every corner is set by its edges; deleted), and a 1e-30 tolerance still
+merged a box's bit-identical points, so the merge mutation is on the grouping itself.
+
+## 2026-10-20 — the block mesher against blockmeshbuilder: lattices, placement, cone, patch types
+
+The owner's blockMesh front end is blockmeshbuilder (BMB, github.com/NauticalMile64/blockmeshbuilder, read
+in full: structures, grading, geometry, boundary tags, every example). Gaps against our core, and the
+owner's decision (2026-10-20): **built now** — block arrays (`BlockLattice`, Cartesian and cylindrical)
+with masking, several shells/segments and grading shared per interval; the bowed and turned O-grid core
+(`core_bow`, `azimuth`); placement (`HexBlock.placed` on `io.cad.Placement`); plane and cone projection;
+patch types, a default patch, and a global count factor (BMB's `density_scale`) and `cell_counts` (its
+`number_of_divisions`). **Deferred** — per-edge grading within a block (BMB's edgeGrading), spline and
+B-spline edges (a callable covers them), cell zones per block (the dual takes one zone), periodic patches
+(cyclic/AMI; the dual refuses periodic), the axisymmetric wedge with a collapsed axis. **Never** — the
+airfoil boundary-layer wrap (prism layers cover arbitrary walls) and `mergePatchPairs` (no non-conformal
+coupling). BMB's `thin_baffles` example builds only a graded cavity, so it shows nothing on baffles.
+
+Measured (relative volume error against the exact solid, `PolyhedralDual` at 45°, macOS arm64):
+`PipeOGrid(1, [0, 1, 2], n, n/2, n/2)` n = 4/8/16: primal −2.550e-2 / −6.413e-3 / −1.606e-3, dual
+−6.02e-2 / −1.57e-2 / −3.97e-3; the bowed pipe (`core_bow` 0.6) gives the same primal error (the core
+does not touch the wall polygon). Frustum shell (cylindrical lattice, radii 0.5→0.4 and 1.0→0.7 over
+height 1, n/2 × n × n): primal −2.550e-2 / −6.413e-3 / −1.606e-3, dual −6.02e-2 / −1.57e-2 / −3.97e-3.
+Every dual closed (≤ 1.7e-16). Refactoring `PipeOGrid` and `Annulus` onto lattices left the existing
+block tests' values unchanged.
+
+Mutation pass (`test_meshing_lattices.py`, each red): `Graded` toward the end not mirrored; scaled growth
+not re-exponented; explicit fractions split wrongly, or a non-whole factor accepted; `cell_counts` floor 0;
+the plane's step halved; the cone's foot without its radial part; placement with the matrix untransposed,
+or the projection's offset not removed; a reflection not relabelled; per-interval lists collapsed to their
+first; the mask ignored; the default cylinder or cone projection dropped; the cylindrical edge made
+straight; the 180° and radius checks loosened; the list-length check off; `Straight` ignored; the shells
+misplaced; the bow's middle wrong; the core's bowed edges left straight (a partial join); the azimuth
+rotation off by π/4; `around` ignored; `patch_types` dropped by `element_mesh`; `count_factor` ignored;
+the pipe tube's inner faces projected; its first-shell radial edges not straight. One survivor was a test
+gap and is fixed: with two side blocks the side's middle node is at the uniform angle, so the radial
+edge was straight either way — the test now uses three and checks the lines are straight.

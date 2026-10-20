@@ -196,9 +196,15 @@ cfd/                                  # repo root
 │   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back, with the march history its step record carries
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   ├── meshing/                      # mesh generation from CAD (host-side numpy + numba; Netgen only in a child process)
+│   │   ├── blocks.py                 #   HexBlock: a curved hexahedron filled by transfinite interpolation; Arc, SampledCurve; placed / scaled_counts
+│   │   ├── divisions.py              #   Graded and the count / fractions divisions of a block direction; cell_counts
+│   │   ├── surfaces.py               #   PlaneSurface / CylinderSurface / ConeSurface / SphereSurface projections
+│   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
+│   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
+│   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
 │   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches) -> Mesh; FaceSelection -> FacesNear / FacesOn
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
-│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches) -> Mesh
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
 │   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement
 │   │   ├── hex_core.py               #   OctreeCore.mesh(inside, lower, upper) -> HexCore: conformal hex core, pyramid caps
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, triangles, layered) -> LayerExtrusion: prism layers sized for the dual

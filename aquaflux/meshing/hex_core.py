@@ -47,15 +47,10 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from .elements import HEXAHEDRON_CORNERS
 from .octree import BITS, Octree, RefinementCriterion, cube_samples, point_keys
 
 __all__ = ["HexCore", "OctreeCore"]
-
-#: A cube's corners in units of its edge, as a hexahedron: its lower face, then its upper one, corner
-#: over corner.
-HEXAHEDRON_CORNERS = np.array(
-    [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]
-)
 
 #: A face's corners in the plane of its two other axes, counter-clockwise about its axis.
 FACE_RING = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
