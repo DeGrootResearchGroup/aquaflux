@@ -80,10 +80,10 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 - **Accepted primal**: 3D, non-periodic, one cell zone, no patch on interior faces, closed manifold
   boundary, every point on a face. Each refused by name.
 - **Cells at sharp concave folds are cut into pieces** (`_Pieces`): every point on an edge folding concavely
-  by more than `feature_angle` (sign by `boundary_folds`). **Why it is required for correctness, not
-  quality**: uncut, such a cell wraps around the fold, and on Netgen tets `Mesh.geometry()`'s centroid-based
-  orientation turned exactly one face per cell inward (topology closed, consistently oriented faces summing
-  to zero; log). **The rule**: the walls are the feature sectors at the point that touch one of its concave
+  by more than `feature_angle` (sign by `boundary_folds`). **Why, now that the mesh orients faces by
+  shared edges** (`mesh.md`): an uncut cell closes but wraps around the fold — worst non-convexity 1.2 on the
+  Netgen L at maxh 0.01, against 0.35 cut (log). Under the former centroid-based orientation it was a
+  correctness matter: one face per such cell was turned inward. **The rule**: the walls are the feature sectors at the point that touch one of its concave
   edges, each with its area-weighted normal at the point; each primal cell around the point goes to the
   wall its centroid lies deepest behind (`argmax -(c - p)·n`), and each wall's cells are one dual cell
   (face-connected, else `NotImplementedError`). Merging sectors across convex edges is wrong (the L's end
@@ -95,9 +95,10 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
     pieces changes around its edge is cut into one face per run, closed through a vertex of the edge; each
     cut face gives a quad `[p, edge vertex, face vertex, edge vertex]` between the two pieces; boundary
     fans are also cut where the faces' cells change piece. The point itself becomes a vertex.
-  - ⚠️ **The added vertices must lie on the surface between pieces, or the cut fails the same way.** At
-    face and edge centroids the separating surface zig-zags along tet faces and Netgen L cells still
-    failed closure (maxh 0.01: 6 cells, 3 points, ~4e-5). So: a face's vertex where its dual edge crosses
+  - **The added vertices lie on the surface between pieces**, or the separating surface zig-zags along tet
+    faces: Netgen L at maxh 0.01, worst non-convexity 0.56 with the cut faces' vertices at face centroids,
+    1.1 with the cut edges' hubs at midpoints, 1.23 with both (0.35 placed); under the former centroid
+    orientation the unplaced cut also failed closure. So: a face's vertex where its dual edge crosses
     the plane `(n_b − n_a)·(x − p) = 0` (fraction kept to [0.1, 0.9] so a centroid on the plane does not
     give coincident vertices; mean over cutting points); an interior edge's hub the least-squares point
     on every interface it meets and in the dual face's plane (on the triple line where three pieces meet);

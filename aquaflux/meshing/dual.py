@@ -29,9 +29,9 @@ built from). Away from them the dual's boundary runs through face centroids, ins
 boundary by the chord of a face.
 
 **A cell at a sharp concave fold is cut into pieces.** The dual cell of a point on an edge folding
-concavely by more than the feature angle wraps around the fold; on tetrahedra it can fold far
-enough that its approximate centroid lies beyond one of its own faces, and the mesh -- which orients
-every face's normal away from that centroid -- would turn that face inward. So the primal cells
+concavely by more than the feature angle wraps around the fold, so far from convex that one of its
+own vertices lies a whole cell size beyond one of its faces -- a poor cell for a finite-volume
+discretization, whose fluxes assume a face separates its two cells. So the primal cells
 around such a point are shared among the walls meeting at its concave edges, each going to the wall
 its centroid lies deepest behind, and each wall's share is one dual cell. Where two pieces meet,
 the dual faces are cut through vertices put on the surface between them (for two walls, the plane

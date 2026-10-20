@@ -23,6 +23,7 @@ from tests.support.meshes import (
     restated,
     tetrahedral_grid_3d,
     without_cells,
+    worst_excursion,
 )
 from tests.support.polymesh import cyclic_two_cube_polymesh_data
 
@@ -230,31 +231,6 @@ def _assert_conformal(dual: Mesh) -> None:
     assert all(count == 2 for cell in uses for count in cell.values())
 
 
-def _worst_excursion(dual: Mesh) -> np.ndarray:
-    """Per cell: how far its farthest vertex lies outside one of its faces, over the cell's size.
-
-    Zero for a convex cell with flat faces; the faces' planes are those the mesh orients.
-    """
-    geometry = dual.geometry()
-    coords = np.asarray(dual.node_coords)
-    normal, centroid = np.asarray(geometry.face.normal), np.asarray(geometry.face.centroid)
-    owner, neighbour = np.asarray(dual.face_cells.owner), np.asarray(dual.face_cells.neighbour)
-    offsets = np.asarray(dual.face_nodes.offsets)
-    nodes = np.asarray(dual.face_nodes.face_node_indices)
-    vertices = [set() for _ in range(dual.n_cells)]
-    for face in range(dual.n_faces):
-        for cell in (owner[face], neighbour[face]):
-            if cell >= 0:
-                vertices[cell].update(nodes[offsets[face] : offsets[face + 1]].tolist())
-    worst = np.zeros(dual.n_cells)
-    for face in range(dual.n_faces):
-        for cell, sign in ((owner[face], 1.0), (neighbour[face], -1.0)):
-            if cell >= 0:
-                rise = sign * (coords[sorted(vertices[cell])] - centroid[face]) @ normal[face]
-                worst[cell] = max(worst[cell], float(rise.max()))
-    return worst / np.cbrt(np.asarray(geometry.cell.volume))
-
-
 # An L of hexahedra, longer in z than x so that no cell centroid lies on the plane bisecting it:
 # the concave edge runs along y at x = 1/3, z = 3/4.
 L_EDGE = (1 / 3, 0.75)
@@ -277,7 +253,7 @@ def test_a_cell_on_a_sharp_concave_edge_is_cut_into_two_convex_pieces():
         np.isclose(points[:, 0], L_EDGE[0]) & np.isclose(points[:, 2], L_EDGE[1])
     )
     assert on_edge.size == 3 and dual.n_cells == primal.n_nodes + on_edge.size
-    assert float(_worst_excursion(dual).max()) < 1e-12
+    assert float(worst_excursion(dual).max()) < 1e-12
     np.testing.assert_allclose(np.asarray(dual.geometry().cell.volume).sum(), 1.0, rtol=1e-12)
     _assert_closed(dual)
     _assert_conformal(dual)
@@ -334,7 +310,7 @@ def test_a_concave_corner_of_three_walls_is_cut_into_three_pieces():
     # Nearly convex: a face cut around two points of the corner is crossed by two of the planes
     # between pieces, and its one vertex on that dual edge lies between them. An uncut cell there
     # would wrap round the corner (an excursion near 1).
-    assert float(_worst_excursion(dual).max()) < 0.05
+    assert float(worst_excursion(dual).max()) < 0.05
     removed = np.prod([1.0, 1.2, 2.4] - corner)
     np.testing.assert_allclose(
         np.asarray(dual.geometry().cell.volume).sum(), 1.0 * 1.2 * 2.4 - removed, rtol=1e-12

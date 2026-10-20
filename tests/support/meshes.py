@@ -446,3 +446,28 @@ def without_cells(mesh: Mesh, removed, *, patch: str) -> Mesh:
         patch_types=dict(patches.patch_types),
         patch_groups=dict(patches.patch_groups),
     )
+
+
+def worst_excursion(dual: Mesh) -> np.ndarray:
+    """Per cell: how far its farthest vertex lies outside one of its faces, over the cell's size.
+
+    Zero for a convex cell with flat faces; the faces' planes are those the mesh orients.
+    """
+    geometry = dual.geometry()
+    coords = np.asarray(dual.node_coords)
+    normal, centroid = np.asarray(geometry.face.normal), np.asarray(geometry.face.centroid)
+    owner, neighbour = np.asarray(dual.face_cells.owner), np.asarray(dual.face_cells.neighbour)
+    offsets = np.asarray(dual.face_nodes.offsets)
+    nodes = np.asarray(dual.face_nodes.face_node_indices)
+    vertices = [set() for _ in range(dual.n_cells)]
+    for face in range(dual.n_faces):
+        for cell in (owner[face], neighbour[face]):
+            if cell >= 0:
+                vertices[cell].update(nodes[offsets[face] : offsets[face + 1]].tolist())
+    worst = np.zeros(dual.n_cells)
+    for face in range(dual.n_faces):
+        for cell, sign in ((owner[face], 1.0), (neighbour[face], -1.0)):
+            if cell >= 0:
+                rise = sign * (coords[sorted(vertices[cell])] - centroid[face]) @ normal[face]
+                worst[cell] = max(worst[cell], float(rise.max()))
+    return worst / np.cbrt(np.asarray(geometry.cell.volume))

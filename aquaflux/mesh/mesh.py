@@ -35,6 +35,7 @@ import numpy as np
 from . import cell, face, groups
 from .connectivity import FaceCellConnectivity, FaceNodeConnectivity, index_dtype, interior_mask
 from .geometry import MeshGeometry
+from .orientation import RingSigns, owner_outward_normals, ring_signs
 
 
 class Mesh(eqx.Module):
@@ -359,8 +360,10 @@ class Mesh(eqx.Module):
         """Compute the derived face and cell geometry (build-time, jit-compiled).
 
         Wires the computation in dependency order: the dimension's face-geometry strategy
-        gives area/centroid and a node-order normal; the approximate cell centroids orient the
-        normals owner-outward and give the exact cell volume/centroid accumulation its local
+        gives area/centroid and a node-order normal; the cells' faces, consistently oriented over
+        the edges they share (``orientation.ring_signs``, from the connectivity
+        alone), are turned out of each owner by its volume's sign; the approximate cell centroids
+        are that volume's reference and the exact cell volume/centroid accumulation's local
         reference point (see :class:`~aquaflux.mesh.cell.CellGeometry`).
 
         Geometry is returned as a fresh :class:`~aquaflux.mesh.geometry.MeshGeometry` product
@@ -376,7 +379,10 @@ class Mesh(eqx.Module):
             (volumes, centroids).
         """
         scheme = face.face_geometry_scheme(self.dim)
-        return _fused_geometry(scheme, self.node_coords, self.face_nodes, self.face_cells, self.dim)
+        signs = ring_signs(self.face_nodes, self.face_cells)
+        return _fused_geometry(
+            scheme, self.node_coords, self.face_nodes, self.face_cells, self.dim, signs
+        )
 
 
 @eqx.filter_jit
@@ -386,6 +392,7 @@ def _fused_geometry(
     face_nodes: FaceNodeConnectivity,
     face_cells: FaceCellConnectivity,
     dim: int,
+    signs: RingSigns,
 ) -> MeshGeometry:
     """The face/cell geometry pipeline of :meth:`Mesh.geometry`, compiled as one call.
 
@@ -397,7 +404,9 @@ def _fused_geometry(
     """
     area, centroid, node_order_normal = scheme.unoriented_geometry(node_coords, face_nodes)
     approx = cell.CellGeometry.approx_centroids(centroid, face_cells)
-    normal = scheme.orient_owner_outward(node_order_normal, centroid, approx[face_cells.owner])
+    normal = owner_outward_normals(
+        scheme, node_order_normal, area, centroid, approx, face_cells, signs
+    )
 
     face_geometry = face.FaceGeometry(area=area, centroid=centroid, normal=normal)
     cell_geometry = cell.CellGeometry.from_faces(face_geometry, face_cells, dim, approx)
