@@ -596,3 +596,31 @@ extended is `validation/meshing_dual/mapped_layers_sozzi.py`.
 - Reviewed by three agents (primal join, dual-side merging, critique of the rule). Merging an apex cell
   into a neighbour (toy model, no Netgen): closed but L-shaped cells, non-convexity 0.2 → ~1.0, so the
   planarizer's guard would refuse every merge. Open: #785.
+
+## 2026-10-20 — pipes' cores as structured O-grids
+
+Sozzi, maxh 0.02, layers (0.0005, 1.2, 5) on every wall, lamp cylinder and both pipes mapped, macOS
+arm64, netgen-mesher 6.2.2608; ensembles of drawings rotated 1-5 µrad about x (scratch script over
+`validation/meshing_dual/mapped_layers_sozzi.py`, which now finds the pipes by default). Pipe faces: face
+centroid x > 0.889 m or z > 0.06 m.
+
+| arm (draws) | cells | pipes > 50° | pipes worst | pipes p99 | other > 50° | volume ratio p99 | smallest cells (m³) |
+|---|---|---|---|---|---|---|---|
+| no cores (#783) (5) | ~48.5k | 85-93 | 87-89° | 46.8° | 109-122 | 165-177 | ~3.6e-10 |
+| O-grid, shell continuing the layers' growth (5) | ~53.6k | 66-72 | 62-74° | 7.3° | 150-170 | 34.5-35.2 | 3e-11 (several) |
+| O-grid, one-cell shell (5, shipped) | ~49.5k | 32-37 | 58.6-60.1° | 6.0° | 117-137 | 36.3-38.3 | 2-3 at 3.5-3.9e-11, then ~1.4e-10 |
+| O-grid, junction_rows 4 (2) | ~53.8k | 120-141 | 64-90° | 12.3-14.7° | 99-117 | 47.5 | ~3e-11 |
+| one-cell shell, rows not flattened (2) | ~49.6k | 38-41 | 62.6-62.7° | 8.2° | 123-125 | 39 | ~4e-11 |
+
+- The smallest cells are the junction discs' cap apexes (x ≈ 898.5 mm in the outlet, z ≈ 53 mm in the
+  riser), ~0.33 mm across: #785, confined to two discs. The continued shell's first cell is 0.3 of its
+  depth (the layers' alternation), so its outer disc quads are thin, their caps low and the apex cells
+  smaller and more numerous; it also made other faces over 50° rise (150-170).
+- **The saddle rows**: with the continued shell the riser's junction disc, interpolated straight from its
+  saddle rim, kept 98 % of the 1 mm saddle and two disc caps crossed (Netgen "boundary mesh is
+  overlapping"; one intersecting pair found by a triangle-triangle sweep of the fill's surface). With the
+  one-cell shell it no longer fails, but flat rows are still better (table).
+- Inlet and outlet areas 0.9783 of πr² in every arm: the open ends' O-grid cross-sections cover what the
+  end faces' triangles did. Mutations, each red: open end faces kept (the stub-cylinder test); the core
+  joined one ring point round (radial-line test); the fluid-inside check off; the junction disc wound
+  the wrong way and rows not flattened (both the Sozzi pipes test; the latter also the mapped test).

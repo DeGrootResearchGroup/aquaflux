@@ -32,6 +32,8 @@ from .elements import element_mesh, face_keys, search_rows
 from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import NetgenProcess, SurfaceTriangulation
+from .pipe_core import PipeCore
+from .pipes import fill_pipes, find_pipes, pipe_ends
 from .polygons import Polygons, PyramidCaps
 
 __all__ = ["CadMesher", "FaceSelection", "FacesNear", "FacesOn", "RegionFaces"]
@@ -162,6 +164,8 @@ class CadMesher:
         The height of the pyramids that cap each quadrilateral the tetrahedra meet, over the
         quadrilateral's first edge (round a structured grid), in ``(0, 1/2)`` (see
         :class:`~aquaflux.meshing.PyramidCaps`).
+    pipe_core : PipeCore
+        How the cores of pipes (see :meth:`mesh`) are filled.
     netgen : NetgenProcess
         The Netgen it runs.
     """
@@ -172,6 +176,7 @@ class CadMesher:
     grading: float | None = None
     layers: PrismLayers | None = None
     cap_height: float = 0.25
+    pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
 
     def __post_init__(self) -> None:
@@ -191,6 +196,7 @@ class CadMesher:
         others: str = "walls",
         layered: Sequence[str] = (),
         mapped: Sequence[str] = (),
+        pipes: Sequence[str] | None = None,
     ) -> Mesh:
         """The polyhedral mesh of ``region``.
 
@@ -209,6 +215,12 @@ class CadMesher:
             The patches whose faces are meshed with structured quadrilaterals in place of triangles
             (see :class:`~aquaflux.meshing.MappedQuads`): each face a band or four-sided. Layered,
             they carry hexahedra.
+        pipes : sequence of str, or None
+            The patches whose faces are pipes: each a cylinder the fluid fills, bounded by two
+            loops of equal counts (a multiple of four), with nothing else inside it. A pipe's face
+            is meshed as a structured grid (as ``mapped``), layered if its patch is, and its core
+            filled with a structured O-grid (:attr:`pipe_core`; see
+            :mod:`~aquaflux.meshing.pipes`). Unset, every face that is one; empty, none.
 
         Returns
         -------
@@ -220,7 +232,8 @@ class CadMesher:
         ValueError
             If a patch name is reserved or given twice, a selection finds no face, two selections
             share one, a layered or mapped patch is not a patch, a patch is layered without
-            :attr:`layers`, or a mapped patch's face is neither a band nor four-sided.
+            :attr:`layers`, a mapped patch's face is neither a band nor four-sided, or a face of a
+            patch named in ``pipes`` is not a pipe.
         MeshingError
             If Netgen fails.
         """
@@ -231,7 +244,12 @@ class CadMesher:
         if layered and self.layers is None:
             raise ValueError("patches are named to be layered, but the mesher has no layers")
         mapped = list(mapped)
-        for role, chosen in (("layered", layered), ("mapped", mapped)):
+        named_pipes = None if pipes is None else list(pipes)
+        for role, chosen in (
+            ("layered", layered),
+            ("mapped", mapped),
+            ("pipes", named_pipes or ()),
+        ):
             unknown = sorted(set(chosen) - set(names))
             if unknown:
                 raise ValueError(
@@ -245,23 +263,41 @@ class CadMesher:
                 **self._netgen_options(min_size=self.min_size),
             )
         patch_of_face = _patch_of_face(model, region, surface, topology.n_faces, patches, others)
-        walls = self._mapped(model, region, topology, surface, patch_of_face, names, mapped)
+        pipe_faces = _pipe_faces(topology, surface, patch_of_face, names, named_pipes)
+        chosen = np.union1d(_faces_of(patch_of_face, names, mapped), pipe_faces)
+        walls = self._mapped(model, region, topology, surface, chosen)
         on_layered = np.isin(patch_of_face[walls.face], [names.index(n) for n in layered])
         prisms = hexahedra = stacked = None
+        sides = side_face = None
         if on_layered.any():
             grown = self.layers.extrude(walls.points, walls.faces, on_layered)
-            points, fill = grown.points, grown.inner
+            points, fill, wall_faces = grown.points, grown.inner, grown.walls
             prisms, hexahedra, stacked = grown.prisms, grown.hexahedra, grown.columns
-            boundary = _Boundary.of(
-                grown.walls, walls.face, grown.sides, walls.face[grown.side_face]
-            )
+            sides, side_face = grown.sides, walls.face[grown.side_face]
         else:
-            points, fill = walls.points, walls.faces
-            boundary = _Boundary.of(walls.faces, walls.face)
+            points, fill, wall_faces = walls.points, walls.faces, walls.faces
+        wall_tag = walls.face
+        if len(pipe_faces):
+            pipes_in = self._pipes(topology, walls, pipe_faces, on_layered, stacked)
+            points, cores, fill, wall_faces, wall_tag = fill_pipes(
+                self.pipe_core, points, fill, wall_faces, wall_tag, pipes_in
+            )
+            hexahedra = cores if hexahedra is None else np.concatenate([hexahedra, cores])
+        boundary = _Boundary.of(wall_faces, wall_tag, sides, side_face)
         # The tetrahedra meet triangles only: each quadrilateral left for them is capped on their side.
         caps = PyramidCaps.on(points, fill.quads[:, ::-1], self.cap_height)
         points = np.vstack([points, caps.apexes])
         points, tetrahedra = self._filled(points, np.vstack([fill.triangles, caps.sides]))
+        layered_walls = walls.faces.where(on_layered)
+        if len(pipe_faces):
+            # An open pipe end's own points inside the layers' ring are left on no cell.
+            cells = [tetrahedra, prisms, hexahedra, caps.pyramids]
+            points, renumber = _compacted(points, [c for c in cells if c is not None])
+            tetrahedra, prisms, hexahedra = (None if c is None else renumber(c) for c in cells[:3])
+            caps = PyramidCaps(caps.apexes, renumber(caps.pyramids), caps.sides)
+            boundary = boundary.renumbered(renumber)
+            layered_walls = layered_walls.renumbered(renumber(np.arange(walls.points.shape[0])))
+            stacked = None if stacked is None else renumber(stacked)
         primal = element_mesh(
             points, tetrahedra, prisms, hexahedra, caps.pyramids,
             patches=boundary.patches(patch_of_face, names),
@@ -269,9 +305,8 @@ class CadMesher:
         columns = None
         if prisms is not None:
             columns = _Columns.of(
-                primal, walls.faces.where(on_layered), tetrahedra.shape[0], prisms.shape[0],
-                self.layers,
-            )  # fmt: skip
+                primal, layered_walls, tetrahedra.shape[0], prisms.shape[0], self.layers
+            )
         edges = _SurfaceEdges.of(boundary)
         feature_pairs = {
             tuple(sorted(topology.faces_of_edge(edge)[:2].tolist()))
@@ -284,11 +319,23 @@ class CadMesher:
         traced = dual.build_traced(primal)
         return _onto_the_drawing(traced, primal, boundary, edges, model, region, topology, columns)
 
+    def _pipes(self, topology, walls: MappedSurface, pipe_faces, on_layered, stacked):
+        """Each pipe's ends, and its rings round the core: the layers' top over its grid, where it
+        is layered, else the grid itself."""
+        top_of = np.arange(walls.points.shape[0])
+        if stacked is not None:
+            top_of[stacked[:, 0]] = stacked[:, -1]
+        pipes = []
+        for f in np.asarray(pipe_faces).tolist():
+            grid = walls.grids[f]
+            ends = pipe_ends(topology, grid, f, walls.faces, walls.face, on_layered)
+            pipes.append((ends, top_of[grid]))
+        return pipes
+
     @staticmethod
-    def _mapped(model, region, topology, surface, patch_of_face, names, mapped) -> MappedSurface:
-        """The triangulated surface, with the faces of the mapped patches remeshed as structured
+    def _mapped(model, region, topology, surface, chosen) -> MappedSurface:
+        """The triangulated surface, with the ``chosen`` faces remeshed as structured
         quadrilaterals, each new point moved onto its face."""
-        chosen = np.flatnonzero(np.isin(patch_of_face, [names.index(n) for n in mapped]))
         if not chosen.size:
             return MappedSurface(surface.points, Polygons(surface.triangles), surface.face)
         return MappedQuads().remesh(
@@ -300,8 +347,11 @@ class CadMesher:
         """``points`` with the fill's new points after them, and the fill's tetrahedra.
 
         Netgen is given only the points the surface uses (it renumbers when one is not), and its
-        tetrahedra are put back in the numbering of ``points``.
+        tetrahedra are put back in the numbering of ``points``. With no surface left (every cell
+        structured), Netgen is not run.
         """
+        if not len(triangles):
+            return points, np.zeros((0, 4), dtype=np.int64)  # nothing left for tetrahedra
         used = np.unique(triangles)
         position = np.full(points.shape[0], -1, dtype=np.int64)
         position[used] = np.arange(used.size)
@@ -316,6 +366,40 @@ class CadMesher:
         """The Netgen settings that are set, to pass through."""
         options = {"grading": self.grading, **extra}
         return {name: value for name, value in options.items() if value is not None}
+
+
+def _compacted(points: np.ndarray, cells: list[np.ndarray]):
+    """``points`` without those no cell uses, and the map from the old numbering to the new."""
+    used = np.zeros(points.shape[0], dtype=bool)
+    for corners in cells:
+        used[np.asarray(corners).reshape(-1)] = True
+    position = np.cumsum(used) - 1
+
+    def renumber(indices):
+        return position[np.asarray(indices, dtype=np.int64)]
+
+    return points[used], renumber
+
+
+def _faces_of(patch_of_face: np.ndarray, names, chosen) -> np.ndarray:
+    """The faces of the patches named in ``chosen``."""
+    return np.flatnonzero(np.isin(patch_of_face, [names.index(n) for n in chosen]))
+
+
+def _pipe_faces(topology, surface: SurfaceTriangulation, patch_of_face, names, named) -> np.ndarray:
+    """The pipes' faces: every face that is one, or (``named`` given) those of the patches named,
+    each of which must be one."""
+    candidates = (
+        np.arange(topology.n_faces) if named is None else _faces_of(patch_of_face, names, named)
+    )
+    found, refused = find_pipes(
+        topology, surface.points, surface.triangles, surface.face, candidates
+    )
+    if named is not None and refused:
+        face, reason = next(iter(refused.items()))
+        patch = names[patch_of_face[face]]
+        raise ValueError(f"face {face} of patch {patch!r} is not a pipe: {reason}")
+    return np.asarray(found, dtype=np.int64)
 
 
 def _check_names(patches, others: str) -> None:
@@ -370,6 +454,12 @@ class _Boundary:
             quads.append(sides)
             under.append(side_face)
         return cls(faces.triangles, triangle_face, np.concatenate(quads), np.concatenate(under))
+
+    def renumbered(self, renumber) -> _Boundary:
+        """The same faces with their points renumbered by ``renumber``."""
+        return _Boundary(
+            renumber(self.triangles), self.triangle_face, renumber(self.quads), self.quad_face
+        )
 
     def rings(self) -> list[tuple[np.ndarray, np.ndarray]]:
         """Each kind of face with the drawing's faces under it."""

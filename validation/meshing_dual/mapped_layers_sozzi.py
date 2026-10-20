@@ -3,7 +3,9 @@
 The Sozzi water (the vessel, its two pipes, the lamp taken out) is meshed twice at each ``maxh``,
 with the same layers on every wall (first dual height 0.5 mm, growth 1.2, five layers): once with
 every face triangulated, so the layers are prisms, and once with the lamp's cylinder and the two
-pipes' cylinders meshed as structured quadrilaterals (``mapped``), so their layers are hexahedra.
+pipes' cylinders meshed as structured quadrilaterals (``mapped``), so their layers are hexahedra. In
+both the mesher finds the two pipes and fills their cores with structured O-grids (its default since
+2026-10-20; before, the pipes' cores were tetrahedra).
 For each the harness prints the cell count, the time to mesh, how many dual cells are hexahedra,
 the share of the lamp's and the pipes' wall faces that are quadrilaterals of hexahedral cells, the
 median and 5-95 % range of the dual's first layer boundary from the true lamp wall (the dual

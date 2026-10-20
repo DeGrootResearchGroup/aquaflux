@@ -147,6 +147,19 @@ one form each, so they need no `kind`, and the top level is the case itself.
     mapped: [lamp]
   ```
 
+  Pipes are found by themselves: a cylindrical face the fluid fills, with nothing else inside it,
+  whose two rims have equal counts (a multiple of four). Its wall is meshed as a structured grid,
+  layered if its patch is, and its core -- what the layers leave -- is filled with a structured
+  O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core, whose sides may bow
+  outward (`core_bow`) to even out its corners, and a shell out to the layers. Where a pipe opens
+  into the rest of the region, the O-grid stops a couple of rows short and the tetrahedra take over.
+  `pipes` names the patches whose faces are pipes instead (`[]` for none), and `pipe_core` sets how
+  their cores are filled:
+
+  ```yaml
+    pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
+  ```
+
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
 the density, so a file cannot state two viscosities that disagree.

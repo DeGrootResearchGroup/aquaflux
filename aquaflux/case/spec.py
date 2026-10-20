@@ -35,7 +35,7 @@ import yaml
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import PinnedPoint, PressureDatum
 from aquaflux.mesh import Mesh
-from aquaflux.meshing import FacesNear, FacesOn, PrismLayers
+from aquaflux.meshing import FacesNear, FacesOn, Graded, PipeCore, PrismLayers
 from aquaflux.radiation import (
     EveryPair,
     NoOcclusion,
@@ -530,6 +530,8 @@ _CASE_MAPPING = SettingsMapping(
         FacesNear,
         FacesOn,
         PrismLayers,
+        PipeCore,
+        Graded,
         Fluid,
         Laminar,
         RANS,

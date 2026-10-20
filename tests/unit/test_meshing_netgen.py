@@ -613,3 +613,66 @@ def test_the_sozzi_lamp_and_pipes_meshed_as_grids_carry_hexahedral_layers():
     first = away[(away > 0.0002) & (away < 0.0008)]
     assert first.size > 100
     assert float(np.median(first)) == pytest.approx(0.0005, rel=0.03)
+
+
+def test_the_sozzi_pipes_cores_are_structured_o_grids_with_a_junction_at_each_vessel():
+    # Both pipes found as pipes (a cylinder the water fills, nothing inside), their walls mapped and
+    # layered and their cores filled with O-grids: open at the inlet and outlet, stopping short of
+    # the junctions with the vessel (the riser's saddle on its cylinder, the outlet on its end
+    # plate). Without the cores the pipes' faces reach 87 degrees non-orthogonal at the 99th
+    # percentile 47 (five draws, 2026-10-20); with them their cells along the axis are hexahedra.
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    patches = {
+        "inlet": FacesNear(((0.04765, 0.0, 0.8945),)),
+        "outlet": FacesNear(((1.739, 0.0, 0.0),)),
+        "lamp": FacesNear(((0.4, 0.01, 0.0),)),
+        "lamp_tip": FacesNear(((0.81, 0.0, 0.0),)),
+        "pipes": FacesNear(((0.0572, 0.0, 0.5), (1.3, 0.0096, 0.0))),
+    }
+    layers = PrismLayers(first_height=0.0005, growth=1.2, count=5)
+    # The riser's grid runs from its saddle; unflattened, its rows near the junction stay saddle
+    # shaped and the caps on the junction's disc cross (Netgen: "boundary mesh is overlapping").
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers).mesh(
+        model, water, patches, layered=("walls", "lamp", "lamp_tip", "pipes"), mapped=("lamp",),
+        pipes=("pipes",),
+    )  # fmt: skip
+    geometry = mesh.geometry()
+    assert np.all(np.asarray(geometry.cell.volume) > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    inside = neighbour >= 0
+    centroid = np.asarray(geometry.cell.centroid)
+    joining = centroid[neighbour[inside]] - centroid[owner[inside]]
+    normal = np.asarray(geometry.face.normal)[inside]
+    cosine = np.abs(np.einsum("ij,ij->i", joining, normal)) / np.linalg.norm(joining, axis=1)
+    angle = np.degrees(np.arccos(np.clip(cosine, 0.0, 1.0)))
+    where = np.asarray(geometry.face.centroid)[inside]
+    in_pipes = (where[:, 0] > 0.9) | (where[:, 2] > 0.07)
+    assert float(np.percentile(angle[in_pipes], 99)) < 7.0  # 6.0; 8.2 with saddle-shaped rows
+    # Along each pipe's axis, away from its junction, every cell is a hexahedron.
+    faces = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+        neighbour[inside], minlength=mesh.n_cells
+    )
+    riser = (np.hypot(centroid[:, 0] - 0.0476, centroid[:, 1]) < 0.002) & (centroid[:, 2] > 0.1)
+    outlet = (np.hypot(centroid[:, 1], centroid[:, 2]) < 0.002) & (centroid[:, 0] > 0.95)
+    for along in (riser, outlet):
+        assert np.count_nonzero(along) > 50
+        assert np.all(faces[along] == 6)
+    area = np.asarray(geometry.face.area)
+    for name in ("inlet", "outlet"):
+        end = float(area[np.asarray(mesh.face_patches.indices(name))].sum())
+        assert end == pytest.approx(np.pi * 0.0096**2, rel=0.03), name

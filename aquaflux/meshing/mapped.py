@@ -23,7 +23,7 @@ through a strip of triangles along it; a four-sided face whose two pairs both di
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -31,6 +31,9 @@ from scipy.spatial import cKDTree
 from .polygons import Polygons
 
 __all__ = ["MappedQuads", "MappedSurface"]
+
+#: The rows over which a band's rows go from a rim's own shape to a flat ring.
+RIM_ROWS = 2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -45,11 +48,17 @@ class MappedSurface:
         Wound out of the solid, as the triangulation was.
     face : np.ndarray of int, shape ``(faces.n_faces,)``
         The face each lies on, the triangles' first.
+    grids : mapping of {int: np.ndarray of int}
+        For each band whose loops have equal counts, its points as a grid ``(rows + 1, n)``: row 0
+        one loop, the last the other, each row round the band in the same direction, column ``i``
+        of every row joined to column ``i`` of the next by the grid's edges. Its quadrilaterals are
+        ``[grid[j, i], grid[j, i + 1], grid[j + 1, i + 1], grid[j + 1, i]]``, round it.
     """
 
     points: np.ndarray
     faces: Polygons
     face: np.ndarray
+    grids: Mapping[int, np.ndarray] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -112,11 +121,14 @@ class MappedQuads:
         kept_triangles = [triangles[~np.isin(face, chosen)]]
         kept_face = [face[~np.isin(face, chosen)]]
         quads, quad_face = [], []
+        grids: dict[int, np.ndarray] = {}
         for f in np.unique(np.asarray(chosen, dtype=np.int64)):
             mine = triangles[face == f]
             loops = _loops(mine)
             if len(loops) == 2:
                 new_triangles, new_quads = grid.band(*loops)
+                if grid.last_grid is not None:
+                    grids[int(f)] = grid.last_grid
             elif len(loops) == 1:
                 loop = loops[0]
                 distance, _ = corners.query(points[loop])
@@ -140,7 +152,7 @@ class MappedQuads:
             np.concatenate(kept_triangles), np.concatenate(quads or [np.zeros((0, 4))])
         )
         tags = np.concatenate([*kept_face, *(quad_face or [np.zeros(0, np.int64)])])
-        return _compacted(grid.points, faces, tags)
+        return _compacted(grid.points, faces, tags, grids)
 
 
 class _Builder:
@@ -149,6 +161,7 @@ class _Builder:
     def __init__(self, points: np.ndarray) -> None:
         self.points = points
         self.moved_from = points.shape[0]
+        self.last_grid: np.ndarray | None = None  # the last band's grid, when it is one
 
     def _added(self, new: np.ndarray) -> np.ndarray:
         """Append points (still to be moved onto their face); their indices."""
@@ -171,11 +184,13 @@ class _Builder:
         a, b = (first, second[::-1]) if first.size >= second.size else (second, first[::-1])
         p = self.points
         b = np.roll(b, -int(np.argmin(np.linalg.norm(p[b] - p[a[0]], axis=1))))
+        self.last_grid = None
         if a.size == b.size:
             shifts = [np.roll(b, -s) for s in (-1, 0, 1)]
             b = min(shifts, key=lambda c: float(np.sum(np.linalg.norm(p[c] - p[a], axis=1) ** 2)))
             rows = _row_count(p[a], p[b], closed=True)
-            return np.zeros((0, 3), np.int64), _grid_quads(self._between(a, p[b], rows, b), True)
+            self.last_grid = self._between(a, p[b], rows, b)
+            return np.zeros((0, 3), np.int64), _grid_quads(self.last_grid, True)
         across = _resampled(p[b], _fractions(p[a], closed=True), closed=True)
         rows = _row_count(p[a], across, closed=True)
         # The loops differ: the grid stops one row short of ``b``, and a strip joins that row to it.
@@ -183,13 +198,27 @@ class _Builder:
         return _zipped(grid[-1], b, self.points, closed=True), _grid_quads(grid, closed=True)
 
     def _between(self, a, across, rows, b=None):
-        """Rows of points from loop ``a`` (row 0) toward the points ``across``, row ``rows``,
-        interpolated linearly: ending with ``b`` when given, else one row short of ``across``."""
+        """Rows of points from loop ``a`` (row 0) toward the points ``across``, row ``rows``:
+        ending with ``b`` when given, else one row short of ``across``.
+
+        Each row is the linear interpolation of the two loops flattened -- each moved along the
+        band's axis onto the plane through its centroid across it -- plus each loop's own bow out
+        of that plane, fading over :data:`RIM_ROWS` rows from it. So away from a rim that is not
+        flat (a pipe's saddle where it meets a vessel) the rows are flat rings, as a pipe's
+        cross-sections are; a band between flat rims is the plain interpolation.
+        """
         start = self.points[a]
+        axis = across.mean(axis=0) - start.mean(axis=0)
+        axis /= np.linalg.norm(axis)
+        bow_start = ((start - start.mean(axis=0)) @ axis)[:, None] * axis
+        bow_end = ((across - across.mean(axis=0)) @ axis)[:, None] * axis
         grid = [a]
         for j in range(1, rows):
             t = j / rows
-            grid.append(self._added((1 - t) * start + t * across))
+            row = (1 - t) * (start - bow_start) + t * (across - bow_end)
+            row += max(0.0, 1.0 - j / RIM_ROWS) * bow_start
+            row += max(0.0, 1.0 - (rows - j) / RIM_ROWS) * bow_end
+            grid.append(self._added(row))
         if b is not None:
             grid.append(b)
         return np.stack(grid)
@@ -323,10 +352,11 @@ def _zipped(first: np.ndarray, second: np.ndarray, points: np.ndarray, closed: b
     return np.array(triangles, dtype=np.int64).reshape(-1, 3)
 
 
-def _compacted(points: np.ndarray, faces: Polygons, face: np.ndarray) -> MappedSurface:
+def _compacted(points, faces: Polygons, face, grids) -> MappedSurface:
     """The surface with the points no face uses dropped, the rest kept in order."""
     used = np.zeros(points.shape[0], dtype=bool)
     for kind in faces.kinds():
         used[kind.reshape(-1)] = True
     position = np.cumsum(used) - 1
-    return MappedSurface(points[used], faces.renumbered(position), face)
+    renumbered = {f: position[g] for f, g in grids.items()}
+    return MappedSurface(points[used], faces.renumbered(position), face, renumbered)

@@ -187,3 +187,33 @@ def test_faces_not_chosen_keep_their_triangles():
     assert mapped.faces.triangles.shape[0] == np.count_nonzero(face == 0)
     # Joined edge for edge: the only edges used once are the band's two rims.
     assert len(_open_edges(mapped.faces)) == 48
+
+
+def test_a_bands_rows_flatten_within_two_rows_of_a_rim_that_is_not_flat():
+    # A cylinder from a saddle-shaped rim (z = 0.3 cos 2 theta, as a pipe meets a vessel) to a flat
+    # one at z = 2: the rows run from the saddle's shape to flat rings, flat from the second row in,
+    # so a pipe's cross-sections away from its junction are flat.
+    n, rows = 24, 6
+    angle = 2 * np.pi * np.arange(n) / n
+    rings, points = [], []
+    for j in range(rows + 1):
+        t = j / rows
+        z = (1 - t) * 0.3 * np.cos(2 * angle) + 2.0 * t
+        rings.append(len(points) + np.arange(n))
+        points += [[np.cos(a), np.sin(a), h] for a, h in zip(angle, z, strict=True)]
+    points = np.array(points)
+    triangles = np.concatenate([_rings(points, rings[j], rings[j + 1]) for j in range(rows)])
+    triangles = _outward(points, triangles, lambda c: np.c_[c[:, :2], np.zeros(len(c))])
+    face = np.zeros(len(triangles), dtype=np.int64)
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_cylinder
+    )
+    grid = mapped.grids[0]
+    z = mapped.points[grid][:, :, 2]
+    bow = z.max(axis=1) - z.min(axis=1)
+    saddle_first = bow[0] > bow[-1]
+    if not saddle_first:
+        bow = bow[::-1]
+    assert bow[0] == pytest.approx(0.6, rel=1e-9)  # the saddle itself
+    assert 0.1 < bow[1] < 0.5  # half way out of it
+    np.testing.assert_allclose(bow[2:], 0.0, atol=1e-12)
