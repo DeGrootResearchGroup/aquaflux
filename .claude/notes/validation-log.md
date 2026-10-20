@@ -935,6 +935,55 @@ program on the Mac, so bandwidth, page size and the jax version are not separate
 M3 figure (2.5-3.4 s / 100 probes, against 9.7 ms per tangent here) is a whole re-fit's probe line, not a
 per-tangent measurement, and is not comparable either.
 
+### One probe program per column field (2026-10-20)
+
+Container: 4-core Intel Xeon @ 2.1 GHz, 15 GiB, no swap; jax 0.12.0, numpy 2.5.4, scipy 1.18.1; glibc
+defaults; nothing else running. Base `main` `1290aa11` (in a second worktree) against `claude/per-field-probe`
+(`0bf40601`..`bd1a6c42`, library identical across them). Shipped `case.yaml` throughout. The probe's chunks
+now follow column fields and each field's program differentiates the residual in that field alone
+(`solve-direct-preconditioners.md`, "One program per column field").
+
+**The programs, batch 8, hybrid start** (`fusion_profile.py`, `FUSION_PROGRAMS=probe,probe-fields`, best of
+15 untraced calls; bytes are operands + outputs summed over kernels):
+
+| | whole state | u | v | w | p | k | ω | per-field mean |
+|---|---|---|---|---|---|---|---|---|
+| bfs3d GB per call | 10.39 | 6.91 | 6.91 | 6.91 | 2.77 | 4.30 | 3.51 | 5.22 |
+| bfs3d temporary MiB | 829 | 524 | 524 | 524 | 222 | 284 | 244 | |
+| bfs3d ms per tangent | 59.3 | 33.8 | 35.6 | 36.9 | 16.1 | 24.3 | 18.4 | 27.5 |
+| pitzDaily GB per call | 2.36 | 1.43 | 1.43 | — | 0.63 | 1.05 | 0.85 | 1.08 |
+| pitzDaily temporary MiB | 154 | 93 | 93 | — | 44 | 60 | 49 | |
+| pitzDaily ms per tangent | 12.1 | 7.1 | 7.0 | — | 3.6 | 5.0 | 4.6 | 5.5 |
+
+Every program shrinks, the velocity ones too (they no longer carry pressure, `k` and `ω` tangents); the
+pressure column, which never forms the velocity gradient's `[faces, 8, 3, 3]` tangents, is the cheapest.
+Throughput is unchanged (bytes and time fall together), so the program is still memory-bound.
+
+**One re-fit, hybrid start, β 0.005, mean of 3** (`refit_profile.py`, field split's probe now timed through
+`_probed_blocks`): bfs3d probe **43.1 → 18.5 s**, whole re-fit 54.0 → 29.4 s, probe faults 15.3M → 7.1M,
+VmHWM after the re-fits 8.20 → 8.58 GiB; pitzDaily probe 1.60 → 0.94 s, re-fit 2.53 → 1.64 s.
+
+**Exactness** (`fieldwise_probe_identity.py`): at both hybrid starts the per-field matrix differs from the
+whole-state one on 2–8 % of entries by at most 2.4e-16 of its (row field, column field) block's largest
+entry, none non-finite; under `XLA_FLAGS=--xla_cpu_max_isa=AVX` (no FMA instructions) the two are identical,
+and pitzDaily's equals `main`'s own matrix exactly. The branch's whole-state product (chunks now aligned to
+fields) equals `main`'s bit for bit at default flags. The march state check: FIELDWISE-MARCH-STATE.
+
+**pitzDaily marches** (`run_case.sh validation/pitzdaily_openfoam/compare.py`, `PITZ_CHECKPOINT_KEEP=100`):
+
+| arm | steps | cycles | re-fits | probe s over the march | step tables | solve | `x_r/h` |
+|---|---|---|---|---|---|---|---|
+| default flags, cache warm, `main` | 21 | 102 | 21 | 34.3 | | 238 s | 8.0686 |
+| default flags, cache warm, branch | 21 | 102 | 21 | 18.9 | first differ at step 12, `R` 8.988e-03 / 8.987e-03 | 233 s | 8.0686 |
+| `max_isa=AVX`, `main` | 21 | 102 | 21 | 28.9 | | 239 s | 8.0686 |
+| `max_isa=AVX`, branch | 21 | 102 | 21 | 18.3 | **identical** | 247 s | 8.0686 |
+
+pitzDaily's wall moves little: steps 2–21 save ~14 s, and the first step pays ~10 s more even with a warm
+cache, for tracing and lowering five probe programs instead of one, once per process (the AVX branch run
+paid 12 s on a cold cache).
+
+FIELDWISE-BFS3D-MARCHES
+
 ### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18/19)
 
 **Read the second table.** The first was taken without the pivot floor, where (PR #766) a near-zero `k`
