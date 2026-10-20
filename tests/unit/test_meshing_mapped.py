@@ -131,6 +131,9 @@ def test_a_band_becomes_a_grid_between_its_rims(bottom, top):
         assert faces.quads.shape[0] == n * (rows - 1)
         assert faces.triangles.shape[0] == bottom + top
     assert _area(mapped.points, faces) == pytest.approx(4 * np.pi, rel=5e-3)
+    # Each quadrilateral starts along the grid's rows, round the band: its first edge is level.
+    corner = mapped.points[faces.quads]
+    np.testing.assert_allclose(corner[:, 0, 2], corner[:, 1, 2], atol=1e-12)
     np.testing.assert_array_equal(mapped.face, np.zeros(faces.n_faces))
 
 

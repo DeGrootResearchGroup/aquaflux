@@ -160,7 +160,8 @@ class CadMesher:
         The prism layers grown on the patches :meth:`mesh` is asked to layer; unset, none.
     cap_height : float
         The height of the pyramids that cap each quadrilateral the tetrahedra meet, over the
-        quadrilateral's edge, in ``(0, 1/2)`` (see :class:`~aquaflux.meshing.PyramidCaps`).
+        quadrilateral's first edge (round a structured grid), in ``(0, 1/2)`` (see
+        :class:`~aquaflux.meshing.PyramidCaps`).
     netgen : NetgenProcess
         The Netgen it runs.
     """

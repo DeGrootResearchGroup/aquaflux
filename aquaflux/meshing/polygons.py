@@ -167,6 +167,12 @@ class PyramidCaps:
         """Caps on ``quads``, each apex ``height`` times the quadrilateral's first edge above its
         centre, on the side its right-hand normal points to.
 
+        The first edge, not the shortest or the mean: on a structured grid it runs round the band
+        (:class:`~aquaflux.meshing.MappedQuads` starts each quadrilateral along the grid's rows),
+        so a cap is a share of the grid's width round it -- short round a pipe's narrow core, where
+        tall caps close in on each other, and long round a lamp's layers, where low ones leave
+        small cells between the caps and the fill.
+
         Parameters
         ----------
         points : np.ndarray, shape ``(n_points, 3)``

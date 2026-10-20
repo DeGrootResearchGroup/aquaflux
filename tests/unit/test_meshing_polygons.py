@@ -61,3 +61,12 @@ def test_caps_on_a_cubes_faces_close_it_and_add_their_volume(height):
     # Each pyramid a cell right side out, as element_mesh numbers its corners.
     volume = np.asarray(element_mesh(every, pyramids=caps.pyramids).geometry().cell.volume)
     np.testing.assert_allclose(volume, 0.25 * (0.5 * height) / 3.0, rtol=1e-12)
+
+
+def test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge():
+    # A 4 x 1 rectangle: the cap is ``height`` of whichever side the ring starts along.
+    points = np.array([[0, 0, 0], [4, 0, 0], [4, 1, 0], [0, 1, 0]], float)
+    for start, first in ((0, 4.0), (1, 1.0)):
+        ring = np.roll([0, 1, 2, 3], -start)[None]
+        caps = PyramidCaps.on(points, ring, 0.25)
+        np.testing.assert_allclose(caps.apexes[0], [2.0, 0.5, 0.25 * first], atol=1e-15)

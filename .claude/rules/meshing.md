@@ -145,7 +145,7 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls", layered=(), mapped=()) -> Mesh`:
 `write_brep` → `triangulate` (face-tagged) → the `mapped` patches' faces remeshed as structured
 quadrilaterals (below) → layers on the `layered` patches (below) → every quadrilateral left for the fill
-capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its edge; Netgen takes triangles
+capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
 only) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
 patches by their CAD face) → `PolyhedralDual.build_traced` (the layers' columns passed)
 → boundary vertices projected onto the CAD (below), with
@@ -254,6 +254,13 @@ not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells a
   0.5033 mm (5-95 % 0.5025-0.5040) against 0.5069 (0.5066-0.5087) with triangles. ⚠️ Faces over 80°
   non-orthogonal: 11 against 2, inside the outlet pipe's entry and at the inlet saddle, where five layers
   leave the pipe a core of a few millimetres for caps and tets -- the O-grid's case.
+- ⚠️ **Each cap's apex is a dual cell**, squeezed between the hexahedra's top and the fill: ~66 cells under
+  2 mm above the lamp's layers (none with triangle layers), neighbour volume ratio p99 164 against 14.
+  **Measured and rejected (log, five draws each)**: sized caps (tall wrecks the pipes' cores, ~4,800 bad
+  faces), a crevice-angle limit (a trade, not a win), the shortest edge (more small cells by the lamp),
+  a diagonal split of the top quadrilateral with no caps (Netgen's tets on it poor, 86-90° faces).
+  **The constant is the first edge on purpose**: pinned by the mapped test's level first edges and
+  `test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge`. Open: #785.
 - Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, Coons grids with and
   without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
   wall face with no vertex on a CAD edge a hexahedron's; Sozzi's lamp and pipes).

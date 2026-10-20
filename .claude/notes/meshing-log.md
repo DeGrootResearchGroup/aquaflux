@@ -554,3 +554,45 @@ lamp numbers. Faces over 80° at 0.02: triangles 2, mapped 11 -- inside the outl
 x ≈ 888 mm) and at the inlet saddle, where the pipes' five layers leave a core of a few millimetres for
 pyramid caps and tetrahedra. Quality, not correctness: every cell closes. Timings from one run each,
 beside another session's bfs3d case: counts good, seconds indicative.
+
+## 2026-10-20 — the pyramid caps' apex cells: sizing, a diagonal split, a crevice limit
+
+Sozzi, maxh 0.02, layers (0.0005, 1.2, 5) on every wall, lamp cylinder and both pipes mapped, macOS arm64,
+netgen-mesher 6.2.2608. Each arm meshed from five drawings rotated 1-5 µrad about x (a single run per arm
+is not enough: one change anywhere moves Netgen's whole fill, and lamp counts moved 23 -> 65 between two
+runs with the same lamp caps). "Lamp small": dual cells under 2 mm (cube root of volume) 13.5-22 mm from
+the lamp axis, 300 < x < 500 mm; "pipes > 50°": faces over 50° non-orthogonal in the pipes; volume ratio
+the larger over the smaller of a face's two cells. Scripts were scratch (not kept); the harness they
+extended is `validation/meshing_dual/mapped_layers_sozzi.py`.
+
+| arm | lamp small | lamp worst | pipes > 50° | other > 50° | non-orth p99 | volume ratio p99 |
+|---|---|---|---|---|---|---|
+| triangle layers (no caps) | 0 | 44-52° | 2030-2370 | 72-95 | 50-51° | 14 |
+| caps 0.25 × first edge (shipped) | 63-70 | 51-56° | 104-134 | 112-129 | 46.2° | 160-167 |
+| sized: 0.7 × mean edge, fold 0.6, gap 0.4 | 23-28 | 53-62° | 4759-4975 | 104-119 | | |
+| sized, gap 0.07 | 77-88 | 49-68° | 48-118 | 97-111 | | |
+| crevice limit 90° (+ gap 0.4, target 0.7) | 53-60 | 52-59° | 126-158 | 108-123 | 41.3-43.3° | 231-234 |
+| crevice limit 105° | 63-70 | 49-53° | 216-348 | 111-123 | 47.1-47.7° | 156-166 |
+| diagonal split of the top quad, no caps | 4-39 | 86-90° | 5870-6920 | 300-960 | 64.5-68.3° | 44-63 (max to 19700) |
+| caps 0.25 × shortest edge (2 draws) | 97-98 | | 106-107 | 103-113 | 46.2° | |
+
+- **Each apex is a primal point, so a dual cell**, squeezed between the hexahedra's top and the fill:
+  hence the small cells and the volume-ratio tail (164 against 14).
+- **Tall caps help the open lamp and wreck the pipes' cores.** The layers leave each 9.6 mm pipe a core
+  of radius ~4.4 mm with twelve quadrilaterals round it; above ~0.6-0.85 mm the core's dual goes bad
+  uniformly along the pipe. The angle left the fill between two neighbouring caps (the crevice,
+  `(π − 2π/n) − 2 atan(2h/w)`) is 90° at 0.66 mm there -- but a crevice threshold does not separate
+  the cases either (72° along the lamp was fine, 77° in the pipe bad), and limiting it to 90° holds the
+  lamp's caps to ~2.5 mm, inside a middle band (2.2-2.5 mm) worse than either low or tall.
+- **The diagonal split** (top quad cut by a ridge diagonal, the hexahedron a seven-faced cell, no apex):
+  Netgen's tetrahedra on the split triangles are poor (2023 under 0.1 quality, volume over rms edge cubed
+  scaled to 1 for a regular one, against 131 for triangle layers), the smallest dual cells in the pipes'
+  cores, one draw unclosed (6e-3); the valley diagonal gave a flat tetrahedron on four corners and a
+  two-node dual face. Rejected.
+- **The first edge is the right constant, not an accident**: a mapped grid's quadrilaterals start along
+  its rows, so it is the width round the band -- short round a pipe (2.3 mm), long round the lamp's layers
+  (6.8 mm against 5 along). Shortest edge lowered the lamp's caps (97 small); mean edge, 0.9 mm in the
+  pipes, was bad there (2969 over 50°, one run).
+- Reviewed by three agents (primal join, dual-side merging, critique of the rule). Merging an apex cell
+  into a neighbour (toy model, no Netgen): closed but L-shaped cells, non-convexity 0.2 → ~1.0, so the
+  planarizer's guard would refuse every merge. Open: #785.
