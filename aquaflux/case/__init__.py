@@ -72,13 +72,20 @@ from .case_file import CaseFile, CheckedCase, read_case, read_case_document, wri
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState, StartingFields
-from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
+from .mesh_source import (
+    AxisGrading,
+    CadMesh,
+    GeometricGrading,
+    MeshSource,
+    OpenFOAMMesh,
+    StructuredGrid,
+)
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
 from .paths import relocated
+from .drawing import CadPlacement
 from .physics import RANS, Laminar, Physics, Radiation
 from .radiation import (
     CadFluid,
-    CadPlacement,
     CadSolid,
     CadSurface,
     Coarsen,
@@ -122,6 +129,7 @@ __all__ = [
     "BodyForce",
     "BulkVelocity",
     "CadFluid",
+    "CadMesh",
     "CadPlacement",
     "CadSolid",
     "CadSurface",

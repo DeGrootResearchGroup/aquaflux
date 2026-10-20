@@ -156,3 +156,25 @@ distinguishable from run-to-run spread.
 skewness 1.44, 2 faces with concave angles (max 31 degrees). Sozzi 0.01 dual (13297 cells) -> failed 3:
 309 concave cells, 2 faces with low-quality decomposition tets, 1 small volume ratio; openness 2.2e-16,
 non-orthogonality max 47.8 avg 14.2, skewness 1.96. Topology passes on both.
+
+## 2026-10-19 — phase 1 end to end: STEP → Netgen → dual → polyMesh
+
+macOS arm64, netgen-mesher 6.2.2608, Sozzi water (`SozziTaghipour.step`, placement swapping x and y,
+reactor_body + inlet_pipe + outlet_pipe less lamp), feature angle 45 degrees, patches inlet = `FacesNear`
+(0.04765, 0, 0.8945), outlet = `FacesNear` (1.739, 0, 0), lamp = `FacesOn(lamp)`, the rest `walls`.
+
+- `CadMesher(max_size=0.02)`: 3.8 s, 10446 cells, closure 1.5e-19; patch areas against the CAD's
+  (faces 6 / 8 / 4+7 / the rest): inlet 2.735e-4 vs 2.865e-4 (-4.5 %), outlet the same, lamp 0.04857 vs
+  0.05090 (-4.6 %), walls 0.3528 vs 0.3622 (-2.6 %): the dual's boundary through triangle centroids,
+  inside the curved walls. Not projected.
+- `aquaflux mesh OUT --case case.yaml --openfoam` at maxh 0.01: 13297 cells (inlet 19, outlet 19,
+  lamp 1747, walls 7791 faces), 8.65 s wall, 0.77 GB peak footprint, one run. checkMesh of this
+  four-patch polyMesh not run (Docker hung); the same mesh with one patch passed topology (entry above).
+- `tetrahedral_mesh` reproduces `tetrahedral_grid_3d`'s former hand assembly bit for bit (offsets,
+  rings, owner, neighbour; n 2 and 3, perturbed).
+- Mutations, each red: owner from the second sighting; a patch triangle off the boundary accepted;
+  the cover check off; CAD features not passed to the dual; every between-face triangle edge named;
+  `FacesOn` tolerance x1e12; the overlap check off; the name check off; `CadMesh.mesher` dropping
+  `grading`; `--openfoam` writing nothing; `--case` taking paths from the working directory (green until
+  the test ran from another directory: from the repository root, the relative path's `..` climbed to `/`
+  and found the file anyway).

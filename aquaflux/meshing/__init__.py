@@ -10,6 +10,10 @@ copy of the geometry kernel cannot share an interpreter with the CAD reader's. I
 mesher, ``pip install aquaflux[meshing]``; :func:`netgen_available` says whether it is installed
 without loading it.
 
+:class:`CadMesher` meshes a region of a CAD model -- some solids' union, less others -- as polyhedra:
+Netgen's tetrahedra of it, their boundary in patches chosen by face (:class:`FacesNear`,
+:class:`FacesOn`), turned into their dual. :func:`tetrahedral_mesh` makes a mesh of any tetrahedra.
+
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
 per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
 edges and patch borders sharp.
@@ -17,6 +21,7 @@ edges and patch borders sharp.
 
 from __future__ import annotations
 
+from .cad_mesher import CadMesher, FaceSelection, FacesNear, FacesOn, RegionFaces
 from .dual import PolyhedralDual
 from .netgen_process import (
     MeshingError,
@@ -26,13 +31,20 @@ from .netgen_process import (
     check_closed_surface,
     netgen_available,
 )
+from .tetrahedra import tetrahedral_mesh
 
 __all__ = [
+    "CadMesher",
+    "FaceSelection",
+    "FacesNear",
+    "FacesOn",
     "MeshingError",
     "NetgenProcess",
     "PolyhedralDual",
+    "RegionFaces",
     "SurfaceTriangulation",
     "TetrahedralMesh",
     "check_closed_surface",
     "netgen_available",
+    "tetrahedral_mesh",
 ]

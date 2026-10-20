@@ -266,13 +266,11 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_and_closes(tmp_path):
     # that the mesh turned a face of each inward (measured at this size). Every cell must close.
     pytest.importorskip("OCP")
     from aquaflux.mesh import closed_cell_residual
-    from aquaflux.meshing import PolyhedralDual
+    from aquaflux.meshing import PolyhedralDual, tetrahedral_mesh
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
     from OCP.BRepTools import BRepTools
     from OCP.gp import gp_Pnt
-
-    from tests.support.meshes import tetrahedral_mesh
 
     shape = BRepAlgoAPI_Fuse(
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.2, 0.1, 0.1).Shape(),
@@ -291,3 +289,78 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_and_closes(tmp_path):
     np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
     scale = float(np.max(np.asarray(dual.geometry().face.area)))
     assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
+
+
+#: The Sozzi water's faces, as its topology numbers them (pinned above by area): the vessel's
+#: cylinder and end plates, the two pipes' cylinders, the lamp's cylinder and hemispherical tip, and
+#: the two pipes' end caps.
+SOZZI_PATCH_FACES = {"inlet": {6}, "outlet": {8}, "lamp": {4, 7}, "walls": {0, 1, 2, 3, 5}}
+
+
+def test_a_case_files_step_mesh_is_written_as_a_polymesh_with_its_patches_on_their_faces(
+    tmp_path, monkeypatch
+):
+    # The whole path a user takes: a case file's CadMesh section, meshed by `aquaflux mesh --case
+    # --openfoam`, read back from the polyMesh. Every boundary face must lie on a CAD face of its
+    # patch, each patch must hold most of its faces' area, and every cell must close.
+    pytest.importorskip("OCP")
+    import contextlib
+    import io
+    import json
+    import os
+    from pathlib import Path
+
+    import yaml
+    from aquaflux.__main__ import main
+    from aquaflux.io import read_openfoam
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.mesh import closed_cell_residual
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    swap = [[0, 1, 0], [1, 0, 0], [0, 0, 1]]
+    section = {
+        "kind": "CadMesh",
+        "file": os.path.relpath(
+            drawing, tmp_path
+        ),  # relative to the case file, as a user writes it
+        "solids": ["reactor_body", "inlet_pipe", "outlet_pipe"],
+        "without": ["lamp"],
+        "placement": {"kind": "CadPlacement", "matrix": swap},
+        "max_size": 0.03,
+        "feature_angle": 0.785,
+        "patches": {
+            "inlet": {"kind": "FacesNear", "points": [[0.04765, 0.0, 0.8945]]},
+            "outlet": {"kind": "FacesNear", "points": [[1.739, 0.0, 0.0]]},
+            "lamp": {"kind": "FacesOn", "solids": ["lamp"]},
+        },
+    }
+    (tmp_path / "case.yaml").write_text(yaml.safe_dump({"mesh": section}))
+    # Run from elsewhere: the drawing is found from the case file's directory, not from here.
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        status = main(["mesh", str(tmp_path / "out"), "--case", str(tmp_path / "case.yaml"),
+                       "--openfoam"])  # fmt: skip
+    reply = json.loads(out.getvalue())
+    assert status == 0, reply
+    assert {patch["name"] for patch in reply["patches"]} == set(SOZZI_PATCH_FACES)
+    mesh = read_openfoam(tmp_path / "out")
+    assert mesh.n_cells == reply["cells"] > 1000
+    scale = float(np.max(np.asarray(mesh.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+
+    model = read_step(drawing, Placement(matrix=swap))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    topology = model.topology(water)
+    geometry = mesh.geometry().face
+    for name, faces in SOZZI_PATCH_FACES.items():
+        mine = np.asarray(mesh.face_patches.indices(name))
+        landed = model.project(water, np.asarray(geometry.centroid)[mine]).face
+        assert set(landed.tolist()) <= faces, name
+        # The dual's boundary runs through the centroids of the triangles, inside a curved wall.
+        area = float(np.asarray(geometry.area)[mine].sum())
+        assert area == pytest.approx(topology.face_area[sorted(faces)].sum(), rel=0.08), name

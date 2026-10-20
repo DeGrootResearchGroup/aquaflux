@@ -32,7 +32,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import numpy as np
 from aquaflux.io.cad import CadRegion, Placement, read_step
 from aquaflux.mesh import Mesh, closed_cell_residual
-from aquaflux.meshing import NetgenProcess, PolyhedralDual
+from aquaflux.meshing import NetgenProcess, PolyhedralDual, tetrahedral_mesh
 from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut, BRepAlgoAPI_Fuse
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
 from OCP.BRepTools import BRepTools
@@ -67,35 +67,6 @@ def _solids(directory: pathlib.Path) -> dict[str, pathlib.Path]:
     water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
     paths["sozzi"] = model.write_brep(water, directory / "sozzi.brep")
     return paths
-
-
-def _tetrahedra_as_mesh(points: np.ndarray, tetrahedra: np.ndarray) -> Mesh:
-    """A face-based mesh of tetrahedra, every boundary face in one patch ``walls``.
-
-    A harness-local construction: each tetrahedron's four triangles, matched by their sorted node
-    triple; a triangle seen twice is interior.
-    """
-    faces = np.concatenate([tetrahedra[:, [1, 2, 3]], tetrahedra[:, [0, 3, 2]],
-                            tetrahedra[:, [0, 1, 3]], tetrahedra[:, [0, 2, 1]]])  # fmt: skip
-    cell = np.tile(np.arange(len(tetrahedra)), 4)
-    keys = np.sort(faces, axis=1)
-    order = np.lexsort(keys.T[::-1])
-    keys, faces, cell = keys[order], faces[order], cell[order]
-    first = np.concatenate([[True], np.any(keys[1:] != keys[:-1], axis=1)])
-    start = np.flatnonzero(first)
-    count = np.diff(np.concatenate([start, [len(keys)]]))
-    owner = cell[start]
-    neighbour = np.where(count == 2, cell[np.minimum(start + 1, len(cell) - 1)], -1)
-    rings = faces[start]
-    return Mesh.from_csr(
-        points,
-        np.arange(len(rings) + 1) * 3,
-        rings.reshape(-1),
-        owner,
-        neighbour,
-        len(tetrahedra),
-        face_patches={"walls": np.flatnonzero(neighbour < 0)},
-    )
 
 
 def _non_convexity(dual: Mesh) -> np.ndarray:
@@ -134,7 +105,9 @@ def main(names: list[str], sizes: list[float]) -> None:
             for maxh in sizes:
                 surface = netgen.triangulate(path, max_size=maxh)
                 filled = netgen.fill(surface.points, surface.triangles, max_size=maxh)
-                primal = _tetrahedra_as_mesh(filled.points, filled.tetrahedra)
+                primal = tetrahedral_mesh(
+                    filled.points, filled.tetrahedra, {"walls": surface.triangles}
+                )
                 start = time.perf_counter()
                 try:
                     dual = DUAL.build(primal)

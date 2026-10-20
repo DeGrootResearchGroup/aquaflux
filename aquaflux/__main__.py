@@ -19,6 +19,7 @@ Three more commands are for a program editing case files -- the browser interfac
     aquaflux write case.yaml < case.json  # write the case given on standard input, checked first
     aquaflux write copy.yaml --relative-to original/ < case.json  # re-base its relative paths
     aquaflux mesh out/ --relative-to case_dir/ < mesh.json  # read or generate a case's mesh and its patches, as VTK
+    aquaflux mesh out/ --case case.yaml --openfoam  # a case file's mesh, also as out/constant/polyMesh
     aquaflux serve                      # answer any of these, one per line, without restarting
 
 ``show``, ``plan``, ``write`` and ``mesh`` print ``{"error": null, ...}`` on success and ``{"error": "<reason>"}`` with exit
@@ -57,7 +58,7 @@ from aquaflux.case import (
     solver_for,
     write_case,
 )
-from aquaflux.io import write_patches, write_vtu
+from aquaflux.io import write_openfoam, write_patches, write_vtu
 
 __all__ = ["main"]
 
@@ -117,8 +118,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     mesh.add_argument(
         "--relative-to",
         metavar="DIR",
-        default=".",
-        help="the directory the mesh section's relative paths are relative to (default: here)",
+        default=None,
+        help="the directory the mesh section's relative paths are relative to (default: here, or "
+        "the case file's directory with --case)",
+    )
+    mesh.add_argument(
+        "--case",
+        metavar="FILE",
+        default=None,
+        help="take the mesh section from this case file rather than from standard input",
+    )
+    mesh.add_argument(
+        "--openfoam",
+        action="store_true",
+        help="also write the mesh as an OpenFOAM polyMesh, in DIRECTORY/constant/polyMesh",
     )
     commands.add_parser(
         "serve", help=f"answer {', '.join(SERVED)} requests, one JSON line each, until input ends"
@@ -127,7 +140,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "serve":
         return _serve_process()
     if arguments.command == "mesh":
-        return _mesh(arguments.directory, sys.stdin.read(), arguments.relative_to)
+        return _mesh(
+            arguments.directory,
+            arguments.case,
+            arguments.relative_to,
+            arguments.openfoam,
+            None if arguments.case is not None else sys.stdin.read(),
+        )
     if arguments.command == "schema":
         print(json.dumps(case_schema()))
         return 0
@@ -206,19 +225,30 @@ def _write(path: str, given: str, relative_to: str | None = None) -> int:
     return 0
 
 
-def _mesh(directory: str, given: str, relative_to: str) -> int:
-    """Read or generate the mesh section in the JSON ``given`` (``{"mesh": {...}}``); write it as VTK.
+def _mesh(
+    directory: str, case: str | None, relative_to: str | None, openfoam: bool, given: str | None
+) -> int:
+    """Read or generate a mesh section; write it as VTK, and as a polyMesh with ``openfoam``.
 
-    Writes the cells as ``mesh.vtu`` and the boundary patches as ``patches.vtm`` (one block per patch,
-    named by it), and prints the mesh file written and the mesh's boundary: each patch holding faces
-    with its face count, and each patch group with the patches in it -- the names a case's
-    ``boundaries`` section may use.
+    The section is the case file ``case``'s, or the JSON ``given`` (``{"mesh": {...}}``). Writes the
+    cells as ``mesh.vtu`` and the boundary patches as ``patches.vtm`` (one block per patch, named by
+    it), and prints the mesh file written and the mesh's boundary: each patch holding faces with its
+    face count, and each patch group with the patches in it -- the names a case's ``boundaries``
+    section may use, and the polyMesh directory written (``null`` without ``openfoam``). Relative paths
+    are taken from ``relative_to``: by default the case file's directory, or here.
     """
     try:
-        source = mesh_source_from_mapping(json.loads(given)["mesh"])
-        mesh = source.read(Path(relative_to)).validate()
+        if case is not None:
+            section = read_case_document(case)["mesh"]
+            base = Path(case).parent if relative_to is None else Path(relative_to)
+        else:
+            section = json.loads(given)["mesh"]
+            base = Path("." if relative_to is None else relative_to)
+        source = mesh_source_from_mapping(section)
+        mesh = source.read(base).validate()
         written = write_vtu(mesh, None, Path(directory) / "mesh.vtu")
         write_patches(mesh, None, Path(directory) / "patches.vtm")
+        polymesh = write_openfoam(mesh, directory, overwrite=True) if openfoam else None
     except (*_REFUSALS, KeyError, json.JSONDecodeError, OSError) as error:
         print(json.dumps({"error": str(error)}))
         return _REFUSED
@@ -234,6 +264,7 @@ def _mesh(directory: str, given: str, relative_to: str) -> int:
             {
                 "error": None,
                 "mesh": str(written),
+                "polymesh": None if polymesh is None else str(polymesh),
                 "cells": mesh.n_cells,
                 "dim": mesh.dim,
                 "patches": boundary,
