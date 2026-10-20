@@ -47,6 +47,11 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
         "STEP reading through the OpenCASCADE kernel; fast tier. CI installs it through the `test` "
         "extra, so this gate removes coverage only from a local environment without the `cad` extra",
     ),
+    "unit/test_cad_topology.py": (
+        "OCP",
+        "a CAD region's topology, face-tagged triangles, file and projection; fast tier. CI installs "
+        "it through the `test` extra, as for test_cad_step.py",
+    ),
     "ui/test_history.py": (
         "pyvista",
         "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",

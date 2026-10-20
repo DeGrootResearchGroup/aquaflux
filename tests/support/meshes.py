@@ -404,3 +404,62 @@ def newell_outward(mesh: Mesh) -> np.ndarray:
         newell = np.cross(p, np.roll(p, -1, axis=0)).sum(axis=0)
         result[face] = newell @ (p.mean(axis=0) - centre[owner[face]]) > 0.0
     return result
+
+
+def without_cells(mesh: Mesh, removed, *, patch: str) -> Mesh:
+    """``mesh`` with some cells taken out, the faces they exposed put in a new boundary patch.
+
+    For a non-convex domain from a convex one: an L from a block of hexahedra, say. Remaining cells
+    and the nodes still used are renumbered in their original order; existing named patches keep
+    their faces. A non-periodic mesh with one cell zone.
+
+    Parameters
+    ----------
+    mesh : Mesh
+    removed : array-like of int
+        The cells to take out.
+    patch : str
+        The name of the patch for the faces between a kept cell and a removed one.
+    """
+    removed = np.asarray(removed, dtype=np.int64)
+    keep = np.ones(mesh.n_cells, dtype=bool)
+    keep[removed] = False
+    new_cell = np.full(mesh.n_cells, -1, dtype=np.int64)
+    new_cell[keep] = np.arange(int(keep.sum()))
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    kept_owner = keep[owner]
+    kept_neighbour = (neighbour >= 0) & keep[np.maximum(neighbour, 0)]
+    faces = np.flatnonzero(kept_owner | kept_neighbour)
+    # A face whose owner went keeps its neighbour as owner; its ring direction does not matter.
+    new_owner = np.where(kept_owner[faces], new_cell[owner[faces]], new_cell[neighbour[faces]])
+    new_neighbour = np.where(
+        kept_owner[faces] & kept_neighbour[faces], new_cell[np.maximum(neighbour[faces], 0)], -1
+    )
+    exposed = (neighbour[faces] >= 0) & (new_neighbour < 0)
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    indices = np.asarray(mesh.face_nodes.face_node_indices)
+    rings = [indices[offsets[f] : offsets[f + 1]] for f in faces]
+    used = np.unique(np.concatenate(rings))
+    new_node = np.full(mesh.n_nodes, -1, dtype=np.int64)
+    new_node[used] = np.arange(used.size)
+    new_face = np.full(mesh.n_faces, -1, dtype=np.int64)
+    new_face[faces] = np.arange(faces.size)
+    patches = mesh.face_patches
+    named = {
+        name: new_face[np.asarray(patches.indices(name))]
+        for name in patches.names
+        if name not in ("interior", "boundary")
+    }
+    named = {name: idx[idx >= 0] for name, idx in named.items()}
+    named[patch] = np.flatnonzero(exposed)
+    return Mesh.from_faces(
+        np.asarray(mesh.node_coords)[used],
+        [new_node[ring] for ring in rings],
+        new_owner,
+        new_neighbour,
+        int(keep.sum()),
+        face_patches=named,
+        patch_types=dict(patches.patch_types),
+        patch_groups=dict(patches.patch_groups),
+    )

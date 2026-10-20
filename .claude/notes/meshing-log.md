@@ -86,3 +86,38 @@ leading points and the surface; one extra unused point made the leading points d
 wound out of the hole: 530 tets, volume 1.0 (the hole's 0.027 filled), 192 boundary faces against 240
 supplied, 53 tet centroids inside the hole. Two overlapping outward cubes: filled, both checks passed.
 
+## 2026-10-19 — the polyhedral dual: closure, concave folds, scale, checkMesh
+
+`PolyhedralDual(feature_angle=45 degrees)`, macOS arm64, netgen-mesher 6.2.2608 tetrahedra
+(`validation/meshing_dual/dual_scale_convexity.py`; primal built from Netgen's tets by the harness, one
+patch `walls`).
+
+**Concave folds.** Netgen L (two boxes 0.2x0.1x0.1 + 0.1x0.1x0.1) at maxh 0.02: 3 of 581 dual cells
+unclosed (residual 1.3e-4, 1.3e-4, 3.9e-4), all on the concave edge (x = z = 0.1): its two ends and one
+interior point. Each is topologically closed (every cell edge on exactly two of its faces) and its faces,
+oriented consistently by shared edges, sum to <= 5.4e-20; `Mesh.geometry()` orients exactly one face per
+cell inward (1 of 9, 1 of 11, 1 of 18). Non-convexity at the edge (largest vertex excursion beyond a face
+plane / cube root of volume) 1.02 at 0.02, 1.01 at 0.01. The structured hex L (2x1x2 less a corner)
+closes. Box 0.1x0.1x0.2 with a cylindrical hole r 0.01: sharpest concave fold 32.2 / 29.9 / 18.6 degrees at
+maxh 0.01 / 0.005 / 0.003, 0 unclosed cells at each (485 / 572 / 1620 points on the hole); its hole-wall
+non-convexity 0.73 / 0.28 at 0.01 / 0.005.
+
+**Volume.** Cylinder r 0.05 h 0.3, dual volume below the tets' by 2.2e-2 / 5.7e-3 / 1.4e-3 / 3.5e-4 /
+1.3e-4 at maxh 0.02 / 0.01 / 0.005 / 0.0025 / 0.0015 (the boundary through face centroids; second order).
+
+**Scale** (cylinder, one run each, otherwise idle machine): 2028 / 14426 / 111283 / 542377 points ->
+build 0.3 / 0.5 / 2.4 / 13.9 s (first call includes numba compilation, cached after). Peak footprint by
+stage at 111283 points (607k tets), one process per stage: Netgen arrays loaded 0.28 GiB, + primal `Mesh`
+0.85, + dual 1.88, + dual geometry 1.89. The whole 4-size run peaked at 12.3 GiB (542k points, 3.07M
+tets). numpy peaks inside `build` at 111k points (`tracemalloc`): tables 292 MiB, features 5 MiB, assembly
+474 MiB (of which the dual `Mesh.from_csr` 110 MiB); the rest of the footprint is JAX arrays. Linear
+extrapolation to 2M points: ~10 GB for the primal as a `Mesh`, ~18 GB for the dual's build.
+
+**checkMesh** (OpenFOAM 13 in Docker, `-allGeometry -allTopology`, duals written by `write_openfoam`):
+structured hex box 4x3x5 -> Mesh OK, 6 faces per cell, non-orthogonality 1e-6. Kuhn tets of the unit cube
+(n 4, perturb 0.2) with one patch -> Mesh OK, non-orthogonality max 42.6 avg 25.1, skewness 1.12. Netgen
+cylinder maxh 0.005 (14426 cells) -> failed 3: 7 faces with low-quality decomposition tets, 1108 concave
+cells (by face planes), 6 faces with volume ratio < 0.01; openness 2e-16, non-orthogonality max 50.1 avg
+13.9, face flatness min 0.79. Netgen sleeve box maxh 0.005 (15995 cells) -> failed 2: 258 concave cells,
+1 small volume ratio; non-orthogonality max 51.7 avg 12.2.
+

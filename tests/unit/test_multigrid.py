@@ -1618,8 +1618,8 @@ def test_a_degenerate_cell_block_is_refused_by_name() -> None:
     tiny = sp.csr_matrix(np.diag([1e-9, 1e-9, 2e-9, 2e-9]))
     assert np.all(np.isfinite(_cell_block_inverse(tiny, 2)))
 
-    # A structurally empty row IS degenerate, and must be named rather than slipping through: it makes
-    # the Hadamard bound zero, against which no determinant compares as smaller.
+    # A structurally empty row IS degenerate, and must be named rather than slipping through: no
+    # permutation then has a nonzero product, so the measure's denominator is zero.
     empty = np.zeros((4, 4))
     empty[0, 0], empty[2, 2], empty[3, 3] = 1.0, 1.0, 1.0  # cell 1's k row is entirely absent
     with pytest.raises(ValueError, match="1 of 2 are singular"):
@@ -1631,8 +1631,8 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
 
     These are the real numbers from a coupled turbulence cell that a Frobenius-normalized test refused
     mid-march: rows differing by 1.5e8, a determinant of 1.35e-06 against a Frobenius-squared norm of
-    1.6e+06, so the bar landed just above the determinant. On the row-norm (Hadamard) bound the same
-    block scores 1.2e-04 -- eight orders clear of degenerate -- and it is genuinely invertible.
+    1.6e+06, so the bar landed just above the determinant. It is genuinely invertible, and scores ~1 on
+    the scale-free measure.
 
     The block is still nastily conditioned, around 1e12, and the assertion on the inverse says so:
     this guard's job is invertibility, not conditioning, and conflating the two is what produced a
@@ -1652,6 +1652,57 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
     assert np.allclose(
         inverses[1] @ block, np.eye(2), atol=1e-6
     )  # ...and inverting it is meaningful
+
+
+def test_block_singularity_is_unmoved_by_scaling_any_row_or_column() -> None:
+    """The singularity measure must not depend on the units of the fields a block couples.
+
+    Each block is rescaled by random row and column factors spanning 24 orders, signs included; the
+    measure must not move beyond rounding. A row-norm (Hadamard) ratio is invariant under row scaling
+    only and fails this by many orders on the column scalings. A singular block must stay at zero.
+    """
+    from aquaflux.precondition.multigrid import _block_singularity
+
+    rng = np.random.default_rng(7)
+    blocks = np.concatenate(
+        [
+            rng.standard_normal((6, 3, 3)),
+            np.array([[[1.48e-05, 2.5e-23, 0.0], [-9.47e14, 0.645, 0.0], [0.0, 0.0, 1.0]]]),
+        ]
+    )
+    reference = _block_singularity(blocks)
+    for _ in range(5):
+        rows = 10.0 ** rng.uniform(-12, 12, (7, 3)) * rng.choice([-1.0, 1.0], (7, 3))
+        columns = 10.0 ** rng.uniform(-12, 12, (7, 3)) * rng.choice([-1.0, 1.0], (7, 3))
+        scaled = rows[:, :, None] * blocks * columns[:, None, :]
+        np.testing.assert_allclose(_block_singularity(scaled), reference, rtol=1e-9)
+    rank_one = np.outer([1.0, 3.0], [2.0, 5.0])[None] * np.array([[1e8], [1e-8]])[None]
+    assert _block_singularity(rank_one)[0] < 1e-12
+
+
+def test_an_invertible_block_with_a_vanishing_variable_is_not_refused() -> None:
+    """A corner cell whose ``k`` collapsed has an invertible ``[k, omega]`` block; the guard must pass it.
+
+    These are the numbers of a coupled turbulence cell at ``k`` ~1e-17, where ``dR_omega/dk`` is ~1e15:
+    lower-triangular, determinant 9.5e-06, but a row-norm (Hadamard) ratio of 6.8e-16, which refused
+    it and ended a march. A zero-diagonal permutation block is invertible as well.
+    """
+    from aquaflux.precondition.multigrid import _block_singularity, _cell_block_inverse
+
+    dense = np.zeros((4, 4))
+    dense[0, 0], dense[0, 2] = 1.4806491567416882e-05, 2.5092750572028642e-23
+    dense[2, 0], dense[2, 2] = -9.472792807543228e14, 0.644862902295833
+    dense[1, 3], dense[3, 1] = 1.0, 1.0  # cell 1: [[0, 1], [1, 0]]
+
+    inverses = _cell_block_inverse(sp.csr_matrix(dense), 2)  # must not raise
+
+    block = np.array([[dense[0, 0], dense[0, 2]], [dense[2, 0], dense[2, 2]]])
+    (a, b), (c, d) = block  # the closed form, entry by entry: a product would cancel ~1e20 terms
+    np.testing.assert_allclose(
+        inverses[0], np.array([[d, -b], [-c, a]]) / (a * d - b * c), rtol=1e-12
+    )
+    measures = _block_singularity(np.stack([block, inverses[1]]))
+    assert measures[0] > 0.99 and measures[1] == 1.0  # nowhere near the 1e-12 cut
 
 
 def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() -> None:

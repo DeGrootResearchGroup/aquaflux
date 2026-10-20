@@ -9,10 +9,14 @@ tetrahedral fill that keeps a supplied boundary surface exactly -- in a child pr
 copy of the geometry kernel cannot share an interpreter with the CAD reader's. It needs the optional
 mesher, ``pip install aquaflux[meshing]``; :func:`netgen_available` says whether it is installed
 without loading it.
+
+:class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
+per primal point -- keeping the boundary's corners, edges and patch borders sharp.
 """
 
 from __future__ import annotations
 
+from .dual import PolyhedralDual
 from .netgen_process import (
     MeshingError,
     NetgenProcess,
@@ -25,6 +29,7 @@ from .netgen_process import (
 __all__ = [
     "MeshingError",
     "NetgenProcess",
+    "PolyhedralDual",
     "SurfaceTriangulation",
     "TetrahedralMesh",
     "check_closed_surface",
