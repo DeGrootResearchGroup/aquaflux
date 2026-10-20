@@ -12,11 +12,12 @@ paths:
 > **Comment Convention**). The dated record — the research survey, the Netgen probes, their numbers — is in
 > `.claude/notes/meshing-log.md`.
 
-**Status: built** — the Netgen child process (`netgen_process.py`, `_netgen_child.py`) and the
-feature-preserving dual (`dual.py`), cells at sharp concave edges cut into pieces. Nothing else of the
-mesher is. The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
-`validation/meshing_netgen/`. The package is not on the published API page (`docs/conf.py`
-`PUBLIC_SUBPACKAGES`) until it has a mesher a user calls.
+**Status: phase 1 built** — STEP region → Netgen tets → polyhedral dual → `Mesh` / polyMesh, from a case
+file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
+`tetrahedral_mesh` (`tetrahedra.py`), the feature-preserving dual (`dual.py`, cells at sharp concave edges
+cut into pieces) and the mesher (`cad_mesher.py`). Prism layers, blocks and the hex core are not built.
+The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
+`validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
 A polyhedral mesher for water-treatment reactors: STEP in, an aquaflux `Mesh` (and an OpenFOAM polyMesh)
 out, with wall-resolved layers that join the bulk **conformally**. Conformity is a requirement here, not a
@@ -119,6 +120,34 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
   `test_meshing_netgen.py` (a Netgen L, the case placement is for); scale and convexity, Sozzi included,
   in `validation/meshing_dual/dual_scale_convexity.py` (log).
 
+## The CAD mesher (`cad_mesher.py`) — built
+
+`CadMesher(max_size, feature_angle, min_size=None, grading=None, netgen=NetgenProcess()).mesh(model,
+region, patches=None, others="walls") -> Mesh`: `write_brep` → `triangulate` (face-tagged) → `fill` →
+`tetrahedral_mesh` (boundary faces in patches by their triangle's CAD face) → `PolyhedralDual`, with
+**the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
+(so a CAD edge stays sharp whatever its triangles fold by; pinned by
+`test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by`). Netgen is injected, so
+`tests/unit/test_meshing_cad_mesher.py` runs the whole pipeline on a stub cube (Kuhn tets) without Netgen
+or OCP.
+- **Patches are chosen by face selection** (`FaceSelection.faces(RegionFaces) -> face indices`; agreed
+  with the project owner, 2026-10-19, who intends a face picker in the browser interface — a click on a
+  face is a point on it, which is all `FacesNear` stores): `FacesNear(points)` — the face each point projects onto (a pipe's
+  end); `FacesOn(solids, tolerance=None)` — faces whose sample point lies within tolerance (unset 1e-6 of
+  the region's extent) of the solids' boundary (a lamp taken out of the water). A face's sample is the
+  centroid of one of its triangles projected onto it. Faces nobody selects go to `others`; two
+  selections sharing a face, a selection finding none, a reserved name, or `others` naming a selection
+  are refused (names before Netgen runs). The CAD records carry no face names, which is why selection is
+  geometric.
+- ⚠️ **Not yet projected onto the CAD**: the dual's boundary vertices are triangle centroids and edge
+  midpoints, so a curved wall's patch area is short by the chord (Sozzi maxh 0.03–0.02: 2.6–4.6 %; log).
+  Projecting them (feature-edge midpoints onto the edge, by alternating projection) needs the dual to
+  say which primal entity each vertex came from — the next step.
+- **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
+  whole `aquaflux mesh --case --openfoam`.
+- `tetrahedral_mesh(points, tetrahedra, patches=None)` numbers faces in first-sighting order (the test
+  fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former hand assembly).
+
 ## Netgen: in a child process, reached through files (binding)
 
 - ⚠️ **Netgen must never be imported into a process that has imported OCP.** The `netgen-mesher` wheel
@@ -175,7 +204,7 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 - **`aquaflux/meshing/`, host-side numpy and numba, not JAX.** It depends on `aquaflux.mesh` (it ends at
   `Mesh.from_csr`, which owns validation) and on `aquaflux.io.cad`; nothing imports it back except a case
-  `MeshSource` (`aquaflux/case/mesh_source.py`).
+  `MeshSource` (`CadMesh`, `aquaflux/case/mesh_source.py`) and the test fixtures.
 - **CAD access goes through `io/cad/kernel.py`**, via `CadModel` and a `CadRegion` (`io.md`, "Regions for a
   mesher"): topology with signed edge folds and adjacency, face-tagged triangulation, the BREP file Netgen
   reads, closest-point projection with outward normals — all numbered in the exploration order Netgen
@@ -186,8 +215,9 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 ## Components to build
 
-1. **CAD topology** in the kernel, as above.
-2. **Feature-preserving dual** (numba), from any conformal primal mesh.
+1. **CAD topology** in the kernel, as above (built).
+2. **Feature-preserving dual** (numba), from any conformal primal mesh (built), and the CAD mesher
+   around it (built; boundary projection not yet).
 3. **Prism-layer extruder**: smoothed normals, several normals at convex ridges, shrinking at concave
    corners, thickness limited by proximity, layer collapse or backtracking on collision.
 4. **Block mesher** in place of blockMesh: transfinite interpolation with projection onto CAD or analytic

@@ -185,7 +185,8 @@ cfd/                                  # repo root
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)
 │   │   ├── spec.py                   #   CaseSpec (mesh/fluid/physics/boundaries/numerics/drive) + Numerics; case_spec_from/to_mapping; check_against(mesh)
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
-│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading (generated)
+│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading / CadMesh (generated)
+│   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by CadMesh and the radiation sources)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
@@ -194,6 +195,12 @@ cfd/                                  # repo root
 │   │   ├── kinematic.py              #   pressure per unit density, the form OpenFOAM's incompressible solvers hold (both directions of the factor)
 │   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back, with the march history its step record carries
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
+│   ├── meshing/                      # mesh generation from CAD (host-side numpy + numba; Netgen only in a child process)
+│   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches) -> Mesh; FaceSelection -> FacesNear / FacesOn
+│   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
+│   │   ├── tetrahedra.py             #   tetrahedral_mesh(points, tetrahedra, patches) -> Mesh
+│   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
+│   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr
 │       ├── partition.py              #   PartitionedMesh + LocalPartition; partition_mesh(mesh, labels) → owned+halo local meshes, gathered geometry, halo plan

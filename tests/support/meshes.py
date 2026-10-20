@@ -21,6 +21,7 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
+from aquaflux.meshing import tetrahedral_mesh
 
 
 def geometry_invariants(mesh: Mesh) -> dict:
@@ -278,41 +279,7 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
                         vertices.append(node(*corner))
                     cells.append(vertices)
 
-    return tetrahedral_mesh(coords, cells)
-
-
-def tetrahedral_mesh(points, cells) -> Mesh:
-    """A face-based mesh of tetrahedra given by their four point indices, in any order.
-
-    Parameters
-    ----------
-    points : array-like, shape ``(n_points, 3)``
-    cells : array-like of int, shape ``(n_cells, 4)``
-    """
-    cells = np.asarray(cells).tolist()
-    # A triangle is shared by at most two tetrahedra, so the first sighting owns it and the second
-    # neighbours it. Keyed on the sorted node triple, which is the face's identity whichever cell
-    # names it; the stored order is the owner's, and any order of three nodes is a valid perimeter.
-    faces, owner, neighbour, seen = [], [], [], {}
-    for index, vertices in enumerate(cells):
-        for corner in range(4):
-            triangle = vertices[:corner] + vertices[corner + 1 :]
-            key = tuple(sorted(triangle))
-            if key in seen:
-                neighbour[seen[key]] = index
-            else:
-                seen[key] = len(faces)
-                faces.append(triangle)
-                owner.append(index)
-                neighbour.append(-1)
-
-    return Mesh.from_faces(
-        jnp.asarray(np.asarray(points, dtype=float)),
-        faces,
-        jnp.asarray(owner),
-        jnp.asarray(neighbour),
-        len(cells),
-    )
+    return tetrahedral_mesh(coords, np.asarray(cells))
 
 
 def hexahedron_beside_a_prism():
