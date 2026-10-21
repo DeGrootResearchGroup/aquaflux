@@ -40,7 +40,7 @@ space about a lamp sleeve, and the hemispherical shell about its end.
 :class:`PolyhedralDual` turns a conformal mesh of any cell kinds into its polyhedral dual -- one cell
 per primal point, cut into convex pieces at a sharp concave edge -- keeping the boundary's corners,
 edges and patch borders sharp. :class:`FacePlanarizer` moves a mesh's free vertices to flatten its
-faces without making any cell less convex.
+faces without making the mesh's worst cells or faces worse.
 """
 
 from __future__ import annotations

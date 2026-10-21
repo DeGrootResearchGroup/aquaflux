@@ -91,16 +91,25 @@ def _kuhn_l(n: int, perturb: float, seed: int) -> Mesh:
     return without_cells(block, np.flatnonzero(corner), patch="cut")
 
 
-def test_no_cell_ends_less_convex_or_more_concave_than_it_started():
-    # Each bound bites here: without the convexity bound five cells end less convex, without the
-    # concavity bound two more concave.
+def test_no_cell_ends_less_convex_than_the_least_convex_it_started_with():
+    # Without the bound this L's least convex cell ends at 0.744 against its start's 0.730. Single
+    # cells may get less convex than they were: the bound is the mesh's worst, not each cell's own.
+    dual, movable = _dual_of(_kuhn_l(4, 0.3, 1))
+    result = FacePlanarizer().planarize(dual, movable)
+    before, after = cell_non_convexity(dual), cell_non_convexity(result.mesh)
+    assert result.warp[-1] < 0.6 * result.warp[0]
+    assert float(after.max()) <= float(before.max()) + 1e-12
+    assert np.any(after > before + 1e-9)
+    assert np.all(np.asarray(result.mesh.geometry().cell.volume) > 0.0)
+
+
+def test_no_cell_turns_concave_or_more_concave_than_it_started():
+    # Without the concavity bound two of this L's cells end more concave.
     dual, movable = _dual_of(_kuhn_l(4, 0.25, 0))
     result = FacePlanarizer().planarize(dual, movable)
     assert result.warp[-1] < 0.6 * result.warp[0]
-    assert np.all(cell_non_convexity(result.mesh) <= cell_non_convexity(dual) + 1e-12)
     bound = np.maximum(cell_concavity(dual), CONCAVE_COSINE)
     assert np.all(cell_concavity(result.mesh) <= bound + 1e-12)
-    assert np.all(np.asarray(result.mesh.geometry().cell.volume) > 0.0)
 
 
 def test_the_pass_stops_on_its_convergence_test_not_its_cap():
@@ -123,6 +132,16 @@ def test_the_planarizer_refuses_a_flat_mesh_and_a_mask_of_the_wrong_shape():
     mesh = structured_grid_3d(1, 1, 1)
     with pytest.raises(ValueError, match="movable must have shape"):
         FacePlanarizer().planarize(mesh, np.ones(3, dtype=bool))
+
+
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+def test_the_planarizer_refuses_a_mesh_with_an_inverted_cell():
+    # A Kuhn grid perturbed until one tetrahedron is nearly flat (volume 3e-19): two of its dual's
+    # cells come out with negative volume, against which no bound means anything.
+    dual, movable = _dual_of(tetrahedral_grid_3d(4, perturb=0.35, seed=1))
+    assert float(np.asarray(dual.geometry().cell.volume).min()) < 0.0
+    with pytest.raises(ValueError, match=r"2 cell\(s\) have a volume that is not positive"):
+        FacePlanarizer().planarize(dual, movable)
 
 
 def _small_dual() -> tuple[Mesh, np.ndarray, np.ndarray]:

@@ -460,13 +460,21 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
   never trips; pinned by the displaced hex block). `max_iterations` is a bound reported through `converged`.
 - **The guard is load-bearing (binding — do not drop a bound).** Unguarded on the Netgen L the former sweep
   cut the warp 98 % but took non-orthogonality to 153 deg and skewness to 11 (vertices dragged to flatten
-  sliver faces carried centroids past faces). A step is kept only where, against the **starting** mesh: no
-  cell less convex (`cell_non_convexity`), none newly concave by checkMesh's test or more so
-  (`cell_concavity`), volume positive, and **no face more non-orthogonal or skewed than the starting
-  mesh's worst face**. ⚠️ Two bounds that look natural block everything: per-cell convexity against the
-  *previous iteration* (stalled at 64 % on a Kuhn dual) and per-face non-orthogonality against each face's
-  *own* start (0 iterations on the L). The volume bound never bites on the fixtures but stays: an
-  inverted cell's convexity is NaN, which passes a `>` bound.
+  sliver faces carried centroids past faces). A step is kept only where, against the **starting** mesh: **no
+  cell less convex than the start's least convex cell** (`cell_non_convexity`), none newly concave by
+  checkMesh's test or more so (`cell_concavity`, **per cell**), volume positive, and **no face more
+  non-orthogonal or skewed than the starting mesh's worst face**. ⚠️ **Bounds against each element's own
+  value trap the pass** (project owner agreed the start's-worst form, 2026-10-20): per-cell convexity
+  against the *previous iteration* stalled at 64 % on a Kuhn dual; per-face non-orthogonality against each
+  face's own start allowed 0 iterations on the L; per-cell convexity against each cell's own start held
+  most of the worst all-free faces (`worst_face_limits.py`), and replacing it with the start's worst gave
+  16–22 % (L, Sozzi) to 62 % (cylinder) less warp, fewer concave cells and 1.1–3.2x faster passes on the
+  four Netgen duals (log). Concavity stays per cell: a cell turning concave is a failure however mild (off,
+  concave cells more than double). ⚠️ **Triangulation-volume dependence is not bounded**, and under the
+  wider bound Sozzi's worst rose above its start (0.299 vs 0.231, a wall cell; log). The mesh is refused
+  if a starting cell's volume is not positive or its quality undefined: a NaN would be the bound. The
+  volume bound never bites on the fixtures but stays: an inverted cell's convexity is NaN, which passes a
+  `>` bound.
 - ⚠️ **How a violating step is repaired (binding)**: shorten first (λ ×`increase`, up to `shortening` × its
   start), then **pin the worsened cells' free vertices and re-solve** (a bad face pins both its cells).
   Deleting held vertices from a finished global step instead stalls (kept share 0.64 → 0.24, log); with no
@@ -486,13 +494,13 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
   building: a step moves 85–100 % of the cells (Kuhn n = 6 dual, every trial) — log.
 - **Where the worst remain (log 2026-10-20)**: most of the worst 1 % interior warp is on faces whose every
   vertex was free (48–68 % on the four Netgen duals, the worst face on Sozzi and the cylinder), so fixed
-  vertices are not what holds them: **the per-cell convexity bound does** (log, 2026-10-20,
-  `worst_face_limits.py`: unbounded they flatten, a tighter stop barely helps; without that bound, L and
-  Sozzi stay within every starting worst, with fewer concave cells, 16–22 % less warp, 2–4x faster); wall
-  cells hold 39–89 % of the worst triangulation-volume dependence. **Open**: sliding boundary vertices along the CAD
-  surface (for the wall cells, on curved walls), a convexity bound against the start's worst cell in place
-  of each cell's own, and cheaper
-  conjugate-gradient products. Pinned in
+  vertices are not what holds them: the per-cell convexity bound then in force did (log, 2026-10-20,
+  `worst_face_limits.py`: unbounded they flatten, a tighter stop barely helps), which is why the bound is
+  now the start's worst; wall cells hold most of the worst triangulation-volume dependence. **Open**:
+  sliding boundary vertices along the CAD surface (for the wall cells, on curved walls); bounding the
+  triangulation-volume dependence; **the bounds as penalties in the objective** (a cost rising steeply
+  near each limit, so the solver trades quality against flatness rather than stopping at a wall — the
+  project owner's preferred longer-term direction, 2026-10-20); cheaper conjugate-gradient products. Pinned in
   `tests/unit/test_meshing_planarize.py` (derivatives against finite differences of the guard's warp,
   the preconditioner against explicit frozen-plane blocks); harness `validation/meshing_dual/planarization.py`.
 

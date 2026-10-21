@@ -20,12 +20,17 @@ Flattening alone is not safe: a vertex dragged to flatten a small face can carry
 past one of the cell's faces. So a step is kept only where it leaves the mesh no worse than the
 pass found it, by these measures:
 
-* no cell less convex than it started (:func:`~aquaflux.mesh.cell_non_convexity`), none newly
-  concave by ``checkMesh``'s face-plane test and none concave more so
-  (:func:`~aquaflux.mesh.cell_concavity`), and every volume positive;
+* no cell less convex than the starting mesh's least convex cell
+  (:func:`~aquaflux.mesh.cell_non_convexity`), none newly concave by ``checkMesh``'s face-plane
+  test and none concave more so (:func:`~aquaflux.mesh.cell_concavity`), and every volume positive;
 * no face more non-orthogonal or more skewed than the worst face of the starting mesh
-  (:func:`~aquaflux.mesh.face_non_orthogonality`, :func:`~aquaflux.mesh.face_skewness`). A
-  face-by-face bound would hold nearly every vertex still: almost any move tilts some face a little.
+  (:func:`~aquaflux.mesh.face_non_orthogonality`, :func:`~aquaflux.mesh.face_skewness`).
+
+The convexity, non-orthogonality and skewness bounds are each the starting mesh's worst, not each
+cell's or face's own starting value: flattening one face moves vertices that several cells share,
+improving some and worsening others a little, and a bound per element holds back nearly every step
+that would do so, though the mesh's worst cell or face is not made worse by it. Concavity is the
+exception, held cell by cell: a cell turning concave is a failure in itself, however mild.
 
 A step that breaks a bound is first shortened, by raising ``lambda``, up to a set multiple of its
 starting value; past that, the free vertices of the cells it worsens are pinned and the step solved
@@ -147,7 +152,9 @@ class FacePlanarizer:
         Raises
         ------
         ValueError
-            If the mesh is not three-dimensional or ``movable`` has the wrong shape.
+            If the mesh is not three-dimensional, ``movable`` has the wrong shape, or a cell's
+            volume is not positive or its quality not defined -- the bounds, taken from the
+            starting mesh, would then hold nothing.
         """
         if mesh.dim != 3:
             raise ValueError("planarization needs a three-dimensional mesh")
@@ -157,6 +164,15 @@ class FacePlanarizer:
         free = np.flatnonzero(movable)
         quality = MeshQuality(mesh)
         state = _State.at(mesh, quality, np.asarray(mesh.node_coords, dtype=np.float64))
+        undefined = (state.cell_quality[:, 2] >= 0.0) | ~np.all(
+            np.isfinite(state.cell_quality), axis=1
+        )
+        if np.any(undefined):
+            raise ValueError(
+                f"{int(undefined.sum())} cell(s) have a volume that is not positive or a quality "
+                f"that is not defined (first: cell {int(np.flatnonzero(undefined)[0])}); "
+                "planarization keeps a mesh no worse than it was, which needs a valid mesh to start"
+            )
         guard = _NoWorse(mesh, state)
         warp = _Warp.of(mesh, free)
         start = self.damping * float(np.mean(1.0 / state.area))
@@ -361,6 +377,7 @@ class _NoWorse:
         self._owner = np.asarray(mesh.face_cells.owner)
         self._neighbour = np.asarray(mesh.face_cells.neighbour)
         cell = start.cell_quality.copy()
+        cell[:, 0] = cell[:, 0].max()  # no cell less convex than the start's least convex
         cell[:, 1] = np.maximum(cell[:, 1], CONCAVE_COSINE)  # a convex cell may change, not fold
         cell[:, 2] = 0.0  # a positive volume
         self._cell_bound = cell + self._SLACK

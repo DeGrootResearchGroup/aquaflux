@@ -679,3 +679,29 @@ non-orthogonality 46.1 / 47.8), concave cells fall, total warp falls 16–22 % a
 Without the concavity bound concave cells more than double. Not measured: a convexity bound against the
 start's worst cell (the analogue of the face bounds) as such; cylinder and sleeve; the effect on
 unit-test fixtures (the L4 fixture's convexity bound bites, `test_meshing_planarize.py`).
+
+## 2026-10-20 — the convexity bound against the start's worst cell
+
+`FacePlanarizer` now bounds every cell's non-convexity by the starting mesh's largest (was each cell's own
+start); concavity stays per cell. `planarization.py`, shipped defaults otherwise, harness duals as above,
+macOS arm64, one run each, shared machine. Per-cell bound (the entry "where the worst faces and cells are"
+above) → start's-worst bound:
+
+| dual | total warp | concave (start) | int warp p99 | non-convexity p99 / max (start max) | tri-volume p99 / max (start max) | non-orth max (start) | time |
+|---|---|---|---|---|---|---|---|
+| L 0.01 | 3.44 → 2.90 | 28 → 27 (57) | .021 → .016 | .068/.312 → .066/.312 (.349) | .030/.229 → .026/.211 (.255) | 43.3 → 46.1 (46.2) | 42 → 37 s |
+| Sozzi 0.01 | 74.5 → 58.1 | 58 → 48 (309) | .055 → .015 | .103/.281 → .096/.280 (.331) | .105/.179 → .104/**.299** (.231) | 46.1 → 47.8 (47.8) | 131 → 41 s |
+| cylinder 0.005 | 13.4 → 5.23 | 66 → 41 (1108) | .023 → .006 | .077/.271 → .057/.271 (.316) | .038/.225 → .027/.185 (.305) | 47.3 → 50.1 (50.1) | 248 → 187 s |
+| sleeve 0.005 | 13.3 → 6.6 | 30 → 8 (258) | .017 → .007 | .072/.293 → .066/.293 (.293) | .046/.226 → .038/.226 (.226) | 48.3 → 51.4 (51.7) | 277 → 128 s |
+
+⚠️ **Sozzi's worst triangulation-volume dependence rose above the start's (0.299 vs 0.231)**: that measure
+is not bounded, and the wider convexity bound let one wall cell (93 % of the worst 1 % are wall cells)
+get worse. The `worst_face_limits.py` entry's "every reported measure stays within its starting worst"
+covered the measures that harness prints, which do not include it. Worst non-orthogonality now rises to
+the start's worst where it had stayed below. The mesh is refused if a starting cell's volume is not
+positive or its quality undefined (a NaN would otherwise be the bound): a Kuhn n 4 grid perturbed 0.35
+(seed 1) has a 3e-19 tetrahedron and two dual cells of volume about −1e19.
+
+Mutations, each red: the bound per cell again (`test_no_cell_ends_less_convex_than_the_least_convex_it_started_with`
+asserts some cell does get less convex); the bound removed (the Kuhn L, perturb 0.3 seed 1, ends at
+0.744 against 0.730); the concavity bound removed; the refusal removed.
