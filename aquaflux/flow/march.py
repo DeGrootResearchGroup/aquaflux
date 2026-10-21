@@ -236,6 +236,9 @@ class _FlowProblem(MaterializedProblem):
     """
 
     momentum: MomentumContinuity
+    probes_by_field = (
+        True  # `MomentumContinuity.residual_with_field`, also on the sweep-capped stand-in
+    )
 
     @property
     def assembler(self) -> MomentumContinuity:

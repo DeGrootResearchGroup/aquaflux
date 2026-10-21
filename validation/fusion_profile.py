@@ -43,7 +43,8 @@ Usage
     FUSION_CASE=bfs3d FUSION_PROGRAMS=probe validation/run_case.sh validation/fusion_profile.py --wait
 
 Environment: ``FUSION_CASE`` (default ``pitzdaily``); ``FUSION_PROGRAMS``, a comma list of ``residual``,
-``jvp`` and ``probe`` (default all three); ``FUSION_BATCH``, the probe's batch (default the library's
+``jvp``, ``probe`` (default those three) and ``probe-fields``, the probe's one program per column field
+(``batched_field_jacobian_matvec``, each seeded with its own field's first colours); ``FUSION_BATCH``, the probe's batch (default the library's
 ``PROBE_BATCH_SIZE``), seeded with the probe's own first colours; ``FUSION_STATE``, a ``.npz`` holding
 ``state`` (default the hybrid start); ``FUSION_CALLS`` traced calls (default 10), ``FUSION_REPEATS``
 untraced timing calls (default 15), ``FUSION_TOP`` rows in each table (default 25), and
@@ -81,6 +82,7 @@ import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition.materialized_session import (  # noqa: E402
     PROBE_BATCH_SIZE,
+    batched_field_jacobian_matvec,
     batched_jacobian_matvec,
 )
 from aquaflux.turbulence import open_session  # noqa: E402
@@ -356,6 +358,10 @@ def _report(label, fn, args, module, tangents=1):
     print(f"\n=== {label} ({ARM} arm, {CASE}) ===", flush=True)
     print(f"temporary buffer {temp:.1f} MiB; {faults:.0f} minor page faults per call")
     print(
+        f"bytes touched per call (operands + outputs, summed over kernels): "
+        f"{sum(k.bytes for k in kernels) / 1e9:.2f} GB; {wall / tangents:.2f} ms per tangent"
+    )
+    print(
         f"untraced wall, best of {REPEATS}: {wall:.2f} ms on {len(cores)} cores, {serial_wall:.2f} ms on one "
         f"core; parallel efficiency {serial_wall / (len(cores) * wall):.0%}"
     )
@@ -466,7 +472,7 @@ def main():
         _restore_lapack_first_pass()
     elif ARM != "main":
         raise SystemExit(f"FUSION_ARM must be 'main' or 'lapack', not {ARM!r}")
-    unknown = set(PROGRAMS) - {"residual", "jvp", "probe"}
+    unknown = set(PROGRAMS) - {"residual", "jvp", "probe", "probe-fields"}
     if unknown:
         raise SystemExit(f"FUSION_PROGRAMS names no such program: {sorted(unknown)}")
     print(
@@ -525,6 +531,33 @@ def main():
             "jit_probe_batch",
             tangents=BATCH,
         )
+    if "probe-fields" in PROGRAMS:
+        # The probe's per-column-field programs, as the session runs them: each field's own first colours,
+        # its residual differentiated in that field alone.
+        session = open_session(case.SOLVER.settings()["preconditioner"], coupled)
+        probe = session._probe_for()
+        plan = probe.plan
+        probed_params, probed_static = eqx.partition(
+            probe.narrow(session.problem.assembler), eqx.is_array
+        )
+        layout = session.problem.layout
+        for field in range(plan.n_fields):
+            start = plan.probe_base[field]
+            stop = start + min(BATCH, plan.n_colours[field])
+            seeds = jnp.asarray(plan.field_seeds(start, stop, out=np.zeros((BATCH, plan.n_cells))))
+
+            def field_batch(p, s, block, field=field):
+                return batched_field_jacobian_matvec(
+                    eqx.combine(p, probed_static), layout, s, field, block
+                )
+
+            _report(
+                f"probe's column field {field} program, batch {BATCH}",
+                jax.jit(field_batch),
+                (probed_params, jax.lax.stop_gradient(state), seeds),
+                "jit_field_batch",
+                tangents=BATCH,
+            )
 
 
 if __name__ == "__main__":

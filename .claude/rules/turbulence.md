@@ -231,7 +231,7 @@ Other files point here. If you find one of these names, read it through this tab
   the case's own row scales. Whether the block family should hold the anchor's too is #711,
   unmeasured. Arms: log, "#701 — the arms".
 - **The jitted Jacobian probes take the assembler as an argument** (`precondition/materialized_session.py`: `jacobian_matvec` /
-  `batched_jacobian_matvec`, module-level `filter_jit`): a closure over `coupled` is a fresh cache entry
+  `batched_jacobian_matvec` / `batched_field_jacobian_matvec`, module-level `filter_jit`): a closure over `coupled` is a fresh cache entry
   per rung, while scaling the viscosity leaves the pytree structure identical
   (`test_scaling_the_viscosity_leaves_the_pytree_structure_identical`,
   `test_the_jacobian_probe_is_a_cache_hit_across_reynolds_rungs`).
@@ -359,6 +359,15 @@ Other files point here. If you find one of these names, read it through this tab
   the IFT adjoint at the root (one transpose solve). `CoupledRANS.build` pre-resolves k/ω boundaries
   (else a dynamic-shape `nonzero` breaks the jit). `CoupledRANS.residual` builds the closure first and
   calls `momentum.flow_fields` once (#106).
+  - **The assembly is `residual_of(velocity, pressure, k, omega)` (physical `k`, `omega`, separate
+    arrays); `residual(state)` unpacks and calls it** (2026-10-20). `residual_with_field(state, field,
+    values)` replaces one per-cell field (layout order `[u.., p, k, omega]`, `values` in the *solved*
+    variable) without repacking, so a pressure, `k` or `omega` derivative never forms the velocity
+    gradient's tangents — the coloured probe's per-field programs (`_CoupledProblem.probes_by_field`,
+    `solve-direct-preconditioners.md`). `_effective_momentum` takes the velocity `(n_cells, dim)`, not the
+    flat flow vector, for the same reason. ⚠️ Any new consumer of a field inside `residual_of` must take
+    the separate array; reaching back for a flat state re-instantiates every tangent (pinned by
+    `test_the_coupled_pressure_and_turbulence_columns_trace_less_than_the_whole_state`).
 - **Fluid consistency guard.** Both blocks take a `PropertyModel` (#353); `CoupledRANS.build` refuses a
   closure whose density or kinematic viscosity disagrees with the flow's material properties
   (`refuse_a_fluid_the_flow_disagrees_with`, #157/#367) — the flow block never reads the closure's

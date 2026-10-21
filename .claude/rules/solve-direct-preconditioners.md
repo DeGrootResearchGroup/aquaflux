@@ -103,7 +103,11 @@ bare block inverse).
   path when `structure.layout` is set and calls `_refactor_blocks`, which only `FieldSplitPreconditioner`
   implements.
 - **A materialize holds the matrix plus one chunk.** Seeds are filled one chunk at a time into a reused
-  buffer (`ColumnProbePlan.seed_block(start, stop, out=)`, one shape, so the batched map compiles once),
+  buffer (`ColumnProbePlan.seed_block(start, stop, out=)` for whole-state seeds, `field_seeds` for one
+  field's; one shape per program, so each batched map compiles once), and **a chunk never spans two
+  column fields** (`ColumnProbePlan.field_chunks`; each field's last chunk may be short and is padded, so
+  a materialize makes up to `n_fields − 1` more calls than `ceil(n_probes / batch)`; `probe_batch_size=None`
+  is one batch per field),
   and `ProbeGather` scatters each chunk's responses as they are computed; out-of-reach entries need no
   sentinel. The gather map's one-time build (`_index_dtype`, COO→CSR grouping) runs at case construction
   and peaks above any single materialize. Measurements: log, "Chunked seeds and per-chunk
@@ -120,6 +124,37 @@ bare block inverse).
     Jacobian and the compiled step, not by building the case (0.84 GiB): 8.46 GiB over the shipped 17-step
     march against 12.25 GiB on `main` `1b68caf6`, identical step tables (2026-10-19, 4-core Linux, jax
     0.12.0): log, "bfs3d memory by owner" and "Where a run's memory goes".
+  - **One program per column field (2026-10-20).** A problem whose assembler implements
+    `residual_with_field(state, field, values)` (`FieldwiseResidual`) sets `probes_by_field = True`
+    (`_CoupledProblem`, `_FlowProblem`); the session (`_probe_products`, used by both the fit and the
+    re-fit) then passes a `FieldwiseMatvec` wrapping `batched_field_jacobian_matvec(assembler, layout,
+    state, field, tangents)` — `field` static, one compiled program per field, seeds `(batch, n_cells)`.
+    The other fields are closed over as constants, so JAX never forms their tangents (a whole-state seed
+    is zeros, which are values: every kernel downstream ran on them). The default (`False`) is the
+    whole-state `batched_jacobian_matvec`. The probe count is unchanged; what each tangent computes is
+    not. ⚠️ **The pruning dies silently if the residual repacks its fields into a flat state** anywhere on
+    the path (the repack's derivative instantiates every zero), and a constant-zero seed is no symbolic
+    zero either; verify on the jaxpr (`test_fieldwise_probe.py` does).
+    - **Not bit-identical at default compiler flags, and that is rounding, not a defect.** On an x86 CPU
+      with fused multiply-add, removing an add of zero changes where XLA contracts multiply-adds: per-field
+      against whole-state matrices differ by ≤ 2.4e-16 of each (row field, column field) block's largest
+      entry, on 2–8 % of entries, none non-finite (bfs3d and pitzDaily hybrid starts, jax 0.12.0, 4-core
+      Xeon, 2026-10-20). Under `XLA_FLAGS=--xla_cpu_max_isa=AVX` (no FMA instructions) the two are
+      **identical** (`np.array_equal` on `data`/`indices`/`indptr`) on both cases. Instrument:
+      `validation/fieldwise_probe_identity.py`. ⚠️ The batched whole-state product was never bit-identical
+      to a per-tangent loop either (up to 2.7e-11 relative on small entries, pitzDaily, same flags and
+      without FMA alike), whatever its old docstring said: never pin a probe change on exact equality at
+      default flags.
+    - **Ready for per-column precision, not built:** `FieldwiseMatvec.seed_dtype(field)` (float64 for
+      every field today) types each field's seed buffer and the tangents' dtype keys each program; a
+      float32 field program must also cast the closed-over state and assembler.
+    - **Measured (4-core Xeon, jax 0.12.0, glibc defaults, hybrid start, batch 8):** bfs3d's per-field
+      programs touch 2.8 (p) to 6.9 GB (each velocity) per call against 10.4 for the whole state, mean
+      27.5 ms per tangent against 59.3; a re-fit's probe 43.1 → 18.5 s (β 0.005). pitzDaily 12.1 → 5.5 ms
+      per tangent, probe 1.60 → 0.94 s. bfs3d's march (owner's arm64 Mac, 2026-10-21): same 17 steps / 149
+      cycles / `x_r/h` 8.361, probe over the march 125–132 → 71 s warm. The price: ~10 s per process to trace and lower the extra programs
+      (pitzDaily, warm cache), and +0.4 GiB VmHWM after a bfs3d re-fit. Tables and marches:
+      `.claude/notes/validation-log.md`, "One probe program per column field".
   - **Batched probing** (`batched_matvec`, a `jax.vmap` of the jvp built once) and the **fixed full-pattern
     gather** (`structure=`) are what the materialized path passes. The full pattern (no `eliminate_zeros`)
     is a superset of the live nonzeros at any state, so the structure never moves cold→developed — that

@@ -437,8 +437,8 @@ def test_active_rows_composes_with_a_per_column_reach():
 
 def test_batched_probing_matches_the_per_probe_loop():
     """Batched probing (the coloured probes share one linearization, applied to stacked seeds) recovers
-    exactly the per-probe loop's Jacobian -- it is a pure speedup, not an approximation. Checked both in
-    one batch and chunked (so the final-chunk padding is exercised)."""
+    the per-probe loop's Jacobian to rounding -- a speedup, not an approximation. Checked both in one
+    batch and chunked (so the final-chunk padding is exercised)."""
     import jax
 
     rng = np.random.default_rng(3)
@@ -459,7 +459,7 @@ def test_batched_probing_matches_the_per_probe_loop():
         batched_matvec=jax.vmap(matvec),
         probe_batch_size=4,
     )
-    assert abs(loop - one_batch).max() < 1e-14  # bit-identical to the loop
+    assert abs(loop - one_batch).max() < 1e-14  # the loop's, to rounding
     assert abs(loop - chunked).max() < 1e-14  # chunking + final-chunk padding changes nothing
     assert abs(loop - k).max() < 1e-12  # and both recover the true matrix
 

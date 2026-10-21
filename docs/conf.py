@@ -195,7 +195,7 @@ SUBPACKAGE_GROUPS = {
         ("Wall treatment and boundary closures", ["boundary"]),
         (
             "The coupled flow-turbulence solve",
-            ["coupled", "march_settings", "driver", "continuation"],
+            ["coupled", "scalar_transforms", "march_settings", "driver", "continuation"],
         ),
         ("Reynolds-number continuation", ["reynolds"]),
         ("Preconditioners", ["preconditioner_spec", "preconditioner"]),

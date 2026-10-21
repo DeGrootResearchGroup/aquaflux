@@ -141,6 +141,13 @@ branches.
 - **A harness that calls `solve_linear` outside a Newton step must bind the measure**
   (`solve.linear.in_progress_measure(engine.linear_solver(), measure)`); the step's GMRES is built with
   `norm=None` and raises elsewhere.
+- **Exact equality between two compiled JAX programs is not a test of their arithmetic.** A changed
+  program is compiled differently and its last bits move: pruning a zero tangent moves XLA's multiply-add
+  (FMA) contraction (≤ 2.4e-16 of a block's largest entry for the per-field probe), and a batched JVP
+  differs from the same JVP looped even without FMA (up to 2.7e-11 relative on small entries, pitzDaily,
+  2026-10-20). For the first kind, run both arms under `XLA_FLAGS=--xla_cpu_max_isa=AVX`, which has no FMA
+  instructions (`fieldwise_probe_identity.py`; the per-field probe is identical there); the second has no
+  such switch. A march compared across such a change is two draws, not a pair.
 - **Print one line per outer step, flushed; print the operating point (mesh size) before measuring; and
   print only settings actually in force.**
 - **Do not gate a loaded checkpoint on its own recorded `residual_norm`** — it is in the row-scaled measure

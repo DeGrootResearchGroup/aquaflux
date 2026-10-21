@@ -46,9 +46,6 @@ from .coupled import (
     coupled_rans_layout,
     CoupledShiftPolicy,
     LiveViscosityVelocityParts,
-    DirectScalars,
-    LogScalars,
-    ScalarVariableTransform,
     coupled_step,
     open_session,
     wall_consistent_state,
@@ -58,6 +55,7 @@ from .coupled import (
     solve_coupled,
 )
 from .driver import bulk_velocity, solve_segregated
+from .scalar_transforms import DirectScalars, LogScalars, ScalarVariableTransform
 from . import coupled_initialization as _coupled_initialization  # noqa: F401  (registers CoupledRANS)
 from .initialization import sst_initial_fields, wall_consistent_omega
 from .march_settings import CoupledShiftSettings
