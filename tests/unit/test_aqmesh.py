@@ -10,6 +10,7 @@ sizes are the same arrays as hexahedra, but a mesh of only quadrilaterals would 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import jax
@@ -155,6 +156,9 @@ def test_an_existing_file_is_kept_unless_overwrite_is_given(tmp_path):
     write_aqmesh(_labelled_hexahedra(), path, overwrite=True)
     assert _same(read_aqmesh(path), _labelled_hexahedra())
     assert sorted(p.name for p in tmp_path.iterdir()) == ["mesh.aqmesh"]  # no partial file left
+    mask = os.umask(0)
+    os.umask(mask)
+    assert path.stat().st_mode & 0o777 == 0o666 & ~mask  # an ordinary file, not a temporary one
 
 
 def test_a_file_without_the_suffix_or_unserializable_provenance_is_refused(tmp_path):

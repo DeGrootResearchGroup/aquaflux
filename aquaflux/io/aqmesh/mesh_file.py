@@ -275,6 +275,8 @@ class AquafluxMeshWriter(MeshWriter):
         try:
             with os.fdopen(handle, "wb") as file:
                 np.savez(file, **arrays)
+            # A temporary file is made readable by its owner alone; the mesh is an ordinary file.
+            os.chmod(partial, 0o666 & ~_umask())
             os.replace(partial, path)
         except BaseException:
             Path(partial).unlink(missing_ok=True)
@@ -381,6 +383,13 @@ class AquafluxMeshReader(MeshReader):
         if "header" not in archive.files:
             raise ValueError(f"{self.path} is not an aquaflux mesh file (it has no header).")
         return AquafluxMeshHeader.from_json(archive["header"].tobytes().decode(), self.path)
+
+
+def _umask() -> int:
+    """The process's file-creation mask, read without changing it."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def write_aqmesh(mesh: Mesh, path, *, overwrite: bool = False, provenance=None) -> Path:
