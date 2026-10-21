@@ -22,6 +22,7 @@ from aquaflux.io import OpenFOAMReader
 from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
 from aquaflux.meshing import (
+    ApexRelaxation,
     CadMesher,
     FaceSelection,
     NetgenProcess,
@@ -338,6 +339,9 @@ class CadMesh(MeshSource):
         A core of hexahedra from an octree inside the region, kept clear of the walls and of the
         layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
         Unset, the core is polyhedral throughout.
+    apex_relaxation : ApexRelaxation or None
+        The apexes of the pyramids capping quadrilaterals for the tetrahedra -- a mapped wall's
+        layers, the hex core -- moved once the tetrahedra are in; unset, left where they stand.
 
     Raises
     ------
@@ -365,6 +369,7 @@ class CadMesh(MeshSource):
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
     core: OctreeCore | None = None
+    apex_relaxation: ApexRelaxation | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -401,7 +406,7 @@ class CadMesh(MeshSource):
             options["pipe_core"] = self.pipe_core
         return CadMesher(
             max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers,
-            core=self.core, **options,
+            core=self.core, apex_relaxation=self.apex_relaxation, **options,
         )  # fmt: skip
 
     def read(self, directory: Path) -> Mesh:

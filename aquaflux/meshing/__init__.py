@@ -17,7 +17,8 @@ before the fill, sized for the dual, so a wall-resolved mesh's layers join its c
 over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals (a band, such as a
 pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
 of triangles and quadrilaterals between these steps, and :class:`PyramidCaps` caps the
-quadrilaterals a tetrahedral fill meets. :class:`PipeCore` fills a pipe's core, inside its layers,
+quadrilaterals a tetrahedral fill meets, and :class:`ApexRelaxation` moves the caps' apexes once
+the fill is in. :class:`PipeCore` fills a pipe's core, inside its layers,
 with a structured O-grid; the mesher finds pipes by itself. :func:`element_mesh` makes a mesh of any
 tetrahedra, triangular prisms, hexahedra and pyramids.
 
@@ -46,6 +47,7 @@ faces without making any cell less convex.
 
 from __future__ import annotations
 
+from .apexes import ApexRelaxation, RelaxedApexes
 from .block_assembly import BlockMesh
 from .block_topologies import Annulus, CubedSphereCap, PipeOGrid
 from .blocks import Arc, Curve, HexBlock, SampledCurve, Surface
@@ -74,6 +76,7 @@ from .planarize import FacePlanarizer, Planarization
 
 __all__ = [
     "Annulus",
+    "ApexRelaxation",
     "Arc",
     "BlockLattice",
     "BlockMesh",
@@ -112,6 +115,7 @@ __all__ = [
     "RefinementCriterion",
     "Region",
     "RegionFaces",
+    "RelaxedApexes",
     "SampledCurve",
     "SampledRegion",
     "SphereSurface",

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from aquaflux.case import CadMesh, CadPlacement, case_schema, mesh_source_from_mapping, relocated
 from aquaflux.case.spec import _CASE_MAPPING
-from aquaflux.meshing import FacesNear, FacesOn, Graded, OctreeCore, PipeCore
+from aquaflux.meshing import ApexRelaxation, FacesNear, FacesOn, Graded, OctreeCore, PipeCore
 
 SECTION = {
     "kind": "CadMesh",
@@ -36,6 +36,7 @@ SECTION = {
         "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
     },
     "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
+    "apex_relaxation": {"kind": "ApexRelaxation", "max_sweeps": 10},
 }
 
 
@@ -55,6 +56,7 @@ def test_the_section_reads_into_its_selections_and_writes_back_as_given():
         pipes=("inlet",),
         pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
         core=OctreeCore(size=0.08, clearance=0.03),
+        apex_relaxation=ApexRelaxation(max_sweeps=10),
     )
     assert _CASE_MAPPING.to_mapping(source) == SECTION
 
@@ -70,6 +72,7 @@ def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaul
     )
     # The core's unset wall size is the mesher's size; its clearance is as set.
     assert mesher.core.resolved(mesher.max_size) == (0.02, 0.03)
+    assert mesher.apex_relaxation == ApexRelaxation(max_sweeps=10)
 
 
 def test_an_unset_setting_is_described_by_what_it_falls_through_to():

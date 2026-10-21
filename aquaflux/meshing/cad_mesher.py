@@ -28,6 +28,7 @@ import numpy as np
 from aquaflux.io.cad import CadModel, CadRegion
 from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
+from .apexes import ApexRelaxation
 from .dual import PolyhedralDual
 from .elements import element_mesh, face_keys, search_rows
 from .hex_core import OctreeCore
@@ -173,6 +174,9 @@ class CadMesher:
         A core of hexahedra inside the fill, kept clear of the layers' top and the other walls,
         its unset wall size ``max_size``; unset, none, and the whole core is the tetrahedra's
         polyhedral dual.
+    apex_relaxation : ApexRelaxation or None
+        How the caps' apexes, wall and core alike, are moved once the tetrahedra are in; unset,
+        they stay where the caps put them.
     netgen : NetgenProcess
         The Netgen it runs.
     """
@@ -185,6 +189,7 @@ class CadMesher:
     cap_height: float = 0.25
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     core: OctreeCore | None = None
+    apex_relaxation: ApexRelaxation | None = None
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
 
     def __post_init__(self) -> None:
@@ -296,6 +301,7 @@ class CadMesher:
         boundary = _Boundary.of(wall_faces, wall_tag, sides, side_face)
         # The tetrahedra meet triangles only: each quadrilateral left for them is capped on their side.
         caps = PyramidCaps.on(points, fill.quads[:, ::-1], self.cap_height)
+        apexes = points.shape[0] + np.arange(caps.apexes.shape[0])
         points = np.vstack([points, caps.apexes])
         points, surface, core = self._cored(points, np.vstack([fill.triangles, caps.sides]))
         points, tetrahedra = self._filled(points, surface, core.fill_size)
@@ -303,6 +309,10 @@ class CadMesher:
         # The layers' hexahedra first, so a column's cells are numbered as the layers grew them.
         hexahedra = core.hexahedra if hexahedra is None else np.vstack([hexahedra, core.hexahedra])
         pyramids = np.vstack([caps.pyramids, core.pyramids])
+        if self.apex_relaxation is not None:
+            points = self.apex_relaxation.relaxed(
+                points, tetrahedra, pyramids, np.concatenate([apexes, core.apexes])
+            ).points
         layered_walls = walls.faces.where(on_layered)
         if len(pipe_faces):
             # An open pipe end's own points inside the layers' ring are left on no cell.
@@ -374,6 +384,7 @@ class CadMesher:
             tetrahedra=start + core.tetrahedra,
             hexahedra=start + core.hexahedra,
             pyramids=start + np.vstack([core.pyramids, core.caps]),
+            apexes=start + core.caps[:, 4],
             fill_size=max(self.max_size, wall),
         )
         return np.vstack([points, core.points]), np.vstack([surface, start + core.surface]), cells
@@ -418,19 +429,22 @@ class _CoreCells:
     hexahedra : np.ndarray of int, shape ``(n, 8)``
     pyramids : np.ndarray of int, shape ``(n, 5)``
         The transition cubes' pyramids, then the caps on the core's boundary.
+    apexes : np.ndarray of int, shape ``(n_caps,)``
+        The caps' apexes.
     fill_size : float
     """
 
     tetrahedra: np.ndarray
     hexahedra: np.ndarray
     pyramids: np.ndarray
+    apexes: np.ndarray
     fill_size: float
 
     @classmethod
     def none(cls, fill_size: float) -> _CoreCells:
         """No core: no cells, and the fill at ``fill_size``."""
         empty = np.zeros((0,), np.int64)
-        return cls(empty.reshape(0, 4), empty.reshape(0, 8), empty.reshape(0, 5), fill_size)
+        return cls(empty.reshape(0, 4), empty.reshape(0, 8), empty.reshape(0, 5), empty, fill_size)
 
 
 def _compacted(points: np.ndarray, cells: list[np.ndarray]):

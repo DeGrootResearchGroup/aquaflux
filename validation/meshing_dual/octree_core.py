@@ -39,9 +39,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from mapped_layers_sozzi import DRAWING, LAYERED, LAYERS, PATCHES, WATER, _hexahedral
 
 
-def _open_vessel(directory: pathlib.Path):
+def _open_vessel(directory: pathlib.Path, placement: Placement | None = None):
     """A cylinder 0.3 m across and 0.6 m long about z, less a sleeve 25 mm across along its
-    axis: the model, the region, its patches and the patches layered."""
+    axis, placed by ``placement``: the model, the region, its patches and the patches layered."""
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder
     from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
@@ -55,7 +55,7 @@ def _open_vessel(directory: pathlib.Path):
     writer = STEPControl_Writer()
     writer.Transfer(water, STEPControl_AsIs)
     writer.Write(str(directory / "vessel.step"))
-    model = read_step(directory / "vessel.step")
+    model = read_step(directory / "vessel.step", placement)
     patches = {
         "inlet": FacesNear(((0.08, 0.0, 0.0),)),
         "outlet": FacesNear(((0.08, 0.0, 0.6),)),
