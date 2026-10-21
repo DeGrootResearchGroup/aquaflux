@@ -7,7 +7,7 @@ primitives, a mesh's own wall -- and exists only as the triangles a file holds.
 occluder list as the primitives and a scene may mix the two.
 
 **It answers on the host.** A segment is tested only against the triangles a
-:class:`~aquaflux.radiation.grid.TriangleGrid` puts along its path, and the walk stops at the
+:class:`~aquaflux.triangle_grid.TriangleGrid` puts along its path, and the walk stops at the
 first blocker -- a search whose whole value is the work it skips, which tracing would price at
 the same rate as the work done. So the body declares itself not
 :attr:`~aquaflux.solids.Body.traceable`, and whoever builds a mask calls it directly.
@@ -38,8 +38,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from aquaflux.radiation.checks import _surface_pieces, enclosure_winding
-from aquaflux.radiation.grid import _MAX_VOXELS, TriangleGrid, _near_cubic_resolution
 from aquaflux.solids import Body
+from aquaflux.triangle_grid import MAX_VOXELS, TriangleGrid, near_cubic_resolution
 
 __all__ = ["TriangleBody"]
 
@@ -106,7 +106,7 @@ class TriangleBody(Body):
             body has no inside. ``False`` requires every piece to be closed.
         resolution : int or tuple of int, optional
             Voxels per axis of the grid segments walk; see
-            :meth:`~aquaflux.radiation.grid.TriangleGrid.build`.
+            :meth:`~aquaflux.triangle_grid.TriangleGrid.build`.
         clearance_resolution : int or tuple of int, optional
             Voxels per axis of the grid the body vouches from. Unset, four times a near-cubic
             grid's of about ten triangles a voxel, per axis, halved as a whole while it holds
@@ -128,8 +128,8 @@ class TriangleBody(Body):
         vertices = np.ascontiguousarray(vertices, dtype=float)
         grid = TriangleGrid.build(vertices, resolution=resolution)
         if clearance_resolution is None:
-            clearance_resolution = _CLEARANCE_REFINEMENT * _near_cubic_resolution(vertices)
-            while np.prod(clearance_resolution, dtype=float) > _MAX_VOXELS:
+            clearance_resolution = _CLEARANCE_REFINEMENT * near_cubic_resolution(vertices)
+            while np.prod(clearance_resolution, dtype=float) > MAX_VOXELS:
                 clearance_resolution = np.maximum(clearance_resolution // 2, 1)
         occupancy = TriangleGrid.build(vertices, resolution=tuple(clearance_resolution))
         if sheet:
@@ -198,7 +198,7 @@ class TriangleBody(Body):
     def vouches(self, summary) -> jnp.ndarray:
         """True where the set's bounding box overlaps no occupied voxel of the grid.
 
-        See :meth:`~aquaflux.radiation.grid.TriangleGrid.holds_any`: no triangle can then meet
+        See :meth:`~aquaflux.triangle_grid.TriangleGrid.holds_any`: no triangle can then meet
         the box, and so none meets a segment inside it.
         """
         summary = np.asarray(summary, dtype=float)
@@ -209,7 +209,7 @@ class TriangleBody(Body):
 
         A summary is a set's upper corner and its lower corner negated, so a tile's box is the
         bounding box of its two sets' boxes, and
-        :meth:`~aquaflux.radiation.grid.TriangleGrid.holds_any_in_unions` answers for it in one
+        :meth:`~aquaflux.triangle_grid.TriangleGrid.holds_any_in_unions` answers for it in one
         compiled pass -- the answers :meth:`vouches` gives on the merged summaries.
         """
         first = np.asarray(first, dtype=float)

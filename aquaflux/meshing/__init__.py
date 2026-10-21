@@ -21,8 +21,9 @@ quadrilaterals a tetrahedral fill meets. :class:`PipeCore` fills a pipe's core, 
 with a structured O-grid; the mesher finds pipes by itself. :func:`element_mesh` makes a mesh of any
 tetrahedra, triangular prisms, hexahedra and pyramids.
 
-:class:`OctreeCore` builds a core of hexahedra inside a region from a balanced :class:`Octree`,
-refined where asked (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
+:class:`OctreeCore` builds a core of hexahedra inside a :class:`Region` -- the region a closed
+triangle surface bounds (:class:`ClosedSurface`), or an inside test (:class:`SampledRegion`) --
+from a balanced :class:`Octree` refined towards its boundary (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
 tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
 are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
 
@@ -66,6 +67,7 @@ from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
 from .octree import NearSurface, Octree, RefinementCriterion
 from .pipe_core import PipeCore, PipeCoreFill
+from .regions import ClosedSurface, Region, SampledRegion
 from .polygons import Polygons, PyramidCaps
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 from .planarize import FacePlanarizer, Planarization
@@ -77,6 +79,7 @@ __all__ = [
     "BlockMesh",
     "CadMesher",
     "CartesianFrame",
+    "ClosedSurface",
     "ConeSurface",
     "CubedSphereCap",
     "Curve",
@@ -107,8 +110,10 @@ __all__ = [
     "PrismLayers",
     "PyramidCaps",
     "RefinementCriterion",
+    "Region",
     "RegionFaces",
     "SampledCurve",
+    "SampledRegion",
     "SphereSurface",
     "Straight",
     "Surface",

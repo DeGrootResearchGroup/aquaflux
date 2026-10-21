@@ -39,6 +39,7 @@ from scipy.spatial import cKDTree
 from aquaflux import ragged
 
 from .polygons import Polygons
+from .regions import ray_hits
 
 __all__ = ["LayerExtrusion", "PrismLayers"]
 
@@ -313,27 +314,10 @@ def _gaps(surface: _Surface, direction, moving, reach) -> np.ndarray:
             continue
         own = surface.rings[surface.faces.triangle_face()[near]]
         near = near[~np.any(own == point, axis=1)]
-        hit = _ray_hits(surface.points[point], direction[point], surface.points[triangles[near]])
+        hit = ray_hits(surface.points[point], direction[point], surface.points[triangles[near]])
         if hit.size:
             gap[point] = hit.min()
     return gap
-
-
-def _ray_hits(origin, direction, corners) -> np.ndarray:
-    """The distances along a ray at which it crosses each triangle it crosses (Moller-Trumbore)."""
-    edge1 = corners[:, 1] - corners[:, 0]
-    edge2 = corners[:, 2] - corners[:, 0]
-    pvec = np.cross(direction, edge2)
-    det = np.einsum("ij,ij->i", edge1, pvec)
-    ok = np.abs(det) > 1e-14
-    inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
-    tvec = origin - corners[:, 0]
-    u = np.einsum("ij,ij->i", tvec, pvec) * inv
-    qvec = np.cross(tvec, edge1)
-    v = (qvec @ direction) * inv
-    t = np.einsum("ij,ij->i", edge2, qvec) * inv
-    inside = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 0)
-    return t[inside]
 
 
 def _smoothed_down(surface: _Surface, share, moving, ratio: float = 1.5) -> np.ndarray:

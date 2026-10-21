@@ -7,7 +7,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from aquaflux.radiation.absorption import UniformAbsorption, VoxelAbsorption
-from aquaflux.radiation.grid import TriangleGrid
 from aquaflux.radiation.images import plane_exchange
 from aquaflux.radiation.model import (
     RadiationSettings,
@@ -26,6 +25,7 @@ from aquaflux.radiation.self_occlusion import (
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual
 from aquaflux.solids import Box, Sphere
+from aquaflux.triangle_grid import TriangleGrid
 
 from tests.unit.radiation_references import cylinder_triangles, inward_box, rectangle_triangles
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from aquaflux.case import CadMesh, CadPlacement, case_schema, mesh_source_from_mapping, relocated
 from aquaflux.case.spec import _CASE_MAPPING
-from aquaflux.meshing import FacePlanarizer, FacesNear, FacesOn, Graded, PipeCore
+from aquaflux.meshing import FacePlanarizer, FacesNear, FacesOn, Graded, OctreeCore, PipeCore
 
 SECTION = {
     "kind": "CadMesh",
@@ -35,6 +35,7 @@ SECTION = {
         "core_bow": 0.3,
         "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
     },
+    "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
 }
 
 
@@ -53,6 +54,7 @@ def test_the_section_reads_into_its_selections_and_writes_back_as_given():
         mapped=("lamp",),
         pipes=("inlet",),
         pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
+        core=OctreeCore(size=0.08, clearance=0.03),
     )
     assert _CASE_MAPPING.to_mapping(source) == SECTION
 
@@ -66,6 +68,8 @@ def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaul
         0.2,
         None,
     )
+    # The core's unset wall size is the mesher's size; its clearance is as set.
+    assert mesher.core.resolved(mesher.max_size) == (0.02, 0.03)
 
 
 def test_an_unset_setting_is_described_by_what_it_falls_through_to():
@@ -95,6 +99,14 @@ def test_the_drawing_is_re_based_with_the_case_file():
         (
             {"patches": {"inlet": {"kind": "FacesOn", "solids": ["a"], "tolerance": 0}}},
             "FacesOn.tolerance must be a positive, finite number",
+        ),
+        (
+            {"core": {"kind": "OctreeCore", "size": 0.08, "wall_size": 0.1}},
+            r"OctreeCore.wall_size \(0.1\) may not exceed its size",
+        ),
+        (
+            {"core": {"kind": "OctreeCore", "size": 0.01}},
+            r"is the boundary's size \(0.02\), which exceeds the core's size",
         ),
     ],
 )

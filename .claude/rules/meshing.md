@@ -17,9 +17,10 @@ file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, 
 `element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
 (`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls and
 hexahedral layers on walls meshed with structured quadrilaterals (`layers.py`, `mapped.py`,
-`polygons.py`), pipes' cores as structured O-grids (`pipes.py`, `pipe_core.py`) and the mesher
-(`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`) and
-the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file.
+`polygons.py`), pipes' cores as structured O-grids (`pipes.py`, `pipe_core.py`), the mesher
+(`cad_mesher.py`) and the octree hex core (`octree.py`, `hex_core.py`, `regions.py`), selectable in
+`CadMesher` and the case file (`CadMesh.core`). The block mesher is built as a library (below), not yet
+wired into `CadMesher` or the case file.
 Face planarization (`planarize.py`) is built and run by `CadMesher` when given a `planarizer` (off by
 default; `planarizer: {kind: FacePlanarizer}` in a case file).
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
@@ -144,13 +145,14 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 ## The CAD mesher (`cad_mesher.py`) — built
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=0.25,
-pipe_core=PipeCore(), netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
+pipe_core=PipeCore(), planarizer=None, core=None, netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
 layered=(), mapped=(), pipes=None) -> Mesh`: `write_brep` → `triangulate` (face-tagged) → pipes found
 (below) → the `mapped` patches' faces and the pipes' remeshed as structured quadrilaterals (below) →
 layers on the `layered` patches (below) → the pipes' cores filled with O-grids, out of the fill (below)
 → every quadrilateral left for the fill
 capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
-only) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
+only) → with a `core`, the octree hex core inside the fill's surface, its capped surface added as a hole
+(`_cored`, below) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
 patches by their CAD face; points no cell uses dropped) → `PolyhedralDual.build_traced` (the layers'
 columns passed); with nothing left for tetrahedra (a pipe open at both ends) Netgen's fill is not run
 → boundary vertices projected onto the CAD (below) → if `planarizer` is set, the faces flattened by
@@ -380,23 +382,60 @@ the log (2026-10-20). Dated numbers in the log.
 - **Joining blocks to the rest of the primal is open**: Netgen refuses quadrilaterals, so a block region's
   free quads need pyramids before a tet fill (`element_mesh` takes pyramids).
 
-## The octree hex core (`octree.py`, `hex_core.py`) — built, not yet wired in
+## The octree hex core (`octree.py`, `hex_core.py`, `regions.py`) — built and wired in
 
-`OctreeCore(size, clearance, refinements=(), cap_height=0.25, samples=3).mesh(inside, lower, upper) ->
-HexCore` (`points`, `hexahedra`, `pyramids`, `tetrahedra`, `caps`, `surface`, `octree`, `kept`). The region
-is an **inside test**, `inside(points (m, 3)) -> bool (m,)`, so an analytic body, a `solids` body
-(`contains`) or later the CAD model all serve. `element_mesh` takes `hexahedra` and `pyramids` beside
-tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inputs unchanged).
+`OctreeCore(size, wall_size=None, clearance=None).mesh(region, lower, upper, *, cap_height,
+boundary_size) -> HexCore` (`points`, `hexahedra`, `pyramids`, `tetrahedra`, `caps`, `surface`, `octree`,
+`kept`); `within(points, triangles, *, cap_height, boundary_size)` is `mesh` of the `ClosedSurface` of a
+closed triangle surface over its box. Agreed with the project owner, 2026-10-20 (the design below):
+**one value the case file reads** — `size` (root cubes), `wall_size` (unset: `boundary_size`, which
+`CadMesher` passes as `max_size`; refused above `size`), `clearance` (unset: twice the wall size);
+`refinements` and its own `cap_height` were removed — **one `cap_height`, `CadMesher`'s, serves the wall
+caps and the core's**, passed to `mesh`. `resolved(boundary_size) -> (wall, clearance)` is the one home of
+the defaults. A clearance at or under `cap_height × wall` is refused (a cap would cross it).
+`element_mesh` takes `hexahedra` and `pyramids` beside tetrahedra and prisms (cells numbered tets, prisms,
+hexes, pyramids; earlier inputs unchanged).
+- **The region is a `Region`** (`regions.py`): `inside(points)` and `meets(lower, upper)` — whether the
+  boundary is taken to pass through each box. Two strategies:
+  - **`ClosedSurface.of(points, triangles, spacing)`, exact**: the triangles in a
+    `aquaflux.triangle_grid.TriangleGrid` of voxels `spacing` across (`within` uses
+    `wall / VOXELS_PER_WALL_CUBE`, 4); `meets` is the grid's conservative `holds_any` (a box overlapping no
+    occupied voxel meets no triangle; errs towards *met* by at most a voxel), and a box wholly outside the
+    grid is not met (the grid's test clips it onto its edge voxels and would say met). `inside` labels the
+    face-connected unoccupied voxels once (`scipy.ndimage.label`) and decides each stretch by **ray
+    parity** at one voxel centre, three directions in different octants that must agree; a point in an
+    occupied voxel gets its own rays. The surface is checked closed and wound outward first
+    (`check_closed_surface`). **Why ray parity, not `radiation.enclosure_winding`** (project owner,
+    2026-10-20): the winding number sits on radiation's solid-angle kernel tier (`solid_angle.py`,
+    `clipping.py`, `work.py`, `checks.py`'s edge machinery), which cannot move with the grid; parity is
+    exact on a surface checked closed, and only a handful of points are asked. The ray test is
+    `regions.ray_hits` (Möller–Trumbore), shared with the layers' gap search.
+  - **`SampledRegion(contains, samples=3)`**: an inside test (an analytic body, a `solids` body);
+    `meets` = the box's sample lattice is mixed, so a boundary between samples is missed. With an odd
+    count the cube's centre is a sample, so "kept" is exactly the former every-sample-inside rule.
+- **`TriangleGrid` moved out of `radiation/` to the neutral leaves `aquaflux/triangle_grid.py` /
+  `triangle_grid_walk.py`** (in `test_layering.NEUTRAL_LEAVES`; `MAX_VOXELS` and
+  `near_cubic_resolution` made public), because the mesher may not import a physics package. Its rules
+  stay in `radiation.md`, whose `paths:` now globs both files.
 - **The tree** (`Octree`): root cubes **of the target `size`** on a lattice from `lower` covering `upper`
   (refinement only goes finer); leaves in integer units of the finest cube, named by their lower corner
   (leaves never overlap), the unit halved when a refinement adds a level. `refined_by(criteria)` splits
-  until no `RefinementCriterion.refines(lower, size)` asks; `NearSurface(inside, size, margin=0,
-  samples=3)` splits cubes whose sample lattice (cube grown by `margin`) is mixed inside/outside.
+  until no `RefinementCriterion.refines(lower, size)` asks; `NearSurface(region, size, margin=0)`
+  splits cubes whose box grown by `margin` the region's boundary `meets`.
   `balanced()` ripples until leaves sharing a face **or part of an edge** are ≤ 1 level apart (vertex
   contact is not balanced): one finest cell across each of the 18 face and edge directions finds any
   leaf ≥ 2 levels coarser, because such a leaf covers the whole own-size region across.
-- **Kept**: a leaf whose cube grown by `clearance` has every sample inside (`samples` per edge): exact
-  for a convex region, a sampling otherwise.
+- **Refined towards the boundary**: `NearSurface(region, wall, margin=clearance + wall)` halves every
+  leaf whose box grown by the margin the boundary `meets`, down to the largest `size / 2**k` not over
+  `wall_size`; balance grades outward. ⚠️ **The `+ wall` is load-bearing**: with a margin of the
+  clearance alone, a coarse cube whose finer neighbour across is not kept faces the fill, cut about its
+  centre (a transition cube's pyramids under wall-sized caps, so cap edges cannot show it). Pinned by
+  `test_a_core_graded_towards_its_boundary_meets_it_with_wall_cubes_alone` (a wall off the lattice); on a
+  ball the children of refined cubes always form the boundary and a test cannot see it. So **the core's
+  boundary is wall cubes only, capped whole**: the fan-triangle path of `surface` is unreachable from
+  `OctreeCore` and kept as the general conformity rule (pinned on a hand-built tree).
+- **Kept**: a leaf the boundary `meets` nowhere within the cube grown by `clearance`, whose centre is
+  `inside`.
 - **Hanging points: resolved by templates, not by Netgen (chosen 2026-10-19).** A cube with a smaller
   cube's corner at any of its edge midpoints is a *transition cube*, cut into pieces meeting a new point
   at its centre; each face is one quad (no halved edge), four quads through the face centre (the cube
@@ -422,13 +461,38 @@ tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inp
   **into the core** — out of the region left to fill — so beside an outward wall it is a hole for
   `NetgenProcess.fill`, which wants only the points the triangles use: renumber (as the Netgen test does).
 - Pinned in `tests/unit/test_meshing_octree.py` (balance by brute force over leaf pairs, refinement to
-  size on the sphere), `test_meshing_hex_core.py` (box = its uniform grid; refined core: volume, boundary
-  area = the cube union's by voxels, no point at any cell edge's middle; capped surface closed, one fan per
-  point, encloses −(cubes + caps); edge-touching boxes parted only on the shared edge; hex/pyramid
-  `element_mesh`), and `test_meshing_netgen.py` (core + caps + Netgen fill in a box: dual closed, volume
-  1, each point surrounded by 8 hexes a cube of their size with 6 quad faces).
-- **Not yet**: wiring into `CadMesher` / the case file (inside test from the CAD model), snapping nodes
-  to walls, and a size field grading the fill from the core's cubes to the wall.
+  size on the sphere), `test_meshing_regions.py` (box less a hole: `inside` against the closed form on
+  both paths, the hole a stretch of its own; `meets` never false where the surface passes, false two
+  voxels clear; an open surface refused), `test_meshing_hex_core.py` (box = its uniform grid, sampled and
+  as a surface with a clearance over a cube; the clearance guard; wall cubes alone at the boundary; refined
+  core: volume, boundary area = the cube union's by voxels, no point at any cell edge's middle; capped
+  surface closed, one fan per point, encloses −(cubes + caps); edge-touching boxes parted only on the
+  shared edge; hex/pyramid `element_mesh`), `test_meshing_cad_mesher.py` (`_cored` without Netgen: the
+  hole closed, the core's cells fill it, `fill_size`), `test_case_cad_mesh.py` (the key, its refusals),
+  and `test_meshing_netgen.py` (core + caps + fill in a box: dual closed, volume 1, interior points cubes
+  with 6 quad faces; the Netgen L with layers and a core through `CadMesher`: dual closed and exact, > 50
+  wall cubes, none nearer the wall than the clearance plus half the layers).
+- **In `CadMesher`** (`_cored`, kept apart from the rest of `mesh` so other work there rebases): the
+  core is built `within` the fill's own closed surface — the layers' top, the bare triangles and the
+  wall caps' sides — so **the clearance is from the layers' top and the wall caps' apexes by
+  construction**, not from the drawing. Its points follow the surface's, its capped surface joins the
+  fill's as a hole, its tets follow the fill's, its hexahedra the layers' (a column's cells keep their
+  numbering), its pyramids and caps the wall caps. **No size field**: Netgen's fill grades its tets from
+  the triangles it is given (`validation/meshing_netgen/fill_grading.py`, log), so the fill's
+  `max_size` is only raised to the wall cubes' size where larger (`_CoreCells.fill_size`). `CadMesh.core`
+  is the case key (`{kind: OctreeCore, size: ...}`); unset, the polyhedral core.
+- **Interaction with #785**: each core cap's apex is a small dual cell too (same `PyramidCaps`, so a fix
+  there reaches both). ⚠️ **Moving the apexes after the fill does not help** (Laplacian with a shape
+  guard; measured on five draws, dropped; log, "the caps' apexes moved after the fill"): the apex cell's
+  size is set by the fill's own points near the cap, so a fix must change what the fill sees.
+- ⚠️ **Measured, the core does not yet pay** (maxh 0.01, log "the octree core wired into `CadMesher`"):
+  on an open vessel the agreed defaults give +15 % cells and 31x the faces over a volume ratio of 20
+  against the polyhedral core -- 94 % of those faces have a core cap's apex cell as the smaller, and
+  the transition cubes' polyhedra carry none (log, "Attribution"); wall cubes of `2 × maxh` save 19 % of the cells, still worse in volume ratio; Sozzi's 34 mm
+  annulus keeps no cube at all. The defaults and #785's priority are with the project owner.
+- **Not yet**: snapping nodes to walls (the core always stays a clearance from every patch, inlets
+  included); user refinement regions; a core in a gap narrower than about `2 × clearance + wall` (left to
+  the tets; Sozzi's annulus, log).
 
 ## Face planarization (`planarize.py`) — built, run by `CadMesher` when asked
 
@@ -587,7 +651,7 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
    preset not); pipes found from cylindrical faces and their cores O-gridded inside their layers
    (`pipes.py`, built above).
 5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
-   in the primal that the dual turns polyhedral (built as a library, above; not wired in).
+   in the primal that the dual turns polyhedral (built and selectable in `CadMesher` / `CadMesh.core`).
 6. **Quality metrics** (non-orthogonality, skewness, convexity; built in `aquaflux/mesh/quality.py`,
    `mesh.md`) and planarization (built, above; run by `CadMesher` when given a `planarizer`).
 

@@ -48,10 +48,10 @@ import aquaflux  # noqa: E402,F401  (enables x64)
 import jax.numpy as jnp  # noqa: E402
 import numba  # noqa: E402
 import numpy as np  # noqa: E402
-from aquaflux.radiation import grid as grid_module  # noqa: E402
+from aquaflux import triangle_grid as grid_module  # noqa: E402
 from aquaflux.radiation import read_stl  # noqa: E402
-from aquaflux.radiation.grid import TriangleGrid  # noqa: E402
-from aquaflux.radiation.grid_walk import _cuts, _ray_frame  # noqa: E402
+from aquaflux.triangle_grid import TriangleGrid  # noqa: E402
+from aquaflux.triangle_grid_walk import _cuts, _ray_frame  # noqa: E402
 from compare_fluence import CASE, WORK, BranchOpenings, _in_chamber, lamp_surfaces  # noqa: E402
 
 CELLS = int(os.environ.get("SOZZI_DIRECTION_CELLS", 40))

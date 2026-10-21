@@ -718,3 +718,92 @@ binds (Kuhn cubes and Ls, perturbed; cube-to-ball maps; Netgen Sozzi 0.02 / 0.03
 0.01 — on each the pass lowers the worst value unbounded), so it is pinned on the guard itself
 (`test_the_guard_holds_each_cells_triangulation_volume_to_the_starts_worst`). Mutations, each red: the
 bound per cell; the bound removed; the column not measured; the kernel taking the gain only.
+
+## 2026-10-20 — the octree core wired into `CadMesher`: the fill's grading, and two vessels
+
+Configuration: macOS arm64, the scratch Netgen environment (netgen-mesher 6.2.2608, OCP 8.0.1), branch
+`claude/octree-core-wiring` on #783's `claude/quad-prism-layers` (`1ed7de5e`), one run each, other
+sessions running light jobs (timings indicative only).
+
+**Netgen grades the fill from the surface it is given** (`validation/meshing_netgen/fill_grading.py 40 4`):
+a unit box of triangles of edge 0.025 round a hole [0.3, 0.7]^3 of edge 0.1, `max_size` 0.1. Median tet
+edge by depth from the outer wall, grading 0.3: 0.036 (at the wall), 0.055, 0.069, 0.075, 0.086 (0.1),
+0.098, 0.108, 0.119, 0.123, 0.130 (0.25); grading 0.5 the same shape (0.037 → 0.123). So no size field is
+built: the fill's `max_size` is raised to the core's wall cubes where they are larger, nothing else.
+
+**Two vessels at maxh 0.01** (`validation/meshing_dual/octree_core.py`, layers first 0.5 mm, growth 1.2,
+five; core cubes 0.04; arms with the clearance unset and, run directly, `0.01 0.04 0.02`):
+
+| | cells | s | cubes | non-orth max / p99 deg | skew max / p99 | volume ratio p99 / max | faces > 20 |
+|---|---|---|---|---|---|---|---|
+| Sozzi, polyhedral | 60985 | 13 | — | 148.7 / 45.8 | 22.9 / 0.74 | 148 / 598 | 20678 |
+| Sozzi, any core arm | refused: no cube fits | | | | | | |
+| open vessel, polyhedral | 70993 | 15 | 0 | 59.2 / 28.5 | 1.30 / 0.64 | 10.1 / 128 | 352 |
+| core, wall 0.01, clearance 0.02 (the defaults) | 81427 | 17 | 3746 | 62.7 / 39.4 | 1.62 / 0.67 | 78.1 / 612 | 10866 |
+| core, wall 0.02, clearance 0.04 (default clearance) | 57256 | 12 | 48 hexahedra in the core | 55.9 / 27.3 | 1.18 / 0.57 | 14.4 / 322 | 971 |
+| core, wall 0.02, clearance 0.02 | 57602 | 12 | 583 | 58.3 / 34.7 | 1.62 / 0.60 | 16.9 / 107 | 1605 |
+
+The open vessel: a cylinder 0.3 m across, 0.6 m long, less a sleeve 25 mm across on its axis, layers on
+the wall and the sleeve, its ends bare. Sozzi: the mapped lamp and pipes of `mapped_layers_sozzi.py`.
+- **Sozzi has no room for a core at this size**: its chamber is an annulus 34 mm across (reactor radius
+  44.5 mm, lamp about 10 mm), about 19 mm once the layers are out, under twice a clearance plus a cube
+  at either clearance.
+- **With the agreed defaults the core is worse on every count**: +15 % cells (likely because wall cubes of `maxh` are
+  smaller than the tets' dual cells, which come out larger than the tets) and 31x the faces over a volume
+  ratio of 20. Cells under a tenth of `maxh^3` rise by 2581 over the polyhedral arm's 39907 (which are
+  nearly all layer cells) -- about one per core cap, so the caps' apex cells (#785's mechanism) are the
+  likely cause; **not separated** from the transition cubes' own polyhedra.
+- **Wall cubes of twice `maxh` save 19 % of the cells** but stay worse than polyhedral in volume ratio
+  (p99 14–17 against 10) and, at clearance 0.02, non-orthogonality p99 (34.7 against 28.5). At the
+  default clearance (0.04) almost no core is kept in the 0.12 m annulus: a kept cube needs its box grown
+  by the clearance clear of the surface, and an axis-aligned box of 0.1 fits a ring 0.12 wide only near
+  the axes (its diagonal is 0.14).
+- Not decided; put to the project owner: the defaults (`wall_size`, `clearance`), and whether #785's
+  apex cells must be fixed before a hex core is worth selecting. Not tried: a Euclidean clearance in
+  place of the grown box; caps of another height on the core.
+
+**Attribution** (`validation/meshing_dual/octree_core_attribution.py`, the open vessel at the defaults:
+maxh 0.01, cubes 0.04, wall 0.01, clearance 0.02; one draw): each dual cell classed by the primal point
+it stands for.
+
+| class | cells | median volume / wall³ | faces ratio > 20 (the smaller cell) | faces > 45° (touching) |
+|---|---|---|---|---|
+| core cap apex | 7528 | 0.136 | 10250 | 1365 |
+| transition centre | 670 | 2.50 | 0 | 0 |
+| cube corner | 18329 | 0.893 | 2 | 334 |
+| fill (Netgen's points) | 5726 | 2.33 | 153 | 69 |
+| layers and walls | 49174 | 0.062 | 461 | 77 |
+
+Of 10866 faces over a volume ratio of 20, **94 % have a core cap's apex cell as the smaller** (5758
+against a cube corner, 4135 against a fill cell); of 1439 faces over 45°, **95 % touch one**. The
+transition cubes' polyhedra carry none. The apex cells are also most of the core arm's extra cells: 7528
+of them, beside only 5726 points of Netgen's own in the whole gap. So the core's case is #785's.
+
+## 2026-10-20 — the caps' apexes moved after the fill: measured and dropped
+
+`ApexRelaxation` (not merged; commit `5c3dd83d` on the pushed branch `claude/apex-relaxation`, with its
+unit tests and the harness `validation/meshing_dual/apex_relaxation.py`): after Netgen's fill, a Jacobi
+sweep moving every cap apex (wall caps and the octree core's) to the mean of the points it shares a
+tetrahedron with, a move kept only where no tetrahedron about the apex -- the fill's, and each cap's four
+corner tetrahedra -- falls below the smaller of its start shape and 0.1 (volume over a regular
+tetrahedron's of its rms edge), halved up to six times, at most 20 sweeps to a tolerance of 1e-3 of the
+apex's mean neighbour distance. Five draws per case (rotated 1-5 µrad about x), macOS arm64, netgen-mesher
+6.2.2608, on `main` `2af33d0e` plus #788; left → relaxed, ranges over the draws:
+
+| | small cells away from walls | faces volume ratio > 20 | ratio p99 | faces > 50° | non-orth p99 |
+|---|---|---|---|---|---|
+| Sozzi, maxh 0.02, no core (pipes O-gridded, lamp mapped) | 45-54 → unchanged | 2634-2688 → 2720-2770 | 36-38 → 39-41 | 153-170 → 97-115 | 34.1 → 33.9° |
+| open vessel, maxh 0.01, octree core 0.04 at its defaults | 1785-1832 → 1853-1915 | 10837-11259 → 11126-11553 | 78-81 → 82-85 | 872-964 → 1598-1800 | 39.8 → 37.8° |
+
+"Small": Sozzi, cells under 2 mm across 13.5-22 mm from the lamp axis at 300 < x < 500 mm; vessel,
+cells under 0.4 maxh across more than 12 mm inside its walls (the core caps' apex cells).
+- **It does not reach the apex cells**: their count is unchanged on Sozzi and rises 4 % on the vessel,
+  and the lopsided faces rise ~3 % on both. The likely reason (inferred, not separately measured): the
+  apex cell is small because Netgen places its own points close to the cap, sizing them from the cap's
+  small side triangles; moving the apex afterwards reshapes its tetrahedra but cannot enlarge them. A fix
+  must change what the fill sees (taller caps on the core, where #785's pipe-core objection does not
+  apply, or Netgen closing the quadrilaterals itself), not move the apex after it.
+- Faces over 50° fall a third on Sozzi but nearly double on the vessel; not worth an opt-in setting
+  (project owner, 2026-10-20: recorded and dropped).
+- Seen in both arms on Sozzi at this `main`: the worst face 111-140° non-orthogonal, which usually means an
+  inside-out cell; not investigated here.
