@@ -149,15 +149,19 @@ def triangulation_volume_change(mesh: Mesh) -> jnp.ndarray:
     """
     if mesh.dim == 2:
         return jnp.zeros(mesh.n_cells)
-    geometry = mesh.geometry()
+    quality = MeshQuality(mesh)
+    return quality.triangulation_volume_change(mesh.node_coords, quality.geometry(mesh.node_coords))
+
+
+@eqx.filter_jit
+def _triangulation_volume_change(
+    geometry: MeshGeometry, face_cells, face_nodes, lift
+) -> jnp.ndarray:
+    """:func:`triangulation_volume_change` from a geometry and its vertices' heights ``lift``."""
     face_geometry = geometry.face
-    lift = _vertex_lift(
-        mesh.face_nodes, mesh.node_coords, face_geometry.normal
-    )  # along the owner-outward normal
     third_area = face_geometry.area / 3.0
-    rise = third_area * mesh.face_nodes.max_to_faces(lift)  # the most a fan can add, owner side
-    fall = third_area * mesh.face_nodes.max_to_faces(-lift)  # the most it can remove
-    face_cells = mesh.face_cells
+    rise = third_area * face_nodes.max_to_faces(lift)  # the most a fan can add, owner side
+    fall = third_area * face_nodes.max_to_faces(-lift)  # the most it can remove
     # Seen from the neighbour the outward normal is reversed, so what adds to the owner removes.
     gain = face_cells.scatter(rise, fall)
     loss = face_cells.scatter(fall, rise)
@@ -363,6 +367,14 @@ class MeshQuality:
             np.asarray(geometry.face.centroid),
             np.asarray(geometry.face.normal),
         )
+
+    def triangulation_volume_change(
+        self, node_coords: jnp.ndarray, geometry: MeshGeometry
+    ) -> jnp.ndarray:
+        """:func:`triangulation_volume_change` at ``node_coords``, ``geometry`` being the geometry there."""
+        mesh = self._mesh
+        lift = self.vertex_heights(node_coords, geometry)  # along the owner-outward normal
+        return _triangulation_volume_change(geometry, mesh.face_cells, mesh.face_nodes, lift)
 
     def face_non_orthogonality(self, geometry: MeshGeometry) -> jnp.ndarray:
         """:func:`face_non_orthogonality`, ``geometry`` being the mesh's geometry."""

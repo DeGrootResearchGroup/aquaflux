@@ -10,6 +10,7 @@ and the preconditioner against the blocks of an explicitly formed frozen-plane J
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -26,9 +27,17 @@ from aquaflux.mesh import (
     face_warp,
     structured_grid_2d,
     structured_grid_3d,
+    triangulation_volume_change,
 )
 from aquaflux.meshing import FacePlanarizer, PolyhedralDual
-from aquaflux.meshing.planarize import _block_inverse, _gradient, _product, _State, _Warp
+from aquaflux.meshing.planarize import (
+    _block_inverse,
+    _gradient,
+    _NoWorse,
+    _product,
+    _State,
+    _Warp,
+)
 
 from tests.support.meshes import perturbed_grid_3d, tetrahedral_grid_3d, without_cells
 
@@ -207,3 +216,28 @@ def test_the_preconditioner_is_the_inverse_of_the_frozen_plane_jacobians_blocks(
             np.eye(3) if pinned[k] else np.linalg.inv(normal[3 * k : 3 * k + 3, 3 * k : 3 * k + 3])
         )
         np.testing.assert_allclose(inverse[k], expected, rtol=1e-6, atol=1e-9)
+
+
+def test_the_guard_holds_each_cells_triangulation_volume_to_the_starts_worst():
+    # On a real mesh this bound bites only on large curved-wall duals (Sozzi's water at maxh 0.01,
+    # where without it a wall cell's volume dependence rose from 0.231 to 0.299), so it is pinned
+    # here on the guard itself: a trial raising one cell past the start's worst is caught, and
+    # one raising it past its own start but not the mesh's worst is let through.
+    dual, _ = _dual_of(tetrahedral_grid_3d(3, perturb=0.25))
+    quality = MeshQuality(dual)
+    start = _State.at(dual, quality, np.asarray(dual.node_coords, dtype=np.float64))
+    np.testing.assert_allclose(
+        start.cell_quality[:, 3], np.asarray(triangulation_volume_change(dual)), rtol=1e-12
+    )
+    guard = _NoWorse(dual, start)
+    change = start.cell_quality[:, 3]
+    calm = int(np.argmin(change))
+    assert change[calm] < 0.5 * change.max()
+
+    def trial(value):
+        cells = start.cell_quality.copy()
+        cells[calm, 3] = value
+        return dataclasses.replace(start, cell_quality=cells)
+
+    assert np.flatnonzero(guard.worsened(trial(change.max() * (1 + 1e-6)))).tolist() == [calm]
+    assert not guard.worsened(trial(0.5 * (change[calm] + change.max()))).any()

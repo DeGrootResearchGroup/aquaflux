@@ -21,15 +21,18 @@ past one of the cell's faces. So a step is kept only where it leaves the mesh no
 pass found it, by these measures:
 
 * no cell less convex than the starting mesh's least convex cell
-  (:func:`~aquaflux.mesh.cell_non_convexity`), none newly concave by ``checkMesh``'s face-plane
-  test and none concave more so (:func:`~aquaflux.mesh.cell_concavity`), and every volume positive;
+  (:func:`~aquaflux.mesh.cell_non_convexity`), nor with a volume more dependent on how its faces are
+  triangulated than the starting mesh's most dependent cell
+  (:func:`~aquaflux.mesh.triangulation_volume_change`), none newly concave by ``checkMesh``'s
+  face-plane test and none concave more so (:func:`~aquaflux.mesh.cell_concavity`), and every
+  volume positive;
 * no face more non-orthogonal or more skewed than the worst face of the starting mesh
   (:func:`~aquaflux.mesh.face_non_orthogonality`, :func:`~aquaflux.mesh.face_skewness`).
 
-The convexity, non-orthogonality and skewness bounds are each the starting mesh's worst, not each
-cell's or face's own starting value: flattening one face moves vertices that several cells share,
-improving some and worsening others a little, and a bound per element holds back nearly every step
-that would do so, though the mesh's worst cell or face is not made worse by it. Concavity is the
+The convexity, triangulation, non-orthogonality and skewness bounds are each the starting mesh's
+worst, not each cell's or face's own starting value: flattening one face moves vertices that several
+cells share, improving some and worsening others a little, and a bound per element holds back nearly
+every step that would do so, though the mesh's worst cell or face is not made worse by it. Concavity is the
 exception, held cell by cell: a cell turning concave is a failure in itself, however mild.
 
 A step that breaks a bound is first shortened, by raising ``lambda``, up to a set multiple of its
@@ -331,7 +334,8 @@ class _State:
     normal: np.ndarray  # (n_faces, 3): unit area vectors
     area: np.ndarray  # (n_faces,)
     height: np.ndarray  # (n_incidences,): the vertex's height above its face's vertex-mean plane
-    cell_quality: np.ndarray  # (n_cells, 3): non-convexity, concavity, -volume (larger is worse)
+    # (n_cells, 4): non-convexity, concavity, -volume, triangulation-volume change (larger is worse)
+    cell_quality: np.ndarray
     face_quality: np.ndarray  # (n_faces, 2): non-orthogonality, skewness
 
     @property
@@ -353,6 +357,7 @@ class _State:
                 quality.cell_non_convexity(coords, geometry),
                 quality.cell_concavity(geometry),
                 -np.asarray(geometry.cell.volume),
+                np.asarray(quality.triangulation_volume_change(coords, geometry)),
             ],
             axis=1,
         )
@@ -378,6 +383,7 @@ class _NoWorse:
         self._neighbour = np.asarray(mesh.face_cells.neighbour)
         cell = start.cell_quality.copy()
         cell[:, 0] = cell[:, 0].max()  # no cell less convex than the start's least convex
+        cell[:, 3] = cell[:, 3].max()  # nor more volume-ambiguous than its most
         cell[:, 1] = np.maximum(cell[:, 1], CONCAVE_COSINE)  # a convex cell may change, not fold
         cell[:, 2] = 0.0  # a positive volume
         self._cell_bound = cell + self._SLACK

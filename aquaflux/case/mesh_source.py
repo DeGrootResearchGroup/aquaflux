@@ -336,8 +336,9 @@ class CadMesh(MeshSource):
         :class:`~aquaflux.meshing.PipeCore`.
     planarizer : FacePlanarizer or None
         Flattens the mesh's faces by moving the cells' interior vertices, never making a cell less
-        convex or a face worse than the worst the mesh started with, nor a convex cell concave;
-        unset, the faces are left as made.
+        convex, or its volume more dependent on how its faces are triangulated, or a face worse,
+        than the worst the mesh started with, nor a convex cell concave; unset, the faces are left
+        as made.
 
     Raises
     ------

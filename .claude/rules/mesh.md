@@ -132,8 +132,8 @@ All classes are `equinox.Module`s.
   - **`MeshQuality(mesh)` is the one implementation of the cell and face checks** (2026-10-20): built
     once from a topology — each cell's (face, outward sign) sides and distinct nodes as CSR, and the
     faces' `RingSigns` — it evaluates `geometry(coords)` (through `Mesh.geometry(signs)`),
-    `vertex_heights`, `cell_non_convexity`, `cell_concavity`, `face_non_orthogonality` and
-    `face_skewness` at any node coordinates; the `Mesh`-level functions are thin callers of it, or of
+    `vertex_heights`, `cell_non_convexity`, `cell_concavity`, `triangulation_volume_change`,
+    `face_non_orthogonality` and `face_skewness` at any node coordinates; the `Mesh`-level functions are thin callers of it, or of
     the same `filter_jit`ted face kernels. A caller that moves vertices and re-checks (the planarizer)
     builds one per pass. The cell checks are two numba kernels, parallel over cells, looping each
     cell's sides against its nodes (or sides): **no pair table is stored**, so memory is the CSR tables

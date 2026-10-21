@@ -705,3 +705,16 @@ positive or its quality undefined (a NaN would otherwise be the bound): a Kuhn n
 Mutations, each red: the bound per cell again (`test_no_cell_ends_less_convex_than_the_least_convex_it_started_with`
 asserts some cell does get less convex); the bound removed (the Kuhn L, perturb 0.3 seed 1, ends at
 0.744 against 0.730); the concavity bound removed; the refusal removed.
+
+## 2026-10-20 — triangulation-volume dependence bounded by the start's worst
+
+The guard gains a fourth cell bound: no cell's `triangulation_volume_change` above the starting mesh's
+largest (`MeshQuality.triangulation_volume_change`; the `Mesh` function is a caller of it). Same harness,
+duals and defaults as the entry above, one run each. Sozzi 0.01: worst triangulation-volume change
+0.299 → 0.228 (start 0.231); total warp 58.1, concave 48, non-convexity max 0.280, non-orthogonality
+47.8, 31 iterations, 41 s — all as without the bound. L, cylinder, sleeve: every printed number
+identical to the entry above (the bound never binds there). No small fixture was found on which it
+binds (Kuhn cubes and Ls, perturbed; cube-to-ball maps; Netgen Sozzi 0.02 / 0.03, cylinder 0.02, sleeve
+0.01 — on each the pass lowers the worst value unbounded), so it is pinned on the guard itself
+(`test_the_guard_holds_each_cells_triangulation_volume_to_the_starts_worst`). Mutations, each red: the
+bound per cell; the bound removed; the column not measured; the kernel taking the gain only.
