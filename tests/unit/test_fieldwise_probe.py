@@ -344,7 +344,13 @@ def test_the_residuals_with_one_field_replaced_are_their_whole_state_residuals(w
     else:
         assembler, layout = coupled, coupled.layout
     rng = np.random.default_rng(5)
-    for field in range(layout.n_fields):
+    fields = range(layout.n_fields)
+    if which == "coupled":
+        # Each field costs a compile. The velocity and pressure branches hand over to the momentum
+        # block's own `unpack_with_field`, which the flow arm checks field by field; `k` and `omega`
+        # (the latter through its solved-to-physical transform) are the coupled residual's own.
+        fields = [layout.field_offset("k"), layout.field_offset("omega")]
+    for field in fields:
         own = state[layout.field_dofs(field) : layout.field_dofs(field + 1)]
         np.testing.assert_array_equal(
             assembler.residual_with_field(state, field, own), assembler.residual(state)

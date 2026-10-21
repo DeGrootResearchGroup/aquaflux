@@ -983,10 +983,23 @@ pitzDaily's wall moves little: steps 2–21 save ~14 s, and the first step pays 
 cache, for tracing and lowering five probe programs instead of one, once per process (the AVX branch run
 paid 12 s on a cold cache).
 
-**bfs3d marches: not measured.** The pair (`main`, then the branch, `BFS3D_CHECKPOINT_KEEP=100`) was
-started twice and the container restarted under it both times, at steps 15 and 11 of the `main` run (VmHWM
-9.3 / 8.8 GiB, 6-7 GiB available at the last sample, so not memory); the branch march never started. Its
-`state-00015` checkpoint is the march state checked above. The owner is measuring the pair locally.
+**bfs3d marches** (project owner, PR #780, 2026-10-21): Apple-silicon Mac (arm64, 11 cores, 18 GB), shipped
+`case.yaml`, `BFS3D_CHECKPOINT_KEEP=100`, `validation/bfs3d_openfoam/run_arm.sh`; `main` at `d2522fd8`
+(merge-base plus #779, meshing only) against the branch at `295cfd45`, two runs each, alternated; the
+machine was shared (load average ~4–10, 8–13 during the branch's first run), so the seconds are indicative:
+
+| arm | coupled solve | probe over the march | refactor | outside the preconditioner (steps 2–17) |
+|---|---|---|---|---|
+| `main` | 511 s | 131.9 s | 62.3 s | 227 s |
+| `main`, again | 481 s | 124.7 s | 58.9 s | 213 s |
+| branch, first run (cold compilation cache) | 604 s | 88.7 s | 72.4 s | 326 s |
+| branch, second run | 455 s | 70.6 s | 60.6 s | 232 s |
+
+All four take 17 steps and 149 cycles and end at R 5.319e-06, `x_r/h` 8.361, their step tables agreeing in
+every column but time to the printed digits. That is not a bit-identity test: `--xla_cpu_max_isa=AVX` is an
+x86 flag, so arm64 has no FMA-off arm. The probe falls from ~9–12 s to 5–7 s a re-fit (~45 % over the
+march). On the 4-core Linux container the pair could not be run: the container restarted under `main`'s
+march twice (steps 15 and 11, not memory), which is where `state-00015` above comes from.
 
 ### The re-fit cadence on this machine class, and a corner cell's `k` (2026-10-18/19)
 
