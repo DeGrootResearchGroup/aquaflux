@@ -929,3 +929,28 @@ Attribution (`validation/meshing_dual/cap_attribution.py`, one draw each, caps 0
 - Outcome (project owner, 2026-10-21): `ClearedCaps()` made the default cap rule; `MergedCaps` dropped,
   kept on the pushed branch `claude/merged-caps-experiment` (commit 60c3e19f) with its tests and the
   harness arm, re-runnable.
+
+## 2026-10-21 — RBF morphing: where it would fit (deferred)
+
+Discussed with the project owner and deferred until the mesher is finished. Radial basis function (RBF)
+morphing moves every point by a smooth field interpolated from control points' displacements, one
+linear solve for the weights, topology unchanged (de Boer, van der Schoot & Bijl 2007; Jakobsson &
+Amoignon 2007 for shape optimization; Rendall & Allen 2008-2009 for greedy control-point selection --
+cited from memory, not re-read). Ranked for this mesher:
+1. **The differentiable map from design parameters to `node_coords`** (lamp position or radius, baffle
+   angle, reactor length): boundary vertices moved by re-projection or analytically, the rest by the
+   field, linear once the centres are fixed, so `jax.grad` of a solved objective reaches the design
+   parameter with no remeshing and no derivative of Netgen.
+2. **Design variants from one base mesh**: Netgen's fill moves with any change (the five-draw
+   ensembles), so meshing each variant mixes design effect with mesh noise; morphing keeps the
+   topology. Same machinery as 1.
+3. **The projection's displacement spread into the layers** (`_onto_the_drawing` moves only the
+   boundary; the lamp's first dual layer 0.5033 mm for 0.5 wanted): small, local.
+4. **The pipe-to-chamber saddle**: an O-grid morphed onto the saddle could reach the junction instead of
+   stopping two rows short.
+5. **Snapping the octree core to walls**: least, since conformity is topological -- snapped points
+   still leave the core's faces unmatched to the layers' tops.
+Costs: a dense solve on every boundary vertex is out (Sozzi ~1e5); greedy selection to a few thousand
+centres or compactly supported (Wendland) functions with a sparse solve; evaluating 2M points is one
+batched product; large motions invert cells, so a quality guard (`MeshQuality`) bounds it. For 1-2 it is
+JAX and solver-side, so a generic module (likely `aquaflux/mesh/`), not `meshing/`.

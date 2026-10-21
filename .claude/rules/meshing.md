@@ -684,7 +684,9 @@ dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles; (4) oc
 
 **Not decided**: radial basis function (RBF) morphing *beside* transfinite interpolation — for spreading a
 projection's displacement through a block (the pipe-to-chamber saddle), snapping octree nodes, and later
-as the differentiable map from CAD parameters to `node_coords`. Raised with the project owner, not agreed.
+as the differentiable map from CAD parameters to `node_coords`. **Deferred until the mesher is finished**
+(project owner, 2026-10-21): the design-parameter applications come after it; the ranked applications
+and costs are in the log, "RBF morphing: where it would fit".
 
 ## Rejected dependencies (why, so they are not re-proposed)
 
