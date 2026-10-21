@@ -49,9 +49,11 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from .caps import ClearedCaps, capped
 from .elements import HEXAHEDRON_CORNERS
+from .merged_caps import MergedCaps
 from .octree import BITS, NearSurface, Octree, point_keys
-from .polygons import PyramidCaps
+from .polygons import Polygons, PyramidCaps
 from .regions import ClosedSurface, Region
 
 __all__ = ["HexCore", "OctreeCore"]
@@ -181,7 +183,7 @@ class OctreeCore:
         lower: Sequence[float],
         upper: Sequence[float],
         *,
-        cap_height: float,
+        cap_height: float | ClearedCaps | MergedCaps,
         boundary_size: float,
     ) -> HexCore:
         """The core of ``region``, within the box from ``lower`` to ``upper``.
@@ -195,9 +197,10 @@ class OctreeCore:
             inside.
         lower, upper : sequence of float, length 3
             A box holding the region.
-        cap_height : float
+        cap_height : float or ClearedCaps
             The caps' height over their quadrilaterals' edge, in ``(0, 1/2)`` (see
-            :class:`~aquaflux.meshing.PyramidCaps`).
+            :class:`~aquaflux.meshing.PyramidCaps`), or each sized to its room
+            (:class:`~aquaflux.meshing.ClearedCaps`, the clearance free in front of every cap).
         boundary_size : float
             The size the region's boundary is meshed at, for an unset :attr:`wall_size`.
 
@@ -211,9 +214,10 @@ class OctreeCore:
             If a cap would reach the clearance's far side (the clearance is no more than the caps'
             height over a wall cube), or no cube fits.
         """
-        PyramidCaps.check_height(cap_height, "the core's cap_height")
         wall, clearance = self.resolved(boundary_size)
-        if clearance <= cap_height * wall:
+        if not isinstance(cap_height, (ClearedCaps, MergedCaps)):
+            PyramidCaps.check_height(cap_height, "the core's cap_height")
+        if not isinstance(cap_height, (ClearedCaps, MergedCaps)) and clearance <= cap_height * wall:
             raise ValueError(
                 f"a cap {cap_height!r} of a wall cube ({wall!r}) high would cross the clearance "
                 f"({clearance!r}) kept from the boundary"
@@ -230,10 +234,15 @@ class OctreeCore:
         kept = _without_pinches(faces)
         if not np.any(kept):
             raise ValueError("no cube fits in the region at this size and clearance")
-        return self._assembled(tree, faces, kept, cap_height)
+        return self._assembled(tree, faces, kept, cap_height, clearance)
 
     def within(
-        self, points: np.ndarray, triangles: np.ndarray, *, cap_height: float, boundary_size: float
+        self,
+        points: np.ndarray,
+        triangles: np.ndarray,
+        *,
+        cap_height: float | ClearedCaps | MergedCaps,
+        boundary_size: float,
     ) -> HexCore:
         """The core inside a closed triangle surface: :meth:`mesh` of its :class:`ClosedSurface`.
 
@@ -262,7 +271,9 @@ class OctreeCore:
         )  # fmt: skip
 
     @staticmethod
-    def _assembled(tree: Octree, faces: _CubeFaces, kept: np.ndarray, cap_height) -> HexCore:
+    def _assembled(
+        tree: Octree, faces: _CubeFaces, kept: np.ndarray, cap_height, clearance: float
+    ) -> HexCore:
         """The cells of the kept cubes and the caps on their boundary, numbered compactly."""
         rings, cube = faces.rings[kept[faces.cube]], faces.cube[kept[faces.cube]]
         transition = faces.transition & kept
@@ -285,8 +296,11 @@ class OctreeCore:
         tetrahedra = np.column_stack([centre_of[cube[inner & ~quads]], rings[inner & ~quads, :3]])
 
         boundary = rings[_once(rings)]
-        caps = PyramidCaps.on(points, boundary[boundary[:, 3] != _UNUSED], cap_height)
-        triangles = boundary[boundary[:, 3] == _UNUSED, :3][:, ::-1]
+        outward = Polygons(
+            boundary[boundary[:, 3] == _UNUSED, :3], boundary[boundary[:, 3] != _UNUSED]
+        )
+        caps = capped(points, outward, cap_height, clearance)
+        triangles = outward.triangles[:, ::-1]
         return HexCore(
             points=np.vstack([points, caps.apexes]),
             hexahedra=number(faces.hexahedra[whole]),

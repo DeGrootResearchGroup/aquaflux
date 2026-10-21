@@ -29,12 +29,14 @@ import numpy as np
 from aquaflux.io.cad import CadModel, CadRegion
 from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
+from .caps import ClearedCaps, capped
 from .dual import PolyhedralDual
 from .elements import element_mesh, face_keys, search_rows
 from .hex_core import OctreeCore
 from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
-from .netgen_process import NetgenProcess, SurfaceTriangulation
+from .merged_caps import MergedCaps
+from .netgen_process import MeshingError, NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
 from .pipes import fill_pipes, find_pipes, pipe_ends
 from .planarize import FacePlanarizer
@@ -165,10 +167,11 @@ class CadMesher:
         How fast the size may change between neighbours, in ``(0, 1]``; unset, Netgen's.
     layers : PrismLayers or None
         The prism layers grown on the patches :meth:`mesh` is asked to layer; unset, none.
-    cap_height : float
+    cap_height : float or ClearedCaps
         The height of the pyramids that cap each quadrilateral the tetrahedra meet, over the
         quadrilateral's first edge (round a structured grid), in ``(0, 1/2)`` (see
-        :class:`~aquaflux.meshing.PyramidCaps`), the hex core's caps included.
+        :class:`~aquaflux.meshing.PyramidCaps`), or each cap sized to the room it has
+        (:class:`~aquaflux.meshing.ClearedCaps`); the hex core's caps included.
     pipe_core : PipeCore
         How the cores of pipes (see :meth:`mesh`) are filled.
     planarizer : FacePlanarizer or None
@@ -189,7 +192,7 @@ class CadMesher:
     min_size: float | None = None
     grading: float | None = None
     layers: PrismLayers | None = None
-    cap_height: float = 0.25
+    cap_height: float | ClearedCaps | MergedCaps = 0.25
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
@@ -202,7 +205,8 @@ class CadMesher:
                 raise ValueError(
                     f"CadMesher.{name} must be a positive, finite number, got {value!r}."
                 )
-        PyramidCaps.check_height(self.cap_height, "CadMesher.cap_height")
+        if not isinstance(self.cap_height, (ClearedCaps, MergedCaps)):
+            PyramidCaps.check_height(self.cap_height, "CadMesher.cap_height")
         if self.core is not None:
             self.core.resolved(self.max_size)  # refuses a core smaller than an unset wall size
 
@@ -303,10 +307,11 @@ class CadMesher:
             hexahedra = cores if hexahedra is None else np.concatenate([hexahedra, cores])
         boundary = _Boundary.of(wall_faces, wall_tag, sides, side_face)
         # The tetrahedra meet triangles only: each quadrilateral left for them is capped on their side.
-        caps = PyramidCaps.on(points, fill.quads[:, ::-1], self.cap_height)
+        caps = capped(points, fill.reversed(), self.cap_height)
         points = np.vstack([points, caps.apexes])
         points, surface, core = self._cored(points, np.vstack([fill.triangles, caps.sides]))
         points, tetrahedra = self._filled(points, surface, core.fill_size)
+        caps, core, points, tetrahedra = self._merged(caps, core, points, tetrahedra)
         tetrahedra = np.vstack([tetrahedra, core.tetrahedra])
         # The layers' hexahedra first, so a column's cells are numbered as the layers grew them.
         hexahedra = core.hexahedra if hexahedra is None else np.vstack([hexahedra, core.hexahedra])
@@ -370,6 +375,26 @@ class CadMesher:
             lambda points, faces: model.project(region, points, faces=faces).points,
         )  # fmt: skip
 
+    def _merged(self, caps: PyramidCaps, core: _CoreCells, points, tetrahedra):
+        """Under :class:`MergedCaps`, the fill's tetrahedra on every cap's quadrilateral made
+        into its pyramid; otherwise everything as it is."""
+        if not isinstance(self.cap_height, MergedCaps):
+            return caps, core, points, tetrahedra
+        pending = np.vstack([caps.pyramids, core.pyramids])
+        waiting = pending[:, 4] < 0
+        points, tetrahedra, made, counts = self.cap_height.merged(
+            points, tetrahedra, pending[waiting, :4]
+        )
+        if counts.failed:
+            raise MeshingError(
+                f"{counts.failed} quadrilateral(s) had no tetrahedra of the fill to make a "
+                "pyramid of"
+            )
+        pending[waiting] = made
+        caps = PyramidCaps(caps.apexes, pending[: caps.pyramids.shape[0]], caps.sides)
+        core = dataclasses.replace(core, pyramids=pending[caps.pyramids.shape[0] :])
+        return caps, core, points, tetrahedra
+
     def _cored(self, points: np.ndarray, surface: np.ndarray):
         """``points`` and the fill's closed ``surface``, with the hex core inside the surface:
         its points after ``points``, its capped surface added to the fill's as a hole, and its
@@ -384,7 +409,11 @@ class CadMesher:
         cells = _CoreCells(
             tetrahedra=start + core.tetrahedra,
             hexahedra=start + core.hexahedra,
-            pyramids=start + np.vstack([core.pyramids, core.caps]),
+            pyramids=np.where(  # a cap left to merge keeps its -1 apex
+                np.vstack([core.pyramids, core.caps]) >= 0,
+                start + np.vstack([core.pyramids, core.caps]),
+                -1,
+            ),
             fill_size=max(self.max_size, wall),
         )
         return np.vstack([points, core.points]), np.vstack([surface, start + core.surface]), cells
