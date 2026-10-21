@@ -31,6 +31,7 @@ from .mesh import Mesh
 from .quality import (
     CONCAVE_COSINE,
     MeshQuality,
+    QualitySummary,
     cell_concavity,
     cell_non_convexity,
     centroid_iteration_shift,
@@ -72,6 +73,7 @@ __all__ = [
     "MeshQuality",
     "PatchTriangles",
     "PolygonFaceGeometry",
+    "QualitySummary",
     "RandomReordering",
     "ReverseCuthillMcKee",
     "cell_adjacency_coo",

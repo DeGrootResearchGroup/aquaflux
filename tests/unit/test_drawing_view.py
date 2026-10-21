@@ -1,0 +1,118 @@
+"""A mesh file's drawing as someone choosing its patches sees it, on the Sozzi reactor's own drawing.
+
+The faces' patches come from the mesher's own selections, so what is pinned here is the view's part:
+every face written and described, the patches of each by name, the face each point lands on, the
+pipes found whatever their rims, the refusals, and the drawing read once while its file is unchanged.
+The references are the drawing's own face records, read apart from the view.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("OCP")
+
+from aquaflux.case import DRAWING_FILE, Drawing, DrawingRegion, view_drawing
+from aquaflux.case import drawing_view as module
+from aquaflux.io.cad import CadRegion, CylinderFace, SphereFace, read_step
+from aquaflux.meshing import FacesNear, FacesOn
+
+SOZZI = (
+    Path(__file__).resolve().parents[2]
+    / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+)
+REGION = DrawingRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), ("lamp",))
+R_PIPE, R_LAMP = 0.00955, 0.010
+
+
+@pytest.fixture(scope="module")
+def faces():
+    """The region's face records, read apart from the view."""
+    model = read_step(SOZZI)
+    return model.topology(CadRegion(REGION.solids, REGION.without)).faces
+
+
+def _view(tmp_path, patches, others=None, region=REGION, drawing=None):
+    drawing = drawing or Drawing(SOZZI.name)
+    return view_drawing(drawing, region, patches, others, SOZZI.parent, tmp_path / "out")
+
+
+def test_every_face_is_written_and_described_and_given_its_patch(tmp_path, faces):
+    view = _view(tmp_path, {"lamp": FacesOn(("lamp",))}, others="vessel")
+    assert view.surface == tmp_path / "out" / DRAWING_FILE and view.selections_error is None
+    assert set(view.solids) == {"lamp", "reactor_body", "inlet_pipe", "outlet_pipe"}
+    # The triangles are written, each carrying the face it lies on.
+    header = view.surface.read_bytes().split(b"<AppendedData")[0].decode()
+    assert int(re.search(r'NumberOfPolys="(\d+)"', header).group(1)) > 100
+    assert 'Name="face"' in header
+    kinds = {"CylinderFace": "cylinder", "SphereFace": "sphere", "PlaneFace": "plane"}
+    assert [face["kind"] for face in view.faces] == [kinds[type(f).__name__] for f in faces]
+    # The lamp's faces are its sleeve and its tip, the fluid outside both: no other face is.
+    lamp = {
+        index
+        for index, record in enumerate(faces)
+        if isinstance(record, (CylinderFace, SphereFace))
+        and not record.solid_inside
+        and abs(record.radius - R_LAMP) < 1e-9
+    }
+    assert lamp and {i for i, name in enumerate(view.patches) if name == "lamp"} == lamp
+    assert set(view.patches) == {"lamp", "vessel"}
+
+
+def test_each_point_lands_on_its_face_and_the_patch_takes_it(tmp_path):
+    first = _view(tmp_path, {})
+    assert set(first.patches) == {"walls"}  # the mesher's own name for the rest, unset
+    ends = [i for i, face in enumerate(first.faces) if face["kind"] == "plane"]
+    smallest = min(ends, key=lambda i: first.faces[i]["area"])
+    point = first.faces[smallest]["point"]
+    view = _view(tmp_path, {"inlet": FacesNear((tuple(point),))})
+    assert view.landed == {"inlet": (smallest,)}
+    assert [i for i, name in enumerate(view.patches) if name == "inlet"] == [smallest]
+
+
+def test_the_pipes_are_found_whatever_their_rims(tmp_path, faces):
+    view = _view(tmp_path, {})
+    pipes = [
+        i
+        for i, record in enumerate(faces)
+        if isinstance(record, CylinderFace) and abs(record.radius - R_PIPE) < 1e-9
+    ]
+    assert len(pipes) == 2 and list(view.pipes) == pipes
+
+
+def test_selections_that_share_a_face_are_refused_but_the_drawing_is_still_shown(tmp_path):
+    lamp = FacesOn(("lamp",))
+    view = _view(tmp_path, {"sleeve": lamp, "again": lamp})
+    assert (
+        view.patches is None and "selects a face another patch has already" in view.selections_error
+    )
+    assert view.surface.is_file() and len(view.faces) == 9
+
+
+def test_until_a_region_is_chosen_only_the_drawings_solids_are_said(tmp_path):
+    view = _view(tmp_path, {}, region=None)
+    assert view.surface is None and view.faces == () and "lamp" in view.solids
+    with pytest.raises(ValueError, match="which the drawing does not hold"):
+        _view(tmp_path, {}, region=DrawingRegion(("tank",)))
+
+
+def test_the_drawing_is_read_once_while_its_file_is_unchanged(tmp_path, monkeypatch):
+    copy = tmp_path / "drawing.step"
+    shutil.copy(SOZZI, copy)
+    reads = []
+    real = module.read_step
+    monkeypatch.setattr(module, "read_step", lambda *a: reads.append(a) or real(*a))
+    module._model.cache_clear()
+    drawing = Drawing(copy.name)
+    for _ in range(2):
+        view_drawing(drawing, REGION, {}, None, tmp_path, tmp_path / "out")
+    assert len(reads) == 1
+    stat = copy.stat()
+    os.utime(copy, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # the file changed
+    view_drawing(drawing, REGION, {}, None, tmp_path, tmp_path / "out")
+    assert len(reads) == 2

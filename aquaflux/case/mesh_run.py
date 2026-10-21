@@ -4,7 +4,8 @@ The mesh file is read and checked, the places the mesh would be written are chec
 is meshed -- meshing can take minutes, and a refusal should come first -- and then the region is
 meshed and written: as ``.aqmesh`` always, and as an OpenFOAM polyMesh when the file asks. The
 ``.aqmesh`` file's header records how the mesh was made: the mesh file's settings as they ran, the
-aquaflux version and commit, when, and how long it took.
+aquaflux version and commit, when, how long it took, and a summary of the mesh's quality
+(:class:`~aquaflux.mesh.QualitySummary`), so a mesh can be judged without being read.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ from pathlib import Path
 
 import aquaflux
 from aquaflux.io import AquafluxMeshWriter, OpenFOAMWriter
-from aquaflux.mesh import Mesh
+from aquaflux.mesh import Mesh, QualitySummary
+from aquaflux.meshing import Stage
 
 from .case_file import MeshFile, read_mesh_file
 from .run import _checkout_state
@@ -39,15 +41,20 @@ class MeshRecord:
         The OpenFOAM polyMesh directory written, if one was asked for.
     seconds : float
         How long the meshing took, writing excluded.
+    quality : QualitySummary
+        The mesh's quality, as its header records it.
     """
 
     mesh: Mesh
     aqmesh: Path
     polymesh: Path | None
     seconds: float
+    quality: QualitySummary
 
 
-def make_mesh(path: str | Path, *, overwrite: bool = False) -> MeshRecord:
+def make_mesh(
+    path: str | Path, *, overwrite: bool = False, on_stage: Stage | None = None
+) -> MeshRecord:
     """Mesh the region a mesh file describes and write it where the file says.
 
     Parameters
@@ -56,6 +63,9 @@ def make_mesh(path: str | Path, *, overwrite: bool = False) -> MeshRecord:
         The mesh file.
     overwrite : bool
         Replace a mesh already where this one would be written.
+    on_stage : callable, optional
+        Told the name of each stage as it starts: the meshing's (see
+        :meth:`~aquaflux.case.MeshSpec.mesh`), then measuring the quality and writing.
 
     Returns
     -------
@@ -79,8 +89,11 @@ def make_mesh(path: str | Path, *, overwrite: bool = False) -> MeshRecord:
                 f"{'it' if len(occupied) == 1 else 'them'}."
             )
     started, clock = datetime.datetime.now(datetime.UTC), time.perf_counter()
-    mesh = mesh_file.spec.mesh(mesh_file.directory)
+    mesh = mesh_file.spec.mesh(mesh_file.directory, on_stage=on_stage)
     seconds = time.perf_counter() - clock
+    _tell(on_stage, "measuring the mesh's quality")
+    quality = QualitySummary.of(mesh)
+    _tell(on_stage, "writing the mesh")
     commit, modified = _checkout_state()
     provenance = {
         "mesh_file": str(Path(path).resolve()),
@@ -88,13 +101,20 @@ def make_mesh(path: str | Path, *, overwrite: bool = False) -> MeshRecord:
         "aquaflux": {"version": aquaflux.__version__, "commit": commit, "modified": modified},
         "started": started.isoformat(timespec="seconds"),
         "seconds": round(seconds, 3),
+        "quality": quality.to_mapping(),
     }
     aqmesh_writer, *others = writers
     aqmesh = AquafluxMeshWriter(
         aqmesh_writer.path, overwrite=overwrite, provenance=provenance
     ).write(mesh)
     polymesh = others[0].write(mesh) if others else None
-    return MeshRecord(mesh=mesh, aqmesh=aqmesh, polymesh=polymesh, seconds=seconds)
+    return MeshRecord(mesh=mesh, aqmesh=aqmesh, polymesh=polymesh, seconds=seconds, quality=quality)
+
+
+def _tell(on_stage: Stage | None, stage: str) -> None:
+    """Tell ``on_stage``, if anyone follows the stages, that ``stage`` starts."""
+    if on_stage is not None:
+        on_stage(stage)
 
 
 def _writers(mesh_file: MeshFile, overwrite: bool) -> list:

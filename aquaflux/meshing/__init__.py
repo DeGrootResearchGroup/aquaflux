@@ -49,7 +49,15 @@ from __future__ import annotations
 from .block_assembly import BlockMesh
 from .block_topologies import Annulus, CubedSphereCap, PipeOGrid
 from .blocks import Arc, Curve, HexBlock, SampledCurve, Surface
-from .cad_mesher import CadMesher, FaceSelection, FacesNear, FacesOn, RegionFaces
+from .cad_mesher import (
+    CadMesher,
+    FaceSelection,
+    FacesNear,
+    FacesOn,
+    RegionFaces,
+    Stage,
+    assign_patches,
+)
 from .caps import ClearedCaps
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
@@ -68,6 +76,7 @@ from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
 from .octree import NearSurface, Octree, RefinementCriterion
 from .pipe_core import PipeCore, PipeCoreFill
+from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
 from .polygons import Polygons, PyramidCaps
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
@@ -117,13 +126,16 @@ __all__ = [
     "SampledCurve",
     "SampledRegion",
     "SphereSurface",
+    "Stage",
     "Straight",
     "Surface",
     "SurfaceTriangulation",
     "TetrahedralMesh",
     "TracedDual",
+    "assign_patches",
     "cell_counts",
     "check_closed_surface",
     "element_mesh",
+    "find_pipes",
     "netgen_available",
 ]

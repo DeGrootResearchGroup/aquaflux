@@ -19,11 +19,13 @@ import pytest
 from aquaflux.mesh import (
     Mesh,
     MeshQuality,
+    QualitySummary,
     cell_concavity,
     cell_non_convexity,
     face_non_orthogonality,
     face_skewness,
     face_warp,
+    graded_nodes,
     stored_ring_is_outward,
     structured_grid_2d,
     structured_grid_3d,
@@ -317,3 +319,42 @@ def test_cell_nodes_are_each_cells_distinct_nodes():
         assert np.all(np.diff(mine) > 0)
         corner = np.all(np.abs(coords - centroid[cell]) < 0.5 + 1e-12, axis=1)
         np.testing.assert_array_equal(mine, np.flatnonzero(corner))
+
+
+# --- the summary a mesh is first judged by -----------------------------------------------------
+
+
+def test_a_summary_reads_a_graded_grids_neighbour_ratio_as_its_growth():
+    # Rows growing by 1.3 from y = 0: every pair of neighbours across a row is 1.3 apart in area, and
+    # neighbours along a row are equal, so the largest ratio is the growth and no face is skewed.
+    growth = 1.3
+    mesh = structured_grid_2d(
+        3, 5, 1.0, 1.0, y_nodes=graded_nodes(5, 1.0, growth, both_sides=False)
+    )
+    summary = QualitySummary.of(mesh)
+    assert summary.cells == 15 and summary.concave_cells == 0
+    assert summary.volume_ratio_max == pytest.approx(growth, rel=1e-12)
+    assert summary.volume_ratio_p99 == pytest.approx(growth, rel=1e-12)
+    assert summary.non_orthogonality_max == pytest.approx(0.0, abs=1e-5)  # an arccos's round-off
+    first_row = 1.0 * (growth - 1) / (growth**5 - 1)
+    assert summary.smallest_volume == pytest.approx(first_row / 3, rel=1e-12)
+
+
+def test_a_summary_takes_its_angle_from_the_interior_faces_and_counts_concave_cells():
+    # The pair's one interior face leans atan(SHEAR / 2) (see the sheared pair above); its far wall
+    # leans more, atan(SHEAR), but a boundary face carries no flux between cells and is not counted.
+    summary = QualitySummary.of(_sheared_pair())
+    expected = math.degrees(math.atan(SHEAR / 2))
+    assert summary.non_orthogonality_max == pytest.approx(expected, abs=1e-10)
+    assert summary.non_orthogonality_p99 == pytest.approx(expected, abs=1e-10)
+    pair = _sheared_pair()
+    assert QualitySummary.of(_l_prism()).concave_cells == 1
+    assert set(QualitySummary.of(pair).to_mapping()) == {
+        "cells", "non_orthogonality_max", "non_orthogonality_p99", "volume_ratio_max",
+        "volume_ratio_p99", "smallest_volume", "concave_cells",
+    }  # fmt: skip
+
+
+def test_a_periodic_mesh_is_not_summarized():
+    with pytest.raises(ValueError, match="periodic mesh's quality is not summarized"):
+        QualitySummary.of(structured_grid_2d(3, 2, 1.0, 1.0, periodic=("x",)))

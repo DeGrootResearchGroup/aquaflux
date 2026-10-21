@@ -53,7 +53,7 @@ from .openfoam import (
 )
 from .reader import MeshReader
 from .writer import MeshWriter
-from .vtk import write_patches, write_pvd, write_vtu
+from .vtk import write_patches, write_pvd, write_triangles, write_vtu
 
 __all__ = [
     "AQMESH_SUFFIX",
@@ -79,5 +79,6 @@ __all__ = [
     "write_openfoam_time",
     "write_patches",
     "write_pvd",
+    "write_triangles",
     "write_vtu",
 ]

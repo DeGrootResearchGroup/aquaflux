@@ -143,6 +143,12 @@ All classes are `equinox.Module`s.
     angle (that reads ~1.6° low). Skewness: `|s| / max(extent of the face along s, 0.2|d|)`, boundary
     `d` the owner's perpendicular and floor `0.4|d|`; the boundary floor is from OpenFOAM's source, not
     seen binding in a checkMesh maximum.
+  - **`QualitySummary.of(mesh)`** (cells; interior faces' non-orthogonality max and p99; neighbour volume
+    ratio max and p99; smallest cell; concave cells by `CONCAVE_COSINE`) is what `aquaflux mesh` records
+    in the `.aqmesh` header and the browser shows; one `MeshQuality` and one geometry for every number.
+    ⚠️ **Refuses a periodic mesh**: `cell_concavity` reads a seam face's centroid on its stored side, so
+    the cells beside a seam read concave (a 3 × 2 grid periodic in x: 2 of 6) — a limitation of
+    `cell_concavity` itself, which the mesher's meshes never meet.
   - **`MeshQuality(mesh)` is the one implementation of the cell and face checks** (2026-10-20): built
     once from a topology — each cell's (face, outward sign) sides and distinct nodes as CSR, and the
     faces' `RingSigns` — it evaluates `geometry(coords)` (through `Mesh.geometry(signs)`),

@@ -5,6 +5,7 @@
     aquaflux-ui results/              # a run's output directory, opened on Results
     aquaflux-ui fields.vtu            # or one VTK file (.vtu, .pvd, .vtp, .vtm)
     aquaflux-ui case.yaml             # a case file, opened on Setup
+    aquaflux-ui --mesh-file mesh.yaml # a mesh file, opened on Mesh (with a case file too, if given)
     aquaflux-ui                       # nothing open yet: Setup, to open a case file
     aquaflux-ui results/ --port 8080 --no-browser
 
@@ -45,6 +46,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="a run's output directory, a .vtu/.pvd/.vtp/.vtm file, or a .yaml case file",
     )
     parser.add_argument(
+        "--mesh-file", metavar="FILE", default=None, help="a mesh file to open in the Mesh section"
+    )
+    parser.add_argument(
         "--port", type=int, default=0, help="the port to serve on; 0 (the default) picks a free one"
     )
     parser.add_argument(
@@ -70,10 +74,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"aquaflux-ui: {error}", file=sys.stderr)
             return 2
 
+    if arguments.mesh_file is not None and not Path(arguments.mesh_file).is_file():
+        print(f"aquaflux-ui: {arguments.mesh_file} does not exist.", file=sys.stderr)
+        return 2
+
     # The page's dependencies are imported only once what it opens has been found.
     from .app import Workspace
 
-    workspace = Workspace(source, case=case)
+    workspace = Workspace(source, case=case, mesh_file=arguments.mesh_file)
     workspace.server.start(
         port=arguments.port, host=arguments.host, open_browser=not arguments.no_browser
     )

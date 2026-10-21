@@ -9,12 +9,14 @@ viewer processes far more cheaply than the equivalent polyhedron.
 Three seams, mirroring the readers' split: :mod:`.topology` reconstructs the cell connectivity,
 :mod:`.xml` serializes it, and :mod:`.writer` is the only part that opens a file. The boundary
 patches, and fields that live on their faces, are written by :mod:`.patches`: one polygonal-data
-file per patch, indexed by one multiblock file.
+file per patch, indexed by one multiblock file; a surface of triangles that is not a mesh's
+boundary, by :mod:`.surface`.
 """
 
 from __future__ import annotations
 
 from .patches import boundary_patches, vtm_document, vtp_parts, write_patches
+from .surface import write_triangles
 from .topology import (
     VTK_HEXAHEDRON,
     VTK_POLYGON,
@@ -40,5 +42,6 @@ __all__ = [
     "vtu_parts",
     "write_patches",
     "write_pvd",
+    "write_triangles",
     "write_vtu",
 ]

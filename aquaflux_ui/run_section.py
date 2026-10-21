@@ -4,7 +4,7 @@ Everything a run does is set in its case file, so this section has no settings o
 to start the solve and one to stop it, a summary of what the case file says the run will do, and the
 march drawn as it goes -- its residual against the stopping target, what each step cost, how the
 step control moved, and what happened along the way. The solve is an ``aquaflux run`` process
-(:class:`~aquaflux_ui.run_process.CaseRun`); the plots are read from the per-step history it writes
+(:class:`~aquaflux_ui.run_process.SolverRun`); the plots are read from the per-step history it writes
 (:mod:`aquaflux_ui.run_monitor`), re-read every second while it runs.
 
 A run replaces an earlier one's results only when told to: if the case's output directory holds
@@ -35,7 +35,7 @@ from .run_monitor import (
     run_events,
     run_tiles,
 )
-from .run_process import CONVERGED, NOT_CONVERGED, REFUSED, CaseRun
+from .run_process import CONVERGED, NOT_CONVERGED, REFUSED, SolverRun
 from .solver_commands import RunPlan
 from .widgets import empty_state
 
@@ -75,17 +75,17 @@ class RunSection:
     ----------
     server : trame server
         The workspace's server.
-    setup : SetupSection
-        The Setup section, whose open case this section runs: its document, schema and solver
-        commands are read when they are needed, so an edit there is seen here.
+    case : DocumentForm
+        The Setup section's case form, whose open case this section runs: its document, schema and
+        solver commands are read when they are needed, so an edit there is seen here.
     """
 
     key, title, icon = "run", "Run", "mdi-play-circle-outline"
 
-    def __init__(self, server, setup) -> None:
+    def __init__(self, server, case) -> None:
         self.server = server
-        self.setup = setup
-        self.run: CaseRun | None = None
+        self.case = case
+        self.run: SolverRun | None = None
         self.plan: RunPlan | None = None
         self.limits = RunLimits()
         self._started_at = 0.0
@@ -130,14 +130,14 @@ class RunSection:
         """Ask where a run of the open case would write, and what it would replace."""
         state = self.server.state
         path = state.case_path if state.case_loaded else ""
-        plan = await asyncio.to_thread(self.setup.commands.plan, path) if path else None
+        plan = await asyncio.to_thread(self.case.commands.plan, path) if path else None
         self.plan = plan
         with self.server.state as state:
             state.run_occupied = [] if plan is None else [str(p) for p in plan.occupied]
             directory = None if plan is None else plan.directory
             state.run_directory = "" if directory is None else str(directory)
             state.run_directory_shown = (
-                "" if directory is None else _relative(directory, self.setup.path)
+                "" if directory is None else _relative(directory, self.case.path)
             )
             if not state.run_occupied:
                 state.run_overwrite = False
@@ -149,7 +149,7 @@ class RunSection:
 
     def _summary(self) -> list[dict]:
         """What the case file says the run will do, as label and value rows."""
-        document, schema = self.setup.document, self.setup.schema
+        document, schema = self.case.document, self.case.schema
         if document is None or schema is None:
             return []
 
@@ -173,7 +173,7 @@ class RunSection:
         if limits.atol is not None or limits.rtol is not None:
             rows.append(("Stops below", _stop_text(limits)))
         if self.plan is not None and self.plan.directory is not None:
-            rows.append(("Output", _relative(self.plan.directory, self.setup.path)))
+            rows.append(("Output", _relative(self.plan.directory, self.case.path)))
         return [{"label": label, "value": value} for label, value in rows if value]
 
     def _update_ready(self) -> None:
@@ -201,10 +201,12 @@ class RunSection:
     def start(self) -> None:
         """Start the open case's solve, if it can start."""
         state = self.server.state
-        if not state.run_ready or self.setup.path is None or self.setup.schema is None:
+        if not state.run_ready or self.case.path is None or self.case.schema is None:
             return
-        self.limits = RunLimits.from_case(self.setup.schema, self.setup.document)
-        self.run = CaseRun(self.setup.path, self._console, overwrite=bool(state.run_overwrite))
+        self.limits = RunLimits.from_case(self.case.schema, self.case.document)
+        self.run = SolverRun(
+            "run", self.case.path, self._console, overwrite=bool(state.run_overwrite)
+        )
         self._started_at = time.time()
         self.run.start()
         self._steps_drawn = -1
@@ -287,7 +289,7 @@ class RunSection:
                 self._steps_drawn = -1
                 self._redraw(force=True, history=history)
                 return
-            self.limits = RunLimits.from_case(self.setup.schema, self.setup.document)
+            self.limits = RunLimits.from_case(self.case.schema, self.case.document)
             state.run_state, state.run_state_text = "earlier", "Showing the earlier run"
             self._steps_drawn = -1
             self._show(history)
@@ -530,7 +532,7 @@ def _relative(directory: Path, case: Path | None) -> str:
     return str(directory)
 
 
-def _ending(run: CaseRun) -> tuple[str, str]:
+def _ending(run: SolverRun) -> tuple[str, str]:
     """The run state and the status line for a run that has ended."""
     status = run.status
     if run.stopped:

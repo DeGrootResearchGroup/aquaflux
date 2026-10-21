@@ -27,6 +27,14 @@ __all__ = [
 
 LIGHT, DARK = "light", "dark"
 
+#: Six hues of a palette validated for colour-vision deficiency on adjacent marks, by theme: the
+#: equations of a per-equation plot, and the patches of a drawing. The orange and violet the event
+#: marks and the highlight use are left out.
+_CATEGORIES = {
+    LIGHT: ("#2A78D6", "#1BAF7A", "#EDA100", "#E87BA4", "#008300", "#E34948"),
+    DARK: ("#3987E5", "#199E70", "#C98500", "#D55181", "#008300", "#E66767"),
+}
+
 
 @dataclasses.dataclass(frozen=True)
 class RenderStyle:
@@ -42,6 +50,9 @@ class RenderStyle:
         The plain colour of a surface drawn as context beside a slice or a threshold.
     highlight : str
         The colour a chosen boundary patch is drawn in, set apart from everything else.
+    categories : tuple of str
+        One colour per patch of a drawing whose patches are being chosen, in the patches' order,
+        repeating past the last; the faces left to the others patch are drawn in ``context``.
     """
 
     background_top: str
@@ -49,12 +60,13 @@ class RenderStyle:
     text: str
     context: str
     highlight: str
+    categories: tuple[str, ...]
 
 
 #: The rendered view's palette by theme name.
 THEMES: dict[str, RenderStyle] = {
-    LIGHT: RenderStyle("#FFFFFF", "#DDE3EA", "#334155", "#B8C2CC", "#EA580C"),
-    DARK: RenderStyle("#1E293B", "#0B1120", "#E2E8F0", "#64748B", "#FB923C"),
+    LIGHT: RenderStyle("#FFFFFF", "#DDE3EA", "#334155", "#B8C2CC", "#EA580C", _CATEGORIES[LIGHT]),
+    DARK: RenderStyle("#1E293B", "#0B1120", "#E2E8F0", "#64748B", "#FB923C", _CATEGORIES[DARK]),
 }
 
 
@@ -98,7 +110,7 @@ PLOT_STYLES: dict[str, PlotStyle] = {
         ("#0E7490", "#94A3B8"),
         "#334155",
         "#E2E8F0",
-        ("#2A78D6", "#1BAF7A", "#EDA100", "#E87BA4", "#008300", "#E34948"),
+        _CATEGORIES[LIGHT],
         "#EA580C",
         "#4A3AA7",
         "rgba(148, 163, 184, 0.16)",
@@ -108,7 +120,7 @@ PLOT_STYLES: dict[str, PlotStyle] = {
         ("#22D3EE", "#64748B"),
         "#CBD5E1",
         "#1F2937",
-        ("#3987E5", "#199E70", "#C98500", "#D55181", "#008300", "#E66767"),
+        _CATEGORIES[DARK],
         "#FB923C",
         "#9085E9",
         "rgba(100, 116, 139, 0.18)",

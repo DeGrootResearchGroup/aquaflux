@@ -14,6 +14,7 @@ OpenFOAM's ``checkMesh``, so a mesh's numbers can be compared with what that too
 
 from __future__ import annotations
 
+import dataclasses
 from typing import TYPE_CHECKING
 
 import equinox as eqx
@@ -290,6 +291,96 @@ def cell_concavity(mesh: Mesh) -> np.ndarray:
     """
     quality = MeshQuality(mesh)
     return quality.cell_concavity(quality.geometry(mesh.node_coords))
+
+
+@dataclasses.dataclass(frozen=True)
+class QualitySummary:
+    """The few numbers a mesh is first judged by, as a person choosing between meshes reads them.
+
+    Non-orthogonality and the neighbour volume ratio are taken over the interior faces, where a
+    flux runs between two cells; a mesh with no interior face reports zero for both.
+
+    Attributes
+    ----------
+    cells : int
+        Number of cells.
+    non_orthogonality_max, non_orthogonality_p99 : float
+        The largest interior face's :func:`face_non_orthogonality`, and its 99th percentile, in
+        degrees.
+    volume_ratio_max, volume_ratio_p99 : float
+        The larger over the smaller volume of the two cells across each interior face: the largest
+        and its 99th percentile.
+    smallest_volume : float
+        The smallest cell's volume (its area, on a two-dimensional mesh).
+    concave_cells : int
+        The cells ``checkMesh``'s face-plane test counts concave (:func:`cell_concavity` above
+        :data:`CONCAVE_COSINE`).
+
+    Examples
+    --------
+    >>> from aquaflux.mesh import QualitySummary, structured_grid_3d
+    >>> summary = QualitySummary.of(structured_grid_3d(2, 1, 1))
+    >>> summary.cells, summary.non_orthogonality_max, summary.volume_ratio_max
+    (2, 0.0, 1.0)
+    """
+
+    cells: int
+    non_orthogonality_max: float
+    non_orthogonality_p99: float
+    volume_ratio_max: float
+    volume_ratio_p99: float
+    smallest_volume: float
+    concave_cells: int
+
+    @classmethod
+    def of(cls, mesh: Mesh) -> QualitySummary:
+        """The summary of ``mesh``, its geometry computed once for every number.
+
+        Raises
+        ------
+        ValueError
+            If the mesh is periodic: the face-plane concavity test reads a seam face's centroid on
+            the side it is stored on, so it would count the cells beside a seam concave.
+        """
+        if mesh.face_cells.neighbour_offset is not None:
+            raise ValueError(
+                "a periodic mesh's quality is not summarized: the concave-cell test would misread "
+                "the cells beside its seams."
+            )
+        quality = MeshQuality(mesh)
+        geometry = quality.geometry(mesh.node_coords)
+        interior = np.asarray(mesh.face_cells.interior)
+        angle = np.asarray(quality.face_non_orthogonality(geometry))[interior]
+        volume = np.asarray(geometry.cell.volume)
+        pair = np.stack(
+            [
+                volume[np.asarray(mesh.face_cells.owner)[interior]],
+                volume[np.asarray(mesh.face_cells.neighbour)[interior]],
+            ]
+        )
+        ratio = pair.max(axis=0) / pair.min(axis=0)
+        concave = quality.cell_concavity(geometry) > CONCAVE_COSINE
+        return cls(
+            cells=mesh.n_cells,
+            non_orthogonality_max=_largest(angle),
+            non_orthogonality_p99=_percentile(angle, 99),
+            volume_ratio_max=_largest(ratio),
+            volume_ratio_p99=_percentile(ratio, 99),
+            smallest_volume=float(volume.min()),
+            concave_cells=int(np.count_nonzero(concave)),
+        )
+
+    def to_mapping(self) -> dict[str, float | int]:
+        """The summary as plain numbers by name, for a file header or a JSON reply."""
+        return dataclasses.asdict(self)
+
+
+def _largest(values: np.ndarray) -> float:
+    return float(values.max()) if values.size else 0.0
+
+
+def _percentile(values: np.ndarray, q: float) -> float:
+    return float(np.percentile(values, q)) if values.size else 0.0
 
 
 class MeshQuality:

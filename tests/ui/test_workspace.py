@@ -35,7 +35,7 @@ def workspace(tmp_path):
 
 
 def test_the_page_opens_on_results_with_every_section_built(workspace):
-    assert [section.key for section in workspace.sections] == ["setup", "run", "results"]
+    assert [section.key for section in workspace.sections] == ["mesh", "setup", "run", "results"]
     state = workspace.server.state
     assert state.section == "results" and state.theme == "light"
     assert state.dataset == "fields" and state.field == "p"
@@ -104,16 +104,16 @@ class SlowCommands:
         reply = CommandResult(0, json.dumps({"root": "CaseSpec", "kinds": kinds}))
         self._real = SolverCommands(lambda arguments, stdin: reply)
 
-    def schema(self):
+    def schema(self, kind=None):
         import time
 
         self.schema_calls += 1
         time.sleep(0.05)
         if self.schema_calls <= self.failures:
             raise RuntimeError("`aquaflux schema` failed: no solver")
-        return self._real.schema()
+        return self._real.schema(kind)
 
-    def show(self, path):
+    def show(self, path, kind=None):
         from aquaflux_ui.solver_commands import CaseDocument
 
         self.opening_seen.append(self.server.state.case_opening)
@@ -135,9 +135,9 @@ def test_a_case_opened_while_the_schema_is_still_being_fetched_waits_for_that_on
     setup, commands, server = _setup_with(SlowCommands, f"test-prefetch-{tmp_path.name}")
 
     async def page():
-        prefetch = asyncio.ensure_future(setup._prefetch_schema())
+        prefetch = asyncio.ensure_future(setup.form._prefetch_schema())
         await asyncio.sleep(0)  # the prefetch is under way when the case is chosen
-        assert await setup.open(tmp_path / "pitz.yaml") is None
+        assert await setup.form.open(tmp_path / "pitz.yaml") is None
         await prefetch
 
     asyncio.run(page())
@@ -154,8 +154,8 @@ def test_a_schema_that_failed_in_the_background_is_asked_for_again_when_a_case_i
     )
 
     async def page():
-        await setup._prefetch_schema()  # fails quietly
-        assert await setup.open(tmp_path / "pitz.yaml") is None
+        await setup.form._prefetch_schema()  # fails quietly
+        assert await setup.form.open(tmp_path / "pitz.yaml") is None
 
     asyncio.run(page())
     assert commands.schema_calls == 2 and server.state.case_loaded is True

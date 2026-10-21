@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("trame")
 
-from aquaflux_ui.solver_commands import SolverCommands
+from aquaflux_ui.solver_commands import CASE_FILE, MESH_FILE, SolverCommands
 from aquaflux_ui.solver_worker import CommandResult
 
 
@@ -82,6 +82,7 @@ def test_mesh_sends_the_section_and_reads_the_report():
         "dim": 2,
         "patches": [{"name": "top", "faces": 4}],
         "groups": {},
+        "made": {"quality": {"cells": 12}},
     }
     runner = Recorder(CommandResult(0, json.dumps(report)))
     section = {"kind": "AquafluxMesh", "path": "mesh.aqmesh"}
@@ -89,11 +90,12 @@ def test_mesh_sends_the_section_and_reads_the_report():
     ((arguments, stdin),) = runner.calls
     assert arguments == ["export-mesh", "out", "--relative-to", "case_dir"]
     assert json.loads(stdin) == {"mesh": section}
-    assert (export.error, export.cells, export.dim, export.patches) == (
+    assert (export.error, export.cells, export.dim, export.patches, export.made) == (
         None,
         12,
         2,
         report["patches"],
+        report["made"],
     )
 
 
@@ -123,3 +125,49 @@ def test_a_refused_plan_says_why():
     runner = Recorder(CommandResult(2, json.dumps({"error": "case.yaml: no such file"})))
     plan = SolverCommands(runner).plan("case.yaml")
     assert plan.error == "case.yaml: no such file" and plan.directory is None
+
+
+def test_a_mesh_file_is_asked_for_by_its_own_flag_and_its_schema_kept_apart():
+    case = {"root": "CaseSpec", "kinds": {}}
+    mesh = {"root": "MeshSpec", "kinds": {}}
+    shown = {"error": None, "case": {"drawing": {"file": "a.step"}}}
+    runner = Recorder(
+        *(CommandResult(0, json.dumps(reply)) for reply in (mesh, case, shown, {"error": None}))
+    )
+    commands = SolverCommands(runner)
+    assert commands.schema(MESH_FILE).root == "MeshSpec"
+    assert commands.schema(CASE_FILE).root == "CaseSpec"
+    assert commands.schema(MESH_FILE).root == "MeshSpec"  # kept, not asked again
+    assert commands.show("m.yaml", MESH_FILE).case == shown["case"]
+    assert commands.write("m.yaml", {}, "old", MESH_FILE) is None
+    assert [arguments for arguments, _ in runner.calls] == [
+        ["schema", "--mesh-file"],
+        ["schema"],
+        ["show", "m.yaml", "--mesh-file"],
+        ["write", "m.yaml", "--mesh-file", "--relative-to", "old"],
+    ]
+
+
+def test_the_drawing_sends_the_mesh_file_and_reads_its_faces():
+    reply = {
+        "error": None,
+        "surface": "out/drawing.vtp",
+        "solids": ["tank"],
+        "faces": [{"kind": "plane", "area": 1.0, "point": [0, 0, 0]}],
+        "patches": ["walls"],
+        "landed": {},
+        "pipes": [0],
+        "selections_error": None,
+    }
+    runner = Recorder(
+        CommandResult(0, json.dumps(reply)), CommandResult(2, json.dumps({"error": "no drawing"}))
+    )
+    commands = SolverCommands(runner)
+    view = commands.drawing({"drawing": {"file": "tank.step"}}, "mesh_dir", "out")
+    ((arguments, stdin),) = runner.calls
+    assert arguments == ["drawing", "out", "--relative-to", "mesh_dir"]
+    assert json.loads(stdin) == {"mesh_file": {"drawing": {"file": "tank.step"}}}
+    assert (str(view.surface), view.solids, view.patches, view.pipes) == (
+        "out/drawing.vtp", ["tank"], ["walls"], [0],
+    )  # fmt: skip
+    assert commands.drawing({}, "mesh_dir", "out").error == "no drawing"

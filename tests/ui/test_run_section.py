@@ -48,10 +48,10 @@ def _page(tmp_path, plan: RunPlan):
     server = get_server(name=f"test-run-{tmp_path.name}", client_type="vue3")
     commands = _Plans(plan)
     workspace = Workspace(None, server, commands=commands)
-    setup = workspace.setup
-    setup.schema = CaseSchema(case_schema())
-    setup.document = read_case_document(PITZDAILY)
-    setup.path = PITZDAILY
+    case = workspace.setup.form
+    case.schema = CaseSchema(case_schema())
+    case.document = read_case_document(PITZDAILY)
+    case.path = PITZDAILY
     server.state.update({"case_loaded": True, "case_path": str(PITZDAILY), "case_modified": False})
     return workspace, commands, server.state
 
@@ -171,7 +171,7 @@ def test_a_history_older_than_the_run_being_followed_is_not_shown_as_its_own(tmp
 
 
 def test_a_finished_run_keeps_its_ending_and_the_next_run_asks_again_to_replace(tmp_path):
-    from aquaflux_ui.run_process import CaseRun
+    from aquaflux_ui.run_process import SolverRun
 
     results = tmp_path / "results"
     results.mkdir()
@@ -188,20 +188,21 @@ def test_a_finished_run_keeps_its_ending_and_the_next_run_asks_again_to_replace(
         await run.replan()
         state.run_overwrite = True
         run._update_ready()
-        original = CaseRun.__init__
+        original = SolverRun.__init__
 
-        def standing_in(self, case, console, *, overwrite=False, command=None):
+        def standing_in(self, subcommand, case, console, *, overwrite=False, command=None):
             original(
-                self, case, console, overwrite=overwrite, command=[sys.executable, str(stand_in)]
-            )
+                self, subcommand, case, console, overwrite=overwrite,
+                command=[sys.executable, str(stand_in)],
+            )  # fmt: skip
 
-        CaseRun.__init__ = standing_in
+        SolverRun.__init__ = standing_in
         try:
             run.start()
             assert state.run_overwrite is False  # asked again for the next run
             await asyncio.wait_for(asyncio.gather(*run._tasks), timeout=60)
         finally:
-            CaseRun.__init__ = original
+            SolverRun.__init__ = original
         return state
 
     state = asyncio.run(scenario())

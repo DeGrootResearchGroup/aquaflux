@@ -42,6 +42,7 @@ from aquaflux.meshing import (
     OctreeCore,
     PipeCore,
     PrismLayers,
+    Stage,
 )
 
 from .drawing import CadPlacement
@@ -264,18 +265,23 @@ class MeshSpec:
             layers=self.layers, planarizer=self.planarizer, core=self.core, **options,
         )  # fmt: skip
 
-    def mesh(self, directory: Path) -> Mesh:
+    def mesh(self, directory: Path, on_stage: Stage | None = None) -> Mesh:
         """The region, read from its drawing and meshed.
 
         Parameters
         ----------
         directory : pathlib.Path
             The directory the mesh file sits in, which relative paths are taken from.
+        on_stage : callable, optional
+            Told the name of each stage as it starts: reading the drawing, then the mesher's (see
+            :meth:`~aquaflux.meshing.CadMesher.mesh`).
 
         Returns
         -------
         Mesh
         """
+        if on_stage is not None:
+            on_stage("reading the drawing")
         placement = self.drawing.placement
         model = read_step(
             Path(directory) / self.drawing.file,
@@ -284,5 +290,6 @@ class MeshSpec:
         options = {} if self.others is None else {"others": self.others}
         return self.mesher().mesh(
             model, self.region.cad_region(), dict(self.patches),
-            layered=self.layered, mapped=self.mapped, pipes=self.pipes, **options,
+            layered=self.layered, mapped=self.mapped, pipes=self.pipes, on_stage=on_stage,
+            **options,
         )  # fmt: skip

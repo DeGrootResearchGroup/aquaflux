@@ -1,4 +1,4 @@
-"""The workspace page: one interface for a case's setup, its run, and its results.
+"""The workspace page: one interface for a case's mesh, its setup, its run, and its results.
 
 A narrow rail on the left switches between the sections. Each section is an object with its own side
 panel, main area and app-bar buttons (:class:`Section`); the workspace builds them all once and shows
@@ -17,6 +17,7 @@ from trame.ui.vuetify3 import VAppLayout
 from trame.widgets import client, html
 from trame.widgets import vuetify3 as v3
 
+from .mesh_section import MeshSection
 from .results_section import ResultsSection
 from .run_section import RunSection
 from .setup_section import SetupSection
@@ -81,7 +82,7 @@ class NoResultsSection:
 
 
 class Workspace:
-    """The page: Setup, Run and Results, switched from a rail, under one app bar.
+    """The page: Mesh, Setup, Run and Results, switched from a rail, under one app bar.
 
     Parameters
     ----------
@@ -91,8 +92,10 @@ class Workspace:
         Serves the page; unset, a new one.
     case : path-like, optional
         A case file the Setup section opens; given with no ``source``, the page opens on Setup.
+    mesh_file : path-like, optional
+        A mesh file the Mesh section opens; given with no ``source``, the page opens on Mesh.
     commands : SolverCommands, optional
-        How the Setup section asks the solver; unset, the installed one.
+        How the Mesh and Setup sections ask the solver; unset, the installed one.
     """
 
     def __init__(
@@ -101,6 +104,7 @@ class Workspace:
         server=None,
         case=None,
         commands: SolverCommands | None = None,
+        mesh_file=None,
     ) -> None:
         self.server = server if server is not None else get_server(client_type="vue3")
         self.title = source.title if source is not None else (Path(case).name if case else "")
@@ -109,16 +113,23 @@ class Workspace:
             {
                 "theme": LIGHT,
                 "trame__title": f"{self.title} · aquaflux" if self.title else "aquaflux",
-                "section": ResultsSection.key if source is not None else SetupSection.key,
+                "section": (
+                    ResultsSection.key
+                    if source is not None
+                    else MeshSection.key
+                    if mesh_file is not None
+                    else SetupSection.key
+                ),
                 "drawer": True,
             }
         )
         self.setup = SetupSection(self.server, commands, case)
+        self.mesh = MeshSection(self.server, self.setup.commands, self.setup, mesh_file)
         self.results = (
             ResultsSection(source, self.server) if source is not None else NoResultsSection()
         )
-        self.run = RunSection(self.server, self.setup)
-        self.sections: tuple[Section, ...] = (self.setup, self.run, self.results)
+        self.run = RunSection(self.server, self.setup.form)
+        self.sections: tuple[Section, ...] = (self.mesh, self.setup, self.run, self.results)
         if len({section.key for section in self.sections}) != len(self.sections):
             raise ValueError("every section of a workspace needs its own key.")
         self._build_page()
@@ -146,7 +157,8 @@ class Workspace:
                             v3.VIcon(section.icon)
                             html.Div(section.title, classes="af-rail-label")
             with v3.VNavigationDrawer(
-                v_model=("drawer",), width=("section === 'setup' ? 520 : 360",), permanent=True,
+                v_model=("drawer",), width=("['setup', 'mesh'].includes(section) ? 520 : 360",),
+                permanent=True,
                 border=True,
             ):  # fmt: skip
                 for section in self.sections:
@@ -165,11 +177,15 @@ class Workspace:
             v3.VDivider(vertical=True, classes="mx-4 my-3")
             html.Span(
                 self.title,
-                v_if="section !== 'setup' || !case_loaded",
+                v_if="!(section === 'setup' && case_loaded) && !(section === 'mesh' && meshfile_loaded)",
                 classes="text-body-1 text-medium-emphasis",
             )
             html.Span(
                 "{{ case_name }}", v_if="section === 'setup' && case_loaded",
+                classes="text-body-1 text-medium-emphasis",
+            )  # fmt: skip
+            html.Span(
+                "{{ meshfile_name }}", v_if="section === 'mesh' && meshfile_loaded",
                 classes="text-body-1 text-medium-emphasis",
             )  # fmt: skip
             v3.VSpacer()

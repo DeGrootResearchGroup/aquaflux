@@ -56,7 +56,7 @@ class PipeEnds:
 
 def find_pipes(
     topology: CadTopology, points: np.ndarray, triangles: np.ndarray, face: np.ndarray,
-    candidates: np.ndarray,
+    candidates: np.ndarray, rim_counts: bool = True,
 ) -> tuple[list[int], dict[int, str]]:  # fmt: skip
     """Which of ``candidates`` are pipes, and why each other is not.
 
@@ -67,6 +67,10 @@ def find_pipes(
         The region's surface triangulation, each triangle tagged by its face.
     candidates : np.ndarray of int
         The faces to look at.
+    rim_counts : bool
+        Whether a pipe's rims must already have the O-grid's counts: equal, a multiple of four.
+        Off, a face is a pipe whatever its triangulation's rims, as one triangulated again with its
+        rims divided alike (:func:`rim_divisions`) would be.
 
     Returns
     -------
@@ -88,7 +92,7 @@ def find_pipes(
         if len(loops) != 2:
             refused[f] = f"it is bounded by {len(loops)} loops, not the two of a band"
             continue
-        if sizes[0] != sizes[1] or sizes[0] % 4:
+        if rim_counts and (sizes[0] != sizes[1] or sizes[0] % 4):
             refused[f] = (
                 f"its rims have {sizes[0]} and {sizes[1]} points; an O-grid needs equal counts, "
                 "a multiple of four"

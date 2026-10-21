@@ -37,6 +37,7 @@ from aquaflux.flow import PinnedPoint, PressureDatum
 from aquaflux.mesh import Mesh
 from aquaflux.meshing import (
     FacePlanarizer,
+    FaceSelection,
     FacesNear,
     FacesOn,
     Graded,
@@ -836,6 +837,62 @@ def mesh_spec_from_mapping(mapping: Mapping[str, object]) -> MeshSpec:
     if not isinstance(spec, MeshSpec):  # pragma: no cover - the root kind is put in above
         raise ValueError(f"a mesh file reads as a MeshSpec, got a {type(spec).__name__}.")
     return spec
+
+
+def drawing_sections_from_mapping(
+    mapping: Mapping[str, object],
+) -> tuple[Drawing, DrawingRegion | None, dict[str, FaceSelection], str | None]:
+    """Read the sections of a mesh file its patches are chosen by, without the rest of the file.
+
+    The drawing, the region, the patches and ``others``, read by the same rules as within a whole
+    mesh file (:func:`mesh_spec_from_mapping`), so the drawing can be looked at -- and its region
+    and patches chosen -- while the sizes and everything else are unfinished. A region not yet
+    given, or naming no solid yet, is ``None``.
+
+    Parameters
+    ----------
+    mapping : mapping
+        The mesh file, as it stands.
+
+    Returns
+    -------
+    tuple of (Drawing, DrawingRegion or None, dict of {str: FaceSelection}, str or None)
+
+    Raises
+    ------
+    ValueError
+        If the drawing is missing, or a section is refused; the message says where.
+    TypeError
+        If a value is of the wrong family for its position.
+    """
+    if not isinstance(mapping, Mapping):
+        raise ValueError(f"a mesh file is a mapping of its sections, got {mapping!r}.")
+    drawn = mapping.get("drawing")
+    if not isinstance(drawn, Mapping):
+        raise ValueError("a mesh file's drawing is needed to look at it.")
+    drawing = _CASE_MAPPING.from_mapping({"kind": Drawing.__name__, **drawn})
+    given_region = mapping.get("region")
+    region = None
+    if isinstance(given_region, Mapping) and given_region.get("solids"):
+        region = _CASE_MAPPING.from_mapping({"kind": DrawingRegion.__name__, **given_region})
+    given = mapping.get("patches") or {}
+    if not isinstance(given, Mapping):
+        raise ValueError(f"a mesh file's patches are a table of face selections, got {given!r}.")
+    patches = {}
+    for name, entry in given.items():
+        try:
+            selection = _CASE_MAPPING.from_mapping(entry)
+        except (ValueError, TypeError) as error:
+            raise type(error)(f"at 'patches.{name}': {error}") from error
+        if not isinstance(selection, FaceSelection):
+            raise ValueError(
+                f"at 'patches.{name}': a patch is a face selection, got {type(selection).__name__}."
+            )
+        patches[name] = selection
+    others = mapping.get("others")
+    if others is not None and not isinstance(others, str):
+        raise ValueError(f"a mesh file's others names a patch, got {others!r}.")
+    return drawing, region, patches, others
 
 
 def mesh_spec_to_mapping(spec: MeshSpec) -> dict[str, object]:
