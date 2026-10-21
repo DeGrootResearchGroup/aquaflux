@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from aquaflux.case import CadMesh, CadPlacement, case_schema, mesh_source_from_mapping, relocated
 from aquaflux.case.spec import _CASE_MAPPING
-from aquaflux.meshing import FacesNear, FacesOn
+from aquaflux.meshing import FacesNear, FacesOn, Graded, PipeCore
 
 SECTION = {
     "kind": "CadMesh",
@@ -29,6 +29,12 @@ SECTION = {
     "others": "vessel_walls",
     "grading": 0.2,
     "mapped": ["lamp"],
+    "pipes": ["inlet"],
+    "pipe_core": {
+        "kind": "PipeCore",
+        "core_bow": 0.3,
+        "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
+    },
 }
 
 
@@ -45,12 +51,15 @@ def test_the_section_reads_into_its_selections_and_writes_back_as_given():
         others="vessel_walls",
         grading=0.2,
         mapped=("lamp",),
+        pipes=("inlet",),
+        pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
     )
     assert _CASE_MAPPING.to_mapping(source) == SECTION
 
 
 def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaults():
     mesher = mesh_source_from_mapping(SECTION).mesher()
+    assert mesher.pipe_core == PipeCore(core_bow=0.3, shell=Graded(3, 1.2))
     assert (mesher.max_size, mesher.feature_angle, mesher.grading, mesher.min_size) == (
         0.02,
         0.785,

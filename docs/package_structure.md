@@ -208,7 +208,9 @@ cfd/                                  # repo root
 │   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement
 │   │   ├── hex_core.py               #   OctreeCore.mesh(inside, lower, upper) -> HexCore: conformal hex core, pyramid caps
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
-│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces
+│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids
+│   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
+│   │   ├── pipes.py                  #   find_pipes / pipe_ends / fill_pipes: pipes found from the CAD, their cores O-gridded inside their layers
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter

@@ -17,7 +17,8 @@ file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, 
 `element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
 (`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls and
 hexahedral layers on walls meshed with structured quadrilaterals (`layers.py`, `mapped.py`,
-`polygons.py`) and the mesher (`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`) and
+`polygons.py`), pipes' cores as structured O-grids (`pipes.py`, `pipe_core.py`) and the mesher
+(`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`) and
 the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file.
 Face planarization (`planarize.py`) is built but not yet called by the mesher.
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
@@ -142,12 +143,15 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 ## The CAD mesher (`cad_mesher.py`) — built
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=0.25,
-netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls", layered=(), mapped=()) -> Mesh`:
-`write_brep` → `triangulate` (face-tagged) → the `mapped` patches' faces remeshed as structured
-quadrilaterals (below) → layers on the `layered` patches (below) → every quadrilateral left for the fill
+pipe_core=PipeCore(), netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
+layered=(), mapped=(), pipes=None) -> Mesh`: `write_brep` → `triangulate` (face-tagged) → pipes found
+(below) → the `mapped` patches' faces and the pipes' remeshed as structured quadrilaterals (below) →
+layers on the `layered` patches (below) → the pipes' cores filled with O-grids, out of the fill (below)
+→ every quadrilateral left for the fill
 capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
 only) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
-patches by their CAD face) → `PolyhedralDual.build_traced` (the layers' columns passed)
+patches by their CAD face; points no cell uses dropped) → `PolyhedralDual.build_traced` (the layers'
+columns passed); with nothing left for tetrahedra (a pipe open at both ends) Netgen's fill is not run
 → boundary vertices projected onto the CAD (below), with
 **the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
 (so a CAD edge stays sharp whatever its triangles fold by; pinned by
@@ -265,10 +269,55 @@ not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells a
   without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
   wall face with no vertex on a CAD edge a hexahedron's; Sozzi's lamp and pipes).
 
+## Pipes: structured O-grid cores (`pipes.py`, `pipe_core.py`) — built
+
+A pipe's wall is a mapped band, layered like any wall, and **the core its layers leave is filled with a
+structured O-grid** (`PipeCore`) whose outer quads are the layers' top quads, point for point -- no
+seam, no caps inside the pipe (agreed with the project owner, 2026-10-20, over replacing whole pipes
+with the block mesher's `PipeOGrid`: the extruder keeps the wall cells and their hand-over to the
+vessel's layers at the junction; a few layers then a full O-grid inside gives the grading control).
+- **Found** (`find_pipes`): a `CylinderFace` with the fluid inside (`solid_inside`), two loops of equal
+  counts, a multiple of four, nothing else of the surface inside it between its rims (refuses a vessel
+  shell round a lamp). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
+  the patches, each face of which must be one (else `ValueError` naming the reason); `()` none.
+  `CadMesh.pipes` / `CadMesh.pipe_core` in a case file.
+- **`MappedSurface.grids`**: each equal-rimmed band's points as a grid `(rows + 1, n)`, rows round it,
+  columns joined. ⚠️ **A band's rows flatten within `RIM_ROWS` (2) of a rim that is not flat**: each row
+  is the interpolation of the two rims flattened along the axis, plus each rim's bow fading over two rows.
+  Plain interpolation kept the riser's 1 mm saddle in every row near the junction (pipe p99
+  non-orthogonality 8.2° against 6.0°, worst 62.7° against 58.6°, two draws; log). A band between flat
+  rims (the lamp) is unchanged. Pinned by `test_a_bands_rows_flatten_within_two_rows_of_a_rim_that_is_not_flat`.
+- **`PipeCore(core_size=0.5, core_bow=0.0, shell=None, junction_rows=2).fill(points, rings)`**: per
+  ring of `4 k` points, a `k × k` core (half-width `core_size` × the ring's mean radius, its first corner
+  toward ring point 0; `core_bow` as `PipeOGrid`'s, through `_CoreSides`, nodes at equal angles) by
+  `blocks.transfinite`, and a shell of one radial line per ring point; consecutive cross-sections joined.
+  The shell's division is the same in every cross-section: `shell` (a count or `Graded`), else cells about
+  as long as the ring's spacing. ⚠️ **Not the layers' growth continued** (proposed and agreed, then
+  measured worse): the layers' dual sizing alternates thick and thin, so the continued shell starts thin
+  and its junction caps' apexes make 0.3 mm cells; one cell gave pipe faces over 50° 36 against 66 (log).
+  ⚠️ The dual cells of the core's four corners in each cross-section are **triangular prisms** (three
+  primal cells meet there): inherent to an O-grid; the bow evens their neighbours.
+- **Ends** (`pipe_ends`, `fill_pipes`): an end on a flat face without layers bounded only by the
+  pipe's rim (`_is_cap`: its edges ⊆ the pipe's) is **open** -- the O-grid runs to it and its last
+  cross-section replaces that face's own faces inside the layers' ring, same patch (inlet / outlet area
+  unchanged, 0.9783 of πr² both ways); else a **junction** -- the O-grid stops `junction_rows` short and
+  its cross-section is the interface the fill meets, wound out of the fill and capped (`PyramidCaps`).
+  4 rows short was worse than 2 (log). The open end's own interior points are left on no cell and
+  dropped (`_compacted`), everything numbered after renumbered.
+- Measured on Sozzi (maxh 0.02, layers 0.5 mm × 1.2 × 5, lamp and pipes mapped, five draws; log):
+  pipes' faces over 50° 32-37 against 85-93 without cores, p99 6.0° against 46.8°, worst 59-60° against
+  87-89°, neighbour volume ratio p99 36-38 against 165-177; ~1k more cells. ⚠️ The junction discs'
+  cap apexes leave 2-3 cells of ~3.5e-11 m³ (0.33 mm) per mesh -- #785, now confined to two discs.
+- Pinned in `tests/unit/test_meshing_pipes.py` (O-grid exact in a polygon prism, its outer faces the
+  rings' quads, corners, bow, radial lines not twisted; `find_pipes`' refusals; the whole mesher on a stub
+  cylinder open at both ends, no Netgen, every cell hexahedral but the corner prisms) and
+  `test_meshing_netgen.py` (Sozzi's pipes: closure, pipe p99 < 7°, hexahedra along both axes, end areas).
+
 ## The block mesher — built as a library (`blocks.py`, `divisions.py`, `surfaces.py`, `lattices.py`, `block_assembly.py`, `block_topologies.py`)
 
 Library code with unit tests (`tests/unit/test_meshing_blocks.py`, `test_meshing_lattices.py`); **not yet
-reached from `CadMesher` or a case file**, no pipe detection, no wall-layer window masking. Its scope
+reached from `CadMesher` or a case file**, no wall-layer window masking (pipes are found and O-gridded by
+`pipes.py` instead, inside their layers; `PipeOGrid`'s core and bow are reused there). Its scope
 follows blockmeshbuilder (BMB), the owner's blockMesh front end; the gap list and what was deferred are in
 the log (2026-10-20). Dated numbers in the log.
 - **`HexBlock(corners, divisions, edges=, faces=, projections=, patches=)`**: corners in hexahedron order
@@ -510,7 +559,8 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
    surfaces, carrying the `uvmesh` topologies (four-quadrant annulus with the π/4 offset when a cap joins,
    the five-block cubed-sphere shell, the square-core pipe O-grid — **these built**, with BMB-style block
    lattices, masking, placement, plane/cone projection and patch types; wall-layer window masking as a
-   preset not) and pipe detection from cylindrical faces (not built).
+   preset not); pipes found from cylindrical faces and their cores O-gridded inside their layers
+   (`pipes.py`, built above).
 5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
    in the primal that the dual turns polyhedral (built as a library, above; not wired in).
 6. **Quality metrics** (non-orthogonality, skewness, convexity; built in `aquaflux/mesh/quality.py`,
