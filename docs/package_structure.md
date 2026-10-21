@@ -216,6 +216,7 @@ cfd/                                  # repo root
 │   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
 │   │   ├── pipes.py                  #   find_pipes / pipe_ends / fill_pipes: pipes found from the CAD, their cores O-gridded inside their layers
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
+│   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)

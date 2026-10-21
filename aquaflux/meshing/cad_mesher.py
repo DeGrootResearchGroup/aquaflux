@@ -29,6 +29,7 @@ import numpy as np
 from aquaflux.io.cad import CadModel, CadRegion
 from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
+from .caps import ClearedCaps, capped
 from .dual import PolyhedralDual
 from .elements import element_mesh, face_keys, search_rows
 from .hex_core import OctreeCore
@@ -165,10 +166,12 @@ class CadMesher:
         How fast the size may change between neighbours, in ``(0, 1]``; unset, Netgen's.
     layers : PrismLayers or None
         The prism layers grown on the patches :meth:`mesh` is asked to layer; unset, none.
-    cap_height : float
-        The height of the pyramids that cap each quadrilateral the tetrahedra meet, over the
-        quadrilateral's first edge (round a structured grid), in ``(0, 1/2)`` (see
-        :class:`~aquaflux.meshing.PyramidCaps`), the hex core's caps included.
+    cap_height : ClearedCaps or float
+        How high the pyramids stand that cap each quadrilateral the tetrahedra meet, the hex
+        core's included: each sized to the room it has (:class:`~aquaflux.meshing.ClearedCaps`,
+        the default), or one share of every quadrilateral's first edge, in ``(0, 1/2)`` (see
+        :class:`~aquaflux.meshing.PyramidCaps`). A cap's apex is a cell of the dual, so a low
+        one is a small cell between the quadrilateral and the fill.
     pipe_core : PipeCore
         How the cores of pipes (see :meth:`mesh`) are filled.
     planarizer : FacePlanarizer or None
@@ -189,7 +192,7 @@ class CadMesher:
     min_size: float | None = None
     grading: float | None = None
     layers: PrismLayers | None = None
-    cap_height: float = 0.25
+    cap_height: ClearedCaps | float = dataclasses.field(default_factory=ClearedCaps)
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
@@ -202,7 +205,8 @@ class CadMesher:
                 raise ValueError(
                     f"CadMesher.{name} must be a positive, finite number, got {value!r}."
                 )
-        PyramidCaps.check_height(self.cap_height, "CadMesher.cap_height")
+        if not isinstance(self.cap_height, ClearedCaps):
+            PyramidCaps.check_height(self.cap_height, "CadMesher.cap_height")
         if self.core is not None:
             self.core.resolved(self.max_size)  # refuses a core smaller than an unset wall size
 
@@ -303,7 +307,7 @@ class CadMesher:
             hexahedra = cores if hexahedra is None else np.concatenate([hexahedra, cores])
         boundary = _Boundary.of(wall_faces, wall_tag, sides, side_face)
         # The tetrahedra meet triangles only: each quadrilateral left for them is capped on their side.
-        caps = PyramidCaps.on(points, fill.quads[:, ::-1], self.cap_height)
+        caps = capped(points, fill.reversed(), self.cap_height)
         points = np.vstack([points, caps.apexes])
         points, surface, core = self._cored(points, np.vstack([fill.triangles, caps.sides]))
         points, tetrahedra = self._filled(points, surface, core.fill_size)

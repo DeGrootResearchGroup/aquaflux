@@ -195,9 +195,30 @@ class PyramidCaps:
         points = np.asarray(points, dtype=np.float64)
         quads = np.asarray(quads, dtype=np.int64).reshape(-1, 4)
         corner = points[quads]
+        return cls.at(points, quads, height * np.linalg.norm(corner[:, 1] - corner[:, 0], axis=1))
+
+    @classmethod
+    def at(cls, points: np.ndarray, quads: np.ndarray, rises: np.ndarray) -> PyramidCaps:
+        """Caps on ``quads``, each apex ``rises`` above its quadrilateral's centre, on the side its
+        right-hand normal points to.
+
+        Parameters
+        ----------
+        points : np.ndarray, shape ``(n_points, 3)``
+        quads : np.ndarray of int, shape ``(n_quads, 4)``
+        rises : np.ndarray, shape ``(n_quads,)``
+            Each apex's height, a length.
+
+        Returns
+        -------
+        PyramidCaps
+            The apexes numbered ``n_points`` onward, in the order of ``quads``.
+        """
+        points = np.asarray(points, dtype=np.float64)
+        quads = np.asarray(quads, dtype=np.int64).reshape(-1, 4)
+        corner = points[quads]
         normal = np.cross(corner[:, 2] - corner[:, 0], corner[:, 3] - corner[:, 1])
-        edge = np.linalg.norm(corner[:, 1] - corner[:, 0], axis=1)
-        rise = (height * edge / np.linalg.norm(normal, axis=1))[:, None]
+        rise = (np.asarray(rises, dtype=np.float64) / np.linalg.norm(normal, axis=1))[:, None]
         apexes = corner.mean(axis=1) + rise * normal
         apex = points.shape[0] + np.arange(quads.shape[0])
         sides = np.concatenate(
