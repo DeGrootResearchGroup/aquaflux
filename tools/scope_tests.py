@@ -211,9 +211,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         "`python -m aquaflux` runs __main__, which it imports itself",
     ),
     "tests/ui/test_sources.py": ((), "names `aquaflux` only as a key of a run record"),
+    "tests/unit/test_mesh_file.py": ((), "names `aquaflux` only as a key of a mesh's provenance"),
     "tests/unit/test_compiled_residual_census.py": (
         (),
-        "uses the repository root only as the case directory of a structured grid",
+        "uses the repository root only as the case directory; its grid is read by absolute path",
     ),
 }
 

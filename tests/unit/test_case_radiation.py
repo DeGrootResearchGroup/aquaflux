@@ -46,6 +46,8 @@ from aquaflux.radiation import (
     read_ies,
 )
 
+from tests.support.case_meshes import grid_mesh
+
 REPO = Path(__file__).resolve().parents[2]
 IES = REPO / "validation" / "ray_effects_room" / "ushio_b1.ies"
 CELLS, LENGTHS = (3, 4, 5), (1.0, 1.5, 2.0)
@@ -54,7 +56,7 @@ CELLS, LENGTHS = (3, 4, 5), (1.0, 1.5, 2.0)
 def _sections(**changes) -> dict:
     """A radiation case on a generated box: a lamp on top, two reflecting walls, a body in front."""
     sections = {
-        "mesh": {"kind": "StructuredGrid", "cells": list(CELLS), "lengths": list(LENGTHS)},
+        "mesh": grid_mesh(list(CELLS), list(LENGTHS)),
         "physics": {
             "kind": "Radiation",
             "medium": {"kind": "UniformMedium", "transmittance": 80.0},
@@ -276,6 +278,7 @@ def test_the_files_a_case_names_are_found_checked_and_rebased(tmp_path) -> None:
     sections["physics"]["occluders"].append({"kind": "StlBody", "file": "missing.stl"})
     spec = case_spec_from_mapping(sections)
     assert dict(named_paths(spec)) == {
+        "mesh.path": spec.mesh.path,  # a case's mesh is a file too
         "physics.occluders[1].file": "missing.stl",
         "boundaries.top.profile.file": "lamp.ies",
     }
@@ -384,7 +387,7 @@ def test_a_radiation_case_refuses_what_it_would_not_read(sections, match) -> Non
 
 def _laminar(**boundary) -> dict:
     return {
-        "mesh": {"kind": "StructuredGrid", "cells": [2, 2], "lengths": [1.0, 1.0]},
+        "mesh": grid_mesh([2, 2], [1.0, 1.0]),
         "fluid": FLUID,
         "physics": {"kind": "Laminar"},
         "boundaries": {
@@ -448,7 +451,7 @@ def test_a_radiation_case_that_does_not_fit_its_mesh_is_refused(tmp_path, change
 
 def test_a_lamp_on_a_two_dimensional_mesh_is_refused(tmp_path) -> None:
     sections = {
-        "mesh": {"kind": "StructuredGrid", "cells": [2, 2], "lengths": [1.0, 1.0]},
+        "mesh": grid_mesh([2, 2], [1.0, 1.0]),
         "physics": {"kind": "Radiation"},
         "boundaries": {
             "top": {"kind": "Lamp", "power": 1.0, "profile": {"kind": "LambertianProfile"}},

@@ -13,14 +13,14 @@ paths:
 > `.claude/notes/meshing-log.md`.
 
 **Status: phase 1 built** — STEP region → Netgen tets → polyhedral dual → `Mesh` / polyMesh, from a case
-file (`CadMesh`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
+file (`MeshSpec`, made by `aquaflux mesh mesh.yaml` into a `.aqmesh`; `case.md`) or `CadMesher`: the Netgen child process (`netgen_process.py`, `_netgen_child.py`),
 `element_mesh` (`elements.py`: tetrahedra, prisms, hexahedra and pyramids), the feature-preserving dual
 (`dual.py`, cells at sharp concave edges cut into pieces), prism layers on triangulated walls and
 hexahedral layers on walls meshed with structured quadrilaterals (`layers.py`, `mapped.py`,
 `polygons.py`), pipes' cores as structured O-grids (`pipes.py`, `pipe_core.py`), the mesher
 (`cad_mesher.py`) and the octree hex core (`octree.py`, `hex_core.py`, `regions.py`), selectable in
-`CadMesher` and the case file (`CadMesh.core`). The block mesher is built as a library (below), not yet
-wired into `CadMesher` or the case file.
+`CadMesher` and the mesh file (`MeshSpec.core`). The block mesher is built as a library (below), not yet
+wired into `CadMesher` or the mesh file.
 Face planarization (`planarize.py`) is built and run by `CadMesher` when given a `planarizer` (off by
 default; `planarizer: {kind: FacePlanarizer}` in a case file).
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
@@ -195,7 +195,7 @@ or OCP.
   - ⚠️ **Netgen's arrays are int32**: a sorted-triple key of 7k points overflows it, and silently put
     lamp triangles on the vessel's face. Keys are built in int64.
 - **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
-  whole `aquaflux mesh --case --openfoam` before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
+  whole `aquaflux mesh` (then a case-file mesh section, with `--openfoam`) before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
   at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
 - `element_mesh(points, tetrahedra=None, prisms=None, hexahedra=None, pyramids=None, patches=None,
   patch_types=None)` numbers cells in that order and faces in first-sighting order (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
@@ -208,7 +208,7 @@ or OCP.
 faces: Polygons, layered) -> LayerExtrusion(points, prisms, hexahedra, inner, walls, sides, side_face,
 columns)`: one extruder for both kinds, prisms over triangles and hexahedra over quadrilaterals, layer by
 layer in the surface's order; `inner` and `walls` are `Polygons`; `columns` each moved point then its
-layer points. A case file states it as `CadMesh.layers` with the patch names in `CadMesh.layered` (both
+layer points. A mesh file states it as `MeshSpec.layers` with the patch names in `MeshSpec.layered` (both
 or neither). A surface of both kinds travels as a `Polygons` (`polygons.py`: two arrays, never one padded
 one, so a face is never read with a missing corner; a per-face quantity runs over the triangles first).
 - **Inside-out test per kind**: a prism's three tets of its standard split (as before); a hexahedron's
@@ -265,7 +265,7 @@ one, so a face is never read with a missing corner; a per-face quantity runs ove
 ## Structured quadrilateral walls (`mapped.py`) — built
 
 `MappedQuads(corner_tolerance=1e-9).remesh(points, triangles, face, chosen, vertices, onto) ->
-MappedSurface(points, faces: Polygons, face)`; `CadMesher.mesh(mapped=...)` / `CadMesh.mapped` name the
+MappedSurface(points, faces: Polygons, face)`; `CadMesher.mesh(mapped=...)` / `MeshSpec.mapped` name the
 patches (agreed with the project owner, 2026-10-20: quads from mapped meshing of chosen CAD faces, one
 extruder for both kinds, pyramid caps to the fill; a block's faces as the source were the alternative
 not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells are hexahedra.
@@ -324,7 +324,7 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   counts, a multiple of four, nothing else of the surface inside it between its rims (refuses a vessel
   shell round a lamp). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
   the patches, each face of which must be one (else `ValueError` naming the reason); `()` none.
-  `CadMesh.pipes` / `CadMesh.pipe_core` in a case file.
+  `MeshSpec.pipes` / `MeshSpec.pipe_core` in a mesh file.
 - **Rims divided alike** (`rim_divisions`, #789): Netgen's rim counts follow the size (Sozzi: 12/13 at
   maxh 0.005, 17/17 at 0.0035), so a candidate (fluid-filled cylinder, two loops) whose loops differ or
   are not a multiple of four gets both rims `4·ceil(max/4)` segments -- never coarser than Netgen chose
@@ -371,7 +371,7 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
 ## The block mesher — built as a library (`blocks.py`, `divisions.py`, `surfaces.py`, `lattices.py`, `block_assembly.py`, `block_topologies.py`)
 
 Library code with unit tests (`tests/unit/test_meshing_blocks.py`, `test_meshing_lattices.py`); **not yet
-reached from `CadMesher` or a case file**, no wall-layer window masking (pipes are found and O-gridded by
+reached from `CadMesher` or a mesh file**, no wall-layer window masking (pipes are found and O-gridded by
 `pipes.py` instead, inside their layers; `PipeOGrid`'s core and bow are reused there). Its scope
 follows blockmeshbuilder (BMB), the owner's blockMesh front end; the gap list and what was deferred are in
 the log (2026-10-20). Dated numbers in the log.
@@ -521,7 +521,7 @@ hexes, pyramids; earlier inputs unchanged).
   core: volume, boundary area = the cube union's by voxels, no point at any cell edge's middle; capped
   surface closed, one fan per point, encloses −(cubes + caps); edge-touching boxes parted only on the
   shared edge; hex/pyramid `element_mesh`), `test_meshing_cad_mesher.py` (`_cored` without Netgen: the
-  hole closed, the core's cells fill it, `fill_size`), `test_case_cad_mesh.py` (the key, its refusals),
+  hole closed, the core's cells fill it, `fill_size`), `test_mesh_file.py` (the key, its refusals),
   and `test_meshing_netgen.py` (core + caps + fill in a box: dual closed, volume 1, interior points cubes
   with 6 quad faces; the Netgen L with layers and a core through `CadMesher`: dual closed and exact, > 50
   wall cubes, none nearer the wall than the clearance plus half the layers).
@@ -532,7 +532,7 @@ hexes, pyramids; earlier inputs unchanged).
   fill's as a hole, its tets follow the fill's, its hexahedra the layers' (a column's cells keep their
   numbering), its pyramids and caps the wall caps. **No size field**: Netgen's fill grades its tets from
   the triangles it is given (`validation/meshing_netgen/fill_grading.py`, log), so the fill's
-  `max_size` is only raised to the wall cubes' size where larger (`_CoreCells.fill_size`). `CadMesh.core`
+  `max_size` is only raised to the wall cubes' size where larger (`_CoreCells.fill_size`). `MeshSpec.core`
   is the case key (`{kind: OctreeCore, size: ...}`); unset, the polyhedral core.
 - **Interaction with #785**: each core cap's apex is a dual cell too; `ClearedCaps` sizes the core's
   caps and the walls' alike (small cells 1785-1832 → 257-322, with more faces over 50°: above). ⚠️
@@ -691,7 +691,7 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
 - **`aquaflux/meshing/`, host-side numpy and numba, not JAX** (exception: `planarize.py`'s AD step; see
   "Face planarization"). It depends on `aquaflux.mesh` (it ends at
   `Mesh.from_csr`, which owns validation) and on `aquaflux.io.cad`; nothing imports it back except a case
-  `MeshSource` (`CadMesh`, `aquaflux/case/mesh_source.py`) and the test fixtures.
+  mesh file (`MeshSpec`, `aquaflux/case/mesh_file.py`) and the test fixtures.
 - **CAD access goes through `io/cad/kernel.py`**, via `CadModel` and a `CadRegion` (`io.md`, "Regions for a
   mesher"): topology with signed edge folds and adjacency, face-tagged triangulation, the BREP file Netgen
   reads, closest-point projection with outward normals — all numbered in the exploration order Netgen
@@ -715,7 +715,7 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
    preset not); pipes found from cylindrical faces and their cores O-gridded inside their layers
    (`pipes.py`, built above).
 5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
-   in the primal that the dual turns polyhedral (built and selectable in `CadMesher` / `CadMesh.core`).
+   in the primal that the dual turns polyhedral (built and selectable in `CadMesher` / `MeshSpec.core`).
 6. **Quality metrics** (non-orthogonality, skewness, convexity; built in `aquaflux/mesh/quality.py`,
    `mesh.md`) and planarization (built, above; run by `CadMesher` when given a `planarizer`).
 

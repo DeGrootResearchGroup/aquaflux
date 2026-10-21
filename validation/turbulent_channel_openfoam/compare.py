@@ -137,7 +137,8 @@ def solve_aquaflux(name, nu_of):
     flow, k, omega = checked.solve(coupled)
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)
-    idx = np.arange(0, mesh.n_cells, spec.mesh.cells[0])  # one wall-normal column
+    nx = int(np.count_nonzero(np.isclose(c[:, 1], c[:, 1].min())))  # cells along one row
+    idx = np.arange(0, mesh.n_cells, nx)  # one wall-normal column
     yc, u = c[idx, 1], np.asarray(velocity[:, 0])[idx]
     order = np.argsort(yc)
     yplus, uplus, xi, u_tau, Re_tau = _wall_unit_profile(yc[order], u[order], nu)

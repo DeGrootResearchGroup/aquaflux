@@ -69,6 +69,8 @@ import jax.numpy as jnp
 import pytest
 from aquaflux.case import CaseFile, case_spec_from_mapping
 
+from tests.support.case_meshes import grid_mesh
+
 pytestmark = pytest.mark.skipif(
     jax.default_backend() != "cpu",
     reason="the compiled program counted here is the CPU backend's",
@@ -80,7 +82,7 @@ REPO = Path(__file__).resolve().parents[2]
 #: k and omega, the multiple-correction gradient, log omega and the frozen production limiter. The size
 #: is set by what the backend partitions, not by the physics (see the module docstring).
 SECTIONS = {
-    "mesh": {"kind": "StructuredGrid", "cells": [60, 40], "lengths": [2.0, 1.0]},
+    "mesh": grid_mesh([60, 40], [2.0, 1.0]),
     "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-5},
     "physics": {
         "kind": "RANS",

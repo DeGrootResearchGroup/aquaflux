@@ -16,13 +16,15 @@ from pathlib import Path
 import pytest
 from aquaflux.__main__ import main, serve
 from aquaflux.case import (
+    Fluid,
     OpenFOAMTime,
-    StructuredGrid,
     prepare_run,
     read_case,
     read_case_document,
 )
 from aquaflux.case.paths import relocated
+
+from tests.support.case_meshes import grid_mesh
 
 REPO = Path(__file__).resolve().parents[2]
 PITZDAILY = REPO / "validation" / "pitzdaily_openfoam" / "case.yaml"
@@ -163,14 +165,14 @@ def test_relocating_a_case_re_bases_each_relative_path_it_states_and_no_other(tm
     assert moved.outputs.directory == spec.outputs.directory  # where this file's runs write
     absolute = dataclasses.replace(spec, mesh=dataclasses.replace(spec.mesh, path="/meshes/m"))
     assert relocated(absolute, Path("/a"), Path("/z")).mesh.path == "/meshes/m"
-    grid = StructuredGrid(cells=(4, 4), lengths=(1.0, 1.0))
-    assert relocated(grid, Path("/a"), Path("/z")) is grid
+    fluid = Fluid(density=1.0, kinematic_viscosity=1.0e-5)  # names no file
+    assert relocated(fluid, Path("/a"), Path("/z")) is fluid
 
 
-def test_mesh_generates_a_structured_grid_and_reports_its_patches(capsys, tmp_path, monkeypatch):
-    section = {"kind": "StructuredGrid", "cells": [4, 3], "lengths": [2.0, 1.0]}
+def test_export_mesh_writes_a_mesh_and_its_patches_as_vtk(capsys, tmp_path, monkeypatch):
+    section = grid_mesh([4, 3], [2.0, 1.0])
     status, reply = _run(
-        capsys, ["mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
+        capsys, ["export-mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
     )
     assert status == 0 and reply["error"] is None
     assert (tmp_path / "mesh.vtu").is_file() and reply["mesh"] == str(tmp_path / "mesh.vtu")
@@ -183,13 +185,13 @@ def test_mesh_generates_a_structured_grid_and_reports_its_patches(capsys, tmp_pa
     assert sorted(re.findall(r'name="([^"]+)"', index)) == ["bottom", "left", "right", "top"]
 
 
-def test_mesh_reads_a_mesh_relative_to_the_case_and_reports_its_groups(
+def test_export_mesh_reads_a_mesh_relative_to_the_case_and_reports_its_groups(
     capsys, tmp_path, monkeypatch
 ):
     section = read_case_document(PITZDAILY)["mesh"]
     status, reply = _run(
         capsys,
-        ["mesh", str(tmp_path), "--relative-to", str(PITZDAILY.parent)],
+        ["export-mesh", str(tmp_path), "--relative-to", str(PITZDAILY.parent)],
         json.dumps({"mesh": section}),
         monkeypatch,
     )
@@ -201,9 +203,11 @@ def test_mesh_reads_a_mesh_relative_to_the_case_and_reports_its_groups(
     ("section", "match"),
     [({"kind": "Wall"}, "names a mesh source"), ({"kind": "OpenFOAMMesh", "path": "nowhere"}, "")],
 )
-def test_mesh_refuses_a_section_that_is_no_mesh(capsys, tmp_path, monkeypatch, section, match):
+def test_export_mesh_refuses_a_section_that_is_no_mesh(
+    capsys, tmp_path, monkeypatch, section, match
+):
     status, reply = _run(
-        capsys, ["mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
+        capsys, ["export-mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
     )
     assert status == 2 and match in reply["error"]
 

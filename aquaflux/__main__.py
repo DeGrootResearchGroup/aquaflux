@@ -1,14 +1,16 @@
-"""The ``aquaflux`` command: check a case file, or run it.
+"""The ``aquaflux`` command: check a case file, or run it; make a mesh from a mesh file.
 
 ::
 
     aquaflux check case.yaml            # read the file and check it against its mesh, in seconds
     aquaflux run case.yaml              # read, check, build, solve and write the results
     aquaflux run case.yaml --overwrite  # replace the results of an earlier run
+    aquaflux mesh mesh.yaml             # mesh the region a mesh file describes, and write it
+    aquaflux mesh mesh.yaml --overwrite # replace a mesh made before
 
 ``python -m aquaflux`` is the same command. ``run`` exits with status 0 when the solve converges and 1
-when it stops short (its log, checkpoints and run record are still written); either command exits with
-status 2 when the file is refused, with the reason on standard error.
+when it stops short (its log, checkpoints and run record are still written); ``check``, ``run`` and
+``mesh`` exit with status 2 when the file is refused, with the reason on standard error.
 
 Three more commands are for a program editing case files -- the browser interface -- and speak JSON
 (JavaScript Object Notation) on their standard output:
@@ -18,11 +20,11 @@ Three more commands are for a program editing case files -- the browser interfac
     aquaflux plan case.yaml             # where a run would write, and which earlier results it would replace
     aquaflux write case.yaml < case.json  # write the case given on standard input, checked first
     aquaflux write copy.yaml --relative-to original/ < case.json  # re-base its relative paths
-    aquaflux mesh out/ --relative-to case_dir/ < mesh.json  # read or generate a case's mesh and its patches, as VTK
-    aquaflux mesh out/ --case case.yaml --openfoam  # a case file's mesh, also as out/constant/polyMesh
+    aquaflux export-mesh out/ --relative-to case_dir/ < mesh.json  # a case's mesh and its patches, as VTK
+    aquaflux export-mesh out/ --case case.yaml --openfoam  # a case file's mesh, also as out/constant/polyMesh
     aquaflux serve                      # answer any of these, one per line, without restarting
 
-``show``, ``plan``, ``write`` and ``mesh`` print ``{"error": null, ...}`` on success and ``{"error": "<reason>"}`` with exit
+``show``, ``plan``, ``write`` and ``export-mesh`` print ``{"error": null, ...}`` on success and ``{"error": "<reason>"}`` with exit
 status 2 when the file, or the case, is refused.
 
 ``serve`` is for a program that asks many of these in turn: starting Python and importing the solver
@@ -49,6 +51,7 @@ import yaml
 from aquaflux.case import (
     case_schema,
     case_spec_from_mapping,
+    make_mesh,
     mesh_source_from_mapping,
     plan_run,
     prepare_run,
@@ -66,7 +69,7 @@ __all__ = ["main"]
 _REFUSED = 2
 
 #: The commands ``serve`` answers: the ones that read and write case files, each finished in seconds.
-SERVED = ("schema", "show", "write", "mesh", "check", "plan")
+SERVED = ("schema", "show", "write", "export-mesh", "check", "plan")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -111,8 +114,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="the directory the case's relative paths are relative to now; they are re-based onto "
         "the written file's directory (default: that directory, so nothing moves)",
     )
+    make = commands.add_parser("mesh", help="mesh the region a mesh file describes, and write it")
+    make.add_argument("mesh_file", help="the mesh file (YAML)")
+    make.add_argument(
+        "--overwrite", action="store_true", help="replace a mesh already where this one goes"
+    )
     mesh = commands.add_parser(
-        "mesh", help="read or generate the mesh section given as JSON on standard input, as VTK"
+        "export-mesh", help="read the mesh section given as JSON on standard input, as VTK"
     )
     mesh.add_argument("directory", help="where to write mesh.vtu")
     mesh.add_argument(
@@ -140,6 +148,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "serve":
         return _serve_process()
     if arguments.command == "mesh":
+        return _make_mesh(arguments.mesh_file, arguments.overwrite)
+    if arguments.command == "export-mesh":
         return _mesh(
             arguments.directory,
             arguments.case,
@@ -225,10 +235,32 @@ def _write(path: str, given: str, relative_to: str | None = None) -> int:
     return 0
 
 
+def _make_mesh(path: str, overwrite: bool) -> int:
+    """Mesh the region the mesh file ``path`` describes, write it, and say what was made."""
+    try:
+        record = make_mesh(path, overwrite=overwrite)
+    except (*_REFUSALS, FileExistsError) as error:
+        print(f"aquaflux: {error}", file=sys.stderr)
+        return _REFUSED
+    mesh = record.mesh
+    patches = ", ".join(
+        f"{name} ({mesh.face_patches.size(name)} faces)"
+        for name in mesh.face_patches.names
+        if mesh.face_patches.size(name)
+        and mesh.face_patches.is_boundary_patch(name, mesh.face_cells)
+    )
+    written = str(record.aqmesh) + ("" if record.polymesh is None else f" and {record.polymesh}")
+    print(
+        f"{path}: {mesh.n_cells} cells ({mesh.dim}D), patches {patches}; meshed in "
+        f"{record.seconds:.1f} s; written to {written}."
+    )
+    return 0
+
+
 def _mesh(
     directory: str, case: str | None, relative_to: str | None, openfoam: bool, given: str | None
 ) -> int:
-    """Read or generate a mesh section; write it as VTK, and as a polyMesh with ``openfoam``.
+    """Read a case's mesh section; write it as VTK, and as a polyMesh with ``openfoam``.
 
     The section is the case file ``case``'s, or the JSON ``given`` (``{"mesh": {...}}``). Writes the
     cells as ``mesh.vtu`` and the boundary patches as ``patches.vtm`` (one block per patch, named by

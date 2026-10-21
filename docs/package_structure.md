@@ -190,8 +190,10 @@ cfd/                                  # repo root
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)
 │   │   ├── spec.py                   #   CaseSpec (mesh/fluid/physics/boundaries/numerics/drive) + Numerics; case_spec_from/to_mapping; check_against(mesh)
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
-│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading / CadMesh (generated)
-│   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by CadMesh and the radiation sources)
+│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: AquafluxMesh (.aqmesh) / OpenFOAMMesh (polyMesh); a case only reads its mesh
+│   │   ├── mesh_file.py              #   MeshSpec (+ Drawing, DrawingRegion, MeshSizes, MeshOutput): a mesh file, a STEP region meshed by CadMesher
+│   │   ├── mesh_run.py               #   make_mesh(path, overwrite) -> MeshRecord: what `aquaflux mesh mesh.yaml` does (refuses an occupied output before meshing)
+│   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by the mesh file and the radiation sources)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)

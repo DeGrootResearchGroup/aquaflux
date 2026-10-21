@@ -70,7 +70,7 @@ one form each, so they need no `kind`, and the top level is the case itself.
 
 ## The sections
 
-**`mesh`** — where the mesh comes from, read or generated:
+**`mesh`** — the file the mesh is read from:
 
 - {class}`~aquaflux.case.AquafluxMesh` reads aquaflux's own mesh file (`.aqmesh`; see
   [the mesh](mesh.md)), exactly as it was written; a relative `path` is taken from the directory the
@@ -79,116 +79,9 @@ one form each, so they need no `kind`, and the top level is the case itself.
   `constant/polyMesh`; a relative `path` is taken from the directory the case file sits in. A
   case one cell thick between `empty` patches reads as a two-dimensional mesh, and those patches
   are not named in the file.
-- {class}`~aquaflux.case.StructuredGrid` generates a two-dimensional structured grid on the box
-  `[0, lx] x [0, ly]`, with patches named by side — `left`, `right`, `bottom`, `top` — or, given
-  three counts and three lengths, a uniform three-dimensional box with `back` and `front` as well. An axis
-  listed as `periodic` wraps around, and its two sides are not patches at all; an axis given a
-  `grading` has its cells sized by it
-  ({class}`~aquaflux.case.GeometricGrading`: finest at the walls, growing by `growth`):
 
-  ```yaml
-  mesh:
-    kind: StructuredGrid
-    cells: [4, 96]
-    lengths: [1.0, 2.0]
-    periodic: [x]
-    grading:
-      y: {kind: GeometricGrading, growth: 1.09}
-  ```
-- {class}`~aquaflux.case.CadMesh` meshes a region of a STEP drawing as polyhedra: the union of
-  some `solids` less those `without`. Netgen fills the region with tetrahedra no larger than
-  about `max_size`, and the mesh is their polyhedral dual — one cell per tetrahedron point, so
-  the cells are larger than `max_size` — with every edge of the boundary that folds by more than
-  `feature_angle` (in radians) kept sharp. Each of its `patches` is named for the faces of the
-  region a selection chooses: {class}`~aquaflux.meshing.FacesNear`, the face nearest each of some
-  points (a pipe's end), or {class}`~aquaflux.meshing.FacesOn`, the faces lying on some solids'
-  surface (a lamp taken out of the water). The faces no selection chooses make the patch
-  `others`, `walls` unless named. The mesh is generated each time the case is read, which needs
-  `pip install aquaflux[cad,meshing]`; write it once as a polyMesh with
-  `aquaflux mesh out/ --case case.yaml --openfoam` and read that with `OpenFOAMMesh` to mesh only
-  once.
-
-  ```yaml
-  mesh:
-    kind: CadMesh
-    file: reactor.step
-    solids: [reactor_body, inlet_pipe, outlet_pipe]
-    without: [lamp]
-    max_size: 0.02
-    feature_angle: 0.785
-    patches:
-      inlet: {kind: FacesNear, points: [[0.04765, 0.0, 0.8945]]}
-      outlet: {kind: FacesNear, points: [[1.739, 0.0, 0.0]]}
-      lamp: {kind: FacesOn, solids: [lamp]}
-  ```
-
-  Every vertex of the mesh's boundary lies on the drawing: on its faces, and on its sharp edges along
-  them. Between those vertices a boundary face is flat, so a curved wall's patch is a little short of
-  the drawing's area.
-
-  Wall-resolved layers grow from the patches listed in `layered`, sized for the solver's cells: the
-  cells against the wall are `first_height` tall and each layer above is `growth` times the one below
-  ({class}`~aquaflux.meshing.PrismLayers`; `growth` must exceed 1). Where a layered wall meets a patch
-  without layers, such as a pipe's end, the layers slide along it:
-
-  ```yaml
-    layers: {kind: PrismLayers, first_height: 0.0005, growth: 1.2, count: 5}
-    layered: [walls, lamp]
-  ```
-
-  The dual's faces are not flat: their corners are the centroids of the tetrahedra around an edge.
-  A `planarizer` flattens them by moving those centroids
-  ({class}`~aquaflux.meshing.FacePlanarizer`), never making a cell less convex than the least convex
-  cell the mesh started with, a cell's volume more dependent on how its faces are triangulated than
-  the most dependent one's, a face more non-orthogonal or skewed than its worst face, or a convex
-  cell concave.
-  The boundary stays on the drawing and the layers keep their heights from the wall. It is off unless
-  given; `{kind: FacePlanarizer}` takes its defaults:
-
-  ```yaml
-    planarizer: {kind: FacePlanarizer}
-  ```
-
-  The faces of the patches listed in `mapped` are meshed as structured grids of quadrilaterals
-  rather than triangles ({class}`~aquaflux.meshing.MappedQuads`): each must be a band -- a cylinder
-  or cone round an axis, or a flat ring, bounded by two closed loops -- or four-sided. Layered, such a
-  wall carries hexahedra, so the solver's cells against it are hexahedra too. The lamp's cylinder
-  and the pipes' walls are bands; a lamp's rounded tip is not, so it needs a patch of its own:
-
-  ```yaml
-    patches:
-      lamp: {kind: FacesNear, points: [[0.4, 0.01, 0.0]]}
-      lamp_tip: {kind: FacesNear, points: [[0.81, 0.0, 0.0]]}
-    layered: [walls, lamp, lamp_tip]
-    mapped: [lamp]
-  ```
-
-  Pipes are found by themselves: a cylindrical face the fluid fills, with nothing else inside it,
-  bounded by two rims. Both rims are divided alike, into a multiple of four, so that the O-grid
-  can join them at every mesh size: where Netgen's own division would not do, the region is
-  triangulated again with the rims' division set. Its wall is meshed as a structured grid,
-  layered if its patch is, and its core -- what the layers leave -- is filled with a structured
-  O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core, whose sides may bow
-  outward (`core_bow`) to even out its corners, and a shell out to the layers. Where a pipe opens
-  into the rest of the region, the O-grid stops a couple of rows short and the tetrahedra take over.
-  `pipes` names the patches whose faces are pipes instead (`[]` for none), and `pipe_core` sets how
-  their cores are filled:
-
-  ```yaml
-    pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
-  ```
-
-  The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
-  ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
-  are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of
-  the layers' top (unset, twice the wall size). The tetrahedra fill the gap, grading from the wall's
-  size to the cubes', and the solver's cells there are polyhedra joining the cubes to the layers. A
-  core needs room: a gap narrower than about twice the clearance plus a wall cube, as round a lamp
-  in a narrow annulus, is left to the tetrahedra, and a region with no such room anywhere is refused.
-
-  ```yaml
-    core: {kind: OctreeCore, size: 0.08}
-  ```
+A case does not make its mesh: a mesh is made once from a mesh file, by `aquaflux mesh mesh.yaml`,
+and read by as many cases as use it (see {doc}`mesh_files`).
 
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
@@ -498,8 +391,8 @@ browser interface's Setup section is built on them. Each prints JSON:
 aquaflux schema                                   # every kind, field and choice a case file may hold
 aquaflux show case.yaml                           # the file as aquaflux reads it, and why it is refused
 aquaflux write copy.yaml --relative-to . < case.json  # check, then write; re-base relative paths
-aquaflux mesh out/ --relative-to . < mesh.json        # read or generate a mesh section, as VTK
-aquaflux mesh out/ --case case.yaml --openfoam       # a case file's mesh, as VTK and out/constant/polyMesh
+aquaflux export-mesh out/ --relative-to . < mesh.json  # read a mesh section, as VTK
+aquaflux export-mesh out/ --case case.yaml --openfoam # a case file's mesh, as VTK and out/constant/polyMesh
 ```
 
 `schema` is read off the same definitions a file is checked against, so a program

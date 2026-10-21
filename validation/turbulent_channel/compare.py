@@ -91,14 +91,16 @@ def reduce_to_wall_units(spec, momentum, flow, dt):
     mesh, geom = momentum.mesh, momentum.geometry
     # The bulk velocity, the channel height (full height H, half-height h = H / 2, which Re_tau is
     # based on) and the viscosity are the case file's; Re_b = U_b H / nu follows from them.
-    u_b, H = spec.drive.target, spec.mesh.lengths[1]
+    # The channel's full height is the mesh's extent across it.
+    u_b, H = spec.drive.target, float(np.ptp(np.asarray(mesh.node_coords)[:, 1]))
     nu = spec.fluid.kinematic_viscosity
     Re_b = u_b * H / nu
 
     velocity, _ = momentum.unpack(flow)
     c = np.asarray(geom.cell.centroid)
     # One wall-normal column (x-homogeneous): cells are numbered x fastest, so every nx-th cell.
-    idx = np.arange(0, mesh.n_cells, spec.mesh.cells[0])
+    nx = int(np.count_nonzero(np.isclose(c[:, 1], c[:, 1].min())))  # cells along one row
+    idx = np.arange(0, mesh.n_cells, nx)
     yc, u = c[idx, 1], np.asarray(velocity[:, 0])[idx]
     half = H / 2.0
     u_tau = float(np.sqrt(nu * u[0] / yc[0]))  # near-wall cell in the sublayer -> molecular stress

@@ -84,10 +84,11 @@ def test_mesh_sends_the_section_and_reads_the_report():
         "groups": {},
     }
     runner = Recorder(CommandResult(0, json.dumps(report)))
-    export = SolverCommands(runner).mesh({"kind": "StructuredGrid"}, "case_dir", "out")
+    section = {"kind": "AquafluxMesh", "path": "mesh.aqmesh"}
+    export = SolverCommands(runner).mesh(section, "case_dir", "out")
     ((arguments, stdin),) = runner.calls
-    assert arguments == ["mesh", "out", "--relative-to", "case_dir"]
-    assert json.loads(stdin) == {"mesh": {"kind": "StructuredGrid"}}
+    assert arguments == ["export-mesh", "out", "--relative-to", "case_dir"]
+    assert json.loads(stdin) == {"mesh": section}
     assert (export.error, export.cells, export.dim, export.patches) == (
         None,
         12,

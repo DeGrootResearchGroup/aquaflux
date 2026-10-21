@@ -240,6 +240,10 @@ class AquafluxMeshWriter(MeshWriter):
         self.overwrite = overwrite
         self.provenance = provenance
 
+    def replaces(self) -> tuple[Path, ...]:
+        """The file itself, if it is already there."""
+        return (Path(self.path),) if Path(self.path).exists() else ()
+
     def write(self, mesh: Mesh) -> Path:
         """Write ``mesh`` and return the file.
 
@@ -252,7 +256,7 @@ class AquafluxMeshWriter(MeshWriter):
             anyone reads.
         """
         path = Path(self.path)
-        if path.exists() and not self.overwrite:
+        if self.replaces() and not self.overwrite:
             raise FileExistsError(f"{path} exists; pass overwrite to replace it.")
         if any(name not in ("interior", "boundary") and name in RESERVED_PATCH_NAMES
                for name in mesh.face_patches.names):  # fmt: skip

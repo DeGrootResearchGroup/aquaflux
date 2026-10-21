@@ -5,13 +5,10 @@
 # nu = U_b H / Re_b.
 
 mesh:
-  kind: StructuredGrid
-  cells: [4, 120]
-  lengths: [1.0, 2.0]
-  periodic: [x]
-  # Wall-normal cells growing by 1.075 from each wall toward the centre.
-  grading:
-    y: {kind: GeometricGrading, growth: 1.075}
+  # The periodic channel, 4 x 120 cells, its wall-normal cells growing by 1.075 from each wall
+  # toward the centre (written by validation/turbulent_channel/write_meshes.py).
+  kind: AquafluxMesh
+  path: ../meshes/channel_120.aqmesh
 
 fluid:
   density: 1.0

@@ -36,3 +36,16 @@ class MeshWriter(eqx.Module):
         Path
             The file or directory written.
         """
+
+    @abc.abstractmethod
+    def replaces(self) -> tuple[Path, ...]:
+        """The files writing would replace: those already where the mesh would go.
+
+        Without leave to overwrite, :meth:`write` refuses to write while any is there, so a caller
+        about to spend long making a mesh can ask first.
+
+        Returns
+        -------
+        tuple of Path
+            Empty when nothing is there.
+        """
