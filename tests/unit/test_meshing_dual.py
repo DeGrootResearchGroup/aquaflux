@@ -494,3 +494,23 @@ def test_layers_turning_a_concave_edge_are_cut_up_their_columns():
     np.testing.assert_allclose(volume.sum(), 3 * 0.5**3, rtol=1e-12)
     _assert_closed(dual)
     _assert_conformal(dual)
+
+
+def test_the_traced_dual_names_the_primal_cell_each_centroid_vertex_is():
+    # Cut at a concave edge, the dual also has vertices between pieces, which are no cell's centroid.
+    block = tetrahedral_grid_3d(3)
+    stretched = Mesh.from_csr(
+        np.asarray(block.node_coords) * [1.0, 1.0, 1.5], block.face_nodes.offsets,
+        block.face_nodes.face_node_indices, block.face_cells.owner, block.face_cells.neighbour,
+        block.n_cells,
+    )  # fmt: skip
+    primal = _without_corner(_cube_walls(stretched), (1 / 3, 0.5), [0, 2])
+    traced = SHARP.build_traced(primal)
+    at = np.flatnonzero(traced.vertex_cell >= 0)
+    assert np.array_equal(np.sort(traced.vertex_cell[at]), np.arange(primal.n_cells))
+    np.testing.assert_allclose(
+        np.asarray(traced.mesh.node_coords)[at],
+        np.asarray(primal.geometry().cell.centroid)[traced.vertex_cell[at]],
+        atol=1e-15,
+    )
+    assert at.size < traced.mesh.n_nodes - np.count_nonzero(traced.vertex_face >= 0)

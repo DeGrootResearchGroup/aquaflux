@@ -133,6 +133,19 @@ one form each, so they need no `kind`, and the top level is the case itself.
     layered: [walls, lamp]
   ```
 
+  The dual's faces are not flat: their corners are the centroids of the tetrahedra around an edge.
+  A `planarizer` flattens them by moving those centroids
+  ({class}`~aquaflux.meshing.FacePlanarizer`), never making a cell less convex than the least convex
+  cell the mesh started with, a cell's volume more dependent on how its faces are triangulated than
+  the most dependent one's, a face more non-orthogonal or skewed than its worst face, or a convex
+  cell concave.
+  The boundary stays on the drawing and the layers keep their heights from the wall. It is off unless
+  given; `{kind: FacePlanarizer}` takes its defaults:
+
+  ```yaml
+    planarizer: {kind: FacePlanarizer}
+  ```
+
   The faces of the patches listed in `mapped` are meshed as structured grids of quadrilaterals
   rather than triangles ({class}`~aquaflux.meshing.MappedQuads`): each must be a band -- a cylinder
   or cone round an axis, or a flat ring, bounded by two closed loops -- or four-sided. Layered, such a

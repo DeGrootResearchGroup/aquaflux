@@ -20,7 +20,8 @@ hexahedral layers on walls meshed with structured quadrilaterals (`layers.py`, `
 `polygons.py`), pipes' cores as structured O-grids (`pipes.py`, `pipe_core.py`) and the mesher
 (`cad_mesher.py`). The octree hex core (`octree.py`, `hex_core.py`) and
 the block mesher are built as libraries (below), neither yet wired into `CadMesher` or the case file.
-Face planarization (`planarize.py`) is built but not yet called by the mesher.
+Face planarization (`planarize.py`) is built and run by `CadMesher` when given a `planarizer` (off by
+default; `planarizer: {kind: FacePlanarizer}` in a case file).
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -152,7 +153,8 @@ capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its **fi
 only) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
 patches by their CAD face; points no cell uses dropped) → `PolyhedralDual.build_traced` (the layers'
 columns passed); with nothing left for tetrahedra (a pipe open at both ends) Netgen's fill is not run
-→ boundary vertices projected onto the CAD (below), with
+→ boundary vertices projected onto the CAD (below) → if `planarizer` is set, the faces flattened by
+moving the centroids of the primal cells outside the layers (`_free_centroids`; "Face planarization"), with
 **the triangle edges between two CAD faces whose CAD edge folds beyond `feature_angle` named as features**
 (so a CAD edge stays sharp whatever its triangles fold by; pinned by
 `test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by`). Netgen is injected, so
@@ -169,7 +171,8 @@ or OCP.
   geometric.
 - **Every boundary vertex is projected onto the drawing** (`_onto_the_drawing`), from the dual's
   `TracedDual` (`vertex_face`: the primal boundary face a vertex is the centroid of; `vertex_edge`: the
-  primal boundary edge a midpoint or a cut's hub stands for): a face centroid onto its triangle's CAD
+  primal boundary edge a midpoint or a cut's hub stands for; `vertex_cell`: the primal cell a vertex is
+  the centroid of — the dual's first `n_cells` vertices — which is what a flattening pass may move): a face centroid onto its triangle's CAD
   face; an edge vertex onto the CAD face of its two triangles, or, when they lie on two faces, onto the
   CAD edge between them (`CadModel.project(..., edges=)`), the nearest of several. A primal point is on
   the drawing already. Sozzi after projection (log): patch areas −0.5 to −1.5 % (flat polygons between
@@ -427,14 +430,20 @@ tetrahedra and prisms (cells numbered tets, prisms, hexes, pyramids; earlier inp
 - **Not yet**: wiring into `CadMesher` / the case file (inside test from the CAD model), snapping nodes
   to walls, and a size field grading the fill from the core's cubes to the wall.
 
-## Face planarization (`planarize.py`) — built, not wired into `CadMesher`
+## Face planarization (`planarize.py`) — built, run by `CadMesher` when asked
 
 `FacePlanarizer(min_decrease=1e-3, flat=1e-12, damping=1e-3, shortening=100, increase=4, decrease=3,
 linear_tolerance=0.1, max_linear_products=200, max_iterations=200, max_attempts=60).planarize(mesh,
 movable) -> Planarization(mesh, warp, converged, linear_products)`. Moves only the vertices `movable`
-marks, chosen by the caller: **for a dual, the primal cell centroids — the dual's first
-`primal.n_cells` vertices** (boundary vertices, feature points and the cut's vertices between pieces must
-stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
+marks, chosen by the caller: **for a dual, the primal cell centroids, `TracedDual.vertex_cell >= 0`**
+(boundary vertices, feature points and the cut's vertices between pieces must stay). **`CadMesher`
+also holds the layer cells' centroids** (`_free_centroids`): the projection has just set them at their
+heights from the true wall, which a move would undo (pinned by
+`test_the_planarizer_in_the_mesher_leaves_the_layers_at_their_heights_from_the_wall`). It runs after
+the projection, so a curved wall's boundary vertices are on the drawing when the bounds are taken.
+**Off by default** (`planarizer=None`): turning it on changes every mesh's interior, and that default
+is the project owner's to change. Cost on top of meshing: Sozzi water at maxh 0.03 with layers on the
+lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20).
 - **Objective**: total warp `E = |r|²`, `r` each incidence's height above its face's vertex-mean plane
   over √area (the `1/area` weight beat a uniform one on the L under the former solver: non-orthogonality
   max 39.9 vs 46.1 deg).
@@ -451,13 +460,23 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
   never trips; pinned by the displaced hex block). `max_iterations` is a bound reported through `converged`.
 - **The guard is load-bearing (binding — do not drop a bound).** Unguarded on the Netgen L the former sweep
   cut the warp 98 % but took non-orthogonality to 153 deg and skewness to 11 (vertices dragged to flatten
-  sliver faces carried centroids past faces). A step is kept only where, against the **starting** mesh: no
-  cell less convex (`cell_non_convexity`), none newly concave by checkMesh's test or more so
-  (`cell_concavity`), volume positive, and **no face more non-orthogonal or skewed than the starting
-  mesh's worst face**. ⚠️ Two bounds that look natural block everything: per-cell convexity against the
-  *previous iteration* (stalled at 64 % on a Kuhn dual) and per-face non-orthogonality against each face's
-  *own* start (0 iterations on the L). The volume bound never bites on the fixtures but stays: an
-  inverted cell's convexity is NaN, which passes a `>` bound.
+  sliver faces carried centroids past faces). A step is kept only where, against the **starting** mesh: **no
+  cell less convex than the start's least convex cell** (`cell_non_convexity`) **nor more
+  volume-ambiguous than its most** (`triangulation_volume_change`), none newly concave by
+  checkMesh's test or more so (`cell_concavity`, **per cell**), volume positive, and **no face more
+  non-orthogonal or skewed than the starting mesh's worst face**. ⚠️ **Bounds against each element's own
+  value trap the pass** (project owner agreed the start's-worst form, 2026-10-20): per-cell convexity
+  against the *previous iteration* stalled at 64 % on a Kuhn dual; per-face non-orthogonality against each
+  face's own start allowed 0 iterations on the L; per-cell convexity against each cell's own start held
+  most of the worst all-free faces (`worst_face_limits.py`), and replacing it with the start's worst gave
+  16–22 % (L, Sozzi) to 62 % (cylinder) less warp, fewer concave cells and 1.1–3.2x faster passes on the
+  four Netgen duals (log). Concavity stays per cell: a cell turning concave is a failure however mild (off,
+  concave cells more than double). **Triangulation-volume dependence is bounded by the start's worst
+  too**: without it, under the wider convexity bound, Sozzi's worst rose above its start (0.299 vs 0.231,
+  a wall cell); with it 0.228, nothing else changed (log). The mesh is refused
+  if a starting cell's volume is not positive or its quality undefined: a NaN would be the bound. The
+  volume bound never bites on the fixtures but stays: an inverted cell's convexity is NaN, which passes a
+  `>` bound.
 - ⚠️ **How a violating step is repaired (binding)**: shorten first (λ ×`increase`, up to `shortening` × its
   start), then **pin the worsened cells' free vertices and re-solve** (a bad face pins both its cells).
   Deleting held vertices from a finished global step instead stalls (kept share 0.64 → 0.24, log); with no
@@ -475,8 +494,14 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
   number identical, the warp history equal to 1e-16. **The conjugate-gradient products are now ~87 % of
   a pass** (5503 at ~16 ms): the next lever. Recomputing only the cells a step touches is not worth
   building: a step moves 85–100 % of the cells (Kuhn n = 6 dual, every trial) — log.
-- **Open**: sliding boundary vertices along the CAD surface, or splitting faces still warped, for the
-  boundary faces and the maxima; cheaper conjugate-gradient products. Pinned in
+- **Where the worst remain (log 2026-10-20)**: most of the worst 1 % interior warp is on faces whose every
+  vertex was free (48–68 % on the four Netgen duals, the worst face on Sozzi and the cylinder), so fixed
+  vertices are not what holds them: the per-cell convexity bound then in force did (log, 2026-10-20,
+  `worst_face_limits.py`: unbounded they flatten, a tighter stop barely helps), which is why the bound is
+  now the start's worst; wall cells hold most of the worst triangulation-volume dependence. **Open**:
+  sliding boundary vertices along the CAD surface (for the wall cells, on curved walls); **the bounds as penalties in the objective** (a cost rising steeply
+  near each limit, so the solver trades quality against flatness rather than stopping at a wall — the
+  project owner's preferred longer-term direction, 2026-10-20); cheaper conjugate-gradient products. Pinned in
   `tests/unit/test_meshing_planarize.py` (derivatives against finite differences of the guard's warp,
   the preconditioner against explicit frozen-plane blocks); harness `validation/meshing_dual/planarization.py`.
 
@@ -564,7 +589,7 @@ stay). `TracedDual` does not yet carry this mask; wiring it in is the next PR's.
 5. **Octree core**, 2:1 balanced across faces and edges, hanging nodes resolved by pyramid/tet templates
    in the primal that the dual turns polyhedral (built as a library, above; not wired in).
 6. **Quality metrics** (non-orthogonality, skewness, convexity; built in `aquaflux/mesh/quality.py`,
-   `mesh.md`) and planarization (built, above; not yet wired in).
+   `mesh.md`) and planarization (built, above; run by `CadMesher` when given a `planarizer`).
 
 **Phasing**: (1) CAD topology → surface triangulation → polygonal wall mesh → polyhedral core through the
 dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles; (4) octree hex core.

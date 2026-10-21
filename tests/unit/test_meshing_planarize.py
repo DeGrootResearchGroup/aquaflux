@@ -10,6 +10,7 @@ and the preconditioner against the blocks of an explicitly formed frozen-plane J
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -26,9 +27,17 @@ from aquaflux.mesh import (
     face_warp,
     structured_grid_2d,
     structured_grid_3d,
+    triangulation_volume_change,
 )
 from aquaflux.meshing import FacePlanarizer, PolyhedralDual
-from aquaflux.meshing.planarize import _block_inverse, _gradient, _product, _State, _Warp
+from aquaflux.meshing.planarize import (
+    _block_inverse,
+    _gradient,
+    _NoWorse,
+    _product,
+    _State,
+    _Warp,
+)
 
 from tests.support.meshes import perturbed_grid_3d, tetrahedral_grid_3d, without_cells
 
@@ -91,16 +100,25 @@ def _kuhn_l(n: int, perturb: float, seed: int) -> Mesh:
     return without_cells(block, np.flatnonzero(corner), patch="cut")
 
 
-def test_no_cell_ends_less_convex_or_more_concave_than_it_started():
-    # Each bound bites here: without the convexity bound five cells end less convex, without the
-    # concavity bound two more concave.
+def test_no_cell_ends_less_convex_than_the_least_convex_it_started_with():
+    # Without the bound this L's least convex cell ends at 0.744 against its start's 0.730. Single
+    # cells may get less convex than they were: the bound is the mesh's worst, not each cell's own.
+    dual, movable = _dual_of(_kuhn_l(4, 0.3, 1))
+    result = FacePlanarizer().planarize(dual, movable)
+    before, after = cell_non_convexity(dual), cell_non_convexity(result.mesh)
+    assert result.warp[-1] < 0.6 * result.warp[0]
+    assert float(after.max()) <= float(before.max()) + 1e-12
+    assert np.any(after > before + 1e-9)
+    assert np.all(np.asarray(result.mesh.geometry().cell.volume) > 0.0)
+
+
+def test_no_cell_turns_concave_or_more_concave_than_it_started():
+    # Without the concavity bound two of this L's cells end more concave.
     dual, movable = _dual_of(_kuhn_l(4, 0.25, 0))
     result = FacePlanarizer().planarize(dual, movable)
     assert result.warp[-1] < 0.6 * result.warp[0]
-    assert np.all(cell_non_convexity(result.mesh) <= cell_non_convexity(dual) + 1e-12)
     bound = np.maximum(cell_concavity(dual), CONCAVE_COSINE)
     assert np.all(cell_concavity(result.mesh) <= bound + 1e-12)
-    assert np.all(np.asarray(result.mesh.geometry().cell.volume) > 0.0)
 
 
 def test_the_pass_stops_on_its_convergence_test_not_its_cap():
@@ -123,6 +141,16 @@ def test_the_planarizer_refuses_a_flat_mesh_and_a_mask_of_the_wrong_shape():
     mesh = structured_grid_3d(1, 1, 1)
     with pytest.raises(ValueError, match="movable must have shape"):
         FacePlanarizer().planarize(mesh, np.ones(3, dtype=bool))
+
+
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+def test_the_planarizer_refuses_a_mesh_with_an_inverted_cell():
+    # A Kuhn grid perturbed until one tetrahedron is nearly flat (volume 3e-19): two of its dual's
+    # cells come out with negative volume, against which no bound means anything.
+    dual, movable = _dual_of(tetrahedral_grid_3d(4, perturb=0.35, seed=1))
+    assert float(np.asarray(dual.geometry().cell.volume).min()) < 0.0
+    with pytest.raises(ValueError, match=r"2 cell\(s\) have a volume that is not positive"):
+        FacePlanarizer().planarize(dual, movable)
 
 
 def _small_dual() -> tuple[Mesh, np.ndarray, np.ndarray]:
@@ -188,3 +216,28 @@ def test_the_preconditioner_is_the_inverse_of_the_frozen_plane_jacobians_blocks(
             np.eye(3) if pinned[k] else np.linalg.inv(normal[3 * k : 3 * k + 3, 3 * k : 3 * k + 3])
         )
         np.testing.assert_allclose(inverse[k], expected, rtol=1e-6, atol=1e-9)
+
+
+def test_the_guard_holds_each_cells_triangulation_volume_to_the_starts_worst():
+    # On a real mesh this bound bites only on large curved-wall duals (Sozzi's water at maxh 0.01,
+    # where without it a wall cell's volume dependence rose from 0.231 to 0.299), so it is pinned
+    # here on the guard itself: a trial raising one cell past the start's worst is caught, and
+    # one raising it past its own start but not the mesh's worst is let through.
+    dual, _ = _dual_of(tetrahedral_grid_3d(3, perturb=0.25))
+    quality = MeshQuality(dual)
+    start = _State.at(dual, quality, np.asarray(dual.node_coords, dtype=np.float64))
+    np.testing.assert_allclose(
+        start.cell_quality[:, 3], np.asarray(triangulation_volume_change(dual)), rtol=1e-12
+    )
+    guard = _NoWorse(dual, start)
+    change = start.cell_quality[:, 3]
+    calm = int(np.argmin(change))
+    assert change[calm] < 0.5 * change.max()
+
+    def trial(value):
+        cells = start.cell_quality.copy()
+        cells[calm, 3] = value
+        return dataclasses.replace(start, cell_quality=cells)
+
+    assert np.flatnonzero(guard.worsened(trial(change.max() * (1 + 1e-6)))).tolist() == [calm]
+    assert not guard.worsened(trial(0.5 * (change[calm] + change.max()))).any()

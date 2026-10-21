@@ -21,7 +21,14 @@ import numpy as np
 from aquaflux.io import OpenFOAMReader
 from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
-from aquaflux.meshing import CadMesher, FaceSelection, NetgenProcess, PipeCore, PrismLayers
+from aquaflux.meshing import (
+    CadMesher,
+    FacePlanarizer,
+    FaceSelection,
+    NetgenProcess,
+    PipeCore,
+    PrismLayers,
+)
 
 from .drawing import CadPlacement
 
@@ -327,6 +334,11 @@ class CadMesh(MeshSource):
     pipe_core : PipeCore or None
         How the pipes' cores are filled; unset, the defaults of
         :class:`~aquaflux.meshing.PipeCore`.
+    planarizer : FacePlanarizer or None
+        Flattens the mesh's faces by moving the cells' interior vertices, never making a cell less
+        convex, or its volume more dependent on how its faces are triangulated, or a face worse,
+        than the worst the mesh started with, nor a convex cell concave; unset, the faces are left
+        as made.
 
     Raises
     ------
@@ -352,6 +364,7 @@ class CadMesh(MeshSource):
     mapped: tuple[str, ...] = ()
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
+    planarizer: FacePlanarizer | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -387,8 +400,9 @@ class CadMesh(MeshSource):
         if self.pipe_core is not None:
             options["pipe_core"] = self.pipe_core
         return CadMesher(
-            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers, **options
-        )
+            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers,
+            planarizer=self.planarizer, **options,
+        )  # fmt: skip
 
     def read(self, directory: Path) -> Mesh:
         """The region, read from its drawing and meshed -- see :meth:`MeshSource.read`."""

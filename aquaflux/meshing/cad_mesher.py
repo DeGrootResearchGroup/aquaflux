@@ -6,9 +6,10 @@ tagged by its face; the faces chosen are meshed again as structured quadrilatera
 grown inward from the walls chosen; each quadrilateral left facing the rest is capped with a
 pyramid, and Netgen fills what is left with tetrahedra; all the cells become a mesh whose boundary
 faces are in patches chosen by face (:class:`FaceSelection`); that mesh's polyhedral dual is built,
-the region's sharp edges kept as features; and the dual's boundary vertices, which sit at the
+the region's sharp edges kept as features; the dual's boundary vertices, which sit at the
 boundary faces' centroids and the midpoints of their edges, are moved onto the region's faces and
-sharp edges.
+sharp edges; and, if asked, the dual's faces are flattened by moving its cell centroids
+(:class:`~aquaflux.meshing.FacePlanarizer`).
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from .mapped import MappedQuads, MappedSurface
 from .netgen_process import NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
 from .pipes import fill_pipes, find_pipes, pipe_ends
+from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
 
 __all__ = ["CadMesher", "FaceSelection", "FacesNear", "FacesOn", "RegionFaces"]
@@ -166,6 +168,11 @@ class CadMesher:
         :class:`~aquaflux.meshing.PyramidCaps`).
     pipe_core : PipeCore
         How the cores of pipes (see :meth:`mesh`) are filled.
+    planarizer : FacePlanarizer or None
+        Flattens the dual's faces once its boundary is on the drawing, moving only the centroids
+        of the primal cells outside the layers: the boundary stays on the drawing, the cut cells'
+        pieces keep the surface between them, and the layers keep their heights from the wall.
+        Unset, the faces are left as the dual makes them.
     netgen : NetgenProcess
         The Netgen it runs.
     """
@@ -177,6 +184,7 @@ class CadMesher:
     layers: PrismLayers | None = None
     cap_height: float = 0.25
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
+    planarizer: FacePlanarizer | None = None
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
 
     def __post_init__(self) -> None:
@@ -317,7 +325,10 @@ class CadMesher:
             self.feature_angle, feature_edges=edges.between(feature_pairs), columns=stacked
         )
         traced = dual.build_traced(primal)
-        return _onto_the_drawing(traced, primal, boundary, edges, model, region, topology, columns)
+        mesh = _onto_the_drawing(traced, primal, boundary, edges, model, region, topology, columns)
+        if self.planarizer is None:
+            return mesh
+        return self.planarizer.planarize(mesh, _free_centroids(traced, columns)).mesh
 
     def _pipes(self, topology, walls: MappedSurface, pipe_faces, on_layered, stacked):
         """Each pipe's ends, and its rings round the core: the layers' top over its grid, where it
@@ -568,6 +579,18 @@ def _onto_the_drawing(
             best[nearer] = moved.distance[nearer]
             coordinates[mine[nearer]] = moved.points[nearer]
     return eqx.tree_at(lambda mesh: mesh.node_coords, traced.mesh, jnp.asarray(coordinates))
+
+
+def _free_centroids(traced, columns) -> np.ndarray:
+    """The dual's vertices a flattening pass may move: the centroids of primal cells not in layers.
+
+    A layer cell's centroid has been placed at its height from the true wall (see
+    :func:`_onto_the_drawing`), so it stays; so does every vertex that is not a cell centroid.
+    """
+    movable = traced.vertex_cell >= 0
+    if columns is not None:
+        movable &= ~np.isin(traced.vertex_cell, columns.cells)
+    return movable
 
 
 @dataclasses.dataclass(frozen=True)

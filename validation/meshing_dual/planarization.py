@@ -11,6 +11,13 @@ size); the cells ``checkMesh`` would count concave by face planes; the largest c
 volume that re-triangulating its faces could make; non-orthogonality (maximum, and the average as
 ``checkMesh`` takes it, the angle of the mean cosine) and skewness; and the worst closure.
 
+After the pass it prints where the worst are. Each face is a boundary face, an interior face with a
+vertex on the boundary, one with a vertex the concave cut placed between pieces, or one whose every
+vertex was free to move; each cell is a cut piece (it has a vertex between pieces), a wall cell (it
+has a boundary face), or an interior cell. For the worst 1 % of interior faces by warp, and of cells
+by non-convexity and by triangulation-volume change, it gives the share in each class, and each
+class's own maximum over the whole mesh.
+
 Run in an environment with ``cadquery-ocp-novtk`` and ``netgen-mesher``::
 
     python validation/meshing_dual/planarization.py L cylinder 0.01 0.005
@@ -62,6 +69,53 @@ def describe(mesh: Mesh) -> str:
     )
 
 
+def where_the_worst_are(mesh: Mesh, movable: np.ndarray) -> str:
+    """The classes of the worst faces and cells, as the module docstring describes."""
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    owner, neighbour = np.asarray(mesh.face_cells.owner), np.asarray(mesh.face_cells.neighbour)
+    boundary_face = neighbour < 0
+    of_face = np.repeat(np.arange(mesh.n_faces), np.diff(offsets))
+    on_boundary = np.zeros(mesh.n_nodes, dtype=bool)
+    on_boundary[nodes[boundary_face[of_face]]] = True
+    between = ~movable & ~on_boundary  # fixed, not on the boundary: placed by the cut
+    touches_boundary = np.bincount(of_face, weights=on_boundary[nodes], minlength=mesh.n_faces) > 0
+    touches_cut = np.bincount(of_face, weights=between[nodes], minlength=mesh.n_faces) > 0
+    face_class = np.select(
+        [boundary_face, touches_boundary, touches_cut],
+        ["boundary", "by boundary", "by cut"],
+        "free",
+    )
+    cell_offsets, cell_nodes = mesh.cell_nodes()
+    of_cell = np.repeat(np.arange(mesh.n_cells), np.diff(cell_offsets))
+    piece = np.bincount(of_cell, weights=between[cell_nodes], minlength=mesh.n_cells) > 0
+    wall = np.zeros(mesh.n_cells, dtype=bool)
+    wall[owner[boundary_face]] = True
+    cell_class = np.select([piece, wall], ["cut piece", "wall"], "interior")
+
+    def breakdown(values, classes, names):
+        worst = values >= np.quantile(values, 0.99)
+        parts = []
+        for name in names:
+            mine = classes == name
+            peak = f"{values[mine].max():.3f}" if mine.any() else "-"
+            parts.append(f"{name} {worst[mine].sum() / worst.sum():.0%} (max {peak})")
+        return ", ".join(parts)
+
+    warp = np.asarray(face_warp(mesh))
+    interior = ~boundary_face
+    faces = ("by boundary", "by cut", "free")
+    cells = ("cut piece", "wall", "interior")
+    boundary_max = warp[boundary_face].max() if boundary_face.any() else 0.0
+    return (
+        f"worst 1% interior warp: {breakdown(warp[interior], face_class[interior], faces)}; "
+        f"boundary faces' max {boundary_max:.3f}\n"
+        f"    worst 1% non-convexity: {breakdown(cell_non_convexity(mesh), cell_class, cells)}\n"
+        f"    worst 1% tri-volume: "
+        f"{breakdown(np.asarray(triangulation_volume_change(mesh)), cell_class, cells)}"
+    )
+
+
 def main(names: list[str], sizes: list[float], iterations: int) -> None:
     netgen = NetgenProcess()
     planarizer = FacePlanarizer(max_iterations=iterations)
@@ -75,9 +129,8 @@ def main(names: list[str], sizes: list[float], iterations: int) -> None:
                 primal = element_mesh(
                     filled.points, filled.tetrahedra, patches={"walls": surface.triangles}
                 )
-                dual = DUAL.build(primal)
-                # The dual numbers the primal cell centroids first among its vertices.
-                movable = np.arange(dual.n_nodes) < primal.n_cells
+                traced = DUAL.build_traced(primal)
+                dual, movable = traced.mesh, traced.vertex_cell >= 0
                 print(f"{name} maxh={maxh:g} cells={dual.n_cells} moved={int(movable.sum())}")
                 print(f"  before: {describe(dual)}", flush=True)
                 start = time.perf_counter()
@@ -89,6 +142,7 @@ def main(names: list[str], sizes: list[float], iterations: int) -> None:
                     f"total warp {result.warp[0]:.3g} -> {result.warp[-1]:.3g} in {spent:.1f} s"
                 )
                 print(f"  after:  {describe(result.mesh)}", flush=True)
+                print(f"  where:  {where_the_worst_are(result.mesh, movable)}", flush=True)
 
 
 if __name__ == "__main__":

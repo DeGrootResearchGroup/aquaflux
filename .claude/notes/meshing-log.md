@@ -624,3 +624,97 @@ centroid x > 0.889 m or z > 0.06 m.
   end faces' triangles did. Mutations, each red: open end faces kept (the stub-cylinder test); the core
   joined one ring point round (radial-line test); the fluid-inside check off; the junction disc wound
   the wrong way and rows not flattened (both the Sozzi pipes test; the latter also the mapped test).
+
+## 2026-10-20 — where the worst faces and cells are after planarization
+
+`validation/meshing_dual/planarization.py` (its "where" lines), shipped `FacePlanarizer()` defaults with the
+cheaper guard (#784), harness duals (unprojected, one patch, feature angle 45 deg, moved = `vertex_cell >= 0`),
+macOS arm64, one run each. Faces: boundary / "by cut" (an interior face with a vertex the cut placed between
+pieces) / "by boundary" (a boundary vertex, none between pieces) / "free" (every vertex movable). Cells:
+cut piece (a vertex between pieces) / wall (a boundary face) / interior. Shares of the worst 1 %, with each
+class's maximum over the mesh:
+
+| dual | interior warp: by cut / by boundary / free | boundary faces' max warp | non-convexity: cut piece / wall / interior | tri-volume: cut piece / wall / interior | pass time |
+|---|---|---|---|---|---|
+| L 0.01 | 11 % (.184) / 41 % (.250) / 48 % (.117) | 0.000 | 50 % (.312) / 47 % (.250) / 3 % (.069) | 55 % (.124) / 39 % (.229) / 5 % (.038) | 42.5 s |
+| Sozzi 0.01 | 3 % (.208) / 30 % (.169) / 67 % (.327) | 0.160 | 38 % (.281) / 47 % (.205) / 16 % (.209) | 9 % (.156) / 87 % (.179) / 4 % (.128) | 131.9 s |
+| cylinder 0.005 | – / 32 % (.149) / 68 % (.303) | 0.026 | – / 40 % (.124) / 60 % (.271) | – / 68 % (.116) / 32 % (.225) | 248.1 s |
+| sleeve 0.005 | – / 41 % (.325) / 59 % (.233) | 0.125 | – / 79 % (.293) / 21 % (.140) | – / 89 % (.226) / 11 % (.110) | 276.6 s |
+
+Quality after the pass identical to the 2026-10-20 shipped-solver entry (the guard change kept results).
+Reading: **most of the worst interior warp is on faces every vertex of which was free** (the worst face of
+Sozzi and the cylinder among them), so a fixed vertex is not what keeps them warped; whether the guard's
+bounds or the competition between neighbouring faces does is not distinguished by this run. **Wall cells
+hold most of the worst triangulation-volume dependence (39–89 %)** and much of the worst non-convexity, so
+sliding boundary vertices along the drawing is a lever for those, on curved walls (the L's walls are flat
+and its boundary faces exactly so); on the L the cut pieces hold the worst non-convexity.
+
+## 2026-10-20 — what holds the worst all-free faces: the per-cell convexity bound
+
+`validation/meshing_dual/worst_face_limits.py` (base `6532fa0f`), harness duals (unprojected, one patch,
+feature angle 45 deg, moved = `vertex_cell >= 0`), macOS arm64, one run per arm. Tracked faces: the
+interior faces in the shipped pass's worst 1 % by warp whose every vertex is free (L 0.01: 106, start
+median 0.075; Sozzi 0.01: 477, start median 0.083). Bounds loosened by setting their column to infinity
+(positive volume always kept). Tracked warp median / max, share halved against the shipped pass, then
+total warp, worst non-convexity, concave cells, worst interior non-orthogonality, time:
+
+| arm | L | Sozzi |
+|---|---|---|
+| shipped | .035 / .117, 0 %; 3.44, .312, 28, 43.3, 42 s | .073 / .327, 0 %; 74.5, .281, 58, 46.1, 131 s |
+| no convexity bound | .024 / .117, 27 %; 2.90, .312, 27, 46.1, 20 s | .008 / .321, 85 %; 58.1, .280, 48, 47.8, 30 s |
+| no concavity bound | .024 / .102, 34 %; 2.23, .312, 68, 43.2, 14 s | .039 / .169, 51 %; 74.5, .282, 105, 47.7, 17 s |
+| no non-orthogonality bound | identical to shipped | identical to shipped |
+| no skewness bound | .026 / .117, 27 %; 3.05, .249, 27, 43.3 (skew 1.57), 24 s | ≈ shipped (skew 2.07) |
+| no quality bound | .005 / .039, 82 %; 0.63, 9.04, 109, 179.3, 10 s | .004 / .038, 100 %; 52.8, 1.93, 224, 179.4, 21 s |
+| shipped, tight stop (1e-6, 1000 it) | .032 / .117, 10 %; 3.16, .312, 29, 46.2, 1171 s (cap) | .065 / .327, 16 %; 69.1, .281, 73, 47.8, 3051 s |
+| no quality bound, tight stop | .004 / .024, 95 %; 0.34, 25.6, 155, 178.7, 39 s | .002 / .023, 100 %; 51.9, 2.43, 320, 179.0, 137 s |
+
+Starting worsts: L non-convexity .349, concave 57, non-orth 46.2; Sozzi .331, 309, 47.8. Reading: the
+unconstrained optimum flattens the tracked faces (so neighbour competition does not hold them), and a
+much tighter stop barely helps (so the stopping test does not); the bounds hold them, chiefly **the
+per-cell convexity bound** (no cell less convex than it started), with the concavity bound and on the
+L the skewness bound also binding; the non-orthogonality bound never binds on these two. Without the
+convexity bound every reported measure stays within its starting worst (non-convexity max .312 / .280,
+non-orthogonality 46.1 / 47.8), concave cells fall, total warp falls 16–22 % and the pass is 2–4x faster.
+Without the concavity bound concave cells more than double. Not measured: a convexity bound against the
+start's worst cell (the analogue of the face bounds) as such; cylinder and sleeve; the effect on
+unit-test fixtures (the L4 fixture's convexity bound bites, `test_meshing_planarize.py`).
+
+## 2026-10-20 — the convexity bound against the start's worst cell
+
+`FacePlanarizer` now bounds every cell's non-convexity by the starting mesh's largest (was each cell's own
+start); concavity stays per cell. `planarization.py`, shipped defaults otherwise, harness duals as above,
+macOS arm64, one run each, shared machine. Per-cell bound (the entry "where the worst faces and cells are"
+above) → start's-worst bound:
+
+| dual | total warp | concave (start) | int warp p99 | non-convexity p99 / max (start max) | tri-volume p99 / max (start max) | non-orth max (start) | time |
+|---|---|---|---|---|---|---|---|
+| L 0.01 | 3.44 → 2.90 | 28 → 27 (57) | .021 → .016 | .068/.312 → .066/.312 (.349) | .030/.229 → .026/.211 (.255) | 43.3 → 46.1 (46.2) | 42 → 37 s |
+| Sozzi 0.01 | 74.5 → 58.1 | 58 → 48 (309) | .055 → .015 | .103/.281 → .096/.280 (.331) | .105/.179 → .104/**.299** (.231) | 46.1 → 47.8 (47.8) | 131 → 41 s |
+| cylinder 0.005 | 13.4 → 5.23 | 66 → 41 (1108) | .023 → .006 | .077/.271 → .057/.271 (.316) | .038/.225 → .027/.185 (.305) | 47.3 → 50.1 (50.1) | 248 → 187 s |
+| sleeve 0.005 | 13.3 → 6.6 | 30 → 8 (258) | .017 → .007 | .072/.293 → .066/.293 (.293) | .046/.226 → .038/.226 (.226) | 48.3 → 51.4 (51.7) | 277 → 128 s |
+
+⚠️ **Sozzi's worst triangulation-volume dependence rose above the start's (0.299 vs 0.231)**: that measure
+is not bounded, and the wider convexity bound let one wall cell (93 % of the worst 1 % are wall cells)
+get worse. The `worst_face_limits.py` entry's "every reported measure stays within its starting worst"
+covered the measures that harness prints, which do not include it. Worst non-orthogonality now rises to
+the start's worst where it had stayed below. The mesh is refused if a starting cell's volume is not
+positive or its quality undefined (a NaN would otherwise be the bound): a Kuhn n 4 grid perturbed 0.35
+(seed 1) has a 3e-19 tetrahedron and two dual cells of volume about −1e19.
+
+Mutations, each red: the bound per cell again (`test_no_cell_ends_less_convex_than_the_least_convex_it_started_with`
+asserts some cell does get less convex); the bound removed (the Kuhn L, perturb 0.3 seed 1, ends at
+0.744 against 0.730); the concavity bound removed; the refusal removed.
+
+## 2026-10-20 — triangulation-volume dependence bounded by the start's worst
+
+The guard gains a fourth cell bound: no cell's `triangulation_volume_change` above the starting mesh's
+largest (`MeshQuality.triangulation_volume_change`; the `Mesh` function is a caller of it). Same harness,
+duals and defaults as the entry above, one run each. Sozzi 0.01: worst triangulation-volume change
+0.299 → 0.228 (start 0.231); total warp 58.1, concave 48, non-convexity max 0.280, non-orthogonality
+47.8, 31 iterations, 41 s — all as without the bound. L, cylinder, sleeve: every printed number
+identical to the entry above (the bound never binds there). No small fixture was found on which it
+binds (Kuhn cubes and Ls, perturbed; cube-to-ball maps; Netgen Sozzi 0.02 / 0.03, cylinder 0.02, sleeve
+0.01 — on each the pass lowers the worst value unbounded), so it is pinned on the guard itself
+(`test_the_guard_holds_each_cells_triangulation_volume_to_the_starts_worst`). Mutations, each red: the
+bound per cell; the bound removed; the column not measured; the kernel taking the gain only.
