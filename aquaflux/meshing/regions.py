@@ -19,6 +19,7 @@ from typing import Protocol
 
 import numpy as np
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 from aquaflux.triangle_grid import MAX_VOXELS, TriangleGrid
 
@@ -225,6 +226,45 @@ def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
             "about which side of the surface it lies on: one grazes the surface"
         )
     return votes[:, 0]
+
+
+def first_hits(points, faces, origins, directions, reach, skipped) -> np.ndarray:
+    """How far each ray goes before it meets a surface again: its nearest crossing of a face.
+
+    Only faces whose centroid lies within ``reach`` of a ray's origin are looked at, and none with a
+    corner among the ray's ``skipped`` points (the faces it starts on); a ray crossing none goes
+    ``inf``. A quadrilateral is crossed where either triangle of a diagonal cut is.
+
+    Parameters
+    ----------
+    points : np.ndarray, shape ``(n_points, 3)``
+    faces : Polygons
+        The surface.
+    origins, directions : np.ndarray, shape ``(n_rays, 3)``
+        Each ray's start and its direction, a unit vector.
+    reach : np.ndarray, shape ``(n_rays,)``
+    skipped : np.ndarray of int, shape ``(n_rays, k)``
+        Points whose faces each ray ignores; ``-1`` pads a row.
+
+    Returns
+    -------
+    np.ndarray, shape ``(n_rays,)``
+    """
+    points = np.asarray(points, dtype=np.float64)
+    triangles = faces.as_triangles()
+    rings = faces.padded()[faces.triangle_face()]
+    tree = cKDTree(points[triangles].mean(axis=1))
+    gaps = np.full(len(origins), np.inf)
+    for ray in range(len(origins)):
+        near = np.asarray(tree.query_ball_point(origins[ray], reach[ray]), dtype=np.int64)
+        own = skipped[ray][skipped[ray] >= 0]
+        near = near[~np.any(np.isin(rings[near], own), axis=1)]
+        if not near.size:
+            continue
+        hit = ray_hits(origins[ray], directions[ray], points[triangles[near]])
+        if hit.size:
+            gaps[ray] = hit.min()
+    return gaps
 
 
 def ray_hits(origin, direction, corners) -> np.ndarray:

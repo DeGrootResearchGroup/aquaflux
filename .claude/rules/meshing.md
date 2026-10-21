@@ -151,13 +151,13 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 ## The CAD mesher (`cad_mesher.py`) — built
 
-`CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=0.25,
+`CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=ClearedCaps(),
 pipe_core=PipeCore(), planarizer=None, core=None, netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
 layered=(), mapped=(), pipes=None) -> Mesh`: `write_brep` → `triangulate` (face-tagged) → pipes found
 (below) → the `mapped` patches' faces and the pipes' remeshed as structured quadrilaterals (below) →
 layers on the `layered` patches (below) → the pipes' cores filled with O-grids, out of the fill (below)
 → every quadrilateral left for the fill
-capped with a `PyramidCaps` pyramid on the fill's side (`cap_height` × its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
+capped with a `PyramidCaps` pyramid on the fill's side (`caps.capped`: sized by `ClearedCaps`, below, or a fixed share of its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
 only) → with a `core`, the octree hex core inside the fill's surface, its capped surface added as a hole
 (`_cored`, below) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
 patches by their CAD face; points no cell uses dropped) → `PolyhedralDual.build_traced` (the layers'
@@ -270,13 +270,26 @@ not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells a
   0.5033 mm (5-95 % 0.5025-0.5040) against 0.5069 (0.5066-0.5087) with triangles. ⚠️ Faces over 80°
   non-orthogonal: 11 against 2, inside the outlet pipe's entry and at the inlet saddle, where five layers
   leave the pipe a core of a few millimetres for caps and tets -- the O-grid's case.
-- ⚠️ **Each cap's apex is a dual cell**, squeezed between the hexahedra's top and the fill: ~66 cells under
-  2 mm above the lamp's layers (none with triangle layers), neighbour volume ratio p99 164 against 14.
-  **Measured and rejected (log, five draws each)**: sized caps (tall wrecks the pipes' cores, ~4,800 bad
-  faces), a crevice-angle limit (a trade, not a win), the shortest edge (more small cells by the lamp),
-  a diagonal split of the top quadrilateral with no caps (Netgen's tets on it poor, 86-90° faces).
-  **The constant is the first edge on purpose**: pinned by the mapped test's level first edges and
-  `test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge`. Open: #785.
+- ⚠️ **Each cap's apex is a dual cell**, and its size is set by the cap's height: low caps (the old 0.25
+  × first edge) squeeze ~50 cells under 2 mm above Sozzi's lamp layers (volume ratio p99 37). **Caps are
+  sized to their room by default (`ClearedCaps`, `caps.py`)**: `target` 0.7 × the first edge (the width
+  round a mapped band: short round a pipe, long round the lamp), lowered so a side leans at most `fold`
+  0.6 of half the fill's angle over each edge (0.25 × edge over a concave right angle, ~0.69 on a flat
+  wall) and to `gap` 0.4 of the distance to the surface opposite (`regions.first_hits`, shared with the
+  layers' gaps) or of the core's clearance. Five draws (log, "taller caps sized to their room"): Sozzi
+  small cells 45-54 → 5-8, ratio p99 37 → 16-17, non-orth p99 34 → 32°, faces > 50° 153-170 → 120-129;
+  the open vessel's core 1785-1832 → 257-322 small, ratio p99 78-81 → 17.5, **but faces > 50° 872-964 →
+  1402-1686**, nearly all between neighbouring core caps' apex cells (across the crevice between them).
+  The old tall-cap objection (#785: the pipes' narrow cores) no longer applies -- they are O-grids.
+  **Measured and rejected**: a fixed 0.45 (the vessel's faces > 50° to 1899-3254); target 1.0 (Sozzi
+  ratio p99 7 but non-orth p99 42°, the apexes then larger than the cells round them); Owen-Saigal
+  pyramids merged from the fill's tetrahedra without their cleanup (`MergedCaps`, kept on the pushed
+  branch `claude/merged-caps-experiment`, commit 60c3e19f): two of five Sozzi draws unmergeable, and the
+  octree core's concave steps send 3316 of 7528 quads back to a point of their own; earlier, a crevice
+  limit, the shortest edge and a diagonal split with no caps. Netgen's own quad closing
+  (`CloseOpenQuads`) does not close quads given from Python (log). Background: log, "hexahedra to
+  tetrahedra: what the literature and other meshers do". Pinned by `tests/unit/test_meshing_caps.py`
+  and `test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge`.
 - Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, Coons grids with and
   without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
   wall face with no vertex on a CAD edge a hexahedron's; Sozzi's lamp and pipes).
@@ -399,7 +412,8 @@ closed triangle surface over its box. Agreed with the project owner, 2026-10-20 
 `CadMesher` passes as `max_size`; refused above `size`), `clearance` (unset: twice the wall size);
 `refinements` and its own `cap_height` were removed — **one `cap_height`, `CadMesher`'s, serves the wall
 caps and the core's**, passed to `mesh`. `resolved(boundary_size) -> (wall, clearance)` is the one home of
-the defaults. A clearance at or under `cap_height × wall` is refused (a cap would cross it).
+the defaults. Given as a share, a clearance at or under `cap_height × wall` is refused (a cap would cross
+it); `ClearedCaps` holds each core cap within `gap` of the clearance instead.
 `element_mesh` takes `hexahedra` and `pyramids` beside tetrahedra and prisms (cells numbered tets, prisms,
 hexes, pyramids; earlier inputs unchanged).
 - **The region is a `Region`** (`regions.py`): `inside(points)` and `meets(lower, upper)` — whether the
@@ -416,7 +430,8 @@ hexes, pyramids; earlier inputs unchanged).
     2026-10-20): the winding number sits on radiation's solid-angle kernel tier (`solid_angle.py`,
     `clipping.py`, `work.py`, `checks.py`'s edge machinery), which cannot move with the grid; parity is
     exact on a surface checked closed, and only a handful of points are asked. The ray test is
-    `regions.ray_hits` (Möller–Trumbore), shared with the layers' gap search.
+    `regions.ray_hits` (Möller–Trumbore); `regions.first_hits` (a ray's nearest crossing, a KD-tree of
+    face centroids within reach) builds on it for the layers' gaps and `ClearedCaps`' room.
   - **`SampledRegion(contains, samples=3)`**: an inside test (an analytic body, a `solids` body);
     `meets` = the box's sample lattice is mixed, so a boundary between samples is missed. With an odd
     count the cube's centre is a sample, so "kept" is exactly the former every-sample-inside rule.
@@ -462,9 +477,10 @@ hexes, pyramids; earlier inputs unchanged).
   the finer of equals. ⚠️ **Dropping every cube at a pinch cascades** on a staircase ball (557 → 34 cubes;
   log), and so does dropping each pinch's minority side (557 → 149: two rules can pick opposite sides);
   the one-per-point rule gives 557 → 485.
-- **Caps**: each boundary quad gets a pyramid outward, apex `cap_height × edge` above its centre. ⚠️
-  **`cap_height` < 1/2**: at a concave right-angled step two caps' sides lean together at 45° from
-  their quads at 1/2 and coincide. `surface` (cap sides + transition cubes' boundary triangles) is wound
+- **Caps**: each boundary quad gets a pyramid outward (`caps.capped` on the core's boundary, the
+  clearance free in front of it). ⚠️ **A fixed share stays < 1/2**: at a concave right-angled step two
+  caps' sides lean together at 45° from their quads at 1/2 and coincide; `ClearedCaps`' fold limit is
+  that rule per edge. `surface` (cap sides + transition cubes' boundary triangles) is wound
   **into the core** — out of the region left to fill — so beside an outward wall it is a hole for
   `NetgenProcess.fill`, which wants only the points the triangles use: renumber (as the Netgen test does).
 - Pinned in `tests/unit/test_meshing_octree.py` (balance by brute force over leaf pairs, refinement to
@@ -488,8 +504,9 @@ hexes, pyramids; earlier inputs unchanged).
   the triangles it is given (`validation/meshing_netgen/fill_grading.py`, log), so the fill's
   `max_size` is only raised to the wall cubes' size where larger (`_CoreCells.fill_size`). `CadMesh.core`
   is the case key (`{kind: OctreeCore, size: ...}`); unset, the polyhedral core.
-- **Interaction with #785**: each core cap's apex is a small dual cell too (same `PyramidCaps`, so a fix
-  there reaches both). ⚠️ **Moving the apexes after the fill does not help** (Laplacian with a shape
+- **Interaction with #785**: each core cap's apex is a dual cell too; `ClearedCaps` sizes the core's
+  caps and the walls' alike (small cells 1785-1832 → 257-322, with more faces over 50°: above). ⚠️
+  **Moving the apexes after the fill does not help** (Laplacian with a shape
   guard; measured on five draws, dropped; log, "the caps' apexes moved after the fill"): the apex cell's
   size is set by the fill's own points near the cap, so a fix must change what the fill sees.
 - ⚠️ **Measured, the core does not yet pay** (maxh 0.01, log "the octree core wired into `CadMesher`"):
@@ -667,7 +684,9 @@ dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles; (4) oc
 
 **Not decided**: radial basis function (RBF) morphing *beside* transfinite interpolation — for spreading a
 projection's displacement through a block (the pipe-to-chamber saddle), snapping octree nodes, and later
-as the differentiable map from CAD parameters to `node_coords`. Raised with the project owner, not agreed.
+as the differentiable map from CAD parameters to `node_coords`. **Deferred until the mesher is finished**
+(project owner, 2026-10-21): the design-parameter applications come after it; the ranked applications
+and costs are in the log, "RBF morphing: where it would fit".
 
 ## Rejected dependencies (why, so they are not re-proposed)
 

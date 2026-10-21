@@ -852,3 +852,105 @@ Found on the way: #789 (pipes cored only when Netgen's rim counts are equal mult
 0.005, 0 at 0.0035, 2 at 0.0025) and #790 (the fill's "boundary mesh is overlapping" at 0.0025 with
 hexahedral layers, pipe cores or not; triangle walls with prism layers and mapped walls without layers
 both mesh).
+
+## 2026-10-21 — hexahedra to tetrahedra: what the literature and other meshers do
+
+Background for #785/#790 (three research agents, web and source reading, 2026-10-20; [S] a source says
+it, else inferred). No source reports our exact pathology, a small dual cell at an inserted apex; mature
+codes avoid creating one.
+- **Owen & Saigal (2001)**, "Formation of pyramid elements for hexahedra to tetrahedra transitions",
+  CMAME 190:4505-4518 (SAND2000-0494J, osti.gov/biblio/751546, full text read) [S]: building pyramids
+  before the tet fill was rejected (intersection checks against opposite boundaries). Preferred:
+  mesh with each quad split along a diagonal, 2-3 swap until the diagonal has exactly two tets, merge
+  them into a pyramid -- the apex is a tet-mesher vertex, not an inserted one; ~10 % fall back to a node
+  at the diagonal's midpoint, smoothed. Immediately after, the tets are "unacceptable"; cleanup by local
+  Laplacian smoothing within three edges plus T23/T32/T44 flips is part of the method. Ideal apex on the
+  base normal at h = 0.98 b (square base b), by the min radius ratio of the pyramid's four tets.
+- **Netgen** (`libsrc/meshing/meshfunc.cpp::CloseOpenQuads`, `rules/pyramidrules*.rls`) [S]: closes open
+  quads with rule sets (hexes if `try_hexes`, prisms, "connect pyramid to triangle", "connect to
+  vis-a-vis point"); rules reusing a front point cost quality 1, new apexes ("Pyramid on quad" h 0.5,
+  "small Pyramid on quad" h 0.1) cost 100; `giveuptolopenquads` default 15 (">100 for free pyramids").
+  Probed from Python (netgen-mesher 6.2.2608, `quad_probe` scratch, a unit box with one quad or a 4x4
+  quad face, both windings, `giveuptolopenquads` to 2000, `giveuptol` 1000, Delaunay on and off): never
+  closes them ("mesh has still open quads"); the same box with the quads split meshes. Not pursued.
+- **Gmsh** (live-clones mirror, `meshGRegionBoundaryRecovery.cpp`, `meshRelocateVertex.cpp`) [S]: apex
+  inserted flat at the quad centroid, relocated after the fill toward centroid + 0.5 sqrt(area) n under
+  a quality guard; pyramids off, the quad is split by the diagonal with the better min triangle quality.
+- **Production meshers** [S]: Fluent's polyhedral conversion dualises non-hex cells only, keeps hexes and
+  splits a hex face that meets a dual cell (Fluent UG §7.11-7.12; prism layers "used directly", with
+  stair-stepping at the layer/tet junction); Mosaic/poly-hexcore joins hex core and poly-prism layers with
+  polyhedra (algorithm unpublished; Ansys patent US 11,282,274 builds the connection from the last layer's
+  outer surface and its dual); STAR-CCM+ meshes the core on a subsurface first and extrudes the layers
+  from its boundary faces, so they match by construction; snappyHexMesh and cfMesh transition with split
+  polyhedra; NSU3D/DLR form transition pyramids from existing nodes (Mavriplis & Pirzadeh 1999, NASA
+  CR-1999-208999). Fluent warns pyramids on high-aspect quads give highly skewed triangles.
+- Ranked for us: (1) taller caps, 0.5-1.0 edge, clearance-limited (Owen 0.98 b, Netgen and Gmsh 0.5),
+  now that the pipes' cores are O-grids rather than narrow capped cores; (2) Owen-Saigal: the apex a
+  Netgen point; (3) a hybrid dual keeping the hexahedral layers primal (Fluent), a redesign of the layers.
+
+## 2026-10-21 — taller caps sized to their room, and pyramids merged from the fill (Owen-Saigal)
+
+`validation/meshing_dual/cap_transitions.py` (five draws rotated 1-5 µrad about x; Sozzi at maxh 0.02
+with layers 0.5 mm × 1.2 × 5 on every wall, lamp mapped, pipes found and O-gridded; open vessel at maxh
+0.01 about an octree core of 0.04 m cubes, wall size and clearance unset), `main` 33172345 plus this
+change, macOS arm64, netgen-mesher 6.2.2608. "Small": Sozzi cells under 2 mm 13.5-22 mm from the lamp
+axis at 300 < x < 500 mm; vessel cells under 4 mm more than 12 mm inside its walls. Ranges over the draws.
+
+| Sozzi | small | ratio>20 | ratio p99 | non-orth p99 | >50° (pipes) | >90° | failed |
+|---|---|---|---|---|---|---|---|
+| caps 0.25 × first edge (shipped) | 45-54 | 2634-2688 | 36-38 | 34.0-34.2° | 153-170 (72-79) | max 111-140° | 0 |
+| caps 0.45 | 2-7 | 1126-1221 | 15.6-16.2 | 31.5-31.7° | 122-127 (62-67) | max 151-177° | 0 |
+| `ClearedCaps()` (0.7, fold 0.6, gap 0.4) | 5-8 | 1221-1315 | 16.0-17.0 | 31.8-32.1° | 120-129 (56-62) | 3-4 | 0 |
+| `ClearedCaps(1.0, fold 0.8)` | 0 | 129-173 | 7.0 | 41.6-41.9° | 200-220 (67-69) | 4-6 | 0 |
+| `MergedCaps()` (no cleanup) | 1-31 | 834-1977 | 13.8-25.7 | 32.0-47.9° | 197-1333 (124-144) | 5-41 | 2 of 5 |
+
+| open vessel, octree core | small | ratio>20 | ratio p99 | non-orth p99 | >50° | failed |
+|---|---|---|---|---|---|---|
+| caps 0.25 (shipped) | 1785-1832 | 10837-11259 | 78-81 | 39.6-39.9° | 872-964 | 0 |
+| caps 0.45 | 393-492 | 2823-4131 | 17.5-20.9 | 39.4-47.1° | 1899-3254 | 0 |
+| `ClearedCaps()` | 257-322 | 2311-2832 | 17.5-17.8 | 39.3-40.4° | 1402-1686 | 0 |
+| `ClearedCaps(1.0, fold 0.8)` | 91-133 | 1471-2947 | 14.9-18.0 | 39.4-43.8° | 1929-2557 | 0 |
+| `MergedCaps()` (no cleanup) | 3271-3635 | 14654-16265 | 94-205 | 47.3-47.9° | 2751-3366 | 0 |
+
+Attribution (`validation/meshing_dual/cap_attribution.py`, one draw each, caps 0.25 / `ClearedCaps(1.0)`):
+- Faces over 50° touch an apex cell: Sozzi 139 of 155 / 194 of 201; vessel 863 of 875 / 1900 of 2043.
+  On the vessel nearly all join two core apex cells (847 / 1741): the face across the crevice between
+  neighbouring caps. Apex cells' median size: Sozzi 3.26 / 9.41 mm against 2.56 mm for the rest (tall
+  wall caps fill the lamp's annulus: Netgen adds 62 points there, against 1606); vessel 5.14 / 6.97 mm.
+- Sozzi's faces over 90° (3-6 a draw, in every cap arm) join two non-apex cells at x ≈ 45-50 mm,
+  |y| ≈ 6.5 mm, z ≈ 40 mm; none in the vessel.
+- `MergedCaps` after Netgen fills against the quads cut along their ridge diagonal (Sozzi one draw:
+  1381 of 1652 quads two tetrahedra round the cut, 247 three, 23 four, 1 one): direct 1341, swapped 245,
+  opened 66. On the vessel 1613 of 5329 two-tetrahedra rings have their apex on another core quad's
+  corner -- the octree core's concave steps -- so a pyramid there would cover part of that quad, and
+  3316 of 7528 quads fall back to a point of their own near the quad, recreating the squeezed cell.
+  Owen & Saigal's cleanup (smoothing within three edges, T23/T32/T44 flips) was not built; two Sozzi
+  draws still left one quad unmergeable.
+- Outcome (project owner, 2026-10-21): `ClearedCaps()` made the default cap rule; `MergedCaps` dropped,
+  kept on the pushed branch `claude/merged-caps-experiment` (commit 60c3e19f) with its tests and the
+  harness arm, re-runnable.
+
+## 2026-10-21 — RBF morphing: where it would fit (deferred)
+
+Discussed with the project owner and deferred until the mesher is finished. Radial basis function (RBF)
+morphing moves every point by a smooth field interpolated from control points' displacements, one
+linear solve for the weights, topology unchanged (de Boer, van der Schoot & Bijl 2007; Jakobsson &
+Amoignon 2007 for shape optimization; Rendall & Allen 2008-2009 for greedy control-point selection --
+cited from memory, not re-read). Ranked for this mesher:
+1. **The differentiable map from design parameters to `node_coords`** (lamp position or radius, baffle
+   angle, reactor length): boundary vertices moved by re-projection or analytically, the rest by the
+   field, linear once the centres are fixed, so `jax.grad` of a solved objective reaches the design
+   parameter with no remeshing and no derivative of Netgen.
+2. **Design variants from one base mesh**: Netgen's fill moves with any change (the five-draw
+   ensembles), so meshing each variant mixes design effect with mesh noise; morphing keeps the
+   topology. Same machinery as 1.
+3. **The projection's displacement spread into the layers** (`_onto_the_drawing` moves only the
+   boundary; the lamp's first dual layer 0.5033 mm for 0.5 wanted): small, local.
+4. **The pipe-to-chamber saddle**: an O-grid morphed onto the saddle could reach the junction instead of
+   stopping two rows short.
+5. **Snapping the octree core to walls**: least, since conformity is topological -- snapped points
+   still leave the core's faces unmatched to the layers' tops.
+Costs: a dense solve on every boundary vertex is out (Sozzi ~1e5); greedy selection to a few thousand
+centres or compactly supported (Wendland) functions with a sparse solve; evaluating 2M points is one
+batched product; large motions invert cells, so a quality guard (`MeshQuality`) bounds it. For 1-2 it is
+JAX and solver-side, so a generic module (likely `aquaflux/mesh/`), not `meshing/`.

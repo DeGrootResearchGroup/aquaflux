@@ -34,12 +34,11 @@ import dataclasses
 import math
 
 import numpy as np
-from scipy.spatial import cKDTree
 
 from aquaflux import ragged
 
 from .polygons import Polygons
-from .regions import ray_hits
+from .regions import first_hits
 
 __all__ = ["LayerExtrusion", "PrismLayers"]
 
@@ -300,23 +299,14 @@ def _distinct_normals(normals: np.ndarray, tolerance: float = 1e-3) -> list[np.n
 def _gaps(surface: _Surface, direction, moving, reach) -> np.ndarray:
     """How far each moving point can go along its direction before meeting the surface again.
 
-    Only faces within ``reach`` of the point are looked at; beyond, the gap is ``inf``. A
-    quadrilateral is crossed where either of the two triangles of a diagonal cut crosses it.
+    Only faces within ``reach`` of the point are looked at; beyond, the gap is ``inf``.
     """
-    triangles = surface.faces.as_triangles()
-    tree = cKDTree(surface.points[triangles].mean(axis=1))
     gap = np.full(surface.points.shape[0], np.inf)
-    for point in np.flatnonzero(moving):
-        near = np.asarray(
-            tree.query_ball_point(surface.points[point], reach[point]), dtype=np.int64
-        )
-        if not near.size:
-            continue
-        own = surface.rings[surface.faces.triangle_face()[near]]
-        near = near[~np.any(own == point, axis=1)]
-        hit = ray_hits(surface.points[point], direction[point], surface.points[triangles[near]])
-        if hit.size:
-            gap[point] = hit.min()
+    moved = np.flatnonzero(moving)
+    gap[moved] = first_hits(
+        surface.points, surface.faces, surface.points[moved], direction[moved], reach[moved],
+        moved[:, None],
+    )  # fmt: skip
     return gap
 
 

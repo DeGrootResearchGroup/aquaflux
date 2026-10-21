@@ -50,6 +50,7 @@ from .block_assembly import BlockMesh
 from .block_topologies import Annulus, CubedSphereCap, PipeOGrid
 from .blocks import Arc, Curve, HexBlock, SampledCurve, Surface
 from .cad_mesher import CadMesher, FaceSelection, FacesNear, FacesOn, RegionFaces
+from .caps import ClearedCaps
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
     MeshingError,
@@ -79,6 +80,7 @@ __all__ = [
     "BlockMesh",
     "CadMesher",
     "CartesianFrame",
+    "ClearedCaps",
     "ClosedSurface",
     "ConeSurface",
     "CubedSphereCap",
