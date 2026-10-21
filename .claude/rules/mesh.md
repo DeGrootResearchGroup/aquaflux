@@ -29,6 +29,17 @@ All classes are `equinox.Module`s.
     (`_fused_geometry`) — eager dispatch materialized a full buffer per step (roughly halved peak memory
     at scale). The perimeter traversal is still enumerated eagerly once in `FaceNodeConnectivity.from_csr`
     (data-dependent counts).
+  - **The 3D centre fan runs in blocks of incidences** (`PolygonFaceGeometry.block`, default `2**18`;
+    `FaceNodeConnectivity.reduce_in_blocks`, a `lax.scan` adding each block into the per-face sums). XLA
+    on CPU materializes every per-incidence input to a scatter, so formed all at once each corner,
+    directed area and weighted centroid was a full `(n_incidences, 3)` buffer: XLA's temp for
+    `_fused_geometry` 865 → 220 MiB (175 → 45 B per incidence) on a 5.2M-incidence primal, time +10 %,
+    values within round-off. Reformulating without blocks does not help (a per-face moment matrix needs
+    more; log). `fan_triangles(..., incidences=)` stays the one home of the corners. Pinned by
+    `test_a_reduction_in_blocks_sums_what_one_over_every_incidence_sums` and
+    `test_the_centre_fan_in_small_blocks_is_the_centre_fan_in_one` (blocking only: the formula itself is
+    pinned by the analytic tests). `warp_first_moment` is not blocked (9 per incidence; only the
+    Hessian-carrying gradient calls it).
 - `geometry.py` — `MeshGeometry` (`{face: FaceGeometry, cell: CellGeometry}`), passed as one `geometry`
   collaborator; seams reading one side take only that side (`FaceFluxOperator.face_flux(state,
   face_geometry)`). **Geometry is derived on demand, never stored on `Mesh`**: it is a pure function of the
@@ -44,8 +55,8 @@ All classes are `equinox.Module`s.
     its centroid can land outside the cell (a real snappyHexMesh mesh flipped `D_P·n` negative and crashed
     the AMG positivity guard). Owner and neighbour each use their own reference. Pinned by
     `tests/unit/test_mesh.py::test_cell_centroid_accurate_far_from_origin`.
-- `connectivity.py` — the storage-and-movement layer (leaf module; imports only `jax.numpy`/`numpy`/
-  `segment_sum`):
+- `connectivity.py` — the storage-and-movement layer (leaf module; imports only `jax` (`lax.scan`,
+  `eval_shape` for `reduce_in_blocks`), `jax.numpy`/`numpy`/`segment_sum`):
   - **`FaceCellConnectivity` (`mesh.face_cells`).** Gather is direct indexing with `owner` /
     `safe_neighbour` (boundary-safe); no `gather_*` wrappers. Scatters: `scatter(owner_contrib,
     neighbour_contrib)`, `scatter_to_owner`, `scatter_conservative` (owner `+`, neighbour `−`),

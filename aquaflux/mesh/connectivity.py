@@ -22,6 +22,7 @@ directly on raw owner/neighbour arrays where no connectivity object is in hand.
 from __future__ import annotations
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.ops import segment_max, segment_min, segment_sum
@@ -581,10 +582,65 @@ class FaceNodeConnectivity(eqx.Module):
         """Sum a per-incidence quantity into per-face totals, shape ``(n_faces, ...)``."""
         return segment_sum(per_incidence, self.face_of_incidence, self.n_faces)
 
+    def reduce_in_blocks(self, contribution, block: int):
+        """Sum a per-incidence quantity into per-face totals, ``block`` incidences at a time.
+
+        What :meth:`reduce_to_faces` does for a quantity computed from the incidences rather than
+        held for all of them: ``contribution`` is evaluated on one block of incidences after
+        another, and each block's values are added into the faces' totals, so only one block's
+        per-incidence values exist at once. A mesh has several incidences per face, and a
+        quantity formed for all of them at once is a full-size buffer per intermediate; here the
+        working memory is set by ``block`` instead. The totals differ from
+        :meth:`reduce_to_faces`'s only by the order of the sums.
+
+        Parameters
+        ----------
+        contribution : callable
+            Maps incidence indices, shape ``(block,)``, to a pytree of per-incidence values, each
+            of shape ``(block, ...)``. The last block is padded with incidence 0; the padding's
+            values are dropped.
+        block : int
+            Incidences per block, at least 1 (all of them, when the mesh has fewer).
+
+        Returns
+        -------
+        pytree of jnp.ndarray
+            The per-face totals, each of shape ``(n_faces, ...)``.
+        """
+        total = self.face_node_indices.shape[0]
+        block = max(1, min(block, total))
+        n_blocks = -(-total // block)
+        offsets = jnp.arange(block, dtype=self.face_of_incidence.dtype)
+
+        def add_block(sums, first):
+            incidences = first + offsets
+            real = incidences < total
+            incidences = jnp.where(real, incidences, 0)
+            # Padding goes to a face past the last, which the scatter drops.
+            faces = jnp.where(real, self.face_of_incidence[incidences], self.n_faces)
+            values = contribution(incidences)
+            return jax.tree.map(lambda s, v: s.at[faces].add(v, mode="drop"), sums, values), None
+
+        shapes = jax.eval_shape(contribution, offsets)
+        zeros = jax.tree.map(lambda s: jnp.zeros((self.n_faces, *s.shape[1:]), s.dtype), shapes)
+        starts = jnp.arange(n_blocks, dtype=offsets.dtype) * block
+        sums, _ = jax.lax.scan(add_block, zeros, starts)
+        return sums
+
     def max_to_faces(self, per_incidence: jnp.ndarray) -> jnp.ndarray:
         """The largest of a per-incidence quantity over each face's nodes, shape ``(n_faces, ...)``."""
         return segment_max(per_incidence, self.face_of_incidence, self.n_faces)
 
-    def vertex_mean(self, node_coords: jnp.ndarray) -> jnp.ndarray:
-        """Mean of each face's node coordinates, shape ``(n_faces, dim)``."""
-        return scale(self.reduce_to_faces(self.gather_node_coords(node_coords)), 1.0 / self.counts)
+    def vertex_mean(self, node_coords: jnp.ndarray, block: int | None = None) -> jnp.ndarray:
+        """Mean of each face's node coordinates, shape ``(n_faces, dim)``.
+
+        Given ``block``, the coordinates are gathered and summed that many incidences at a time
+        (:meth:`reduce_in_blocks`), so they are never all gathered at once.
+        """
+        if block is None:
+            total = self.reduce_to_faces(self.gather_node_coords(node_coords))
+        else:
+            total = self.reduce_in_blocks(
+                lambda incidences: node_coords[self.face_node_indices[incidences]], block
+            )
+        return scale(total, 1.0 / self.counts)

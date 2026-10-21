@@ -52,7 +52,7 @@ import numba
 import numpy as np
 
 from aquaflux import ragged
-from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
+from aquaflux.mesh import RESERVED_PATCH_NAMES, FaceGeometry, Mesh, MeshGeometry
 
 #: The automatic patch names, which a primal's named patches are distinguished from.
 _AUTOMATIC = set(RESERVED_PATCH_NAMES)
@@ -137,18 +137,21 @@ class PolyhedralDual:
         """
         _check_primal(primal)
         tables = _PrimalTables.of(primal)
-        feature, concave = self._features(primal, tables)
+        geometry = primal.geometry()  # once: every step below reads the same primal geometry
+        feature, concave = self._features(primal, geometry.face, tables)
         walks = _Walks.of(primal, tables)
-        pieces = _Pieces.of(primal, tables, walks, feature, concave, self.columns)
-        return _assemble(primal, tables, walks, feature, pieces)
+        pieces = _Pieces.of(primal, geometry, tables, walks, feature, concave, self.columns)
+        return _assemble(primal, geometry, tables, walks, feature, pieces)
 
-    def _features(self, primal: Mesh, tables: _PrimalTables) -> tuple[np.ndarray, np.ndarray]:
+    def _features(
+        self, primal: Mesh, face_geometry: FaceGeometry, tables: _PrimalTables
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Which edges are features, and which fold concavely by more than the feature angle.
 
         Both of shape ``(n_edges,)``; every such concave edge is a feature.
         """
         on_boundary = tables.boundary_faces[:, 0] >= 0
-        fold = boundary_folds(primal, tables.boundary_faces[on_boundary])
+        fold = boundary_folds(face_geometry, tables.boundary_faces[on_boundary])
         concave = np.zeros(tables.n_edges, dtype=bool)
         concave[on_boundary] = fold < -self.feature_angle
         label = np.asarray(primal.face_patches.label)
@@ -195,12 +198,13 @@ class TracedDual:
     vertex_cell: np.ndarray
 
 
-def boundary_folds(primal: Mesh, pairs: np.ndarray) -> np.ndarray:
+def boundary_folds(face_geometry: FaceGeometry, pairs: np.ndarray) -> np.ndarray:
     """The signed fold between pairs of boundary faces: positive convex, negative concave.
 
     Parameters
     ----------
-    primal : Mesh
+    face_geometry : FaceGeometry
+        The faces' geometry, normals out of their owners.
     pairs : np.ndarray of int, shape ``(n, 2)``
         Pairs of boundary faces sharing an edge.
 
@@ -210,8 +214,7 @@ def boundary_folds(primal: Mesh, pairs: np.ndarray) -> np.ndarray:
         The angle, in radians, between the two faces' outward normals, negative where the second
         face's centroid lies outside the first's plane (the domain is concave there).
     """
-    geometry = primal.geometry().face
-    normal, centroid = np.asarray(geometry.normal), np.asarray(geometry.centroid)
+    normal, centroid = np.asarray(face_geometry.normal), np.asarray(face_geometry.centroid)
     first, second = pairs[:, 0], pairs[:, 1]
     cosine = np.clip(np.einsum("ij,ij->i", normal[first], normal[second]), -1.0, 1.0)
     rises = np.einsum("ij,ij->i", centroid[second] - centroid[first], normal[first]) > 0.0
@@ -556,8 +559,8 @@ class _Pieces:
 
     @classmethod
     def of(
-        cls, primal: Mesh, tables: _PrimalTables, walks: _Walks, feature: np.ndarray,
-        concave: np.ndarray, columns: np.ndarray | None = None,
+        cls, primal: Mesh, geometry: MeshGeometry, tables: _PrimalTables, walks: _Walks,
+        feature: np.ndarray, concave: np.ndarray, columns: np.ndarray | None = None,
     ) -> _Pieces:  # fmt: skip
         """Cut the dual cell of every point on a ``concave`` edge (shape ``(n_edges,)``), and of
         every point above one in ``columns`` (see :class:`PolyhedralDual`) by the same walls.
@@ -575,7 +578,6 @@ class _Pieces:
             columns = np.asarray(columns, dtype=np.int64)
             is_cut = set(cut_points.tolist())
             above = {int(row[0]): row[1:] for row in columns if int(row[0]) in is_cut}
-        geometry = primal.geometry()
         centroid = np.asarray(geometry.cell.centroid)
         area_vector = np.asarray(geometry.face.normal) * np.asarray(geometry.face.area)[:, None]
         points = np.asarray(primal.node_coords, dtype=np.float64)
@@ -669,15 +671,14 @@ class _Vertices:
 
     @classmethod
     def of(
-        cls, primal: Mesh, tables: _PrimalTables, feature: np.ndarray, middle: np.ndarray,
-        pieces: _Pieces,
+        cls, primal: Mesh, geometry: MeshGeometry, tables: _PrimalTables, feature: np.ndarray,
+        middle: np.ndarray, pieces: _Pieces,
     ) -> _Vertices:  # fmt: skip
         """Cell centroids, boundary-face centroids, a vertex per face cut between pieces,
         midpoints of ``middle`` edges, and the points on two feature edges or cut into pieces.
 
         The vertices of cut faces and of edges cut between pieces start at face centroids and edge
         midpoints and are moved onto the surfaces between pieces as the faces are built."""
-        geometry = primal.geometry()
         neighbour = np.asarray(primal.face_cells.neighbour)
         points = np.asarray(primal.node_coords, dtype=np.float64)
         face_centroid = np.asarray(geometry.face.centroid, dtype=np.float64)
@@ -717,8 +718,9 @@ class _Faces:
 
 
 def _assemble(
-    primal: Mesh, tables: _PrimalTables, walks: _Walks, feature: np.ndarray, pieces: _Pieces
-) -> TracedDual:
+    primal: Mesh, geometry: MeshGeometry, tables: _PrimalTables, walks: _Walks,
+    feature: np.ndarray, pieces: _Pieces,
+) -> TracedDual:  # fmt: skip
     """Number the dual's vertices, build its faces, and hand them to ``Mesh.from_csr``."""
     on_boundary = tables.boundary_faces[:, 0] >= 0
     # The edges whose faces see a piece: those at a cut point, and those of a face cut between
@@ -731,8 +733,8 @@ def _assemble(
     split[touched_edges] = [
         _breaks(walks, tables, pieces, edge, on_boundary[edge]).size > 0 for edge in touched_edges
     ]
-    vertices = _Vertices.of(primal, tables, feature, feature | split, pieces)
-    _place_cut_faces(primal, pieces, vertices)
+    vertices = _Vertices.of(primal, geometry, tables, feature, feature | split, pieces)
+    _place_cut_faces(primal, geometry, pieces, vertices)
 
     faces = _Faces()
     plain = _plain_edge_faces(np.flatnonzero(~touched), walks, tables, feature, vertices)
@@ -769,7 +771,7 @@ def _assemble(
     return TracedDual(mesh, vertex_face, vertex_edge, vertex_cell)
 
 
-def _place_cut_faces(primal, pieces, vertices) -> None:
+def _place_cut_faces(primal, geometry, pieces, vertices) -> None:
     """Put each cut face's vertex where the segment between its cells' centroids crosses between
     the pieces (the mean, for a face cut around more than one point).
 
@@ -780,7 +782,6 @@ def _place_cut_faces(primal, pieces, vertices) -> None:
     """
     if not pieces.cuts.size:
         return
-    geometry = primal.geometry()
     centroid = np.asarray(geometry.cell.centroid)
     point, face = pieces.cuts[:, 0], pieces.cuts[:, 1]
     first = np.asarray(primal.face_cells.owner)[face]

@@ -131,9 +131,16 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
   dual volume 2.2 % / 0.57 % under the tets' on a cylinder at maxh 0.02 / 0.01 (second order). The dual
   itself does not know the true surface; `build_traced` says where each boundary vertex came from, and
   `CadMesher` projects them onto the drawing (below).
-- ⚠️ **Memory is the open problem at the 2M target**: the primal held as a full `Mesh` costs ~5 KB per
-  point and the dual's build ~9 KB per point (111k points; log), so 2M points would need ~28 GB. The likely
-  fix is a numpy-only primal (the primal is never solved on) and a leaner assembly; not yet done.
+- ⚠️ **Memory at the 2M target is set by temporaries, not by what is held**: Sozzi, 660k cells, peak
+  footprint 3.33 GiB (macOS allocator cache off; ~4.7 KB per cell, so ~9.6 GB at 2M), held after meshing
+  0.68 GiB. The peak is now `Mesh.from_csr` (the dual's, then the primal's: `element_mesh`'s sorts and
+  `validate`'s `np.unique`); before the blocked centre fan and the dual computing its primal geometry
+  once (`build_traced` passes one `MeshGeometry` down) it was the primal's `Mesh.geometry`, four times,
+  4.71 GiB. Netgen's child peaks apart (1.44 GiB at 660k). Measured by
+  `validation/meshing_dual/memory_by_stage.py` (log, "Memory by stage").
+  - ⚠️ **On macOS read footprints with `MallocLargeCache=0`**: libmalloc keeps freed large blocks and
+    charges them to the process until a different-sized allocation lands on top, so a default run reads
+    up to ~40 % above what is live (266k cells: 2.40 against 1.72 GiB) and "held" stages look large.
 - **Quality, not correctness, on Netgen duals**: `checkMesh` passes structured and Kuhn-tet duals; Netgen
   duals, cut ones included (L, Sozzi), pass topology and closure but report concave cells by face planes
   (1.5–7.7 %), a few low-quality face decompositions and small volume ratios (log). `aquaflux.mesh`'s

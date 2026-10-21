@@ -739,6 +739,50 @@ def test_volume_gradient_matches_finite_difference() -> None:
     assert jnp.allclose(grad[i, ax], fd, atol=1e-5)
 
 
+# ------------------------------------------------------- reductions over incidences, in blocks
+
+_SOLIDS = [_unit_cube, _tetrahedron, _two_unit_cubes, _triangular_prism, _box_2_3_4, _warped_hex]
+
+
+@pytest.mark.parametrize("block", [1, 3, 5, 24, 1000])
+def test_a_reduction_in_blocks_sums_what_one_over_every_incidence_sums(block) -> None:
+    """Every incidence counted once, whatever the block: 3 and 5 leave a padded last block of the
+    two cubes' 44 incidences (a padding value counted would add to face 0), 1 is a block per
+    incidence, 24 splits a face across two blocks, and 1000 is one block larger than the mesh."""
+    face_nodes = _two_unit_cubes().face_nodes
+    n = face_nodes.face_node_indices.shape[0]
+    vectors = jnp.arange(3.0 * n).reshape(n, 3) ** 1.5
+    scalars = jnp.cos(jnp.arange(float(n)))
+    summed = face_nodes.reduce_in_blocks(lambda i: (vectors[i], scalars[i]), block)
+    assert jnp.allclose(summed[0], face_nodes.reduce_to_faces(vectors), rtol=1e-14, atol=0.0)
+    assert jnp.allclose(summed[1], face_nodes.reduce_to_faces(scalars), rtol=1e-14, atol=1e-15)
+
+
+@pytest.mark.parametrize("builder", _SOLIDS)
+def test_the_centre_fan_in_small_blocks_is_the_centre_fan_in_one(builder) -> None:
+    """Areas, centroids, normals and the planarity sums do not depend on the block, nor do their
+    gradients: blocks of 3 incidences split faces and pad the last block on every solid here."""
+    mesh = builder()
+    whole, split = PolygonFaceGeometry(), PolygonFaceGeometry(block=3)
+    for expected, found in zip(
+        whole.centre_fan(mesh.node_coords, mesh.face_nodes),
+        split.centre_fan(mesh.node_coords, mesh.face_nodes),
+        strict=True,
+    ):
+        assert jnp.allclose(found, expected, rtol=1e-13, atol=1e-14)
+
+    def moment(coords, scheme):
+        area, centroid, normal, _ = scheme.centre_fan(coords, mesh.face_nodes)
+        return jnp.sum(area[:, None] * centroid * normal)
+
+    assert jnp.allclose(
+        jax.grad(moment)(mesh.node_coords, split),
+        jax.grad(moment)(mesh.node_coords, whole),
+        rtol=1e-12,
+        atol=1e-13,
+    )
+
+
 # --------------------------------------------------- validate(): silent-NaN robustness guards
 
 

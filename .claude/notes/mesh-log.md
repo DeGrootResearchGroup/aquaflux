@@ -217,3 +217,17 @@ skewness boundary line = owner to face centroid; interior floor 0.3; boundary fl
 warp over area not root area; triangulation change's neighbour sign; gain only (needs faces of 5+ vertices:
 a quadrilateral's heights are symmetric); a half not a third; non-convexity's neighbour sign; concavity
 pairing a face with itself; a block boundary skipping a cell; `cell_nodes` from owners only.
+
+## 2026-10-20 — the centre fan's working set
+
+On a 5.19M-incidence primal (Sozzi at maxh 0.0035, 1.54M faces), XLA's `memory_analysis()` temp for
+`_fused_geometry`: 865.2 MiB (174.9 B per incidence), the centre fan alone 724.0. Unblocked
+reformulations, all within 1.1e-15 of it: relative to the vertex mean with the centroid from a per-face
+moment matrix `sum (s+e) d^T` in one pass 1142 MiB; relative, two passes re-gathering 771 MiB;
+`indices_are_sorted=True` changed neither. XLA on CPU materializes each scatter's per-incidence input, so
+only a bound on how many incidences exist at once helps. Blocked (`2**18` incidences): 220.3 MiB (44.5 B
+per incidence, the rest per-face arrays), best of five 0.097 against 0.088 s; area, face centroid and
+normal within 9e-16 of their largest entry, cell volumes within a relative 1.8e-12 (smallest cells).
+Mutations of the blocked reduction, each red in the block tests: padding counted into face 0; blocks
+starting one short. The second pass reading the wrong faces' normals passes the block tests (both
+sides run it) and fails 13 analytic geometry tests.

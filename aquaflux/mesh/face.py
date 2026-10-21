@@ -232,7 +232,18 @@ class PolygonFaceGeometry(FaceGeometryScheme):
 
     Gives the vector-area unit normal and physical area ``|S|`` for any polygon, warped or
     not, with a vertex-order-independent centroid.
+
+    Attributes
+    ----------
+    block : int
+        Face-node incidences per block in :meth:`centre_fan`. Its triangles are formed and summed
+        into the faces a block at a time (``FaceNodeConnectivity.reduce_in_blocks``), so its
+        working memory is set by the block, not by the mesh: formed all at once, each of the
+        triangle's corners, directed area and weighted centroid is a buffer of three numbers per
+        incidence. Smaller blocks take more, shorter passes.
     """
+
+    block: int = eqx.field(default=2**18, static=True)
 
     def unoriented_geometry(
         self,
@@ -274,6 +285,7 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         node_coords: jnp.ndarray,
         face_nodes: FaceNodeConnectivity,
         apex: jnp.ndarray | None = None,
+        incidences: jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """The centre-fan triangles themselves, one per face-node incidence.
 
@@ -289,16 +301,21 @@ class PolygonFaceGeometry(FaceGeometryScheme):
             The face→node gather/reduce operators.
         apex : jnp.ndarray, optional
             Per-face apex, shape ``(n_faces, 3)``; defaults to each face's vertex mean.
+        incidences : jnp.ndarray of int, optional
+            The incidences whose triangles to form, shape ``(n,)``; every one by default.
 
         Returns
         -------
-        (apex, start, end) : tuple of jnp.ndarray, each shape ``(n_incidences, 3)``
+        (apex, start, end) : tuple of jnp.ndarray, each shape ``(n_incidences, 3)`` (or ``(n, 3)``)
             The apex of each triangle, and the start and end of its perimeter edge.
         """
-        start = face_nodes.gather_node_coords(node_coords)
-        end = face_nodes.perimeter_next(start)
-        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords)
-        return centre[face_nodes.face_of_incidence], start, end
+        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords, self.block)
+        if incidences is None:
+            start = face_nodes.gather_node_coords(node_coords)
+            return centre[face_nodes.face_of_incidence], start, face_nodes.perimeter_next(start)
+        start = node_coords[face_nodes.face_node_indices[incidences]]
+        end = node_coords[face_nodes.face_node_indices[face_nodes.next_incidence[incidences]]]
+        return centre[face_nodes.face_of_incidence[incidences]], start, end
 
     def centre_fan(
         self,
@@ -337,22 +354,32 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         area-weighted centroid. ``total_triangle_area`` keeps the unsigned sum, purely for the
         planarity diagnostic.
         """
-        pa, pb, pc = self.fan_triangles(node_coords, face_nodes, apex)
-        directed = 0.5 * jnp.cross(pb - pa, pc - pa, axis=-1)  # (n_triangles, 3)
-        tri_centroid = (pa + pb + pc) / 3.0
+        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords, self.block)
 
-        vector_area = face_nodes.reduce_to_faces(directed)  # S
+        def triangles(incidences):
+            pa, pb, pc = self.fan_triangles(node_coords, face_nodes, centre, incidences)
+            return pa, pb, pc, 0.5 * jnp.cross(pb - pa, pc - pa, axis=-1)  # directed area d_i
+
+        def areas(incidences):
+            directed = triangles(incidences)[3]
+            return directed, norm(directed)
+
+        # Two passes over the triangles, a block at a time: the centroid's weights need the
+        # normal, which needs every triangle of the face first.
+        vector_area, total_tri_area = face_nodes.reduce_in_blocks(areas, self.block)  # S, sum|d_i|
         area = norm(vector_area)  # |S|
         normal = _safe_unit(vector_area)
-        # Signed projected area of each fan triangle onto the (unit) face normal. Summed per face
-        # this is exactly |S|, so it is the correct area-weight — and it is negative for a
-        # reflex-vertex triangle, which the unsigned |d_i| would wrongly add.
-        signed = dot(directed, normal[face_nodes.face_of_incidence])
-        safe_area = jnp.where(area > 0.0, area, 1.0)[
-            :, None
-        ]  # degenerate face -> 0 centroid, no NaN
-        centroid = face_nodes.reduce_to_faces(scale(tri_centroid, signed)) / safe_area
-        total_tri_area = face_nodes.reduce_to_faces(norm(directed))
+
+        def weighted_centroids(incidences):
+            pa, pb, pc, directed = triangles(incidences)
+            # Signed projected area of each fan triangle onto the (unit) face normal. Summed per
+            # face this is exactly |S|, so it is the correct area-weight — and it is negative for
+            # a reflex-vertex triangle, which the unsigned |d_i| would wrongly add.
+            signed = dot(directed, normal[face_nodes.face_of_incidence[incidences]])
+            return scale((pa + pb + pc) / 3.0, signed)
+
+        safe_area = jnp.where(area > 0.0, area, 1.0)[:, None]  # degenerate face -> 0, no NaN
+        centroid = face_nodes.reduce_in_blocks(weighted_centroids, self.block) / safe_area
         return area, centroid, normal, total_tri_area
 
 
