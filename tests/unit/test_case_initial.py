@@ -27,10 +27,9 @@ from aquaflux.case.initial import starting_arguments
 from aquaflux.case.restart_file import (
     RestartHeader,
     checkpoint_writer,
-    mesh_digest,
     read_restart,
 )
-from aquaflux.mesh import permute_cells
+from aquaflux.mesh import mesh_digest, permute_cells
 from aquaflux.solve import Resumption, StateCheckpointer, StepReport
 
 

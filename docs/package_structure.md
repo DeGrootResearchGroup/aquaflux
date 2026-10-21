@@ -67,9 +67,11 @@ cfd/                                  # repo root
 │   │   ├── reorder.py                #   cell renumbering: permute_cells() (canonical P·A·Pᵀ) + CellReordering → Identity/ReverseCuthillMcKee/Random (RCM protects the AMG coarse space on large meshes)
 │   │   ├── graph.py                  #   cell↔cell adjacency (build-time): cell_adjacency_coo() (SciPy COO, for RCM) / cell_adjacency_csr() (CSR arrays, for partitioners)
 │   │   ├── structured.py             #   structured_grid_2d() / structured_grid_3d() / graded_nodes(): clean orthogonal quad/hex grids (interior-node skew for order studies lives in tests/support/meshes.py)
+│   │   ├── digest.py                 #   mesh_digest(mesh): one digest for one mesh, wherever it is read (checkpoints, .aqmesh headers)
 │   │   └── collapse.py               #   collapse_extruded_direction(): one-cell-thick extruded 3D mesh → genuine 2D Mesh (used by the OpenFOAM reader for empty-patch 2D cases)
 │   │
 │   ├── io/                           # mesh import (file formats → Mesh) and field output; depends on mesh, never the reverse
+│   │   ├── aqmesh/                   #   aquaflux's own mesh file (.aqmesh): write_aqmesh / read_aqmesh / read_aqmesh_header, read back exactly
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   ├── cell_fields.py            #   as_cell_values(): the conversion + per-cell length check every field writer makes
 │   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)

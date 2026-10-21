@@ -72,6 +72,9 @@ one form each, so they need no `kind`, and the top level is the case itself.
 
 **`mesh`** — where the mesh comes from, read or generated:
 
+- {class}`~aquaflux.case.AquafluxMesh` reads aquaflux's own mesh file (`.aqmesh`; see
+  [the mesh](mesh.md)), exactly as it was written; a relative `path` is taken from the directory the
+  case file sits in.
 - {class}`~aquaflux.case.OpenFOAMMesh` reads an OpenFOAM polyMesh, or a case directory holding
   `constant/polyMesh`; a relative `path` is taken from the directory the case file sits in. A
   case one cell thick between `empty` patches reads as a two-dimensional mesh, and those patches
