@@ -259,12 +259,14 @@ def test_help_text_is_plain():
 
 
 def test_a_list_of_fixed_choices_is_picked_from_its_choices():
-    document = read_case_document(
-        REPO / "validation" / "turbulent_channel" / "cases" / "re20000.yaml"
-    )
-    row = _rows(document)[("mesh", "periodic")]
+    # No case-file field is a list of fixed choices, so a schema of one such field: a tuple of
+    # Literal values, as the solver prints it.
+    axes = {"type": "list", "of": [{"type": "choice", "values": ["x", "y"]}]}
+    field = {"name": "axes", "accepts": [axes], "required": False, "doc": "", "default": []}
+    schema = CaseSchema({"root": "Probe", "kinds": {"Probe": {"summary": "", "fields": [field]}}})
+    (row,) = form_sections(schema, {"axes": ["x"]})[0]["rows"]
     assert row.widget == "choices" and row.value == ["x"]
-    assert [item["value"] for item in row.items] == ["x"]
+    assert [item["value"] for item in row.items] == ["x", "y"]
 
 
 def test_a_group_says_what_is_set_inside_it_so_it_can_stay_folded():
