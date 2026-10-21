@@ -648,3 +648,34 @@ bounds or the competition between neighbouring faces does is not distinguished b
 hold most of the worst triangulation-volume dependence (39–89 %)** and much of the worst non-convexity, so
 sliding boundary vertices along the drawing is a lever for those, on curved walls (the L's walls are flat
 and its boundary faces exactly so); on the L the cut pieces hold the worst non-convexity.
+
+## 2026-10-20 — what holds the worst all-free faces: the per-cell convexity bound
+
+`validation/meshing_dual/worst_face_limits.py` (base `6532fa0f`), harness duals (unprojected, one patch,
+feature angle 45 deg, moved = `vertex_cell >= 0`), macOS arm64, one run per arm. Tracked faces: the
+interior faces in the shipped pass's worst 1 % by warp whose every vertex is free (L 0.01: 106, start
+median 0.075; Sozzi 0.01: 477, start median 0.083). Bounds loosened by setting their column to infinity
+(positive volume always kept). Tracked warp median / max, share halved against the shipped pass, then
+total warp, worst non-convexity, concave cells, worst interior non-orthogonality, time:
+
+| arm | L | Sozzi |
+|---|---|---|
+| shipped | .035 / .117, 0 %; 3.44, .312, 28, 43.3, 42 s | .073 / .327, 0 %; 74.5, .281, 58, 46.1, 131 s |
+| no convexity bound | .024 / .117, 27 %; 2.90, .312, 27, 46.1, 20 s | .008 / .321, 85 %; 58.1, .280, 48, 47.8, 30 s |
+| no concavity bound | .024 / .102, 34 %; 2.23, .312, 68, 43.2, 14 s | .039 / .169, 51 %; 74.5, .282, 105, 47.7, 17 s |
+| no non-orthogonality bound | identical to shipped | identical to shipped |
+| no skewness bound | .026 / .117, 27 %; 3.05, .249, 27, 43.3 (skew 1.57), 24 s | ≈ shipped (skew 2.07) |
+| no quality bound | .005 / .039, 82 %; 0.63, 9.04, 109, 179.3, 10 s | .004 / .038, 100 %; 52.8, 1.93, 224, 179.4, 21 s |
+| shipped, tight stop (1e-6, 1000 it) | .032 / .117, 10 %; 3.16, .312, 29, 46.2, 1171 s (cap) | .065 / .327, 16 %; 69.1, .281, 73, 47.8, 3051 s |
+| no quality bound, tight stop | .004 / .024, 95 %; 0.34, 25.6, 155, 178.7, 39 s | .002 / .023, 100 %; 51.9, 2.43, 320, 179.0, 137 s |
+
+Starting worsts: L non-convexity .349, concave 57, non-orth 46.2; Sozzi .331, 309, 47.8. Reading: the
+unconstrained optimum flattens the tracked faces (so neighbour competition does not hold them), and a
+much tighter stop barely helps (so the stopping test does not); the bounds hold them, chiefly **the
+per-cell convexity bound** (no cell less convex than it started), with the concavity bound and on the
+L the skewness bound also binding; the non-orthogonality bound never binds on these two. Without the
+convexity bound every reported measure stays within its starting worst (non-convexity max .312 / .280,
+non-orthogonality 46.1 / 47.8), concave cells fall, total warp falls 16–22 % and the pass is 2–4x faster.
+Without the concavity bound concave cells more than double. Not measured: a convexity bound against the
+start's worst cell (the analogue of the face bounds) as such; cylinder and sleeve; the effect on
+unit-test fixtures (the L4 fixture's convexity bound bites, `test_meshing_planarize.py`).

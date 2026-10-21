@@ -486,9 +486,12 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
   building: a step moves 85–100 % of the cells (Kuhn n = 6 dual, every trial) — log.
 - **Where the worst remain (log 2026-10-20)**: most of the worst 1 % interior warp is on faces whose every
   vertex was free (48–68 % on the four Netgen duals, the worst face on Sozzi and the cylinder), so fixed
-  vertices are not what holds them (guard or neighbour competition — not distinguished); wall cells hold
-  39–89 % of the worst triangulation-volume dependence. **Open**: sliding boundary vertices along the CAD
-  surface (for the wall cells, on curved walls), what limits the free faces, and cheaper
+  vertices are not what holds them: **the per-cell convexity bound does** (log, 2026-10-20,
+  `worst_face_limits.py`: unbounded they flatten, a tighter stop barely helps; without that bound, L and
+  Sozzi stay within every starting worst, with fewer concave cells, 16–22 % less warp, 2–4x faster); wall
+  cells hold 39–89 % of the worst triangulation-volume dependence. **Open**: sliding boundary vertices along the CAD
+  surface (for the wall cells, on curved walls), a convexity bound against the start's worst cell in place
+  of each cell's own, and cheaper
   conjugate-gradient products. Pinned in
   `tests/unit/test_meshing_planarize.py` (derivatives against finite differences of the guard's warp,
   the preconditioner against explicit frozen-plane blocks); harness `validation/meshing_dual/planarization.py`.
