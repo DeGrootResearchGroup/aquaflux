@@ -18,6 +18,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -93,7 +94,13 @@ class NetgenProcess:
     python: str = sys.executable
 
     def triangulate(
-        self, shape, *, max_size: float, min_size: float = 0.0, grading: float = 0.3
+        self,
+        shape,
+        *,
+        max_size: float,
+        min_size: float = 0.0,
+        grading: float = 0.3,
+        edge_divisions: Mapping[int, int] | None = None,
     ) -> SurfaceTriangulation:
         """Triangulate the faces of the one solid in a BREP or STEP file.
 
@@ -107,6 +114,12 @@ class NetgenProcess:
         grading : float
             How fast the size may change between neighbouring triangles, in ``(0, 1]``; Netgen's own
             default is ``0.3``, and a smaller value grades more gently.
+        edge_divisions : mapping of {int: int}, optional
+            Edges to divide into exactly that many segments of equal length, in place of the
+            division the sizes would give; the faces either side meet them at those points. An edge
+            is numbered by its place among the solid's edges, each counted once where first met in
+            a topology explorer's order -- the order :meth:`~aquaflux.io.cad.CadModel.topology`
+            numbers them in.
 
         Returns
         -------
@@ -123,6 +136,9 @@ class NetgenProcess:
             "max_size": float(max_size),
             "min_size": float(min_size),
             "grading": float(grading),
+            "edge_divisions": [
+                [int(edge), int(segments)] for edge, segments in (edge_divisions or {}).items()
+            ],
         }
         result = self._run(request, {})
         return SurfaceTriangulation(result["points"], result["triangles"], result["face"])

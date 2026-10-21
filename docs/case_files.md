@@ -161,7 +161,9 @@ one form each, so they need no `kind`, and the top level is the case itself.
   ```
 
   Pipes are found by themselves: a cylindrical face the fluid fills, with nothing else inside it,
-  whose two rims have equal counts (a multiple of four). Its wall is meshed as a structured grid,
+  bounded by two rims. Both rims are divided alike, into a multiple of four, so that the O-grid
+  can join them at every mesh size: where Netgen's own division would not do, the region is
+  triangulated again with the rims' division set. Its wall is meshed as a structured grid,
   layered if its patch is, and its core -- what the layers leave -- is filled with a structured
   O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core, whose sides may bow
   outward (`core_bow`) to even out its corners, and a shell out to the layers. Where a pipe opens
