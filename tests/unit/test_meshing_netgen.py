@@ -17,11 +17,15 @@ import pytest
 from aquaflux.meshing import (
     MeshingError,
     NetgenProcess,
+    Polygons,
+    PrismLayers,
+    PyramidCaps,
     check_closed_surface,
+    element_mesh,
     netgen_available,
 )
 
-from tests.support.meshes import box_surface
+from tests.support.meshes import box_surface, voxel_surface
 
 pytestmark = pytest.mark.skipif(not netgen_available(), reason="netgen-mesher is not installed")
 
@@ -173,6 +177,41 @@ def test_the_fill_meshes_the_gap_between_two_surfaces():
     volumes = _signed_volumes(filled.points, filled.tetrahedra)
     assert np.all(volumes > 0.0)
     np.testing.assert_allclose(volumes.sum(), 1.0 - 0.3**3, rtol=1e-12)
+
+
+@pytest.mark.parametrize("min_top_share", [0.0, None])
+def test_capped_hexahedral_layers_meeting_at_an_edge_leave_a_surface_netgen_fills(min_top_share):
+    # A cube of quadrilaterals an eighth wide, hexahedral layers almost as thick: where two walls
+    # meet, the top face beside the edge collapses to a sliver, and the pyramid capping it crosses
+    # the other wall's top. Netgen stops on the overlapping surface; with the top's edges kept to a
+    # share of the wall's (the default) it fills it, and the cells close and fill the cube.
+    from aquaflux.mesh import closed_cell_residual
+
+    points, quads = voxel_surface([(0, 0, 0)], 8)
+    share = {} if min_top_share is None else {"min_top_share": min_top_share}
+    layers = PrismLayers(first_height=0.06125, growth=1.2, count=1, **share)
+    grown = layers.extrude(points, Polygons(quads=quads), np.ones(len(quads), dtype=bool))
+    caps = PyramidCaps.on(grown.points, grown.inner.quads[:, ::-1], 0.25)
+    points = np.vstack([grown.points, caps.apexes])
+    used = np.unique(caps.sides)
+    position = np.full(points.shape[0], -1)
+    position[used] = np.arange(used.size)
+    if min_top_share == 0.0:
+        with pytest.raises(MeshingError, match="boundary mesh is overlapping"):
+            NetgenProcess().fill(points[used], position[caps.sides], max_size=0.125)
+        return
+    filled = NetgenProcess().fill(points[used], position[caps.sides], max_size=0.125)
+    back = np.concatenate([used, points.shape[0] + np.arange(filled.points.shape[0] - used.size)])
+    mesh = element_mesh(
+        np.vstack([points, filled.points[used.size :]]),
+        tetrahedra=back[filled.tetrahedra],
+        hexahedra=grown.hexahedra,
+        pyramids=caps.pyramids,
+    )
+    assert float(np.max(np.abs(np.asarray(closed_cell_residual(mesh))))) < 1e-14
+    volume = np.asarray(mesh.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    assert volume.sum() == pytest.approx(1.0, rel=1e-12)
 
 
 def test_a_fill_of_the_wrong_region_is_refused():

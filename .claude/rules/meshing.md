@@ -138,6 +138,8 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
   once (`build_traced` passes one `MeshGeometry` down) it was the primal's `Mesh.geometry`, four times,
   4.71 GiB. Netgen's child peaks apart (1.44 GiB at 660k). Measured by
   `validation/meshing_dual/memory_by_stage.py` (log, "Memory by stage").
+  With mapped, layered walls (since #790's fix): 671030 cells at maxh 0.0025, peak 3.21 GiB; 1001489 at
+  0.002, 4.80 GiB (one run each, 2026-10-21; log, "the fill's overlap at maxh 0.0025").
   - ⚠️ **On macOS read footprints with `MallocLargeCache=0`**: libmalloc keeps freed large blocks and
     charges them to the process until a different-sized allocation lands on top, so a default run reads
     up to ~40 % above what is live (266k cells: 2.40 against 1.72 GiB) and "held" stages look large.
@@ -202,7 +204,7 @@ or OCP.
 
 ## Prism layers (`layers.py`) — built, on triangles and quadrilaterals
 
-`PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8).extrude(points,
+`PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8, min_top_share=0.1).extrude(points,
 faces: Polygons, layered) -> LayerExtrusion(points, prisms, hexahedra, inner, walls, sides, side_face,
 columns)`: one extruder for both kinds, prisms over triangles and hexahedra over quadrilaterals, layer by
 layer in the surface's order; `inner` and `walls` are `Polygons`; `columns` each moved point then its
@@ -225,10 +227,26 @@ one, so a face is never read with a missing corner; a per-face quantity runs ove
   face and its triangles are drawn in to the layers' top (`walls`; `sides` are the boundary quads).
   Deferred: several normals at a sharp convex ridge (one averaged normal shears the prisms there).
 - **Thickness**: limited to `gap_share` of the distance along the direction to the surface (ray cast within
-  2.5 thicknesses), then halved at the points of any inverted prism or turned drawn-in triangle until none
+  2.5 thicknesses), then halved at the points of any inverted prism or turned drawn-in triangle, **or at
+  both ends of any edge of the layers' top shorter than `min_top_share` of the wall edge under it**, until none
   is (`max_halvings`), and **tapered**: no point more than 1.5× its thinnest neighbour, iterated to a fixed
   point. ⚠️ A diffusive smoothing (10 sweeps per pass) thinned a whole slab's middle to 30 % of the gap
   limit from its edges' halving; the ratio limit is local.
+- ⚠️ **Where walls meet at under 180° (seen from the fluid) the top collapses** (#790): the edge's column
+  moves along the bisector, so the top face beside it is narrower than its wall face by about the
+  thickness, and a sliver once the thickness nears the wall's spacing (Sozzi at maxh 0.0025: the lamp's
+  first quadrilateral at the end wall 2.5 mm → 0.032 mm). A pyramid cap on a sliver stands through the
+  other wall's top -- under a fixed `cap_height` share (sized by the long first edge) Netgen's fill stopped,
+  "boundary mesh is overlapping"; the default `ClearedCaps`' fold limit instead shrinks it to ~10 µm (it
+  meshes, smallest cell 25× smaller than with the floor). Hence
+  `min_top_share`: 0.1 sits under the uniform narrowing inside a pipe whose layers take `gap_share`
+  (`1 − 2·gap_share` = 0.2), so only collapse is thinned (on Sozzi at 0.0025 one ring of 23 quadrilaterals,
+  halved once; 222 of 71732 columns thinner with the taper round it).
+  The cause is the extruder's, not the caps': with triangle walls the junction's top faces carry prisms and
+  nothing is capped, so that arm meshed. Pinned by `test_a_top_face_collapsed_where_walls_meet_is_thinned_until_its_caps_clear_the_fill`
+  and the Netgen cube `test_capped_hexahedral_layers_meeting_at_an_edge_leave_a_surface_netgen_fills`.
+  Open: a drawn-in bare face can shrink the same way (not checked); smoothing the columns' directions
+  near the edge would spread the shrink instead of thinning (not built). Log: "the fill's overlap at maxh 0.0025".
 - **The fill gets only the layers' top plus the bare triangles** (`inner`); `CadMesher._filled` hands Netgen
   just the points that surface uses (Netgen renumbers otherwise) and maps the tets back.
 - ⚠️ **Projection must follow the layers** (`_Columns`): a wall face's centroid moves onto the CAD by up to the
@@ -315,7 +333,7 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   second time** with `NetgenProcess.triangulate(edge_divisions=)` (only when something is asked) and runs
   `find_pipes` on that; `patch_of_face` comes from the first triangulation (per CAD face, unchanged).
   Both Sozzi pipes cored at every maxh 0.02-0.0035 (log, "Pipe rims divided alike"); at 0.0025 the
-  rims already fit (24/24) and the mesh waits on #790's fill failure. Pinned by
+  rims already fit (24/24); the fill's failure there was #790 (layers, below). Pinned by
   `test_meshing_pipes.py` (the counts, a two-edge rim, the second triangulation) and
   `test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes`.
 - **`MappedSurface.grids`**: each equal-rimmed band's points as a grid `(rows + 1, n)`, rows round it,

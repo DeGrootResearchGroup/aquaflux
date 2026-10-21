@@ -514,3 +514,20 @@ def box_surface(lo, hi, n, *, into_box, offset=0):
                         ring = ring[::-1]
                     triangles += [ring[:3], [ring[0], ring[2], ring[3]]]
     return np.array(points), np.array(triangles)
+
+
+def crossing_edges(points, triangles) -> int:
+    """How many times an edge of a triangle surface passes through a triangle not at its ends --
+    zero on a surface that does not cross itself. Every edge against every triangle, so for a small
+    surface."""
+    from aquaflux.meshing.regions import ray_hits
+
+    points = np.asarray(points, dtype=np.float64)
+    triangles = np.asarray(triangles, dtype=np.int64)
+    edges = np.unique(np.sort(triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1), axis=0)
+    count = 0
+    for a, b in edges:
+        apart = ~np.any((triangles == a) | (triangles == b), axis=1)
+        hits = ray_hits(points[a], points[b] - points[a], points[triangles[apart]])
+        count += int(np.count_nonzero(hits < 1.0))
+    return count
