@@ -735,3 +735,40 @@ def test_the_planarizer_in_the_mesher_leaves_the_layers_at_their_heights_from_th
     on_boundary = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in boundary]))
     assert not np.any(moved[on_boundary])
     assert np.all(np.asarray(flat.geometry().cell.volume) > 0.0)
+
+
+def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path):
+    # At maxh 0.0035 Netgen divides every rim of both pipes into 17 (2026-10-21), which no O-grid
+    # joins. Asked for the rim edges' divisions -- numbered as CadModel.topology numbers edges,
+    # the riser's inlet rim drawn as two edges -- it gives both rims 20 points, equally spaced: by
+    # arc length to 1.0002 on the riser's saddle, whose curve parameter is not its arc length (equal
+    # steps in the parameter give 1.004).
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.meshing.mapped import _loops
+    from aquaflux.meshing.pipes import find_pipes, rim_divisions
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    topology = model.topology(water)
+    brep = model.write_brep(water, tmp_path / "water.brep")
+    netgen = NetgenProcess()
+    candidates = np.arange(topology.n_faces)
+    own = netgen.triangulate(brep, max_size=0.0035)
+    assert find_pipes(topology, own.points, own.triangles, own.face, candidates)[0] == []
+    divisions = rim_divisions(topology, own.triangles, own.face, candidates)
+    assert sorted(divisions.values()) == [5, 15, 20, 20, 20]  # the inlet rim's edges 15 and 5
+    surface = netgen.triangulate(brep, max_size=0.0035, edge_divisions=divisions)
+    pipes, _ = find_pipes(topology, surface.points, surface.triangles, surface.face, candidates)
+    assert len(pipes) == 2
+    for pipe in pipes:
+        for loop in _loops(surface.triangles[surface.face == pipe]):
+            assert loop.size == 20
+            step = np.linalg.norm(np.diff(surface.points[np.append(loop, loop[0])], axis=0), axis=1)
+            assert step.max() < 1.001 * step.min()

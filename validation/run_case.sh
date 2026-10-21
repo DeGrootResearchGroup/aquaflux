@@ -345,7 +345,7 @@ fi
   # LD_PRELOAD and GLIBC_TUNABLES are the allocator's other two settings beside MALLOC_*: a replacement
   # allocator moves a standalone program's timing by up to a third (its large temporaries stop being
   # mapped afresh every call), so a timing taken under one must say so.
-  env | grep -E '^((BFS3D|PITZ|UV|AQUAFLUX|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET|SOZZI|RC|REF|BV|BP|BL|RADIATION|RAY|SLEEVE|CHANNEL|TRACED|VBR|REFIT|REPLAY|FUSION|TUBULAR|TORUS|MALLOC|ELBOW|XLA|MESHING)_|(LD_PRELOAD|GLIBC_TUNABLES|MallocLargeCache)(=|$))' | sort | sed 's/^/env: /' || true
+  env | grep -E '^((BFS3D|PITZ|UV|AQUAFLUX|PROBE|PROFILE|CONSISTENCY|FLOW|TAPER|LAM|TET|SOZZI|RC|REF|BV|BP|BL|RADIATION|RAY|SLEEVE|CHANNEL|TRACED|VBR|REFIT|REPLAY|FUSION|TUBULAR|TORUS|MALLOC|ELBOW|XLA|MESHING|NETGEN)_|(LD_PRELOAD|GLIBC_TUNABLES|MallocLargeCache)(=|$))' | sort | sed 's/^/env: /' || true
 } > "$RUN_FILE"
 
 echo "launched pid $PID"

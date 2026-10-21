@@ -23,7 +23,7 @@ from aquaflux.meshing import (
     SurfaceTriangulation,
     element_mesh,
 )
-from aquaflux.meshing.pipes import find_pipes
+from aquaflux.meshing.pipes import find_pipes, rim_divisions
 
 N, RADIUS, HEIGHT, ROWS = 12, 4.0, 10.0, 4
 
@@ -319,3 +319,74 @@ def test_a_pipe_open_at_both_ends_is_meshed_as_hexahedra_throughout_without_tetr
             np.asarray(geometry.face.area)[np.asarray(mesh.face_patches.indices(name))].sum()
         )
         assert _polygon_prism_volume() / HEIGHT < area <= np.pi * RADIUS**2 * (1 + 1e-12)
+
+
+@pytest.mark.parametrize(
+    ("bottom", "top", "count"), [(12, 13, 16), (17, 17, 20), (13, 12, 16), (11, 8, 12)]
+)
+def test_a_candidates_rims_are_both_asked_for_the_larger_count_rounded_up_to_four(
+    bottom, top, count
+):
+    # Netgen's rim counts as on Sozzi (12 and 13 at maxh 0.005, 17 and 17 at 0.0035): an O-grid
+    # needs one count on both rims, a multiple of four, and never coarser than Netgen chose.
+    _, triangles, face = _tube_surface(bottom=bottom, top=top)
+    divisions = rim_divisions(_tube_topology(), triangles, face, np.arange(3))
+    assert divisions == {0: count, 1: count}
+
+
+def test_rims_an_o_grid_already_joins_are_left_as_netgen_divided_them():
+    _, triangles, face = _tube_surface(bottom=16, top=16)
+    assert rim_divisions(_tube_topology(), triangles, face, np.arange(3)) == {}
+
+
+def test_a_cylinder_the_fluid_is_outside_is_not_asked_for_rim_divisions():
+    wall = CylinderFace(np.zeros(3), np.array([0.0, 0.0, 1.0]), RADIUS, (0.0, HEIGHT), 2 * np.pi,
+                        solid_inside=False)  # fmt: skip
+    _, triangles, face = _tube_surface(bottom=12, top=13)
+    assert rim_divisions(_tube_topology(wall), triangles, face, np.arange(3)) == {}
+
+
+def test_a_rim_drawn_in_two_edges_shares_its_count_between_them_by_length():
+    # As Sozzi's inlet rim: three quarters of the bottom circle is one edge, the last quarter
+    # another, so sixteen segments go twelve and four.
+    topology = _tube_topology()
+    circle = 2 * np.pi * RADIUS
+    topology = CadTopology(
+        faces=topology.faces,
+        face_area=topology.face_area,
+        vertices=np.array([[RADIUS, 0.0, 0.0], [RADIUS, 0.0, HEIGHT], [0.0, -RADIUS, 0.0]]),
+        edge_vertices=np.array([[0, 2], [2, 0], [1, 1], [0, 1]]),
+        edge_length=np.array([0.75 * circle, 0.25 * circle, circle, HEIGHT]),
+        edge_face_offsets=np.array([0, 2, 4, 6, 7]),
+        edge_face_indices=np.array([0, 1, 0, 1, 0, 2, 0]),
+        edge_angle=np.array([np.pi / 2, np.pi / 2, np.pi / 2, np.nan]),
+        seam=np.array([False, False, False, True]),
+    )
+    _, triangles, face = _tube_surface(bottom=12, top=13)
+    assert rim_divisions(topology, triangles, face, np.arange(3)) == {0: 12, 1: 4, 2: 16}
+
+
+class _RimsAsAsked(_NoFill):
+    """Netgen's triangulation of the cylinder with rims of 12 and 13 points, or as many as asked."""
+
+    def __init__(self) -> None:
+        self.asked = []
+
+    def triangulate(self, shape, edge_divisions=None, **options):
+        self.asked.append(edge_divisions)
+        if edge_divisions is None:
+            return SurfaceTriangulation(*_tube_surface(bottom=12, top=13, rows=8))
+        bottom, top = edge_divisions[0], edge_divisions[1]
+        return SurfaceTriangulation(*_tube_surface(bottom=bottom, top=top, rows=8))
+
+
+def test_a_pipe_whose_rims_netgen_divided_unequally_is_triangulated_again_and_cored():
+    # Without the second triangulation the cylinder would be refused as a pipe and its core left
+    # to tetrahedra, which this Netgen refuses to make.
+    netgen = _RimsAsAsked()
+    mesher = CadMesher(max_size=1.0, feature_angle=np.radians(45), netgen=netgen)
+    patches = {"inlet": FacesNear(((0.0, 0.0, 0.0),)), "outlet": FacesNear(((0.0, 0.0, HEIGHT),))}
+    mesh = mesher.mesh(_Tube(), CadRegion(("tube",)), patches)
+    assert netgen.asked == [None, {0: 16, 1: 16}]
+    scale = float(np.max(np.asarray(mesh.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale

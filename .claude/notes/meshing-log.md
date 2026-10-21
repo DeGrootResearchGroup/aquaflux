@@ -504,8 +504,9 @@ unless said.
 **Netgen's edge points, not ours.** Probed whether Netgen meshes faces through edge points we place:
 `GenerateMesh(perfstepsend=MESHEDGES)` then a second `GenerateMesh(mesh=..., perfstepsstart=...)` with
 `perfstepsstart=MeshingStep.MESHSURFACE` meshes nothing (0 triangles); the integer `3` resumes at the
-surface step and keeps the 72 edge segments. But an edge's count cannot be set: per-edge `maxh = L/n`
-is an upper bound only (asking a cylinder's rims for 20, 37, 50 segments gave 31, 37, 49). So the mapped
+surface step and keeps the 72 edge segments. Per-edge `maxh = L/n` does not set an edge's count, being
+an upper bound only (asking a cylinder's rims for 20, 37, 50 segments gave 31, 37, 49); `Edge.partition`
+does (2026-10-21, "Pipe rims divided alike"), used for pipe rims only. So the mapped
 grid takes Netgen's own edge points from the face's triangles' boundary, and joins opposite sides of
 different counts through one strip of triangles. The kernel's (u, v) evaluation planned for the grid is
 not needed: points are interpolated in space and moved onto the face by `CadModel.project`.
@@ -954,3 +955,42 @@ Costs: a dense solve on every boundary vertex is out (Sozzi ~1e5); greedy select
 centres or compactly supported (Wendland) functions with a sparse solve; evaluating 2M points is one
 batched product; large motions invert cells, so a quality guard (`MeshQuality`) bounds it. For 1-2 it is
 JAX and solver-side, so a generic module (likely `aquaflux/mesh/`), not `meshing/`.
+
+## 2026-10-21 — Pipe rims divided alike (#789)
+
+macOS arm64, netgen-mesher 6.2.2608 from a scratch venv (`NetgenProcess(python=)`), one run per arm,
+shared machine (another session meshing), so seconds are rough. Configuration:
+`validation/meshing_dual/pipe_rims_sozzi.py` -- `mapped_layers_sozzi.py`'s settings (layers 0.5 mm x 1.2
+x 5 on every wall, the lamp mapped, `pipes` unset so every pipe found is cored, no core, no
+planarizer). "Cored" read from the mesh: every cell within 2 mm of the pipe's axis, away from
+its junction, a hexahedron. Before = `main` at ddfeb518; after = this change on ddfeb518 -- both
+under the caps of that commit (`PyramidCaps`, height 0.25 of the first edge), before #792 made the
+room-sized caps the default; cell counts and smallest volumes are of that cap rule.
+
+| maxh | Netgen's rims (riser; outlet) | before: cored, cells, closure | after: cored, cells, closure |
+|---|---|---|---|
+| 0.02 | 12/12; 12/12 | 2 of 2, 49494, 4.2e-16 | 2 of 2, 49494, 4.2e-16 (nothing asked) |
+| 0.01 | 12/12; 12/12 | 2 of 2, 61903, 7.1e-16 | 2 of 2, 61903, 7.1e-16 (nothing asked) |
+| 0.005 | 12/13; 12/12 | 1 of 2 (riser tets), 131093, 7.2e-16 | 2 of 2 (rims 16), 145676, 7.2e-16 |
+| 0.0035 | 17/17; 17/17 | 0 of 2, 266725, 8.8e-16 | 2 of 2 (rims 20), 292145, 6.9e-16 |
+| 0.0025 | 24/24; 24/24 | fill fails (#790) | fill fails (#790); nothing asked, so as before |
+
+Closure is the worst cell's residual over the largest face area. At 0.0025 the rims already take an
+O-grid (`find_pipes` accepts both), so the cores there wait only on #790. Smallest cell volume 0.0035:
+2.41e-11 before, 7.88e-12 after (the junction discs' cap apexes, #785, now present on both pipes); 0.005
+3.75e-11 → 1.87e-11. Cost: one more surface triangulation when something is asked (the Netgen test's
+two triangulations at 0.0035 plus reading the drawing take ~11 s).
+
+How Netgen is told (probed in this session, `NetgenProcess` child): per-edge `maxh` is a bound, but
+netgen.occ's `Edge.partition` sets the division exactly -- the interior points' parameters scaled to
+[0, 1] (raw parameters failed five faces' surface meshing), read only when an `OCCGeometry` is made of
+the shape (set on the geometry's own shape and meshed, it did nothing). Edge numbering: `shape.edges`
+gave 29 entries for Sozzi's 15 edges (once per face); the distinct ones in first-met order matched
+`CadModel.topology`'s all 15 by length and end vertices. Asked 16 per rim at 0.005 and 0.0035 and 0.02,
+Netgen gave exactly 16/16 on both pipes. Rim spacing at 0.0035 with 20 segments: max/min step 1.0002 on
+the riser's saddle placed by arc length, 1.0039 by equal parameter steps (circles 1 + 4e-14 either way).
+
+Rounding rule: `4·ceil(max/4)`, not nearest, so a rim is never coarser than Netgen chose (13 → 16, 17 →
+20). Mutations of the unit tests, each red: no rounding, `round` for `ceil`, equal share across a rim's
+edges, no second triangulation, asking when the rims already fit; of the Netgen test: no second
+`OCCGeometry`, no dedup of the edges, equal parameter steps for arc length.

@@ -153,8 +153,8 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=ClearedCaps(),
 pipe_core=PipeCore(), planarizer=None, core=None, netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
-layered=(), mapped=(), pipes=None) -> Mesh`: `write_brep` → `triangulate` (face-tagged) → pipes found
-(below) → the `mapped` patches' faces and the pipes' remeshed as structured quadrilaterals (below) →
+layered=(), mapped=(), pipes=None) -> Mesh`: `write_brep` → `triangulate` (face-tagged; again with the rims divided
+alike where a pipe candidate's need it) → pipes found (below) → the `mapped` patches' faces and the pipes' remeshed as structured quadrilaterals (below) →
 layers on the `layered` patches (below) → the pipes' cores filled with O-grids, out of the fill (below)
 → every quadrilateral left for the fill
 capped with a `PyramidCaps` pyramid on the fill's side (`caps.capped`: sized by `ClearedCaps`, below, or a fixed share of its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
@@ -257,8 +257,9 @@ not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells a
   **four-sided** (one loop, four points within `corner_tolerance` × extent of the drawing's vertices) --
   a Coons grid of its sides. Anything else (Sozzi's hemispherical lamp tip: one loop, no four corners;
   the vessel's cylinder: three loops, the riser's hole) is refused by name.
-- **Netgen's edge points, kept**: Netgen cannot be told an edge's count (per-edge `maxh` is a bound; log),
-  so the grid's sides are the triangulation's, which the neighbouring faces share. **Unequal opposite
+- **Netgen's edge points, kept**: the grid's sides are the triangulation's, which the neighbouring faces
+  share (per-edge `maxh` is only a bound; an exact count needs `edge_divisions`, below, used for pipe
+  rims only). **Unequal opposite
   sides**: the grid stops a row short and a strip of triangles (`_zipped`, shorter diagonal first) joins it
   to the shorter-counted side; a four-sided face with both pairs unequal is refused.
 - New points are interpolated in space and moved onto the face by the injected `onto` (the mesher's
@@ -306,6 +307,17 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   shell round a lamp). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
   the patches, each face of which must be one (else `ValueError` naming the reason); `()` none.
   `CadMesh.pipes` / `CadMesh.pipe_core` in a case file.
+- **Rims divided alike** (`rim_divisions`, #789): Netgen's rim counts follow the size (Sozzi: 12/13 at
+  maxh 0.005, 17/17 at 0.0035), so a candidate (fluid-filled cylinder, two loops) whose loops differ or
+  are not a multiple of four gets both rims `4·ceil(max/4)` segments -- never coarser than Netgen chose
+  -- shared among a rim's edges by length (largest remainder, ≥ 1 each; Sozzi's inlet rim is two edges,
+  15 + 5); an edge on two candidates' rims takes the larger. `CadMesher.mesh` then triangulates **a
+  second time** with `NetgenProcess.triangulate(edge_divisions=)` (only when something is asked) and runs
+  `find_pipes` on that; `patch_of_face` comes from the first triangulation (per CAD face, unchanged).
+  Both Sozzi pipes cored at every maxh 0.02-0.0035 (log, "Pipe rims divided alike"); at 0.0025 the
+  rims already fit (24/24) and the mesh waits on #790's fill failure. Pinned by
+  `test_meshing_pipes.py` (the counts, a two-edge rim, the second triangulation) and
+  `test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes`.
 - **`MappedSurface.grids`**: each equal-rimmed band's points as a grid `(rows + 1, n)`, rows round it,
   columns joined. ⚠️ **A band's rows flatten within `RIM_ROWS` (2) of a rim that is not flat**: each row
   is the interpolation of the two rims flattened along the axis, plus each rim's bow fading over two rows.
@@ -623,6 +635,16 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
     the `k−1`-th face in OCP's `TopExp_Explorer` order of the same file** — the contract the kernel's face
     IDs meet. Pinned end to end by `test_netgen_numbers_a_written_regions_faces_as_its_topology_does`
     (Sozzi water, `CadModel.write_brep` → Netgen: per-face area, and sampled centroids projected back). `max_size` is Netgen's target, not a bound (edges reach ~1.7x).
+  - **`edge_divisions={edge: segments}`**: those edges divided exactly, at equal arc length, through
+    netgen.occ's `Edge.partition` (`_divide_edges`). ⚠️ Three traps, each silent: the partition is the
+    edge's **interior** points' parameters **scaled to [0, 1]** over its parameter range (raw parameters
+    break the surface mesh); it is read only when an `OCCGeometry` is **made of the shape**, so the child
+    makes a second one after setting it; and `shape.edges` lists an edge once per face it bounds, so an
+    edge's number is its place among the **distinct** edges in first-met order (dedup by `hash` + `==`),
+    which is `CadModel.topology`'s `MapShapes` numbering (all 15 Sozzi edges matched by length and end
+    vertices, 2026-10-21). Keep the `shape.edges` list alive while its edges are used (a temporary
+    segfaulted). Equal arc length matters on the riser's saddle, whose parameter is not arc length (spacing
+    ratio 1.0002 against 1.004 in equal parameter steps).
   - **`fill(points, triangles, max_size=, grading=)`**: tets filling the region a closed, outward-wound
     surface bounds (holes wound into the hole), **keeping the surface exactly**: its points first, at their
     indices and coordinates. This is the conformal gap fill. Tets are returned positively oriented

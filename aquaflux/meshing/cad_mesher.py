@@ -37,7 +37,7 @@ from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
-from .pipes import fill_pipes, find_pipes, pipe_ends
+from .pipes import fill_pipes, find_pipes, pipe_ends, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
 
@@ -239,10 +239,13 @@ class CadMesher:
             they carry hexahedra.
         pipes : sequence of str, or None
             The patches whose faces are pipes: each a cylinder the fluid fills, bounded by two
-            loops of equal counts (a multiple of four), with nothing else inside it. A pipe's face
-            is meshed as a structured grid (as ``mapped``), layered if its patch is, and its core
-            filled with a structured O-grid (:attr:`pipe_core`; see
-            :mod:`~aquaflux.meshing.pipes`). Unset, every face that is one; empty, none.
+            loops (its rims), with nothing else inside it. A pipe's face is meshed as a structured
+            grid (as ``mapped``), layered if its patch is, and its core filled with a structured
+            O-grid (:attr:`pipe_core`; see :mod:`~aquaflux.meshing.pipes`). Where Netgen's
+            division of a candidate's rims would not take an O-grid (two counts, or one not a
+            multiple of four), the region is triangulated again with both rims divided alike,
+            into the larger count rounded up to a multiple of four. Unset, every face that is one;
+            empty, none.
 
         Returns
         -------
@@ -279,13 +282,17 @@ class CadMesher:
                 )
         topology = model.topology(region)
         with tempfile.TemporaryDirectory() as directory:
-            surface = self.netgen.triangulate(
-                model.write_brep(region, Path(directory) / "region.brep"),
-                max_size=self.max_size,
-                **self._netgen_options(min_size=self.min_size),
+            brep = model.write_brep(region, Path(directory) / "region.brep")
+            surface = self._triangulated(brep)
+            patch_of_face = _patch_of_face(
+                model, region, surface, topology.n_faces, patches, others
             )
-        patch_of_face = _patch_of_face(model, region, surface, topology.n_faces, patches, others)
-        pipe_faces = _pipe_faces(topology, surface, patch_of_face, names, named_pipes)
+            candidates = _pipe_candidates(topology, patch_of_face, names, named_pipes)
+            divisions = rim_divisions(topology, surface.triangles, surface.face, candidates)
+            if divisions:
+                # Netgen's own rims would not take an O-grid: triangulate again, rims divided alike.
+                surface = self._triangulated(brep, edge_divisions=divisions)
+        pipe_faces = _pipe_faces(topology, surface, patch_of_face, names, candidates, named_pipes)
         chosen = np.union1d(_faces_of(patch_of_face, names, mapped), pipe_faces)
         walls = self._mapped(model, region, topology, surface, chosen)
         on_layered = np.isin(patch_of_face[walls.face], [names.index(n) for n in layered])
@@ -415,6 +422,12 @@ class CadMesher:
         back = np.concatenate([used, points.shape[0] + np.arange(added.shape[0])])
         return np.vstack([points, added]), back[filled.tetrahedra]
 
+    def _triangulated(self, brep: Path, **extra) -> SurfaceTriangulation:
+        """Netgen's triangulation of the region written to ``brep``."""
+        return self.netgen.triangulate(
+            brep, max_size=self.max_size, **self._netgen_options(min_size=self.min_size, **extra)
+        )
+
     def _netgen_options(self, **extra) -> dict:
         """The Netgen settings that are set, to pass through."""
         options = {"grading": self.grading, **extra}
@@ -466,12 +479,17 @@ def _faces_of(patch_of_face: np.ndarray, names, chosen) -> np.ndarray:
     return np.flatnonzero(np.isin(patch_of_face, [names.index(n) for n in chosen]))
 
 
-def _pipe_faces(topology, surface: SurfaceTriangulation, patch_of_face, names, named) -> np.ndarray:
-    """The pipes' faces: every face that is one, or (``named`` given) those of the patches named,
-    each of which must be one."""
-    candidates = (
-        np.arange(topology.n_faces) if named is None else _faces_of(patch_of_face, names, named)
-    )
+def _pipe_candidates(topology, patch_of_face, names, named) -> np.ndarray:
+    """The faces that may be pipes: every face, or (``named`` given) those of the patches named."""
+    if named is None:
+        return np.arange(topology.n_faces)
+    return _faces_of(patch_of_face, names, named)
+
+
+def _pipe_faces(
+    topology, surface: SurfaceTriangulation, patch_of_face, names, candidates, named
+) -> np.ndarray:
+    """The pipes among ``candidates``; each must be one when ``named`` names their patches."""
     found, refused = find_pipes(
         topology, surface.points, surface.triangles, surface.face, candidates
     )

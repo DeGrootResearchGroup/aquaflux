@@ -30,14 +30,20 @@ def _triangulate(work: Path, request: dict) -> dict[str, np.ndarray]:
 
     Netgen numbers faces in the order a topology explorer visits them in the shape it reads, which is
     the order OCP's explorer visits them in the same file; the returned ``face`` is that order.
-    Triangles are wound outward from the solid.
+    Triangles are wound outward from the solid. The edges in ``edge_divisions`` are divided as
+    :func:`_divide_edges` says.
     """
     from netgen.meshing import MeshingStep
     from netgen.occ import OCCGeometry
 
     geometry = OCCGeometry(request["shape"])
-    if len(geometry.shape.solids) != 1:
-        raise ValueError(f"{request['shape']} holds {len(geometry.shape.solids)} solids, not one")
+    shape = geometry.shape
+    if len(shape.solids) != 1:
+        raise ValueError(f"{request['shape']} holds {len(shape.solids)} solids, not one")
+    if request.get("edge_divisions"):
+        _divide_edges(shape, request["edge_divisions"])
+        # Netgen reads an edge's division when a geometry is made of the shape, so make it again.
+        geometry = OCCGeometry(shape)
     mesh = geometry.GenerateMesh(
         perfstepsend=MeshingStep.MESHSURFACE,
         maxh=request["max_size"],
@@ -52,6 +58,36 @@ def _triangulate(work: Path, request: dict) -> dict[str, np.ndarray]:
         "triangles": elements["nodes"].astype(np.int64) - 1,
         "face": elements["index"].astype(np.int64) - 1,
     }
+
+
+#: Points per segment at which an edge is sampled to place its division by arc length.
+SAMPLES_PER_SEGMENT = 64
+
+
+def _divide_edges(shape, divisions: list[list[int]]) -> None:
+    """Divide edges of ``shape`` into segments of equal arc length: each ``[edge, segments]``.
+
+    An edge is numbered by its place among the shape's distinct edges, in the order the explorer
+    first meets each (it meets an edge once per face it bounds) -- the numbering of a topology map,
+    which the CAD reader's topology uses. Netgen takes a division as the edge's interior points'
+    parameters, scaled to ``[0, 1]`` over the edge's parameter range; here they are placed at equal
+    arc length, the curve sampled at :data:`SAMPLES_PER_SEGMENT` points per segment.
+    """
+    edges = shape.edges  # held: the edges are views into it
+    distinct, seen = [], {}
+    for k in range(len(edges)):
+        same = seen.setdefault(hash(edges[k]), [])
+        if not any(edges[k] == edges[j] for j in same):
+            same.append(k)
+            distinct.append(k)
+    for index, segments in divisions:
+        edge = edges[distinct[index]]
+        start, end = edge.parameter_interval
+        t = np.linspace(start, end, SAMPLES_PER_SEGMENT * segments + 1)
+        points = np.array([[p.x, p.y, p.z] for p in map(edge.Value, t)])
+        length = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
+        at = np.interp(np.linspace(0.0, length[-1], segments + 1)[1:-1], length, t)
+        edge.partition = (at - start) / (end - start)
 
 
 def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
