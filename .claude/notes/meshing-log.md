@@ -807,3 +807,48 @@ cells under 0.4 maxh across more than 12 mm inside its walls (the core caps' ape
   (project owner, 2026-10-20: recorded and dropped).
 - Seen in both arms on Sozzi at this `main`: the worst face 111-140° non-orthogonal, which usually means an
   inside-out cell; not investigated here.
+
+## 2026-10-20 — Memory by stage, toward 2M cells
+
+Harness `validation/meshing_dual/memory_by_stage.py` (each `CadMesher` stage wrapped: this process's
+physical footprint at start, sampled peak and end; Netgen's child's peak resident set beside the stage
+that ran it; one process per size). Sozzi water as `mapped_layers_sozzi.py`: `max_size` as listed,
+`feature_angle` 0.785, five layers (first 0.5 mm, growth 1.2) on every wall, lamp and pipes mapped, pipe
+cores where `find_pipes` accepts them; macOS arm64, netgen-mesher 6.2.2608, jax 0.10.2, one run each.
+
+**The macOS allocator cache.** With libmalloc's defaults a freed large block stays charged to the process:
+`element_mesh` alone left the footprint at 1.40 GiB after returning (tracemalloc: 6 MiB live), unchanged by
+`malloc_zone_pressure_relief`, reused by a second call, but a new 1.1 GiB array landed on top (2.52).
+With `MallocLargeCache=0` the same sequence returns to 0.16. So every footprint below is with
+`MallocLargeCache=0`; with defaults the 266k run peaked at 2.40 against 1.72 GiB.
+
+**Before** (main after #786), cache off:
+
+| maxh | cells | peak GiB | held after meshing | Netgen child RSS |
+|---|---|---|---|---|
+| 0.005 | 133112 | 0.96 | 0.33 | 0.25 |
+| 0.0035 | 265279 | 1.72 | 0.40 | 0.52 |
+| 0.0025, triangle walls, no pipe cores | 659651 | 4.71 | 0.68 | 1.52 |
+
+(0.0025 with mapped, layered walls does not mesh: #790.) At 266k every peak was `Mesh.geometry`: four
+calls on the primal (1.54M faces, 5.19M incidences, 663k cells), each ~1.0 GiB above its start, ~0.5 s
+each; the dual's own geometry after meshing +0.92 GiB. The primal's arrays are 119 MiB; the
+`element_mesh` inputs 35 MB. XLA's own temp for `_fused_geometry` on that primal: 865 MiB, of which the
+centre fan 724.
+
+**After** (blocked centre fan; primal geometry once in `build_traced`), same configuration:
+
+| maxh | cells | peak GiB | dual s | dual geometry above start |
+|---|---|---|---|---|
+| 0.0035 | 265279 | 1.31 (1.72) | 5.3 (6.4) | 0.23 (0.92) |
+| 0.0025, triangle walls, no pipe cores | 659651 | 3.33 (4.71) | 15.2 (21.6) | 0.64 (2.66) |
+
+Now the peak is `Mesh.from_csr`: in the dual's assembly 2.57 → 3.33 GiB at 660k (its inputs built from
+Python lists before it, 1.90 → 2.57), and the primal's 2.27 → 3.04 (`element_mesh`'s numpy before it,
+0.34 → 2.27). Linear in cells from 266k to 660k within ~15 % (6.0 then 6.8 KB per cell before; 4.1 then
+4.7 after), so ~9.6 GB at 2M (cache off), an extrapolation.
+
+Found on the way: #789 (pipes cored only when Netgen's rim counts are equal multiples of four: 1 of 2 at
+0.005, 0 at 0.0035, 2 at 0.0025) and #790 (the fill's "boundary mesh is overlapping" at 0.0025 with
+hexahedral layers, pipe cores or not; triangle walls with prism layers and mapped walls without layers
+both mesh).

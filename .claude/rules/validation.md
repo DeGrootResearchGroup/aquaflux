@@ -123,6 +123,9 @@ branches.
   makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB
   trim threshold wraps to 0. Measurements: `.claude/notes/solve-open-directions.md`, "Inside the step
   program (2026-10-18)".
+- **On macOS a footprint includes freed large blocks unless the run sets `MallocLargeCache=0`**: libmalloc
+  keeps them charged to the process, so a stage's "held" memory and a peak read high (up to ~40 % on the
+  mesher). Set it when the number is the question (`meshing.md`, memory bullet).
 - **A harness that builds a step must use the case's own shift settings, and form the shift through
   `ShiftTerm.shift(beta)`, never `beta * term.diagonal`** — the latter drops `row_shift_scale`, where
   `turbulence_damping` lives.
