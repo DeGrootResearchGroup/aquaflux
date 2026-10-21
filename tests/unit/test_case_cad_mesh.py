@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from aquaflux.case import CadMesh, CadPlacement, case_schema, mesh_source_from_mapping, relocated
 from aquaflux.case.spec import _CASE_MAPPING
-from aquaflux.meshing import FacesNear, FacesOn
+from aquaflux.meshing import FacePlanarizer, FacesNear, FacesOn, Graded, OctreeCore, PipeCore
 
 SECTION = {
     "kind": "CadMesh",
@@ -28,6 +28,14 @@ SECTION = {
     },
     "others": "vessel_walls",
     "grading": 0.2,
+    "mapped": ["lamp"],
+    "pipes": ["inlet"],
+    "pipe_core": {
+        "kind": "PipeCore",
+        "core_bow": 0.3,
+        "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
+    },
+    "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
 }
 
 
@@ -43,18 +51,25 @@ def test_the_section_reads_into_its_selections_and_writes_back_as_given():
         patches={"inlet": FacesNear(((0.0, 0.0, 2.0),)), "lamp": FacesOn(("lamp",))},
         others="vessel_walls",
         grading=0.2,
+        mapped=("lamp",),
+        pipes=("inlet",),
+        pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
+        core=OctreeCore(size=0.08, clearance=0.03),
     )
     assert _CASE_MAPPING.to_mapping(source) == SECTION
 
 
 def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaults():
     mesher = mesh_source_from_mapping(SECTION).mesher()
+    assert mesher.pipe_core == PipeCore(core_bow=0.3, shell=Graded(3, 1.2))
     assert (mesher.max_size, mesher.feature_angle, mesher.grading, mesher.min_size) == (
         0.02,
         0.785,
         0.2,
         None,
     )
+    # The core's unset wall size is the mesher's size; its clearance is as set.
+    assert mesher.core.resolved(mesher.max_size) == (0.02, 0.03)
 
 
 def test_an_unset_setting_is_described_by_what_it_falls_through_to():
@@ -85,6 +100,14 @@ def test_the_drawing_is_re_based_with_the_case_file():
             {"patches": {"inlet": {"kind": "FacesOn", "solids": ["a"], "tolerance": 0}}},
             "FacesOn.tolerance must be a positive, finite number",
         ),
+        (
+            {"core": {"kind": "OctreeCore", "size": 0.08, "wall_size": 0.1}},
+            r"OctreeCore.wall_size \(0.1\) may not exceed its size",
+        ),
+        (
+            {"core": {"kind": "OctreeCore", "size": 0.01}},
+            r"is the boundary's size \(0.02\), which exceeds the core's size",
+        ),
     ],
 )
 def test_a_section_out_of_range_is_refused_by_name(change, message):
@@ -101,3 +124,12 @@ def test_a_patch_that_is_not_a_face_selection_is_refused():
             feature_angle=0.785,
             patches={"inlet": "the pipe's end"},
         )
+
+
+def test_a_planarizer_reads_from_its_kind_and_reaches_the_mesher():
+    section = {**SECTION, "planarizer": {"kind": "FacePlanarizer", "shortening": 10.0}}
+    source = mesh_source_from_mapping(section)
+    assert source.planarizer == FacePlanarizer(shortening=10.0)
+    assert source.mesher().planarizer == FacePlanarizer(shortening=10.0)
+    assert _CASE_MAPPING.to_mapping(source) == section
+    assert mesh_source_from_mapping(SECTION).mesher().planarizer is None

@@ -44,7 +44,15 @@ from tests.support.tools import load_tool
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
 #: Dependency-free leaf modules of the package, which any layer may import.
-NEUTRAL_LEAVES = ("morton", "ragged", "text_table", "vectors", "warn_once")
+NEUTRAL_LEAVES = (
+    "morton",
+    "ragged",
+    "text_table",
+    "triangle_grid",
+    "triangle_grid_walk",
+    "vectors",
+    "warn_once",
+)
 
 #: The packages that hold a specific physical model rather than machinery. A module here that grows large
 #: is the place residual-agnostic code hides, because it was written for the first consumer.

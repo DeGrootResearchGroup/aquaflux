@@ -1,6 +1,8 @@
 ---
 paths:
   - "aquaflux/radiation/**"
+  - "aquaflux/triangle_grid.py"
+  - "aquaflux/triangle_grid_walk.py"
 ---
 
 # Rules — `aquaflux/radiation/` (ultraviolet fluence rate)
@@ -38,7 +40,7 @@ heading to search for; sections condensed on 2026-10-17 are there verbatim as `#
 | `lit_blocks.py` | the gather's layout: receivers in blocks of 8, each against the facets that can light it |
 | `triangle_body.py` | `TriangleBody`, a `Body` of triangles over a `TriangleGrid` |
 | `triangles.py` | watertight ray-triangle intersection |
-| `grid.py`, `grid_walk.py` | `TriangleGrid` and its compiled (Numba) walk |
+| `aquaflux/triangle_grid.py`, `triangle_grid_walk.py` | `TriangleGrid` and its compiled (Numba) walk — neutral leaves outside the package, since the mesher's regions use the grid too |
 | `self_occlusion.py` | `SelfOcclusion`: `RayCastOcclusion` (default), `SilhouetteOcclusion`, `NoOcclusion` |
 | `silhouette.py` | exact covered fraction, conservative cone cull, `covers_nothing` |
 | `clusters.py` | `FacetClusters` for the silhouette's clustered cull |
@@ -351,7 +353,7 @@ Woop, Benthin & Wald (*JCGT* 2013), not Möller–Trumbore (which leaked 6 of 26
   `_block_is_cut` is traced (#462). Cost is `n³` on the transfer's own case (~420–465 Mtest/s, 3,184
   facets: 77 s) and independent of what rays hit; the grid (below) breaks that by design.
 - One predicate, two implementations: `_counts_as_hit` (`distance > near`, `distance <= 1.0`, not
-  excluded) with `_watertight_hit` for `_block_is_cut`, and a copy in `grid_walk._cuts` because a Numba
+  excluded) with `_watertight_hit` for `_block_is_cut`, and a copy in `triangle_grid_walk._cuts` because a Numba
   loop cannot call a traced function. A change to one must be made to the other; the grid tests compare
   them at every resolution.
 
@@ -564,21 +566,21 @@ tolerance=None)`; `blocks` is the grid walk (`traceable=False`); `contains` is d
 (open: no inside; closed: solid where `enclosure_winding(closed pieces) + n_inward > 0.5`); `sheet=True`
 forces no inside, `sheet=False` refuses an open piece, a closed piece enclosing no volume is refused. It
 vouches through its own occupancy grid (`TriangleBody.occupancy`, `_CLEARANCE_REFINEMENT = 4` × a
-near-cubic grid, `holds_any`; certificate one Numba loop, `grid._unions_held`), sized from the near-cubic
+near-cubic grid, `holds_any`; certificate one Numba loop, `triangle_grid._unions_held`), sized from the near-cubic
 grid, not the walk grid.
 
-**`TriangleGrid`** (`grid.py`): triangles registered in the voxels their (rounding-widened) boxes span;
+**`TriangleGrid`** (`aquaflux/triangle_grid.py`, a neutral leaf since the mesher's `ClosedSurface` asks its `holds_any` too; `meshing.md`): triangles registered in the voxels their (rounding-widened) boxes span;
 segments walked by 3D-DDA (Amanatides & Woo) to the first blocker. Selected by `RayCastOcclusion(grid=True
 | int | triple | TriangleGrid)`; **off by default** (changes cost, not answers).
 
 - ⚠️ **A traced walk is worse than brute force** (static trip count and voxel occupancy make every ray
   pay the worst case), so the walk is host code — and **compiled** host code:
-  `grid_walk.walk_to_first_hit`, a `numba.njit(parallel=True)` loop, one ray per `prange` iteration, the
+  `triangle_grid_walk.walk_to_first_hit`, a `numba.njit(parallel=True)` loop, one ray per `prange` iteration, the
   first axis winning a tie, capped at `sum(resolution) + 3` steps, each ray's frame (`_ray_frame`) formed
   once. `blocks` takes no `work_limit`. Numba is a core dependency (project owner's decision). ⚠️ The first
   call of a process compiles the loop (~2 s); not cached to disk. `NUMBA_NUM_THREADS=1` is set beside
   `OMP_NUM_THREADS` in `tools/fastgate.sh`'s parallel tier and CI.
-- **Default resolution (`grid._resolution`)**: equal voxel counts per axis, each voxel in the proportions of
+- **Default resolution (`triangle_grid._resolution`)**: equal voxel counts per axis, each voxel in the proportions of
   the triangles' bounding box (edges capped at `_MAX_ASPECT = 32` to one another), `_VOXEL_BUDGET = 4` × the
   voxels of the near-cubic grid at `_TARGET_PER_VOXEL` (`_near_cubic`, sized from the triangles' area). An
   axis under one voxel gets one. Reason: steps along an axis go as the segment's travel over the edge, and

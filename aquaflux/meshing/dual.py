@@ -57,6 +57,10 @@ from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 #: The automatic patch names, which a primal's named patches are distinguished from.
 _AUTOMATIC = set(RESERVED_PATCH_NAMES)
 
+#: The smallest singular value, relative to the largest, of the planes a vertex is placed on that is
+#: kept: about the sine of three degrees between two planes.
+_PLANES_APART = 0.05
+
 # Status codes of the compiled walks.
 _OK, _NOT_MANIFOLD = 0, 1
 
@@ -74,10 +78,16 @@ class PolyhedralDual:
     feature_edges : np.ndarray of int, shape ``(n, 2)``, optional
         Further edges to keep, as pairs of primal point indices (in either order); each must be an
         edge of the primal boundary. Edges between two patches are features whatever is given.
+    columns : np.ndarray of int, shape ``(n, k)``, optional
+        Points stacked over boundary points, as layers grown from a wall are: each row a primal
+        boundary point, then the points above it in turn. Where a boundary point's dual cell is
+        cut at a sharp concave edge, so are those of the points above it, by the same walls --
+        their cells turn the same corner.
     """
 
     feature_angle: float
     feature_edges: np.ndarray | None = None
+    columns: np.ndarray | None = None
 
     def build(self, primal: Mesh) -> Mesh:
         """The dual of ``primal`` -- the mesh of :meth:`build_traced`.
@@ -93,7 +103,8 @@ class PolyhedralDual:
         -------
         Mesh
             One cell per primal point, in the same order, then the further pieces of the points on
-            sharp concave edges, by point. The dual's boundary faces are in the patches of the
+            sharp concave edges, by point, each followed by those of the points above it in
+            ``columns``. The dual's boundary faces are in the patches of the
             primal faces they cover, with the same types and groups.
 
         Raises
@@ -128,7 +139,7 @@ class PolyhedralDual:
         tables = _PrimalTables.of(primal)
         feature, concave = self._features(primal, tables)
         walks = _Walks.of(primal, tables)
-        pieces = _Pieces.of(primal, tables, walks, feature, concave)
+        pieces = _Pieces.of(primal, tables, walks, feature, concave, self.columns)
         return _assemble(primal, tables, walks, feature, pieces)
 
     def _features(self, primal: Mesh, tables: _PrimalTables) -> tuple[np.ndarray, np.ndarray]:
@@ -155,12 +166,16 @@ class PolyhedralDual:
 
 @dataclasses.dataclass(frozen=True)
 class TracedDual:
-    """A dual mesh, and the primal boundary each of its boundary vertices stands for.
+    """A dual mesh, and the primal entity each of its vertices stands for.
 
     A vertex on the dual's boundary is a primal boundary face's centroid, the midpoint of a primal
     boundary edge (or, where a cell is cut into pieces, a point on that edge's two boundary faces'
     centroids), or a primal boundary point itself. A mesher that knows the true surface the primal
-    boundary approximates moves the first two onto it; a primal point is already there.
+    boundary approximates moves the first two onto it; a primal point is already there. Inside, a
+    vertex is a primal cell's centroid, or, where a cell is cut into pieces, a point placed on the
+    surface between two pieces. A cell centroid carries no meaning a small move would lose -- any
+    point inside its primal cell gives the same topology -- so it is what a smoothing or flattening
+    pass may move; the vertices between pieces must stay on that surface.
 
     Attributes
     ----------
@@ -170,11 +185,14 @@ class TracedDual:
         The primal boundary face whose centroid each vertex is, or ``-1``.
     vertex_edge : np.ndarray of int, shape ``(n_vertices, 2)``
         The two points of the primal boundary edge each vertex stands for (ascending), or ``-1``.
+    vertex_cell : np.ndarray of int, shape ``(n_vertices,)``
+        The primal cell whose centroid each vertex is, or ``-1``.
     """
 
     mesh: Mesh
     vertex_face: np.ndarray
     vertex_edge: np.ndarray
+    vertex_cell: np.ndarray
 
 
 def boundary_folds(primal: Mesh, pairs: np.ndarray) -> np.ndarray:
@@ -484,13 +502,18 @@ class _Pieces:
     origin: np.ndarray
     normal: np.ndarray
 
+    def depth(self, piece: np.ndarray, at: np.ndarray) -> np.ndarray:
+        """How far behind each piece's wall each point lies, shape ``(n,)``: positive inside."""
+        k = np.searchsorted(self.pieces, piece)
+        return -np.einsum("ij,ij->i", at - self.origin[k], self.normal[k])
+
     def interface(self, first: int, second: int) -> tuple[np.ndarray, float]:
         """The plane two pieces of one point meet on, as ``(row, value)``: ``row @ x == value``."""
         a, b = np.searchsorted(self.pieces, [first, second])
         row = self.normal[b] - self.normal[a]
         return row, float(row @ self.origin[a])
 
-    def crossing(self, first, second, start, end) -> np.ndarray:
+    def crossing(self, first, second, start, end, clip: bool = True) -> np.ndarray:
         """Where segments cross the surface between two pieces of one point, as a fraction.
 
         Parameters
@@ -499,12 +522,16 @@ class _Pieces:
             Pieces of one point each.
         start, end : np.ndarray, shape ``(n, 3)``
             The segments' ends, ``start`` on the side of ``first``.
+        clip : bool
+            Keep the fraction to ``[0.1, 0.9]``, so that no added vertex sits on an end; else
+            return it as found (outside ``[0, 1]`` where the segment does not cross, ``nan``
+            where it lies in the surface).
 
         Returns
         -------
         np.ndarray, shape ``(n,)``
             The fraction of the way from ``start`` to ``end`` at which the two walls' depths are
-            equal, kept to ``[0.1, 0.9]`` so that no added vertex sits on an end.
+            equal.
         """
         a = np.searchsorted(self.pieces, first)
         b = np.searchsorted(self.pieces, second)
@@ -513,6 +540,8 @@ class _Pieces:
         fall = np.einsum("ij,ij->i", end - self.origin[a], towards)
         with np.errstate(divide="ignore", invalid="ignore"):
             fraction = rise / (rise - fall)
+        if not clip:
+            return fraction
         return np.clip(np.nan_to_num(fraction, nan=0.5), 0.1, 0.9)
 
     def dual_cells(self, point: int | np.ndarray, cells: np.ndarray) -> np.ndarray:
@@ -528,9 +557,10 @@ class _Pieces:
     @classmethod
     def of(
         cls, primal: Mesh, tables: _PrimalTables, walks: _Walks, feature: np.ndarray,
-        concave: np.ndarray,
+        concave: np.ndarray, columns: np.ndarray | None = None,
     ) -> _Pieces:  # fmt: skip
-        """Cut the dual cell of every point on a ``concave`` edge (shape ``(n_edges,)``).
+        """Cut the dual cell of every point on a ``concave`` edge (shape ``(n_edges,)``), and of
+        every point above one in ``columns`` (see :class:`PolyhedralDual`) by the same walls.
 
         Raises
         ------
@@ -540,6 +570,11 @@ class _Pieces:
         """
         n_points, n_cells = primal.n_nodes, primal.n_cells
         cut_points = np.unique(tables.edge_nodes[concave])
+        above = {}
+        if columns is not None and len(columns):
+            columns = np.asarray(columns, dtype=np.int64)
+            is_cut = set(cut_points.tolist())
+            above = {int(row[0]): row[1:] for row in columns if int(row[0]) in is_cut}
         geometry = primal.geometry()
         centroid = np.asarray(geometry.cell.centroid)
         area_vector = np.asarray(geometry.face.normal) * np.asarray(geometry.face.area)[:, None]
@@ -552,36 +587,37 @@ class _Pieces:
         keys, pieces, cuts, walls_of = [], [], [], []
         cut = np.zeros(n_points, dtype=bool)
         next_cell = n_points
-        for point in cut_points:
-            edges, fan = walks.fan(point)
+        for base in cut_points:
+            edges, fan = walks.fan(base)
             sector = np.cumsum(feature[edges]) % max(int(np.count_nonzero(feature[edges])), 1)
             at_fold = np.flatnonzero(concave[edges])
             walls = np.unique(np.concatenate([sector[at_fold], sector[at_fold - 1]]))
             normal = np.stack([area_vector[fan[sector == wall]].sum(axis=0) for wall in walls])
             normal /= np.linalg.norm(normal, axis=1, keepdims=True)
-            faces = face_of[
-                incidence_order[incidence_offsets[point] : incidence_offsets[point + 1]]
-            ]
-            around = np.unique(np.concatenate([owner[faces], neighbour[faces]]))
-            around = around[around >= 0]
-            depth = -(centroid[around] - points[point]) @ normal.T
-            used, group = np.unique(np.argmax(depth, axis=1), return_inverse=True)
-            n_groups = int(group.max()) + 1
-            if n_groups < 2:
-                continue
-            inner = faces[neighbour[faces] >= 0]
-            first = group[np.searchsorted(around, owner[inner])]
-            second = group[np.searchsorted(around, neighbour[inner])]
-            _check_connected(around, n_groups, owner[inner], neighbour[inner], first == second)
-            cut[point] = True
-            keys.append(point * n_cells + around)
-            pieces.append(np.where(group == 0, point, next_cell + group - 1))
-            walls_of.append(
-                (np.r_[point, next_cell + np.arange(n_groups - 1)], points[point], normal[used])
-            )
-            next_cell += n_groups - 1
-            between = inner[first != second]
-            cuts.append(np.stack([np.full(between.size, point), between], axis=1))
+            for point in [int(base), *above.get(int(base), [])]:
+                faces = face_of[
+                    incidence_order[incidence_offsets[point] : incidence_offsets[point + 1]]
+                ]
+                around = np.unique(np.concatenate([owner[faces], neighbour[faces]]))
+                around = around[around >= 0]
+                depth = -(centroid[around] - points[point]) @ normal.T
+                used, group = np.unique(np.argmax(depth, axis=1), return_inverse=True)
+                n_groups = int(group.max()) + 1
+                if n_groups < 2:
+                    continue
+                inner = faces[neighbour[faces] >= 0]
+                first = group[np.searchsorted(around, owner[inner])]
+                second = group[np.searchsorted(around, neighbour[inner])]
+                _check_connected(around, n_groups, owner[inner], neighbour[inner], first == second)
+                cut[point] = True
+                keys.append(point * n_cells + around)
+                pieces.append(np.where(group == 0, point, next_cell + group - 1))
+                walls_of.append(
+                    (np.r_[point, next_cell + np.arange(n_groups - 1)], points[point], normal[used])
+                )
+                next_cell += n_groups - 1
+                between = inner[first != second]
+                cuts.append(np.stack([np.full(between.size, point), between], axis=1))
         if not keys:
             empty, none = np.zeros(0, dtype=np.int64), np.zeros((0, 3))
             pairs = np.zeros((0, 2), dtype=np.int64)
@@ -589,8 +625,11 @@ class _Pieces:
         ids = np.concatenate([own for own, _, _ in walls_of])
         origin = np.concatenate([np.tile(at, (own.size, 1)) for own, at, _ in walls_of])
         order = np.argsort(ids)
+        keys = np.concatenate(keys)
+        piece = np.concatenate(pieces)
+        sorter = np.argsort(keys)
         return cls(
-            n_cells, np.concatenate(keys), np.concatenate(pieces), cut, next_cell,
+            n_cells, keys[sorter], piece[sorter], cut, next_cell,
             np.concatenate(cuts), ids[order], origin[order],
             np.concatenate([normals for _, _, normals in walls_of])[order],
         )  # fmt: skip
@@ -713,6 +752,9 @@ def _assemble(
     vertex_edge = np.full((n_vertices, 2), -1, dtype=np.int64)
     halved = np.flatnonzero((vertices.middle >= 0) & on_boundary)
     vertex_edge[vertices.middle[halved]] = tables.edge_nodes[halved]
+    # The cell centroids are the first vertices, in the primal's cell order (see _Vertices.of).
+    vertex_cell = np.full(n_vertices, -1, dtype=np.int64)
+    vertex_cell[: primal.n_cells] = np.arange(primal.n_cells)
     mesh = Mesh.from_csr(
         vertices.coordinates,
         np.concatenate([[0], np.cumsum(counts)]),
@@ -724,23 +766,45 @@ def _assemble(
         patch_types=dict(patches.patch_types),
         patch_groups=dict(patches.patch_groups),
     )
-    return TracedDual(mesh, vertex_face, vertex_edge)
+    return TracedDual(mesh, vertex_face, vertex_edge, vertex_cell)
 
 
 def _place_cut_faces(primal, pieces, vertices) -> None:
     """Put each cut face's vertex where the segment between its cells' centroids crosses between
-    the pieces (the mean, for a face cut around more than one point)."""
+    the pieces (the mean, for a face cut around more than one point).
+
+    Where that crossing lies in front of the walls -- outside the region, beyond the concave edge,
+    as beside a long cell (a hexahedron along a pipe at its junction with a wall) the segment cuts
+    across the corner -- the vertex would fold the pieces; it is taken instead where the dual edge
+    through the face's centroid, from one centroid to the face's and on to the other, crosses.
+    """
     if not pieces.cuts.size:
         return
-    centroid = np.asarray(primal.geometry().cell.centroid)
+    geometry = primal.geometry()
+    centroid = np.asarray(geometry.cell.centroid)
     point, face = pieces.cuts[:, 0], pieces.cuts[:, 1]
     first = np.asarray(primal.face_cells.owner)[face]
     second = np.asarray(primal.face_cells.neighbour)[face]
-    start, end = centroid[first], centroid[second]
-    fraction = pieces.crossing(
-        pieces.dual_cells(point, first), pieces.dual_cells(point, second), start, end
-    )
-    where = start + fraction[:, None] * (end - start)
+    start, middle, end = centroid[first], np.asarray(geometry.face.centroid)[face], centroid[second]
+    sides = pieces.dual_cells(point, first), pieces.dual_cells(point, second)
+    straight = pieces.crossing(*sides, start, end)
+    where = start + straight[:, None] * (end - start)
+    outside = pieces.depth(sides[0], where) <= 0.0
+    if np.any(outside):
+        # The crossing's depth difference changes sign on one of the two halves; take that one.
+        pair = sides[0][outside], sides[1][outside]
+        a, m, b = start[outside], middle[outside], end[outside]
+        to_middle = pieces.crossing(*pair, a, m, clip=False)
+        on_first = (to_middle >= 0.0) & (to_middle <= 1.0)
+        along = np.where(
+            on_first, 0.5 * to_middle, 0.5 + 0.5 * pieces.crossing(*pair, m, b, clip=False)
+        )
+        along = np.clip(np.nan_to_num(along, nan=0.5), 0.1, 0.9)
+        where[outside] = np.where(
+            (along <= 0.5)[:, None],
+            a + (2.0 * along)[:, None] * (m - a),
+            m + (2.0 * along - 1.0)[:, None] * (b - m),
+        )
     target = vertices.cut_face[face]
     total = np.zeros((vertices.coordinates.shape[0], 3))
     np.add.at(total, target, where)
@@ -855,7 +919,12 @@ def _place_middle(middle, ring, at, ends, breaks, bounded, pieces, coordinates) 
         rows, values = np.asarray(rows), np.asarray(values)
         scale = np.linalg.norm(rows, axis=1)
         rows, values = rows / scale[:, None], values / scale
-        coordinates[middle] = mean + np.linalg.pinv(rows, rcond=1e-8) @ (values - rows @ mean)
+        # Planes meeting at under a few degrees -- the same walls' planes at two neighbouring
+        # points of a curved edge -- meet far away; they are taken as one, in the least-squares
+        # sense, by dropping the directions they fix only that weakly.
+        coordinates[middle] = mean + np.linalg.pinv(rows, rcond=_PLANES_APART) @ (
+            values - rows @ mean
+        )
         return
     start, end = coordinates[ring[0]], coordinates[ring[-1]]
     fraction = 0.5

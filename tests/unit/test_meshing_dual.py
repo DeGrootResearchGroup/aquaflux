@@ -14,7 +14,13 @@ import math
 import numpy as np
 import pytest
 from aquaflux.io.openfoam.assembler import assemble
-from aquaflux.mesh import Mesh, closed_cell_residual, structured_grid_2d, structured_grid_3d
+from aquaflux.mesh import (
+    Mesh,
+    cell_non_convexity,
+    closed_cell_residual,
+    structured_grid_2d,
+    structured_grid_3d,
+)
 from aquaflux.meshing import PolyhedralDual
 from aquaflux.meshing.dual import _check_connected
 
@@ -23,7 +29,6 @@ from tests.support.meshes import (
     restated,
     tetrahedral_grid_3d,
     without_cells,
-    worst_excursion,
 )
 from tests.support.polymesh import cyclic_two_cube_polymesh_data
 
@@ -253,7 +258,7 @@ def test_a_cell_on_a_sharp_concave_edge_is_cut_into_two_convex_pieces():
         np.isclose(points[:, 0], L_EDGE[0]) & np.isclose(points[:, 2], L_EDGE[1])
     )
     assert on_edge.size == 3 and dual.n_cells == primal.n_nodes + on_edge.size
-    assert float(worst_excursion(dual).max()) < 1e-12
+    assert float(cell_non_convexity(dual).max()) < 1e-12
     np.testing.assert_allclose(np.asarray(dual.geometry().cell.volume).sum(), 1.0, rtol=1e-12)
     _assert_closed(dual)
     _assert_conformal(dual)
@@ -310,7 +315,7 @@ def test_a_concave_corner_of_three_walls_is_cut_into_three_pieces():
     # Nearly convex: a face cut around two points of the corner is crossed by two of the planes
     # between pieces, and its one vertex on that dual edge lies between them. An uncut cell there
     # would wrap round the corner (an excursion near 1).
-    assert float(worst_excursion(dual).max()) < 0.05
+    assert float(cell_non_convexity(dual).max()) < 0.05
     removed = np.prod([1.0, 1.2, 2.4] - corner)
     np.testing.assert_allclose(
         np.asarray(dual.geometry().cell.volume).sum(), 1.0 * 1.2 * 2.4 - removed, rtol=1e-12
@@ -420,3 +425,92 @@ def test_a_named_feature_edge_off_the_boundary_is_refused():
     interior_edge = edge_nodes[inside[edge_nodes].all(axis=1)][:1]
     with pytest.raises(ValueError, match="not an edge of the primal boundary"):
         PolyhedralDual(feature_angle=1.0, feature_edges=interior_edge).build(primal)
+
+
+def _layered_l():
+    """An L of three cubes (edge 1/2), hexahedral layers grown inward from all its walls, and a
+    core of the lattice's hexahedra, its outer points pulled in to the layers' top; with the
+    layers' columns."""
+    from aquaflux.meshing import Polygons, PrismLayers, element_mesh
+
+    from tests.support.meshes import voxel_surface
+
+    voxels, n, size = [(0, 0, 0), (1, 0, 0), (0, 0, 1)], 2, 0.5
+    points, quads = voxel_surface(voxels, n, size)
+    grown = PrismLayers(first_height=0.01, growth=1.25, count=4).extrude(
+        points, Polygons(quads=quads), np.ones(len(quads), dtype=bool)
+    )
+    top = {tuple(np.round(points[row[0]] / size * n).astype(int)): row[-1] for row in grown.columns}
+    lattice, core = {}, []
+    all_points = [grown.points]
+    added = grown.points.shape[0]
+
+    def number(key):
+        nonlocal added
+        if key in top:
+            return top[key]
+        if key not in lattice:
+            lattice[key] = added
+            all_points.append(np.asarray(key, float)[None] / n * size)
+            added += 1
+        return lattice[key]
+
+    corners = [
+        (0, 0, 0),
+        (1, 0, 0),
+        (1, 1, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+        (1, 0, 1),
+        (1, 1, 1),
+        (0, 1, 1),
+    ]
+    for voxel in voxels:
+        for i, j, k in np.ndindex(n, n, n):
+            base = np.asarray(voxel) * n + (i, j, k)
+            core.append([number(tuple(base + c)) for c in corners])
+    primal = element_mesh(np.vstack(all_points), hexahedra=np.vstack([grown.hexahedra, core]))
+    return primal, grown.columns
+
+
+def test_layers_turning_a_concave_edge_are_cut_up_their_columns():
+    # The layer points above the L's inside edge have dual cells that turn its corner too, as the
+    # edge's own points' would uncut: their faces along the corner, drawn round it from one wall's
+    # layer cells to the other's, fold, and the cells do not close. Cut by the same walls, up the
+    # column, every cell closes and the dual fills the L exactly.
+    primal, columns = _layered_l()
+    scale = float(np.max(np.asarray(primal.geometry().face.area)))
+    uncut = SHARP.build(primal)
+    assert float(np.max(np.asarray(closed_cell_residual(uncut)))) > 1e-3 * scale
+    dual = PolyhedralDual(SHARP.feature_angle, columns=columns).build(primal)
+    on_edge = np.flatnonzero(
+        np.isclose(np.asarray(primal.node_coords)[columns[:, 0], 0], 0.5)
+        & np.isclose(np.asarray(primal.node_coords)[columns[:, 0], 2], 0.5)
+    )
+    # Every point of the edge's columns cut in two: the edge's three points and four layers each.
+    assert dual.n_cells == primal.n_nodes + on_edge.size * 5
+    volume = np.asarray(dual.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 3 * 0.5**3, rtol=1e-12)
+    _assert_closed(dual)
+    _assert_conformal(dual)
+
+
+def test_the_traced_dual_names_the_primal_cell_each_centroid_vertex_is():
+    # Cut at a concave edge, the dual also has vertices between pieces, which are no cell's centroid.
+    block = tetrahedral_grid_3d(3)
+    stretched = Mesh.from_csr(
+        np.asarray(block.node_coords) * [1.0, 1.0, 1.5], block.face_nodes.offsets,
+        block.face_nodes.face_node_indices, block.face_cells.owner, block.face_cells.neighbour,
+        block.n_cells,
+    )  # fmt: skip
+    primal = _without_corner(_cube_walls(stretched), (1 / 3, 0.5), [0, 2])
+    traced = SHARP.build_traced(primal)
+    at = np.flatnonzero(traced.vertex_cell >= 0)
+    assert np.array_equal(np.sort(traced.vertex_cell[at]), np.arange(primal.n_cells))
+    np.testing.assert_allclose(
+        np.asarray(traced.mesh.node_coords)[at],
+        np.asarray(primal.geometry().cell.centroid)[traced.vertex_cell[at]],
+        atol=1e-15,
+    )
+    assert at.size < traced.mesh.n_nodes - np.count_nonzero(traced.vertex_face >= 0)

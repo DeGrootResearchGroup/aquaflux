@@ -448,26 +448,69 @@ def without_cells(mesh: Mesh, removed, *, patch: str) -> Mesh:
     )
 
 
-def worst_excursion(dual: Mesh) -> np.ndarray:
-    """Per cell: how far its farthest vertex lies outside one of its faces, over the cell's size.
+def voxel_surface(voxels, n: int, size: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """The boundary of a union of cubes of edge ``size`` at integer corners ``voxels``, each cube
+    face cut into ``n x n`` quadrilaterals wound out of the union, every point used once."""
+    voxels = {tuple(v) for v in voxels}
+    keys, quads = {}, []
 
-    Zero for a convex cell with flat faces; the faces' planes are those the mesh orients.
+    def point(p):
+        key = tuple(np.round(np.asarray(p) * n).astype(int))
+        return keys.setdefault(key, len(keys))
+
+    for voxel in voxels:
+        for axis in range(3):
+            for side in (0, 1):
+                across = list(voxel)
+                across[axis] += 1 if side else -1
+                if tuple(across) in voxels:
+                    continue
+                u, v = [a for a in range(3) if a != axis]
+                for i in range(n):
+                    for j in range(n):
+                        ring = []
+                        for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                            p = np.array(voxel, float)
+                            p[axis] += side
+                            p[u] += (i + di) / n
+                            p[v] += (j + dj) / n
+                            ring.append(point(p))
+                        # (u, v, axis) right-handed when axis follows v cyclically.
+                        right_handed = (axis - v) % 3 == 1
+                        quads.append(ring if right_handed == bool(side) else ring[::-1])
+    points = np.zeros((len(keys), 3))
+    for key, index in keys.items():
+        points[index] = np.asarray(key) / n * size
+    return points, np.array(quads)
+
+
+def box_surface(lo, hi, n, *, into_box, offset=0):
+    """The six faces of the cube ``[lo, hi]^3``, ``n`` x ``n`` squares each split in two.
+
+    Wound out of the cube, or into it with ``into_box`` (the walls of a hole). Point indices start
+    at ``offset``.
     """
-    geometry = dual.geometry()
-    coords = np.asarray(dual.node_coords)
-    normal, centroid = np.asarray(geometry.face.normal), np.asarray(geometry.face.centroid)
-    owner, neighbour = np.asarray(dual.face_cells.owner), np.asarray(dual.face_cells.neighbour)
-    offsets = np.asarray(dual.face_nodes.offsets)
-    nodes = np.asarray(dual.face_nodes.face_node_indices)
-    vertices = [set() for _ in range(dual.n_cells)]
-    for face in range(dual.n_faces):
-        for cell in (owner[face], neighbour[face]):
-            if cell >= 0:
-                vertices[cell].update(nodes[offsets[face] : offsets[face + 1]].tolist())
-    worst = np.zeros(dual.n_cells)
-    for face in range(dual.n_faces):
-        for cell, sign in ((owner[face], 1.0), (neighbour[face], -1.0)):
-            if cell >= 0:
-                rise = sign * (coords[sorted(vertices[cell])] - centroid[face]) @ normal[face]
-                worst[cell] = max(worst[cell], float(rise.max()))
-    return worst / np.cbrt(np.asarray(geometry.cell.volume))
+    ticks = np.linspace(lo, hi, n + 1)
+    points, index, triangles = [], {}, []
+
+    def point(xyz):
+        key = tuple(np.round(xyz, 12))
+        if key not in index:
+            index[key] = offset + len(points)
+            points.append(xyz)
+        return index[key]
+
+    for axis in range(3):
+        a, b = (axis + 1) % 3, (axis + 2) % 3
+        for side in (lo, hi):
+            for i in range(n):
+                for j in range(n):
+                    ring = []
+                    for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                        xyz = np.zeros(3)
+                        xyz[axis], xyz[a], xyz[b] = side, ticks[i + di], ticks[j + dj]
+                        ring.append(point(xyz))
+                    if (side == lo) != into_box:
+                        ring = ring[::-1]
+                    triangles += [ring[:3], [ring[0], ring[2], ring[3]]]
+    return np.array(points), np.array(triangles)

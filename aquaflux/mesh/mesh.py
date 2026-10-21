@@ -32,6 +32,8 @@ import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 
+from aquaflux import ragged
+
 from . import cell, face, groups
 from .connectivity import FaceCellConnectivity, FaceNodeConnectivity, index_dtype, interior_mask
 from .geometry import MeshGeometry
@@ -356,7 +358,32 @@ class Mesh(eqx.Module):
         """Number of cells."""
         return self.face_cells.n_cells
 
-    def geometry(self) -> MeshGeometry:
+    def cell_nodes(self) -> tuple[np.ndarray, np.ndarray]:
+        """Each cell's distinct nodes — those of its faces — as a CSR list (build-time, numpy).
+
+        Returns
+        -------
+        (offsets, nodes)
+            Row pointers of shape ``(n_cells + 1,)`` and the flat node indices, cell ``c``'s being
+            ``nodes[offsets[c]:offsets[c + 1]]``, in ascending order.
+        """
+        owner = np.asarray(self.face_cells.owner, dtype=np.int64)
+        neighbour = np.asarray(self.face_cells.neighbour, dtype=np.int64)
+        interior = np.flatnonzero(neighbour >= 0)
+        cell_of_side = np.concatenate([owner, neighbour[interior]])
+        face_of_side = np.concatenate([np.arange(owner.size), interior])
+        ring_nodes, side, _ = ragged.rows(
+            np.asarray(self.face_nodes.offsets),
+            np.asarray(self.face_nodes.face_node_indices, dtype=np.int64),
+            face_of_side,
+        )
+        # One integer key per (cell, node) pair makes the per-cell de-duplication one global sort.
+        keys = np.unique(cell_of_side[side] * self.n_nodes + ring_nodes)
+        offsets = np.zeros(self.n_cells + 1, dtype=np.int64)
+        np.cumsum(np.bincount(keys // self.n_nodes, minlength=self.n_cells), out=offsets[1:])
+        return offsets, keys % self.n_nodes
+
+    def geometry(self, signs: RingSigns | None = None) -> MeshGeometry:
         """Compute the derived face and cell geometry (build-time, jit-compiled).
 
         Wires the computation in dependency order: the dimension's face-geometry strategy
@@ -372,6 +399,13 @@ class Mesh(eqx.Module):
         positions correct and avoids a cache going stale under cell renumbering / partitioning
         (see :class:`~aquaflux.mesh.geometry.MeshGeometry`).
 
+        Parameters
+        ----------
+        signs : RingSigns, optional
+            The faces' ring directions, ``ring_signs(self.face_nodes, self.face_cells)``, found
+            when not given. They depend on the connectivity alone, so a caller computing the
+            geometry of one topology at many node positions finds them once and passes them.
+
         Returns
         -------
         MeshGeometry
@@ -379,7 +413,8 @@ class Mesh(eqx.Module):
             (volumes, centroids).
         """
         scheme = face.face_geometry_scheme(self.dim)
-        signs = ring_signs(self.face_nodes, self.face_cells)
+        if signs is None:
+            signs = ring_signs(self.face_nodes, self.face_cells)
         return _fused_geometry(
             scheme, self.node_coords, self.face_nodes, self.face_cells, self.dim, signs
         )

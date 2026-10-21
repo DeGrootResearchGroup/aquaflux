@@ -21,6 +21,8 @@ from aquaflux.meshing import (
     netgen_available,
 )
 
+from tests.support.meshes import box_surface
+
 pytestmark = pytest.mark.skipif(not netgen_available(), reason="netgen-mesher is not installed")
 
 BOX = (1.0, 2.0, 3.0)
@@ -161,41 +163,9 @@ def test_the_fill_keeps_the_surface_and_fills_exactly_what_it_encloses(solids, n
     )
 
 
-def _box_surface(lo, hi, n, *, into_box, offset=0):
-    """The six faces of the cube ``[lo, hi]^3``, ``n`` x ``n`` squares each split in two.
-
-    Wound out of the cube, or into it with ``into_box`` (the walls of a hole). Point indices start
-    at ``offset``.
-    """
-    ticks = np.linspace(lo, hi, n + 1)
-    points, index, triangles = [], {}, []
-
-    def point(xyz):
-        key = tuple(np.round(xyz, 12))
-        if key not in index:
-            index[key] = offset + len(points)
-            points.append(xyz)
-        return index[key]
-
-    for axis in range(3):
-        a, b = (axis + 1) % 3, (axis + 2) % 3
-        for side in (lo, hi):
-            for i in range(n):
-                for j in range(n):
-                    ring = []
-                    for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
-                        xyz = np.zeros(3)
-                        xyz[axis], xyz[a], xyz[b] = side, ticks[i + di], ticks[j + dj]
-                        ring.append(point(xyz))
-                    if (side == lo) != into_box:
-                        ring = ring[::-1]
-                    triangles += [ring[:3], [ring[0], ring[2], ring[3]]]
-    return np.array(points), np.array(triangles)
-
-
 def test_the_fill_meshes_the_gap_between_two_surfaces():
-    outer_points, outer = _box_surface(0.0, 1.0, 4, into_box=False)
-    inner_points, inner = _box_surface(0.35, 0.65, 2, into_box=True, offset=len(outer_points))
+    outer_points, outer = box_surface(0.0, 1.0, 4, into_box=False)
+    inner_points, inner = box_surface(0.35, 0.65, 2, into_box=True, offset=len(outer_points))
     points = np.vstack([outer_points, inner_points])
     triangles = np.vstack([outer, inner])
     filled = NetgenProcess().fill(points, triangles, max_size=0.3)
@@ -210,8 +180,8 @@ def test_a_fill_of_the_wrong_region_is_refused():
     # volume, so the surface check passes it, and Netgen fills straight through the hole, keeping
     # every supplied point. Only the check that the tetrahedra are bounded by the supplied surface
     # catches it.
-    outer_points, outer = _box_surface(0.0, 1.0, 4, into_box=False)
-    inner_points, inner = _box_surface(0.35, 0.65, 2, into_box=False, offset=len(outer_points))
+    outer_points, outer = box_surface(0.0, 1.0, 4, into_box=False)
+    inner_points, inner = box_surface(0.35, 0.65, 2, into_box=False, offset=len(outer_points))
     with pytest.raises(MeshingError, match="bounded by 192 triangles, not the 240 supplied"):
         NetgenProcess().fill(
             np.vstack([outer_points, inner_points]), np.vstack([outer, inner]), max_size=0.3
@@ -267,14 +237,12 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
     # and with the vertices on its cut edges left at their midpoints 1.1. Cut and placed, every
     # cell is within 0.35 of convex.
     pytest.importorskip("OCP")
-    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.mesh import cell_non_convexity, closed_cell_residual
     from aquaflux.meshing import PolyhedralDual, element_mesh
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
     from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
     from OCP.BRepTools import BRepTools
     from OCP.gp import gp_Pnt
-
-    from tests.support.meshes import worst_excursion
 
     shape = BRepAlgoAPI_Fuse(
         BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.2, 0.1, 0.1).Shape(),
@@ -293,7 +261,7 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
     np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
     scale = float(np.max(np.asarray(dual.geometry().face.area)))
     assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
-    assert float(worst_excursion(dual).max()) < 0.45
+    assert float(cell_non_convexity(dual).max()) < 0.4
 
 
 #: The Sozzi water's faces, as its topology numbers them (pinned above by area): the vessel's
@@ -430,3 +398,340 @@ def test_prism_layers_on_the_sozzi_walls_keep_their_first_height_from_the_true_w
         first = away[(away > 0.0002) & (away < 0.0008)]
         assert first.size > 100, name
         assert float(np.median(first)) == pytest.approx(0.0005, rel=0.03), name
+
+
+def test_the_dual_of_an_octree_core_filled_out_to_a_box_is_closed_and_hexahedral_inside():
+    # A core of 0.2 cubes, halved to 0.1 towards the box's walls and kept 0.15 clear of them;
+    # Netgen fills the gap between its capped surface and the walls, keeping both. The dual of the
+    # whole primal mesh must fill the box exactly, and every point the core's hexahedra surround
+    # on all sides must become a cube of their size (the dual of a block of equal cubes is the
+    # same block shifted half a cube).
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import OctreeCore, PolyhedralDual, element_mesh
+
+    wall_points, wall = box_surface(0.0, 1.0, 8, into_box=False)
+    core = OctreeCore(size=0.2, wall_size=0.1, clearance=0.15).within(
+        wall_points, wall, cap_height=0.25, boundary_size=0.125
+    )
+    assert set(np.unique(core.octree.level[core.kept]).tolist()) == {0, 1}
+    # The fill wants the surface's own points only; the core's inner points follow its result.
+    on_surface = np.unique(core.surface)
+    number = np.empty(core.points.shape[0], dtype=np.int64)
+    number[on_surface] = len(wall_points) + np.arange(on_surface.size)
+    filled = NetgenProcess().fill(
+        np.vstack([wall_points, core.points[on_surface]]),
+        np.vstack([wall, number[core.surface]]),
+        max_size=0.125,
+    )
+    inner = np.setdiff1d(np.arange(core.points.shape[0]), on_surface)
+    number[inner] = len(filled.points) + np.arange(inner.size)
+    primal = element_mesh(
+        np.vstack([filled.points, core.points[inner]]),
+        tetrahedra=np.vstack([filled.tetrahedra, number[core.tetrahedra]]),
+        hexahedra=number[core.hexahedra],
+        pyramids=number[np.vstack([core.pyramids, core.caps])],
+    )
+    np.testing.assert_allclose(np.asarray(primal.geometry().cell.volume).sum(), 1.0, rtol=1e-12)
+    dual = PolyhedralDual(feature_angle=np.radians(45)).build(primal)
+    assert dual.n_cells == primal.n_nodes  # a box has no concave edge to cut cells at
+    volume = np.asarray(dual.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 1.0, rtol=1e-12)
+    scale = float(np.max(np.asarray(dual.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(dual)))) < 1e-12 * scale
+    surrounded = np.bincount(number[core.hexahedra].ravel(), minlength=primal.n_nodes) == 8
+    assert np.count_nonzero(surrounded) > 50
+    size = np.zeros(primal.n_nodes)
+    hexahedra = number[core.hexahedra]
+    size[hexahedra] = np.linalg.norm(
+        primal.node_coords[hexahedra[:, 1]] - primal.node_coords[hexahedra[:, 0]], axis=1
+    )[:, None]
+    np.testing.assert_allclose(volume[surrounded], size[surrounded] ** 3, rtol=1e-12)
+    face_size = np.diff(np.asarray(dual.face_nodes.offsets))
+    faces_of = np.zeros(dual.n_cells, dtype=np.int64)
+    quads_of = np.zeros(dual.n_cells, dtype=np.int64)
+    for side in (dual.face_cells.owner, dual.face_cells.neighbour):
+        side = np.asarray(side)
+        np.add.at(faces_of, side[side >= 0], 1)
+        np.add.at(quads_of, side[side >= 0], face_size[side >= 0] == 4)
+    assert np.all(faces_of[surrounded] == 6) and np.all(quads_of[surrounded] == 6)
+
+
+def _hexahedral_walls(mesh, patch: str) -> np.ndarray:
+    """Which of a patch's faces are quadrilaterals of hexahedral dual cells."""
+    size = np.diff(np.asarray(mesh.face_nodes.offsets))
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    faces = np.zeros(mesh.n_cells, dtype=np.int64)
+    quads = np.zeros(mesh.n_cells, dtype=np.int64)
+    for side in (owner, neighbour):
+        np.add.at(faces, side[side >= 0], 1)
+        np.add.at(quads, side[side >= 0], size[side >= 0] == 4)
+    mine = np.asarray(mesh.face_patches.indices(patch))
+    return (size[mine] == 4) & (faces[owner[mine]] == 6) & (quads[owner[mine]] == 6)
+
+
+def _hexahedral_wall_share(mesh, patch: str) -> float:
+    """The share of a patch's faces that are quadrilaterals of hexahedral dual cells."""
+    return float(np.mean(_hexahedral_walls(mesh, patch)))
+
+
+def _l_drawing(tmp_path):
+    """An L of two boxes, 0.2 x 0.1 x 0.1 m and a 0.1 m cube standing on its first half, drawn by
+    OCP and read back from a STEP file: the model and the region of its one solid."""
+    pytest.importorskip("OCP")
+    from aquaflux.io.cad import CadRegion, read_step
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+    from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
+    from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+
+    # Drawn in millimetres, which is what a STEP file without units is read in.
+    fused = BRepAlgoAPI_Fuse(
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 200, 100, 100).Shape(),
+        BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 100), 100, 100, 100).Shape(),
+    ).Shape()
+    unified = ShapeUpgrade_UnifySameDomain(fused)
+    unified.Build()
+    writer = STEPControl_Writer()
+    writer.Transfer(unified.Shape(), STEPControl_AsIs)
+    writer.Write(str(tmp_path / "l.step"))
+    model = read_step(tmp_path / "l.step")
+    return model, CadRegion((model.names[0],))
+
+
+def _depth_in_the_l(points):
+    """How far each point inside the L lies from its boundary: from the L's box, or from the box
+    cut out of it above its second half."""
+    to_box = np.min(np.concatenate([points, [0.2, 0.1, 0.2] - points], axis=1), axis=1)
+    cut_low, cut_high = np.array([0.1, -1.0, 0.1]), np.array([1.0, 1.0, 1.0])
+    outside_cut = np.maximum(np.maximum(cut_low - points, points - cut_high), 0.0)
+    return np.minimum(to_box, np.linalg.norm(outside_cut, axis=1))
+
+
+def test_mapped_walls_layered_round_an_l_give_hexahedra_that_close_at_its_inside_edge(tmp_path):
+    # The L's six rectangular faces meshed as structured grids, its two L-shaped ends left to
+    # triangles, and layers grown on all eight. At the inside edge the two walls' hexahedra meet
+    # and the layer points above the edge are cut with it; the dual must close everywhere and fill
+    # the L exactly, and the cells against the grids must be hexahedra.
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+
+    model, region = _l_drawing(tmp_path)
+    ends = {"ends": FacesNear(((0.05, 0.0, 0.05), (0.05, 0.1, 0.05)))}
+    layers = PrismLayers(first_height=0.002, growth=1.2, count=3)
+    mesh = CadMesher(max_size=0.02, feature_angle=np.radians(45), layers=layers).mesh(
+        model, region, ends, layered=("walls", "ends"), mapped=("walls",)
+    )
+    volume = np.asarray(mesh.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
+    scale = float(np.max(np.asarray(mesh.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    # A wall face with no vertex on one of the L's edges is the dual face of a grid point inside
+    # its CAD face: its cell, and the one above it in every layer, a hexahedron.
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    walls = np.asarray(mesh.face_patches.indices("walls"))
+    used = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in walls]))
+    topology = model.topology(region)
+    ends = topology.vertices[topology.edge_vertices]  # the L's edges are straight
+    along = ends[:, 1] - ends[:, 0]
+    offset = np.asarray(mesh.node_coords)[used][:, None] - ends[None, :, 0]
+    t = np.clip(np.einsum("pek,ek->pe", offset, along) / np.sum(along**2, axis=1), 0.0, 1.0)
+    gap = np.linalg.norm(offset - t[..., None] * along[None], axis=2).min(axis=1)
+    on_edge = np.zeros(mesh.n_nodes, dtype=bool)
+    on_edge[used[gap < 1e-9]] = True
+    inside = np.array([not on_edge[nodes[offsets[f] : offsets[f + 1]]].any() for f in walls])
+    assert np.count_nonzero(inside) > 100
+    assert np.all(_hexahedral_walls(mesh, "walls")[inside])
+
+
+def test_a_hex_core_inside_the_layers_of_an_l_joins_them_through_polyhedra(tmp_path):
+    # Prism layers on every wall of the L, and inside them a core of 0.02 m cubes halved to
+    # 0.01 m towards the layers' top and kept 0.02 m clear of it (the L is only 0.1 m across, so
+    # its core is all wall cubes). The dual must close everywhere
+    # and fill the L exactly; the core's interior points become cubes of their hexahedra's size
+    # with six quadrilateral faces; and no cube stands nearer the wall than the clearance plus
+    # half the layers' thickness.
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, OctreeCore, PrismLayers
+
+    model, region = _l_drawing(tmp_path)
+    layers = PrismLayers(first_height=0.002, growth=1.2, count=3)
+    core = OctreeCore(size=0.02, wall_size=0.01, clearance=0.02)
+    mesh = CadMesher(max_size=0.01, feature_angle=np.radians(45), layers=layers, core=core).mesh(
+        model, region, layered=("walls",)
+    )
+    volume = np.asarray(mesh.geometry().cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
+    scale = float(np.max(np.asarray(mesh.geometry().face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    size = np.diff(np.asarray(mesh.face_nodes.offsets))
+    faces_of = np.zeros(mesh.n_cells, dtype=np.int64)
+    quads_of = np.zeros(mesh.n_cells, dtype=np.int64)
+    for side in (mesh.face_cells.owner, mesh.face_cells.neighbour):
+        side = np.asarray(side)
+        np.add.at(faces_of, side[side >= 0], 1)
+        np.add.at(quads_of, side[side >= 0], size[side >= 0] == 4)
+    cubes = (faces_of == 6) & (quads_of == 6) & np.isclose(volume, 0.01**3, rtol=1e-9)
+    assert np.count_nonzero(cubes) > 50
+    centroid = np.asarray(mesh.geometry().cell.centroid)
+    thickness = float(layers.offsets()[-1])
+    assert _depth_in_the_l(centroid[cubes]).min() >= 0.02 + 0.5 * thickness
+
+
+def test_the_sozzi_lamp_and_pipes_meshed_as_grids_carry_hexahedral_layers():
+    # The lamp's cylinder and the two pipes' (each a band) as structured grids, layered with the
+    # vessel and the lamp's tip. The pipes meet the vessel at concave edges -- the riser on its
+    # cylinder, a saddle, and the outlet on its end plate. Every cell must close; the cells against
+    # the grids must be hexahedra; and the dual's first layer boundary on the lamp must sit at the
+    # first height from the true wall.
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    patches = {
+        "inlet": FacesNear(((0.04765, 0.0, 0.8945),)),
+        "outlet": FacesNear(((1.739, 0.0, 0.0),)),
+        "lamp": FacesNear(((0.4, 0.01, 0.0),)),
+        "lamp_tip": FacesNear(((0.81, 0.0, 0.0),)),
+        "pipes": FacesNear(((0.0572, 0.0, 0.5), (1.3, 0.0096, 0.0))),
+    }
+    layers = PrismLayers(first_height=0.0005, growth=1.2, count=5)
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers).mesh(
+        model, water, patches, layered=("walls", "lamp", "lamp_tip", "pipes"),
+        mapped=("lamp", "pipes"),
+    )  # fmt: skip
+    geometry = mesh.geometry()
+    assert np.all(np.asarray(geometry.cell.volume) > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    # All but the faces at the grids' rims, where the dual's faces meet the CAD's edges.
+    assert _hexahedral_wall_share(mesh, "lamp") > 0.95
+    assert _hexahedral_wall_share(mesh, "pipes") > 0.95
+    coords = np.asarray(mesh.node_coords)
+    radius = np.hypot(coords[:, 1], coords[:, 2])
+    near = (coords[:, 0] > 0.1) & (coords[:, 0] < 0.7) & (np.abs(radius - 0.0105) < 0.001)
+    away = model.project(water, coords[near]).distance
+    first = away[(away > 0.0002) & (away < 0.0008)]
+    assert first.size > 100
+    assert float(np.median(first)) == pytest.approx(0.0005, rel=0.03)
+
+
+def test_the_sozzi_pipes_cores_are_structured_o_grids_with_a_junction_at_each_vessel():
+    # Both pipes found as pipes (a cylinder the water fills, nothing inside), their walls mapped and
+    # layered and their cores filled with O-grids: open at the inlet and outlet, stopping short of
+    # the junctions with the vessel (the riser's saddle on its cylinder, the outlet on its end
+    # plate). Without the cores the pipes' faces reach 87 degrees non-orthogonal at the 99th
+    # percentile 47 (five draws, 2026-10-20); with them their cells along the axis are hexahedra.
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    patches = {
+        "inlet": FacesNear(((0.04765, 0.0, 0.8945),)),
+        "outlet": FacesNear(((1.739, 0.0, 0.0),)),
+        "lamp": FacesNear(((0.4, 0.01, 0.0),)),
+        "lamp_tip": FacesNear(((0.81, 0.0, 0.0),)),
+        "pipes": FacesNear(((0.0572, 0.0, 0.5), (1.3, 0.0096, 0.0))),
+    }
+    layers = PrismLayers(first_height=0.0005, growth=1.2, count=5)
+    # The riser's grid runs from its saddle; unflattened, its rows near the junction stay saddle
+    # shaped and the caps on the junction's disc cross (Netgen: "boundary mesh is overlapping").
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers).mesh(
+        model, water, patches, layered=("walls", "lamp", "lamp_tip", "pipes"), mapped=("lamp",),
+        pipes=("pipes",),
+    )  # fmt: skip
+    geometry = mesh.geometry()
+    assert np.all(np.asarray(geometry.cell.volume) > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    inside = neighbour >= 0
+    centroid = np.asarray(geometry.cell.centroid)
+    joining = centroid[neighbour[inside]] - centroid[owner[inside]]
+    normal = np.asarray(geometry.face.normal)[inside]
+    cosine = np.abs(np.einsum("ij,ij->i", joining, normal)) / np.linalg.norm(joining, axis=1)
+    angle = np.degrees(np.arccos(np.clip(cosine, 0.0, 1.0)))
+    where = np.asarray(geometry.face.centroid)[inside]
+    in_pipes = (where[:, 0] > 0.9) | (where[:, 2] > 0.07)
+    assert float(np.percentile(angle[in_pipes], 99)) < 7.0  # 6.0; 8.2 with saddle-shaped rows
+    # Along each pipe's axis, away from its junction, every cell is a hexahedron.
+    faces = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+        neighbour[inside], minlength=mesh.n_cells
+    )
+    riser = (np.hypot(centroid[:, 0] - 0.0476, centroid[:, 1]) < 0.002) & (centroid[:, 2] > 0.1)
+    outlet = (np.hypot(centroid[:, 1], centroid[:, 2]) < 0.002) & (centroid[:, 0] > 0.95)
+    for along in (riser, outlet):
+        assert np.count_nonzero(along) > 50
+        assert np.all(faces[along] == 6)
+    area = np.asarray(geometry.face.area)
+    for name in ("inlet", "outlet"):
+        end = float(area[np.asarray(mesh.face_patches.indices(name))].sum())
+        assert end == pytest.approx(np.pi * 0.0096**2, rel=0.03), name
+
+
+def test_the_planarizer_in_the_mesher_leaves_the_layers_at_their_heights_from_the_wall():
+    # Layers on the lamp. The flattening pass may move the tetrahedra's centroids only: every dual
+    # vertex inside the layers, and every boundary vertex, must be where the mesher put it without
+    # the pass. Two iterations are enough to show which vertices move.
+    pytest.importorskip("OCP")
+    from pathlib import Path
+
+    from aquaflux.io.cad import CadRegion, Placement, read_step
+    from aquaflux.meshing import CadMesher, FacePlanarizer, FacesNear, FacesOn, PrismLayers
+
+    drawing = (
+        Path(__file__).resolve().parents[2]
+        / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
+    )
+    model = read_step(drawing, Placement(matrix=[[0, 1, 0], [1, 0, 0], [0, 0, 1]]))
+    water = CadRegion(("reactor_body", "inlet_pipe", "outlet_pipe"), without=("lamp",))
+    patches = {
+        "inlet": FacesNear(((0.04765, 0.0, 0.8945),)),
+        "outlet": FacesNear(((1.739, 0.0, 0.0),)),
+        "lamp": FacesOn(("lamp",)),
+    }
+    layers = PrismLayers(first_height=0.0005, growth=1.2, count=5)
+
+    def mesh(planarizer):
+        mesher = CadMesher(max_size=0.03, feature_angle=0.785, layers=layers, planarizer=planarizer)
+        return mesher.mesh(model, water, patches, layered=("lamp",))
+
+    plain, flat = mesh(None), mesh(FacePlanarizer(max_iterations=2))
+    before, after = np.asarray(plain.node_coords), np.asarray(flat.node_coords)
+    moved = np.linalg.norm(after - before, axis=1) > 1e-15
+    # The layers fill the 0.0005 * (1 + 1.2 + ... + 1.2^4) = 3.72 mm round the lamp (radius 10.5 mm).
+    radius = np.hypot(before[:, 1], before[:, 2])
+    lengthwise = (before[:, 0] > 0.1) & (before[:, 0] < 0.7)
+    in_layers = lengthwise & (radius > 0.0105) & (radius < 0.0105 + 0.0037)
+    assert in_layers.sum() > 100
+    assert moved.sum() > 100 and not np.any(moved & in_layers)
+    offsets = np.asarray(plain.face_nodes.offsets)
+    nodes = np.asarray(plain.face_nodes.face_node_indices)
+    boundary = np.flatnonzero(np.asarray(plain.face_cells.neighbour) < 0)
+    on_boundary = np.unique(np.concatenate([nodes[offsets[f] : offsets[f + 1]] for f in boundary]))
+    assert not np.any(moved[on_boundary])
+    assert np.all(np.asarray(flat.geometry().cell.volume) > 0.0)

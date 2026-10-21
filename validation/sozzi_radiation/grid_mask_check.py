@@ -6,7 +6,7 @@ through that pipe's opening (:class:`~compare_fluence.BranchOpenings`). That is 
 a description of one reactor rather than a method. This runs the general method against it --
 the vessel wall as the 53,500 triangles its STL actually is, a
 :class:`~aquaflux.radiation.TriangleBody` culled by its
-:class:`~aquaflux.radiation.grid.TriangleGrid` -- and asks whether the two agree.
+:class:`~aquaflux.triangle_grid.TriangleGrid` -- and asks whether the two agree.
 
 **They cannot agree exactly, and the disagreement is the measurement.** The analytic occluder
 uses the ideal cylinders the geometry was designed from; the STL is a faceted approximation of

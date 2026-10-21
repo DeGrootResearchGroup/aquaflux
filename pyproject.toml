@@ -45,7 +45,7 @@ dependencies = [
     # Numba: compiled host loops for work whose value is in what it SKIPS, which neither a traced
     # JAX loop (static trip count, so every item pays the worst case) nor numpy passes (a whole-array
     # pass per step over every item still in flight) can do cheaply. Its consumer is the triangle
-    # grid's walk (`aquaflux/radiation/grid_walk.py`), each ray walked to its first hit. 0.61 is the
+    # grid's walk (`aquaflux/triangle_grid_walk.py`), each ray walked to its first hit. 0.61 is the
     # first release with wheels for Python 3.13.
     "numba>=0.61",
     # filelock: the inter-process lock JAX's *bounded* persistent compilation cache takes

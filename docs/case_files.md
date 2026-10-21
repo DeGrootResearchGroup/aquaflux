@@ -133,6 +133,58 @@ one form each, so they need no `kind`, and the top level is the case itself.
     layered: [walls, lamp]
   ```
 
+  The dual's faces are not flat: their corners are the centroids of the tetrahedra around an edge.
+  A `planarizer` flattens them by moving those centroids
+  ({class}`~aquaflux.meshing.FacePlanarizer`), never making a cell less convex than the least convex
+  cell the mesh started with, a cell's volume more dependent on how its faces are triangulated than
+  the most dependent one's, a face more non-orthogonal or skewed than its worst face, or a convex
+  cell concave.
+  The boundary stays on the drawing and the layers keep their heights from the wall. It is off unless
+  given; `{kind: FacePlanarizer}` takes its defaults:
+
+  ```yaml
+    planarizer: {kind: FacePlanarizer}
+  ```
+
+  The faces of the patches listed in `mapped` are meshed as structured grids of quadrilaterals
+  rather than triangles ({class}`~aquaflux.meshing.MappedQuads`): each must be a band -- a cylinder
+  or cone round an axis, or a flat ring, bounded by two closed loops -- or four-sided. Layered, such a
+  wall carries hexahedra, so the solver's cells against it are hexahedra too. The lamp's cylinder
+  and the pipes' walls are bands; a lamp's rounded tip is not, so it needs a patch of its own:
+
+  ```yaml
+    patches:
+      lamp: {kind: FacesNear, points: [[0.4, 0.01, 0.0]]}
+      lamp_tip: {kind: FacesNear, points: [[0.81, 0.0, 0.0]]}
+    layered: [walls, lamp, lamp_tip]
+    mapped: [lamp]
+  ```
+
+  Pipes are found by themselves: a cylindrical face the fluid fills, with nothing else inside it,
+  whose two rims have equal counts (a multiple of four). Its wall is meshed as a structured grid,
+  layered if its patch is, and its core -- what the layers leave -- is filled with a structured
+  O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core, whose sides may bow
+  outward (`core_bow`) to even out its corners, and a shell out to the layers. Where a pipe opens
+  into the rest of the region, the O-grid stops a couple of rows short and the tetrahedra take over.
+  `pipes` names the patches whose faces are pipes instead (`[]` for none), and `pipe_core` sets how
+  their cores are filled:
+
+  ```yaml
+    pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
+  ```
+
+  The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
+  ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
+  are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of
+  the layers' top (unset, twice the wall size). The tetrahedra fill the gap, grading from the wall's
+  size to the cubes', and the solver's cells there are polyhedra joining the cubes to the layers. A
+  core needs room: a gap narrower than about twice the clearance plus a wall cube, as round a lamp
+  in a narrow annulus, is left to the tetrahedra, and a region with no such room anywhere is refused.
+
+  ```yaml
+    core: {kind: OctreeCore, size: 0.08}
+  ```
+
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
 the density, so a file cannot state two viscosities that disagree.

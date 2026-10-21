@@ -14,13 +14,15 @@ import math
 import numpy as np
 import pytest
 from aquaflux.io.cad import CadRegion, CadTopology, Projection
-from aquaflux.mesh import closed_cell_residual
+from aquaflux.mesh import closed_cell_residual, face_warp
 from aquaflux.meshing import (
     CadMesher,
+    FacePlanarizer,
     FacesNear,
     FacesOn,
     SurfaceTriangulation,
     TetrahedralMesh,
+    check_closed_surface,
 )
 
 from tests.support.meshes import tetrahedral_grid_3d
@@ -100,10 +102,13 @@ class _Cube:
 
 
 class _Netgen:
-    """Kuhn tetrahedra of the cube, as a triangulation and a fill; counts its calls."""
+    """Kuhn tetrahedra of the cube, as a triangulation and a fill; counts its calls.
 
-    def __init__(self) -> None:
-        mesh = tetrahedral_grid_3d(2)
+    ``n`` cubes a side; ``perturb`` moves the interior points (the boundary stays the cube's).
+    """
+
+    def __init__(self, n: int = 2, perturb: float = 0.0) -> None:
+        mesh = tetrahedral_grid_3d(n, perturb=perturb)
         self.points = np.asarray(mesh.node_coords)
         offsets = np.asarray(mesh.face_nodes.offsets)
         nodes = np.asarray(mesh.face_nodes.face_node_indices).reshape(-1, 3)
@@ -305,3 +310,85 @@ def test_a_vertex_on_an_edge_inside_one_face_is_moved_onto_that_face():
     expected = np.count_nonzero(traced.vertex_face >= 0) + in_one_wall
     assert np.count_nonzero(np.isclose(shift, 0.01)) == expected
     assert np.count_nonzero(shift > 1e-12) == expected
+
+
+def test_a_planarizer_flattens_the_dual_moving_only_its_cell_centroids():
+    # The perturbed Kuhn tetrahedra's dual has warped faces. Flattened, its boundary vertices -- on the
+    # drawing, 0.01 off the cube -- must not have moved, while its cell centroids have.
+    def mesh(planarizer):
+        mesher = CadMesher(
+            max_size=0.5, feature_angle=math.radians(45), planarizer=planarizer,
+            netgen=_Netgen(n=3, perturb=0.2),
+        )  # fmt: skip
+        return mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION)
+
+    plain, flat = mesh(None), mesh(FacePlanarizer())
+    before, after = np.asarray(plain.node_coords), np.asarray(flat.node_coords)
+    moved = np.linalg.norm(after - before, axis=1) > 1e-12
+    offsets = np.asarray(plain.face_nodes.offsets)
+    nodes = np.asarray(plain.face_nodes.face_node_indices)
+    on_boundary = np.zeros(plain.n_nodes, dtype=bool)
+    for face in np.flatnonzero(np.asarray(plain.face_cells.neighbour) < 0):
+        on_boundary[nodes[offsets[face] : offsets[face + 1]]] = True
+    assert moved.any() and not np.any(moved & on_boundary)
+    interior = np.asarray(plain.face_cells.interior)
+
+    def total_warp(mesh):
+        return float(np.sum(np.asarray(face_warp(mesh))[interior] ** 2))
+
+    assert total_warp(flat) < 0.5 * total_warp(plain)
+    assert float(np.asarray(flat.geometry().cell.volume).sum()) == pytest.approx(
+        float(np.asarray(plain.geometry().cell.volume).sum()), rel=1e-12
+    )
+    assert float(np.max(np.asarray(closed_cell_residual(flat)))) < 1e-14
+
+
+def test_the_layer_cells_centroids_are_not_free_to_move():
+    # Vertices 0-3 are the centroids of primal cells 0-3, of which 1 and 3 are layer cells; vertex 4
+    # is no cell's centroid.
+    from types import SimpleNamespace
+
+    from aquaflux.meshing.cad_mesher import _free_centroids
+
+    traced = SimpleNamespace(vertex_cell=np.array([0, 1, 2, 3, -1]))
+    columns = SimpleNamespace(cells=np.array([[1], [3]]))
+    assert _free_centroids(traced, columns).tolist() == [True, False, True, False, False]
+    assert _free_centroids(traced, None).tolist() == [True, True, True, True, False]
+
+
+def test_the_core_is_a_hole_in_the_fills_surface_and_its_cells_are_numbered_after_its_points():
+    # A box of edge 2 meshed at 0.2, a core of 0.5 cubes graded to 0.25 at its walls: the core's
+    # capped surface joins the box's as a hole, the cells it brings fill exactly that hole, and
+    # the tetrahedra round it may be as large as its wall cubes.
+    from aquaflux.meshing import OctreeCore, element_mesh
+
+    from tests.support.meshes import box_surface
+
+    points, surface = box_surface(0.0, 1.0, 8, into_box=False)
+    points = 2.0 * points
+    core = OctreeCore(size=0.5, wall_size=0.25, clearance=0.3)
+    mesher = CadMesher(max_size=0.2, feature_angle=math.radians(45), core=core, netgen=_Netgen())
+    joined, holed, cells = mesher._cored(points, surface)
+    np.testing.assert_array_equal(joined[: len(points)], points)
+    np.testing.assert_array_equal(holed[: len(surface)], surface)
+    used, local = np.unique(holed, return_inverse=True)
+    check_closed_surface(joined[used], local.reshape(-1, 3))
+    corner = joined[holed]
+    left = np.einsum("ij,ij->i", corner[:, 0], np.cross(corner[:, 1], corner[:, 2])).sum() / 6.0
+    filled = element_mesh(
+        joined, tetrahedra=cells.tetrahedra, hexahedra=cells.hexahedra, pyramids=cells.pyramids
+    )
+    volume = float(np.asarray(filled.geometry().cell.volume).sum())
+    assert cells.hexahedra.shape[0] > 0 and 0.0 < left < 8.0
+    np.testing.assert_allclose(volume + left, 8.0, rtol=1e-12)
+    # The cells' outer faces are the hole's triangles, and nothing else.
+    offsets = np.asarray(filled.face_nodes.offsets)
+    nodes = np.asarray(filled.face_nodes.face_node_indices)
+    rings = [
+        nodes[offsets[f] : offsets[f + 1]]
+        for f in np.flatnonzero(np.asarray(filled.face_cells.neighbour) < 0)
+    ]
+    hole = holed[len(surface) :]
+    assert {tuple(sorted(r.tolist())) for r in rings} == {tuple(sorted(r)) for r in hole.tolist()}
+    assert cells.fill_size == 0.25
+    assert CadMesher(max_size=0.2, feature_angle=1.0)._cored(points, surface)[2].fill_size == 0.2

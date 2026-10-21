@@ -1,6 +1,6 @@
 """The triangle grid's walk: each segment walked to its first hit by one compiled loop.
 
-:meth:`~aquaflux.radiation.grid.TriangleGrid.blocks` walks each segment through the voxels it
+:meth:`~aquaflux.triangle_grid.TriangleGrid.blocks` walks each segment through the voxels it
 crosses (Amanatides & Woo's 3D-DDA) and tests the triangles those voxels hold. Here that walk is
 ordinary compiled code, one ray per iteration of a parallel loop (Numba): the walk's state stays in
 registers, a ray that hits something stops at once, and no (ray, triangle) pair is ever written to

@@ -51,6 +51,8 @@ cfd/                                  # repo root
 │   ├── vectors.py                    # leaf: per-element vector algebra — dot / norm_squared / scale (buries axis/[:,None] bookkeeping; imported everywhere)
 │   ├── context.py                    # leaf: MeshContext (face_cells/geometry/properties) + FieldContext (mesh + one field's boundary_values/gradient) — below schemes/boundary so both can take it without a cycle
 │   ├── text_table.py                 # fixed-width ASCII tables for solver reports
+│   ├── triangle_grid.py              # leaf: TriangleGrid — triangles registered in voxels; segments walked to a first hit (radiation's shadow masks), boxes tested for any triangle (the mesher's regions)
+│   ├── triangle_grid_walk.py         # leaf: the grid's compiled (Numba) segment walk
 │   ├── warn_once.py                  # leaf: warn_once / forget_warnings — a diagnostic said once per process per kind
 │   │
 │   ├── mesh/                         # Mesh container + face/cell geometry + connectivity (2D and 3D)
@@ -197,10 +199,23 @@ cfd/                                  # repo root
 │   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back, with the march history its step record carries
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
 │   ├── meshing/                      # mesh generation from CAD (host-side numpy + numba; Netgen only in a child process)
-│   │   ├── cad_mesher.py             #   CadMesher.mesh(model, region, patches) -> Mesh; FaceSelection -> FacesNear / FacesOn
+│   │   ├── blocks.py                 #   HexBlock: a curved hexahedron filled by transfinite interpolation; Arc, SampledCurve; placed / scaled_counts
+│   │   ├── divisions.py              #   Graded and the count / fractions divisions of a block direction; cell_counts
+│   │   ├── surfaces.py               #   PlaneSurface / CylinderSurface / ConeSurface / SphereSurface projections
+│   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
+│   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
+│   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
+│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped) -> Mesh; FaceSelection -> FacesNear / FacesOn
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
-│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, patches) -> Mesh
-│   │   ├── layers.py                 #   PrismLayers.extrude(points, triangles, layered) -> LayerExtrusion: prism layers sized for the dual
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
+│   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement towards a region's boundary
+│   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
+│   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
+│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids
+│   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
+│   │   ├── pipes.py                  #   find_pipes / pipe_ends / fill_pipes: pipes found from the CAD, their cores O-gridded inside their layers
+│   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)

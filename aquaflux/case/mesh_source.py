@@ -21,7 +21,15 @@ import numpy as np
 from aquaflux.io import OpenFOAMReader
 from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
-from aquaflux.meshing import CadMesher, FaceSelection, NetgenProcess, PrismLayers
+from aquaflux.meshing import (
+    CadMesher,
+    FacePlanarizer,
+    FaceSelection,
+    NetgenProcess,
+    OctreeCore,
+    PipeCore,
+    PrismLayers,
+)
 
 from .drawing import CadPlacement
 
@@ -316,12 +324,33 @@ class CadMesh(MeshSource):
     layered : tuple of str
         The patches the layers grow on. Where one meets a patch without layers, the layers slide
         along it. Default: none.
+    mapped : tuple of str
+        The patches whose faces are meshed with structured quadrilaterals rather than triangles,
+        each face a band (a cylinder, a cone, a ring) or four-sided; layered, they carry hexahedra.
+        Default: none.
+    pipes : tuple of str or None
+        The patches whose faces are pipes -- each a cylinder the fluid fills, with nothing inside --
+        their walls meshed as grids and their cores as structured O-grids. Unset, every face that
+        is one; empty, none.
+    pipe_core : PipeCore or None
+        How the pipes' cores are filled; unset, the defaults of
+        :class:`~aquaflux.meshing.PipeCore`.
+    planarizer : FacePlanarizer or None
+        Flattens the mesh's faces by moving the cells' interior vertices, never making a cell less
+        convex, or its volume more dependent on how its faces are triangulated, or a face worse,
+        than the worst the mesh started with, nor a convex cell concave; unset, the faces are left
+        as made.
+    core : OctreeCore or None
+        A core of hexahedra from an octree inside the region, kept clear of the walls and of the
+        layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
+        Unset, the core is polyhedral throughout.
 
     Raises
     ------
     ValueError
-        If no solid is named; a size, the angle or the grading is not a positive, finite number; or
-        layers are given without a patch to grow on, or patches are named without layers.
+        If no solid is named; a size, the angle or the grading is not a positive, finite number;
+        layers are given without a patch to grow on, or patches are named without layers; or the
+        core's size is below an unset wall size.
     """
 
     path_fields: ClassVar[tuple[str, ...]] = ("file",)
@@ -338,6 +367,11 @@ class CadMesh(MeshSource):
     grading: float | None = None
     layers: PrismLayers | None = None
     layered: tuple[str, ...] = ()
+    mapped: tuple[str, ...] = ()
+    pipes: tuple[str, ...] | None = None
+    pipe_core: PipeCore | None = None
+    planarizer: FacePlanarizer | None = None
+    core: OctreeCore | None = None
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (CadMesher.mesh, NetgenProcess.triangulate)
@@ -353,6 +387,9 @@ class CadMesh(MeshSource):
                 )
         object.__setattr__(self, "patches", types.MappingProxyType(dict(self.patches)))
         object.__setattr__(self, "layered", tuple(self.layered))
+        object.__setattr__(self, "mapped", tuple(self.mapped))
+        if self.pipes is not None:
+            object.__setattr__(self, "pipes", tuple(self.pipes))
         if (self.layers is None) != (not self.layered):
             raise ValueError(
                 "a CadMesh grows layers on the patches it names in layered, so it takes both "
@@ -367,9 +404,12 @@ class CadMesh(MeshSource):
             for name in ("min_size", "grading")
             if (value := getattr(self, name)) is not None
         }
+        if self.pipe_core is not None:
+            options["pipe_core"] = self.pipe_core
         return CadMesher(
-            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers, **options
-        )
+            max_size=self.max_size, feature_angle=self.feature_angle, layers=self.layers,
+            planarizer=self.planarizer, core=self.core, **options,
+        )  # fmt: skip
 
     def read(self, directory: Path) -> Mesh:
         """The region, read from its drawing and meshed -- see :meth:`MeshSource.read`."""
@@ -380,5 +420,5 @@ class CadMesh(MeshSource):
         options = {} if self.others is None else {"others": self.others}
         return self.mesher().mesh(
             model, CadRegion(self.solids, self.without), dict(self.patches),
-            layered=self.layered, **options,
+            layered=self.layered, mapped=self.mapped, pipes=self.pipes, **options,
         )  # fmt: skip

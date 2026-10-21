@@ -7,11 +7,11 @@ import warnings
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from aquaflux import triangle_grid as grid_module
 from aquaflux.mesh import structured_grid_3d
 from aquaflux.mesh.surface import patch_triangles
-from aquaflux.radiation import grid as grid_module
-from aquaflux.radiation.grid import TriangleGrid, _near_cubic_resolution
 from aquaflux.radiation.triangles import segment_is_cut
+from aquaflux.triangle_grid import TriangleGrid, near_cubic_resolution
 
 from tests.unit.radiation_references import closed_drum
 
@@ -130,7 +130,7 @@ def test_the_default_voxels_take_the_boxs_proportions_and_its_triangle_count():
     assert grid.resolution.max() - grid.resolution.min() <= 1, grid.resolution
     box = np.ptp(stretched.reshape(-1, 3), axis=0)
     np.testing.assert_allclose(grid.spacing / grid.spacing[0], box / box[0], rtol=0.05)
-    cubic = _near_cubic_resolution(stretched)
+    cubic = near_cubic_resolution(stretched)
     assert 3.0 < np.prod(grid.resolution) / np.prod(cubic) < 5.0, (grid.resolution, cubic)
     occupied = np.diff(grid.starts)
     assert 1.0 < occupied[occupied > 0].mean() < 40.0, occupied[occupied > 0].mean()
@@ -154,7 +154,7 @@ def test_no_default_voxel_is_more_than_the_cap_longer_than_it_is_wide():
     assert resolution[2] == 1 and resolution[0] > 10 and resolution[1] > 10, resolution
     # And the count is still the budget's, spent over the two axes the surface extends along;
     # solving for it over all three would divide by the flat axis's near-zero extent.
-    cubic = _near_cubic_resolution(flat)
+    cubic = near_cubic_resolution(flat)
     assert 3.0 < np.prod(resolution) / np.prod(cubic) < 5.0, (resolution, cubic)
 
 
