@@ -12,9 +12,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from aquaflux.mesh import Mesh
-from aquaflux.meshing import Polygons, PrismLayers, element_mesh
+from aquaflux.meshing import Polygons, PrismLayers, PyramidCaps, element_mesh
 
-from tests.support.meshes import tetrahedral_grid_3d, voxel_surface
+from tests.support.meshes import crossing_edges, tetrahedral_grid_3d, voxel_surface
 
 
 def _outward_surface(mesh: Mesh) -> tuple[np.ndarray, np.ndarray]:
@@ -127,8 +127,12 @@ def test_a_drawn_in_triangle_that_would_turn_over_is_saved_by_thinning():
     # with halving the layers there are thinned until none does.
     points, triangles = _box(4)
     top = np.all(np.isclose(points[triangles][:, :, 2], 1.0), axis=1)
-    thick = PrismLayers(first_height=0.12, growth=1.2, count=2, max_halvings=0)
-    with pytest.raises(ValueError, match="inside out after their layers were thinned 0 times"):
+    # (No floor on the top's edges, so only a turned triangle can be the reason.)
+    thick = PrismLayers(first_height=0.12, growth=1.2, count=2, max_halvings=0, min_top_share=0.0)
+    with pytest.raises(
+        ValueError,
+        match="inside out, or an edge of the layers' top too short, after their layers were thinned 0 times",
+    ):
         thick.extrude(points, Polygons(triangles), ~top)
     grown = PrismLayers(first_height=0.12, growth=1.2, count=2).extrude(
         points, Polygons(triangles), ~top
@@ -179,9 +183,9 @@ def test_a_prism_that_would_turn_over_at_a_concave_edge_is_saved_by_thinning():
     points, triangles = _outward_surface(l_shape)
     every = np.ones(len(triangles), dtype=bool)
     with pytest.raises(ValueError, match="inside out"):
-        PrismLayers(first_height=0.1, growth=1.2, count=2, max_halvings=0).extrude(
-            points, Polygons(triangles), every
-        )
+        PrismLayers(
+            first_height=0.1, growth=1.2, count=2, max_halvings=0, min_top_share=0.0
+        ).extrude(points, Polygons(triangles), every)
     grown = PrismLayers(first_height=0.1, growth=1.2, count=2).extrude(
         points, Polygons(triangles), every
     )
@@ -207,6 +211,7 @@ def test_a_point_with_nowhere_to_slide_is_refused():
         ({"count": 0}, "count must be a whole number >= 1"),
         ({"gap_share": 0.6}, r"gap_share must be in \(0, 0.5\]"),
         ({"max_stretch": 0.5}, "max_stretch must be >= 1"),
+        ({"min_top_share": 1.0}, r"min_top_share must be in \[0, 1\)"),
     ],
 )
 def test_settings_out_of_range_are_refused(settings, message):
@@ -281,10 +286,44 @@ def test_a_hexahedron_that_would_turn_over_at_a_concave_edge_is_saved_by_thinnin
     points, quads = voxel_surface([(0, 0, 0), (1, 0, 0), (0, 0, 1)], 2, size=0.5)
     every = np.ones(len(quads), dtype=bool)
     with pytest.raises(ValueError, match="inside out"):
-        PrismLayers(first_height=0.1, growth=1.2, count=2, max_halvings=0).extrude(
-            points, Polygons(quads=quads), every
-        )
+        PrismLayers(
+            first_height=0.1, growth=1.2, count=2, max_halvings=0, min_top_share=0.0
+        ).extrude(points, Polygons(quads=quads), every)
     grown = PrismLayers(first_height=0.1, growth=1.2, count=2).extrude(
         points, Polygons(quads=quads), every
     )
     assert np.all(_cells_volume(grown) > 0.0)
+
+
+def test_a_top_face_collapsed_where_walls_meet_is_thinned_until_its_caps_clear_the_fill():
+    # A cube of quadrilaterals an eighth wide, layered all round 0.1225 thick: at each edge the
+    # columns lean together along the bisector, so the top face beside the edge is 0.0025 wide, and
+    # the pyramid capping it stands through the other wall's top -- the surface left for the fill
+    # crosses itself, which a fill refuses. With the default the thickness there is halved.
+    points, quads = voxel_surface([(0, 0, 0)], 8)
+    every = np.ones(len(quads), dtype=bool)
+
+    def fill_surface(layers):
+        grown = layers.extrude(points, Polygons(quads=quads), every)
+        caps = PyramidCaps.on(grown.points, grown.inner.quads[:, ::-1], 0.25)
+        return grown, np.vstack([grown.points, caps.apexes]), caps.sides
+
+    _, unguarded, sides = fill_surface(
+        PrismLayers(first_height=0.06125, growth=1.2, count=1, min_top_share=0.0)
+    )
+    assert crossing_edges(unguarded, sides) > 0
+    grown, guarded, sides = fill_surface(PrismLayers(first_height=0.06125, growth=1.2, count=1))
+    assert crossing_edges(guarded, sides) == 0
+    top = np.arange(grown.points.shape[0])
+    top[grown.columns[:, 0]] = grown.columns[:, -1]
+    pairs, _ = Polygons(quads=quads).edges()
+    shrink = np.linalg.norm(np.diff(grown.points[top[pairs]], axis=1), axis=2) / np.linalg.norm(
+        np.diff(points[pairs], axis=1), axis=2
+    )
+    assert shrink.min() >= 0.1
+    # Only where the walls meet: three rows in from every edge a face keeps the full thickness.
+    thickness = np.linalg.norm(grown.points[grown.columns[:, -1]] - points, axis=1)
+    inside = np.sum((points > 0.3) & (points < 0.7), axis=1) == 2
+    assert inside.sum() == 6 * 9
+    np.testing.assert_allclose(thickness[inside], 0.1225, rtol=1e-12)
+    assert thickness.min() == pytest.approx(0.06125)

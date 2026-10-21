@@ -24,7 +24,12 @@ faces are drawn in to meet the layers' top.
 lies on is cleared by the full thickness (at most ``max_stretch`` times it), and thinned where the
 wall faces another closely -- to at most ``gap_share`` of the distance across -- and then wherever a
 cell, or a face drawn in, would turn inside out, halving the thickness there until none does.
-Around a thinned point the layers taper back to full thickness, by at most half again from one
+Where the region's walls meet at less than a straight angle, the columns there lean together and
+the faces of the layers' top beside the edge come out narrower than the wall faces under them -- by
+about the thickness, so a face whose wall is about as wide as the layers are thick collapses to a
+sliver. A sliver is no face for a fill to meet (a pyramid on it stands over its neighbours' faces),
+so an edge of the top shorter than ``min_top_share`` of the wall edge under it is halved the same
+way. Around a thinned point the layers taper back to full thickness, by at most half again from one
 point to the next.
 """
 
@@ -111,6 +116,11 @@ class PrismLayers:
         The most a point's layers are lengthened, at a fold, to clear the faces it lies on.
     max_halvings : int
         How many times a point's thickness may be halved to keep its cells right side out.
+    min_top_share : float
+        The shortest an edge of the layers' top may be, as a share of the wall edge under it, in
+        ``[0, 1)``; a shorter one is thinned. The default leaves untouched the uniform narrowing
+        inside a pipe whose layers take ``gap_share`` of it (``1 - 2 gap_share``, 0.2 at the
+        default), and catches a top face collapsed where walls meet.
     """
 
     first_height: float
@@ -119,6 +129,7 @@ class PrismLayers:
     gap_share: float = 0.4
     max_stretch: float = 2.0
     max_halvings: int = 8
+    min_top_share: float = 0.1
 
     def __post_init__(self) -> None:
         if not (math.isfinite(self.first_height) and self.first_height > 0):
@@ -136,6 +147,10 @@ class PrismLayers:
             raise ValueError(f"PrismLayers.gap_share must be in (0, 0.5], got {self.gap_share!r}.")
         if not (math.isfinite(self.max_stretch) and self.max_stretch >= 1):
             raise ValueError(f"PrismLayers.max_stretch must be >= 1, got {self.max_stretch!r}.")
+        if not (0 <= self.min_top_share < 1):
+            raise ValueError(
+                f"PrismLayers.min_top_share must be in [0, 1), got {self.min_top_share!r}."
+            )
 
     def offsets(self) -> np.ndarray:
         """Each layer's top above the wall, before any stretch or thinning, shape ``(count,)``.
@@ -170,8 +185,8 @@ class PrismLayers:
         ------
         ValueError
             If a point of a layered face lies on three or more faces without layers that meet at an
-            angle (it has nowhere to slide), or a cell stays inside out after the thickness there has
-            been halved ``max_halvings`` times.
+            angle (it has nowhere to slide), or a cell stays inside out (or an edge of the top too
+            short) after the thickness there has been halved ``max_halvings`` times.
         """
         points = np.asarray(points, dtype=np.float64)
         layered = np.asarray(layered, dtype=bool)
@@ -188,14 +203,14 @@ class PrismLayers:
         share = _smoothed_down(surface, share, moving)
         for _ in range(self.max_halvings + 1):
             extrusion = _built(surface, layered, moving, direction, offsets, share * stretch)
-            bad = _inverted(extrusion, surface, layered, moving)
+            bad = _to_be_thinned(extrusion, surface, layered, moving, self.min_top_share)
             if not bad.size:
                 return extrusion
             share[bad] *= 0.5
             share = _smoothed_down(surface, share, moving)
         raise ValueError(
-            f"{bad.size} point(s) still have a cell or a drawn-in face inside out after their "
-            f"layers were thinned {self.max_halvings} times"
+            f"{bad.size} point(s) still have a cell or a drawn-in face inside out, or an edge of "
+            f"the layers' top too short, after their layers were thinned {self.max_halvings} times"
         )
 
 
@@ -385,8 +400,10 @@ def _built(surface, layered, moving, direction, offsets, reach) -> LayerExtrusio
     )
 
 
-def _inverted(extrusion: LayerExtrusion, surface: _Surface, layered, moving) -> np.ndarray:
-    """The moving points of any cell that is inside out, or of any drawn-in face that turned."""
+def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving, min_top_share):
+    """The moving points of any cell that is inside out, of any drawn-in face that turned, and at
+    either end of any edge of the layers' top shorter than ``min_top_share`` of the wall edge
+    under it."""
     points = extrusion.points
     rows = []
     for cells, tetrahedra in ((extrusion.prisms, _PRISM_TETRAHEDRA),
@@ -406,6 +423,12 @@ def _inverted(extrusion: LayerExtrusion, surface: _Surface, layered, moving) -> 
     turned = np.einsum("ij,ij->i", drawn.normals(points), surface.normals[~layered]) <= 0.0
     turned_triangles, turned_quads = drawn.split(turned)
     rows += [drawn.triangles[turned_triangles].reshape(-1), drawn.quads[turned_quads].reshape(-1)]
+    top = np.arange(points.shape[0])
+    top[extrusion.columns[:, 0]] = extrusion.columns[:, -1]
+    pairs, _ = surface.faces.where(layered).edges()
+    wall = np.linalg.norm(points[pairs[:, 1]] - points[pairs[:, 0]], axis=1)
+    above = np.linalg.norm(points[top[pairs[:, 1]]] - points[top[pairs[:, 0]]], axis=1)
+    rows.append(pairs[above < min_top_share * wall].reshape(-1))
     # The surface's points at the bad cells, among the moving ones.
     n_surface = surface.points.shape[0]
     wall_points = _wall_point(np.concatenate(rows), n_surface, np.flatnonzero(moving))

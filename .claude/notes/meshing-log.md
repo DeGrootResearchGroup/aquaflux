@@ -994,3 +994,68 @@ Rounding rule: `4·ceil(max/4)`, not nearest, so a rim is never coarser than Net
 20). Mutations of the unit tests, each red: no rounding, `round` for `ceil`, equal share across a rim's
 edges, no second triangulation, asking when the rims already fit; of the Netgen test: no second
 `OCCGeometry`, no dedup of the edges, equal parameter steps for arc length.
+
+## 2026-10-21 — the fill's overlap at maxh 0.0025 (#790): a collapsed layer top under a cap
+
+Sozzi water as `memory_by_stage.py` (lamp and pipes mapped, five layers 0.5 mm × 1.2 on every wall,
+`feature_angle` 0.785), maxh 0.0025, macOS arm64, netgen-mesher 6.2.2608, main at `ddfeb518`.
+
+**Which triangles.** The fill's surface (layers' top, bare faces, cap sides; dumped just before
+`_filled`) has 192222 triangles; a brute edge-through-triangle check finds 52 crossing pairs, all in
+one ring: 17 triangles of the vessel's end-wall layer top against the sides of 9 pyramid caps on the
+lamp's layer-top quadrilaterals, where the lamp (r = 10 mm) leaves the end wall (x = 0). Netgen reports
+only the first pair, which is why `pipes=()` "failed on the same pair".
+
+**What made them.** The water's angle at that junction is 90°, so the corner column moves along the
+bisector (stretch √2): its top at x = 2.476 mm, while the lamp's next column (x = 2.508 mm on the wall)
+moves only radially. The lamp's first layer-top quadrilateral is 0.032 mm wide axially against its wall
+face's 2.508 mm (edge ratio 0.0126). By the shortest top edge over the wall edge under it, 23 layered
+quadrilaterals fall under 0.05 (all under 0.1), every one in that ring, and no layered triangle under 0.1. Its cap
+is sized by the first edge, which runs round (3.05 mm), so it rises 0.76 mm -- through the end wall's
+layer top, which is tapered (0.5 of full thickness at the corner ring, 0.75 one ring out) and so leans
+over the lamp's layers by about 0.45 mm per mm. The thickness at the corner (2.26-2.48 mm, already
+halved once against inversion) has reached the wall's spacing (2.5 mm): at coarser maxh the spacing is
+wider and the top face is not a sliver. With triangle walls the same slivers are prisms and nothing is
+capped on them, so that arm meshed.
+
+**Under `ClearedCaps`** (PR #792's default, branch `claude/pyramid-transitions` at its tip, re-extruded
+offline from the dumped walls): no crossing, because the fold limit across the sliver's 16 µm
+half-width shrinks its cap to **10 µm** -- the small-apex-cell problem (#785) at its worst.
+
+**The fix: thin where the top collapses.** `PrismLayers.min_top_share` (0.1): an edge of the layers'
+top shorter than that share of the wall edge under it halves the thickness at its two points, as an
+inverted cell does. Offline on the dumped walls (same extrusion, then caps, then the crossing check):
+
+| cap rule | `min_top_share` | crossing pairs | smallest cap |
+|---|---|---|---|
+| fixed 0.25 | 0 (before) | 52 | 0.33 mm |
+| fixed 0.25 | 0.1 / 0.25 / 0.5 | 0 / 0 / 0 | 0.33 mm |
+| `ClearedCaps()` | 0 | 0 | 0.010 mm |
+| `ClearedCaps()` | 0.1 / 0.25 | 0 / 0 | 0.24 mm |
+
+Columns left thinner than before: 222 of 71732 at 0.1 (the junction's ring halved once, and the taper
+round it), 294 at 0.25, 644 at 0.5. The minimum thickness anywhere is unchanged at
+0.1-0.25 (1.13 mm, a gap limit elsewhere). 0.1 was chosen under the narrowing a pipe's layers make
+uniformly when they take `gap_share` of it (`1 − 2·0.4` = 0.2), so a narrow pipe is never thinned for
+it. Reproduced small: a cube of 8 × 8 quadrilaterals per face, one layer 0.1225 thick -- Netgen stops on
+"boundary mesh is overlapping" without the floor and fills it (closure 1e-17) with it.
+
+**Whole runs after the fix** (fixed caps unless said; timings beside another session's work, counts good):
+
+| maxh, arm | cells | closure (of the largest face area) | smallest cell, m³ | peak footprint GiB |
+|---|---|---|---|---|
+| 0.0025, pipe cores | 671030 | 5.0e-16 | 4.70e-12 | 3.21 |
+| 0.0025, no pipe cores | 661019 | 5.1e-16 | 3.93e-11 | 3.25 |
+| 0.0025, `ClearedCaps()` (#792's tip with the floor) | 666826 | 5.3e-16 | 1.16e-11 | 3.19 |
+| 0.0025, `ClearedCaps()` without the floor (#792 alone) | 666876 | 5.2e-16 | 4.54e-13 | 3.18 |
+| 0.0025, triangle walls, no pipe cores | 659889 | 6.6e-16 | 1.94e-10 | 3.35 |
+| 0.002, pipe cores | 1001489 | 7.4e-16 | 1.49e-11 | 4.80 |
+
+So #792 alone also gets past the fill at 0.0025, but by the 10 µm caps: its smallest cell is 25× smaller than
+with the floor. The triangle-wall arm was 659651 cells on main after #786; not a controlled pair (main
+has moved since). Netgen's child peaked at 0.86 GiB RSS at 0.0025 and 1.85 at 0.002. Harnesses kept in
+the repository: `memory_by_stage.py` (now prints closure and the smallest cell); the surface dump and the
+crossing check were scratch, and the cube tests reproduce what they showed.
+Rebased onto main after #792 (`ClearedCaps` the default) and #789 (`be11a08c`): maxh 0.0025 with pipe
+cores gives 666826 cells, closure 5.3e-16, smallest cell 1.16e-11 m³, peak 3.17 GiB -- the "#792's tip
+with the floor" row exactly.

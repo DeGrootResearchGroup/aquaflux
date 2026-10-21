@@ -2,13 +2,14 @@
 
 The Sozzi water is meshed as ``mapped_layers_sozzi.py`` meshes it with its walls mapped (the lamp's
 and the pipes' cylinders structured, five layers on every wall, the pipes' cores O-grids), and the
-mesh's geometry is computed after, as a solve would. Each stage of the mesher is wrapped, and for
-each the harness prints its time and this process's physical footprint (the memory the operating
-system charges it, compressed pages included -- not its resident set) at the stage's start, its
-peak during the stage, and at its end. Netgen runs in a child process; its peak resident set is
-printed beside the stage that ran it, since the parent's footprint is held while it runs. The peak
-during a stage is sampled every 5 ms and also read from the kernel's lifetime maximum, so a peak
-the sampler misses (a thread holding the interpreter lock) is still seen when it is a new maximum.
+mesh's geometry is computed after, as a solve would, with its closure and smallest cell printed. Each
+stage of the mesher is wrapped, and for each the harness prints its time and this process's
+physical footprint (the memory the operating system charges it, compressed pages included -- not
+its resident set) at the stage's start, its peak during the stage, and at its end. Netgen runs in a
+child process; its peak resident set is printed beside the stage that ran it, since the parent's
+footprint is held while it runs. The peak during a stage is sampled every 5 ms and also read from
+the kernel's lifetime maximum, so a peak the sampler misses (a thread holding the interpreter
+lock) is still seen when it is a new maximum.
 
 Each size runs in its own process, one after another, so each starts from nothing. Run with
 ``MallocLargeCache=0``: by default macOS's allocator keeps freed large blocks charged to the process,
@@ -117,7 +118,7 @@ class _Stages:
 def _one_size(size: float) -> None:
     import numpy as np
     from aquaflux.io.cad import Placement, read_step
-    from aquaflux.mesh import Mesh
+    from aquaflux.mesh import Mesh, closed_cell_residual
     from aquaflux.meshing import (
         CadMesher,
         NetgenProcess,
@@ -169,6 +170,15 @@ def _one_size(size: float) -> None:
         f"  cells {mesh.n_cells}  faces {mesh.n_faces}  face-node incidences {incidences}  "
         f"meshed in {meshed:.1f} s  lifetime peak footprint "
         f"{stages.footprint.lifetime_max() / GIB:.2f} GiB",
+        flush=True,
+    )
+    # After the footprints: every cell closed, none inside out.
+    closure = float(np.max(np.asarray(closed_cell_residual(mesh)))) / float(
+        np.max(np.asarray(geometry.face.area))
+    )
+    print(
+        f"  closure {closure:.1e} (largest face area)  min cell volume "
+        f"{float(np.min(np.asarray(geometry.cell.volume))):.2e}",
         flush=True,
     )
 
