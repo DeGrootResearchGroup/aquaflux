@@ -761,3 +761,20 @@ the wall and the sleeve, its ends bare. Sozzi: the mapped lamp and pipes of `map
 - Not decided; put to the project owner: the defaults (`wall_size`, `clearance`), and whether #785's
   apex cells must be fixed before a hex core is worth selecting. Not tried: a Euclidean clearance in
   place of the grown box; caps of another height on the core.
+
+**Attribution** (`validation/meshing_dual/octree_core_attribution.py`, the open vessel at the defaults:
+maxh 0.01, cubes 0.04, wall 0.01, clearance 0.02; one draw): each dual cell classed by the primal point
+it stands for.
+
+| class | cells | median volume / wall³ | faces ratio > 20 (the smaller cell) | faces > 45° (touching) |
+|---|---|---|---|---|
+| core cap apex | 7528 | 0.136 | 10250 | 1365 |
+| transition centre | 670 | 2.50 | 0 | 0 |
+| cube corner | 18329 | 0.893 | 2 | 334 |
+| fill (Netgen's points) | 5726 | 2.33 | 153 | 69 |
+| layers and walls | 49174 | 0.062 | 461 | 77 |
+
+Of 10866 faces over a volume ratio of 20, **94 % have a core cap's apex cell as the smaller** (5758
+against a cube corner, 4135 against a fill cell); of 1439 faces over 45°, **95 % touch one**. The
+transition cubes' polyhedra carry none. The apex cells are also most of the core arm's extra cells: 7528
+of them, beside only 5726 points of Netgen's own in the whole gap. So the core's case is #785's.

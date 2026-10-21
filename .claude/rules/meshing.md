@@ -485,8 +485,8 @@ hexes, pyramids; earlier inputs unchanged).
   there reaches both).
 - ⚠️ **Measured, the core does not yet pay** (maxh 0.01, log "the octree core wired into `CadMesher`"):
   on an open vessel the agreed defaults give +15 % cells and 31x the faces over a volume ratio of 20
-  against the polyhedral core (likely the core caps' apex cells, not separated from the transition
-  cubes); wall cubes of `2 × maxh` save 19 % of the cells, still worse in volume ratio; Sozzi's 34 mm
+  against the polyhedral core -- 94 % of those faces have a core cap's apex cell as the smaller, and
+  the transition cubes' polyhedra carry none (log, "Attribution"); wall cubes of `2 × maxh` save 19 % of the cells, still worse in volume ratio; Sozzi's 34 mm
   annulus keeps no cube at all. The defaults and #785's priority are with the project owner.
 - **Not yet**: snapping nodes to walls (the core always stays a clearance from every patch, inlets
   included); user refinement regions; a core in a gap narrower than about `2 × clearance + wall` (left to
