@@ -482,7 +482,9 @@ hexes, pyramids; earlier inputs unchanged).
   `max_size` is only raised to the wall cubes' size where larger (`_CoreCells.fill_size`). `CadMesh.core`
   is the case key (`{kind: OctreeCore, size: ...}`); unset, the polyhedral core.
 - **Interaction with #785**: each core cap's apex is a small dual cell too (same `PyramidCaps`, so a fix
-  there reaches both).
+  there reaches both). ⚠️ **Moving the apexes after the fill does not help** (Laplacian with a shape
+  guard; measured on five draws, dropped; log, "the caps' apexes moved after the fill"): the apex cell's
+  size is set by the fill's own points near the cap, so a fix must change what the fill sees.
 - ⚠️ **Measured, the core does not yet pay** (maxh 0.01, log "the octree core wired into `CadMesher`"):
   on an open vessel the agreed defaults give +15 % cells and 31x the faces over a volume ratio of 20
   against the polyhedral core -- 94 % of those faces have a core cap's apex cell as the smaller, and

@@ -778,3 +778,32 @@ Of 10866 faces over a volume ratio of 20, **94 % have a core cap's apex cell as 
 against a cube corner, 4135 against a fill cell); of 1439 faces over 45°, **95 % touch one**. The
 transition cubes' polyhedra carry none. The apex cells are also most of the core arm's extra cells: 7528
 of them, beside only 5726 points of Netgen's own in the whole gap. So the core's case is #785's.
+
+## 2026-10-20 — the caps' apexes moved after the fill: measured and dropped
+
+`ApexRelaxation` (not merged; commit `5c3dd83d` on the pushed branch `claude/apex-relaxation`, with its
+unit tests and the harness `validation/meshing_dual/apex_relaxation.py`): after Netgen's fill, a Jacobi
+sweep moving every cap apex (wall caps and the octree core's) to the mean of the points it shares a
+tetrahedron with, a move kept only where no tetrahedron about the apex -- the fill's, and each cap's four
+corner tetrahedra -- falls below the smaller of its start shape and 0.1 (volume over a regular
+tetrahedron's of its rms edge), halved up to six times, at most 20 sweeps to a tolerance of 1e-3 of the
+apex's mean neighbour distance. Five draws per case (rotated 1-5 µrad about x), macOS arm64, netgen-mesher
+6.2.2608, on `main` `2af33d0e` plus #788; left → relaxed, ranges over the draws:
+
+| | small cells away from walls | faces volume ratio > 20 | ratio p99 | faces > 50° | non-orth p99 |
+|---|---|---|---|---|---|
+| Sozzi, maxh 0.02, no core (pipes O-gridded, lamp mapped) | 45-54 → unchanged | 2634-2688 → 2720-2770 | 36-38 → 39-41 | 153-170 → 97-115 | 34.1 → 33.9° |
+| open vessel, maxh 0.01, octree core 0.04 at its defaults | 1785-1832 → 1853-1915 | 10837-11259 → 11126-11553 | 78-81 → 82-85 | 872-964 → 1598-1800 | 39.8 → 37.8° |
+
+"Small": Sozzi, cells under 2 mm across 13.5-22 mm from the lamp axis at 300 < x < 500 mm; vessel,
+cells under 0.4 maxh across more than 12 mm inside its walls (the core caps' apex cells).
+- **It does not reach the apex cells**: their count is unchanged on Sozzi and rises 4 % on the vessel,
+  and the lopsided faces rise ~3 % on both. The likely reason (inferred, not separately measured): the
+  apex cell is small because Netgen places its own points close to the cap, sizing them from the cap's
+  small side triangles; moving the apex afterwards reshapes its tetrahedra but cannot enlarge them. A fix
+  must change what the fill sees (taller caps on the core, where #785's pipe-core objection does not
+  apply, or Netgen closing the quadrilaterals itself), not move the apex after it.
+- Faces over 50° fall a third on Sozzi but nearly double on the vessel; not worth an opt-in setting
+  (project owner, 2026-10-20: recorded and dropped).
+- Seen in both arms on Sozzi at this `main`: the worst face 111-140° non-orthogonal, which usually means an
+  inside-out cell; not investigated here.
