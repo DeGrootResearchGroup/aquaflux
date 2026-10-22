@@ -2112,3 +2112,25 @@ citable.)
 cap, at every arm above. It becomes a real knob only if the tolerance is loosened far enough for the cap
 to start catching, which none of these arms reach.
 
+
+### SIMPLE pieces on the device (2026-10-22)
+
+Configuration: pitzDaily `case.yaml` as shipped (float32 split, `SimpleSmoothed` leading with block
+splitting and both Frobenius diagonals, `frozen_coarsening`), 4-core Linux container, jax 0.12.0.1, CPU.
+Branch `claude/aquaflux-host-device-review-ef4ffs` at `883fbc4e` against `8541d091` (#804's tree, `main`'s
+library). `validation/pitzdaily_openfoam/march_cost.py` under `run_case.sh`, the two arms alternated.
+
+- **The march is the same march**: 21 steps, 102 cycles, final R 5.736e-06, `x_r/h` 8.0686, `nu_t/nu`
+  peak 418.09, 21 refits (13 full, 8 cost) on both.
+- **Wall clock** (solve, seconds): base 267.9, 257.9; device pieces 272.6, 266.2 (+2-3 %). To the end of
+  step 1: 85, 82 against 89, 87 (the plans built at the first fit, and the fit's compilation); after it,
+  158/155 against 162/157.
+- **Refits**: refactor total base 14.5, 14.5 s, device pieces 15.1, 14.8 s. On the captured blocks one
+  split refit is 0.71 s against 0.69 s; the SIMPLE fit alone 0.30 s against 0.25 s for the host pieces.
+- **Peak resident (VmHWM)**: base 2.98, 3.00 GiB; device pieces 2.99, 3.04 GiB. Device arrays +42 MiB
+  (the plans' layouts and gathers, 0.214 -> 0.256 GiB live); held host memory after `malloc_trim` 0.863
+  -> 0.873 GiB.
+- How the fit got there (fine leading level, 36675 rows): the first form searched every padded product
+  term with the looped binary search (1.32 s); entries rather than padded rows, the unrolled search and
+  2**18-term chunks (against 2**21) took it to ~0.42; the aligned Gram matrix 0.40 -> 0.004 s, and the
+  per-cell field sum before the Schur product's search halved its searches on this 2D case.

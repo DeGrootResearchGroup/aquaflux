@@ -46,7 +46,8 @@ or host `_diagonal_approximate_inverse`.
   (`divergence_run_width`) the Schur product sums a cell's fields before placing a term, cutting the
   searches by the field count.
 - ⚠️ Not bit-identical to the old host pieces: the products sum in another order (≤ ~6e-16 relative on
-  the test saddle). Cost: log, "SIMPLE pieces on the device (2026-10-22)".
+  the test saddle). Cost on pitzDaily (CPU, 2026-10-22): same march, solve +2-3 % (the first fit; the
+  refits are level), peak resident +0.02-0.04 GiB; log, "SIMPLE pieces on the device (2026-10-22)".
 
 ## Defaults and why
 
