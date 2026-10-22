@@ -241,6 +241,10 @@ VALIDATION_INTERNAL_REACHES = {
     "PROBE_BATCH_SIZE",
     "ColumnProbePlan",
     "ProbeGather",
+    # The probed blocks' in-place shift, wrapped by `compact_jacobian_screen.py` to drop a probe's far
+    # couplings just before every fit. Hooking the place both fit paths hand their values to the split
+    # is what makes the screened split the one a march would build from such a Jacobian.
+    "ProbedBlocks",
     "batched_field_jacobian_matvec",
     "batched_jacobian_matvec",
     # The one place a fit and a re-fit choose their products, reached by the harness that compares the

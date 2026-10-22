@@ -187,7 +187,9 @@ bare block inverse).
   changes the aggregation's coarse space (3 levels / 480 coarse equations against 2 / 1296 on bfs3d) and
   diverged the then-shipped pattern-dependent smoother; positions, not values, were causal, and a stored
   exact zero is not a substitute (sparse arithmetic prunes it). Re-measure under the traced hierarchy
-  before lowering it; ledger: `solve-refuted-directions.md`, reach-2 under "Low-β directions".
+  before lowering it; ledger: `solve-refuted-directions.md`, reach-2 under "Low-β directions". Under the
+  traced split, zeroing the VALUES beyond reach 2 (positions kept) costs 1.2–1.9× the applications on
+  bfs3d, and beyond reach 1 does not converge at all (ledger, "TRUNCATING the Jacobian to reach 1").
 - ⚠️ **A short reach corrupts rather than truncates.** A colouring is collision-free only for the pattern
   it was built at, so two cells sharing a reach-2 colour can both couple to a row at distance 3; the
   response holds the sum and the de-compression charges it to the near entry. So pattern entries outside a
