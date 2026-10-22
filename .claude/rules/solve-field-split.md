@@ -147,9 +147,19 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
 **The block inverses hold their hierarchies in the split's precision** (`HierarchyBlockInverse(stored_
 precision=)`, passed by the session through `BlockInverse.bound(stored_precision=)` where the family's
 `_stores_precision` allows; lAIR does not, and stays double). Each fit and refit is computed in float64
-and rounded once after `derive_extras`, prolongation values excepted (a frozen refit reads them back, and
-the held Galerkin maps key on them), so the split shares the inverse's arrays and applies exactly what
-narrowing a double hierarchy gave. Host `apply` stays double (a float64 residual promotes every operation;
+and rounded once, prolongation values excepted (a frozen refit reads them back, and the held Galerkin maps
+key on them), so the split shares the inverse's arrays and applies exactly what narrowing a double
+hierarchy gave. Each SIMPLE piece is rounded as it is formed (`_simple_pieces(precision=)`, the host
+Schur it returns stays double) and the levels a level at a time after `derive_extras`, so no whole double
+copy sits beside a whole rounded one. **The host split holds its coupling in the split's precision too**
+(`FieldSplitInverse(stored_precision=)`, from the session's `FieldSplitPreconditioner.build`), rounded
+through `traced_cycle.host_in_precision` (JAX's conversion, which flushes single-precision subnormals as
+the traced split's does) and packed into single-precision slots (`_PaddedLayout.operator` keeps its
+operand's type). All of this is bit-identical in every array the solve applies — the traced split is
+composed from the same rounded entries — pinned by
+`test_a_split_holding_its_coupling_in_single_precision_composes_the_same_single_split`,
+`test_pieces_held_in_single_precision_are_the_double_pieces_rounded_once`, and on bfs3d by the
+`BFS3D_MEMORY_CHECKSUMS=1` leaf digests of `memory_attribution.py`. Host `apply` stays double (a float64 residual promotes every operation;
 an explicit widening was measured bit-identical and deleted). bfs3d 2-step peak 10.82 -> 10.15 GiB, steady
 device float64 1.23 -> 0.15 GiB (2026-10-18; `solve-direct-preconditioners-log.md`, "bfs3d memory by
 owner"). Pinned by `test_an_inverse_held_in_single_precision_holds_its_double_fit_rounded_once` and
@@ -161,8 +171,8 @@ decision, #732: same steps, cycles and root; pitzDaily −24 %, bfs3d −17 % wa
 2026-10-16 are float64; `PITZ_SPLIT_PRECISION` / `BFS3D_SPLIT_PRECISION=float64` reproduce them.
 
 - `FieldSplit.precision` (`SPLIT_PRECISIONS`, `materialized_spec.py`) reaches the split through
-  `MaterializedSession._precision` at both the first fit and a refit. The fit stays float64 (hierarchies,
-  inverted diagonal blocks, coupling); `TracedFieldSplit.in_precision` rounds every floating leaf once,
+  `MaterializedSession._precision` at both the first fit and a refit. The fit is computed in float64
+  (hierarchies, inverted diagonal blocks, coupling); `TracedFieldSplit.in_precision` rounds every floating leaf once,
   and `apply` narrows its input and widens its output, so residual, Krylov and stop stay float64. A
   host-composed split refuses float32 at the fit.
 - ⚠️ **The adjoint must be preconditioned in double.** float32 arithmetic is linear only to ~1e-7, and
