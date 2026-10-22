@@ -16,6 +16,7 @@ import pytest
 from aquaflux.case import Fields, case_spec_from_mapping, case_spec_to_mapping
 from aquaflux.case.initial import StartingFields
 
+from tests.support.case_meshes import grid_mesh
 from tests.support.polymesh import copy_slab_polymesh
 
 
@@ -159,10 +160,10 @@ def test_a_value_that_is_not_finite_is_refused_naming_the_field(tmp_path) -> Non
 def test_a_case_on_another_kind_of_mesh_is_refused(tmp_path) -> None:
     """The cells of an OpenFOAM case are numbered by its mesh, which a generated grid does not share."""
     root = _time_directory(tmp_path)
-    grid = {"kind": "StructuredGrid", "cells": [2, 1], "lengths": [2.0, 1.0]}
+    grid = grid_mesh([2, 1], [2.0, 1.0])
     spec = case_spec_from_mapping(_sections() | {"mesh": grid})
     mesh = spec.mesh.read(root).validate()
-    with pytest.raises(ValueError, match="must be that case's OpenFOAMMesh, not a StructuredGrid"):
+    with pytest.raises(ValueError, match="must be that case's OpenFOAMMesh, not a AquafluxMesh"):
         Fields(path="of", time="5").read(root, spec, mesh)
 
 
@@ -196,7 +197,7 @@ def test_an_empty_path_or_time_is_refused() -> None:
 
 def test_a_radiation_case_refuses_the_section() -> None:
     radiation = {
-        "mesh": {"kind": "StructuredGrid", "cells": [2, 2, 2], "lengths": [1.0, 1.0, 1.0]},
+        "mesh": grid_mesh([2, 2, 2], [1.0, 1.0, 1.0]),
         "physics": {
             "kind": "Radiation",
             "medium": {"kind": "UniformMedium", "absorption": 1.0},

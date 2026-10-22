@@ -44,12 +44,12 @@ class CaseDocument:
 
 @dataclasses.dataclass(frozen=True)
 class MeshExport:
-    """A case's mesh, as the solver read or generated it and wrote it for viewing.
+    """A case's mesh, as the solver read it and wrote it for viewing.
 
     Attributes
     ----------
     error : str or None
-        Why it could not be read or generated, if it could not; the other attributes are then unset.
+        Why it could not be read, if it could not; the other attributes are then unset.
     directory : pathlib.Path or None
         Where ``mesh.vtu`` (and ``patches.vtm``, when the solver writes the boundary) were written.
     cells, dim : int
@@ -152,7 +152,7 @@ class SolverCommands:
         return _reply(self._run(arguments, json.dumps({"case": case}))).get("error")
 
     def mesh(self, section: Mapping, relative_to: str | Path, directory: str | Path) -> MeshExport:
-        """Read or generate a case's mesh from its ``mesh`` section, written into ``directory``.
+        """Read a case's mesh from its ``mesh`` section, written into ``directory`` for viewing.
 
         Parameters
         ----------
@@ -167,7 +167,7 @@ class SolverCommands:
         -------
         MeshExport
         """
-        arguments = ["mesh", str(directory), "--relative-to", str(relative_to)]
+        arguments = ["export-mesh", str(directory), "--relative-to", str(relative_to)]
         reply = _reply(self._run(arguments, json.dumps({"mesh": section})))
         if reply.get("error"):
             return MeshExport(reply["error"])

@@ -21,6 +21,7 @@ from aquaflux.case.restart_file import read_restart
 from aquaflux.flow import solve_flow_march
 from aquaflux.io import read_openfoam_time, read_volume_scalar_field
 
+from tests.support.case_meshes import grid_mesh
 from tests.support.polymesh import copy_slab_polymesh
 
 REPO = Path(__file__).resolve().parents[2]
@@ -28,7 +29,7 @@ SLAB = REPO / "tests" / "fixtures" / "polymesh_2d_slab_frontandback"
 
 #: A laminar channel at a Reynolds number of about 50, fed a uniform velocity at its left side.
 _CHANNEL = {
-    "mesh": {"kind": "StructuredGrid", "cells": [8, 4], "lengths": [2.0, 1.0]},
+    "mesh": grid_mesh([8, 4], [2.0, 1.0]),
     "fluid": {"density": 1.0, "kinematic_viscosity": 2.0e-2},
     "physics": {"kind": "Laminar"},
     "boundaries": {

@@ -33,11 +33,27 @@ import yaml
 from aquaflux.mesh import Mesh
 
 from .initial import StartingFields, starting_arguments
+from .mesh_file import MeshSpec
 from .paths import named_paths
 from .solver import solver_for
-from .spec import CaseSpec, case_spec_from_mapping, case_spec_to_mapping
+from .spec import (
+    CaseSpec,
+    case_spec_from_mapping,
+    case_spec_to_mapping,
+    mesh_spec_from_mapping,
+    mesh_spec_to_mapping,
+)
 
-__all__ = ["CaseFile", "CheckedCase", "read_case", "read_case_document", "write_case"]
+__all__ = [
+    "CaseFile",
+    "CheckedCase",
+    "MeshFile",
+    "read_case",
+    "read_case_document",
+    "read_mesh_file",
+    "write_case",
+    "write_mesh_file",
+]
 
 _BOOL_TAG = "tag:yaml.org,2002:bool"
 _FLOAT_TAG = "tag:yaml.org,2002:float"
@@ -300,6 +316,63 @@ def write_case(spec: CaseSpec, path: str | Path) -> None:
         If ``spec`` holds a value no case file can name (see
         :func:`~aquaflux.case.case_spec_to_mapping`).
     """
-    mapping = case_spec_to_mapping(spec)
+    _write_document(case_spec_to_mapping(spec), path)
+
+
+def _write_document(mapping: dict, path: str | Path) -> None:
+    """Write a file's mapping as YAML the parse of :func:`read_case_document` reads back equal."""
     with Path(path).open("w", encoding="utf-8") as stream:
         yaml.safe_dump(mapping, stream, sort_keys=False, default_flow_style=False)
+
+
+@dataclasses.dataclass(frozen=True)
+class MeshFile:
+    """A mesh file as read: its settings, and the directory its relative paths are taken from.
+
+    Attributes
+    ----------
+    spec : MeshSpec
+    directory : pathlib.Path
+        The directory the file sits in.
+    """
+
+    spec: MeshSpec
+    directory: Path
+
+
+def read_mesh_file(path: str | Path) -> MeshFile:
+    """Read a mesh file (see :mod:`aquaflux.case.mesh_file`), by the same parse as a case file.
+
+    Parameters
+    ----------
+    path : str or path-like
+
+    Returns
+    -------
+    MeshFile
+
+    Raises
+    ------
+    ValueError, TypeError
+        If a setting is refused; the message begins with the file's path.
+    yaml.YAMLError
+        If the file is not valid YAML, or a mapping in it names one key twice.
+    """
+    path = Path(path)
+    try:
+        spec = mesh_spec_from_mapping(read_case_document(path))
+    except (ValueError, TypeError) as error:
+        raise type(error)(f"{path}: {error}") from error
+    return MeshFile(spec=spec, directory=path.parent)
+
+
+def write_mesh_file(spec: MeshSpec, path: str | Path) -> None:
+    """Write a mesh file that :func:`read_mesh_file` reads back as an equal one.
+
+    Parameters
+    ----------
+    spec : MeshSpec
+    path : str or path-like
+        The file to write; replaced if it exists.
+    """
+    _write_document(mesh_spec_to_mapping(spec), path)

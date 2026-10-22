@@ -6,7 +6,10 @@ Each is compared here against that configuration as the scripts wrote it out by 
 files -- a frozen copy, since the scripts themselves now build from the files under test.
 
 The comparison is one pytree (the same structure, static fields included, and every array leaf
-bit-equal), with one deliberate difference: the scripts held the viscosity as a Python number, and a
+bit-equal), on the case file's own mesh. That mesh is a tracked ``.aqmesh`` file, written once from
+the same graded grid: its row heights are checked against the grading to round-off, and the reference
+is then built on exactly those heights, since a grading computed on another machine's ``pow`` can
+differ from the file's in the last bit. There is one deliberate difference: the scripts held the viscosity as a Python number, and a
 case file holds it as an array, which a Reynolds continuation can rescale without recompiling. The
 reference below uses the array form, and
 :func:`test_the_array_viscosity_evaluates_to_the_same_viscosity_as_the_number` shows the number form
@@ -58,8 +61,11 @@ CONFIGURATIONS = [
 ]
 
 
-def _hand_built(ny, growth, nu, force, advection, *, viscosity_as_array=True) -> CoupledRANS:
-    """The channel as its script assembled it by hand (the viscosity form aside -- see the module)."""
+def _hand_built(
+    ny, growth, nu, force, advection, *, viscosity_as_array=True, y_nodes=None
+) -> CoupledRANS:
+    """The channel as its script assembled it by hand (the viscosity form aside -- see the module),
+    its rows at ``y_nodes`` if given, else graded by ``growth``."""
     mesh = structured_grid_2d(
         4,
         ny,
@@ -67,7 +73,7 @@ def _hand_built(ny, growth, nu, force, advection, *, viscosity_as_array=True) ->
         ly=H,
         periodic=("x",),
         named_boundaries=True,
-        y_nodes=graded_nodes(ny, H, growth),
+        y_nodes=graded_nodes(ny, H, growth) if y_nodes is None else y_nodes,
     )
     geometry = mesh.geometry()
     viscosity = jnp.asarray(1.0 * nu) if viscosity_as_array else 1.0 * nu
@@ -120,7 +126,12 @@ def test_each_channel_case_file_builds_the_channel_its_script_assembled(
     case = read_case(REPO / "validation" / path)
     # The file states the viscosity the script computed, to the last bit -- it was written from it.
     assert case.spec.fluid.kinematic_viscosity == nu
-    _same_problem(case.check().build(), _hand_built(ny, growth, nu, force, advection))
+    checked = case.check()
+    # The tracked mesh is the script's grading, to round-off; the reference is built on its rows.
+    rows = np.unique(np.asarray(checked.mesh.node_coords)[:, 1])
+    np.testing.assert_allclose(rows, graded_nodes(ny, H, growth), rtol=0.0, atol=4e-16 * H)
+    reference = _hand_built(ny, growth, nu, force, advection, y_nodes=rows)
+    _same_problem(checked.build(), reference)
 
 
 def test_the_array_viscosity_evaluates_to_the_same_viscosity_as_the_number() -> None:

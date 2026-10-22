@@ -20,6 +20,7 @@ import lineax as lx
 import pytest
 from aquaflux.case import (
     RANS,
+    AquafluxMesh,
     BulkVelocity,
     CaseSpec,
     CoupledMarch,
@@ -29,7 +30,6 @@ from aquaflux.case import (
     Numerics,
     RootSolve,
     Segregated,
-    StructuredGrid,
     ViscosityRamp,
     Wall,
     case_spec_from_mapping,
@@ -70,13 +70,15 @@ from aquaflux.turbulence import (
     scale_momentum_only,
 )
 
+from tests.support.case_meshes import grid_mesh, grid_mesh_path
+
 REPO = Path(__file__).resolve().parents[2]
 
 
 def _sections(physics: str = "RANS", **overrides: object) -> dict[str, object]:
     """A 2D channel between walls, as a file would state it, with ``overrides`` added as sections."""
     sections = {
-        "mesh": {"kind": "StructuredGrid", "cells": [4, 4], "lengths": [1.0, 1.0]},
+        "mesh": grid_mesh([4, 4], [1.0, 1.0]),
         "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-3},
         "physics": {"kind": physics},
         "boundaries": {
@@ -101,7 +103,7 @@ def _sections(physics: str = "RANS", **overrides: object) -> dict[str, object]:
 def _periodic_rans(**overrides: object) -> CaseSpec:
     """A streamwise-periodic RANS channel holding its bulk velocity."""
     return CaseSpec(
-        mesh=StructuredGrid(cells=(4, 8), lengths=(1.0, 2.0), periodic=("x",)),
+        mesh=AquafluxMesh(grid_mesh_path((4, 8), (1.0, 2.0), ("x",))),
         fluid=Fluid(density=1.0, kinematic_viscosity=1e-4),
         physics=RANS(),
         boundaries={"bottom": Wall(k="zero"), "top": Wall(k="zero")},

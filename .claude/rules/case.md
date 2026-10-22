@@ -47,8 +47,10 @@ its file alone.**
 | `scopes.py` | `FLOW` / `TURBULENCE` / `RADIATION`, `SCOPES`, the `Scoped` mixin (`setting_scopes`, `required_in_scope`, `settings_in`, `missing_in`) |
 | `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics, drive, pressure datum, sources, solver, initial, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
-| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `AquafluxMesh` (a `.aqmesh` file, read exactly; `io.md`) / `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` / `CadMesh` (a STEP region meshed by `meshing.CadMesher`; patches by `meshing.FacesNear` / `FacesOn`, layers by `meshing.PrismLayers` on the patches in `layered`, the patches in `mapped` meshed as structured quadrilaterals, pipes found (or named in `pipes`) and their cores O-gridded by `meshing.PipeCore` (`pipe_core`), the faces flattened by a `meshing.FacePlanarizer` in `planarizer` (off unless given), all read directly) |
-| `drawing.py` | `CadPlacement`, shared by `CadMesh` and the radiation CAD sources |
+| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `AquafluxMesh` (a `.aqmesh` file, read exactly; `io.md`) / `OpenFOAMMesh` |
+| `mesh_file.py` | `MeshSpec` and its one-form sections `Drawing`, `DrawingRegion`, `MeshSizes`, `MeshOutput`: a mesh file (below) |
+| `mesh_run.py` | `make_mesh(path, overwrite) -> MeshRecord`: `aquaflux mesh` |
+| `drawing.py` | `CadPlacement`, shared by the mesh file and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
 | `physics.py` | `Physics` → `_Flow` → `Laminar` / `RANS`, and `Radiation`; flow physics map a march state to named fields (`restart_fields`) and back (`initial_fields`) |
@@ -161,16 +163,28 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - ⚠️ **A pytree comparison must require an array leaf to be matched by an array leaf** — comparing through
   `np.asarray` let `Constant(4e-3)` equal `Constant(jnp.asarray(4e-3))`, hiding the per-rung recompile.
 
-## Periodic channels: mesh source, drive, sources
+## The mesh: read by a case, made by a mesh file
 
-- **`MeshSource.read(directory) -> Mesh` is the contract** (a generated grid has nothing to read).
-- **`CadMesh` regenerates its mesh on every read** (`check` and `run` included; Sozzi at maxh 0.01 is
-  ~9 s). The user's route to mesh once is `aquaflux mesh OUT --case case.yaml --openfoam`, then an
-  `OpenFOAMMesh` of `OUT`. Its `feature_angle` is in radians, like `CadSurface.angle`.
-- **`StructuredGrid(cells, lengths, periodic, grading)`** builds `structured_grid_2d(named_boundaries=True)`
-  (side-named patches minus a periodic axis's two sides); `periodic` supports `x` only; a whole-number float
-  cell count is normalized to an int. A 3D `StructuredGrid` is uniform and non-periodic
-  (`structured_grid_3d` has neither).
+- **A case only reads its mesh** (project owner, 2026-10-21): `AquafluxMesh(path)` (`.aqmesh`, the
+  mesher's output and the default) or `OpenFOAMMesh(path)` (import). `MeshSource.read(directory) -> Mesh`
+  is the contract. There is no generated mesh source: `CadMesh` and `StructuredGrid` (with
+  `GeometricGrading`) are gone, since a mesh remade on every read changes with Netgen's fill each time
+  (so a checkpoint's digest would not match) and costs minutes at scale, and nobody runs a real case on a
+  box grid.
+- **A mesh file is the mesher's input** (`mesh_file.py`: `MeshSpec(drawing, region, sizes, patches,
+  others, layers, layered, mapped, pipes, pipe_core, planarizer, core, output)`, the one-form sections
+  `drawing` / `region` / `sizes` / `output` written without `kind`), read by the case's own YAML parse
+  and registry (`read_mesh_file` / `write_mesh_file` in `case_file.py`, `mesh_spec_from_mapping` /
+  `mesh_spec_to_mapping` / `mesh_schema` in `spec.py`, sharing `_with_kinds` / `_without_kinds` with
+  the case). `sizes.feature_angle` is in radians, like `CadSurface.angle`.
+- **`aquaflux mesh mesh.yaml [--overwrite]`** is `mesh_run.make_mesh`: read, then **refuse an occupied
+  output before meshing** (each writer's `MeshWriter.replaces()`, the rule its own `write` refuses by),
+  mesh, write the `.aqmesh` (its header's `provenance`: the settings as they ran, version, commit,
+  modified, start, seconds) and the polyMesh if `output.openfoam` is set. Exit 2 on a refused file or an
+  occupied output; not in `SERVED` (it can take minutes).
+- **Tests build their boxes with `tests/support/case_meshes.grid_mesh`**, which writes a
+  `structured_grid_2d`/`3d` as `.aqmesh` once per process and returns the `AquafluxMesh` section by
+  absolute path. The channel cases read tracked meshes ("The case files in the repository").
 - **The drive is `DriveSpec` → `BulkVelocity(target, direction, initial_force)`**; unset is
   boundary-driven (there is no `BoundaryDriven` kind). `BulkVelocity` exists because `MassFlow.force` is an
   array leaf the mapping cannot check; `initial_force` is the multiplier's seed, documented as a guess.
@@ -231,12 +245,12 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - **Editing commands for the browser interface**: `aquaflux schema` (`case_schema()`), `aquaflux show
   case.yaml` (`{"error", "case"}`; a refused file is still shown), `aquaflux write case.yaml [--relative-to
   DIR]` (validates through `case_spec_from_mapping`; writes nothing when refused; drops comments and
-  default-valued settings), `aquaflux mesh OUT [--case FILE] [--openfoam]` (the mesh section alone, via
+  default-valued settings), `aquaflux export-mesh OUT [--case FILE] [--openfoam]` (the mesh section alone, via
   `mesh_source_from_mapping`, from stdin JSON or from a case file, whose directory is then the base; writes
   `OUT/mesh.vtu`, with `--openfoam` also `OUT/constant/polyMesh`; prints cells, dim, patches with faces,
-  groups, and `polymesh`). Pinned by `tests/unit/test_case_editing_commands.py`; `--case --openfoam` by
-  `test_meshing_netgen.py` (a Sozzi `CadMesh`, run from another directory).
-- **`aquaflux serve`** answers `SERVED` commands (`schema`/`show`/`write`/`mesh`/`check`/`plan`, never `run`)
+  groups, and `polymesh`). Pinned by `tests/unit/test_case_editing_commands.py`; `aquaflux mesh` by
+  `tests/unit/test_mesh_file.py` and, on Sozzi run from another directory, `test_meshing_netgen.py`.
+- **`aquaflux serve`** answers `SERVED` commands (`schema`/`show`/`write`/`export-mesh`/`check`/`plan`, never `run` or `mesh`)
   one JSON line per request by calling `main(arguments)` in-process with stdio swapped; an exception or
   `SystemExit` becomes that request's status. ⚠️ **Replies go on a `dup` of fd 1, and fd 1 is then pointed at
   stderr**, so stray stdout writes cannot corrupt the protocol. It exists because a command's work is
@@ -337,8 +351,13 @@ There is no per-class `relocated`/`rebased_path`. `CaseFile.check` refuses a mis
 - Both pinned by `test_each_step_case_script_runs_its_files_solver_when_no_override_is_set`.
 - **`validation/turbulent_channel/cases/re{20000,45000,240000}.yaml` and
   `validation/turbulent_channel_openfoam/cases/{low,high}.yaml`** each state ν to the last bit and a
-  `Segregated` solve; the harnesses call `checked.solve(coupled)` and read height, bulk velocity and `nx` from
-  the file. The OpenFOAM harness refuses if the file's ν is not `nu_of / Ubar`.
+  `Segregated` solve; the harnesses call `checked.solve(coupled)` and read the bulk velocity from the file
+  (height and `nx` from the mesh, below). The OpenFOAM harness refuses if the file's ν is not `nu_of / Ubar`.
+  Their meshes are tracked `.aqmesh` files, `validation/turbulent_channel/meshes/channel_{96,120,224}.aqmesh`
+  (4 x n, periodic in x, wall-normal growth 1.09 / 1.075 / 1.052), written by
+  `validation/turbulent_channel/write_meshes.py`; the harnesses take the height from the mesh's extent and
+  the row length from the first row's cells, no longer from the file's mesh section. Read exactly, they
+  build the same problem as the old `StructuredGrid` did (`test_channel_case_files.py` unchanged).
 - `validation/ray_effects_room/cases/*.yaml` (`validation.md`).
 
 ## Radiation cases

@@ -39,7 +39,7 @@ open without JAX, and the solver never pays for VTK/trame. That is why it is a t
 | `case_form.py` | `CaseSchema`, `Row`, `form_sections`, edit functions, `setting`, `parse_input`, `plain_doc` | pure: schema + document → rows; edits return new documents; lists no kind/field/choice of its own |
 | `solver_commands.py` | `SolverCommands` (`schema`/`show`/`write`/`mesh`/`check`/`plan`), `CaseDocument`, `MeshExport`, `RunPlan`, `Runner` | parses the commands' JSON; runner injected (tests stub it), default `SolverWorker` |
 | `solver_worker.py` | `SolverWorker`, `CommandResult`, `TIMEOUT` | see below |
-| `mesh_view.py` | `MeshView`, `mesh_layers`, `patches_addressed`, `read_patches` | draws what `aquaflux mesh` wrote; reads no mesh format itself |
+| `mesh_view.py` | `MeshView`, `mesh_layers`, `patches_addressed`, `read_patches` | draws what `aquaflux export-mesh` wrote; reads no mesh format itself |
 | `file_browser.py` | `list_directory`, `FileBrowser` | server-side: a browser picker hides the real path, and mesh paths are relative to the case |
 | `run_section.py` | `RunSection`, `POLL_SECONDS` | Run's layout and wiring; re-reads history every `POLL_SECONDS` |
 | `run_monitor.py` | `RunLimits`, `RunEvent`, `run_events`, `run_tiles`, `residual_figure`, `cost_figures`, `equation_columns`, `RETRY_REASONS`, `EQUATION_PREFIX` | pure: history + limits → figures, tiles, events |
@@ -141,7 +141,7 @@ long-lived `sys.executable -m aquaflux serve` process** (`SolverWorker`, see `ca
 - **Saving** goes through `aquaflux write --relative-to <the directory it was opened from>`, so Save as
   re-bases the mesh path. The solver's refusal is shown above the form; its `at '<path>'` marks the row
   and section red.
-- **Mesh view.** The solver reads or generates the mesh (`aquaflux mesh OUT --relative-to <case dir>`
+- **Mesh view.** The solver reads the mesh (`aquaflux export-mesh OUT --relative-to <case dir>`
   with the **unsaved** `mesh` section on stdin), writing `mesh.vtu` + `patches.vtm` (`write_patches`, one
   block per patch) into a per-load temporary subdirectory. An edit under `mesh` marks it stale. Patch
   chips (and Boundaries entries naming a patch or group) highlight via `patches_addressed`, matched by

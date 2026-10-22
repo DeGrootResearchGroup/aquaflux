@@ -67,6 +67,7 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Running a case file", ["run"]),
+        ("Making a mesh from a mesh file", ["mesh_file", "mesh_run"]),
     ],
     "meshing": [
         ("Meshing a region of a CAD model", ["cad_mesher"]),

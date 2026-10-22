@@ -309,23 +309,20 @@ def test_the_dual_of_a_netgen_l_is_cut_at_its_inside_edge_into_nearly_convex_cel
 SOZZI_PATCH_FACES = {"inlet": {6}, "outlet": {8}, "lamp": {4, 7}, "walls": {0, 1, 2, 3, 5}}
 
 
-def test_a_case_files_step_mesh_is_written_as_a_polymesh_with_its_patches_on_their_faces(
-    tmp_path, monkeypatch
-):
-    # The whole path a user takes: a case file's CadMesh section, meshed by `aquaflux mesh --case
-    # --openfoam`, read back from the polyMesh. Every boundary vertex must lie on the drawing, every
-    # boundary face on a CAD face of its patch with nearly all of its faces' area, and every cell
-    # must close.
+def test_a_mesh_files_mesh_is_written_with_its_patches_on_their_faces(tmp_path, monkeypatch):
+    # The whole path a user takes: a mesh file, meshed by `aquaflux mesh mesh.yaml` into a .aqmesh
+    # file and an OpenFOAM polyMesh, read back from each. Every boundary vertex must lie on the
+    # drawing, every boundary face on a CAD face of its patch with nearly all of its faces' area,
+    # and every cell must close.
     pytest.importorskip("OCP")
     import contextlib
     import io
-    import json
     import os
     from pathlib import Path
 
     import yaml
     from aquaflux.__main__ import main
-    from aquaflux.io import read_openfoam
+    from aquaflux.io import read_aqmesh, read_openfoam
     from aquaflux.io.cad import CadRegion, Placement, read_step
     from aquaflux.mesh import closed_cell_residual
 
@@ -334,35 +331,36 @@ def test_a_case_files_step_mesh_is_written_as_a_polymesh_with_its_patches_on_the
         / "validation/uvreactor_openfoam/of_case/SozziTaghipour.step"
     )
     swap = [[0, 1, 0], [1, 0, 0], [0, 0, 1]]
-    section = {
-        "kind": "CadMesh",
-        "file": os.path.relpath(
-            drawing, tmp_path
-        ),  # relative to the case file, as a user writes it
-        "solids": ["reactor_body", "inlet_pipe", "outlet_pipe"],
-        "without": ["lamp"],
-        "placement": {"kind": "CadPlacement", "matrix": swap},
-        "max_size": 0.03,
-        "feature_angle": 0.785,
+    document = {
+        "drawing": {
+            # Relative to the mesh file, as a user writes it.
+            "file": os.path.relpath(drawing, tmp_path),
+            "placement": {"kind": "CadPlacement", "matrix": swap},
+        },
+        "region": {"solids": ["reactor_body", "inlet_pipe", "outlet_pipe"], "without": ["lamp"]},
+        "sizes": {"max_size": 0.03, "feature_angle": 0.785},
         "patches": {
             "inlet": {"kind": "FacesNear", "points": [[0.04765, 0.0, 0.8945]]},
             "outlet": {"kind": "FacesNear", "points": [[1.739, 0.0, 0.0]]},
             "lamp": {"kind": "FacesOn", "solids": ["lamp"]},
         },
+        "output": {"path": "out/sozzi.aqmesh", "openfoam": "out"},
     }
-    (tmp_path / "case.yaml").write_text(yaml.safe_dump({"mesh": section}))
-    # Run from elsewhere: the drawing is found from the case file's directory, not from here.
+    (tmp_path / "mesh.yaml").write_text(yaml.safe_dump(document))
+    # Run from elsewhere: the drawing is found from the mesh file's directory, not from here.
     (tmp_path / "elsewhere").mkdir()
     monkeypatch.chdir(tmp_path / "elsewhere")
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        status = main(["mesh", str(tmp_path / "out"), "--case", str(tmp_path / "case.yaml"),
-                       "--openfoam"])  # fmt: skip
-    reply = json.loads(out.getvalue())
-    assert status == 0, reply
-    assert {patch["name"] for patch in reply["patches"]} == set(SOZZI_PATCH_FACES)
-    mesh = read_openfoam(tmp_path / "out")
-    assert mesh.n_cells == reply["cells"] > 1000
+        status = main(["mesh", str(tmp_path / "mesh.yaml")])
+    assert status == 0, out.getvalue()
+    mesh = read_aqmesh(tmp_path / "out" / "sozzi.aqmesh")
+    assert {
+        name for name in mesh.face_patches.names
+        if mesh.face_patches.size(name) and mesh.face_patches.is_boundary_patch(name, mesh.face_cells)
+    } == set(SOZZI_PATCH_FACES)  # fmt: skip
+    assert read_openfoam(tmp_path / "out").n_cells == mesh.n_cells > 1000
+    assert f"{mesh.n_cells} cells (3D)" in out.getvalue()
     scale = float(np.max(np.asarray(mesh.geometry().face.area)))
     assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
 

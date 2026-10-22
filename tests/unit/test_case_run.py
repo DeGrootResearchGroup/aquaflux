@@ -37,6 +37,8 @@ from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobi
 from aquaflux.solve import DualTimeLoop
 from aquaflux.turbulence import BlockDiagonal, solve_segregated
 
+from tests.support.case_meshes import grid_mesh
+
 REPO = Path(__file__).resolve().parents[2]
 SLAB = REPO / "tests" / "fixtures" / "polymesh_2d_slab_frontandback"
 
@@ -223,8 +225,8 @@ def test_an_outputs_section_that_cannot_be_written_is_refused(outputs, match) ->
 
 
 def test_an_openfoam_time_directory_is_refused_for_a_mesh_that_is_not_openfoams() -> None:
-    grid = {"kind": "StructuredGrid", "cells": [4, 4], "lengths": [1.0, 1.0]}
-    with pytest.raises(ValueError, match=r"the mesh is a StructuredGrid. Write the fields as Vtk"):
+    grid = grid_mesh([4, 4], [1.0, 1.0])
+    with pytest.raises(ValueError, match=r"the mesh is a AquafluxMesh. Write the fields as Vtk"):
         case_spec_from_mapping(
             _sections(
                 mesh=grid,
@@ -450,7 +452,7 @@ def test_a_run_refuses_to_replace_an_openfoam_time_directory(tmp_path: Path) -> 
 
 def test_a_case_holding_a_bulk_velocity_runs_its_physics_march_by_default(tmp_path: Path) -> None:
     """A held bulk velocity with no solver stated is marched, the force solved with the fields."""
-    grid = {"kind": "StructuredGrid", "cells": [4, 4], "lengths": [1.0, 2.0], "periodic": ["x"]}
+    grid = grid_mesh([4, 4], [1.0, 2.0], periodic=["x"])
     sections = _sections(
         "RANS",
         mesh=grid,

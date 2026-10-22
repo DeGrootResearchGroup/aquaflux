@@ -228,6 +228,11 @@ class OpenFOAMWriter(MeshWriter):
         self.directory = str(directory)
         self.overwrite = overwrite
 
+    def replaces(self) -> tuple[Path, ...]:
+        """The files of :data:`MESH_FILES` already in the case's polyMesh directory."""
+        target = Path(self.directory) / POLYMESH_LOCATION
+        return tuple(target / name for name in MESH_FILES if (target / name).exists())
+
     def write(self, mesh: Mesh) -> Path:
         """Write ``mesh`` and return the polyMesh directory.
 
@@ -251,15 +256,15 @@ class OpenFOAMWriter(MeshWriter):
         """
         files = format_polymesh(disassemble(mesh), mesh.n_cells)
         target = Path(self.directory) / POLYMESH_LOCATION
-        existing = [name for name in MESH_FILES if (target / name).exists()]
+        existing = self.replaces()
         if existing and not self.overwrite:
             raise FileExistsError(
-                f"{target} already holds a mesh ({', '.join(existing)}); pass overwrite=True to "
-                "replace it"
+                f"{target} already holds a mesh ({', '.join(path.name for path in existing)}); "
+                "pass overwrite=True to replace it"
             )
         target.mkdir(parents=True, exist_ok=True)
-        for name in existing:
-            (target / name).unlink()
+        for path in existing:
+            path.unlink()
         for name, text in files.items():
             (target / name).write_text(text)
         return target
