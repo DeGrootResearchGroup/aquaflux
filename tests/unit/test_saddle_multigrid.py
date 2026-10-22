@@ -394,3 +394,47 @@ def test_the_frobenius_block_inverse_beats_inverting_the_cell_block_alone() -> N
 
     assert splitting_error(fitted) < splitting_error(exact)
     assert n_fields == 4  # the saddle's field count, stated so the slice above is readable
+
+
+@pytest.mark.parametrize("block_splitting", [False, True])
+def test_pieces_held_in_single_precision_are_the_double_pieces_rounded_once(
+    block_splitting,
+) -> None:
+    """``precision="float32"`` rounds each piece as it is formed, to what rounding them afterwards gave.
+
+    A level's pieces are rounded one at a time so that they are never all held in double beside their
+    rounded copies. The rounding must be the one a single-precision split applies, entry for entry, and
+    every floating piece must come out narrow -- a piece left double would be rounded later anyway,
+    silently keeping the double copy alive -- while the host Schur returned beside them stays double.
+    """
+    from aquaflux.precondition.traced_cycle import in_precision
+
+    a = _saddle()
+    wide, wide_schur = _simple_pieces(a, 4, block_splitting=block_splitting)
+    narrow, narrow_schur = _simple_pieces(
+        a, 4, block_splitting=block_splitting, precision="float32"
+    )
+    assert (narrow.f_block_inverse is None) == (not block_splitting)
+    rounded = jax.tree.leaves(in_precision(wide, "float32"))
+    held = jax.tree.leaves(narrow)
+    assert len(held) == len(rounded)
+    for leaf, reference in zip(held, rounded, strict=True):
+        if jnp.issubdtype(reference.dtype, jnp.floating):
+            assert leaf.dtype == jnp.float32
+        assert leaf.dtype == reference.dtype
+        assert np.array_equal(np.asarray(leaf), np.asarray(reference))
+    assert narrow_schur.dtype == np.float64
+    assert (narrow_schur != wide_schur).nnz == 0
+
+
+def test_an_inverse_held_in_single_precision_forms_its_pieces_narrow() -> None:
+    """The inverse's own precision reaches the pieces it derives, not only the cast applied after them."""
+    a = _saddle()
+    settings = {"strength_threshold": 0.25, "max_levels": 3, "max_coarse": 40}
+    double = SimpleSmoothedInverse(a, 4, **settings)
+    narrow = SimpleSmoothedInverse(a, 4, **settings, stored_precision="float32")
+    pieces = narrow.derive_extras(double._hierarchy)
+    floating = [
+        leaf for leaf in jax.tree.leaves(pieces) if jnp.issubdtype(leaf.dtype, jnp.floating)
+    ]
+    assert floating and all(leaf.dtype == jnp.float32 for leaf in floating)

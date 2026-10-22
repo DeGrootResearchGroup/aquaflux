@@ -427,6 +427,22 @@
       - **pitzDaily, branch against `main`**: step tables identical, 21 steps / 106 cycles / `R` 2.618e-06;
         warm-cache wall 173 s against 181 s; peak `VmHWM` 3.17 against 3.16 GiB (its peak is not set by
         these copies).
+      - **The split's coupling and SIMPLE pieces held in float32 as formed, the levels narrowed one at a
+        time (2026-10-21, `claude/float32-storage-c15425` against `9ffe291b`)**: 11-core M-series Mac,
+        18 GiB, jax 0.10.2, `MallocLargeCache=0`, shipped `case.yaml` (split `float32`, `PivotFloor(0.15)`),
+        `BFS3D_MEMORY_STEPS=2`, warm cache, one run per arm. Peak footprint **9.70 -> 9.67 GiB**; block
+        re-fit #1's stage peak 9.68 -> 9.62, its `tracemalloc` peak 5.03 -> 4.99 GiB; held host after the
+        first re-fit 2.85 -> 2.81 GiB (the coupling's 80 MiB of float64 values now 40). Every traced split
+        (fit and both re-fits, 293 leaves each) has the same SHA-256 leaf digests on both arms
+        (`BFS3D_MEMORY_CHECKSUMS=1`), and the march tables agree except wall time. **So float64
+        formation of the hierarchy and pieces is not what sets the peak**: the first re-fit's ~2 GiB host
+        transient is the entry maps' build (#757; `EntryMap._target` 469 MiB, `_source` 171 MiB,
+        `SparsePattern.indices` 178 MiB held at its end) and scipy's temporaries, and the device float64
+        transient freed by per-level narrowing is a few tens of MiB at that moment. What is still float64
+        and is not stored in float32, because the fit reads it in double: the probe's value array (280 MiB,
+        transient per fit), the level operators and diagonals until `derive_extras` has read them
+        (`to_scipy`), the prolongation values (a refit reads them back), and the entry maps' weights
+        (`None` for the 0/1 transfers both blocks use).
 
 ## Condensed out of the rule (2026-10-17)
 

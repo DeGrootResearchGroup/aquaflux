@@ -62,7 +62,7 @@ from .multigrid import (
     refresh_air_hierarchy,
 )
 from .padded_rows import _padded_operator, _PaddedRowOperator
-from .traced_cycle import TracedCycle
+from .traced_cycle import TracedCycle, host_in_precision
 
 __all__ = [
     "FieldGroups",
@@ -302,13 +302,21 @@ class FieldSplitInverse:
         assembled operator, not modelled.
     groups : FieldGroups
         The partition the three arguments above are consistent with.
+    stored_precision : {"float64", "float32"}
+        The floating-point type the coupling block is **held** in, at construction and after every
+        refit: rounded once from the operator it is cut from. ``"float32"`` is for a split applied in
+        single precision anyway (:attr:`~aquaflux.precondition.FieldSplit.precision`), whose traced form
+        would round it to exactly these entries; the block inverses then hold their hierarchies the same
+        way (:class:`~aquaflux.precondition.HierarchyBlockInverse`'s ``stored_precision``), so
+        :meth:`apply` applies the rounded split in double precision.
 
     Raises
     ------
     TypeError
         If either block inverse is not a :class:`~aquaflux.precondition.FrozenInverse`.
     ValueError
-        If ``coupling`` does not have the shape the partition implies.
+        If ``coupling`` does not have the shape the partition implies, or ``stored_precision`` is not
+        one of the two above.
     """
 
     def __init__(
@@ -317,6 +325,8 @@ class FieldSplitInverse:
         trailing: FrozenInverse,
         coupling: sp.spmatrix,
         groups: FieldGroups,
+        *,
+        stored_precision: str = "float64",
     ) -> None:
         for name, inverse in (("leading", leading), ("trailing", trailing)):
             if not isinstance(inverse, FrozenInverse):
@@ -331,8 +341,13 @@ class FieldSplitInverse:
                 "unknowns). A block of the transposed orientation would apply silently and precondition "
                 "the wrong triangle."
             )
+        if stored_precision not in ("float64", "float32"):
+            raise ValueError(
+                f"stored_precision must be 'float64' or 'float32', got {stored_precision!r}."
+            )
         self._leading = leading
         self._trailing = trailing
+        self._stored_precision = stored_precision
         self._set_coupling(coupling)
         self._groups = groups
         # The gathers that cut a refit's operator into blocks, kept between refits.
@@ -341,10 +356,19 @@ class FieldSplitInverse:
     def _set_coupling(self, coupling: sp.spmatrix) -> None:
         """Store the retained coupling block, discarding any transpose cached for the previous one.
 
-        Copied: the block handed in may be a view of a larger array (one materialize's values), which
-        holding it would keep alive until the next refit.
+        Copied, in the precision it is held in: the block handed in may be a view of a larger array (one
+        materialize's values), which holding it would keep alive until the next refit.
         """
-        self._coupling = sp.csr_matrix(coupling).copy()
+        coupling = sp.csr_matrix(coupling)
+        data = host_in_precision(coupling.data, self._stored_precision)
+        self._coupling = sp.csr_matrix(
+            (
+                data.copy() if data is coupling.data else data,
+                coupling.indices.copy(),
+                coupling.indptr.copy(),
+            ),
+            shape=coupling.shape,
+        )
         self._coupling_transpose: sp.csr_matrix | None = None
 
     @property
@@ -488,6 +512,7 @@ def field_split_inverse(
     *,
     leading_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
     trailing_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+    stored_precision: str = "float64",
 ) -> FieldSplitInverse:
     """Build a block-triangular field split, fitting each diagonal block with its own injected inverse.
 
@@ -509,6 +534,8 @@ def field_split_inverse(
         :class:`~aquaflux.precondition.JacobiSmoothed` on a pair of transported scalars. The returned
         object must be a :class:`~aquaflux.precondition.FrozenInverse`, be a fixed linear map (the outer
         Krylov solve is not flexible) and transpose exactly (the adjoint's solve uses it).
+    stored_precision : {"float64", "float32"}
+        The precision the retained coupling is held in (see :class:`FieldSplitInverse`).
 
     Returns
     -------
@@ -520,6 +547,7 @@ def field_split_inverse(
         groups,
         leading_inverse=leading_inverse,
         trailing_inverse=trailing_inverse,
+        stored_precision=stored_precision,
     )
 
 
@@ -529,6 +557,7 @@ def _field_split_of_blocks(
     *,
     leading_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
     trailing_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+    stored_precision: str = "float64",
 ) -> FieldSplitInverse:
     """:func:`field_split_inverse` over an operator already cut into ``groups``' four blocks."""
     leading_block, _, trailing_by_leading, trailing_block = blocks
@@ -537,6 +566,7 @@ def _field_split_of_blocks(
         trailing_inverse(trailing_block, groups.n_trailing_fields),
         trailing_by_leading,
         groups,
+        stored_precision=stored_precision,
     )
 
 
@@ -583,6 +613,7 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
         batched_matvec: Callable | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
+        stored_precision: str = "float64",
     ) -> FieldSplitPreconditioner:
         """Materialize the coupled Jacobian, shift it, and fit a split to it.
 
@@ -598,13 +629,19 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
             ``(sub_matrix, n_fields_in_group) -> inverse`` for that block, exactly as
             :func:`field_split_inverse` takes them. An injected inverse must be a
             :class:`~aquaflux.precondition.RefactorableInverse` to survive a mid-march refresh.
+        stored_precision : {"float64", "float32"}
+            The precision the retained coupling is held in (see :class:`FieldSplitInverse`).
 
         Returns
         -------
         FieldSplitPreconditioner
             The frozen preconditioner.
         """
-        inverses = {"leading_inverse": leading_inverse, "trailing_inverse": trailing_inverse}
+        inverses = {
+            "leading_inverse": leading_inverse,
+            "trailing_inverse": trailing_inverse,
+            "stored_precision": stored_precision,
+        }
         if structure is not None and structure.layout is not None:
             cls._require_partition(structure, groups)
             probed = cls._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)

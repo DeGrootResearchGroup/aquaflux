@@ -64,26 +64,29 @@ class _HierarchyStep:
         return self.cycle(hierarchy, extras, residual, self.smoother)
 
 
-def _narrowed(hierarchy: SmoothedHierarchy, precision: str) -> SmoothedHierarchy:
-    """``hierarchy`` with its floating-point arrays cast to ``precision``, prolongation values kept.
+def _narrowed(levels: list, equilibration, precision: str) -> SmoothedHierarchy:
+    """A hierarchy's levels with their floating-point arrays cast to ``precision``, prolongation values kept.
 
     The prolongation values stay as they are because a frozen-coarsening refit
     (:meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit`) reads them back to form the next
     Galerkin operators: rounding them would change every refit after the first. Everything else is
     rounded once, exactly as a traced split applied in ``precision`` rounds it, so a hierarchy held in
     single precision and one narrowed when it is applied hold the same entries.
+
+    ``levels`` is consumed: each double level is replaced in the list by its rounded copy as soon as
+    that copy exists, so a caller holding no other reference to the double hierarchy frees it a level
+    at a time rather than holding all of it beside all of its rounded copy.
     """
-    levels = tuple(
-        eqx.tree_at(
+    for index, level in enumerate(levels):
+        levels[index] = eqx.tree_at(
             lambda cast: cast.p_val,
             in_precision(level, precision),
             level.p_val,
             is_leaf=lambda leaf: leaf is None,
         )
-        for level in hierarchy.levels
-    )
+        del level
     return SmoothedHierarchy(
-        levels=levels, equilibration=in_precision(hierarchy.equilibration, precision)
+        levels=tuple(levels), equilibration=in_precision(equilibration, precision)
     )
 
 
@@ -257,12 +260,17 @@ class HierarchyBlockInverse:
 
     def _after_coarsening(self) -> None:
         """Re-derive whatever the smoother reads off the hierarchy, and drop the stale transpose."""
-        self._extras = self.derive_extras(self._hierarchy)
+        # A smoother whose extras are held narrow rounds each level's record as it forms it (the
+        # SIMPLE pieces do), so the cast below returns those arrays unchanged.
+        self._extras = in_precision(self.derive_extras(self._hierarchy), self._stored_precision)
         if self._stored_precision != "float64":
-            # After the extras: they are derived from the double-precision levels, and only then is
-            # either rounded, so a narrowed hierarchy holds exactly what narrowing it later would.
-            self._hierarchy = _narrowed(self._hierarchy, self._stored_precision)
-            self._extras = in_precision(self._extras, self._stored_precision)
+            # After the extras: they are derived from the double-precision levels, and only then are
+            # the levels rounded, so a narrowed hierarchy holds exactly what narrowing it later would.
+            # The double hierarchy is let go first, so `_narrowed` holds its only reference.
+            double, self._hierarchy = self._hierarchy, None
+            levels, equilibration = list(double.levels), double.equilibration
+            del double
+            self._hierarchy = _narrowed(levels, equilibration, self._stored_precision)
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose
         # -- only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per
         # arm for something most callers never touch. Dropped rather than kept here, because it

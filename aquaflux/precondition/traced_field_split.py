@@ -186,8 +186,10 @@ def traced_field_split(inverse: FieldSplitInverse, precision: str = "float64") -
         first, retaining the trailing-by-leading coupling, as in the host split.
     precision : {"float64", "float32"}
         The precision the split is applied in (see :attr:`~aquaflux.precondition.FieldSplit.precision`).
-        Every floating-point array the split holds is rounded to it once, here, after the fit; integer
-        index arrays are unchanged.
+        Every floating-point array the split holds is rounded to it once after the fit -- here, unless the
+        host split already holds it rounded (a block inverse's ``stored_precision``, the split's own for
+        its coupling), in which case those arrays are used as they are. Integer index arrays are
+        unchanged.
 
     Returns
     -------
