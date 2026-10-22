@@ -665,7 +665,9 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
             cls._require_partition(structure, groups)
             probed = cls._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
             probed.add_shift(shift_diagonal)
-            return cls(_field_split_of_blocks(probed.blocks(), groups, **inverses), groups)
+            blocks = probed.blocks()
+            del probed  # the blocks are slices of its values, which the fit need not hold
+            return cls(_field_split_of_blocks(blocks, groups, **inverses), groups)
         jacobian = cls._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )

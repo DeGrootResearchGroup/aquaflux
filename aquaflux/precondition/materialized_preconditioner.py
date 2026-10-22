@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
@@ -171,12 +172,19 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
             # and the blocks go straight to the inverse, so the whole matrix is never formed and no
             # value is read back to the host.
             probed = self._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
+            # Each phase waits for its own device work, so the log charges it to the phase that did it.
+            jax.block_until_ready(probed.data)
             timer.lap("probe")
             probed.add_shift(
                 self._fitted_shift(shift_diagonal, probed.diagonal, diagonal_correction)
             )
+            # The blocks are slices of the values; the values are let go before the fit, so the two are
+            # never held through it together.
+            blocks = probed.blocks()
+            del probed
+            jax.block_until_ready([block.values for block in blocks])
             timer.lap("assemble")
-            self._refactor_blocks(probed.blocks())
+            self._refactor_blocks(blocks)
             timer.lap("refactor")
             return timer.phases()
         jacobian = self._materialize_jacobian(

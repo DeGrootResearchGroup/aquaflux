@@ -917,3 +917,28 @@ decoupled stand-in on this operator family) without paying for the leading block
 flow↔turbulence coupling blocks at all. Not the same idea as the deleted `PerFieldNativeInverse`
 (2026-08-15): that built per-field hierarchies with no cross-field coupling, but still sliced its
 operator from the shared full materialization, so it never saved this cost.
+
+### The refit's probe and coupling on the device (2026-10-22)
+
+Configuration: pitzDaily `case.yaml` as shipped (float32 split, `SimpleSmoothed` leading with
+`frozen_coarsening`, `JacobiSmoothed` trailing, `PivotFloor(0.15)`, `PROBE_BATCH_SIZE` 8), 4-core Linux
+container, jax 0.12.0.1, CPU. Branch `claude/aquaflux-host-device-review-ef4ffs` (`4b3383f9` plus the
+release of the probed values before the fit) against `main` `9143cc74`.
+`validation/pitzdaily_openfoam/march_cost.py` under `run_case.sh`, arms alternated.
+
+- **Same march on every run**: 21 steps, 102 cycles, final R 5.736e-06, `x_r/h` 8.0686, `nu_t/nu` peak
+  418.09, 21 refits (13 full, 8 cost).
+- **Solve wall clock (s)**: main 253.2, 250.8, 262.1, 247.6; branch 252.0, 256.7, 253.2 (before the
+  release), 256.8, 242.0 (after). Refit phases summed: main 33.1-36.5 s, branch 31.5-35.0 s.
+- **Peak resident (VmHWM, GiB)**: main 2.955, 2.961, 3.021, 3.040; branch before the release 3.088,
+  3.005, 3.103; after it 3.083, 2.908 (one 0.04 above main's highest, one 0.05 below its lowest).
+  Before the release the four device slices and the whole probed array were alive together through
+  the fit. Four runs of main spread by 0.085 GiB, so two runs per arm cannot resolve a difference
+  smaller than that.
+- **Held memory** (a march with `malloc_trim(0)` after every refit,
+  median over the 21 refits; the scratch form of `validation/pitzdaily_openfoam/refit_held_memory.py`):
+  resident after the trim main 2.305 GiB, branch 2.264 (before the release),
+  2.281 (after); live device arrays 0.390 -> 0.419 GiB (the probe order, the diagonal positions and the
+  coupling moved to the device; their host copies are gone). With the trim inside the march the peak was
+  2.761 against 2.793 GiB: the rest of the untrimmed peak's variation is freed memory kept by XLA's
+  worker-thread arenas.

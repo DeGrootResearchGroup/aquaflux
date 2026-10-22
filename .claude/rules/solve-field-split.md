@@ -45,10 +45,22 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
   `TypeError` before either block is touched. **A session's split never sees the whole matrix**: its
   probe is laid out by the split's blocks (`JacobianProbe.build(groups=)`, `sparse_jacobian.BlockLayout`),
   so a fit and every refit probe one block-major value array, add the shift on its stored diagonal in
-  place (`ProbedBlocks.add_shift`) and hand the blocks, views of that array, to
-  `FieldSplitInverse.refactor_blocks` / `_field_split_of_blocks` — no whole CSR, shifted copy or cut
-  (bfs3d 2-step peak 9.42 -> 8.47 GiB, held host 3.12 -> 2.74 GiB without the cut's maps, 2026-10-18).
-  `_set_coupling` copies the coupling block, which would otherwise pin the whole array. `refactor_block`
+  place (`ProbedBlocks.add_shift`) and hand the blocks to `FieldSplitInverse.refactor_blocks` /
+  `_field_split_of_blocks` — no whole CSR, shifted copy or cut (bfs3d 2-step peak 9.42 -> 8.47 GiB, held
+  host 3.12 -> 2.74 GiB without the cut's maps, 2026-10-18).
+  - **All of it on the device (2026-10-22)**: the values, the shift and the pivot floor stay there, the
+    blocks are `entry_map.DeviceMatrix` slices (the whole array is let go before the fit, so the two are
+    not held through it together), and `_block_for` hands a `HierarchyBlockInverse` its block as it is
+    (`FrozenCoarsening.fit` fits it in place) and any other inverse a host matrix (`as_scipy`), as
+    `RefactorableInverse` promises. The first fit reads the two diagonal blocks back once (a factory
+    coarsens on the host). `_set_coupling` holds the coupling as a `DeviceMatrix` in the split's
+    precision (a copy, never a view of the probe's values); `FieldSplitInverse.coupling` is a host copy
+    made on first read after a refit and dropped by the next. A refit reads back only the pivot floor's
+    row set and the fit's checks. Pinned by
+    `test_a_refit_probed_into_blocks_stays_on_the_device_and_fits_what_the_host_cut_fits` (it patches
+    `as_scipy` to raise). Cost on pitzDaily: log, "The refit's probe and coupling on the device
+    (2026-10-22)".
+  `refactor_block`
   (a whole operator, for other callers) still cuts by held gathers (`FieldGroups.blocks(matrix, maps)`),
   and `traced_field_split` packs the coupling through the split's maps
   (`FieldSplitInverse.padded_coupling()`); all bit-identical to slicing and `from_scipy`
