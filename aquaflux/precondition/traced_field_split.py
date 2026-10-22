@@ -40,20 +40,18 @@ that work genuinely belongs on a CPU.
 
 from __future__ import annotations
 
-import dataclasses
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from .field_split import FieldGroups, FieldSplitInverse
 from .padded_rows import _PaddedRowOperator
-from .traced_cycle import OffersTracedCycle, TracedCycle, in_precision
+from .traced_cycle import OffersTracedCycle, TracedCycle, TracedForm
 
 __all__ = ["TracedFieldSplit", "offers_traced_split", "traced_field_split"]
 
 
-class TracedFieldSplit(eqx.Module):
+class TracedFieldSplit(TracedForm):
     """A block-triangular approximate inverse over a two-group field partition, applied on device.
 
     The traced counterpart of :class:`~aquaflux.precondition.FieldSplitInverse`, with the same
@@ -84,15 +82,6 @@ class TracedFieldSplit(eqx.Module):
     coupling: _PaddedRowOperator
     groups: FieldGroups = eqx.field(static=True)
     precision: str = eqx.field(static=True, default="float64")
-
-    def in_precision(self, precision: str) -> TracedFieldSplit:
-        """This split with every floating-point array cast to ``precision``, and applied in it.
-
-        Integer index arrays are unchanged. Narrowing rounds the fitted entries once; widening a
-        narrowed split back gives the same rounded entries applied in double precision, which is an
-        exactly linear map again -- what a transpose solve run to a tight tolerance needs.
-        """
-        return dataclasses.replace(in_precision(self, precision), precision=precision)
 
     @property
     def n_dofs(self) -> int:
@@ -132,24 +121,6 @@ class TracedFieldSplit(eqx.Module):
         first = self.leading_cycle(lead)
         result = jnp.concatenate([first, self.trailing_cycle(trail - self.coupling.apply(first))])
         return result.astype(residual.dtype)
-
-    def matvec(self):
-        """The preconditioner matvec, as the ``residual -> M residual`` callable a Krylov solve takes.
-
-        The traced counterpart of :meth:`~aquaflux.precondition.HostPreconditioner.matvec`, and
-        deliberately the same shape -- so a caller selects between a host bundle and a traced one by
-        construction rather than by branching. Where that one returns a :func:`jax.pure_callback`, this
-        returns the cycle itself, so the Krylov solve calls straight into it.
-
-        Returned as a plain closure rather than as the bound :meth:`apply`. ``jax.jit`` keys its cache
-        on the callable, and a bound method of an ``equinox.Module`` carries the module into that key --
-        which raises here, since this one holds array leaves and is deliberately not hashable.
-        """
-
-        def apply(residual: jnp.ndarray) -> jnp.ndarray:
-            return self.apply(residual)
-
-        return apply
 
 
 def offers_traced_split(inverse: object) -> bool:

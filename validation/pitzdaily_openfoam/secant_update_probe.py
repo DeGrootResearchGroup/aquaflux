@@ -75,7 +75,7 @@ from aquaflux.precondition.materialized_session import (  # noqa: E402
     frozen_shift_diagonal,
     jacobian_matvec,
 )
-from aquaflux.precondition.monolithic_policy import with_traced_split  # noqa: E402
+from aquaflux.precondition.monolithic_policy import with_traced_form  # noqa: E402
 from aquaflux.precondition.sparse_jacobian import shifted_jacobian  # noqa: E402
 from aquaflux.precondition.traced_field_split import traced_field_split  # noqa: E402
 from aquaflux.solve import residual_stop_gmres, restart_cycles  # noqa: E402
@@ -162,7 +162,7 @@ class Probe:
         """Re-fit the split to ``jacobian + shift`` and hand the step the traced copy, as the march does."""
         self.pc.inverse.refactor_block(shifted_jacobian(jacobian, shift))
         split = traced_field_split(self.pc.inverse, self.precision)
-        self.replay.step = with_traced_split(self.replay.step, split)
+        self.replay.step = with_traced_form(self.replay.step, split)
 
 
 def target_steps(replay):

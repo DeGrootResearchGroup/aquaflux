@@ -336,7 +336,7 @@ def test_the_adjoint_applies_a_single_precision_split_in_double_and_so_exactly_l
     rounded entries back to double precision, which is. The single-precision defect is asserted too, so
     the test cannot pass on a split that was never narrowed.
     """
-    from aquaflux.precondition.monolithic_policy import _TracedSplitAdjoint
+    from aquaflux.precondition.monolithic_policy import _TracedFormAdjoint
 
     host, double, groups = _pair()
     single = traced_field_split(host, "float32")
@@ -352,7 +352,7 @@ def test_the_adjoint_applies_a_single_precision_split_in_double_and_so_exactly_l
         )
 
     assert linearity_defect(single.apply) > 1e-10
-    adjoint = _TracedSplitAdjoint(single)(None)
+    adjoint = _TracedFormAdjoint(single)(None)
     assert linearity_defect(adjoint) < 1e-13
     assert (
         1e-12

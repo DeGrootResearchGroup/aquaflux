@@ -339,6 +339,21 @@ cycle (`OffersTracedCycle`), not a `FrozenInverse`, so it takes no `Inverse` suf
 module files keep their names; `lu_preconditioner.py` and `amg_preconditioner.py` are deleted, and `MaterializedJacobianPreconditioner` now lives in `materialized_preconditioner.py`. Measurements in these files that
 name an old class were taken with the same class under its old name; the rename changed no behaviour.
 
+
+## Renamed 2026-10-22 — the traced form a step carries (a single block inverse moved on device)
+
+A bare `BlockInverse` (the laminar `MaterializedJacobian(SimpleSmoothed())`) was applied through
+`pure_callback` on every Krylov application although its cycle is traced, because the session took the
+device path only for a `FieldSplitInverse`. The device path now takes any inverse whose blocks all offer a
+traced cycle, so the split-specific names became wrong. No aliases.
+
+| was | is |
+|---|---|
+| `TracedSplitShiftPolicy(base, split)` | `TracedFormShiftPolicy(base, form)` |
+| `_TracedSplitAdjoint(split)` | `_TracedFormAdjoint(form)` |
+| `with_traced_split(step, split)` | `with_traced_form(step, form)` (old name in `test_vocabulary.py`'s `RETIRED`) |
+| `MaterializedSession._traced` / `._split` | `MaterializedSession._form` (`None` on the host path) |
+| `TracedFieldSplit.in_precision` / `.matvec` | inherited from `traced_cycle.TracedForm`, also the base of the new `TracedSingleBlock` |
 ## Contracts: `state.py` — the bordered state before `MassFlow.join`/`.split` (#375) and the deleted surface
 
   - **A bordered state is an extra named block, not a special case — AND THE BLOCK HAS TO DO THE

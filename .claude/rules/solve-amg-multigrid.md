@@ -174,7 +174,7 @@ path.
   as that copy is made, so the two whole copies are never alive together (pinned by
   `test_narrowing_a_hierarchy_replaces_each_double_level_in_the_list_it_is_given`). It lives beside its one
   user, not on `SmoothedHierarchy`, because `multigrid.py` is held at its size ratchet. The cast helper is
-  `traced_cycle.in_precision`, shared with `TracedFieldSplit.in_precision`; a leaf already in the target
+  `traced_cycle.in_precision`, shared with `TracedForm.in_precision`; a leaf already in the target
   type is returned as the same array. ⚠️ **Round on the host only through `traced_cycle.host_in_precision`**
   (JAX's conversion): numpy's cast keeps a single-precision subnormal that JAX's flushes to zero, so a host
   rounding by numpy is not the traced split's rounding. Why and measurements: `solve-field-split.md`, "the

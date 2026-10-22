@@ -80,7 +80,7 @@ let the shift walk into a regime where the frozen preconditioner stops tracking 
   `step_projection`, `krylov_solver`, `residual_norm`, `adjoint_preconditioner_factory`,
   `jacobian_residual`. `DampedNewtonStep` is deliberately not a subclass (no shift). ⚠️ `DualTimeStep`
   redeclares `line_search` with default **10** against the base's **0**.
-  - `adjoint_preconditioner_factory` is a **data** field (#290): a traced split (`_TracedSplitAdjoint`) or
+  - `adjoint_preconditioner_factory` is a **data** field (#290): a traced inverse (`_TracedFormAdjoint`) or
     `solve.UnshiftedPreconditioner(policy)` rides as array leaves so a re-fit needs no recompile; a value
     with no arrays (a closure, `FrozenTransposeFactory`, `None`) is still static.
   - `ShiftedStep.preconditioned_as(other)` swaps in `other`'s `shift_policy`,

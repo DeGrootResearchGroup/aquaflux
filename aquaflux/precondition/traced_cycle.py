@@ -16,6 +16,8 @@ compilation-cache hit and a changed answer, which is the pair of properties a mi
 
 from __future__ import annotations
 
+import abc
+import dataclasses
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
@@ -24,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-__all__ = ["OffersTracedCycle", "TracedCycle"]
+__all__ = ["OffersTracedCycle", "TracedCycle", "TracedForm", "TracedSingleBlock"]
 
 
 def in_precision(tree, precision: str):
@@ -109,3 +111,78 @@ class OffersTracedCycle(Protocol):
     def traced_cycle(self) -> TracedCycle:
         """The cycle over what this inverse currently holds, as a :class:`TracedCycle`."""
         ...
+
+
+class TracedForm(eqx.Module):
+    """A fitted frozen inverse in the form a jitted Krylov solve applies on device: a fixed linear ``r -> M r``.
+
+    What a step needs of the inverse it carries as data, whichever form that inverse takes -- a field
+    split of two traced cycles, or one traced cycle over the whole state: the degrees of freedom it
+    spans, the precision it is applied in, and the map itself. Its arrays are leaves, so a form of the
+    same shapes taken after a re-fit reuses the compiled step and applies the re-fitted values.
+
+    There is no ``transpose`` argument: the map is traced and linear, so :func:`jax.linear_transpose`
+    derives ``M^T`` from the forward code.
+
+    Every subclass provides two more attributes, as fields or properties, which this base reads: ``n_dofs``,
+    the degrees of freedom the map is defined over, and ``precision``, ``"float64"`` or ``"float32"``,
+    the precision the map is applied in (a static field, so :meth:`in_precision` can replace it).
+    """
+
+    @abc.abstractmethod
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """``M residual``, shape ``(n_dofs,)``, in the residual's own dtype."""
+
+    def in_precision(self, precision: str):
+        """This form with every floating-point array cast to ``precision``, and applied in it.
+
+        Integer index arrays are unchanged. Narrowing rounds the fitted entries once; widening a
+        narrowed form back gives the same rounded entries applied in double precision, which is an
+        exactly linear map again -- what a transpose solve run to a tight tolerance needs.
+        """
+        return dataclasses.replace(in_precision(self, precision), precision=precision)
+
+    def matvec(self) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        """The preconditioner matvec, as the ``residual -> M residual`` callable a Krylov solve takes.
+
+        The traced counterpart of :meth:`~aquaflux.precondition.HostPreconditioner.matvec`, and
+        deliberately the same shape -- so a caller selects between a host inverse and a traced one by
+        construction rather than by branching. Where that one returns a :func:`jax.pure_callback`, this
+        returns the map itself, so the Krylov solve calls straight into it.
+
+        Returned as a plain closure rather than as the bound :meth:`apply`. ``jax.jit`` keys its cache
+        on the callable, and a bound method of an ``equinox.Module`` carries the module into that key --
+        which raises here, since this one holds array leaves and is deliberately not hashable.
+        """
+
+        def apply(residual: jnp.ndarray) -> jnp.ndarray:
+            return self.apply(residual)
+
+        return apply
+
+
+class TracedSingleBlock(TracedForm):
+    """One block inverse's traced cycle applied to the whole state, on device.
+
+    The form of an inverse fitted to the whole materialized Jacobian -- a state with a single group of
+    fields, such as a laminar flow's ``(u, p)`` saddle under one hierarchy. Applied through a host
+    callback instead, every Krylov iteration would copy the state vector to the host and back although
+    the cycle itself is traced.
+
+    Attributes
+    ----------
+    cycle : TracedCycle
+        The inverse's cycle, its hierarchy held as leaves.
+    n_dofs : int
+        Degrees of freedom of the whole state. Static.
+    precision : str
+        The precision the cycle is applied in. Static.
+    """
+
+    cycle: TracedCycle
+    n_dofs: int = eqx.field(static=True)
+    precision: str = eqx.field(static=True, default="float64")
+
+    def apply(self, residual: jnp.ndarray) -> jnp.ndarray:
+        """Apply the cycle to ``residual``, shape ``(n_dofs,)``, in :attr:`precision`."""
+        return self.cycle(residual.astype(self.precision)).astype(residual.dtype)

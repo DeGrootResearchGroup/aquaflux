@@ -423,12 +423,12 @@ def test_the_coupled_shift_settings_are_the_flow_ones_plus_the_closures_damping(
 def test_a_simple_smoothed_march_reaches_the_same_root(channel) -> None:
     """A laminar flow takes the traced ``SimpleSmoothed`` hierarchy over its whole ``(u, p)`` saddle.
 
-    This is the inverse the field split uses for the saddle. The refresh observer is the evidence the in-place refit ran (a solve that never refit would still
-    converge on the state it was first fitted at), and the isinstance check that the march ran on it.
+    This is the inverse the field split uses for the saddle. The refresh observer is the evidence the
+    in-place refit ran (a solve that never refit would still converge on the state it was first fitted
+    at), and the isinstance check that the march ran on its traced form, applied on device.
     """
-    from aquaflux.precondition.block_preconditioner import (
-        MaterializedBlockPreconditioner,
-    )
+    from aquaflux.precondition.monolithic_policy import TracedFormShiftPolicy
+    from aquaflux.precondition.traced_cycle import TracedSingleBlock
 
     assembler, root = channel
     built, timings = [], []
@@ -445,13 +445,58 @@ def test_a_simple_smoothed_march_reaches_the_same_root(channel) -> None:
         max_steps=150,
         dual_time=DualTimeLoop(inner_steps=3),
     )
-    assert built and isinstance(
-        built[0].shift_policy.preconditioner, MaterializedBlockPreconditioner
-    )
+    assert built and isinstance(built[0].shift_policy, TracedFormShiftPolicy)
+    assert isinstance(built[0].shift_policy.form, TracedSingleBlock)
     assert any(
         t.kind == "full" and any(name == "refactor" for name, _ in t.phases) for t in timings
     )
     assert float(jnp.linalg.norm(state - root) / jnp.linalg.norm(root)) < 1e-6
+
+
+def test_a_single_block_inverse_is_carried_in_the_step_and_each_refit_hands_back_a_new_one(
+    channel,
+) -> None:
+    """One block inverse over the whole state is applied on device, as a field split's blocks are.
+
+    Its cycle is traced, so a Krylov iteration must not send the state vector to the host and back.
+    The step must carry the traced form (no host callback in its preconditioner or its adjoint's); a
+    re-fit must come back as an update, since that form is data and cannot be changed in place; and
+    the update must reach both places the form rides, at an unchanged structure (the compiled step's
+    key), applying the host inverse's re-fitted values.
+    """
+    from aquaflux.precondition.monolithic_policy import TracedFormShiftPolicy
+    from aquaflux.precondition.traced_field_split import contains_host_callback
+    from aquaflux.solve import ConstantRelaxation
+
+    assembler, _ = channel
+    state = assembler.initial_state() + 0.05
+    session = open_flow_session(MaterializedJacobian(SimpleSmoothed()), assembler)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    assert isinstance(step.shift_policy, TracedFormShiftPolicy)
+    n = state.shape[0]
+    assert not contains_host_callback(step.shift_policy.form.matvec(), jnp.zeros(n))
+    assert not contains_host_callback(step.adjoint_preconditioner_factory(state), jnp.zeros(n))
+
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    first = session.refresh_preconditioner(active, state)  # the forced first fit
+    assert first is not None
+    active = first(active)  # as the march does: the build's form is released by the re-fit
+    assert session.refresh_preconditioner(active, state) is None  # offered, nothing re-fitted
+
+    r = jax.random.normal(jax.random.PRNGKey(0), (n,))
+    # Applied before the re-fit: the re-fit releases the arrays only the superseded form holds.
+    before = active.shift_policy.form.apply(r)
+    update = session.refresh_preconditioner(active, state * 1.05, due=True)
+    assert update is not None
+    refitted = update(active)
+    host = session.preconditioner.inverse.apply(r)
+    applied = refitted.shift_policy.form.apply(r)
+    assert jnp.allclose(applied, host, rtol=1e-12, atol=1e-14)
+    assert not jnp.allclose(applied, before)
+    assert jnp.array_equal(refitted.adjoint_preconditioner_factory(state)(r), applied)
+    assert jax.tree.structure(eqx.filter(refitted, eqx.is_array)) == jax.tree.structure(
+        eqx.filter(active, eqx.is_array)
+    )
 
 
 def test_the_block_preconditioner_is_an_approximate_inverse_and_transposes_exactly() -> None:

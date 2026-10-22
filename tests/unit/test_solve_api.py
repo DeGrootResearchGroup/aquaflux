@@ -277,10 +277,10 @@ VALIDATION_INTERNAL_REACHES = {
     # from the same function rather than assembling a lookalike.
     "contains_host_callback",
     "traced_field_split",
-    # A step with its traced split swapped for a refitted one, reached by the secant-update probe
+    # A step with its traced inverse swapped for a refitted one, reached by the secant-update probe
     # (`pitzdaily_openfoam/secant_update_probe.py`) to solve each arm's Jacobian under the same step the
-    # march builds; a step assembled by hand would put the split in one of its two places but not both.
-    "with_traced_split",
+    # march builds; a step assembled by hand would put the inverse in one of its two places but not both.
+    "with_traced_form",
 }
 
 

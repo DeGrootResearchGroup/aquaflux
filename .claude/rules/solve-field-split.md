@@ -101,7 +101,18 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
 TracedCycle` (`traced_cycle.py`; `TracedCycle` / `OffersTracedCycle` are exported from `precondition`,
 for a user's own block inverse). Every shipped block inverse (`SimpleSmoothed`, `JacobiSmoothed`,
 `AirReduction`) offers one, so every spec-built `FieldSplit` is traced; the host form survives only for
-a block without a traced cycle (an `inverse_wrapper`) and for a bare `BlockInverse`.
+a block without a traced cycle (an `inverse_wrapper`).
+
+**`TracedForm` (`traced_cycle.py`) is what a step carries, whichever shape the inverse has**: an abstract
+`equinox.Module` owning `in_precision` and `matvec()`, its subclasses supplying `apply`, `n_dofs` and a
+static `precision`. Two subclasses: `TracedFieldSplit`, and `TracedSingleBlock(cycle, n_dofs)` for a
+bare `BlockInverse` over the whole state (the laminar `MaterializedJacobian(SimpleSmoothed())`). The
+session's `_traced_form(inverse, precision)` (`materialized_session.py`) is the one choice
+of form, returning `None` for an inverse with a host block. Pinned for the single block by
+`test_a_single_block_inverse_is_carried_in_the_step_and_each_refit_hands_back_a_new_one`
+(`tests/integration/test_flow_march.py`). ⚠️ The base does not declare `n_dofs`/`precision` as
+`eqx.AbstractVar`: equinox then orders `precision` (which has a default) before a subclass's own fields,
+and the dataclass refuses to build.
 
 **Why.** The host split's numpy `apply` behind a `pure_callback` forces six whole-vector host↔device
 transfers per application even when both blocks are traced cycles. On CPU the traced form is
@@ -121,21 +132,21 @@ each); the case for it is the GPU, which is unmeasured — harness `validation/t
   cache key); `matvec()` returns a plain closure.
 
 **How it is wired.**
-1. `MaterializedSession._build` fits the host `FieldSplitPreconditioner`, then, if
-   `offers_traced_split(...)`, uses `TracedSplitShiftPolicy(base, session._split)`
-   (`monolithic_policy.py`) instead of `MonolithicFactorShiftPolicy`. **One traced split per fit**: the
+1. `MaterializedSession._build` fits the host preconditioner, then, if `_traced_form(...)` returns a
+   form, uses `TracedFormShiftPolicy(base, session._form)` (`monolithic_policy.py`) instead of
+   `MonolithicFactorShiftPolicy`. **One traced form per fit**: the
    session takes it once at the fit and after each re-fit, and every step it builds (the stopping step
    included, re-pointed at each re-fit) carries those arrays — a split per step kept a copy of the whole
    hierarchy alive per held step (`solve.md`, `materialized_session`). The problem's
    `build_step(state, policy, march, base_regime)` receives the glued policy. `session.preconditioner`
    is the host object either way.
 2. **A re-fit is a new step, not a mutation.** `BetaTrackingRefresh` re-fits in place and returns whether
-   it did; the session returns an update `step -> with_traced_split(step, split)`, which `newton_march`
+   it did; the session returns an update `step -> with_traced_form(step, form)`, which `newton_march`
    applies to both `strategy` and `active_step`, and reports on `MarchResult.strategy` for the next
    segment and the adjoint. The superseded split's own arrays are released (`solve.md`,
    `materialized_session`), so a step kept across a re-fit raises if applied.
-3. **The split rides in two places, both data**: the policy and the adjoint factory (`_TracedSplitAdjoint`;
-   the step's `adjoint_preconditioner_factory` is a data field). `with_traced_split` replaces both in one
+3. **The form rides in two places, both data**: the policy and the adjoint factory (`_TracedFormAdjoint`;
+   the step's `adjoint_preconditioner_factory` is a data field). `with_traced_form` replaces both in one
    `tree_at`. ⚠️ Updating only the policy leaves the adjoint on the starting split.
 4. **A re-fit is a cache hit only at unchanged array shapes.** A block whose coarsening reads values
    must set `frozen_coarsening` (both cases do on the leading block), and every derived sparse piece is
@@ -172,11 +183,11 @@ decision, #732: same steps, cycles and root; pitzDaily −24 %, bfs3d −17 % wa
 
 - `FieldSplit.precision` (`SPLIT_PRECISIONS`, `materialized_spec.py`) reaches the split through
   `MaterializedSession._precision` at both the first fit and a refit. The fit is computed in float64
-  (hierarchies, inverted diagonal blocks, coupling); `TracedFieldSplit.in_precision` rounds every floating leaf once,
+  (hierarchies, inverted diagonal blocks, coupling); `TracedForm.in_precision` rounds every floating leaf once,
   and `apply` narrows its input and widens its output, so residual, Krylov and stop stay float64. A
   host-composed split refuses float32 at the fit.
 - ⚠️ **The adjoint must be preconditioned in double.** float32 arithmetic is linear only to ~1e-7, and
-  GMRES needs a fixed linear preconditioner, so a tight transpose solve stagnates. `_TracedSplitAdjoint`
+  GMRES needs a fixed linear preconditioner, so a tight transpose solve stagnates. `_TracedFormAdjoint`
   widens the split (`in_precision("float64")`) once per transpose solve — the rounded entries are
   harmless, the rounded arithmetic is not. Pinned by
   `test_the_adjoint_applies_a_single_precision_split_in_double_and_so_exactly_linearly`.
