@@ -116,6 +116,29 @@ def test_a_gathering_map_into_a_dense_layout_leaves_an_unreached_slot_zero() -> 
     assert np.array_equal(blocks.apply(operand).reshape(want.shape), want)
 
 
+def test_a_padded_gather_holds_its_filled_slots_as_a_mask_and_still_names_each_term_s_slot() -> (
+    None
+):
+    """A gather into padded rows fills its slots in ascending order, so it holds a byte a slot rather
+    than a slot index a term; each term's slot, read back, is still where its entry lands.
+
+    The slots are read independently, from where each stored entry's number lands in the numbered
+    padded rows, both for the rows and for the transpose (whose terms read the operand out of order).
+    """
+    pattern = _random_pattern(30, 30, 0.15, seed=33)
+    width = int(np.diff(pattern.indptr).max()) + 1
+    for transposed in (False, True):
+        numbered = SparsePattern(pattern).numbered()
+        operand = sp.csr_matrix(numbered.T) if transposed else numbered
+        numbers = _padded_rows(operand, width, "column" if transposed else "row")[1].ravel()
+        packing = EntryMap.placing(SparsePattern(pattern), numbers)
+        assert packing._filled is not None and packing._target is None
+        assert packing._filled.nbytes < 4 * packing.source.size
+        landed = np.flatnonzero(numbers)
+        assert np.array_equal(packing.target, landed)
+        assert np.array_equal(packing.source, numbers[landed].astype(np.int64) - 1)
+
+
 def test_a_held_padded_layout_packs_exactly_what_a_fresh_packing_does() -> None:
     """``_padded_operator`` through a held layout equals ``_PaddedRowOperator.from_scipy``, both ways."""
     pattern = _random_pattern(25, 25, 0.2, seed=5)

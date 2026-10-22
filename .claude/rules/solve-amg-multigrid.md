@@ -264,6 +264,11 @@ path.
     pattern (the same set `_galerkin_coarse` stores on). `EntryMaps` (held as `StructuralPatterns.maps`, and
     by `FieldSplitInverse._maps`) keys one map per slot and rebuilds it when the operand's pattern, or a
     fixed operand's pattern or values, moved; `EntryMap.apply` itself refuses an operand of another pattern.
+    **A pattern is held once however many owners read it**: `SparsePattern.of` returns the live pattern
+    matching the operand by content (`matches`), used by `EntryMaps.pattern_of` and both landings, since
+    the split cuts a block and its hierarchy then refits a copy of it (a scaling or shift copies the index
+    arrays, so identity alone misses it). Pinned by
+    `test_two_owners_reading_one_pattern_hold_one_copy_and_another_pattern_is_never_given_it`.
     Wired: `SmoothedHierarchy.refit` (Galerkin via `_galerkin_coarse(patterns=)`, level packing via
     `_PaddedLayout`/`_padded_operator` in `padded_rows.py`, cell blocks via `_cell_block_inverse(patterns=)`, now computed once
     per level), `_simple_pieces` (the four block cuts and every packing), `FieldGroups.blocks(maps=)` and
@@ -286,7 +291,9 @@ path.
       each later refit's refactor ~0.5-0.7 s against ~0.9-1.1 s. ⚠️ **They are held for the session:
       ~0.2 GB more host memory on pitzDaily** (held caches 62 -> 276 MB, peak 1.20 -> 1.41 GB in the
       standalone harness), proportional to stored entries: about 1.47 GB on bfs3d's split after two steps (measured
-      2026-10-22, log below). Index arrays are int32, all-ones weights and in-order sources/targets are not stored,
+      2026-10-22, log below). Index arrays are int32, all-ones weights and in-order sources/targets are not stored, a gather
+      filling its slots in ascending order (every `placing` map) holds a byte-a-slot mask in place of
+      its targets (`EntryMap._filled`),
       and the numbered pattern is not kept -- keep it so. **`EntryMap.product` is built to hold one
       term list at a time** (no all-ones weight list, the slots by a sorted copy of the keys and
       `searchsorted`, not `np.unique`'s inverse): the leading block's fine Galerkin map set bfs3d's

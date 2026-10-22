@@ -172,6 +172,19 @@ class EntryMap:
             # Every slot filled once: held as the source of each slot in order, the targets dropped.
             self._source = self._source[np.argsort(self._target, kind="stable")]
             self._target = None
+        # A gather filling its slots in ascending order (every one `placing` builds) is held as which
+        # slots it fills, a byte a slot, where that is smaller than a slot index a term: assigning
+        # through the mask writes the terms in slot order, which is term order.
+        self._filled: np.ndarray | None = None
+        if (
+            self._scatter
+            and self._target is not None
+            and self.n_out < self._target.size * self._target.itemsize
+            and np.all(np.diff(self._target) > 0)
+        ):
+            self._filled = np.zeros(self.n_out, dtype=bool)
+            self._filled[self._target] = True
+            self._target = None
         # A map reading every entry once, in storage order, holds no source either.
         if self._source.size == pattern.nnz and np.array_equal(
             self._source, np.arange(pattern.nnz, dtype=index)
@@ -345,6 +358,8 @@ class EntryMap:
     @property
     def target(self) -> np.ndarray:
         """Each term's output slot, shape ``(n_terms,)``."""
+        if self._filled is not None:
+            return np.flatnonzero(self._filled)
         return np.arange(self.n_out) if self._target is None else self._target
 
     def apply(self, matrix: sp.spmatrix) -> np.ndarray:
@@ -367,7 +382,7 @@ class EntryMap:
             return values
         if self._scatter:
             out = np.zeros(self.n_out, dtype=np.float64)
-            out[self._target] = values
+            out[self._target if self._filled is None else self._filled] = values
             return out
         if self.weight is not None:
             values = values * self.weight
