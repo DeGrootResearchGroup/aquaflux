@@ -16,13 +16,13 @@ import pytest
 from aquaflux.mesh import closed_cell_residual
 from aquaflux.meshing import (
     NearSurface,
-    Octree,
     OctreeCore,
     SampledRegion,
     check_closed_surface,
     element_mesh,
 )
 from aquaflux.meshing.hex_core import _CubeFaces, _without_pinches
+from aquaflux.octree import Octree
 
 from tests.support.meshes import box_surface
 

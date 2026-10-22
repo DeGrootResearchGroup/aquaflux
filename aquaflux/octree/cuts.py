@@ -250,18 +250,18 @@ def leaf_cuts(tree: Octree, rows: np.ndarray, region, standoff: float) -> LeafCu
     LeafCuts
     """
     rows = np.asarray(rows, dtype=np.int64)
-    corners = tree.corners(rows)  # (r, 8, 3)
+    corners = tree.cube_corners(rows)  # (r, 8, 3)
     first, second = corners[:, EDGES[:, 0], :], corners[:, EDGES[:, 1], :]  # (r, 12, 3)
-    edge_codes = np.stack([tree.key(first), tree.key(second)], axis=-1).reshape(-1, 2)
+    edge_codes = np.stack([tree.keys(first), tree.keys(second)], axis=-1).reshape(-1, 2)
     unique, edge_of = np.unique(edge_codes, axis=0, return_inverse=True)
     edge_of = edge_of.reshape(-1)
-    ends = tree.unkey(unique)  # (e, 2, 3)
+    ends = tree.coordinates(unique)  # (e, 2, 3)
     points, on_edge = crossing_points(
         region, tree.position(ends[:, 0]), tree.position(ends[:, 1]), standoff
     )
     # The same point reached along different edges of one line: merge to a tolerance far below the
     # standoff, far above rounding.
-    quantum = 1e-9 * tree.step
+    quantum = 1e-9 * tree.unit
     rounded = np.round((points - tree.origin) / quantum).astype(np.int64)
     distinct, point_of = np.unique(rounded, axis=0, return_index=False, return_inverse=True)
     point_of = point_of.reshape(-1)

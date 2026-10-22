@@ -23,8 +23,8 @@ from scipy.spatial import cKDTree
 
 from aquaflux.triangle_grid import MAX_VOXELS, TriangleGrid
 
+from .near_surface import cube_samples
 from .netgen_process import check_closed_surface
-from .octree import cube_samples
 
 __all__ = ["ClosedSurface", "Region", "SampledRegion"]
 

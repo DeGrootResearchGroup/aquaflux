@@ -293,7 +293,7 @@ def build(arm: str, reactor: Reactor):
         low=reactor.low - pad,
         high=reactor.high + pad,
         spacing=spacing,
-        max_level=levels,
+        depth=levels,
         tolerance=tolerance,
         standoff=standoff,
         transform=Logarithm(FLOOR),
@@ -330,7 +330,7 @@ def write_tree(field, path: Path) -> None:
         corners,
         path,
         point_fields={"G": values},
-        cell_fields={"level": field.tree.levels[rows].astype(float)},
+        cell_fields={"level": field.tree.level[rows].astype(float)},
     )
 
 
@@ -355,7 +355,7 @@ def stage_grids() -> None:
             "cut_points_sampled": int(field.is_cut.sum()),
             "samples": len(field.points),
             "leaves_by_level": np.bincount(
-                field.tree.levels, minlength=field.tree.max_level + 1
+                field.tree.level, minlength=field.tree.depth + 1
             ).tolist(),
             "ghost_nodes": len(field.ghost_nodes),
             "seconds_total": round(total, 1),

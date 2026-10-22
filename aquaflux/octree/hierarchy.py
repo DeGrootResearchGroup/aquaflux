@@ -43,7 +43,7 @@ class Hierarchy:
     Attributes
     ----------
     keys : tuple of np.ndarray of int
-        Per level, the sorted keys (:meth:`Octree.key`) of the nodes of that level.
+        Per level, the sorted keys (:meth:`Octree.keys`) of the nodes of that level.
     surpluses : tuple of np.ndarray
         Per level, each node's surplus, in the order of ``keys``.
     """
@@ -54,7 +54,7 @@ class Hierarchy:
     @classmethod
     def empty(cls, tree: Octree) -> Hierarchy:
         """A hierarchy with no nodes, whose interpolant is zero everywhere."""
-        none = tuple(np.zeros(0, dtype=np.int64) for _ in range(tree.max_level + 1))
+        none = tuple(np.zeros(0, dtype=np.int64) for _ in range(tree.depth + 1))
         return cls(keys=none, surpluses=tuple(np.zeros(0) for _ in none))
 
     @property
@@ -62,21 +62,21 @@ class Hierarchy:
         """How many nodes carry a surplus."""
         return sum(len(k) for k in self.keys)
 
-    def at_lattice(self, tree: Octree, u) -> np.ndarray:
-        """The interpolant at points given in lattice steps, ``(n, 3)`` -> ``(n,)``."""
+    def at_units(self, tree: Octree, u) -> np.ndarray:
+        """The interpolant at points given in units of the tree (:meth:`Octree.units`), ``(n, 3)`` -> ``(n,)``."""
         u = np.asarray(u, dtype=float)
-        top = tree.lattice_shape - 1
+        top = tree.extent
         total = np.zeros(len(u))
         for level, (keys, surplus) in enumerate(zip(self.keys, self.surpluses, strict=True)):
             if len(keys) == 0:
                 continue
-            size = tree.size(level)
+            size = tree.span_at(level)
             low = np.clip(np.floor(u / size).astype(np.int64) * size, 0, top - size)
             fraction = (u - low) / size
             for offset in CORNERS:
                 corner = low + size * offset
                 weight = np.prod(np.where(offset == 1, fraction, 1.0 - fraction), axis=-1)
-                key = tree.key(corner)
+                key = tree.keys(corner)
                 slot = np.minimum(np.searchsorted(keys, key), len(keys) - 1)
                 hit = keys[slot] == key
                 total += np.where(hit, surplus[slot] * weight, 0.0)
@@ -84,7 +84,7 @@ class Hierarchy:
 
     def __call__(self, tree: Octree, points) -> np.ndarray:
         """The interpolant at points in space, ``(n, 3)`` -> ``(n,)``."""
-        return self.at_lattice(tree, tree.lattice(points))
+        return self.at_units(tree, tree.units(points))
 
     def with_values(self, tree: Octree, keys, values) -> Hierarchy:
         """The hierarchy with these nodes added at these values.
@@ -111,18 +111,18 @@ class Hierarchy:
         values = np.asarray(values, dtype=float)
         if len(np.unique(keys)) != len(keys):
             raise ValueError("Hierarchy.with_values: a node is given twice.")
-        lattice = tree.unkey(keys)
-        node_level = tree.node_level(lattice)
+        lattice = tree.coordinates(keys)
+        point_level = tree.point_level(lattice)
         new_keys, new_surpluses = list(self.keys), list(self.surpluses)
         current = self
-        for level in np.unique(node_level):
-            rows = np.flatnonzero(node_level == level)
+        for level in np.unique(point_level):
+            rows = np.flatnonzero(point_level == level)
             existing = new_keys[level]
             if np.isin(keys[rows], existing).any():
                 raise ValueError(
                     "Hierarchy.with_values: a node already in the hierarchy is given again."
                 )
-            surplus = values[rows] - current.at_lattice(tree, lattice[rows])
+            surplus = values[rows] - current.at_units(tree, lattice[rows])
             merged = np.concatenate([existing, keys[rows]])
             order = np.argsort(merged)
             new_keys[level] = merged[order]

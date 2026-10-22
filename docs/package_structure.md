@@ -87,8 +87,8 @@ cfd/                                  # repo root
 │   │       ├── assembler.py          #     assemble(PolyMeshData) → Mesh: neighbour pad, n_cells, patches/zones, from_csr
 │   │       └── reader.py             #     OpenFOAMReader: file I/O; parse → assemble → collapse (empty-patch 2D)
 │   │
-│   ├── octree/                       # adaptive sampling of a field on an octree (generic: field = callable, region = a solid)
-│   │   ├── tree.py                   #   Octree: root cells on one integer lattice; split, subset, locate, node_level, key/unkey
+│   ├── octree/                       # the octree (shared by the mesher's hex core and the sampler) and adaptive sampling of a field on it (generic: field = callable, region = a solid)
+│   │   ├── tree.py                   #   Octree: root cubes, leaves in integer units; refined / refined_by / balanced, subset, locate, leaf_at, point_level, keys/coordinates; RefinementCriterion
 │   │   ├── hierarchy.py              #   Hierarchy: hat-function interpolant, one surplus per node; with_values (coarse first)
 │   │   ├── cuts.py                   #   cut points where cell edges cross the region's boundary, a standoff deep by signed distance
 │   │   ├── ghosts.py                 #   ghost_values: values for nodes outside the region (edges + bounded weighted extrapolation)
@@ -221,7 +221,7 @@ cfd/                                  # repo root
 │   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
 │   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
-│   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement towards a region's boundary
+│   │   ├── near_surface.py           #   NearSurface: refine an octree towards a region's boundary; cube_samples
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual

@@ -1,30 +1,52 @@
-"""The octree: a box of cubic root cells, each split into eight halves as often as it is asked.
+"""An octree of cubes over a box: a lattice of equal root cubes, each split into eight halves as often
+as it is asked.
 
-Every position the tree can name lies on one integer **lattice**, the corners of the finest cells it
-could ever hold. A cell at level ``l`` spans ``2**(max_level - l)`` lattice steps along each axis, so
-its corners, its edges and the lattice point at its centre are all integer coordinates, and two
-cells share a corner exactly when they name the same integer triple. Nothing is compared as a float.
+Cubes are held in integer **units**, the edge of the smallest cube the tree has: a cube of level ``l``
+in a tree of depth ``d`` spans ``2**(d - l)`` units, so its corners, its edges' ends and the point at
+its centre all have integer coordinates, and two cubes share a corner exactly when they name the same
+integer triple. Nothing is compared as a float. Leaves never overlap, so a leaf is named by its lower
+corner and its level.
 
-A **node** is a lattice point that is a corner of some cell the tree holds or has held. Its *level*
-is the coarsest level whose cells have corners there -- the level at which it first appears -- and
-is read off its coordinates alone: the coarsest lattice spacing all three divide.
+A tree's depth is its finest level. Splitting a leaf at that level halves the unit and doubles every
+coordinate, so a tree can grow as deep as it is asked (:meth:`Octree.refined`); a tree built at a depth
+it will not exceed (:meth:`Octree.lattice` with ``depth``) keeps one unit throughout, which is what a
+caller holding coordinates from one pass to the next needs.
 
-The leaves are stored as two arrays, a level and a low corner per leaf. Splitting replaces a leaf by
-its eight children; nothing keeps the interior cells, because nothing asks for them.
+A lattice point's **level** is the coarsest level whose cubes have corners there -- the level at which
+it first appears as a corner -- and is read off its coordinates alone (:meth:`Octree.point_level`).
+
+Two ways of refining share the tree. :meth:`Octree.refined_by` splits where any of some criteria asks,
+and :meth:`Octree.balanced` then splits until neighbours differ by at most a level, the bound a cube
+cut into fixed shapes to match smaller neighbours needs. A caller that decides its own splits, leaf by
+leaf, calls :meth:`Octree.refined` directly and need not balance.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import functools
+import itertools
+from collections.abc import Sequence
+from typing import Protocol
 
 import numpy as np
 
-#: The eight corners of a cell, as offsets from its low corner in units of its size. Ordered so that
-#: corner ``c`` has offset ``((c >> 2) & 1, (c >> 1) & 1, c & 1)``.
-CORNERS = np.array([(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)], dtype=np.int64)
+#: Bits per axis in a point's key (:meth:`Octree.keys`). Coordinates may be held at half a unit, so a
+#: tree may span at most ``2**(BITS - 1)`` units along an axis.
+BITS = 21
 
-#: The twelve edges of a cell, as pairs of corners in :data:`CORNERS` order, the lower corner first.
+#: The eighteen directions to a cube's face and edge neighbours: each offset with one or two of its
+#: components non-zero.
+FACE_AND_EDGE_DIRECTIONS = np.array(
+    [d for d in itertools.product((-1, 0, 1), repeat=3) if 1 <= np.count_nonzero(d) <= 2]
+)
+
+#: A cube's eight corners, as offsets from its lower corner in units of its edge, ordered so that
+#: corner ``c`` has offset ``((c >> 2) & 1, (c >> 1) & 1, c & 1)``. In units of half its edge they are
+#: its eight children's lower corners, in the order :meth:`Octree.refined` puts the children.
+CORNERS = np.array(list(itertools.product((0, 1), repeat=3)), dtype=np.int64)
+
+#: The twelve edges of a cube, as pairs of corners in :data:`CORNERS` order, the lower corner first.
 EDGES = np.array(
     [
         (a, b)
@@ -36,232 +58,290 @@ EDGES = np.array(
 )
 
 
-@dataclasses.dataclass(frozen=True, eq=False)
-class Octree:
-    """Leaves of an octree over a box of cubic root cells.
+class RefinementCriterion(Protocol):
+    """Which cubes to split."""
 
-    Build one with :meth:`covering`, then :meth:`split` it.
+    def refines(self, lower: np.ndarray, size: np.ndarray) -> np.ndarray:
+        """Whether to split each cube.
+
+        Parameters
+        ----------
+        lower : np.ndarray, shape ``(n, 3)``
+            Each cube's lower corner.
+        size : np.ndarray, shape ``(n,)``
+            Each cube's edge length.
+
+        Returns
+        -------
+        np.ndarray of bool, shape ``(n,)``
+        """
+
+
+@dataclasses.dataclass(frozen=True)
+class Octree:
+    """The leaves of a lattice of octrees over a box.
 
     Attributes
     ----------
     origin : np.ndarray, shape ``(3,)``
-        The low corner of the box: lattice point ``(0, 0, 0)``.
-    spacing : float
-        The root cells' edge length.
+        The lattice's lower corner.
+    unit : float
+        The edge of the smallest cube the tree has: the root cubes' edge over ``2**depth``.
+    depth : int
+        The finest level; the root cubes are level ``0``.
     shape : np.ndarray of int, shape ``(3,)``
-        Root cells along each axis.
-    max_level : int
-        The deepest level a cell may reach; the finest cells have edge ``spacing / 2**max_level``,
-        which is also the lattice step.
-    levels : np.ndarray of int, shape ``(n_leaves,)``
-        Each leaf's level, ``0`` for a root cell.
-    low : np.ndarray of int, shape ``(n_leaves, 3)``
-        Each leaf's low corner, in lattice steps.
+        Root cubes along each axis.
+    level : np.ndarray of int, shape ``(n_leaves,)``
+        Each leaf's level.
+    corner : np.ndarray of int, shape ``(n_leaves, 3)``
+        Each leaf's lower corner, in units from the origin.
     """
 
     origin: np.ndarray
-    spacing: float
+    unit: float
+    depth: int
     shape: np.ndarray
-    max_level: int
-    levels: np.ndarray
-    low: np.ndarray
+    level: np.ndarray
+    corner: np.ndarray
 
     @classmethod
-    def covering(cls, low, high, spacing: float, max_level: int) -> Octree:
-        """The root cells of edge ``spacing`` covering the box from ``low`` to ``high``.
+    def lattice(
+        cls, lower: Sequence[float], upper: Sequence[float], size: float, depth: int = 0
+    ) -> Octree:
+        """Root cubes of edge ``size`` from ``lower``, as many along each axis as cover ``upper``.
 
         Parameters
         ----------
-        low, high : array_like, shape ``(3,)``
+        lower, upper : array_like, shape ``(3,)``
             Opposite corners of the box to cover.
-        spacing : float
-            The root cells' edge length.
-        max_level : int
-            The deepest level a cell may be split to; at least zero.
+        size : float
+            The root cubes' edge.
+        depth : int, optional
+            The tree's depth from the start: its unit is ``size / 2**depth``. A tree is split no
+            deeper than this without its unit changing.
 
         Returns
         -------
         Octree
-            Every root cell a leaf, ordered by its integer coordinates.
+            Every root cube a leaf, in order of its integer coordinates.
 
         Raises
         ------
         ValueError
-            If the box is empty, the spacing is not positive, or ``max_level`` is negative or so deep
-            that the lattice cannot be numbered in 64 bits.
+            If the box is empty, the size is not positive, the depth is negative, or the tree would
+            span more units along an axis than a key can hold.
         """
-        low, high = np.asarray(low, dtype=float), np.asarray(high, dtype=float)
-        if spacing <= 0.0:
-            raise ValueError(f"Octree spacing must be positive, got {spacing!r}.")
-        if max_level < 0:
-            raise ValueError(f"Octree max_level must be at least zero, got {max_level!r}.")
-        if np.any(high <= low):
-            raise ValueError(f"Octree box is empty: low {low.tolist()}, high {high.tolist()}.")
-        shape = np.maximum(np.ceil((high - low) / spacing - 1e-9).astype(np.int64), 1)
-        nodes_per_axis = shape * 2**max_level + 1
-        if np.log2(nodes_per_axis.astype(float)).sum() + np.log2(max_level + 1) > 62:
-            raise ValueError(
-                f"Octree: {shape.tolist()} root cells at max_level {max_level} have too many lattice "
-                "points to number in 64 bits; use a coarser root spacing or fewer levels."
-            )
-        cells = np.stack(np.meshgrid(*(np.arange(n) for n in shape), indexing="ij"), axis=-1)
-        step = 2**max_level
-        return cls(
-            origin=low,
-            spacing=float(spacing),
-            shape=shape,
-            max_level=int(max_level),
-            levels=np.zeros(int(np.prod(shape)), dtype=np.int64),
-            low=cells.reshape(-1, 3) * step,
+        lower = np.asarray(lower, dtype=np.float64)
+        extent = np.asarray(upper, dtype=np.float64) - lower
+        if size <= 0.0 or np.any(extent <= 0.0):
+            raise ValueError("the box must have positive extent and the cubes a positive size")
+        if depth < 0:
+            raise ValueError(f"the depth must be at least zero, got {depth!r}")
+        shape = np.maximum(np.ceil(extent / size - 1e-9), 1).astype(np.int64)
+        corner = np.array(list(itertools.product(*(range(n) for n in shape))), dtype=np.int64)
+        tree = cls(
+            lower,
+            float(size) / 2**depth,
+            int(depth),
+            shape,
+            np.zeros(len(corner), np.int64),
+            corner << depth,
         )
+        tree._check_span()
+        return tree
 
-    # -- the lattice ------------------------------------------------------------------------------
+    # -- the leaves -------------------------------------------------------------------------------
 
     @property
     def n_leaves(self) -> int:
         """How many leaves the tree has."""
-        return len(self.levels)
+        return len(self.level)
 
     @property
-    def step(self) -> float:
-        """The lattice step: the finest cell's edge length."""
-        return self.spacing / 2**self.max_level
+    def extent(self) -> np.ndarray:
+        """The box's edge along each axis, in units; shape ``(3,)``. Its lattice points run from
+        ``0`` to ``extent`` inclusive."""
+        return self.shape << self.depth
 
     @property
-    def lattice_shape(self) -> np.ndarray:
-        """Lattice points along each axis."""
-        return self.shape * 2**self.max_level + 1
+    def span(self) -> np.ndarray:
+        """Each leaf's edge, in units; shape ``(n_leaves,)``."""
+        return self.span_at(self.level)
 
-    def size(self, levels) -> np.ndarray:
-        """Edge length, in lattice steps, of a cell at each level."""
-        return np.left_shift(np.int64(1), self.max_level - np.asarray(levels, dtype=np.int64))
+    @property
+    def lower(self) -> np.ndarray:
+        """Each leaf's lower corner; shape ``(n_leaves, 3)``."""
+        return self.position(self.corner)
 
-    def key(self, lattice) -> np.ndarray:
-        """The integer key of each lattice point, shape ``(...)`` from ``(..., 3)``."""
-        lattice = np.asarray(lattice, dtype=np.int64)
-        n = self.lattice_shape
-        return (lattice[..., 0] * n[1] + lattice[..., 1]) * n[2] + lattice[..., 2]
+    @property
+    def size(self) -> np.ndarray:
+        """Each leaf's edge length; shape ``(n_leaves,)``."""
+        return self.unit * self.span
 
-    def unkey(self, keys) -> np.ndarray:
-        """The lattice point, shape ``(..., 3)``, of each key."""
-        keys = np.asarray(keys, dtype=np.int64)
-        n = self.lattice_shape
-        return np.stack([keys // (n[1] * n[2]), (keys // n[2]) % n[1], keys % n[2]], axis=-1)
+    @property
+    def centre(self) -> np.ndarray:
+        """Each leaf's centre; shape ``(n_leaves, 3)``."""
+        return self.lower + 0.5 * self.size[:, None]
 
-    def position(self, lattice) -> np.ndarray:
-        """Where each lattice point (``(..., 3)`` integers, or fractions of a step) is, in space."""
-        return self.origin + self.step * np.asarray(lattice, dtype=float)
+    def cube_corners(self, rows=None) -> np.ndarray:
+        """The eight corners of each of these leaves (all by default), in units, ``(n, 8, 3)`` in
+        :data:`CORNERS` order."""
+        rows = slice(None) if rows is None else rows
+        return self.corner[rows][:, None, :] + self.span[rows][:, None, None] * CORNERS[None]
 
-    def lattice(self, points) -> np.ndarray:
-        """Each point's position in lattice steps from :attr:`origin`, unrounded, ``(..., 3)``."""
-        return (np.asarray(points, dtype=float) - self.origin) / self.step
+    def refined(self, split: np.ndarray) -> Octree:
+        """This tree with each leaf where ``split`` holds replaced by its eight children.
 
-    def node_level(self, lattice) -> np.ndarray:
-        """The coarsest level whose cell corners include each lattice point, shape ``(...)``.
-
-        A point is a corner of level-``l`` cells exactly when each of its coordinates is a multiple of
-        their size, ``2**(max_level - l)``; the root lattice (level zero) is the coarsest.
+        The children follow the leaves kept, eight per split leaf in the order of their parents and in
+        :data:`CORNERS` order within each, so the children of the ``k``-th split leaf are rows
+        ``n_kept + 8 k`` to ``n_kept + 8 k + 7``.
         """
-        lattice = np.asarray(lattice, dtype=np.int64)
-        level = np.full(lattice.shape[:-1], self.max_level, dtype=np.int64)
-        for depth in range(self.max_level - 1, -1, -1):
-            size = np.int64(1) << (self.max_level - depth)
-            on = np.all(lattice % size == 0, axis=-1)
-            level = np.where(on, depth, level)
-        return level
+        split = np.asarray(split, dtype=bool)
+        if not np.any(split):
+            return self
+        tree = self
+        if np.any(self.level[split] == self.depth):  # a new finest level halves the unit
+            tree = dataclasses.replace(
+                self, unit=self.unit / 2.0, depth=self.depth + 1, corner=2 * self.corner
+            )
+            tree._check_span()
+        half = (tree.span[split] // 2)[:, None, None]
+        children = tree.corner[split][:, None, :] + half * CORNERS[None, :, :]
+        level = np.concatenate([tree.level[~split], np.repeat(tree.level[split] + 1, 8)])
+        corner = np.concatenate([tree.corner[~split], children.reshape(-1, 3)])
+        return dataclasses.replace(tree, level=level, corner=corner)
 
-    # -- the leaves -------------------------------------------------------------------------------
+    def refined_by(self, criteria: Sequence[RefinementCriterion]) -> Octree:
+        """Split the leaves any criterion asks for, again and again until none asks."""
+        tree = self
+        while criteria:
+            split = np.zeros(tree.level.shape, dtype=bool)
+            for criterion in criteria:
+                split |= np.asarray(criterion.refines(tree.lower, tree.size), dtype=bool)
+            if not np.any(split):
+                return tree
+            tree = tree.refined(split)
+        return tree
 
-    def corners(self, rows=None) -> np.ndarray:
-        """The lattice points of each leaf's eight corners, ``(n, 8, 3)`` in :data:`CORNERS` order."""
-        rows = slice(None) if rows is None else rows
-        size = self.size(self.levels[rows])
-        return self.low[rows][:, None, :] + size[:, None, None] * CORNERS[None, :, :]
+    def balanced(self) -> Octree:
+        """Split leaves until any two sharing a face or part of an edge are at most a level apart.
 
-    def centres(self, rows=None) -> np.ndarray:
-        """Each leaf's centre, in space, ``(n, 3)``."""
-        rows = slice(None) if rows is None else rows
-        size = self.size(self.levels[rows])
-        return self.position(self.low[rows] + 0.5 * size[:, None])
+        A leaf two or more levels coarser than a face or edge neighbour covers the whole of the
+        neighbour's own-size region across that face or edge, so one finest cell just across it
+        finds that leaf.
+        """
+        tree = self
+        while True:
+            split = np.zeros(tree.level.shape, dtype=bool)
+            span = tree.span[:, None]
+            for direction in FACE_AND_EDGE_DIRECTIONS:
+                across = tree.corner + np.where(direction < 0, -1, np.where(direction > 0, span, 0))
+                found = tree.leaf_at(across)
+                coarse = (found >= 0) & (tree.level[np.maximum(found, 0)] < tree.level - 1)
+                split[found[coarse]] = True
+            if not np.any(split):
+                return tree
+            tree = tree.refined(split)
 
-    def cell_spacing(self, rows=None) -> np.ndarray:
-        """Each leaf's edge length, in space, ``(n,)``."""
-        rows = slice(None) if rows is None else rows
-        return self.step * self.size(self.levels[rows])
+    def subset(self, rows) -> Octree:
+        """The tree with only these leaves, in this order -- the cubes of a box that some region can
+        reach, say. Points elsewhere in the box then lie in no leaf."""
+        rows = np.asarray(rows, dtype=np.int64)
+        return dataclasses.replace(self, level=self.level[rows], corner=self.corner[rows])
 
-    def split(self, marked) -> tuple[Octree, np.ndarray]:
-        """The tree with the marked leaves each replaced by their eight children.
+    # -- finding leaves ---------------------------------------------------------------------------
+
+    @functools.cached_property
+    def _sorted_corners(self) -> tuple[np.ndarray, np.ndarray]:
+        """The leaves' lower corners' keys, sorted, and the leaf each belongs to."""
+        keys = self.keys(self.corner)
+        order = np.argsort(keys)
+        return keys[order], order
+
+    def leaf_at(self, cells: np.ndarray) -> np.ndarray:
+        """The leaf holding each finest cell, named by its lower corner in units; ``-1`` outside.
 
         Parameters
         ----------
-        marked : np.ndarray of bool, shape ``(n_leaves,)``
-            Leaves to split. A leaf already at :attr:`max_level` must not be marked.
+        cells : np.ndarray of int, shape ``(m, 3)``
 
         Returns
         -------
-        tree : Octree
-            The unmarked leaves in their order, then the children, eight per split leaf in the order
-            the leaves were marked and in :data:`CORNERS` order within each.
-        children : np.ndarray of int, shape ``(n_split, 8)``
-            The rows of each split leaf's children in the new tree.
-
-        Raises
-        ------
-        ValueError
-            If a marked leaf is already at :attr:`max_level`.
+        np.ndarray of int, shape ``(m,)``
         """
-        marked = np.asarray(marked, dtype=bool)
-        if np.any(self.levels[marked] >= self.max_level):
-            raise ValueError(
-                f"Octree.split: {int(np.sum(self.levels[marked] >= self.max_level))} marked leaves are "
-                f"already at max_level {self.max_level}."
-            )
-        kept = ~marked
-        parents = np.flatnonzero(marked)
-        half = self.size(self.levels[parents] + 1)
-        child_low = self.low[parents][:, None, :] + half[:, None, None] * CORNERS[None, :, :]
-        child_level = np.repeat(self.levels[parents] + 1, 8)
-        tree = dataclasses.replace(
-            self,
-            levels=np.concatenate([self.levels[kept], child_level]),
-            low=np.concatenate([self.low[kept], child_low.reshape(-1, 3)]),
-        )
-        children = int(kept.sum()) + np.arange(8 * len(parents)).reshape(-1, 8)
-        return tree, children
-
-    def subset(self, rows) -> Octree:
-        """The tree with only these leaves, in this order -- the cells of a box that the region a
-        field lives in can reach, say. Points elsewhere in the box then lie in no leaf."""
-        rows = np.asarray(rows, dtype=np.int64)
-        return dataclasses.replace(self, levels=self.levels[rows], low=self.low[rows])
-
-    @functools.cached_property
-    def _codes(self) -> tuple[np.ndarray, np.ndarray]:
-        """Each leaf's code (its low corner's key and its level, as one integer), sorted, and the
-        leaf each sorted code belongs to."""
-        codes = self.key(self.low) * (self.max_level + 1) + self.levels
-        order = np.argsort(codes)
-        return codes[order], order
+        cells = np.asarray(cells, dtype=np.int64)
+        within = np.all((cells >= 0) & (cells < self.extent), axis=1)
+        ordered, order = self._sorted_corners
+        found = np.full(cells.shape[0], -1, dtype=np.int64)
+        for level in np.unique(self.level):
+            shift = int(self.depth - level)
+            candidate = self.keys(np.where(within[:, None], (cells >> shift) << shift, 0))
+            position = np.minimum(np.searchsorted(ordered, candidate), ordered.size - 1)
+            leaf = order[position]
+            hit = within & (ordered[position] == candidate) & (self.level[leaf] == level)
+            found[hit] = leaf[hit]
+        return found
 
     def locate(self, points) -> np.ndarray:
-        """The leaf holding each point, ``(n,)``; ``-1`` for a point in no leaf.
+        """The leaf holding each point in space, ``(n,)``; ``-1`` for a point in no leaf.
 
-        A point on a face shared by two leaves is given to the one on its high side, except on the
-        box's own high faces, where it is given to the leaf below.
+        A point on a face two leaves share is given to the leaf on its upper side, except on the
+        box's own upper faces, where it is given to the leaf below.
         """
-        u = self.lattice(points)
-        outside = np.any((u < 0.0) | (u > self.lattice_shape - 1), axis=-1)
-        u = np.clip(u, 0.0, self.lattice_shape - 1)
-        codes, order = self._codes
-        found = np.full(len(u), -1, dtype=np.int64)
-        for level in range(self.max_level + 1):
-            size = self.size(level)
-            low = np.minimum(
-                np.floor(u / size).astype(np.int64) * size, self.lattice_shape - 1 - size
+        units = self.units(np.asarray(points, dtype=float).reshape(-1, 3))
+        extent = self.extent
+        outside = np.any((units < 0.0) | (units > extent), axis=-1)
+        cells = np.minimum(np.floor(np.clip(units, 0.0, extent)).astype(np.int64), extent - 1)
+        return np.where(outside, -1, self.leaf_at(cells))
+
+    # -- lattice points ---------------------------------------------------------------------------
+
+    def span_at(self, level) -> np.ndarray:
+        """The edge, in units, of a cube at each level."""
+        return np.left_shift(np.int64(1), self.depth - np.asarray(level, dtype=np.int64))
+
+    def position(self, units) -> np.ndarray:
+        """Where each point given in units (``(..., 3)``, integer or not) lies in space."""
+        return self.origin + self.unit * np.asarray(units, dtype=float)
+
+    def units(self, points) -> np.ndarray:
+        """Each point's coordinates in units from the origin, unrounded, ``(..., 3)``."""
+        return (np.asarray(points, dtype=float) - self.origin) / self.unit
+
+    def point_level(self, units) -> np.ndarray:
+        """The coarsest level whose cubes have corners at each lattice point, ``(...)``.
+
+        A point is a corner of level-``l`` cubes exactly when each of its coordinates is a multiple of
+        their edge, ``2**(depth - l)``.
+        """
+        units = np.asarray(units, dtype=np.int64)
+        level = np.full(units.shape[:-1], self.depth, dtype=np.int64)
+        for coarser in range(self.depth - 1, -1, -1):
+            on = np.all(units % self.span_at(coarser) == 0, axis=-1)
+            level = np.where(on, coarser, level)
+        return level
+
+    @staticmethod
+    def keys(coordinates) -> np.ndarray:
+        """One integer per point of non-negative integer coordinates, ordered as the points are by
+        ``(x, y, z)``; shape ``(...)`` from ``(..., 3)``."""
+        coordinates = np.asarray(coordinates, dtype=np.int64)
+        return (
+            (coordinates[..., 0] << (2 * BITS))
+            | (coordinates[..., 1] << BITS)
+            | coordinates[..., 2]
+        )
+
+    @staticmethod
+    def coordinates(keys) -> np.ndarray:
+        """The integer coordinates :meth:`keys` encoded; shape ``(..., 3)``."""
+        keys = np.asarray(keys, dtype=np.int64)
+        mask = (np.int64(1) << BITS) - 1
+        return np.stack([keys >> (2 * BITS), (keys >> BITS) & mask, keys & mask], axis=-1)
+
+    def _check_span(self) -> None:
+        if np.any(self.shape << self.depth >= 1 << (BITS - 1)):
+            raise ValueError(
+                f"the tree spans {int(np.max(self.shape << self.depth))} of its smallest cubes "
+                f"along an axis; at most {(1 << (BITS - 1)) - 1} are supported"
             )
-            code = self.key(low) * (self.max_level + 1) + level
-            slot = np.minimum(np.searchsorted(codes, code), len(codes) - 1)
-            hit = (codes[slot] == code) & (found < 0)
-            found[hit] = order[slot[hit]]
-        found[outside] = -1
-        return found

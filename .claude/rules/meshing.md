@@ -475,11 +475,14 @@ hexes, pyramids; earlier inputs unchanged).
   `triangle_grid_walk.py`** (in `test_layering.NEUTRAL_LEAVES`; `MAX_VOXELS` and
   `near_cubic_resolution` made public), because the mesher may not import a physics package. Its rules
   stay in `radiation.md`, whose `paths:` now globs both files.
-- **The tree** (`Octree`): root cubes **of the target `size`** on a lattice from `lower` covering `upper`
-  (refinement only goes finer); leaves in integer units of the finest cube, named by their lower corner
-  (leaves never overlap), the unit halved when a refinement adds a level. `refined_by(criteria)` splits
-  until no `RefinementCriterion.refines(lower, size)` asks; `NearSurface(region, size, margin=0)`
-  splits cubes whose box grown by `margin` the region's boundary `meets`.
+- **The tree** (`aquaflux.octree.Octree`, shared with the adaptive sampler and kept in that generic
+  package so neither consumer imports the other; `.claude/rules/octree.md`): root cubes **of the target
+  `size`** on a lattice from `lower` covering `upper` (refinement only goes finer); leaves in integer units
+  of the finest cube, named by their lower corner (leaves never overlap), the unit halved when a refinement
+  adds a level. Points are keyed by `Octree.keys` / `Octree.coordinates` (the hex core's half-unit points
+  too). `refined_by(criteria)` splits until no `RefinementCriterion.refines(lower, size)` asks;
+  `meshing/near_surface.py::NearSurface(region, size, margin=0)` splits cubes whose box grown by `margin`
+  the region's boundary `meets`.
   `balanced()` ripples until leaves sharing a face **or part of an edge** are ≤ 1 level apart (vertex
   contact is not balanced): one finest cell across each of the 18 face and edge directions finds any
   leaf ≥ 2 levels coarser, because such a leaf covers the whole own-size region across.

@@ -665,7 +665,7 @@ field = sample_adaptively(
     low=box_low,
     high=box_high,  # a box holding the water, with room around it
     spacing=0.008,  # the coarse grid
-    max_level=4,  # halved at most four times: 0.5 mm
+    depth=4,  # halved at most four times: 0.5 mm
     tolerance=0.01,  # on ln G: about one per cent
     transform=Logarithm(floor=1.0),
 )

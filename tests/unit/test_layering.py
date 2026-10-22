@@ -140,8 +140,8 @@ GENERIC_PACKAGES = {
     "one that needs a physics package to be built is not residual-agnostic",
     "solids": "plain geometry, and a solid body that needs a physics package to be described is in "
     "the wrong package",
-    "octree": "adaptive sampling of any field over any region, and a sampler that needs a physics "
-    "package to refine is not sampling any field",
+    "octree": "the octree the mesher and the sampler share, and adaptive sampling of any field over any "
+    "region; a tree or a sampler that needs a physics package is not generic",
 }
 
 #: The generic packages each generic package is built on. ``solve`` is on nothing, so the march can be

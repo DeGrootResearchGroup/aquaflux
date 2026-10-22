@@ -18,7 +18,7 @@ The loop, from a uniform tree of root cells over a region:
    would add, so the probe is then entered in the interpolant as one.
 4. **Split** each new cell where a sample on it (a new corner, a new cut point on one of its edges,
    or its probe) missed by more than the tolerance; or where the cell is coarser than ``min_level``.
-5. Repeat until no cell is split, or every cell that would be is at ``max_level``.
+5. Repeat until no cell is split, or every cell that would be is at ``depth``.
 
 **The interpolant** is the hierarchical one of :mod:`.hierarchy`: continuous everywhere, and through
 every node sampled. A node outside the region -- or inside it by less than the standoff -- is not
@@ -58,7 +58,7 @@ _AXES = np.concatenate([np.eye(3, dtype=np.int64), -np.eye(3, dtype=np.int64)])
 #: data. One cell -- the node's own hat -- leaves a node at a convex edge of the region with data all
 #: in one plane, and so no gradient across it; two reach past the edge's other side.
 _EXTRAPOLATION_REACH = 2
-#: The lattice points around a node within that reach, as offsets in cells.
+#: The lattice points around a node within that reach, as offsets in cubes of its level.
 _AROUND = np.array(
     [
         (i, j, k)
@@ -72,7 +72,7 @@ _AROUND = np.array(
 #: The default standoff, as a fraction of the finest cell's edge: small enough that the samples lie
 #: next to the boundary at any scale, large against the rounding of the cut points' bisection.
 STANDOFF_FRACTION = 1e-3
-#: Two cut points closer than this many lattice steps are one: the same crossing reached along edges
+#: Two cut points closer than this many units are one: the same crossing reached along edges
 #: of different lengths lands within rounding of itself, far below any standoff.
 _SAME_POINT = 1e-9
 
@@ -186,7 +186,7 @@ class SampledField:
         How far the tree before each sample's pass missed it, in the transformed values; ``nan`` for
         the first pass's samples, which nothing predicted.
     sampled_nodes, ghost_nodes : np.ndarray of int
-        The sorted keys (:meth:`Octree.key`) of the nodes sampled -- those at least the standoff inside
+        The sorted keys (:meth:`Octree.keys`) of the nodes sampled -- those at least the standoff inside
         the region -- and of the others given a ghost value.
     rounds : tuple of Round
         What each pass did.
@@ -233,23 +233,23 @@ class SampledField:
         points : np.ndarray, shape ``(k, 3)``
             The corners of those leaves, each once.
         corners : np.ndarray of int, shape ``(m, 8)``
-            Each leaf's corners as rows of ``points``, in :data:`~aquaflux.octree.tree.CORNERS` order.
+            Each leaf's corners as rows of ``points``, in ``CORNERS`` order (corner ``4i+2j+k`` at offset ``(i, j, k)``).
         rows : np.ndarray of int, shape ``(m,)``
             The leaves, as rows of the tree.
         values : np.ndarray, shape ``(k,)``
             The field sampled at each point in the region, ``nan`` at one outside it.
         """
         tree = self.tree
-        keys = tree.key(tree.corners())
+        keys = tree.keys(tree.cube_corners())
         reached = np.isin(keys, self.sampled_nodes) | np.isin(keys, self.ghost_nodes)
         rows = np.flatnonzero(reached.any(axis=1))
         nodes, corners = np.unique(keys[rows], return_inverse=True)
         values = np.full(len(nodes), np.nan)
         inside = np.isin(nodes, self.sampled_nodes)
         values[inside] = self.transform.inverse(
-            self.hierarchy.at_lattice(tree, tree.unkey(nodes[inside]))
+            self.hierarchy.at_units(tree, tree.coordinates(nodes[inside]))
         )
-        return tree.position(tree.unkey(nodes)), corners.reshape(-1, 8), rows, values
+        return tree.position(tree.coordinates(nodes)), corners.reshape(-1, 8), rows, values
 
 
 def sample_adaptively(
@@ -259,7 +259,7 @@ def sample_adaptively(
     low,
     high,
     spacing: float,
-    max_level: int,
+    depth: int,
     tolerance: float,
     standoff: float | None = None,
     transform: Linear | Logarithm | None = None,
@@ -282,7 +282,7 @@ def sample_adaptively(
         A box holding the region, with room around it: a node outside the region needs neighbours.
     spacing : float
         The root cells' edge length.
-    max_level : int
+    depth : int
         How many times a root cell may be halved.
     tolerance : float
         The largest miss, in the transformed field, that leaves a cell unsplit.
@@ -312,27 +312,29 @@ def sample_adaptively(
     ------
     ValueError
         If no node or cut point of the root cells lies in the region, ``min_level`` is not in
-        ``[0, max_level]``, or the sampler returns the wrong shape.
+        ``[0, depth]``, or the sampler returns the wrong shape.
     """
-    if not 0 <= min_level <= max_level:
+    if not 0 <= min_level <= depth:
         raise ValueError(
-            f"sample_adaptively: min_level must lie in [0, max_level], got {min_level} and {max_level}."
+            f"sample_adaptively: min_level must lie in [0, depth], got {min_level} and {depth}."
         )
     transform = Linear() if transform is None else transform
     if standoff is None:
-        standoff = STANDOFF_FRACTION * spacing / 2**max_level
+        standoff = STANDOFF_FRACTION * spacing / 2**depth
     if not standoff > 0.0:
         raise ValueError(f"sample_adaptively: the standoff must be positive, got {standoff!r}.")
     say = report or (lambda _: None)
     build = _Refinement(sample, region, transform, standoff)
-    tree = Octree.covering(low, high, spacing, max_level)
+    # The tree is built at its deepest level from the start, so its unit -- and every node's key --
+    # stays the same from one pass to the next.
+    tree = Octree.lattice(low, high, spacing, depth=depth)
     tree = tree.subset(np.flatnonzero(_within_reach(region, tree, np.arange(tree.n_leaves))))
     new = np.arange(tree.n_leaves)
     split = 0
     while True:
         record, misses = build.absorb(tree, new)
-        marked = build.reached(tree, new) & (tree.levels[new] < max_level)
-        marked &= (tree.levels[new] < min_level) | (misses > tolerance)
+        marked = build.reached(tree, new) & (tree.level[new] < depth)
+        marked &= (tree.level[new] < min_level) | (misses > tolerance)
         record = dataclasses.replace(record, split=split, marked=int(marked.sum()))
         build.rounds.append(record)
         say(
@@ -345,8 +347,11 @@ def sample_adaptively(
             break
         mask = np.zeros(tree.n_leaves, dtype=bool)
         mask[new[marked]] = True
-        tree, children = tree.split(mask)
-        new, split = children.reshape(-1), int(marked.sum())
+        tree = tree.refined(mask)
+        split = int(marked.sum())
+        new = (
+            tree.n_leaves - 8 * split + np.arange(8 * split)
+        )  # the children follow the leaves kept
     return build.field(tree)
 
 
@@ -354,8 +359,8 @@ def _within_reach(region, tree: Octree, rows: np.ndarray, reach: float = 0.0) ->
     """Which leaves the region's boundary, or the region, may reach within ``reach`` of: those whose
     centre is within half a diagonal of it, and ``reach``. The signed distance of a solid is at most
     the true distance in magnitude, so this keeps every leaf it should."""
-    half_diagonal = 0.5 * np.sqrt(3.0) * tree.cell_spacing(rows)
-    return region_distance(region, tree.centres(rows)) <= half_diagonal + reach
+    half_diagonal = 0.5 * np.sqrt(3.0) * tree.size[rows]
+    return region_distance(region, tree.centre[rows]) <= half_diagonal + reach
 
 
 class _Refinement:
@@ -386,7 +391,7 @@ class _Refinement:
     # -- bookkeeping ------------------------------------------------------------------------------
 
     def _rounded(self, tree: Octree, points: np.ndarray) -> list[tuple]:
-        quantum = _SAME_POINT * tree.step
+        quantum = _SAME_POINT * tree.unit
         return list(map(tuple, np.round((points - tree.origin) / quantum).astype(np.int64)))
 
     def _lookup(self, keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -422,10 +427,10 @@ class _Refinement:
         probes' misses count.
         """
         first = self.hierarchy is None
-        corner_keys = tree.key(tree.corners(new))  # (r, 8)
+        corner_keys = tree.keys(tree.cube_corners(new))  # (r, 8)
         candidates = np.unique(corner_keys)
         fresh = candidates[~self._lookup(candidates)[0]]
-        fresh_lattice = tree.unkey(fresh)
+        fresh_lattice = tree.coordinates(fresh)
         # A node is sampled only at least a standoff inside the region; one nearer the boundary is given a
         # ghost, as one outside is. On a lamp's true surface a node can lie in the plane of the facets that
         # stand in for it, where the field is not defined -- a gather there returns nothing.
@@ -438,21 +443,21 @@ class _Refinement:
 
         # The cut points: on the new leaves' edges, and where an edge from a new outside node to a
         # neighbour in the region leaves it -- usually the same points.
-        half_diagonal = 0.5 * np.sqrt(3.0) * tree.cell_spacing(new)
-        boundary_near = np.abs(region_distance(self.region, tree.centres(new))) <= half_diagonal
+        half_diagonal = 0.5 * np.sqrt(3.0) * tree.size[new]
+        boundary_near = np.abs(region_distance(self.region, tree.centre[new])) <= half_diagonal
         cuts = leaf_cuts(tree, new[boundary_near], self.region, self.standoff)
         cut_leaf = np.flatnonzero(boundary_near)
         # Ghosts: for every outside corner of the new leaves -- a new node, or an old one whose ghost was
         # fitted at a coarser scale and is fitted again at the finest new leaf around it -- whose hat
         # can reach into the region.
-        leaf_size = np.broadcast_to(tree.size(tree.levels[new])[:, None], corner_keys.shape)
+        leaf_size = np.broadcast_to(tree.span_at(tree.level[new])[:, None], corner_keys.shape)
         corner_known, corner_slot = self._lookup(corner_keys)
         outside_corner = corner_known & ~self.node_inside[corner_slot]
         outside, at = np.unique(corner_keys[outside_corner], return_inverse=True)
         size = np.full(len(outside), np.iinfo(np.int64).max)
         np.minimum.at(size, at.reshape(-1), leaf_size[outside_corner])
-        reachable = region_distance(self.region, tree.position(tree.unkey(outside))) <= (
-            np.sqrt(3.0) * tree.step * size
+        reachable = region_distance(self.region, tree.position(tree.coordinates(outside))) <= (
+            np.sqrt(3.0) * tree.unit * size
         )
         outside, size = outside[reachable], size[reachable]
         edges = self._ghost_edges(tree, outside, size)
@@ -470,16 +475,16 @@ class _Refinement:
         # corners are ghosts, fitted to agree with its cut points -- so it is tested one level down,
         # at the node its children would add.
         corner_inside = corner_known & self.node_inside[corner_slot]
-        probed = np.flatnonzero(~corner_inside.all(axis=1) & (tree.levels[new] < tree.max_level))
-        centre = tree.low[new[probed]] + tree.size(tree.levels[new[probed]])[:, None] // 2
+        probed = np.flatnonzero(~corner_inside.all(axis=1) & (tree.level[new] < tree.depth))
+        centre = tree.corner[new[probed]] + tree.span_at(tree.level[new[probed]])[:, None] // 2
         centre_inside = region_distance(self.region, tree.position(centre)) <= -self.standoff
-        probed, probe_keys = probed[centre_inside], tree.key(centre[centre_inside])
+        probed, probe_keys = probed[centre_inside], tree.keys(centre[centre_inside])
 
         points = np.concatenate(
             [
-                tree.position(tree.unkey(sampled_nodes)),
+                tree.position(tree.coordinates(sampled_nodes)),
                 cut_points,
-                tree.position(tree.unkey(probe_keys)),
+                tree.position(tree.coordinates(probe_keys)),
             ]
         )
         started = time.perf_counter()
@@ -574,12 +579,12 @@ class _Refinement:
         self.ghost_values = np.concatenate([self.ghost_values[kept], values])[order]
 
     def _ghost_edges(self, tree: Octree, outside: np.ndarray, size: np.ndarray) -> dict:
-        """For nodes outside the region, the edges of length ``size`` (lattice steps, one per node) to
+        """For nodes outside the region, the edges of length ``size`` (units, one per node) to
         their neighbours in it along the axes, and where each edge leaves the region."""
-        lattice = tree.unkey(outside)
+        lattice = tree.coordinates(outside)
         neighbour = lattice[:, None, :] + size[:, None, None] * _AXES[None, :, :]  # (n, 6, 3)
-        in_box = np.all((neighbour >= 0) & (neighbour < tree.lattice_shape), axis=-1)
-        keys = tree.key(np.where(in_box[..., None], neighbour, 0))
+        in_box = np.all((neighbour >= 0) & (neighbour < (tree.extent + 1)), axis=-1)
+        keys = tree.keys(np.where(in_box[..., None], neighbour, 0))
         known, slot = self._lookup(keys)
         usable = in_box & known & self.node_inside[slot]
         owner, axis = np.nonzero(usable)
@@ -614,8 +619,8 @@ class _Refinement:
         # For the extrapolation: the sampled nodes around each at its own level, and every cut point, in
         # a box reaching _EXTRAPOLATION_REACH cells of its own level either way, edges included.
         around = lattice[:, None, :] + edges["size"][:, None, None] * _AROUND[None, :, :]
-        in_box = np.all((around >= 0) & (around < tree.lattice_shape), axis=-1)
-        found, value = self._sampled_value(tree.key(np.where(in_box[..., None], around, 0)))
+        in_box = np.all((around >= 0) & (around < (tree.extent + 1)), axis=-1)
+        found, value = self._sampled_value(tree.keys(np.where(in_box[..., None], around, 0)))
         owner, which = np.nonzero(in_box & found)
         data_owner, data_offset, data_value = (
             [owner],
@@ -624,7 +629,7 @@ class _Refinement:
         )
         rows = np.fromiter(self.cut_index.values(), dtype=np.int64, count=len(self.cut_index))
         if len(rows):
-            position = tree.lattice(np.concatenate(self.points)[rows])
+            position = tree.units(np.concatenate(self.points)[rows])
             reach = _EXTRAPOLATION_REACH * size * (1.0 + 1e-9)
             near = cKDTree(position).query_ball_point(lattice.astype(float), r=reach, p=np.inf)
             counts = np.array([len(group) for group in near], dtype=np.int64)
@@ -648,7 +653,7 @@ class _Refinement:
     def reached(self, tree: Octree, rows: np.ndarray) -> np.ndarray:
         """Which leaves may hold part of the region: a corner sampled in it, or the region within reach
         of the centre."""
-        known, slot = self._lookup(tree.key(tree.corners(rows)))
+        known, slot = self._lookup(tree.keys(tree.cube_corners(rows)))
         inside = (known & self.node_inside[slot]).any(axis=1)
         return inside | _within_reach(self.region, tree, rows)
 

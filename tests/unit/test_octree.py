@@ -21,18 +21,24 @@ from aquaflux.octree.tree import CORNERS, EDGES
 from aquaflux.solids import Box, Cylinder, Difference, Sphere
 
 
+def _children(tree: Octree, split: np.ndarray) -> tuple[Octree, np.ndarray]:
+    """The tree with these leaves split, and the rows of each split leaf's eight children."""
+    refined = tree.refined(split)
+    n = int(np.count_nonzero(split))
+    return refined, refined.n_leaves - 8 * n + np.arange(8 * n).reshape(-1, 8)
+
+
 def _split_twice() -> Octree:
     """Two root cells, the first split, one of its children split again: three levels side by side."""
-    tree = Octree.covering([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, 3)
-    tree, children = tree.split(np.array([True, False]))
+    tree = Octree.lattice([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, depth=3)
+    tree, children = _children(tree, np.array([True, False]))
     mask = np.zeros(tree.n_leaves, dtype=bool)
     mask[children[0, 7]] = True  # the child touching the unsplit root cell's face and the centre
-    tree, _ = tree.split(mask)
-    return tree
+    return tree.refined(mask)
 
 
 def _all_nodes(tree: Octree) -> np.ndarray:
-    return np.unique(tree.key(tree.corners()))
+    return np.unique(tree.keys(tree.cube_corners()))
 
 
 # -- the tree --------------------------------------------------------------------------------------
@@ -46,40 +52,49 @@ def test_edges_join_corners_that_differ_along_one_axis():
     assert len({tuple(e) for e in EDGES}) == 12
 
 
-def test_root_cells_cover_the_box_with_whole_cells():
-    tree = Octree.covering([0.0, 0.0, 0.0], [0.25, 0.1, 0.1], 0.1, 2)
+def test_root_cells_cover_the_box_with_whole_cells_at_the_depth_asked():
+    tree = Octree.lattice([0.0, 0.0, 0.0], [0.25, 0.1, 0.1], 0.1, depth=2)
     np.testing.assert_array_equal(tree.shape, [3, 1, 1])
     assert tree.n_leaves == 3
-    assert tree.step == pytest.approx(0.025)
-    np.testing.assert_array_equal(tree.low[:, 0], [0, 4, 8])
+    assert tree.unit == pytest.approx(0.025)
+    np.testing.assert_array_equal(tree.corner[:, 0], [0, 4, 8])
+    np.testing.assert_allclose(tree.size, 0.1)
+    with pytest.raises(ValueError, match="depth must be at least zero"):
+        Octree.lattice([0.0] * 3, [1.0] * 3, 1.0, depth=-1)
 
 
 def test_a_key_names_one_lattice_point_and_back():
-    tree = Octree.covering([0.0, 0.0, 0.0], [3.0, 2.0, 5.0], 1.0, 2)
-    lattice = np.stack(np.meshgrid(*(np.arange(n) for n in tree.lattice_shape), indexing="ij"), -1)
-    lattice = lattice.reshape(-1, 3)
-    keys = tree.key(lattice)
+    tree = Octree.lattice([0.0, 0.0, 0.0], [3.0, 2.0, 5.0], 1.0, depth=2)
+    units = np.stack(np.meshgrid(*(np.arange(n + 1) for n in tree.extent), indexing="ij"), -1)
+    units = units.reshape(-1, 3)
+    keys = tree.keys(units)
     assert len(np.unique(keys)) == len(keys)
-    np.testing.assert_array_equal(tree.unkey(keys), lattice)
+    np.testing.assert_array_equal(tree.coordinates(keys), units)
 
 
-def test_a_node_level_is_the_coarsest_lattice_it_lies_on():
-    tree = Octree.covering([0.0, 0.0, 0.0], [2.0, 2.0, 2.0], 1.0, 3)
-    lattice = np.array(
-        [[0, 0, 0], [8, 0, 8], [4, 0, 0], [8, 4, 0], [2, 6, 0], [1, 0, 0], [8, 8, 3]]
-    )
-    np.testing.assert_array_equal(tree.node_level(lattice), [0, 0, 1, 1, 2, 3, 3])
+def test_a_point_level_is_the_coarsest_lattice_it_lies_on():
+    tree = Octree.lattice([0.0, 0.0, 0.0], [2.0, 2.0, 2.0], 1.0, depth=3)
+    units = np.array([[0, 0, 0], [8, 0, 8], [4, 0, 0], [8, 4, 0], [2, 6, 0], [1, 0, 0], [8, 8, 3]])
+    np.testing.assert_array_equal(tree.point_level(units), [0, 0, 1, 1, 2, 3, 3])
 
 
-def test_splitting_makes_eight_children_filling_the_parent():
-    tree = Octree.covering([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, 2)
-    split, children = tree.split(np.array([False, True]))
+def test_splitting_makes_eight_children_filling_the_parent_after_the_leaves_kept():
+    tree = Octree.lattice([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, depth=2)
+    split, children = _children(tree, np.array([False, True]))
     assert split.n_leaves == 9
     np.testing.assert_array_equal(children, [np.arange(1, 9)])
-    np.testing.assert_array_equal(split.levels, [0] + [1] * 8)
-    np.testing.assert_array_equal(split.low[children[0]], tree.low[1] + 2 * CORNERS)
-    with pytest.raises(ValueError, match="already at max_level"):
-        Octree.covering([0.0] * 3, [1.0] * 3, 1.0, 0).split(np.array([True]))
+    np.testing.assert_array_equal(split.level, [0] + [1] * 8)
+    np.testing.assert_array_equal(split.corner[children[0]], tree.corner[1] + 2 * CORNERS)
+    np.testing.assert_array_equal(split.cube_corners([0])[0], CORNERS * 4)
+    assert split.unit == tree.unit  # below the depth it was built at, the unit stays
+
+
+def test_splitting_at_the_depth_halves_the_unit_and_keeps_every_position():
+    tree = Octree.lattice([1.0, 2.0, 3.0], [2.0, 3.0, 4.0], 1.0)
+    deeper = tree.refined(np.array([True]))
+    assert deeper.depth == 1 and deeper.unit == pytest.approx(0.5)
+    np.testing.assert_allclose(deeper.lower[0], tree.lower[0])
+    np.testing.assert_allclose(deeper.size, 0.5)
 
 
 def test_every_point_is_located_in_the_one_leaf_holding_it():
@@ -88,14 +103,19 @@ def test_every_point_is_located_in_the_one_leaf_holding_it():
     points = rng.uniform([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], (4000, 3))
     leaf = tree.locate(points)
     assert np.all(leaf >= 0)
-    u = tree.lattice(points)
-    size = tree.size(tree.levels[leaf])[:, None]
-    assert np.all((u >= tree.low[leaf]) & (u <= tree.low[leaf] + size))
+    u = tree.units(points)
+    span = tree.span[leaf][:, None]
+    assert np.all((u >= tree.corner[leaf]) & (u <= tree.corner[leaf] + span))
     np.testing.assert_array_equal(
         tree.locate(np.array([[2.5, 0.5, 0.5], [-0.1, 0.5, 0.5]])), [-1, -1]
     )
+    # A point on the box's upper face is in the leaf below it.
+    assert tree.locate(np.array([[2.0, 1.0, 1.0]]))[0] >= 0
     # Every level was reached, so no level's lookup can be skipped unnoticed.
-    assert set(tree.levels[leaf]) == {0, 1, 2}
+    assert set(tree.level[leaf]) == {0, 1, 2}
+    # A subset's other leaves hold nothing.
+    kept = tree.subset(np.flatnonzero(tree.level > 0))
+    assert np.all(kept.locate(points[tree.level[leaf] == 0]) == -1)
 
 
 # -- the hierarchical interpolant ------------------------------------------------------------------
@@ -103,7 +123,9 @@ def test_every_point_is_located_in_the_one_leaf_holding_it():
 
 def _hierarchy_of(tree: Octree, function) -> Hierarchy:
     keys = _all_nodes(tree)
-    return Hierarchy.empty(tree).with_values(tree, keys, function(tree.position(tree.unkey(keys))))
+    return Hierarchy.empty(tree).with_values(
+        tree, keys, function(tree.position(tree.coordinates(keys)))
+    )
 
 
 def test_the_interpolant_passes_through_every_node():
@@ -111,7 +133,7 @@ def test_the_interpolant_passes_through_every_node():
     keys = _all_nodes(tree)
     values = np.random.default_rng(1).normal(size=len(keys))
     hierarchy = Hierarchy.empty(tree).with_values(tree, keys, values)
-    np.testing.assert_allclose(hierarchy.at_lattice(tree, tree.unkey(keys)), values, atol=1e-12)
+    np.testing.assert_allclose(hierarchy.at_units(tree, tree.coordinates(keys)), values, atol=1e-12)
 
 
 def test_nodes_added_in_any_order_or_batch_give_the_same_interpolant():
@@ -119,7 +141,7 @@ def test_nodes_added_in_any_order_or_batch_give_the_same_interpolant():
     keys = _all_nodes(tree)
     values = np.random.default_rng(2).normal(size=len(keys))
     whole = Hierarchy.empty(tree).with_values(tree, keys, values)
-    level = tree.node_level(tree.unkey(keys))
+    level = tree.point_level(tree.coordinates(keys))
     staged = Hierarchy.empty(tree)
     for depth in (0, 1, 2):  # coarse first, as a refinement adds them
         rows = level == depth
@@ -129,11 +151,11 @@ def test_nodes_added_in_any_order_or_batch_give_the_same_interpolant():
 
 
 def test_a_surplus_is_how_far_the_coarser_nodes_missed():
-    tree = Octree.covering([0.0] * 3, [1.0] * 3, 1.0, 1)
-    tree, _ = tree.split(np.array([True]))
-    corner_keys = tree.key(2 * CORNERS)  # the root cell's corners
+    tree = Octree.lattice([0.0] * 3, [1.0] * 3, 1.0, depth=1)
+    tree = tree.refined(np.array([True]))
+    corner_keys = tree.keys(2 * CORNERS)  # the root cell's corners
     coarse = Hierarchy.empty(tree).with_values(tree, corner_keys, np.arange(8.0))
-    centre = tree.key(np.array([1, 1, 1]))
+    centre = tree.keys(np.array([1, 1, 1]))
     fine = coarse.with_values(tree, [centre], [10.0])
     assert fine.surpluses[1][0] == pytest.approx(10.0 - np.mean(np.arange(8.0)))
 
@@ -153,11 +175,11 @@ def test_the_interpolant_is_continuous_where_a_coarse_cell_meets_finer_ones():
     np.testing.assert_allclose(left, right, atol=1e-7)
     # The finer nodes on the face do reach the coarse side: a coarse-corners-only interpolant differs.
     coarse = tree.locate(on_face + across)
-    assert np.all(tree.levels[coarse] == 0)
+    assert np.all(tree.level[coarse] == 0)
     root = Hierarchy.empty(tree).with_values(
         tree,
-        tree.key(tree.corners([coarse[0]])[0]),
-        hierarchy.at_lattice(tree, tree.corners([coarse[0]])[0]),
+        tree.keys(tree.cube_corners([coarse[0]])[0]),
+        hierarchy.at_units(tree, tree.cube_corners([coarse[0]])[0]),
     )
     assert np.max(np.abs(root(tree, on_face + across) - right)) > 1e-3
 
@@ -243,7 +265,7 @@ def test_a_segment_wholly_inside_or_outside_has_no_cut_point():
 
 
 def test_a_cut_on_an_edge_two_leaves_share_is_one_point_listed_on_both():
-    tree = Octree.covering([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, 1)
+    tree = Octree.lattice([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, depth=1)
     # A ball centred on the shared face's top edge x = 1, z = 1, cutting it at y = 0.5 +- 0.3.
     ball = Sphere(centre=[1.0, 0.5, 1.0], radius=0.3)
     cuts = leaf_cuts(tree, np.array([0, 1]), ball, standoff=0.01)
@@ -256,8 +278,8 @@ def test_a_cut_on_an_edge_two_leaves_share_is_one_point_listed_on_both():
 
 
 def test_a_crossing_reached_along_a_long_and_a_short_edge_is_one_point():
-    tree = Octree.covering([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, 1)
-    tree, _ = tree.split(np.array([True, False]))  # left cell split: its edge on x = 1 is halved
+    tree = Octree.lattice([0.0, 0.0, 0.0], [2.0, 1.0, 1.0], 1.0, depth=1)
+    tree = tree.refined(np.array([True, False]))  # left cell split: its edge on x = 1 is halved
     ball = Sphere(
         centre=[1.0, 0.0, 0.0], radius=0.3
     )  # cuts the shared edge x = 1, y = 0 at z = 0.3
@@ -386,9 +408,9 @@ BOX = dict(low=[-0.0225, -0.0225, -0.0225], high=[0.0225, 0.0225, 0.0225])
 def test_a_field_linear_in_what_is_interpolated_is_not_refined_and_is_exact():
     water = _water()
     linear = lambda p: 5.0 + p @ np.array([10.0, -20.0, 30.0])  # noqa: E731
-    field = sample_adaptively(linear, water, **BOX, spacing=0.005, max_level=3, tolerance=1e-8,
+    field = sample_adaptively(linear, water, **BOX, spacing=0.005, depth=3, tolerance=1e-8,
                               standoff=1e-4, min_level=1)  # fmt: skip
-    assert set(field.tree.levels) <= {0, 1}
+    assert set(field.tree.level) <= {0, 1}
     assert field.rounds[-1].marked == 0
     points = np.random.default_rng(7).uniform(-0.02, 0.02, (2000, 3))
     points = points[np.asarray(water.contains(points))]
@@ -398,14 +420,14 @@ def test_a_field_linear_in_what_is_interpolated_is_not_refined_and_is_exact():
 def test_refinement_goes_deep_only_beside_the_steep_part_and_meets_the_tolerance():
     water = _water()
     sampler = _Recorder(_decay)
-    field = sample_adaptively(sampler, water, **BOX, spacing=0.005, max_level=4, tolerance=0.01,
+    field = sample_adaptively(sampler, water, **BOX, spacing=0.005, depth=4, tolerance=0.01,
                               standoff=1e-5, transform=Logarithm(1e-6))  # fmt: skip
-    centres = field.tree.centres()
+    centres = field.tree.centre
     distance = np.hypot(centres[:, 1], centres[:, 2]) - 0.005
-    deepest = field.tree.levels == field.tree.max_level
+    deepest = field.tree.level == field.tree.depth
     # The field's curvature is steepest beside the rod, so most of the finest cells are there.
     assert np.median(distance[deepest]) < 0.001
-    assert np.median(distance[field.tree.levels == field.tree.max_level - 1]) > 0.004
+    assert np.median(distance[field.tree.level == field.tree.depth - 1]) > 0.004
     rng = np.random.default_rng(8)
     points = rng.uniform(-0.02, 0.02, (20000, 3))
     points = points[np.asarray(water.contains(points))]
@@ -413,7 +435,7 @@ def test_refinement_goes_deep_only_beside_the_steep_part_and_meets_the_tolerance
     assert np.median(error) < 1e-3
     assert np.percentile(error, 99) < 0.02
     # A uniform grid at the root spacing does far worse: the refinement is doing the work.
-    uniform = sample_adaptively(_decay, water, **BOX, spacing=0.005, max_level=0, tolerance=np.inf,
+    uniform = sample_adaptively(_decay, water, **BOX, spacing=0.005, depth=0, tolerance=np.inf,
                                 standoff=1e-5, transform=Logarithm(1e-6), min_level=0)  # fmt: skip
     assert np.median(np.abs(uniform(points) / _decay(points) - 1.0)) > 10 * np.median(error)
 
@@ -421,7 +443,7 @@ def test_refinement_goes_deep_only_beside_the_steep_part_and_meets_the_tolerance
 def test_each_point_is_sampled_once_and_inside_the_region():
     water = _water()
     sampler = _Recorder(_decay)
-    field = sample_adaptively(sampler, water, **BOX, spacing=0.005, max_level=3, tolerance=0.01,
+    field = sample_adaptively(sampler, water, **BOX, spacing=0.005, depth=3, tolerance=0.01,
                               standoff=1e-5, transform=Logarithm(1e-6))  # fmt: skip
     asked = np.concatenate(sampler.asked)
     assert len(sampler.asked) == len(field.rounds)
@@ -432,7 +454,7 @@ def test_each_point_is_sampled_once_and_inside_the_region():
 
 def test_the_interpolant_passes_through_every_sampled_node_and_near_every_cut_point():
     water = _water()
-    field = sample_adaptively(_decay, water, **BOX, spacing=0.005, max_level=3, tolerance=0.01,
+    field = sample_adaptively(_decay, water, **BOX, spacing=0.005, depth=3, tolerance=0.01,
                               standoff=1e-5, transform=Logarithm(1e-6))  # fmt: skip
     nodes = field.points[~field.is_cut]
     np.testing.assert_allclose(field(nodes), field.values[~field.is_cut], rtol=1e-10)
@@ -445,7 +467,7 @@ def test_a_cut_point_beside_the_rod_is_what_makes_the_layer_next_to_it_right():
     points the layer is interpolated between values on both sides; the cut points themselves sit a
     standoff from the surface."""
     water = _water()
-    field = sample_adaptively(_decay, water, **BOX, spacing=0.0025, max_level=0, tolerance=np.inf,
+    field = sample_adaptively(_decay, water, **BOX, spacing=0.0025, depth=0, tolerance=np.inf,
                               standoff=1e-5, transform=Logarithm(1e-6), min_level=0)  # fmt: skip
     # A cut point lies a standoff from the boundary by signed distance, whatever its edge's angle.
     cut = field.points[field.is_cut]
@@ -476,7 +498,7 @@ def test_logarithm_floors_and_refuses_a_floor_of_zero():
 
 def test_a_point_outside_the_box_is_refused():
     water = _water()
-    field = sample_adaptively(_decay, water, **BOX, spacing=0.01, max_level=0, tolerance=np.inf,
+    field = sample_adaptively(_decay, water, **BOX, spacing=0.01, depth=0, tolerance=np.inf,
                               standoff=1e-5, min_level=0)  # fmt: skip
     with pytest.raises(ValueError, match="in no leaf of the octree"):
         field(np.array([[1.0, 0.0, 0.0]]))
@@ -484,17 +506,17 @@ def test_a_point_outside_the_box_is_refused():
 
 def test_hexahedra_are_the_leaves_holding_the_region_with_its_samples_at_their_corners():
     water = _water()
-    field = sample_adaptively(_decay, water, **BOX, spacing=0.005, max_level=2, tolerance=0.01,
+    field = sample_adaptively(_decay, water, **BOX, spacing=0.005, depth=2, tolerance=0.01,
                               standoff=1e-5, transform=Logarithm(1e-6))  # fmt: skip
     points, corners, rows, values = field.hexahedra()
-    np.testing.assert_allclose(points[corners], field.tree.position(field.tree.corners(rows)))
+    np.testing.assert_allclose(points[corners], field.tree.position(field.tree.cube_corners(rows)))
     inside = np.asarray(water.signed_distance(points)) <= -1e-5  # sampled: a standoff inside
     np.testing.assert_array_equal(np.isfinite(values), inside)
     np.testing.assert_allclose(values[inside], _decay(points[inside]), rtol=1e-10)
     # Every leaf left out has no corner in the water.
     left_out = np.setdiff1d(np.arange(field.tree.n_leaves), rows)
     outside = ~np.asarray(
-        water.contains(field.tree.position(field.tree.corners(left_out)).reshape(-1, 3))
+        water.contains(field.tree.position(field.tree.cube_corners(left_out)).reshape(-1, 3))
     )
     assert outside.all()
     # And the leaves kept include the ones the rod cuts, all of whose corners are inside the rod.
@@ -504,11 +526,11 @@ def test_hexahedra_are_the_leaves_holding_the_region_with_its_samples_at_their_c
 def test_the_cut_points_misses_take_the_cells_beside_the_rod_to_the_deepest_level():
     """Beside the rod the steepest change is between the last node and the surface, where only cut
     points sample it: their misses are what split the cells there the last time."""
-    field = sample_adaptively(_decay, _water(), **BOX, spacing=0.005, max_level=4, tolerance=0.05,
+    field = sample_adaptively(_decay, _water(), **BOX, spacing=0.005, depth=4, tolerance=0.05,
                               standoff=1e-5, transform=Logarithm(1e-6))  # fmt: skip
-    deepest = field.tree.levels == field.tree.max_level
+    deepest = field.tree.level == field.tree.depth
     assert deepest.any()
-    centres = field.tree.centres(np.flatnonzero(deepest))
+    centres = field.tree.centre[deepest]
     assert np.median(np.hypot(centres[:, 1], centres[:, 2]) - 0.005) < 0.001
 
 
@@ -519,15 +541,15 @@ def test_a_cell_with_a_corner_not_sampled_is_tested_at_its_centre_and_split_wher
     tolerance. At this standoff the cut points lie far enough from the rod that several cells' corners
     and cut points all agree while their centres do not."""
     tolerance = 0.05
-    field = sample_adaptively(_decay, _water(), **BOX, spacing=0.005, max_level=4,
+    field = sample_adaptively(_decay, _water(), **BOX, spacing=0.005, depth=4,
                               tolerance=tolerance, standoff=5e-4, transform=Logarithm(1e-6))  # fmt: skip
     tree = field.tree
     # The last pass probes too: its probes join the interpolant then, with no later pass to add them.
     assert field.rounds[-1].probes > 0
-    rows = np.flatnonzero(tree.levels < tree.max_level)
-    centres = tree.key(tree.low[rows] + tree.size(tree.levels[rows])[:, None] // 2)
+    rows = np.flatnonzero(tree.level < tree.depth)
+    centres = tree.keys(tree.corner[rows] + tree.span[rows][:, None] // 2)
     nodes = np.flatnonzero(~field.is_cut)
-    sampled = tree.key(np.round(tree.lattice(field.points[nodes])).astype(np.int64))
+    sampled = tree.keys(np.round(tree.units(field.points[nodes])).astype(np.int64))
     probed = np.isin(centres, sampled)
     assert probed.sum() > 100  # cells beside the rod, left whole, with a probe at the centre
     miss = dict(zip(sampled.tolist(), field.misses[nodes].tolist(), strict=True))
@@ -548,7 +570,7 @@ def test_the_default_standoff_is_a_thousandth_of_the_finest_cell_at_any_scale(sc
     water = Difference(vessel, rod)
     box = {key: np.asarray(value) * scale for key, value in BOX.items()}
     field = sample_adaptively(lambda p: _decay(p / scale), water, **box, spacing=0.005 * scale,
-                              max_level=2, tolerance=0.05, transform=Logarithm(1e-6))  # fmt: skip
+                              depth=2, tolerance=0.05, transform=Logarithm(1e-6))  # fmt: skip
     standoff = 1e-3 * 0.005 * scale / 4
     depth = -np.asarray(water.signed_distance(field.points))
     assert depth.min() >= standoff * (1 - 1e-6)
@@ -557,5 +579,5 @@ def test_the_default_standoff_is_a_thousandth_of_the_finest_cell_at_any_scale(sc
 
 def test_a_standoff_that_is_not_positive_is_refused():
     with pytest.raises(ValueError, match="standoff must be positive"):
-        sample_adaptively(_decay, _water(), **BOX, spacing=0.01, max_level=0, tolerance=np.inf,
+        sample_adaptively(_decay, _water(), **BOX, spacing=0.01, depth=0, tolerance=np.inf,
                           standoff=0.0, min_level=0)  # fmt: skip
