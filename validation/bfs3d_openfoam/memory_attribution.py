@@ -75,6 +75,8 @@ CENSUS = os.environ.get("BFS3D_MEMORY_CENSUS", "1") == "1"
 #: A class name whose live instances are traced back to their holders at each step's end (for a copy
 #: that should be gone, say), as referrer chains printed to the log; unset traces nothing.
 HOLDERS = os.environ.get("BFS3D_MEMORY_HOLDERS", "")
+#: ``1`` also times each entry map's build as a stage (a row per map: dozens per re-fit).
+MAPS = os.environ.get("BFS3D_MEMORY_MAPS", "0") == "1"
 RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.json"))
 #: ``1`` prints a checksum of every leaf of each traced split the session composes (at the fit and at
 #: every re-fit), so two checkouts' runs show whether anything the solve applies differs, bit for bit.
@@ -639,6 +641,12 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(materialized_session, "traced_field_split", "traced split (device leaves)")
     if CHECKSUMS:
         _print_split_checksums(materialized_session)
+    if MAPS:
+        from aquaflux.precondition import entry_map
+
+        wrap(entry_map.EntryMap, "product", "entry map: product")
+        wrap(entry_map.EntryMap, "gathering", "entry map: gathering")
+        wrap(entry_map.EntryMap, "placing", "entry map: placing")
 
     captured: dict = {}
     step_program = march._march_step

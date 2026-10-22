@@ -1898,3 +1898,14 @@ re-ran the 17 directly affected files (260 passed) and their 8 slow tests.
 operator); the bilinear SIMPLE products and the `d_inv @ a` product of each spectral estimate (unread by
 both shipped smoothers: neither SIMPLE nor undamped Jacobi reads `lam_max`); the readback of each leading
 level (`to_scipy`) in `derive_extras`. bfs3d not measured (its mesh is not on these containers).
+
+### The product map's build transient (2026-10-22)
+
+`validation/bfs3d_openfoam/memory_attribution.py`, `MallocLargeCache=0`, macOS physical footprint (Apple
+M3 Pro, 18 GB), shipped `case.yaml`, main `85c55e2d`. Two-step run with census: peak 9.68 GiB, set in re-fit 1's
+leading `block re-fit`; held at step 2's end: entry maps' `_target` 641 MB, `SparsePattern.indices`
+472 MB (28 arrays), `_source` 359 MB. One-step run with `BFS3D_MEMORY_MAPS=1` (each map build a stage,
+census off): **`EntryMap.product` #1 (the leading block's fine Galerkin map) alone set the peak**,
+traced host 2.88 -> 5.03 GB, footprint 9.67 GiB, keeping 0.10 GB. With the product built one list at a
+time: that build's traced peak 3.73 GB, run peak **8.71 GiB**, now level with the step program's first
+call (8.67) and the re-fit (8.65); the build took 3.0 s against 1.9 s (the sort of the key copy).

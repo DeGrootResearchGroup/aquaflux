@@ -217,6 +217,76 @@ def test_a_changed_operand_entry_reaches_exactly_the_products_it_enters() -> Non
         assert np.all(np.abs(change[want != 0.0] - want[want != 0.0]) < 1e-6 * np.abs(delta))
 
 
+def _product_by_unique(left, pattern: SparsePattern, right):
+    """The product map's terms formed the plain way -- every list kept, the slots by ``np.unique`` --
+    as ``(source, target, weight, landing keys)``: the reference the lean builder must reproduce."""
+    n_rows_m, n_columns_m = pattern.shape
+    row = np.repeat(np.arange(n_rows_m), np.diff(pattern.indptr))
+    source, column = np.arange(pattern.nnz), pattern.indices.astype(np.int64)
+    weight = np.ones(pattern.nnz)
+    n_columns = n_columns_m
+    if left is not None:
+        left = sp.coo_matrix(left)
+        pairs = [(t, e) for t in range(row.size) for e in range(left.nnz) if left.col[e] == row[t]]
+        index_t, index_l = (np.array(p, dtype=np.int64) for p in zip(*pairs, strict=True))
+        source, column = source[index_t], column[index_t]
+        row, weight = left.row[index_l].astype(np.int64), weight[index_t] * left.data[index_l]
+    if right is not None:
+        right = sp.coo_matrix(right)
+        pairs = [
+            (t, r)
+            for t in range(column.size)
+            for r in range(right.nnz)
+            if right.row[r] == column[t]
+        ]
+        index_t, index_r = (np.array(p, dtype=np.int64) for p in zip(*pairs, strict=True))
+        source, row = source[index_t], row[index_t]
+        column, weight = right.col[index_r].astype(np.int64), weight[index_t] * right.data[index_r]
+        n_columns = right.shape[1]
+    keys, target = np.unique(row * n_columns + column, return_inverse=True)
+    return source, target, weight, keys
+
+
+@pytest.mark.parametrize(
+    "sides", ["both, 0/1", "both, weighted", "left only", "right only"], ids=str
+)
+def test_the_product_map_holds_the_terms_of_the_plain_construction_in_its_order(sides) -> None:
+    """The product map is built to hold one term list at a time; its terms -- which operand entry,
+    which slot, what weight, in what order -- must be exactly those of the plain construction, so a
+    refit's sums (taken in term order) keep their bits.
+
+    Each term is enumerated here by brute force over every pair rather than by the builder's pairing,
+    and the cases cover a 0/1 transfer on both sides (the shipped refit: no weight list is formed),
+    weighted transfers with several entries a row (the general pairing), and each side alone.
+    """
+    fine = _field_major_block(12, 2, seed=30)
+    tentative = _block_tentative(np.arange(12) // 3, 4, 2, False).tocsr()
+    weighted = (tentative + 0.3 * _random_pattern(24, 24, 0.1, 31) @ tentative).tocsr()
+    left, right = {
+        "both, 0/1": (tentative.T.tocsr(), tentative),
+        "both, weighted": (weighted.T.tocsr(), weighted),
+        "left only": (weighted.T.tocsr(), None),
+        "right only": (None, weighted),
+    }[sides]
+    pattern = SparsePattern(fine)
+    entry_map = EntryMap.product(left, pattern, right)
+    source, target, weight, keys = _product_by_unique(left, pattern, right)
+    assert np.array_equal(entry_map.source, source)
+    assert np.array_equal(entry_map.target, target)
+    if entry_map.weight is None:
+        assert np.all(weight == 1.0) and sides == "both, 0/1"
+    else:
+        assert np.array_equal(entry_map.weight, weight)
+    n_columns = entry_map.landing.shape[1]
+    landing_rows = np.repeat(
+        np.arange(entry_map.landing.shape[0]), np.diff(entry_map.landing.indptr)
+    )
+    assert np.array_equal(landing_rows * n_columns + entry_map.landing.indices, keys)
+    operand = _revalued(fine, 32)
+    want = np.bincount(target, weights=operand.data[source] * weight, minlength=keys.size)
+    assert np.array_equal(entry_map.apply(operand), want)
+
+
 def test_two_applications_of_one_map_agree_bit_for_bit() -> None:
     """The map sums its terms in one fixed order, so it is deterministic: a refit by a held map and one
     by a map built afresh from the same pattern give the same bits."""
