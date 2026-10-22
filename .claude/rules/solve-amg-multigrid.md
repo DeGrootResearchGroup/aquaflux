@@ -293,7 +293,8 @@ path.
       standalone harness), proportional to stored entries: about 1.47 GB on bfs3d's split after two steps (measured
       2026-10-22, log below). Index arrays are int32, all-ones weights and in-order sources/targets are not stored, a gather
       filling its slots in ascending order (every `placing` map) holds a byte-a-slot mask in place of
-      its targets (`EntryMap._filled`),
+      its targets (`EntryMap._filled`; with the shared patterns, bfs3d's peak 9.25 -> 8.75 GiB, log, "Shared
+      patterns and filled-slot masks (2026-10-22)"),
       and the numbered pattern is not kept -- keep it so. **`EntryMap.product` is built to hold one
       term list at a time** (no all-ones weight list, the slots by a sorted copy of the keys and
       `searchsorted`, not `np.unique`'s inverse): the leading block's fine Galerkin map set bfs3d's

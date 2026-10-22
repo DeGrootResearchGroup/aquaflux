@@ -1909,3 +1909,12 @@ census off): **`EntryMap.product` #1 (the leading block's fine Galerkin map) alo
 traced host 2.88 -> 5.03 GB, footprint 9.67 GiB, keeping 0.10 GB. With the product built one list at a
 time: that build's traced peak 3.73 GB, run peak **8.71 GiB**, now level with the step program's first
 call (8.67) and the re-fit (8.65); the build took 3.0 s against 1.9 s (the sort of the key copy).
+
+### Shared patterns and filled-slot masks (2026-10-22)
+
+Same harness and machine as above, two steps with census, main `f25ea3e1` (#799 and #802 in) against
+branch `claude/held-maps` (patterns shared by content, ascending gathers held as masks). Peak 9.25 ->
+**8.75 GiB**; footprint at step 2's end 7.65 -> 7.15 GiB; held host arrays 2.02 -> 1.55 GB, of which
+`EntryMap._target` 612 MB -> (masks `_filled` 150 MB, product targets below the census's top rows) and
+`SparsePattern.indices` 451 MB / 28 arrays -> 304 MB / 19. Device 1.33 GB both. On main the peak had
+moved to re-fit 2's leading block re-fit (9.18 GiB stage peak).
