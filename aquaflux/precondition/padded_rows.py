@@ -5,7 +5,8 @@ operator this way: two ``(n_rows, width)`` arrays of column indices and entries,
 ``width`` filled with zero-valued slots, and the same for the transpose. :class:`_PaddedRowOperator` is
 the operator and its matvec; :func:`_padded_rows` is the one slot rule; :class:`_PaddedLayout` holds the
 packing of an operator whose pattern does not move as two fixed gathers (entry maps), so a refit moves
-only values; :func:`_padded_operator` picks between packing afresh and the held layout.
+only values, from a host matrix or from values already on the device; :func:`_padded_operator` picks
+between packing afresh and the held layout.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import numpy as np
 import scipy.sparse as sp
 from jax.custom_derivatives import linear_call
 
-from .entry_map import EntryMap, EntryMaps, SparsePattern
+from .entry_map import DeviceEntryMap, EntryMap, EntryMaps, SparsePattern
 
 
 class _PaddedRowOperator(eqx.Module):
@@ -187,49 +188,69 @@ def _padded_rows(a: sp.csr_matrix, width: int | None, what: str):
     return columns, values, lengths
 
 
-class _PaddedLayout:
+class _PaddedLayout(eqx.Module):
     """Where each stored entry of a fixed-pattern operator lands in its padded-row form, both ways.
 
     :meth:`_PaddedRowOperator.from_scipy` derives every slot from the operator's index arrays and
     transposes it to pack ``Aᵀ``; on a pattern that does not move, both packings are the same gather
-    every time. This holds the two gathers (:class:`EntryMap`, read off one run of :func:`_padded_rows`
-    over the numbered pattern each way, so the slot rule has one home) and the index arrays they fill,
-    already on the device, so :meth:`operator` moves only values.
+    every time. This holds the two gathers (:class:`~aquaflux.precondition.entry_map.DeviceEntryMap`,
+    read off one run of :func:`_padded_rows` over the numbered pattern each way, so the slot rule has one
+    home) and the index arrays they fill, all on the device, so packing moves only values and runs
+    either from a host matrix (:meth:`operator`) or, traced, from values already on the device
+    (:meth:`packed`).
+
+    An ``equinox.Module`` whose arrays are leaves and whose shape is static, so a layout rides into a
+    jitted refit as an argument.
     """
 
-    def __init__(
-        self, pattern: SparsePattern, width: int | None, transpose_width: int | None
-    ) -> None:
+    rows: DeviceEntryMap
+    transposed: DeviceEntryMap
+    columns: jnp.ndarray  # (n_rows, width) the slot columns of every operator packed by this layout
+    row_lengths: jnp.ndarray  # (n_rows,)
+    t_columns: jnp.ndarray  # (n_cols, transpose_width)
+    shape: tuple[int, int] = eqx.field(static=True)
+
+    @classmethod
+    def of(
+        cls, pattern: SparsePattern, width: int | None = None, transpose_width: int | None = None
+    ) -> _PaddedLayout:
+        """The layout of ``pattern`` padded to ``width`` (``transpose_width`` for ``Aᵀ``) slots.
+
+        ``None`` pads to the widest row (column), as :meth:`_PaddedRowOperator.from_scipy` does.
+        """
         numbered = pattern.numbered()
         columns, numbers, lengths = _padded_rows(numbered, width, "row")
         t_columns, t_numbers, _ = _padded_rows(sp.csr_matrix(numbered.T), transpose_width, "column")
-        self._rows = EntryMap.placing(pattern, numbers)
-        self._transposed = EntryMap.placing(pattern, t_numbers)
-        self._shape = pattern.shape
-        self._columns = jnp.asarray(columns)
-        self._row_lengths = jnp.asarray(lengths.astype(np.int32))
-        self._t_columns = jnp.asarray(t_columns)
+        return cls(
+            rows=EntryMap.placing(pattern, numbers).on_device(),
+            transposed=EntryMap.placing(pattern, t_numbers).on_device(),
+            columns=jnp.asarray(columns),
+            row_lengths=jnp.asarray(lengths.astype(np.int32)),
+            t_columns=jnp.asarray(t_columns),
+            shape=pattern.shape,
+        )
+
+    def packed(self, values: jnp.ndarray) -> _PaddedRowOperator:
+        """The operator storing ``values`` on this layout's pattern, shape ``(nnz,)``, traced.
+
+        In ``values``'s own floating-point type: a gather moves entries without arithmetic, so it is
+        exact in any type, and a single-precision operator is packed into single-precision slots.
+        """
+        return _PaddedRowOperator(
+            columns=self.columns,
+            values=self.rows.apply(values).reshape(self.columns.shape),
+            row_lengths=self.row_lengths,
+            shape=self.shape,
+            t_columns=self.t_columns,
+            t_values=self.transposed.apply(values).reshape(self.t_columns.shape),
+        )
 
     def operator(self, a: sp.csr_matrix) -> _PaddedRowOperator:
         """``a`` in padded-row form: equal, slot for slot, to ``_PaddedRowOperator.from_scipy(a, ...)``.
 
-        In ``a``'s own floating-point type, as :meth:`_PaddedRowOperator.from_scipy` keeps it: a gather
-        moves entries without arithmetic, so it is exact in any type, and a single-precision operator
-        is packed into single-precision slots rather than a double copy of them.
+        ``a`` must store this layout's pattern (the caller holds the layout keyed by it).
         """
-        return _PaddedRowOperator(
-            columns=self._columns,
-            values=jnp.asarray(self._packed(self._rows, a, self._columns.shape)),
-            row_lengths=self._row_lengths,
-            shape=self._shape,
-            t_columns=self._t_columns,
-            t_values=jnp.asarray(self._packed(self._transposed, a, self._t_columns.shape)),
-        )
-
-    @staticmethod
-    def _packed(gather: EntryMap, a: sp.csr_matrix, shape: tuple[int, int]) -> np.ndarray:
-        """``gather`` applied to ``a``, laid out as ``shape`` in ``a``'s floating-point type."""
-        return gather.apply(a).reshape(shape).astype(a.dtype, copy=False)
+        return self.packed(jnp.asarray(a.data))
 
 
 def _padded_operator(
@@ -246,7 +267,7 @@ def _padded_operator(
     return maps.held(
         (slot, width, transpose_width),
         a,
-        lambda pattern: _PaddedLayout(pattern, width, transpose_width),
+        lambda pattern: _PaddedLayout.of(pattern, width, transpose_width),
     ).operator(a)
 
 

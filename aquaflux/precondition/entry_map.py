@@ -14,7 +14,10 @@ matrix, padded rows, a dense per-cell block -- is the caller's; the map is the s
 :class:`EntryMaps` keeps the maps one owner needs between refits, keyed by call site, rebuilding a map
 only when an operand's pattern (or a fixed operand's values) has moved.
 
-Host numpy and scipy only, off the jit path.
+A map is built on the host, from patterns alone, with numpy and scipy. :meth:`EntryMap.on_device` gives
+the same map as a :class:`DeviceEntryMap`, whose arrays live on the device and whose :meth:`~DeviceEntryMap.
+apply` is traced JAX: a preconditioner refit then moves its operator's values through the map without
+leaving the device.
 """
 
 from __future__ import annotations
@@ -22,12 +25,15 @@ from __future__ import annotations
 import weakref
 from collections.abc import Callable, Hashable
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
 from aquaflux.ragged import pairs_within_groups
 
-__all__ = ["EntryMap", "EntryMaps", "SparsePattern"]
+__all__ = ["DeviceEntryMap", "EntryMap", "EntryMaps", "SparsePattern"]
 
 
 class SparsePattern:
@@ -326,6 +332,38 @@ class EntryMap:
         """Each term's output slot, shape ``(n_terms,)``."""
         return np.arange(self.n_out) if self._target is None else self._target
 
+    def on_device(self) -> DeviceEntryMap:
+        """This map with its arrays on the device, applied by traced JAX (:class:`DeviceEntryMap`).
+
+        A map whose terms fill distinct slots becomes one gather per output slot; any other is held with
+        its terms sorted by slot, so the sum into each slot is a sorted segment sum.
+        """
+        if self._scatter:
+            slots = np.full(self.n_out, self.pattern.nnz, dtype=self._index_dtype())
+            slots[self.target] = self.source
+            return DeviceEntryMap(
+                slots=jnp.asarray(slots),
+                source=None,
+                target=None,
+                weight=None,
+                n_in=self.pattern.nnz,
+                n_out=self.n_out,
+            )
+        order = np.argsort(self.target, kind="stable")
+        return DeviceEntryMap(
+            slots=None,
+            source=jnp.asarray(self.source[order]),
+            target=jnp.asarray(self.target[order]),
+            weight=None if self.weight is None else jnp.asarray(self.weight[order]),
+            n_in=self.pattern.nnz,
+            n_out=self.n_out,
+        )
+
+    def _index_dtype(self) -> type[np.signedinteger]:
+        """The smallest index type holding every entry, the sentinel past them, and every slot."""
+        bound = max(self.pattern.nnz + 1, self.n_out)
+        return np.int32 if bound < np.iinfo(np.int32).max else np.int64
+
     def apply(self, matrix: sp.spmatrix) -> np.ndarray:
         """The output values for ``matrix``, flat, shape ``(n_out,)``.
 
@@ -359,18 +397,65 @@ class EntryMap:
         return self.landing.csr(self.apply(matrix))
 
 
+class DeviceEntryMap(eqx.Module):
+    """An :class:`EntryMap` on the device: ``out = sum over terms of weight * values[source]``, traced.
+
+    Built by :meth:`EntryMap.on_device`, never directly. One of two forms, decided by the map:
+
+    - a **gather** (``slots`` set): each output slot reads at most one operand entry, ``slots`` holding
+      its index or ``n_in`` for a slot no entry reaches, which reads a zero appended to the values;
+    - a **sum** (``source``, ``target`` set): one term per pair, sorted by ``target``, summed into each
+      slot by a sorted segment sum, each term scaled by ``weight`` when the map has weights.
+
+    The index arrays are leaves and only the sizes are static, so a map rides into a jitted refit as an
+    argument and every refit at the same pattern reuses one compiled program.
+
+    Attributes
+    ----------
+    slots : jnp.ndarray or None
+        For a gather, the operand entry each output slot reads, shape ``(n_out,)``.
+    source, target : jnp.ndarray or None
+        For a sum, each term's operand entry and output slot, shape ``(n_terms,)``, sorted by slot.
+    weight : jnp.ndarray or None
+        For a weighted sum, each term's factor, shape ``(n_terms,)``.
+    n_in, n_out : int
+        Operand entries and output slots. Static.
+    """
+
+    slots: jnp.ndarray | None
+    source: jnp.ndarray | None
+    target: jnp.ndarray | None
+    weight: jnp.ndarray | None
+    n_in: int = eqx.field(static=True)
+    n_out: int = eqx.field(static=True)
+
+    def apply(self, values: jnp.ndarray) -> jnp.ndarray:
+        """The output values for an operand's stored ``values``, shape ``(n_in,)`` -> ``(n_out,)``.
+
+        In ``values``'s own floating-point type: a gather moves entries without arithmetic, and a sum
+        adds in the operand's type as the host map does.
+        """
+        if self.slots is not None:
+            return jnp.concatenate([values, jnp.zeros(1, dtype=values.dtype)])[self.slots]
+        terms = values[self.source]
+        if self.weight is not None:
+            terms = terms * self.weight.astype(values.dtype)
+        return jax.ops.segment_sum(
+            terms, self.target, num_segments=self.n_out, indices_are_sorted=True
+        )
+
+
 class EntryMaps:
     """The entry maps one owner reuses across refits, one per call site, rebuilt when an operand moves.
 
-    Each ``slot`` names a call site (``("galerkin", 0)``). A map is reused while its operand still stores
-    the pattern it was built for and any fixed operands it was built from are unchanged in pattern and
-    value; otherwise it is rebuilt and replaced. Patterns are shared between the maps reading one
+    Each ``slot`` names a call site (``("leading", 0)``). A map is reused while its operand still stores
+    the pattern it was built for; otherwise it is rebuilt and replaced. Patterns are shared between the maps reading one
     operand, so a pattern compared once in a refit passes by identity at every other map that reads it.
     A host object, never a leaf of a traced hierarchy.
     """
 
     def __init__(self) -> None:
-        self._maps: dict[Hashable, tuple[tuple, object]] = {}
+        self._maps: dict[Hashable, tuple[SparsePattern, object]] = {}
         self._patterns: list[SparsePattern] = []
 
     def pattern_of(self, matrix: sp.csr_matrix) -> SparsePattern:
@@ -388,9 +473,8 @@ class EntryMaps:
         slot: Hashable,
         matrix: sp.csr_matrix,
         build: Callable[[SparsePattern], object],
-        fixed: tuple[sp.spmatrix | None, ...] = (),
     ):
-        """What ``build`` made for this slot, reused while ``matrix``'s pattern and ``fixed`` hold.
+        """What ``build`` made for this slot, reused while ``matrix``'s pattern holds.
 
         Parameters
         ----------
@@ -400,21 +484,18 @@ class EntryMaps:
             The operand whose values vary.
         build : callable
             ``pattern -> object`` holding one or more maps over ``matrix``'s pattern.
-        fixed : tuple of scipy.sparse matrix or None
-            Operands whose values the maps bake in; a change to any of them rebuilds.
 
         Returns
         -------
         object
             The held or newly built object.
         """
-        key = tuple(_fixed_key(operand) for operand in fixed)
         entry = self._maps.get(slot)
-        if entry is not None and entry[0][0].matches(matrix) and _keys_equal(entry[0][1], key):
+        if entry is not None and entry[0].matches(matrix):
             return entry[1]
         pattern = self.pattern_of(matrix)
         built = build(pattern)
-        self._maps[slot] = ((pattern, key), built)
+        self._maps[slot] = (pattern, built)
         return built
 
     def csr(
@@ -425,19 +506,6 @@ class EntryMaps:
     ) -> sp.csr_matrix:
         """``operation(matrix)`` for an operation that only moves entries, by its held map."""
         return self.held(slot, matrix, lambda p: EntryMap.gathering(p, operation)).csr(matrix)
-
-    def product(
-        self,
-        slot: Hashable,
-        left: sp.spmatrix | None,
-        matrix: sp.csr_matrix,
-        right: sp.spmatrix | None,
-    ) -> sp.csr_matrix:
-        """``left @ matrix @ right`` on its structural pattern, by its held map."""
-        held = self.held(
-            slot, matrix, lambda p: EntryMap.product(left, p, right), fixed=(left, right)
-        )
-        return held.csr(matrix)
 
 
 def _pairs(terms: np.ndarray, fixed: np.ndarray, n_groups: int) -> tuple[np.ndarray, np.ndarray]:
@@ -465,23 +533,3 @@ def _times(weight: np.ndarray | None, data: np.ndarray, index: np.ndarray) -> np
         return weight
     factor = np.asarray(data, dtype=np.float64)[index]
     return factor if weight is None else weight * factor
-
-
-def _fixed_key(operand: sp.spmatrix | None):
-    if operand is None:
-        return None
-    operand = sp.csr_matrix(operand)
-    return (operand.shape, operand.indptr.copy(), operand.indices.copy(), operand.data.copy())
-
-
-def _keys_equal(held: tuple, given: tuple) -> bool:
-    if len(held) != len(given):
-        return False
-    for a, b in zip(held, given, strict=True):
-        if a is None or b is None:
-            if a is not b:
-                return False
-            continue
-        if a[0] != b[0] or not all(np.array_equal(x, y) for x, y in zip(a[1:], b[1:], strict=True)):
-            return False
-    return True
