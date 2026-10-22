@@ -285,9 +285,14 @@ path.
       pairing, whose `_pairs` takes a lookup path when each fine row meets at most one transfer entry);
       each later refit's refactor ~0.5-0.7 s against ~0.9-1.1 s. ⚠️ **They are held for the session:
       ~0.2 GB more host memory on pitzDaily** (held caches 62 -> 276 MB, peak 1.20 -> 1.41 GB in the
-      standalone harness), proportional to stored entries, so roughly 1.4 GB on bfs3d's split by scaling
-      (unmeasured). Index arrays are int32, all-ones weights and in-order sources/targets are not stored,
-      and the numbered pattern is not kept -- keep it so. Measurements and the per-part profile: log,
+      standalone harness), proportional to stored entries: about 1.47 GB on bfs3d's split after two steps (measured
+      2026-10-22, log below). Index arrays are int32, all-ones weights and in-order sources/targets are not stored,
+      and the numbered pattern is not kept -- keep it so. **`EntryMap.product` is built to hold one
+      term list at a time** (no all-ones weight list, the slots by a sorted copy of the keys and
+      `searchsorted`, not `np.unique`'s inverse): the leading block's fine Galerkin map set bfs3d's
+      peak, 9.67 -> 8.71 GiB with the maps' terms unchanged in content and order (log, "The product
+      map's build transient (2026-10-22)"; pinned by
+      `test_the_product_map_holds_the_terms_of_the_plain_construction_in_its_order`). Measurements and the per-part profile: log,
       "Refit by entry maps (2026-10-17)"; harness `validation/pitzdaily_openfoam/refit_profile.py`.
 - **A coarsening that reads no values is refitted, not re-aggregated** (`HierarchyBlockInverse.
   refactor_block`, `_coarsening_reads_values()`): at `strength_threshold` 0, `prolongation_smoothing`

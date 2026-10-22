@@ -256,10 +256,15 @@ class EntryMap:
         EntryMap
             The map, landing on the product's structural pattern.
         """
+        # The term lists are as long as the operand (and longer, if a fixed operand has rows of more
+        # than one entry), so they are built to be held one at a time: no term list is kept once the
+        # next is made, a weight list exists only once a fixed operand's entries are not all one, and
+        # the landing slots are found by sorting a copy of the keys rather than by `np.unique`, whose
+        # inverse costs several more lists of the same length.
         n_rows_m, n_columns_m = pattern.shape
-        entry_row = np.repeat(np.arange(n_rows_m), np.diff(pattern.indptr))
-        source = np.arange(pattern.nnz)
-        row, column, weight = entry_row, pattern.indices.astype(np.int64), np.ones(pattern.nnz)
+        row = np.repeat(np.arange(n_rows_m), np.diff(pattern.indptr))
+        column = pattern.indices.astype(np.int64)
+        source = weight = None  # every operand entry, in storage order; every weight one
         n_rows, n_columns = n_rows_m, n_columns_m
         if left is not None:
             left = sp.coo_matrix(left)
@@ -268,21 +273,39 @@ class EntryMap:
             # Pair each term with every L entry in the column its row names. The terms are the long
             # list, so they go first: the pairing sorts only its second list.
             index_t, index_l = _pairs(row, left.col, n_rows_m)
-            source, column = source[index_t], column[index_t]
-            row, weight = left.row[index_l].astype(np.int64), weight[index_t] * left.data[index_l]
+            del row
+            source, column = index_t, column[index_t]
+            row = left.row[index_l].astype(np.int64)
+            weight = _times(None, left.data, index_l)
+            del index_l
             n_rows = left.shape[0]
         if right is not None:
             right = sp.coo_matrix(right)
             if right.shape[0] != n_columns_m:
                 raise ValueError(f"R is {right.shape}, but M has {n_columns_m} columns.")
             index_t, index_r = _pairs(column, right.row, n_columns_m)
-            source, row = source[index_t], row[index_t]
-            column, weight = (
-                right.col[index_r].astype(np.int64),
-                weight[index_t] * right.data[index_r],
-            )
+            del column
+            source = index_t if source is None else source[index_t]
+            row = row[index_t]
+            weight = _times(None if weight is None else weight[index_t], right.data, index_r)
+            del index_t
+            column = right.col[index_r].astype(np.int64)
+            del index_r
             n_columns = right.shape[1]
-        keys, target = np.unique(row * n_columns + column, return_inverse=True)
+        if source is None:
+            source = np.arange(pattern.nnz)
+        # `row * n_columns + column`, formed in place over the row list.
+        np.multiply(row, n_columns, out=row)
+        np.add(row, column, out=row)
+        del column
+        keys = np.sort(row)
+        distinct = np.empty(keys.size, dtype=bool)
+        distinct[:1] = True
+        np.not_equal(keys[1:], keys[:-1], out=distinct[1:])
+        keys = keys[distinct]
+        del distinct
+        target = np.searchsorted(keys, row)
+        del row
         counts = np.bincount(keys // n_columns, minlength=n_rows)
         indptr = np.concatenate([[0], np.cumsum(counts)])
         landing = SparsePattern(
@@ -432,6 +455,16 @@ def _pairs(terms: np.ndarray, fixed: np.ndarray, n_groups: int) -> tuple[np.ndar
     index_fixed = entry_of_group[terms]
     index_terms = np.flatnonzero(index_fixed >= 0)
     return index_terms, index_fixed[index_terms]
+
+
+def _times(weight: np.ndarray | None, data: np.ndarray, index: np.ndarray) -> np.ndarray | None:
+    """Each term's weight times the fixed-operand entry it pairs with; ``None`` (every weight one)
+    while both are all ones. ``weight`` ``None`` is all ones, and one times an entry is that entry
+    exactly, so the weights are those a list of ones would have given."""
+    if np.all(data == 1.0):
+        return weight
+    factor = np.asarray(data, dtype=np.float64)[index]
+    return factor if weight is None else weight * factor
 
 
 def _fixed_key(operand: sp.spmatrix | None):
