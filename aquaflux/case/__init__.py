@@ -81,6 +81,7 @@ from .case_file import (
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState, StartingFields
+from .drawing_view import DRAWING_FILE, DrawingView, view_drawing
 from .mesh_file import Drawing, DrawingRegion, MeshOutput, MeshSizes, MeshSpec
 from .mesh_run import MeshRecord, make_mesh
 from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
@@ -124,6 +125,7 @@ from .spec import (
     case_schema,
     case_spec_from_mapping,
     case_spec_to_mapping,
+    drawing_sections_from_mapping,
     mesh_schema,
     mesh_source_from_mapping,
     mesh_spec_from_mapping,
@@ -131,6 +133,7 @@ from .spec import (
 )
 
 __all__ = [
+    "DRAWING_FILE",
     "RANS",
     "AquafluxMesh",
     "BodyForce",
@@ -149,6 +152,7 @@ __all__ = [
     "CoupledMarch",
     "Drawing",
     "DrawingRegion",
+    "DrawingView",
     "DriveSpec",
     "FieldWriter",
     "Fields",
@@ -204,6 +208,7 @@ __all__ = [
     "case_schema",
     "case_spec_from_mapping",
     "case_spec_to_mapping",
+    "drawing_sections_from_mapping",
     "make_mesh",
     "mesh_schema",
     "mesh_source_from_mapping",
@@ -216,6 +221,7 @@ __all__ = [
     "read_mesh_file",
     "relocated",
     "solver_for",
+    "view_drawing",
     "write_case",
     "write_mesh_file",
 ]

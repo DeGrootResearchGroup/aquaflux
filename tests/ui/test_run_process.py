@@ -1,4 +1,5 @@
-"""Tests for :class:`~aquaflux_ui.run_process.CaseRun`, the ``aquaflux run`` process the Run section drives.
+"""Tests for :class:`~aquaflux_ui.run_process.SolverRun`, the ``aquaflux run`` process the Run section
+drives (and the ``aquaflux mesh`` process the Mesh section drives).
 
 A short Python program stands in for the solver: it prints what it was asked, and exits or waits as
 the test needs. What is pinned is how the page starts, watches and stops a run, not the solve.
@@ -14,7 +15,7 @@ import pytest
 
 pytest.importorskip("trame")
 
-from aquaflux_ui.run_process import CONVERGED, NOT_CONVERGED, CaseRun
+from aquaflux_ui.run_process import CONVERGED, NOT_CONVERGED, SolverRun
 
 #: Prints its arguments and exits with the status its case file's name ends in (``case-1`` exits 1, a
 #: name with none exits 0); a case named ``wait`` waits for an interrupt instead, and exits 1 when it
@@ -42,14 +43,14 @@ def stand_in(tmp_path):
     return [sys.executable, str(script)]
 
 
-def _wait(run: CaseRun, seconds: float = 20.0) -> None:
+def _wait(run: SolverRun, seconds: float = 20.0) -> None:
     deadline = time.monotonic() + seconds
     while run.running and time.monotonic() < deadline:
         time.sleep(0.05)
 
 
 def test_a_run_reports_its_exit_status_and_what_it_printed(tmp_path, stand_in):
-    run = CaseRun(tmp_path / "case-1", tmp_path / "console.txt", command=stand_in)
+    run = SolverRun("run", tmp_path / "case-1", tmp_path / "console.txt", command=stand_in)
     assert run.status is None and not run.running
     run.start()
     _wait(run)
@@ -58,8 +59,10 @@ def test_a_run_reports_its_exit_status_and_what_it_printed(tmp_path, stand_in):
 
 
 def test_replacing_earlier_results_is_asked_for_only_when_told_to(tmp_path, stand_in):
-    replacing = CaseRun(tmp_path / "case", tmp_path / "a.txt", overwrite=True, command=stand_in)
-    keeping = CaseRun(tmp_path / "case", tmp_path / "b.txt", command=stand_in)
+    replacing = SolverRun(
+        "run", tmp_path / "case", tmp_path / "a.txt", overwrite=True, command=stand_in
+    )
+    keeping = SolverRun("run", tmp_path / "case", tmp_path / "b.txt", command=stand_in)
     assert replacing.arguments[-1] == "--overwrite"
     assert "--overwrite" not in keeping.arguments
     replacing.start()
@@ -68,7 +71,7 @@ def test_replacing_earlier_results_is_asked_for_only_when_told_to(tmp_path, stan
 
 
 def test_stop_interrupts_the_run_so_it_can_record_how_it_ended(tmp_path, stand_in):
-    run = CaseRun(tmp_path / "wait", tmp_path / "console.txt", command=stand_in)
+    run = SolverRun("run", tmp_path / "wait", tmp_path / "console.txt", command=stand_in)
     run.start()
     deadline = time.monotonic() + 20.0
     while "asked" not in run.console_tail() and time.monotonic() < deadline:
@@ -83,8 +86,15 @@ def test_stop_interrupts_the_run_so_it_can_record_how_it_ended(tmp_path, stand_i
 
 
 def test_a_run_is_started_once(tmp_path, stand_in):
-    run = CaseRun(tmp_path / "case", tmp_path / "console.txt", command=stand_in)
+    run = SolverRun("run", tmp_path / "case", tmp_path / "console.txt", command=stand_in)
     run.start()
     with pytest.raises(RuntimeError, match="started already"):
         run.start()
     _wait(run)
+
+
+def test_a_meshing_is_asked_of_the_mesh_command_with_its_mesh_file(tmp_path, stand_in):
+    run = SolverRun("mesh", tmp_path / "mesh.yaml", tmp_path / "console.txt", command=stand_in)
+    run.start()
+    _wait(run)
+    assert run.status == 0 and run.console_tail() == f"asked: mesh {tmp_path / 'mesh.yaml'}"

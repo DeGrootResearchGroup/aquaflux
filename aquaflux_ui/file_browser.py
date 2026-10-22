@@ -96,6 +96,8 @@ class FileBrowser:
     on_choose : callable
         ``(path, mode) -> str | None``, called with the chosen file and the mode the dialog was opened
         in; it returns why the choice failed (shown in the dialog, which stays open) or ``None``.
+    what : str, optional
+        What the files are, for the dialog's title: ``Open case file``.
     """
 
     def __init__(
@@ -104,8 +106,10 @@ class FileBrowser:
         key: str,
         suffixes: Sequence[str],
         on_choose: Callable[[str, str], str | None],
+        what: str = "case file",
     ) -> None:
         self.server = server
+        self.what = what
         self.key = key
         self.suffixes = tuple(suffixes)
         self.on_choose = on_choose
@@ -181,7 +185,7 @@ class FileBrowser:
                             color="primary",
                         )
                     v3.VCardTitle(
-                        f"{{{{ {k}_mode === 'save' ? 'Save case file' : 'Open case file' }}}}",
+                        f"{{{{ {k}_mode === 'save' ? 'Save {self.what}' : 'Open {self.what}' }}}}",
                         classes="text-subtitle-1",
                     )
                 with html.Div(classes="px-4 d-flex align-center flex-wrap", style="gap: 2px;"):

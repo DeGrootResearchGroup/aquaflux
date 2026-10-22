@@ -1,4 +1,5 @@
-"""The solver's case-file commands, asked of a separate process: schema, show, write, mesh, check, plan.
+"""The solver's file commands, asked of a separate process: schema, show, write, mesh, drawing, check,
+plan.
 
 This package does not import the solver -- that would bring JAX into the page's process -- so
 everything it needs to know about a case file it asks the ``aquaflux`` command, which prints JSON
@@ -17,10 +18,44 @@ from pathlib import Path
 from .case_form import CaseSchema
 from .solver_worker import CommandResult, SolverWorker
 
-__all__ = ["CaseDocument", "MeshExport", "RunPlan", "Runner", "SolverCommands"]
+__all__ = [
+    "CASE_FILE",
+    "MESH_FILE",
+    "CaseDocument",
+    "DocumentKind",
+    "DrawingView",
+    "MeshExport",
+    "RunPlan",
+    "Runner",
+    "SolverCommands",
+]
 
 #: Runs ``aquaflux <arguments>`` with the given standard input; the seam a test replaces.
 Runner = Callable[[Sequence[str], str | None], CommandResult]
+
+
+@dataclasses.dataclass(frozen=True)
+class DocumentKind:
+    """A kind of file the solver's editing commands read and write.
+
+    Attributes
+    ----------
+    name : str
+        What the page calls it: ``case file``, ``mesh file``.
+    flags : tuple of str
+        What the ``schema``, ``show`` and ``write`` commands are told to read it: none for a case
+        file.
+    """
+
+    name: str
+    flags: tuple[str, ...] = ()
+
+
+#: A case file: the settings of a solve.
+CASE_FILE = DocumentKind("case file")
+
+#: A mesh file: how to mesh a region of a drawing, which ``aquaflux mesh`` makes.
+MESH_FILE = DocumentKind("mesh file", ("--mesh-file",))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,6 +93,9 @@ class MeshExport:
         Its boundary patches holding faces: ``{"name", "faces"}`` each, in the mesh's order.
     groups : dict
         Its patch groups, each with the patches in it.
+    made : dict or None
+        How the mesh was made, as its file records it -- for a mesh ``aquaflux mesh`` made, its
+        settings, when, how long, and its ``quality``; ``None`` for a file that records nothing.
     """
 
     error: str | None
@@ -66,6 +104,41 @@ class MeshExport:
     dim: int = 3
     patches: list = dataclasses.field(default_factory=list)
     groups: dict = dataclasses.field(default_factory=dict)
+    made: dict | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class DrawingView:
+    """A mesh file's drawing as the solver read it, written for viewing, and the patches of its faces.
+
+    Attributes
+    ----------
+    error : str or None
+        Why the drawing could not be read, if it could not; the other attributes are then unset.
+    surface : pathlib.Path or None
+        The triangles written, each carrying ``face``, the face of the drawing it lies on.
+    solids : list of str
+        The drawing's solids.
+    faces : list of dict
+        Per face: its ``kind`` (``plane``, ``cylinder``, ...), ``area`` and a ``point`` on it.
+    patches : list of str or None
+        Each face's patch by the file's selections; ``None`` when they are refused.
+    landed : dict
+        For each patch chosen by points, the face each of its points lands on, in order.
+    pipes : list of int
+        The faces that are pipes.
+    selections_error : str or None
+        Why the selections are refused, if they are: the drawing is still shown.
+    """
+
+    error: str | None
+    surface: Path | None = None
+    solids: list = dataclasses.field(default_factory=list)
+    faces: list = dataclasses.field(default_factory=list)
+    patches: list | None = None
+    landed: dict = dataclasses.field(default_factory=dict)
+    pipes: list = dataclasses.field(default_factory=list)
+    selections_error: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,31 +176,35 @@ class SolverCommands:
 
     def __init__(self, runner: Runner | None = None) -> None:
         self._run = runner if runner is not None else SolverWorker()
-        self._schema: CaseSchema | None = None
+        self._schemas: dict[DocumentKind, CaseSchema] = {}
 
-    def schema(self) -> CaseSchema:
-        """The case-file schema, asked for once and kept.
+    def schema(self, kind: DocumentKind = CASE_FILE) -> CaseSchema:
+        """The schema of a kind of file, asked for once and kept.
 
         Raises
         ------
         RuntimeError
             If the command fails -- the solver is not installed beside the page, say.
         """
-        if self._schema is None:
-            result = self._run(["schema"], None)
+        if kind not in self._schemas:
+            result = self._run(["schema", *kind.flags], None)
             if result.status != 0:
                 raise RuntimeError(f"`aquaflux schema` failed: {_reason(result)}")
-            self._schema = CaseSchema(json.loads(result.output))
-        return self._schema
+            self._schemas[kind] = CaseSchema(json.loads(result.output))
+        return self._schemas[kind]
 
-    def show(self, path: str | Path) -> CaseDocument:
-        """A case file as the solver reads it."""
-        result = self._run(["show", str(path)], None)
+    def show(self, path: str | Path, kind: DocumentKind = CASE_FILE) -> CaseDocument:
+        """A file as the solver reads it."""
+        result = self._run(["show", str(path), *kind.flags], None)
         reply = _reply(result)
         return CaseDocument(Path(path), reply.get("case"), reply.get("error"))
 
     def write(
-        self, path: str | Path, case: Mapping, relative_to: str | Path | None = None
+        self,
+        path: str | Path,
+        case: Mapping,
+        relative_to: str | Path | None = None,
+        kind: DocumentKind = CASE_FILE,
     ) -> str | None:
         """Write ``case`` to ``path`` through the solver's own writer.
 
@@ -136,20 +213,55 @@ class SolverCommands:
         path : path-like
             The file to write.
         case : mapping
-            The case file's content.
+            The file's content.
         relative_to : path-like, optional
-            The directory the case's relative paths mean now -- where it was opened from. They are
+            The directory the file's relative paths mean now -- where it was opened from. They are
             re-based onto ``path``'s directory, so a copy saved elsewhere still finds its mesh.
+        kind : DocumentKind, optional
+            The kind of file; unset, a case file.
 
         Returns
         -------
         str or None
-            Why it was refused, or ``None`` once it is written. A refused case writes nothing.
+            Why it was refused, or ``None`` once it is written. A refused file writes nothing.
         """
-        arguments = ["write", str(path)]
+        arguments = ["write", str(path), *kind.flags]
         if relative_to is not None:
             arguments += ["--relative-to", str(relative_to)]
         return _reply(self._run(arguments, json.dumps({"case": case}))).get("error")
+
+    def drawing(
+        self, mesh_file: Mapping, relative_to: str | Path, directory: str | Path
+    ) -> DrawingView:
+        """Read a mesh file's drawing, as the file stands, written into ``directory`` for viewing.
+
+        Parameters
+        ----------
+        mesh_file : mapping
+            The mesh file's content, saved or not: its drawing and region must be set.
+        relative_to : path-like
+            The directory its relative paths are relative to: the mesh file's.
+        directory : path-like
+            Where the solver writes the drawing's triangles.
+
+        Returns
+        -------
+        DrawingView
+        """
+        arguments = ["drawing", str(directory), "--relative-to", str(relative_to)]
+        reply = _reply(self._run(arguments, json.dumps({"mesh_file": mesh_file})))
+        if reply.get("error"):
+            return DrawingView(reply["error"])
+        return DrawingView(
+            None,
+            Path(reply["surface"]),
+            reply.get("solids", []),
+            reply.get("faces", []),
+            reply.get("patches"),
+            reply.get("landed", {}),
+            reply.get("pipes", []),
+            reply.get("selections_error"),
+        )
 
     def mesh(self, section: Mapping, relative_to: str | Path, directory: str | Path) -> MeshExport:
         """Read a case's mesh from its ``mesh`` section, written into ``directory`` for viewing.
@@ -178,6 +290,7 @@ class SolverCommands:
             reply.get("dim", 3),
             reply.get("patches", []),
             reply.get("groups", {}),
+            reply.get("made"),
         )
 
     def check(self, path: str | Path) -> tuple[bool, str]:

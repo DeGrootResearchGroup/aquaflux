@@ -20,6 +20,7 @@ from aquaflux.meshing import (
     FacePlanarizer,
     FacesNear,
     FacesOn,
+    RegionFaces,
     SurfaceTriangulation,
     TetrahedralMesh,
     check_closed_surface,
@@ -392,3 +393,40 @@ def test_the_core_is_a_hole_in_the_fills_surface_and_its_cells_are_numbered_afte
     assert {tuple(sorted(r.tolist())) for r in rings} == {tuple(sorted(r)) for r in hole.tolist()}
     assert cells.fill_size == 0.25
     assert CadMesher(max_size=0.2, feature_angle=1.0)._cored(points, surface)[2].fill_size == 0.2
+
+
+def test_each_stage_is_told_as_it_starts_and_only_the_stages_a_mesh_needs():
+    told = []
+    mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
+    mesher.mesh(_Cube(fold=math.pi / 2), REGION, {"lid": FacesNear(((0.5, 0.5, 1.0),))},
+                on_stage=told.append)  # fmt: skip
+    # No layers, no mapped walls, no pipes (no face is a cylinder), no core, no planarizer.
+    assert told == [
+        "triangulating the surface",
+        "choosing the patches' faces",
+        "filling with tetrahedra",
+        "building the polyhedral dual",
+        "moving the boundary onto the drawing",
+    ]
+
+
+def test_a_points_selection_tells_the_face_each_point_lands_on_in_order():
+    cube = _Cube(fold=math.pi / 2)
+    faces = RegionFaces(cube, REGION, np.zeros((6, 3)))
+    near = FacesNear(((0.5, 0.5, 0.99), (0.01, 0.5, 0.5), (0.5, 0.4, 0.98)))
+    assert near.landed(faces).tolist() == [5, 0, 5]  # z+, x-, z+ again
+    assert near.faces(faces).tolist() == [0, 5]
+
+
+def test_a_face_is_sampled_on_itself_and_a_face_with_no_triangle_is_refused():
+    cube = _Cube(fold=math.pi / 2, push=0.1)
+    # One triangle on z+ (face 5) a little inside the cube, one on x- (face 0); none on the rest.
+    corners = np.array([[[0.2, 0.2, 0.9], [0.8, 0.2, 0.9], [0.2, 0.8, 0.9]],
+                        [[0.1, 0.2, 0.2], [0.1, 0.8, 0.2], [0.1, 0.2, 0.8]]])  # fmt: skip
+    with pytest.raises(ValueError, match="4 face\\(s\\) were given no triangle"):
+        RegionFaces.sampled(cube, REGION, corners, np.array([5, 0]))
+    every = np.concatenate([corners, np.repeat(corners[:1], 4, axis=0)])
+    sampled = RegionFaces.sampled(cube, REGION, every, np.array([5, 0, 1, 2, 3, 4]))
+    # Each face's first triangle's centroid, moved onto that face (``push`` out of the cube).
+    np.testing.assert_allclose(sampled.samples[5], [0.4, 0.4, 1.0], atol=1e-12)
+    np.testing.assert_allclose(sampled.samples[0], [0.0, 0.4, 0.4], atol=1e-12)

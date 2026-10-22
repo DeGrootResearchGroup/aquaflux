@@ -247,6 +247,10 @@ agreed with the project owner). Reuses `xml.py`'s `_Arrays`, `_narrowed`, `cell_
 wound out of the domain** via `stored_ring_is_outward`. A field of the wrong length is refused naming the
 patch. Used by `case.PatchVtk`. Checked in ParaView against a run's `incident_power` (log).
 
+`io/vtk/surface.py::write_triangles(corners, fields, path, *, binary=True)`: triangles that are no mesh's
+boundary (a mesh file's drawing, for the browser's face picker) as one `.vtp`, shared corners written once
+(`np.unique` of the corners), a value per triangle as `CellData` (`face`); built on `vtp_parts`.
+
 ## The two field writers share a helper, not a contract
 
 `write_vtu(mesh, fields, path)` and `write_openfoam_time(case, time, fields, mesh)` are deliberately not one

@@ -19,7 +19,7 @@ import abc
 import dataclasses
 import math
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import equinox as eqx
@@ -41,7 +41,18 @@ from .pipes import fill_pipes, find_pipes, pipe_ends, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
 
-__all__ = ["CadMesher", "FaceSelection", "FacesNear", "FacesOn", "RegionFaces"]
+__all__ = [
+    "CadMesher",
+    "FaceSelection",
+    "FacesNear",
+    "FacesOn",
+    "RegionFaces",
+    "Stage",
+    "assign_patches",
+]
+
+#: Told the name of each stage of meshing as it starts: ``on_stage("growing layers")``.
+Stage = Callable[[str], None]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,6 +76,36 @@ class RegionFaces:
     def n_faces(self) -> int:
         """Number of faces."""
         return self.samples.shape[0]
+
+    @classmethod
+    def sampled(
+        cls, model: CadModel, region: CadRegion, corners: np.ndarray, face: np.ndarray
+    ) -> RegionFaces:
+        """The region's faces, each sampled at the centroid of one of its triangles moved onto it.
+
+        Parameters
+        ----------
+        model : CadModel
+        region : CadRegion
+        corners : np.ndarray, shape ``(n_triangles, 3, 3)``
+            A triangulation of the region's surface: each triangle's corners.
+        face : np.ndarray of int, shape ``(n_triangles,)``
+            The face each triangle lies on.
+
+        Raises
+        ------
+        ValueError
+            If a face of the region has no triangle.
+        """
+        n_faces = model.topology(region).n_faces
+        face = np.asarray(face, dtype=np.int64)
+        first = np.full(n_faces, -1, dtype=np.int64)
+        first[face[::-1]] = np.arange(face.size)[::-1]
+        if np.any(first < 0):
+            raise ValueError(f"{int(np.count_nonzero(first < 0))} face(s) were given no triangle")
+        centroids = np.asarray(corners)[first].mean(axis=1)
+        samples = model.project(region, centroids, faces=np.arange(n_faces)).points
+        return cls(model, region, samples)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,8 +142,12 @@ class FacesNear(FaceSelection):
 
     def faces(self, region: RegionFaces) -> np.ndarray:
         """The nearest face to each point -- see :meth:`FaceSelection.faces`."""
-        landed = region.model.project(region.region, np.asarray(self.points, dtype=float))
-        return np.unique(landed.face)
+        return np.unique(self.landed(region))
+
+    def landed(self, region: RegionFaces) -> np.ndarray:
+        """The face each point lands on, in the points' order, shape ``(n_points,)``."""
+        points = np.asarray(self.points, dtype=float)
+        return np.asarray(region.model.project(region.region, points).face, dtype=np.int64)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -219,6 +264,7 @@ class CadMesher:
         layered: Sequence[str] = (),
         mapped: Sequence[str] = (),
         pipes: Sequence[str] | None = None,
+        on_stage: Stage | None = None,
     ) -> Mesh:
         """The polyhedral mesh of ``region``.
 
@@ -246,6 +292,9 @@ class CadMesher:
             multiple of four), the region is triangulated again with both rims divided alike,
             into the larger count rounded up to a multiple of four. Unset, every face that is one;
             empty, none.
+        on_stage : callable, optional
+            Told the name of each stage as it starts (only the stages this mesh needs), so a long
+            meshing can be followed.
 
         Returns
         -------
@@ -280,25 +329,33 @@ class CadMesher:
                 raise ValueError(
                     f"{role} patch(es) {unknown} are not patches; the patches are {names}"
                 )
+        stage = on_stage if on_stage is not None else _unobserved
         topology = model.topology(region)
         with tempfile.TemporaryDirectory() as directory:
+            stage("triangulating the surface")
             brep = model.write_brep(region, Path(directory) / "region.brep")
             surface = self._triangulated(brep)
-            patch_of_face = _patch_of_face(
-                model, region, surface, topology.n_faces, patches, others
+            stage("choosing the patches' faces")
+            faces = RegionFaces.sampled(
+                model, region, surface.points[surface.triangles], surface.face
             )
+            patch_of_face = assign_patches(faces, patches)
             candidates = _pipe_candidates(topology, patch_of_face, names, named_pipes)
             divisions = rim_divisions(topology, surface.triangles, surface.face, candidates)
             if divisions:
                 # Netgen's own rims would not take an O-grid: triangulate again, rims divided alike.
+                stage("triangulating again, the pipes' rims divided alike")
                 surface = self._triangulated(brep, edge_divisions=divisions)
         pipe_faces = _pipe_faces(topology, surface, patch_of_face, names, candidates, named_pipes)
         chosen = np.union1d(_faces_of(patch_of_face, names, mapped), pipe_faces)
+        if chosen.size:
+            stage("meshing the mapped walls and pipes as grids")
         walls = self._mapped(model, region, topology, surface, chosen)
         on_layered = np.isin(patch_of_face[walls.face], [names.index(n) for n in layered])
         prisms = hexahedra = stacked = None
         sides = side_face = None
         if on_layered.any():
+            stage("growing the layers")
             grown = self.layers.extrude(walls.points, walls.faces, on_layered)
             points, fill, wall_faces = grown.points, grown.inner, grown.walls
             prisms, hexahedra, stacked = grown.prisms, grown.hexahedra, grown.columns
@@ -307,6 +364,7 @@ class CadMesher:
             points, fill, wall_faces = walls.points, walls.faces, walls.faces
         wall_tag = walls.face
         if len(pipe_faces):
+            stage("filling the pipes' cores with O-grids")
             pipes_in = self._pipes(topology, walls, pipe_faces, on_layered, stacked)
             points, cores, fill, wall_faces, wall_tag = fill_pipes(
                 self.pipe_core, points, fill, wall_faces, wall_tag, pipes_in
@@ -316,7 +374,10 @@ class CadMesher:
         # The tetrahedra meet triangles only: each quadrilateral left for them is capped on their side.
         caps = capped(points, fill.reversed(), self.cap_height)
         points = np.vstack([points, caps.apexes])
+        if self.core is not None:
+            stage("placing the hexahedral core")
         points, surface, core = self._cored(points, np.vstack([fill.triangles, caps.sides]))
+        stage("filling with tetrahedra")
         points, tetrahedra = self._filled(points, surface, core.fill_size)
         tetrahedra = np.vstack([tetrahedra, core.tetrahedra])
         # The layers' hexahedra first, so a column's cells are numbered as the layers grew them.
@@ -333,6 +394,7 @@ class CadMesher:
             boundary = boundary.renumbered(renumber)
             layered_walls = layered_walls.renumbered(renumber(np.arange(walls.points.shape[0])))
             stacked = None if stacked is None else renumber(stacked)
+        stage("building the polyhedral dual")
         primal = element_mesh(
             points, tetrahedra, prisms, hexahedra, pyramids,
             patches=boundary.patches(patch_of_face, names),
@@ -352,9 +414,11 @@ class CadMesher:
             self.feature_angle, feature_edges=edges.between(feature_pairs), columns=stacked
         )
         traced = dual.build_traced(primal)
+        stage("moving the boundary onto the drawing")
         mesh = _onto_the_drawing(traced, primal, boundary, edges, model, region, topology, columns)
         if self.planarizer is None:
             return mesh
+        stage("flattening the faces")
         return self.planarizer.planarize(mesh, _free_centroids(traced, columns)).mesh
 
     def _pipes(self, topology, walls: MappedSurface, pipe_faces, on_layered, stacked):
@@ -509,18 +573,26 @@ def _check_names(patches, others: str) -> None:
         raise ValueError(f"{others!r} names both a selection and the faces no selection names")
 
 
-def _patch_of_face(model, region, surface: SurfaceTriangulation, n_faces, patches, others):
-    """Each face's patch, as its position among the selections (``others`` last)."""
-    # A point on each face: the centroid of one of its triangles, moved onto the face.
-    first = np.full(n_faces, -1, dtype=np.int64)
-    first[surface.face[::-1]] = np.arange(surface.face.size)[::-1]
-    if np.any(first < 0):
-        raise ValueError(f"{int(np.count_nonzero(first < 0))} face(s) were given no triangle")
-    centroids = surface.points[surface.triangles[first]].mean(axis=1)
-    samples = model.project(region, centroids, faces=np.arange(n_faces)).points
-    faces = RegionFaces(model, region, samples)
-    patch_of_face = np.full(n_faces, len(patches), dtype=np.int64)
-    taken = np.zeros(n_faces, dtype=bool)
+def assign_patches(faces: RegionFaces, patches: Mapping[str, FaceSelection]) -> np.ndarray:
+    """Each face's patch: the position of the selection choosing it, or ``len(patches)`` for none.
+
+    Parameters
+    ----------
+    faces : RegionFaces
+    patches : mapping of {str: FaceSelection}
+        The selections, in order.
+
+    Returns
+    -------
+    np.ndarray of int, shape ``(n_faces,)``
+
+    Raises
+    ------
+    ValueError
+        If a selection finds no face, or chooses a face an earlier one chose.
+    """
+    patch_of_face = np.full(faces.n_faces, len(patches), dtype=np.int64)
+    taken = np.zeros(faces.n_faces, dtype=bool)
     for index, (name, selection) in enumerate(patches.items()):
         chosen = selection.faces(faces)
         if np.any(taken[chosen]):
@@ -528,6 +600,10 @@ def _patch_of_face(model, region, surface: SurfaceTriangulation, n_faces, patche
         taken[chosen] = True
         patch_of_face[chosen] = index
     return patch_of_face
+
+
+def _unobserved(stage: str) -> None:
+    """A stage nobody follows."""
 
 
 @dataclasses.dataclass(frozen=True)

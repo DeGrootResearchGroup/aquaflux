@@ -1,9 +1,10 @@
-"""A case being solved: one ``aquaflux run`` process, started, watched and stopped from the page.
+"""A long solver command -- a case being solved, a mesh being made -- in a process started, watched
+and stopped from the page.
 
-The solve runs in a process of its own -- this package does not import the solver -- with the same
-Python interpreter as the page, so it is the solver installed beside it. What it prints, its log and
-any refusal, goes to a file the page reads back; how the march is going is read from the history it
-writes, a row per step.
+The command runs in a process of its own -- this package does not import the solver -- with the same
+Python interpreter as the page, so it is the solver installed beside it. What it prints goes to a
+file the page reads back: a solve's log and any refusal, a meshing's stages as they start. How a
+march is going is read from the history it writes, a row per step.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 
 from .solver_worker import OWN_PROCESS_GROUP
 
-__all__ = ["CONVERGED", "NOT_CONVERGED", "REFUSED", "STOP_GRACE", "CaseRun"]
+__all__ = ["CONVERGED", "NOT_CONVERGED", "REFUSED", "STOP_GRACE", "SolverRun"]
 
 #: ``aquaflux run``'s exit statuses: converged, stopped short of its stopping test, file refused.
 CONVERGED, NOT_CONVERGED, REFUSED = 0, 1, 2
@@ -27,40 +28,45 @@ CONVERGED, NOT_CONVERGED, REFUSED = 0, 1, 2
 STOP_GRACE = 60.0
 
 
-class CaseRun:
-    """One solve of a case file, in a process of its own.
+class SolverRun:
+    """One ``aquaflux <subcommand> <file>`` -- a solve, a meshing -- in a process of its own.
 
     Parameters
     ----------
-    case : path-like
-        The case file.
+    subcommand : str
+        ``run`` to solve a case file, ``mesh`` to make a mesh file's mesh.
+    file : path-like
+        The case file, or the mesh file.
     console : path-like
-        Where what the run prints is written: its log as it goes, and the reason if it is refused.
+        Where what it prints is written as it goes, and the reason if it is refused.
     overwrite : bool
-        Replace an earlier run's results; without it a case whose output directory holds results is
-        refused, as ``aquaflux run`` refuses it.
+        Replace what an earlier one wrote; without it, a run whose output directory holds results,
+        or a meshing whose mesh is already there, is refused, as the command refuses it.
     command : sequence of str, optional
-        The command before the case file's arguments; unset, ``python -m aquaflux`` with this
-        interpreter. A test passes another program.
+        The command before the subcommand; unset, ``python -m aquaflux`` with this interpreter. A
+        test passes another program.
     """
 
     def __init__(
         self,
-        case: str | os.PathLike[str],
+        subcommand: str,
+        file: str | os.PathLike[str],
         console: str | os.PathLike[str],
         *,
         overwrite: bool = False,
         command: Sequence[str] | None = None,
     ) -> None:
-        self.case = Path(case)
+        self.file = Path(file)
         self.console = Path(console)
         base = list(command) if command is not None else [sys.executable, "-m", "aquaflux"]
-        self.arguments = [*base, "run", str(self.case), *(["--overwrite"] if overwrite else [])]
+        self.arguments = [
+            *base, subcommand, str(self.file), *(["--overwrite"] if overwrite else [])
+        ]  # fmt: skip
         self._process: subprocess.Popen | None = None
         self.stopped = False
 
     def start(self) -> None:
-        """Start the solve.
+        """Start the command.
 
         Raises
         ------
@@ -88,11 +94,11 @@ class CaseRun:
 
     @property
     def status(self) -> int | None:
-        """Its exit status once it has ended (see :data:`CONVERGED`), else ``None``."""
+        """Its exit status once it has ended (for a solve, see :data:`CONVERGED`), else ``None``."""
         return None if self._process is None else self._process.poll()
 
     def stop(self, grace: float = STOP_GRACE) -> None:
-        """Interrupt the solve, as Ctrl-C would, and kill it if it has not ended within ``grace``."""
+        """Interrupt it, as Ctrl-C would, and kill it if it has not ended within ``grace``."""
         if not self.running:
             return
         self.stopped = True

@@ -39,6 +39,16 @@ class MeshSource(abc.ABC):
             The mesh.
         """
 
+    def provenance(self, directory: Path) -> dict | None:
+        """How the mesh was made, as its file records it; ``None`` for a format that records none.
+
+        Parameters
+        ----------
+        directory : pathlib.Path
+            The directory the case file sits in.
+        """
+        return None
+
 
 @dataclasses.dataclass(frozen=True)
 class AquafluxMesh(MeshSource):
@@ -73,6 +83,14 @@ class AquafluxMesh(MeshSource):
     def read(self, directory: Path) -> Mesh:
         """The mesh in the file -- see :meth:`MeshSource.read`."""
         return AquafluxMeshReader(Path(directory) / self.path).read()
+
+    def provenance(self, directory: Path) -> dict | None:
+        """The header's record of how the mesh was made -- see :meth:`MeshSource.provenance`.
+
+        A mesh ``aquaflux mesh`` made records the mesh file's settings as they ran, the aquaflux
+        version and commit, when it started and how long it took, and a summary of its quality.
+        """
+        return AquafluxMeshReader(Path(directory) / self.path).header().provenance
 
 
 @dataclasses.dataclass(frozen=True)

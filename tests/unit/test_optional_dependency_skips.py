@@ -52,6 +52,11 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
         "a CAD region's topology, face-tagged triangles, file and projection; fast tier. CI installs "
         "it through the `test` extra, as for test_cad_step.py",
     ),
+    "unit/test_drawing_view.py": (
+        "OCP",
+        "a mesh file's drawing read and triangulated for choosing its patches; fast tier. CI installs "
+        "it through the `test` extra, as for test_cad_step.py",
+    ),
     "ui/test_history.py": (
         "pyvista",
         "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
@@ -111,6 +116,14 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
     "ui/test_run_section.py": (
         "trame",
         "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_mesh_section.py": (
+        "trame",
+        "the Mesh section on a built page; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_patch_picking.py": (
+        "pyvista",
+        "what a click on a drawing's face does to a mesh file; fast tier. CI installs it through the `test` extra",
     ),
     "ui/test_independence.py": (
         "trame",

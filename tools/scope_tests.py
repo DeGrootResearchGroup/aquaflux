@@ -158,6 +158,10 @@ REACHES: dict[str, tuple[tuple[str, ...], str]] = {
         ("validation/uvreactor_openfoam/of_case/*",),
         "reads the reactor's STEP drawing",
     ),
+    "tests/unit/test_drawing_view.py": (
+        ("validation/uvreactor_openfoam/of_case/*",),
+        "reads the reactor's STEP drawing",
+    ),
     "tests/integration/test_bfs3d_species.py": (
         ("validation/bfs3d_species/*", "validation/bfs3d_openfoam/*"),
         "imports the species harness from validation/ and reads the OpenFOAM case",

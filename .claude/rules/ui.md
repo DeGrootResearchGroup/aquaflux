@@ -9,8 +9,9 @@ paths:
 > Comment Convention and Claude-Facing-File Reference Ban apply to `aquaflux_ui/*.py` exactly as to
 > `aquaflux/` — it is shipped surface. Spell out comma-separated values (CSV) at first use per file.
 
-A local browser interface with three sections: **Setup** (open / edit / save / check a case file),
-**Run** (solve the open case and follow its march live), **Results** (read-only viewer). PyVista/VTK renders
+A local browser interface with four sections: **Mesh** (open / start / edit a mesh file, pick its
+patches on the drawing, make the mesh, give it to the case), **Setup** (open / edit / save / check a
+case file), **Run** (solve the open case and follow its march live), **Results** (read-only viewer). PyVista/VTK renders
 server-side (off-screen `pv.Plotter`), trame serves the page and streams images through trame-vtk's
 `VtkRemoteView`, plotly draws plots. `ui` extra; entry point `aquaflux-ui` (`aquaflux_ui.__main__:main`).
 Out of scope (project owner): steering a running march, remote/multi-user hosting, a PyWebView wrapper
@@ -35,27 +36,34 @@ open without JAX, and the solver never pays for VTK/trame. That is why it is a t
 | `controls.py` | `view_from_state`, `new_/edit_/fit_slice`, `new_/edit_/fit_threshold`, `parse_number` | pure, no trame; `view_from_state` is the one state→`View` mapping |
 | `app.py` | `Workspace`, `Section` protocol, `NoResultsSection` | page shell (app bar, rail, theme toggle); owns no section's controls |
 | `results_section.py` | `ResultsSection`, `convergence_figure` | the viewer; routes control events to `controls` |
-| `setup_section.py` | `SetupSection`, `SECTION_ICONS` | case editor; Open / Save / Save as / Check above the form in the side panel (owner: main area is for the mesh view) |
-| `case_form.py` | `CaseSchema`, `Row`, `form_sections`, edit functions, `setting`, `parse_input`, `plain_doc` | pure: schema + document → rows; edits return new documents; lists no kind/field/choice of its own |
-| `solver_commands.py` | `SolverCommands` (`schema`/`show`/`write`/`mesh`/`check`/`plan`), `CaseDocument`, `MeshExport`, `RunPlan`, `Runner` | parses the commands' JSON; runner injected (tests stub it), default `SolverWorker` |
+| `document_form.py` | `DocumentForm`, `DOCUMENT_SUFFIXES`, `GROUP_INDENT` | one file's form (open / new / save / edits / rows template), state named by its `key` (`case_*`, `meshfile_*`); hooks `opened`, `changed`, `names`, `label_clicked`, `label_classes` carry what is particular to a section |
+| `setup_section.py` | `SetupSection`, `SECTION_ICONS` | a `DocumentForm("case")` + the mesh view; Open / Save / Save as / Check above the form (owner: main area is for the mesh view); `use_mesh(section)` for the Mesh section |
+| `mesh_section.py` | `MeshSection`, `MESH_SECTION_ICONS`, `DRAWING_SUFFIXES`, `POLL_SECONDS`, `quality_tiles` | a `DocumentForm("meshfile")` + the drawing (picking) and the mesh made (`MeshView`) |
+| `patch_picking.py` | `picked`, `Pick`, `patch_rows`, `PatchRow`, `face_colours` | pure: a click's edit of the document, the patch list, the faces' colours |
+| `drawing_scene.py` | `DrawingScene` | draws `drawing.vtp` coloured per face, hides faces, picks by `vtkCellPicker` |
+| `case_form.py` | `CaseSchema`, `Row`, `form_sections`, `ANY`, edit functions, `setting`, `parse_input`, `plain_doc` | pure: schema + document (+ `names` by path pattern) → rows; edits return new documents; lists no kind/field/choice of its own |
+| `solver_commands.py` | `SolverCommands` (`schema`/`show`/`write` per `DocumentKind` — `CASE_FILE`, `MESH_FILE`; `mesh`/`drawing`/`check`/`plan`), `CaseDocument`, `MeshExport` (`made`), `DrawingView`, `RunPlan`, `Runner` | parses the commands' JSON; runner injected (tests stub it), default `SolverWorker` |
 | `solver_worker.py` | `SolverWorker`, `CommandResult`, `TIMEOUT` | see below |
 | `mesh_view.py` | `MeshView`, `mesh_layers`, `patches_addressed`, `read_patches` | draws what `aquaflux export-mesh` wrote; reads no mesh format itself |
 | `file_browser.py` | `list_directory`, `FileBrowser` | server-side: a browser picker hides the real path, and mesh paths are relative to the case |
 | `run_section.py` | `RunSection`, `POLL_SECONDS` | Run's layout and wiring; re-reads history every `POLL_SECONDS` |
 | `run_monitor.py` | `RunLimits`, `RunEvent`, `run_events`, `run_tiles`, `residual_figure`, `cost_figures`, `equation_columns`, `RETRY_REASONS`, `EQUATION_PREFIX` | pure: history + limits → figures, tiles, events |
-| `run_process.py` | `CaseRun`, `CONVERGED`/`NOT_CONVERGED`/`REFUSED`, `STOP_GRACE` | one `sys.executable -m aquaflux run case.yaml [--overwrite]` in its own process group, output to a console file |
+| `run_process.py` | `SolverRun`, `CONVERGED`/`NOT_CONVERGED`/`REFUSED`, `STOP_GRACE` | one `sys.executable -m aquaflux run case.yaml` or `mesh mesh.yaml` (`[--overwrite]`) in its own process group, output to a console file |
 | `plots.py` | `base_figure` | the one plotly base for every plot |
 | `widgets.py` | `panel`, `icon_button`, `empty_state` | shared page pieces |
 | `theme.py` | `vuetify_config`, `RenderStyle`/`THEMES`, `PlotStyle`/`PLOT_STYLES`, `colormap_gradient`, `PAGE_CSS` | **every colour** lives here per theme; `Scene(plotter, style)` takes its `RenderStyle` injected |
 | `__main__.py` | CLI | imports `app` only after the source opened, so a bad path fails before trame loads |
 
-`aquaflux-ui [path]`: a results directory or VTK file opens Results; a `.yaml` opens Setup with the case
-loaded; no path opens Setup.
+`aquaflux-ui [path] [--mesh-file FILE]`: a results directory or VTK file opens Results; a `.yaml` opens
+Setup with the case loaded; `--mesh-file` opens Mesh with it (and wins over Setup when both are given);
+no path opens Setup.
 
 ## The solver seam
-Setup asks the solver through `aquaflux schema`/`show`/`write`/`mesh`/`check`/`plan`, answered by **one
-long-lived `sys.executable -m aquaflux serve` process** (`SolverWorker`, see `case.md`). Run starts
-`aquaflux run` separately and follows the files it flushes per step (`history.csv`, the console).
+Setup and Mesh ask the solver through `aquaflux schema`/`show`/`write` (`--mesh-file` for a mesh
+file)/`export-mesh`/`drawing`/`check`/`plan`, answered by **one long-lived `sys.executable -m aquaflux
+serve` process** (`SolverWorker`, see `case.md`; one worker shared by both sections). Run starts `aquaflux
+run` separately and follows the files it flushes per step (`history.csv`, the console); Mesh starts
+`aquaflux mesh` separately the same way and shows its console (one line per stage).
 - `SolverWorker` starts lazily (schema prefetch at page load), serializes requests with a lock, reads
   replies on a daemon thread so the timeout works on every platform; a timeout or death stops the process
   and the next request starts a new one. Both `poll()` before writing and a one-retry on `BrokenPipeError`
@@ -91,13 +99,15 @@ long-lived `sys.executable -m aquaflux serve` process** (`SolverWorker`, see `ca
   `trame.widgets.vtk.VtkRemoteView(plotter.render_window)` directly.
 
 ## Page and look
-- `Workspace` of three `Section`s (`drawer()`, `main()`, `toolbar()`, `shown()`), each built once and shown
-  with `v_show`, so it keeps camera/panels/slices while hidden.
+- `Workspace` of four `Section`s, rail order Mesh / Setup / Run / Results (`drawer()`, `main()`,
+  `toolbar()`, `shown()`), each built once and shown with `v_show`, so it keeps camera/panels/slices while
+  hidden. Mesh and Setup get the 520 px drawer.
 - Bare `VAppLayout`, flat app bar, accordion side panel, rounded cards, a **system font stack** (offline:
   no web font). Component defaults are set once in `vuetify_config()["defaults"]`, not per widget. Inputs
   0.875 rem in 32 px boxes, 38 px rows (`theme.PAGE_CSS`).
 - ⚠️ **`v_show` cannot hide an element carrying `d-flex`** (`display: flex !important`) — put the class on
-  a child.
+  a child, or lay it out with an inline `display: flex` style (which `v_show`'s inline `none` replaces).
+  The Mesh view's panel showed under the drawing until fixed this way.
 - ⚠️ **Tooltip text colour must be set per theme** (`theme._PAGE_COLOURS`): Vuetify keeps a fixed
   `#EEEEEE` `on-surface-variant`, invisible on the light surface. Pinned by
   `test_a_tooltips_text_is_readable_on_its_background` (WCAG ≥ 4.5).
@@ -123,7 +133,7 @@ long-lived `sys.executable -m aquaflux serve` process** (`SolverWorker`, see `ca
   or the backspace button **unsets** to default. An unknown key is shown struck through with a remove
   button.
 - **Nesting** (owner's choice): guide rails drawn per row in its own background
-  (`setup_section._RAIL_STYLE`) plus a depth tint capped at 2, indent `GROUP_INDENT`; and folding of
+  (`document_form._RAIL_STYLE`) plus a depth tint capped at 2, indent `GROUP_INDENT`; and folding of
   group headings (`case_form.GROUP_WIDGETS`) below a section's top level, with a summary or
   `Row.contents` subtitle and a dot when `Row.set_inside > 0` (`_with_group_contents`). ⚠️ Background
   position and size must be separate CSS properties — inside `background-image` the value is invalid and
@@ -148,8 +158,49 @@ long-lived `sys.executable -m aquaflux serve` process** (`SolverWorker`, see `ca
   **name** against the mesh. 2D face on, volume by outer surface, edges omitted past `EDGE_LIMIT`;
   framing server-side with `FRAME_ZOOM` (client `reset_camera` fit too tightly).
 - **Loading feedback**: `case_opening` drives a status line and loading card (shown before any case is
-  loaded). The schema is prefetched at server start (`_prefetch_schema`); an open during it awaits that
+  loaded). The schema is prefetched at server start (`DocumentForm._prefetch_schema`, per form); an open during it awaits that
   request (`_schema_task`); a failed prefetch is retried by the next open.
+
+## Mesh (the mesh-file editor and the mesher)
+Layout mocked and approved by the owner (2026-10-21): side panel — the file's actions, **Patches**,
+**Make mesh** / **Use in the case** / the replace switch, then the mesh file's form; main — a Drawing /
+Mesh toggle.
+- **The drawing is the solver's** (`aquaflux drawing OUT --relative-to DIR`, the unsaved file on stdin,
+  `case.md`): `drawing.vtp` (triangles carrying `face`) + each face's kind, area and a point on it, its
+  patch by the mesher's own `assign_patches`, the face each `FacesNear` point lands on (`landed`), the
+  pipe faces. **Nothing here decides a selection**: a click edits the document (`patch_picking.picked`)
+  and the drawing is asked again (`MeshSection._changed` on any of drawing/region/patches/others; one
+  request in flight, one more queued, `load_drawing`). A pick while one is in flight is refused (the
+  `landed` lists would not match the document).
+- **A click is a point** (agreed with the owner, 2026-10-19: all `FacesNear` stores): on a free face it
+  appends the face's sample point (making a `FacesNear` for a new name); on the chosen patch's face it
+  removes the points landing there (a patch left with none leaves the file, but stays in the list as
+  pending, still chosen); on another `FacesNear` patch's face it moves it; a `FacesOn` face, or a
+  `FacesOn` patch chosen, is refused with a message (edit the selection in the form). New names are
+  pending (`_pending`) until their first face.
+- **Picking is server-side**: `VtkRemoteView(picking_modes=['click'], click=...)` sends the click's
+  pixel position (y from the bottom); `DrawingScene.pick` runs a `vtkCellPicker` on the rendered actor.
+  ⚠️ **A drag also ends in a DOM click**: `DrawingScene` observes the render window interactor's
+  `LeftButtonPressEvent` and `dragged()` compares the camera's position and focal point there with now.
+  ⚠️ Not the whole `camera_position` and not a camera saved at load: rendering squares the view-up (so
+  it never compared equal), and the view resets the camera on mount (the first click was lost).
+- **Hide faces** mode: a click hides the face (so a lamp inside a vessel can be reached); `show()` draws
+  `extract_cells` of the rest and `pick` reads `face` from what is drawn. **Show all** resets.
+- **Names from the drawing**: `DocumentForm(names=...)` → `form_sections(..., names)` makes the `strings`
+  rows `region.solids`/`without`, `patches.*.solids` (the drawing's solids), `layered`/`mapped` (the
+  patch list) and `pipes` (patches every face of which is a pipe) into `choices`; held names not offered
+  are kept.
+- **New** picks a STEP file first; the unsaved file's relative paths are taken from the drawing's
+  directory (`DocumentForm.new(document, directory)`, `directory` property) and re-based on Save as.
+- **Make mesh** needs the saved, unmodified file; `SolverRun("mesh", ...)`; the console is polled each
+  `POLL_SECONDS`; exit 0 → the mesh is read as a case would (`export-mesh` of `{kind: AquafluxMesh,
+  path}`) and drawn with `quality_tiles(export.made)` — **every number from the `.aqmesh` header**
+  (`provenance.quality`, `seconds`), none computed here; "already there" in the console → the replace
+  switch is named. Opening a file whose mesh exists shows it.
+- **Use in the case** sets Setup's `mesh` to `{kind: AquafluxMesh, path: relpath(aqmesh, case dir)}`
+  (`SetupSection.use_mesh`, an edit: modified, mesh stale) and switches to Setup.
+- Patch colours: `RenderStyle.categories` (the validated categorical hues shared with
+  `PlotStyle.equations`, `theme._CATEGORIES`), the others patch in `context`.
 
 ## Run
 No settings of its own — everything is the case file's (layout mocked and approved by the owner). Side
@@ -177,10 +228,16 @@ Each module gates on `pytest.importorskip("pyvista"|"trame")`, declared in
 `tests/unit/test_optional_dependency_skips.py`. **No test renders a frame** (no display on CI; off-screen
 fallback not established), so `Scene` is tested by its actors. `test_workspace.py` builds the whole page
 and drives Results through page state, but skips where `pv.system_supports_plotting()` is false, so it may
-not run on CI — event wiring is exercised only by hand in a browser.
+not run on CI — event wiring is exercised only by hand in a browser. `test_mesh_section.py` builds the
+page with stub commands (real schemas, a square's drawing, a box) and answers picks itself
+(`drawing.pick` replaced); `test_patch_picking.py` pins the click edits against hand-written documents.
+Locally the `ui` tests skip without PyVista: run them with a viz environment's site-packages on
+`PYTHONPATH` (the two must share a Python version).
 
 ## Deferred (not built)
 - Results following a run live (`times()` growing) and switching to a run's output when it finishes.
 - A radiation run's patch fields in Results (`patches.vtm` listed by `RunDirectory`, read by `VtkFiles`)
   — not yet checked in a browser on a real radiation run.
 - PyWebView wrapper; streamlines/glyphs (U only as coloured magnitude/component).
+- Mesh: editing a `FacesOn` selection by clicking (it names solids), a section view through the
+  drawing, and the mesh made's patches highlighted from the patch list.

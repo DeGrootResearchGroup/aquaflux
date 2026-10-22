@@ -51,3 +51,20 @@ Configuration: VTK 9.7.1, PyVista 0.49.0, trame 4.0.0, trame-vtk 2.11.17, macOS 
   slices on different axes, a typed slice coordinate, a threshold with a typed minimum, grey context).
 - See `io.md` for the hexahedron writer's file-size/memory measurement (1M cells: 70 vs 198 MB file,
   393 vs 1074 MB peak RSS).
+
+## 2026-10-21 — the Mesh section, checked by hand on Sozzi
+
+- Layout mocked and approved by the owner (patch list + Make mesh above the mesh file's form; Drawing /
+  Mesh toggle in the main area). Checked in the in-app browser at 1440 × 900 with the Sozzi drawing
+  (`max_size` 0.02, lamp by `FacesOn`): the drawing came back in 1.2 s (cold; 16 ms once cached), a new
+  patch took the vessel's cylinder on one click and gave it back on the next, **Hide faces** revealed
+  the lamp inside, and **Make mesh** printed its eleven stages and ended at 15 310 cells, non-orthogonality
+  p99 / max 32° / 54°, volume ratio p99 15.8, 350 concave cells, 7.0 s (one run).
+- Found while checking: the click handler first compared whole camera positions (view-up squared by
+  rendering, so never equal: every click read as a drag), then a camera saved at load (the view resets
+  the camera on mount, so the first click was lost). Fixed by reading the camera at the interactor's
+  `LeftButtonPressEvent` and comparing position and focal point only.
+- The Mesh view's panel showed under the drawing until its `d-flex` was replaced by an inline flex style
+  (the `v_show` trap).
+- `SetupSection._on_theme` had never been registered, so Setup's mesh view never followed the theme;
+  registered in the form split.

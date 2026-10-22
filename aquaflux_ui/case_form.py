@@ -9,6 +9,10 @@ case file appears in it with no change here.
 A document is the case file's content as plain data -- mappings, lists, strings, numbers -- and every
 edit returns a new document rather than changing one. :func:`form_sections` lays a document out as
 rows, one per setting, each carrying what the page needs to draw it and the path that addresses it.
+
+The same holds for any file the solver prints a schema of in this form -- a mesh file as much as a
+case file. Where a list of names is chosen from things the schema cannot know, such as the solids of
+a drawing, the page passes the names it knows (``names``) and the row offers them.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import re
 from collections.abc import Mapping, Sequence
 
 __all__ = [
+    "ANY",
     "KIND",
     "CaseSchema",
     "Row",
@@ -43,6 +48,9 @@ KIND = "kind"
 
 #: A path into a document: mapping keys and list indices, from the top.
 Path = tuple[str | int, ...]
+
+#: Stands for any one step of a path in a pattern of :func:`form_sections`' ``names``.
+ANY = "*"
 
 #: A reStructuredText role in a docstring -- ``:class:`~aquaflux.flow.PinnedPoint``` -- whose text is
 #: what a reader of a form wants: the last name, without the role or the module.
@@ -282,7 +290,9 @@ def _scalar_widget(accepts: Sequence[dict]) -> str | None:
 # --- laying a document out as rows ------------------------------------------------------------
 
 
-def form_sections(schema: CaseSchema, document: Mapping) -> list[dict]:
+def form_sections(
+    schema: CaseSchema, document: Mapping, names: Mapping[Path, Sequence[str]] | None = None
+) -> list[dict]:
     """The form for ``document``: one section per top-level field of the case, each a list of rows.
 
     Parameters
@@ -291,6 +301,10 @@ def form_sections(schema: CaseSchema, document: Mapping) -> list[dict]:
         The case-file schema.
     document : mapping
         The case file's content.
+    names : mapping of {tuple: sequence of str}, optional
+        Names to choose a list of strings from, by the pattern of the setting's path (:data:`ANY`
+        for any one step): a ``strings`` row matching one becomes a ``choices`` row offering those
+        names and the ones it holds.
 
     Returns
     -------
@@ -328,8 +342,36 @@ def form_sections(schema: CaseSchema, document: Mapping) -> list[dict]:
             }
         )
     for section in sections:
-        section["rows"] = _with_group_contents(schema, section["rows"])
+        rows = _offering_names(section["rows"], names or {})
+        section["rows"] = _with_group_contents(schema, rows)
     return sections
+
+
+def _offering_names(rows: list[Row], names: Mapping[Path, Sequence[str]]) -> list[Row]:
+    """``rows``, each ``strings`` row whose path a pattern in ``names`` matches made a choice of them."""
+    if not names:
+        return rows
+    offered = []
+    for row in rows:
+        chosen = next(
+            (given for pattern, given in names.items() if _matches(pattern, row.path)), None
+        )
+        if row.widget != "strings" or chosen is None:
+            offered.append(row)
+            continue
+        held = [part.strip() for part in (row.value or "").split(",") if part.strip()]
+        values = [*chosen, *(name for name in held if name not in chosen)]
+        offered.append(
+            dataclasses.replace(row, widget="choices", value=held, items=_options(values, None))
+        )
+    return offered
+
+
+def _matches(pattern: Path, path: Path) -> bool:
+    """Whether ``path`` is ``pattern``, :data:`ANY` standing for any one step."""
+    return len(pattern) == len(path) and all(
+        step == ANY or step == part for step, part in zip(pattern, path, strict=True)
+    )
 
 
 #: The rows that head a group of settings, which can be folded.

@@ -11,8 +11,18 @@ aquaflux mesh mesh.yaml --overwrite  # replace a mesh made before
 The mesh is written as aquaflux's own `.aqmesh` file (see [the mesh](mesh.md)), and as an OpenFOAM
 polyMesh as well if the file asks; a case reads it with {class}`~aquaflux.case.AquafluxMesh`. The
 `.aqmesh` file records how the mesh was made: the mesh file's settings as they ran, the aquaflux
-version and commit, when, and how long it took. A mesh already where this one would go is refused
-before anything is meshed, unless `--overwrite` is given.
+version and commit, when, how long it took, and a summary of its quality
+({class}`~aquaflux.mesh.QualitySummary`: the cells, the interior faces' non-orthogonality at the
+99th percentile and at most, the neighbour volume ratio likewise, the smallest cell and the concave
+cells), so a mesh can be judged without being read. A mesh already where this one would go is
+refused before anything is meshed, unless `--overwrite` is given.
+
+`aquaflux mesh` prints each stage of the meshing as it starts, after the seconds since it began --
+reading the drawing, triangulating the surface, growing the layers, filling with tetrahedra,
+building the polyhedral dual and so on, only those the file asks for -- and then the mesh made and
+its quality. The browser interface makes a mesh the same way and shows the same lines
+({doc}`user_interface`), and is where a mesh file's patches can be chosen by clicking the drawing's
+faces.
 
 A mesh file's top level is its sections; `drawing`, `region`, `sizes` and `output` have one form each
 and name no `kind`. Relative paths are taken from the directory the mesh file sits in:

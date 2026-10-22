@@ -62,7 +62,7 @@ cfd/                                  # repo root
 │   │   ├── face.py                   #   FaceGeometry + FaceGeometryScheme → EdgeFaceGeometry (2D) / PolygonFaceGeometry (3D, centre-fan)
 │   │   ├── cell.py                   #   CellGeometry: volume, centroid (divergence theorem, dim-general)
 │   │   ├── groups.py                 #   LabelledGroups base → CellZones / FacePatches (named partitions; derived interfaces)
-│   │   ├── quality.py                #   diagnostics: face_planarity, centroid_iteration_shift, closed_cell_residual
+│   │   ├── quality.py                #   diagnostics: face_planarity, centroid_iteration_shift, closed_cell_residual; QualitySummary.of(mesh) (what a mesh header records)
 │   │   ├── distance.py               #   distance_to_patches(): cell→named-patch distance, the geometric field wall models need
 │   │   ├── reorder.py                #   cell renumbering: permute_cells() (canonical P·A·Pᵀ) + CellReordering → Identity/ReverseCuthillMcKee/Random (RCM protects the AMG coarse space on large meshes)
 │   │   ├── graph.py                  #   cell↔cell adjacency (build-time): cell_adjacency_coo() (SciPy COO, for RCM) / cell_adjacency_csr() (CSR arrays, for partitioners)
@@ -77,6 +77,7 @@ cfd/                                  # repo root
 │   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)
 │   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity (hexahedra as VTK hexahedra), each face wound outward from the cell listing it (pure numpy)
 │   │   │   ├── xml.py                #     VtkCells + cell fields → .vtu / .pvd document parts; raw appended binary by default, ASCII on request (pure)
+│   │   │   ├── surface.py            #     write_triangles: a surface of triangles and a value per triangle as one .vtp (a drawing's faces)
 │   │   │   └── writer.py             #     write_vtu / write_pvd: the only file I/O
 │   │   └── openfoam/                 #   OpenFOAM polyMesh reader (ASCII): read_openfoam() / OpenFOAMReader
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
@@ -192,7 +193,8 @@ cfd/                                  # repo root
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
 │   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: AquafluxMesh (.aqmesh) / OpenFOAMMesh (polyMesh); a case only reads its mesh
 │   │   ├── mesh_file.py              #   MeshSpec (+ Drawing, DrawingRegion, MeshSizes, MeshOutput): a mesh file, a STEP region meshed by CadMesher
-│   │   ├── mesh_run.py               #   make_mesh(path, overwrite) -> MeshRecord: what `aquaflux mesh mesh.yaml` does (refuses an occupied output before meshing)
+│   │   ├── mesh_run.py               #   make_mesh(path, overwrite, on_stage) -> MeshRecord: what `aquaflux mesh mesh.yaml` does (refuses an occupied output before meshing; records the quality)
+│   │   ├── drawing_view.py           #   view_drawing(...) -> DrawingView: a mesh file's drawing for choosing its patches (`aquaflux drawing`)
 │   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by the mesh file and the radiation sources)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
@@ -209,7 +211,7 @@ cfd/                                  # repo root
 │   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
 │   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
 │   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
-│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped) -> Mesh; FaceSelection -> FacesNear / FacesOn
+│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
 │   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
 │   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement towards a region's boundary

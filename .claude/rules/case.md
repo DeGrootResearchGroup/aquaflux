@@ -49,7 +49,8 @@ its file alone.**
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
 | `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `AquafluxMesh` (a `.aqmesh` file, read exactly; `io.md`) / `OpenFOAMMesh` |
 | `mesh_file.py` | `MeshSpec` and its one-form sections `Drawing`, `DrawingRegion`, `MeshSizes`, `MeshOutput`: a mesh file (below) |
-| `mesh_run.py` | `make_mesh(path, overwrite) -> MeshRecord`: `aquaflux mesh` |
+| `mesh_run.py` | `make_mesh(path, overwrite, on_stage) -> MeshRecord`: `aquaflux mesh` |
+| `drawing_view.py` | `view_drawing(drawing, region, patches, others, directory, out) -> DrawingView`, `DRAWING_FILE`: `aquaflux drawing` |
 | `drawing.py` | `CadPlacement`, shared by the mesh file and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
@@ -179,9 +180,14 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   the case). `sizes.feature_angle` is in radians, like `CadSurface.angle`.
 - **`aquaflux mesh mesh.yaml [--overwrite]`** is `mesh_run.make_mesh`: read, then **refuse an occupied
   output before meshing** (each writer's `MeshWriter.replaces()`, the rule its own `write` refuses by),
-  mesh, write the `.aqmesh` (its header's `provenance`: the settings as they ran, version, commit,
-  modified, start, seconds) and the polyMesh if `output.openfoam` is set. Exit 2 on a refused file or an
-  occupied output; not in `SERVED` (it can take minutes).
+  mesh, measure (`mesh.QualitySummary`), write the `.aqmesh` (its header's `provenance`: the settings as
+  they ran, version, commit, modified, start, seconds, `quality`) and the polyMesh if `output.openfoam` is
+  set. Exit 2 on a refused file or an occupied output; not in `SERVED` (it can take minutes). **Each
+  stage is printed as it starts** (`  12.3 s  growing the layers`, flushed; `on_stage` threaded through
+  `MeshSpec.mesh` into `CadMesher.mesh`, then "measuring the mesh's quality" and "writing the mesh"),
+  then the summary and the quality line; the browser shows these lines as they are, parsing none.
+  `MeshSource.provenance(directory)` reads the record back (`AquafluxMesh`: the header's; `OpenFOAMMesh`:
+  `None`), and `export-mesh` prints it as `made`.
 - **Tests build their boxes with `tests/support/case_meshes.grid_mesh`**, which writes a
   `structured_grid_2d`/`3d` as `.aqmesh` once per process and returns the `AquafluxMesh` section by
   absolute path. The channel cases read tracked meshes ("The case files in the repository").
@@ -245,12 +251,21 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - **Editing commands for the browser interface**: `aquaflux schema` (`case_schema()`), `aquaflux show
   case.yaml` (`{"error", "case"}`; a refused file is still shown), `aquaflux write case.yaml [--relative-to
   DIR]` (validates through `case_spec_from_mapping`; writes nothing when refused; drops comments and
-  default-valued settings), `aquaflux export-mesh OUT [--case FILE] [--openfoam]` (the mesh section alone, via
+  default-valued settings) — all three with `--mesh-file` for a mesh file (`__main__._Document`: schema,
+  read, write per kind of file; the document is still under `case`), `aquaflux export-mesh OUT [--case FILE] [--openfoam]` (the mesh section alone, via
   `mesh_source_from_mapping`, from stdin JSON or from a case file, whose directory is then the base; writes
   `OUT/mesh.vtu`, with `--openfoam` also `OUT/constant/polyMesh`; prints cells, dim, patches with faces,
-  groups, and `polymesh`). Pinned by `tests/unit/test_case_editing_commands.py`; `aquaflux mesh` by
+  groups, `polymesh` and `made`), and `aquaflux drawing OUT [--relative-to DIR]` (`{"mesh_file": ...}` on
+  stdin, read by `drawing_sections_from_mapping` — drawing required, region `None` until it names a
+  solid, patches and `others`; `view_drawing` writes `OUT/drawing.vtp` by `io.write_triangles`, each
+  triangle's `face`, and prints `solids`, `faces` (kind, area, point), `patches` (by
+  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`) and
+  `selections_error` — a refused selection is not the reply's `error`, so the drawing is still shown).
+  The drawing is read once per (path, mtime, placement) and triangulated once per region (`lru_cache`s
+  in the serve process): Sozzi 1.2 s cold, 16 ms after (2026-10-21, macOS arm64). Pinned by
+  `tests/unit/test_case_editing_commands.py`, `test_drawing_view.py` (Sozzi); `aquaflux mesh` by
   `tests/unit/test_mesh_file.py` and, on Sozzi run from another directory, `test_meshing_netgen.py`.
-- **`aquaflux serve`** answers `SERVED` commands (`schema`/`show`/`write`/`export-mesh`/`check`/`plan`, never `run` or `mesh`)
+- **`aquaflux serve`** answers `SERVED` commands (`schema`/`show`/`write`/`export-mesh`/`drawing`/`check`/`plan`, never `run` or `mesh`)
   one JSON line per request by calling `main(arguments)` in-process with stdio swapped; an exception or
   `SystemExit` becomes that request's status. ⚠️ **Replies go on a `dup` of fd 1, and fd 1 is then pointed at
   stderr**, so stray stdout writes cannot corrupt the protocol. It exists because a command's work is

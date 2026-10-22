@@ -210,6 +210,15 @@ def test_a_cylinder_whose_rims_differ_is_not_a_pipe():
     assert "its rims have 12 and 16 points" in refused[0]
 
 
+def test_a_cylinder_whose_rims_differ_is_a_pipe_when_its_rims_are_to_be_divided_again():
+    # The drawing view asks before any rim is divided: a second triangulation sets the counts.
+    points, triangles, face = _tube_surface(bottom=12, top=14)
+    found, refused = find_pipes(
+        _tube_topology(), points, triangles, face, np.array([0]), rim_counts=False
+    )
+    assert (found, refused) == ([0], {})
+
+
 def test_a_cylinder_with_something_inside_is_not_a_pipe():
     # A lamp down the middle: a few triangles of another face inside the cylinder.
     points, triangles, face = _tube_surface()

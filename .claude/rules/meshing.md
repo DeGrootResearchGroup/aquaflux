@@ -155,7 +155,8 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=ClearedCaps(),
 pipe_core=PipeCore(), planarizer=None, core=None, netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
-layered=(), mapped=(), pipes=None) -> Mesh`: `write_brep` → `triangulate` (face-tagged; again with the rims divided
+layered=(), mapped=(), pipes=None, on_stage=None) -> Mesh` (`on_stage`, a `Stage`, is told each stage's name as it starts,
+only the stages this mesh runs; `aquaflux mesh` prints them, `case.md`): `write_brep` → `triangulate` (face-tagged; again with the rims divided
 alike where a pipe candidate's need it) → pipes found (below) → the `mapped` patches' faces and the pipes' remeshed as structured quadrilaterals (below) →
 layers on the `layered` patches (below) → the pipes' cores filled with O-grids, out of the fill (below)
 → every quadrilateral left for the fill
@@ -174,9 +175,13 @@ or OCP.
 - **Patches are chosen by face selection** (`FaceSelection.faces(RegionFaces) -> face indices`; agreed
   with the project owner, 2026-10-19, who intends a face picker in the browser interface — a click on a
   face is a point on it, which is all `FacesNear` stores): `FacesNear(points)` — the face each point projects onto (a pipe's
-  end); `FacesOn(solids, tolerance=None)` — faces whose sample point lies within tolerance (unset 1e-6 of
-  the region's extent) of the solids' boundary (a lamp taken out of the water). A face's sample is the
-  centroid of one of its triangles projected onto it. Faces nobody selects go to `others`; two
+  end; `FacesNear.landed(faces)` is each point's face in order, which the browser's picker removes
+  points by); `FacesOn(solids, tolerance=None)` — faces whose sample point lies within tolerance (unset
+  1e-6 of the region's extent) of the solids' boundary (a lamp taken out of the water). A face's sample
+  is the centroid of one of its triangles projected onto it (`RegionFaces.sampled(model, region,
+  corners, face)`, any triangulation tagged by face: Netgen's here, the kernel's in the drawing view).
+  **`assign_patches(faces, patches)` is the one rule** for each face's patch (the mesher and `aquaflux
+  drawing` both call it). Faces nobody selects go to `others`; two
   selections sharing a face, a selection finding none, a reserved name, or `others` naming a selection
   are refused (names before Netgen runs). The CAD records carry no face names, which is why selection is
   geometric.
@@ -322,7 +327,8 @@ with the block mesher's `PipeOGrid`: the extruder keeps the wall cells and their
 vessel's layers at the junction; a few layers then a full O-grid inside gives the grading control).
 - **Found** (`find_pipes`): a `CylinderFace` with the fluid inside (`solid_inside`), two loops of equal
   counts, a multiple of four, nothing else of the surface inside it between its rims (refuses a vessel
-  shell round a lamp). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
+  shell round a lamp); `rim_counts=False` skips the counts, for the drawing view (asked before any
+  rim is divided). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
   the patches, each face of which must be one (else `ValueError` naming the reason); `()` none.
   `MeshSpec.pipes` / `MeshSpec.pipe_core` in a mesh file.
 - **Rims divided alike** (`rim_divisions`, #789): Netgen's rim counts follow the size (Sozzi: 12/13 at

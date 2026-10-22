@@ -14,12 +14,15 @@ import pytest
 import yaml
 from aquaflux.__main__ import main
 from aquaflux.case import (
+    AquafluxMesh,
     CadPlacement,
     Drawing,
     DrawingRegion,
     MeshOutput,
     MeshSizes,
     MeshSpec,
+    OpenFOAMMesh,
+    drawing_sections_from_mapping,
     make_mesh,
     mesh_schema,
     mesh_spec_from_mapping,
@@ -29,7 +32,7 @@ from aquaflux.case import (
     write_mesh_file,
 )
 from aquaflux.io import read_aqmesh, read_aqmesh_header, read_openfoam
-from aquaflux.mesh import structured_grid_3d
+from aquaflux.mesh import QualitySummary, structured_grid_3d
 from aquaflux.meshing import FacePlanarizer, FacesNear, FacesOn, Graded, OctreeCore, PipeCore
 
 DOCUMENT = {
@@ -171,8 +174,10 @@ def boxed(monkeypatch):
     """The region's meshing replaced by a box, counting the times it is asked for."""
     calls = []
 
-    def mesh(self, directory):
+    def mesh(self, directory, on_stage=None):
         calls.append(directory)
+        if on_stage is not None:
+            on_stage("meshing the box")
         return BOX
 
     monkeypatch.setattr(MeshSpec, "mesh", mesh)
@@ -191,6 +196,19 @@ def test_making_the_mesh_writes_it_with_how_it_was_made(tmp_path, boxed):
     assert provenance["mesh_file"] == str(path.resolve())
     assert {"version", "commit", "modified"} <= set(provenance["aquaflux"])
     assert provenance["seconds"] >= 0.0 and provenance["started"]
+    # The quality is the mesh's own, so it can be judged without being read.
+    assert (
+        provenance["quality"] == QualitySummary.of(BOX).to_mapping() == record.quality.to_mapping()
+    )
+    # A case reading the mesh sees the same record; a polyMesh records none.
+    assert AquafluxMesh(str(record.aqmesh)).provenance(tmp_path) == provenance
+    assert OpenFOAMMesh("of_case").provenance(tmp_path) is None
+
+
+def test_each_stage_is_told_as_it_starts_then_measuring_and_writing(tmp_path, boxed):
+    told = []
+    make_mesh(_mesh_file(tmp_path), on_stage=told.append)
+    assert told == ["meshing the box", "measuring the mesh's quality", "writing the mesh"]
 
 
 def test_a_mesh_already_there_is_refused_before_anything_is_meshed(tmp_path, boxed):
@@ -211,8 +229,44 @@ def test_the_command_makes_the_mesh_and_refuses_a_bad_file(tmp_path, boxed, caps
     assert main(["mesh", str(path)]) == 0
     out = capsys.readouterr().out
     assert f"{BOX.n_cells} cells (3D)" in out and str(tmp_path / "mesh.aqmesh") in out
+    lines = out.splitlines()
+    # Each stage on a line of its own as it starts, after the seconds since meshing began.
+    assert [line.split("s  ", 1)[1] for line in lines[:3]] == [
+        "meshing the box", "measuring the mesh's quality", "writing the mesh",
+    ]  # fmt: skip
+    assert "quality: non-orthogonality 0.0 deg at the 99th percentile" in out
     assert main(["mesh", str(path)]) == 2  # already there
     assert "already there" in capsys.readouterr().err
     bad = tmp_path / "bad.yaml"
     bad.write_text("region: {solids: []}\n")
     assert main(["mesh", str(bad)]) == 2
+
+
+def test_the_drawing_and_its_patches_are_read_while_the_rest_is_unfinished():
+    unfinished = {key: DOCUMENT[key] for key in ("drawing", "region", "patches", "others")}
+    drawing, region, patches, others = drawing_sections_from_mapping(unfinished)
+    spec = mesh_spec_from_mapping(DOCUMENT)
+    assert (drawing, region, patches, others) == (
+        spec.drawing, spec.region, dict(spec.patches), spec.others,
+    )  # fmt: skip
+    # A region not yet given, or naming no solid yet, is not a refusal: the drawing is still shown.
+    for region_section in ({}, {"region": {"solids": []}}):
+        read = drawing_sections_from_mapping({"drawing": DOCUMENT["drawing"], **region_section})
+        assert read[1:] == (None, {}, None)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"region": DOCUMENT["region"]}, "drawing is needed"),
+        (
+            {**DOCUMENT, "patches": {"inlet": {"kind": "FacesNear", "points": [[1.0]]}}},
+            "at 'patches.inlet'",
+        ),
+        ({**DOCUMENT, "patches": {"inlet": {"kind": "MeshOutput"}}}, "a patch is a face selection"),
+        ({**DOCUMENT, "others": 3}, "others names a patch"),
+    ],
+)
+def test_the_drawings_sections_are_refused_by_name(document, message):
+    with pytest.raises(ValueError, match=message):
+        drawing_sections_from_mapping(document)
