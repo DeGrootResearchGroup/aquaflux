@@ -280,7 +280,12 @@ path.
       another order (bounded by `2 · n_terms · eps · Σ|w_j a_j|`, `tests/unit/test_entry_map.py`), and the
       LU, power iteration and block inverses are JAX's. The build and a refit share the function, so a
       refit at the built operator reproduces the build exactly.
-    - **Cost**: see the log, "The device fit (2026-10-22)".
+    - **Cost** (pitzDaily, CPU, 2026-10-22): same march; steady refactor ~0.7 s against ~0.83 s; the first
+      fit ~6-8 s dearer (map building moved from the first refit, plus the fit program's per-process
+      compilation); memory held +29 MiB, but peak resident +0.06-0.32 GiB, freed memory XLA's worker-thread
+      arenas keep (`malloc_trim` returns it). A compiled function's outputs are new buffers, so the fit
+      returns slot values and the operator is assembled on the layout's own index arrays -- keep it so.
+      Log, "The device fit (2026-10-22)".
   - **Entry maps (`entry_map.py`)**: on a pattern that does not move, every sparse operation linear in one
     varying operand is a fixed map `out_t = Σ w_tj a_j`: `EntryMap` stores it as (source entry, target
     slot, weight), applies it on the host as one gather/multiply/`bincount`, and `on_device()` gives a
