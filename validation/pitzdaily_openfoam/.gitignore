@@ -13,3 +13,4 @@ of_case/constant/polyMesh/
 of_transient/constant/polyMesh/
 of_transient/log.*
 of_transient/postProcessing/
+refit_matrices/
