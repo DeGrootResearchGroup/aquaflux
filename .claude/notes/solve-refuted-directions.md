@@ -1675,3 +1675,148 @@ in commit `1e69b4ab` on branch `claude/pivot-floor` (PR #766): `aquaflux/turbule
 `precondition/materialized_session.py`, and the session-owned setting's plumbing in `turbulence/coupled.py`,
 `reynolds.py` and `case/solver.py`. Measurements: `.claude/notes/turbulence-log.md`, "Per-cell production
 freeze (2026-10-18)".
+
+## TRUNCATING the Jacobian to reach 1 (or 2) before fitting the field split, with or without a matrix-free fine level — REFUTED on bfs3d; a CONSISTENT compact operator is UNTESTED (2026-10-22)
+
+**Why it was asked.** The split stores the coupled Jacobian at its full reach of three. On a polyhedral dual
+(`validation/polyhedral_stencil_size.py`: Delaunay dual of a jittered 20³ lattice, 15.4 faces a cell) a
+reach-3 stencil is 237 cells against 63 on hexahedra, a reach-2 one 81 against 25, a reach-1 one 16.6
+against 7. The probe colouring needs 988 / 330 / 44 colours at reach 3 / 2 / 1 against 94 / 38 / 13. That
+puts a few hundred thousand polyhedral cells far out of an 18 GB laptop's reach under any per-entry
+storage cut (assessment in the session notes of 2026-10-21). The proposed way out was to fit the split to a
+compact Jacobian: momentum, k and ω rows to reach 1, continuity rows to their Rhie–Chow reach 2. The Krylov
+matvec would stay the exact JVP, so the root and the adjoint would not move.
+
+**Screen** (`validation/bfs3d_openfoam/compact_jacobian_screen.py`). Configuration:
+- **States:** shipped `case.yaml` (float32 split, `PivotFloor(0.15)`, `refresh_on_cycles` 4) at `9ffe291b`,
+  on an M3 Pro with jax 0.10.2. A fresh march of 17 steps (511 s, final `|R|` 4.9e-6, the recorded
+  trajectory), checkpointed every step.
+- **What each arm drops:** the probed Jacobian's entries beyond the arm's cell distance, per (row field,
+  column field), zeroed just before every fit and re-fit, the anchor fit that freezes the coarsening
+  included. Kept values stay exact.
+- **What each arm is judged against:** the exact shifted JVP, at the step-initial states of steps 5, 7, 10
+  and 15 and at the root (state 17) with no shift. Each state gets the march's own residual-stop solve and
+  a right-preconditioned GMRES(15) to 1e-8 on the true residual, capped at 600 applications. At the root it
+  also solves the transpose against a `u`-block cotangent.
+- **Registered pass bar:** `compact` within 1.3× `exact`'s applications at every state.
+
+Applications to 1e-8 (true relative residual where the cap was hit):
+
+| arm | entries/cell | step 5 | step 7 | step 10 | step 15 | root fwd | root transpose |
+|---|---|---|---|---|---|---|---|
+| exact | 1593 | 128 | 233 | 197 | 285 | 263 | 392 |
+| reach 2, every pair | 654 | 241 | 393 | 302 | 349 | 341 | 600 (6.4e-6) |
+| **compact** (p rows 2, rest 1) | 256 | 600 (0.96) | 600 (0.14) | 600 (0.99) | 600 (0.99) | 600 (0.63) | 600 (0.99) |
+| compact, coupling kept whole | 657 | 600 (0.56) | 600 (1.3e-2) | 600 (0.62) | 600 (0.94) | 600 (6.7e-2) | 600 (0.99) |
+| pressure pairs 2, rest 1 ¹ | 339 | — | 600 (3.0e-2) | — | — | 600 (5.7e-2) | 600 (0.99) |
+| reach 1, every pair | 189 | 600 (0.90) | 600 (0.92) | 600 (0.99) | 600 (0.99) | 600 (0.98) | 600 (1.00) |
+
+¹ Added after `compact` failed, to test whether the pressure gradient's distance-2 mass (17 % of the
+momentum ← p block's Frobenius norm beyond reach 1, under `MultipleCorrectionGradient`) was the whole loss.
+It was not.
+
+At the march's own tolerance the picture is the same: `exact` 16 / 19 / 30 / 35 applications, reach 2
+31 / 31 / 47 / 43, every reach-1 arm 211 (the restart cap) with Euclidean residuals 0.01–0.99.
+
+**Why it loses.** The split needs every block to at least reach 2. Truncating the velocity block to reach 1
+alone drops 2.6–10 % of the u/v/w blocks' norm (w ← u 10 %, which is the eddy viscosity's strain rate), and
+no reach-1 arm converges at any state, whatever it keeps of the pressure or the coupling. Reach 2 converges
+forward at 1.2–1.9× the applications but misses 1e-8 on the root's transpose within 600 applications.
+
+**Caveats:**
+- The states are step-initial. They are a step's easy solves, so the tight solve and the root are the
+  discriminating columns.
+- Truncation is not a consistent narrowed residual (a compact gradient, the strain rate stopped), and that
+  realizable arm was registered only if truncation passed. A narrowed surrogate changes the near entries
+  as well, and it would have to recover what truncation shows is load-bearing.
+
+**A matrix-free fine level does not rescue it (2026-10-22, same harness and states, `mf:` arms).** The split
+was fitted to the truncated Jacobian, as above, but every fine-level operator product in both hierarchies
+(the V-cycle's residuals and the SIMPLE and block-Jacobi smoothers' sweeps, 11 products an application) and
+the coupling block were applied as exact Jacobian-vector products plus the fit's own diagonal. Only the
+smoothers' pieces and the coarse levels stayed those of the truncated Jacobian. This is what a split that
+stores a compact Jacobian and never the fine one would apply.
+- **Control:** `mf:exact` reproduced the stored exact arm exactly (step 7: 19 / 233 applications; root:
+  263 forward, 392 transposed), with the replacement's operator within float32 rounding of the stored one
+  (2.4e-7 leading, 2.1e-8 trailing).
+- **`mf:compact`:** 600 applications without converging at every state reached, with true residuals of
+  0.40 (step 5), 1.3e-2 (step 7), 0.86 (step 15) and 5.0e-2 (root, forward), against 0.96 / 0.14 / 0.99 /
+  0.63 with the stored compact operator. The march's own solve also hit its restart cap at every step.
+- **Not reached:** the root's transpose, `mf:reach2` and `mf:reach1`. The run was stopped at a 22 GB
+  footprint. The cause was the harness, not the method: each product closed over the state, so its residual
+  intermediates were compiled in as constants, 11 times per program and in four programs per state. The
+  harness now routes them through `jacobian_matvec` with the state as an argument; its footprint is
+  unmeasured.
+
+So it is the compact Jacobian's smoother pieces and coarse operators, not the fine-level products, that
+cannot carry the couplings beyond reach 1.
+
+**What this does NOT close (a review, 2026-10-22).**
+- **A consistent compact operator.** Truncation zeroes far entries with no compensation, so it breaks row
+  sums and the structure aggregation relies on. A Jacobian of a consistently compact residual is a
+  different operator: first-order upwind, a compact gradient, and the strain rate stopped in the eddy
+  viscosity, the ADflow-style first-order preconditioner. That arm was registered as conditional on
+  truncation passing, which does not follow, so it remains open.
+- **Reach 2's transpose was not run to completion.** It stopped at the 600 cap at 6.4e-6, where 1.5× the
+  exact arm's 392 is about 590. A longer budget, or a restart longer than 15, was never tried, nor was
+  `mf:reach2`.
+
+**Consequence for memory.** Truncating the stored stencil is not the lever on this operator, with or without
+a matrix-free fine level. Reach 2 costs 1.2–1.9× the applications for 2.4× fewer stored entries on
+hexahedra.
+
+## A fully matrix-free fine level for the field split — EXACT with the stored Schur diagonal; an unbiased 32-sample estimate at weight 1.0 fails; NOT closed (2026-10-22)
+
+**What it was.** The `mff:` / `mffh:` arms of `validation/bfs3d_openfoam/compact_jacobian_screen.py`, on the
+`exact` truncation:
+- every fine-level product of both hierarchies is an exact Jacobian-vector product: the V-cycle residuals,
+  and the SIMPLE correction's divergence, velocity correction `F̃⁻¹G` and Schur `C − D F̃⁻¹G`;
+- so is the coupling block;
+- kept are only the per-cell velocity inverse, the diagonals, the prolongations and the coarse levels.
+
+All of the kept pieces except one are what a streamed probe could supply without holding the Jacobian.
+The exception is the Frobenius-optimal Schur diagonal `S_ii / |S_i|²` (`schur_frobenius`, the shipped
+default), whose row norms need `S`'s rows, and `S` is reach 6.
+
+**Configuration:** the same as the compact entry above (shipped `case.yaml` at `9ffe291b`, M3 Pro, the
+17-step march's `state-00006` → step 7 at β 0.005, and the root `state-00017`).
+
+| arm | step 7, march tol | step 7 to 1e-8 | root forward | root transpose |
+|---|---|---|---|---|
+| stored split (`exact`) | 19 | 233 | 263 | 392 |
+| `mff:exact` (stored Schur diagonal) | 19 | 233 | 263 | 392 |
+| `mffh:exact` (row norms from 32 random sign products) | 211 (cap) | 600 (1.6e-4) | 600 (2.0e-3) | 600 (0.77) |
+
+**Correctness:** every matrix-free product agrees with its stored counterpart to the stored copy's float32
+rounding (fine level 2.4e-7 / 2.1e-8, divergence 6e-7, velocity correction 4e-8, Schur 1.7e-7). Per
+application, 11 fine-level products and 3 SIMPLE corrections are traced through the replacements.
+
+**What it would save (bfs3d, device split, float32):** 887 of the split's 1271 MiB (70 %). That is the fine
+operators with their stored transposes, the leading fine level's divergence, velocity correction and Schur
+(67 / 67 / 133 MiB), and the coupling (177 MiB). The coarse levels keep 384 MiB. The host's fine-level
+copies (the probe's values, gather and maps) would go too; they were not measured here.
+
+**Why the realizable version fails.** The Schur relaxation is per-row and undamped, and a 32-sample estimate
+of `|S_i|²` has a median relative error of 0.12 (90th percentile 0.29, maximum 0.7). That alone takes step 7
+from 19 applications to the cap, and breaks the transpose. An exact `|S_i|²` needs either `S`'s rows
+formed, at least transiently, or a probe of `S` coloured on its reach-6 pattern. More samples converge as
+`1/sqrt(k)`, so they are not affordable.
+
+**Cost even when exact:** about 3x per application in this harness (0.91 s against about 0.3 s), plus about
+15 minutes to compile each matrix-free program.
+
+**Not measured:** the run's peak footprint. The watchdog's parse missed values below 10 GB, though it would
+have stopped the run above 12 GB.
+
+**Not tried, and the arm above is not a fair test of it.** `solve-flow-block.md` makes the Schur diagonal
+and `pressure_smoother_weight` one knob, and the estimate was swapped in at weight 1.0. Since
+`|S_i|² ≥ S_ii²`, an underestimate over-relaxes a row. An estimate biased high (clipped at `S_ii²` and
+inflated), or a short sweep of the weight, may well suffice at 32 samples. Also unaccounted: the saving
+above is steady-state only. The coarse levels are Galerkin products of the fine operator, so unless they
+are probed through the aggregates, a re-fit still holds the fine Jacobian and the peak, which is set inside
+the re-fits, does not fall by 887 MiB.
+
+**Reopen with** an exact, cheap `|S_i|²`: for instance, forming `S` in row chunks at the fit from transiently
+held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. Or with a Schur
+relaxation that needs no row norms and is shown to work: plain damped Jacobi is the one other candidate, and
+`solve-flow-block.md` records that an undamped one diverges.

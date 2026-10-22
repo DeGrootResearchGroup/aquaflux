@@ -764,6 +764,60 @@ Measured 2026-10-17 on the replay and moved to `solve-refuted-directions.md` ("A
 of the materialized Jacobian"). The updated Jacobian is no closer to a fresh probe than the stale one in
 any block, and the probe it would replace now costs ~1 s, about one refactor.
 
+## 14. Preconditioner memory for large polyhedral cases — what is left open (2026-10-22)
+
+**Context.** The goal was a k-ω SST case of a few hundred thousand polyhedral cells on an 18 GB laptop. Two
+attempts to shrink the split's storage are in `solve-refuted-directions.md`:
+- "TRUNCATING the Jacobian to reach 1": truncation refuted, a consistent compact operator untested;
+- "A fully matrix-free fine level": exact with the stored Schur diagonal, not closed.
+
+The harness for both is `validation/bfs3d_openfoam/compact_jacobian_screen.py`. The polyhedral stencil sizes
+are from `validation/polyhedral_stencil_size.py`. An independent review of the evidence concluded the
+preconditioner is probably not the lever for that goal: with the split removed, bfs3d's steady footprint is
+still about 4× the per-cell budget, and the compiled step's temporaries alone are about 44 KB a cell. **Take the
+measurement in 14a before any of 14b–14d.**
+
+### 14a. Attribute the compiled programs' temporaries — the deciding measurement
+
+**What.** `jit(...).lower(...).compile().memory_analysis()` on bfs3d's march step and on the probe's batched
+JVP, each compiled twice: with the shipped split and with an identity preconditioner. Compile only, no march.
+Optionally add one device-memory snapshot at the first re-fit's peak.
+
+**Why.** It splits the step's ~984 MiB of temporaries into the preconditioner's share and the residual
+JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_rows, width)` products.
+- If the residual's share alone exceeds the per-cell budget once projected by face count, which is about
+  2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
+- If the padded products dominate, 14b–14d are worth doing.
+
+### 14b. A consistent compact operator for the fit
+
+The Jacobian of a narrowed residual, compact by construction:
+- first-order upwind;
+- a compact Green–Gauss gradient;
+- the strain rate stopped in the eddy viscosity;
+- the continuity rows kept at Rhie–Chow's reach 2.
+
+It is fitted in place of the truncated one, through `_CoupledNarrowing`, the probe's existing seam. It
+differs from the refuted truncation by keeping row sums consistent. **Pass bar:** as in the screen, within
+1.3× the exact arm's applications at every state, the root's transpose included.
+
+### 14c. A biased-high Schur row-norm estimate for the matrix-free fine level
+
+The `mffh:` arm with `|S_i|²` estimated, then clipped below at `S_ii²` and inflated, swept jointly with
+`pressure_smoother_weight`.
+
+It would also need the coarse levels probed through the aggregates. Otherwise a re-fit still holds the fine
+Jacobian and the peak does not fall.
+
+### 14d. Arithmetic-preserving storage cuts
+
+None of these needs a convergence study:
+- build the padded operators' stored transposes only when the adjoint asks;
+- do not store the fine Schur on its structural reach-6 pattern (133 MiB on bfs3d);
+- narrower column indices.
+
+They are worth doing for bfs3d's own sake, but not for the 300k target.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
