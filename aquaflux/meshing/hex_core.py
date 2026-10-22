@@ -1,7 +1,7 @@
 """A core of hexahedra from a balanced octree, joined conformally where cube sizes change, its outer
 quadrilaterals capped with pyramids for a tetrahedral fill.
 
-**Which cubes.** An :class:`~aquaflux.meshing.Octree` of root cubes of the core's ``size``
+**Which cubes.** An :class:`~aquaflux.octree.Octree` of root cubes of the core's ``size``
 covers the region's box, is refined towards the region's boundary, and is balanced, so cubes
 sharing a face or part of an edge differ by at most one level. A leaf is kept when the region's
 boundary passes nowhere through the cube grown by ``clearance`` on every side and the cube's centre
@@ -50,9 +50,11 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from aquaflux.octree import Octree
+
 from .caps import ClearedCaps, capped
 from .elements import HEXAHEDRON_CORNERS
-from .octree import BITS, NearSurface, Octree, point_keys
+from .near_surface import NearSurface
 from .polygons import Polygons, PyramidCaps
 from .regions import ClosedSurface, Region
 
@@ -67,12 +69,6 @@ _UNUSED = -1
 #: kept only clear of every voxel the surface reaches, so a cube may be dropped up to a voxel
 #: beyond the clearance; a finer grid costs a register entry per triangle per voxel it spans.
 VOXELS_PER_WALL_CUBE = 4
-
-
-def _decode(keys: np.ndarray) -> np.ndarray:
-    """The integer coordinates ``point_keys`` encoded; shape ``(..., 3)``."""
-    mask = (np.int64(1) << BITS) - 1
-    return np.stack([keys >> (2 * BITS), (keys >> BITS) & mask, keys & mask], axis=-1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -282,7 +278,7 @@ class OctreeCore:
         keys = np.unique(
             np.concatenate([rings[rings != _UNUSED], centres, faces.hexahedra[whole].ravel()])
         )
-        points = tree.origin + 0.5 * tree.unit * _decode(keys)
+        points = tree.origin + 0.5 * tree.unit * Octree.coordinates(keys)
 
         def number(k):
             return np.where(k == _UNUSED, _UNUSED, np.searchsorted(keys, k))
@@ -340,9 +336,9 @@ class _CubeFaces:
         lower = 2 * tree.corner[leaves]
         edge = 2 * tree.span[leaves][:, None]
         offsets = 2 * tree.corner[:, None, :] + 2 * tree.span[:, None, None] * HEXAHEDRON_CORNERS
-        corners = np.unique(point_keys(offsets))  # every leaf's corners, kept or not
-        self.centre = point_keys(lower + edge // 2)
-        self.hexahedra = point_keys(lower[:, None, :] + edge[:, :, None] * HEXAHEDRON_CORNERS)
+        corners = np.unique(Octree.keys(offsets))  # every leaf's corners, kept or not
+        self.centre = Octree.keys(lower + edge // 2)
+        self.hexahedra = Octree.keys(lower[:, None, :] + edge[:, :, None] * HEXAHEDRON_CORNERS)
 
         def present(keys):
             position = np.minimum(np.searchsorted(corners, keys), corners.size - 1)
@@ -358,9 +354,9 @@ class _CubeFaces:
             middle = (corner + np.roll(corner, -1, axis=1)) // 2  # middle[i] after corner[i]
             sides.append(
                 (
-                    point_keys(corner),
-                    point_keys(middle),
-                    point_keys((corner[:, 0] + corner[:, 2]) // 2),
+                    Octree.keys(corner),
+                    Octree.keys(middle),
+                    Octree.keys((corner[:, 0] + corner[:, 2]) // 2),
                 )
             )
         halved = np.stack([present(middle) for _, middle, _ in sides], axis=1)

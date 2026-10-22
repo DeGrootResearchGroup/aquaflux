@@ -8,7 +8,8 @@ from the tree's own neighbour search, so a fault in that search cannot hide a fa
 from __future__ import annotations
 
 import numpy as np
-from aquaflux.meshing import NearSurface, Octree, SampledRegion
+from aquaflux.meshing import NearSurface, SampledRegion
+from aquaflux.octree import Octree
 
 CENTRE, RADIUS = np.array([0.4, 0.4, 0.4]), 0.2
 BOX = 1.5

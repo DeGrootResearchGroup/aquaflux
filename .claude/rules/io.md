@@ -251,6 +251,14 @@ patch. Used by `case.PatchVtk`. Checked in ParaView against a run's `incident_po
 boundary (a mesh file's drawing, for the browser's face picker) as one `.vtp`, shared corners written once
 (`np.unique` of the corners), a value per triangle as `CellData` (`face`); built on `vtp_parts`.
 
+`io/vtk/writer.py::write_hexahedra(points, corners, path, *, point_fields=None, cell_fields=None, binary=True)`:
+axis-aligned cells that are no mesh's (an octree's leaves, `aquaflux.octree.SampledField.hexahedra()`) as
+`VTK_HEXAHEDRON`, values at the points (`PointData`, `vtu_parts(point_fields=)`) and per cell. Corners come
+in binary order (corner `4i+2j+k` at `(i,j,k)`, `aquaflux.octree.tree.CORNERS`) and are mapped to VTK's in one
+place, `_BINARY_TO_VTK_HEXAHEDRON`. A coarse leaf beside finer ones is written with its own eight corners,
+so a viewer draws it from those even where the octree's own interpolant uses the finer nodes on its faces.
+Pinned by `tests/unit/test_vtk_hexahedra.py`.
+
 ## The two field writers share a helper, not a contract
 
 `write_vtu(mesh, fields, path)` and `write_openfoam_time(case, time, fields, mesh)` are deliberately not one

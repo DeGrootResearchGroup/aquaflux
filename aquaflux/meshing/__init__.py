@@ -23,7 +23,7 @@ tetrahedra, triangular prisms, hexahedra and pyramids.
 
 :class:`OctreeCore` builds a core of hexahedra inside a :class:`Region` -- the region a closed
 triangle surface bounds (:class:`ClosedSurface`), or an inside test (:class:`SampledRegion`) --
-from a balanced :class:`Octree` refined towards its boundary (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
+from a balanced :class:`~aquaflux.octree.Octree` refined towards its boundary (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
 tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
 are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
 
@@ -74,7 +74,7 @@ from .divisions import Graded, cell_counts
 from .layers import LayerExtrusion, PrismLayers
 from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
-from .octree import NearSurface, Octree, RefinementCriterion
+from .near_surface import NearSurface
 from .pipe_core import PipeCore, PipeCoreFill
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
@@ -109,7 +109,6 @@ __all__ = [
     "MeshingError",
     "NearSurface",
     "NetgenProcess",
-    "Octree",
     "OctreeCore",
     "PipeCore",
     "PipeCoreFill",
@@ -120,7 +119,6 @@ __all__ = [
     "PolyhedralDual",
     "PrismLayers",
     "PyramidCaps",
-    "RefinementCriterion",
     "Region",
     "RegionFaces",
     "SampledCurve",

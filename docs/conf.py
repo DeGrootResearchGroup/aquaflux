@@ -40,6 +40,7 @@ PUBLIC_SUBPACKAGES = [
     "radiation",
     "case",
     "solids",
+    "octree",
     "io.cad",
     "meshing",
 ]
@@ -77,7 +78,7 @@ SUBPACKAGE_GROUPS = {
         ("Pipes, and their cores as structured O-grids", ["pipes", "pipe_core"]),
         ("Surfaces of triangles and quadrilaterals, and pyramid caps", ["polygons", "caps"]),
         ("A mesh of tetrahedra, prisms, hexahedra and pyramids", ["elements"]),
-        ("An octree hexahedral core", ["octree", "hex_core", "regions"]),
+        ("An octree hexahedral core", ["near_surface", "hex_core", "regions"]),
         ("Hexahedral blocks", ["blocks", "divisions", "surfaces", "block_assembly"]),
         ("Block lattices and round layouts", ["lattices", "block_topologies"]),
         ("Netgen, in a child process", ["netgen_process"]),
@@ -190,6 +191,11 @@ SUBPACKAGE_GROUPS = {
     ],
     "solids": [
         ("Solid bodies, their combinations, and fluid regions", ["bodies"]),
+    ],
+    "octree": [
+        ("Sampling a field adaptively", ["sampling"]),
+        ("The tree and its interpolant", ["tree", "hierarchy"]),
+        ("The region's boundary", ["cuts", "ghosts"]),
     ],
     "turbulence": [
         ("The k-ω SST model", ["sst", "transport", "sources", "strain"]),

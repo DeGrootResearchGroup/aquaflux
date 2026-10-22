@@ -15,7 +15,9 @@ The generic packages had the same blind spot later: ``schemes/gradient.py`` and
   depends on a concrete preconditioner. The same holds for ``solids/``: its bodies were written for the
   radiation model's shadows and lived inside it, and a solid body names no physics, so a computer-aided
   design (CAD) reader or any other consumer can use them only while they import nothing from a physics
-  package.
+  package. ``octree/`` holds the octree and samples a field over a region on an adaptive one; the
+  sampler was written for the fluence rate and the tree for mesh generation, and it takes the field as
+  a callable and the region as a solid, so neither consumer waits on the other's package.
 * :func:`test_a_module_stays_below_the_size_at_which_misplaced_code_hides_in_it` -- a size ratchet on
   every module of the package, physics and generic alike, with each over-size module's current size as
   its budget.
@@ -138,6 +140,8 @@ GENERIC_PACKAGES = {
     "one that needs a physics package to be built is not residual-agnostic",
     "solids": "plain geometry, and a solid body that needs a physics package to be described is in "
     "the wrong package",
+    "octree": "the octree the mesher and the sampler share, and adaptive sampling of any field over any "
+    "region; a tree or a sampler that needs a physics package is not generic",
 }
 
 #: The generic packages each generic package is built on. ``solve`` is on nothing, so the march can be

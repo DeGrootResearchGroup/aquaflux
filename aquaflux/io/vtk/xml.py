@@ -194,6 +194,7 @@ def vtu_parts(
     cells: VtkCells,
     fields: Iterable[CellField] = (),
     *,
+    point_fields: Iterable[CellField] = (),
     binary: bool = True,
 ) -> tuple[bytes | memoryview, ...]:
     """Serialize one unstructured-grid piece as the parts of a ``.vtu`` document.
@@ -204,6 +205,9 @@ def vtu_parts(
         Points and connectivity, from :func:`~aquaflux.io.vtk.topology.build_vtk_cells`.
     fields : iterable of CellField, optional
         Cell-centred fields, from :func:`cell_data_arrays`. Default: no fields, i.e. the mesh alone.
+    point_fields : iterable of CellField, optional
+        Fields at the points, shaped the same way (one row per point), written as VTK ``PointData``.
+        Default: none.
     binary : bool, optional
         Write the numeric arrays as raw bytes in an appended block (default), or as decimal text
         inline. Text is for reading a small mesh by eye; it carries the same values but is several
@@ -218,6 +222,7 @@ def vtu_parts(
     """
     arrays = _Arrays(binary)
     fields = tuple(fields)
+    point_fields = tuple(point_fields)
     lines = [
         '<?xml version="1.0"?>',
         f'<VTKFile type="UnstructuredGrid" version="1.0" byte_order="{_BYTE_ORDER}" '
@@ -237,6 +242,10 @@ def vtu_parts(
         lines.append(arrays.tag(_narrowed(cells.faces), "faces", indent=" " * 8))
         lines.append(arrays.tag(_narrowed(cells.face_offsets), "faceoffsets", indent=" " * 8))
     lines.append("      </Cells>")
+    if point_fields:
+        lines.append("      <PointData>")
+        lines.extend(arrays.tag(field.values, field.name, indent=" " * 8) for field in point_fields)
+        lines.append("      </PointData>")
     lines.append("      <CellData>")
     lines.extend(arrays.tag(field.values, field.name, indent=" " * 8) for field in fields)
     lines.extend(["      </CellData>", "    </Piece>", "  </UnstructuredGrid>"])

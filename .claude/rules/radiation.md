@@ -780,6 +780,13 @@ code; a change to those formulas must update it. Record: log → `[rule text] Do
 Records: log → "THE SCENE: LAMPS KEPT OUT OF THE TRANSFER…", "#604 STEP 1…", and `[rule text] THE SCENE…`
 (the #622 and #667 measurements and mutation passes).
 
+### `fluence_rate_at(scene, points)`: the scene as a sampler (#726)
+
+`scene.py::fluence_rate_at` solves the scene with `points` as its only receivers (its own `volume` and
+`surfaces` dropped) and returns `G`; `aquaflux.octree.sample_adaptively` calls it once per pass with that
+pass's new points. ⚠️ A scene that exchanges light re-solves the exchange on every call: fine for black
+walls, wasteful with reflectors (a scene that solves once and gathers many times is not built).
+
 ### #604: sequencing, and transparent solids (step 2)
 
 #604 is sequenced by capability: (1) emitters that also reflect (done); (2) transparent solids; (3) the

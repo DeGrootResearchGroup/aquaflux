@@ -306,6 +306,14 @@ the numbers.
   sleeve's own value (G = 2M at a diffuse emitter's surface) as data. Run at most five tracker runs at once
   in Docker's VM.
 
+- `sozzi_radiation/adaptive_grid.py` samples `G` on an adaptive octree (`aquaflux.octree.sample_adaptively`)
+  and compares it with uniform grids against the gather at 14,000 random water points banded by distance
+  from the sleeve, all from the drawing (no mesh). Stages `ripple`, `reference`, `grids`, `summary`
+  (`SOZZI_ADAPTIVE_STAGE`, `SOZZI_ADAPTIVE_ARMS`; `work/adaptive/`). An arm's name is its configuration
+  (`uniform_h<mm>` / `adaptive_t<tol>`, then `_s<mm>` standoff, `_l<levels>`, `_m<min_level>`; unnamed,
+  the library's standoff). The README table is the record; dated detail in the log. ⚠️ The dose was not
+  run (it needs the uvmesh mesh and tracker).
+
 ## `tubular_reactor` — ten lamps on a background grid
 
 Radiation only: 10 Sozzi lamps in a 300 mm vessel, a 100-hole perforated inlet plate, walls reflecting 0.1;

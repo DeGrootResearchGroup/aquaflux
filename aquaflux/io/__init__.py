@@ -18,7 +18,8 @@ state can be viewed beside the solution it is validated against, post-processed 
 or used to restart a run, and :func:`read_openfoam_time` is its inverse, reading a time directory's
 fields back onto a mesh -- a run's starting state. :func:`write_vtu` instead writes the mesh *and* its fields as one
 self-contained VTK XML file, which needs no case to write into and so is the path for a mesh that
-came from anywhere; :func:`write_pvd` indexes a series of those as one transient dataset.
+came from anywhere; :func:`write_pvd` indexes a series of those as one transient dataset, and
+:func:`write_hexahedra` writes axis-aligned hexahedra with no mesh at all -- an octree's leaves.
 
 Geometry comes in from computer-aided design (CAD) as well as from meshes: :mod:`aquaflux.io.cad`
 reads a STEP drawing into exact :mod:`aquaflux.solids` bodies — each checked against the drawing
@@ -53,7 +54,7 @@ from .openfoam import (
 )
 from .reader import MeshReader
 from .writer import MeshWriter
-from .vtk import write_patches, write_pvd, write_triangles, write_vtu
+from .vtk import write_hexahedra, write_patches, write_pvd, write_triangles, write_vtu
 
 __all__ = [
     "AQMESH_SUFFIX",
@@ -74,6 +75,7 @@ __all__ = [
     "read_surface_scalar_field",
     "read_volume_scalar_field",
     "write_aqmesh",
+    "write_hexahedra",
     "write_openfoam",
     "write_openfoam_field",
     "write_openfoam_time",

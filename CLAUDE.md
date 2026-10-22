@@ -51,6 +51,7 @@ Checklist still governs).
 | `.claude/rules/parallel.md` | `aquaflux/parallel/**` | distributed memory: graph partitioners, the `PartitionedMesh` owned+halo decomposition, uniform-shape padding, and the `shard_map` residual that runs an *injected* assembler per device (never a re-implementation) |
 | `.claude/rules/radiation.md` | `aquaflux/radiation/**` | ultraviolet fluence rate `G` by a deterministic backward gather over surface facets: the solid-angle kernels and why they are not interchangeable, the load-bearing numerical details, the `F_ii = 0` convention; the scene (`solve_scene`) and transparent solids (refraction) |
 | `.claude/rules/solids.md` | `aquaflux/solids/**` | solid bodies answered by formula rather than search: the `Body` contract, analytic primitives, constructive solid geometry, `Outside`; generic geometry, held to the same import-nothing rule as `solve/` |
+| `.claude/rules/octree.md` | `aquaflux/octree/**`, `tests/unit/test_octree.py` | the octree (one lattice of root cubes, leaves as level + lower corner) shared by the mesher's hex core and the adaptive sampler; the sampler's hierarchical interpolant, cut points, ghosts and probes; generic, imports nothing |
 | `.claude/rules/meshing.md` | `aquaflux/meshing/**` | mesh generation from STEP (phase 1 built: STEP → Netgen tets → dual, a mesh file → `.aqmesh`): one conformal hybrid primal mesh, then one feature-preserving dual; Netgen only in a child process |
 | `.claude/rules/ui.md` | `aquaflux_ui/**`, `tests/ui/**` | the browser interface `aquaflux-ui` (`ui` extra; Mesh / Setup / Run / Results): the binding independence rule (imports neither `aquaflux` nor `jax`, and the solver never imports it — tested), the `ResultSource` seam, the render-free `Pipeline` and its large-mesh policy, the trame page |
 | `.claude/rules/case.md` | `aquaflux/case/**`, `aquaflux/__main__.py`, `validation/*/case.yaml`, `validation/*/cases/*.yaml` | a whole case in one YAML file: the `CaseSpec` core, physics and drive, one physical kind per boundary patch, the fluid stated once, the YAML 1.2 parse, the build, the solver section, `aquaflux run` and its run records, the `initial` section (`Checkpoint`, `Fields`) |
@@ -69,7 +70,7 @@ Checklist still governs).
 | `.claude/notes/solve-open-directions.md` | the backlog of unmeasured solver speed-up directions |
 | `.claude/notes/claude-md-log.md` | this file's rules (the incidents and measurements behind them) |
 | `.claude/notes/module-review-rubric.md` | not a log: the two-pass Module Review Rubric, read when a review is asked for |
-| `.claude/notes/{case,validation,io,mesh,meshing,discretization,parallel,ui,solids,boundary,solve-field-split}-log.md` | the matching rule |
+| `.claude/notes/{case,validation,io,mesh,meshing,octree,discretization,parallel,ui,solids,boundary,solve-field-split}-log.md` | the matching rule |
 
 ### Writing the design records (binding)
 

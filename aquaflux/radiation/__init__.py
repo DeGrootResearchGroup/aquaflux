@@ -176,6 +176,7 @@ from aquaflux.radiation.scene import (
     SceneSolution,
     SurfaceReceivers,
     VolumeReceivers,
+    fluence_rate_at,
     solve_scene,
     subtriangle_centroids,
 )
@@ -262,6 +263,7 @@ __all__ = [
     "direct_irradiance",
     "enclosure_winding",
     "fluence_rate",
+    "fluence_rate_at",
     "fresnel_transmittance",
     "lamp_exitance",
     "mirrored_fluence_rate",

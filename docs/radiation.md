@@ -625,6 +625,63 @@ settings make that affordable:
 [Reactor geometry from CAD](cad_geometry.md) walks through both paths on a 1.6-million-cell
 reactor, with timings.
 
+## The fluence rate without a mesh: an adaptive grid
+
+The fluence rate at a point is an independent sum over the lamp, so it needs no mesh at all — only
+points. A uniform grid of points wastes most of them, though: the field is smooth almost everywhere,
+and nearly all the error of interpolating it sits in the first millimetres around a lamp sleeve,
+where it falls off steeply. {func}`~aquaflux.octree.sample_adaptively` samples it on an octree
+instead, refined only where the field needs it:
+
+1. gather `G` at the nodes of a coarse grid of the water, and at **cut points**: where a cell's edge
+   crosses the water's boundary — the sleeve, the vessel wall — a small standoff inside the water;
+2. split the cells, gather only the new points, and compare each with what the coarser grid
+   predicted there. That **miss** is the interpolation error the coarser grid made, measured rather
+   than estimated. A cell the boundary cuts is also gathered at its centre: its corners outside the
+   water carry fitted values, so its own corners and cut points cannot show how far it misses
+   between them;
+3. split again wherever a miss exceeds the tolerance, until nothing is split or the deepest level
+   is reached.
+
+Every gathered value is kept as it is. The interpolant is a sum of hat functions, level by level,
+so it is continuous where a coarse cell meets finer ones and passes through every node gathered; a
+node outside the water is given a value fitted to the cut points beside it, so the cells the sleeve
+cuts are interpolated between the gathered values on both sides of the gap rather than
+extrapolated. The result interpolates to any points — a flow mesh's cell centres, for a dose:
+
+```python
+from aquaflux.octree import Logarithm, sample_adaptively
+from aquaflux.radiation import NoOcclusion, RadiationSettings, Scene, fluence_rate_at
+
+scene = Scene(
+    lamps=lamp,
+    occluders=(vessel,),
+    absorption=medium,
+    settings=RadiationSettings(self_occlusion=NoOcclusion()),
+)
+field = sample_adaptively(
+    lambda points: fluence_rate_at(scene, points),
+    water,  # a solid: the vessel's fluid less the lamp
+    low=box_low,
+    high=box_high,  # a box holding the water, with room around it
+    spacing=0.008,  # the coarse grid
+    depth=4,  # halved at most four times: 0.5 mm
+    tolerance=0.01,  # on ln G: about one per cent
+    transform=Logarithm(floor=1.0),
+)
+G = field(cell_centres)
+```
+
+Interpolating `ln G` makes the tolerance relative, and suits a field that falls off roughly
+exponentially. The floor (in W/m²) is where the tolerance stops applying: below it a miss counts as
+zero, so a shadow edge in water that carries almost no light — far up an outlet pipe — is not chased
+to the deepest level. Cut points lie a small standoff inside the water, by default a thousandth of
+the finest cell: a point on a triangulated lamp's surface can lie in a facet's plane, where the
+field is not defined, while any point of the drawn water is clear of a convex lamp's facets, which
+lie inside its drawn surface. Where a lamp is concave its facets bulge past the drawing; pass a
+`standoff` beyond its chord tolerance there. `field.hexahedra()` gives the leaves as hexahedra for
+`aquaflux.io.write_hexahedra`, to look at in ParaView.
+
 ## Air disinfection
 
 Nothing in the model is specific to water: an in-duct or upper-room air system is the same

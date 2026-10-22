@@ -1102,3 +1102,16 @@ defaults; one run per arm, back to back; peak sampled every 20 s.
   distinguished.
 - **Without the floor the ranking was 5 < 4 < 3 (failed)**; with it, 4 < 3 < 5. The unfloored ranking was
   rounding's, as PR #766's diagnosis predicts.
+
+## `sozzi_radiation/adaptive_grid.py`: the adaptive octree against uniform grids (2026-10-16, #726)
+
+Linux x86_64, 4 cores, jax 0.11.2, Python 3.13.16; lamp 25,876 facets (chord 5e-5, facet 4 mm), 35.417 W;
+absorption 35.67 /m, black walls; ln G floored at 1 W/m2; adaptive roots 16 mm, `min_level` 1, 5 levels
+unless `_l`. Headline (tolerance 0.05, probes, default standoff 0.5 um, 1.09M samples): 1-2 mm 0.16 % median
+/ 0.82 % p99, against uniform 2 mm's better standoff 0.81 / 5.0 %; it beats uniform 2 mm in every band
+within 5 mm at 1.3-1.5x its samples. ⚠️ The issue's acceptance (4 mm's error everywhere at a fraction of its
+points) is NOT met: the bulk (>10 mm) stays at 0.26-0.30 % median against 4 mm's 0.15-0.17 %. A tiny
+standoff HURTS a uniform grid (4 mm, 1-2 mm median 2.0 % -> 4.0 %): a sample on the sleeve's steep, convex
+profile joined linearly across a coarse cell overshoots. One more level (0.25 mm cells) doubled the samples
+and moved nothing beyond 0.5 mm. Records renamed `_s0.5` were taken at a 0.5 mm standoff; `no_probes/` holds
+the arms before the probes. Full table: `validation/sozzi_radiation/README.md`.

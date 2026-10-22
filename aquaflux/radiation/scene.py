@@ -543,6 +543,35 @@ def solve_scene(
     )
 
 
+def fluence_rate_at(scene: Scene, points) -> np.ndarray:
+    """The scene's fluence rate at some points, in W/m²: the scene solved with them as its volume.
+
+    What an adaptive sampler of the fluence rate calls, pass after pass, with only the points it has
+    not sampled yet (:func:`aquaflux.octree.sample_adaptively`). The scene's own volume points and
+    surface points are left out, so each call gathers at these points alone.
+
+    ⚠️ A scene whose surfaces exchange light -- reflectors, or a lamp that reflects -- solves that
+    exchange afresh at every call, which costs far more than the gather when the call is small.
+
+    Parameters
+    ----------
+    scene : Scene
+    points : array_like, shape ``(n, 3)``
+        Points in the medium.
+
+    Returns
+    -------
+    np.ndarray, shape ``(n,)``
+
+    Raises
+    ------
+    ValueError
+        As :func:`solve_scene`, for a point inside a body.
+    """
+    alone = dataclasses.replace(scene, volume=VolumeReceivers(points), surfaces={})
+    return solve_scene(alone).fluence_rate
+
+
 @dataclasses.dataclass(frozen=True)
 class _Exchange:
     """The facets that exchange reflected light: every reflector, then every areal lamp facet.
