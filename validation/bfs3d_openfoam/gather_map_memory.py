@@ -53,7 +53,13 @@ import numpy as np
 # harnesses in this directory do.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from aquaflux.precondition.sparse_jacobian import (ColumnProbePlan, ProbeGather, block_stencil_colouring, block_stencil_gather_map,)
+import jax.numpy as jnp
+from aquaflux.precondition.sparse_jacobian import (
+    ColumnProbePlan,
+    ProbeGather,
+    block_stencil_colouring,
+    block_stencil_gather_map,
+)
 
 
 def peak_bytes() -> int:
@@ -121,9 +127,12 @@ def check(side: int, reach: int, n_fields: int) -> None:
     n, nf = plan.n_cells, plan.n_fields * plan.n_cells
     responses = np.arange(plan.n_probes * nf, dtype=np.float64).reshape(plan.n_probes, nf)
 
-    data = np.zeros(gather.nnz)
-    for start in range(plan.n_probes):
-        gather.scatter(data, responses[start : start + 1], start, 1)
+    chunks = [(0, start, 1) for start in range(plan.n_probes)]
+    width = gather.width(chunks)
+    data = jnp.zeros(gather.nnz)
+    for _, start, count in chunks:
+        data = gather.scatter(data, jnp.asarray(responses[start : start + 1]), start, count, width)
+    data = np.asarray(data)
 
     # Every entry the map filled must hold the response element its (row, column) implies. Derived for
     # all entries at once rather than by walking rows: at this pattern's size a Python loop over the

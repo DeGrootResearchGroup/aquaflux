@@ -24,7 +24,6 @@ from typing import Protocol, runtime_checkable
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 __all__ = ["OffersTracedCycle", "TracedCycle", "TracedForm", "TracedSingleBlock"]
 
@@ -50,32 +49,6 @@ def in_precision(tree, precision: str):
         ),
         tree,
     )
-
-
-def host_in_precision(values: np.ndarray, precision: str) -> np.ndarray:
-    """``values`` rounded to ``precision`` exactly as :func:`in_precision` rounds an array leaf.
-
-    For an operator held on the host in the precision its traced form is applied in. The conversion
-    runs through JAX rather than numpy because the two differ below the single-precision normal range:
-    JAX's CPU conversion flushes such a value to a signed zero, numpy's cast keeps it as a subnormal.
-    Rounding here and composing the traced form afterwards therefore gives the same entries, bit for
-    bit, as composing it from the double values and rounding there.
-
-    Parameters
-    ----------
-    values : np.ndarray
-        Floating-point values, any shape.
-    precision : {"float64", "float32"}
-        The floating-point type to round to.
-
-    Returns
-    -------
-    np.ndarray
-        ``values`` itself when it is already in ``precision``; otherwise a new writable array.
-    """
-    if values.dtype == np.dtype(precision):
-        return values
-    return np.array(jnp.asarray(values).astype(precision))
 
 
 class TracedCycle(eqx.Module):

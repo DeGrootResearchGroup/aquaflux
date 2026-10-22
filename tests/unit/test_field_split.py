@@ -628,6 +628,74 @@ def test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path(
     np.testing.assert_allclose(split._trailing.fitted, want_trailing.toarray(), rtol=0, atol=1e-12)
 
 
+def test_a_refit_probed_into_blocks_stays_on_the_device_and_fits_what_the_host_cut_fits() -> None:
+    """Blocks probed on the device reach both hierarchies and the coupling without a host read-back.
+
+    The values, the shift and the coupling stay on the device from the probe to the fit, so nothing in
+    the refit may read a block back to the host; and the fit must be the one the host path gives from
+    the whole shifted matrix, cut and handed over as host blocks -- the same hierarchies, entry for
+    entry, and the same coupling. The coupling's host copy is made only when something reads it.
+    """
+    import jax.numpy as jnp
+    from aquaflux.precondition import field_split, hierarchy_inverse
+    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+
+    n_cells = 200
+    groups = FieldGroups.by_counts(n_cells, n_leading_fields=2, n_trailing_fields=2)
+    rng = np.random.default_rng(11)
+    coupling = sp.random(2 * n_cells, 2 * n_cells, density=0.01, random_state=4, format="csr")
+
+    def operator(scale: float) -> sp.csr_matrix:
+        whole = sp.bmat(
+            [
+                [_nodal_block(n_cells, seed=0), None],
+                [scale * coupling, _nodal_block(n_cells, seed=1)],
+            ]
+        )
+        return sp.csr_matrix(whole * scale)
+
+    def build() -> FieldSplitInverse:
+        leading, _, trailing_by_leading, trailing = groups.blocks(operator(1.0))
+        return FieldSplitInverse(
+            JacobiSmoothedInverse(leading, 2),
+            JacobiSmoothedInverse(trailing, 2),
+            trailing_by_leading,
+            groups,
+            stored_precision="float32",
+        )
+
+    on_device, on_host = build(), build()
+    developed = operator(1.7)
+    shift = rng.uniform(1.0, 2.0, groups.n_dofs)
+    layout, order = BlockLayout.of(developed, groups.n_leading_dofs)
+    probed = ProbedBlocks(jnp.asarray(developed.data[order]), layout)
+    probed.add_shift(jnp.asarray(shift))
+
+    def no_host(_block):
+        raise AssertionError("a refit probed on the device read a block back to the host")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(field_split, "as_scipy", no_host)
+        patch.setattr(hierarchy_inverse, "as_scipy", no_host)
+        on_device.refactor_blocks(probed.blocks())
+    assert on_device._host_coupling is None
+    on_host.refactor_block(developed + sp.diags(shift))
+
+    for side in ("_leading", "_trailing"):
+        device_leaves = jax.tree.leaves(getattr(on_device, side).traced_cycle().state)
+        host_leaves = jax.tree.leaves(getattr(on_host, side).traced_cycle().state)
+        assert len(device_leaves) == len(host_leaves)
+        for got, want in zip(device_leaves, host_leaves, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+    want = groups.blocks(developed)[2].toarray()
+    assert on_device.coupling.dtype == np.float32
+    np.testing.assert_array_equal(on_device.coupling.toarray(), on_host.coupling.toarray())
+    np.testing.assert_allclose(on_device.coupling.toarray(), want, rtol=1e-7, atol=0)
+    np.testing.assert_array_equal(
+        np.asarray(on_device.padded_coupling().values), np.asarray(on_host.padded_coupling().values)
+    )
+
+
 def test_narrowing_a_hierarchy_replaces_each_double_level_in_the_list_it_is_given() -> None:
     """``_narrowed`` consumes its list, so the double levels go one at a time, not all at the end.
 

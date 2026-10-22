@@ -40,10 +40,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1]))
 
+import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.precondition import FieldGroups  # noqa: E402
 from aquaflux.precondition import field_split as field_split_module  # noqa: E402
+from aquaflux.precondition.entry_map import DeviceMatrix, SparsePattern, as_scipy  # noqa: E402
 
 STORE = Path(os.environ.get("PITZ_REFIT_STORE", HERE / "refit_matrices"))
 MODE = os.environ.get("PITZ_REFIT_MODE", "profile")
@@ -89,17 +91,17 @@ BLOCK_NAMES = ("ll", "lt", "tl", "tt")
 def _save(name: str, blocks: tuple[sp.spmatrix, ...]) -> None:
     STORE.mkdir(exist_ok=True)
     for block_name, block in zip(BLOCK_NAMES, blocks, strict=True):
-        sp.save_npz(STORE / f"{name}-{block_name}.npz", sp.csr_matrix(block), compressed=False)
+        sp.save_npz(STORE / f"{name}-{block_name}.npz", as_scipy(block), compressed=False)
     sizes = ", ".join(
         f"{b}: {block.shape} {block.nnz}" for b, block in zip(BLOCK_NAMES, blocks, strict=True)
     )
     print(f"[refit_profile] saved {name}: {sizes}", flush=True)
 
 
-def _load(name: str) -> tuple[sp.csr_matrix, ...]:
-    return tuple(
-        sp.load_npz(STORE / f"{name}-{block_name}.npz").tocsr() for block_name in BLOCK_NAMES
-    )
+def _load(name: str) -> tuple[DeviceMatrix, ...]:
+    """A captured operator's blocks on the device, as the march hands them to the split."""
+    blocks = (sp.load_npz(STORE / f"{name}-{block_name}.npz").tocsr() for block_name in BLOCK_NAMES)
+    return tuple(DeviceMatrix(SparsePattern.of(b), jnp.asarray(b.data)) for b in blocks)
 
 
 def capture() -> None:

@@ -65,7 +65,7 @@ table for the old continuation builders is in `turbulence.md`.
   never the operator solved. One user: the pivot floor (`solve.md`, `PivotFloor`). Default `None` is
   byte-identical. **Both re-fit paths add the shift through `_fitted_shift`** (the whole matrix, and a
   field split probed straight into its blocks, which never forms it and reads the diagonal through
-  `ProbedBlocks.diagonal()`); a test observes the fit by spying on it. ⚠️ A correction wired on the
+  `ProbedBlocks.diagonal()`, a device array; the shift is a device array from `frozen_shift_diagonal`); a test observes the fit by spying on it. ⚠️ A correction wired on the
   whole-matrix path alone silently never reaches a field split, the only inverse the step cases ship
   (#763 merging #766). Pinned by `test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path`.
 - **`refresh_in_place` returns one shape across the family**: the `("probe", s), ("assemble", s),
@@ -97,19 +97,25 @@ bare block inverse).
   log, "Saturation colouring and its bucket queue".
 - **A probe feeding a field split is laid out by the split's blocks** (`block_stencil_gather_map(plan,
   leading_fields=)` -> `ProbeGather.layout`, a `BlockLayout`; `materialize_blocks` -> `ProbedBlocks`):
-  one block-major value array, each block a CSR view of its slice (assigned, not passed to scipy's
-  constructor, which copies a view), the shift added in place at the stored diagonal (refused if one is
-  missing). `materialize_block_jacobian` refuses such a structure; `refresh_in_place` takes the block
-  path when `structure.layout` is set and calls `_refactor_blocks`, which only `FieldSplitPreconditioner`
-  implements.
+  one block-major value array **on the device** (2026-10-22), each block an `entry_map.DeviceMatrix` of
+  its slice over a host `SparsePattern` the layout owns (`SparsePattern.of_arrays`, so a hierarchy fitted
+  to that block shares it rather than holding a copy), the shift added at the stored diagonal by one
+  donated scatter (`_add_at`; refused if a diagonal entry is missing). `materialize_block_jacobian`
+  refuses such a structure; `refresh_in_place` takes the block path when `structure.layout` is set and
+  calls `_refactor_blocks`, which only `FieldSplitPreconditioner` implements. A refit on this path reads
+  nothing back to the host but the pivot floor's row set (`solve-field-split.md`, "Refresh").
 - **A materialize holds the matrix plus one chunk.** Seeds are filled one chunk at a time into a reused
   buffer (`ColumnProbePlan.seed_block(start, stop, out=)` for whole-state seeds, `field_seeds` for one
   field's; one shape per program, so each batched map compiles once), and **a chunk never spans two
   column fields** (`ColumnProbePlan.field_chunks`; each field's last chunk may be short and is padded, so
   a materialize makes up to `n_fields − 1` more calls than `ceil(n_probes / batch)`; `probe_batch_size=None`
   is one batch per field),
-  and `ProbeGather` scatters each chunk's responses as they are computed; out-of-reach entries need no
-  sentinel. The gather map's one-time build (`_index_dtype`, COO→CSR grouping) runs at case construction
+  and `ProbeGather` scatters each chunk's responses as they are computed, **on the device** (2026-10-22):
+  the probe-grouped order (`_source`, `_position`) lives there, `_ChunkProbe.responses` returns device
+  arrays, and `_scatter_chunk` (one jit, `donate_argnums=0`) places a chunk through `ProbeGather.width`
+  lanes (the most entries any chunk fills), so one program serves every chunk; a lane past the chunk's
+  end is dropped (`mode="drop"`). `ProbeGather.values(probing)` is the loop; the whole-matrix path reads
+  the values back once at its end. Out-of-reach entries need no sentinel. The gather map's one-time build (`_index_dtype`, COO→CSR grouping) runs at case construction
   and peaks above any single materialize. Measurements: log, "Chunked seeds and per-chunk
   de-compression" and "The gather map's build peak".
   - **Batch size:** `PROBE_BATCH_SIZE = 8` (`materialized_session.py`), where processor time bottomed on

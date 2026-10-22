@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from .entry_map import as_scipy
 from .multigrid import (
     FrozenCoarsening,
     ShapeBudget,
@@ -327,8 +328,10 @@ class HierarchyBlockInverse:
 
         Parameters
         ----------
-        block : scipy.sparse matrix
-            The group's new diagonal block, field-major, of the shape this was built at.
+        block : scipy.sparse matrix or DeviceMatrix
+            The group's new diagonal block, field-major, of the shape this was built at. A refit fits a
+            :class:`~aquaflux.precondition.entry_map.DeviceMatrix` from its values on the device; only a
+            re-coarsening reads it back to the host.
 
         Raises
         ------
@@ -336,19 +339,18 @@ class HierarchyBlockInverse:
             If the new block's shape differs from the built one -- silently re-fitting to a different
             operator would give a preconditioner for a system nothing is solving.
         """
-        matrix = sp.csr_matrix(block)
-        if matrix.shape != (self._n_dofs, self._n_dofs):
+        if block.shape != (self._n_dofs, self._n_dofs):
             raise ValueError(
-                f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
+                f"cannot refactor a {self._n_dofs}-dof inverse onto a {block.shape[0]}-dof block."
             )
         if self._frozen_coarsening or not self._coarsening_reads_values():
             # The held hierarchy is let go first, so the old levels are not alive beside the new ones.
             self._hierarchy = None
-            self._hierarchy = self._coarsening.fit(matrix, "HierarchyBlockInverse.refactor_block")
+            self._hierarchy = self._coarsening.fit(block, "HierarchyBlockInverse.refactor_block")
             self._after_coarsening()
             return
         before = tuple(level.n for level in self._hierarchy.levels)
-        self._rebuild(matrix)
+        self._rebuild(as_scipy(block))
         after = tuple(level.n for level in self._hierarchy.levels)
         if after != before:
             self._report(

@@ -177,9 +177,9 @@ path.
   `test_narrowing_a_hierarchy_replaces_each_double_level_in_the_list_it_is_given`). It lives beside its one
   user, not on `SmoothedHierarchy`, because `multigrid.py` is held at its size ratchet. The cast helper is
   `traced_cycle.in_precision`, shared with `TracedForm.in_precision`; a leaf already in the target
-  type is returned as the same array. ⚠️ **Round on the host only through `traced_cycle.host_in_precision`**
-  (JAX's conversion): numpy's cast keeps a single-precision subnormal that JAX's flushes to zero, so a host
-  rounding by numpy is not the traced split's rounding. Why and measurements: `solve-field-split.md`, "the
+  type is returned as the same array. ⚠️ **Never round with numpy's cast**: it keeps a single-precision
+  subnormal that JAX's conversion flushes to zero, so it is not the traced split's rounding (the coupling,
+  the last host-rounded array, is rounded on the device by `in_precision` since 2026-10-22). Why and measurements: `solve-field-split.md`, "the
   split applied in single precision".
 
 - **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
@@ -255,7 +255,9 @@ path.
     with the singularity count), `lam_max` (20 power steps on `D⁻¹A`, `spectral_estimate`) and coarse
     inverse, plus `LevelChecks` the host reads back once and raises on (the messages of
     `_require_positive_diagonal` / `_refuse_singular_blocks`). `multigrid.FrozenCoarsening(plan, pattern)`
-    is the host face: `fit(a, where)` checks shape and pattern ("cannot refit ..."), re-derives an
+    is the host face: `fit(a, where)` (`a` a scipy matrix or an `entry_map.DeviceMatrix`, a host
+    `SparsePattern` with device values, fitted where they are; `HierarchyBlockInverse.refactor_block`
+    passes either through and reads one back, `as_scipy`, only to re-coarsen) checks shape and pattern ("cannot refit ..."), re-derives an
     equilibration scale by the host rule (`equilibration_scale` of the device diagonal, one round trip),
     fits, and assembles the `SmoothedHierarchy`. `_build_aggregation_hierarchy` plans level by level
     (`level_plan`; a budget's unit diagonals on empty coarse slots by `landing_with_diagonal`, applied as an

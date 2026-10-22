@@ -163,10 +163,11 @@ key on them), so the split shares the inverse's arrays and applies exactly what 
 hierarchy gave. Each SIMPLE piece is rounded as it is formed (`_simple_pieces(precision=)`, the host
 Schur it returns stays double) and the levels a level at a time after `derive_extras`, so no whole double
 copy sits beside a whole rounded one. **The host split holds its coupling in the split's precision too**
-(`FieldSplitInverse(stored_precision=)`, from the session's `FieldSplitPreconditioner.build`), rounded
-through `traced_cycle.host_in_precision` (JAX's conversion, which flushes single-precision subnormals as
-the traced split's does) and packed into single-precision slots (`_PaddedLayout.operator` keeps its
-operand's type). All of this is bit-identical in every array the solve applies — the traced split is
+(`FieldSplitInverse(stored_precision=)`, from the session's `FieldSplitPreconditioner.build`), held on
+the device as a `DeviceMatrix` rounded by `in_precision` (JAX's conversion, which flushes
+single-precision subnormals as the traced split's does) and packed into single-precision slots
+(`_PaddedLayout.operator` keeps its operand's type); `FieldSplitInverse.coupling` reads a host copy back
+on first use after a refit, for the host `apply` and diagnostics. All of this is bit-identical in every array the solve applies — the traced split is
 composed from the same rounded entries — pinned by
 `test_a_split_holding_its_coupling_in_single_precision_composes_the_same_single_split`,
 `test_pieces_held_in_single_precision_are_the_double_pieces_rounded_once`, and on bfs3d by the

@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import dataclasses
 
-import numpy as np
+import jax
+import jax.numpy as jnp
 
 __all__ = ["PivotFloor"]
 
@@ -59,7 +60,7 @@ class PivotFloor:
     >>> floor = PivotFloor(threshold=0.15)
     >>> pivot = np.array([1.0e-6, -1.0e-6, 5.0e-5, -7.0e-5, 0.0])
     >>> scale = np.array([2.0e-5, 2.0e-5, 2.0e-5, 2.0e-5, 0.0])
-    >>> pivot + floor.correction(pivot, scale)
+    >>> pivot + np.asarray(floor.correction(pivot, scale))
     array([ 2.e-05, -2.e-05,  5.e-05, -7.e-05,  0.e+00])
     """
 
@@ -73,32 +74,46 @@ class PivotFloor:
             )
 
     def correction(
-        self, pivot: np.ndarray, scale: np.ndarray, *, rows: np.ndarray | None = None
-    ) -> np.ndarray:
+        self, pivot: jnp.ndarray, scale: jnp.ndarray, *, rows: jnp.ndarray | None = None
+    ) -> jnp.ndarray:
         """What to add to each pivot so the fit sees it floored, shape ``(n_dofs,)``.
+
+        Computed on the device, beside the diagonal it corrects: the arrays may be host or device ones,
+        and the result is a device array.
 
         Parameters
         ----------
-        pivot : np.ndarray
+        pivot : jnp.ndarray
             Each row's shifted diagonal ``J_ii + s_i`` as the fit would otherwise see it, shape
             ``(n_dofs,)``.
-        scale : np.ndarray
+        scale : jnp.ndarray
             Each row's base pseudo-time diagonal ``d_i``, shape ``(n_dofs,)``; zero (or negative) on a row
             that carries no shift, which is never changed.
-        rows : np.ndarray, optional
+        rows : jnp.ndarray, optional
             Boolean, shape ``(n_dofs,)``: the rows that may be changed at all. ``None`` (default) allows
             every row.
 
         Returns
         -------
-        np.ndarray
+        jnp.ndarray
             ``sign(p) d - p`` on the rows replaced and ``0`` elsewhere, shape ``(n_dofs,)``.
         """
-        pivot = np.asarray(pivot, dtype=float)
-        scale = np.asarray(scale, dtype=float)
-        # A row with no shift (d <= 0) can never fall inside the band, since |p| >= 0 >= threshold * d.
-        replaced = np.abs(pivot) < self.threshold * scale
-        if rows is not None:
-            replaced &= np.asarray(rows, dtype=bool)
-        side = np.where(pivot < 0.0, -1.0, 1.0)
-        return np.where(replaced, side * scale - pivot, 0.0)
+        return _correction(
+            jnp.asarray(pivot, dtype=jnp.float64),
+            jnp.asarray(scale, dtype=jnp.float64),
+            None if rows is None else jnp.asarray(rows, dtype=bool),
+            self.threshold,
+        )
+
+
+@jax.jit
+def _correction(
+    pivot: jnp.ndarray, scale: jnp.ndarray, rows: jnp.ndarray | None, threshold: float
+) -> jnp.ndarray:
+    """:meth:`PivotFloor.correction`, compiled (run eagerly, each operation is a dispatch of its own)."""
+    # A row with no shift (d <= 0) can never fall inside the band, since |p| >= 0 >= threshold * d.
+    replaced = jnp.abs(pivot) < threshold * scale
+    if rows is not None:
+        replaced &= rows
+    side = jnp.where(pivot < 0.0, -1.0, 1.0)
+    return jnp.where(replaced, side * scale - pivot, 0.0)

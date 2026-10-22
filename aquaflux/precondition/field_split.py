@@ -49,7 +49,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from ..solve import FieldLayout
-from .entry_map import EntryMaps
+from .entry_map import DeviceMatrix, EntryMaps, SparsePattern, as_scipy
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import FrozenInverse, release, require_refactorable
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
@@ -62,7 +62,7 @@ from .multigrid import (
     refresh_air_hierarchy,
 )
 from .padded_rows import _padded_operator, _PaddedRowOperator
-from .traced_cycle import TracedCycle, host_in_precision
+from .traced_cycle import TracedCycle, in_precision
 
 __all__ = [
     "FieldGroups",
@@ -296,15 +296,15 @@ class FieldSplitInverse:
         The two block inverses, each over its own group's degrees of freedom. A refresh additionally needs
         each to be a :class:`~aquaflux.precondition.RefactorableInverse`, which
         :class:`~aquaflux.precondition.HierarchyBlockInverse` and :class:`AirReductionInverse` are.
-    coupling : scipy.sparse matrix
+    coupling : scipy.sparse matrix or DeviceMatrix
         The retained off-diagonal block, mapping the **leading** group's degrees of freedom to the
         **trailing** group's equations, shape ``(n_trailing_dofs, n_leading_dofs)``. Taken from the
-        assembled operator, not modelled.
+        assembled operator, not modelled, and held on the device (:attr:`coupling` reads it back).
     groups : FieldGroups
         The partition the three arguments above are consistent with.
     stored_precision : {"float64", "float32"}
         The floating-point type the coupling block is **held** in, at construction and after every
-        refit: rounded once from the operator it is cut from. ``"float32"`` is for a split applied in
+        refit: rounded once, on the device, from the operator it is cut from. ``"float32"`` is for a split applied in
         single precision anyway (:attr:`~aquaflux.precondition.FieldSplit.precision`), whose traced form
         would round it to exactly these entries; the block inverses then hold their hierarchies the same
         way (:class:`~aquaflux.precondition.HierarchyBlockInverse`'s ``stored_precision``), so
@@ -323,7 +323,7 @@ class FieldSplitInverse:
         self,
         leading: FrozenInverse,
         trailing: FrozenInverse,
-        coupling: sp.spmatrix,
+        coupling: sp.spmatrix | DeviceMatrix,
         groups: FieldGroups,
         *,
         stored_precision: str = "float64",
@@ -353,37 +353,37 @@ class FieldSplitInverse:
         # The gathers that cut a refit's operator into blocks, kept between refits.
         self._maps = EntryMaps()
 
-    def _set_coupling(self, coupling: sp.spmatrix) -> None:
-        """Store the retained coupling block, discarding any transpose cached for the previous one.
+    def _set_coupling(self, coupling: sp.spmatrix | DeviceMatrix) -> None:
+        """Store the retained coupling block on the device, discarding any host copy made of the previous one.
 
-        Copied, in the precision it is held in: the block handed in may be a view of a larger array (one
-        materialize's values), which holding it would keep alive until the next refit.
+        Held as a :class:`~aquaflux.precondition.entry_map.DeviceMatrix` in the precision it is applied
+        in, whatever form it arrives in: a block probed on the device stays there, and a host block is
+        copied over. Either way it is a copy, never a view of the larger array the block was cut from
+        (one materialize's values), which holding would keep alive until the next refit.
         """
-        coupling = sp.csr_matrix(coupling)
-        data = host_in_precision(coupling.data, self._stored_precision)
-        self._coupling = sp.csr_matrix(
-            (
-                data.copy() if data is coupling.data else data,
-                coupling.indices.copy(),
-                coupling.indptr.copy(),
-            ),
-            shape=coupling.shape,
-        )
-        self._coupling_transpose: sp.csr_matrix | None = None
+        if isinstance(coupling, DeviceMatrix):
+            pattern, values = coupling.pattern, coupling.values
+        else:
+            coupling = sp.csr_matrix(coupling)
+            pattern, values = SparsePattern.of(coupling), jnp.asarray(coupling.data)
+        # Let go of the previous block before the new one is rounded, so the two are not held together.
+        self._coupling = self._host_coupling = self._coupling_transpose = None
+        self._coupling = DeviceMatrix(pattern, in_precision(values, self._stored_precision))
 
     @property
     def _transposed_coupling(self) -> sp.csr_matrix:
-        """The coupling block transposed, formed on first use and then cached.
+        """The coupling block transposed, on the host, formed on first use and then cached.
 
         It must not be re-derived per application: ``A.T`` on a compressed-sparse-row matrix yields a
         compressed-sparse-column view whose product converts on every call, which for a block of this
         size is a measurable part of an application that is otherwise two multigrid cycles. Nor should
-        it be formed before anything asks for it, which is what the caching here buys. Only the
-        transpose apply reads it — the adjoint's transpose solve — so a forward march would otherwise
-        carry a second full copy of the coupling block, rebuilt at every refresh, and never touch it.
+        it be formed before anything asks for it, which is what the caching here buys. Only the host
+        transpose apply reads it -- the adjoint's transpose solve through a host split -- so a forward
+        march would otherwise carry a second full copy of the coupling block, rebuilt at every refresh,
+        and never touch it.
         """
         if self._coupling_transpose is None:
-            self._coupling_transpose = sp.csr_matrix(self._coupling.transpose())
+            self._coupling_transpose = sp.csr_matrix(self.coupling.transpose())
         return self._coupling_transpose
 
     @property
@@ -403,14 +403,21 @@ class FieldSplitInverse:
 
     @property
     def coupling(self) -> sp.csr_matrix:
-        """The retained trailing-by-leading block, shape ``(n_trailing_dofs, n_leading_dofs)``."""
-        return self._coupling
+        """The retained trailing-by-leading block on the host, shape ``(n_trailing_dofs, n_leading_dofs)``.
+
+        Read back from the device on first use after a refit and cached until the next, in the
+        precision it is held in: only the host :meth:`apply` and diagnostics read it, so a split applied
+        on the device never holds a host copy.
+        """
+        if self._host_coupling is None:
+            self._host_coupling = self._coupling.pattern.csr(np.array(self._coupling.values))
+        return self._host_coupling
 
     def padded_coupling(self) -> _PaddedRowOperator:
         """The retained coupling in padded-row form, for a split composed on device.
 
         Its packing is a fixed gather on the coupling's pattern, held between refits with the gathers
-        that cut the blocks, so a refit's re-composition moves only values.
+        that cut the blocks, so a refit's re-composition moves only values, and those only on the device.
         """
         return _padded_operator(self._coupling, maps=self._maps, slot="coupling")
 
@@ -439,7 +446,7 @@ class FieldSplitInverse:
         # order and uses the transposed coupling, which is the whole of the difference between them.
         order = ((self._leading, self._groups.leading), (self._trailing, self._groups.trailing))
         (first, first_dofs), (second, second_dofs) = reversed(order) if transpose else order
-        coupling = self._transposed_coupling if transpose else self._coupling
+        coupling = self._transposed_coupling if transpose else self.coupling
         out = np.empty_like(residual)
         y_first = first.apply(residual[first_dofs], transpose=transpose)
         y_second = second.apply(residual[second_dofs] - coupling @ y_first, transpose=transpose)
@@ -474,16 +481,16 @@ class FieldSplitInverse:
         """
         self.refactor_blocks(self._groups.blocks(block, self._maps))
 
-    def refactor_blocks(self, blocks: tuple[sp.csr_matrix, ...]) -> None:
+    def refactor_blocks(self, blocks: tuple[sp.csr_matrix | DeviceMatrix, ...]) -> None:
         """Re-fit to an operator already cut into this partition's blocks, IN PLACE.
 
         :meth:`refactor_block` cuts the whole operator and lands here; a probe laid out block by block
         (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`) hands its blocks straight in,
-        so the whole operator is never formed.
+        on the device, so the whole operator is never formed and no value crosses to the host.
 
         Parameters
         ----------
-        blocks : tuple of scipy.sparse.csr_matrix
+        blocks : tuple of scipy.sparse.csr_matrix or DeviceMatrix
             ``(A_ll, A_lt, A_tl, A_tt)`` as :meth:`FieldGroups.blocks` orders them, already shifted.
             ``A_lt`` is not read. The blocks may share memory with each other: the coupling is copied.
 
@@ -494,8 +501,8 @@ class FieldSplitInverse:
         """
         leading = require_refactorable(self._leading, "this field split's leading block")
         trailing = require_refactorable(self._trailing, "this field split's trailing block")
-        leading.refactor_block(blocks[0])
-        trailing.refactor_block(blocks[3])
+        leading.refactor_block(_block_for(leading, blocks[0]))
+        trailing.refactor_block(_block_for(trailing, blocks[3]))
         # Solving the leading group first corrects the trailing equations: the block retained is
         # trailing-by-leading.
         self._set_coupling(blocks[2])
@@ -504,6 +511,16 @@ class FieldSplitInverse:
         """Release both block inverses' resources, if they hold any."""
         release(self._leading)
         release(self._trailing)
+
+
+def _block_for(inverse: object, block: sp.csr_matrix | DeviceMatrix) -> sp.spmatrix | DeviceMatrix:
+    """``block`` in the form ``inverse`` re-fits from.
+
+    A :class:`~aquaflux.precondition.HierarchyBlockInverse` fits on the device and takes a block there
+    as it is; any other inverse is handed a host matrix, as
+    :class:`~aquaflux.precondition.RefactorableInverse` promises it.
+    """
+    return block if isinstance(inverse, HierarchyBlockInverse) else as_scipy(block)
 
 
 def field_split_inverse(
@@ -552,7 +569,7 @@ def field_split_inverse(
 
 
 def _field_split_of_blocks(
-    blocks: tuple[sp.csr_matrix, ...],
+    blocks: tuple[sp.csr_matrix | DeviceMatrix, ...],
     groups: FieldGroups,
     *,
     leading_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
@@ -561,9 +578,11 @@ def _field_split_of_blocks(
 ) -> FieldSplitInverse:
     """:func:`field_split_inverse` over an operator already cut into ``groups``' four blocks."""
     leading_block, _, trailing_by_leading, trailing_block = blocks
+    # A factory builds from a host matrix, and coarsening it is host work, so the first fit reads the
+    # two diagonal blocks back; the coupling stays where it is.
     return FieldSplitInverse(
-        leading_inverse(leading_block, groups.n_leading_fields),
-        trailing_inverse(trailing_block, groups.n_trailing_fields),
+        leading_inverse(as_scipy(leading_block), groups.n_leading_fields),
+        trailing_inverse(as_scipy(trailing_block), groups.n_trailing_fields),
         trailing_by_leading,
         groups,
         stored_precision=stored_precision,
@@ -662,7 +681,7 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
                 f"and this field split after {groups.n_leading_dofs}."
             )
 
-    def _refactor_blocks(self, blocks: tuple[sp.csr_matrix, ...]) -> None:
+    def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
         """Re-fit the split to a probe's blocks (see the base's :meth:`refresh_in_place`)."""
         self.inverse.refactor_blocks(blocks)
 

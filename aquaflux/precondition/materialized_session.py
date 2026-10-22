@@ -222,11 +222,12 @@ def _probe_products(
     )
 
 
-def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
+def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> jnp.ndarray:
     """The frozen pseudo-transient shift diagonal a factorization is built against, at ``state``.
 
     ``beta`` scales the base policy's shift diagonal; the ``stop_gradient`` keeps the frozen factorization
-    off the differentiation path. Shared by the initial build and every in-place refresh.
+    off the differentiation path. Shared by the initial build and every in-place refresh, and left on the
+    device, where a probed operator's shift is added.
 
     It asks the term for the shift at ``beta`` rather than scaling the diagonal itself, so a policy that
     runs a block at its own pseudo-timestep preconditions the operator it actually forms. Open-coding
@@ -245,7 +246,9 @@ def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
     return _frozen_shift_and_scale(base, beta, state)[0]
 
 
-def _frozen_shift_and_scale(base, beta: float, state: jnp.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _frozen_shift_and_scale(
+    base, beta: float, state: jnp.ndarray
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """:func:`frozen_shift_diagonal` and the base diagonal ``d`` it scales, from one shift term.
 
     The base diagonal is each row's pseudo-time scale independent of ``beta`` -- what a
@@ -255,8 +258,8 @@ def _frozen_shift_and_scale(base, beta: float, state: jnp.ndarray) -> tuple[np.n
     """
     term = base.shift_term(state)
     return (
-        np.asarray(jax.lax.stop_gradient(term.shift(beta))),
-        np.asarray(jax.lax.stop_gradient(term.diagonal)),
+        jax.lax.stop_gradient(jnp.asarray(term.shift(beta))),
+        jax.lax.stop_gradient(jnp.asarray(term.diagonal)),
     )
 
 
@@ -397,7 +400,8 @@ class BetaTrackingRefresh:
         self._probe = probe
         self._by_field = by_field
         self._pivot_floor = pivot_floor
-        self._floorable_rows = floorable_rows
+        # On the device, where the floor is applied, once rather than at every re-fit.
+        self._floorable_rows = None if floorable_rows is None else jnp.asarray(floorable_rows)
         self.floored_rows = np.zeros(0, dtype=np.int64)
         self._preconditioner = preconditioner
         self._refit_beta_floor = refit_beta_floor
@@ -498,9 +502,10 @@ class BetaTrackingRefresh:
         self.floored_rows = np.zeros(0, dtype=np.int64)
         floor = self._pivot_floor
 
-        def correction(jacobian_diagonal: np.ndarray) -> np.ndarray:
+        def correction(jacobian_diagonal: jnp.ndarray) -> jnp.ndarray:
             change = floor.correction(jacobian_diagonal + shift, scale, rows=self._floorable_rows)
-            self.floored_rows = np.flatnonzero(change)
+            # The one value read back: which rows were floored, for the march's log.
+            self.floored_rows = np.flatnonzero(np.asarray(change))
             return change
 
         matvec, batched_matvec = _probe_products(probed, frozen, self._by_field)

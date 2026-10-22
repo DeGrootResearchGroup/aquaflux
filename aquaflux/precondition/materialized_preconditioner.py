@@ -23,6 +23,7 @@ from .host_preconditioner import HostPreconditioner, require_refactorable
 from .phase_timer import PhaseTimer
 
 if TYPE_CHECKING:
+    from .entry_map import DeviceMatrix
     from .sparse_jacobian import ProbedBlocks, ProbeGather
 
 
@@ -83,7 +84,7 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
             probe_batch_size=probe_batch_size,
         )
 
-    def _refactor_blocks(self, blocks: tuple[sp.csr_matrix, ...]) -> None:
+    def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
         """Re-fit the inverse to an operator probed into blocks; only a field split can take one."""
         raise TypeError(
             f"a probe laid out block by block feeds a field split only, not a {type(self).__name__}."
@@ -104,34 +105,34 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
 
     @staticmethod
     def _fitted_shift(
-        shift_diagonal: np.ndarray,
-        jacobian_diagonal: Callable[[], np.ndarray],
-        diagonal_correction: Callable[[np.ndarray], np.ndarray | None] | None,
-    ) -> np.ndarray:
+        shift_diagonal: jnp.ndarray,
+        jacobian_diagonal: Callable[[], jnp.ndarray],
+        diagonal_correction: Callable[[jnp.ndarray], jnp.ndarray | None] | None,
+    ) -> jnp.ndarray:
         """The diagonal a re-fit adds to the Jacobian: the shift, plus ``diagonal_correction``'s amount.
 
         Both re-fit paths -- the whole matrix and a probe straight into a split's blocks -- go through
         here, so a correction reaches the fit whichever one runs. ``jacobian_diagonal`` reads the
         unshifted Jacobian's diagonal, shape ``(n_dofs,)``, and is called only when there is a
-        correction to ask for.
+        correction to ask for. On the block path every operand is on the device, and so is the sum.
         """
         if diagonal_correction is None:
             return shift_diagonal
-        correction = diagonal_correction(np.asarray(jacobian_diagonal()))
+        correction = diagonal_correction(jacobian_diagonal())
         if correction is None:
             return shift_diagonal
-        return np.asarray(shift_diagonal) + correction
+        return shift_diagonal + correction
 
     def refresh_in_place(
         self,
         matvec: Callable[[jnp.ndarray], jnp.ndarray],
         plan,
-        shift_diagonal: np.ndarray,
+        shift_diagonal: jnp.ndarray,
         *,
         batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
         probe_batch_size: int | None = None,
         structure: ProbeGather | None = None,
-        diagonal_correction: Callable[[np.ndarray], np.ndarray | None] | None = None,
+        diagonal_correction: Callable[[jnp.ndarray], jnp.ndarray | None] | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Re-materialize at a developed state and re-fit the frozen inverse to it, IN PLACE.
 
@@ -166,8 +167,9 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         inverse = require_refactorable(self.inverse, f"this {type(self).__name__}")
         timer = PhaseTimer()
         if structure is not None and structure.layout is not None:
-            # Probed into blocks: the shift is added in place on values this refresh owns, and the
-            # blocks go straight to the inverse, so the whole matrix is never formed.
+            # Probed into blocks on the device: the shift is added in place on values this refresh owns,
+            # and the blocks go straight to the inverse, so the whole matrix is never formed and no
+            # value is read back to the host.
             probed = self._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
             timer.lap("probe")
             probed.add_shift(
