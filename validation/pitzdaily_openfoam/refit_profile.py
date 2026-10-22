@@ -1,24 +1,29 @@
 """Where does one refit of the shipped field split spend its host-side refactor?
 
-A refit probes the coupled Jacobian, shifts it, and re-fits the field split to it through
-``FieldSplitInverse.refactor_block``. The march log's ``pc`` lines split a refit into probe and refactor;
-this harness splits the refactor itself, on the matrices the shipped march actually refits to.
+A refit probes the coupled Jacobian straight into the field split's blocks, shifts them, and re-fits
+the split through ``FieldSplitInverse.refactor_blocks``; the first fit goes through
+``field_split._field_split_of_blocks``. The march log's ``pc`` lines split a refit into probe and
+refactor; this harness splits the refactor itself, on the blocks the shipped march actually refits to.
 
 Two modes, chosen by ``PITZ_REFIT_MODE``:
 
 ``capture``
-    Runs the shipped march (``compare.py``'s ``solve_aquaflux``) and saves the shifted field-major
-    matrix of the first fit and of the first ``PITZ_REFIT_CAPTURE`` (default 3) refits to
-    ``refit_matrices/``, then stops the march. Run with ``validation/run_case.sh``.
+    Runs the shipped march (``compare.py``'s ``solve_aquaflux``) and saves the shifted blocks of the
+    first fit and of the first ``PITZ_REFIT_CAPTURE`` (default 3) refits to ``refit_matrices/``, then
+    stops the march. Run with ``validation/run_case.sh``.
 ``profile`` (the default)
-    Loads those matrices, fits the case file's field split to the first, then re-fits it to each captured
-    refit matrix under ``cProfile`` and prints the cumulative time of the refactor's parts: the products,
-    the padded-row packing, the smoother set-up per level, the spectral estimates, the coarse inverse.
-    Then times ``PITZ_REFIT_REPEATS`` (default 5) plain refits per matrix, best and median.
+    Loads those blocks, fits the case file's field split to the first, then re-fits it to each captured
+    refit under ``cProfile`` and prints the cumulative time of the refactor's parts: the products, the
+    padded-row packing, the smoother set-up per level, the spectral estimates, the coarse inverse. Then
+    times ``PITZ_REFIT_REPEATS`` (default 5) plain refits per capture, best and median.
 
-The split is fitted at the case file's settings (``case.yaml``'s ``FieldSplit``), so the profile is of
-the shipped preconditioner, in float64 (the float32 rounding happens on the traced split, after the
-refactor, and is not part of ``refactor_block``).
+The split is fitted at the case file's settings (``case.yaml``'s ``FieldSplit``), its blocks held in the
+file's precision as the session holds them, so the profile is of the shipped preconditioner.
+
+The capture hooks the two seams the session calls. They once hooked ``field_split_inverse`` and
+``refactor_block``, which the session stopped calling when the probe was laid out by the split's
+blocks; the capture then ran a whole march and saved nothing, so the run refuses to finish quietly
+without a capture.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ CAPTURE = int(os.environ.get("PITZ_REFIT_CAPTURE", "3"))
 REPEATS = int(os.environ.get("PITZ_REFIT_REPEATS", "5"))
 #: Functions whose cumulative time the profile reports, by name as cProfile records it.
 PARTS = (
+    "refactor_blocks",
     "refactor_block",
     "refit",
     "_rebuild",
@@ -77,75 +83,100 @@ class _Stop(Exception):
     """Raised by the capture hook once enough refits are saved, to end the march early."""
 
 
-def _save(name: str, matrix: sp.spmatrix) -> None:
+#: The four blocks a refit hands the split, in ``FieldGroups.blocks`` order; the second is never read.
+BLOCK_NAMES = ("ll", "lt", "tl", "tt")
+
+
+def _save(name: str, blocks: tuple[sp.spmatrix, ...]) -> None:
     STORE.mkdir(exist_ok=True)
-    sp.save_npz(STORE / f"{name}.npz", sp.csr_matrix(matrix), compressed=False)
-    print(f"[refit_profile] saved {name}: {matrix.shape}, {matrix.nnz} stored", flush=True)
+    for block_name, block in zip(BLOCK_NAMES, blocks, strict=True):
+        sp.save_npz(STORE / f"{name}-{block_name}.npz", sp.csr_matrix(block), compressed=False)
+    sizes = ", ".join(
+        f"{b}: {block.shape} {block.nnz}" for b, block in zip(BLOCK_NAMES, blocks, strict=True)
+    )
+    print(f"[refit_profile] saved {name}: {sizes}", flush=True)
+
+
+def _load(name: str) -> tuple[sp.csr_matrix, ...]:
+    return tuple(
+        sp.load_npz(STORE / f"{name}-{block_name}.npz").tocsr() for block_name in BLOCK_NAMES
+    )
 
 
 def capture() -> None:
     import compare
 
-    build = field_split_module.field_split_inverse
-    refactor = field_split_module.FieldSplitInverse.refactor_block
+    build = field_split_module._field_split_of_blocks
+    refactor = field_split_module.FieldSplitInverse.refactor_blocks
     count = {"refits": 0}
 
-    def recording_build(matrix, groups, **inverses):
-        _save("fit", matrix)
+    def recording_build(blocks, groups, **inverses):
+        _save("fit", blocks)
         np.save(
             STORE / "groups.npy",
-            np.array([groups.layout.n_cells, groups.n_leading_fields, groups.layout.n_fields]),
+            np.array([groups.n_cells, groups.n_leading_fields, groups.n_fields]),
         )
-        return build(matrix, groups, **inverses)
+        return build(blocks, groups, **inverses)
 
-    def recording_refactor(self, block):
-        _save(f"refit-{count['refits']}", block)
+    def recording_refactor(self, blocks):
+        _save(f"refit-{count['refits']}", blocks)
         count["refits"] += 1
         if count["refits"] >= CAPTURE:
             raise _Stop
-        return refactor(self, block)
+        return refactor(self, blocks)
 
-    field_split_module.field_split_inverse = recording_build
-    field_split_module.FieldSplitInverse.refactor_block = recording_refactor
-    import aquaflux.precondition.materialized_session as session_module
-
-    session_module.field_split_inverse = recording_build
+    field_split_module._field_split_of_blocks = recording_build
+    field_split_module.FieldSplitInverse.refactor_blocks = recording_refactor
     try:
         compare.solve_aquaflux(checkpoint_dir=None)
     except _Stop:
         print(f"[refit_profile] captured the fit and {CAPTURE} refits", flush=True)
+        return
+    raise SystemExit(
+        f"[refit_profile] the march ended after {count['refits']} refits, short of {CAPTURE}: "
+        "nothing reached the hooks the capture needs."
+    )
 
 
-def _split(fit: sp.csr_matrix):
+def _split(fit: tuple[sp.csr_matrix, ...]):
     import compare
 
     spec = compare.SOLVER.preconditioner.inverse
     n_cells, n_leading, n_fields = (int(v) for v in np.load(STORE / "groups.npy"))
     groups = FieldGroups.by_counts(n_cells, n_leading, n_fields - n_leading)
-    return field_split_module.field_split_inverse(
-        fit, groups, leading_inverse=spec.leading, trailing_inverse=spec.trailing
+
+    def bound(block_inverse):
+        stored = spec.precision if block_inverse._stores_precision else "float64"
+        return block_inverse.bound(stored_precision=stored)
+
+    print(f"[refit_profile] split held in {spec.precision}", flush=True)
+    return field_split_module._field_split_of_blocks(
+        fit,
+        groups,
+        leading_inverse=bound(spec.leading),
+        trailing_inverse=bound(spec.trailing),
+        stored_precision=spec.precision,
     )
 
 
 def profile() -> None:
-    fit = sp.load_npz(STORE / "fit.npz").tocsr()
-    refits = sorted(STORE.glob("refit-*.npz"))
     started = time.perf_counter()
-    split = _split(fit)
+    split = _split(_load("fit"))
     print(f"first fit: {time.perf_counter() - started:.2f} s", flush=True)
-    for path in refits:
-        matrix = sp.load_npz(path).tocsr()
+    names = sorted({path.name.rsplit("-", 1)[0] for path in STORE.glob("refit-*-ll.npz")})
+    for name in names:
+        blocks = _load(name)
         profiler = cProfile.Profile()
         profiler.enable()
-        split.refactor_block(matrix)
+        split.refactor_blocks(blocks)
         profiler.disable()
         stats = pstats.Stats(profiler, stream=io.StringIO())
-        print(f"\n[{path.stem}] cumulative seconds by part (nested parts overlap)")
+        print(f"\n[{name}] cumulative seconds by part (nested parts overlap)")
         rows = {}
-        for (_, _, name), (_, calls, _, cumulative, _) in stats.stats.items():
-            if name in PARTS:
-                total_calls, total = rows.get(name, (0, 0.0))
-                rows[name] = (total_calls + calls, total + cumulative)
+        for (_, _, function), (_, calls, _, cumulative, _) in stats.stats.items():
+            if function in PARTS:
+                total_calls, total = rows.get(function, (0, 0.0))
+                rows[function] = (total_calls + calls, total + cumulative)
         for name in PARTS:
             if name in rows:
                 calls, cumulative = rows[name]
@@ -156,10 +187,10 @@ def profile() -> None:
         samples = []
         for _ in range(REPEATS):
             started = time.perf_counter()
-            split.refactor_block(matrix)
+            split.refactor_blocks(blocks)
             samples.append(time.perf_counter() - started)
         print(
-            f"[{path.stem}] refactor_block: best {min(samples):.3f} s, "
+            f"[{name}] refactor_blocks: best {min(samples):.3f} s, "
             f"median {float(np.median(samples)):.3f} s over {REPEATS}",
             flush=True,
         )
