@@ -115,6 +115,29 @@ def test_a_gathering_map_into_a_dense_layout_leaves_an_unreached_slot_zero() -> 
     assert np.array_equal(blocks.apply(operand).reshape(want.shape), want)
 
 
+def test_a_padded_gather_holds_its_filled_slots_as_a_mask_and_still_names_each_term_s_slot() -> (
+    None
+):
+    """A gather into padded rows fills its slots in ascending order, so it holds a byte a slot rather
+    than a slot index a term; each term's slot, read back, is still where its entry lands.
+
+    The slots are read independently, from where each stored entry's number lands in the numbered
+    padded rows, both for the rows and for the transpose (whose terms read the operand out of order).
+    """
+    pattern = _random_pattern(30, 30, 0.15, seed=33)
+    width = int(np.diff(pattern.indptr).max()) + 1
+    for transposed in (False, True):
+        numbered = SparsePattern(pattern).numbered()
+        operand = sp.csr_matrix(numbered.T) if transposed else numbered
+        numbers = _padded_rows(operand, width, "column" if transposed else "row")[1].ravel()
+        packing = EntryMap.placing(SparsePattern(pattern), numbers)
+        assert packing._filled is not None and packing._target is None
+        assert packing._filled.nbytes < 4 * packing.source.size
+        landed = np.flatnonzero(numbers)
+        assert np.array_equal(packing.target, landed)
+        assert np.array_equal(packing.source, numbers[landed].astype(np.int64) - 1)
+
+
 def test_a_held_padded_layout_packs_exactly_what_a_fresh_packing_does() -> None:
     """``_padded_operator`` through a held layout equals ``_PaddedRowOperator.from_scipy``, both ways."""
     pattern = _random_pattern(25, 25, 0.2, seed=5)
@@ -298,6 +321,36 @@ def test_two_applications_of_one_map_agree_bit_for_bit() -> None:
 
 
 # --- refusal: a map applies only to the structure it was built for ---------------------------------
+
+
+def test_two_owners_reading_one_pattern_hold_one_copy_and_another_pattern_is_never_given_it() -> (
+    None
+):
+    """Owners reading the same block -- a map's output, or a copy of it -- share one held pattern.
+
+    The second owner's operand is a separate copy (as a scaling or a shift makes), so only a match by
+    content can find the first owner's pattern. A pattern of the same shape and entry count but other
+    columns must not be given it: its values would land in the wrong slots.
+    """
+    block = _random_pattern(40, 40, 0.1, seed=40)
+    first, second = EntryMaps(), EntryMaps()
+    held = first.pattern_of(block)
+    copy = sp.csr_matrix((block.data * 2.0, block.indices.copy(), block.indptr.copy()), block.shape)
+    assert second.pattern_of(copy) is held
+    landing = EntryMap.gathering(
+        SparsePattern(block.T.tocsr()), lambda m: sp.csr_matrix(m.T)
+    ).landing
+    assert landing is held  # a map landing on a held pattern lands on that pattern
+    moved = block.copy()
+    row = int(np.flatnonzero(np.diff(moved.indptr) > 1)[0])
+    start, stop = moved.indptr[row], moved.indptr[row + 1]
+    taken = set(moved.indices[start:stop].tolist())
+    moved.indices[stop - 1] = next(
+        c for c in range(40) if c not in taken
+    )  # one entry, another column
+    moved.has_sorted_indices = False
+    other = second.pattern_of(moved)
+    assert other is not held and np.array_equal(other.indices, moved.indices)
 
 
 def test_a_map_refuses_an_operand_whose_structure_has_moved() -> None:

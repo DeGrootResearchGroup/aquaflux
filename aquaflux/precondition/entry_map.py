@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Callable, Hashable
+from typing import ClassVar
 
 import equinox as eqx
 import jax
@@ -45,6 +46,11 @@ class SparsePattern:
     another map, which shares its pattern's arrays) passes by identity without comparing again.
     """
 
+    #: The live patterns by shape and entry count, so an owner reading a matrix whose pattern another
+    #: owner already holds -- a map's output, or a copy of one made by a scaling or a shift -- is given
+    #: that pattern rather than a second copy of its index arrays.
+    _live: ClassVar[dict[tuple, weakref.WeakSet]] = {}
+
     def __init__(self, matrix: sp.spmatrix) -> None:
         matrix = sp.csr_matrix(matrix)
         self.shape: tuple[int, int] = matrix.shape
@@ -53,6 +59,21 @@ class SparsePattern:
         self.indices = matrix.indices.copy()
         # Weak references: remembering an operand's arrays must not keep them alive.
         self._accepted = (weakref.ref(self.indptr), weakref.ref(self.indices))
+        SparsePattern._live.setdefault((self.shape, self.nnz), weakref.WeakSet()).add(self)
+
+    @classmethod
+    def of(cls, matrix: sp.csr_matrix) -> SparsePattern:
+        """The live pattern ``matrix`` stores, whoever holds it; a new one only when none does.
+
+        A pattern is held for an owner's session, and it is as large as the operand's index arrays, so
+        two owners reading one block (the field split cutting it, its hierarchy refitting it) would
+        otherwise each hold a copy. :meth:`matches` decides, so a reused pattern is exactly the
+        operand's.
+        """
+        for held in tuple(cls._live.get((matrix.shape, int(matrix.nnz)), ())):
+            if held.matches(matrix):
+                return held
+        return cls(matrix)
 
     @property
     def nnz(self) -> int:
@@ -157,6 +178,19 @@ class EntryMap:
             # Every slot filled once: held as the source of each slot in order, the targets dropped.
             self._source = self._source[np.argsort(self._target, kind="stable")]
             self._target = None
+        # A gather filling its slots in ascending order (every one `placing` builds) is held as which
+        # slots it fills, a byte a slot, where that is smaller than a slot index a term: assigning
+        # through the mask writes the terms in slot order, which is term order.
+        self._filled: np.ndarray | None = None
+        if (
+            self._scatter
+            and self._target is not None
+            and self.n_out < self._target.size * self._target.itemsize
+            and np.all(np.diff(self._target) > 0)
+        ):
+            self._filled = np.zeros(self.n_out, dtype=bool)
+            self._filled[self._target] = True
+            self._target = None
         # A map reading every entry once, in storage order, holds no source either.
         if self._source.size == pattern.nnz and np.array_equal(
             self._source, np.arange(pattern.nnz, dtype=index)
@@ -189,7 +223,7 @@ class EntryMap:
         result = operation(pattern.numbered())
         if sp.issparse(result):
             result = sp.csr_matrix(result)
-            return cls.placing(pattern, result.data, landing=SparsePattern(result))
+            return cls.placing(pattern, result.data, landing=SparsePattern.of(result))
         return cls.placing(pattern, result)
 
     @classmethod
@@ -314,7 +348,7 @@ class EntryMap:
         del row
         counts = np.bincount(keys // n_columns, minlength=n_rows)
         indptr = np.concatenate([[0], np.cumsum(counts)])
-        landing = SparsePattern(
+        landing = SparsePattern.of(
             sp.csr_matrix(
                 (np.zeros(keys.size), (keys % n_columns).astype(np.int32), indptr),
                 shape=(n_rows, n_columns),
@@ -330,6 +364,8 @@ class EntryMap:
     @property
     def target(self) -> np.ndarray:
         """Each term's output slot, shape ``(n_terms,)``."""
+        if self._filled is not None:
+            return np.flatnonzero(self._filled)
         return np.arange(self.n_out) if self._target is None else self._target
 
     def on_device(self) -> DeviceEntryMap:
@@ -385,7 +421,7 @@ class EntryMap:
             return values
         if self._scatter:
             out = np.zeros(self.n_out, dtype=np.float64)
-            out[self._target] = values
+            out[self._target if self._filled is None else self._filled] = values
             return out
         if self.weight is not None:
             values = values * self.weight
@@ -464,7 +500,7 @@ class EntryMaps:
         for pattern in self._patterns:
             if pattern.matches(matrix):
                 return pattern
-        pattern = SparsePattern(matrix)
+        pattern = SparsePattern.of(matrix)
         # Bounded: a long-lived owner whose operands keep moving holds only the recent patterns.
         self._patterns = [*self._patterns[-15:], pattern]
         return pattern

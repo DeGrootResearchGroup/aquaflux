@@ -481,6 +481,6 @@ def landing_with_diagonal(landing: SparsePattern, slots: np.ndarray) -> _Landing
 
     numbered = with_diagonal(np.arange(1, landing.nnz + 1, dtype=np.float64), 0.0)
     constant = with_diagonal(np.zeros(landing.nnz), 1.0)
-    pattern = SparsePattern(numbered)
+    pattern = SparsePattern.of(numbered)
     embed = EntryMap.placing(landing, numbered.data).on_device()
     return _Landing(pattern, embed, constant.data)

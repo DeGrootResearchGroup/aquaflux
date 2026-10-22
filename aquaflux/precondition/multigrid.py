@@ -1063,7 +1063,7 @@ def _build_aggregation_hierarchy(
             f"got {prolongation_smoothing!r}."
         )
     original = sp.csr_matrix(a)
-    fine_pattern = SparsePattern(original)
+    fine_pattern = SparsePattern.of(original)
     scale_rows = scale_columns = None
     if equilibrate:
         # The coarsening reads the equilibrated operator; the fit re-derives the same scale on the device.
@@ -1072,7 +1072,7 @@ def _build_aggregation_hierarchy(
             np.repeat(np.arange(a.shape[0], dtype=np.int32), np.diff(a.indptr))
         )
         scale_columns = jnp.asarray(a.indices.astype(np.int32))
-    pattern = SparsePattern(a)
+    pattern = SparsePattern.of(a)
     values = jnp.asarray(a.data, dtype=jnp.float64)
     plans: list[_LevelPlan] = []
     landing = _Landing(pattern, None, None)

@@ -296,7 +296,12 @@ path.
     R)` gives `M -> L M R` for fixed `L`, `R` onto the product's structural pattern (the same set
     `_galerkin_coarse` stores on). `EntryMaps` (held as `StructuralPatterns.maps`, and by
     `FieldSplitInverse._maps`) keys one gathering map per slot and rebuilds it when the operand's pattern
-    moved; `EntryMap.apply` itself refuses an operand of another pattern. Host-wired: `_simple_pieces` (the
+    moved; `EntryMap.apply` itself refuses an operand of another pattern. **A pattern is held once however many owners
+    read it**: `SparsePattern.of` returns the live pattern matching the operand by content (`matches`),
+    used by `EntryMaps.pattern_of`, both landings and the coarsening's plan, since the split cuts a block
+    and its hierarchy then fits a copy of it (a scaling or shift copies the index arrays, so identity alone
+    misses it). Pinned by
+    `test_two_owners_reading_one_pattern_hold_one_copy_and_another_pattern_is_never_given_it`. Host-wired: `_simple_pieces` (the
     four block cuts and every packing), `FieldGroups.blocks(maps=)` and
     `FieldSplitInverse.padded_coupling()` (`traced_field_split`). Not mapped, because bilinear in the values
     or not a sparse operation: `D⁻¹G`, the Schur, the Frobenius diagonals.
@@ -304,8 +309,10 @@ path.
       (the class default; neither case file sets it), so `P` is the aggregates' 0/1 indicator, and a refit
       reuses the held `P` in any case. A smoothed `P` would still give a linear map at refit (the refit
       freezes `P`); only a rebuild re-smooths it.
-    - Index arrays are int32, all-ones weights and in-order sources/targets are not stored, and the
-      numbered pattern is not kept -- keep it so. **`EntryMap.product` is built to hold one term list at a
+    - Index arrays are int32, all-ones weights and in-order sources/targets are not stored, a host gather
+      filling its slots in ascending order (every `placing` map) holds a byte-a-slot mask in place of its
+      targets (`EntryMap._filled`; with the shared patterns, bfs3d's peak 9.25 -> 8.75 GiB, log, "Shared
+      patterns and filled-slot masks (2026-10-22)"), and the numbered pattern is not kept -- keep it so. **`EntryMap.product` is built to hold one term list at a
       time** (no all-ones weight list, the slots by a sorted copy of the keys and `searchsorted`, not
       `np.unique`'s inverse): the leading block's fine Galerkin map set bfs3d's peak, 9.67 -> 8.71 GiB with
       the maps' terms unchanged in content and order (log, "The product map's build transient
