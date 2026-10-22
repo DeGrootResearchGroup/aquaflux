@@ -28,7 +28,8 @@ def _saddle(seed: int = 0, shape: str = "mixed") -> sp.csr_matrix:
     different columns (the Gram matrix is searched), while the divergence and the correction line up
     by cell (the Schur product sums each cell's fields first). ``"aligned"``: every velocity coupling
     reaches the same cells, so both shortcuts apply. ``"ragged"``: as ``"mixed"`` with one divergence
-    entry left out, so the Schur product takes every entry on its own.
+    entry left out, so the Schur product takes every entry on its own. ``"decoupled"``: no
+    velocity-pressure coupling is stored at all.
     """
     rng = np.random.default_rng(seed)
     n = N_CELLS
@@ -53,6 +54,8 @@ def _saddle(seed: int = 0, shape: str = "mixed") -> sp.csr_matrix:
             elif max(f, g) < FIELDS:
                 add(f * n + ring, g * n + ring, 0.3 * rng.standard_normal(n))
                 add(f * n + ring, g * n + (ring + 2) % n, 0.1 * rng.standard_normal(n))
+            elif shape == "decoupled":
+                continue
             else:
                 add(f * n + ring, g * n + ring, 0.2 * rng.standard_normal(n))
                 neighbour = g * n + (ring + 1) % n
@@ -218,3 +221,19 @@ def test_block_splitting_with_simplec_is_refused() -> None:
     a = _saddle()
     with pytest.raises(ValueError, match="choose one"):
         simple_plan(SparsePattern.of(a), FIELDS + 1, block_splitting=True, simplec=True)
+
+
+def test_a_level_storing_no_velocity_pressure_coupling_has_the_pressure_block_as_its_schur() -> (
+    None
+):
+    """With ``G`` and ``D`` storing nothing the products have no terms at all: ``M G`` is empty and
+    ``S = C``. A product over no entries must not reach its chunk loop, which slices a row even when it
+    runs no iteration (it failed so on a field-split hierarchy)."""
+    a = _saddle(shape="decoupled")
+    for splitting in ({"frobenius": True}, {"frobenius": True, "block_splitting": True}):
+        plan, values, checks = _fit(a, **splitting)
+        refuse_unusable(checks)
+        c = _blocks(a)[3].toarray()
+        schur = plan.schur_layout.with_values(*values.schur).to_scipy().toarray()
+        np.testing.assert_array_equal(schur, c)
+        assert plan.correction_layout.with_values(*values.correction).to_scipy().nnz == 0

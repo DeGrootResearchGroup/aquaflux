@@ -478,6 +478,10 @@ def _product_onto(left, right, out: _PaddedLayout) -> jnp.ndarray:
     r_columns, r_values, r_lengths = right
     r_width = r_columns.shape[1]
     n_out = out.rows.n_in
+    if rows.shape[0] == 0:
+        # No stored entry on the left (a level whose divergence block stores none): no terms, and no
+        # chunk to slice -- a loop over none still traces its body once.
+        return jnp.zeros(n_out, r_values.dtype)
     out_columns = _sentinel_columns(out.columns, out.row_lengths, out.shape[1])
     out_starts = jnp.cumsum(out.row_lengths) - out.row_lengths
     r_stored = jnp.arange(r_width)[None, :] < r_lengths[:, None]
@@ -545,7 +549,7 @@ def _cell_gram(columns, values, lengths, n_cells: int, fields: int, aligned: boo
     of rows at a time.
     """
     n_rows, width = columns.shape
-    if aligned:
+    if aligned or n_rows == 0:
         by_field = values.reshape(fields, n_cells, width)
         return jnp.einsum("fca,gca->cfg", by_field, by_field)
     searchable = _sentinel_columns(columns, lengths, n_rows)
