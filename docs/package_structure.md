@@ -193,6 +193,7 @@ cfd/                                  # repo root
 │   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy / TracedFormShiftPolicy: a base shift policy paired with a frozen monolithic inverse, on the host or on device
 │   │   ├── padded_rows.py            #   _PaddedRowOperator: the padded-row (ELLPACK) level operator and its held packing
 │   │   ├── entry_map.py              #   EntryMap / EntryMaps: a refit's fixed-pattern sparse operations as fixed linear maps of the values
+│   │   ├── level_fit.py              #   CoarseningPlan / fit_levels: a frozen coarsening's level values, fitted on the device
 │   │   └── phase_timer.py            #   PhaseTimer: a refresh split into named, consecutive timed phases
 │   │
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)

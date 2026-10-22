@@ -17,10 +17,9 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.precondition import JacobiSmoothedInverse, hierarchy_inverse
 from aquaflux.precondition.entry_map import EntryMap, EntryMaps, SparsePattern
+from aquaflux.precondition.level_fit import cell_blocks as _cell_blocks
 from aquaflux.precondition.multigrid import (
-    StructuralPatterns,
     _block_tentative,
-    _cell_blocks,
     _galerkin_coarse,
     _ones,
     _onto_pattern,
@@ -374,23 +373,10 @@ def test_a_map_refuses_an_operand_whose_structure_has_moved() -> None:
         entry_map.apply(shifted)
 
 
-def test_a_held_product_is_rebuilt_when_a_fixed_operand_changes_its_values() -> None:
-    """``EntryMaps`` bakes ``L`` and ``R`` into the weights, so a changed ``R`` must give a new map --
-    held, the old weights would silently compute the old product."""
-    fine = _field_major_block(20, 1, seed=21)
-    prolongation = _block_tentative(np.arange(20) // 4, 5, 1, False).tocsr()
-    maps = EntryMaps()
-    operand = _revalued(fine, 22)
-    maps.product("galerkin", prolongation.T, operand, prolongation)
-    scaled = (2.0 * prolongation).tocsr()
-    got = maps.product("galerkin", scaled.T, operand, scaled)
-    np.testing.assert_allclose(got.toarray(), (scaled.T @ operand @ scaled).toarray(), rtol=1e-13)
-
-
 # --- the maps inside a refit -------------------------------------------------------------------------
 
 
-def _hierarchy(block: sp.csr_matrix):
+def _hierarchy(block: sp.csr_matrix, coarsening: list | None = None):
     return build_convection_hierarchy(
         block,
         block_size=2,
@@ -399,29 +385,31 @@ def _hierarchy(block: sp.csr_matrix):
         mis_aggregation=True,
         prolongation_smoothing="none",
         aggressive_levels=0,
+        coarsening=coarsening,
     )
 
 
-def test_a_mapped_refit_has_the_built_shapes_and_the_product_refit_s_values() -> None:
-    """A refit through the held maps keeps every array shape of the hierarchy it refits (so a compiled
-    cycle stays a cache hit) and equals the refit by sparse products to rounding.
+def test_a_refit_through_the_held_coarsening_has_the_built_shapes_and_the_galerkin_values() -> None:
+    """A refit through the held coarsening keeps every array shape of the hierarchy it refits (so a
+    compiled cycle stays a cache hit), and each coarse operator is the Galerkin product of the level
+    above to the rounding of its terms.
 
-    Each level operator is a Galerkin product of the one above, so each is checked against the product
-    of the level above it in the same refit, to the rounding of its terms' magnitudes as above (checking
-    against the product refit's own chain would compound the levels' rounding).
+    Each level operator is checked against the product of the level above it in the same refit, to the
+    rounding of its terms' magnitudes as above (checking against an independent chain would compound
+    the levels' rounding).
     """
-    built = _hierarchy(_field_major_block(120, 2, seed=23))
-    patterns = StructuralPatterns()
+    held = []
+    built = _hierarchy(_field_major_block(120, 2, seed=23), held)
     for seed in (24, 25):
         operand = _revalued(_field_major_block(120, 2, seed=23), seed) + sp.eye(240) * 30.0
         operand = sp.csr_matrix(operand)
-        mapped = built.refit(operand, patterns=patterns)
-        plain = built.refit(operand)
-        for got, want, original in zip(mapped.levels, plain.levels, built.levels, strict=True):
-            for leaf_got, leaf_want, leaf_built in zip(
-                jax.tree.leaves(got), jax.tree.leaves(want), jax.tree.leaves(original), strict=True
+        mapped = held[0].fit(operand)
+        for got, original in zip(mapped.levels, built.levels, strict=True):
+            for leaf_got, leaf_built in zip(
+                jax.tree.leaves(got), jax.tree.leaves(original), strict=True
             ):
-                assert np.shape(leaf_got) == np.shape(leaf_want) == np.shape(leaf_built)
+                assert np.shape(leaf_got) == np.shape(leaf_built)
+        np.testing.assert_array_equal(mapped.levels[0].operator.to_scipy().data, operand.data)
         for depth, level in enumerate(mapped.levels[:-1]):
             fine = level.operator.to_scipy()
             prolongation = level.prolongation_scipy().tocsr()

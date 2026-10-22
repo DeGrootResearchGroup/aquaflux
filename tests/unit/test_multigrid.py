@@ -1204,14 +1204,15 @@ def test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero
     settings = dict(block_size=2, prolongation_smoothing="none", max_coarse=8)
 
     built_zero = build_convection_hierarchy(zero, **settings)
-    built_live = build_convection_hierarchy(live, **settings)
+    held = []
+    built_live = build_convection_hierarchy(live, coarsening=held, **settings)
     assert len(built_zero.levels) == len(built_live.levels) >= 2
     for a, b in zip(built_zero.levels, built_live.levels, strict=True):
         assert a.operator.values.shape == b.operator.values.shape, (
             "a rebuild moved the coarse shape"
         )
 
-    refitted = built_live.refit(zero)
+    refitted = held[0].fit(zero)
     for a, b in zip(refitted.levels, built_live.levels, strict=True):
         assert a.operator.values.shape == b.operator.values.shape, "a refit moved the coarse shape"
 
@@ -1661,7 +1662,7 @@ def test_block_singularity_is_unmoved_by_scaling_any_row_or_column() -> None:
     measure must not move beyond rounding. A row-norm (Hadamard) ratio is invariant under row scaling
     only and fails this by many orders on the column scalings. A singular block must stay at zero.
     """
-    from aquaflux.precondition.multigrid import _block_singularity
+    from aquaflux.precondition.level_fit import block_singularity as _block_singularity
 
     rng = np.random.default_rng(7)
     blocks = np.concatenate(
@@ -1687,7 +1688,8 @@ def test_an_invertible_block_with_a_vanishing_variable_is_not_refused() -> None:
     lower-triangular, determinant 9.5e-06, but a row-norm (Hadamard) ratio of 6.8e-16, which refused
     it and ended a march. A zero-diagonal permutation block is invertible as well.
     """
-    from aquaflux.precondition.multigrid import _block_singularity, _cell_block_inverse
+    from aquaflux.precondition.level_fit import block_singularity as _block_singularity
+    from aquaflux.precondition.multigrid import _cell_block_inverse
 
     dense = np.zeros((4, 4))
     dense[0, 0], dense[0, 2] = 1.4806491567416882e-05, 2.5092750572028642e-23
@@ -1717,10 +1719,13 @@ def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() 
     """
     plain = dict(prolongation_smoothing="none")
     n = 600
-    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)), **plain)
+    held = []
+    cold = build_convection_hierarchy(
+        _chain_operator(n, 0.01, np.ones(n - 1)), coarsening=held, **plain
+    )
     developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
 
-    refitted = cold.refit(developed_operator)
+    refitted = held[0].fit(developed_operator)
     rebuilt = build_convection_hierarchy(developed_operator, **plain)
 
     assert len(refitted.levels) == len(rebuilt.levels)
@@ -1815,10 +1820,13 @@ def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:
     """
     n = 600
     smoothed = dict(prolongation_smoothing="symmetric-part")
-    cold = build_convection_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)), **smoothed)
+    held = []
+    build_convection_hierarchy(
+        _chain_operator(n, 0.01, np.ones(n - 1)), coarsening=held, **smoothed
+    )
     developed_operator = _chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1))
 
-    refitted = cold.refit(developed_operator)
+    refitted = held[0].fit(developed_operator)
     rebuilt = build_convection_hierarchy(developed_operator, **smoothed)
 
     coarsest = -1
@@ -1844,10 +1852,11 @@ def test_refit_holds_a_partition_that_a_rebuild_would_move() -> None:
     plain = dict(prolongation_smoothing="none", max_coarse=coarse, strength_threshold=threshold)
     strong_y = _anisotropic_poisson(24, 24, aspect_ratio=100.0)
     strong_x = _anisotropic_poisson(24, 24, aspect_ratio=0.01)
-    built = build_convection_hierarchy(strong_y, **plain)
+    held = []
+    built = build_convection_hierarchy(strong_y, coarsening=held, **plain)
 
     rebuilt = build_convection_hierarchy(strong_x, **plain)
-    refitted = built.refit(strong_x)
+    refitted = held[0].fit(strong_x)
 
     def membership(hierarchy):
         """Which coarse unknown each fine degree of freedom feeds, on the finest level."""
@@ -1867,9 +1876,10 @@ def test_refit_holds_a_partition_that_a_rebuild_would_move() -> None:
 
 def test_refit_rejects_an_operator_of_the_wrong_size() -> None:
     """A mismatched operator raises rather than returning a hierarchy that silently coarsens nothing."""
-    hierarchy = build_convection_hierarchy(_chain_operator(200, 0.01, np.ones(199)))
-    with pytest.raises(ValueError, match="cannot refit"):
-        hierarchy.refit(_chain_operator(100, 0.01, np.ones(99)))
+    held = []
+    build_convection_hierarchy(_chain_operator(200, 0.01, np.ones(199)), coarsening=held)
+    with pytest.raises(ValueError, match="cannot refit a 200-dof hierarchy"):
+        held[0].fit(_chain_operator(100, 0.01, np.ones(99)))
 
 
 def _rotated_anisotropy():

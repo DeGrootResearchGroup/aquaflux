@@ -361,7 +361,7 @@ def _simple_smoothed_cycle(
     so a refresh at unchanged shapes is a compilation-cache hit.** A locally-defined ``jax.jit`` closure
     is a fresh cache entry per closure, so re-deriving the preconditioner would recompile the whole
     cycle every time -- which is what the level records' static/traced split, the shape ladder and
-    :meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit` all exist to avoid. Closing over the
+    :meth:`~aquaflux.precondition.multigrid.FrozenCoarsening.fit` all exist to avoid. Closing over the
     arrays is also expensive on the *first* build: they become compile-time constants, so a hierarchy's
     worth of them is embedded in the compiled program rather than passed as buffers.
 
@@ -738,9 +738,10 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         #
         # These come from THIS inverse's own last coarsening, into a list `_coarsen` hands the builder
         # for exactly this build -- never a shared accumulator another hierarchy could have written to
-        # since. A frozen-coarsening refresh calls `refit`, not `_coarsen`, so it aggregates nothing new;
-        # `self._aggregate_stats` then still holds this same inverse's own last real aggregation, which
-        # is the honest thing to report (a frozen coarsening still HAS aggregates, just not new ones).
+        # since. A frozen-coarsening refresh fits the held coarsening rather than calling `_coarsen`, so
+        # it aggregates nothing new; `self._aggregate_stats` then still holds this same inverse's own
+        # last real aggregation, which is the honest thing to report (a frozen coarsening still HAS
+        # aggregates, just not new ones).
         for depth, stat in enumerate(self._aggregate_stats):
             self._report(
                 f"      aggregates level {depth}: {stat['aggregates']} of size "

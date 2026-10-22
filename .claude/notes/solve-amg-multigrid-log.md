@@ -1918,3 +1918,32 @@ branch `claude/held-maps` (patterns shared by content, ascending gathers held as
 `EntryMap._target` 612 MB -> (masks `_filled` 150 MB, product targets below the census's top rows) and
 `SparsePattern.indices` 451 MB / 28 arrays -> 304 MB / 19. Device 1.33 GB both. On main the peak had
 moved to re-fit 2's leading block re-fit (9.18 GiB stage peak).
+
+### The device fit (2026-10-22)
+
+Configuration: pitzDaily `case.yaml` as shipped (float32 split, `SimpleSmoothed` leading with
+`frozen_coarsening`, `JacobiSmoothed` trailing, pivot floor 0.15), 4-core Linux container, jax 0.12.0.1,
+CPU. Branch `claude/aquaflux-host-device-review-ef4ffs` at `080cc8c3` against `main` at `64d08ee1`.
+Harness `validation/pitzdaily_openfoam/march_cost.py` under `run_case.sh`; captured blocks and
+`fit_memory.py`-style probes (fit, then three captured refits).
+
+- **The march is the same march**: 21 steps, 102 cycles, final R 5.736e-06, `x_r/h` 8.0686, `nu_t/nu`
+  peak 418.09 on both (refit count 20 or 21: one cost-triggered refit moves with rounding).
+- **Wall clock** (solve, seconds): main 278.6, 279.7, 290.2; branch 289.5, 288.7, 278.7. Runs on one
+  commit spread ±6 s. To the end of step 1: main 85-86, branch 91-94 (the first fit: maps built at the
+  build rather than at the first refit, and the fit program's ~2.4 s compilation, under the 2 s
+  persistence floor per program so paid every process). After step 1: equal (169 vs 170 s).
+- **Refits**: refactor total main 19.6-23.1 s, branch 14.0-16.0 s; steady refactor of the captured
+  blocks 0.68-0.72 s against 0.81-0.86 s; the first refit 0.9 s against 2.7 s.
+- **Memory held**: after `malloc_trim(0)` the standalone fit holds 0.838 GiB against 0.809 (+29 MiB;
+  +67 MiB under `MALLOC_ARENA_MAX=1`): traced host allocations -80 MiB (178 vs 258 MiB), device arrays
+  +94 MiB (the plan's index maps, which on main were host arrays).
+- **Peak resident (VmHWM)**: main 2.87, 2.84, 2.77 GiB; branch 3.12, 2.93, 3.10, 3.09 GiB. An RSS trace of
+  a paired run shows a steady +0.2-0.3 GiB from ~110 s to the end. It is freed memory the allocator keeps:
+  the fit now runs in XLA, whose worker threads allocate in their own glibc arenas (`validation.md`, the
+  32 MiB/arena bullet); with one arena the standalone gap falls from +0.27 to +0.10 GiB, and
+  `malloc_trim` returns it. Not a CPU-independent cost: a GPU allocates the fit's buffers on the device.
+- Fixed on the way: a compiled function's outputs are new buffers, so returning whole padded-row
+  operators from the fit copied every level's index arrays (~37 MiB); a map's in-order source list was
+  promoted to int64 on the device (~32 MiB); eager gathers in the SIMPLE packing compiled op by op (4.1 s
+  of a first fit).

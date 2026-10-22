@@ -40,6 +40,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from .multigrid import (
+    FrozenCoarsening,
     ShapeBudget,
     SmoothedHierarchy,
     StructuralPatterns,
@@ -67,9 +68,9 @@ class _HierarchyStep:
 def _narrowed(levels: list, equilibration, precision: str) -> SmoothedHierarchy:
     """A hierarchy's levels with their floating-point arrays cast to ``precision``, prolongation values kept.
 
-    The prolongation values stay as they are because a frozen-coarsening refit
-    (:meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit`) reads them back to form the next
-    Galerkin operators: rounding them would change every refit after the first. Everything else is
+    The prolongation values stay as they are because they are the very arrays the coarsening holds
+    (:class:`~aquaflux.precondition.multigrid.FrozenCoarsening`), so a rounded copy would be held beside
+    them rather than in their place. Everything else is
     rounded once, exactly as a traced split applied in ``precision`` rounds it, so a hierarchy held in
     single precision and one narrowed when it is applied hold the same entries.
 
@@ -124,7 +125,7 @@ class HierarchyBlockInverse:
         limit bounds a dense inverse whose cost is cubic in the dof count.
     frozen_coarsening : bool
         Refresh by refitting values onto the coarsening derived at the first build
-        (:meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit`) rather than coarsening again.
+        (:meth:`~aquaflux.precondition.multigrid.FrozenCoarsening.fit`) rather than coarsening again.
         The shapes then cannot move at all; what it trades is coarse-space quality, since the partition
         describes the operator at the state it was first built at.
     shape_headroom : float, optional
@@ -138,10 +139,10 @@ class HierarchyBlockInverse:
     stored_precision : {"float64", "float32"}
         The floating-point type the hierarchy is **held** in between refreshes. Each fit and refit is
         computed in double precision and then rounded once to this type (the prolongation values
-        excepted, which a refit reads back). ``"float32"`` is for an inverse applied in single precision
-        anyway (a field split with ``precision="float32"``): its traced cycle then needs no second,
-        narrowed copy of the hierarchy beside a double one nothing applies. :meth:`apply` always runs in
-        double precision, on the rounded entries.
+        excepted, which the held coarsening shares). ``"float32"`` is for an inverse applied in single
+        precision anyway (a field split with ``precision="float32"``): its traced cycle then needs no
+        second, narrowed copy of the hierarchy beside a double one nothing applies. :meth:`apply` always
+        runs in double precision, on the rounded entries.
     """
 
     def __init__(
@@ -181,13 +182,14 @@ class HierarchyBlockInverse:
         self._budget: ShapeBudget | None = None
         self._transpose_fn = None
         # This inverse's own last aggregate-size histogram (see `_coarsen`) -- empty until the first
-        # build, and left untouched by a frozen-coarsening refresh (`refit`), which aggregates nothing
+        # build, and left untouched by a frozen-coarsening refresh (a fit), which aggregates nothing
         # new. A diagnostic only; a subclass that wants to report it reads this rather than the builder.
         self._aggregate_stats: tuple[dict, ...] = ()
-        # The structural patterns of this inverse's computed operators (Galerkin products, a smoother's
-        # derived pieces), kept between refreshes: they move only with the operands' patterns, which a
-        # frozen coarsening on a fixed-pattern block never changes, and they cost as much as the
-        # products they pattern.
+        # The coarsening the last build fitted through, on the device; a frozen refresh fits it again.
+        self._coarsening: FrozenCoarsening | None = None
+        # The structural patterns of a smoother's derived pieces, kept between refreshes: they move
+        # only with the operands' patterns, which a frozen coarsening on a fixed-pattern block never
+        # changes, and they cost as much as the products they pattern.
         self._patterns = StructuralPatterns()
         self._rebuild(matrix)
 
@@ -233,10 +235,12 @@ class HierarchyBlockInverse:
         another hierarchy aggregates can ever land on this one's report (#287).
         """
         stats: list[dict] = []
+        coarsening: list[FrozenCoarsening] = []
         hierarchy = build_convection_hierarchy(
-            matrix, shape_budget=budget, stats=stats, **self._build_settings
+            matrix, shape_budget=budget, stats=stats, coarsening=coarsening, **self._build_settings
         )
         self._aggregate_stats = tuple(stats)
+        (self._coarsening,) = coarsening
         return hierarchy
 
     def _rebuild(self, matrix: sp.csr_matrix) -> None:
@@ -343,7 +347,9 @@ class HierarchyBlockInverse:
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
             )
         if self._frozen_coarsening or not self._coarsening_reads_values():
-            self._hierarchy = self._hierarchy.refit(matrix, patterns=self._patterns)
+            # The held hierarchy is let go first, so the old levels are not alive beside the new ones.
+            self._hierarchy = None
+            self._hierarchy = self._coarsening.fit(matrix, "HierarchyBlockInverse.refactor_block")
             self._after_coarsening()
             return
         before = tuple(level.n for level in self._hierarchy.levels)
@@ -361,8 +367,8 @@ class HierarchyBlockInverse:
         It cannot when nothing that builds the transfers reads a value: no strength threshold (the
         aggregation then sees the pattern alone, :func:`~aquaflux.precondition.multigrid._aggregation_edges`),
         an unsmoothed prolongation (the aggregates' indicator, not a relaxation of the operator) and no
-        shape ladder (a budgeted build pads, which a refit does not reproduce). Equilibration rescales
-        values only, so it does not enter.
+        shape ladder (asking for one asks for each refresh to re-aggregate into it). Equilibration
+        rescales values only, so it does not enter.
         """
         settings = self._build_settings
         return (

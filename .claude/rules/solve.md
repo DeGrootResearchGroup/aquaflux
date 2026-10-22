@@ -16,7 +16,7 @@ subsystem detail is in the files the Index names. Dated history: `.claude/notes/
 |---|---|---|
 | `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; traps from the deleted incomplete-/complete-LU preconditioners |
 | `.claude/notes/solve-direct-preconditioners-log.md` | *(never auto-loads)* | Dated investigation behind Jacobian materialization: probing reach, #191, materialize cost |
-| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
+| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
 | `.claude/notes/solve-amg-multigrid-log.md` | *(never auto-loads)* | Dated investigation behind the traced multigrid and smoothed aggregation |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | Full dated flow-block investigation, including qualified/retracted findings |
@@ -46,7 +46,7 @@ Follow the root `CLAUDE.md` "Writing the design records". Solve-specific:
   `jacobian_probe`, `field_split`, `traced_field_split`, `traced_cycle`, `hierarchy_inverse`,
   `saddle_multigrid`, `host_preconditioner`, `block_inverse`, `block_preconditioner`,
   `materialized_preconditioner`, `materialized_spec`, `materialized_session`, `monolithic_policy`,
-  `bordered`, `phase_timer`, `entry_map`, `padded_rows`). An older entry saying `solve/<one of those>.py` means the `precondition/`
+  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `level_fit`). An older entry saying `solve/<one of those>.py` means the `precondition/`
   one. `precondition/` imports `solve/` and nothing else; `solve/` imports nothing outside itself (so
   every residual can run on it); every scipy/numba import is on the `precondition/` side. Pinned by
   `tests/unit/test_layering.py` (`BUILT_ON = {"precondition": ("solve",)}`). The engine holds a session

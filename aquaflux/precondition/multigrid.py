@@ -44,8 +44,6 @@ diagonal rescaling in the apply.
 from __future__ import annotations
 
 import heapq
-import itertools
-import warnings
 import zlib
 from collections.abc import Callable, Hashable, Sequence
 from typing import NamedTuple
@@ -53,14 +51,27 @@ from typing import NamedTuple
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
-import scipy.linalg as sla
 import scipy.sparse as sp
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
-from .entry_map import EntryMap, EntryMaps
-from .frozen_operator import symmetrically_equilibrate
-from .padded_rows import _padded_operator, _PaddedRowOperator
+from .entry_map import EntryMaps, SparsePattern, compiled_apply
+from .frozen_operator import equilibration_scale, symmetrically_equilibrate
+from .level_fit import (
+    CoarseningPlan,
+    _Landing,
+    _LevelPlan,
+    apply_block_inverse,
+    cell_blocks,
+    dense_inverse,
+    fine_diagonal,
+    fit_levels,
+    invert_cell_blocks,
+    landing_with_diagonal,
+    level_plan,
+    matrix_spectral_estimate,
+)
+from .padded_rows import _PaddedRowOperator
 
 
 def _require_positive_diagonal(diagonal: np.ndarray, where: str) -> None:
@@ -233,45 +244,17 @@ def aggregate_size_histogram(aggregate: np.ndarray, n_coarse_cells: int) -> dict
     }
 
 
-def _cell_blocks(a: sp.csr_matrix, block_size: int) -> np.ndarray:
-    """Each cell's own dense ``block_size × block_size`` block of a field-major operator, ``(n_cells, b, b)``.
-
-    Cell ``i``'s degrees of freedom are ``{f * n_cells + i}``; an entry the operator does not store is
-    zero. It only moves entries, so on a fixed pattern it is an :class:`EntryMap` gather
-    (:func:`_cell_block_inverse`'s ``patterns``).
-    """
-    n_cells = a.shape[0] // block_size
-    rows = np.arange(n_cells)
-    blocks = np.empty((n_cells, block_size, block_size))
-    for f in range(block_size):
-        for g in range(block_size):
-            blocks[:, f, g] = np.asarray(a[f * n_cells + rows, g * n_cells + rows]).ravel()
-    return blocks
+def _refuse_singular_blocks(singular: int, n_cells: int, where: str) -> None:
+    """Refuse an operator with ``singular`` of its ``n_cells`` cell blocks singular, naming ``where``."""
+    if singular:
+        raise ValueError(
+            f"{where}: block smoothing needs every cell block invertible, but {singular} "
+            f"of {n_cells} are singular. Unlike a non-positive scalar diagonal — which a block smoother "
+            "tolerates — this is a genuinely degenerate operator that no smoother choice repairs."
+        )
 
 
-def _block_singularity(blocks: np.ndarray) -> np.ndarray:
-    """How near each square block is to singular, independent of its rows' and columns' scales, ``(n,)``.
-
-    ``|det B|`` over the largest ``prod_i |B[i, s(i)]|`` among the permutations ``s``: scaling a row or a
-    column multiplies the determinant and every such product by the same factor, so the measure is
-    invariant under both, as the variables' units are arbitrary. It is ``1`` for a diagonal or
-    triangular block with a nonzero diagonal and ``0`` for a singular one, or for a block with no nonzero
-    product along any permutation (structurally singular). ``b!`` passes for ``(n, b, b)`` blocks.
-    """
-    n, b, _ = blocks.shape
-    magnitude, rows, largest = np.abs(blocks), np.arange(b), np.zeros(n)
-    for permutation in itertools.permutations(range(b)):
-        largest = np.maximum(largest, np.prod(magnitude[:, rows, list(permutation)], axis=1))
-    return np.divide(np.abs(np.linalg.det(blocks)), largest, out=np.zeros(n), where=largest > 0.0)
-
-
-def _cell_block_inverse(
-    a: sp.csr_matrix,
-    block_size: int,
-    where: str = "operator",
-    patterns: StructuralPatterns | None = None,
-    slot: Hashable = "cell blocks",
-) -> np.ndarray:
+def _cell_block_inverse(a: sp.csr_matrix, block_size: int, where: str = "operator") -> np.ndarray:
     """The inverse of each cell's own dense ``block_size × block_size`` block, shape ``(n_cells, b, b)``.
 
     What a **block** smoother inverts, in place of the scalar diagonal a point smoother uses. The
@@ -283,12 +266,15 @@ def _cell_block_inverse(
     Jacobi needs every ``a_ii`` positive, while this needs only each block **invertible** — a block can
     be perfectly well conditioned with a negative entry on its diagonal.
 
-    Field-major, so a cell's degrees of freedom are strided by ``n_cells`` rather than contiguous.
+    Field-major, so a cell's degrees of freedom are strided by ``n_cells`` rather than contiguous. The
+    inversion and the singularity test are :func:`~aquaflux.precondition.level_fit.invert_cell_blocks`,
+    the same a hierarchy fit applies on the device.
 
-    **Singularity is judged by :func:`_block_singularity`, which no row or column scaling moves**, as the
-    fields' units are arbitrary. Two earlier bars lacked that and each refused an invertible block
-    mid-march: a Frobenius-normalized determinant (rows 1.5e8 apart), and a row-norm (Hadamard) bound
-    ``|det| / prod ||row_i||``, invariant under row scaling only, on a corner cell with ``k`` ~1e-17:
+    **Singularity is judged by** :func:`~aquaflux.precondition.level_fit.block_singularity`, **which no
+    row or column scaling moves**, as the fields' units are arbitrary. Two earlier bars lacked that and
+    each refused an invertible block mid-march: a Frobenius-normalized determinant (rows 1.5e8 apart),
+    and a row-norm (Hadamard) bound ``|det| / prod ||row_i||``, invariant under row scaling only, on a
+    corner cell with ``k`` ~1e-17:
 
         [[ 1.48e-05,  2.5e-23],       determinant 9.5e-06, Hadamard ratio 6.8e-16,
          [-9.47e+14,  6.45e-01]]      this measure ~1.0
@@ -307,11 +293,6 @@ def _cell_block_inverse(
         so this runs on the fine operator and on every Galerkin coarse one, and "4 of 23040 are
         singular" sent three separate attempts hunting a fine-grid state that was never degenerate.
         Say which level.
-    patterns : StructuralPatterns, optional
-        Where the gather of the cell blocks out of ``a`` is kept between refits, under ``slot``.
-        ``None`` samples the blocks afresh.
-    slot : hashable
-        Which operator this is, when ``patterns`` is given.
 
     Raises
     ------
@@ -319,24 +300,10 @@ def _cell_block_inverse(
         If any cell block is singular, naming where and how many — a genuinely degenerate operator, as
         distinct from a merely indefinite one, and not something a different smoother would rescue.
     """
-    n_cells = a.shape[0] // block_size
-    if patterns is None:
-        blocks = _cell_blocks(a, block_size)
-    else:
-        blocks = patterns.maps.held(
-            slot,
-            a,
-            lambda pattern: EntryMap.gathering(pattern, lambda m: _cell_blocks(m, block_size)),
-        ).apply(a)
-        blocks = blocks.reshape(n_cells, block_size, block_size)
-    singular = _block_singularity(blocks) < 1e-12
-    if singular.any():
-        raise ValueError(
-            f"{where}: block smoothing needs every cell block invertible, but {int(singular.sum())} "
-            f"of {n_cells} are singular. Unlike a non-positive scalar diagonal — which a block smoother "
-            "tolerates — this is a genuinely degenerate operator that no smoother choice repairs."
-        )
-    return np.linalg.inv(blocks)
+    blocks = cell_blocks(a, block_size)
+    inverse, singular = invert_cell_blocks(jnp.asarray(blocks))
+    _refuse_singular_blocks(int(singular), blocks.shape[0], where)
+    return np.asarray(inverse)
 
 
 def _block_diagonal_inverse_operator(
@@ -650,7 +617,7 @@ class _SparseLevel(eqx.Module):
     sparsity pattern (:func:`_aggregate`), so a rebuild on a fixed mesh reproduces the aggregates
     exactly. Above zero it reads ``|A_ij|`` (:func:`_aggregation_edges`) and the partition moves as the
     operator develops — measured on a coupled flow block, level sizes wander by 10–20 % across a march's
-    refreshes and every move retraces the compiled cycle. :meth:`SmoothedHierarchy.refit` is the way to
+    refreshes and every move retraces the compiled cycle. :meth:`FrozenCoarsening.fit` is the way to
     keep the structure fixed in that case: it reuses this level's prolongation and re-derives only the
     values.
     """
@@ -797,90 +764,114 @@ class SmoothedHierarchy(eqx.Module):
             transpose_width.append(int(np.ceil(level.operator.transpose_width * headroom)))
         return ShapeBudget(tuple(coarse_cells), tuple(operator_width), tuple(transpose_width))
 
-    def refit(
-        self, a: sp.csr_matrix, patterns: StructuralPatterns | None = None
-    ) -> SmoothedHierarchy:
-        """Re-derive every level's operator at a new ``a``, reusing **this** hierarchy's prolongations.
 
-        A plain rebuild re-runs the aggregation, which reproduces the same partition only when the
-        coarsening reads the sparsity pattern alone — false at a nonzero ``strength_threshold``, where
-        the partition follows ``|A_ij|`` and moves as the operator develops. Refitting holds the
-        coarsening fixed and recomputes only what depends on values: each level's Galerkin operator
-        ``Pᵀ A P``, its diagonal (or per-cell block inverse), its spectral estimate, and the coarsest
-        level's dense inverse. Array shapes and static metadata are therefore unchanged, so a refitted
-        hierarchy passed as a jit argument is a compilation-cache hit.
+class FrozenCoarsening:
+    """An aggregation hierarchy's coarsening, held fixed, and the fit of its values to an operator.
 
-        **That holds for a hierarchy coarsened without a** :class:`ShapeBudget`. A refit re-derives each
-        level from the reused prolongations alone: it pads no operator to a budgeted row width, and it
-        does not re-apply the unit diagonal the budgeted build gives an empty padding aggregate. Refit a
-        budgeted hierarchy and the shapes move (and a structurally empty coarse row can then be
-        rejected); rebuild into the budget instead.
+    A coarsening decides the hierarchy's structure -- the aggregates, the prolongations, every level
+    operator's sparsity pattern -- and with that structure held, every value a level carries is a fixed
+    function of the fine operator's values (:mod:`~aquaflux.precondition.level_fit`). This holds the
+    structure on the device as a :class:`~aquaflux.precondition.level_fit.CoarseningPlan` and fits a
+    hierarchy to an operator through it: the first build does, and so does every refit that keeps the
+    coarsening, so a refit re-derives each level's operator, diagonal, block inverse, spectral estimate
+    and coarse inverse at the new operator without moving any of them through the host.
 
-        **What is frozen is the interpolation, which is more than the aggregation when the prolongator
-        was smoothed.** With ``prolongation_smoothing="none"`` the prolongation is the aggregates'
-        piecewise-constant indicator and holds no operator values, so freezing it *is* freezing the
-        coarsening exactly. With either smoothed prolongator it also carries a relaxation built from the
-        old operator, and refitting keeps that too.
+    What is frozen is the interpolation, which is more than the aggregation when the prolongator was
+    smoothed: with ``prolongation_smoothing="none"`` the prolongation is the aggregates' indicator and
+    holds no operator values, so freezing it *is* freezing the coarsening exactly; a smoothed one also
+    carries a relaxation built from the operator it was coarsened at, and a fit keeps that too. An
+    equilibrated hierarchy re-derives its scale from each operator it is fitted to.
 
-        An equilibrated hierarchy re-derives its scale from ``a``, as a rebuild would; the prolongations
-        it reuses were shaped by the previous operator's scale.
+    Built by the coarsening (``build_convection_hierarchy(..., coarsening=)``), never directly.
+
+    Parameters
+    ----------
+    plan : CoarseningPlan
+        The structure, on the device.
+    pattern : SparsePattern
+        The fine operator's pattern, which every operator fitted must store. Held on the host, so an
+        operator storing another pattern is caught before its values go anywhere.
+    """
+
+    def __init__(self, plan: CoarseningPlan, pattern: SparsePattern) -> None:
+        self.plan = plan
+        self.pattern = pattern
+
+    @property
+    def n_dofs(self) -> int:
+        """The fine operator's degrees of freedom."""
+        return self.pattern.shape[0]
+
+    def fit(self, a: sp.spmatrix, where: str = "FrozenCoarsening.fit") -> SmoothedHierarchy:
+        """The hierarchy over ``a`` on this coarsening: every level's values re-derived, nothing re-aggregated.
 
         Parameters
         ----------
         a : scipy.sparse matrix
-            The new fine operator, of the shape this hierarchy was built at.
-        patterns : StructuralPatterns, optional
-            Where each level's index work is kept between refits: the map from the fine operator's
-            values to each Galerkin product's (the prolongations are this hierarchy's, so the product
-            is a fixed linear function of the values), each level's padded-row packing, and the gather
-            of its cell blocks. On a fine operator with an unchanged pattern only the first refit builds
-            them. ``None`` computes every product and packing afresh.
+            The fine operator, of this coarsening's shape and pattern.
+        where : str
+            What to name in a refusal, with the level appended.
 
         Returns
         -------
         SmoothedHierarchy
-            A new hierarchy over ``a`` with this one's coarsening.
+            A hierarchy over ``a`` with this coarsening; at unchanged shapes, a compilation-cache hit
+            for any cycle compiled over an earlier fit.
 
         Raises
         ------
         ValueError
-            If ``a``'s shape differs from the finest level's, or a level's diagonal is not usable.
+            If ``a``'s shape or stored pattern differs from the coarsening's, or a level's diagonal is
+            not usable (a scalar level's must be finite and positive, a nodal level's cell blocks
+            invertible).
         """
-        finest = self.levels[0].n
-        if a.shape != (finest, finest):
+        a = sp.csr_matrix(a)
+        if a.shape != self.pattern.shape:
             raise ValueError(
-                f"cannot refit a {finest}-dof hierarchy onto a {a.shape[0]}-dof operator."
+                f"cannot refit a {self.n_dofs}-dof hierarchy onto a {a.shape[0]}-dof operator."
             )
-        a = a.tocsr()
-        scale: np.ndarray | None = None
-        if self.equilibration is not None:
-            a, scale = symmetrically_equilibrate(a)
-        levels: list[_SparseLevel] = []
-        for depth, level in enumerate(self.levels):
-            context = f"SmoothedHierarchy.refit (level {depth})"
-            block_inverse = (
-                None
-                if level.block_size == 1
-                else _cell_block_inverse(a, level.block_size, context, patterns, ("cells", depth))
+        if not self.pattern.matches(a):
+            raise ValueError(
+                f"cannot refit: the operator stores {a.nnz} entries in another pattern than the "
+                f"{self.pattern.nnz} this coarsening was built on, so its values would land in the "
+                "wrong slots. Coarsen the new operator instead."
             )
-            d_inv = _diagonal_inverse_operator(a, level.block_size, context, block_inverse)
-            lam = _spectral_radius(d_inv @ a)
-            built = {
-                "block_size": level.block_size,
-                "block_inverse": block_inverse,
-                "patterns": patterns,
-                "slot": ("level", depth),
-            }
-            if level.coarse_inv is None:
-                prolongation = level.prolongation_scipy()
-                levels.append(_sparse_level(a, lam, None, prolongation, level.n_coarse, **built))
-                csr = prolongation.tocsr()
-                a = _galerkin_coarse(csr.T.tocsr(), a, csr, patterns, ("galerkin", depth))
-            else:
-                levels.append(_sparse_level(a, lam, _dense_inverse(a), None, 0, **built))
+        values = jnp.asarray(a.data, dtype=jnp.float64)
+        scale = None
+        if self.plan.equilibrated:
+            # The rule is the host one, so a hierarchy equilibrates exactly as a frozen operator does.
+            scale = jnp.asarray(equilibration_scale(np.asarray(fine_diagonal(self.plan, values))))
+        fitted, checks = fit_levels(self.plan, values, scale)
+        for depth, (level, check) in enumerate(zip(fitted, checks, strict=True)):
+            context = f"{where} (level {depth})"
+            if int(check.bad_diagonal):
+                _require_positive_diagonal(np.asarray(level.diagonal), context)
+            _refuse_singular_blocks(int(check.singular_blocks), check.n_cells, context)
         return SmoothedHierarchy(
-            tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
+            tuple(
+                _fitted_level(plan, level)
+                for plan, level in zip(self.plan.levels, fitted, strict=True)
+            ),
+            scale,
         )
+
+
+def _fitted_level(plan: _LevelPlan, values) -> _SparseLevel:
+    """A level from its structure and its fitted values (:class:`~aquaflux.precondition.level_fit.LevelValues`)."""
+    p_frow, p_ccol, p_val = plan.prolongation if plan.prolongation is not None else (None,) * 3
+    return _SparseLevel(
+        n=plan.n,
+        operator=plan.layout.with_values(values.slot_values, values.transposed_slot_values),
+        diagonal=values.diagonal,
+        lam_max=values.lam_max,
+        coarse_inv=values.coarse_inv,
+        p_frow=p_frow,
+        p_ccol=p_ccol,
+        p_val=p_val,
+        n_coarse=plan.n_coarse,
+        block_inverse=values.block_inverse,
+        block_size=plan.block_size,
+    )
 
 
 def _diagonal_inverse_operator(
@@ -914,77 +905,11 @@ def _diagonal_inverse_operator(
     return _block_diagonal_inverse_operator(a, block_size, context, block_inverse)
 
 
-def _sparse_level(
-    a: sp.csr_matrix,
-    lam_max: float,
-    coarse_inv: np.ndarray | None,
-    prolongation: sp.coo_matrix | None,
-    n_coarse: int,
-    block_size: int = 1,
-    width: int | None = None,
-    transpose_width: int | None = None,
-    *,
-    block_inverse: np.ndarray | None = None,
-    patterns: StructuralPatterns | None = None,
-    slot: Hashable = "level",
-) -> _SparseLevel:
-    """Freeze a scipy sparse operator (+ optional prolongation / coarse inverse) into JAX arrays.
-
-    ``width`` pads the operator's rows to a fixed number of slots (see
-    :meth:`_PaddedRowOperator.from_scipy`), which is what keeps a budgeted rebuild a compilation-cache
-    hit. ``block_inverse`` is :func:`_cell_block_inverse` of ``a`` when the caller already holds it, and
-    ``patterns`` keeps the operator's padded-row packing between refits under ``slot``
-    (:func:`_padded_operator`).
-    """
-    p_frow = p_ccol = p_val = None
-    if prolongation is not None:
-        p_frow = jnp.asarray(prolongation.row)
-        p_ccol = jnp.asarray(prolongation.col)
-        p_val = jnp.asarray(prolongation.data)
-    return _SparseLevel(
-        n=a.shape[0],
-        operator=_padded_operator(
-            a, width, transpose_width, None if patterns is None else patterns.maps, slot
-        ),
-        diagonal=jnp.asarray(a.diagonal()),
-        lam_max=jnp.asarray(float(lam_max)),
-        coarse_inv=None if coarse_inv is None else jnp.asarray(coarse_inv),
-        p_frow=p_frow,
-        p_ccol=p_ccol,
-        p_val=p_val,
-        n_coarse=n_coarse,
-        block_inverse=(
-            None
-            if block_size == 1
-            else jnp.asarray(
-                _cell_block_inverse(a, block_size) if block_inverse is None else block_inverse
-            )
-        ),
-        block_size=block_size,
-    )
-
-
 def _dense_inverse(a: sp.spmatrix) -> np.ndarray:
-    """The coarsest level's dense inverse, by LU where the operator admits one.
+    """A host operator's dense inverse, by :func:`~aquaflux.precondition.level_fit.dense_inverse`.
 
-    The coarse solve must be an actual solve — an inexact bottom solve leaves the smoothest error in
-    and is the dominant cause of mesh-dependent V-cycle degradation — but it need not be a
-    *pseudo*-inverse. A pseudo-inverse is a singular value decomposition, which costs roughly an order
-    of magnitude more than a factorization at the same size, and the gap widens with size — so it is
-    worst at the largest coarse level this module permits
-    (:data:`_MAX_DENSE_COARSE_DOFS`). That cost is charged at every build and at every mid-march
-    refresh, so it is the largest single term in a hierarchy setup.
-
-    The generality is only needed for a **singular** operator, and this module works to avoid producing
-    one: an empty aggregate is given a unit diagonal precisely so the coarse level has no structurally
-    zero row. So the factorization is tried first, and the decomposition is kept as the fallback for the
-    case it genuinely covers.
-
-    **Singularity is judged by LAPACK's reciprocal-condition estimate rather than by whether the
-    factorization raised**, because an operator can be numerically singular without being exactly so:
-    a factorization of one returns finite nonsense rather than failing. The threshold is the same one
-    the pseudo-inverse applies when it truncates a small singular value, so the two paths agree on
-    where the operator stops being invertible instead of drawing the line in two places.
+    The coarsest level of a hierarchy fitted on the device is inverted by the same function; this is its
+    form for a coarsening that holds its operators on the host (lAIR).
 
     Parameters
     ----------
@@ -996,25 +921,13 @@ def _dense_inverse(a: sp.spmatrix) -> np.ndarray:
     np.ndarray
         Its inverse (or pseudo-inverse), shape ``(n, n)``.
     """
-    dense = a.toarray()
-    n = dense.shape[0]
-    with warnings.catch_warnings():
-        # A singular operator is handled below, so LAPACK's warning about it is not news.
-        warnings.simplefilter("ignore", sla.LinAlgWarning)
-        try:
-            lu_and_pivots = sla.lu_factor(dense, check_finite=False)
-        except ValueError:
-            return np.linalg.pinv(dense)
-    reciprocal_condition = sla.lapack.dgecon(lu_and_pivots[0], np.linalg.norm(dense, 1))[0]
-    if reciprocal_condition > n * np.finfo(np.float64).eps:
-        return sla.lu_solve(lu_and_pivots, np.eye(n), check_finite=False)
-    return np.linalg.pinv(dense)
+    return np.asarray(dense_inverse(jnp.asarray(a.toarray(), dtype=jnp.float64)))
 
 
 def _largest_singular_value(matrix: sp.spmatrix, iterations: int = 20) -> float:
     """Largest singular value of a sparse matrix, by power iteration on ``MᵀM`` (off-jit).
 
-    Distinct from :func:`_spectral_radius`, and the distinction is load-bearing for a nonsymmetric
+    Distinct from :func:`~aquaflux.precondition.level_fit.matrix_spectral_estimate`, and the distinction is load-bearing for a nonsymmetric
     operator: ``sigma_max >= |lambda|_max``, so using an eigenvalue where the method calls for a
     singular value produces too large a smoothing step. They coincide only for a normal matrix.
     """
@@ -1030,21 +943,6 @@ def _largest_singular_value(matrix: sp.spmatrix, iterations: int = 20) -> float:
         v = w / norm
         sigma = np.sqrt(norm)
     return float(sigma)
-
-
-def _spectral_radius(matrix: sp.spmatrix, iterations: int = 20) -> float:
-    """Estimate the largest eigenvalue magnitude of a sparse matrix by power iteration (off-jit)."""
-    rng = np.random.default_rng(0)
-    v = rng.standard_normal(matrix.shape[0])
-    v /= np.linalg.norm(v)
-    lam = 1.0
-    for _ in range(iterations):
-        w = matrix @ v
-        lam = float(np.linalg.norm(w))
-        if lam == 0.0:
-            return 1.0
-        v = w / lam
-    return lam
 
 
 def _aggregation_edges(a_agg: sp.csr_matrix, strength_threshold: float) -> sp.coo_matrix:
@@ -1122,6 +1020,7 @@ def _build_aggregation_hierarchy(
     prolongation_smoothing: str = "symmetric-part",
     shape_budget: ShapeBudget | None = None,
     stats: list[dict] | None = None,
+    coarsening: list[FrozenCoarsening] | None = None,
 ) -> SmoothedHierarchy:
     """Coarsen ``a`` into a frozen smoothed-aggregation hierarchy — the loop shared by the symmetric
     and convection-diffusion builders.
@@ -1130,6 +1029,11 @@ def _build_aggregation_hierarchy(
     (:func:`aggregate_size_histogram`), one entry per aggregated level, coarsest-appended-last — a
     diagnostic for a caller that wants to report it. The caller owns the list (a fresh one per build),
     so two builds -- even concurrent ones -- never share or overwrite each other's statistics.
+
+    ``coarsening``, when given, is appended to with the :class:`FrozenCoarsening` the hierarchy was
+    fitted through, for a caller that refits it to later operators. The coarsening decides structure
+    on the host; every value a level carries -- operator, diagonal, block inverse, spectral estimate,
+    coarse inverse -- is fitted on the device, by the same function a refit calls.
 
     ``aggregation_operator`` maps each level's true operator to the operator that drives aggregation
     and prolongation smoothing: identity for a symmetric graph Laplacian, and the symmetric part
@@ -1141,9 +1045,9 @@ def _build_aggregation_hierarchy(
     the aggregation operator's ``D⁻¹ A_agg`` — sets the constant-preserving prolongation smoothing.
     ``lam_store`` — of the **true** ``D⁻¹ A`` — is frozen into each level for the runtime smoother: the
     Galerkin coarse operators of a convection-diffusion problem pick up large complex eigenvalues the
-    symmetric part misses, so a coarse-level smoother damped by ``lam_smooth`` alone would diverge. When
-    the aggregation operator *is* the true operator (the symmetric path) the two coincide and the
-    estimate is computed once.
+    symmetric part misses, so a coarse-level smoother damped by ``lam_smooth`` alone would diverge.
+    ``lam_smooth`` is computed only where the prolongation is smoothed; ``lam_store`` is part of every
+    level's fit.
 
     ``equilibrate`` rescales the fine operator to a unit-magnitude diagonal before any of that runs,
     and the hierarchy then carries the factor so the solve is unchanged. It matters because every
@@ -1158,33 +1062,44 @@ def _build_aggregation_hierarchy(
             f"prolongation_smoothing must be one of {sorted(_PROLONGATION_SMOOTHING)}, "
             f"got {prolongation_smoothing!r}."
         )
-    scale: np.ndarray | None = None
+    original = sp.csr_matrix(a)
+    fine_pattern = SparsePattern.of(original)
+    scale_rows = scale_columns = None
     if equilibrate:
-        a, scale = symmetrically_equilibrate(a)
-    levels: list[_SparseLevel] = []
+        # The coarsening reads the equilibrated operator; the fit re-derives the same scale on the device.
+        a, _ = symmetrically_equilibrate(original)
+        scale_rows = jnp.asarray(
+            np.repeat(np.arange(a.shape[0], dtype=np.int32), np.diff(a.indptr))
+        )
+        scale_columns = jnp.asarray(a.indices.astype(np.int32))
+    pattern = SparsePattern.of(a)
+    values = jnp.asarray(a.data, dtype=jnp.float64)
+    plans: list[_LevelPlan] = []
+    landing = _Landing(pattern, None, None)
     live_cells = (
         a.shape[0] // block_size
     )  # cells carrying real equations; the rest are budget padding
     while True:
-        a_agg = aggregation_operator(a)
-        d_inv = _diagonal_inverse_operator(
-            a, block_size, f"_build_aggregation_hierarchy (level {len(levels)})"
+        depth = len(plans)
+        widths = (
+            {"width": None, "transpose_width": None}
+            if depth == 0 or shape_budget is None
+            else {
+                "width": shape_budget.operator_width[depth - 1],
+                "transpose_width": shape_budget.transpose_width[depth - 1],
+            }
         )
-        lam_smooth = _spectral_radius(d_inv @ a_agg)  # prolongation-smoothing damping
-        lam_store = (
-            lam_smooth if a_agg is a else _spectral_radius(d_inv @ a)
-        )  # runtime smoother scale
         budgeted = (
             None
             if shape_budget is None
-            else (shape_budget.coarse_cells[len(levels)], shape_budget.operator_width[len(levels)])
-            if len(levels) < len(shape_budget.coarse_cells)
+            else (shape_budget.coarse_cells[depth], shape_budget.operator_width[depth])
+            if depth < len(shape_budget.coarse_cells)
             else None
         )
         coarsest = (
-            len(levels) >= len(shape_budget.coarse_cells)
+            depth >= len(shape_budget.coarse_cells)
             if shape_budget is not None
-            else a.shape[0] <= max_coarse or len(levels) + 1 >= max_levels
+            else a.shape[0] <= max_coarse or depth + 1 >= max_levels
         )
         if coarsest:
             if a.shape[0] > _MAX_DENSE_COARSE_DOFS:
@@ -1197,24 +1112,17 @@ def _build_aggregation_hierarchy(
                     f"max_coarse."
                 )
             # Coarsest level: a direct dense solve — an inexact coarse solve is the dominant cause of
-            # mesh-dependent V-cycle degradation, so it must be an actual solve. `_dense_inverse`
+            # mesh-dependent V-cycle degradation, so it must be an actual solve. The fit's dense inverse
             # handles a nonsymmetric coarse operator, and a singular one.
-            levels.append(
-                _sparse_level(
-                    a,
-                    lam_store,
-                    _dense_inverse(a),
-                    None,
-                    0,
-                    block_size,
-                    width=None
-                    if len(levels) == 0 or shape_budget is None
-                    else shape_budget.operator_width[len(levels) - 1],
-                    transpose_width=None
-                    if len(levels) == 0 or shape_budget is None
-                    else shape_budget.transpose_width[len(levels) - 1],
-                )
+            plan, _ = level_plan(
+                pattern,
+                block_size,
+                prolongation=None,
+                embed=landing.embed,
+                constant=landing.constant,
+                **widths,
             )
+            plans.append(plan)
             break
         # Coarsen CELLS, not degrees of freedom, when the operator has several fields per cell: the
         # aggregation graph is collapsed onto cell connectivity and the prolongation carries each field
@@ -1243,12 +1151,12 @@ def _build_aggregation_hierarchy(
         if mis_aggregation:
             connectivity = sp.csr_matrix(abs(_aggregation_edges(graph, strength_threshold)))
             connectivity = (connectivity + connectivity.T).tocsr()
-            if len(levels) < aggressive_levels:
+            if depth < aggressive_levels:
                 # Aggressive coarsening: aggregate over distance-2 connectivity so the hierarchy
                 # coarsens fast enough to stay shallow as the mesh grows, then repair the reach it
                 # buys by re-attaching each member to a root it actually touches.
                 aggregate, roots, n_coarse_cells = _mis_aggregate(
-                    _square_graph(connectivity), seed=len(levels), avoid_singletons=avoid_singletons
+                    _square_graph(connectivity), seed=depth, avoid_singletons=avoid_singletons
                 )
                 aggregate = _reattach_to_adjacent_root(aggregate, roots, connectivity)
                 if avoid_singletons:
@@ -1260,7 +1168,7 @@ def _build_aggregation_hierarchy(
                     )
             else:
                 aggregate, _, n_coarse_cells = _mis_aggregate(
-                    connectivity, seed=len(levels), avoid_singletons=avoid_singletons
+                    connectivity, seed=depth, avoid_singletons=avoid_singletons
                 )
         else:
             upper = _aggregation_edges(
@@ -1282,7 +1190,7 @@ def _build_aggregation_hierarchy(
             usable = budgeted[0] - 1
             if n_coarse_cells > usable:
                 raise ValueError(
-                    f"level {len(levels)} aggregated into {n_coarse_cells} cells, above the "
+                    f"level {depth} aggregated into {n_coarse_cells} cells, above the "
                     f"{usable} usable of {budgeted[0]} budgeted (one slot is reserved for padding). "
                     f"Raise the budget's headroom; aggregates are never merged to fit, because that "
                     f"would change the coarse space."
@@ -1294,7 +1202,6 @@ def _build_aggregation_hierarchy(
         tentative = _block_tentative(
             aggregate, n_coarse_cells, block_size, orthonormal_prolongation
         )
-        n_coarse = tentative.shape[1]
         if prolongation_smoothing == "none":
             prolongation = tentative.tocsr()
         elif prolongation_smoothing == "standard":
@@ -1311,6 +1218,9 @@ def _build_aggregation_hierarchy(
             # step length is set by sigma_max(D^-1 A), which on a raw operator whose diagonal
             # spans orders of magnitude measures the spread of the diagonal rather than
             # anything about the coupling, so the resulting smoothing is arbitrary.
+            _require_positive_diagonal(
+                a.diagonal(), f"_build_aggregation_hierarchy (level {depth})"
+            )
             scalar_d_inv = sp.diags(1.0 / a.diagonal())
             prolongation = _onto_pattern(
                 tentative
@@ -1322,31 +1232,30 @@ def _build_aggregation_hierarchy(
             # The symmetric-part variant: damp by an EIGENVALUE of the aggregation operator's
             # `D^-1 A_agg`, and use the block diagonal on a nodal level. On the symmetric path
             # `A_agg is A` and the two forms coincide up to the damping constant.
+            a_agg = aggregation_operator(a)
+            d_inv = _diagonal_inverse_operator(
+                a, block_size, f"_build_aggregation_hierarchy (level {depth})"
+            )
+            lam_smooth = matrix_spectral_estimate(d_inv @ a_agg)
             prolongation = _onto_pattern(
                 tentative
                 - (prolongation_weight * 2.0 / lam_smooth) * (d_inv @ (a_agg @ tentative)),
                 _smoothing_pattern(tentative, a, block_size),
             )
-        levels.append(
-            _sparse_level(
-                a,
-                lam_store,
-                None,
-                prolongation.tocoo(),
-                n_coarse,
-                block_size,
-                width=None
-                if len(levels) == 0 or shape_budget is None
-                else shape_budget.operator_width[len(levels) - 1],
-                transpose_width=None
-                if len(levels) == 0 or shape_budget is None
-                else shape_budget.transpose_width[len(levels) - 1],
-            )
+        plan, product = level_plan(
+            pattern,
+            block_size,
+            prolongation=prolongation.tocoo(),
+            embed=landing.embed,
+            constant=landing.constant,
+            **widths,
         )
-        # The Galerkin coarse operator from the true A, stored on its structural pattern (see
-        # `_galerkin_coarse`): a plain product drops entries that come out exactly zero, so the stored
-        # count -- an array shape -- would move with the operator's values on a refresh.
-        a = _galerkin_coarse(prolongation.T.tocsr(), a, prolongation.tocsr())
+        plans.append(plan)
+        # The Galerkin coarse operator from the true A, on its structural pattern: the map sums every
+        # product term into the slot it lands in, so an entry that comes out exactly zero stays stored
+        # and the coarse shapes do not move with the operator's values.
+        values = compiled_apply(plan.galerkin, values)
+        landing = _Landing(product, None, None)
         live_cells = occupied
         if budgeted is not None and occupied < n_coarse_cells:
             # An empty aggregate leaves a structurally zero row and column, which no diagonal-based
@@ -1360,20 +1269,16 @@ def _build_aggregation_hierarchy(
             )
             # Only the genuinely structurally-empty ones: the reserved slot already carries a diagonal
             # summed from the padded cells it absorbed, and adding to that would be arbitrary.
-            empty = slots[a.diagonal()[slots] == 0.0]
-            # Appended through COO rather than added: a sparse sum drops entries that are exactly
-            # zero, which would undo the structural pattern the Galerkin product just stored.
-            entries = a.tocoo()
-            a = sp.coo_matrix(
-                (
-                    np.concatenate([entries.data, np.ones(empty.size)]),
-                    (np.concatenate([entries.row, empty]), np.concatenate([entries.col, empty])),
-                ),
-                shape=a.shape,
-            ).tocsr()
-    return SmoothedHierarchy(
-        tuple(levels), None if scale is None else jnp.asarray(scale, dtype=jnp.float64)
-    )
+            empty = slots[product.csr(np.asarray(values)).diagonal()[slots] == 0.0]
+            landing = landing_with_diagonal(product, empty)
+            if landing.embed is not None:
+                values = compiled_apply(landing.embed, values) + jnp.asarray(landing.constant)
+        pattern = landing.pattern
+        a = pattern.csr(np.asarray(values))
+    frozen = FrozenCoarsening(CoarseningPlan(tuple(plans), scale_rows, scale_columns), fine_pattern)
+    if coarsening is not None:
+        coarsening.append(frozen)
+    return frozen.fit(original, "_build_aggregation_hierarchy")
 
 
 def build_smoothed_hierarchy(
@@ -1384,6 +1289,7 @@ def build_smoothed_hierarchy(
     max_levels: int = 20,
     strength_threshold: float = 0.0,
     stats: list[dict] | None = None,
+    coarsening: list[FrozenCoarsening] | None = None,
 ) -> SmoothedHierarchy:
     """Build the smoothed-aggregation hierarchy for operator ``a`` — off the jit path.
 
@@ -1419,6 +1325,9 @@ def build_smoothed_hierarchy(
         Appended to with this build's per-level aggregate-size histogram
         (:func:`aggregate_size_histogram`) — a diagnostic for a caller that wants to report it. ``None``
         (default) skips it.
+    coarsening : list of FrozenCoarsening, optional
+        Appended to with the coarsening the hierarchy was fitted through, for a caller that refits it to
+        later operators of the same pattern (:meth:`FrozenCoarsening.fit`). ``None`` (default) skips it.
 
     Returns
     -------
@@ -1433,6 +1342,7 @@ def build_smoothed_hierarchy(
         max_levels=max_levels,
         strength_threshold=strength_threshold,
         stats=stats,
+        coarsening=coarsening,
     )
 
 
@@ -1726,6 +1636,7 @@ def build_convection_hierarchy(
     avoid_singletons: bool = False,
     shape_budget: ShapeBudget | None = None,
     stats: list[dict] | None = None,
+    coarsening: list[FrozenCoarsening] | None = None,
 ) -> SmoothedHierarchy:
     """Build the convection-diffusion hierarchy for operator ``a`` — off the jit path.
 
@@ -1797,6 +1708,9 @@ def build_convection_hierarchy(
         Appended to with this build's per-level aggregate-size histogram
         (:func:`aggregate_size_histogram`) — a diagnostic for a caller that wants to report it. ``None``
         (default) skips it.
+    coarsening : list of FrozenCoarsening, optional
+        Appended to with the coarsening the hierarchy was fitted through, for a caller that refits it to
+        later operators of the same pattern (:meth:`FrozenCoarsening.fit`). ``None`` (default) skips it.
 
     Returns
     -------
@@ -1821,20 +1735,8 @@ def build_convection_hierarchy(
         avoid_singletons=avoid_singletons,
         shape_budget=shape_budget,
         stats=stats,
+        coarsening=coarsening,
     )
-
-
-def _apply_block_inverse(
-    block_inverse: jnp.ndarray, block_size: int, vector: jnp.ndarray
-) -> jnp.ndarray:
-    """Apply the per-cell block inverse to a field-major vector: reshape, contract per cell, flatten.
-
-    Takes the two arrays it reads rather than a level, because both level families carry them and a
-    function typed for one of them could not serve the other without pretending an lAIR level were an
-    aggregation level.
-    """
-    per_cell = vector.reshape(block_size, -1).T  # (n_cells, block_size)
-    return jnp.einsum("cij,cj->ci", block_inverse, per_cell).T.ravel()
 
 
 def _jacobi_smooth(
@@ -1876,7 +1778,7 @@ def _jacobi_smooth(
             x = x + alpha * level.inv_diagonal * (b - _operator_matvec(level, x))
         return x
     for _ in range(sweeps):
-        x = x + alpha * _apply_block_inverse(
+        x = x + alpha * apply_block_inverse(
             level.block_inverse, level.block_size, b - _operator_matvec(level, x)
         )
     return x
@@ -1912,7 +1814,7 @@ def _jacobi_smooth_zero(
         # than by two separately-evaluated (if mathematically equal) divisions.
         x = alpha * level.inv_diagonal * b
     else:
-        x = alpha * _apply_block_inverse(level.block_inverse, level.block_size, b)
+        x = alpha * apply_block_inverse(level.block_inverse, level.block_size, b)
     return _jacobi_smooth(level, b, x, sweeps - 1, smoother_weight, spectral_damping)
 
 
@@ -2442,8 +2344,6 @@ def _galerkin_coarse(
     restriction: sp.csr_matrix,
     a: sp.csr_matrix,
     prolongation: sp.csr_matrix,
-    patterns: StructuralPatterns | None = None,
-    slot: Hashable = "galerkin",
 ) -> sp.csr_matrix:
     """``R A P``, stored on a pattern that depends on the three *patterns* and not on their values.
 
@@ -2461,27 +2361,14 @@ def _galerkin_coarse(
     ----------
     restriction, a, prolongation : scipy.sparse.csr_matrix
         The restriction ``R``, the level operator ``A`` and the prolongation ``P``.
-    patterns : StructuralPatterns, optional
-        Form the product by the held map from ``a``'s values to the coarse operator's, under ``slot``
-        (:meth:`~aquaflux.precondition.entry_map.EntryMaps.product`): with ``R`` and ``P`` fixed it is a
-        linear function of those values, landing on the same structural pattern. Equal to the product
-        computed here to rounding (the terms are summed in another order). ``None`` computes it.
-    slot : hashable
-        Which coarse operator this is, when ``patterns`` is given.
 
     Returns
     -------
     scipy.sparse.csr_matrix
         The coarse operator, shape ``(R.shape[0], P.shape[1])``.
     """
-    if patterns is not None:
-        return patterns.maps.product(slot, restriction, a, prolongation)
-    return _structured(
-        restriction @ a @ prolongation,
-        (restriction, a, prolongation),
-        lambda: _ones(restriction) @ _ones(a) @ _ones(prolongation),
-        patterns,
-        slot,
+    return _onto_pattern(
+        restriction @ a @ prolongation, _ones(restriction) @ _ones(a) @ _ones(prolongation)
     )
 
 
@@ -2935,7 +2822,7 @@ def _fc_jacobi(
             return (
                 smoother_weight
                 * mask
-                * _apply_block_inverse(level.block_inverse, level.block_size, vector)
+                * apply_block_inverse(level.block_inverse, level.block_size, vector)
             )
 
         for _ in range(f_sweeps):
