@@ -359,3 +359,62 @@ def test_the_adjoint_applies_a_single_precision_split_in_double_and_so_exactly_l
         < float(jnp.max(jnp.abs(adjoint(x) - double.apply(x))) / jnp.max(jnp.abs(double.apply(x))))
         < 1e-5
     )
+
+
+def test_a_split_holding_its_coupling_in_single_precision_composes_the_same_single_split() -> None:
+    """``stored_precision="float32"`` holds the coupling rounded once, and changes nothing applied.
+
+    A split applied in single precision rounds its coupling when it is composed, so a host split holding
+    the coupling in double kept a copy nothing applies. Held narrow, the coupling must be the double
+    block rounded once, packed into single-precision slots (not a double copy of them), and the traced
+    split composed from it must equal, leaf for leaf and bit for bit, the one composed from a split
+    holding the coupling in double -- at the fit and after a refit to a new operator.
+
+    One coupling entry sits below the single-precision normal range, where numpy's cast keeps a
+    subnormal and the traced split's conversion flushes it to zero: the held coupling must round as the
+    traced split does, or the two would differ in that entry.
+    """
+    groups = _groups()
+    inverses = {
+        "leading_inverse": SimpleSmoothed(strength_threshold=0.25, max_levels=4, max_coarse=200),
+        "trailing_inverse": JacobiSmoothed(max_coarse=150),
+    }
+    tiny = (groups.n_leading_dofs + 5, 7)  # a trailing row, a leading column: the coupling
+
+    def operator(scale: float = 1.0) -> sp.csr_matrix:
+        a = (_operator() * scale).tolil()
+        a[tiny] = 1e-40
+        return sp.csr_matrix(a)
+
+    wide = field_split_inverse(operator(), groups, **inverses)
+    narrow = field_split_inverse(operator(), groups, **inverses, stored_precision="float32")
+    for refit in (False, True):
+        if refit:
+            developed = operator(1.7)
+            developed.setdiag(developed.diagonal() + 3.0)
+            wide.refactor_block(developed)
+            narrow.refactor_block(developed)
+        assert wide.coupling.dtype == np.float64
+        assert np.count_nonzero(wide.coupling.data == 1e-40) == 1
+        assert narrow.coupling.dtype == np.float32
+        assert np.array_equal(narrow.coupling.indices, wide.coupling.indices)
+        assert narrow.coupling[tiny[0] - groups.n_leading_dofs, tiny[1]] == 0.0
+        packed = narrow.padded_coupling()
+        assert packed.values.dtype == packed.t_values.dtype == jnp.float32
+        from_wide, from_narrow = (traced_field_split(split, "float32") for split in (wide, narrow))
+        wide_leaves, narrow_leaves = jax.tree.leaves(from_wide), jax.tree.leaves(from_narrow)
+        assert len(wide_leaves) == len(narrow_leaves)
+        for held, reference in zip(narrow_leaves, wide_leaves, strict=True):
+            assert held.dtype == reference.dtype
+            assert np.array_equal(np.asarray(held), np.asarray(reference))
+
+
+def test_a_coupling_precision_outside_the_two_is_refused() -> None:
+    with pytest.raises(ValueError, match="stored_precision must be"):
+        field_split_inverse(
+            _operator(),
+            _groups(),
+            leading_inverse=SimpleSmoothed(max_coarse=200),
+            trailing_inverse=JacobiSmoothed(max_coarse=150),
+            stored_precision="bfloat16",
+        )

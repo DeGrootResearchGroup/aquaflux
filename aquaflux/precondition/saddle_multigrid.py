@@ -46,6 +46,7 @@ from .multigrid import (
     _structured,
 )
 from .padded_rows import _padded_operator, _PaddedRowOperator
+from .traced_cycle import in_precision
 
 __all__ = ["SimpleSmoothedInverse", "block_approximate_inverse"]
 
@@ -155,6 +156,7 @@ def _simple_pieces(
     simplec: bool = False,
     report: Callable[[str], None] = lambda _message: None,
     patterns: StructuralPatterns | None = None,
+    precision: str = "float64",
 ) -> tuple[_SimplePieces, sp.csr_matrix]:
     """Form one level's SIMPLE pieces from that level's assembled operator.
 
@@ -167,6 +169,10 @@ def _simple_pieces(
     between calls on a level whose blocks store the same entries (:class:`StructuralPatterns`), with the
     gathers that cut the four blocks out of ``a`` and the padded-row packings of the pieces, so a re-fit
     on a frozen coarsening computes each once.
+
+    ``precision`` is the floating-point type the traced pieces are held in. Every piece is computed in
+    double precision and rounded once as soon as it is formed, so a level's pieces are never all held
+    in double beside their rounded copies; the host Schur returned beside them stays double.
 
     Returns
     -------
@@ -189,7 +195,7 @@ def _simple_pieces(
 
     def padded(name: str, matrix: sp.spmatrix) -> _PaddedRowOperator:
         maps = None if patterns is None else patterns.maps
-        return _padded_operator(matrix, maps=maps, slot=(name, a.shape[0]))
+        return in_precision(_padded_operator(matrix, maps=maps, slot=(name, a.shape[0])), precision)
 
     f_block = block("velocity", velocity, velocity)
     # The approximate velocity inverse the whole relaxation is built on. Jacobi (`1 / F_ii`) is what
@@ -266,11 +272,11 @@ def _simple_pieces(
         _SimplePieces(
             f_block_inverse=block_inverse,
             n_velocity=nv,
-            f_diagonal_inverse=jnp.asarray(f_inverse),
+            f_diagonal_inverse=in_precision(jnp.asarray(f_inverse), precision),
             dg=padded("dg", dg),
             divergence=padded("divergence", d_block),
             schur=padded("schur", schur),
-            schur_diagonal_inverse=jnp.asarray(schur_inverse),
+            schur_diagonal_inverse=in_precision(jnp.asarray(schur_inverse), precision),
         ),
         schur,
     )
@@ -719,6 +725,7 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
                 self._simplec,
                 report=self._report,
                 patterns=self._patterns,
+                precision=self._stored_precision,
             )
         sizes = ", ".join(
             f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.nnz / 1e6:.1f}M nnz"

@@ -626,3 +626,27 @@ def test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path(
     )
     np.testing.assert_allclose(split._leading.fitted, want_leading.toarray(), rtol=0, atol=1e-12)
     np.testing.assert_allclose(split._trailing.fitted, want_trailing.toarray(), rtol=0, atol=1e-12)
+
+
+def test_narrowing_a_hierarchy_replaces_each_double_level_in_the_list_it_is_given() -> None:
+    """``_narrowed`` consumes its list, so the double levels go one at a time, not all at the end.
+
+    A refit forms the whole hierarchy in double precision before rounding it; narrowing it level by
+    level, each double level dropped as its rounded copy is made, is what keeps the two whole copies
+    from being alive together. Each level must still be the double level rounded once, its
+    prolongation values kept double.
+    """
+    from aquaflux.precondition.hierarchy_inverse import _narrowed
+
+    double = JacobiSmoothedInverse(
+        _nodal_block(), 2, strength_threshold=0.25, max_levels=4, max_coarse=40
+    )._hierarchy
+    levels = list(double.levels)
+    narrowed = _narrowed(levels, double.equilibration, "float32")
+    assert len(levels) == len(double.levels) > 1
+    for held, kept, level in zip(levels, narrowed.levels, double.levels, strict=True):
+        assert held is kept
+        assert held.operator.values.dtype == jax.numpy.float32
+        assert np.array_equal(held.operator.values, np.asarray(level.operator.values, np.float32))
+        if level.p_val is not None:
+            assert held.p_val is level.p_val

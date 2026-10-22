@@ -211,15 +211,25 @@ class _PaddedLayout:
         self._t_columns = jnp.asarray(t_columns)
 
     def operator(self, a: sp.csr_matrix) -> _PaddedRowOperator:
-        """``a`` in padded-row form: equal, slot for slot, to ``_PaddedRowOperator.from_scipy(a, ...)``."""
+        """``a`` in padded-row form: equal, slot for slot, to ``_PaddedRowOperator.from_scipy(a, ...)``.
+
+        In ``a``'s own floating-point type, as :meth:`_PaddedRowOperator.from_scipy` keeps it: a gather
+        moves entries without arithmetic, so it is exact in any type, and a single-precision operator
+        is packed into single-precision slots rather than a double copy of them.
+        """
         return _PaddedRowOperator(
             columns=self._columns,
-            values=jnp.asarray(self._rows.apply(a).reshape(self._columns.shape)),
+            values=jnp.asarray(self._packed(self._rows, a, self._columns.shape)),
             row_lengths=self._row_lengths,
             shape=self._shape,
             t_columns=self._t_columns,
-            t_values=jnp.asarray(self._transposed.apply(a).reshape(self._t_columns.shape)),
+            t_values=jnp.asarray(self._packed(self._transposed, a, self._t_columns.shape)),
         )
+
+    @staticmethod
+    def _packed(gather: EntryMap, a: sp.csr_matrix, shape: tuple[int, int]) -> np.ndarray:
+        """``gather`` applied to ``a``, laid out as ``shape`` in ``a``'s floating-point type."""
+        return gather.apply(a).reshape(shape).astype(a.dtype, copy=False)
 
 
 def _padded_operator(

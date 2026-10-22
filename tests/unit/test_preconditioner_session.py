@@ -515,11 +515,14 @@ def test_a_single_precision_split_reaches_the_step_and_a_host_split_refuses_it(c
     step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     assert step.shift_policy.split.precision == "float32"
     assert step.shift_policy.split.coupling.values.dtype == jnp.float32
+    # The host split holds its coupling as the step applies it, not a double copy beside it.
+    assert session.preconditioner.inverse.coupling.dtype == jnp.float32
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
     session.refresh_preconditioner(active, state)  # the forced first fit
     refitted = session.refresh_preconditioner(active, state * 1.05, due=True)(active)
     assert refitted.shift_policy.split.precision == "float32"
     assert refitted.shift_policy.split.coupling.values.dtype == jnp.float32
+    assert session.preconditioner.inverse.coupling.dtype == jnp.float32
 
     def host_trailing(role, factory):
         if role == "leading":

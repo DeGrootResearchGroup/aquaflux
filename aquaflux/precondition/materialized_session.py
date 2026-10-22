@@ -913,6 +913,8 @@ class MaterializedSession:
             self._problem.groups(),
             leading_inverse=self._block_inverse("leading"),
             trailing_inverse=self._block_inverse("trailing"),
+            # Held as the traced split applies it, like the blocks' hierarchies.
+            stored_precision=self._precision,
             **probing,
         )
 
