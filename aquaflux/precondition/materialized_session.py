@@ -19,6 +19,7 @@ from __future__ import annotations
 import abc
 import time
 from collections.abc import Callable
+from typing import Protocol
 
 import equinox as eqx
 import jax
@@ -36,23 +37,27 @@ from .monolithic_policy import (
     TracedSplitShiftPolicy,
     with_traced_split,
 )
-from .traced_field_split import offers_traced_split, traced_field_split
+from .pivot_floor import PivotFloor
+from .sparse_jacobian import FieldwiseMatvec
+from .traced_field_split import TracedFieldSplit, offers_traced_split, traced_field_split
 
 __all__ = [
     "BUILD_BETA",
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
     "BetaTrackingRefresh",
+    "FieldwiseResidual",
     "MaterializedProblem",
     "MaterializedSession",
+    "batched_field_jacobian_matvec",
     "batched_jacobian_matvec",
     "frozen_shift_diagonal",
     "jacobian_matvec",
 ]
 
 #: How many coloured tangents share one vmapped jvp pass when materializing a Jacobian. Larger amortizes
-#: dispatch over more probes; the coloured probes run in ``ceil(n_probes / this)`` fused passes instead of
-#: an ``n_probes``-call Python loop.
+#: dispatch over more probes; each column field's coloured probes run in ``ceil(n_colours / this)`` fused
+#: passes instead of one call per probe.
 #:
 #: Measured on the 3D backward-facing step (399 probes; 47.2M structural nonzeros in the fixed sparsity
 #: pattern, of which ~38.7-39.0M are live at any one state), wall / peak against the batch:
@@ -119,9 +124,11 @@ def jacobian_matvec(assembler, state: jnp.ndarray, tangent: jnp.ndarray) -> jnp.
 def batched_jacobian_matvec(assembler, state: jnp.ndarray, tangents: jnp.ndarray) -> jnp.ndarray:
     """``J(state) @ tangents`` for a stack of tangents -- the batched form the coloured probe uses.
 
-    The same directional derivative as :func:`jacobian_matvec` applied to each row, so the responses are
-    bit-identical to a per-tangent loop; running them as a few fused passes only amortizes dispatch. Takes
-    the assembler as an argument for the same reason.
+    The same directional derivative as :func:`jacobian_matvec` applied to each row; running them as a few
+    fused passes amortizes dispatch. The responses agree with a per-tangent loop to rounding, not bit for
+    bit: the batched program is compiled differently, and the compiler's choices (which operations it
+    fuses, where it contracts a multiply and an add) move the last bits. Takes the assembler as an
+    argument for the same reason.
 
     Parameters
     ----------
@@ -133,6 +140,85 @@ def batched_jacobian_matvec(assembler, state: jnp.ndarray, tangents: jnp.ndarray
         The stack of directions, shape ``(n_tangents, state.size)``.
     """
     return jax.vmap(lambda tangent: jax.jvp(assembler.residual, (state,), (tangent,))[1])(tangents)
+
+
+@eqx.filter_jit
+def batched_field_jacobian_matvec(
+    assembler, layout: FieldLayout, state: jnp.ndarray, field: int, tangents: jnp.ndarray
+) -> jnp.ndarray:
+    """``J(state) @ tangents`` for tangents confined to one column field -- one program per field.
+
+    Differentiates ``assembler.residual_with_field(state, field, values)`` in ``values`` alone, with
+    every other field held at ``state`` as a constant of the derivative. Those fields carry no tangent
+    at all, so nothing they alone reach is evaluated in the derivative; seeding the whole state with
+    zeros outside the field (:func:`batched_jacobian_matvec`) evaluates all of it on zeros. The
+    responses are those of :func:`batched_jacobian_matvec` for the same seeds embedded in the field, to
+    rounding: the two programs are compiled differently.
+
+    ``field`` is a static argument, so each column field compiles its own program once; the assembler
+    is an argument for the reason :func:`jacobian_matvec` gives. The tangents' floating type is part of
+    each program's compilation key too.
+
+    Parameters
+    ----------
+    assembler : object
+        A pytree with a ``residual_with_field(state, field, values)`` method (:class:`FieldwiseResidual`).
+    layout : FieldLayout
+        The state's layout, which says where ``field`` lies.
+    state : jnp.ndarray
+        The state to linearize at, shape ``(layout.size,)``.
+    field : int
+        The column field, counted over the layout's per-cell fields.
+    tangents : jnp.ndarray
+        The stack of directions within that field, shape ``(n_tangents, n_cells)``.
+
+    Returns
+    -------
+    jnp.ndarray
+        The responses, shape ``(n_tangents, layout.size)``.
+    """
+    values = state[layout.field_dofs(field) : layout.field_dofs(field + 1)]
+
+    def residual(of_field):
+        return assembler.residual_with_field(state, field, of_field)
+
+    return jax.vmap(lambda tangent: jax.jvp(residual, (values,), (tangent,))[1])(tangents)
+
+
+class FieldwiseResidual(Protocol):
+    """An assembler whose residual can be evaluated with one per-cell field replaced.
+
+    ``residual_with_field(state, field, values)`` must equal ``residual`` of ``state`` with column field
+    ``field`` (counted over the layout's per-cell fields, the probe's field-major order) set to
+    ``values``, shape ``(n_cells,)``, and must reach the operators through the fields as separate
+    arrays -- never by repacking a flat state, whose concatenation would hand every other field an
+    explicit zero tangent and undo the point of it (see :func:`batched_field_jacobian_matvec`).
+    """
+
+    def residual_with_field(
+        self, state: jnp.ndarray, field: int, values: jnp.ndarray
+    ) -> jnp.ndarray:
+        """The residual at ``state`` with ``field`` replaced by ``values``."""
+
+
+def _probe_products(
+    probed, state: jnp.ndarray, by_field: FieldLayout | None
+) -> tuple[Callable, Callable]:
+    """The single and batched Jacobian products a materialize probes ``probed`` with, at ``state``.
+
+    With ``by_field`` (the layout of a :class:`FieldwiseResidual`) the batched product takes one column
+    field's seeds at a time (:class:`~aquaflux.precondition.sparse_jacobian.FieldwiseMatvec`); without
+    it, the whole state's.
+    """
+
+    def matvec(v):
+        return jacobian_matvec(probed, state, v)
+
+    if by_field is None:
+        return matvec, lambda seeds: batched_jacobian_matvec(probed, state, seeds)
+    return matvec, FieldwiseMatvec(
+        lambda field, seeds: batched_field_jacobian_matvec(probed, by_field, state, field, seeds)
+    )
 
 
 def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
@@ -155,7 +241,22 @@ def frozen_shift_diagonal(base, beta: float, state: jnp.ndarray) -> np.ndarray:
     state : jnp.ndarray
         The state the diagonal is taken at.
     """
-    return np.asarray(jax.lax.stop_gradient(base.shift_term(state).shift(beta)))
+    return _frozen_shift_and_scale(base, beta, state)[0]
+
+
+def _frozen_shift_and_scale(base, beta: float, state: jnp.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """:func:`frozen_shift_diagonal` and the base diagonal ``d`` it scales, from one shift term.
+
+    The base diagonal is each row's pseudo-time scale independent of ``beta`` -- what a
+    :class:`~aquaflux.precondition.PivotFloor` measures a pivot against -- so it is read off the same
+    term rather than recovered by dividing the shift by ``beta``, which would fold in any per-row factor
+    of ``beta`` the policy applies.
+    """
+    term = base.shift_term(state)
+    return (
+        np.asarray(jax.lax.stop_gradient(term.shift(beta))),
+        np.asarray(jax.lax.stop_gradient(term.diagonal)),
+    )
 
 
 def _is_traced(pytree: object) -> bool:
@@ -165,6 +266,37 @@ def _is_traced(pytree: object) -> bool:
     means the caller has wrapped the solve in ``jax.grad`` / ``jvp`` / ``vmap``.
     """
     return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(pytree))
+
+
+def _release_superseded(superseded, current, inverse) -> None:
+    """Free the arrays only a superseded traced split holds, once a re-fit has replaced it.
+
+    Every step the session hands out is re-pointed at the re-fitted split (the march applies the update
+    this hook returns; the session re-points its own stopping steps), so the superseded split's arrays
+    are dead by contract. They are still referenced, though: a march's caller holds the step it started
+    the march with for as long as the march runs (``solve.staged_march`` keeps the step it built as the
+    argument of ``newton_march``, and a caller always holds its arguments for the call), and on a
+    three-dimensional case that pins a whole hierarchy -- most of a gigabyte -- for the rest of the
+    march. Freeing them here is what reclaims it; the alternative is a march that takes its starting
+    step through a hand-off its caller does not keep, a change to the march's interface. A step kept
+    across a re-fit and then applied fails loudly (JAX refuses a deleted array) rather than applying a
+    stale preconditioner.
+
+    Arrays the re-fitted split or the inverse still holds -- a frozen coarsening's index arrays, which a
+    re-fit reuses, or a hierarchy shared with a split applied in its own precision -- are kept.
+    """
+    if superseded is None:
+        return
+    held = {id(leaf) for leaf in jax.tree.leaves(current)}
+    held.update(id(leaf) for leaf in jax.tree.leaves(_held_state(inverse)))
+    for leaf in jax.tree.leaves(superseded):
+        if isinstance(leaf, jax.Array) and id(leaf) not in held and not leaf.is_deleted():
+            leaf.delete()
+
+
+def _held_state(inverse) -> list:
+    """The traced state each block of a split currently holds, for :func:`_release_superseded`."""
+    return [block.traced_cycle().state for block in (inverse.leading, inverse.trailing)]
 
 
 class BetaTrackingRefresh:
@@ -202,11 +334,24 @@ class BetaTrackingRefresh:
     observer : callable, optional
         ``(timing: RefreshTiming) -> None``, called on each refresh with which branch ran, its total
         seconds, and its per-phase costs. ``None`` (default) elides the call.
+    pivot_floor : PivotFloor, optional
+        Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals,
+        measured on the diagonal the fit would otherwise see (the Jacobian's and the shift). It changes the fit only; the operator the steps solve is left as it is. ``None``
+        (default) fits that diagonal unchanged.
+    floorable_rows : np.ndarray, optional
+        Boolean, shape ``(n_dofs,)``: the only rows ``pivot_floor`` may change
+        (:attr:`MaterializedProblem.floorable_fields`). ``None`` (default) lets it change any shifted row.
+    by_field : FieldLayout, optional
+        The state's layout when the assembler is a :class:`FieldwiseResidual`, so each column field is
+        probed by its own program (:func:`batched_field_jacobian_matvec`); ``None`` (default) probes
+        with whole-state seeds.
 
     Attributes
     ----------
     assembler : object
         The assembler this hook currently refreshes for; :meth:`rebind` changes it.
+    floored_rows : np.ndarray
+        The rows ``pivot_floor`` changed at the last re-fit, shape ``(n_floored,)``; empty without one.
     """
 
     def __init__(
@@ -217,8 +362,15 @@ class BetaTrackingRefresh:
         *,
         refit_beta_floor: float = 0.0,
         observer: Callable[[RefreshTiming], None] | None = None,
+        pivot_floor: PivotFloor | None = None,
+        floorable_rows: np.ndarray | None = None,
+        by_field: FieldLayout | None = None,
     ) -> None:
         self._probe = probe
+        self._by_field = by_field
+        self._pivot_floor = pivot_floor
+        self._floorable_rows = floorable_rows
+        self.floored_rows = np.zeros(0, dtype=np.int64)
         self._preconditioner = preconditioner
         self._refit_beta_floor = refit_beta_floor
         self._observer = observer
@@ -305,22 +457,33 @@ class BetaTrackingRefresh:
         ``refit_beta_floor * d`` rather than growing without bound the way a stale (never-refreshed)
         preconditioner's does.
 
-        The preconditioner materializes through the coloured probe in its batched form. Both probes take
-        the assembler as an argument to a module-level jitted function, so a :meth:`rebind` changes no
-        compilation key of theirs.
+        The preconditioner materializes through the coloured probe in its batched form, one column field
+        at a time when the problem's assembler offers it (``by_field``). Every probe takes the assembler
+        as an argument to a module-level jitted function, so a :meth:`rebind` changes no compilation key
+        of theirs.
         """
         frozen = jax.lax.stop_gradient(jnp.asarray(state))
-        shift = frozen_shift_diagonal(
+        shift, scale = _frozen_shift_and_scale(
             step.shift_policy.base, max(beta, self._refit_beta_floor), frozen
         )
         probed = self._probed
+        self.floored_rows = np.zeros(0, dtype=np.int64)
+        floor = self._pivot_floor
+
+        def correction(jacobian_diagonal: np.ndarray) -> np.ndarray:
+            change = floor.correction(jacobian_diagonal + shift, scale, rows=self._floorable_rows)
+            self.floored_rows = np.flatnonzero(change)
+            return change
+
+        matvec, batched_matvec = _probe_products(probed, frozen, self._by_field)
         return self._preconditioner.refresh_in_place(
-            lambda v: jacobian_matvec(probed, frozen, v),
+            matvec,
             self._probe.plan,
             shift,
-            batched_matvec=lambda seeds: batched_jacobian_matvec(probed, frozen, seeds),
+            batched_matvec=batched_matvec,
             probe_batch_size=PROBE_BATCH_SIZE,
             structure=self._probe.structure,
+            diagonal_correction=None if floor is None else correction,
         )
 
     def _report(
@@ -347,6 +510,19 @@ class MaterializedProblem(abc.ABC):
     mutating one, so a session can rebind across continuation rungs without aliasing.
     """
 
+    #: The fields, by layout name, whose shifted diagonal pivot a source term can take through zero: the
+    #: only rows a :class:`~aquaflux.precondition.PivotFloor` may change. A pivot is judged against its
+    #: row's pseudo-time diagonal, and a row whose pivot is merely small beside that diagonal without being
+    #: anywhere near singular (a momentum row) would be changed for nothing. Empty (default): no field,
+    #: and a session refuses a pivot floor for this problem rather than ignore it.
+    floorable_fields: tuple[str, ...] = ()
+
+    #: Whether :attr:`assembler`, and the stand-in the probe narrows it to, is a
+    #: :class:`FieldwiseResidual`, so that the coloured probe differentiates it in one column field at a
+    #: time and the other fields' tangents are never formed. ``False`` (default): the probe seeds the
+    #: whole state, as for any residual.
+    probes_by_field: bool = False
+
     @property
     @abc.abstractmethod
     def assembler(self) -> object:
@@ -362,15 +538,16 @@ class MaterializedProblem(abc.ABC):
         """This problem on another companion assembler of the same case."""
 
     @abc.abstractmethod
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         """The coloured probe for this problem's graph.
 
         Parameters
         ----------
         settings : dict
             The spec's set probe fields (``stencil_reach``, ``column_reach``, ``gradient_sweeps``).
-        active_rows : np.ndarray or None
-            Field-pair blocks a split never reads, or ``None`` to want every block.
+        groups : FieldGroups or None
+            The partition of the field split the probe feeds, or ``None`` for a probe of the whole
+            matrix (see :meth:`~aquaflux.precondition.JacobianProbe.build`).
         """
 
     @abc.abstractmethod
@@ -426,8 +603,11 @@ class MaterializedSession:
     through a :class:`~aquaflux.precondition.monolithic_policy.TracedSplitShiftPolicy`, so a Krylov iteration
     emits no host callback. The host split is still what is fitted and re-fitted; after each re-fit the
     hook hands the march a step carrying the traced form of the re-fitted split
-    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). That is a compilation-cache hit only
-    while the two hierarchies keep their array shapes across a re-fit, so a block whose coarsening reads
+    (:func:`~aquaflux.precondition.monolithic_policy.with_traced_split`). The traced form is taken
+    once per fit and shared by every step the session builds, the stopping steps included: each is a
+    copy of the whole hierarchy in the split's precision, so a copy per step would keep one alive per
+    step held. Swapping in a re-fitted split is a compilation-cache hit only while the two hierarchies
+    keep their array shapes across a re-fit, so a block whose coarsening reads
     operator values must freeze it (``frozen_coarsening``) or pour it into a fixed ladder
     (``shape_headroom``); otherwise every re-fit recompiles the step. Any other inverse is applied
     through a host callback and re-fitted in place.
@@ -489,6 +669,12 @@ class MaterializedSession:
                 "fields form a single group (a laminar flow); this problem has a leading and a trailing "
                 "group. Wrap block inverses in FieldSplit(leading=..., trailing=...)."
             )
+        if spec.pivot_floor is not None and not problem.floorable_fields:
+            raise ValueError(
+                f"a pivot floor changes only the rows of the fields a problem names as ones whose pivot can "
+                f"pass through zero, and {type(problem).__name__} names none, so it would change nothing. "
+                "Leave pivot_floor unset for this problem."
+            )
         self._spec = spec
         self._problem = problem
         self._observer = observer
@@ -500,6 +686,10 @@ class MaterializedSession:
         self._preconditioner: object | None = None
         # Whether the fitted inverse is carried in the step in its traced form; decided at the fit.
         self._traced = False
+        # The traced form of the fitted split, taken once per fit and carried by every step built from
+        # it. Each traced form is a copy of the whole hierarchy in the split's precision, so a step
+        # holding its own would keep one such copy alive per step built, for as long as that step is.
+        self._split: TracedFieldSplit | None = None
         # What the last build was made at and with, for building a step on another problem alike.
         self._reference_state: jnp.ndarray | None = None
         self._march: dict = {}
@@ -513,7 +703,14 @@ class MaterializedSession:
             refitted = self._refresh_hook()(active_step, state, due=due)
             if not (refitted and self._traced):
                 return None
-            split = traced_field_split(self._preconditioner.inverse)
+            superseded, self._split = self._split, None
+            self._split = split = traced_field_split(self._preconditioner.inverse, self._precision)
+            # The stopping steps share it too: they are read for their measure alone, and otherwise
+            # each would keep the fit it was built at alive for the rest of the build.
+            self._stopping_steps = {
+                key: with_traced_split(step, split) for key, step in self._stopping_steps.items()
+            }
+            _release_superseded(superseded, split, self._preconditioner.inverse)
             return lambda step: with_traced_split(step, split)
 
         self.refresh_preconditioner = (
@@ -620,22 +817,35 @@ class MaterializedSession:
         if self._preconditioner is None:
             self._preconditioner = self._fit(state, base)
             self._traced = offers_traced_split(self._preconditioner.inverse)
+            if self._traced:
+                self._split = traced_field_split(self._preconditioner.inverse, self._precision)
+            if self._precision != "float64" and not self._traced:
+                raise ValueError(
+                    f"FieldSplit(precision={self._precision!r}) needs a split applied on the device, "
+                    "and this one has a block with no traced cycle, so it is applied on the host in "
+                    "double precision."
+                )
         return problem.build_step(state, self._policy(base), bound, VCYCLE_LINEAR_SOLVE)
 
     def _policy(self, base) -> MonolithicFactorShiftPolicy | TracedSplitShiftPolicy:
         """``base`` glued to the fitted inverse, in whichever form the step carries it."""
         if self._traced:
-            return TracedSplitShiftPolicy(base, traced_field_split(self._preconditioner.inverse))
+            return TracedSplitShiftPolicy(base, self._split)
         return MonolithicFactorShiftPolicy(base, self._preconditioner)
+
+    @property
+    def _precision(self) -> str:
+        """The precision the fitted split is applied in; a single block inverse is always double."""
+        inverse = self._spec.inverse
+        return inverse.precision if isinstance(inverse, FieldSplit) else "float64"
 
     def _probe_for(self) -> JacobianProbe:
         if self._probe is None:
             self._probe = self._problem.probe(
                 self._spec.probe.settings(),
-                # A split never reads the leading-by-trailing triangle, so its probe need not store it.
-                self._problem.groups().active_rows()
-                if isinstance(self._spec.inverse, FieldSplit)
-                else None,
+                # A probe feeding a split stores neither the triangle the split never reads nor the whole
+                # matrix: its entries are laid out by the split's blocks.
+                self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None,
             )
         return self._probe
 
@@ -652,25 +862,36 @@ class MaterializedSession:
                 self._probe_for(),
                 self._preconditioner,
                 observer=self._observer,
+                pivot_floor=self._spec.pivot_floor,
+                floorable_rows=self._floorable_row_mask(),
+                by_field=self._by_field,
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook
+
+    @property
+    def _by_field(self) -> FieldLayout | None:
+        """The layout to probe one column field at a time over, or ``None`` for whole-state seeds."""
+        return self._problem.layout if self._problem.probes_by_field else None
+
+    def _floorable_row_mask(self) -> np.ndarray | None:
+        """Which rows the pivot floor may change, shape ``(n_dofs,)``, or ``None`` without a floor."""
+        if self._spec.pivot_floor is None:
+            return None
+        layout = self._problem.layout
+        rows = np.zeros(layout.size, dtype=bool)
+        for name in self._problem.floorable_fields:
+            rows[layout.slice_of(name)] = True
+        return rows
 
     def _fit(self, state: jnp.ndarray, base) -> object:
         probe = self._probe_for()
         probed = probe.narrow(self._problem.assembler)
         frozen = jax.lax.stop_gradient(state)
-
-        def matvec(v):
-            return jacobian_matvec(probed, frozen, v)
-
+        matvec, batched_matvec = _probe_products(probed, frozen, self._by_field)
         build_beta = BUILD_BETA if self._spec.build_beta is None else self._spec.build_beta
         shift = frozen_shift_diagonal(base, build_beta, state)
         inverse = self._spec.inverse
-
-        def batched_matvec(seeds):
-            return batched_jacobian_matvec(probed, frozen, seeds)
-
         probing = {
             "batched_matvec": batched_matvec,
             "probe_batch_size": PROBE_BATCH_SIZE,
@@ -697,5 +918,8 @@ class MaterializedSession:
 
     def _block_inverse(self, role: str) -> Callable:
         spec: BlockInverse = getattr(self._spec.inverse, role)
-        factory = spec.bound(report=self._reports[role]) if role in self._reports else spec
+        # A block applied in single precision is held in it too, where its family can be: otherwise a
+        # double copy of its hierarchy would sit beside the single one the step applies, unread.
+        stored = self._precision if spec._stores_precision else "float64"
+        factory = spec.bound(report=self._reports.get(role), stored_precision=stored)
         return factory if self._inverse_wrapper is None else self._inverse_wrapper(role, factory)

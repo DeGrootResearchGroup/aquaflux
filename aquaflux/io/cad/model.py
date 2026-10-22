@@ -6,7 +6,12 @@ of the package consumes, all in the case's frame and in metres:
 * :meth:`CadModel.solid` — one named solid as an exact body from :mod:`aquaflux.solids`;
 * :meth:`CadModel.fluid` — several named solids as the fluid they hold, an
   :class:`~aquaflux.solids.Outside`, for shadowing a vessel by what it contains;
-* :meth:`CadModel.triangles` — a solid's surface as triangles, for an emitting surface.
+* :meth:`CadModel.triangles` — a solid's surface as triangles, for an emitting surface;
+* for a mesher, a :class:`~aquaflux.io.cad.CadRegion` (some solids' union, less others) and what it
+  needs of one: :meth:`CadModel.topology` (faces, edges, how they connect and fold),
+  :meth:`CadModel.face_triangles` (the surface as triangles tagged by face),
+  :meth:`CadModel.write_brep` (the region as a file a mesher reads) and :meth:`CadModel.project`
+  (points moved onto the boundary, with the outward normal there).
 
 **Every body handed out has been checked against the solid it came from, and a body that fails is
 refused rather than returned.** The recognition rules propose a body; the kernel then samples points
@@ -33,12 +38,14 @@ solids, and a fluid is a union. So :meth:`CadModel.fluid` checks the union, and
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import numpy as np
 
 from aquaflux.io.cad.faces import SolidDescription
 from aquaflux.io.cad.placement import Placement
 from aquaflux.io.cad.recognize import DEFAULT_RULES, Recognition, recognize
+from aquaflux.io.cad.topology import CadRegion, CadTopology, FaceTriangles, Projection
 from aquaflux.solids import Outside, Solid
 
 __all__ = ["CadModel", "InexactBody", "read_step"]
@@ -92,6 +99,8 @@ class CadModel:
         self._sample_spacing = sample_spacing
         self._descriptions: dict[str, SolidDescription] = {}
         self._recognitions: dict[str, Recognition] = {}
+        self._regions: dict[CadRegion, object] = {}
+        self._topologies: dict[CadRegion, CadTopology] = {}
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -144,7 +153,7 @@ class CadModel:
             spacing = max(self.describe(name).extent for name in names) / _SAMPLES_ACROSS
         distance = 0.0
         for sampled, other in ((truth, claim), (claim, truth)):
-            points = self._kernel.triangulate(sampled, spacing, 0.5, spacing).reshape(-1, 3)
+            points = self._kernel.triangulate(sampled, spacing, 0.5, spacing)[0].reshape(-1, 3)
             points = np.unique(points, axis=0)
             distance = max(distance, float(np.max(self._kernel.distances(points, other))))
         tolerance = self._boundary_tolerance
@@ -234,7 +243,111 @@ class CadModel:
         np.ndarray, shape ``(n_triangles, 3, 3)``
             Ready for :meth:`aquaflux.radiation.Surfaces.from_triangles`.
         """
-        return self._kernel.triangulate(self._shape(name), chord, angle, facet_size)
+        return self._kernel.triangulate(self._shape(name), chord, angle, facet_size)[0]
+
+    # -----------------------------------------------------------------------------------------
+    # Regions, for a mesher
+    # -----------------------------------------------------------------------------------------
+
+    def _region(self, region: CadRegion):
+        if region not in self._regions:
+            self._regions[region] = self._kernel.region(
+                [self._shape(name) for name in region.solids],
+                [self._shape(name) for name in region.without],
+            )
+        return self._regions[region]
+
+    def topology(self, region: CadRegion) -> CadTopology:
+        """How the region's faces, edges and vertices connect, numbered in exploration order.
+
+        The order is the one a mesher reading :meth:`write_brep`'s file numbers the faces in.
+        """
+        if region not in self._topologies:
+            self._topologies[region] = self._kernel.topology(self._region(region))
+        return self._topologies[region]
+
+    def face_triangles(
+        self,
+        region: CadRegion,
+        *,
+        chord: float,
+        facet_size: float | None = None,
+        angle: float = 0.5,
+    ) -> FaceTriangles:
+        """The region's surface as triangles wound outward, each tagged by its face.
+
+        Parameters
+        ----------
+        region : CadRegion
+        chord, facet_size, angle
+            As in :meth:`triangles`. A face cut into pieces by ``facet_size`` keeps its own index.
+
+        Returns
+        -------
+        FaceTriangles
+        """
+        triangles, face = self._kernel.triangulate(self._region(region), chord, angle, facet_size)
+        return FaceTriangles(triangles=triangles, face=face)
+
+    def write_brep(self, region: CadRegion, path: str | os.PathLike) -> Path:
+        """Write the region as a boundary-representation (BREP) file, the kernel's own format.
+
+        A mesher reading the file numbers its faces as :meth:`topology` does.
+
+        Returns
+        -------
+        Path
+            The file written.
+        """
+        path = Path(path)
+        self._kernel.write_brep(self._region(region), path)
+        return path
+
+    def project(self, region: CadRegion, points, faces=None, edges=None) -> Projection:
+        """Points moved onto the region's boundary, with the face and outward normal there.
+
+        Parameters
+        ----------
+        region : CadRegion
+        points : array-like, shape ``(n, 3)``
+        faces : array-like of int, shape ``(n,)``, optional
+            The face (as :meth:`topology` numbers them) to move each point onto -- to snap a node
+            to the face it belongs to, whatever face is nearest.
+        edges : array-like of int, shape ``(n,)``, optional
+            The edge (as :meth:`topology` numbers them) to move each point onto -- to snap a node
+            to the sharp edge it lies on -- in place of ``faces``. The face reported is the first,
+            in exploration order, that meets the edge. With neither, the nearest point of the
+            whole boundary.
+
+        Returns
+        -------
+        Projection
+
+        Raises
+        ------
+        ValueError
+            If both faces and edges are given, or an index is out of range.
+
+        Notes
+        -----
+        One kernel distance query per point, in a Python loop: for snapping the nodes of a
+        boundary, not for every node of a volume mesh.
+        """
+        if faces is not None and edges is not None:
+            raise ValueError("project onto faces or onto edges, not both")
+        topology = None
+        for name, chosen in (("face", faces), ("edge", edges)):
+            if chosen is None:
+                continue
+            topology = topology or self.topology(region)
+            count = topology.n_faces if name == "face" else topology.n_edges
+            chosen = np.asarray(chosen, dtype=np.int64).reshape(-1)
+            if chosen.size and (chosen.min() < 0 or chosen.max() >= count):
+                msg = f"a {name} index is outside [0, {count})"
+                raise ValueError(msg)
+        faces = None if faces is None else np.asarray(faces, dtype=np.int64).reshape(-1)
+        edges = None if edges is None else np.asarray(edges, dtype=np.int64).reshape(-1)
+        return self._kernel.project(self._region(region), points, faces, edges)
 
 
 def read_step(path: str | os.PathLike, placement: Placement | None = None, **options) -> CadModel:

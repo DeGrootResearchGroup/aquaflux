@@ -21,13 +21,11 @@ from aquaflux.case import (
     CaseSpec,
     FixedTurbulence,
     Fluid,
-    GeometricGrading,
     Inlet,
     IntensityLength,
     Numerics,
     OpenFOAMMesh,
     Outlet,
-    StructuredGrid,
     Wall,
     case_spec_from_mapping,
     case_spec_to_mapping,
@@ -48,7 +46,7 @@ from aquaflux.flow import (
 )
 from aquaflux.io import read_openfoam
 from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
-from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d, structured_grid_3d
+from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
@@ -63,6 +61,8 @@ from aquaflux.turbulence import (
     SSTTurbulence,
     turbulence_scales,
 )
+
+from tests.support.case_meshes import grid_mesh
 
 REPO = Path(__file__).resolve().parents[2]
 #: A one-cell-thick slab between `empty` front and back patches, read as 2D: left, right, bottom, top.
@@ -900,19 +900,13 @@ def test_an_unset_setting_leaves_the_builders_default_in_force() -> None:
     _same_problem(built, reference)
 
 
-# --- generated meshes, a held bulk velocity, a prescribed force -------------------------------
+# --- a periodic channel, a held bulk velocity, a prescribed force ------------------------------
 
 
 def _channel_sections(**overrides: object) -> dict[str, object]:
     """A laminar periodic channel, as a file would state it."""
     sections = {
-        "mesh": {
-            "kind": "StructuredGrid",
-            "cells": [4, 6],
-            "lengths": [1.0, 2.0],
-            "periodic": ["x"],
-            "grading": {"y": {"kind": "GeometricGrading", "growth": 1.3}},
-        },
+        "mesh": grid_mesh([4, 6], [1.0, 2.0], periodic=["x"], growth=1.3),
         "fluid": {"density": 1.0, "kinematic_viscosity": 0.1},
         "physics": {"kind": "Laminar"},
         "boundaries": {"bottom": {"kind": "Wall"}, "top": {"kind": "Wall"}},
@@ -923,98 +917,15 @@ def _channel_sections(**overrides: object) -> dict[str, object]:
     return {**sections, **overrides}
 
 
-def test_a_structured_grid_generates_the_mesh_its_settings_describe() -> None:
-    grid = StructuredGrid(
-        cells=(4, 6),
-        lengths=(1.0, 2.0),
-        periodic=("x",),
-        grading={"y": GeometricGrading(growth=1.3)},
-    )
-    mesh = grid.read(REPO)
-    reference = structured_grid_2d(
-        4,
-        6,
-        1.0,
-        2.0,
-        named_boundaries=True,
-        periodic=("x",),
-        y_nodes=graded_nodes(6, 2.0, 1.3),
-    )
-    _same_problem(mesh, reference)
-    # A periodic axis's two sides are an interior seam, not patches.
-    assert {"bottom", "top"} <= set(mesh.face_patches.names)
-    assert not {"left", "right"} & set(mesh.face_patches.names)
-
-
-def test_a_three_dimensional_structured_grid_is_the_uniform_box_its_settings_describe() -> None:
-    mesh = StructuredGrid(cells=(2, 3, 4), lengths=(1.0, 2.0, 3.0)).read(REPO)
-    # Unequal counts and lengths on every axis, so a transposed pair would change the mesh.
-    _same_problem(mesh, structured_grid_3d(2, 3, 4, 1.0, 2.0, 3.0, named_boundaries=True))
-    assert {"left", "right", "bottom", "top", "back", "front"} <= set(mesh.face_patches.names)
-
-
-def test_a_grading_toward_one_wall_reaches_the_generator() -> None:
-    grid = StructuredGrid(
-        cells=(2, 5), lengths=(1.0, 1.0), grading={"y": GeometricGrading(1.5, both_sides=False)}
-    )
-    y = np.unique(np.asarray(grid.read(REPO).node_coords)[:, 1])
-    np.testing.assert_allclose(y, graded_nodes(5, 1.0, 1.5, both_sides=False))
-
-
-def test_a_whole_number_cell_count_written_as_a_float_is_a_count() -> None:
-    assert StructuredGrid(cells=(4.0, 6.0), lengths=(1.0, 1.0)).cells == (4, 6)
-
-
 @pytest.mark.parametrize(
     ("build", "match"),
     [
-        (
-            lambda: StructuredGrid(cells=(2, 2, 2, 2), lengths=(1.0, 1.0, 1.0, 1.0)),
-            "two cell counts and two lengths, or three of each",
-        ),
-        (
-            lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0)),
-            "two cell counts and two lengths, or three of each",
-        ),
-        (
-            lambda: StructuredGrid(cells=(2, 2, 2), lengths=(1.0, 1.0, 1.0), periodic=("x",)),
-            "three-dimensional structured grid is uniform",
-        ),
-        (lambda: StructuredGrid(cells=(0, 2), lengths=(1.0, 1.0)), "cell counts must be >= 1"),
-        (lambda: StructuredGrid(cells=(2, 2), lengths=(1.0, -1.0)), "lengths must be positive"),
-        (
-            lambda: StructuredGrid(cells=(1, 2), lengths=(1.0, 1.0), periodic=("x",)),
-            "needs at least two cells",
-        ),
-        (
-            lambda: StructuredGrid(cells=(2, 2), lengths=(1.0, 1.0), periodic=("x", "x")),
-            "named twice as periodic",
-        ),
-        (
-            lambda: StructuredGrid(
-                cells=(2, 2), lengths=(1.0, 1.0), grading={"z": GeometricGrading(1.1)}
-            ),
-            r"grading names axes \('x', 'y'\), got \['z'\]",
-        ),
-        (lambda: GeometricGrading(growth=0.0), "growth must be a positive"),
         (lambda: BulkVelocity(target=float("nan")), "BulkVelocity.target must be finite"),
         (lambda: BodyForce(force=(1.0,)), "two or three components, got 1"),
     ],
-    ids=[
-        "four-dimensional",
-        "lengths-of-another-dimension",
-        "three-dimensional-and-periodic",
-        "no-cells",
-        "negative-length",
-        "one-periodic-cell",
-        "periodic-twice",
-        "grading-an-axis-it-lacks",
-        "zero-growth",
-        "non-finite-target",
-        "one-component-force",
-    ],
+    ids=["non-finite-target", "one-component-force"],
 )
-def test_a_generated_mesh_or_forcing_that_cannot_exist_is_refused(build, match) -> None:
+def test_a_forcing_that_cannot_exist_is_refused(build, match) -> None:
     with pytest.raises(ValueError, match=match):
         build()
 

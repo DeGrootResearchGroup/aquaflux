@@ -76,6 +76,10 @@ solver:
         avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
         frozen_coarsening: true}
       trailing: {kind: JacobiSmoothed, max_coarse: 2000, equilibrate: false}
+      # Applied in single precision: fitted in double, its arrays rounded once, the residual, Krylov
+      # solves and the adjoint's preconditioner kept in double. Same steps, cycles and root as float64,
+      # faster (pitzDaily march 405 s against 531 s, #732).
+      precision: float32
     # The pattern is reach 3 and every column is PROBED at reach 2 (100 probes against 165). The probe
     # then sums each column's distance-3 couplings (~4e-4 of the Jacobian's norm here) into its near
     # entries; the SIMPLE-smoothed flow block and the Jacobi-smoothed k-omega block take that perturbed
@@ -86,6 +90,10 @@ solver:
     # this reach-3 pattern 123, and in a reach-4 pattern 121 -- the reach-4 pattern makes every refit's
     # refactor dearer and was ~10 % slower overall. The probe drops 4.3-5.8 s -> 2.5-3.4 s per refit.
     probe: {kind: JacobianProbeSpec, stencil_reach: 3, column_reach: [2, 2, 2, 2, 2]}
+    # Near-zero k pivots are fitted at their row's pseudo-time diagonal, sign kept: without it a k pivot
+    # near zero makes the float32 split wrong by order one around it and the step's direction rounding-
+    # decided (bfs3d 38 -> 21 steps, pitzDaily unchanged at 21; 2026-10-18).
+    pivot_floor: {kind: PivotFloor, threshold: 0.15}
   # Each outer step a dual-time inner loop of up to five Newton iterations, stopping at a hundredth of
   # the step's starting residual; a solve that runs 3 restart cycles ends the step, and the
   # preconditioner is refitted before the next (counted as cycles run, the residual stop's count).

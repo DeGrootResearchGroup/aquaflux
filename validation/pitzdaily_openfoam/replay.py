@@ -18,7 +18,8 @@ inside the step instead) does not replay faithfully; re-run the capture.
 
 A replay that does not reproduce the march's recorded cycle counts is measuring some other sequence, so
 every consumer should check it: :meth:`MarchReplay.march_solver` is the march's own solver, bound to the
-step's measure.
+step's measure and, given :attr:`System.rtol`, to the tolerance the march's adaptive rule solved that
+step to.
 
 ⚠️ Any later run of ``compare.py`` writes its own rolling checkpoints into the same directory and evicts
 the capture's step states (the inner dumps survive, the states do not); re-run the capture first. A
@@ -43,11 +44,14 @@ from aquaflux.precondition.materialized_session import (
     jacobian_matvec,
 )
 from aquaflux.solve import (
+    DEFAULT_ADAPTIVE_TOLERANCE,
     ConstantRelaxation,
     solve_linear,
 )
 from aquaflux.solve.linear import (
     in_progress_measure,
+    relative_tolerance,
+    with_relative_tolerance,
 )
 from aquaflux.turbulence import coupled_step, open_session, scale_both_blocks, scale_momentum_only
 from aquaflux.turbulence.coupled import coupled_scaled_norm
@@ -88,7 +92,8 @@ class System:
 
     ``b`` is the right-hand side, ``shift`` the diagonal ``s``, ``p`` the linearization point and
     ``measure`` the step's progress measure, which the march's solve stops in. ``recorded`` is the cycle
-    count the march reported for it.
+    count the march reported for it, and ``rtol`` the relative tolerance the march solved it to (see
+    :meth:`MarchReplay.tolerance`).
     """
 
     step: int
@@ -100,6 +105,7 @@ class System:
     measure: object
     b: jnp.ndarray
     recorded: int
+    rtol: float
 
 
 class MarchReplay:
@@ -190,9 +196,37 @@ class MarchReplay:
             self.coupled, self.ramp.anchor ** (1.0 - station / self.ramp.stations)
         )
 
-    def march_solver(self, measure):
-        """The march's own Krylov solver, stopping in ``measure`` as the step binds it."""
-        return in_progress_measure(self.step.linear_solver(), measure)
+    def march_solver(self, measure, rtol: float | None = None):
+        """The march's own Krylov solver, stopping in ``measure`` as the step binds it, at ``rtol`` if given
+        (a system's :attr:`System.rtol`) and at the regime's own tolerance otherwise."""
+        solver = in_progress_measure(self.step.linear_solver(), measure)
+        return solver if rtol is None else with_relative_tolerance(solver, rtol)
+
+    def tolerance(self, step: int) -> float:
+        """The relative tolerance the march solved step ``step``'s systems to.
+
+        A march varies it from step to step by its :class:`~aquaflux.solve.AdaptiveLinearTolerance` (the
+        case's, or the library default), from the report of the step before: tighter after a line-search
+        setback, tighter still in a linear-solve-limited tail. A checkpoint does not record the tolerance,
+        so it is rebuilt here from the recorded reports by the same rule. The tail rule's floor reads the
+        stopping measure's residual, which a checkpoint does not record either; the steered residual
+        stands in for it, which can move a tail tolerance's floor and nothing else.
+        """
+        base = relative_tolerance(self.step.linear_solver())
+        rule = self.solver.adaptive_tolerance or DEFAULT_ADAPTIVE_TOLERANCE
+        previous = self.states.get(step - 1)
+        before = self.states.get(step - 2)
+        if base is None or previous is None or before is None:
+            return base
+        reduction = float(previous["residual_norm"]) / float(before["residual_norm"])
+        convergence = self.solver.convergence
+        return rule.next_tolerance(
+            base,
+            alpha=float(previous["alpha"]),
+            reduction=reduction,
+            stopping_norm=float(previous["residual_norm"]),
+            target=convergence.atol + convergence.rtol * float(self.states[1]["residual_norm"]),
+        )
 
     def solve(self, system: System, solver):
         """``solver`` on ``system`` with the current preconditioner: ``(delta, raw_steps)``."""
@@ -239,6 +273,7 @@ class MarchReplay:
             r_n = assembler.residual(phi_n)
             shift = jax.lax.stop_gradient(self.policy.shift_term(phi_n, r_n).shift(beta))
             measure = coupled_scaled_norm(self.coupled, self.policy, phi_n)
+            rtol = self.tolerance(k)
             # A station change re-fits in full at the step's start, and so does a step following one that
             # stopped for a re-fit.
             if assembler is not previous or due:
@@ -250,7 +285,7 @@ class MarchReplay:
                 record = self.inner[(k, i)]
                 recorded = int(record["cycles"])
                 b = -(assembler.residual(p) + shift * (p - phi_n))
-                yield System(k, i, assembler, p, phi_n, shift, measure, b, recorded)
+                yield System(k, i, assembler, p, phi_n, shift, measure, b, recorded, rtol)
                 # A solve this expensive ended the step; the re-fit is taken at the next step's start.
                 if self.refresh_on is not None and recorded >= self.refresh_on:
                     due = True

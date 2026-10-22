@@ -205,7 +205,9 @@ from a mesh's boundary patch ({func}`~aquaflux.mesh.patch_triangles`), or from a
   {class}`~aquaflux.radiation.PhotometricProfile` for the lamp window's facets. The vertical angle is
   measured from each facet's normal and the horizontal angle round it from a direction `up` you
   choose, so the window's facets must face along the fixture's beam; the table is bilinear between
-  its tabulated directions and completed round the circle by its declared symmetry. The profile
+  its tabulated directions and completed round the circle by the symmetry its horizontal range
+  declares (a range of half a turn — 0 to 180, 90 to 270 or −90 to 90 degrees — is mirrored about
+  the plane through its two ends). The profile
   varies around its axis as well as away from it, which is why a profile is asked about a direction
   and a facet normal rather than a single angle ({class}`~aquaflux.radiation.AxisymmetricProfile`
   is the family that depends on the angle alone). The direct gathers take it; the surface transfer,
@@ -741,8 +743,14 @@ attaches to a scalar carried by the converged flow.
 - **Exact energy balance for a non-diffuse source.** A cosine-power source's distribution is
   evaluated along one direction per pair of facets, centroid to centroid; energy is conserved
   exactly only for diffuse sources, and the error shrinks as the surface is refined.
-- **Zero-thickness sheets block from both sides only when declared as such**: see
-  {class}`~aquaflux.radiation.SilhouetteOcclusion` and {class}`~aquaflux.radiation.TriangleBody`.
+- **A zero-thickness sheet is one-sided unless declared.** A baffle or a shelf given as one layer
+  of triangles has the fluid on both sides. Name its body in the surface set's `two_sided`
+  ({class}`~aquaflux.radiation.Surfaces`) and it blocks light from both sides and receives and
+  reflects it on both faces; each facet is then two faces in the surface solve, and the results
+  indexed by facet list the back faces after the set's own facets
+  ({meth}`~aquaflux.radiation.Surfaces.with_back_faces`). A sheet may reflect but not emit.
+  Undeclared, it reflects and absorbs on its front only, and the silhouette clip lets light through
+  it from behind (an open sheet is warned about). See also {class}`~aquaflux.radiation.TriangleBody`.
 
 ## Theory
 

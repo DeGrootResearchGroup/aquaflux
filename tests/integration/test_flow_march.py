@@ -24,6 +24,7 @@ from aquaflux.flow import (
 from aquaflux.flow import march as flow_march_module
 from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
 from aquaflux.solve import (
+    AdaptiveLinearTolerance,
     BlockScaled,
     Convergence,
     DualTimeLoop,
@@ -295,8 +296,10 @@ def test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure() -> No
     assert float(jnp.linalg.norm(state - reference) / jnp.linalg.norm(reference)) < 1e-6
 
 
-def test_a_stopping_step_reaches_the_march_from_the_flow_solve(channel, monkeypatch) -> None:
-    """``solve_flow_march(stopping_step=...)`` is handed to the march, as from the coupled solve."""
+def test_a_stopping_step_and_an_adaptive_tolerance_reach_the_march_from_the_flow_solve(
+    channel, monkeypatch
+) -> None:
+    """``solve_flow_march`` hands both march settings to the march, as the coupled solve does."""
     from aquaflux.solve import MarchResult
     from aquaflux.solve import driver as driver_module
 
@@ -309,6 +312,8 @@ def test_a_stopping_step_reaches_the_march_from_the_flow_solve(channel, monkeypa
 
     monkeypatch.setattr(driver_module, "newton_march", recording_march)
 
+    adaptive = AdaptiveLinearTolerance()
+
     def stopping(step):
         return step
 
@@ -318,8 +323,10 @@ def test_a_stopping_step_reaches_the_march_from_the_flow_solve(channel, monkeypa
         strategy=flow_march_step(assembler, assembler.initial_state()),
         convergence=Convergence(measure=Euclidean(), rtol=1.0, atol=1e30),
         stopping_step=stopping,
+        adaptive_tolerance=adaptive,
     )
     assert calls[0]["stopping_step"] is stopping
+    assert calls[0]["adaptive_tolerance"] is adaptive
 
 
 def test_globalization_reaches_the_flow_march_step(channel) -> None:

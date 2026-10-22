@@ -20,6 +20,7 @@ import lineax as lx
 import pytest
 from aquaflux.case import (
     RANS,
+    AquafluxMesh,
     BulkVelocity,
     CaseSpec,
     CoupledMarch,
@@ -29,7 +30,6 @@ from aquaflux.case import (
     Numerics,
     RootSolve,
     Segregated,
-    StructuredGrid,
     ViscosityRamp,
     Wall,
     case_spec_from_mapping,
@@ -44,9 +44,11 @@ from aquaflux.precondition import (
     JacobianProbeSpec,
     JacobiSmoothed,
     MaterializedJacobian,
+    PivotFloor,
     SimpleSmoothed,
 )
 from aquaflux.solve import (
+    AdaptiveLinearTolerance,
     CflResidualDualTimeControl,
     Convergence,
     DirectSolve,
@@ -68,13 +70,15 @@ from aquaflux.turbulence import (
     scale_momentum_only,
 )
 
+from tests.support.case_meshes import grid_mesh, grid_mesh_path
+
 REPO = Path(__file__).resolve().parents[2]
 
 
 def _sections(physics: str = "RANS", **overrides: object) -> dict[str, object]:
     """A 2D channel between walls, as a file would state it, with ``overrides`` added as sections."""
     sections = {
-        "mesh": {"kind": "StructuredGrid", "cells": [4, 4], "lengths": [1.0, 1.0]},
+        "mesh": grid_mesh([4, 4], [1.0, 1.0]),
         "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-3},
         "physics": {"kind": physics},
         "boundaries": {
@@ -99,7 +103,7 @@ def _sections(physics: str = "RANS", **overrides: object) -> dict[str, object]:
 def _periodic_rans(**overrides: object) -> CaseSpec:
     """A streamwise-periodic RANS channel holding its bulk velocity."""
     return CaseSpec(
-        mesh=StructuredGrid(cells=(4, 8), lengths=(1.0, 2.0), periodic=("x",)),
+        mesh=AquafluxMesh(grid_mesh_path((4, 8), (1.0, 2.0), ("x",))),
         fluid=Fluid(density=1.0, kinematic_viscosity=1e-4),
         physics=RANS(),
         boundaries={"bottom": Wall(k="zero"), "top": Wall(k="zero")},
@@ -548,6 +552,32 @@ def test_a_coupled_march_hands_solve_coupled_its_settings_and_nothing_it_leaves_
     assert recorded.solve_reynolds_ramp.calls == []
 
 
+def test_an_adaptive_tolerance_is_read_from_the_file_and_reaches_either_march(recorded) -> None:
+    """The setting is a case-file kind, and both march families hand it to their solve unchanged."""
+    adaptive = AdaptiveLinearTolerance(after_setback=0.05, tail_gate=None)
+    spec = case_spec_from_mapping(
+        _sections(
+            solver={
+                "kind": "CoupledMarch",
+                "adaptive_tolerance": {
+                    "kind": "AdaptiveLinearTolerance",
+                    "after_setback": 0.05,
+                    "tail_gate": None,
+                },
+            }
+        )
+    )
+    assert spec.solver == CoupledMarch(adaptive_tolerance=adaptive)
+
+    spec.solver.solve("problem")
+    ((_, kwargs),) = recorded.solve_coupled.calls
+    assert kwargs["adaptive_tolerance"] is spec.solver.adaptive_tolerance
+
+    FlowMarch(adaptive_tolerance=adaptive).solve("problem")
+    ((_, kwargs),) = recorded.solve_flow_march.calls
+    assert kwargs["adaptive_tolerance"] == adaptive
+
+
 def test_a_ramp_ending_on_the_settle_ends_on_the_marchs_own_controls_settle(recorded) -> None:
     """The schedule the ramp is handed ends on the very control the march runs -- one "settled".
 
@@ -619,7 +649,16 @@ def test_a_block_diagonal_preconditioner_is_left_to_the_solve(recorded) -> None:
 
 @pytest.mark.parametrize(
     "keyword",
-    ["dual_time", "max_steps", "retry", "shift", "omega_step_ratio", "homotopy", "preconditioner"],
+    [
+        "dual_time",
+        "max_steps",
+        "retry",
+        "adaptive_tolerance",
+        "shift",
+        "omega_step_ratio",
+        "homotopy",
+        "preconditioner",
+    ],
 )
 def test_a_script_cannot_pass_a_setting_even_one_the_file_leaves_unset(recorded, keyword) -> None:
     with pytest.raises(TypeError, match=rf"CoupledMarch: {keyword} is a setting of the case"):
@@ -771,10 +810,14 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
                     frozen_coarsening=True,
                 ),
                 JacobiSmoothed(max_coarse=2000, equilibrate=False),
+                # Applied in single precision, the case's own since #732.
+                precision="float32",
             ),
             probe=JacobianProbeSpec(
                 stencil_reach=3, column_reach=(2, 2, 2, 2, 2), gradient_sweeps=None
             ),
+            # Near-zero k pivots moved out of the fit, both step cases' since 2026-10-19.
+            pivot_floor=PivotFloor(threshold=0.15),
         ),
         # The residual-only Krylov stop and its re-tuned refresh threshold, the case's own since the
         # script stopped building its march.
@@ -842,11 +885,13 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
                     equilibrate=False,
                     avoid_singletons=False,
                 ),
+                precision="float32",
             ),
             probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
+            pivot_floor=PivotFloor(threshold=0.15),
         ),
         "dual_time": DualTimeLoop(
-            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=3
+            inner_steps=5, inner_tol=1e-2, cycle_budget=42, refresh_on_cycles=4
         ),
         "linear_solve": LinearSolveSettings(rtol=0.3, restart=15, max_restarts=14, stop="residual"),
         "step_control": CflResidualDualTimeControl(

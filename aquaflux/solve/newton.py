@@ -90,11 +90,25 @@ def newton_correction(
     solver: lx.AbstractLinearSolver | None = None,
     preconditioner: Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]] | None = None,
     preconditioner_side: str = "right",
+    residual: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """The raw Newton correction ``delta`` (solving ``J delta = -R(phi)``), ``R(phi)``, and the cost.
 
     Separated from :func:`newton_step` so a globalized driver can damp the step (a line search on
     ``phi + alpha delta``) using the same matrix-free, differentiable solve.
+
+    Parameters
+    ----------
+    residual_fn : callable
+        Maps ``phi`` of shape ``(n_cells,)`` to the residual, same shape.
+    phi : jnp.ndarray
+        Current iterate, shape ``(n_cells,)``.
+    solver, preconditioner, preconditioner_side
+        As for :func:`newton_step`.
+    residual : jnp.ndarray, optional
+        ``R(phi)``, shape ``(n_cells,)``, when the caller already holds it (a march carries the residual
+        its previous step ended at); it is then the right-hand side as given, and the residual is not
+        evaluated again. ``None`` evaluates it.
 
     Returns
     -------
@@ -107,7 +121,7 @@ def newton_correction(
         A forward-step strategy passes it on so a staged march can watch a frozen preconditioner go
         stale; a caller with no use for it drops it.
     """
-    r = residual_fn(phi)
+    r = residual_fn(phi) if residual is None else residual
 
     def jacobian_vector_product(v, _phi=phi):
         return jax.jvp(residual_fn, (_phi,), (v,))[1]

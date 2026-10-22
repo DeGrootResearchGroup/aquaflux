@@ -27,11 +27,12 @@ from aquaflux.case.initial import starting_arguments
 from aquaflux.case.restart_file import (
     RestartHeader,
     checkpoint_writer,
-    mesh_digest,
     read_restart,
 )
-from aquaflux.mesh import permute_cells
+from aquaflux.mesh import mesh_digest, permute_cells
 from aquaflux.solve import Resumption, StateCheckpointer, StepReport
+
+from tests.support.case_meshes import grid_mesh
 
 
 def _sections(physics: str = "Laminar", cells=(4, 4), **overrides: object) -> dict[str, object]:
@@ -41,7 +42,7 @@ def _sections(physics: str = "Laminar", cells=(4, 4), **overrides: object) -> di
     if rans:
         inlet["turbulence"] = {"kind": "FixedTurbulence", "k": 1e-3, "omega": 2.0}
     sections = {
-        "mesh": {"kind": "StructuredGrid", "cells": list(cells), "lengths": [2.0, 1.0]},
+        "mesh": grid_mesh(list(cells), [2.0, 1.0]),
         "fluid": {"density": 1.0, "kinematic_viscosity": 1.0e-2},
         "physics": {
             "kind": physics,
@@ -143,9 +144,9 @@ def test_a_digest_ignores_rounding_in_the_last_bits_of_a_coordinate(tmp_path) ->
 
 def test_a_digest_tells_a_moved_mesh_from_the_original(tmp_path) -> None:
     mesh = case_spec_from_mapping(_sections()).mesh.read(tmp_path)
-    stretched = case_spec_from_mapping(
-        _sections(mesh={"kind": "StructuredGrid", "cells": [4, 4], "lengths": [2.0, 1.01]})
-    ).mesh.read(tmp_path)
+    stretched = case_spec_from_mapping(_sections(mesh=grid_mesh([4, 4], [2.0, 1.01]))).mesh.read(
+        tmp_path
+    )
     assert mesh_digest(stretched) != mesh_digest(mesh)
 
 
@@ -574,7 +575,7 @@ def test_a_restart_that_does_not_fit_leaves_the_checkpoints_it_was_told_to_overw
 
     case = _file(
         tmp_path,
-        mesh={"kind": "StructuredGrid", "cells": [8, 4], "lengths": [2.0, 1.0]},
+        mesh=grid_mesh([8, 4], [2.0, 1.0]),
         initial={"kind": "Checkpoint", "path": "first"},
     )
     with pytest.raises(ValueError, match=r"it holds 16 cells, but this case's mesh has 32"):
@@ -605,7 +606,7 @@ def test_a_radiation_case_refuses_a_starting_state_when_the_file_is_read() -> No
     from aquaflux.case import case_spec_from_mapping as read
 
     radiation = {
-        "mesh": {"kind": "StructuredGrid", "cells": [2, 2, 2], "lengths": [1.0, 1.0, 1.0]},
+        "mesh": grid_mesh([2, 2, 2], [1.0, 1.0, 1.0]),
         "physics": {"kind": "Radiation"},
         "boundaries": {
             "left": {"kind": "Lamp", "profile": {"kind": "LambertianProfile"}, "power": 1.0},

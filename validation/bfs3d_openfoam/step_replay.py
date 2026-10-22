@@ -169,7 +169,12 @@ def main() -> None:
         print(f"\n  beta {beta:g}", flush=True)
         print("    | inner |  cyc |       G in |      G out |   rate | alpha |", flush=True)
         outcome, residual_norm = _march_step(
-            active, assembler.residual, phi_n, jnp.asarray(reference), active.linear_solver()
+            active,
+            assembler.residual,
+            phi_n,
+            assembler.residual(phi_n),
+            jnp.asarray(reference),
+            active.linear_solver(),
         )
         print(
             f"  -> |R| {float(residual_norm):.3e}, min alpha {float(outcome.alpha):.3f}, "

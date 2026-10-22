@@ -245,8 +245,60 @@ class ColumnProbePlan:
             out[:] = 0.0
         for row, index in enumerate(range(start, stop)):
             field, colour = self.probe(index)
-            out[row, field * n + np.where(self.colour[field] == colour)[0]] = 1.0
+            out[row, field * n + self._colour_cells(field, colour)] = 1.0
         return out
+
+    def field_seeds(self, start: int, stop: int, out: np.ndarray | None = None) -> np.ndarray:
+        """One column field's seeds for probes ``[start, stop)``, shape ``(rows, n_cells)``.
+
+        The same indicators as :meth:`seed_block`, restricted to the one field every probe in the range
+        reads: what a product differentiating the residual in that field alone takes. Buffer handling
+        as :meth:`seed_block` (``out`` may be longer than the range; it is zeroed first).
+
+        Parameters
+        ----------
+        start, stop : int
+            Half-open range of flat probe indices, all of one column field.
+        out : np.ndarray, optional
+            A buffer of shape ``(rows >= stop - start, n_cells)`` to fill. ``None`` allocates one.
+
+        Returns
+        -------
+        np.ndarray
+            The buffer, filled.
+
+        Raises
+        ------
+        ValueError
+            If the range spans more than one column field.
+        """
+        fields = np.unique(self._probe_field[start:stop])
+        if fields.size > 1:
+            raise ValueError(
+                f"probes [{start}, {stop}) read column fields {fields.tolist()}; one field's seeds "
+                "cannot carry another's."
+            )
+        if out is None:
+            out = np.zeros((stop - start, self.n_cells))
+        else:
+            out[:] = 0.0
+        for row, index in enumerate(range(start, stop)):
+            out[row, self._colour_cells(*self.probe(index))] = 1.0
+        return out
+
+    def field_chunks(self, chunk: int):
+        """The probes in ranges of at most ``chunk``, never spanning two column fields.
+
+        Probes are numbered field by field (:attr:`probe_base`), so each field's run is cut into chunks
+        of its own and a field's last chunk may be short. Yields ``(field, start, count)``.
+        """
+        for field, (base, count) in enumerate(zip(self.probe_base, self.n_colours, strict=True)):
+            for start in range(base, base + count, chunk):
+                yield field, start, min(chunk, base + count - start)
+
+    def _colour_cells(self, field: int, colour: int) -> np.ndarray:
+        """The cells column field ``field`` gives colour ``colour``, shape ``(n_in_colour,)``."""
+        return np.where(self.colour[field] == colour)[0]
 
 
 def column_probe_plan(
@@ -537,7 +589,9 @@ def _saturation_colouring(conflict: sp.csr_matrix, n: int) -> np.ndarray:
     return colour
 
 
-def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
+def block_stencil_gather_map(
+    plan: ColumnProbePlan, leading_fields: int | None = None
+) -> ProbeGather:
     """Precompute the fixed field-major CSR structure and a gather map from the probe responses to it.
 
     The sparsity pattern and the coloured probes are fixed (they depend only on the mesh graph), so the
@@ -558,15 +612,23 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
     ``responses[probe_base[b] + colour[b][j]][a n + i]``, i.e. flat index
     ``(probe_base[b] + colour[b][j]) * (n_fields n) + row_dof``.
 
+    With ``leading_fields`` the matrix is never laid out whole: the entries are ordered block by block
+    over the partition of the fields into the first ``leading_fields`` and the rest (each block in its
+    own CSR order), so the four blocks a field split consumes are slices of one value array
+    (:func:`materialize_blocks`) rather than cut out of a full matrix and its shifted copy.
+
     Parameters
     ----------
     plan : ColumnProbePlan
         The assembly pattern and the colouring probing each column field.
+    leading_fields : int, optional
+        Partition the stored entries into blocks at this many leading fields (see above). ``None``
+        (default) keeps the whole matrix's CSR order.
 
     Returns
     -------
     ProbeGather
-        The fixed CSR structure and the de-compression, chunk by chunk.
+        The fixed CSR structure (or block layout) and the de-compression, chunk by chunk.
     """
     n = plan.n_cells
     n_fields = plan.n_fields
@@ -629,7 +691,110 @@ def block_stencil_gather_map(plan: ColumnProbePlan) -> ProbeGather:
         raise ValueError(
             "block_stencil_gather_map: duplicate (row, col) in the pattern (bad colouring)."
         )
-    return ProbeGather(csr.indptr, csr.indices, csr.data, zero_slot, nf)
+    if leading_fields is None:
+        return ProbeGather(csr.indptr, csr.indices, csr.data, zero_slot, nf)
+    layout, order = BlockLayout.of(csr, leading_fields * n)
+    return ProbeGather(None, None, csr.data[order], zero_slot, nf, layout=layout)
+
+
+class BlockLayout:
+    """Where a two-group partition's four blocks lie in one block-major value array.
+
+    The stored entries of a field-major matrix are ordered leading-by-leading, leading-by-trailing,
+    trailing-by-leading, trailing-by-trailing, each block's entries in that block's own compressed-sparse-
+    row (CSR) order, so each block is a contiguous slice of the values and a matrix over that slice needs
+    no copy. The structure of each block is held here; only the values change from one materialize to
+    the next.
+
+    Attributes
+    ----------
+    leading_dofs : int
+        The degrees of freedom of the leading group (the partition point).
+    n_dofs : int
+        The degrees of freedom of the whole matrix.
+    """
+
+    def __init__(
+        self,
+        leading_dofs: int,
+        n_dofs: int,
+        blocks: tuple[tuple[int, int, np.ndarray, np.ndarray], ...],
+        diagonal: np.ndarray,
+    ) -> None:
+        self.leading_dofs = leading_dofs
+        self.n_dofs = n_dofs
+        # Per block: (start, stop) of its slice of the values, and its CSR row pointers and columns.
+        self._blocks = blocks
+        # Position of each degree of freedom's diagonal entry in the values, shape (n_dofs,).
+        self._diagonal = diagonal
+
+    @classmethod
+    def of(cls, csr: sp.csr_matrix, leading_dofs: int) -> tuple[BlockLayout, np.ndarray]:
+        """The layout of ``csr``'s stored entries, and the order taking CSR positions to block-major ones.
+
+        Raises
+        ------
+        ValueError
+            If a diagonal entry is not stored: the shift is added in place on the stored diagonal, so a
+            missing one would have nowhere to go.
+        """
+        n_dofs = csr.shape[0]
+        index_dtype = _index_dtype(max(n_dofs, csr.nnz))
+        rows = np.repeat(np.arange(n_dofs, dtype=index_dtype), np.diff(csr.indptr))
+        cols = csr.indices
+        key = (rows >= leading_dofs).astype(np.int8) * 2 + (cols >= leading_dofs)
+        # A stable order keeps each block's entries in the CSR order they had in the whole matrix.
+        order = np.argsort(key, kind="stable")
+        bounds = np.concatenate([[0], np.cumsum(np.bincount(key, minlength=4))])
+        offsets = (0, leading_dofs)
+        blocks = []
+        diagonal = np.full(n_dofs, -1, dtype=index_dtype)
+        for block in range(4):
+            start, stop = int(bounds[block]), int(bounds[block + 1])
+            taken = order[start:stop]
+            row0, col0 = offsets[block // 2], offsets[block % 2]
+            n_rows = (leading_dofs, n_dofs - leading_dofs)[block // 2]
+            block_rows = rows[taken] - index_dtype(row0)
+            indptr = np.concatenate(
+                [[0], np.cumsum(np.bincount(block_rows, minlength=n_rows))]
+            ).astype(index_dtype)
+            indices = (cols[taken] - index_dtype(col0)).astype(index_dtype, copy=False)
+            blocks.append((start, stop, indptr, indices))
+            if block in (0, 3):
+                on_diagonal = np.flatnonzero(block_rows == indices)
+                diagonal[block_rows[on_diagonal] + row0] = start + on_diagonal
+        if (diagonal < 0).any():
+            raise ValueError(
+                "BlockLayout: the pattern stores no diagonal entry for some degree of freedom, so the "
+                "shift has nowhere to be added."
+            )
+        return cls(leading_dofs, n_dofs, tuple(blocks), diagonal), order
+
+    def blocks(self, data: np.ndarray) -> tuple[sp.csr_matrix, ...]:
+        """The four blocks over ``data``, as matrices sharing its memory (no copy).
+
+        Returns
+        -------
+        tuple of scipy.sparse.csr_matrix
+            ``(A_ll, A_lt, A_tl, A_tt)``, as :meth:`~aquaflux.precondition.FieldGroups.blocks` orders them.
+        """
+        sizes = (self.leading_dofs, self.n_dofs - self.leading_dofs)
+        blocks = []
+        for block, (start, stop, indptr, indices) in enumerate(self._blocks):
+            # Assigned, not passed to the constructor: scipy copies a ``data`` that is a view of a larger
+            # array, which would bring back exactly the copy this layout exists to remove.
+            matrix = sp.csr_matrix((sizes[block // 2], sizes[block % 2]))
+            matrix.indptr, matrix.indices, matrix.data = indptr, indices, data[start:stop]
+            blocks.append(matrix)
+        return tuple(blocks)
+
+    def diagonal(self, data: np.ndarray) -> np.ndarray:
+        """The stored diagonal of ``data`` in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+        return data[self._diagonal]
+
+    def add_to_diagonal(self, data: np.ndarray, shift_diagonal: np.ndarray) -> None:
+        """Add ``shift_diagonal`` (shape ``(n_dofs,)``) to the stored diagonal of ``data``, in place."""
+        data[self._diagonal] += np.asarray(shift_diagonal, dtype=np.float64)
 
 
 class ProbeGather:
@@ -652,23 +817,30 @@ class ProbeGather:
 
     Attributes
     ----------
-    indptr, indices : np.ndarray
-        The fixed CSR structure of the ``(n_fields n, n_fields n)`` Jacobian.
+    indptr, indices : np.ndarray or None
+        The fixed CSR structure of the ``(n_fields n, n_fields n)`` Jacobian; ``None`` when the entries
+        are laid out by ``layout`` instead.
+    layout : BlockLayout or None
+        The block-major layout of the entries over a two-group partition, or ``None`` for the whole
+        matrix's CSR order.
     nnz : int
         Stored entries, including the explicit zeros the full pattern keeps.
     """
 
     def __init__(
         self,
-        indptr: np.ndarray,
-        indices: np.ndarray,
+        indptr: np.ndarray | None,
+        indices: np.ndarray | None,
         gather_map: np.ndarray,
         zero_slot: int,
         nf: int,
+        *,
+        layout: BlockLayout | None = None,
     ) -> None:
         self.indptr = indptr
         self.indices = indices
-        self.nnz = int(indices.shape[0])
+        self.layout = layout
+        self.nnz = int(gather_map.shape[0])
         self._nf = nf
         # Narrowed as each array is formed rather than at the end, so the wide form is never one of the
         # several live at once. A source index is bounded by `zero_slot`, a position by the entry count.
@@ -745,10 +917,13 @@ def materialize_block_jacobian(
     be evaluated as one batched directional derivative instead of a Python loop of separate calls. Pass
     ``batched_matvec`` -- a ``(k, nf) -> (k, nf)`` map applying ``matvec`` to ``k`` stacked seeds at once
     (e.g. ``jax.vmap`` of the jvp, **built once and reused** so it compiles a single time) -- to take that
-    path; the responses are bit-identical to the per-probe loop (the same directional derivative per seed),
-    so it is a pure speedup. ``probe_batch_size`` chunks the batch to bound peak memory (``k`` simultaneous
-    tangents); ``None`` evaluates all probes in one batch. Without ``batched_matvec`` the per-probe loop is
-    used, so any ``matvec`` (including a non-``vmap``-able NumPy one) still works.
+    path; the responses are the per-probe loop's to rounding (the same directional derivative per seed,
+    in a program compiled differently), so it is a speedup, not an approximation. A
+    :class:`FieldwiseMatvec` instead takes one column field's seeds at a time and differentiates the
+    residual in that field alone. ``probe_batch_size`` chunks the batch to bound peak memory (``k``
+    simultaneous tangents); a chunk never spans two column fields, and ``None`` evaluates each column
+    field's probes in one batch. Without ``batched_matvec`` the per-probe loop is used, so any ``matvec``
+    (including a non-``vmap``-able NumPy one) still works.
 
     Parameters
     ----------
@@ -760,13 +935,14 @@ def materialize_block_jacobian(
         The assembly pattern and the colouring probing each column field
         (:meth:`ColumnProbePlan.uniform` for one reach throughout, :func:`column_probe_plan` to give
         each column its own).
-    batched_matvec : callable, optional
+    batched_matvec : callable or FieldwiseMatvec, optional
         A batched form of ``matvec``: ``(k, nf) -> (k, nf)`` applying the same directional derivative to
-        ``k`` stacked seeds at once. When given, probing runs batched (a few fused passes) instead of the
-        per-probe loop. Must be built once and reused by the caller so it compiles a single time.
+        ``k`` stacked seeds at once, or a :class:`FieldwiseMatvec` taking ``(field, (k, n_cells))``. When
+        given, probing runs batched (a few fused passes) instead of the per-probe loop. Must be built once
+        and reused by the caller so it compiles a single time.
     probe_batch_size : int, optional
         The batched-path chunk size (number of simultaneous tangents), to bound peak memory. ``None``
-        (default) runs all probes in one batch. Ignored on the per-probe loop.
+        (default) runs each column field's probes in one batch. Ignored on the per-probe loop.
     structure : ProbeGather, optional
         A precomputed :func:`block_stencil_gather_map` for this plan. When given, each chunk's responses
         are scattered into the **fixed full-pattern** CSR as they are computed and then dropped -- so the
@@ -797,30 +973,20 @@ def materialize_block_jacobian(
     # is `n_probes * nf` floats -- hundreds of megabytes on a three-dimensional coupled case, and held
     # for the whole materialize -- while a chunk is a few, and rebuilding an indicator vector is cheap.
     n_probes = plan.n_probes
-    chunk = n_probes if probe_batch_size is None else max(1, probe_batch_size)
+    probing = _ChunkProbe(plan, probe_batch_size, matvec, batched_matvec)
 
     if structure is not None:
-        # De-compress AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed CSR
-        # and then dropped, so the only large array live at once is the matrix being built. Holding
-        # every response instead costs `n_probes * nf` floats -- comparable to the matrix itself.
-        data = np.zeros(
-            structure.nnz
-        )  # zero: entries outside their column's reach are never written
-        block = np.zeros((chunk, nf))
-        for start in range(0, n_probes, chunk):
-            m = min(chunk, n_probes - start)
-            plan.seed_block(start, start + m, out=block)
-            responses = _probe_chunk(matvec, batched_matvec, block, m)
-            structure.scatter(data, responses, start, m)
+        if structure.layout is not None:
+            raise ValueError(
+                "this structure lays its entries out block by block; materialize_blocks recovers it."
+            )
+        data = _probed_values(probing, structure)
         return sp.csr_matrix((data, structure.indices, structure.indptr), shape=(nf, nf))
 
     probes = [plan.probe(index) for index in range(n_probes)]
     responses = np.empty((n_probes, nf), dtype=np.float64)
-    block = np.zeros((chunk, nf))
-    for start in range(0, n_probes, chunk):
-        m = min(chunk, n_probes - start)
-        plan.seed_block(start, start + m, out=block)
-        responses[start : start + m] = _probe_chunk(matvec, batched_matvec, block, m)[:m]
+    for field, start, m in probing.chunks():
+        responses[start : start + m] = probing.responses(field, start, m)[:m]
 
     # De-compress by scatter: each probe's response holds column `b` of every block in its colour's share.
     # The share is per (field, colour), since each column field carries its own colouring -- and only
@@ -848,18 +1014,169 @@ def materialize_block_jacobian(
     return jacobian
 
 
-def _probe_chunk(matvec, batched_matvec, block, count):
-    """This chunk's probe responses, shape ``(rows, n_fields * n_cells)``.
+def _probed_values(probing: _ChunkProbe, structure: ProbeGather) -> np.ndarray:
+    """Every stored entry's value, in ``structure``'s order, by probing one chunk at a time.
 
-    One batched call when ``batched_matvec`` is given -- the buffer keeps a single shape across every
-    chunk, so it compiles once and a padded final chunk needs no special case -- otherwise a plain loop
-    over the chunk's rows, which any ``matvec`` supports including a non-vectorizable NumPy one.
+    De-compressed AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed values
+    and then dropped, so the only large array live at once is the values being built. Holding every
+    response instead costs ``n_probes * nf`` floats -- comparable to the matrix itself.
     """
-    if batched_matvec is not None:
-        return np.asarray(batched_matvec(jnp.asarray(block)), dtype=np.float64)
-    return np.stack(
-        [np.asarray(matvec(jnp.asarray(block[row])), dtype=np.float64) for row in range(count)]
+    data = np.zeros(structure.nnz)  # zero: entries outside their column's reach are never written
+    for field, start, m in probing.chunks():
+        structure.scatter(data, probing.responses(field, start, m), start, m)
+    return data
+
+
+def materialize_blocks(
+    matvec: Callable[[jnp.ndarray], jnp.ndarray],
+    plan: ColumnProbePlan,
+    *,
+    structure: ProbeGather,
+    batched_matvec: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
+    probe_batch_size: int | None = None,
+) -> ProbedBlocks:
+    """The block Jacobian of ``matvec`` over ``structure``'s partition, by the same coloured probing.
+
+    The counterpart of :func:`materialize_block_jacobian` for a structure built with
+    ``leading_fields`` (:func:`block_stencil_gather_map`): the probes fill one block-major value array,
+    and the four blocks are matrices over slices of it. Entry for entry, the blocks are those
+    :meth:`~aquaflux.precondition.FieldGroups.blocks` cuts from the whole matrix, explicit zeros included.
+
+    Parameters
+    ----------
+    matvec, plan, batched_matvec, probe_batch_size
+        As :func:`materialize_block_jacobian` takes them.
+    structure : ProbeGather
+        A structure with a :class:`BlockLayout`.
+
+    Returns
+    -------
+    ProbedBlocks
+        The values and their blocks.
+    """
+    if structure.layout is None:
+        raise ValueError(
+            "this structure has no block layout; materialize_block_jacobian recovers it."
+        )
+    return ProbedBlocks(
+        _probed_values(_ChunkProbe(plan, probe_batch_size, matvec, batched_matvec), structure),
+        structure.layout,
     )
+
+
+class ProbedBlocks:
+    """One materialize's values over a :class:`BlockLayout`: the blocks, and the shift added in place.
+
+    Attributes
+    ----------
+    data : np.ndarray
+        The values, block-major, shape ``(nnz,)``.
+    layout : BlockLayout
+        Where each block lies in them.
+    """
+
+    def __init__(self, data: np.ndarray, layout: BlockLayout) -> None:
+        self.data = data
+        self.layout = layout
+
+    def blocks(self) -> tuple[sp.csr_matrix, ...]:
+        """``(A_ll, A_lt, A_tl, A_tt)`` over :attr:`data`, sharing its memory."""
+        return self.layout.blocks(self.data)
+
+    def diagonal(self) -> np.ndarray:
+        """The Jacobian's diagonal in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+        return self.layout.diagonal(self.data)
+
+    def add_shift(self, shift_diagonal: np.ndarray) -> None:
+        """Add the pseudo-transient shift to the diagonal, in place.
+
+        The in-place counterpart of :func:`shifted_jacobian`, for values this materialize owns: the
+        whole matrix is never formed, so there is no input to keep unmodified, and every diagonal entry
+        is stored (:meth:`BlockLayout.of` refuses a pattern without one), so no entry is created.
+        """
+        self.layout.add_to_diagonal(self.data, shift_diagonal)
+
+
+class FieldwiseMatvec:
+    """A batched Jacobian product that takes one column field's seeds at a time.
+
+    ``apply(field, seeds)`` returns ``J @ e`` for each row of ``seeds`` embedded in column field
+    ``field`` of an otherwise zero direction: shape ``(k, n_cells) -> (k, n_fields * n_cells)``. Passed
+    as ``batched_matvec``, it makes the probe seed each chunk with that one field
+    (:meth:`ColumnProbePlan.field_seeds`) rather than with the whole state.
+
+    **Why a product would rather be told the field.** A direction given as a whole state, zero outside
+    one field, still carries a tangent into every field: the zeros are values, and every kernel
+    downstream of them runs on them. A product that differentiates the residual in the one field alone
+    leaves the others constants of the derivative, so the work they would have carried is never
+    traced; for a coupled flow residual, a pressure or turbulence column never forms the velocity
+    gradient's tangents at all.
+
+    Attributes
+    ----------
+    apply : callable
+        ``(field, seeds) -> responses`` as above. Must be built once and reused, so each field's
+        program compiles a single time.
+    """
+
+    def __init__(self, apply: Callable[[int, jnp.ndarray], jnp.ndarray]) -> None:
+        self.apply = apply
+
+    def __call__(self, field: int, seeds: jnp.ndarray) -> jnp.ndarray:
+        return self.apply(field, seeds)
+
+    def seed_dtype(self, field: int) -> np.dtype:
+        """The floating type ``field``'s seeds are built in: every field's program runs in double."""
+        return np.dtype(np.float64)
+
+
+class _ChunkProbe:
+    """One materialize's probes, a chunk at a time, through whichever product the caller supplied.
+
+    Chunks never span two column fields (:meth:`ColumnProbePlan.field_chunks`), so a
+    :class:`FieldwiseMatvec` can be handed one field's seeds; a whole-state product is seeded with the
+    same chunks laid out over the whole state. Either way the buffer keeps one shape across every chunk
+    of a field, so a batched product compiles once per program and a padded final chunk needs no special
+    case; without a batched product each chunk is a plain loop of ``matvec`` over its rows, which any
+    ``matvec`` supports, including a non-vectorizable NumPy one.
+    """
+
+    def __init__(self, plan: ColumnProbePlan, probe_batch_size, matvec, batched_matvec) -> None:
+        self._plan = plan
+        # Unset: each column field's probes in one batch.
+        self._chunk = max(plan.n_colours) if probe_batch_size is None else max(1, probe_batch_size)
+        self._matvec = matvec
+        self._batched = batched_matvec
+        self._fieldwise = isinstance(batched_matvec, FieldwiseMatvec)
+        self._block: np.ndarray | None = None
+
+    def chunks(self):
+        """``(field, start, count)`` for every chunk, as :meth:`ColumnProbePlan.field_chunks`."""
+        return self._plan.field_chunks(self._chunk)
+
+    def responses(self, field: int, start: int, count: int) -> np.ndarray:
+        """Responses of probes ``[start, start + count)``, shape ``(rows >= count, n_fields * n_cells)``."""
+        plan = self._plan
+        if self._fieldwise:
+            block = self._buffer(plan.n_cells, self._batched.seed_dtype(field))
+            plan.field_seeds(start, start + count, out=block)
+            return np.asarray(self._batched(field, jnp.asarray(block)), dtype=np.float64)
+        block = self._buffer(plan.n_fields * plan.n_cells, np.dtype(np.float64))
+        plan.seed_block(start, start + count, out=block)
+        if self._batched is not None:
+            return np.asarray(self._batched(jnp.asarray(block)), dtype=np.float64)
+        return np.stack(
+            [
+                np.asarray(self._matvec(jnp.asarray(block[row])), dtype=np.float64)
+                for row in range(count)
+            ]
+        )
+
+    def _buffer(self, width: int, dtype: np.dtype) -> np.ndarray:
+        """The reused seed buffer, ``(chunk, width)`` in ``dtype``; reallocated only if either changes."""
+        if self._block is None or self._block.shape[1] != width or self._block.dtype != dtype:
+            self._block = np.zeros((self._chunk, width), dtype=dtype)
+        return self._block
 
 
 def jacobian_relative_error(

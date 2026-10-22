@@ -90,7 +90,7 @@ from aquaflux.schemes import (
     SweptGradientSolve,
 )
 from aquaflux.solve import CflResidualDualTimeControl, Convergence, MarchLogger, StateCheckpointer, combine_observers, residual_stop_gmres
-from aquaflux.precondition import FieldSplit
+from aquaflux.precondition import FieldSplit, PivotFloor
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.turbulence import (
     BetaTaperedDamping,
@@ -197,11 +197,27 @@ def _solver_with_overrides(solver):
         preconditioner = dataclasses.replace(
             preconditioner, probe=dataclasses.replace(preconditioner.probe, **probe)
         )
+    # The precision the field split is applied in (`PITZ_SPLIT_PRECISION`, `float64` or `float32`);
+    # the residual, the Krylov solves and the adjoint's preconditioner stay in double precision.
+    precision = _environment("SPLIT_PRECISION", str)
+    if precision is not None:
+        preconditioner = dataclasses.replace(
+            preconditioner,
+            inverse=dataclasses.replace(preconditioner.inverse, precision=precision),
+        )
     # The shift the inverse is re-fitted at is `max(beta, refit_beta_floor)` (`PITZ_REFIT_BETA_FLOOR`):
     # below the floor the inverse is fitted at the floor while the march solves at its own shift.
     refit_floor = _environment("REFIT_BETA_FLOOR", float)
     if refit_floor is not None:
         preconditioner = dataclasses.replace(preconditioner, refit_beta_floor=refit_floor)
+    # Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals
+    # (`PITZ_PIVOT_FLOOR`, the threshold in (0, 1), `none` off; unset keeps the file's).
+    pivot_floor = _environment("PIVOT_FLOOR", str)
+    if pivot_floor is not None:
+        preconditioner = dataclasses.replace(
+            preconditioner,
+            pivot_floor=None if pivot_floor == "none" else PivotFloor(float(pivot_floor)),
+        )
     edits["preconditioner"] = preconditioner
     damping = _environment("TURB_DAMPING", float)
     if damping is not None:
@@ -521,8 +537,8 @@ class _KrylovWork:
     """Applications of the preconditioned operator over a march, counted per inner solve.
 
     ``lineax``'s count follows from its cycles (one start-up application, then ``restart + 1`` per
-    cycle); the residual stop reports its own, since it may stop part way through a cycle, and it
-    includes the one application per cycle that recomputes the true residual.
+    cycle); the residual stop reports its own, one per Krylov iteration, since it may stop part way
+    through a cycle.
     """
 
     def __init__(self):
@@ -625,6 +641,7 @@ FIELD_SPLIT = isinstance(SOLVER.preconditioner.inverse, FieldSplit)
 #: one run each, the case file then on `main`): clip alone 18 steps / 133 cycles / 126 s, clip + bound
 #: `e` 18 / 130 / 132 s, `x_r/h` 8.0686 both.
 OMEGA_STEP_RATIO = SOLVER.omega_step_ratio
+PIVOT_FLOOR = SOLVER.preconditioner.pivot_floor
 
 #: ⚠️ THE WALL CONDITION ON `k`, AND IT IS A CHOICE OF PROBLEM RATHER THAN OF SOLVER. Turbulent
 #: fluctuations vanish at a no-slip wall, so `k -> 0` and `Dirichlet(0)` is the textbook condition --
@@ -1242,6 +1259,10 @@ def solve_aquaflux(
             f"{FLOW_INVERSE} {SIMPLE_FLOW}",
         ),
         ("trailing inverse", f"jacobi_smoothed {JACOBI_TRAILING}" if FIELD_SPLIT else "n/a"),
+        (
+            "split precision",
+            SOLVER.preconditioner.inverse.precision if FIELD_SPLIT else "n/a",
+        ),
         ("probe stencil reach", probe.stencil_reach),
         ("gradient scheme", _gradient_scheme_label(case["spec"].numerics.gradient)),
         ("probe gradient sweeps", probe.gradient_sweeps or "full (the scheme's own)"),
@@ -1259,6 +1280,7 @@ def solve_aquaflux(
             if math.isinf(OMEGA_STEP_RATIO)
             else OMEGA_STEP_RATIO,
         ),
+        ("pivot floor", "off" if PIVOT_FLOOR is None else PIVOT_FLOOR.threshold),
         ("stop (rtol, atol)", f"{RTOL}, {ATOL}"),
         ("inner dump above", INNER_DUMP_ABOVE or "off"),
     ):

@@ -19,6 +19,17 @@ def test_rows_gathers_the_chosen_rows_in_the_order_chosen_with_repeats():
     np.testing.assert_array_equal(counts, [3, 2, 0, 3, 1])
 
 
+def test_rows_can_gather_chosen_rows_last_to_first():
+    selected = np.array([2, 0, 1, 2, 3])
+    reverse = np.array([True, False, True, False, True])
+    values, _, _ = ragged.rows(OFFSETS, ITEMS, selected, reverse)
+    expected = [
+        ITEMS[OFFSETS[r] : OFFSETS[r + 1]][:: -1 if flip else 1]
+        for r, flip in zip(selected, reverse, strict=True)
+    ]
+    np.testing.assert_array_equal(values, np.concatenate(expected))
+
+
 def test_group_is_the_csr_of_items_by_key_keeping_their_order():
     keys = np.array([2, 0, 2, 3, 0, 2])
     offsets, order = ragged.group(keys, 5)

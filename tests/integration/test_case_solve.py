@@ -19,9 +19,11 @@ from aquaflux.flow import solve_flow_march
 from aquaflux.solve import Convergence, DualTimeLoop
 from aquaflux.turbulence import sst_initial_fields
 
+from tests.support.case_meshes import grid_mesh_path
+
 #: A laminar channel at a Reynolds number of about 50, fed a uniform velocity at its left side.
 _CHANNEL = """
-mesh: {kind: StructuredGrid, cells: [8, 4], lengths: [2.0, 1.0]}
+mesh: {kind: AquafluxMesh, path: GRID}
 fluid: {density: 1.0, kinematic_viscosity: 2.0e-2}
 physics: {kind: Laminar}
 boundaries:
@@ -36,7 +38,7 @@ numerics:
 #: A RANS channel fed at its left side, solved by the segregated loop: an unconstrained flow, so its
 #: flow solve is :func:`~aquaflux.flow.reused_flow_solve` rather than the bulk-velocity one.
 _SEGREGATED_RANS_CHANNEL = """
-mesh: {kind: StructuredGrid, cells: [8, 4], lengths: [2.0, 1.0]}
+mesh: {kind: AquafluxMesh, path: GRID}
 fluid: {density: 1.0, kinematic_viscosity: 1.0e-3}
 physics: {kind: RANS}
 boundaries:
@@ -62,11 +64,16 @@ _SOLVER = {
 }
 
 
+def _with_grid(text: str) -> str:
+    """A case's text with its mesh, the 8 x 4 box, written and named in place of ``GRID``."""
+    return text.replace("GRID", grid_mesh_path((8, 4), (2.0, 1.0)))
+
+
 @pytest.fixture(scope="module")
 def channel(tmp_path_factory):
     """The channel's file, checked and built once: the solver section changes the solve, not the problem."""
     path = tmp_path_factory.mktemp("case") / "case.yaml"
-    path.write_text(_CHANNEL)
+    path.write_text(_with_grid(_CHANNEL))
     checked = read_case(path).check()
     return checked, checked.build()
 
@@ -85,7 +92,7 @@ def test_a_laminar_case_stating_no_solver_marches_to_a_root_from_its_file(channe
 def test_a_solver_section_reaches_the_march_it_describes(channel) -> None:
     """The file's settings, not the defaults, are what ran: the root is the one they give directly."""
     checked, problem = channel
-    document = yaml.safe_load(_CHANNEL) | {"solver": _SOLVER}
+    document = yaml.safe_load(_with_grid(_CHANNEL)) | {"solver": _SOLVER}
     stated = dataclasses.replace(checked, spec=case_spec_from_mapping(document))
     state = stated.solve(problem)
     np.testing.assert_array_equal(
@@ -115,7 +122,7 @@ def test_an_inlet_driven_rans_case_runs_the_segregated_loop_from_its_file(tmp_pa
     returning the state alone fails on the loop's first sweep, so reaching a root at all is the check.
     """
     path = tmp_path / "case.yaml"
-    path.write_text(_SEGREGATED_RANS_CHANNEL)
+    path.write_text(_with_grid(_SEGREGATED_RANS_CHANNEL))
     checked = read_case(path).check()
     problem = checked.build()
 

@@ -68,17 +68,29 @@ from .boundaries import (
     PatchCondition,
     Wall,
 )
-from .case_file import CaseFile, CheckedCase, read_case, read_case_document, write_case
+from .case_file import (
+    CaseFile,
+    CheckedCase,
+    MeshFile,
+    read_case,
+    read_case_document,
+    read_mesh_file,
+    write_case,
+    write_mesh_file,
+)
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState, StartingFields
-from .mesh_source import AxisGrading, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
+from .drawing_view import DRAWING_FILE, DrawingView, view_drawing
+from .mesh_file import Drawing, DrawingRegion, MeshOutput, MeshSizes, MeshSpec
+from .mesh_run import MeshRecord, make_mesh
+from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
 from .paths import relocated
+from .drawing import CadPlacement
 from .physics import RANS, Laminar, Physics, Radiation
 from .radiation import (
     CadFluid,
-    CadPlacement,
     CadSolid,
     CadSurface,
     Coarsen,
@@ -113,12 +125,17 @@ from .spec import (
     case_schema,
     case_spec_from_mapping,
     case_spec_to_mapping,
+    drawing_sections_from_mapping,
+    mesh_schema,
     mesh_source_from_mapping,
+    mesh_spec_from_mapping,
+    mesh_spec_to_mapping,
 )
 
 __all__ = [
+    "DRAWING_FILE",
     "RANS",
-    "AxisGrading",
+    "AquafluxMesh",
     "BodyForce",
     "BulkVelocity",
     "CadFluid",
@@ -133,13 +150,15 @@ __all__ = [
     "Coarsen",
     "CosinePowerProfile",
     "CoupledMarch",
+    "Drawing",
+    "DrawingRegion",
+    "DrawingView",
     "DriveSpec",
     "FieldWriter",
     "Fields",
     "FixedTurbulence",
     "FlowMarch",
     "Fluid",
-    "GeometricGrading",
     "IesProfile",
     "InitialState",
     "Inlet",
@@ -149,8 +168,13 @@ __all__ = [
     "Laminar",
     "Lamp",
     "LampProfile",
+    "MeshFile",
+    "MeshOutput",
     "MeshPatch",
+    "MeshRecord",
+    "MeshSizes",
     "MeshSource",
+    "MeshSpec",
     "NotConverged",
     "Numerics",
     "OccluderSpec",
@@ -176,7 +200,6 @@ __all__ = [
     "StartingFields",
     "StlBody",
     "StlSurface",
-    "StructuredGrid",
     "SurfaceSource",
     "UniformMedium",
     "ViscosityRamp",
@@ -185,12 +208,20 @@ __all__ = [
     "case_schema",
     "case_spec_from_mapping",
     "case_spec_to_mapping",
+    "drawing_sections_from_mapping",
+    "make_mesh",
+    "mesh_schema",
     "mesh_source_from_mapping",
+    "mesh_spec_from_mapping",
+    "mesh_spec_to_mapping",
     "plan_run",
     "prepare_run",
     "read_case",
     "read_case_document",
+    "read_mesh_file",
     "relocated",
     "solver_for",
+    "view_drawing",
     "write_case",
+    "write_mesh_file",
 ]

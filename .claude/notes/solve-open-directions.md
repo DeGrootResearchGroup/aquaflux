@@ -14,7 +14,7 @@
 
 ## Where the time is — the reading these entries rest on
 
-The recorded numbers (`solve-march.md`, `solve-refuted-directions.md`):
+The recorded numbers (`solve-march.md`, `solve-march-log.md`, `solve-refuted-directions.md`):
 
 | case | cells | dofs | wall | compile | Krylov matvec |
 |---|---|---|---|---|---|
@@ -23,7 +23,13 @@ The recorded numbers (`solve-march.md`, `solve-refuted-directions.md`):
 
 The matvec actually run is `jax.jvp` through the full residual, which reconstructs nine gradients per
 evaluation on pitzDaily. Measured 2026-10-07 on pitzDaily (4-core Linux, jax 0.11.2): the jvp is 44 ms,
-while a SciPy matvec on the materialized `J` (7.4M nnz, ~120 per row) is 6.5 ms, about 7× cheaper. bfs3d's
+while a SciPy matvec on the materialized `J` (7.4M nnz, ~120 per row) is 6.5 ms, about 7× cheaper.
+⚠️ **That 44 ms predates the adjugate first pass (2026-10-16), and it is a standalone call that pays
+~11 000 page faults** (re-measured 2026-10-17, `main` `183e9ffa`, same container class). The standalone
+jvp is now **16.5 ms** with the glibc default allocator, and **9.8–11.1 ms** with the faults removed,
+which is the cost a matvec inside the compiled step program sees (the march's wall does not move when
+they are removed). The "7× cheaper" ratio is therefore now nearer 1.5–2.5×. See
+`.claude/rules/discretization.md`, "Single-threaded kernels". bfs3d's
 `J` is 47.2M structural nnz (~340 per row). The matrix is not used for the matvec because *materializing*
 it costs 165–564 batched JVPs (`sparse_jacobian.py`, coloured probing), which is why the preconditioner is
 refreshed only every few steps — and the ledger already found that **staleness, not hard operators, is the
@@ -39,32 +45,156 @@ number of OUTER steps the target station takes, which its shift floor sets (meas
 
 ---
 
-### Re-measured 2026-10-14 by profile, on the shipped march
+### Re-measured 2026-10-17 by profile, on the shipped march
 
-pitzDaily `case.yaml` at `da37958a`, one cold-cache run under `py-spy` (25 Hz, whole process), Linux
-x86_64, 4 cores, jax 0.11.2; `PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1` (checkpoint writing
-measured at 0.5 s). 18 steps / 123 cycles, `x_r/h` 8.0686, 898 s:
+pitzDaily `case.yaml` at `3c5b58d6` (`main` after #721, #732, #735, #736, #742 and the compiled norm and
+field extraction), Linux x86_64 container, 4 cores, 15 GB, no swap, Python 3.13.16, jax/jaxlib 0.11.2;
+`PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`. **21 steps / 50 inner solves / 106 restart cycles /
+1258 applications of the preconditioned operator / 21 refits (13 `full`, 8 `cost`), final stopping `R`
+2.618e-06, `x_r/h` 8.0686**, identical in every run below. Each column is one run of the whole process
+under `py-spy record --idle --threads -r 25` (main thread only), sorted by
+`validation/pitzdaily_openfoam/profile_buckets.py`, which assigns a stack to the first rule any of its
+frames meets (compilation first, so a refit's first compile counts as compilation):
 
-| bucket | s | share |
+| bucket | cold s | share | warm s | share | was (`da37958a`, cold, 898 s) |
+|---|---|---|---|---|---|
+| the compiled step program (GMRES, preconditioner applies, JVPs) | 106 | 32 % | 110 | 38 % | 417 s, 46 % |
+| compilation and tracing, all phases | 115 | 35 % | 73 | 25 % | 212 s, 24 % |
+| refit: coloured probe (~1.5 s per refit) | 42 | 13 % | 41 | 14 % | 95 s, 11 % |
+| refit: hierarchy refactor (host) and other build, the first fit included (predates the entry maps, below) | 48 | 14 % | 49 | 17 % | 56 s, 6 % |
+| the step's row-scaled measure rebuilt from each step's state | 2 | 1 % | 2 | 1 % | (not a row) |
+| march-log field extraction | 0 | 0 % | 0 | 0 % | 35 s, 4 %, op by op |
+| the stopping test's residual | 0 | 0 % | 0 | 0 % | 32 s, 4 %, op by op |
+| driver, setup, report | 17 | 5 % | 15 | 5 % | 50 s, 5 % |
+| **whole process** | **329** | | **290** | | 898 |
+
+**What the compile row contains (2026-10-17, `9efc5759`, same container and settings, shipped path, two
+warm runs logged with `JAX_LOG_COMPILES=1` and read by `compile_timeline.py`'s `breakdown`, one warm run
+under the profiler):** all of it is before step 1. **After step 1 the march compiles, reads from the
+cache, traces and lowers nothing** -- 0 programs across the 21 refits (13 `full`, 8 `cost`) and the 12
+stations, cold and warm, with or without the capture variables; only the 3 tiny post-march reads follow.
+Before step 1, warm: 977 small programs compiled (26.2 s; the persistence floor's, owned elsewhere), 6
+programs read from the cache (3.9 s, `_march_step` 2.25 s), tracing 15.4 s (`_march_step` 7.5,
+`batched_jacobian_matvec` 2.6, three initialization `newton_step`s 2.0, `norm_of_residual` 1.6,
+`_eddy_viscosity_drift` 0.7, `_field_values` 0.6) and lowering 7.5 s (`_march_step` 4.0) -- 53 s, every
+program traced once. Under the profiler the bucket read 47 s (attached ~10 s after launch); the 17.6 s it
+put under `newton_march`'s step call is step 1's own trace, lowering and cache read. So the "~35 s
+unexplained" read off the 73 s warm column is not recompiles, and did not reproduce: what remains is the
+small programs and tracing the five large ones, neither per refit nor per station. The pin that a refit
+and a station hand the march an already-compiled step:
+`test_a_traced_split_step_is_one_compiled_program_across_refits_and_stations`
+(`tests/unit/test_preconditioner_session.py`). Warm walls in those runs: 224 s (log on), 238 s (profiled),
+218 s (log on, capture variables set), all 21 steps to `R` 2.618e-06.
+
+**Since #649 (2026-10-18)** `_march_step` traces in 6.2 s and compiles in 19.0 s from cold (7.7 / 23.1 s at `cf80be32`; HLO 60,970 → 48,377 lines): the step is handed the residual at its start, so the dual-time anchor's `R(φⁿ)` copy is gone. Configuration and the full-march pair: `solve-march-log.md`, "#649".
+
+The march log's solve wall was 320 s cold and 284 s warm under the profiler. Without it, the shipped path
+(`compare.py` with no override) took **249, 227 and 236 s** in three warm runs on the same container,
+spread over 1.5 hours, the first with the capture variables set. So run-to-run spread on this container
+is ~5-10 %, well above the ~1.3 % recorded elsewhere for back-to-back runs, and the profiler adds roughly
+another 10-20 %.
+The application count comes from `PITZ_KRYLOV_STOP=residual`, which goes through `compare.py`'s
+script-only study path (the shipped path reports no count). Its step table was identical to the
+shipped run's, so the count is the shipped march's. The refit seconds are the march log's own `pc`
+lines (warm, shipped path, 21 refits): 61 s, probe 32 s, refactor 27 s.
+**What moved, read from the table:** the compiled step program is now about a quarter of what it was
+(417 -> 110 s, while the march grew from 18 to 21 steps), so a cold run is dominated by compilation and
+by the refits (62 % of the cold process together). A refit's probe is ~1.5 s, against ~6 s before the
+adjugate inverse (#735), which is what a cheaper JVP predicts for ~165 batched JVPs (not separated further).
+
+Inside one Krylov application, timed by `validation/pitzdaily_openfoam/application_cost.py` at the
+first inner system of steps 19, 20 and 21 of that capture (the target station; `replay.py` reproduces
+the march's refits). Each piece is the best of 15 warm calls of its own compiled program, run with
+`MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=2147483647`. Under the default allocator
+the JVP's 42.8 MiB temporary buffer and the leading cycle's both page-fault on every standalone call
+(11 200 and 9 000 faults), which the step program does not pay; those figures were JVP 22-27 ms and
+split apply 53-61 ms:
+
+| piece | ms | was (`da37958a`) |
 |---|---|---|
-| the compiled step program (GMRES, preconditioner applies, JVPs) | 417 | 46 % |
-| compilation and tracing, all phases (cold cache) | 212 | 24 % |
-| refit: coloured probe (~165 batched JVPs, ~6 s per refit) | 95 | 11 % |
-| refit: hierarchy refactor (host) and other build | 56 | 6 % |
-| march-log field extraction, op by op | 35 | 4 % |
-| the stopping test's residual, op by op | 32 | 4 % |
-| driver, setup, report | 50 | 5 % |
+| field-split apply, float32 (as shipped) | **48-50** | 186-190 (float64, CSR) |
+| -- the `[u, v, p]` SIMPLE-smoothed V-cycle | 36-39 | ~130 |
+| -- the `[k, omega]` Jacobi-smoothed V-cycle | 8-9 | ~55 |
+| -- the coupling product | 1.5-1.9 | ~7 |
+| JVP `J v` | **14-17** | 77-86 (with the batched LU, #735) |
+| the two compiled as one program, `(J + s) M v` | 78-81 (19 000 faults per call under both settings: a ~74 MiB buffer, see below) | -- |
 
-Inside one Krylov application, timed at the target-station states of that capture (steps 13, 15, 18;
-`replay.py` as repaired in #719): field-split apply **186-190 ms** (the `[u, v, p]` SIMPLE-smoothed
-V-cycle ~130 ms, the `[k, omega]` Jacobi-smoothed one ~55 ms, the coupling product ~7 ms) against a JVP
-of **77-86 ms**, so the preconditioner is ~70 % of an application. The JVP was 45 ms on 2026-10-10;
-the multiple-correction gradient is the likely cause (not measured, and not a lever: that gradient is
-the production scheme). The two op-by-op rows were removed by compiling them (2026-10-14, `solve.md`,
-`norm_of_residual`): 804 -> 727 s warm, identical march.
+So **the preconditioner is ~75 % of an application (apply / (apply + JVP), 74-78 %), not ~90 %**. The
+split's cost fell by ~3.8x (padded-row operators, #721, and float32, #732) while the JVP fell by ~5x
+(the adjugate inverse, #735), so the share barely moved from the ~70 % recorded before. It would be
+~93 % only if the split had stayed at its CSR float64 cost: arm C below measures exactly that, 195-200 ms
+against a 14-18 ms JVP. The composite's extra ~15 ms is its allocator, not its work (next section).
+
+### Inside the step program (2026-10-18): no unaccounted cost; the composite's excess was the allocator
+
+Same case, counts and capture as above, at `main` `9efc5759`, on a DIFFERENT 4-core Linux container
+(Xeon @ 2.10 GHz, 15 GB, glibc 2.39, jax 0.11.2), where every piece runs ~1.4x faster than in the table
+above, so compare only within this section. Warm cache throughout. Instruments:
+`validation/pitzdaily_openfoam/step_program_timing.py` (the march with its compiled step wrapped by a
+blocking timer, under `PITZ_KRYLOV_STOP=residual`; compile-free calls only) and `krylov_overhead.py` (the
+step's own `solve_linear` over `residual_stop_gmres`, restart 15, row-scaled measure, on the first inner
+system of steps 19-21; budgeted arms run exactly 60 iterations; best of 7). jemalloc is Ubuntu's
+`libjemalloc.so.2` with `MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`.
+
+| ms per application | default glibc | jemalloc |
+|---|---|---|
+| the step program, per application its solves made (20 compile-free calls, 1247 applications) | **60.1, 56.8, 57.3** (3 marches) | 58.0 |
+| -- its minor faults | ~41 000 per CALL (558-623 per application) | 40 per application |
+| the march's own solve at the march's tolerance (`krylov_overhead` `march`) | 48-53 | 46-53 |
+| -- GMRES bookkeeping per iteration (diagonal stand-in operator) | **0.83-1.26** | 0.84-1.32 |
+| -- JVP per iteration (identity arm minus stand-in) | 8.4-10.6 | 9.1-11.3 |
+| -- preconditioner per iteration (full minus identity; `s M` arm minus stand-in) | 37-45; 31-39 | 34-45; 30-35 |
+| standalone `(J + s) M v`, mean of 60 back-to-back calls | 63-65 (19 145 faults per call) | **41-47** (0) |
+| standalone `M v`, `J v`, same statistic | 34-44, 12-22 | 32-33, 11-12 |
+| standalone, best single call (`application_cost.py`): apply, JVP, composite | 39-44, 15-18, 58-63 | 28-29, 10, 37-46 |
+
+What this settles:
+- **A Krylov iteration inside the loop costs what the standalone composite costs once allocation is taken
+  out** (46-53 against 41-47 under jemalloc). The "15-25 ms unaccounted" was two artefacts: the standalone
+  composite maps a ~74 MiB temporary afresh on every call (19 145 faults), and best-of-15 single calls
+  understate a mean (`M v` best 28-29, mean 32-33). The step's loop allocates once per SOLVE, so its
+  faults are per call, not per application, and jemalloc removing them changes the in-loop time by nothing
+  measurable.
+- **Why the thresholds did not remove the composite's faults**: XLA allocates on its worker threads, whose
+  glibc arenas are heaps of at most 64 MiB (`HEAP_MAX_SIZE`), so a larger request is `mmap`ed whatever
+  `MALLOC_MMAP_THRESHOLD_` says. Reproduced with bare `malloc`/`free` from a Python thread: 43 MiB faults
+  every call by default and not with the thresholds raised; 80 MiB faults every call (20 481) with them
+  raised, and not under `MALLOC_ARENA_MAX=1` or jemalloc. (On the main thread a 1 GiB threshold DOES
+  apply in glibc 2.39; the 32 MiB cap bounds only the adaptive threshold.)
+- **GMRES bookkeeping is ~2 % of an application** (0.8-1.3 ms against ~50), so idea 2b (row scaling up
+  front, one projection pass, Givens) is bounded at ~1.3 s per march and was not built (ledger:
+  "Cheaper GMRES bookkeeping in `_ResidualStopGMRES`").
+- **The step program's application (57-60 ms) is ~7-10 ms above its solves' (48-53)**: the line search's
+  residuals and measures, the per-solve `x = M y` and the inner loop's own residuals, spread over the
+  applications. Not decomposed further; at ~10 s per march it is the only residue left in this bucket.
+- **The allocator does not move the march.** Shipped `compare.py`, warm, identical step tables and
+  `x_r/h` 8.0686: default 206 s (its step 1 took 68 s against 47-49 in every other run, an outlier) and
+  176 s; jemalloc 179 and 169 s. Summed over the 21 refits, the coloured probe took 21.9-24.4 s by default
+  and 16.5-18.7 s under jemalloc (its batched-JVP program's temporaries stop faulting), the host refactor
+  20.4-21.9 s against 22.7-23.5 s, so the refits gain ~3-4 s net, inside the 5-10 % spread. Not made a
+  `run_case.sh` default: it would buy ~2 % and make every timing incomparable with the record.
+  `run_case.sh` records `LD_PRELOAD` and `GLIBC_TUNABLES` beside `MALLOC_*` since this change.
+  ⚠️ An allocator that keeps freed memory raises the footprint: `MALLOC_ARENA_MAX=1` with both thresholds
+  took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and its 15 GB container
+  restarted, so on bfs3d such a setting is for fixed-state probes, not marches.
+
+**The refactor after the entry maps (2026-10-17, `solve-amg-multigrid-log.md` "Refit by entry maps").**
+Not re-profiled by bucket. The march log's `pc` lines, same case and counts, on a different 4-core
+container from the table's (base `main` 9efc5759): refactor 22.7 / 21.4 s on `main` (two warm runs)
+against 14.8 s with the maps as committed (15.2-17.0 s in two runs of an earlier version), the first
+refit paying ~1.5-2.5 s more to build them and every later one ~0.5-0.7 s against ~0.9-1.1 s, for
+~0.2 GB more host memory. The refactor row above predates this.
+
+**What each probe tangent computes WAS a lever, and is spent (2026-10-20).** Each column field now has its
+own program that differentiates the residual in that field alone (`solve-direct-preconditioners.md`, "One
+program per column field"): bfs3d's probe per re-fit 43.1 → 18.5 s, pitzDaily's 1.60 → 0.94 s, at the
+hybrid start on a 4-core Xeon (validation-log, "One probe program per column field"). What is left of it is
+per-column precision (probe the pressure column in float64, the rest in float32), the owner's next step
+and unmeasured; the seam is `FieldwiseMatvec.seed_dtype`.
+
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
-built once per session and reused by every refit. A refit's ~6 s is the ~165 JVPs that compute the new
-VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 %).
+built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
+the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 % on pitzDaily; on bfs3d on 4-core Linux with the pivot floor, where a re-fit costs ~2.5 steps, 4 took 0.59x the solve of 3 and 5 1.18x, one sample each, 2026-10-19).
 
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
@@ -175,6 +305,13 @@ Linux, one run each (this case's march is deterministic in its counts):
 that reaches `refresh_on_cycles` ends its step and the re-fit precedes the next one, so the step counts
 above are not comparable with a march on the current tree.
 
+⚠️ **Which solver these applications were counted on.** This table (2026-10-08) and the replay's 514 / 890
+were counted with NO recomputation of `b − A x`: the library's solver restarted from the Arnoldi residual and
+gave its verdict on it. From 2026-10-09 (`6d52eb1`) to 2026-10-16 every cycle end recomputed it, one more
+application per cycle, so every residual-stop march in that window (the `refresh_on_cycles` tables below,
+bfs3d's #699 table, the forced-default tiers) paid that charge; since 2026-10-16 only the final cycle does
+(see the dated entry at the end of 6b).
+
 The control reproduces the shipped march exactly (31 / 99 / 203). The looser corrections cost about one
 inner Newton iteration per step and the cheaper solves pay for it twice over. ⚠️ **Not a pure stop
 effect:** the residual stop reports cycles run where `lineax` reports cycles run minus one, so the
@@ -196,7 +333,8 @@ default flip the case files would carry `stop: residual, refresh_on_cycles: 2` (
 re-measured there).
 
 **In the library (2026-10-09):** `LinearSolveSettings.stop: residual` selects it from a case file or a
-builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the default is still `lineax`.
+builder (`PITZ_FORWARD_STOP=residual` edits pitzDaily's file); the library default became `residual`
+on 2026-10-15 (#645, with the adaptive tolerance).
 **pitzDaily opts in (2026-10-09, project owner's decision):** its `case.yaml` carries `stop: residual`
 and `refresh_on_cycles: 2`. ⚠️ So "the shipped `case.yaml`" in any pitzDaily entry dated before
 2026-10-09 means the `lineax` stop at `refresh_on_cycles` 3; `PITZ_FORWARD_STOP=lineax
@@ -236,7 +374,10 @@ Cycle counts are not comparable across stops (see above), so the comparison is w
 
 `x_r/h` 8.361 in all four. bfs3d's `case.yaml` takes the residual stop since 2026-10-13, at `refresh_on_cycles`
 3. Runs 1 and 3 pass the pre-registered bar; 2 fails it on the retry and gains
-nothing over 3. **3 and 4 are not separable** (23 s apart, inside this machine's spread for one run each);
+nothing over 3. **3 and 4 were not separable in that table** (23 s apart, inside the machine's spread for one
+run each, before #766's pivot floor). With the floor (2026-10-19, one sample each per machine), 4 was fastest
+on both machine classes: M3 Pro 531 / 475 / 497 s for 3 / 4 / 5 (21 / 17 / 17 steps), 4-core Linux 3141 /
+1860 / 3693 s (32 / 17 / 28): `validation-log.md`, "The re-fit cadence on this machine class";
 2 does not win on bfs3d as it did on pitzDaily before #290. No erratic march of the kind below appeared:
 runs 1 and 3 end on eight steps at `alpha` 1 with `|R|` halving every step at the floor shift 0.005 and
 never rising. ⚠️ That tail's rate is the floor's (no release in this file), so these runs cannot show the
@@ -248,8 +389,9 @@ went from ~2.8 to ~5.3 s. Compare bfs3d runs only within one commit. The refacto
 structural-pattern products of 868ab80/f7326c1 (on pitzDaily 0.88 -> 1.06 s per split refit), cached
 since 2026-10-13 (`StructuralPatterns`, `solve-amg-multigrid.md`: 0.83 s); the trajectory change is not
 explained by it and is not bisected.
-**Still open before the default moves:** the end-of-march failures below (#645's forcing safeguard), the
-cost thresholds' re-calibration, and the project owner's decision.
+**The default moved on 2026-10-15 (#645), with `AdaptiveLinearTolerance` as the forcing safeguard for
+the end-of-march failures below.** Still open: the cost thresholds' re-calibration under the new count,
+and a bfs3d arm with the adaptive tolerance (its file already ran the residual stop).
 
 **The tiers with `stop: residual` forced as the default (2026-10-09, `residual_stop_gmres` with the
 true residual recomputed at every cycle end, commit after `1619fd0`; jax 0.11.2, CPU, 4-core Linux).**
@@ -269,10 +411,22 @@ pass under `lineax`:
   (ramp rung on lineax, a slightly different anchor) it converges in 24, linearly. So the inexact step is
   fragile here near the anchor, not only slow at the end.
 - **Consequence:** flipping the default as built would trade pitzDaily's 1.88x for slower, linear endings
-  on tight-tolerance solves and a lost robustness margin on at least one continuation. Candidate remedies,
-  unbuilt and unmeasured: a terminal forcing safeguard (solve no looser than `½ target / |R_k|`, which
-  tightens only in the last few steps and so avoids what refuted Eisenstat–Walker), and re-solving tighter
-  after a line-search cut.
+  on tight-tolerance solves and a lost robustness margin on at least one continuation.
+- **The remedy, BUILT opt-in 2026-10-15 (#645): `solve.AdaptiveLinearTolerance`** — two rules, one setting
+  (`newton_march(adaptive_tolerance=)`, reachable from every march and a case file's `solver` section):
+  tighten in a tail of full-length steps limited by their own solve (`0.9·ρ²`, floored at
+  `½ target / |R_k|`), and solve the step after a cut-back or a rising residual to 0.1. The other proposed
+  remedy, re-solving the cut-back step tighter, was refuted (ledger: "Re-solving a cut-back step at a
+  tighter tolerance"). Measurements, on the prototype and then on the built code, are in `solve-log.md`,
+  "Contracts: `adaptive_tolerance.py` — measured on the built setting (#645)", and `validation/adaptive_tolerance_probe.py`. **The slow tier with BOTH forced on
+  (`LinearSolveRegime.stop` defaulting to `residual`, and the setting at its defaults on every march whose
+  solver is a relative-residual GMRES) passes: 39 of 39** (2026-10-15, `d0871e2` + the two forcings in a
+  scratch worktree, Linux x86_64, 4 cores, jax 0.11.2, 1:01:39). The stop alone failed four
+  (`test_coupled_field_split.py`'s two channel marches, which errored, plus its adjoint test, and the
+  Reynolds-continuation adjoint test). ⚠️ The first forced run, with the
+  reduction re-measured in each step's own scales, still failed the Reynolds test (6.5e-3 at 60 target
+  steps): see `solve.md` for why the reduction is read report to report. Both became the library
+  defaults the same day; bfs3d has no arm with the adaptive tolerance yet.
 
 **Follow-ups.** Two were measured on the replay and are closed (ledger: "Weighted inner product and
 longer restarts for the residual-stop GMRES"): neither a measure-weighted inner product nor a restart of
@@ -292,6 +446,49 @@ outer steps and a retry (whose tight solve the application count omits). So most
 stop; what is left is modest and comes with the first sign of fragility — 4b (#637) stays deferred, now
 to be measured on top of 6b rather than instead of it.
 
+**✅ The end-of-cycle recomputation charged only at the verdict (2026-10-16).** `_ResidualStopGMRES` recomputed
+`b − A x` at every cycle end (one application of `A M` each, about 0.27 s on pitzDaily). It now hands a cycle
+that falls short the Arnoldi residual, `V (β e₁ − H y)`, and recomputes only when the recurrence says the
+solve has met its target, so the verdict reads the true residual.
+- **The drift, measured first** (`arnoldi_drift_probe.py`): every inner system of a capture of the shipped
+  `case.yaml` (`stop: residual`, `rtol` 0.3, restart 15, `refresh_on_cycles` 3, field split `SimpleSmoothed` /
+  `JacobiSmoothed`; 18 steps, 68 systems, every station refit), solved by GMRES(15) with classical Gram–Schmidt
+  twice, restarting from the recurrence, up to 20 cycles; the true residual formed (uncounted) at each cycle end
+  and where each target is first met; row-scaled measure; `44ba609`, Linux x86_64, 4 cores, jax 0.11.2, 5580 s.
+  `departure` = measure(true − recurrence) / measure(true); `verdict` = measure(true) / target at the stop:
+
+  | target | systems reaching it | worst departure at a cycle end still above it | at its stop | worst verdict |
+  |---|---|---|---|---|
+  | 0.3 | 68 | 1.1e-12 | 2.3e-12 | 0.9996 |
+  | 1e-3 | 65 | 5.2e-10 | 7.8e-10 | 0.9995 |
+  | 1e-6 | 48 | 3.0e-7 | 6.9e-7 | 0.9963 |
+  | 1e-10 | 32 | 3.7e-3 | 7.5e-3 | **1.0013** |
+
+  The absolute departure is a round-off of `‖b‖` throughout, so its relative size grows as the target tightens.
+  As a restart vector it is harmless at every target; as a verdict it is not at 1e-10 (one solve declared
+  converged 0.13 % above its target; the unmet counts are the 20-cycle cap, not drift). Hence the hybrid, not the
+  unconditional restart: one application per solve stays, and no new setting.
+- **Replay check:** on the target station's 16 systems (`krylov_recycling_probe.py`, arms `residual,gmres-15`)
+  the library took exactly the probe's GMRES count plus one, solve for solve (467 against 451), and reproduced
+  every recorded cycle count.
+- **The march** (`PITZ_KRYLOV_STOP=residual` to count, shipped `case.yaml` otherwise, same machine and commit as
+  above, one run each, back to back through `run_case.sh`, nothing else running; this march is deterministic
+  in its counts):
+
+  | | every cycle end (`main`) | final cycle only |
+  |---|---|---|
+  | outer steps / inner solves / restart cycles | 18 / 68 / 123 | 18 / 68 / 123 |
+  | applications of `A M` | 1462 | **1407 (−55 = cycles − solves)** |
+  | solve wall | 463 s | 470 s |
+  | march clock, step 1 → 18 | 380 s | **359 s** |
+  | final `\|R\|` / `x_r/h` / peak `nu_t/nu` | 9.574e-06 / 8.0686 / 418.09 | identical |
+
+  Step tables identical in every column but time. ⚠️ Read the march clock, not the solve wall: step 1 carries the
+  compilation, and the arm on `main`'s code ran second with its program already cached (64 s to step 1 against
+  93 s). The 21 s difference matches 55 applications at about 0.3 s each plus the Gram–Schmidt work, ~4 % of
+  the steady march; one run each, so it is not separable from run-to-run spread on its own — the application
+  count is the evidence.
+
 ## 7. Mixed precision: float64 outside, float32 inside the preconditioner
 
 **What.** Keep the residual, the Krylov true-residual recurrence, the outer stopping test and the
@@ -305,15 +502,16 @@ is the whole game on a GPU; on CPU the gain is smaller but non-zero. A float32 p
 
 **What it does not change.** The preconditioner never enters the state or its gradient; a rounding
 change inside it changes Krylov convergence only. `solve-amg-multigrid.md` already notes the one place
-a float32 hierarchy *forces* a change (the small-block pivoting at §1313): treat that as the checklist.
+a float32 hierarchy *forces* a change (the small-block pivoting, under "The traced multigrid — in progress"): treat that as the checklist.
 
 **Pre-registered measurement.** bfs3d, matched preconditioner at `state-00049`: cycles and apply wall,
 float64 vs float32 PC. Pass is cycles within +10 % at lower wall. The real measurement is on a GPU
 (next entry).
 
 **Measured on pitzDaily, CPU (2026-10-09) — convergence is unchanged, and the CPU apply is SLOWER.**
-⚠️ A substitution for the pre-registered bfs3d measurement (its mesh is not in this container), made on
-the user's instruction. `precision_replay_probe.py` replays the march's own 75 target-station systems
+⚠️ A substitution for the pre-registered bfs3d measurement, made on the user's instruction, in the belief
+that bfs3d's mesh was not in the repository. It was (tracked since 2026-10-17 at
+`validation/bfs3d_openfoam/of_case/constant/polyMesh`), so the bfs3d measurement can be taken. `precision_replay_probe.py` replays the march's own 75 target-station systems
 (steps 17–31, capture of the shipped `case.yaml`: residual stop, `rtol` 0.3, restart 15, `refresh_on_cycles`
 2, field split `SimpleSmoothed` / `JacobiSmoothed`; jax 0.11.2, CPU, 4-core Linux) with both block
 inverses' V-cycles in float32 — hierarchy, smoothers and right-hand side; the split's coupling product,
@@ -331,7 +529,64 @@ cycle count.
   On a synthetic matrix of the same shape and density it is 21.1 against 6.4 ms, so it is the kernel,
   not this operator. A gather plus sorted segment sum IS faster in float32 (8.9 against 10.7 ms) but is
   still slower than the float64 CSR kernel, so no CPU kernel choice makes float32 pay here.
-- **So the CPU half is answered and closes nothing:** precision does not cost convergence on this case,
+- ⚠️ **The kernel this rests on is gone (2026-10-14):** the level operators are padded-row
+  (`_PaddedRowOperator`), a fused gather-multiply-sum rather than the CSR kernel call, so "no CPU kernel
+  choice makes float32 pay" is unmeasured for the shipped form and the CPU half is open again.
+  `csr_kernel_precision.py` now times the padded-row form beside the CSR one, in both precisions.
+- **On the padded-row form float32 PAYS, and is shippable as `FieldSplit(precision="float32")` (2026-10-16,
+  PR #732, opt-in; `solve-field-split.md` holds the design).** Every number below is one run per arm at a
+  fixed configuration; "pitzDaily march" is the shipped `case.yaml` on `float32-field-split` `d8ca69ab`,
+  4-core Linux container, jax 0.11.2, the two arms back to back, differing only in `PITZ_SPLIT_PRECISION`.
+  - *Kernel, split apply:* pitzDaily at its hybrid start (Linux, best of 15) 52.5 ms against 71-87 ms
+    float64; bfs3d at `state-00018` (Apple M3 Pro, jax 0.10.2, best of 10) **82 ms against 140 ms**, which
+    also beats `main`'s CSR (105-109 ms) -- float32 is the one change found that recovers the Mac's
+    forward loss on wide rows without an XLA flag (see `solve-amg-multigrid.md`'s padded-row entry).
+  - *pitzDaily march:* **405 s against 531 s (-24 %)**, 18 steps / 123 cycles both, the step tables
+    identical to four figures through step 17, final `R` 9.093e-06 against 9.071e-06, `x_r/h` 8.0686 both.
+  - *Adjoint:* a split applied in float32 ARITHMETIC broke the transpose solve (stagnation at rtol 1e-10:
+    it is linear only to ~1e-7); the adjoint now widens the rounded split to float64, and the float32
+    arm then matches the finite difference to 1e-5 on the coupled channel.
+  - *bfs3d march* (shipped `case.yaml`, `7e96745a`, Apple M3 Pro, jax 0.10.2, one run per arm, float64
+    first, idle machine): **498 s against 599 s (-17 %)**, 18 steps / 129 cycles both with identical
+    per-step inner and cycle counts, final `R` 6.185e-07 and `x_r/h` 8.361 both; steps from 5 on are
+    20-35 % faster, step 1 (compilation) level, the refit unchanged (it is float64 work).
+  - **Shipped (2026-10-16, the project owner's decision): both case files set `precision: float32`;
+    the library default stays float64.** This direction's CPU half is closed as a win.
+  - **The two PRs re-measured together, on `main` after the adjugate inverse (2026-10-17).** Both #721
+    and #732 were already merged when this was run, so this is an ablation on `main` `3c5b58d6`, not a
+    PR-against-base comparison. Arms with #721 removed run in a local worktree of `main` with #721's
+    merge reverted (`git revert -m 1 5cc4bf09`: the library code reverts cleanly, the only conflict is
+    in this file). The float32 arms are the shipped `case.yaml`, and the float64 arms set
+    `PITZ_SPLIT_PRECISION=float64`. Shipped pitzDaily `case.yaml`, warm cache, the Linux container
+    and jax 0.11.2 of the table above. Splits are timed by `application_cost.py` at steps 19-21, faults
+    removed. **Every arm took the identical march: 21 steps / 50 inner solves / 106 cycles / 1258
+    applications / 21 refits, step tables equal in every column but `t(s)`, final `R` 2.618e-06,
+    `x_r/h` 8.0686.** So the comparison is wall clock alone:
+
+    | arm | level operators | split | solve wall | split apply | JVP | M share |
+    |---|---|---|---|---|---|---|
+    | A, both (shipped) | padded-row | float32 | **227-249 s** (3 runs) | 48-50 ms | 14-17 ms | 74-78 % |
+    | B, #721 only | padded-row | float64 | 251-283 s (2 runs) | 66-67 ms | 14-18 ms | 78-82 % |
+    | D, #732 only | CSR | float32 | 786 s (1 run) | 441-451 ms | 13-18 ms | 96-97 % |
+    | C, neither | CSR | float64 | 449 s (1 run) | 195-200 ms | 14-18 ms | 92-93 % |
+
+    - **#721 is the large win: 449 -> 251-283 s (-37 to -44 %) at float64**, split apply 195-200 ->
+      66-67 ms (-66 %). That is about twice the ~30 % its PR measured at the hybrid start. Its one
+      cost visible here is the refit's host refactor, 20 s (CSR) against 27 s (padded) over the 21
+      refits, which is the padded and transposed copies being built.
+    - **#732 is worth ~6-12 % on top of #721** (B 251-283 against A 227-249 s; in a B-between-A
+      bracket of back-to-back runs, 227 / 251 / 236 s), split apply 66-67 -> 48-50 ms. That is above
+      the 3 % tie threshold, but the container's own spread is ~5-10 %, so the size is not pinned
+      closer than that. The PR measured -24 % (531 -> 405 s) at `d8ca69ab`, before the adjugate inverse
+      made the JVP and the probe cheaper, which raised the step program's split share.
+    - **Without #721, float32 LOSES: 449 -> 786 s (+75 %)**, apply 2.2x slower. This is the CSR
+      kernel's float32 penalty recorded above (2026-10-09), now measured over a whole march. So #732
+      depends on #721, as its PR said.
+    - Counts are deterministic here (the same in all thirteen marches of this record), so one run per arm
+      holds for counts. For wall clock, arms C and D lie outside any noise and A against B does not by
+      much. bfs3d was not re-run here, so its figures remain the PRs' own (M3 Pro, jax 0.10.2); its mesh is
+      tracked (`validation/bfs3d_openfoam/of_case/constant/polyMesh`), so it can be.
+- **(2026-10-09, under the CSR kernel, since superseded by the two bullets above) the CPU half closed nothing:** precision does not cost convergence on this case,
   and the bandwidth gain cannot show on CPU through this kernel. The GPU measurement (entry 8), where the
   CSR product is a different kernel, remains the deciding one; bfs3d's convergence is unmeasured.
 
@@ -347,7 +602,7 @@ entry 6 is a JAX solver by necessity; a GPU-friendly smoother (coloured Gauss–
 the operator allows, or more ILU-free sweeps) replaces ILU(0), whose quality the ledger credits to a
 sequential global sweep that does not parallelize.
 
-**Measurement.** Unavailable until a GPU environment exists (`solve-amg-multigrid.md` §1958). Record
+**Measurement.** Unavailable until a GPU environment exists (`solve-amg-multigrid.md`, "Faithful smoothed aggregation — matching PETSc GAMG"). Record
 the first GPU march's step/cycle counts against the CPU march's — counts should match; clocks are the
 result.
 
@@ -359,6 +614,26 @@ members**, because the preconditioner is ~80 % of each application and does not 
 the preconditioner would be traced and a member too small to fill the device; reopen it there.
 
 ## 10. Nonlinear elimination of the ω stiffness
+
+**⚠️ ITS MOTIVATION IS REFUTED ON pitzDaily (2026-10-14); bfs3d is the deciding check.** The entry below
+reads the census's pure-ω near-null direction as "the cell block is weakly coupled in ω". On pitzDaily `state-00017` (shift 1e-4, 2026-10-14, `cell_block_conditioning.py --case pitzdaily_openfoam`, jax 0.11.2, Linux, 4 cores)
+the same signature appears, and it is a large coupling in the ω ROW to the cell's own pressure and
+velocity (equilibrated ω–p 1348, ω–u −787 in cell 721, against an ω diagonal of 1), not a weak ω column:
+
+| blocks | `σ_min` < 1e-3 | < 1e-2 |
+|---|---|---|
+| as assembled | 6 | 273 |
+| ω row's couplings to the other fields zeroed | **0** | **0** |
+| ω column's couplings zeroed (control) | 6 | 274 |
+
+Over the 200 smallest blocks `σ_min` tracks one over the largest ω-row coupling (log-log correlation
+0.99), and the inverse's largest entry is that coupling's size -- non-normal, not singular. A local ω
+solve with the flow frozen is already well posed, so the elimination below targets nothing; the shift
+not reaching the cells is predicted too (it adds to a diagonal that was never small). **To close or
+reopen it:** run `validation/bfs3d_openfoam/cell_block_conditioning.py N <shift> 0.05 0` on the three
+states in the table below; the `no ω-row` / `no ω-col` columns decide it. Why ∂R_ω/∂p is so large near
+walls is unmeasured (a hypothesis: ω's convective flux through the Rhie--Chow mass flux, where ω is
+large, against a small pressure diagonal).
 
 **What.** Before each global Newton step, run a few cheap local nonlinear solves of the ω equation
 (flow and `k` frozen) in the cells the cell-block SVD flags (`σ_min < 1e-3`, ~1.5 % of bfs3d), then
@@ -419,7 +694,7 @@ cycle at step 18: since #290 the release fires at step 17 of 19, so there is not
 (the replay's 1-8 cycles per step were taken on the 31-step march of 2026-10-10). Ledger entry: "Re-fitting
 at the released shift". **What the sweep found instead is the floor itself:** the 0.05 and 0.005 arms part
 at step 4, the first step below 0.05, and refitting at the step's own shift saves 11 cycles (7 %) and a
-step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (`solve-amg-multigrid.md`); the SIMPLE-smoothed
+step. The 0.05 floor was set for the ILU(0) smoother on bfs3d (git history of `solve-amg-multigrid.md` before 2026-10-17, "Zero-fill is the low-β smoother"); the SIMPLE-smoothed
 hierarchy does not evidently need it. **pitzDaily's file drops the floor** (2026-10-13, owner's decision;
 none is the 1e-4 arm exactly, since the shift never goes below `release_floor`; confirmed by a march of
 the file as committed, whose step table matches the 1e-4 arm's line for line). ⚠️ The 0.05 arm's wall overlapped a few seconds of unit tests; cycles and steps
@@ -483,17 +758,24 @@ bfs3d (since measured, #678: see the top of this entry).
 
 ---
 
+## 13. CLOSED — a Schubert (sparse Broyden) secant update of the materialized Jacobian between probes
+
+Measured 2026-10-17 on the replay and moved to `solve-refuted-directions.md` ("A Schubert secant update
+of the materialized Jacobian"). The updated Jacobian is no closer to a fresh probe than the stale one in
+any block, and the probe it would replace now costs ~1 s, about one refactor.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
   ledger ("Compiling the next station ahead of time"). The 396 s quoted here first is gone: a cold
-  pitzDaily run now compiles 115 s, 77 s of it before step 1, and a station change compiles ~1–2 s.
+  pitzDaily run compiles before step 1 only, and a station change or a refit compiles nothing
+  (2026-10-17, `9efc5759`; the compile row's paragraph under "Re-measured 2026-10-17 by profile").
 - **First-order seed for the second-order residual — CLOSED (2026-10-10), even at best.** See the
   ledger ("Seeding the second-order march from a first-order solve").
 - **Gradient reconstruction `sweeps` in the tangent — ALREADY ANSWERED; live on bfs3d only.** This entry
   was stale: `jacobian_gradient_sweeps` (narrowing the sweeps only in the copy of the residual the Krylov
   operator is differentiated from) is built, and on pitzDaily under `CorrectedGreenGauss` swept-2 gave the
-  identical march 9.7 % faster, the knee at 2 (`schemes.md`). pitzDaily now ships
+  identical march 9.7 % faster, the knee at 2 (`schemes-log.md`). pitzDaily now ships
   `MultipleCorrectionGradient`, which has no sweeps, so it no longer applies there. bfs3d moved to
   `MultipleCorrectionGradient` too (2026-10-13), so it no longer applies to either case. `jacobian_gradient_sweeps` stays a script-only study arm and
   is NOT to become a case-file setting (project owner, 2026-10-12): the schemes without sweeps work better

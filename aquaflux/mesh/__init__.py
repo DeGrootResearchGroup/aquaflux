@@ -15,6 +15,7 @@ from .connectivity import (
     index_dtype,
     interior_mask,
 )
+from .digest import mesh_digest
 from .distance import distance_to_patches
 from .face import (
     EdgeFaceGeometry,
@@ -27,7 +28,20 @@ from .geometry import MeshGeometry
 from .graph import cell_adjacency_coo, cell_adjacency_csr
 from .groups import PADDING_PATCH, RESERVED_PATCH_NAMES, CellZones, FacePatches, LabelledGroups
 from .mesh import Mesh
-from .quality import centroid_iteration_shift, closed_cell_residual, face_planarity
+from .quality import (
+    CONCAVE_COSINE,
+    MeshQuality,
+    QualitySummary,
+    cell_concavity,
+    cell_non_convexity,
+    centroid_iteration_shift,
+    closed_cell_residual,
+    face_non_orthogonality,
+    face_planarity,
+    face_skewness,
+    face_warp,
+    triangulation_volume_change,
+)
 from .reorder import (
     CellReordering,
     IdentityReordering,
@@ -37,8 +51,10 @@ from .reorder import (
 )
 from .structured import graded_nodes, structured_grid_2d, structured_grid_3d
 from .surface import PatchTriangles, patch_triangles
+from .winding import stored_ring_is_outward
 
 __all__ = [
+    "CONCAVE_COSINE",
     "PADDING_PATCH",
     "RESERVED_PATCH_NAMES",
     "CellGeometry",
@@ -54,23 +70,33 @@ __all__ = [
     "LabelledGroups",
     "Mesh",
     "MeshGeometry",
+    "MeshQuality",
     "PatchTriangles",
     "PolygonFaceGeometry",
+    "QualitySummary",
     "RandomReordering",
     "ReverseCuthillMcKee",
     "cell_adjacency_coo",
     "cell_adjacency_csr",
+    "cell_concavity",
+    "cell_non_convexity",
     "centroid_iteration_shift",
     "closed_cell_residual",
     "collapse_extruded_direction",
     "distance_to_patches",
     "face_geometry_scheme",
+    "face_non_orthogonality",
     "face_planarity",
+    "face_skewness",
+    "face_warp",
     "graded_nodes",
     "index_dtype",
     "interior_mask",
+    "mesh_digest",
     "patch_triangles",
     "permute_cells",
+    "stored_ring_is_outward",
     "structured_grid_2d",
     "structured_grid_3d",
+    "triangulation_volume_change",
 ]

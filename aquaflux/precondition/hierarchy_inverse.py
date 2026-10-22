@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -44,7 +45,7 @@ from .multigrid import (
     StructuralPatterns,
     build_convection_hierarchy,
 )
-from .traced_cycle import TracedCycle
+from .traced_cycle import TracedCycle, in_precision
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,6 +62,29 @@ class _HierarchyStep:
     def __call__(self, state, residual: jnp.ndarray) -> jnp.ndarray:
         hierarchy, extras = state
         return self.cycle(hierarchy, extras, residual, self.smoother)
+
+
+def _narrowed(hierarchy: SmoothedHierarchy, precision: str) -> SmoothedHierarchy:
+    """``hierarchy`` with its floating-point arrays cast to ``precision``, prolongation values kept.
+
+    The prolongation values stay as they are because a frozen-coarsening refit
+    (:meth:`~aquaflux.precondition.multigrid.SmoothedHierarchy.refit`) reads them back to form the next
+    Galerkin operators: rounding them would change every refit after the first. Everything else is
+    rounded once, exactly as a traced split applied in ``precision`` rounds it, so a hierarchy held in
+    single precision and one narrowed when it is applied hold the same entries.
+    """
+    levels = tuple(
+        eqx.tree_at(
+            lambda cast: cast.p_val,
+            in_precision(level, precision),
+            level.p_val,
+            is_leaf=lambda leaf: leaf is None,
+        )
+        for level in hierarchy.levels
+    )
+    return SmoothedHierarchy(
+        levels=levels, equilibration=in_precision(hierarchy.equilibration, precision)
+    )
 
 
 class HierarchyBlockInverse:
@@ -108,6 +132,13 @@ class HierarchyBlockInverse:
     report : callable, optional
         Where the build record goes. ``None`` is silent; a case passes ``print``. A library object must
         not write to stdout on its own.
+    stored_precision : {"float64", "float32"}
+        The floating-point type the hierarchy is **held** in between refreshes. Each fit and refit is
+        computed in double precision and then rounded once to this type (the prolongation values
+        excepted, which a refit reads back). ``"float32"`` is for an inverse applied in single precision
+        anyway (a field split with ``precision="float32"``): its traced cycle then needs no second,
+        narrowed copy of the hierarchy beside a double one nothing applies. :meth:`apply` always runs in
+        double precision, on the rounded entries.
     """
 
     def __init__(
@@ -121,7 +152,13 @@ class HierarchyBlockInverse:
         frozen_coarsening: bool = False,
         shape_headroom: float | None = None,
         report: Callable[[str], None] | None = None,
+        stored_precision: str = "float64",
     ) -> None:
+        if stored_precision not in ("float64", "float32"):
+            raise ValueError(
+                f"stored_precision must be 'float64' or 'float32', got {stored_precision!r}."
+            )
+        self._stored_precision = stored_precision
         matrix = sp.csr_matrix(block)
         self._n_dofs = matrix.shape[0]
         self._report = report if report is not None else lambda _message: None
@@ -212,7 +249,8 @@ class HierarchyBlockInverse:
             self._budget = self._hierarchy.shape_budget(self._shape_headroom)
             self._report(
                 f"      shape ladder: cells {self._budget.coarse_cells}, "
-                f"nnz {self._budget.operator_nnz} (headroom {self._shape_headroom})",
+                f"row widths {self._budget.operator_width}, transposed "
+                f"{self._budget.transpose_width} (headroom {self._shape_headroom})",
             )
             self._hierarchy = self._coarsen(matrix, self._budget)
         self._after_coarsening()
@@ -220,6 +258,11 @@ class HierarchyBlockInverse:
     def _after_coarsening(self) -> None:
         """Re-derive whatever the smoother reads off the hierarchy, and drop the stale transpose."""
         self._extras = self.derive_extras(self._hierarchy)
+        if self._stored_precision != "float64":
+            # After the extras: they are derived from the double-precision levels, and only then is
+            # either rounded, so a narrowed hierarchy holds exactly what narrowing it later would.
+            self._hierarchy = _narrowed(self._hierarchy, self._stored_precision)
+            self._extras = in_precision(self._extras, self._stored_precision)
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose
         # -- only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per
         # arm for something most callers never touch. Dropped rather than kept here, because it
@@ -244,7 +287,12 @@ class HierarchyBlockInverse:
         )
 
     def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
-        """The cycle over what this inverse currently holds, traced in and not captured."""
+        """The cycle over what this inverse currently holds, traced in and not captured.
+
+        Applied in double precision whatever the hierarchy is held in: a double residual promotes every
+        operation on single-precision entries, so this is an exactly linear map, as a transpose solve run
+        tightly needs.
+        """
         return self.traced_cycle()(residual)
 
     def refactor_block(self, block: sp.spmatrix) -> None:
@@ -264,6 +312,12 @@ class HierarchyBlockInverse:
         either the level sizes are compared against the previous build so a retrace is reported with a
         reason attached rather than being silent.
 
+        **Where a rebuild would reproduce the coarsening exactly, this refits instead** -- at no strength
+        threshold, with an unsmoothed prolongation and no shape ladder (:meth:`_coarsening_reads_values`).
+        The aggregates and the prolongation are then functions of the pattern alone, so re-aggregating
+        returns the hierarchy already held, and the refit re-derives the same values without the
+        aggregation.
+
         Parameters
         ----------
         block : scipy.sparse matrix
@@ -280,7 +334,7 @@ class HierarchyBlockInverse:
             raise ValueError(
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {matrix.shape[0]}-dof block."
             )
-        if self._frozen_coarsening:
+        if self._frozen_coarsening or not self._coarsening_reads_values():
             self._hierarchy = self._hierarchy.refit(matrix, patterns=self._patterns)
             self._after_coarsening()
             return
@@ -292,6 +346,22 @@ class HierarchyBlockInverse:
                 f"      refresh moved the coarsening: levels {before} -> {after} "
                 f"(the jitted cycle retraces; the strength threshold reads values)",
             )
+
+    def _coarsening_reads_values(self) -> bool:
+        """Whether rebuilding at a new operator of the same pattern could change the coarsening.
+
+        It cannot when nothing that builds the transfers reads a value: no strength threshold (the
+        aggregation then sees the pattern alone, :func:`~aquaflux.precondition.multigrid._aggregation_edges`),
+        an unsmoothed prolongation (the aggregates' indicator, not a relaxation of the operator) and no
+        shape ladder (a budgeted build pads, which a refit does not reproduce). Equilibration rescales
+        values only, so it does not enter.
+        """
+        settings = self._build_settings
+        return (
+            settings["strength_threshold"] > 0.0
+            or settings.get("prolongation_smoothing") != "none"
+            or self._shape_headroom is not None
+        )
 
     def apply(self, residual: np.ndarray, *, transpose: bool = False) -> np.ndarray:
         """Approximate ``A^-1 r`` (or ``A^-T r``) with one hierarchy over the whole group."""

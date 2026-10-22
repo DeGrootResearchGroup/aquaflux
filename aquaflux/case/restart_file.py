@@ -23,13 +23,13 @@ The header and the fields are written and read here and nowhere else, so the two
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from aquaflux.mesh import mesh_digest
 from aquaflux.solve import Resumption, report_record
 
 if TYPE_CHECKING:
@@ -43,47 +43,12 @@ __all__ = [
     "RestartFile",
     "RestartHeader",
     "checkpoint_writer",
-    "mesh_digest",
     "read_restart",
     "refuse_non_finite",
 ]
 
-#: How finely a node's position is resolved when a mesh is digested, as a fraction of the mesh's
-#: largest extent. Coarse enough that rounding in the last bits of a coordinate -- the same mesh read
-#: on another machine -- lands in the same bin, fine enough that no mesh anyone would call the same
-#: shares a digest with a moved one.
-_DIGEST_RESOLUTION = 1.0e-6
-
 #: The prefix a field's array carries in the file, so a field named like a header entry cannot shadow it.
 _FIELD_PREFIX = "field_"
-
-
-def mesh_digest(mesh: Mesh) -> str:
-    """A digest of a mesh's topology and node positions, the same for the same mesh wherever it is read.
-
-    Parameters
-    ----------
-    mesh : Mesh
-        The mesh. Only its face-to-cell connectivity and node coordinates are read, so no geometry
-        has to have been computed.
-
-    Returns
-    -------
-    str
-        A hexadecimal digest. Two meshes with the same cell numbering and nodes within a millionth of
-        the mesh's extent of each other share one.
-    """
-    owner = np.asarray(mesh.face_cells.owner, dtype=np.int64)
-    neighbour = np.asarray(mesh.face_cells.neighbour, dtype=np.int64)
-    nodes = np.asarray(mesh.node_coords, dtype=np.float64)
-    extent = float(np.max(nodes.max(axis=0) - nodes.min(axis=0)))
-    resolution = _DIGEST_RESOLUTION * (extent if extent > 0.0 else 1.0)
-    binned = np.round(nodes / resolution).astype(np.int64)
-    digest = hashlib.sha256()
-    for array in (owner, neighbour, binned):
-        digest.update(repr(array.shape).encode())
-        digest.update(np.ascontiguousarray(array).tobytes())
-    return digest.hexdigest()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,7 +65,7 @@ class RestartHeader:
     dim : int
         The mesh's spatial dimension, which sets the width of ``U``.
     mesh_digest : str
-        The mesh's :func:`mesh_digest`.
+        The mesh's :func:`~aquaflux.mesh.mesh_digest`.
     case_digest : str
         A digest of the case that wrote the file. Recorded, never compared.
     problem_digest : str

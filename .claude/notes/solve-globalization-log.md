@@ -85,7 +85,7 @@
       - **The single-step sweep rated convective at Co ≈ 1 (0.051 %/s) level with a_P at β = 0.5 (0.056)
         and better than a_P at every β ≥ 1.** The marches say the opposite. That is the **second** time
         in one session that a single-state single-step ‖R‖ measurement chose the wrong winner (the first
-        was the log-space ω shift, `.claude/rules/turbulence.md`). **Treat %/s sweeps as a way to find
+        was the log-space ω shift, `.claude/notes/turbulence-log.md`, "The ω shift diagonal inherits ω's dynamic range"). **Treat %/s sweeps as a way to find
         candidates, never as a way to choose between them** — the choice needs a march judged on physics.
         (The 2026-07-26 re-profile is the **third** instance: the same sweep's `Co ≈ 1` optimum did not
         survive a constant-β march either.)
@@ -160,7 +160,7 @@
 
       Every block descends and the reattachment holds. **So no closure/model work is required to get
       the bubble** — the closure was never the problem (which also confirms the older three-way
-      verification recorded in `.claude/rules/turbulence.md`), and the entire remaining gap is the
+      verification recorded in `.claude/notes/turbulence-log.md`, "pitzDaily reference and the max blend"), and the entire remaining gap is the
       solver's inability to travel from a cold start to a root it is perfectly happy to sit on.
       - **Consequence for what to build:** de-emphasizing ω in the *measure* is now a justified lever
         rather than a guess, because a reachable correct root is known to exist. The target is
@@ -175,7 +175,7 @@
         root, that cannot be confused with a genuine stall: it is the global norm failing to report
         flow convergence. This is the concrete case for per-block reporting (#24) and row
         equilibration (#29).
-      - **A `max` near-wall blend is better on CONVERGENCE, not only on accuracy.** `.claude/rules/turbulence.md`
+      - **A `max` near-wall blend is better on CONVERGENCE, not only on accuracy.** `.claude/notes/turbulence-log.md` ("pitzDaily reference and the max blend")
         justified `p → ∞` on agreement grounds (per-wall-cell `|R_ω|/ω` 3500× smaller) and left the
         default open as "a model decision". This adds an independent argument: from the same start it
         reaches **2× the residual depth** (6.70 vs 13.70) and a **2.8× lower flow residual** in the same
@@ -637,12 +637,12 @@
       - **DELETED — "the low-β wall is the block-SIMPLE preconditioner, and the ILUT breaks it" was
       superseded on both halves.** The remedy is gone: the monolithic ILUT was measured **dominated** and
       removed, and there is no `coupled_ilut_continuation` / `IlutFactors` / `ilut_beta_tracking_refresh`
-      any more (see `solve-direct-preconditioners.md`). The premise is gone too: the shipped AMG
+      any more (record in git history of `solve-direct-preconditioners.md` before 2026-10-17). The premise is gone too: the shipped AMG
       preconditioners solve to **adjoint grade at zero shift**, which is the very regime this entry
       claimed only a complete factorization could reach. The one line worth keeping is the trap: a
       dual-time march driving β low is where a preconditioner's low-shift behaviour is tested, so measure
       there and not at the march's floor. ⚠️ And note what the entry never controlled for — the
-      block-SIMPLE path had **no k-positivity limiter at all** until 2026-08-19 (`turbulence.md`), so an
+      block-SIMPLE path had **no k-positivity limiter at all** until 2026-08-19 (record in git history of `.claude/rules/turbulence.md` before 2026-10-17), so an
       unguarded `k` crossing zero produces exactly the NaN it attributed to conditioning.
       - **Residual FLOOR + over-development past the minimum = loose `inner_tol`, NOT the preconditioner.**
       Even with the ILUT (a flat cycle count — the linear solve is fine), the march bottoms out at a
@@ -1225,6 +1225,12 @@ PITZ_INNER_DUMP_ABOVE=1`): 31 steps, 161 cycles (85 on the ramp, 76 on the targe
 solves), final `|R|` 8.345e-06, `x_r/h` 8.07, no retries, 1036 s. `beta` reaches the floor at step 13
 (of a 16-step ramp) and sits there for the whole target station (steps 17-31), where the residual falls
 linearly at 0.55-0.84 per step.
+
+⚠️ **Unverified since 2026-10-18:** until then the probe built its arms' steps once and discarded each
+re-fit's update, so where the split was traced (#290, the same day as this table) its arms applied the
+split from the steps' build, not the re-fit at their own state and shift. Whether this table ran on the
+host split (re-fitted in place, so correct) or the traced one is not recorded; it was not re-run. The
+harness now derives every arm from the replay's current step.
 
 **The probe** (`validation/pitzdaily_openfoam/endgame_shift_probe.py`): ONE outer step from a checkpointed
 state at `beta` 0.005 / 0.0015 / 0.0005 / 0, the inverse re-fitted at that state at `max(beta, 0.05)`
@@ -1858,4 +1864,759 @@ every row.
 the log's `limit` aside and `L` flag) was deleted as unused, with the harnesses that only read it
 (`march_stall_replay.py`, `k_row_scale_probe.py`). The line search's `grow` went with it: the step's `max_alpha = 1.0`
 default had capped its rungs at the full step since 2026-08-15, so it too reached nothing.
+
+
+## The dual-time step's compiled program: five residual copies to three (2026-10-17)
+
+`DualTimeStep` traced the residual five times per `_march_step`: the anchor's `R(φⁿ)`, the Newton
+right-hand side `G(p)` at every inner iteration, the line-search ladder body, `R(phi_next)` at the end for
+the step's measure, and the Krylov solve's JVP. The second and fourth are redundant in arithmetic (the
+right-hand side is the `G` the previous search evaluated at the rung it kept; `R = G − β d (p − φⁿ)`), and
+are gone; the contract is in `solve-globalization.md` ("The line search returns its residual VECTOR").
+
+**Configuration.** pitzDaily, `validation/pitzdaily_openfoam/compare.py`, Linux x86_64 4-core container,
+jax 0.11.2, Python 3.13; main at `183e9ffa` against `183e9ffa` + this change, each from its own worktree
+(`compare.py` puts its OWN repository root first on `sys.path`, so a `PYTHONPATH` pointing at another
+checkout is silently ignored — the first copy-4 arm measured main a second time that way, and served as a
+noise repeat). Compile figures are the `JAX_LOG_COMPILES=1` lines of a two-step run (`case.yaml` with
+`max_steps: 2`, the mesh path absolute) on an empty `AQUAFLUX_COMPILATION_CACHE_DIR`, with
+`XLA_FLAGS=--xla_dump_to=… --xla_dump_hlo_module_re=.*march_step.* --xla_dump_hlo_as_text` on in every arm
+(the dump adds its own writes to every compile). One run per arm.
+
+| arm | trace `_march_step` (s) | lower to MLIR (s) | XLA compile (s) | HLO lines before / after optimization |
+|---|---|---|---|---|
+| main | 10.5 | 3.9 | 27.4 | 85,650 / 102,885 |
+| main, repeat | 11.1 | 3.9 | 27.6 | 85,650 / 102,885 |
+| copy 4 only (`R(phi_next)` from the kept `G`) | 9.6 | 3.7 | 24.4 | 73,438 / 94,910 |
+| copies 4 and 2 (final code) | 7.5 | 3.5 | 21.3 | 60,970 / 84,840 |
+
+So about a fifth off XLA's compile (27.5 → 21.3 s) and about 30 % off tracing (10.8 → 7.5 s), the tracing
+part paid on every run, warm cache or cold. Lowering moved within noise. The two-step tables are identical
+to every printed digit.
+
+**Full march, shipped `case.yaml`, warm cache per arm (each arm's cache filled by its two-step run), back to
+back, one run each:** both **21 steps, 50 inner solves, 106 restart cycles**, the step tables identical to
+every printed digit but `t(s)` (final step-row `R` 2.618e-06, steered 2.258e-06), `x_r/h` **8.0686**, no
+redone step. Solve wall **204 → 195 s**. The run-time saving is one residual evaluation per inner iteration
+and one per outer step, 71 here, plus the shorter tracing; one run per arm does not separate the two.
+
+**Not bit-identical in principle, identical here in what is printed.** The step's `R(phi_next)` rounds at
+the size of the transient term, and the carried right-hand side was evaluated at `phi + alpha delta` inside
+the ladder rather than at the iterate formed after it.
+
+
+## Moved verbatim from `solve-globalization.md` (2026-10-17 prune) — the rule as it stood
+
+> The whole rule body before it was condensed, kept so measurements, test inventories and the
+> reasoning behind each binding entry stay re-adjudicable. The current rule is the authority.
+
+
+### [from rule] ⚠️ A DEFECT THAT FIRES FOR THE WRONG REASON CAN BE LOAD-BEARING (binding, measured 2026-09-09)
+
+**A globalization defect can be the only thing holding the march out of a bad regime, so fixing it
+*correctly* is what breaks the case.** Read this before removing any damping behaviour you have
+diagnosed as wrong — the diagnosis being right does not make the removal safe, and the failure lands
+one or more steps later, far from the change.
+
+The instance, in full in this file's `redamp` entry and in `.claude/notes/solve-march-log.md`, "`redamp` — the spurious brake `rebase` removed was load-bearing": a
+residual-ratio control mis-read a homotopy's station change as divergence and braked. The mis-reading
+was real — a station change raises the residual because the *problem* changed, not because the step
+was wrong — and removing it was correct. It was also the only thing holding the shift out of a regime
+where the frozen preconditioner stops tracking the operator: the shift walked into a wall, the line
+search collapsed to `alpha = 0`, `|R|` rose two orders, and the retry ladder had to escalate to
+recover. (Not "a shift the preconditioner cannot invert" — the preconditioner's own copy of the shift
+is floored separately and never went that low. See the mechanism note in `.claude/rules/solve-march.md`; the measurement is in `.claude/notes/solve-march-log.md`, "`redamp` — the spurious brake `rebase` removed was load-bearing".) **The principled
+replacement had to reproduce the accidental brake's own arithmetic before it worked.**
+
+What to take from it, none of which is specific to that mechanism:
+
+- **Before deleting a damping behaviour, ask what it is holding, not only whether it is right.** Those
+  are different questions and the second does not answer the first.
+  - **This applies to ACCIDENTS as much as to defects — to anything nobody put there deliberately.**
+    The brake above was a mis-reading; the preconditioner's own shift floor (`refit_beta_floor`, 0.05 on that
+    case) is the same shape from the other direction — a constant chosen against no recorded evidence
+    that silently decides where the frozen operator stops following the real one. Neither was designed,
+    both were load-bearing, and an unexamined constant is harder to notice than a wrong rule because
+    nothing about it looks like a decision.
+    ⚠️ An earlier draft named the *march's* `beta_min` here instead. That was a conflation of two
+    different floors and it was wrong: `beta_min = 0.005` is fine on that case — the march converges
+    there. Left as a correction rather than deleted, because the two floors are easy to mistake for
+    one and the mistake changes which knob you reach for.
+- **A correct fix that makes the case worse is evidence about the SYSTEM, not about the fix.** The
+  right response is to find what the defect was doing and supply it deliberately — not to revert, and
+  not to ship the defect on the grounds that it works.
+- **Measure the removal on its own before combining it with anything.** The intermediate arm (the fix
+  alone, no replacement) is what located the wall; a run that changed both at once would have shown a
+  number and no mechanism.
+
+### [from rule] Globalization — Newton step, continuation, line search
+
+- **`RetryPolicy.solver` is a SETTINGS VALUE, `LinearSolverSpec` (`solve/linear_solver_spec.py`, 2026-09-24,
+  #437), not a `lineax` solver.** `GmresSolve(rtol, restart, stagnation_iters, max_restarts)` builds
+  `relative_residual_gmres(...)` (the Euclidean relative stop the only two callers used,
+  `relative_residual_gmres(1e-4, restart=40)`); `DirectSolve()` builds `lx.AutoLinearSolver(well_posed=True)`.
+  The reason is the case file: a `lineax` object is not plain data, so a policy holding one could not be
+  read by `SettingsMapping`, and `RetryPolicy` is now a case-file kind as it stands. `newton_march` builds
+  the solver **once per march** (`tight_solver`) and hands that one object to every divergence retry.
+  ⚠️ **Only this field moved.** `RootSolveSettings.linear_solver` / `.adjoint_solver` and
+  `solve_coupled(adjoint_solver=)` still take `lineax` solvers; the case layer's `RootSolve` builds them from
+  `LinearSolverSpec`s. Moving those too touches ~12 call sites and was left out of scope. The unit tests'
+  `"tight"` marker survives as a `LinearSolverSpec` test double (`_TightSolve.build() -> "tight"`), which is
+  also what pins the build: a march passing the spec itself, unbuilt, reaches the step as a non-`"tight"`
+  object and the retry tests go red.
+
+- **What only SOME strategies or controls can do is a declared protocol in `strategy.py`, asked by
+  `isinstance` — never `getattr(x, name, default)` (binding, #281 part 2, 2026-10-10).** All exported:
+  - **`NewtonStrategy.with_norm(norm)`** is how the march swaps the per-iteration measure in. It used to
+    `eqx.tree_at(lambda s: s.residual_norm, …)` on the step, so a strategy conforming in full but keeping
+    its measure under another name failed inside equinox with an error naming a lambda. Implemented on
+    `DampedNewtonStep` and on the `ShiftedStep` base (the same `tree_at`, so the swap is still a data-leaf
+    change and a compilation-cache hit).
+  - **`CarriesRelaxationSchedule`** (`relaxation_schedule`) and **`ReadableShift`** (a schedule's `beta`;
+    `ConstantRelaxation` yes, `SwitchedEvolutionRelaxation` no). `ShiftedNewtonStrategy` is now
+    `NewtonStrategy + CarriesRelaxationSchedule`. **`shift_of(strategy)`** is the ONE reader of a shift —
+    `None` where there is none — used by the march's reports, the escalation's carry, the β-tracking
+    refresh and `RetryPolicy.require_shifted`. There is no `march._shift_of`.
+    `ShiftStrengthControl.next_step` refuses a step that is not a `CarriesRelaxationSchedule`.
+  - **`AbortsInnerLoop`** (`with_inner_abort(*, above_cycles, below_alpha)`, `None` = keep the step's
+    own): `RetryPolicy.with_inner_abort` calls it instead of probing two field names and rewriting them
+    with `dataclasses.replace` on a type it does not own. `DualTimeStep` implements it.
+  - **`StopsForRefresh`** (`refresh_on_cycles: int | None`, a data member): a strategy that can end a
+    step early for a preconditioner re-fit, reporting `StepOutcome.refresh_due` (the ninth field, added
+    with it, 2026-10-10, #290). `newton_march` asks it before the first step and refuses one with
+    `refresh_on_cycles` set and no `refresh_preconditioner`. `DualTimeStep` implements it; see
+    `solve-march.md` for the march side.
+  - **`ShiftCarryingControl(StepControl)`** declares `carry_beta`, `resumed_at`, `redamp` and `rebase`
+    **together**, and the march and `staged_march` call any of them only on a control that is one.
+    ⚠️ **All four or none, by decision (project owner, 2026-10-10):** they are one capability — keeping
+    the carried β right — so a control offering some would be right across one boundary and silently
+    wrong across another. A control implementing only some now gets **none** of them (pinned by
+    `test_the_shift_hooks_reach_a_control_offering_all_four_and_none_offering_some`). Only
+    `ShiftStrengthControl` implements any, so no shipped control changed behaviour.
+  - Why: a probe answers "no" in silence when a class offers the capability under another name, and a
+    march that skips a feature looks exactly like one that never needed it. Membership is pinned both
+    ways against the real classes in `tests/unit/test_strategy_capabilities.py`; every new test was
+    mutation-checked. The remaining `getattr` sites outside this family are tracked in #669.
+
+- **`ShiftedStep` is the shared body of the two shifted Newton steps (`solve/continuation.py`, BUILT
+  2026-08-15).** `PseudoTransientStep` and `DualTimeStep` differ entirely in `stepper()` — what one
+  *outer step* means — and not at all in how they are configured or interrogated. The fields they
+  share (`shift_policy`, `relaxation_schedule`, `line_search`, `step_projection`, `krylov_solver`,
+  `residual_norm`, `adjoint_preconditioner_factory`, and `jacobian_residual` since; a ninth, `step_limit`,
+  a whole-step cap, was deleted 2026-10-14 as unused) and all three `NewtonStrategy`
+  accessors (`norm`, `linear_solver`, `adjoint_preconditioner`) were written out **twice, identically**,
+  field comments included. A subclass now supplies `stepper` plus the fields its own step shape needs.
+  `DampedNewtonStep` is deliberately NOT a subclass: it has no shift, and its `linear_solver` returns a
+  different constant, so folding it in would mean inventing a `relaxation_schedule` it does not possess.
+  ⚠️ **`adjoint_preconditioner_factory` is a DATA field since 2026-10-12 (#290); it was static.** A
+  traced field split rides in it as array leaves (`_TracedSplitAdjoint`), so a re-fit can replace it
+  without a recompile; so does the block-diagonal family's `solve.UnshiftedPreconditioner(policy)` (the
+  policy's preconditioner at zero shift, a module where it was a lambda; #386), so a re-pointed session
+  can replace it. A value holding no arrays — a closure, a frozen dataclass such as
+  `FrozenTransposeFactory`, `None` — is still filtered to the static side and keyed as before.
+  **Verified as a pure refactor**: no field and no default changed on either class, compared field by
+  field against the previous implementation (`DualTimeStep.line_search` stays **10** against the base's
+  **0** — it redeclares it, which is why that difference has to be checked rather than assumed).
+
+- **⚠️ THE RESIDUAL AND THE JACOBIAN MAY BE DIFFERENT FUNCTIONS — `ShiftedStep.jacobian_residual`
+  (BUILT 2026-08-22).** An optional `phi -> R~(phi)` whose Jacobian--vector product forms the shifted
+  solve's operator, in place of differentiating the residual the step is driving to zero. `None`
+  (default) differentiates the residual itself and is byte-identical. Threaded through
+  `_shifted_solve(jacobian_fn=…)`, read by **both** steppers (a march runs the dual-time one, so wiring
+  the single-step branch alone would leave it inert on the path that matters).
+
+  **The asymmetry it exists to express: `R` decides the answer, `J` decides only the rate.** The
+  residual defines *which discrete equations are being solved*, so an approximation there moves the
+  root; the Jacobian only decides how fast an inexact-Newton iteration reaches whichever root `R`
+  defines, which is the same latitude the forward regime's `rtol = 0.3` (`LinearSolveSettings`) already takes
+  on the linear solve. Holding
+  both to one accuracy because one function serves both is a coincidence of implementation, not a
+  requirement. The concrete consumer is the gradient reconstruction's sweep count — see
+  `.claude/rules/schemes.md` (measurements in `.claude/notes/schemes-log.md`) for what it is worth and where the knee is.
+
+  - **The adjoint is exact BY CONSTRUCTION, not by care, and this is the load-bearing property.**
+    `root_adjoint`'s backward rule forms `jax.vjp(residual_fn, …)` at the converged state directly and
+    never consults the Newton step, so nothing set here can reach a gradient. That is what makes a cheaper
+    forward operator legitimate at all: the sensitivity a user asks for stays exact however loosely the
+    march got to the root. Pinned by
+    `test_a_stand_in_jacobian_leaves_the_adjoint_exact`.
+  - **The descent test still reads the TRUE residual.** `PseudoTransientStep`'s `directional` is
+    `jvp(norm o residual_fn)`, so the merit and its slope are the real ones; only the operator that
+    produced the direction is approximate. Correct — the question a descent test asks is whether the
+    step helps the residual being solved.
+  - **Data, not static.** The natural argument is a bound method of an assembler, which equinox carries
+    as a pytree, so its arrays ride as dynamic leaves and every step stays a compilation-cache hit
+    rather than recompiling against baked-in constants. Same reasoning as `residual_norm`.
+  - **A reachability test is mandatory and is easy to omit.** An unwired field leaves the correction
+    bit-identical, and every property asserted of it then holds for a reason unrelated to the field.
+    `test_a_stand_in_jacobian_genuinely_changes_the_step_it_produces` scales the stand-in's Jacobian by
+    a fixed factor, whose unshifted exact solve must scale the step by its reciprocal.
+  - **⚠️ A FACTOR-OF-TWO-WRONG JACOBIAN IS EXACTLY NEWTON'S STABILITY BOUNDARY — do not reach for it as
+    a harmless test fixture (learnt the hard way, 2026-08-22).** An operator scaled by `s` makes the
+    step `1/s` times the Newton step, so the iteration's fixed-point derivative at the root is
+    `1 - 1/s`, which at `s = 0.5` is `-1`: it oscillates forever without decaying, once the
+    pseudo-transient shift has eased to zero near the root. `0.5` is therefore the *least* harmless
+    factor available rather than an obvious one, and two tests written with it ran to `max_steps` and
+    failed. The fixture is at `0.8` (derivative `-0.25`) — still unmistakably the wrong operator, and
+    one that converges. Note this is also the *quantitative* form of the exchange rate the field
+    trades in: an operator error of order one is not a slower Newton, it is no Newton at all, so a
+    cap's error budget is bounded well below that and not merely "small".
+
+- **`ShiftedStep.preconditioned_as(other)` (2026-10-12, #386)** swaps in `other`'s `shift_policy`,
+  `adjoint_preconditioner_factory` and `jacobian_residual` — everything built from the problem — and keeps
+  every setting of the step itself, the shift strength included. It is how `RebuildingSession` hands a
+  running march a step rebuilt on another problem without discarding the shift its control set. `tree_at`
+  with `is_leaf=None` so an unset field swaps too.
+
+- **There is no `_TrailingFirstFieldSplit` and no `_set_order` (deleted 2026-09-13, #371).** The field
+  split has one ordering, so `FieldSplitInverse.apply` has one body that branches only on
+  `transpose` (which reverses the solve order and uses `Cᵀ`).
+
+- **Forward globalization is ONE injected strategy — `strategy: NewtonStrategy`.** The forward
+  Newton loop has a single point of variation: `RootSolver` takes one `strategy`
+  implementing the `NewtonStrategy` protocol (`stepper()` → the per-step
+  `(residual_fn, phi, ‖R₀‖, solver) -> phi_next`; `linear_solver()` → the inexact-Newton forward
+  GMRES for that march; `adjoint_preconditioner()` → the converged-state transpose preconditioner).
+  Two concrete strategies: **`DampedNewtonStep`** (default — the backtracking line search, holding
+  the forward/adjoint preconditioner and the line-search count) and **`PseudoTransientStep`**
+  (`aquaflux/solve/`, the residual-agnostic diagonally-shifted march; the flow configures it via
+  `aquaflux/flow/`'s `momentum_continuation` factory — no wrapper class). The march calls the
+  injected step unconditionally — there is **no "was a strategy given?" branch**, and the solver grew
+  **no separate `line_search` / `preconditioner` / `continuation` constructor arguments** of its own
+  (they were unified into the strategy; do not reintroduce them). Each strategy's shift vanishes at the fixed point, so the converged state and
+  the IFT adjoint are strategy-independent. When adding a globalization (e.g. a monotone/forcing
+  acceptance), add a `NewtonStrategy` — do **not** grow a branch in the march.
+  - **`ShiftedNewtonStrategy` is the SECOND contract, and the eager march's beta machinery requires it
+    (binding, 2026-08-15).** `NewtonStrategy` says what every strategy must *do*; `ShiftedNewtonStrategy`
+    says what one must additionally *carry* — a `relaxation_schedule` holding `beta` as a readable,
+    replaceable **dynamic** leaf. It is separate rather than folded in because not every strategy has
+    a shift: `DampedNewtonStep` globalizes by backtracking alone, and demanding a `relaxation_schedule`
+    of it would be inventing a quantity it does not possess.
+    **What it replaces, and why it matters more than it looks:** the requirement was enforced by
+    `hasattr` probes scattered through `newton_march`, which fail **silently**. A `DampedNewtonStep`
+    satisfies `NewtonStrategy` in full, so a march configured with `RetryPolicy.on_cycles` accepted it and then
+    never escalated — from the log, indistinguishable from a march that never needed to. One reporting
+    path failed the *opposite* way and read `active_step.relaxation_schedule` unguarded, so the same
+    conforming step raised `AttributeError` mid-march. `newton_march` now checks **once, on the first
+    iteration, against the step the CONTROL produced** (`RetryPolicy.require_shifted`), naming the
+    feature and what it needs.
+    **⚠️ THE OBJECT CHECKED IS `active_step`, NOT THE STEP HANDED IN, AND THAT IS LOAD-BEARING (fixed
+    2026-08-16).** Checking before the loop looks equivalent and is not: the default schedule is
+    `SwitchedEvolutionRelaxation`, which is **memoryless and exposes no `beta`**, while a
+    `ShiftStrengthControl` swaps a `ConstantRelaxation` (which does) onto the step every iteration. So
+    the readable beta the escalation needs is supplied **by the control**, and a pre-loop gate sees a
+    step that never runs. It rejected the shipped configuration outright — every `bfs3d` march runs a
+    shift control *and* both retry thresholds, so **not one could start**, under any flow inverse, with
+    a `TypeError` whose own message names `DualTimeStep` as acceptable while refusing one. The check
+    still precedes any escalation, which is the property it exists for, and with no control
+    `active_step` is the base step so the ungated path is unchanged. Pinned in **both** directions by
+    `test_the_escalation_guard_accepts_a_shift_a_step_control_installs` and
+    `test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate` — the pair matters,
+    because a gate can be "fixed" by deleting it and only the second test notices.
+    ⚠️ **This was found by RUNNING a march, not by the suite, and it was the second such break in one
+    sitting** (the other: `compare.py` handed `solve_coupled` a bare `refresh_preconditioner` callable where
+    a `RefreshPolicy` was expected, so reading the policy raised before step 1). **No test tier drives
+    this case's own driver**, so a refactor can tighten a seam, take the case out entirely, and leave
+    every gate green. Treat "the fast gate passes" as saying nothing about whether `bfs3d` can march.
+    - **Gate only what is genuinely silent (binding).** The escalation is gated. The divergence retry
+      (`retry_solver` / `retry_divergence_cap`) is **not** — it re-solves at a tighter tolerance and
+      never touches beta, so it works on any step; its *reporting* goes through `shift_of`, which
+      returns `None` for a step with no shift rather than inventing one. A `StepControl` is **not**
+      gated either: the protocol only asks it to return a ready-to-run step, a step-agnostic one is
+      legitimate (and exercised), so the protocol stays typed on `NewtonStrategy`. A control that
+      *does* drive beta refuses for itself: `ShiftStrengthControl.next_step` is typed on
+      `ShiftedNewtonStrategy` and raises a `TypeError` naming the control and the step when the step
+      has no `relaxation_schedule` (#158, 2026-10-10). It used to "fail loudly" only as a bare
+      `AttributeError` from inside its `tree_at`, naming neither. The march calls it before its first
+      step, so nothing is taken first (pinned by `test_step_control.py`, all three controls,
+      mutation-checked). It tests the field's presence, not a readable beta, because it replaces the
+      schedule rather than reading it. Gating at the march would reject what the protocol permits.
+    - **The runtime check tests the SHIFT, not `isinstance(..., ShiftedNewtonStrategy)`.** The argument is
+      already typed `NewtonStrategy`, so re-testing those four methods at runtime would reject a
+      legitimate duck-typed step for a reason unrelated to the feature asked for — which it did, on
+      every test double, when first written that way.
+- **`continuation.py` — BUILT (`PseudoTransientStep`, residual-agnostic).** The pseudo-transient
+  continuation engine lives **here in `solve/`, not in `flow/`** — it is a `NewtonStrategy`
+  (`stepper`/`linear_solver`/`adjoint_preconditioner`) that runs an **injected**
+  `RelaxationSchedule` for the shift strength β, the diagonally-shifted solve `(J + diag(βd))δ = −R`
+  (`solve_linear(throw=False)`), and the closed-loop accept/escalate `while_loop`. **`stepper()`
+  returns a `StepOutcome`** carrying the accepted attempt's cycle count, its line-search factor α (the
+  step-quality signal, ≤1; a march reads both off the report), and
+  **its `residual_norm`** — the measure at the accepted candidate, which the escalation carry now
+  transports beside the candidate it belongs to (a fully-rejected step returns `phi` untouched, so it
+  reports `phi`'s own measure, the `residual_norm` the caller handed in). The attempt already formed it
+  for the acceptance test, so both drivers read it instead of re-evaluating the residual at the same
+  iterate.
+  - **The β schedule is an injected `RelaxationSchedule` (`solve/relaxation.py`), SER extracted as the
+    default (binding — do not re-inline the β rule).** ⚠️ **Its method is `shift_strength(‖R‖, ‖R₀‖)`,
+    renamed from `relaxation()` in #373:** it returns β, which damps *more* as it grows, where an
+    under-relaxation factor in `(0, 1]` damps *less* — and both words are live in this package (the
+    segregated loop under-relaxes k and ω by a factor). The classes keep their names,
+    `SwitchedEvolutionRelaxation` being the literature's. The old `beta0`/`exponent`/`beta_floor` fields on
+    `PseudoTransientStep` are gone; the field is `relaxation_schedule: RelaxationSchedule`, defaulting to
+    `SwitchedEvolutionRelaxation(beta0=2, exponent=1, beta_floor=0)` — byte-identical to the old inline
+    `max(beta_floor, β₀(‖R‖/‖R₀‖)^p)`. It is the direct twin of the injected `ResidualNorm`
+    (`solve/norm.py`). A `RelaxationSchedule` is **memoryless** (β from the two residual norms only), which
+    is what keeps it on the differentiable traced path. `ConstantRelaxation(β)` carries β as a **dynamic
+    0-d leaf** so an external control can vary it per step as a `filter_jit` cache hit (the `lam_max`
+    precedent). `beta0`/`exponent`/`beta_floor` are the public spelling still, but they are now fields of
+    the shared `Globalization` (below) rather than keywords on each builder, and
+    `Globalization`'s step construction translates them — only when one is set; unset, the step's own
+    default schedule applies — a factory building the real object, not a shim. A *stateful* or α-driven damping rule is **not** a schedule; it
+    is a `StepControl` on the eager march (see `march.py`).
+
+  - **⚠️ ONE `Globalization` FOR ALL SIX BUILDERS — the engine's own settings are not per-builder
+    keywords (binding, BUILT 2026-09-13, #372).** `Globalization` (`solve/continuation.py`, exported)
+    carries every setting that describes *how a march damps* rather than *what it is solving*: the SER
+    schedule (`beta0`, `exponent`, `beta_floor`), the escalation ladder (`max_escalations`,
+    `escalation_factor`), the divergence guard's `divergence_cap`, and the backtracking ladder
+    (`line_search`, `line_search_growth`). Its two methods, `step(policy, **fields)` and
+    `dual_time_step(policy, **fields)`, are the **only** places a globalization becomes a step; the
+    per-problem fields (`adjoint_preconditioner_factory`, `krylov_solver`, `residual_norm`,
+    `step_projection`, `jacobian_residual`) ride through as passthroughs.
+    - **Every field is UNSET by default (`None`), and unset falls through — first to the builder's base,
+      then to the step class's own default (binding).** `_coupled_step` calls
+      `globalization.with_defaults(line_search=_COUPLED_LINE_SEARCH)`, so `Globalization(beta0=1.5)`
+      changes one setting on every builder while the coupled march keeps its ten rungs, and an explicit
+      `line_search=0` survives. No default is declared on `Globalization` itself, so none is restated.
+      ⚠️ **The first version carried a full default set and two presets** (`DEFAULT_GLOBALIZATION` and a
+      `COUPLED_GLOBALIZATION` differing in `line_search`) with a prose rule to start from the right one. A
+      bare `Globalization(beta0=1.5)` on a coupled builder then silently reset the line search to zero, and
+      a declarative case file's `globalization: {beta0: 1.5}` had no way to say which preset it meant.
+      There is no `COUPLED_GLOBALIZATION` now; `DEFAULT_GLOBALIZATION` is the empty override.
+    - **What it refuses rather than drops.** `dual_time_step` raises on any escalation-ladder field that is
+      set (`max_escalations`, `escalation_factor`, `divergence_cap`, `line_search_growth`): the
+      dual-time inner loop has no ladder, so they would reach nothing. A step field the target class does
+      not declare raises **even when passed as `None`** — `_supplied` checks names before dropping unset
+      values, because filtering first made a misplaced `acceptance=None` vanish — and a setting given both
+      on the object and as a step field raises rather than one silently winning.
+    - **The membership test is whether a setting's reason can be stated without naming a residual or a
+      preconditioner.** It can for all of the above. It cannot for the closure's step projection (per-cell k clip +
+      ω step bound), whose value is a function of the state layout — so its one setting,
+      `omega_step_ratio`, stays on the coupled builders, which hold the `CoupledRANS` that can construct
+      it (`_closure_step_projection`), and arrives at `step()` as an ordinary `step_projection` field.
+      (`positivity_floor`/`positivity_projection` no longer exist — deleted 2026-10-14.) Nor can it for the per-family Krylov restart regime or the progress measure's default.
+      **Decided (#387, 2026-09-14):** `shift_basis`, the velocity shift parts and `turbulence_damping`
+      pass the test but describe how the *shift* is formed rather than how the march damps, so they are
+      their own value, `turbulence.CoupledShiftSettings`, on the coupled builders — kept off this object also
+      because the damping strategies and the live velocity parts carry state. **Still open:** `divergence_cap` and `line_search_growth.basin`
+      are residual ratios read in a measure the object excludes (#370); and `acceptance` and the schedule
+      are flattened to scalars, so a non-`DivergenceGuard` rule or a non-SER schedule reaches a step only
+      through `step(**fields)` with those fields unset.
+    - **What it replaced, and the reach it still does not give.** The four coupled builders carried eight
+      of these keywords apiece; `momentum_continuation` and `scalar_pseudo_transient_solve` carried **two**,
+      so `beta_floor`, `line_search`, `grow` and the growth rule were unreachable from the flow-only and
+      scalar paths, and `line_search_growth` from all six. (⚠️ **There is no `grow` any more** -- the
+      ladder's rungs above the full step, on `Globalization`, `PseudoTransientStep` and
+      `backtracking_line_search` -- deleted 2026-10-14: a `max_alpha = 1.0` default the step passed
+      whenever no whole-step limit was set had capped every rung at the full step since 2026-08-15
+      (`7c1361bd`), so it had reached nothing for two months. The ladder starts at the full step.) The problem-specific step fields
+      (`step_projection`, `krylov_solver`, `residual_norm`, `jacobian_residual`) are **still** unreachable
+      from those two builders — outside #372's settings, not closed by it. The segregated flow solve
+      `bulk_velocity_flow_solve` is a `DampedNewtonStep`, a different engine that takes no `Globalization`.
+    - **⚠️ Moving keywords off a builder that keeps `**kwargs` turns a retired name into a silent one.**
+      The deleted `coupled_continuation` forwarded leftovers to `BlockPreconditioner.build`, which only a
+      first build reads — a refresh (`reuse=`) carries the flow block — so `beta0=` on a refresh was
+      silently dropped. Closed structurally since #371: flow-block settings travel only as a
+      `BlockDiagonal` spec, whose fields are pinned to `build`'s keywords, and march keywords are bound
+      against `coupled_step`'s signature (`_march_keywords`), so an unknown name is a `TypeError` at
+      construction. There is no `_refuse_unknown_flow_block_options` any more; nothing could reach it.
+    - Pinned by `tests/unit/test_globalization_reach.py`: every builder takes the object; a non-default one
+      arrives on the built step **field for field**; the shipped defaults as **literal numbers**; one
+      override leaves every other setting alone; and each refusal above.
+  - **Three boundary responses on `ShiftStrengthControl`, and what each keeps is the whole design
+    (`carry_beta` long-standing; `rebase` and `redamp` BUILT 2026-09-09).** The carried state is
+    `ShiftControlState(beta, memo, release)` (a named tuple since 2026-10-12; `(beta, memo)` before). All
+    three keep `release`, the release's memory of a failed release (below); only `resumed_at` starts a
+    state without one. Each of these is an *outside event changed the situation, keep what still applies*
+    seam, and they differ only in what still applies:
+    | method | called when | keeps | drops |
+    |---|---|---|---|
+    | `carry_beta` | a β-escalation retry | the memo | — (β replaced) |
+    | `rebase` | a `ResidualHomotopy` station change, one step later | β | the ratio reference |
+    | `redamp` | that station change, on the entering step | the memo | — (β scaled) |
+    `carry_beta` keeps the memo because an escalation changes only how far the march steps through the
+    **same** residual; `rebase` drops it because the next residual is a **different function** and a
+    ratio across that boundary divides two incomparable numbers.
+    - **⚠️ `rebase`'s contract is "drop the ratio REFERENCE, keep everything else that still applies",
+      NOT "clear the memo" — a subclass whose memo carries more than the reference MUST override it.**
+      The base clears the whole memo, correct only because the base's memo *is* the reference. A richer
+      memo (a live growth rate, a cap) would lose those, and the failure is silent in the worst way: the
+      ratio then defaults to `1.0` on every adaptation, so the brake `rebase` exists to stop mis-firing
+      stops firing *at all*, which is indistinguishable from the rebase working. For the same reason,
+      **call these rather than unpacking `(beta, previous_residual) = state`** at a call site — that
+      keeps typechecking after a memo grows a field and quietly stops supplying a reference.
+    - **`redamp` is not optional and is not a knob.** Without it the shift descends by
+      `grow ** steps_per_station` per station, unopposed, and walks through the level the next station
+      can carry. The failure, the four-arm measurement, and why a learned floor under β or a cap on the
+      growth rate are both *refuted* alternatives are in `.claude/rules/solve-march.md` under
+      `ResidualHomotopy` / `redamp` (the four-arm table in `.claude/notes/solve-march-log.md`, "`ResidualHomotopy` — what it is for, and the four-arm result") — read there rather than restating here.
+  - **`release_floor` -- the floor comes off once the march has settled at the target (BUILT 2026-10-10,
+    opt-in, `None` by default).** A dual-time step at a fixed shift contracts each error mode by
+    `beta / (lambda + beta)`, so a march parked at `beta_min` near its root converges linearly at a rate
+    the FLOOR sets: on pitzDaily the target station's 15 steps all ran at 0.005 against a slowest mode at
+    0.5-0.8 of it. A field pair on the `ShiftStrengthControl` base (`release_floor`, `settle_alpha`
+    default 1.0), so all three controls reach it and a case file writes it on any `step_control`. The rule
+    lives in one method, `_floored`, applied after every `_adapt`: **released** iff the previous step
+    `arrived`, the rule did not raise beta, and either it was `settled(report)` -- ran at or below
+    `beta_min` with `alpha >= settle_alpha` -- (then beta = `release_floor`) or it already ran below
+    `beta_min` (then the rule's own beta).
+    - **`ShiftStrengthControl.settled(report)` is THE definition of settled (2026-10-11), read by the
+      release AND by a ramp that ends on it** (`RampSchedule(end_when=control.settled)`, see
+      `solve.md`). ⚠️ There is no `release_alpha`: it was renamed `settle_alpha` the same day, before
+      the release ever merged, because it now defines settled for both readers. `settled` deliberately
+      ignores `arrived` -- that is the release's own further condition, not part of being settled. Anything else -- a clipped released step, a rising residual for a rule that reads one
+    -- puts `beta_min` back in one step, not by doubling up from the released shift. `_clamp`'s lower bound
+    is `release_floor` when set, so the rules may go below `beta_min` and `_floored` is the one place that
+    decides whether they may. "Released" is read off the previous report's shift; what the state carries
+    for the release is only the backoff's memory (below).
+    - **⚠️ The gate is the measured part, not a guess.** A zero-shift step from the state the ramp ARRIVED
+      at raised the residual (line search to `alpha` 0, 42-cycle steps, the same under an inverse fitted
+      at zero shift); two states later, after the first step at the floor with `alpha` 1, the same step
+      met the stopping bar. So `arrived` alone is the wrong signal, and the shift a state can take
+      belongs to the state -- the `(state, beta)` rule in `solve-march.md`, one more time.
+    - **`release_floor` must be positive**, refused at construction: a retry escalates beta by scaling it
+      (`RetryPolicy.escalate`), and zero scales to zero.
+    - **Measured:** pitzDaily 31 -> 22 steps, 161 -> 141 cycles, target station 15 -> 6 steps and 67 -> 30
+      inner solves, same `x_r/h`, final `|R|` 1.7e-6 against 8.3e-6. Cycles fall less than steps because
+      each released step's solves cost 2-3x a floor step's: the inverse is still re-fitted at
+      `refit_beta_floor` (0.05). Re-fitting at the released shift instead was measured 2026-10-13 on the
+      post-#290 march and is worth one cycle there (`.claude/notes/solve-open-directions.md` 11a); the floor
+      itself was worth 10, and pitzDaily's file now sets none. Full tables and configuration in `solve-globalization-log.md`.
+    - **pitzDaily's `case.yaml` ships it since 2026-10-11**, at 1e-4 and paired with `grow` 3 and 12
+      stations (111 cycles / 16 steps against the 161 / 31 shipped before; the `grow` x `stations` sweep
+      in the log), with `release_backoff: 0.5` stated beside it since 2026-10-12 (the class default,
+      written out so the file says what the shipped release does after a failure). **Not the class
+      default** (`release_floor=None`) and **not bfs3d's file**.
+      ⚠️ Those counts were taken while a cost re-fit ran MID-STEP at `refresh_on_cycles` 2. Since #290 a
+      re-fit ends its step, which at 2 moved the release to step 34 of 39 (the settled test needs a
+      full-length step, which one-iteration steps rarely give); pitzDaily now ships 3, where it fires at
+      step 18 of 20 -- `.claude/notes/solve-open-directions.md` 6b.
+    - **bfs3d, measured 2026-10-11 (#678, `61a14308`, M3 Pro, jax 0.10.2):** the release alone at 1e-4 on
+      the shipped `grow` 1.5 x 12 stations passes -- 28 -> 24 steps, 174 -> 173 cycles (193 -> 192
+      counting rejected attempts), the same one retry, the same root (rel L2 1.8e-4, inside the shipped
+      arm's own last-two-step drift of 5.7e-4). The march is bit-identical up to the release, which fires
+      the step after the first full-length step at the floor; the two released steps cost 12 and 15
+      cycles against 4-5 at the floor, so the saving is steps, not cycles. **pitzDaily's pairing with
+      `grow` 3 transfers only with pitzDaily's inner stop**: under bfs3d's lineax stop it costs 214
+      accepted / 459 all cycles with nine steps redone; under `stop: residual` it is 25 steps / 195 all
+      cycles with three redone, beating the shipped schedule under that stop (35 / 294) and fastest of
+      every arm (792 s against 1191, indicative).
+      **bfs3d's file releases since 2026-10-13** (owner's decision, with `grow` 3, the residual stop, no
+      refit floor and the multiple-correction gradient: 19 steps / 656 s against 36 / 1250 s, same
+      `x_r/h`); a library default still waits on the three slow tests #645 names (a loose terminal step is what they measure). Tables in
+      `solve-globalization-log.md` ("bfs3d: the release, `grow` 3 and the settle-ended ramp").
+    - **A failed release is not retried until the residual falls below a bar (`release_backoff`, BUILT
+      2026-10-12, default 0.5).** Without it `_floored` kept no memory: a released step collapsed, the rule
+      backed off to `beta_min`, the next full-length floor step was `settled` again, and the release fired
+      again -- every other step from a deep ramp start (pitzDaily anchor 300: steps 19, 21, 23, 25; anchor
+      1000: eight failures in a row, stopped at step 38 and 502 cycles). Now the rule backing off from a
+      released step records `bar = release_backoff * residual the release fired from` in the state's
+      `ReleaseMemory`, and the floor is released again only from a settled step at or under it. A release
+      that holds sets no bar, so a march whose first release holds is **bit-identical** (pitzDaily anchor
+      100: the same 16-step table, 111 cycles, to every printed digit but `t(s)`). Measured on pitzDaily
+      (shipped march, `PITZ_RAMP_ANCHOR`, Linux x86_64 4 cores, jax 0.11.2, 2026-10-12): anchor 300 255 ->
+      **210** cycles (failed releases 3 -> 1, 1543 -> 1301 s); anchor 1000 converges in 82 steps / **612**
+      cycles / 3702 s to the same root, where before it was stopped at 38 / 502 / 5018 s still thrashing.
+      ⚠️ **It does NOT make a deep start competitive, and no release rule could:** from anchor 1000's state
+      SIX releases failed, from `|R|` 2.3e-3 down to 6.4e-5 (173 cycles together); only the seventh, from
+      3.1e-5, held -- while anchor 100's single release holds from 1.5e-3. The residual a release needs
+      belongs to the state the ramp leaves, and a deep anchor's cost is the floor's linear tail from it.
+      ⚠️ The bar compares residuals across steps in the row-scaled measure, which is rebuilt every step --
+      an approximate comparison, adequate for a factor-2 bar and not for a fine one. ⚠️ `rho1` on the
+      settled step does not predict which release will hold (0.35-0.97 before anchor 1000's six failures;
+      0.32 and 0.87 before the releases that held at anchors 1000 and 100), so it is not a better gate.
+      Log: `solve-globalization-log.md` ("The release backoff").
+    - Pinned by `test_step_control.py` (each condition; every one of twelve single-line mutations of the
+      rule turns a test red; the backoff by its own six tests, nine of ten mutations red -- the tenth,
+      keeping a stale `started_from` on re-release, is unreachable because a failure always clears it)
+      and `test_newton_march.py::test_a_released_shift_turns_a_linear_tail_into_newton_steps`.
+  - **The shift's SPATIAL distribution is an injected `ShiftBasis` (`solve/shift_basis.py`) — the
+    spatial twin of the `RelaxationSchedule` (binding).** `RelaxationSchedule` sets *how much* damping
+    (the scalar β); `ShiftBasis` sets the per-cell base diagonal `d` the shift `β d` is built on, from
+    the operator's two diagonal buckets: `local_diagonal(convective, dissipative) -> d`. The one concrete
+    is `LocalCourantBasis(dissipative_weight=w)`: `d = convective + w·dissipative`. **`w = 1` (default) is
+    the full operator diagonal `a_P`** — and because `d = a_P` (the same diagonal the operator carries),
+    `β a_P` is spatially-*uniform* under-relaxation (relaxation `1/(1+β)` in every cell), byte-compatible
+    with the historical shift. **That equivalence is exact and worth stating plainly: on the momentum
+    rows, this shift IS the implicit under-relaxation a segregated pressure-correction solver applies,
+    at `α_u = 1/(1+β)`.** Both sides match, not just the diagonal — the shift acts on `δ = φ − φ_k` and
+    so contributes `β a_P φ_k` to the right-hand side, which is exactly the `((1−α_u)/α_u) a_P φ_old`
+    that implicit under-relaxation adds. At the pitzDaily march's operating point `β ≈ 1.9`, that is
+    `α_u ≈ 0.345`, against the 0.3 that established segregated codes use as their default momentum
+    relaxation. **Consequence (load-bearing for the cold-start work): the momentum treatment is the
+    industry-standard one in different notation, so it is NOT where a cold-start reachability gap can
+    be hiding, and "our globalization is exotic / uncovered by theory" is false.** Look instead at what
+    differs — the coupled pressure/continuity treatment, the turbulence relaxation and limiters, and the
+    fact that the reference which reliably reaches this root is a *transient* run. **`w = 0` is a genuine local convective time step** (`d = Σ_f max(mdot_f,0)`
+    = ½Σ|mdot|), the non-uniform per-cell `Δt` a Courant condition implies — OF's `Co = ½Δt Σ|φ|/V` and
+    Fluent's *segregated* local pseudo-time step are this same convective basis. The buckets are supplied
+    by each block: `rhie_chow.momentum_diagonal_parts` (velocity) and
+    `preconditioner.scalar_transport_shift_diagonal_parts` (k/ω), each summing to the block's total shift
+    diagonal to rounding. **Consequence for the preconditioner (binding):** with a non-`a_P` basis the
+    shifted diagonal is `a_P + β d`, *not* `a_P(1+β)`, so `make_preconditioner` must invert `a_P + β d` —
+    the velocity block's `apply_at` is fed exactly that (was `a_P(1+β)`; identical when `w=1`). Threaded
+    through `momentum_continuation`/`coupled_continuation`/`solve_coupled(shift=CoupledShiftSettings(basis=…))`
+    (the coupled builders' loose `shift_basis=` keyword is gone, #387) and the k/ω
+    shift policies; **pressure keeps zero shift regardless** (elliptic), which is why a *local* basis is
+    defensible on this coupled solver where Fluent uses a global time scale for its coupled path.
+    - **The velocity buckets' SOURCE is injected (`VelocityShiftParts`), because the shift and the
+      preconditioner have different lifetimes (binding).** `CoupledShiftPolicy` used to take them from
+      the frozen flow preconditioner, which welded two unrelated lifetimes together: the preconditioner
+      is deliberately frozen for many steps (re-freezing the flow block is measured unhelpful), while the
+      shift is a *local time scale* that should describe the operator being solved now. Worse, the
+      borrowed quantity was **live in velocity but frozen in viscosity**, so in a coupled solve `μ_eff =
+      ρ(ν + ν_t)` was stuck at its freeze-state value and the velocity time scale ignored the eddy
+      viscosity that develops — nobody chose that, it fell out of reusing the preconditioner's assembler.
+      `FrozenViscosityVelocityParts` (the default, `None`) reproduces the old diagonal **exactly**;
+      `LiveViscosityVelocityParts` re-forms the closure at the state being stepped, costing one closure
+      evaluation per *step* (milliseconds against a tens-of-seconds solve). It receives the scalar blocks
+      **as solved**, so it holds the transforms and maps back to physical — passing `log ω` to the closure
+      would silently build the shift from the wrong field. Note `a_p` still comes from the preconditioner
+      and must: it is what the velocity block inverts, so the two would otherwise disagree.
+      *Measured:* live vs frozen viscosity at a developed state is a modest p50 0.96 / max 1.82 with **no
+      tail** — a correctness fix, not a large lever.
+      - **Where the pieces live (binding, #156 seam 3).** The `VelocityShiftParts` **protocol** lives in
+        `solve/shift_basis.py`, beside `ShiftBasis` — the natural sibling: `ShiftBasis` says *how* to
+        combine the buckets, `VelocityShiftParts` says *where they come from*. `FrozenViscosityVelocityParts`
+        (needs only a `BlockPreconditioner`) lives in `flow/continuation.py`; only `LiveViscosityVelocityParts`
+        (needs `SSTTurbulence` + the transforms) stays in `turbulence/coupled.py`. This is what lets the
+        **flow-only** `MomentumShiftPolicy` carry the *same* `velocity_shift_parts` seam (it could not
+        before — the protocol lived in `turbulence`, and `flow` importing it would be a cycle). Its
+        `parts(flow, k_solved=None, omega_solved=None)` makes the turbulence blocks optional, so the
+        flow-only policy calls `parts(flow)` while the coupled one passes all three. The flow-only path is
+        still behaviour-unaffected (constant μ ⇒ frozen and live coincide); the seam exists for symmetry
+        and a future variable-viscosity flow, and to delete the byte-for-byte duplicated inline pattern.
+      - **⚠️ `LiveViscosityVelocityParts.parts` declared the two turbulence blocks WITHOUT the protocol's
+        defaults until 2026-08-20 (#282), so it did not satisfy the arity its own protocol promises.**
+        Latent — nothing hands the coupled implementation to the flow-only policy today — but it would
+        have become a `TypeError` from inside a shift policy the moment the monolithic builders started
+        accepting a `velocity_shift_parts`, which is the same change that fixed it. It now takes the
+        call and raises a message naming `FrozenViscosityVelocityParts`, because unlike its sibling it
+        genuinely cannot do the job without the turbulence context. **A `Protocol` is not checked at
+        runtime, so an implementation narrower than its protocol is invisible until the call that needs
+        the wider arity — write the defaults even where the implementation will reject them.**
+      - **`velocity_shift_parts` reaches all FOUR coupled builders since 2026-08-20 (#282).** It was on
+        the two block builders only; `_monolithic_shift_source` now takes and forwards it. Nothing
+        structural had excluded it — a live source needs momentum + turbulence + the transforms, not a
+        flow preconditioner — and the configuration it was built for, a dual-time low-shift march whose
+        shift tracks the developing `ν_t`, is a *monolithic* one. So it was absent from precisely the
+        path it was written for.
+    Adding a
+    basis (e.g. a Fluent-style global min-physical-time-scale) is a new `ShiftBasis`; do not branch the
+    policies.
+
+  - **`ShiftTerm` has THREE parts, and two of them are closures of `β` for the same reason (2026-09-11).**
+    `diagonal` is the base per-row time scale; `make_preconditioner(β)` builds the inverse of the
+    operator that `β` actually shifts; and `row_shift_scale(β)` is an optional per-row multiplier on the
+    strength, so different blocks may run at different pseudo-timesteps. `ShiftTerm.shift(β)` is the one
+    place they are combined — `β · row_shift_scale(β) · diagonal` — and **every** consumer goes through
+    it, including anything assembling a preconditioner for that same shifted operator, so the operator
+    and its inverse cannot disagree about what "the shift" is.
+    - **⚠️ A BLOCK FACTOR MUST NOT BE FOLDED INTO `diagonal`, for two independent reasons.** `β` reaches
+      the step **already clamped** at `beta_min`, so a factor in the diagonal multiplies the *floor* and
+      that block never stops being damped after the march has switched the damping off for every other
+      one. And the base diagonal doubles as the **row scale of the row-equilibrated residual measure**
+      (`coupled_scaled_norm`), so a factor there divides that block's reported residual — silently
+      moving the bar the march is steered by, stopped on and compared across arms with. Both bit once;
+      see `.claude/rules/turbulence.md` under `turbulence_damping`.
+    - **⚠️ A WRAPPER POLICY THAT REBUILDS A `ShiftTerm` FROM `.diagonal` ALONE DROPS THE REST IN
+      SILENCE** — the march runs and the dropped behaviour simply never happens. Two shipped wrappers
+      did exactly that (`MonolithicFactorShiftPolicy`, and the mass-flow policy that is now
+      `flow.BorderedShiftPolicy`, which forwards `row_shift_scale`), which is how a
+      per-block damping measured as a no-op. Forward every part, and find the wrappers **structurally**
+      (AST), not by grepping the callee's name.
+    - **`residual` is `R(φ)` when the caller has it and `None` otherwise**, offered because both steps
+      evaluate it immediately before asking for the shift, so a policy whose shift depends on the
+      distance from a root reads it for free. ⚠️ **It is optional, so omitting it does not fail** — such
+      a policy quietly falls back to its no-residual branch and runs as a constant. `DualTimeStep`
+      omitted it until 2026-09-11 while computing the very same value one line above, which made every
+      residual-dependent policy inert on every case that runs `inner_steps > 1`. Pinned on both steps.
+
+  - **Two injected seams**, both `Protocol`s: the physics comes from a **`ShiftPolicy`**
+  (`shift_term(φ, residual=None) -> ShiftTerm(diagonal, make_preconditioner, row_shift_scale)`;
+  `ShiftTerm.diagonal` is the full-state base shift, `make_preconditioner(β)` the frozen shifted `M`),
+  and the per-attempt accept/reject
+  decision from a **`StepAcceptance`** (`accept(candidate_norm, residual_norm, residual_norm_0,
+  attempt) -> bool`). The escalation-loop *mechanics* (grow `β`, cap at `max_escalations`, carry the
+  best candidate) stay in the engine; only the decision is delegated. Default acceptance is
+  **`DivergenceGuard(divergence_cap=10.0)`** — accept unless the candidate is non-finite or exceeds
+  `divergence_cap·‖R₀‖` (a divergence guard, not a descent test, since the march is non-monotone); a
+  monotone / forcing rule is a drop-in `StepAcceptance` — do **not** hardwire an acceptance test into
+  the `while_loop`. So the engine is
+  reusable for **any** nonlinear residual (reaction/energy/turbulence), not just the coupled flow —
+  verified in `tests/unit/test_pseudo_transient.py`, which drives it on a scalar root with a trivial
+  policy (no mesh, no flow). The flow application is `aquaflux/flow/continuation.py`'s
+  `MomentumShiftPolicy` (velocity-block `a_P` shift + shifted SIMPLE preconditioner), configured into a
+  `PseudoTransientStep` by the `momentum_continuation(assembler, …)` **factory** (which builds the
+  block preconditioner and injects the `DivergenceGuard` + adjoint factory) — **no wrapper/adapter
+  class**, since `PseudoTransientStep` is itself the `NewtonStrategy`. The scalar application is
+  `aquaflux/turbulence/continuation.py`'s `ScalarShiftPolicy` (the transport operator diagonal — the
+  scalar `a_P` analogue from `scalar_transport_shift_diagonal` — as the base shift, with the frozen
+  scalar-transport AMG reused **unshifted** as `M`, since the shift only adds positive diagonal),
+  globalizing the stiff k/omega solves via `scalar_pseudo_transient_solve` — the **only** scalar path
+  the SST driver supports (the fixed-count Newton sub-solve was removed). When a new nonlinear residual
+  needs pseudo-time globalization, write a `ShiftPolicy` — do **not** re-implement the march.
+  - **`stepper()` returns a `StepOutcome` (`phi_next`, its `residual_norm`, `cycles`, `alpha`, and
+    four more — see `solve-march.md`) — ONE step method on the whole `NewtonStrategy` protocol,
+    counted/uncounted pair deleted (binding).** Every strategy reports its step's restart-cycle count
+    (`DampedNewtonStep` gets it from `newton_correction`, which now returns `(delta, r, cycles)`); a
+    consumer with no use for it drops it (`phi, _ = step(…)`). A `counted_stepper()` sibling existed
+    briefly, with `stepper()` forwarding to it and dropping the count — deleted for the same reason as
+    `solve_linear_counted` above, and note it had **no production consumer at all** while it existed.
+    The reported count is the **accepted** attempt's, not the sum over rejected escalation attempts —
+    the cost of the step actually taken. **A step whose every attempt was rejected reports `0`**
+    (`best_cycles` is only written on acceptance): a consumer must treat `0` as *no measurement*, not
+    as *free*, or a rejected step reads as the cheapest in the march. Consumed by `newton_march`
+    (`solve-march.md`), which is since 2026-09-15 the only march there is.
+  - ⚠️ **"The count is NOT carried out of `_forward`'s `while_loop`" is DEAD — there is no such loop
+    (deleted 2026-09-15, phase 3).** Both of its reasons have lapsed: a generic Newton loop no longer
+    has to choose which step's count survives, because the one march reports **every** step through
+    `StepReport`; and the `int32`-in-a-`custom_vjp`-primal objection went when the loop moved outside
+    the `custom_vjp` (the adjoint is attached afterwards by `root_adjoint`). Per-step cost is simply
+    observed.
+
+  - **`line_search` — backtrack the shifted step before escalating β (binding, the coupled-RANS fix).**
+    The step optionally scales the shifted correction `δ` back along `{1, 1/2, …, 1/2**line_search}`
+    (`backtracking_line_search`, extracted from `implicit.py` and shared with `DampedNewtonStep` — one
+    home for the ladder) and keeps the largest length that reduces the residual, **before** the
+    accept/escalate test. The ladder is a **`lax.while_loop` that stops at the first (largest) reducing
+    rung** — a full step that already descends (the common case near the root) costs one residual
+    evaluation, not `line_search+1`, and the loop body compiles once instead of unrolling `line_search+1`
+    residual copies into the graph. It is safe as a non-differentiable `while_loop` because the search is
+    **forward-only**: it runs inside a Newton iteration on `stop_gradient` inputs, whose derivative is
+    attached afterwards at the root by `root_adjoint` and never differentiates the iteration (every
+    caller is a `NewtonStrategy`; nothing differentiates through it — audited). Do **not** call it on a differentiated
+    path. `line_search=0` (default) is the old behaviour: take the full step `φ+δ`, and
+    the **only** recourse to an overshoot is escalating β — a *full re-solve*. This was measured to be
+    the dominant coupled-RANS cost: from the hybrid IC the full coupled Newton step overshoots by
+    ~10⁷× (‖R‖ 220 → 5.8e9), so every step burned ~4–7 expensive re-solves and, worse, escalating β
+    (β=16/64) still did **not** descend (rel ≈ 1.0 — the march stalled). A line search on the **one**
+    β₀ solve finds α≈¼ → rel≈0.48 (residual halved) in a few cheap residual evaluations. So the
+    coupled path sets `line_search>0` (`coupled_continuation`, `_COUPLED_LINE_SEARCH=10`); β escalation
+    stays the fallback for a genuinely bad *direction* (an ill-conditioned shifted solve), not an
+    overshoot. Like the shift, the search only reshapes the forward path — converged state and IFT
+    adjoint unchanged. The flow and scalar paths leave `line_search` unset, so they take the step's own
+    `0` and are bit-identical — a default now, not a limit: since #372 either can be handed
+    `Globalization(line_search=…)` without constructing the step by hand.
+  - **The line search returns its residual VECTOR, and the dual-time step runs on it (BUILT 2026-10-17,
+    branch `claude/step-program-size`).** `LineSearchStep.residual` is `R(phi)` at the returned iterate,
+    carried through the ladder beside its measure (the last rung walked is the accepted one whenever there
+    is one; the fallback rung's travels with `longest_norm`). **`alpha = 0` is the branch to get right:**
+    the iterate is the start point, which the ladder never evaluated, so the vector is the caller's own
+    `backtracking_line_search(..., residual=R(phi))`, and `None` when the caller passed none (the
+    validation probes; a library caller always passes it — all three strategies do, so they read the
+    search the same way). With no finite rung it is a NaN seed, non-finite like the measure.
+    `DualTimeStep` uses it twice: the carried `G` is the next inner iteration's Newton right-hand side
+    (the anchor's `R(φⁿ)` seeds it, the transient term being zero there), and the step's reported
+    `R(phi_next)` is that `G` less `transient_term(phi_next)` — one subtraction, through the same helper
+    `G` was built with. **Not bit-identical to re-evaluating `R`**: it rounds at the size of
+    `β d (phi − φⁿ)`, which vanishes at the march's root; and the carried right-hand side was evaluated at
+    `phi + alpha delta` inside the ladder rather than at the iterate formed after it, so it may differ by a
+    rounding there too. On the cube root the reported norm matches a fresh `R` to within `8 eps (|R| +
+    |β d Δphi|)`; pitzDaily's march is recorded in `solve-globalization-log.md`. `PseudoTransientStep`
+    and `DampedNewtonStep` gain nothing inside a step (each evaluates `R(phi)` once, at the start); what
+    #649 asks beyond this — carrying the vector ACROSS outer steps through `newton_march`, which would
+    also drop the dual-time anchor's `R(φⁿ)` — is not built. Pinned by
+    `test_the_dual_time_step_evaluates_the_residual_once_per_inner_iteration` (executions counted by a
+    `jax.debug.callback`, Jacobian from an uncounted copy), `..._reports_the_steady_residual_at_the_iterate_it_returns`,
+    `test_a_step_whose_every_inner_search_takes_no_step_reports_the_anchor_s_own_residual`,
+    `test_a_dual_time_march_step_traces_the_residual_only_where_it_must` and the `.residual` assertions
+    in the four line-search fallback tests (`test_newton_march.py`); five of six single-line mutations turn them red. The one
+    surviving mutation (handing the stalled search a wrong `g`) is unreachable through a step: a stalled
+    inner iteration is a fixed point, so the next solve starts where it did and stalls again.
+  - **`krylov_solver` overrides the shared `_INEXACT_CONTINUATION_SOLVER`; the coupled default stops on a
+    relative residual in an INJECTED norm (`relative_residual_gmres`, `solve/linear.py`).**
+    `linear_solver()` returns the injected `krylov_solver` when set, else the shared restart-40 GMRES.
+    The coupled path injects restart 120 (the stiff saddle needs hundreds of restart-40 cycles; a
+    40-vector subspace discards too much Arnoldi history). ⚠️ **The norm it stops in has MOVED since this
+    was written — the "global 2-norm" below describes the arrangement these measurements were taken
+    under, not the current default.** Since #282 every coupled family stops in the march's own row-scaled
+    measure at the forward regime's `rtol = 0.3` (`LinearSolveSettings`, #388), built by `_coupled_step` rather
+    than by any builder; see
+    `solve.md`'s regime table. The mechanism below is unaffected and is why the componentwise stock stop
+    was abandoned in the first place. **The dominant waste was the TERMINATION, not the restart.** The
+    old `GMRES(rtol=1e-3, atol=1e-10)` reached true_rel ~4e-12 in ~15 restart cycles / 1800 matvecs on the
+    cold-IC pitzDaily solve although only rtol=1e-3 was asked — because `lineax`'s stock stop is
+    **componentwise** (`|r_i| ≤ atol + rtol|b_i|` under max_norm), and the ~470 near-wall ω wall-fixation
+    rows start satisfied (right-hand side ~0), so their per-row scale collapses onto the absolute `atol`
+    floor and a handful of them hold the whole solve to ~1e-10 (~9 orders past 1e-3). `relative_residual_gmres`
+    scales the system to unit right-hand-side 2-norm and runs GMRES at `rtol=0, atol=target, norm=2-norm`,
+    so it stops on `norm(r)/norm(b) ≤ target` — immune to those rows. ⚠️ **That residual is the TRUE
+    one, not `‖Mr‖`: `_shifted_solve` takes `solve_linear`'s `preconditioner_side="right"` default, so the
+    Krylov residual is `b − A M y = b − A x`. No "solution accuracy" follows from it — an earlier version of
+    this line inferred "≈1% solution accuracy since M≈A⁻¹", which holds only under LEFT preconditioning and
+    misled a later reader into a wrong hypothesis.** Measured on the real cold-IC march: ~3-5 cycles (often 2-3/step), ~4× fewer
+    matvecs to the same `x_r/h`, trajectory unchanged.
+
+  - **The residual measure is an injected `ResidualNorm`, owned by the `NewtonStrategy` (`solve/norm.py`).**
+    Every `NewtonStrategy` exposes `norm()`; the march reads it for the outer stopping test
+    (`newton_march`'s segment reference, or a per-iteration `norm_builder`) and the strategy
+    uses the *same* measure for its own globalization — so the convergence test, the SER ramp
+    `β = β₀(‖R‖/‖R₀‖)^p`, `backtracking_line_search` (which now takes a `norm=` kwarg), and the
+    `DivergenceGuard` all agree on one scale. Default is `jnp.linalg.norm` (`DampedNewtonStep.norm()` and
+    `PseudoTransientStep`'s `residual_norm` field both default to it), so **the flow path is
+    bit-identical**. The non-trivial impl is `BlockScaledNorm(sizes, scales)`: it splits the flat
+    residual into contiguous blocks, divides each by its own reference magnitude, and returns the L2 of
+    those per-block relative residuals — `sqrt(Σ_b (‖R_b‖/scale_b)²)`. **Why it exists (the coupled-RANS
+    fix):** the plain Euclidean ‖R‖ on `[flow, k, ω]` is ~100% ω (ω residual O(1e5), k O(1e-3)), so the
+    line search can neither *see* nor *protect* the k block — a step that collapses k is accepted (barely
+    moves the ω-dominated norm) while one that reduces k is vetoed because ω ticked up, and k gets
+    starved (measured: k median collapses to ~7e-5 vs a physical ~0.5, and the march freezes). `coupled.py`
+    builds a `BlockScaledNorm` over `[flow, k, ω]` (and `[…, β]` for the mass-flow bordered march) with
+    per-field scales `‖R0_field‖` at the reference state, so the whole system is judged. The adjoint never
+    forms a residual norm, so the measure is a **forward-only** device — the converged state and IFT
+    gradient are norm-independent, and `root_adjoint` does not take one at all.
+  - **A `ShiftPolicy`'s preconditioner is DATA — REVERSED 2026-10-12 (#386); it was a binding
+    non-pytree from #105.** `ScalarTransportPreconditioner` (`turbulence/preconditioner.py`) and its
+    strategies are `equinox.Module`s with their hierarchies on the traced side, and the coupled block
+    policy's adjoint factory is `solve.UnshiftedPreconditioner(policy)`, not a lambda. **Why reversed:**
+    a viscosity ramp re-points the block session at every station, and a station step holding new static
+    preconditioner objects recompiled the coupled solve at every station (~40 s against ~7 s per step on
+    the re20000 channel); as data, a step whose hierarchies keep their coarsening differs only in values,
+    and the march takes it as a cache hit. **The two #105 hazards, re-examined:** (ii) the cache — a
+    carried instance is still a hit, and now so is a rebuild on an unchanged coarsening (two-level, which
+    aggregates by the graph); a rebuild whose coarse shapes move (a fresh lAIR split, a flow block
+    re-aggregated at another viscosity) is a miss by *shape*, which is why `RebuildingSession._repointed`
+    derives the new step from the held one. (i) the adjoint — `UnexpectedTracerError` came from a solve
+    taking the preconditioner as a traced argument; the march now runs on `stop_array_gradients` copies,
+    so the policy's arrays reach `root_adjoint`'s non-differentiated slot concrete, as
+    `_TracedSplitAdjoint`'s have since #290. Confirmed by CI's slow tier on PR #704 (`full-ci`, head
+    `78e0bbf`): the tests that `jax.grad` through a block-diagonal coupled solve
+    (`tests/integration/test_coupled_rans.py`, `test_reynolds_continuation.py`,
+    `test_coupled_mass_flow.py`) all pass. Pinned by
+    `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` (both scalar blocks, with a
+    freshly built control that misses) and
+    `test_the_scalar_solve_compiles_once_whether_its_preconditioner_is_carried_or_rebuilt`, both
+    mutation-checked.
+- **`norm_builder` — the residual measure is re-derived every outer iteration, and held FIXED within
+  one (binding).** `newton_march(norm_builder=…)` takes a `(step, state) -> ResidualNorm` (the step so a
+  measure can read its row diagonals from the step's shift; since #370 a solve builds it from its
+  `Convergence` measure with `ResidualMeasure._builder`) and, at the top of
+  each iteration, swaps the rebuilt measure onto the step with `eqx.tree_at` (the same mechanism the
+  α-control uses for β) and re-measures `residual_norm_0` against it so the SER ratio stays on one
+  scale. Every line-search trial step, the acceptance test and the reported norm within that iteration
+  then use the *same* measure — **rebuilding per trial step would let a candidate win by shrinking its
+  own denominator rather than its residual**, so the search would stop comparing like with like.
+  - **This is why `residual_norm` is a DATA field on both `NewtonStrategy`s, not a static one.** A static
+    field lives in the treedef, so swapping it would be a new compilation *every step*. As data, and
+    with the measure carrying its scales as traced leaves over a fixed block structure
+    (`RowScaledNorm`), the swap is a cache hit. A plain callable (the default) has no array leaves and
+    is filtered to the static side regardless, so the default path is byte-identical.
+  - **⚠️ AND THE STEP'S LINEAR SOLVE MUST READ THE SWAPPED MEASURE, which it did not until #370
+    (2026-09-16).** The swap reaches `step.residual_norm` only. The march resolves its Krylov solver
+    **once** (`strategy.linear_solver()`), and `_coupled_step` had built that solver with
+    `norm=residual_norm` captured at build — so under a rebuilt measure the outer stop, line search and
+    shift used the rebuilt one while every inner `rtol = 0.3` stop used the build-time one (on a
+    refreshed march, the initial-state measure carried into each refresh). Both flagship cases ran this
+    way. The fix: `relative_residual_gmres(norm=None)` means "the measure of the step that runs me", and
+    all three steppers (`PseudoTransientStep`, `DualTimeStep`, `DampedNewtonStep`) call
+    `solve.linear.in_progress_measure(solver, self.residual_norm)` before solving; an explicit norm or a stock
+    `lineax` solver is left alone, and a `norm=None` solver run outside a step raises. Pinned by
+    `test_convergence.py::test_each_step_stops_a_measure_following_linear_solve_in_its_own_measure`.
+  - **`RowScaledNorm` was march-only because `RootSolver` passed its measure through a
+    `custom_vjp` non-differentiable (hashable) slot.** That slot is gone (2026-09-15: the loop runs
+    outside the `custom_vjp`, and `root_adjoint` takes no measure), and `solve_coupled` no longer ends
+    in a traced finishing solve. Whether `RootSolver` now accepts a rebuilt `RowScaledNorm` is
+    untested.
 

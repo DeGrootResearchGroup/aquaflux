@@ -1,0 +1,96 @@
+"""Every file a shipped case file names is in the repository, or is declared to be generated.
+
+A case file names its mesh (and, for radiation, a lamp's photometry) by a path relative to itself. A
+path into a directory the repository ignores reads cleanly and builds on the machine that ran the
+generator, and nowhere else: the 3D backward-facing step once named ``runs/kwsst/polyMesh``, which an
+OpenFOAM run writes and ``.gitignore`` excludes, while the same mesh sat tracked in another case's
+directory, so from a fresh checkout the case could not be built and nothing said so.
+
+A path that a fresh checkout cannot have is therefore a decision to write down, with what generates
+it, in :data:`GENERATED` -- declared, not discovered. A declared path that is now tracked, or that no
+case file names any more, fails too, so the table cannot outlive what it describes.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+from aquaflux.case import read_case
+from aquaflux.case.paths import named_paths
+
+REPO = Path(__file__).resolve().parents[2]
+
+#: Repository-relative paths a shipped case file may name although no file under them is tracked:
+#: path -> what writes it.
+GENERATED: dict[str, str] = {
+    "validation/ray_effects_room/work/bunny/case/constant/polyMesh": (
+        "generate_dom.py (blockMesh + snappyHexMesh in OpenFOAM's Docker image)"
+    ),
+    "validation/ray_effects_room/work/empty/case/constant/polyMesh": (
+        "generate_dom.py (blockMesh + snappyHexMesh in OpenFOAM's Docker image)"
+    ),
+}
+
+
+def _tracked() -> list[str]:
+    """Every tracked file, repository-relative."""
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=REPO, capture_output=True, check=True, text=True
+    )
+    return [name for name in listed.stdout.split("\0") if name]
+
+
+def _case_files(tracked: list[str]) -> list[str]:
+    return [name for name in tracked if name.startswith("validation/") and name.endswith(".yaml")]
+
+
+def _named(tracked: list[str]) -> dict[str, list[str]]:
+    """Each path the shipped case files name, normalized to the repository -> the files naming it."""
+    named: dict[str, list[str]] = {}
+    for case_file in _case_files(tracked):
+        case = read_case(REPO / case_file)
+        for location, path in named_paths(case.spec):
+            assert not os.path.isabs(path), f"{case_file} {location} is absolute: {path}"
+            target = os.path.relpath(os.path.normpath(case.directory / path), REPO)
+            named.setdefault(target, []).append(f"{case_file} ({location})")
+    return named
+
+
+def _is_tracked(path: str, tracked: list[str]) -> bool:
+    """Whether ``path`` is a tracked file or a directory holding one."""
+    return any(name == path or name.startswith(path + "/") for name in tracked)
+
+
+def test_the_census_reads_every_shipped_case_file() -> None:
+    # The guard below is only as wide as the files it reads: an empty or partial listing would pass it.
+    tracked = _tracked()
+    case_files = _case_files(tracked)
+    assert "validation/bfs3d_openfoam/case.yaml" in case_files
+    assert "validation/pitzdaily_openfoam/case.yaml" in case_files
+    assert any(path.endswith("polyMesh") for path in _named(tracked))
+
+
+def test_every_path_a_shipped_case_file_names_is_tracked_or_declared_generated() -> None:
+    tracked = _tracked()
+    missing = {
+        path: where
+        for path, where in _named(tracked).items()
+        if path not in GENERATED and not _is_tracked(path, tracked)
+    }
+    assert not missing, (
+        "a shipped case file names a path that is not in the repository, so a fresh checkout cannot "
+        f"build it (track it, or declare what generates it in GENERATED): {missing}"
+    )
+
+
+def test_every_declared_generated_path_is_named_and_untracked() -> None:
+    tracked = _tracked()
+    named = _named(tracked)
+    stale = {
+        path: "no shipped case file names it" if path not in named else "it is tracked"
+        for path in GENERATED
+        if path not in named or _is_tracked(path, tracked)
+    }
+    assert not stale, f"a GENERATED entry no longer describes the repository: {stale}"

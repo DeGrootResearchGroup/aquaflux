@@ -5,11 +5,14 @@ The first **3D** same-mesh, cell-for-cell cross-code validation, the three-dimen
 spanning ``4h`` between two **no-slip side walls** -- the finite span with viscous side walls makes the
 flow genuinely three-dimensional (corner/secondary flow, spanwise-varying reattachment), not a 2D
 extrusion. ``of_case/run_of.sh`` runs the OpenFOAM ``incompressibleFluid`` steady SIMPLE solver with
-``kOmegaSST`` and writes the fields, the mesh and the 3D cell centres to ``runs/kwsst/``;
-``of_transient/run_transient.sh`` runs a time-accurate reference to a statistically-steady state
-(``runs/kwsst_transient/``). This script reads that **same mesh** into aquaflux via ``read_openfoam``
-and solves the coupled RANS system on it, so the two solutions live on identical cells and are compared
-directly (no interpolation between independent meshes).
+``kOmegaSST`` on the tracked mesh ``of_case/constant/polyMesh`` and writes the fields and the 3D cell
+centres to ``runs/kwsst/``; ``of_transient/run_transient.sh`` runs a time-accurate reference to a
+statistically-steady state (``runs/kwsst_transient/``) on the same mesh. This script reads that **same
+mesh** (the path ``case.yaml`` names, :data:`MESH`) into aquaflux via ``read_openfoam`` and solves the
+coupled RANS system on it, so the two solutions live on identical cells and are compared directly (no
+interpolation between independent meshes). The mesh is in the repository; the OpenFOAM fields are not, so
+without them the script still marches and reports aquaflux's reattachment length, and says the comparison
+was skipped.
 
 aquaflux setup, mirroring the 2D case:
 
@@ -46,7 +49,7 @@ pitzDaily case, the field is physical: no inlet checkerboard). Use a **transient
 (``runs/kwsst_transient/``) as the comparison target, and compare the outer-flow structure (velocity,
 reattachment length) rather than the raw residual.
 
-Run (after both OpenFOAM runs) from the repo root:
+Run from the repo root (the comparison needs both OpenFOAM runs first):
     python3 validation/bfs3d_openfoam/compare.py
 """
 
@@ -59,6 +62,7 @@ import os
 import re
 import sys
 import time
+import types
 from pathlib import Path
 
 # Running a script puts the SCRIPT's directory on `sys.path`, not the working directory, so
@@ -83,7 +87,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import Convergence, DualTimeLoop, LinearSolveSettings, MarchLogger, RetryPolicy, StateCheckpointer, combine_observers
-from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
+from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, PivotFloor, SimpleSmoothed
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
@@ -101,7 +105,7 @@ from aquaflux.turbulence import (
 )
 
 HERE = Path(__file__).resolve().parent
-RUNS = HERE / "runs" / "kwsst"  # steady run: the mesh + 3D cell centres (geometry)
+RUNS = HERE / "runs" / "kwsst"  # steady run: the 3D cell centres (geometry)
 TRANSIENT = HERE / "runs" / "kwsst_transient"  # the comparison fields (time-averaged / steady)
 FIGS = HERE / "figures"
 
@@ -117,7 +121,11 @@ WALLS = ["upperWall", "lowerWall", "sideWalls"]
 #: end of the configuration, is checked to be exactly the file's when none is set. The case's problem is
 #: still assembled by hand here, which is what makes it the independent reference the file's physics is
 #: checked against (`validation/case_file_parity.py`).
-FILE_SOLVER = read_case(HERE / "case.yaml").spec.solver
+_FILE = read_case(HERE / "case.yaml")
+FILE_SOLVER = _FILE.spec.solver
+#: The polyMesh both codes run on, as `case.yaml` names it (relative to the file): tracked, in the
+#: OpenFOAM case directory where `blockMesh` writes it.
+MESH = _FILE.directory / _FILE.spec.mesh.path
 _FILE_RAMP = FILE_SOLVER.continuation
 _FILE_INVERSE = FILE_SOLVER.preconditioner.inverse
 # The coupled Newton march budget. Stiff, separating, 3D, high-Re case on a wall-function mesh; the cap
@@ -662,9 +670,9 @@ TRAILING_INVERSE = (
 #: hierarchy smoothed by a zero-fill incomplete LU) -- were removed with the library's PETSc split blocks
 #: and its ILU(0) kernel (#371); `BFS3D_FLOW_INVERSE` set to anything else now refuses to start.
 #:
-#: `BFS3D_REFRESH_ON_CYCLES`: the file's `3` was re-measured under the residual stop (2026-10-12, at
-#: `46af0749`, corrected Green-Gauss, `grow` 1.5, one run each): 2 / 3 / 4 took 814 / 810 / 787 s, 34 /
-#: 30 / 30 steps, and 2 added a retry. 3 and 4 are not separable on single runs; 2 loses.
+#: `BFS3D_REFRESH_ON_CYCLES`: the file's `4` (since 2026-10-19; `3` before) was measured with the pivot
+#: floor, one run each: 3 / 4 / 5 took 531 / 475 / 497 s (21 / 17 / 17 steps) on an 11-core laptop and
+#: 3141 / 1860 / 3693 s (32 / 17 / 28 steps) on a 4-core Linux container, where a re-fit costs ~2.5 steps.
 def _flush_print(message: str) -> None:
     """Send a preconditioner's build record to the run log, flushed so it lands in order.
 
@@ -738,12 +746,28 @@ LEADING_INVERSE = SimpleSmoothed(**LEADING_SETTINGS)
 
 #: What preconditions this case's march, as one value, which every harness in this directory reads rather
 #: than re-assembling.
+#: The precision the split is applied in (``BFS3D_SPLIT_PRECISION``, ``float64`` or ``float32``); the
+#: residual, the Krylov solves and the adjoint's preconditioner stay in double precision.
+SPLIT_PRECISION = os.environ.get("BFS3D_SPLIT_PRECISION") or _FILE_INVERSE.precision
+
+#: Fit each re-fit with its near-zero pivots moved out to their rows' pseudo-time diagonals
+#: (``BFS3D_PIVOT_FLOOR``, the threshold in (0, 1), ``none`` off; unset keeps the file's).
+_pivot_floor = os.environ.get("BFS3D_PIVOT_FLOOR")
+PIVOT_FLOOR = (
+    FILE_SOLVER.preconditioner.pivot_floor
+    if _pivot_floor is None
+    else None
+    if _pivot_floor == "none"
+    else PivotFloor(float(_pivot_floor))
+)
+
 PRECONDITIONER = MaterializedJacobian(
-    FieldSplit(LEADING_INVERSE, TRAILING_INVERSE),
+    FieldSplit(LEADING_INVERSE, TRAILING_INVERSE, precision=SPLIT_PRECISION),
     probe=JacobianProbeSpec(
         column_reach=COLUMN_REACH, stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach
     ),
     refit_beta_floor=PC_BETA_FLOOR,
+    pivot_floor=PIVOT_FLOOR,
 )
 
 #: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --
@@ -906,8 +930,8 @@ INNER_DUMP_ABOVE = int(os.environ.get("BFS3D_INNER_DUMP_ABOVE", "0"))
 # also keeps the inner loop's progress, where the old reaction -- abort and escalate beta -- threw away
 # the work and the pseudo-timestep together. (Until #290 the re-fit happened mid-step instead.)
 #
-# ⚠️ THE DEFAULT IS 3, AND IT USED TO BE 0. Every recorded measurement on this case was taken
-# cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
+# ⚠️ THE FILE'S VALUE IS 4 (3 UNTIL 2026-10-19), AND IT USED TO BE 0. Every measurement recorded on this
+# case before 2026-10-19 was taken cost-triggered at 3; the scheduled cadence is measured at 3632 s against 1959 s for the otherwise
 # identical arm, so `0` selected a configuration that is 1.85x slower and that nothing uses. Leaving it
 # as the default meant every A/B launched without the environment variable silently measured the refresh
 # TRIGGER instead of the thing under test -- which happened, to two preconditioner arms in one session,
@@ -1144,7 +1168,7 @@ def build_case(model=None, momentum_advection=None, gradient=None):
     """
     if model is None:
         model = SSTModel()
-    mesh = read_openfoam(RUNS / "polyMesh")
+    mesh = read_openfoam(MESH)
     geom = mesh.geometry()
     grad = _gradient_scheme() if gradient is None else gradient
     # Second-order upwind momentum advection (Venkatakrishnan-limited linear upwind); first-order upwind
@@ -1293,6 +1317,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             f"{FLOW_INVERSE} {LEADING_SETTINGS}",
         ),
         ("turbulence inverse", TURBULENCE_INVERSE),
+        ("split precision", SPLIT_PRECISION),
         *([("lAIR trailing settings", AIR_TRAILING)] if TURBULENCE_INVERSE == "air" else []),
         *(
             [("native trailing settings", _jacobi_trailing_description())]
@@ -1350,6 +1375,7 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             if math.isinf(OMEGA_STEP_RATIO)
             else OMEGA_STEP_RATIO,
         ),
+        ("pivot floor", "off" if PIVOT_FLOOR is None else PIVOT_FLOOR.threshold),
         ("inner forward rtol (row-scaled)", FORWARD_RTOL),
         ("inner forward stop", FORWARD_STOP or "lineax (unset)"),
         # Printed because a banner diff is only a CONFIG diff if every knob that installs a wrapper or
@@ -1409,7 +1435,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # Seeded with this rung's own starting state: the march equilibrates each step at the state it
         # begins from, so without the seed the rung's first step would be scaled at its end state and
         # its per-equation rows would not add up to the residual reported beside them.
-        rung_residuals.append(coupled_residuals(rung["companion"], step, rung["seed_state"]))
+        # Handed the step's base shift policy, not the step: the row scales are all it reads, and the
+        # step also carries the fitted preconditioner, a copy of the whole hierarchy that this reporter
+        # would otherwise keep alive for the rest of the rung after every re-fit had replaced it.
+        policy = types.SimpleNamespace(shift_policy=step.shift_policy.base)
+        rung_residuals.append(coupled_residuals(rung["companion"], policy, rung["seed_state"]))
         return step
 
     session_options = dict(
@@ -1646,20 +1676,33 @@ def _fresh_log(path: Path) -> Path:
     return path
 
 
+def _has_reference():
+    """Whether both OpenFOAM runs' outputs are here: the steady run's cell centres and the transient's fields.
+
+    Neither is tracked (each is regenerated by its OpenFOAM script), while the mesh is, so the march can
+    run from a fresh checkout and only the comparison needs them.
+    """
+    return (RUNS / "Ccx").exists() and (TRANSIENT / "U").exists()
+
+
 def main():
-    if not (RUNS / "polyMesh").exists():
-        raise SystemExit(f"OpenFOAM mesh not found in {RUNS}; run of_case/run_of.sh first.")
-    if not (TRANSIENT / "U").exists():
-        raise SystemExit(
-            f"Transient reference not found in {TRANSIENT}; run of_transient/run_transient.sh first."
+    if not MESH.exists():
+        raise SystemExit(f"the mesh case.yaml names is not at {MESH}.")
+    of = None
+    if _has_reference():
+        of = read_openfoam_reference()
+        print(
+            f"OpenFOAM: {of['centroid'].shape[0]} cells, Ux in "
+            f"[{of['U'][:, 0].min():.3f}, {of['U'][:, 0].max():.3f}], "
+            f"Uz in [{of['U'][:, 2].min():.3f}, {of['U'][:, 2].max():.3f}] (3D)",
+            flush=True,
         )
-    of = read_openfoam_reference()
-    print(
-        f"OpenFOAM: {of['centroid'].shape[0]} cells, Ux in "
-        f"[{of['U'][:, 0].min():.3f}, {of['U'][:, 0].max():.3f}], "
-        f"Uz in [{of['U'][:, 2].min():.3f}, {of['U'][:, 2].max():.3f}] (3D)",
-        flush=True,
-    )
+    else:
+        print(
+            f"no OpenFOAM reference in {RUNS} and {TRANSIENT} (run of_case/run_of.sh and "
+            "of_transient/run_transient.sh): marching aquaflux alone, the comparison will be skipped.",
+            flush=True,
+        )
 
     t0 = time.time()
     aq = solve_aquaflux(
@@ -1670,6 +1713,19 @@ def main():
         f"Ux in [{aq['U'][:, 0].min():.3f}, {aq['U'][:, 0].max():.3f}]",
         flush=True,
     )
+    if of is None:
+        slab = mid_span_slab(aq["centroid"])
+        print(
+            f"  xr_aqua_mid: {reattachment_length(aq['centroid'], aq['U'][:, 0], z_slab=slab):.4f}",
+            flush=True,
+        )
+        print("  spanwise x_r/h (z, aquaflux):", flush=True)
+        for zc_i, xa in spanwise_reattachment(aq["centroid"], aq["U"][:, 0]):
+            print(f"    z={zc_i:.4f}  aqua {xa:.2f}", flush=True)
+        print(
+            "comparison skipped (no OpenFOAM reference); report.md and figures/ left as they were."
+        )
+        return
 
     from scipy.spatial import cKDTree
 

@@ -1,7 +1,7 @@
 # The browser interface
 
-`aquaflux-ui` is a browser interface served by your own machine; it opens on the
-results of a run. Nothing is uploaded anywhere: the page is served on `127.0.0.1`, the
+`aquaflux-ui` is a browser interface served by your own machine, for making a mesh,
+setting up a case on it, running the case and looking at its results. Nothing is uploaded anywhere: the page is served on `127.0.0.1`, the
 scene is rendered locally by VTK, and the browser is sent images of it.
 
 ## Installing and starting it
@@ -25,15 +25,51 @@ chooses the port (by default a free one). Stop it with Ctrl-C.
 
 ## The page
 
-A rail on the left switches between three sections: **Setup**, **Run** and
+A rail on the left switches between four sections: **Mesh**, **Setup**, **Run** and
 **Results**. The button at the left of the top bar hides or shows the side panel,
 to give the view the whole window.
 
 ```bash
-aquaflux-ui results/        # a run's output directory: opens on Results
-aquaflux-ui case.yaml       # a case file: opens on Setup, with the case loaded
-aquaflux-ui                 # nothing yet: opens on Setup
+aquaflux-ui results/                # a run's output directory: opens on Results
+aquaflux-ui case.yaml               # a case file: opens on Setup, with the case loaded
+aquaflux-ui --mesh-file mesh.yaml   # a mesh file: opens on Mesh, with the mesh file loaded
+aquaflux-ui                         # nothing yet: opens on Setup
 ```
+
+## Mesh: making a mesh from a drawing
+
+The Mesh section edits a [mesh file](mesh_files.md) and makes its mesh. **Open** chooses
+a mesh file; **New** starts one from a STEP drawing, chosen first, and saves it beside
+the drawing unless told otherwise. The side panel holds the file's settings section by
+section, in the same form Setup uses for a case file, every choice offered by the
+installed mesher. The lists of solids (the region's, a lamp's surface) are chosen from
+the drawing's own solids, and the patches that are layered or meshed as grids from the
+file's patches.
+
+Beside the form the drawing is drawn as aquaflux reads it: the faces of the region,
+each in the colour of its patch, and grey for the faces no patch chooses. Until the
+region is chosen, the page says so, and lists the drawing's solids to choose it from.
+
+**Patches** lists the file's patches, how many of the drawing's faces each holds, and
+how it chooses them: by points, or by solids. To name a patch by clicking, type its name
+and press Enter, then click its faces in the drawing. A click on a face adds the face to
+the chosen patch, as a point on it -- what `FacesNear` stores -- and a click on a face
+already in it takes it away. A face in another patch moves to the chosen one. A patch
+that chooses its faces by solids (`FacesOn`, a lamp's whole surface) is edited in the
+form instead. **Hide faces** makes a click hide the face under it instead, so the faces
+behind -- a lamp inside a vessel -- can be reached; **Show all** brings them back. A
+click that ends a drag of the view picks nothing.
+
+**Make mesh** runs `aquaflux mesh` on the saved file in a process of its own, so it
+waits while the file has unsaved changes. The Mesh view shows each stage as it starts
+and, once the mesh is made, the mesh and its quality as the `.aqmesh` file records it:
+its cells, its faces' non-orthogonality at the 99th percentile and at most, the
+neighbour volume ratio at the 99th percentile, the concave cells, and how long it took.
+A mesh already made is replaced only once **Replace the mesh made before** is switched
+on. Opening a mesh file whose mesh is already made shows that mesh and its quality.
+
+**Use in the case** makes the mesh made the mesh of the case open in Setup, by a path
+from the case's own folder, and switches to Setup to save it.
 
 ## Setup: editing a case file
 
@@ -69,10 +105,9 @@ as into another folder, the case's relative paths — the mesh's, above all — 
 re-based so it still finds its mesh. **Check** checks the saved file against its
 mesh, as `aquaflux check` does.
 
-Beside the form, the case's mesh is shown as aquaflux reads it — or generates it,
-for a structured grid — with its boundary patches listed by name and face count.
-Changing the mesh settings marks the view out of date; **Reload** reads or generates
-the mesh again from the settings as they stand, saved or not. Choosing a patch, or a
+Beside the form, the case's mesh is shown as aquaflux reads it, with its boundary
+patches listed by name and face count. Changing the mesh settings marks the view out
+of date; **Reload** reads the mesh again from the settings as they stand, saved or not. Choosing a patch, or a
 boundary entry named after a patch or a patch group, picks it out in the view once
 aquaflux writes the boundary patches with the mesh.
 
@@ -180,7 +215,8 @@ The interface imports neither aquaflux nor JAX — Results reads files with VTK 
 the solver never imports the interface. Results copied to another machine therefore
 open there with only the extra's own dependencies installed.
 
-Setup does need the solver. It asks the aquaflux installed beside the interface,
-in one solver process started with the page (`aquaflux serve`), so the few seconds
-that importing the solver takes are spent once, while the page loads, rather than on
-every case opened or saved.
+Mesh and Setup do need the solver. They ask the aquaflux installed beside the
+interface, in one solver process started with the page (`aquaflux serve`), so the few
+seconds that importing the solver takes are spent once, while the page loads, rather
+than on every file opened or saved. Reading a drawing needs aquaflux's `cad` extra, and
+making a mesh its `meshing` extra as well.

@@ -30,8 +30,8 @@ from xml.sax.saxutils import quoteattr
 import numpy as np
 
 from aquaflux import ragged
+from aquaflux.mesh import stored_ring_is_outward
 
-from .topology import stored_ring_is_outward
 from .xml import (
     _BLOCK_HEADER_DTYPE,
     _BYTE_ORDER,

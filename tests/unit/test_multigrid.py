@@ -24,7 +24,6 @@ from aquaflux.precondition.multigrid import (
     StructuralPatterns,
     _cell_graph,
     _chebyshev_smooth,
-    _CsrOperator,
     _dense_inverse,
     _fc_jacobi,
     _frozen_neighbourhoods,
@@ -50,6 +49,7 @@ from aquaflux.precondition.multigrid import (
     refresh_air_hierarchy,
     smoothed_multigrid_cycles,
 )
+from aquaflux.precondition.padded_rows import _PaddedRowOperator
 
 
 def _poisson(n):
@@ -125,6 +125,96 @@ def _smoothed_residual_factor(n):
         x = proj(x + proj(smoothed_multigrid_cycles(hierarchy, b - matvec(x), cycles=1)))
         norms.append(float(jnp.linalg.norm(matvec(x) - b)))
     return (norms[-1] / norms[-4]) ** (1 / 3)
+
+
+def _ragged_operator() -> sp.csr_matrix:
+    """A rectangular operator whose rows differ in width -- one empty, one holding a stored zero.
+
+    Rows of one width would let an operator that mixed up which row a slot belongs to pass, and a
+    stored zero is part of the sparsity a refit's structural patterns are read from.
+    """
+    rows = np.array([0, 0, 0, 2, 3, 3, 3, 3])
+    cols = np.array([4, 0, 2, 1, 0, 1, 2, 3])
+    vals = np.array([1.5, -2.0, 0.0, 3.0, 0.25, -1.0, 4.0, 2.5])
+    return sp.csr_matrix((vals, (rows, cols)), shape=(4, 5))
+
+
+def test_a_padded_row_operator_reproduces_the_matrix_it_froze() -> None:
+    a = _ragged_operator()
+    operator = _PaddedRowOperator.from_scipy(a)
+    assert operator.values.shape == (4, 4), "padded to the widest row"
+    assert operator.nnz == a.nnz == 8, "the stored zero is counted"
+    back = operator.to_scipy()
+    assert np.array_equal(back.indptr, a.indptr)
+    assert np.array_equal(back.indices, a.indices)
+    assert np.array_equal(back.data, a.data)
+    x = np.random.default_rng(0).standard_normal(5)
+    assert np.allclose(np.asarray(operator.apply(jnp.asarray(x))), a @ x, rtol=0, atol=1e-14)
+    square = sp.csr_matrix(a[:, :4])
+    assert np.array_equal(
+        np.asarray(_PaddedRowOperator.from_scipy(square).diagonal), square.diagonal()
+    )
+
+
+def test_a_padded_row_operator_takes_a_wider_budget_and_refuses_a_narrower_one() -> None:
+    a = _ragged_operator()
+    padded = _PaddedRowOperator.from_scipy(a, width=7)
+    assert padded.values.shape == (4, 7)
+    x = jnp.asarray(np.random.default_rng(1).standard_normal(5))
+    assert np.array_equal(
+        np.asarray(padded.apply(x)), np.asarray(_PaddedRowOperator.from_scipy(a).apply(x))
+    )
+    assert padded.to_scipy().nnz == a.nnz, "padding slots are not stored entries"
+    with pytest.raises(ValueError, match="a row of 4 entries, wider than the 3 budgeted"):
+        _PaddedRowOperator.from_scipy(a, width=3)
+
+
+def test_a_padded_row_operator_transposes_to_the_transposed_matrix() -> None:
+    a = _ragged_operator()
+    operator = _PaddedRowOperator.from_scipy(a)
+    y = np.random.default_rng(2).standard_normal(4)
+    (transposed,) = jax.linear_transpose(operator.apply, jnp.zeros(5))(jnp.asarray(y))
+    assert np.allclose(np.asarray(transposed), a.T @ y, rtol=0, atol=1e-14)
+
+
+def _primitives(jaxpr) -> set[str]:
+    """Every primitive in ``jaxpr``, those of the sub-programs it calls included."""
+    names = set()
+    for equation in jaxpr.eqns:
+        names.add(equation.primitive.name)
+        for parameter in equation.params.values():
+            for sub in parameter if isinstance(parameter, tuple | list) else (parameter,):
+                inner = getattr(sub, "jaxpr", sub)
+                if hasattr(inner, "eqns"):
+                    names |= _primitives(inner)
+    return names
+
+
+def test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose() -> None:
+    """The adjoint applies every level operator transposed, so the transpose must not be a scatter.
+
+    Derived from the forward gather, ``jax.linear_transpose`` produces a scatter-add over every slot;
+    the stored ``A^T`` is applied as a forward product instead. The forward product scatters nothing
+    either, so a program free of any scatter is the stored path and nothing else.
+    """
+    a = _ragged_operator()
+    operator = _PaddedRowOperator.from_scipy(a)
+    assert operator.t_values.shape == (5, 2), "A^T padded to the widest column"
+    transposed = jax.linear_transpose(operator.apply, jnp.zeros(5))
+    primitives = _primitives(jax.make_jaxpr(transposed)(jnp.zeros(4)).jaxpr)
+    assert "gather" in primitives
+    assert not any("scatter" in name for name in primitives)
+
+
+def test_a_padded_row_operators_transpose_takes_its_own_budget() -> None:
+    a = _ragged_operator()
+    padded = _PaddedRowOperator.from_scipy(a, transpose_width=6)
+    assert padded.t_values.shape == (5, 6)
+    y = jnp.asarray(np.random.default_rng(3).standard_normal(4))
+    (transposed,) = jax.linear_transpose(padded.apply, jnp.zeros(5))(y)
+    assert np.allclose(np.asarray(transposed), a.T @ np.asarray(y), rtol=0, atol=1e-14)
+    with pytest.raises(ValueError, match="a column of 2 entries, wider than the 1 budgeted"):
+        _PaddedRowOperator.from_scipy(a, transpose_width=1)
 
 
 def test_smoothed_aggregation_v_cycle_is_mesh_independent() -> None:
@@ -319,7 +409,7 @@ def _chebyshev_propagation_polynomial(eigenvalues, lam_max, degree, lo_frac):
     n = len(eigenvalues)
     level = _SparseLevel(
         n=n,
-        operator=_CsrOperator.from_scipy(sp.diags(np.asarray(eigenvalues)).tocsr()),
+        operator=_PaddedRowOperator.from_scipy(sp.diags(np.asarray(eigenvalues)).tocsr()),
         diagonal=jnp.ones(n),
         lam_max=float(lam_max),
         coarse_inv=None,
@@ -607,7 +697,7 @@ def test_a_wider_restriction_neighbourhood_buys_accuracy_and_costs_density() -> 
 
     def peak_density(**kwargs):
         levels = build_air_hierarchy(operator, **kwargs).levels
-        return max(level.operator.data.shape[0] / level.n for level in levels)
+        return max(level.operator.nnz / level.n for level in levels)
 
     assert peak_density() < 0.5 * peak_density(restriction_theta=0.0), (
         "the wider neighbourhood is no longer denser, so the default is paying accuracy for nothing"
@@ -874,7 +964,7 @@ def test_air_coarse_operators_stay_sparse_on_a_distance_two_operator() -> None:
     rediscovered on a real mesh.
     """
     hierarchy = build_air_hierarchy(_distance_two_operator(10))
-    density = [level.operator.data.shape[0] / level.n for level in hierarchy.levels]
+    density = [level.operator.nnz / level.n for level in hierarchy.levels]
     assert len(density) > 2, "too few levels to say anything about how the recursion behaves"
     growth = [after / before for before, after in itertools.pairwise(density)]
     assert max(growth) < 2.0, f"the coarse operators are densifying: {density}"
@@ -946,13 +1036,14 @@ def test_aggregation_hierarchy_structure_is_value_independent() -> None:
     assert len(cold.levels) == len(developed.levels)
     for lo, hi in zip(cold.levels, developed.levels, strict=True):
         assert (lo.n, lo.n_coarse) == (hi.n, hi.n_coarse)  # static metadata
-        assert lo.operator.data.shape == hi.operator.data.shape  # operator sparsity
+        assert lo.operator.values.shape == hi.operator.values.shape  # operator sparsity
         assert lo.diagonal.shape == hi.diagonal.shape
         if lo.p_val is not None:
             assert lo.p_val.shape == hi.p_val.shape  # prolongation sparsity
     # ...and the values really do differ, so the invariance above is not a trivial no-op.
     assert not np.allclose(
-        np.asarray(cold.levels[0].operator.data), np.asarray(developed.levels[0].operator.data)
+        np.asarray(cold.levels[0].operator.to_scipy().data),
+        np.asarray(developed.levels[0].operator.to_scipy().data),
     )
 
 
@@ -1004,8 +1095,8 @@ def test_lair_structure_is_value_dependent_unlike_aggregation() -> None:
     cold = build_air_hierarchy(_chain_operator(n, 0.01, np.ones(n - 1)))
     developed = build_air_hierarchy(_chain_operator(n, 50.0, np.linspace(1.0, 1000.0, n - 1)))
 
-    shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in cold.levels]
-    developed_shapes = [(lv.n, lv.n_coarse, lv.operator.data.shape) for lv in developed.levels]
+    shapes = [(lv.n, lv.n_coarse, lv.operator.values.shape) for lv in cold.levels]
+    developed_shapes = [(lv.n, lv.n_coarse, lv.operator.values.shape) for lv in developed.levels]
     assert shapes != developed_shapes, (
         "lAIR coarsening happened to be shape-stable here; the refresh-by-reusing-the-split "
         "requirement is justified by its value dependence, so re-check _strength_classical"
@@ -1030,10 +1121,11 @@ def test_refresh_air_hierarchy_keeps_the_structure_and_is_a_cache_hit() -> None:
     assert len(refreshed.levels) == len(cold.levels)
     for old, new in zip(cold.levels, refreshed.levels, strict=True):
         assert (old.n, old.n_coarse) == (new.n, new.n_coarse)
-        assert old.operator.data.shape == new.operator.data.shape
+        assert old.operator.values.shape == new.operator.values.shape
     # ...but the values genuinely moved to the new operator.
     assert not np.allclose(
-        np.asarray(cold.levels[0].operator.data), np.asarray(refreshed.levels[0].operator.data)
+        np.asarray(cold.levels[0].operator.to_scipy().data),
+        np.asarray(refreshed.levels[0].operator.to_scipy().data),
     )
 
     traces = []
@@ -1115,11 +1207,13 @@ def test_a_nodal_hierarchy_keeps_its_shapes_when_a_coupling_becomes_exactly_zero
     built_live = build_convection_hierarchy(live, **settings)
     assert len(built_zero.levels) == len(built_live.levels) >= 2
     for a, b in zip(built_zero.levels, built_live.levels, strict=True):
-        assert a.operator.data.shape == b.operator.data.shape, "a rebuild moved the coarse shape"
+        assert a.operator.values.shape == b.operator.values.shape, (
+            "a rebuild moved the coarse shape"
+        )
 
     refitted = built_live.refit(zero)
     for a, b in zip(refitted.levels, built_live.levels, strict=True):
-        assert a.operator.data.shape == b.operator.data.shape, "a refit moved the coarse shape"
+        assert a.operator.values.shape == b.operator.values.shape, "a refit moved the coarse shape"
 
     # The stored zeros are only padding: the coarse operator still IS the Galerkin product.
     prolongation = built_zero.levels[0].prolongation_scipy().tocsr()
@@ -1180,7 +1274,7 @@ def test_a_threshold_free_mis_coarsening_keeps_its_shapes_when_a_coupling_become
     assert len(built_zero.levels) == len(built_live.levels) >= 3
     for a, b in zip(built_zero.levels, built_live.levels, strict=True):
         assert (a.n, a.n_coarse) == (b.n, b.n_coarse), "the aggregates moved with the values"
-        assert a.operator.data.shape == b.operator.data.shape, "a coarse shape moved"
+        assert a.operator.values.shape == b.operator.values.shape, "a coarse shape moved"
 
 
 def test_galerkin_coarse_pattern_does_not_move_when_a_weight_becomes_zero() -> None:
@@ -1524,8 +1618,8 @@ def test_a_degenerate_cell_block_is_refused_by_name() -> None:
     tiny = sp.csr_matrix(np.diag([1e-9, 1e-9, 2e-9, 2e-9]))
     assert np.all(np.isfinite(_cell_block_inverse(tiny, 2)))
 
-    # A structurally empty row IS degenerate, and must be named rather than slipping through: it makes
-    # the Hadamard bound zero, against which no determinant compares as smaller.
+    # A structurally empty row IS degenerate, and must be named rather than slipping through: no
+    # permutation then has a nonzero product, so the measure's denominator is zero.
     empty = np.zeros((4, 4))
     empty[0, 0], empty[2, 2], empty[3, 3] = 1.0, 1.0, 1.0  # cell 1's k row is entirely absent
     with pytest.raises(ValueError, match="1 of 2 are singular"):
@@ -1537,8 +1631,8 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
 
     These are the real numbers from a coupled turbulence cell that a Frobenius-normalized test refused
     mid-march: rows differing by 1.5e8, a determinant of 1.35e-06 against a Frobenius-squared norm of
-    1.6e+06, so the bar landed just above the determinant. On the row-norm (Hadamard) bound the same
-    block scores 1.2e-04 -- eight orders clear of degenerate -- and it is genuinely invertible.
+    1.6e+06, so the bar landed just above the determinant. It is genuinely invertible, and scores ~1 on
+    the scale-free measure.
 
     The block is still nastily conditioned, around 1e12, and the assertion on the inverse says so:
     this guard's job is invertibility, not conditioning, and conflating the two is what produced a
@@ -1558,6 +1652,57 @@ def test_a_badly_scaled_block_is_not_mistaken_for_a_singular_one() -> None:
     assert np.allclose(
         inverses[1] @ block, np.eye(2), atol=1e-6
     )  # ...and inverting it is meaningful
+
+
+def test_block_singularity_is_unmoved_by_scaling_any_row_or_column() -> None:
+    """The singularity measure must not depend on the units of the fields a block couples.
+
+    Each block is rescaled by random row and column factors spanning 24 orders, signs included; the
+    measure must not move beyond rounding. A row-norm (Hadamard) ratio is invariant under row scaling
+    only and fails this by many orders on the column scalings. A singular block must stay at zero.
+    """
+    from aquaflux.precondition.multigrid import _block_singularity
+
+    rng = np.random.default_rng(7)
+    blocks = np.concatenate(
+        [
+            rng.standard_normal((6, 3, 3)),
+            np.array([[[1.48e-05, 2.5e-23, 0.0], [-9.47e14, 0.645, 0.0], [0.0, 0.0, 1.0]]]),
+        ]
+    )
+    reference = _block_singularity(blocks)
+    for _ in range(5):
+        rows = 10.0 ** rng.uniform(-12, 12, (7, 3)) * rng.choice([-1.0, 1.0], (7, 3))
+        columns = 10.0 ** rng.uniform(-12, 12, (7, 3)) * rng.choice([-1.0, 1.0], (7, 3))
+        scaled = rows[:, :, None] * blocks * columns[:, None, :]
+        np.testing.assert_allclose(_block_singularity(scaled), reference, rtol=1e-9)
+    rank_one = np.outer([1.0, 3.0], [2.0, 5.0])[None] * np.array([[1e8], [1e-8]])[None]
+    assert _block_singularity(rank_one)[0] < 1e-12
+
+
+def test_an_invertible_block_with_a_vanishing_variable_is_not_refused() -> None:
+    """A corner cell whose ``k`` collapsed has an invertible ``[k, omega]`` block; the guard must pass it.
+
+    These are the numbers of a coupled turbulence cell at ``k`` ~1e-17, where ``dR_omega/dk`` is ~1e15:
+    lower-triangular, determinant 9.5e-06, but a row-norm (Hadamard) ratio of 6.8e-16, which refused
+    it and ended a march. A zero-diagonal permutation block is invertible as well.
+    """
+    from aquaflux.precondition.multigrid import _block_singularity, _cell_block_inverse
+
+    dense = np.zeros((4, 4))
+    dense[0, 0], dense[0, 2] = 1.4806491567416882e-05, 2.5092750572028642e-23
+    dense[2, 0], dense[2, 2] = -9.472792807543228e14, 0.644862902295833
+    dense[1, 3], dense[3, 1] = 1.0, 1.0  # cell 1: [[0, 1], [1, 0]]
+
+    inverses = _cell_block_inverse(sp.csr_matrix(dense), 2)  # must not raise
+
+    block = np.array([[dense[0, 0], dense[0, 2]], [dense[2, 0], dense[2, 2]]])
+    (a, b), (c, d) = block  # the closed form, entry by entry: a product would cancel ~1e20 terms
+    np.testing.assert_allclose(
+        inverses[0], np.array([[d, -b], [-c, a]]) / (a * d - b * c), rtol=1e-12
+    )
+    measures = _block_singularity(np.stack([block, inverses[1]]))
+    assert measures[0] > 0.99 and measures[1] == 1.0  # nowhere near the 1e-12 cut
 
 
 def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() -> None:
@@ -1581,12 +1726,15 @@ def test_refit_reproduces_a_rebuild_where_the_coarsening_is_value_independent() 
     assert len(refitted.levels) == len(rebuilt.levels)
     for got, want in zip(refitted.levels, rebuilt.levels, strict=True):
         assert (got.n, got.n_coarse) == (want.n, want.n_coarse)
-        assert np.allclose(np.asarray(got.operator.data), np.asarray(want.operator.data))
+        assert np.allclose(
+            np.asarray(got.operator.to_scipy().data), np.asarray(want.operator.to_scipy().data)
+        )
         assert np.allclose(np.asarray(got.diagonal), np.asarray(want.diagonal))
         assert np.allclose(float(got.lam_max), float(want.lam_max))
     # ...and the refit really moved the values, so the agreement above is not two copies of `cold`.
     assert not np.allclose(
-        np.asarray(refitted.levels[0].operator.data), np.asarray(cold.levels[0].operator.data)
+        np.asarray(refitted.levels[0].operator.to_scipy().data),
+        np.asarray(cold.levels[0].operator.to_scipy().data),
     )
 
 
@@ -1675,8 +1823,8 @@ def test_refit_keeps_a_smoothed_prolongator_a_rebuild_would_re_derive() -> None:
 
     coarsest = -1
     assert not np.allclose(
-        np.asarray(refitted.levels[coarsest].operator.data),
-        np.asarray(rebuilt.levels[coarsest].operator.data),
+        np.asarray(refitted.levels[coarsest].operator.to_scipy().data),
+        np.asarray(rebuilt.levels[coarsest].operator.to_scipy().data),
     )
 
 
@@ -1712,7 +1860,9 @@ def test_refit_holds_a_partition_that_a_rebuild_would_move() -> None:
         "the rotated operator did not re-partition, so this fixture cannot show the difference"
     )
     # The refit is over the NEW operator, not a copy of the old hierarchy.
-    assert np.allclose(np.asarray(refitted.levels[0].operator.data), strong_x.tocsr().data, atol=0)
+    assert np.allclose(
+        np.asarray(refitted.levels[0].operator.to_scipy().data), strong_x.tocsr().data, atol=0
+    )
 
 
 def test_refit_rejects_an_operator_of_the_wrong_size() -> None:
@@ -1770,13 +1920,20 @@ def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -
             (
                 level.n,
                 level.n_coarse,
-                int(level.operator.data.shape[0]),
+                level.operator.values.shape,
+                level.operator.t_values.shape,
                 None if level.p_val is None else int(level.p_val.shape[0]),
             )
             for level in hierarchy.levels
         ]
 
     assert signature(built[0]) == signature(built[1])
+    # Each coarse level is padded to its budget, operator and stored transpose alike; equal signatures
+    # alone would hold for any two builds whose natural widths happened to agree.
+    for hierarchy in built:
+        coarse = hierarchy.levels[1:]
+        assert [level.operator.width for level in coarse] == list(budget.operator_width)
+        assert [level.operator.transpose_width for level in coarse] == list(budget.transpose_width)
 
     traces = []
 
@@ -2038,8 +2195,9 @@ def test_block_air_refresh_preserves_the_structure() -> None:
     assert len(refreshed.levels) == len(built.levels)
     for old, new in zip(built.levels, refreshed.levels, strict=True):
         assert (old.n, old.n_coarse, old.block_size) == (new.n, new.n_coarse, new.block_size)
-        assert old.operator.data.shape == new.operator.data.shape
+        assert old.operator.values.shape == new.operator.values.shape
     # ...and the refresh is not a no-op: the values moved with the operator.
     assert not np.allclose(
-        np.asarray(built.levels[0].operator.data), np.asarray(refreshed.levels[0].operator.data)
+        np.asarray(built.levels[0].operator.to_scipy().data),
+        np.asarray(refreshed.levels[0].operator.to_scipy().data),
     )

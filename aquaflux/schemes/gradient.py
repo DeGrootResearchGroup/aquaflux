@@ -23,7 +23,6 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
-import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
@@ -35,6 +34,8 @@ import lineax as lx
 from aquaflux.mesh import face_geometry_scheme
 from aquaflux.vectors import dot, scale
 
+from ..solve import solve_linear
+from ..warn_once import warn_once
 from .interpolation import (
     blend_owner_neighbour,
     interpolate_owner_neighbour,
@@ -44,8 +45,6 @@ from .interpolation import (
 if TYPE_CHECKING:
     from aquaflux.mesh import FaceCellConnectivity, Mesh, MeshGeometry
 
-
-_GRADIENT_UNCONVERGED_WARNED = False
 
 _Tree = TypeVar("_Tree")
 
@@ -61,18 +60,14 @@ def _warn_gradient_unconverged(sweeps: int, tol: float) -> None:
     Invoked from a ``jax.debug.callback`` inside :meth:`SweptGradientSolve.solve`, gated by a
     ``lax.cond`` so it fires only when the residual (which the sweep already computed) exceeds
     ``tol``. Because that callback runs on every under-resolved gradient solve (many per Newton
-    step), a module-level flag guarantees a single emission — the mesh conditioning is fixed, so one
+    step), :func:`~aquaflux.warn_once.warn_once` guarantees a single emission — the mesh conditioning is fixed, so one
     warning is the whole message.
     """
-    global _GRADIENT_UNCONVERGED_WARNED
-    if _GRADIENT_UNCONVERGED_WARNED:
-        return
-    _GRADIENT_UNCONVERGED_WARNED = True
-    warnings.warn(
+    warn_once(
+        "gradient.unconverged",
         f"SweptGradientSolve: the corrected-gradient sweeps are under-resolved on this mesh "
         f"(relative residual exceeded {tol:.0e} after {sweeps} sweeps). Increase `sweeps` for this "
         f"non-orthogonality, or set `warn_tol=None` to silence.",
-        stacklevel=1,
     )
 
 
@@ -269,14 +264,21 @@ def boundary_gradient_block(
     return jnp.swapaxes(block, 1, 2) / geometry.cell.volume[:, None, None]
 
 
-def _small_inverse(matrix: jnp.ndarray) -> jnp.ndarray:
+def small_inverse(matrix: jnp.ndarray) -> jnp.ndarray:
     """Per-cell inverse of a batch of 1x1, 2x2 or 3x3 matrices, by the adjugate.
 
     Written out because these inverses run inside every reconstruction, so inside every residual
-    evaluation and every Jacobian--vector product: a batched library inverse is one call per cell
-    batch that the compiler cannot fuse with anything around it, while the adjugate is a handful of
-    elementwise products it fuses freely, an order of magnitude cheaper here. Fine for the
-    well-conditioned ``I - B`` blocks it serves; not a general-purpose inverse.
+    evaluation and every Jacobian--vector product: a batched library inverse is a call into a
+    linear-algebra library (an LU factorization and two triangular solves per cell batch) that the
+    compiler cannot fuse with anything around it, while the adjugate is a handful of elementwise
+    products it fuses freely, an order of magnitude cheaper here.
+
+    Fine for the well-conditioned per-cell blocks it serves -- the compact and corrected schemes'
+    ``I - B`` and the multiple-correction first pass's ``M1 - B``, whose condition numbers stay in
+    single digits when ``B`` is built from each boundary condition's own gradient weight. It does no
+    pivoting, so it is **not** a general-purpose inverse: an ill-conditioned block loses accuracy
+    here faster than it would through a pivoted factorization. Its result is not bit-identical to a
+    library inverse; the two agree to roundoff on such blocks.
 
     Parameters
     ----------
@@ -500,7 +502,7 @@ class CompactGreenGauss(GradientScheme):
         if boundary_gradient_weight is None:
             return gradient
         block = boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
-        inverse = _small_inverse(jnp.eye(mesh.dim, dtype=gradient.dtype) - block)
+        inverse = small_inverse(jnp.eye(mesh.dim, dtype=gradient.dtype) - block)
         return jnp.einsum("nij,nj->ni", inverse, gradient)
 
 
@@ -834,14 +836,14 @@ class GradientSolve(eqx.Module):
         """
 
 
-class CellPreconditioner(eqx.Module):
-    """Strategy: which approximate inverse of ``A_g`` drives the corrected-gradient sweep.
+class DiagonalBlock(eqx.Module):
+    """Strategy: which diagonal block of ``A_g`` the corrected-gradient sweep inverts.
 
-    The sweep converges at a rate set by ``rho(I - P^-1 A_g)``, so this choice decides how many
-    sweeps a given accuracy costs -- and, on a mesh with a degenerate cell, whether the iteration
+    The choice the caller configures; :meth:`build` returns the :class:`GradientPreconditioner` that is
+    applied. The sweep converges at a rate set by ``rho(I - P^-1 A_g)``, so this choice decides how
+    many sweeps a given accuracy costs -- and, on a mesh with a degenerate cell, whether the iteration
     converges at all. A strategy rather than a flag because the options differ in what they compute,
-    not merely in a constant: one reads a per-cell scalar already to hand, the other probes the
-    operator.
+    not merely in a constant: one reads a per-cell scalar already to hand, the other probes the operator.
     """
 
     @abc.abstractmethod
@@ -856,8 +858,8 @@ class CellPreconditioner(eqx.Module):
         """
 
 
-class InverseCellVolume(CellPreconditioner):
-    """``1/V`` per cell -- the default, and the right choice on a mesh of reasonable quality.
+class VolumeDiagonalBlock(DiagonalBlock):
+    """The cell volume as the diagonal block (``1/V`` per cell) -- the default, for a sound mesh.
 
     ``A_g``'s per-cell block is the cell volume less the skewness coupling, so on a well-shaped cell
     this is within the skewness of the true block and the sweep it drives converges quickly. It costs
@@ -874,7 +876,7 @@ class InverseCellVolume(CellPreconditioner):
     ⚠️ **It degrades exactly as the cell does.** The neglected coupling scales with face area while
     the volume does not, so as a cell flattens ``1/V`` stops approximating anything. Measured on a
     single squashed cell, the reconstruction error there grows without bound with the volume ratio:
-    3.6e+04 at a ratio of 2.5e3, 2.9e+12 at 3.6e4, 2.9e+28 at 3.6e8. Prefer :class:`ExactCellBlock`
+    3.6e+04 at a ratio of 2.5e3, 2.9e+12 at 3.6e4, 2.9e+28 at 3.6e8. Prefer :class:`ProbedDiagonalBlock`
     on a mesh carrying such cells, or on any case that diverges.
     """
 
@@ -884,11 +886,11 @@ class InverseCellVolume(CellPreconditioner):
         # (V (I - B))^-1 = (I - B)^-1 / V, inverted in that order so that a cell with no such face
         # gets exactly 1/V -- the same scaling as without a block, to the last bit.
         dim = terms.area_vector.shape[-1]
-        inverse = _small_inverse(jnp.eye(dim) - terms.boundary_block)
+        inverse = small_inverse(jnp.eye(dim) - terms.boundary_block)
         return CellBlockJacobi(inverse / terms.volume[:, None, None])
 
 
-class ExactCellBlock(CellPreconditioner):
+class ProbedDiagonalBlock(DiagonalBlock):
     """The operator's **true** per-cell block, recovered by probing and inverted per cell.
 
     Costs ``dim`` extra operator applies to extract, plus a small dense inverse per cell, and its
@@ -987,16 +989,18 @@ class GmresGradientSolve(GradientSolve):
                 "distributed gradient solve (its preconditioned-Richardson sweeps form no global "
                 "inner product, so a per-sweep ghost exchange is exact)."
             )
-        # Right-preconditioned: the Krylov space is built on `A P⁻¹` and the right-hand side is left
-        # alone, so the residual the solver measures IS the true residual. See the class docstring —
-        # preconditioning this on the left instead moves the convergence and stagnation tests into a
-        # norm ~1e6 away from the problem's own, and it breaks solves that otherwise converge.
-        op = lx.FunctionLinearOperator(
-            lambda v: operator(preconditioner.apply(v)),
-            jax.ShapeDtypeStruct(rhs.shape, rhs.dtype),
+        # Right-preconditioned (``solve_linear``'s default side, named here because it is
+        # load-bearing): the residual the solver measures IS the true residual. See the class
+        # docstring — on the left the convergence and stagnation tests move into a norm ~1e6 away
+        # from the problem's own, and that breaks solves that otherwise converge.
+        solution, _ = solve_linear(
+            operator,
+            rhs,
+            lx.GMRES(rtol=self.rtol, atol=self.atol),
+            preconditioner.apply,
+            preconditioner_side="right",
         )
-        solution = lx.linear_solve(op, rhs, solver=lx.GMRES(rtol=self.rtol, atol=self.atol)).value
-        return preconditioner.apply(solution)
+        return solution
 
 
 class SweptGradientSolve(GradientSolve):
@@ -1724,12 +1728,11 @@ class HessianSolve(eqx.Module):
     """Strategy: how the gradient is obtained from the coupled gradient-and-Hessian system.
 
     The scheme assembles two systems, and there is more than one defensible way to get a gradient out
-    of them — sweep both blocks together, eliminate the Hessian and solve the two separately, or solve
-    the un-eliminated system whole. Each is one of these, and a scheme carries **exactly one**.
+    of them — sweep both blocks together, or solve the un-eliminated system whole. Each is one of
+    these, and a scheme carries **exactly one**.
 
     That is the point of the interface rather than a consequence of it. These paths do not share
-    settings: an inner-solve strategy means nothing to a coupled sweep, and a sweep count means
-    nothing to a nested solve. Held as separate fields on the scheme they would all be present at
+    settings: a sweep count and relaxation mean nothing to a packed solve's injected solver. Held as separate fields on the scheme they would all be present at
     once, most of them inert, and a caller configuring the wrong one would be ignored in silence —
     which is exactly what happened when the coupled sweep first became the default, and cost four
     call sites in this repository their meaning. Under one field the mistake cannot be written down.
@@ -1796,9 +1799,8 @@ class CoupledBlockSweep(HessianSolve):
     Attributes
     ----------
     sweeps : int
-        Number of coupled sweeps (static). One sweep costs **two** face-kernel passes against the
-        nested path's ``1 + inner``, so a given accuracy is reached for far less work -- but the count
-        needed is not the nested path's outer count and has to be calibrated on its own.
+        Number of coupled sweeps (static). One sweep costs **two** face-kernel passes, and the count
+        a given accuracy needs depends on the mesh, so calibrate it (:meth:`calibrated`).
 
         ⚠️ **The count is what this costs, not the work inside one sweep, and the two are easy to
         confuse.** On a 12225-cell mesh the sweeps are ~82 % of a reconstruction, and *halving* the
@@ -1849,9 +1851,7 @@ class CoupledBlockSweep(HessianSolve):
     ) -> CoupledBlockSweep:
         """Build this sweep with its count **measured from the mesh** rather than assumed.
 
-        Its count is not the nested solve's outer count and cannot be borrowed from it: a coupled
-        sweep costs about a third as much and converges at its own rate, so a count that is right for
-        one is wrong for the other. The rate is a property of the mesh — both operators and both
+        The rate is a property of the mesh — both operators and both
         preconditioners are geometry-only — so it is measured once here and reused for every
         reconstruction on that mesh.
 
@@ -1886,8 +1886,9 @@ class CoupledBlockSweep(HessianSolve):
         measured on the packed ``[g, h]`` error, because the two blocks converge together and the
         asymptotic rate belongs to the pair — but the Hessian's error dominates that estimate while
         the gradient's falls faster. Measured at the shared default tolerance, the reconstruction
-        comes in five to seven times *better* than asked: 5.0e-07 against a nested solve's 3.4e-06 on
-        an orthogonal grid, 1.1e-06 against 5.2e-06 at 30 % perturbation. Read a comparison against
+        comes in five to seven times better than a solve that eliminates the Hessian and is calibrated
+        on the gradient alone to the same tolerance: 5.0e-07 against 3.4e-06 on an orthogonal grid,
+        1.1e-06 against 5.2e-06 at 30 % perturbation. Read a comparison against
         another scheme at equal *tolerance* accordingly — this one is not spending its budget the
         same way.
 
@@ -1952,14 +1953,14 @@ class CorrectedGreenGauss(GradientScheme):
         The strategy applying ``A_g⁻¹`` to solve ``A_g·G = B·φ`` (default
         :class:`SweptGradientSolve`, the scalable unrolled sweep; use :class:`GmresGradientSolve` for
         a mesh skewed enough to need an exact Krylov solve).
-    preconditioner : CellPreconditioner
-        How each cell's rows are scaled in the solve. :class:`InverseCellVolume` (the default) divides
-        them by the cell's volume, which suits a mesh of reasonable quality; :class:`ExactCellBlock`
+    preconditioner : DiagonalBlock
+        How each cell's rows are scaled in the solve. :class:`VolumeDiagonalBlock` (the default) divides
+        them by the cell's volume, which suits a mesh of reasonable quality; :class:`ProbedDiagonalBlock`
         inverts each cell's own block, for a mesh with badly flattened cells.
     """
 
     solver: GradientSolve = eqx.field(default_factory=SweptGradientSolve)
-    preconditioner: CellPreconditioner = eqx.field(default_factory=InverseCellVolume)
+    preconditioner: DiagonalBlock = eqx.field(default_factory=VolumeDiagonalBlock)
 
     @staticmethod
     def terms(
@@ -2032,7 +2033,7 @@ class CorrectedGreenGauss(GradientScheme):
 
     @classmethod
     def system(
-        cls, t: _CorrectedTerms, preconditioner: CellPreconditioner | None = None
+        cls, t: _CorrectedTerms, preconditioner: DiagonalBlock | None = None
     ) -> GradientSystem:
         """The gradient system ``A_g·G = B·φ`` as a solve strategy sees it — operator and preconditioner.
 
@@ -2053,7 +2054,7 @@ class CorrectedGreenGauss(GradientScheme):
             Operator, preconditioner, and the ``(n_cells, dim)`` shape of the gradient.
         """
         n_cells, dim = t.volume.shape[0], t.area_vector.shape[-1]
-        chosen = InverseCellVolume() if preconditioner is None else preconditioner
+        chosen = VolumeDiagonalBlock() if preconditioner is None else preconditioner
         return GradientSystem(chosen.build(t), cls.operator(t), (n_cells, dim))
 
     @classmethod
@@ -2067,7 +2068,7 @@ class CorrectedGreenGauss(GradientScheme):
         floor: int = SweepCalibration.floor,
         cap: int = SweepCalibration.cap,
         seed: int = SweepCalibration.seed,
-        preconditioner: CellPreconditioner | None = None,
+        preconditioner: DiagonalBlock | None = None,
     ) -> CorrectedGreenGauss:
         """Build this scheme with the sweep count **measured from the mesh** rather than assumed.
 
@@ -2117,7 +2118,7 @@ class CorrectedGreenGauss(GradientScheme):
         >>> scheme.solver.sweeps  # orthogonal: the correction vanishes, one sweep is exact
         1
         """
-        chosen = InverseCellVolume() if preconditioner is None else preconditioner
+        chosen = VolumeDiagonalBlock() if preconditioner is None else preconditioner
         return cls(
             solver=_calibrated_solver(
                 cls.system(cls.terms(mesh, geometry), chosen),
@@ -2505,121 +2506,16 @@ class AveragedInteriorHessian(HessianBoundaryClosure):
         )
 
 
-class NestedHessianSolve(HessianSolve):
-    """Eliminate the Hessian and solve the two systems separately — the Hessian re-converged from
-    zero inside every apply of the outer one.
-
-    The two systems are not alike, so they take separate strategies: ``solver`` drives the outer Schur
-    system on the gradient, ``hessian_solver`` the inner ``A_HH`` system that runs inside every one of
-    its operator applies.
-
-    ⚠️ **This is the slower path on the meshes this scheme exists for**, because it discards what the
-    previous outer apply learned about the Hessian: 1.4x the cost of :class:`CoupledBlockSweep` at
-    30 % grid perturbation, 1.8x at 40 %, and up to 12x under :class:`AveragedNeighbourHessian`,
-    whose Hessian system is the expensive one to re-converge. Those ratios were measured while one
-    coupled sweep cost four face-kernel passes rather than today's two, so they understate the gap. It is
-    faster only on an orthogonal mesh, where the outer solve is nearly trivial and there is nothing to
-    save — and where this scheme has no advantage worth its cost anyway.
-
-    Kept because it is the arrangement every measurement in this scheme's history was taken on, and
-    the control any comparison against the coupled sweep needs.
-
-    Attributes
-    ----------
-    solver : GradientSolve
-        Drives the outer Schur system.
-    hessian_solver : GradientSolve
-        Drives the inner ``A_HH`` system. Its ``warn_tol`` is ``None`` by default — see below.
-    """
-
-    solver: GradientSolve = eqx.field(default_factory=lambda: SweptGradientSolve(sweeps=20))
-    hessian_solver: GradientSolve = eqx.field(
-        default_factory=lambda: SweptGradientSolve(sweeps=10, warn_tol=None)
-    )
-
-    def gradients(
-        self,
-        systems: _HessianSystems,
-        field: jnp.ndarray,
-        boundary_values: jnp.ndarray,
-        *,
-        local_schur_block: bool,
-    ) -> jnp.ndarray:
-        if self.solver.requires_linear_operator and self.hessian_solver.emits_host_diagnostics:
-            raise ValueError(
-                "hessian_solver runs inside the outer Schur operator, and this outer solver forms "
-                "its implicit-diff tangent by transposing that operator — which requires the "
-                "operator be strictly linear. The inner solver's under-resolution diagnostic norms "
-                "the residual, which is not, so the transpose fails deep inside the linear solver "
-                "with an uninformative error. Pass warn_tol=None on the hessian_solver (e.g. "
-                "SweptGradientSolve(sweeps=6, warn_tol=None)), or use a fixed-sweep outer `solver`, "
-                "which differentiates by unrolling and imposes no such requirement. The outer "
-                "`solver`'s own diagnostic is unaffected."
-            )
-        inner = systems.inner()
-        outer = systems.outer(self.hessian_solver, inner, local_schur_block)
-        return self.solver.solve(
-            outer.preconditioner, outer.operator, systems.gradient_rhs(field, boundary_values)
-        )
-
-    @classmethod
-    def calibrated(
-        cls,
-        mesh: Mesh,
-        geometry: MeshGeometry,
-        *,
-        tol: float = SweepCalibration.tol,
-        iters: int = SweepCalibration.iters,
-        floor: int = SweepCalibration.floor,
-        cap: int = SweepCalibration.cap,
-        seed: int = SweepCalibration.seed,
-        local_schur_block: bool = True,
-        boundary_closure: HessianBoundaryClosure | None = None,
-    ) -> NestedHessianSolve:
-        """Build this path with **both** counts measured from the mesh rather than assumed.
-
-        The two systems converge at very different rates and neither is well served by a count chosen
-        in advance, so both are measured: the inner Hessian system first, then the outer system
-        *using that calibrated inner solve*, which is the composition that will actually run.
-
-        Parameters
-        ----------
-        mesh, geometry
-            The mesh to measure on and its geometry. The geometry must be concrete.
-        tol, iters, floor, cap, seed
-            Calibration settings, as elsewhere.
-        local_schur_block : bool
-            Which outer preconditioner the outer count is measured against — it changes the operator.
-        boundary_closure : HessianBoundaryClosure, optional
-            The closure to measure under; it changes the operator too.
-
-        Returns
-        -------
-        NestedHessianSolve
-            Carrying the two measured counts.
-        """
-        settings = dict(tol=tol, iters=iters, floor=floor, cap=cap, seed=seed)
-        closure = OwnerHessian() if boundary_closure is None else boundary_closure
-        systems = HessianCorrectedGradient._systems(mesh, geometry, closure)
-        inner_system = systems.inner()
-        # The inner solve runs inside the outer operator, whose transpose an outer Krylov strategy
-        # would form, so its diagnostic is disabled — the same pairing the field default carries.
-        hessian_solver = _calibrated_solver(inner_system, warn_tol=None, **settings)
-        return cls(
-            solver=_calibrated_solver(
-                systems.outer(hessian_solver, inner_system, local_schur_block), **settings
-            ),
-            hessian_solver=hessian_solver,
-        )
-
-
 class PackedSystemSolve(HessianSolve):
     """Solve the un-eliminated ``[g, h]`` system whole, without eliminating the Hessian.
 
-    This exists to check the elimination against the system it eliminates from: the two must agree to
-    machine precision, and that they do is a property of the discretization rather than of either
-    solver. It is not the production path — the whole point of the elimination is that the gradient is
-    the only primary unknown, which is what lets it Schur-couple into a flow solve at gradient size.
+    This is the **exact reference**: with ``solver=GmresGradientSolve()`` it solves the scheme's system
+    to the Krylov tolerance with no sweep count of its own, so it is what a sweep count is checked
+    against on an unfamiliar mesh. Its gradient is the coupled sweep's fixed point — the Schur
+    reduction of this same system — so the two must agree once the sweep has converged, which is a
+    property of the discretization rather than of either solver. It is not the production path: the
+    point of the elimination is that the gradient is the only primary unknown, which is what lets it
+    Schur-couple into a flow solve at gradient size.
 
     Deliberately plain: the packed system is preconditioned by the cell volume, which serves both
     blocks because both diagonal blocks carry it.
@@ -2711,8 +2607,8 @@ class HessianCorrectedGradient(GradientScheme):
     well-conditioned). Every block comes from **AD** — the residual is the forward
     reconstruction (a few interpolations and Green–Gauss sums), never hand-derived
     coefficient matrices — and the ``A_HH⁻¹`` is applied matrix-free by the injected solver.
-    Pass ``hessian_solve=PackedSystemSolve()`` to solve the full ``[g, H]`` system instead, which
-    is how the elimination is checked against the system it eliminates from.
+    Pass ``hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())`` to solve the full
+    ``[g, H]`` system exactly instead, which is the reference a sweep count is checked against.
 
     The right-hand side of the eliminated system is ``b_g`` **unreduced**: the Hessian equation is a
     Green–Gauss sum of gradient components and so carries no term in the reconstructed field at all,
@@ -2738,65 +2634,11 @@ class HessianCorrectedGradient(GradientScheme):
       ``(n_sym, n_sym)`` — four times the storage in three dimensions, against a third less for the
       unknown itself.
 
-    *How* each system is solved is an injected :class:`GradientSolve`, exactly as in
-    :class:`CorrectedGreenGauss` — but there are **two** systems here and they are not alike, so they
-    take separate strategies rather than sharing one:
+    *How* the systems are solved is one injected :class:`HessianSolve` (see ``hessian_solve``
+    below); the default, :class:`CoupledBlockSweep`, sweeps the gradient and Hessian blocks
+    alternately, each under its own per-cell preconditioner.
 
-    - :class:`NestedHessianSolve`'s ``solver`` drives the **outer** Schur system on the gradient. It is well conditioned (the
-      measured condition number of ``S`` is between 1 and 7 across mild-to-heavy skew), so a
-      preconditioned fixed sweep solves it without a Krylov method — which is the default, and the
-      reason is what a *march* pays rather than what one reconstruction costs. A Krylov solve is
-      differentiated by the implicit function theorem, so every Jacobian--vector product solves a
-      second Schur system, each with its own inner solve inside every one of its iterations; a fixed
-      sweep is differentiated by unrolling. Measured per reconstruction against a corrected
-      Green--Gauss baseline of 1.0, at equal accuracy: a Krylov outer costs ``92.9x`` forward and
-      ``158.6x`` as a jvp, this default ``66.5x`` and ``59.9x`` — **2.6x cheaper on the jvp path**,
-      which is the one a Krylov flow solve pays per iteration.
-    - its ``hessian_solver`` drives the **inner** ``A_HH`` system on the Hessian, once per outer operator
-      apply. Its cost is multiplied by the outer iteration count, so it is the one that decides
-      whether the scheme is affordable — and it needs **no Krylov solve at all**: paired with the
-      per-cell :class:`CellBlockJacobi` block below, a fixed handful of Richardson sweeps takes it to
-      machine precision. Its accuracy sets how faithfully the applied operator matches ``S``, and
-      hence the reconstruction's exactness for quadratic fields; the outer *rate* is almost
-      independent of it (measured: the outer ``ρ`` moves by 0.3% between one inner sweep and twelve).
-
-    **Choosing the outer sweep count.** Twenty, because that is what preserves the scheme's defining
-    property on a skewed mesh rather than what is cheapest. Departure from an exactly-solved
-    reconstruction of the same system, on a quadratic field:
-
-    ==========================  ========  ========  ========  ========
-    mesh                        outer 5   outer 10  outer 15  outer 20
-    ==========================  ========  ========  ========  ========
-    2D grid, 20% perturbed      4.8e-05   1.2e-08   5.0e-12   1.7e-15
-    2D grid, 30% perturbed      1.2e-04   7.4e-08   6.2e-11   7.9e-14
-    3D hex grid, 25% perturbed  1.3e-04   1.5e-07   1.7e-10   1.9e-13
-    ==========================  ========  ========  ========  ========
-
-    Cost is linear in this count, so a lower one is available and is a reasonable *case* choice where
-    the mesh is mild: five sweeps costs a quarter as much and still reconstructs two orders closer to
-    the exact gradient than a corrected Green--Gauss reconstruction differs from it, which is the
-    comparison that matters when the two schemes are being weighed against each other. What it gives
-    up is exactness for quadratics, so it is not the library default.
-
-    **Choosing the inner sweep count.** The inner iteration contracts geometrically at a rate set by
-    the mesh's skewness alone, so the count is a mesh property and not a size one. Measured on a
-    heavily skewed hexahedral grid, the reconstruction's departure from exactness for a quadratic
-    falls by about two and a half orders per two sweeps — ``4.8e-04`` at two sweeps, ``1.3e-06`` at
-    four, ``3.0e-09`` at six, ``8.6e-12`` at eight — and reaches the exactly-solved answer to machine
-    precision at ten, which is the default. A mesh skewed enough to need more will lose quadratic
-    exactness *quietly*, because the fixed sweep carries no convergence test; the inner solver's own
-    under-resolution warning cannot help here (it is disabled by default for the transposability
-    reason below), so on an unfamiliar mesh check the count directly by comparing against
-    ``hessian_solver=GmresGradientSolve()``, which solves the same system exactly.
-
-    **The inner solver must not emit host diagnostics.** It runs inside the outer Schur operator, and
-    an outer Krylov ``solver`` forms its implicit-diff tangent by transposing that operator — which
-    requires the operator be strictly linear. A convergence diagnostic is not, so the default inner
-    solver sets ``warn_tol=None`` and the combination that would fail is rejected with an explanation
-    rather than left to fail inside the linear solver. A fixed-sweep outer ``solver`` differentiates
-    by unrolling instead and carries no such restriction.
-
-    **Why the inner system needs a block preconditioner and not ``1/V``.** ``A_HH``'s per-cell block
+    **Why the Hessian block needs a block preconditioner and not ``1/V``.** ``A_HH``'s per-cell block
     is not close to ``V·I``: the Hessian enters its own equation through the gradient it reconstructs,
     at the same order as the volume term. Inverse-volume Richardson on it has a spectral radius of
     ``0.5`` — *on an orthogonal mesh*, where there is no skewness at all — which is why an inner
@@ -2815,19 +2657,8 @@ class HessianCorrectedGradient(GradientScheme):
         **How** the two systems are solved, as one injected strategy — the scheme carries exactly
         one, so a path's settings travel with the path. :class:`CoupledBlockSweep` (the default)
         sweeps both blocks together, carrying the Hessian from one sweep to the next;
-        :class:`NestedHessianSolve` eliminates the Hessian and re-converges it from zero inside every
-        apply of the outer solve; :class:`PackedSystemSolve` solves the un-eliminated ``[g, h]``
-        system whole, which is the check that the elimination changes nothing.
-
-        The default is the coupled sweep because it matches the nested pair's accuracy at a fraction
-        of the face-kernel passes -- 40 against 220 for the ``20`` / ``20+10`` pair -- and is worth
-        1.4x at 30 % grid perturbation, 1.8x at 40 %, and up to 12x under
-        :class:`AveragedNeighbourHessian`. ⚠️ Those speed ratios were measured while one sweep cost
-        **four** passes rather than today's two, so they understate the coupled path; the pass counts
-        themselves are exact. And read either against the caveat on
-        :attr:`CoupledBlockSweep.sweeps`: a face-pass count is a poor predictor of wall clock here. ⚠️ It is *slower* on an orthogonal mesh, where
-        the nested outer solve is nearly trivial — which is also a mesh on which this scheme has no
-        advantage worth its cost.
+        :class:`PackedSystemSolve` solves the un-eliminated ``[g, h]`` system whole, which with a
+        Krylov solver is the exact reference a sweep count is checked against.
     local_schur_block : bool
         Build the outer preconditioner from the Schur complement's own per-cell block rather than
         from ``A_gg``'s alone. **Default ``True``.**
@@ -2880,10 +2711,9 @@ class HessianCorrectedGradient(GradientScheme):
         if operator_hook is not None:
             raise NotImplementedError(
                 "HessianCorrectedGradient cannot run domain-decomposed: the gradient couples to the "
-                "Hessian through the nested Schur and inner A_HH solves, whose operators read ghost "
-                "gradients and ghost Hessians that a single per-apply exchange of the outer gradient "
-                "does not refresh. A correct distributed build would exchange inside each nested "
-                "solve — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
+                "Hessian, whose rows read ghost gradients and ghost Hessians that a single per-apply "
+                "exchange of the gradient does not refresh. A correct distributed build would "
+                "exchange the Hessian too — not yet built. Use CorrectedGreenGauss with SweptGradientSolve for a "
                 "distributed non-orthogonal gradient."
             )
         # ⚠️ Deliberately applied by `gradients` to the converged answer, and NOT projected onto the
@@ -2991,17 +2821,12 @@ class HessianCorrectedGradient(GradientScheme):
         schur: bool = True,
         local_schur_block: bool = True,
         boundary_closure: HessianBoundaryClosure | None = None,
-        coupled: bool = True,
     ) -> HessianCorrectedGradient:
-        """Build this scheme with **both** sweep counts measured from the mesh rather than assumed.
+        """Build this scheme with its sweep count measured from the mesh rather than assumed.
 
-        The two systems here converge at very different rates and neither is well served by a count
-        chosen in advance, so both are measured: the inner Hessian system first, then the outer
-        system *using that calibrated inner solve*, which is the composition that will actually run.
-        The outer rate is nearly a constant of the scheme rather than of the mesh — its difficulty is
-        the gradient--Hessian coupling **within** a cell, not the mesh's skewness — so the outer count
-        barely moves between a mild mesh and a heavily perturbed one, while the inner count tracks
-        the skewness in the usual way.
+        The count is :meth:`CoupledBlockSweep.calibrated`'s, measured under the boundary closure and
+        outer preconditioner the scheme will run with, since both change the operator and so the
+        rate.
 
         Read the counts this returns against the class defaults with their targets in mind, not
         side by side: the defaults are sized to preserve exactness for quadratic fields (an error
@@ -3009,10 +2834,8 @@ class HessianCorrectedGradient(GradientScheme):
         questions, and a calibrated count *below* the default is not evidence the default was wrong.
         Pass a tighter ``tol`` to calibrate for exactness instead.
 
-        The inner truncation sets an error floor no number of outer sweeps removes, but it reaches
-        the gradient attenuated by three to five orders, so calibrating both at one tolerance leaves
-        margin. That attenuation was measured on two meshes only — check the composition against
-        ``hessian_solver=GmresGradientSolve()`` on an unfamiliar one rather than assuming it.
+        On an unfamiliar mesh, check the calibrated scheme against the exact reference,
+        ``hessian_solve=PackedSystemSolve(solver=GmresGradientSolve())``, rather than assuming it.
 
         As with :meth:`CorrectedGreenGauss.calibrated`, the counts are concrete Python ints, so this
         must run **outside** any differentiated or traced region, and under domain decomposition it
@@ -3025,23 +2848,24 @@ class HessianCorrectedGradient(GradientScheme):
         geometry : MeshGeometry
             That mesh's face and cell metrics.
         tol : float, optional
-            Target relative gradient error in the L2 norm over all cells (default ``1e-4``), applied
-            to both systems. See :class:`SweepCalibration`.
+            Target relative gradient error in the L2 norm over all cells (default ``1e-4``). See
+            :class:`SweepCalibration`.
         iters : int, optional
-            Apply budget for each rate estimate (default 24). The outer estimate runs an inner solve
-            inside every apply, so it is the dearer of the two.
+            Apply budget for the rate estimate (default 24).
         floor, cap : int, optional
-            Bounds on the returned counts (defaults 1 and 64).
+            Bounds on the returned count (defaults 1 and 64).
         seed : int, optional
             Seed for the estimates' starting vectors (default 0).
         schur : bool, optional
-            As on the class (default ``True``). When ``False`` there is no inner system and the
-            single calibrated count is for the full packed system.
+            When ``False``, calibrate a fixed sweep on the full packed system instead of the coupled
+            sweep (default ``True``).
 
         Returns
         -------
         HessianCorrectedGradient
-            The scheme, carrying :class:`SweptGradientSolve` strategies at the calibrated counts.
+            The scheme, carrying a :class:`CoupledBlockSweep` at the calibrated count, or a
+            :class:`PackedSystemSolve` with a calibrated :class:`SweptGradientSolve` when ``schur`` is
+            ``False``.
         """
         settings = {"tol": tol, "iters": iters, "floor": floor, "cap": cap, "seed": seed}
         # The closure changes the operator, so it must be in force while the counts are measured
@@ -3059,22 +2883,12 @@ class HessianCorrectedGradient(GradientScheme):
             )
         # One field, so one strategy is built and it is the one that will run -- there is no second
         # path left carrying counts nobody measured.
-        solve: HessianSolve = (
-            CoupledBlockSweep.calibrated(
-                mesh,
-                geometry,
-                local_schur_block=local_schur_block,
-                boundary_closure=closure,
-                **settings,
-            )
-            if coupled
-            else NestedHessianSolve.calibrated(
-                mesh,
-                geometry,
-                local_schur_block=local_schur_block,
-                boundary_closure=closure,
-                **settings,
-            )
+        solve = CoupledBlockSweep.calibrated(
+            mesh,
+            geometry,
+            local_schur_block=local_schur_block,
+            boundary_closure=closure,
+            **settings,
         )
         return cls(
             hessian_solve=solve,

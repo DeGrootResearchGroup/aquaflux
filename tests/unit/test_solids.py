@@ -26,8 +26,11 @@ from aquaflux.solids import (
     Outside,
     Solid,
     Sphere,
+    Torus,
     Union,
 )
+
+from tests.unit.torus_reference import has_real_root, inside_intervals, quartic
 
 NO_OFFSET = jnp.zeros(())
 
@@ -168,6 +171,10 @@ def _bodies() -> dict[str, Solid]:
         ),
         "two holes in two lobes": Difference(
             Union(Sphere([0.5, 0, 0], 0.45), Sphere([-0.5, 0, 0], 0.45)), Sphere([0, 0, 0], 0.35)
+        ),
+        "torus": Torus([0.1, -0.1, 0.05], [0.3, -0.2, 1.0], 0.9, 0.3),
+        "torus sector": Torus(
+            [0.1, 0.0, 0.0], [0.2, 1.0, 0.1], 0.8, 0.35, arc_start=[1.0, 0.0, 0.3], arc=2.0
         ),
     }
 
@@ -708,3 +715,326 @@ def test_a_boundary_point_is_at_zero_on_its_own_face_whose_gradient_is_that_face
         assert np.all(np.delete(faces, own) < 0.0)
         gradient = jax.grad(lambda x, k=own: body.face_distances(x)[k])(jnp.asarray(point))
         np.testing.assert_allclose(np.asarray(gradient), normal, atol=1e-15)
+
+
+# ---------------------------------------------------------------------------------------
+# The torus: two intervals, found by bracketing a quartic, judged against exact arithmetic
+# ---------------------------------------------------------------------------------------
+
+
+def _crossings(body, origin, direction):
+    """The non-empty intervals ``body`` reports along each line, sorted, as lists of pairs."""
+    enter, exit_ = map(
+        np.asarray, body.intervals(jnp.asarray(origin, dtype=float), jnp.asarray(direction))
+    )
+    return [
+        sorted((a, b) for a, b in zip(enter[i], exit_[i], strict=True) if b >= a)
+        for i in range(len(enter))
+    ]
+
+
+def _in_tube(rng, count, ring, tube, arc=2.0 * np.pi):
+    """Points uniform over the tube's cross-section, round ``arc`` of a ring about ``+z``."""
+    around = rng.uniform(0.0, arc, count)
+    turn = rng.uniform(0.0, 2.0 * np.pi, count)
+    depth = tube * np.sqrt(rng.uniform(0.0, 1.0, count))
+    reach = ring + depth * np.cos(turn)
+    return np.stack([reach * np.cos(around), reach * np.sin(around), depth * np.sin(turn)], 1)
+
+
+def test_a_torus_meets_each_line_where_the_exact_quartic_changes_sign():
+    """Every interval's ends against the roots of the quartic, found in exact arithmetic.
+
+    Three kinds of line, because they fail differently: lines at random, which mostly miss or
+    cross the tube once or twice; lines between two points inside the tube, which run along it
+    and give the quartic the long flat bottom where a start from the turning point is poor; and
+    lines from far down a straight leg into a bend, which is an elbow's own geometry. A wrong
+    count of intervals, a crossing on the wrong side of the hole, or a root left unconverged
+    shows as a disagreement in the ends.
+    """
+    rng = np.random.default_rng(21)
+    ring, tube = 1.0, 0.3
+    body = Torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], ring, tube)
+    count = 40
+    origin = np.concatenate(
+        [
+            rng.uniform(-2.0, 2.0, (count, 3)),
+            _in_tube(rng, count, ring, tube),
+            np.stack(
+                [
+                    np.full(count, ring) + rng.uniform(-tube, tube, count) * 0.7,
+                    rng.uniform(-4.0, -1.0, count),
+                    rng.uniform(-tube, tube, count) * 0.7,
+                ],
+                axis=1,
+            ),
+        ]
+    )
+    target = np.concatenate(
+        [
+            rng.uniform(-2.0, 2.0, (count, 3)),
+            _in_tube(rng, count, ring, tube),
+            _in_tube(rng, count, ring, tube, arc=np.pi / 2.0),
+        ]
+    )
+    direction = target - origin
+    told = _crossings(body, origin, direction)
+    meeting = [0, 0, 0]
+    for i in range(len(origin)):
+        exact = inside_intervals(origin[i], direction[i], [0, 0, 0], [0, 0, 1], ring, tube)
+        assert len(told[i]) == len(exact), (i, told[i], exact)
+        meeting[min(len(exact), 2)] += 1
+        length = np.linalg.norm(direction[i])
+        for (a, b), (p, q) in zip(told[i], exact, strict=True):
+            assert abs(a - p) * length < 1e-12 and abs(b - q) * length < 1e-12, (i, told[i], exact)
+    assert min(meeting) > 5, f"the lines must miss, cross once and cross twice: {meeting}"
+
+
+def _grazing_lines():
+    """Lines touching the tube at one point, pushed into or away from it by a hair.
+
+    Each touch is along a direction in which the surface curves away from the line, so pushed
+    into the solid the line enters it and pushed away it misses. Offsets of a part in 1e9 to
+    1e12 of the tube radius, sources one to a hundred ring diameters away.
+    """
+    ring, tube = 1.0, 0.25
+    around, up = np.radians(40.0), np.radians(30.0)
+    general = np.array(
+        [(ring + tube * np.cos(up)) * np.cos(around), (ring + tube * np.cos(up)) * np.sin(around),
+         tube * np.sin(up)]
+    )  # fmt: skip
+    normal = np.array([np.cos(up) * np.cos(around), np.cos(up) * np.sin(around), np.sin(up)])
+    touches = [
+        ((ring + tube, 0, 0), (1, 0, 0), (0, 1, 0)),  # outer equator, along the ring
+        ((ring + tube, 0, 0), (1, 0, 0), (0, 0, 1)),  # outer equator, round the tube
+        ((ring, 0, tube), (0, 0, 1), (1, 0, 0)),  # top, across the hole: it touches twice
+        ((ring, 0, tube), (0, 0, 1), (0, 1, 0)),  # top, along the ring
+        ((ring - tube, 0, 0), (-1, 0, 0), (0, 0, 1)),  # inner equator, round the tube
+        (general, normal, (-np.sin(around), np.cos(around), 0.0)),
+        (
+            general,
+            normal,
+            (-np.sin(up) * np.cos(around), -np.sin(up) * np.sin(around), np.cos(up)),
+        ),
+    ]
+    lines, into = [], []
+    for point, outward, along in touches:
+        point, outward, along = (np.asarray(v, dtype=float) for v in (point, outward, along))
+        for distance in (1.0, 10.0, 100.0):
+            for offset in (1e-9, 1e-10, 1e-11, 1e-12):
+                for side in (1.0, -1.0):
+                    start = point - side * offset * tube * outward - distance * 2 * ring * along
+                    lines.append((start, 2.0 * distance * 2 * ring * along))
+                    into.append(side > 0)
+    return ring, tube, lines, np.asarray(into)
+
+
+def test_a_line_grazing_the_tube_is_decided_as_exact_arithmetic_decides_it():
+    """Whether a nearly tangent line meets the tube, for 168 of them, with no exception.
+
+    This is the case the formulation is for. A closed-form quartic decides it from a
+    discriminant formed by cancellation, and on these same lines a general polynomial root
+    finder (``numpy.roots``) reports 47 wrongly, 24 of them a line that does enter the tube
+    read as a miss -- light through a body that should stop it. Here the decision is the sign of
+    the line's distance to the tube's centre circle at the quartic's turning point, and it must
+    agree with the exact count of the quartic's real roots on every line.
+    """
+    ring, tube, lines, into = _grazing_lines()
+    body = Torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], ring, tube)
+    origin = np.array([start for start, _ in lines])
+    direction = np.array([step for _, step in lines])
+    exact = np.array(
+        [has_real_root(quartic(o, d, [0, 0, 0], [0, 0, 1], ring, tube)) for o, d in lines]
+    )
+    assert np.array_equal(exact, into), "the fixture's lines must go the way they were built"
+    told = np.asarray([bool(c) for c in _crossings(body, origin, direction)])
+    assert np.array_equal(told, exact), np.flatnonzero(told != exact)
+
+
+def test_a_line_skimming_the_inside_of_a_bend_is_crossed_where_it_leaves():
+    """Two lines from an elbow's straight leg that run along the bend just under its inner wall.
+
+    Each comes within a fraction of a millimetre of the wall and stays there for a long stretch
+    before leaving the tube, so the function whose root is the exit is tiny and nearly flat
+    there. An unguarded Newton iteration bounces across that stretch without converging and
+    left both exits a hundredth of the line's length short -- far enough to shadow cells the
+    line reaches. Both were found by comparing a whole elbow's shadow mask, 28 million sight
+    lines, against an independent reference.
+    """
+    for ring, start, finish in (
+        (
+            0.1,
+            [-0.2222222222222222, 0.009793652410468293, -0.005644482309347458],
+            [0.018909867847724412, 0.044116138958996465, 0.0255365381570455],
+        ),
+        (
+            0.15,
+            [-0.19444444444444445, -0.01091641, 0.00293391],
+            [0.06876094, -0.04760115, 0.03373728],
+        ),
+    ):
+        body = Torus([0.0, 0.0, ring], [0.0, -1.0, 0.0], ring, 0.05)
+        start, finish = np.asarray(start), np.asarray(finish)
+        exact = inside_intervals(start, finish - start, [0, 0, ring], [0, -1, 0], ring, 0.05)
+        (told,) = _crossings(body, start[None], (finish - start)[None])
+        assert len(told) == len(exact) == 1
+        assert exact[0][1] > 1.0, "the receiver is in the water, so the exit is past it"
+        np.testing.assert_allclose(told[0], exact[0], rtol=0, atol=1e-13)
+
+
+def test_a_torus_s_chords_are_the_ones_its_two_radii_set():
+    """Closed forms, each end asserted.
+
+    Down the axis a line passes through the hole and meets nothing. Across the middle in the
+    ring's plane it crosses the tube on both sides of the hole, over ``[R - r, R + r]`` each.
+    Along a tangent to the centre circle, in the ring's plane, it stays at least ``R`` from the
+    centre and is inside while within ``R + r`` of it: one chord of half-length
+    ``sqrt((R + r)^2 - R^2)``.
+    """
+    ring, tube = 1.0, 0.25
+    body = Torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], ring, tube)
+    down, across, tangent = _crossings(
+        body,
+        np.array([[0.0, 0.0, -3.0], [-3.0, 0.0, 0.0], [ring, -3.0, 0.0]]),
+        np.array([[0.0, 0.0, 6.0], [6.0, 0.0, 0.0], [0.0, 6.0, 0.0]]),
+    )
+    assert down == []
+    expected = [(-ring - tube, -ring + tube), (ring - tube, ring + tube)]
+    np.testing.assert_allclose(np.array(across) * 6.0 - 3.0, expected, rtol=0, atol=1e-14)
+    half = np.sqrt((ring + tube) ** 2 - ring**2)
+    np.testing.assert_allclose(np.array(tangent) * 6.0 - 3.0, [(-half, half)], rtol=0, atol=1e-14)
+
+
+def test_a_sector_keeps_the_part_of_the_ring_its_arc_sweeps():
+    """A quarter of a ring, from ``+x`` round to ``+y`` about ``+z``: the chord along the tangent
+    at ``+x`` keeps only its half on the ``+y`` side, cut by the start plane; a line through the
+    middle along ``x`` keeps the crossing at ``+x`` and loses the one at ``-x``; and a line
+    through the opposite quarter meets nothing."""
+    ring, tube = 1.0, 0.25
+    quarter = Torus(
+        [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], ring, tube, arc_start=[1.0, 0.0, 0.0], arc=np.pi / 2
+    )
+    tangent, across, opposite = _crossings(
+        quarter,
+        np.array([[ring, -3.0, 0.0], [-3.0, 0.0, 0.0], [-ring, 3.0, 0.0]]),
+        np.array([[0.0, 6.0, 0.0], [6.0, 0.0, 0.0], [0.0, -6.0, 0.0]]),
+    )
+    half = np.sqrt((ring + tube) ** 2 - ring**2)
+    np.testing.assert_allclose(np.array(tangent) * 6.0 - 3.0, [(0.0, half)], rtol=0, atol=1e-14)
+    np.testing.assert_allclose(
+        np.array(across) * 6.0 - 3.0, [(ring - tube, ring + tube)], rtol=0, atol=1e-14
+    )
+    assert opposite == []
+    assert quarter.interval_count == 2
+    assert bool(quarter.contains(jnp.asarray([ring / np.sqrt(2.0), ring / np.sqrt(2.0), 0.0])))
+    assert not bool(quarter.contains(jnp.asarray([0.0, -ring, 0.0])))
+
+
+def test_a_bend_held_by_a_torus_is_clear_exactly_where_its_water_reaches():
+    """An elbow's fluid -- two legs and a quarter torus -- against sampling it a point at a time.
+
+    Segments between points in the water, many of them from the inlet leg round into the bend,
+    are clear exactly when every point along them is in some region. Sampling cannot see a gap
+    narrower than its step, so a disagreement is forgiven only where the reported gap is that
+    narrow -- bounded, not counted.
+    """
+    ring, tube, leg = 0.15, 0.05, 0.4
+    water = Outside(
+        Cylinder([-leg / 2.0 + 1e-7, 0, 0], [1, 0, 0], tube, leg / 2.0 + 1e-7),
+        Torus([0, 0, ring], [0, -1, 0], ring, tube, arc_start=[0, 0, -1], arc=np.pi / 2),
+        Cylinder([ring, 0, ring + leg / 2.0 - 1e-7], [0, 0, 1], tube, leg / 2.0 + 1e-7),
+    )
+    rng = np.random.default_rng(8)
+    count = 800
+    turn = rng.uniform(0.0, 2.0 * np.pi, count)
+    depth = tube * np.sqrt(rng.uniform(0.0, 1.0, count))
+    inlet = np.stack(
+        [rng.uniform(-leg, 0.0, count), depth * np.cos(turn), depth * np.sin(turn)], axis=1
+    )
+    around = rng.uniform(0.0, np.pi / 2.0, count)
+    bend = np.stack(
+        [
+            (ring + depth * np.cos(turn)) * np.sin(around),
+            depth * np.sin(turn),
+            ring - (ring + depth * np.cos(turn)) * np.cos(around),
+        ],
+        axis=1,
+    )
+    assert not np.asarray(water.contains(jnp.asarray(np.concatenate([inlet, bend])))).any()
+    told = np.asarray(water.blocks(jnp.asarray(inlet), jnp.asarray(bend), jnp.zeros(count)))
+    assert told.any() and not told.all(), "the fixture must exercise both answers"
+    steps = 2001
+    walk = inlet[:, None] + np.linspace(0.0, 1.0, steps)[None, :, None] * (bend - inlet)[:, None]
+    sampled = np.asarray(water.contains(jnp.asarray(walk))).any(axis=1)
+    disputed = np.flatnonzero(sampled != told)
+    assert len(disputed) <= 2, (len(disputed), disputed)
+
+
+def test_a_torus_that_is_not_a_ring_or_a_sector_wider_than_a_half_turn_is_refused():
+    """Each refusal names its own reason, so a wrong one cannot pass for another."""
+    with pytest.raises(ValueError, match="tube meets itself"):
+        Torus([0, 0, 0], [0, 0, 1], 1.0, 1.0)
+    with pytest.raises(ValueError, match="needs both arc_start"):
+        Torus([0, 0, 0], [0, 0, 1], 1.0, 0.2, arc=1.0)
+    with pytest.raises(ValueError, match="Union of two"):
+        Torus([0, 0, 0], [0, 0, 1], 1.0, 0.2, arc_start=[1, 0, 0], arc=3.5)
+    with pytest.raises(ValueError, match="lies along its axis"):
+        Torus([0, 0, 0], [0, 0, 1], 1.0, 0.2, arc_start=[0, 0, 2], arc=1.0)
+
+
+def test_a_torus_compiles_with_its_geometry_as_arguments_and_broadcasts():
+    """The mask is one compiled expression over a facets-by-receivers broadcast."""
+    body = Torus([0, 0, 0], [0, 0, 1], 1.0, 0.25, arc_start=[1, 0, 0], arc=2.0)
+    rng = np.random.default_rng(2)
+    starts = jnp.asarray(rng.uniform(-1.5, 1.5, (6, 1, 3)))
+    finishes = jnp.asarray(rng.uniform(-1.5, 1.5, (1, 50, 3)))
+    eager = np.asarray(body.blocks(starts, finishes, jnp.zeros((6, 50))))
+    assert eager.shape == (6, 50) and eager.any() and not eager.all()
+    compiled = np.asarray(
+        eqx.filter_jit(lambda b, a, f, n: b.blocks(a, f, n))(
+            body, starts, finishes, jnp.zeros((6, 50))
+        )
+    )
+    assert np.array_equal(eager, compiled)
+
+
+def test_a_grazing_line_s_crossings_are_placed_as_well_as_its_inputs_allow():
+    """Where lines touching the tube at random -- some also crossing it elsewhere -- go in and out.
+
+    Near a tangency a crossing is fixed only to about the square root of rounding, so the ends are
+    held to that, as a length, not to rounding. The lines that need care are those that graze
+    the tube in one place and leave it close by: the exit then lies beside the quartic's middle
+    turning point, where a start from the quadratic model about the low one puts Newton a long
+    way off -- and a fixed count of steps leaves the exit a millimetre short on a ring of radius
+    one, inside every tolerance a classification test has.
+    """
+    rng = np.random.default_rng(5)
+    ring, tube, count = 1.0, 0.25, 160
+    around, turn = rng.uniform(0, 2 * np.pi, count), rng.uniform(0, 2 * np.pi, count)
+    reach = ring + tube * np.cos(turn)
+    point = np.stack([reach * np.cos(around), reach * np.sin(around), tube * np.sin(turn)], 1)
+    outward = np.stack(
+        [np.cos(turn) * np.cos(around), np.cos(turn) * np.sin(around), np.sin(turn)], 1
+    )
+    first = np.stack([-np.sin(around), np.cos(around), 0 * around], 1)
+    angle = rng.uniform(0, 2 * np.pi, count)
+    along = np.cos(angle)[:, None] * first + np.sin(angle)[:, None] * np.cross(outward, first)
+    offset = 10.0 ** rng.uniform(-12, -2, count) * tube * rng.choice([-1.0, 1.0], count)
+    distance = 10.0 ** rng.uniform(0, 2, count) * 2 * ring
+    origin = point - offset[:, None] * outward - distance[:, None] * along
+    direction = 2 * distance[:, None] * along
+    body = Torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], ring, tube)
+    told = _crossings(body, origin, direction)
+    for i in range(count):
+        exact = inside_intervals(origin[i], direction[i], [0, 0, 0], [0, 0, 1], ring, tube)
+        assert len(told[i]) == len(exact), (i, told[i], exact)
+        length = np.linalg.norm(direction[i])
+        for (a, b), (p, q) in zip(told[i], exact, strict=True):
+            assert abs(a - p) * length < 1e-7 and abs(b - q) * length < 1e-7, (i, told[i], exact)
+
+
+def test_a_segment_of_no_length_is_inside_the_ring_or_nowhere():
+    """A point: blocked when it lies in the tube, clear when it lies in the hole or outside."""
+    body = Torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0, 0.25)
+    points = jnp.asarray([[1.1, 0.0, 0.0], [0.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    assert np.asarray(body.blocks(points, points, jnp.zeros(3))).tolist() == [True, False, False]

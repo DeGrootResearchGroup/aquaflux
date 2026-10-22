@@ -5,1184 +5,444 @@ paths:
 
 # Rules — `aquaflux/flow/` (coupled pressure–velocity)
 
-> ⚠️ **`coupled_continuation`, `coupled_lu_continuation`, `coupled_amg_continuation`, `lu_beta_tracking_refresh` and `amg_beta_tracking_refresh` no longer exist (deleted 2026-09-14, #371).** Entries below that name them are dated history. The coupled march is now one builder, `coupled_step`, given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit | BlockInverse)` (a `CompleteLu` inverse existed until 2026-10-11)), and a march that keeps its preconditioner current runs on a session (`open_session`) — see the rename table in `.claude/rules/turbulence.md`.
+The coupled p–U block — the project's central bet. Solved **monolithically** `(u, v[, w], p)` per cell,
+not segregated SIMPLE/PISO; the whole Jacobian comes from AD. This file may cite the C++/Fortran
+precursors for *your* understanding; none of that provenance may reach `.py` or `docs/` (root
+`CLAUDE.md` Comment Convention). Dated measurements and investigation records: `.claude/notes/flow-log.md`.
 
-> ⚠️ **`BlockPreconditioner.build(velocity=…)` takes a value, not a string (2026-09-14, #390).** `"smoothed"` → `ViscousMultilevel()`, `"convection"` → `ConvectionTwoLevel()`, `"convection-air"` → `ConvectionAir()`; a string is refused. `SmoothedAmgConvectionVelocity` is split into `TwoLevelConvectionVelocity` / `AirConvectionVelocity`, and `_build_velocity_block` is gone (each value has a private `_build`). `VelocityBlock` and `_ConvectionVelocityBlock` are **abstract** (`abc`), and `SettingsValue.__new__` refuses them at construction naming the three values — an `isinstance` check alone let a bare base through to a late, empty `NotImplementedError` after the pressure Schur was built (review of PR #398). Entries below quoting the strings are dated history.
-
-> ⚠️ **Renamed 2026-10-12 (#373, part 2).** `MomentumContinuity.viscosity` is `effective_viscosity` (it returns `μ + ρν_t`;
-> bare `viscosity` means the molecular property). The mass-flow drive's solved body force is written `f` in the code and
-> its docstrings (`MassFlow.forced(momentum, force)`, `R_aug([w, f])`), because `β` means the pseudo-transient shift
-> strength everywhere else. Entries below that write the force as `β` predate the rename and mean `f`.
-
-> **Provenance boundary (binding).** This file cites the C++/Fortran precursors to inform
-> *your* understanding — that is its job, and why it loads into your
-> context. Per the root `CLAUDE.md` **Comment Convention**, none of that provenance may
-> reach the shipped surface (`.py` comments/docstrings, `docs/`): cite the *math*, never the
-> reference code, the `.claude/` rules, the design notes, or the author's own papers.
-
-The coupled p–U block — the project's central bet. Solved **monolithically**
-`(u, v[, w], p)` per cell, not segregated SIMPLE/PISO. Governed by the root `CLAUDE.md`
-Engineering Principles.
+**Names that no longer exist** (grep lands here): `coupled_continuation`, `coupled_lu_continuation`,
+`coupled_amg_continuation`, `lu_beta_tracking_refresh`, `amg_beta_tracking_refresh` → one builder
+`coupled_step` given a preconditioner value (`BlockDiagonal` or `MaterializedJacobian(FieldSplit |
+BlockInverse)`), sessions via `open_session` (rename table in `turbulence.md`). `BlockPreconditioner.build
+(velocity="smoothed"/"convection"/"convection-air")` → values `ViscousMultilevel()` / `ConvectionTwoLevel()`
+/ `ConvectionAir()` (a string is refused; `VelocityBlock` and `_ConvectionVelocityBlock` are abstract and
+`SettingsValue.__new__` refuses them). `MomentumContinuity.viscosity` → `effective_viscosity` (returns
+`μ + ρν_t`; bare `viscosity` means the molecular property). The mass-flow drive's solved force is `f` in
+code (`MassFlow.forced(momentum, force)`); older entries in the log writing it `β` mean `f`, since `β` is
+the pseudo-transient shift strength. `pressure_pin=` / `pressure_pin_value=` → `pressure_datum=`. The
+`body_force` leaf → a `UniformBodyForce` source or a `MassFlow` drive. There is no `MASS_FLOW_CONVERGENCE`,
+`solve_coupled_mass_flow`, `mass_flow_coupled_continuation`, `simple_preconditioner`,
+`viscous_face_coefficient`, `convection_diffusion_operator`, `BlockStateLayout`, `inner=` selector,
+`AggregationSchur`, `DampedJacobiSchur` or `DiagonalVelocity`.
 
 ## Status — BUILT (steady laminar, Poiseuille-validated)
-- **`FlowBoundary.closes() -> FLOW_FIELDS = ("velocity", "pressure", "mdot")` (#355).** A flow
-  condition is a *bundle* of three closures where a scalar `BoundaryCondition` is one, and nothing
-  about their shapes says so. `MomentumContinuity.build` refuses a collection whose closures declare
-  anything else, naming the patch — see `boundary.md` for the mechanism and what it replaces.
-- **`FlowBoundary.shears_flow()` has THREE consumers, and one is inside the residual.** The wetted
-  area for `scales.hydraulic_length`; the **wall-function viscosity override** the momentum assembler
-  selects on exactly these faces, which is solution-affecting; and `CoupledRANS.build`'s wall
-  reconciliation. Its docstring claimed the first only, and said it "never enters the residual" —
-  false since the wall model landed, corrected in #355. It is also this package's `is_wall` predicate:
-  do not add a second one.
-- **`datum.py` — `PressureDatum` → `PinnedPoint(point, value=0.0)`; `refuse_an_unsuitable_pressure_datum`
-  (2026-09-24, #500).** `MomentumContinuity.build(pressure_datum=...)` **replaces `pressure_pin=` /
-  `pressure_pin_value=`** (no alias). The datum is a *place*: the cell whose centroid is nearest `point`
-  (ties to the lowest index), resolved once at build into the assembler's static `pressure_pin` field —
-  which keeps its name, since it IS the pinned cell, and which the Schur geometry, the SIMPLE kernels
-  and `potential_flow` read unchanged. A point survives `permute_cells` and a remesh, which an index did
-  not (`test_flow_preconditioner` used to recompute the index after renumbering; now the same point just
-  works — pinned by `test_a_point_pins_the_same_physical_cell_however_the_cells_are_numbered`).
-  - **Whether a datum is needed is DERIVED and enforced both ways**, by
-    `refuse_an_unsuitable_pressure_datum(boundary, datum, caller)`, called from the build: none of the
-    closures `prescribes_pressure()` (declared on `FlowBoundary`, `True` for `PressureOutlet` alone) ⇒ a
-    datum is required (else the system is singular); some does ⇒ a datum is refused (it would
-    over-determine the level). The case file asks the same function through each patch's flow closure.
-  - ⚠️ **The refusal found 15 fast-tier tests (in three files) building a closed domain with NO datum** — assemblers built
-    "only for their geometry" or their viscosity, never solved, so the singular system was never met. They
-    now carry one. A dry run of the slow + validation tiers (every build stopped just after the check)
-    found no others. `pressure_pin_value` had no caller outside the build.
-  - **Why no `PinnedPatch` or mean-pressure datum**: a patch "datum" either pins an arbitrary cell (a point
-    does that) or holds a patch mean — a row coupling every face of the patch, which the coloured probe and
-    the Schur preconditioner do not handle. No `PinnedCell` either: a point does everything an index does
-    and survives renumbering.
-- **`drive.py` — `Drive` → `BoundaryDriven` / `MassFlow` (2026-09-23, #375).** What forces the
-  momentum equation, and what that makes of the state. `MomentumContinuity.drive` **replaces the
-  `body_force` leaf**, which meant a prescribed input on one case and a live solve unknown on another
-  (#224). Two members, not three: a *prescribed* uniform force is a `UniformBodyForce` source, so it is
-  not a drive at all, and the union is only "the unknowns are the fields" against "the unknowns are the
-  fields plus a multiplier". `Drive` is abstract in all seven members on purpose (`held_speed`, the speed a drive holds, added 2026-10-09 for the limiter scale; `held_velocity(dim)`, the plug a starting state takes, added 2026-10-11 in #541 so `body_force_velocity` starts a held bulk velocity at its target rather than at the seed force's speed) — a default would let a
-  bordered drive inherit an answer that drops its multiplier.
-  `MassFlow` owns everything the bordered form needs of the drive, so every solve that holds it shares
-  one definition: `layout` / `join` / `split` (the border, attached through the declared layout),
-  `driven_state` / `fields_state` / `settled` (the seed and the answer), `constraint_vectors` /
-  `constraint_vectors_in` (the border column and row, padded into an outer layout), `forced` (writing a
-  force into the assembler) and `bulk_velocity`. The bordered residual, policy and measures built from
-  it are `flow/bordered.py`'s (see "A held bulk velocity on every march" below). ⚠️ There is no
-  `MASS_FLOW_CONVERGENCE` any more (#541): the bordered row-scaled measure exists, so a held bulk
-  velocity takes the same default stopping test as any other solve.
-  ⚠️ **Both entry points read the drive off the ASSEMBLER rather than taking a target** — a target
-  named twice is how the constraint being enforced and the force being applied come to disagree — and
-  `mass_flow_drive(momentum, caller)` is the one refusal for an assembler that has none. It is worth
-  raising early: the bordered residual writes each iterate into `momentum.drive.force`, so on a
-  boundary-driven assembler the failure is an `equinox.tree_at` path error from inside a traced step.
-  ⚠️ **The refusal runs in BOTH directions, and the second one is the dangerous case because it would
-  otherwise WORK.** `refuse_a_constraint_this_solve_cannot_hold` is called by a solve that marches the
-  fields alone — since #541 only `reused_flow_solve` (`solve_flow_march` and `solve_coupled` border
-  themselves instead). A `MassFlow`
-  drive's force is a perfectly good force, so those would hold it fixed at the seed, converge, and
-  report a bulk velocity nobody asked for, with the constraint silently dropped and nothing in the
-  result saying so. A refusal that only caught the *missing* drive would leave exactly the class of
-  defect this split exists to remove.
-- **`momentum.py` — `MomentumContinuity`.** The coupled residual over the flat state
-  `[vel_0..vel_{dim-1}, pressure]` (the system-first layout; `pack`/`unpack` convert to
-  `(velocity, pressure)`). **That layout is not written here.** `state.py::flow_state_layout(dim,
-  n_cells)` only *names* this system's `velocity` / `pressure` blocks over the shared
-  `solve/state.py::FieldLayout`, which owns every piece of `f * n_cells + i` arithmetic in the
-  package (#285 — there is no `BlockStateLayout` class). `MomentumContinuity.layout` is **public**
-  (it was `_layout`) because the coupled RANS state nests this very object as its `flow` block
-  rather than rebuilding one from `dim` and `n_cells`; `pack`/`unpack`/`initial_state` delegate to
-  it. Per component the momentum balance is a scalar transport of `u_i`
-  — advection (`mdot·u_i`) + viscous diffusion (μ as the coefficient) + pressure force
-  (`p_f n_i A`) — **and all three are `FaceFluxOperator`s composed by the shared `CellBalance`**,
-  the same object that assembles every scalar transport equation (`.claude/rules/discretization.md`).
-  It forms one shared `MeshContext` (properties `{"viscosity": μ}`, since that does not vary with the
-  component) and, per component, wraps it in a `FieldContext` (the component gradient, the boundary
-  velocity) and hands it to
-  `CellBalance((DiffusionFlux, PressureForce, AdvectionFlux)).residual(component, context)`.
-  Continuity is `Σ mdot_f = 0`. The whole Jacobian comes from AD; solved by the existing
-  `RootSolver`.
-  - **`PressureForce` (`momentum.py`, exported from `aquaflux.flow`) is the one flow-specific
-    operator.** `p_f n_i A` — the momentum pressure term written as what it is, a surface flux of
-    momentum — carrying the already-reconstructed face pressure as constructor state and the
-    component as a static field, and **ignoring the transported field** (pressure is a different
-    unknown, exactly as `AdvectionFlux` ignores it through `mass_flux`). That loses no coupling:
-    `face_pressure` is a differentiable function of the pressure unknowns, so AD still recovers the
-    full `dR_momentum/dp`. Before this it was added by hand inside `_momentum_residual`, which is
-    what forced the momentum block to open-code the flux sum and scatter instead of composing the
-    shared balance.
-  - **⚠️ The operator order `(diffusion, pressure, advection)` is load-bearing arithmetic, not
-    style.** A `CellBalance` sums in tuple order and floating-point addition is not associative, so
-    reordering perturbs the residual in the last bits — and `bfs3d` march trajectories are compared
-    bit-for-bit across runs (`march_log_compare.py` exists because a trajectory difference was once
-    mis-attributed to a change rather than to the base). This order reproduces the hand-assembled
-    `(diffusion + pressure) + advection` it replaced; the whole refactor was gated on the coupled
-    `bfs3d` residual at `state-00067` being bit-unchanged, not on tests passing.
-  - **`MomentumContinuity` has no `_scatter`** — there is no such method; the balance scatters, and
-    continuity calls `mesh.face_cells.scatter_conservative(mdot)` directly.
-  - **`source.py` — `MomentumSource` / `UniformBodyForce` (BUILT, #58).** The vector counterpart of
-    `VolumeSource`: volume-integrated force per cell, production positive, subtracted from the
-    balance. Injected as `MomentumContinuity.build(sources=(...))` and applied at the **vector**
-    level in `_momentum_residual`, after the per-component balances are stacked — a momentum source
-    is coupled across components (a rotating-frame term is `−2ρΩ×u`), so it is not a per-component
-    quantity and cannot ride in a `CellBalance`'s scalar `source_operators`.
-    - **`requires()` names the properties a source reads (default `()`)** — inherited, with
-      `uses_gradient()`, from `discretization.DeclaredInputs`, the contract every term family shares
-      (#362); `MomentumContinuity.build` unions them (`declared_properties`) with
-      `viscosity`/`density` into one `properties.require(...)`. `uses_gradient()` (does the source
-      need the velocity-gradient tensor?) has **nothing to check here**: the flow always reconstructs
-      — `gradient_scheme` is not optional — so it is declared, and falsified by
-      `tests/unit/test_declared_inputs.py`, but not enforced at build, so a drag reading a mistyped `"permeability"` is a build-time
-      `ValueError` rather than a `KeyError` inside a traced residual. Not abstract, unlike the three
-      below: a missing declaration only moves where the error surfaces, never the answer.
-    - **It does NOT take a `FieldContext` (binding).** That context carries *one* scalar component's
-      boundary values and reconstructed gradient; a momentum source needs the whole kinematic state
-      (the velocity, and the gradient **tensor** for anything stress-like), so handing it one
-      component's context would be arbitrary. It takes the `VelocityFields` bundle those quantities
-      already travel in, plus `geometry` and the evaluated `properties`.
-    - **Three members, ALL abstract on purpose.** `source` is the term; `face_force` is the
-      face-normal force a *spatially varying* source must expose so the mass flux treats it
-      consistently with the pressure gradient (skip it and the pressure–velocity decoupling
-      Rhie–Chow suppresses reappears in the force); `diagonal` is the contribution to the momentum
-      diagonal, which is assembled **separately from the residual** and feeds the Rhie–Chow damping,
-      the frozen preconditioner and the pseudo-transient shift. Defaults were deliberately *not*
-      given for the last two: a new source inheriting "no face treatment" or "no diagonal" silently
-      would be wrong in exactly the cases that matter. Pin any non-trivial `diagonal` against **AD of
-      the source's own `source`** — the `FixationRow.jacobian_scale` pattern
-      (`test_momentum_source.py` does this for a velocity-dependent drag).
-    - **⚠️ `diagonal` was DECLARED LOAD-BEARING AND NEVER CALLED until 2026-08-20 (#279) — WIRED
-      now.** `momentum_matrix_diagonal` adds `Σ_sources source.diagonal(velocity, geometry,
-      properties)` (via the private `_source_diagonal`) on **both** the residual
-      (`boundary_corrected=True`) and frozen (`False`) paths, and `momentum_matrix_diagonal_parts`
-      adds it to the **dissipative** bucket. Nothing was wrong while the only shipped source was
-      `UniformBodyForce`, whose diagonal is zero — so the whole change is byte-identical today, and a
-      test pins that. It was a trap for the first real one: a porous drag contributes `rate·V` to its
-      own momentum row, and `a_P` is **not** preconditioner-only (it is the differentiated Rhie–Chow
-      damping `V/a_P`), so a correctly-implemented `diagonal()` sitting unused would have given a
-      wrong converged answer *and* a wrong adjoint. Two conventions, both deliberate: the total is
-      added **unfloored** (it is the operator coefficient and must stay honest, even if a source
-      genuinely weakens the diagonal), while the bucket contribution is **component-averaged and
-      floored at zero** (those two are a forward-path stabilization scale documented `>= 0` and
-      isotropic, and an anti-dissipative source must not be allowed to cancel the shift's damping).
-      Pinned the operator-consistency way, not by transcription: with a drag injected,
-      `momentum_matrix_diagonal` must still equal `diag(jacfwd(residual))` — plus a **control** that
-      the sourceless `a_P` fails that same comparison by exactly `rate·V`, so the test cannot pass
-      vacuously. The velocity AMG needed no change: it rescales its frozen hierarchy to the current
-      `a_P` by a symmetric congruence, so a diagonal source term is reproduced there exactly.
-    - **`diagonal` narrowed to take the CELL VELOCITY, not `VelocityFields` (#279).** A diagonal is
-      by definition `∂(row)/∂(that cell's own unknown)`; the boundary-face values and the gradient
-      tensor are neighbour couplings and belong to off-diagonal entries. It is also what makes the
-      wiring possible at all: two of the three assembly sites (the frozen preconditioner and the
-      shift) hold a bare velocity and reconstruct no gradient. `source` keeps the full bundle.
-    - **`face_force` is DECLARED, not implemented — only the `None` (uniform) case exists, and a
-      non-`None` return is now REFUSED at build rather than dropped (#279).** The balanced-force
-      interpolation a non-uniform force needs is deferred with buoyancy (see "Not yet built"); the
-      seam is declared now so the interface cannot be built in a shape that cannot express it.
-      `source.reject_unsupported_face_force(sources, geometry, properties, mesh)`, called once from
-      `MomentumContinuity.build`, raises `NotImplementedError` naming the source — because the mass
-      flux carries the pressure-gradient term alone, so a declared face force would be silently
-      dropped, which is the *worst* of the three possible behaviours. Evaluated at build, not per
-      residual: whether a source declares one is a property of the source, not of the state.
-  - **⚠️ A PRESCRIBED uniform force IS a `UniformBodyForce` source; only a SOLVED one is not (#224,
-    2026-09-23).** Until then `MomentumContinuity` carried a `body_force` leaf beside `sources`, and it
-    meant two different things: a fixed input on a periodic channel, and the live iterate of a
-    bulk-velocity solve. The two meanings are now two classes — a source and a `MassFlow` drive
-    (`flow/drive.py`) — and the leaf is gone. The reason a solved force cannot be a source is specific
-    and worth keeping: the bordered solve writes a traced scalar into that leaf on **every** residual
-    evaluation (`MassFlow.forced`, `eqx.tree_at` on `momentum.drive.force`) and forms its border column
-    from the **analytic** `a = dR_flow/dβ = −V`, which holds only for a uniform, state-independent
-    force. Addressing a *source* that way would mean asking it for its own `dR/dβ` instead of assuming
-    `−V` — the same hand-derived-coefficient trap as the row-scaler defect.
-    ⚠️ **The migration fixed a live defect, which is the general lesson: an inference from a VALUE is
-    not the same as the fact it stands for.** `scales.body_force_velocity` decided "this domain is
-    body-force-driven" by reading the leaf, so a channel built the source way answered zero and the
-    hybrid IC started it at rest. The sum of both routes now has one home,
-    `MomentumContinuity.uniform_body_force()`, and `Drive.volumetric_force` returns `None` for "no
-    force at all" rather than a zero vector — because a mass-flow solve *is* force-driven at the
-    instant its multiplier happens to be zero, which is every solve's first step.
-  - **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding, #106).** The
-    boundary fields, both gradients, the lagged `a_P`, and the Rhie–Chow flux are assembled once by
-    the public `flow_fields(state) -> FlowFields`; `residual` = `residual_from_fields(flow_fields(state))`
-    and `mass_flux(state)` = `flow_fields(state).mdot`. A coupling caller that needs several of these at
-    one state (a coupled RANS residual wanting the residual **and** `mdot`, a segregated sweep wanting
-    the gradient **and** `mdot`) must call `flow_fields` **once** and read the fields — not call the
-    accessors separately, which re-assembles the whole Rhie–Chow flux per accessor (was 3× per coupled
-    residual eval; the pre-optimization HLO / AD-tape size scaled with that). **`velocity_fields` is
-    deliberately the lightweight path** (boundary velocity + the shared `_velocity_gradient` only, **no**
-    `a_P`/`mdot`): the eddy viscosity a segregated sweep needs comes before the mass flux is even
-    defined, so dragging the Rhie–Chow assembly through it would defeat the point. Same formula as the
-    bundle (both read `_velocity_gradient`, which returns the gradient **and** the boundary velocity
-    consistent with it), so no duplication. Pinned by
-    `test_flow_fields_accessors_agree_with_the_bundle` / `test_velocity_fields_skips_the_rhie_chow_assembly`.
-  - **The kinematic half is its own bundle, `VelocityFields` (`velocity`, `boundary_velocity`,
-    `gradient`), nested inside `FlowFields` (binding — Principle 3).** It is exactly the part of a flow
-    state that is a pure function of the velocity unknowns (no pressure, no `a_P`, no `mdot`), and it is
-    the *whole* of what the turbulence closure reads from the flow — `SSTTurbulence.closure_fields`
-    takes this one object. It exists because the adaptive wall treatment needs `velocity` and
-    `boundary_velocity` **as well as** the gradient (the near-wall shear rate is `|U_P − U_wall|/d`
-    measured against the patch's own velocity), and threading three arrays that always travel together
-    is the primitive-obsession smell. `MomentumContinuity.velocity_fields(state)` returns it directly;
-    `flow_fields(state).velocity_fields` is the same record inside the full bundle — **nested, not a
-    second view**, so there is no duplicate spelling of those three arrays. It replaced
-    `velocity_gradient(state)` outright (pre-release, no shim); a caller that only wants the tensor
-    writes `velocity_fields(state).gradient`.
-  - **Fluid properties come
-  from a `PropertyModel`** (`build(mesh, geom, properties, boundary, *, gradient_scheme=…)` — the
-  scheme is keyword-only and defaults to `schemes.DEFAULT_GRADIENT_SCHEME`; must supply
-  `"viscosity"`+`"density"`; `.effective_viscosity`/`.density` evaluate them per-cell — the first adds `ρν_t` to the molecular value) — see
-  `.claude/rules/properties.md`. **`boundary` is a `BoundaryConditions({name: FlowBoundary})`**
-  collection (constructed like a `PropertyModel`), bound inside `build` via
-  `boundary.resolve(mesh.face_patches, mesh.face_cells)` (which refuses a map leaving any boundary
-  face uncovered, so every patch needs a `FlowBoundary`) to a single `boundary` field (not three parallel
-  `names`/`conditions`/`faces` tuples); `_apply_per_patch` now just binds `mesh.face_cells` to
-  `boundary.apply` — do not reintroduce the loose-tuple form or a bare-dict arg (see
-  `.claude/rules/boundary.md`). **`rho` is per-cell**, and the Rhie–Chow mass flux interpolates it
-  *with* the velocity as the momentum `interp(ρu)·n` (density rides with velocity; the correction/
-  Schur term uses `interp(ρ)`). Constant density is bit-for-bit unchanged; variable-density physics
-  is not yet validated.
-  - ⚠️ **THE GRADIENT SCHEME IS BOUND ONCE PER SOLVED FIELD, NOT ONCE (#467).** `build` carries
-    `velocity_gradient_schemes` (one per component, in the state layout's order) and
-    `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry, linearization)` against **that
-    field's** `BoundaryLinearization`; `_velocity_gradient` and `_pressure_gradient`
-    apply those, never `gradient_scheme`. A gradient-type condition folds its dependence on the owner
-    gradient into the reconstruction's first pass, which then inverts `M1 − B`, so a scheme whose
-    corrections were probed on `M1⁻¹` corrects an operator nobody evaluates. **One binding cannot
-    serve the flow state**: the patches treat the fields oppositely — a `PressureOutlet` prescribes
-    the pressure and extrapolates the velocity, a wall does the reverse — so the two weights are
-    nonzero on *disjoint* patches. Measured on an 8×8 perturbed quad grid (perturb 0.3, seed 3,
-    `MultipleCorrectionGradient` + `SkewCorrectedGradient` fallback, pressure prescribed on both
-    x-normal patches and velocity on both walls): quadratics reproduced to ~4e-15 per field, against
-    4.4e-3 of the pressure gradient and 3.1e-3 of the velocity gradient on the single geometry-only
-    binding this replaced. Pinned by `test_the_flow_assembler_binds_a_scheme_per_solved_field` and
-    `test_the_velocity_and_pressure_linearizations_differ_on_the_same_patch`.
-    ⚠️ **On tetrahedra the first version shipped a singular pressure correction** (94 cells at
-    `max|M2⁻¹|` 3.1e16 on the 2462-cell duct) and froze the laminar march; the cause was the probe,
-    not the per-field split — see the ⚠️⚠️ note beside the `bind` entry in `.claude/rules/schemes.md`.
-    Each binding now takes a `BoundaryLinearization` (value weight and gradient weight per face),
-    built by `_build_time_velocity_linearizations` / `_build_time_pressure_linearization`.
-    Both weights are read off the closures by `jax.jvp` at **rest**, which is exact rather than
-    approximate: every flow closure is affine in the gradient it is handed (a prescribed value
-    ignores it, an extrapolating one adds `grad·d_t`), so the derivative at rest is the derivative
-    everywhere — `test_the_flow_boundary_linearizations_do_not_depend_on_the_state`. Unlike the
-    scalar twin on `ResidualAssembler`, no property is evaluated on the way, so there is no
-    calculated-property failure mode here. `build` is therefore **two-phase**: construct with the
-    geometry-only binding in every slot, then `dataclasses.replace` once the closures exist to read
-    the weights from.
-    ⚠️ **`momentum.gradient_scheme` survives and now means the CONDITION-FREE form** — the
-    reconstruction this flow is configured with, prepared for the geometry alone. It is what an
-    initializer solving a *different* equation on this mesh reads and re-binds against that
-    equation's own conditions (`potential_flow` → `laplace_field` → `ResidualAssembler.build`); it is
-    **not** what the residual applies, and reconstructing a flow field with it directly returns the
-    inexact answer above.
-    Exactness now needs a field to satisfy its conditions only **at the boundary faces**, so the
-    ordinary inlet/outlet/wall layout is testable with a pressure varying along the duct
-    (`test_the_flow_is_exact_on_an_inlet_outlet_wall_duct`). There is no such thing as the "must
-    satisfy a zero-gradient patch identically" trap an earlier version of this note described: that
-    was the probe telling every basis field a zero-gradient face had zero normal derivative.
-- **`rhie_chow.py` — `interior_mass_flux` + `momentum_diagonal`.** The Rhie–Chow face flux
-  `mdot_f = ρ(u_ip·n − d̂[(p_N−p_P) − ∇̄p·d]/(d·n))A` couples pressure implicitly and kills
-  checkerboarding; it reduces to the interpolated velocity flux where pressure is smooth. **Skewness-
-  consistent (2nd-order on non-orthogonal meshes):** the momentum `ρu` is reconstructed to the face
-  **integration point** via `interpolate_to_face` (blend + `∇·(x_ip−x_g)`), not stopped at the
-  projection foot `x_g`; and the pressure damping compares the compact and reconstructed jumps **along
-  the connection vector `d`** (`(Δp − ∇̄p·d)/(d·n)`), not projected on the face normal, so the two are
-  the same directional derivative and cancel on a linear pressure field. Validated:
-  `tests/integration/test_skewed_flow.py` (linear Couette reproduced to solver tolerance on a skewed
-  mesh). **`momentum_diagonal` returns per-component `a_P` `(n_cells, dim)`** (isotropic today —
-  viscous/convective/transient are component-independent — but the seam a directional source, e.g.
-  porous resistance, would fill); the Rhie–Chow coefficient is the **directional** projection
-  `d̂ = Σ_i n_i²(V/a_P_i)_f`, which equals the scalar `V/a_P` for equal components. Keeps `g`-weighting
-  (not the Fortran's `0.5`). The block preconditioner reduces `a_P` to the isotropic
-  (component-averaged) scalar — the directional form enters only the operator. The momentum **pressure
-  force** (`momentum.py::_face_pressure`) is likewise reconstructed to the integration point; the
-  lagged-`a_P` momentum estimate uses `interpolate_to_face` too when `grad_velocity` is available
-  (the preconditioner keeps the cheap leading-order blend, exact at convergence since `a_P` is lagged).
-  - **⚠️ `a_P` does NOT widen the coupled Jacobian's velocity stencil — measured, and the opposite is an
-    easy conclusion to reach from this code (2026-08-11).** The argument that looks right: the mass flux
-    carries `V/a_P` averaged across the face, so a cell's residual reads its *neighbour's* momentum
-    diagonal, and that diagonal is a sum over the neighbour's own faces of a lagged convective flux which
-    is itself gradient-reconstructed — a ring on the far side. It is wrong. Removing the velocity gradient
-    from `_lagged_mdot_estimate` leaves the velocity columns reaching graph distance **3**, unchanged; so
-    does first-order momentum advection, and so does a one-shot compact gradient. What actually spends the
-    ring is the **eddy viscosity's dependence on the strain rate** (`.claude/rules/turbulence.md`). Note
-    the one asymmetry here that *is* real and is worth keeping: `_lagged_mdot_estimate` is a function of
-    velocity alone — it carries no pressure, which is what breaks the `a_P` ↔ `mdot` circularity — so
-    pressure never enters `a_P`. That is true, and it is not what sets the reach.
-    Harness: `validation/bfs3d_openfoam/column_reach_probe.py`.
-  **Boundary faces respect the BC type** (`boundary_owner_coeff`, from each patch's
-  `momentum_diagonal_coefficient`): a zero-gradient outlet adds **no** viscous diagonal (its viscous
-  flux `μ(u_owner−u_owner)/(d·n)` is zero), and a no-through-flow wall adds **no** convective diagonal
-  (its mass flux is exactly zero) — assembling over *all* faces uniformly over-counted both. Applied to
-  the **residual** `a_P` only (`momentum_matrix_diagonal`, default `boundary_corrected=True`).
-  **The viscous boundary term uses the operator's per-face boundary viscosity, not the owner cell's
-  (binding, #155).** `boundary_momentum_diagonal` builds `μ_f A/(d·n)` from `_boundary_face_viscosity()`
-  — the same per-face coefficient the residual's `DiffusionFlux` carries at the boundary
-  (`_wall_boundary_viscosity()`, falling back to the owner-cell `μ_eff` off the shearing walls). On a
-  **wall-function** mesh the wall model's `μ + ρ·ν_t,wall` and the wall-adjacent cell's *log-layer*
-  `k/ω` `μ_eff` differ by a large factor (measured ~6.5× on a `y*≈38` cavity), so gathering the owner
-  cell's viscosity left `a_P ≠ diag(J_momentum)` exactly where the wall model is active (suppressing the
-  Rhie–Chow damping `V/a_P` there — a converged-solution effect, like #154). Wall-**resolved** meshes
-  have `ν_t,wall = 0` (a no-op), which is why the wall-resolved `test_channel_law_of_the_wall` cannot see
-  it; pinned instead by a wall-function `a_P` vs `diag(jacfwd(residual))` test (`test_preconditioner.py`). The
-  **frozen** preconditioner / continuation-shift diagonal (`frozen_momentum_diagonal`) keeps the plain
-  all-faces form (`boundary_corrected=False`): it is a forward-path *stabilization* scale, not the
-  operator coefficient, and the extra boundary damping is what carries the high-Reynolds pseudo-transient
-  march — correcting it there regressed `test_channel_high_reynolds` and never affects the converged
-  residual or its adjoint (the shift vanishes at the fixed point).
-- **`a_P`'s viscous term is the flux-continuous conductance, i.e. the diffusion operator's own diagonal
-  (binding, #154).** `momentum_diagonal`/`momentum_diagonal_parts` build the viscous coupling from
-  `discretization.flux_continuous_conductance(μ_eff, geometry, face_cells)` — `Γ_P A / denom`,
-  `denom = (D_P·n) − (Γ_P/Γ_N)(D_N·n)`, the *same* per-face value AD gets by differentiating
-  `DiffusionFlux`'s owner-outward flux, so scattering it to both cells reproduces the residual's momentum
-  diagonal. On an orthogonal graded face it is the **harmonic mean** `2Γ_PΓ_N/(Γ_P+Γ_N)·A/h`. The old
-  g-weighted **arithmetic** face viscosity (`viscous_face_coefficient`, now deleted) agreed only for
-  constant `μ`; on a face with viscosity ratio `r` it over-estimated the coupling by `(1+r)²/(4r)`, so
-  under a graded turbulent `μ_eff = μ + ρν_t` `a_P` was *not* the operator diagonal — which mattered
-  because `a_P` is not solver-internal: it sets the differentiated Rhie–Chow damping `V/a_P` (so it
-  changed the *converged* solution in the shear layer/near-wall), and it is the base of the
-  pseudo-transient shift (so `βd` was not the spatially-uniform relaxation `1/(1+β)` the shift-basis
-  assumes). **Constant `μ` is byte-identical** to the old form on any mesh (`Γ_P=Γ_N ⇒ denom = (x_N−x_P)·n`),
-  which is why every prior test — all constant-`μ` — passed the wrong form. The **same** helper feeds the
-  frozen velocity AMG operators and the scalar shift/AMG (`turbulence/preconditioner.py`), so none can
-  drift from the residual. Note `g`-weighting still governs the *other* face interpolations
-  (`interp(ρu)`, `interp(∇p)`, `interp(V/a_P)`); only the viscosity face value moved to the owner-based
-  conductance. Regression-pinned: `momentum_matrix_diagonal` vs `diag(jacfwd(residual))` at graded `ν_t`
-  (`test_preconditioner.py`), the conductance vs the `DiffusionFlux` diagonal (`test_diffusion.py`).
-- **The velocity-block AMG derives its frozen operator from the shared diagonal definitions — no numpy
-  re-derivation (binding, #45).** The velocity strategies used to rebuild the interior upwind stencil in
-  numpy (`np.add.at`) purely to subtract it back out of `a_P` and recover a boundary diagonal — a
-  reconstruction that had to match the `jnp` formula bit-for-bit across two modules and two languages.
-  Now: the viscous coupling comes from `discretization.flux_continuous_conductance` (the *same* helper
-  `momentum_diagonal` uses, so the two cannot drift), and the boundary diagonal is the boundary-face
-  owner coefficient scattered by `face_cells.scatter` — built from the same `viscous` / reference-flux
-  arrays as the off-diagonals, so the assembled operator's diagonal **is** the frozen `a_P` by
-  construction and the per-iterate rescaling is diagonal-exact without a bit-matching assumption
-  (verified equal to the old path to ~1e-16). It stays on the **uncorrected all-faces** form, matching
-  `frozen_momentum_diagonal` (`boundary_corrected=False`) — that is what the runtime rescaling divides
-  by, and what carries the high-Reynolds march; do not "correct" it to the residual's form.
-- **`boundary.py` — `FlowBoundary` → `NoSlipWall`, `MovingWall`, `VelocityInlet`,
-  `PressureOutlet`.** Each closes velocity (viscous BC + gradient), pressure, and boundary
-  `mdot`. `VelocityInlet`/`MovingWall` take a constant or a profile callable; `MovingWall` passes
-  no fluid (`mdot=0`, for a driven lid). Beyond those three closures a patch also exposes the two
-  **preconditioner/diagonal contributions** it alone knows: `pressure_schur_coefficient`
-  (`d(mdot)/d(p_owner)`, non-zero only at a `PressureOutlet`) and `momentum_diagonal_coefficient`
-  (the owner-velocity linearization of its velocity flux — viscous for a Dirichlet-velocity patch,
-  convective for a through-flow patch; see the `rhie_chow.py` `a_P` note).
-  - **Compose, do NOT inherit (decided; composition now realized).** A `FlowBoundary` is a *bundle*
-    {velocity closure, pressure closure, mass-flux closure}, not a subtype of
-    `boundary.BoundaryCondition`: it returns three coupled quantities, and `mdot` (Rhie–Chow) has no
-    single-field analogue, so `FlowBoundary(BoundaryCondition)` would be an LSP violation. Its
-    velocity/pressure parts, though, are **not re-implemented** here: `velocity_face`/`pressure_face`
-    now **delegate to the scalar `Dirichlet`/`ZeroGradient` closures** — one per velocity component
-    (`_prescribed_components` → per-component `Dirichlet`/`DirichletField`; a zero-gradient outlet →
-    `ZeroGradient` per component) and one for the pressure — via the module helpers `_face_value` /
-    `_velocity_face`. Only `mass_flux` stays flow-specific (and `VelocityInlet.mass_flux` reuses the
-    patch's own prescribed value through `_prescribed_reference_velocity`). This also removed
-    the duplicated `MovingWall._wall` / `VelocityInlet._inlet` broadcasts. Still **no shared base
-    class** with `BoundaryCondition` — composition, not inheritance. (A constant velocity is stored
-    as a floating `(dim,)` **array leaf** and a profile as an `equinox.Module` — a plain function held
-    in `StaticFunction` — so the velocity is differentiable; `_prescribed_components` indexes the
-    array, and reads a profile's components through the `_Component` module rather than a lambda,
-    which would capture the profile out of the pytree. The earlier "static `(dim,)` sequence, a
-    `jnp` array would not concretize under `jit`" arrangement was measured unnecessary and severed
-    the gradient; see `.claude/rules/boundary.md`, #363.)
-  - **`corr` reconciliation — DONE, the flow block runs the scalar path's two passes (#313).**
-    `velocity_face` / `pressure_face` take the owner's reconstructed gradient and the
-    owner-centroid→face displacement `d`, so the delegated `ZeroGradient` carries its tangential
-    non-orthogonal correction instead of returning the bare owner value. `MomentumContinuity`
-    supplies it in `_velocity_gradient` / `_pressure_gradient`, which are the shape
-    `residual.py::_gradient` has always had: leading-order boundary values (the closures at a **zero**
-    gradient, which keeps the residual one pass over the state) feed the reconstruction, and the
-    returned pair is `(gradient, closures re-evaluated at it)` — the second being what the viscous
-    flux and the pressure force read. `boundary_values_at` is passed into both reconstructions, so a
-    scheme that *differences* a boundary value gets the corrected one; the previously-noted
-    impossibility ("its closures accept no gradient") is gone. On an orthogonal grid `d ∥ n`, the
-    correction vanishes and the two passes agree exactly, so **nothing moves on an orthogonal mesh**.
-    - **The two passes are not written here: they are `schemes.BoundaryClosure.reconstruct`, the same
-      object `ResidualAssembler._gradient` composes (#58, 2026-10-09).** `_pressure_closure()` wraps
-      `_boundary_pressure`; `_velocity_closure(velocity, i)` is the per-component view — component
-      `i`'s value written into `velocity`, its `(n_cells, dim)` gradient into row `i` of an otherwise
-      zero tensor, column `i` read back. That view is exact only because every flow closure closes
-      each component on its own (row `i` alone); **the face values the fluxes read are still taken
-      from the vector closures at the whole tensor** (`_boundary_velocity(velocity, gradient)` in
-      `_velocity_gradient`), so a future closure that couples components (a slip or symmetry wall)
-      gets correct face values and needs only its reconstruction hooks revisited. The build-time
-      linearizations are `closure.linearization(...)` too. Before this the flow carried its own copy
-      of the two passes and of both `jvp` weight probes, and it had already drifted: it passed neither
-      `operator_hook` nor `imposed` to the scheme — the scalar copy passes both, so both are now
-      reachable from the flow (`reconstruct(..., imposed=...)`) without a third copy.
-      **Gated on bit-identity, not on tests passing** (254 arrays: residual, every `flow_fields` entry,
-      `a_P`, `jvp`, jitted residual, scalar assembler, coupled RANS residual and `jvp`, over 2D/3D ×
-      compact/corrected/multiple-correction × Stokes/upwind/limited, perturbed meshes): all
-      bit-identical **except the flow residual's reverse-mode `vjp`, which moves 1–4 ulp** — the
-      per-component closures change the transpose's summation order. Forward values and the `jvp`
-      (what a march and its Krylov solves use) do not move, so archived trajectories hold; adjoint
-      gradients move at rounding level only.
-    - **`mass_flux`'s through-flow term is the patch's own *boundary* velocity, for every patch
-      (binding, #319 — corrected from an earlier design where it read the owner velocity).**
-      `_boundary_mass_flux` passes each patch its own already-assembled `boundary_velocity` slice —
-      the value `_boundary_velocity` (hence `flow_fields.velocity_fields.boundary_velocity`) computed
-      immediately before it, at the reconstructed gradient — rather than the owner cell's velocity or
-      a second, patch-private re-derivation of it. `VelocityInlet.mass_flux` simply reads that
-      argument (`rho (u_face·n) A`); it no longer calls `_prescribed_reference_velocity` itself, since
-      the caller already supplies the identical Dirichlet value. `PressureOutlet.mass_flux` reads it
-      too, which is the fix: every other face in the discretization forms its flux from a face value,
-      and the outlet's own zero-gradient closure (with its tangential correction) is that face value.
-      `pressure_schur_coefficient` is unaffected — the boundary velocity does not depend on `p_owner`,
-      so `d(mdot)/d(p_owner)` is unchanged.
-    - **⚠️ This changes the shipped default's answer on a non-orthogonal mesh with an outlet.** Before
-      the fix, `PressureOutlet`'s through-flow term used the owner velocity, which is a **zeroth-order
-      consistency error** at the outlet-owning cells (it does not shrink under mesh refinement: 8×8 →
-      32×32 gave `max|div u| = 0.111 → 0.085 → 0.086` at the exact Stokes Couette field, and a
-      converged solve stalled at `‖u − u_exact‖∞ ≈ 1.2e-3` regardless of mesh). Any archived
-      bit-identity comparison on a skewed mesh with an outlet is void.
-    - Pinned analytically: `tests/integration/test_skewed_flow.py` opens the Couette domain into a
-      `PressureOutlet` (zero-gradient velocity, and the exact field has `grad u·n = 0` there because
-      the perturbation leaves boundary nodes in place). Under `MultipleCorrectionGradient` the outlet
-      face velocity is the exact field to **0.0** and the *whole coupled residual* (momentum and
-      continuity) at the exact field is **≤1e-16** — before this fix continuity held the **1.4e-3**
-      through-flow error above instead. The open (outlet) case now reaches the same solver tolerance
-      as the fully-Dirichlet control (`test_stokes_couette_is_exact_on_a_skewed_mesh`),
-      `‖u − u_exact‖∞ < 1e-6`, rather than stalling at `~1.2e-3`. (Configuration for every number
-      here: 8×8 perturbed grid, `perturb=0.2`, `seed=2`,
-      `MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)`, Stokes, x64.)
-- **The turbulence closure enters through `eddy_viscosity`, and `μ_eff = μ + ρν_t` is formed ONCE, in
-  `MomentumContinuity.effective_viscosity` (binding).** `ν_t` (**kinematic**, the closure's own quantity) rides
-  on its own differentiable leaf, set by `with_eddy_viscosity(nu_t)`; `effective_viscosity` adds it to the
-  molecular `μ` from `properties`. Callers pass only `ν_t` and never restate the closure relation.
-  - **`with_scaled_molecular_viscosity(factor)` rescales the molecular `μ` only** (the `"viscosity"`
-    entry in `properties`, via `PropertyModel.with_scaled`), leaving the eddy-viscosity leaves alone.
-    It is the momentum half of the coupled Reynolds-number rescale a continuation applies (the
-    turbulence half scales `SSTTurbulence.molecular_viscosity`; `CoupledRANS.with_scaled_molecular_viscosity`
-    composes both) — see `.claude/rules/turbulence.md`. Molecular `μ` and eddy `ν_t` stay separate leaves,
-    so the rescale cannot disturb the closure.
-  - **Do not put `ν_t` into the `PropertyModel`.** It is not a material property — water has no eddy
-    viscosity, a turbulent flow of water does. The previous design overwrote the `"viscosity"` entry
-    with a pre-summed `ρ(ν+ν_t)` field, which **destroyed the molecular value**, forced a second home
-    for it (`turbulence.molecular_viscosity` — `solve_segregated`'s docstring openly said the
-    assembler's own molecular viscosity "is ignored"), made the swap non-idempotent, duplicated the
-    `ρ(ν+ν_t)` formula across three call sites, and changed the property's type `Constant`→
-    `FieldProperty` on the first sweep. Keeping the material properties intact fixed all five.
-  - The redundant `density=` parameter of `solve_segregated` and the `density` field of `CoupledRANS`
-    were **removed** with it: both existed only to form `μ_eff`, which the assembler now does from its
-    own `ρ`. (`SSTTurbulence` keeps its `density` and `molecular_viscosity` — the k/ω equations use
-    them for their own `ν + σν_t` diffusion, a genuinely different coefficient.)
-  - `with_eddy_viscosity` is part of the contract the segregated driver requires of any injected
-    momentum stand-in. Pinned in `tests/unit/test_momentum_coupling.py` on a `ρ≠1` fluid, so a dropped
-    density factor cannot pass.
-  - **The wall-function eddy viscosity enters the SAME seam, as a second (per-face) leaf.**
-    `with_eddy_viscosity(nu_t, wall_eddy_viscosity=None)` also carries an optional per-face **kinematic**
-    `ν_t,wall` (shape `(n_faces,)`), the adaptive wall function's value (`turbulence.wall_face_eddy_viscosity(k)`,
-    the `nut_wall` blend on wall faces, zero off them). `_wall_boundary_viscosity()` turns it into the
-    momentum diffusion's `boundary_coefficient`: on the flow's **shearing walls** (`FlowBoundary.shears_flow()`)
-    the wall-face coefficient is `μ + ρ·ν_t,wall` — the wall model's value replacing the owner-cell
-    `k/ω` closure — every other face keeps the owner `μ_eff`, and interior faces are ignored by
-    `DiffusionFlux`. `μ_eff = μ + ρν_t` stays formed **here** (the closure still supplies only the
-    kinematic value). The **residual `a_P` reads this same per-face coefficient at the boundary**
-    (`_boundary_face_viscosity()` → `boundary_momentum_diagonal`), so the momentum diagonal matches the
-    operator at wall faces rather than gathering the (large, log-layer) owner-cell `μ_eff` there — see
-    the `a_P` boundary bullet above (#155). `None` (default) leaves walls resolved, so the momentum block is **bit-identical**;
-    on a wall-resolved mesh `ν_t,wall = 0` (below `y*_lam`), so it is a no-op there too — this is what
-    lets it be always-on. Applied in **both** paths so they solve the identical near-wall model:
-    `coupled.py` inside the residual (live, in the coupled Jacobian) and `driver.py` per sweep (frozen).
-  - **The same call means different things in the two paths**, and nothing at the call site says
-    which: `driver.py` applies it *outside* the residual, so `ν_t` is frozen for the sweep and the
-    coupling is invisible to AD; `coupled.py` applies it *inside*, so `dR_momentum/d(k,ω)` flows
-    through it and the monolithic Jacobian gets its cross-block terms. That is why gradients go
-    through `solve_coupled` and never `solve_segregated`.
-- **Convection — BUILT.** `advection_scheme=` turns on momentum convection (`mdot·u`, upwind or
-  limited), which makes the residual **nonlinear** (mass flux and advected velocity both depend
-  on velocity). `a_P`'s convective part uses a lagged velocity-flux estimate (breaks the
-  `a_P`↔`mdot` circularity). Closed domains fix the pressure level with `pressure_datum=PinnedPoint(...)` (see `datum.py` above).
-- **Body force — BUILT.** `sources=(UniformBodyForce(f),)` adds a uniform per-volume force to the
-  momentum residual (subtracted per component: `R = flux − β·V`). Sign: with `p = p̃ + G·x`, `β>0`
-  drives `+x` and the mean gradient is `G = −β`. Its `force` is a differentiable leaf, and it drives a
-  **streamwise-periodic** channel (`structured_grid_2d(periodic=("x",))` + a `pressure_datum`): verified
-  against exact fully-developed Poiseuille in `test_periodic_channel.py`. A uniform force needs no
-  Rhie–Chow term and does not enter continuity. A force that is *solved for* rather than prescribed is
-  a `MassFlow` drive instead — see the bullet above and the constraint below.
-- **`drive.FlowSolve` — the segregated loop's flow-solve signature, `(momentum, state) -> (momentum,
-  state)`, written once (#158).** `bulk_velocity_flow_solve` and `reused_flow_solve` both return one,
-  so either is handed to `solve_segregated` as it stands; `reused_flow_solve` returned the state alone
-  until 2026-10-10, which broke the case runner's `Segregated` path (see `turbulence.md`'s seam entry).
-  Exported from `aquaflux.flow` (#284): it is the seam a caller's own flow solve implements, and
-  `turbulence/driver.py` names it in an annotation.
-- **Bulk-velocity constraint — BUILT (`flow/mean_velocity.py`, `bulk_velocity_flow_solve`).** A
-  streamwise-periodic channel is driven to a target **bulk velocity** `U_bar` by making the body force
-  `β` a **scalar Lagrange multiplier** on the constraint `⟨U_dir⟩ − U_bar = 0`, solved *jointly* with
-  the flow — not by an outer proportional controller. `β` is **appended to the flow state** and the
-  flow residual is augmented with the constraint equation, `R_aug([w,β]) = [R_flow(w;β); ⟨U_dir⟩(w) −
-  U_bar]`; this **one honest residual** is handed to the production `RootSolver`, and **AD
-  assembles the whole bordered Jacobian** (the force column `∂R/∂β = −V` on the flow-direction momentum
-  rows, since `R = flux − βV`, and the averaging row `∂⟨U⟩/∂w = V/ΣV`) — **no bespoke solver, no
-  hand-derived border** (an earlier version hand-rolled a two-solve rank-one elimination purely to keep
-  the block preconditioner applicable to the border; that is a preconditioner concern, and the study
-  uses a direct solve where it buys nothing — so it was dropped for the augmented residual, which also
-  respects the "AD assembles the Jacobian" rule the hand-derived form broke). `⟨U⟩ = U_bar` holds **by
-  construction** at the converged root, so the bulk velocity can never overshoot while the eddy
-  viscosity is still developing (the failure the old proportional controller had at high Re / high
-  aspect ratio: it measured `U_bulk` at a fixed β, which spiked ~17× before the feedback reacted,
-  collapsing the near-wall `k` onto its floor). Being the production solve it is **convergence-gated**
-  (stops on tolerance, not a fixed count) and **reverse-differentiable** through the IFT adjoint at the
-  root — the constraint is part of the differentiable model at no extra cost. Returns `(momentum,
-  state)` — the assembler carries the converged β out, so a segregated outer loop threads it forward
-  with no controller. The **proportional mass-flow controller in `solve_segregated` was DELETED** (its
-  `bulk_velocity_target`/`bulk_velocity_gain`/`flow_direction` args gone); the driver's flow-solve seam
-  is now `solve_flow(momentum, state) → (momentum, state)`.
-  - **Preconditioning the augmented system — constraint preconditioning (`precondition.bordered_preconditioner`;
-    it was the private `mean_velocity._bordered_preconditioner` until #284 moved it to `precondition/bordered.py`,
-    since it is Schur elimination over a factory and two vectors and names no flow quantity; since #541 `flow/bordered.py`'s `BorderedShiftPolicy` calls it with the drive as its `ScalarBorder`).**
-    β is a multiplier, not a function of `w`, so — unlike a nested gradient sub-solve, which AD absorbs
-    into the outer Jacobian — the border cannot be absorbed inside the residual; it is eliminated one
-    layer down, **in the preconditioner**. Given the flow block preconditioner `M ≈ J⁻¹` (the block-
-    SIMPLE AMG `BlockPreconditioner.factory()`), `bordered_preconditioner(M, drive, fields, a, c)` returns a
-    preconditioner for the `(dim+1)·n_cells + 1` augmented system that Schur-eliminates the scalar β:
-    `y = M·r_flow`, `dβ = (cᵀy − r_β)/(cᵀMa)`, `dw = y − dβ·(Ma)` — one flow-preconditioner apply plus
-    O(n) dots per augmented Krylov iteration, exact when `M = J⁻¹` (converges in one step), inheriting
-    the flow block's mesh-independence otherwise. **Hand-building `a`/`c` here is legitimate** — a
-    preconditioner is an approximate, `stop_gradient`-ed inverse that changes only Krylov convergence,
-    never the solution or adjoint (contrast the *residual*, whose Jacobian is AD-assembled). This is the
-    robust production path (large iterative solve); `preconditioner=None` (a direct or small solve) needs
-    none of it. **The bordered preconditioner is built once in the builder from a concrete `reference`**
-    (required whenever `preconditioner` is given), **not** inside the solve from the `momentum` it is
-    called with — a tracer captured into the (non-differentiated) preconditioner breaks `jax.grad`
-    ("no constant handler" / closed-over-value). Pinned by `test_mean_velocity.py`: with an exact `M` the
-    bordered preconditioner is exactly `J_aug⁻¹` (and AD's border matches the hand-built `a`/`c`), and the
-    block-preconditioned GMRES augmented solve lands on the direct solve's answer. The elimination itself
-    is pinned mesh-free in `test_bordered_preconditioner.py`, with the border at either end.
-  - **The solve is reverse-differentiable in `momentum` (#127).** The assembler is threaded as the Newton
-    **`theta`** (not captured in the residual closure), so the IFT adjoint returns its cotangent —
-    `jax.grad` of an objective through the solve gives e.g. `d/dμ` (verified vs finite differences and the
-    analytic `dβ/dμ = 12U_b/H²` on the laminar channel). A captured assembler instead raises a `custom_vjp`
-    closed-over-value error — the reason `theta` threading is load-bearing, not cosmetic. The **adjoint**
-    transpose solve is preconditioned by the *same* bordered preconditioner **transposed**, which the
-    generic adjoint machinery (`solve/root_adjoint.py::_transposed_preconditioner`) forms with `jax.linear_transpose`
-    (`M_aug` is linear ⇒ `M_augᵀ ≈ J_augᵀ⁻¹` exactly) — no hand-written transpose needed. Pinned: the
-    preconditioned gradient equals the unpreconditioned (direct) one to ~1e-9 (a preconditioner never
-    changes the sensitivity, only the adjoint Krylov iteration count).
-  Pinned by `tests/unit/test_mean_velocity.py` (constraint met to machine precision; analytic β
-  recovered; initial-force-independent; the preconditioner and gradient tests above).
-  - **The same primitives border the monolithic coupled RANS solve and both staged marches (#128, #541).**
-    `flow/bordered.py`'s `MassFlowBorder` is what `solve_coupled` and `solve_flow_march` use to append `β`
-    to their state and Schur-eliminate it in their preconditioner (through `precondition.bordered_preconditioner`), and its `BorderedFlowResidual` is this
-    flow-block solve's residual — so the bulk-velocity constraint is enforced by one place whether the
-    forward solve is segregated or monolithic. Do not re-derive the border anywhere else.
-    ⚠️ **The border is attached and detached through the DECLARED layout, never by `jnp.append` /
-    `[:-1]` (2026-09-23, #375).** `MassFlow.layout(fields)` is `fields.appended(GlobalDofs("body_force",
-    1))`, and `join` / `split` read the entry's position off it with `slice_of`. Before that the layout
-    was declared and then ignored: its only consumer was one residual norm, while five sites across two
-    modules did the packing by hand — so the object that claimed to own the bordered state was telling
-    the truth for three case shapes and not the fourth.
-  - **The periodic seam is NOT a preconditioner problem — do not go looking there again.** A
-    `reused_flow_solve` on a periodic mesh was suspected of a block-SIMPLE defect "across the seam";
-    it was measured and the seam is clean. The offset is absorbed one layer down (`interpolation_factor`
-    and `normal_distance` both route through `face_cells.neighbour_centroid`; the Schur matvec compares
-    *field* values, which are periodic and need no offset), so: preconditioned GMRES converges in 9–18
-    iterations on the periodic mesh and returns the same Newton update as unpreconditioned to `5e-8`;
-    the velocity-AMG `boundary_diagonal` has no negative entries (min `-4e-16`); every shifted-step
-    attempt is accepted with `|δ| ∝ 1/β`. **The real failure was the cold start**: from rest, a
-    body-force channel's residual barely moves during the viscous spin-up (measured ratio `0.984` per
-    step), so the feedforward SER schedule `β = β₀(‖R‖/‖R₀‖)^p` never relaxes, the pseudo-timestep stays
-    tiny, and the march exhausts `max_steps` at ~`0.28‖R₀‖` — a crawl, not a stall. Two independent
-    confirmations: `β₀ ≤ 0.1` converges to `1e-16` in 30 steps, and starting from `potential_flow`'s plug
-    reaches `7e-13`. **Fix shipped = the velocity scale + plug start** (`flow/scales.py`), not a change
-    to the schedule. A cold rest start on a body-force domain still crawls and is left to fail loudly
-    (`RootSolver` raises); revisiting that means revisiting cross-step SER, which was measured
-    ~24% slower on the inlet channel and rejected.
-- **Field initialization — BUILT (`flow/initialization.py`).** `laplace_field(mesh, geometry, boundary,
-  …)` solves a scalar Laplace `div(Γ∇φ)=0` (one exact linear step) — the harmonic interpolant of any
-  boundary data; general-purpose, not flow-specific. The step is **multigrid-preconditioned**
-  (smoothed-aggregation V-cycle on the symmetric graph Laplacian; boundary/Dirichlet stiffness from a
-  single `J·1`, fixed cells decoupled): the Laplacian's condition number grows like the **square of the
-  near-wall cell aspect ratio**, so unpreconditioned it stagnated to a non-finite iterate past AR≈600
-  — i.e. on every genuinely wall-resolved mesh (AR 10³–10⁵). Jacobi is not enough (removes one factor
-  of AR, not two). `potential_flow(momentum)` uses it to build a
-  Fluent-style irrotational velocity `u=∇φ`: a `Neumann` `∂φ/∂n = u_in·n` at each `VelocityInlet`, a
-  `Dirichlet` datum at the `PressureOutlet`, no-penetration (`ZeroGradient`) at walls; returns the flat
-  `[u, p]` state with `p` the **Bernoulli** seed (below). Divergence-free, respects geometry (≈plug only
-  in a straight duct). A domain with
-  **no through-flow boundary** has no potential to solve for, but may still be
-  driven: a body-force periodic channel returns the **plug** `scales.body_force_velocity(momentum)` (see
-  the velocity-scale bullet below). A moving-lid cavity is deliberately *not* that case (no net
-  through-flow → its potential really is zero; a plug would violate the stationary walls), so the test
-  `test_potential_flow_is_zero_on_a_closed_domain` is the guard — do not widen the fallback to
-  `characteristic_velocity`, which reports the *lid* speed. A closed domain always carries a datum (the build
-  refuses one without), and its cell pins the potential's Laplacian; the old "no pin, return rest" branch
-  is gone because it can no longer be reached. Usable to warm-start **any** solve (flow-only, segregated, coupled).
-  ⚠️ **It takes NO `gradient_scheme` argument and must not be given one back (#361).** It
-  reconstructs `grad phi` with `momentum.gradient_scheme` — the scheme that assembler will be solved
-  with, in its condition-free form, which the potential's own `ResidualAssembler` then re-binds
-  against the Laplace problem's conditions (see the per-field binding bullet under
-  `MomentumContinuity.build`; binding against the *momentum* pressure conditions would be the wrong
-  operator here). It used to substitute `CompactGreenGauss()` instead, and since every caller in the repository
-  omitted the argument, every case initialized on one discretization and solved on another. Taking the
-  scheme from the assembler is what makes that unrepresentable rather than merely discouraged; see
-  `.claude/rules/schemes.md` for the default and the test census that pins the policy.
-- **Bernoulli pressure seed — BUILT (`flow/initialization.py`, `bernoulli_pressure`).** `potential_flow`
-  no longer returns `p=0`: it seeds the **dynamic** pressure `p = ½ρ(|u_ref|² − |u|²)` consistent with
-  the irrotational velocity (`p + ½ρ|u|² = const`), anchored so the mean pressure over the
-  `PressureOutlet` cells is **zero** — consistent with the `p=0` outlet datum (`_pressure_outlet_cells`;
-  a domain with no outlet anchors the domain-mean to zero instead, so a uniform plug / quiescent cavity
-  stays at 0). **Why:** a coupled Newton solve otherwise starts with the *whole* dynamic-head pressure
-  field as a first-step correction — measured `‖δ_flow‖≈2694` with `p=0`, of which `‖δ_pressure‖` is
-  ~100% while `‖δ_vel‖≈8`; the seed **halves** it (`δ_flow≈1348`). **Closed-form on purpose (not the
-  pressure-Poisson equation):** the PPE source `ρ·tr(∇u·∇u)` blows up at a sharp geometric corner (the
-  backward-facing step, whose potential-flow `∇u` is singular) — measured `‖p_ppe‖≈9.4e4` and `δ_flow`
-  *35× worse*; Bernoulli reads `|u|`, not `∇u`, so it is immune. This matches how ANSYS/OpenFOAM actually
-  behave — ANSYS hybrid init solves a **source-free** pressure Laplace (`∇²p=0`) from the pressure BCs
-  and, for a velocity-inlet/pressure-outlet case with no pressure-inlet info, seeds `p≈const` and lets
-  the SIMPLE pressure under-relaxation build the field. So the remaining intrinsic `δ_pressure` (the
-  potential→viscous change) is a **solver-side** concern (per-block step / pressure under-relaxation in
-  the coupled step), not an IC one. Pinned by `test_bernoulli_pressure_*` (outlet-anchored, dynamic-head
-  ordering, uniform-flow → 0).
-- **Velocity scale — BUILT (`flow/scales.py`), the one home for "how fast is this flow".** Two consumers
-  need a representative speed before any flow exists — the convection velocity block's frozen
-  linearization and the initializer's plug — so it is derived once here rather than in either.
-  `characteristic_velocity(assembler)`: the **fastest** patch `reference_velocity` if any patch prescribes
-  one, else `body_force_velocity`. `body_force_speed` closes the global balance `β V_total = τ_w A_wall`
-  via the hydraulic length `h = V_total/A_wall` (`hydraulic_length`, wetted area from the new
-  `FlowBoundary.shears_flow()` predicate — True for `NoSlipWall`/`MovingWall`), taking **`min`** of the
-  laminar `β h²/(3μ)` (exact in that regime — unit-tested against the closed-form `βH²/12μ`) and the
-  turbulent `20·u_τ`. `friction_velocity(assembler)` = `√(βh/ρ)` is the shared primitive: it follows from
-  the force balance alone (no viscous or turbulence assumption), so it is the one velocity scale such a
-  domain always has — which is why `turbulence/initialization.py` also sizes its equilibrium `k`/`ω` from
-  it (see `.claude/rules/turbulence.md`). `min` not `max` here: the laminar branch is an extrapolation that
-  diverges as `μ→0`, unlike the prescribed-velocity rule where every candidate is genuinely imposed.
-  **Why it exists:** a streamwise-periodic channel prescribes velocity *nowhere*, so the old
-  boundary-only estimate returned exactly zero and silently degraded the convection velocity block to the
-  viscous block. `BlockPreconditioner.build` now warns (`RuntimeWarning`) when the convection block is
-  asked for but the reference mass flux is zero. A caller that *knows* the speed (a bulk-velocity
-  constraint targets `U_bar`) should pass `reference_state=` explicitly instead.
-- **`reference_speed(assembler)` — the speed as ONE positive number, and the one reader of
-  `flow/scales.py` that ENTERS THE RESIDUAL (2026-10-09, #144).** `MomentumContinuity.build` sets a
-  scaled momentum advection (`with_reference_scale`, `schemes.md`) from it, so a softened
-  Venkatakrishnan limiter's `eps` is a fraction of this speed. Order: **`Drive.held_speed()`** (a new
-  abstract member on both drives: `MassFlow` → `|target|`, `BoundaryDriven` → `None`) — the held bulk
-  velocity is the speed exactly, whatever the multiplier's seed force says — else
-  `|characteristic_velocity|` (fastest prescribed boundary speed, else the body-force balance). It is a
-  **constant of the discretization**, fixed at build: `with_scaled_molecular_viscosity` does not
-  re-derive it, so a Reynolds-ramp companion keeps the target's scale (deliberate — the ramp changes
-  the viscosity, not the limiter). A domain nothing drives refuses a scaled scheme at build (`ValueError`
-  naming the remedy) and builds anything else. ⚠️ **Not covered: a flow driven only by a pressure
-  difference between two `PressureOutlet`s** — `characteristic_velocity` reads no pressure, so such a
-  case with a limited momentum advection is refused and must state the limiter's scale.
-  `wetted_length(mesh, geometry, patches)` is the geometric half of `hydraulic_length`, for a caller
-  that lists its walls itself (the turbulence closure). Pinned in
-  `tests/unit/test_advection_reference_scales.py`, mutation-checked.
-- **Validated:**
-  - Poiseuille (`test_poiseuille.py`) — parabolic `u`, `v≈0`, linear `p`; **2nd-order**; Stokes
-    is linear so **one Newton step**; differentiable.
-  - **Lid-driven cavity** (`test_cavity.py`, `Re=100`) — the first genuinely nonlinear flow;
-    **multi-step Newton converges** (~5 steps to `1e-12`); centreline velocities match **Ghia et
-    al. (1982)** (primary-vortex `u_min≈−0.21`, `v` centreline within ~0.02); reverse-mode
-    **differentiable through the nonlinear solve via the IFT adjoint**.
-- **Structure (post-encapsulation-refactor):** the preconditioner is `block_preconditioner.py`'s
-  `BlockPreconditioner` — a builder composing two **injected strategy families**: an `InnerSchurSolver`
-  (`SmoothedAmgSchur`, the mesh-independent smoothed-aggregation multigrid) for the pressure block and a
-  `VelocityBlockSolver` (`SmoothedAmgVelocity` on the viscous operator / `TwoLevelConvectionVelocity` and `AirConvectionVelocity`
-  on the convection-diffusion operator) for the momentum block, plus — since 2026-08-20 — a third,
-  `SaddleComposition`, saying how those two solves compose (default `BlockTriangularComposition`, the
-  `D·δu` coupling this was hardcoded to). Build it with `BlockPreconditioner.build(assembler, velocity=…).factory()` (the factory is
-  the `preconditioner` argument `newton_step` expects). **`strength_threshold=θ` (default `0`) turns on
-  strength-of-connection aggregation** for the velocity/Schur AMGs — aggregate along strong connections
-  only, the fix that keeps the V-cycle contracting on a high-aspect-ratio / skewed mesh where isotropic
-  aggregation coarsens across the stiff wall-normal direction and stalls; `θ=0` is byte-identical to the
-  historical build, and the coupled RANS path turns it on at `0.25` (a no-op on low-AR pitzDaily, the
-  payoff is the wall-resolved regime). Full evidence + the value-dependence/refresh caveat live in the
-  AMG section of `.claude/rules/solve-amg-multigrid.md`. The dominated Stage-1 fallbacks
-  (`AggregationSchur`/`inner="multigrid"`, `DampedJacobiSchur`/`inner="jacobi"`, `DiagonalVelocity`) and
-  the geometric coefficient-flow multigrid they used were **deleted** as superseded (see root `CLAUDE.md`
-  Principle 0); there is no `inner=` selector — the smoothed AMG is the one pressure Schur. **The
-  dependency is one-way** `block_preconditioner → momentum` — the assembler does **not** know about the
-  preconditioner (the old `MomentumContinuity.simple_preconditioner` convenience wrapper was removed
-  precisely because it made `momentum.py` import `block_preconditioner`, a cycle; do not reintroduce it).
-  The low-level coefficient/Laplacian kernels stay in `preconditioner.py`. `a_P` comes from
-  `MomentumContinuity.momentum_matrix_diagonal` / `BlockPreconditioner.frozen_momentum_diagonal`. `InnerSchurSolver` / `VelocityBlockSolver` / `SaddleComposition` stay abstract
-  as the extension seam — when adding a strategy, add a subclass; do **not** grow an `if … == …` branch.
-  - **`frozen_momentum_diagonal_parts(assembler, state)` is a PUBLIC module-level function, not only a
-    `BlockPreconditioner` method (2026-08-12).** The convective/dissipative buckets a
-    `ShiftBasis` combines need **the assembler and nothing else** — the method has always just
-    delegated to it. Exposing it is what lets a pseudo-transient shift be built without a
-    preconditioner, and that is not cosmetic: `CoupledShiftPolicy` used to hold a whole
-    `BlockPreconditioner` to read these two arrays, so a monolithically-preconditioned coupled step
-    (which supplies its own inverse and never applies that one) built two multigrid hierarchies per
-    build that were never used — *and*, because their aggregation reads the operator's values, their
-    coarse-grid array shapes moved with the molecular viscosity, recompiling the whole coupled solve at
-    every Reynolds-continuation rung. See `.claude/rules/turbulence.md`. The method stays as the one
-    call site's convenience; the function is the one home.
-- **`BlockPreconditioner.on(assembler)` applies a built preconditioner to another problem, its frozen
-  hierarchies kept (2026-10-12, #386).** The hierarchies are rescaled to the current `a_P` on every
-  application, so the assembler is all that ties them to one problem; `on` swaps it (`eqx.tree_at`) and
-  every array keeps its shape. That is what a viscosity ramp's station change uses
-  (`turbulence._BlockSession._repointed`): a `build` on the companion re-aggregates along its strong
-  connections, whose coarse shapes move with the viscosity, and recompiles the march (the freshly built
-  control in `test_a_re_pointed_block_session_step_is_a_compilation_cache_hit` is that miss). Pinned by the re-pointing tests in
-  `tests/unit/test_preconditioner_session.py` (the carried block's `a_P` is the companion's; mutation-checked).
-- **Frozen operators are assembled by `aquaflux/precondition/frozen_operator.py`, not here (#45).** All three preconditioner hierarchies (pressure Schur, viscous velocity block,
-  convection velocity block) build their scipy CSR operator with
-  `ConvectionDiffusionStencil(owner, nb, coefficient, n, *, flux=None, boundary_diagonal=None).assemble()`
-  (#89 — there is no `convection_diffusion_operator`) and regularize the closed-domain pin with `decouple_dof`, then hand the **assembled matrix** to the
-  coarsening builders. Do not re-assemble a stencil inside `block_preconditioner.py`.
-- **The symmetric rescaling and the per-component lift are single-homed (binding — Principle 2).** Every
-  block here freezes a multigrid hierarchy at a reference operator and tracks the current one by the
-  symmetric congruence `A_cur⁻¹ ≈ D⁻¹ A_ref⁻¹ D⁻¹`, `D = sqrt(diag_cur/diag_ref)` — the most subtle
-  numerical invariant in the file. It lives **once**, in `_symmetric_rescaled(inner_solve, diag_ref,
-  diag_cur)`; the momentum block's per-component lift lives once in `_per_component(scalar_solve, dim)`.
-  `SmoothedAmgSchur.apply` composes the first; both velocity blocks inherit a **single** `apply`
-  (`_per_component` ∘ `_symmetric_rescaled`) from the intermediate base `_RescaledAmgVelocity`, which
-  owns the shared `hierarchy` / `dim` / `cycles` fields and defers to an abstract `_inner_solve` — the
-  only thing the viscous and convection-aware blocks actually differ in (besides how they *build* the
-  hierarchy). A new AMG-based velocity block subclasses `_RescaledAmgVelocity` and supplies `build` +
-  `_inner_solve`; do **not** re-write the rescale sandwich or the component loop in a strategy's `apply`.
-  The invariant is pinned directly (rescaled dense solve == exact `A_cur⁻¹` for a diagonal congruence)
-  in `tests/unit/test_preconditioner.py`, independent of any multigrid. (Was issue #51: the sandwich was
-  hand-written in three `apply` methods and the component loop byte-identical in two.)
-- **Every strategy builds from a narrow geometry bundle, not the assembler (binding — Principle 3).**
-  Both strategy families take a frozen geometry seam rather than reaching into the full
-  `MomentumContinuity`: the Schur family holds a `_SchurGeometry` (`face_cells`, `mesh_geometry`,
-  `boundary`, `interp_factor`, `normal_distance`, `rho`, `pressure_pin`; it also *owns* the Schur-coeff
-  computation `coefficient(a_P)` / `boundary_diagonal(a_P)`, so it is a **stored, runtime** object), and
-  the velocity family builds from a sibling `_VelocityGeometry` (`face_cells`, `mesh_geometry`,
-  `interp_factor`, `normal_distance`, `effective_viscosity`, `dim`) that is **build-time-only** — the velocity
-  strategies freeze their AMG hierarchy at build and never store it. Keep these **siblings, not one union
-  bundle** (the runtime-vs-build-time split and the disjoint Schur-only / velocity-only fields are why).
-  Anything that is assembler *behaviour* rather than geometry — the Rhie–Chow `mass_flux(reference_state)`
-  the convection velocity block freezes at — is computed by the builder (which has the assembler) and
-  handed in as a frozen array (`reference_mdot`), so the strategy `build` stays assembler-free and
-  unit-testable from mesh primitives alone. When adding a strategy, extend/consume the matching bundle;
-  do **not** thread the assembler into a strategy.
-- **The mesh connectivity + multigrid knobs `_build_schur`/a velocity-block value's `_build` share are ONE
-  resolved value, `_StrategyInputs`, not a repeated 8-value positional bundle (issue #272, fixed
-  2026-09-12).** `BlockPreconditioner.build` resolves `owner_e`/`nb_e`/`interior`/`n_cells`/`cycles`/
-  `strength_threshold`/`assembler`/`reference_state` once and used to fan them out positionally into
-  both helpers' ~10-12-argument calls — a `NamedTuple` (plain host data, live only for one `build()`
-  call, so it needs none of `_SchurGeometry`/`_VelocityGeometry`'s pytree machinery) now carries the
-  shared eight, cutting each call to the bundle plus its own 2-4 arguments. Pure repackaging, no
-  behaviour change — the two helpers still call the same strategy `.build()`s with the same values in
-  the same order.
-- **Outer block preconditioner — Stage 1 (SIMPLE block-diagonal) was BUILT then REMOVED as superseded.**
-  The original composition was a `DampedJacobiSchur` (a fixed damped-Jacobi sweep on the compact
-  Rhie–Chow **pressure Laplacian** `pressure_schur_laplacian`, coefficient `c_f = ρ(V/a_P)_f A_f/(d·n)_f`)
-  + `DiagonalVelocity` (`diag(a_P)⁻¹`) block-diagonal preconditioner. It gave ~8–12× fewer outer GMRES
-  iterations (skewed cavity: 92→11 at 432 dof, 309→25 at 1200) — but the count still *grew* with mesh
-  because the Jacobi inner is not h-independent. Stage 2 (the mesh-independent smoothed-AMG inner) made
-  it obsolete, so `DampedJacobiSchur` / `DiagonalVelocity` (and the `inner="jacobi"` selector) were
-  deleted as dominated (root `CLAUDE.md` Principle 0). The underlying kernels `pressure_schur_laplacian`
-  / `damped_jacobi_solve` remain in `preconditioner.py` (still directly unit-tested); the composed Stage-1
-  strategy is gone.
 
-## Hybrid initialization is generic (2026-09-19) — `aquaflux.initialization.hybrid_initialize`
+- **`FlowBoundary.closes() -> FLOW_FIELDS = ("velocity", "pressure", "mdot")`.** A flow condition is a
+  bundle of three closures; `MomentumContinuity.build` refuses a collection declaring anything else,
+  naming the patch (mechanism in `boundary.md`).
+- **`FlowBoundary.shears_flow()` is this package's `is_wall` predicate — do not add a second.** Three
+  consumers, one inside the residual: the wetted area for `scales.hydraulic_length`; the wall-function
+  viscosity override the momentum assembler applies on exactly these faces (solution-affecting); and
+  `CoupledRANS.build`'s wall reconciliation.
+- **`datum.py` — `PressureDatum` → `PinnedPoint(point, value=0.0)`.** `MomentumContinuity.build
+  (pressure_datum=...)`. The datum is a place: the cell whose centroid is nearest `point` (ties to the
+  lowest index), resolved once at build into the static `pressure_pin` field (which the Schur geometry,
+  SIMPLE kernels and `potential_flow` read). A point survives `permute_cells` and a remesh; an index does
+  not (`test_a_point_pins_the_same_physical_cell_however_the_cells_are_numbered`).
+  - Whether a datum is needed is derived and enforced both ways by
+    `refuse_an_unsuitable_pressure_datum(boundary, datum, caller)`: no closure `prescribes_pressure()`
+    (`True` for `PressureOutlet` alone) ⇒ a datum is required (else singular); some does ⇒ refused (it
+    over-determines the level). The case file asks the same function.
+  - No `PinnedPatch`/mean-pressure datum (a patch mean is a row coupling every patch face, which the
+    coloured probe and the Schur preconditioner do not handle) and no `PinnedCell` (a point does it and
+    survives renumbering).
+- **`drive.py` — `Drive` → `BoundaryDriven` / `MassFlow`.** `MomentumContinuity.drive` says what forces
+  momentum and what that makes of the state. A *prescribed* uniform force is a `UniformBodyForce` source,
+  not a drive; the two drives are "unknowns are the fields" vs "fields plus a multiplier". `Drive` is
+  abstract in all seven members on purpose (incl. `held_speed`, the speed a drive holds, and
+  `held_velocity(dim)`, the plug a starting state takes so `body_force_velocity` starts a held bulk
+  velocity at its target) — a default would let a bordered drive inherit an answer that drops its multiplier.
+  - `MassFlow` owns everything the bordered form needs of the drive: `layout` / `join` / `split`,
+    `driven_state` / `fields_state` / `settled`, `constraint_vectors` / `constraint_vectors_in`, `forced`,
+    `bulk_velocity`. The border is attached and detached through the declared layout
+    (`fields.appended(GlobalDofs("body_force", 1))`, read with `slice_of`) — never by `jnp.append` / `[:-1]`.
+  - Entry points read the drive off the **assembler**, never take a target (a target named twice lets the
+    constraint and the applied force disagree). `mass_flow_drive(momentum, caller)` refuses an assembler
+    without one — raise it early, because otherwise the failure is an `equinox.tree_at` path error inside a
+    traced step.
+  - ⚠️ The refusal runs both ways: `refuse_a_constraint_this_solve_cannot_hold` is called by a solve that
+    marches the fields alone (now only `reused_flow_solve`). A `MassFlow` force is a valid force, so such a
+    solve would hold it fixed at the seed, converge, and silently drop the constraint.
+  - `MomentumContinuity.uniform_body_force()` is the one home for "the sum of uniform forces";
+    `Drive.volumetric_force` returns `None` for "no force at all", not a zero vector (a mass-flow solve is
+    force-driven even when its multiplier is zero, i.e. at every first step). Do not infer "body-force
+    driven" from a value.
+- **`momentum.py` — `MomentumContinuity`.** Residual over the flat state `[vel_0..vel_{dim-1}, pressure]`.
+  The layout is `state.py::flow_state_layout(dim, n_cells)`, which only *names* blocks over
+  `solve/state.py::FieldLayout` (owner of all `f * n_cells + i` arithmetic). `MomentumContinuity.layout` is
+  public because the coupled RANS state nests it as its `flow` block; `pack`/`unpack`/`initial_state`
+  delegate to it. Per component the momentum balance is
+  `CellBalance((DiffusionFlux, PressureForce, AdvectionFlux)).residual(component, context)` over one
+  shared `MeshContext` and a per-component `FieldContext`. Continuity is `Σ mdot_f = 0` via
+  `mesh.face_cells.scatter_conservative(mdot)` (there is no `_scatter`).
+  - **`PressureForce`** (exported) is the one flow-specific operator: `p_f n_i A`, face pressure as
+    constructor state, ignoring the transported field. AD still recovers `dR_momentum/dp` because the face
+    pressure is a differentiable function of the pressure unknowns.
+  - ⚠️ **The operator order `(diffusion, pressure, advection)` is load-bearing arithmetic.** `CellBalance`
+    sums in tuple order; reordering perturbs the last bits, and `bfs3d` march trajectories are compared
+    bit-for-bit (`march_log_compare.py`).
+  - **Reuse, not reimplementation:** momentum viscous/advection are the existing operators with μ as the
+    diffusion coefficient and `mdot` as the mass flux; do not re-derive a momentum flux.
+- **`source.py` — `MomentumSource` / `UniformBodyForce`.** Vector volume-integrated force per cell,
+  production positive, subtracted from the balance; injected via `build(sources=(...))` and applied at
+  the **vector** level in `_momentum_residual` (a momentum source couples components, e.g. `−2ρΩ×u`, so
+  it cannot ride a `CellBalance`'s scalar `source_operators`).
+  - `requires()` / `uses_gradient()` come from `discretization.DeclaredInputs`; `build` unions
+    `declared_properties` with `viscosity`/`density` into one `properties.require(...)`, so a mistyped
+    property is a build-time `ValueError`. `uses_gradient()` is declared but not enforced (the flow always
+    reconstructs).
+  - It takes the `VelocityFields` bundle, `geometry` and evaluated `properties` — **not** a `FieldContext`
+    (that carries one scalar component's data).
+  - **`source`, `face_force`, `diagonal` are all abstract on purpose** — a silent "no face treatment" or
+    "no diagonal" default is wrong exactly where it matters.
+  - **`diagonal(cell velocity, geometry, properties)` is wired** into `momentum_matrix_diagonal` (both
+    residual and frozen paths, via `_source_diagonal`) and the dissipative bucket of
+    `momentum_matrix_diagonal_parts`. `a_P` is not preconditioner-only (it sets the differentiated
+    Rhie–Chow damping `V/a_P`), so an unused or wrong `diagonal` changes the converged answer and the
+    adjoint. The total is added **unfloored** (operator coefficient); the bucket contribution is
+    **component-averaged and floored at 0** (a forward-path stabilization scale). It takes the cell
+    velocity only (a diagonal is `∂row/∂own unknown`, and the frozen/shift sites hold a bare velocity).
+    Pin any non-trivial `diagonal` against AD of the source's own `source`, with a control showing the
+    sourceless `a_P` fails by exactly the source term (`test_momentum_source.py`). The velocity AMG needs
+    nothing: its symmetric rescaling to the current `a_P` reproduces a diagonal source exactly.
+  - **`face_force` is declared, not implemented**: only `None` (uniform) is supported, and a non-`None`
+    return is refused at build by `source.reject_unsupported_face_force` (the mass flux carries only the
+    pressure gradient, so it would be silently dropped). See "Not yet built" (buoyancy).
+  - A *solved* force cannot be a source: the bordered solve adds `(f − f₀)a` with the analytic
+    `a = dR/df = −V`, valid only for a uniform, state-independent force.
+- **One shared assembly per state — `flow_fields` / `residual_from_fields` (binding).** `flow_fields(state)
+  -> FlowFields` assembles boundary fields, both gradients, the lagged `a_P` and the Rhie–Chow flux once;
+  `residual` and `mass_flux` read from it. A caller needing several of these at one state calls
+  `flow_fields` once — separate accessors re-assemble the Rhie–Chow flux each time. `velocity_fields` is
+  deliberately the lightweight path (boundary velocity + `_velocity_gradient`, no `a_P`/`mdot`): the eddy
+  viscosity is needed before `mdot` exists.
+  - **The fields-based forms are the implementation; the flat ones delegate (2026-10-20).**
+    `flow_fields_of(velocity, pressure)` and `velocity_fields_of(velocity)` do the work, `flow_fields(state)`
+    / `velocity_fields(state)` unpack and call them. `unpack_with_field(state, field, values)` /
+    `residual_with_field(state, field, values)` replace one per-cell field (layout order `[u.., p]`) and
+    assemble from the separate arrays, so `jax.jvp` in that field never forms the others' tangents — the
+    coloured probe's per-field programs (`solve-direct-preconditioners.md`; `_FlowProblem.probes_by_field`).
+    ⚠️ **Never repack fields into a flat state on that path** (`layout.pack`, `concatenate`, `.at[].set` on
+    the flat vector): the repack's derivative hands every field an explicit zero tangent and the pruning is
+    gone, silently. Pinned by `tests/unit/test_fieldwise_probe.py`.
+  - **`VelocityFields` (`velocity`, `boundary_velocity`, `gradient`) is nested inside `FlowFields`**, not a
+    second view; it is the whole of what the turbulence closure reads (`SSTTurbulence.closure_fields`).
+- **Properties and boundary.** `build(mesh, geom, properties, boundary, *, gradient_scheme=…)`;
+  `properties` is a `PropertyModel` supplying `"viscosity"` + `"density"` (`properties.md`); `boundary` a
+  `BoundaryConditions({name: FlowBoundary})` bound in `build` via `boundary.resolve(mesh.face_patches,
+  mesh.face_cells)` (every boundary face must be covered) to one `boundary` field — no loose tuples or bare
+  dict (`boundary.md`). `rho` is per cell; the Rhie–Chow flux interpolates `interp(ρu)·n` and the
+  correction/Schur term uses `interp(ρ)`. Variable-density physics is not validated.
+- ⚠️ **The gradient scheme is bound once per solved field.** `build` carries `velocity_gradient_schemes`
+  (one per component) and `pressure_gradient_scheme`, each `gradient_scheme.bind(mesh, geometry,
+  linearization)` against that field's `BoundaryLinearization` (from `_build_time_velocity_linearizations`
+  / `_build_time_pressure_linearization`); `_velocity_gradient` / `_pressure_gradient` apply those. One
+  binding cannot serve the flow state: a `PressureOutlet` prescribes pressure and extrapolates velocity, a
+  wall the reverse, so the weights are nonzero on disjoint patches (single-binding error ~4e-3 vs ~4e-15
+  per field on a perturbed 8×8 grid; numbers and configuration in the log). Pins:
+  `test_the_flow_assembler_binds_a_scheme_per_solved_field`,
+  `test_the_velocity_and_pressure_linearizations_differ_on_the_same_patch`,
+  `test_the_flow_is_exact_on_an_inlet_outlet_wall_duct`.
+  - The weights are read by `jax.jvp` at rest, exact because every flow closure is affine in the gradient
+    (`test_the_flow_boundary_linearizations_do_not_depend_on_the_state`). `build` is therefore two-phase:
+    construct with geometry-only bindings, then `dataclasses.replace` once the closures exist.
+  - ⚠️ `momentum.gradient_scheme` survives as the **condition-free** form, for an initializer solving a
+    different equation on this mesh to re-bind (`potential_flow` → `laplace_field` →
+    `ResidualAssembler.build`). It is not what the residual applies.
+- **`rhie_chow.py` — `interior_mass_flux` + `momentum_diagonal`.** `mdot_f = ρ(u_ip·n − d̂[(p_N−p_P) −
+  ∇̄p·d]/(d·n))A`. Skewness-consistent: `ρu` is reconstructed to the face integration point via
+  `interpolate_to_face`, and the damping compares compact and reconstructed jumps along `d`, so they cancel
+  on a linear pressure (`tests/integration/test_skewed_flow.py`). `momentum_diagonal` returns per-component
+  `a_P` `(n_cells, dim)` (isotropic today; the seam for directional sources); the Rhie–Chow coefficient is
+  `d̂ = Σ_i n_i²(V/a_P_i)_f`. Keeps `g`-weighting. The block preconditioner uses the component-averaged
+  `a_P`. The momentum pressure force (`_face_pressure`) is reconstructed to the integration point too.
+  - `_lagged_mdot_estimate` is velocity-only (no pressure), which breaks the `a_P` ↔ `mdot` circularity.
+    ⚠️ `a_P` does **not** widen the coupled Jacobian's velocity stencil; the eddy viscosity's strain-rate
+    dependence does (`turbulence.md`; harness `validation/bfs3d_openfoam/column_reach_probe.py`; log).
+  - **Boundary faces respect the BC type** (`boundary_owner_coeff`, from each patch's
+    `momentum_diagonal_coefficient`): a zero-gradient outlet adds no viscous diagonal, a wall no convective
+    one. Applied to the **residual** `a_P` only (`momentum_matrix_diagonal`, `boundary_corrected=True`).
+  - **The residual's viscous boundary term uses the operator's per-face boundary viscosity**
+    (`_boundary_face_viscosity()` → `boundary_momentum_diagonal`), the same coefficient `DiffusionFlux`
+    carries — on wall-function meshes the wall model's `μ + ρν_t,wall` differs from the owner's log-layer
+    `μ_eff` by a large factor. Pinned by a wall-function `a_P` vs `diag(jacfwd(residual))` test
+    (`test_preconditioner.py`).
+  - ⚠️ The **frozen** diagonal (`frozen_momentum_diagonal`, `boundary_corrected=False`) keeps the plain
+    all-faces form: it is a forward-path stabilization scale, its extra boundary damping carries the
+    high-Reynolds pseudo-transient march (correcting it regressed `test_channel_high_reynolds`), and it
+    never affects the converged residual or adjoint. Do not "correct" it.
+- **`a_P`'s viscous term is the diffusion operator's own diagonal (binding).** `momentum_diagonal` /
+  `momentum_diagonal_parts` use `discretization.flux_continuous_conductance(μ_eff, geometry, face_cells)`
+  (`Γ_P A / ((D_P·n) − (Γ_P/Γ_N)(D_N·n))`; harmonic mean on an orthogonal face). A g-weighted arithmetic
+  face viscosity agrees only for constant `μ`, which is why constant-`μ` tests cannot catch a wrong form.
+  The same helper feeds the frozen velocity AMG and the scalar shift/AMG (`turbulence/preconditioner.py`).
+  Pinned: `momentum_matrix_diagonal` vs `diag(jacfwd(residual))` at graded `ν_t` (`test_preconditioner.py`).
+- **The velocity-block AMG's frozen operator comes from the same diagonal definitions — no numpy
+  re-derivation (binding).** Viscous coupling from `flux_continuous_conductance`; boundary diagonal is the
+  boundary-face owner coefficient scattered by `face_cells.scatter`, so the assembled diagonal *is* the
+  frozen `a_P` by construction. It stays on the uncorrected all-faces form, matching
+  `frozen_momentum_diagonal` (what the runtime rescaling divides by).
+- **`boundary.py` — `FlowBoundary` → `NoSlipWall`, `MovingWall`, `VelocityInlet`, `PressureOutlet`.** Each
+  closes velocity, pressure and boundary `mdot`, and exposes `pressure_schur_coefficient`
+  (`d(mdot)/d(p_owner)`, nonzero only at `PressureOutlet`) and `momentum_diagonal_coefficient`.
+  - **Compose, do not inherit (binding).** `FlowBoundary` is not a `BoundaryCondition` subtype (three
+    coupled quantities; `mdot` has no scalar analogue). `velocity_face`/`pressure_face` delegate to scalar
+    `Dirichlet`/`DirichletField`/`ZeroGradient` closures per component (`_prescribed_components`,
+    `_face_value`, `_velocity_face`); only `mass_flux` is flow-specific. A constant velocity is a floating
+    `(dim,)` array leaf and a profile an `equinox.Module` (read via `_Component`, not a lambda), so the
+    velocity is differentiable (`boundary.md`).
+  - **Two-pass boundary reconstruction is `schemes.BoundaryClosure.reconstruct`**, the same object
+    `ResidualAssembler._gradient` composes: leading-order boundary values (closures at zero gradient) feed
+    the reconstruction, then closures are re-evaluated at the reconstructed gradient for the fluxes.
+    `_pressure_closure()` wraps `_boundary_pressure`; `_velocity_closure(velocity, i)` is the per-component
+    view, exact only because every current flow closure closes each component on its own. Face values the
+    fluxes read are still taken from the vector closures at the whole tensor, so a future component-coupling
+    closure (slip/symmetry) needs only its reconstruction hooks revisited. Nothing moves on an orthogonal mesh.
+  - **`mass_flux`'s through-flow term is the patch's own boundary velocity, for every patch (binding).**
+    `_boundary_mass_flux` passes each patch its `boundary_velocity` slice (the value just computed at the
+    reconstructed gradient). `PressureOutlet.mass_flux` reads it, which makes the open Couette case exact
+    on a skewed mesh (`test_skewed_flow.py`; numbers in the log). `pressure_schur_coefficient` is unaffected.
+  - `FlowBoundary.mass_flux` takes nine positional arrays — past the ~5-array trigger; bundling them is
+    part of the buoyancy change (below).
+- **Turbulence enters through `eddy_viscosity`; `μ_eff = μ + ρν_t` is formed once, in
+  `MomentumContinuity.effective_viscosity` (binding).** Kinematic `ν_t` rides its own differentiable leaf
+  (`with_eddy_viscosity(nu_t)`); callers never restate the closure relation. **Do not put `ν_t` into the
+  `PropertyModel`** — it is not a material property, and overwriting `"viscosity"` destroys the molecular
+  value (log). `SSTTurbulence` keeps its own `density`/`molecular_viscosity` for the k/ω diffusion.
+  - `with_scaled_molecular_viscosity(factor)` rescales molecular `μ` only (`PropertyModel.with_scaled`) —
+    the momentum half of a Reynolds rescale (`CoupledRANS.with_scaled_molecular_viscosity` composes both).
+  - The wall-function eddy viscosity is a second per-face kinematic leaf:
+    `with_eddy_viscosity(nu_t, wall_eddy_viscosity=None)` (from `turbulence.wall_face_eddy_viscosity(k)`).
+    `_wall_boundary_viscosity()` makes the diffusion's boundary coefficient `μ + ρ·ν_t,wall` on
+    `shears_flow()` faces, owner `μ_eff` elsewhere; the residual `a_P` reads the same coefficient. `None`
+    and wall-resolved meshes (`ν_t,wall = 0`) are no-ops, so it is always on.
+  - The same call means different things in the two paths: `turbulence/driver.py` applies it outside the
+    residual (frozen per sweep, invisible to AD); `turbulence/coupled.py` inside (cross-block Jacobian
+    terms). That is why gradients go through `solve_coupled`, never `solve_segregated`. Contract pinned in
+    `tests/unit/test_momentum_coupling.py` on a `ρ≠1` fluid.
+- **Convection.** `advection_scheme=` turns on `mdot·u` (upwind or limited), making the residual
+  nonlinear; `a_P`'s convective part uses the lagged velocity-flux estimate. Closed domains fix the
+  pressure level with `pressure_datum`.
+- **Body force.** `sources=(UniformBodyForce(f),)`: `R = flux − f·V` per component; with `p = p̃ + G·x`,
+  `f>0` drives `+x` and `G = −f`. `force` is a differentiable leaf. Drives a streamwise-periodic channel
+  (`structured_grid_2d(periodic=("x",))` + a datum), verified against Poiseuille in
+  `test_periodic_channel.py`. No Rhie–Chow term, no continuity entry.
+- **`drive.FlowSolve` — `(momentum, state) -> (momentum, state)`**, the segregated loop's flow-solve
+  signature, exported; `bulk_velocity_flow_solve` and `reused_flow_solve` both return one.
+- **Bulk-velocity constraint — `flow/mean_velocity.py`, `bulk_velocity_flow_solve`.** The force is a
+  scalar Lagrange multiplier on `⟨U_dir⟩ − U_bar = 0`, appended to the state and solved jointly by the
+  production `RootSolver`; AD assembles the bordered Jacobian (no hand-derived border in the residual).
+  `⟨U⟩ = U_bar` holds by construction at the root, so the bulk velocity cannot overshoot while `ν_t`
+  develops (the failure of the deleted proportional controller). Convergence-gated and
+  reverse-differentiable; returns `(momentum, state)` carrying the converged force.
+  - **Preconditioning: `precondition.bordered_preconditioner(M, border, fields, a, c)`** Schur-eliminates the
+    scalar (`y = M·r_flow`, `dβ = (cᵀy − r_β)/(cᵀMa)`, `dw = y − dβ·Ma`). Hand-building `a`/`c` here is
+    legitimate (a preconditioner changes only Krylov convergence). ⚠️ It is built once in the builder from a
+    concrete `reference` (required whenever `preconditioner` is given), never from the traced `momentum` —
+    a captured tracer breaks `jax.grad`.
+  - ⚠️ **The assembler is threaded as the Newton `theta`, not captured in the residual closure** — a captured
+    assembler raises a `custom_vjp` closed-over-value error. The adjoint transpose solve uses the same
+    bordered preconditioner transposed (`solve/root_adjoint.py::_transposed_preconditioner`,
+    `jax.linear_transpose`). Pinned by `tests/unit/test_mean_velocity.py` (incl. analytic `dβ/dμ`) and
+    `test_bordered_preconditioner.py`.
+  - The same primitives border every march: `flow/bordered.py` (below). Do not re-derive the border elsewhere.
+  - The periodic seam is **not** a preconditioner problem — do not look there again; the cold-start crawl
+    was, fixed by the velocity scale + plug start (log § "The periodic seam").
+- **Field initialization — `flow/initialization.py`.** `laplace_field(mesh, geometry, boundary, …)` solves
+  scalar Laplace in one multigrid-preconditioned linear step (smoothed-aggregation V-cycle; needed because
+  the condition number grows like the square of the near-wall aspect ratio — Jacobi is not enough).
+  `potential_flow(momentum)`: `u = ∇φ` with Neumann `u_in·n` at each `VelocityInlet`, a Dirichlet datum at
+  the `PressureOutlet`, `ZeroGradient` at walls; returns `[u, p]` with the Bernoulli seed. With no
+  through-flow boundary it returns the plug `scales.body_force_velocity(momentum)` (body-force channel);
+  a moving-lid cavity correctly returns zero (`test_potential_flow_is_zero_on_a_closed_domain` — do not
+  widen the fallback to `characteristic_velocity`, which reports the lid speed).
+  - ⚠️ `potential_flow` takes **no `gradient_scheme`** and must not be given one back: it uses
+    `momentum.gradient_scheme` (condition-free) so the initializer and the solve share a discretization
+    (`schemes.md`).
+- **Bernoulli pressure seed — `bernoulli_pressure`.** `p = ½ρ(|u_ref|² − |u|²)`, anchored so the mean over
+  `PressureOutlet` cells is zero (`_pressure_outlet_cells`; else the domain mean). Halves the first coupled
+  Newton correction. Closed-form on purpose: a pressure-Poisson seed reads `∇u`, which is singular at sharp
+  corners (backward-facing step) and was far worse (log). Remaining first-step pressure correction is a
+  solver-side concern. Pinned by `test_bernoulli_pressure_*`.
+- **Velocity scale — `flow/scales.py`, the one home for "how fast is this flow".**
+  `characteristic_velocity(assembler)`: fastest patch `reference_velocity`, else `body_force_velocity`.
+  `body_force_speed` closes `f V_total = τ_w A_wall` via `hydraulic_length` (`V_total/A_wall`, wetted area
+  from `shears_flow()`), taking **`min`** of laminar `f h²/(3μ)` and turbulent `20·u_τ` (the laminar branch
+  diverges as `μ→0`). `friction_velocity = √(f h/ρ)` follows from the force balance alone; the turbulence
+  initializer sizes `k`/`ω` from it. `wetted_length(mesh, geometry, patches)` is the geometric half.
+  `BlockPreconditioner.build` warns when the convection block is requested with zero reference mass flux;
+  a caller that knows the speed should pass `reference_state=`.
+- **`reference_speed(assembler)` enters the residual.** `MomentumContinuity.build` scales momentum
+  advection (`with_reference_scale`, `schemes.md`) by it, so a softened Venkatakrishnan limiter's `eps` is
+  a fraction of it. Order: `Drive.held_speed()` (`MassFlow` → `|target|`, `BoundaryDriven` → `None`), else
+  `|characteristic_velocity|`. Fixed at build — `with_scaled_molecular_viscosity` does not re-derive it
+  (deliberate: a Reynolds ramp changes viscosity, not the limiter). An undriven domain refuses a scaled
+  scheme at build. ⚠️ A flow driven only by a pressure difference between two `PressureOutlet`s is not
+  covered and must state the limiter's scale. Pinned in `tests/unit/test_advection_reference_scales.py`.
+- **Validated:** Poiseuille (`test_poiseuille.py`; 2nd order; Stokes in one Newton step; differentiable)
+  and the Re=100 lid-driven cavity (`test_cavity.py`; ~5 Newton steps to 1e-12; Ghia et al. (1982)
+  centrelines; differentiable through the IFT adjoint).
+- **Structure.** The preconditioner is `block_preconditioner.py`'s `BlockPreconditioner`, composing three
+  injected abstract strategy families: an `InnerSchurSolver` (`SmoothedAmgSchur`, the one pressure Schur), a
+  `VelocityBlockSolver` (`SmoothedAmgVelocity` viscous / `TwoLevelConvectionVelocity` /
+  `AirConvectionVelocity`), and a `SaddleComposition` (default `BlockTriangularComposition`). Build with
+  `BlockPreconditioner.build(assembler, velocity=…).factory()`. Add a strategy as a subclass, never an
+  `if … == …` branch. `strength_threshold=θ` (default 0, byte-identical) turns on strength-of-connection
+  aggregation; the coupled RANS path uses 0.25 (`solve-amg-multigrid.md`).
+  - **Dependency is one-way `block_preconditioner → momentum`**; the assembler must not import the
+    preconditioner (a convenience wrapper on `MomentumContinuity` once created that cycle). Low-level
+    kernels (`pressure_schur_laplacian`, `damped_jacobi_solve`) stay in `preconditioner.py`.
+  - `frozen_momentum_diagonal_parts(assembler, state)` is a public function needing only the assembler,
+    so a shift can be built without a preconditioner (building one per rung re-aggregates and recompiles).
+  - **`BlockPreconditioner.on(assembler)`** re-points a built preconditioner at another problem, frozen
+    hierarchies kept (they are rescaled to the current `a_P` per application). A viscosity ramp's station
+    change uses it (`turbulence._BlockSession._repointed`); a fresh `build` re-aggregates and recompiles
+    (`test_a_re_pointed_block_session_step_is_a_compilation_cache_hit`, `test_preconditioner_session.py`).
+  - Frozen operators are assembled by `precondition/frozen_operator.py`'s `ConvectionDiffusionStencil(...)
+    .assemble()` with `decouple_dof` for the closed-domain pin; do not re-assemble a stencil here.
+  - **Symmetric rescaling and the per-component lift are single-homed (binding).** `A_cur⁻¹ ≈ D⁻¹ A_ref⁻¹
+    D⁻¹`, `D = sqrt(diag_cur/diag_ref)`, lives once in `_symmetric_rescaled`; the per-component lift in
+    `_per_component`. Velocity blocks inherit one `apply` from `_RescaledAmgVelocity` and supply `build` +
+    `_inner_solve`. Pinned in `tests/unit/test_preconditioner.py`.
+  - **Strategies build from narrow geometry bundles, not the assembler (binding).** `_SchurGeometry`
+    (runtime, stored; owns `coefficient(a_P)` / `boundary_diagonal(a_P)`) and `_VelocityGeometry`
+    (build-time only) are siblings, not one union bundle. Assembler behaviour (the reference `mdot`) is
+    computed by the builder and handed in as a frozen array. The shared connectivity + multigrid knobs are
+    one `_StrategyInputs` NamedTuple.
+  - Trap: a non-h-independent inner makes the outer count grow — do not resurrect a damped-Jacobi Schur or
+    `diag(a_P)⁻¹` velocity block (both deleted as dominated).
 
-`hybrid_initialize(problem, **settings)` is a `functools.singledispatch` in a neutral top-level module that
-imports no physics; each package registers the types it owns beside them (**`flow/initialization.py`
-registers `MomentumContinuity` → `potential_flow`**, taking no settings; `transport/initialization.py`
-registers `ScalarTransport` → the harmonic interpolant of its Dirichlet boundary values, zero when nothing
-is prescribed; `turbulence/coupled_initialization.py` registers `CoupledRANS` → `sst_initial_fields`). It used to be the SST
-initializer under a general name — `(momentum, turbulence)` → `(flow, k, omega)` — so a laminar flow or a
-species could not use it. **A new problem type registers its own; do not add a branch to a central
-function.** An unregistered type raises `TypeError` naming it. `solve_flow_march(state=None)` starts from
-`potential_flow`, i.e. the same initializer. ⚠️ **On the tetrahedral duct
-(`validation/tetrahedral_gradient_ab`) potential flow is reported to stagnate** (the reconstruction
-Jacobian's condition number ~3e19, measured for a scalar Laplace problem in `compare.py`) — that is a
-solver problem on that mesh and this dispatch does not change it; whether the laminar `potential_flow`
-itself fails there has **not** been tested.
+## Hybrid initialization is generic — `aquaflux.initialization.hybrid_initialize`
 
-## The flow march — `solve_flow_march` / `flow_march_step` / `FlowMeasures` (BUILT 2026-09-19, #448)
+`hybrid_initialize(problem, **settings)` is a `functools.singledispatch` in a physics-free top-level module;
+each package registers its own types (`flow/initialization.py`: `MomentumContinuity` → `potential_flow`;
+`transport/initialization.py`: `ScalarTransport`; `turbulence/coupled_initialization.py`: `CoupledRANS` →
+`sst_initial_fields`). A new problem type registers its own — do not add a branch to a central function.
+Unregistered types raise `TypeError`. `solve_flow_march(state=None)` uses the same initializer. On the
+tetrahedral duct (`validation/tetrahedral_gradient_ab`) a scalar Laplace stagnates (reconstruction
+Jacobian condition ~3e19); whether laminar `potential_flow` fails there is untested.
+
+## The flow march — `solve_flow_march` / `flow_march_step` / `FlowMeasures`
 
 A laminar problem runs on the **same staged march as the turbulent one** (`solve.staged_march`,
-`solve.shifted_step`; see `solve.md`) — dual-time, `RetryPolicy`, a row-equilibrated measure rebuilt every
-outer iteration, a between-segment preconditioner refresh, a step control, a homotopy, per-step
-observation — configured the same way and meaning the same thing. Previously the only flow-only builder
-was `momentum_continuation`, a bare `PseudoTransientStep` for `RootSolver`, so a laminar case could not be
-a control for a solver question: the control had to run on a weaker driver.
+`solve.shifted_step`; `solve.md`), configured the same way — a laminar case is a valid control for a solver
+question.
 - **`solve_flow_march(momentum, state=None, *, strategy, reference_state, preconditioner_options, …,
-  **march)`** starts from `potential_flow` when given no state, marches on `stop_gradient` copies, and
-  attaches `root_adjoint` at the converged root (so `jax.grad` is one transpose solve whatever path the
-  march took; pinned against finite differences and single-step vs dual-time in
-  `tests/integration/test_flow_march.py`). **`flow_march_step`** builds the step: `momentum_shift_policy`
-  (block-SIMPLE preconditioner + the velocity `a_P` shift, shared with `momentum_continuation`) into
-  `shifted_step`. Its Krylov regime is `_FLOW_LINEAR_SOLVE` = rtol 0.3 / restart 120 / max_restarts 15,
-  **carried from the coupled block-diagonal family and not re-measured on a flow-only residual**.
-  `tools/sibling_builders.py` pairs `flow_march_step` with `coupled_step`; what differs is genuine (the
-  coupled `positivity_*` are `k`'s) and `shift` is the same value on both: `solve.ShiftSettings(basis, velocity_parts)` here, its subclass `CoupledShiftSettings` (adding `turbulence_damping`) there (#450 stage 3). `momentum_continuation` and `momentum_shift_policy` take it too; the old `shift_basis=` keyword is gone.
-  `jacobian_gradient_sweeps` is on both, being a property of the residual and not of the closure.
-- **`FlowMeasures`** supplies `RowScaled` / `BlockScaled` for the `(u, p)` residual: momentum rows by the
-  shift's base diagonal, **continuity by the cell's mass throughput** (it has no diagonal), field scales the
-  mean speed and one. `flow_row_scales` is that flow part, shared with `turbulence.coupled_scaled_norm`,
-  which appends its `k`/`ω` rows — so the flow rows of the two measures cannot drift.
-- **Both of `flow_row_scales`' scales are floored by the characteristic speed `|U|` (#459, 2026-09-29),
-  so a march can start from rest**: the velocity field scale at `REST_SPEED_FRACTION = 0.05 |U|`, each
-  cell's throughput at `REST_THROUGHPUT_FRACTION = 1e-4 rho |U| A` (`A` its summed face area), and a
-  state at rest in a domain nothing drives (`|U| = 0`) is **refused** with an error naming `Euclidean()`.
-  **Why floors that stay on, not one applied only at rest** (all measured 2026-09-29 on the 16 x 16 lid
-  cavity at Re 100 from rest, `FirstOrderUpwind`, `CompactGreenGauss`, default `solve_flow_march`,
-  80-step cap): unfloored the reference measure is NaN; flooring the velocity scale only where the
-  velocity is exactly zero removes the NaN, but every step is still rejected, because the continuity
-  row divides the trial's mass imbalance by `1e-300`; flooring both only at exact rest gets step 0
-  accepted, and then the measure rebuilt at mean speed `0.01 |U|` reads **114x** the start, past
-  `DivergenceGuard`'s 10x cap, and all 79 later steps are rejected. With both floors held the march
-  converges in 18 steps. **The values:** on converged cavities (16² and 32² at Re 100, 32² at Re 400)
-  the mean speed is 0.10-0.11 `|U|`, so the velocity floor does not bind there; the throughput floor
-  binds in 0.0-0.7 % of cells (near-stagnant corners) at `1e-4`, against 0.0 % at `1e-5` and 2.3-3.3 % at
-  `1e-3`, while step 0 sits at 1.4x, 5.3x and 1.3x of the guard's cap respectively — `1e-4` was chosen
-  by the project owner for the margin. Pinned by `tests/unit/test_flow_row_scales.py` (the floors at
-  rest from their definition, the state's own scales once it has flow, the refusal and its limit) and
-  `test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure`. ⚠️ `flow_row_scales` now reads
-  the characteristic speed with a concrete `float`, so it cannot run under a trace — it never did in the
-  march, which builds its measures on concrete values.
-- ⚠️ **`BlockScaled()` stalls (0 cycles, every step rejected) from the default `potential_flow` start**: it takes
-  each block's scale from the start state's own residual, and potential flow is divergence-free, so the
-  continuity block starts ~0 and every later step reads as an enormous relative increase. Measured
-  2026-09-19 on the 24 x 16 channel at Re 200 (`FirstOrderUpwind`, `CompactGreenGauss`, block-SIMPLE
-  defaults): from rest it converges in 10 steps. The default `RowScaled()` has no such sensitivity.
-- **`MaterializedJacobian` march — BUILT 2026-09-19 (#450 stage 2), with a traced inverse (stage 4).** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed()))`, or a session from `open_flow_session` (a `CompleteLu()` inverse existed until 2026-10-11; the measurements below that name it were taken while it did). **Use `SimpleSmoothed`**: the traced JAX pressure-velocity hierarchy over the whole `(u, p)` state (`precondition.block_preconditioner.MaterializedBlockPreconditioner`, `precondition/block_preconditioner.py`), the traced kind the hierarchies exist to provide (GPU). (A PETSc `MonolithicVCycle` arm existed beside it until PETSc was removed, 2026-10-10.) `_FlowProblem` (in `flow/march.py`) supplies the assembler, the graph probe (gradient-sweep cap as `_GradientSweepCap`; default stencil reach 3 — over-reach is exact, only costlier; **the laminar reach was not measured**), **no field groups** (so `FieldSplit` is refused and a bare block inverse is allowed — the mirror of the coupled problem, which refuses the bare block), the shift-only `momentum_shift_only_policy` (no block preconditioner ⇒ no value-dependent multigrid hierarchy to recompile per rung) and the flow step. `MomentumShiftPolicy` takes the assembler first and an optional block preconditioner. **Measured 2026-09-19** on the 24 x 16 plane channel, Re 200 (`mu` 5e-3, `FirstOrderUpwind`, `CompactGreenGauss`), dual-time `inner_steps=3`, `RowScaled`, `rtol=0, atol=1e-9`, CPU, default `SimpleSmoothed()` settings, one run each: block-SIMPLE 17 steps / 51 restart cycles / 11.1 s; `CompleteLu(scipy)` 17 / 51 / 5.6 s; `SimpleSmoothed` **17 / 61 / 6.1 s** — the same trajectory, ~20 % more cycles than an exact factorization, on a 384-cell mesh where the wall clock says little. **Not measured**: a larger or 3D laminar case, or a low-shift state. `solve_flow_march` still has no `mass_flow` (bulk-velocity) form. ⚠️ **The on-device traced split (#290, 2026-10-12) does NOT reach this path**: a bare block inverse is not a field split, so `offers_traced_split` is false and the step keeps the host `MonolithicFactorShiftPolicy` (the session glues the policy and hands it to `_FlowProblem.build_step(state, policy, …)`). Giving a single-group problem the on-device apply would need a traced counterpart for `MaterializedBlockPreconditioner`, which is not built.
-- **The issue's motivating case (the Re_Dh 50 tetrahedral duct), re-run 2026-09-20 on this march**
-  (`validation/tetrahedral_gradient_ab/laminar_duct_march.py`; 2462 tetrahedra, unit density and inlet
-  speed, mu 5e-4, `FirstOrderUpwind`, `CorrectedGreenGauss` at its default sweeps, one run per arm, 60-step
-  cap). **From a uniform plug every arm converges** (`newton_march` over `momentum_continuation` 12 steps,
-  `solve_flow_march` single step 15, dual-time with a complete-LU or `SimpleSmoothed` materialized inverse
-  17 and 17). **From rest the single-step arms fail** (`|R|` ~1.6e-3 after 60 steps, bare or staged) **and
-  `DualTimeLoop(inner_steps=3)` with `MaterializedJacobian(CompleteLu())` or `(SimpleSmoothed())`
-  converges in 13 steps** (Euclidean measure, 5.4e-9 and 5.8e-9). So the failure the issue reported is the
-  single-step pseudo-transient march from rest — a configuration, not the mesh or the gradient scheme —
-  and this march reaches the configuration that fixes it. **Not established:** the start state and
-  tolerance of the issue's original run were never recorded, so rest is a stand-in for it. (These arms
-  were run with `Euclidean()` because the default `RowScaled()` was then NaN from rest; its floors now
-  let it start there (#459, above), and the duct has not been re-run under it.) `MultipleCorrectionGradient` (with the corner-cell
-  fallback) does **not** converge on this duct with the same settings — an open question of #435, not of
-  the flow-only path; its record is in `validation/tetrahedral_gradient_ab/README.md`.
+  **march)`** starts from `potential_flow`, marches on `stop_gradient` copies, attaches `root_adjoint` at the
+  root (pinned against finite differences in `tests/integration/test_flow_march.py`). **`flow_march_step`**:
+  `momentum_shift_policy` (block-SIMPLE + velocity `a_P` shift, shared with `momentum_continuation`) into
+  `shifted_step`. Krylov regime `_FLOW_LINEAR_SOLVE` = rtol 0.3 / restart 120 / max_restarts 15, carried
+  from the coupled block-diagonal family and **not re-measured on a flow-only residual**.
+  `tools/sibling_builders.py` pairs it with `coupled_step`; differences are genuine (the coupled
+  `positivity_*` are `k`'s). `shift` is `solve.ShiftSettings(basis, velocity_parts)` here and its subclass
+  `CoupledShiftSettings` there; `momentum_continuation` / `momentum_shift_policy` take it too.
+  `jacobian_gradient_sweeps` is on both (a residual property).
+- **`FlowMeasures`** supplies `RowScaled` / `BlockScaled`: momentum rows by the shift's base diagonal,
+  continuity by the cell's mass throughput, field scales the mean speed and one. `flow_row_scales` is shared
+  with `turbulence.coupled_scaled_norm`, so the flow rows cannot drift.
+- **`flow_row_scales` floors both scales by the characteristic speed `|U|`, always on**, so a march can start
+  from rest: velocity at `REST_SPEED_FRACTION = 0.05 |U|`, throughput at `REST_THROUGHPUT_FRACTION = 1e-4
+  ρ|U|A` (value chosen by the project owner for guard margin). A rest state with `|U| = 0` is refused,
+  naming `Euclidean()`. Floors applied only at exact rest fail (the measure rebuilt at low speed trips
+  `DivergenceGuard`); evidence in the log. Pinned by `tests/unit/test_flow_row_scales.py` and
+  `test_a_lid_driven_cavity_marches_from_rest_under_the_default_measure`. ⚠️ It reads the speed as a
+  concrete `float`, so it cannot run under a trace.
+- ⚠️ **`BlockScaled()` stalls from the default `potential_flow` start** (potential flow is divergence-free,
+  so the continuity block's scale starts ~0). It converges from rest; the default `RowScaled()` has no
+  such sensitivity (24×16 channel, Re 200, 2026-09-19).
+- **`MaterializedJacobian` march.** `solve_flow_march(preconditioner=MaterializedJacobian(SimpleSmoothed()))`
+  or a session from `open_flow_session`. Use `SimpleSmoothed` (traced pressure–velocity hierarchy
+  `precondition.block_preconditioner.MaterializedBlockPreconditioner`). `_FlowProblem` (`flow/march.py`)
+  supplies the assembler, the graph probe (`_GradientSweepCap`; default stencil reach 3 — over-reach is
+  exact, only costlier; the laminar reach was not measured), **no field groups** (so `FieldSplit` is refused
+  and a bare block inverse allowed — the mirror of the coupled problem), the shift-only
+  `momentum_shift_only_policy`, and the step. On a 384-cell channel it matched block-SIMPLE's trajectory
+  (log). ⚠️ The on-device traced split does not reach this path (`offers_traced_split` is false for a bare
+  block inverse); the step keeps the host `MonolithicFactorShiftPolicy`.
+- **The tetrahedral duct**: its failure was the single-step march from rest, fixed by dual-time with a
+  materialized inverse; `MultipleCorrectionGradient` does not converge there (#435). Log § "the
+  tetrahedral duct re-run".
 
-## A held bulk velocity on every march — `flow/bordered.py` (BUILT 2026-10-11, #541)
+## A held bulk velocity on every march — `flow/bordered.py`
 
-A `MassFlow` drive used to be solvable only by `bulk_velocity_flow_solve` (inside the segregated loop) and
-by a separate coupled `RootSolver` path (`solve_coupled_mass_flow` / `mass_flow_coupled_continuation`,
-**both deleted**) that reached none of `staged_march`'s step control, retry, refresh, homotopy or
-observers. Now `solve_flow_march` and `turbulence.solve_coupled` take a `MassFlow`-driven assembler and
-border themselves; the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelocity`.
-- **`MassFlowBorder(drive, fields, force, average)`** — built by `mass_flow_border(momentum, layout)`
-  (`None` for a boundary-driven assembler; `layout` the flow's own or an outer one whose first block is
-  the flow). Its methods are everything a march needs: `attach` / `detach` / `force_of` (the state),
-  `residual(fn)` (a `BorderedResidual`), `policy(inner)` (a `BorderedShiftPolicy`), `measures(inner)` (a
-  `BorderedMeasures`), `homotopy(inner)` (every station bordered), `source(inner)` (a continuation source
-  handed the *fields* of each augmented state — sessions and caller builders only ever see field states),
-  `on_fields(measure)` (a drift measure read on augmented states).
-- **The border wraps ANY residual because the force enters linearly**: `R(w; β) = R(w; β₀) + (β − β₀)a`
-  with `a = −V`. `BorderedResidual` evaluates the given residual at the force the drive carries and adds
-  the difference; it never writes β into the assembler, so it borders a bare callable (a homotopy
-  station) as readily as an assembler's own. The carried force cancels exactly, values and derivatives.
-  ⚠️ **This rests on the force being uniform and state-independent** — the same assumption the analytic
-  border column always rested on; a source that is not would need its own `dR/dβ`.
+`solve_flow_march` and `turbulence.solve_coupled` take a `MassFlow`-driven assembler and border themselves;
+the case file's `FlowMarch` / `CoupledMarch` hold a `BulkVelocity`.
+- **`MassFlowBorder(drive, fields, force, average)`**, built by `mass_flow_border(momentum, layout)`
+  (`None` when boundary-driven; `layout` the flow's own or an outer one whose first block is the flow).
+  Methods: `attach` / `detach` / `force_of`, `residual(fn)` (`BorderedResidual`), `policy(inner)`
+  (`BorderedShiftPolicy`), `measures(inner)` (`BorderedMeasures`), `homotopy(inner)`, `source(inner)`
+  (hands sessions and caller builders field states only), `on_fields(measure)`.
+- **The border wraps any residual because the force enters linearly**: `R(w; f) = R(w; f₀) + (f − f₀)a`,
+  `a = −V`; it never writes the force into the assembler, so it borders a bare callable (a homotopy
+  station) too. ⚠️ Rests on the force being uniform and state-independent.
 - **Measures**: `BorderedMeasures.row_scaled` appends the constraint row with row scale 1 and field scale
-  `drive.held_speed()`, so it reads as the fractional miss of the target (refused for a zero target);
-  names gain `"bulk_velocity"` (`bordered.BULK_VELOCITY`). `block_scaled` gives it the leading block's
-  scale. The inner measure is handed the step with its bordered policy replaced by the inner one.
-- **The constraint row is UNSHIFTED, and the march starts at the target (decided 2026-10-11).**
-  `BorderedShiftPolicy` gives `β` a zero shift; `bordered_preconditioner` takes no border shift. A
-  shifted step damps the fields' answer to the force while the unshifted row still asks them to reach
-  the target in one step, so the force correction grows with the damping. On the first build that froze
-  the laminar march (every step rejected, `dβ` 202 on a force of 0.3, escalating the shift made it
-  worse) — but the cause was the **start**, not the row: the plug was sized from the seed force, so the
-  constraint opened missed. `Drive.held_velocity` now starts the plug at the target, and the row opens
-  satisfied. The alternative, shifting the row by its own Schur magnitude `|c · M₀ a|` (damping the force
-  as the fields are damped), was built and measured and **rejected**: on `test_mean_velocity._channel`
-  (4 x 48 laminar periodic channel, `mu` 0.1, target 1, block-SIMPLE, default `RowScaled`) it moved but
-  crawled from the plug, and a warm start diverged under it, where the unshifted row converges the warm
-  start in one step and the cold start in 12 at `beta0 = 0.1`. At the default `beta0 = 2` the cold start
-  crawls through the viscous spin-up *with or without* the border (the same with a prescribed force) —
-  the known cold-start crawl recorded under "The periodic seam", not a border property; the integration
-  test runs at `beta0 = 0.1` for that reason.
-- **On the turbulent channels** the coupled march holds re20000 and does not converge re240000; under
-  the default row-scaled measure re20000 is 3-20x slower than under `Euclidean()`, and the slow block is
-  `k`, not the constraint row. The record is in `.claude/rules/turbulence.md` (the bulk-velocity entry)
-  and `validation/turbulent_channel/README.md`.
-- **Two-argument residuals for the adjoint**: `BorderedFlowResidual` (flow) and
+  `drive.held_speed()` (the fractional miss; refused for a zero target), named `bordered.BULK_VELOCITY`.
+  `block_scaled` gives it the leading block's scale.
+- **The constraint row is unshifted, and the march starts at the target (decided 2026-10-11).**
+  `BorderedShiftPolicy` gives the force a zero shift; `bordered_preconditioner` takes no border shift.
+  Starting the plug at the target (`Drive.held_velocity`) is what makes this work — a start sized from the
+  seed force froze the march. Shifting the row by its Schur magnitude was built, measured and rejected
+  (log). At the default `beta0 = 2` a cold start crawls through viscous spin-up with or without the border,
+  so the integration test runs at `beta0 = 0.1`.
+- **Turbulent channels**: the coupled march holds re20000, not re240000; record in
+  `.claude/notes/turbulence-log.md`, "Held bulk velocity on the law-of-the-wall files", and
+  `validation/turbulent_channel/README.md`.
+- Two-argument residuals for the adjoint: `BorderedFlowResidual` and
   `turbulence.coupled._BorderedCoupledResidual` read everything, border vectors included, from `theta`.
-- **The bordered wrappers forward everything a march hands them (fixed 2026-10-12, #386).**
-  `_BorderedHomotopy.enter(step, previous)` passes `previous` through — it took `enter(step)` alone after
-  the protocol gained `previous` (2026-10-11), so **every ramp on a held bulk velocity raised `TypeError`
-  before step 1** (found by running `mass_flow_march.py`'s ramp arm; the unit test's stub had the old
-  arity too). `_DetachedSource.refresh_preconditioner` detaches the state before calling the inner hook,
-  since a session builds from fields; no hook reached it before the block family gained one.
-- **Observers see fields**: `on_checkpoint` is handed the detached fields state (so the case's checkpoint
-  writer reads it unchanged); a restart re-solves the force from the drive's own seed.
-- **Not built: a materialized-Jacobian preconditioner beside a held bulk velocity** — `open_flow_session`
-  / `turbulence.open_session` refuse it (and the case's marches refuse it when the file is read). The
-  Schur elimination around a materialized inverse is mechanical (`bordered_preconditioner` takes any
-  factory); what is missing is a bordered `MaterializedProblem`.
+- Observers see fields: `on_checkpoint` gets the detached fields state; a restart re-solves the force from
+  the drive's seed.
+- **Not built: a materialized-Jacobian preconditioner beside a held bulk velocity** — `open_flow_session` /
+  `turbulence.open_session` and the case's marches refuse it. Missing piece: a bordered `MaterializedProblem`.
 
 ## Binding decisions
-- **`a_P` (momentum diagonal) is DIFFERENTIATED in the residual; only the PRECONDITIONER freezes it
-  (binding — do not describe `a_P` as a lagged/`stop_gradient`-ed coefficient).** It is computed from
-  the standard central-coefficient formula (viscous + convective + transient), with its convective part
-  using a velocity-flux *estimate* for the mass flux (not the Rhie–Chow `mdot` itself), which breaks the
-  `a_P` ↔ `mdot` circularity and makes `a_P` a non-circular function of the velocity. It then enters the
-  Rhie–Chow damping `V/a_P`, whose term is non-zero for a non-linear pressure field, so `a_P` genuinely
-  affects the **converged solution's sensitivity** — freezing it (`stop_gradient`) would leave the
-  implicit-function-theorem adjoint linearizing a *different* residual than the one solved (the converged
-  *value* would be unchanged, the *sensitivity* not). So the residual differentiates `a_P` (verified: on
-  pitzDaily the AD-jvp of the coupled residual matches a central finite difference to ~1e-7 in the flow
-  block). The **block preconditioner**, which needs a constant operator, `stop_gradient`-s `a_P` on its
-  side (and evaluates it at a `stop_gradient`-ed state) — that is where the freezing lives.
-  (Historical note: an earlier design lagged `a_P` in the residual; the code moved to differentiating it.
-  See `rhie_chow.py` / `momentum.py`.)
-- **Monolithic block, AD Jacobian.** The reference (`reference_codes/…conjugatecfd`) assembles
-  the 4×4-per-face block `A(0:6,4,4)` **by hand** in an outer **Picard** loop with lagged
-  coefficients, one **BiCGStab** solve (default PC, **no AMG** — "reasonable convergence" for
-  laminar/porous). Our version replaces the hand-assembled block with the AD Jacobian and Newton;
-  the block **preconditioner is the top research risk** — `lineax` GMRES is the
-  current default; AMG (`jaxamg`, unverified) is deferred exactly as the reference deferred it.
-- **Reuse over reimplementation (Principle 2).** Momentum viscous/advection are the existing
-  operators with μ as the diffusion coefficient and `mdot` as the mass flux — do **not** re-derive
-  a momentum flux. New code is only the pressure force, Rhie–Chow, and the flow BCs.
+- **`a_P` is differentiated in the residual; only the preconditioner freezes it.** Do not describe it as a
+  lagged/`stop_gradient`-ed coefficient. It enters the Rhie–Chow damping `V/a_P`, so freezing it would make
+  the IFT adjoint linearize a different residual (same converged value, wrong sensitivity). The block
+  preconditioner `stop_gradient`s `a_P` and its state.
+- **Monolithic block, AD Jacobian, Newton–Krylov** — replacing the precursor's hand-assembled 4×4-per-face
+  block solved in an outer Picard loop with BiCGStab.
+- **Reuse over reimplementation**: new flow code is only the pressure force, Rhie–Chow and the flow BCs.
 
 ## Not yet built (follow-ons, in order)
-- **Porous / conjugate interface** (`eps` porosity terms, `addCont` interface branch) — the
-  reference's distinguishing capability. **The drag half now has a home *and that home is wired***
-  (#279): a `MomentumSource` returning `−(μ/K)u` with the matching `diagonal`, which since 2026-08-20
-  actually reaches `a_P` (see `source.py` above) instead of being declared and ignored. What remains
-  is the porosity in the continuity/transport terms and the interface branch, not the force.
-- **Buoyancy, and with it the balanced-force face treatment.** `MomentumSource.face_force` is
-  declared and returns `None` everywhere today — and anything else is refused at build (#279), so the
-  gap is loud rather than silent; a spatially varying force must instead be reconstructed to faces
-  consistently with the pressure gradient and enter the mass flux beside it. Wiring it needs the
-  force to reach the **boundary** closures too, and `FlowBoundary.mass_flux` already takes **nine**
-  positional arrays — past this project's own ~5-array trigger — so the per-face-state bundle is part
-  of that change, not a separable tidy-up.
-  Note this is a *variable-density* regime, so it comes due alongside the conservative
-  (non-kinematic) forms the flow and the k/ω transport both currently defer. **It does not implicate
-  a species concentration**, whose balance `∂C/∂t + ∇·(uC) = ∇·(D∇C)` carries no density at all and
-  is already conservative as written — only the *discrete* guarantee that a uniform `C` is preserved
-  leans on constant density, through `Σ Q_f = 0` following from continuity's `Σ ṁ_f = 0`.
-- **Transient** momentum (BDF, reusing `TransientTerm`). **Must use a transient-consistent Rhie–Chow:
-  subtract the transient component of `a_P` in the mass-flux d-coefficient** — use `a_P^{RC} = a_P −
-  ρV/Δt` (spatial only), not the full `a_P`, or the pressure smoothing (and the `-C` block) vanishes as
-  `Δt → 0`, giving checkerboarding *and* a singular SIMPLE Schur in the preconditioner (author's ANSYS
-  experience — two `a_P` roles: spatial for Rhie–Chow/`-C`,
-  full for SIMPLE's `diag(F)⁻¹`). `momentum_diagonal`/`momentum_diagonal_parts` already carry an unused
-  `dt`+`rho` seam whose transient term is the **density-weighted** `ρV/Δt` (conservative `∂(ρu)/∂t`,
-  matching the ρ-weighted convective mass-flux and dynamic-viscosity terms on the same diagonal; `rho`
-  is required whenever `dt` is given — #153). Then **energy
-  coupling** (the scalar transport already exists — couple the temperature field to the flow).
-- **Outer block preconditioner — Stage 2: MESH-INDEPENDENT AMG inner is done; the residual is the Schur
-  approximation.** The inner Schur solve is a **smoothed-aggregation multigrid** V-cycle
-  (`aquaflux/precondition/multigrid.py`, `SmoothedAmgSchur`, the one inner — `BlockPreconditioner.build(asm)`).
-  Built once off-jit with `scipy.sparse` (no PyAMG needed),
-  applied as a frozen matrix-free V-cycle; **~0.25 flat contraction** via three fixes — **direct coarse
-  solve** (dense pinv), **Chebyshev smoother**, and **pin decoupling** (pin zeroed out of the operator →
-  SPD singleton, null-space-matched to the pinned Jacobian; this fixed the earlier stagnation/wrong-solution
-  correctness bugs). A **symmetric diagonal rescaling** `√(diag_cur/diag_ref)` tracks the reference scale
-  (essential). **BOTH blocks get an AMG:** a block-by-block diagnostic (make each block's inverse exact in
-  turn) showed the Schur-only version's residual ~√N was the **velocity block** (`diag(a_P)⁻¹` is
-  Jacobi-quality for the viscous `F⁻¹`), *not* the Schur (making the Schur exact changed nothing) — so
-  **PCD/LSC would not have helped.** The velocity momentum block gets its own smoothed AMG (Dirichlet
-  no-slip → SPD-nonsingular via a `boundary_diagonal`, no pin; per component). The preconditioner is **block-TRIANGULAR**: the
-  pressure block sees the divergence of the velocity predictor, `δp = Ŝ⁻¹(r_p − D·δu)`, with `D·δu`
-  applied as a **jvp through a frozen residual** (`stop_gradient(self)`, so `D` is constant and
-  adjoint-transparent — verified). **Result: outer GMRES 4→8 over 144→2304 cells (~O(N^0.25)), ≈37 iters
-  extrapolated to 1e6 cells** vs unpreconditioned 95→1818; correct/differentiable, all
-  `test_flow_preconditioner.py` pass. (Progression: Schur-AMG-only 9→34 ~√N; +velocity-AMG 7→14 ~O(N^0.3);
-  +D-coupling 4→8 ~O(N^0.25).) The tiny residual growth is the 1-cycle-AMG block approximation, not the
-  structure. **Two cheaper diagonals were measured and rejected** — velocity block-Jacobi and
-  inverse-volume-Jacobi on the gradient solve; see `solve.md`, do not re-attempt.
-- **`FlowBlocks` re-runs its `jvp` per application ON PURPOSE — `jax.linearize` once per iterate was
-  measured and buys nothing (2026-10-09, #55; do not re-attempt without re-running the harness).** Every
-  block (`F`, `G`, `B`, `Ĉ`) is a fresh `jax.jvp` through the frozen residual, primal pass included, on
-  every Krylov iteration. The issue's defence of that ("`frozen_state` is constant, so XLA constant-folds
-  the primal") is **wrong**: `newton_step` builds the preconditioner inside the jitted `_march_step`, so
-  the state is a *traced* runtime value and nothing folds. The real reason is that the primal pass is
-  **loop-invariant inside the Krylov `while_loop`**, and the compiled loop pays only the tangent pass per
-  iteration either way. Harness: `validation/flow_blocks_linearize.py` (builds `M` from a traced state
-  inside the compiled solve; the `linearize` arm is a `FlowBlocks` subclass swapped in for that arm only;
-  `M(v)` is bit-identical between arms). Configuration: `simple_type_composition.py`'s plane channel,
-  `mu` 4e-4, marched to rel 1e-3, `ConvectionTwoLevel` velocity, `msimple` Schur, right-preconditioned
-  GMRES restart 30 to TRUE `rtol` 1e-8; jax 0.11.2, CPU, x86_64, 4 cores, one run, median of 7 timings.
-
-  | cells | primal alone | one `jvp` (no loop) | `jvp` / linearized, per apply in a loop |
-  |---|---|---|---|
-  | 2048 | 1.37 ms | 2.08 ms | 0.76 / 0.79 ms |
-  | 8192 | 3.96 ms | 6.38 ms | 3.64 / 3.70 ms |
-
-  | cells | composition | `M` ms/apply, jvp / linearize | cycles (both) | solve s, jvp / linearize | temp MB |
-  |---|---|---|---|---|---|
-  | 2048 | triangular | 2.12 / 2.07 | 10 | 0.91 / 0.99 | 8.1 / 7.8 |
-  | 2048 | simpler | 3.77 / 4.11 | 6 | 0.88 / 0.84 | 10.8 / 9.9 |
-  | 8192 | triangular | 7.99 / 8.39 | 13 | 5.67 / 5.77 | 31.9 / 30.7 |
-  | 8192 | simpler | 18.05 / 17.48 | 6 | 3.85 / 4.25 | 42.7 / 39.3 |
-
-  So the primal pass is most of an *unlooped* `jvp` (and so would matter for a caller applying a block
-  once outside a loop), but in the loop the two arms cost the same, within this instrument's spread in
-  both directions; an earlier run of the same arms (same machine, same day) agreed, linearize never
-  faster on the solve. **Not measured**: a 256x128 mesh (its march ran past 30 min and the container
-  restarted), GPU, the coupled RANS residual, and whether the hoisting is visible in the compiled HLO —
-  the mechanism is inferred from the timings, not read off the program.
-- **Outer block preconditioner — Stage 3: the remaining limit IS the Schur approximation, and no amount
-  of inner accuracy reaches it (measured on a developed Re=1e5 SST channel; binding, do not re-attempt).**
-  The `cycles` knob and the MSIMPLE scale are both exhausted: **velocity-AMG V-cycles ×2/×4/×8 leave
-  the flow block's error operator `ρ(I − A_flow·M_flow)` at 34.02 / 33.99 / 34.03 / 34.05 (no effect);
-  Schur V-cycles ×2/×4/×8 make it *worse* (41.6 / 48.7 / 48.5)**; both-exact never beats the 1-cycle
-  baseline; and **rebuilding the whole block at the developed state does not help** (34.0 → 31.6 on the
-  channel, 49.9 → 91.9 on pitzDaily). Inverting `Ŝ` more accurately making the preconditioner worse is
-  the signature that `Ŝ` is the **wrong operator**. **Rescaling MSIMPLE's `k` is a ρ mirage:** it
-  collapses ρ (34.0 → 9.6) while barely moving the one-shot error (24.1 → 22.6) and the ρ-optimal `k`
-  sits ~40× above the *maximum* of the per-cell `ρV/a_P` distribution — the degenerate limit that
-  switches the pressure correction off — and on the **real march it is slower** (auto-`k` 348 s / 8 steps
-  vs `k×4` 447 s, identical trajectory). So the shipped per-apply `mean(ρV/a_P)` calibration is
-  near-optimal, and **preconditioner changes must be validated on the real march, not on ρ** (ρ here is
-  dominated by isolated outlier eigenvalues GMRES kills anyway). **Root cause:** the MSIMPLE Schur is a
-  constant-coefficient (scaled pressure-mass-matrix) Poisson — a near-Stokes/low-Re approximation that
-  degrades as convection strengthens. **A better Schur (the stabilized least-squares commutator) was
-  built, lost 6–7× on cycles on the coupled solve, and was DELETED 2026-09-13 (#371) — there is no
-  `schur_scaling="lsc"` and no `StabilizedLscSchur`.** See `.claude/notes/solve-refuted-directions.md`.
-  PCD remains deprioritized
-  independently (finite-element boundary recipes that do not transfer to FVM). Full numbers and the
-  matching "what a preconditioner can and cannot change" rule are in `.claude/notes/solve-globalization-log.md`.
-- **⚠️ SCOPE (binding, corrected 2026-08-18): "msimple beats SIMPLE" above described
-  `coupled_continuation`'s block-diagonal preconditioner, which neither flagship validation case runs and
-  which no longer defaults to MSIMPLE — do not cite it as current evidence for either architecture.**
-  Neither `validation/bfs3d_openfoam/compare.py` nor `validation/pitzdaily_openfoam/compare.py` reaches
-  `coupled_continuation` at all (both build `coupled_amg_continuation(...)` explicitly, whose
-  `_monolithic_shift_source` builds the shift policy with `build_flow_block=False` — no
-  `BlockPreconditioner`, hence no `schur_scaling`, regardless of `FIELD_SPLIT`/`FLOW_INVERSE`). And where
-  MSIMPLE was tested directly against a flagship-scale operator, in the field-split leading-inverse role
-  the current architecture actually uses, it was dominated: `validation/bfs3d_openfoam/field_split_probe.py`'s
-  `split msimple/ilu0` arm (removed 2026-09-13, #371 — in git history) is part of the "FLAT block preconditioners are CLOSED on this case" family in
-  `.claude/notes/solve-flow-block-log.md` (2.554e-06 TRUE relative residual at the 58-restart-cycle cap,
-  where the shipped hierarchical leading inverses converge in ~10 cycles), and a tighter,
-  single-variable-changed measurement (`simple_type_swap_probe.py`, same file, "MSIMPLE swapped in for the
-  SHIPPED leading inverse") that holds the shipped trailing inverse fixed instead of pairing it with an
-  unshipped `ilu0` one shows both arms now converge but MSIMPLE costs ~8-9x the cycles (6→53 at the
-  adjoint operator, 5→40 at the march's own shift). **`_coupled_shift_policy` no longer hardcodes
-  `schur_scaling="msimple"` as of this date** — it was never necessary at the scale that policy is
-  actually used at either: dropping it in favour of `BlockPreconditioner`'s own default reaches the
-  identical fixed point on every small (hundreds-of-cells) unit/integration fixture that used to pin it,
-  up to Re 20000 (see `.claude/rules/turbulence.md`'s matching entry for the full list). What survives
-  unqualified: MSIMPLE as the better of `BlockPreconditioner`'s own `schur_scaling` options for a
-  *standalone flow-only* solve where plain SIMPLE's inner GMRES genuinely stalls
-  (`tests/integration/test_channel_high_reynolds.py`, laminar, 384–3072 cells). It is no longer anyone's
-  default.
-- **⚠️⚠️ EVERY MSIMPLE(R) MEASUREMENT IN THESE FILES WAS TAKEN ON A METHOD THE NAME DID NOT DESCRIBE —
-  corrected 2026-08-20 (#274). Read this before citing any of them.** `schur_scaling="msimpler"`
-  implemented Klaij & Vuik (2013)'s **MSIMPLE**, and not even all of that: the **pressure prediction**
-  that defines their `R` variants was absent, and so was Algorithm 1's closing velocity update. What was
-  shipped is the lower block-triangular pass. That is a perfectly good preconditioner with its own
-  justification (Murphy–Golub–Wathen), but it is not the method whose name it carried — and the paper
-  puts the convergence benefit squarely on the `R` axis while saying the `M` axis buys *setup reuse* and
-  is worse alone ("MSIMPLE and MSIMPLER are clearly poor solvers"; "the (M)SIMPLER variants require much
-  less linear iterations per nonlinear iteration"). So the long-standing puzzle — MSIMPLE measuring worse
-  than plain SIMPLE when it "should" be better — was measuring the axis that trades convergence for setup
-  cost, with the axis that buys convergence missing. **There is no `"msimpler"` string any more.**
-  - **The two axes are now separate parameters, because they are separate things.**
-    `schur_scaling` ∈ `{"simple", "msimple"}` picks the `InnerSchurSolver`; the new
-    `composition` ∈ `{"triangular", "simple", "simpler"}` picks a `SaddleComposition`, i.e. how many
-    times and in what order the velocity and Schur solves are applied. The paper's **MSIMPLER** is
-    `schur_scaling="msimple", composition="simpler"`; its **SIMPLER** is `schur_scaling="simple",
-    composition="simpler"`. `composition="triangular"` is the default and is byte-identical to every
-    build before this change, so nothing above was invalidated by the *code*, only by the *name*.
-    `msimpler_scale` is now `mass_scale` (it is the `M` variant's `k`, and always was).
-  - **`SimplerComposition` is Algorithm 2 verbatim**, with `Ŝ` the compact pressure Laplacian the paper
-    calls `R`: predict `Ŝ δp'' = −B F̃⁻¹ r_u` (from the momentum row alone — *not* the mass row, which is
-    what keeps the wide-stencil `Ĉ` out of the operator being inverted), solve `F δu' = r_u − G δp''`,
-    correct `Ŝ δp' = r_p − B δu' − Ĉ δp''` (`Ĉ` appears here, on the right, where only its action is
-    needed), then `δu = δu' − F̃⁻¹ G δp'` and `δp = δp'' + δp'`. Their step 4 divides the prediction by
-    the outer relaxation `ω_p`; a Newton–Krylov solve has no outer relaxation, which is the `ω_p = 1`
-    limit, so the two pressures simply add. `F̃` is **the diagonal the Schur was assembled from** in
-    every case (`a_P`, or `ρV/k`), which is what keeps prediction, correction and Schur consistent.
-  - **How it is pinned, and why that test is the point.** `tests/unit/test_preconditioner.py` checks each
-    composition against the property that *defines* it rather than against a transcription of its own
-    code: on the saddle `[[diag(d), G], [B, Ĉ]]` — the real gradient, divergence and coupling blocks,
-    with the momentum block replaced by the very diagonal the compositions correct with — `simple` and
-    `simpler` are **exact inverses**, because both are complete block factorizations once their two
-    approximations are exact. `triangular` comes back exact in pressure and *not* in velocity, which pins
-    which half it deliberately omits. A dropped or mis-signed step fails this outright; it is the check
-    the missing prediction could never have passed. Plus linearity and `<y,Mx> = <Mᵀy,x>` for all three,
-    since a non-flexible outer GMRES and the transposed adjoint both require them.
-  - **✅ THE PREDICTION IS WORTH ~30 % OF THE OUTER CYCLES, ON BOTH CASES IT WAS MEASURED ON — so the
-    paper's claim holds here once the step is actually there (2026-08-20).** Harness:
-    `validation/simple_type_composition.py`, a 64×32 plane channel at `mu = 4e-4` (Reynolds number 2500),
-    2048 cells, marched to a *loose* rel 1e-3 (`|R|` 1.614e-05) — **not** to a root, because at a
-    machine-precision root the right-hand side `-R` is roundoff and every arm ties on noise.
-    **Right**-preconditioned GMRES, restart 30, to `rtol` 1e-8 on the **TRUE** residual, cap 200 cycles:
-
-    | schur | composition | cycles | TRUE rel |
-    |---|---|---|---|
-    | `simple` | `triangular` | 27 | 4.42e-10 |
-    | `simple` | `simple` | 39 | 2.23e-10 |
-    | `simple` | `simpler` | **129** | **3.99e-01** — **did NOT converge** |
-    | `msimple` | `triangular` | 9 | 1.27e-10 |
-    | `msimple` | `simple` | 9 | 1.73e-10 |
-    | `msimple` | **`simpler` (MSIMPLER)** | **6** | **9.21e-12** |
-
-    MSIMPLER is **33 % fewer cycles**, converging two orders deeper. Reproduced at a second state
-    (marched to rel 1e-5): 6 against 9 again, and the whole table reproduced **cycle-for-cycle and
-    residual-for-residual** by an independent re-run of the harness.
-    ⚠️ **No wall column, deliberately.** The two runs put the MSIMPLER arm at 0.26 s and 0.35 s against
-    the triangular arm's 0.27 s and 0.30 s — i.e. marginally faster in one and 17 % slower in the other,
-    which is inside this instrument's own ~15 % spread at sub-second scale. **At this problem size the
-    second Schur solve's cost and the cycles it saves are indistinguishable in wall clock**; the honest
-    claim is the cycle count, and whether the trade pays in seconds has to be measured somewhere the
-    solve is not already a third of a second. On `bfs3d` below the per-cycle cost separation is large
-    enough to read despite the same caveat — MSIMPLER against the triangular pass is ~3.2 s/cycle
-    against ~1.8 s, a 1.8x that matches the mechanism exactly (two Schur solves and four residual
-    linearizations against one and one) rather than resting on the timer.
-  - **⚠️ BUT PLAIN SIMPLER — the prediction on the `a_P`-scaled Schur — DOES NOT CONVERGE, and that
-    asymmetry is the practical rule to take from this.** The prediction inverts `Ŝ` against a
-    *velocity*-derived right-hand side, so it is far more exposed to `Ŝ` being a poor match for
-    `-B F̃⁻¹ G` than the correction is. The `a_P` Schur is already the worse of the two here (27 cycles
-    against 9 for the same composition), and the prediction amplifies that rather than surviving it. So:
-    **pair `composition="simpler"` with `schur_scaling="msimple"`, which is exactly the pairing the paper
-    promotes.** The mechanism is offered as the reading that fits, and is *not* separately measured — a
-    Reynolds sweep to test it directly was started and abandoned (its low-Reynolds march would not
-    finish); do not cite it as established.
-  - **On `bfs3d`'s real coupled Jacobian the prediction buys the same ~29–45 %, and how that leaves the
-    family DEPENDS ON WHICH OPERATOR: ~1.9x behind the shipped inverse at the adjoint's unshifted one,
-    within 16 % at the march's own shift.** Harness:
-    `validation/bfs3d_openfoam/simple_type_swap_probe.py` (the renamed, extended
-    `msimpler_swap_probe.py`) at `state-00059`, the converged root of a full shipped 3-rung cold march;
-    field split, column reach (3,3,3,3,2,2), real right-hand side `-R(state)`, one materialization shared
-    by every arm, GMRES restart 15 to true `rtol` 1e-8, cap 60 restarts; **only the leading (flow-saddle)
-    inverse differs — trailing inverse, wiring and shift held at the shipped bundle throughout**. At the
-    **zero-shift (adjoint) operator**:
-
-    | leading inverse | zero shift (the adjoint's operator) | march shift β=0.0050 |
-    |---|---|---|
-    | **shipped** — `simplesmooth` SIMPLE-smoothed AMG | **17** | **19** |
-    | `msimple` / `triangular` — what every earlier measurement tested | 45 | 40 |
-    | `msimple` / `simple` — Algorithm 1 in full | **58 (the cap)** | 47 |
-    | `msimple` / `simpler` — **MSIMPLER** | **32** | **22** |
-
-    ⚠️ **Other work shared the machine during this run, so cycles are the evidence and the seconds are
-    not** (cycle counts on this case are exactly reproducible; wall clock is not). For the record the
-    zero-shift solves were 46 / 79 / 124 / 101 s in table order.
-
-    Read four things off it. (1) **The prediction is worth 45 → 32 (−29 %) at zero shift and 40 → 22
-    (−45 %) at the march's shift**, bracketing the channel's −33 % — so the missing step was real and
-    buys what the paper says it buys, on a flagship-scale operator. (2) **Algorithm 1's closing velocity
-    update makes it *worse* here** (45 → the cap; 40 → 47), where on the channel it was neutral; every
-    use of `F̃⁻¹` is a liability when `F̃` is a poor stand-in for `F`, and a mass matrix is a poor
-    stand-in on a wall-resolved high-Reynolds 3D mesh. So `composition="simple"` is *not* "triangular
-    plus a free improvement", and MSIMPLER wins despite that update rather than because of it.
-    (3) ⚠️ **The recorded "MSIMPLE is dominated ~8-9x" headline does not survive at the operating point:
-    at the march's own shift MSIMPLER is 22 against the shipped 19, within 16 %.** The gap is real at the
-    adjoint's unshifted operator (32 against 17) and nearly closed at the march's — so anyone citing this
-    family's standing must say **which operator**. (4) It is nonetheless still behind on both, and
-    **cycles are not seconds**: MSIMPLER costs ~3.7 s/cycle here against the shipped ~2.6 s (two Schur
-    solves and four residual linearizations per apply, against one and one), so at 22 against 19 it
-    remains the slower arm. A whole-march A/B would settle it and none has been run. **Nothing here moves
-    a default.**
-    ⚠️ **The recorded "~8-9x, 6→53" figure was taken when `bfs3d` shipped `hostilu` as its leading
-    inverse; it now ships `simplesmooth`, whose baseline is 17, not 6.** Both numbers are right under their own
-    bundle — do not compare them across it.
-- **Fully-AD `a_P`** — a possible refinement (the diffusion Gate-C / limiter pattern), not yet needed.
-- **Gradient-scheme cost — largely solved (use `SweptGradientSolve`).** The *per-matvec* and
-  *compile* cost of the nested corrected-gradient solve (distinct from the outer iteration count) is
-  cut ~5× by inverting the constant `A_g` with fixed matrix-free Richardson sweeps instead of a
-  nested implicit-diff GMRES — an exact `O(n)` drop-in (N=32 coupled Newton step 112 s → 23 s). It is
-  the default advanced-gradient scheme to inject into `MomentumContinuity` on skewed meshes. See
-  `schemes.md` / `solve.md`. (A dense-LU variant was measured and removed — `O(n²)`, strictly dominated;
-  do not rebuild.)
+- **Porous / conjugate interface.** The drag half has a wired home (a `MomentumSource` returning
+  `−(μ/K)u` with a matching `diagonal`); remaining are porosity in continuity/transport and the interface branch.
+- **Buoyancy, and the balanced-force face treatment.** A spatially varying force must be reconstructed to
+  faces consistently with the pressure gradient and enter the mass flux beside it, including the boundary
+  closures — so bundling `FlowBoundary.mass_flux`'s nine arrays into a per-face-state object is part of that
+  change. It is a variable-density regime, due with the conservative forms flow and k/ω defer. A species
+  concentration is not implicated (only its discrete uniform-`C` preservation leans on constant density).
+- **Transient momentum** (BDF, reusing `TransientTerm`). ⚠️ Must use a transient-consistent Rhie–Chow:
+  `a_P^{RC} = a_P − ρV/Δt` in the mass-flux d-coefficient, or the pressure smoothing and the `-C` block
+  vanish as `Δt → 0` (checkerboarding and a singular SIMPLE Schur). `momentum_diagonal(_parts)` already
+  carry an unused `dt` + `rho` seam (`ρV/Δt`; `rho` required with `dt`). Then energy coupling.
+- **Outer block preconditioner — Stage 2: mesh-independent AMG inner is done.** Smoothed-aggregation
+  V-cycle Schur (`SmoothedAmgSchur`), built off-jit with `scipy.sparse`; ~0.25 contraction from a direct
+  coarse solve, Chebyshev smoother and pin decoupling; symmetric diagonal rescaling is essential. Both blocks
+  get an AMG — the velocity block, not the Schur, was the √N limit, so PCD/LSC would not help.
+  Block-triangular: `δp = Ŝ⁻¹(r_p − D·δu)` with `D·δu` a jvp through a frozen (`stop_gradient`) residual.
+  Outer GMRES grew ~O(N^0.25). Two cheaper diagonals were rejected (`.claude/notes/solve-log.md`, "Binding
+  decisions — where preconditioning must attach (skewed cavity)"). Numbers in the log.
+- **`FlowBlocks` re-runs its `jvp` per application on purpose** — `jax.linearize` per iterate buys nothing
+  (harness `validation/flow_blocks_linearize.py`; log § "FlowBlocks linearize").
+- **Stage 3: the remaining limit is the Schur approximation (binding, do not re-attempt).** More V-cycles,
+  rebuilding at the developed state, and rescaling MSIMPLE's `k` do not help; the stabilized
+  least-squares commutator Schur lost and was deleted. Validate preconditioner changes on the real march,
+  not the spectral radius. Log § "Stage 3"; ledger `.claude/notes/solve-refuted-directions.md`.
+- **SIMPLE-type compositions.** `schur_scaling` ∈ `{"simple", "msimple"}` picks the `InnerSchurSolver`;
+  `composition` ∈ `{"triangular" (default), "simple", "simpler"}` picks the `SaddleComposition`. MSIMPLER is
+  `msimple` + `simpler`; `mass_scale` is the `M` variant's `k`. MSIMPLER saves ~30–45 % of outer cycles over
+  triangular but stays behind the shipped `bfs3d` leading inverse; plain SIMPLER does not converge; no
+  default moved. `SimplerComposition` is the paper's Algorithm 2 at `ω_p = 1`, with `F̃` the diagonal the
+  Schur was assembled from. Pinned in `tests/unit/test_preconditioner.py` by the defining property: on the
+  saddle with a diagonal momentum block `simple`/`simpler` are exact inverses and `triangular` is exact in
+  pressure only; plus linearity and adjoint consistency. Measurements: log § "SCOPE", "MSIMPLE(R) measurements".
+- **Fully-AD `a_P`** — possible refinement, not needed.
+- **Gradient-scheme cost — use `SweptGradientSolve`** (fixed matrix-free Richardson sweeps on constant
+  `A_g`, an exact O(n) drop-in, ~5× cheaper than a nested GMRES) on skewed meshes (`schemes.md`,
+  `solve.md`). A dense-LU variant is O(n²) and dominated; do not rebuild.
 
 ## Testability seam
-`interior_mass_flux` and the BCs are pure functions of per-face arrays — unit-tested with no
-mesh (`test_rhie_chow.py`, `test_flow_boundary.py`). `momentum_diagonal` is checked for positivity
-and linear-in-μ scaling. The coupled solve is gated on the analytical Poiseuille field and its
-2nd-order convergence, plus an AD-through-solve no-NaN check.
+`interior_mass_flux` and the BCs are pure functions of per-face arrays, unit-tested with no mesh
+(`test_rhie_chow.py`, `test_flow_boundary.py`). `momentum_diagonal` is checked for positivity and
+linear-in-μ scaling. The coupled solve is gated on analytical Poiseuille and its 2nd-order convergence,
+plus an AD-through-solve check.

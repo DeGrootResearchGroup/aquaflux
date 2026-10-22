@@ -99,6 +99,30 @@ finite coordinates, index dtypes and ranges, the right number of nodes per face
 sentinel used correctly. An invalid mesh raises `ValueError` with a clear message rather
 than silently producing wrong volumes or `NaN`s downstream.
 
+## Saving and reading a mesh
+
+A mesh is saved in aquaflux's own file, `.aqmesh`, with `aquaflux.io.write_aqmesh(mesh, path)`,
+and read back with `aquaflux.io.read_aqmesh(path)`; a case file reads one as
+{class}`~aquaflux.case.AquafluxMesh`. The file holds the mesh's arrays as the mesh holds them, so
+it reads back exactly: the same cells and faces in the same order, the same patches, patch types,
+patch groups and cell zones. A two-dimensional mesh is stored as two-dimensional and a periodic one
+as periodic, which an OpenFOAM polyMesh cannot do without an extrusion or matched patch pairs.
+
+The file is a NumPy `.npz` archive with these members:
+
+| member | holds |
+|---|---|
+| `node_coords` | node coordinates, `(n_nodes, dim)` |
+| `face_node_offsets`, `face_node_indices` | the faces' nodes, in compressed sparse row form: face `f`'s nodes are `face_node_indices[face_node_offsets[f]:face_node_offsets[f + 1]]` |
+| `owner`, `neighbour` | each face's two cells, `-1` for a boundary face's neighbour |
+| `patch_label`, `zone_label` | each face's patch and each cell's zone, by position in the header's names |
+| `neighbour_offset` | a periodic mesh only: each face's offset of the neighbour across the seam |
+| `header` | a JSON document: the format's name and version, `dim` and the sizes, the patch and zone names, patch types and groups, the mesh's digest ({func}`~aquaflux.mesh.mesh_digest`), and a `provenance` record of how the mesh was made |
+
+`aquaflux.io.read_aqmesh_header(path)` reads the header alone. A file written in a newer version
+of the format is refused, and so is one whose mesh no longer has the digest it was written with:
+it has been changed or damaged since.
+
 ## Geometry
 
 The metrics the solver needs — face areas, face centroids, outward normals, cell

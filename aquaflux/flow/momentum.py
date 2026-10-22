@@ -1095,19 +1095,37 @@ class MomentumContinuity(eqx.Module):
     def flow_fields(self, state: jnp.ndarray) -> FlowFields:
         """Assemble the shared flow quantities for ``state`` (boundary fields, gradients, ``mdot``).
 
-        The one place the velocity/pressure gradients and the Rhie--Chow mass flux are formed. A
-        consumer that needs more than one of them at a single state -- the residual and ``mdot`` in a
+        A consumer that needs more than one of them at a single state -- the residual and ``mdot`` in a
         coupled solve, the velocity gradient and ``mdot`` in a segregated sweep -- calls this **once**
         and reads the fields it needs (via :meth:`residual_from_fields`, :attr:`FlowFields.mdot`,
         :attr:`FlowFields.velocity_fields`), so the boundary fields, gradients, ``a_P``, and
-        Rhie--Chow flux are assembled a single time instead of once per accessor.
+        Rhie--Chow flux are assembled a single time instead of once per accessor. The flat-state form
+        of :meth:`flow_fields_of`.
 
         Parameters
         ----------
         state : jnp.ndarray
             The flat flow state ``[vel_0..vel_{dim-1}, pressure]``, shape ``((dim + 1) n_cells,)``.
         """
-        velocity, pressure = self.unpack(state)
+        return self.flow_fields_of(*self.unpack(state))
+
+    def flow_fields_of(self, velocity: jnp.ndarray, pressure: jnp.ndarray) -> FlowFields:
+        """Assemble the shared flow quantities from the velocity and pressure as separate arrays.
+
+        The one place the velocity/pressure gradients and the Rhie--Chow mass flux are formed. It takes
+        the two fields apart rather than as one flat vector so that a directional derivative in one of
+        them leaves the other with no tangent at all: differentiated in the pressure alone, the
+        velocity gradient, ``a_P`` and everything built on them are constants of the derivative, which
+        a flat state cannot express (slicing a flat tangent hands the velocity an explicit zero
+        tangent, and every kernel downstream of it runs on those zeros).
+
+        Parameters
+        ----------
+        velocity : jnp.ndarray
+            Cell velocity, shape ``(n_cells, dim)``.
+        pressure : jnp.ndarray
+            Cell pressure, shape ``(n_cells,)``.
+        """
         grad_velocity, boundary_velocity = self._velocity_gradient(velocity)
 
         # Rhie--Chow coupling: the pressure gradient, the momentum diagonal a_P, and the mass flux
@@ -1191,5 +1209,57 @@ class MomentumContinuity(eqx.Module):
             The flat flow state ``[vel_0..vel_{dim-1}, pressure]``, shape ``((dim + 1) n_cells,)``.
         """
         velocity, _ = self.unpack(state)
+        return self.velocity_fields_of(velocity)
+
+    def velocity_fields_of(self, velocity: jnp.ndarray) -> VelocityFields:
+        """The kinematic velocity bundle from the cell velocity alone, shape ``(n_cells, dim)``.
+
+        :meth:`velocity_fields` for a caller that holds the velocity as its own array, so a derivative
+        taken in another field never reaches the gradient reconstruction (see :meth:`flow_fields_of`).
+        """
         grad_velocity, boundary_velocity = self._velocity_gradient(velocity)
         return VelocityFields(velocity, boundary_velocity, grad_velocity)
+
+    def unpack_with_field(
+        self, state: jnp.ndarray, field: int, values: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Velocity and pressure of ``state`` with one of its fields replaced by ``values``.
+
+        ``field`` counts the state's per-cell fields in the flat layout's order
+        ``[vel_0..vel_{dim-1}, pressure]``. The replaced field's dependence reaches only what reads it:
+        a pressure leaves the velocity a constant, and a velocity component leaves the pressure one. This
+        is what a Jacobian probe of one column field differentiates through (see
+        :meth:`residual_with_field`).
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The flat flow state, shape ``((dim + 1) n_cells,)``.
+        field : int
+            Which per-cell field to replace, ``0 <= field <= dim``.
+        values : jnp.ndarray
+            Its new values, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        tuple of jnp.ndarray
+            Velocity ``(n_cells, dim)`` and pressure ``(n_cells,)``.
+        """
+        velocity, pressure = self.unpack(state)
+        if field == self.layout.field_offset("pressure"):
+            return velocity, values
+        return velocity.at[:, field].set(values), pressure
+
+    def residual_with_field(
+        self, state: jnp.ndarray, field: int, values: jnp.ndarray
+    ) -> jnp.ndarray:
+        """The residual at ``state`` with one per-cell field replaced by ``values``.
+
+        Equal to :meth:`residual` of the state so modified, but assembled from the separate fields
+        (:meth:`unpack_with_field`), so ``jax.jvp`` in ``values`` computes only the tangents that field
+        reaches. Parameters as :meth:`unpack_with_field`; returns the flat residual, shape
+        ``((dim + 1) n_cells,)``.
+        """
+        return self.residual_from_fields(
+            self.flow_fields_of(*self.unpack_with_field(state, field, values))
+        )

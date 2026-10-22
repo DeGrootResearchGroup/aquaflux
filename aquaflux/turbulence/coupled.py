@@ -29,7 +29,6 @@ adjoint sees only the smooth interior physics).
 
 from __future__ import annotations
 
-import abc
 import dataclasses
 import inspect
 import math
@@ -41,8 +40,6 @@ import jax
 import jax.numpy as jnp
 import lineax as lx
 import numpy as np
-
-from aquaflux.discretization import DifferenceRow, FixationRow, LogRatioRow
 
 # A held bulk velocity borders the coupled residual exactly as it borders the flow's own: the border
 # vectors, the constraint preconditioner, the augmented measures and residual are the flow package's,
@@ -67,10 +64,12 @@ from aquaflux.precondition import (
 )
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
+    DEFAULT_ADAPTIVE_TOLERANCE,
     DEFAULT_GLOBALIZATION,
     DEFAULT_SHIFT_BASIS,
     NO_REFRESH,
     NO_RETRIES,
+    AdaptiveLinearTolerance,
     BlockScaledNorm,
     CellFields,
     ContinuationSource,
@@ -123,112 +122,13 @@ from .preconditioner import (
     UnpreconditionedScalars,
 )
 from .preconditioner_spec import BlockDiagonal
+from .scalar_transforms import DirectScalars, LogScalars, ScalarVariableTransform
 from .sources import production_and_limit
 
 if TYPE_CHECKING:
     from aquaflux.flow import MomentumContinuity
 
     from .transport import SSTClosureFields, SSTTurbulence
-
-
-class ScalarVariableTransform(eqx.Module):
-    """Strategy: the change of variable between the *solved* turbulence unknown and the physical
-    ``k`` / ``omega`` the closure needs.
-
-    The coupled Newton solves for a per-cell scalar unknown ``w``; the closure and transport physics
-    are always written in the physical field ``phi = to_physical(w)``. A strategy that maps ``w`` onto
-    a strictly positive ``phi`` therefore makes ``k, omega > 0`` hold **by construction under any Newton
-    step**, which is what the direct (identity) parametrization cannot guarantee: a full step there can
-    drive ``omega`` negative, and ``nu_t = k / omega`` then flips sign without the residual going
-    non-finite, so the divergence guard never catches it.
-
-    Because the physics residual is written in ``phi``, its Jacobian with respect to the solved ``w``
-    picks up the chain-rule factor ``d(phi)/d(w) = jacobian_scale(phi)``. The frozen scalar
-    preconditioner and pseudo-transient shift are assembled for the *physical* operator, so they are
-    rescaled by this factor to precondition the reparametrized block (see
-    :func:`coupled_step`).
-    """
-
-    @abc.abstractmethod
-    def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
-        """Map the solved unknown ``w`` to the physical field ``phi`` (shape preserved)."""
-
-    @abc.abstractmethod
-    def to_solved(self, phi: jnp.ndarray) -> jnp.ndarray:
-        """Map a physical field ``phi`` to the solved unknown ``w`` (the inverse of
-        :meth:`to_physical`)."""
-
-    @abc.abstractmethod
-    def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
-        """``d(phi)/d(w)`` evaluated at physical ``phi`` -- the factor the physical operator's rows are
-        scaled by to precondition/shift the reparametrized block."""
-
-    @abc.abstractmethod
-    def fixation_row(self) -> FixationRow:
-        """How an algebraic value fixation on this field should be written as a residual row.
-
-        A value fixation must be expressed in the **solved** unknown, not the physical field, or its
-        linearization inherits the transform's nonlinearity: under ``phi = e**w`` the plain difference
-        row ``phi - target`` gives a Newton correction ``dw = target/phi - 1``, which overshoots by
-        ``e**(r-1)`` against a target ratio ``r``, while the log-ratio row is linear in ``w`` and lands
-        on the constraint in one full step. The transform owns this choice because it is the only
-        object that knows which variable is actually being solved for.
-        """
-
-
-class DirectScalars(ScalarVariableTransform):
-    """The identity parametrization: the solved unknown *is* the physical field (``phi = w``).
-
-    Positivity is not structural here -- it is carried by the pseudo-transient shift, the divergence
-    guard, and (for ``k``) the per-cell clip :func:`positive_k_projection` -- so a
-    full Newton step can transiently violate ``omega > 0`` on a stiff high-Reynolds case. The
-    historical default; use :class:`LogScalars` where that matters.
-    """
-
-    def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
-        return w
-
-    def to_solved(self, phi: jnp.ndarray) -> jnp.ndarray:
-        return phi
-
-    def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
-        return jnp.ones_like(phi)
-
-    def fixation_row(self) -> FixationRow:
-        """The plain difference -- the solved unknown *is* the physical field here."""
-        return DifferenceRow()
-
-
-class LogScalars(ScalarVariableTransform):
-    """The log parametrization ``phi = e^w`` for both ``k`` and ``omega``.
-
-    ``phi = e^w > 0`` for every real ``w``, so ``k`` and ``omega`` stay strictly positive under **any**
-    Newton step -- the structural fix for the direct form's transient negativity at high Reynolds
-    number. The physical root is unchanged (``e^w`` is a smooth bijection onto the positives, so
-    ``R(e^w) = 0`` has the same solution as ``R(phi) = 0``); only the Newton iterate space changes, and
-    at the converged state the realizability floor is inactive, so the coupled adjoint is unaffected.
-    The chain-rule factor is ``d(e^w)/d(w) = e^w = phi``.
-    """
-
-    def to_physical(self, w: jnp.ndarray) -> jnp.ndarray:
-        return jnp.exp(w)
-
-    def to_solved(self, phi: jnp.ndarray) -> jnp.ndarray:
-        return jnp.log(phi)
-
-    def jacobian_scale(self, phi: jnp.ndarray) -> jnp.ndarray:
-        return phi
-
-    def fixation_row(self) -> FixationRow:
-        """The log ratio ``log(phi/target) = w - log(target)`` -- linear in the solved unknown ``w``.
-
-        The difference row would be exponential in ``w`` here, so a near-wall cell whose ``omega`` is a
-        factor ``r`` from its target takes a correction ``dw = r - 1`` and overshoots to ``phi e**(r-1)``
-        instead of landing on ``phi r``. It also writes the row on the scale of ``phi`` (which spans
-        orders of magnitude near a wall) rather than of ``w``, which lets a handful of fixation cells
-        dominate the residual measure the whole march is judged by.
-        """
-        return LogRatioRow()
 
 
 def coupled_rans_layout(flow: FieldLayout) -> FieldLayout:
@@ -435,7 +335,8 @@ class CoupledRANS(eqx.Module):
         tuple of (SSTClosureFields, MomentumContinuity)
             The closure at these fields, and the flow assembler carrying its eddy viscosity.
         """
-        return _effective_momentum(self.momentum, self.turbulence, flow, k, omega)
+        velocity, _pressure = self.momentum.unpack(flow)
+        return _effective_momentum(self.momentum, self.turbulence, velocity, k, omega)
 
     def residual(self, state: jnp.ndarray) -> jnp.ndarray:
         """The coupled residual ``R(u, p, k, omega)`` for the flat state, same shape as ``state``.
@@ -454,11 +355,78 @@ class CoupledRANS(eqx.Module):
         differentiation supplies the chain-rule Jacobian.
         """
         flow, k, omega = self.physical_fields(state)
-        closure, momentum = self.effective_momentum(flow, k, omega)
+        return self.residual_of(*self.momentum.unpack(flow), k, omega)
+
+    def residual_with_field(
+        self, state: jnp.ndarray, field: int, values: jnp.ndarray
+    ) -> jnp.ndarray:
+        """The residual at ``state`` with one per-cell field replaced by ``values``.
+
+        Equal to :meth:`residual` of the state so modified, but assembled from the separate fields
+        (:meth:`residual_of`), never from a repacked flat state, so ``jax.jvp`` in ``values`` computes
+        only the tangents that field reaches: a pressure, ``k`` or ``omega`` leaves the velocity
+        gradient, and every kernel built on it, a constant of the derivative. A coloured Jacobian probe
+        of one column field differentiates through it.
+
+        Parameters
+        ----------
+        state : jnp.ndarray
+            The flat coupled state, shape ``((dim + 3) n_cells,)``.
+        field : int
+            Which per-cell field to replace, counted in the flat layout's order
+            ``[vel_0..vel_{dim-1}, pressure, k, omega]``.
+        values : jnp.ndarray
+            Its new values in the **solved** variable, shape ``(n_cells,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The flat residual, same shape as ``state``.
+        """
+        flow, k_solved, omega_solved = self.layout.unpack(state)
+        if field < self.layout.field_offset("k"):
+            velocity, pressure = self.momentum.unpack_with_field(flow, field, values)
+        else:
+            velocity, pressure = self.momentum.unpack(flow)
+            if field == self.layout.field_offset("k"):
+                k_solved = values
+            else:
+                omega_solved = values
+        return self.residual_of(
+            velocity,
+            pressure,
+            self.k_transform.to_physical(k_solved),
+            self.omega_transform.to_physical(omega_solved),
+        )
+
+    def residual_of(
+        self, velocity: jnp.ndarray, pressure: jnp.ndarray, k: jnp.ndarray, omega: jnp.ndarray
+    ) -> jnp.ndarray:
+        """The coupled residual from the four fields as separate arrays.
+
+        The assembly :meth:`residual` describes, written in fields rather than a flat state so that a
+        derivative in one of them carries no tangent through the others (see
+        :meth:`residual_with_field`).
+
+        Parameters
+        ----------
+        velocity : jnp.ndarray
+            Cell velocity, shape ``(n_cells, dim)``.
+        pressure : jnp.ndarray
+            Cell pressure, shape ``(n_cells,)``.
+        k, omega : jnp.ndarray
+            The **physical** turbulence fields, shape ``(n_cells,)`` each.
+
+        Returns
+        -------
+        jnp.ndarray
+            The flat residual, shape ``((dim + 3) n_cells,)``.
+        """
+        closure, momentum = _effective_momentum(self.momentum, self.turbulence, velocity, k, omega)
 
         # One Rhie--Chow assembly at the re-viscosified state feeds both the flow residual and the
         # mass flux the scalars advect on.
-        fields = momentum.flow_fields(flow)
+        fields = momentum.flow_fields_of(velocity, pressure)
         flow_residual = momentum.residual_from_fields(fields)
         k_residual = self.turbulence.k_residual(fields.mdot, closure)(k)
         # The near-wall omega fixation is written in the *solved* unknown, so under a log
@@ -573,8 +541,8 @@ class LiveViscosityVelocityParts(eqx.Module):
             )
         k = self.k_transform.to_physical(k_solved)
         omega = self.omega_transform.to_physical(omega_solved)
-        _closure, live = _effective_momentum(self.momentum, self.turbulence, flow, k, omega)
-        velocity, _pressure = live.unpack(flow)
+        velocity, _pressure = self.momentum.unpack(flow)
+        _closure, live = _effective_momentum(self.momentum, self.turbulence, velocity, k, omega)
         return live.momentum_matrix_diagonal_parts(velocity)
 
 
@@ -1057,18 +1025,20 @@ class CoupledShiftPolicy(eqx.Module):
 def _effective_momentum(
     momentum: MomentumContinuity,
     turbulence: SSTTurbulence,
-    flow: jnp.ndarray,
+    velocity: jnp.ndarray,
     k: jnp.ndarray,
     omega: jnp.ndarray,
 ) -> tuple[SSTClosureFields, MomentumContinuity]:
-    """The closure at ``(flow, k, omega)`` and ``momentum`` re-viscosified by it.
+    """The closure at ``(velocity, k, omega)`` and ``momentum`` re-viscosified by it.
 
     Free of :class:`CoupledRANS` so the consumer that holds the pair of assemblers without holding the
     coupled one -- :class:`LiveViscosityVelocityParts`, which forms the shift at the current effective
     viscosity -- reaches the same three lines as :meth:`CoupledRANS.effective_momentum` rather than
-    repeating them. ``k`` and ``omega`` are the **physical** fields.
+    repeating them. ``velocity`` is the cell velocity, shape ``(n_cells, dim)``, taken alone so that the
+    closure carries no tangent from a pressure derivative; ``k`` and ``omega`` are the **physical**
+    fields.
     """
-    closure = turbulence.closure_fields(momentum.velocity_fields(flow), k, omega)
+    closure = turbulence.closure_fields(momentum.velocity_fields_of(velocity), k, omega)
     return closure, momentum.with_eddy_viscosity(
         closure.nu_t, turbulence.wall_face_eddy_viscosity(k)
     )
@@ -1320,10 +1290,10 @@ def positive_k_projection(coupled: CoupledRANS, tau: float = 0.99):
 
     **Why per cell, not a cap on the whole step.** The alternative, shortening the whole step by the
     fraction-to-the-boundary rule, takes a minimum over cells, so one cell whose ``k`` is numerically
-    zero sets the step length for all of them. On a 3D backward-facing step that cell is a stagnant
-    side-wall corner -- no shear, so no turbulent-energy production -- and it held the step to 0.001-0.002
-    while every other cell admitted 0.6 or more, which is what made the march redo steps at a larger
-    shift. Clipping per cell leaves that cell to decay alone and lets the rest take the step.
+    zero sets the step length for all of them. On a 3D backward-facing step that cell is a top-wall /
+    side-wall corner whose k-row diagonal production's ``k``-derivative had turned negative, and it held
+    the step to 0.001-0.002 while every other cell admitted 0.6 or more. Clipping per cell lets the rest
+    take the step; the clipped cell shrinks by ``1 - tau`` while its correction points down.
 
     Returns ``None`` when ``k`` is solved in a form that is positive by construction (a log variable),
     since a projection there would clip nothing.
@@ -1708,7 +1678,7 @@ def coupled_jacobian_probe(
     column_reach: Sequence[int] | None = None,
     gradient_sweeps: int | None = None,
     *,
-    active_rows: np.ndarray | None = None,
+    groups: FieldGroups | None = None,
     production_viscosity_frozen: bool = False,
 ) -> JacobianProbe:
     """The coupled RANS Jacobian's coloured probe: its mesh graph, its layout and its stand-in.
@@ -1726,8 +1696,8 @@ def coupled_jacobian_probe(
     gradient_sweeps : int, optional
         Probe a copy of the residual whose corrected-gradient solve is capped at this many Richardson
         sweeps, rather than the residual itself. ``None`` (default) probes the residual as it stands.
-    active_rows : np.ndarray, optional
-        Exclude field-pair blocks from the materialized pattern; see
+    groups : FieldGroups, optional
+        The partition of the field split the probe feeds; see
         :meth:`~aquaflux.precondition.JacobianProbe.build`.
     production_viscosity_frozen : bool
         Materialize the Jacobian of the **frozen-production** copy
@@ -1745,7 +1715,7 @@ def coupled_jacobian_probe(
         coupled.layout.n_fields,
         stencil_reach,
         column_reach,
-        active_rows=active_rows,
+        groups=groups,
         narrowing=_CoupledNarrowing(gradient_sweeps, production_viscosity_frozen),
     )
 
@@ -2182,6 +2152,8 @@ class _CoupledProblem(MaterializedProblem):
 
     coupled: CoupledRANS
     production_viscosity: bool
+    floorable_fields = ("k",)  # production, proportional to k through nu_t, can cancel the k pivot
+    probes_by_field = True  # `CoupledRANS.residual_with_field`, also on every narrowed stand-in
 
     @property
     def assembler(self) -> CoupledRANS:
@@ -2194,11 +2166,11 @@ class _CoupledProblem(MaterializedProblem):
     def with_assembler(self, assembler: CoupledRANS) -> _CoupledProblem:
         return dataclasses.replace(self, coupled=assembler)
 
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         return coupled_jacobian_probe(
             self.coupled,
             **settings,
-            active_rows=active_rows,
+            groups=groups,
             # The preconditioner must be assembled from the operator the Krylov solve applies.
             production_viscosity_frozen=self.production_viscosity,
         )
@@ -2603,6 +2575,7 @@ def solve_coupled(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = DEFAULT_ADAPTIVE_TOLERANCE,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -2780,6 +2753,10 @@ def solve_coupled(
         produces. The step is redone from the same state at the tighter tolerance -- only the Krylov
         solve changes -- which recovers it while keeping the accepted trajectory, and pays the tighter
         solve on the few trouble steps rather than on every step.
+    adaptive_tolerance : AdaptiveLinearTolerance or None
+        Vary how tightly each step solves its linear system, from how the previous step went; see
+        :class:`~aquaflux.solve.AdaptiveLinearTolerance`. Default
+        :data:`~aquaflux.solve.DEFAULT_ADAPTIVE_TOLERANCE`; ``None`` solves every step to the regime's own.
     on_retry : callable, optional
         ``(reason, attempt, beta) -> None``, forwarded to
         :func:`~aquaflux.solve.newton_march`: called before a step is redone, with why. A log without it
@@ -2890,6 +2867,7 @@ def solve_coupled(
         on_step=on_step,
         on_checkpoint=on_checkpoint,
         retry=retry,
+        adaptive_tolerance=adaptive_tolerance,
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,

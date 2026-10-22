@@ -56,7 +56,8 @@
     pressure is not.
     **⚠️ PARTLY REHABILITATED (2026-08-08): a second, independent measurement puts ω in the same
     place.** The cell-block singular-value decomposition above finds the near-null direction of the
-    worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle. That is
+    worst diagonal blocks to be **pure ω**, in 353 of 23040 cells, under the *current* bundle (⚠️ which
+    on pitzDaily is a large ω-row coupling to the flow, not an empty ω column -- see the WHICH-row entry). That is
     local block conditioning, not per-field V-cycle smoothing rates — a different quantity by a
     different route — so "ω is the 3D per-field lever, not pressure" now rests on two legs instead of
     one unfalsifiable one. The *factor* that once accompanied it is deleted for want of a configuration; treat
@@ -127,12 +128,18 @@
       all 23040 diagonal 6×6 blocks of the equilibrated cell-major operator at the same state:
       `σ_min` median 2.87e-2, 1st percentile 8.42e-4, minimum 3.21e-4, with **353 cells below 1e-3**
       and condition numbers there of 5e6–9e6. In every one of the twenty worst blocks the near-null
-      right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. So it
-      is the ω *column* that is nearly empty: perturbing ω in such a cell barely changes any of that
-      cell's own six equations, because ω's influence there is carried almost entirely by neighbour
-      transport rather than locally. That is exactly the quantity a cell-centred patch must invert and
-      a global cell-major incomplete-LU sweep never does, which is the cleanest available explanation
-      for why every patch smoother fails on this operator while ILU(0) is untroubled. The affected
+      right singular vector is **pure ω** — `(u,v,w,p,k,ω) = (0,0,0,0,0,1)` to three decimals. ⚠️ **The
+      reading first written here -- "the ω column is nearly empty" -- does not follow from a pure-ω
+      singular vector, and on pitzDaily it is wrong.** A block that is the identity plus one large entry
+      in the ω ROW (∂R_ω on the cell's own `p` or `u`) has `σ_min` ≈ one over that entry and a near-null
+      direction along ω, with an ordinary ω diagonal and a stable exact local solve. On pitzDaily `state-00017` (shift 1e-4, 2026-10-14, `cell_block_conditioning.py --case pitzdaily_openfoam`, jax 0.11.2, Linux, 4 cores) the same
+      signature appears (6 cells below 1e-3, pure ω, shift-insensitive), and removing the ω row's
+      couplings to the other fields takes the count below 1e-3 from 6 to **0** (below 1e-2, 273 to **0**)
+      while removing the ω column's changes neither; cell 721's raw ∂R_ω/∂ω is 0.6, its equilibrated
+      ω–p entry 1348. bfs3d has not been re-measured this way (the probe now prints both counts). If it
+      agrees, what a cell-centred patch meets is non-normality -- an error in its local pressure
+      multiplied by ~1e3 into ω -- which a global cell-major incomplete-LU sweep and the block-triangular
+      field split (whose lower block is exactly this coupling) carry without inverting it in isolation. The affected
       cells sit in low-`k` regions (median `k` 0.122 against 0.655 over the mesh) and occur in exact
       spanwise-symmetric pairs, so they are a coherent region of the flow, not scattered noise.
       **⚠️ BUT THE SHIFT DOES NOT CONTROL IT, so this does NOT explain the low-β wall.** Sweeping the
@@ -416,7 +423,7 @@ reordering. A SIMPLE-smoothed hierarchy never eliminates the matrix, so it has n
 measurements. What was closed then was either of them as a default, and the bisect that would say *when* the collapse entered.
 ⚠️ **Consequence for anyone reading an old number: a `petsc`-bundle figure for this case is not
 reproducible on the current tree.** Full detail, including what was ruled out first (the day's four
-merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/rules/validation.md`
+merges are inert — `|R|` identical to twelve digits at a fixed state), in `.claude/notes/validation-log.md`
 § "pitzDaily's SHIPPED PRECONDITIONER STOPPED MARCHING IT".
 
 ## PETSc (monolithic GAMG V-cycle, UMFPACK complete LU) — DELETED as dominated (2026-10-10)
@@ -508,7 +515,7 @@ iterate, e.g. on hardware where the probe itself changes cost class.
 `ResidualHomotopy` station at `x + dlam·dx/dlam`, `J dx/dlam = -dR/dlam`, rather than at the previous
 state, to cut the "opening residual" a station change creates.
 
-**Already measured once, on the configuration it was proposed for** (`turbulence.md`, 2026-09-08,
+**Already measured once, on the configuration it was proposed for** (`.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies and a literature survey", 2026-09-08,
 `validation/continuation_seed_error.py`): on the decade **ladder** the predictor made the seed 23 % worse
 on bfs3d and helped only on a ladder too fine to afford while β restarted per rung. The item's own
 evidence ("rung 2 opened 6,000× worse") was the ladder's, and pitzDaily no longer runs a ladder.
@@ -537,6 +544,28 @@ scored in the row-equilibrated measure the march stops on, rebuilt at the new st
 
 Reopen only for a march that converges each station (a ladder, or `steps_per_station` ≫ 1) at a spacing
 fine enough that `continuation_seed_error.py`'s `E1/E0` falls well below one.
+
+## Re-solving a cut-back step at a tighter tolerance — DOES NOT RECOVER IT (2026-10-15, #645)
+
+**What was proposed** (`solve-open-directions.md` 6b, as a remedy for the residual stop's erratic
+Reynolds-continuation march): when a step's line search cuts it back, redo that step from the same state
+with the Krylov tolerance tightened tenfold (0.3 → 0.03; floored at 1e-6), keeping the redo if its
+residual is lower. Fired on a step with line-search `alpha < 0.5`.
+
+**Probe** (env-switched prototype in `newton_march`, never committed): the Reynolds-continuation adjoint
+test's forward march (`tests/integration/test_reynolds_continuation.py`, 28×20 channel, `n_points=1`,
+`max_steps` 60, `BlockDiagonal(ScalarTwoLevel, ConvectionTwoLevel)`, default `Convergence`), residual stop at
+0.3; main `a5d61d4`, Linux x86_64, 4 cores, jax 0.11.2. **It still failed at 60 target steps**, alone and
+with the tail rule, like the plain residual stop (4.8e-2). The redo almost never helped: across the ~20
+redone steps the redo's line search cut back to the SAME `alpha` as the original in all but two, and its
+residual moved by at most a few per cent either way (e.g. step 24: `alpha` 0.008, `|R|` 1.517e-1 both
+times). So the cut-back is not the linear solve's error — a tighter solve of the same linearization from
+the same state gives the same direction — and once the march has entered the region where those steps
+happen, repairing one step does not leave it.
+
+**What worked instead:** solving the NEXT step tighter (0.1) — 12 steps, no collapses — which keeps the
+march out of that region rather than repairing a step inside it. Built as `AdaptiveLinearTolerance`'s
+setback rule (`solve.md`).
 
 ## Eisenstat–Walker adaptive forcing terms — NOT WORTH BUILDING (2026-10-08); a looser FIXED term is
 
@@ -674,17 +703,18 @@ CPU, 4-core Linux, one run per arm, all `x_r/h` 8.0686:
 | default cache, first run after `main` moved | 64.4 s | 37.8 s | 99 s | 736 s |
 | default cache, warm (stopped after step 1) | — | — | 62 s | — |
 
-- **A station change is already a cache hit.** After step 1, steps compile 0.4–2 s each, almost all of
-  it small eager programs; the exceptions are the flow V-cycle (~0.4 s whenever a refresh moves the
-  thresholded coarsening, which is documented) and one 7.1 s recompile of `batched_jacobian_matvec` at
-  step 9, whose signature differs from step 1's only in one argument being committed to the device
-  rather than uncommitted. So overlapping a next station's compile hides at most ~38 s (5 % of a cold
-  run) and nothing on a warm one.
+- **A station change is already a cache hit, and so is a refit.** At `9efc5759` (2026-10-17, same
+  container, jax 0.11.2, cold and warm, logged with `JAX_LOG_COMPILES=1`) the shipped march compiles,
+  reads, traces and lowers nothing between step 1 and step 21 -- across its 21 refits and 12 stations --
+  and `batched_jacobian_matvec` once. The 0.4–2 s per step and the 7.1 s step-9 recompile
+  measured 2026-10-10 on an earlier tree no longer occur. So there is no next station's compile to
+  overlap; what a run compiles is all before step 1 (`solve-open-directions.md`, the compile row).
 - **The persistent cache works, including for programs holding the preconditioner's host callback**
   (checked on a toy and on the march step itself, which a warm run took from the cache). The
   "default cache" row above is partly cold only because every library change re-keys its programs.
   Programs compiling in under 2 s (aquaflux's `jax_persistent_cache_min_compile_time_secs`) are never
-  written, so ~1700 small ones (~30 s) recompile every run.
+  written, so the small eager programs recompile every run. At `183e9ffa` that is ~977 programs and
+  ~26 s, all before step 1 (a warm two-step run). Keeping them is opt-in per run (entry below).
 - ⚠️ **A trap met while measuring:** "the cache did not serve the march step" was first read as JAX
   refusing to persist host-callback programs. It was a key change from the library moving under the
   cache; a warm run settled it. Read a cache miss against what changed since the cache was written.
@@ -891,7 +921,7 @@ data model. Each had nothing in `validation/` or any test selecting it.
   `RefreshPolicy(builder=...)` that re-factored the complete LU in place at a FIXED `lu_beta`. On a
   dual-time march that is exactly the shift mismatch the tracking hook removes: an LU frozen at
   β = 0.05 needs 25 / 111 / 217 / 474 GMRES iterations at β = 0.1 / 0.5 / 1 / 2 against 1 matched, and
-  NaN'd on a cold pitzDaily ramp (`solve-direct-preconditioners.md`). Its only remaining regime — a
+  NaN'd on a cold pitzDaily ramp (git history of `.claude/rules/solve-direct-preconditioners.md` before 2026-10-17). Its only remaining regime — a
   single-step SER march with an LU and a drift trigger — was never selected or measured.
 - **`host_exact_forward_solve` — DELETED, never selected.** PETSc GMRES driving the monolithic V-cycle
   over a shell of the exact Jacobian-vector product, instead of the JAX-side Krylov with the V-cycle as
@@ -922,13 +952,13 @@ data model. Each had nothing in `validation/` or any test selecting it.
   `leading_inverse` and `trailing_inverse`. Neither flagship case selected a PETSc split block. On the
   trailing half the traced `jacobi` inverse beat the host GAMG V-cycle in a controlled `bfs3d` pair,
   2124 s / 67 steps against 2893 s / 72 to the same `x_r/h` 8.36 (`zerogradient` k wall, 1e-08
-  positivity floor; `solve-field-split.md`). On the leading half `petsc` stopped marching pitzDaily
+  positivity floor; `solve-field-split-log.md`). On the leading half `petsc` stopped marching pitzDaily
   (§ "Incomplete-LU preconditioning of the pitzDaily flow block") and sat at parity with `hostilu` on
   `bfs3d`; both cases ship `simplesmooth`. The monolithic `MonolithicVCycleInverse` is unaffected.
 - **`flow_first=False` (the turbulence-first split, `_TrailingFirstFieldSplit`) — DELETED, never
   selected.** It tied flow-first on the forward operator (4 cycles each) and lost at the converged
   zero-shift operator, 13 against 11 (PETSc ILU(0) blocks on both halves, `bfs3d`;
-  `solve-field-split.md`).
+  `solve-field-split-log.md`).
 - **Harnesses deleted with them** (recover from git history): `bfs3d_openfoam/turbulence_smoother_sweep.py`
   (every arm a PETSc leading block), `bfs3d_openfoam/rung_hierarchy_reuse.py` (a PETSc leading block; its
   question was GAMG interpolation reuse across rungs), and every split arm of
@@ -972,6 +1002,35 @@ and binding defaults are in `solve-globalization.md`.
   which is the larger and more load-bearing finding here.** See `solve-globalization-log.md` §
   "THE EQUILIBRATED MEASURE BARELY FALLS ON A MARCH THE EUCLIDEAN NORM LOVES" and the "EUCLIDEAN ‖R‖
   MIS-RANKS STATES" entry immediately after it.
+- **Escalating β on a cost spike (`RetryPolicy.on_cycles` as an escalation trigger) — CLOSED, split
+  2026-08-17; do not re-fuse.** The cost threshold once both stopped the dual-time inner loop and
+  escalated β (×`beta_factor`) for a step whose solve exceeded `N` cycles, tried before the tight
+  divergence retry. A cycle count says the frozen preconditioner is struggling with the operator, not
+  that the step is stiff, and on `bfs3d` a stiffer operator was not an easier one (140 applications at
+  β 0.5 against 32 at 0.05), so it now only aborts and redoes the step at the same shift
+  (`retry.abort_above_cycles`, one redo, on a re-fitted preconditioner); stiffness is escalated on
+  `retry.on_alpha` and divergence. Keep `abort_above_cycles < cycle_budget`, or a truncated grind is
+  accepted. Full detail: `solve-amg-multigrid-log.md`, "✅ RESOLVED — the cost guard and the shift escalation are now
+  separate responses"; the pre-split design text was deleted from `solve-march.md` (recover from git
+  history).
+
+(The other two deletions — the traced finishing solve and the eager pre-march that observation
+used to select — were removed code paths, not refuted directions, and left one-line traps in
+`solve-march.md`; no ledger entry suggested. The Step-0 diagnostic / `beta_rel_change` refutation
+already has ledger coverage, lines ~336 and ~934.)
+- **A floor under β learned from a collapse, or a cap on β's growth rate (a "ceiling") — refuted as repairs for
+  the mid-ramp shift collapse (pitzDaily viscosity ramp inside one march, 2026-09-09).** Once `rebase`
+  removed the ratio rule's spurious brake at station changes, the shift descended unopposed to β ≈ 0.012
+  and the line search collapsed. Both candidate repairs *infer* a property of the shift from the march's
+  behaviour ("a collapse here means β is too small"; "a brake here means the rate is too fast"), and that
+  evidence decays as the state moves: the same march later converged at β = 0.005 (alpha 1.000, 3-5
+  cycles a step) once arrived and settled — a shift fatal at step 13 and comfortable at step 47, so the
+  wall belongs to `(state, β)`, not to β, and a learned floor would forbid the low-shift convergence that
+  finishes the march. The built repair is `ShiftStrengthControl.redamp` (damp by `shift_factor` on the
+  step entering a station, holding the control that step; default `redamping = 2.0`), which infers
+  nothing and measured 40 steps / 261 restart cycles against 36 / 269 for the accidental brake. Detail:
+  `.claude/rules/solve-march.md` (`redamp`); `.claude/notes/solve-march-log.md`, "`redamp` — the spurious
+  brake `rebase` removed was load-bearing" and "`redamp` — the two floors, the `(state, β)` wall, …".
 
 ## A viscosity ramp keyed to the shift (`nu` as a function of `beta`) — CLOSED BEFORE BUILDING (2026-10-11)
 
@@ -1016,7 +1075,7 @@ measured on pitzDaily: it repairs the k row at **`turbulence_damping` 1** (singl
 the shipped case, which damps the closure rows at 3 — a full march is 16 steps / 111 cycles / `x_r/h`
 8.0686 in both arms, and the probe at damping 3 shows every arm already taking a full step to 0.034.
 Deleted rather than kept as an unused option; branch history has it (`probe-312-additive-shift`,
-dda9be7). Full numbers and configuration: `.claude/rules/turbulence.md`, the #312 entry. Re-open only on
+dda9be7). Full numbers and configuration: `.claude/notes/turbulence-log.md`, "#312 — `abs` on the k shift (reverted 2026-08-26) and `|r| + |f|` (inert, 2026-10-12)". Re-open only on
 a case that marches undamped closure rows and shows the near-cancellation in the march.
 
 ## Re-fitting at the released shift (open-directions 11a) — CLOSED ON pitzDaily AND bfs3d (2026-10-13)
@@ -1055,7 +1114,564 @@ removed that tail.**
 - **Superseded bound:** the 2026-10-08 replay of the 31-step march (no release) gave ~3–4 steps and ~7 %
   of cycles over its fifteen-step tail. That tail was the floor's linear rate, and `release_floor` is the
   cheaper cure for it. The 2026-10-08 table is on #639.
-- **bfs3d was not replayed.** Its mesh is not in the cloud container, and the harness imports pitzDaily's
-  `compare`. bfs3d still ships no release, so it keeps a floor tail (33–36 steps). The release is already
+- **bfs3d was not replayed**: the harness imports pitzDaily's `compare` (bfs3d's mesh is tracked, at
+  `validation/bfs3d_openfoam/of_case/constant/polyMesh`). bfs3d still ships no release, so it keeps a floor tail (33–36 steps). The release is already
   measured there: 33 → 29 steps (open-directions 11a). Reopen only for a march that must keep a long
   linear tail at a floor the release cannot remove.
+
+## Partitioning the single-threaded kernels of the residual / JVP — NOT A LEVER (2026-10-17)
+
+The `dot` precedent (reduction-rooted fusions on one thread, 40 % of a reconstruction) was checked
+across the whole pitzDaily coupled residual and its JVP with `validation/fusion_profile.py` (`FUSION_CASE=pitzdaily`)
+(per-kernel solo time on one core plus time alone on 4 cores, joined to the HLO; `main` `183e9ffa`, jax
+0.11.2, 4-core Linux). Unpartitioned kernels are 26 % of the clean JVP's one-core time, spread over 640
+kernels, **the largest 0.9 %**. On 4 cores an unpartitioned kernel is alone in flight for 7 % of the span.
+Respelling the three remaining `__ynn_fusion`s (interpolation skewness `einsum`, strain-rate Frobenius
+sum) through `vectors.dot` / `norm_squared` took them 3 → 0 with no wall gain (the residual got slower), and
+turning the 42 batched `dot`s into multiply-sums changed nothing measurable. Separately, a standalone JVP
+pays ~11 000 page faults per call on glibc (its 42.8 MiB temporary buffer exceeds the 32 MiB dynamic mmap
+cap). Raising the threshold cuts the standalone JVP ~40 % but leaves the march unchanged (183 s against
+180 / 186 s, identical steps). Full tables: `.claude/rules/discretization.md`, "Single-threaded kernels".
+
+## The residual-stop GMRES giving its VERDICT on the Arnoldi residual — UNSAFE at tight targets (2026-10-16)
+
+Dropping every recomputation of `b − A x` from `_ResidualStopGMRES` (restart AND final verdict from the
+recurrence, as it was before 2026-10-09) would save one more application per solve than what shipped. Replayed
+on all 68 systems of a pitzDaily march (`arnoldi_drift_probe.py`), the recurrence's departure from the true
+residual is a round-off of `‖b‖`: no verdict was wrong at targets 0.3, 1e-3 or 1e-6, but at 1e-10 one solve of 32
+was declared converged with its true residual 0.13 % above the target. The class takes any `rtol`, so the
+verdict keeps its one application; restarting from the recurrence is safe and is what shipped. Full table in
+`solve-open-directions.md` 6b.
+
+## Stage-1 SIMPLE block-diagonal flow preconditioner (damped-Jacobi Schur + `diag(a_P)⁻¹`) — DELETED as dominated
+
+`DampedJacobiSchur` (a fixed damped-Jacobi sweep on the compact Rhie–Chow pressure Laplacian
+`pressure_schur_laplacian`, `c_f = ρ(V/a_P)_f A_f/(d·n)_f`) composed block-diagonally with
+`DiagonalVelocity` (`diag(a_P)⁻¹`), selected by `inner="jacobi"`. It cut outer GMRES ~8–12× against
+unpreconditioned (skewed cavity: 92→11 at 432 dof, 309→25 at 1200; no further configuration recorded),
+but the count still grew with the mesh because a Jacobi inner is not h-independent. The smoothed-AMG
+inner (Stage 2, `SmoothedAmgSchur` + an AMG velocity block, block-triangular) made it obsolete, and it was
+deleted with the `inner=` selector, `AggregationSchur` (`inner="multigrid"`) and the geometric
+coefficient-flow multigrid. The kernels `pressure_schur_laplacian` / `damped_jacobi_solve` remain in
+`flow/preconditioner.py`. Trap: do not reintroduce a non-h-independent inner for the flow block.
+Detail: `.claude/rules/flow.md` ("Structure" and "Stage 2" entries).
+
+## Remedies for a zero-fill incomplete-LU smoother on the coupled saddle — CLOSED (2026-08-16; code deleted 2026-09-13 / 2026-10-10)
+
+Before incomplete-LU preconditioning was closed as a direction (entry above, 2026-08-22), the zero-fill
+smoother inside the then-shipped PETSc GAMG V-cycle was swept on pitzDaily (self-start seed, reach 5,
+ILU(0) ×4, plain aggregation, operator and V-cycle at the same β, GMRES(15) to 1e-6 on the true residual)
+for a remedy, and none spanned the shift range a march crosses: **a factorization shift** (`nonzero` /
+`inblocks` bit-identical to the control; `positive_definite` zeroed the negative pivots but still failed and
+broke the healthy β = 0.05 arm — Chow & Saad's and Chapman–Saad–Wigton's published over-shift behaviour);
+**re-orderings** (`rowlength`/`qmd` rescued β = 0.5 and broke β = 0.05; `rcm` worst of all); **more sweeps**
+(non-monotone, ×16 diverged what ×4 solved); **no equilibration** (neutral); **block ILU(0) at bs = n_fields**
+(identical to point ILU(0) on a dense-cell-block pattern, as Chapman–Saad–Wigton report); **MILU** (not run:
+proven only for symmetric M-matrices and worse than ILU under opposite-signed convection, Elman 1986); and
+**`condest` as an arm selector** (same `condest`, opposite outcomes; no threshold separates arms at β = 0.05).
+Matching the preconditioner's stencil to the operator's (reach 3 vs 5) reversed direction with β. Untested
+when the direction closed: MC64's permutation, HILUCSI-style static deferring of the pressure rows, and a
+first-order-upwind probed operator. Every harness (`ilu0_remedy_sweep.py`, `mc64_precheck.py`, …) was
+deleted 2026-10-02 and PETSc 2026-10-10, so none of this is re-runnable; the full record is in git history
+of `.claude/rules/solve-direct-preconditioners.md` before 2026-10-17. Transferable lesson: a pivot census,
+`condest` and a diagonal-dominance census each failed to track convergence — judge on the true residual.
+
+## Static reorderings for a zero-fill ILU smoother (HILUCSI deferring, MC64 permutation, pressure-last) — MEASURED OUT (2026-08-17)
+
+On pitzDaily's `[u, v, p]` block (reach 5, zero-fill `Ilu0`, symmetric equilibration, true-residual GMRES
+to 1e-8 at the self-start and at a converged root, β 0.5 / 0.05 / 0), HILUCSI-style static deferring of
+the smallest-diagonal rows (Chen, Ghai & Jiao, arXiv:1911.10139; criterion taken before equilibration) was
+never better than the mesh's own cell order and clearly worse at 5 %; MC64 symmetrized, permutation only
+(`min_weight_full_bipartite_matching` on `−log|a_ij|`), was a bit-identical no-op because the diagonal is
+already the matched entry, and cost 70–150 s to build (its scaling half is not exposed by `scipy`, so this
+is not a test of MC64). Velocities-first/pressure-last failed at five of six points and pressure-first
+everywhere: pressure-last relies on velocity elimination filling the pressure block with the Schur
+complement, which zero fill discards. Only RCM and ascending row length helped. All of it served the
+`Ilu0` / `hostilu` smoother, deleted 2026-09-13 (#371); re-ask only for a level-of-fill factorization.
+Detail: git history of `.claude/rules/solve-amg-multigrid.md` before 2026-10-17, "Ordering, not fill, is
+what fails zero-fill on `pitzDaily`".
+
+## "Equilibration changes the graph the coarsening sees" — REFUTED (2026-08-12)
+
+Proposed to explain why symmetric equilibration made the traced `[k, ω]` hierarchy worse (5 → 10 cycles):
+the equilibrating sparse product drops explicit zeros (26.8 % of the trailing block's stored entries at
+bfs3d's target-Re cold field). Measured with the real `_cell_graph` / `_aggregation_edges` /
+`_mis_aggregate`, it moves 199 of 644 166 cell-graph edges (0.03 %) and 2300 → 2302 aggregates: the cell
+collapse absorbs it. The live explanation remains the non-equivariant tentative prolongation. Harness
+`validation/bfs3d_openfoam/equilibration_graph_effect.py`; detail in `solve-amg-multigrid-log.md`,
+"Faithful smoothed aggregation — matching PETSc GAMG".
+
+## "Rescaling promotes collapsed-`k` rows and inflates their corrections" — REFUTED (2026-08-11)
+
+Proposed to explain why `equilibrate` changed the step length under the (since deleted) global `k` cap.
+Exact `∂R_k/∂k` per cell by one-hot Jacobian-vector product on bfs3d's rung-2 dumps: across twelve orders of
+magnitude in `k` the diagonal moves ~1.1× and the scale 1.7×, and one cell's diagonal is identical to four
+digits while its `k` varies a millionfold — destruction, transport and the pseudo-transient shift do not
+vanish as `k → 0`, so a collapsing `k` does not weaken its own equation. Detail in
+`solve-amg-multigrid-log.md`, "The traced multigrid — in progress".
+
+## QR-orthonormalized tentative prolongation as a deep-hierarchy fix — REFUTED
+
+PETSc orthonormalizes each aggregate's block by QR (unit-2-norm columns where ours are 0/1). Built as
+`orthonormal_prolongation`: bit-identical at two levels, 17–30× worse deeper. Detail in
+`solve-flow-block-log.md`, "Depth, singletons, and the prolongation".
+
+
+## Accelerating the Hessian-corrected (`CoupledBlockSweep`) gradient reconstruction — CLOSED on five routes (2026-08-23)
+
+Measured on the 1.6M-cell UV reactor mesh and pitzDaily, contraction rate of the coupled sweep as
+`CoupledBlockSweep.calibrated` measures it (`local_schur_block=True`, `iters=24`). **Sub-solving either
+block** (k fixed sweeps of `A_gg` and/or `A_HH` in place of the per-cell inverse) saturates by two or three
+inner sweeps and never pays for itself — the local Schur block already inverts each cell's coupled block,
+so what remains of a 0.44–0.54 rate is inter-cell. **Polynomial acceleration / Chebyshev / per-sweep
+relaxation schedules** are all degree-N polynomials with `q(0) = 1`, bounded by one GMRES run on the same
+system: ~2x in residual at k = 10, i.e. about one sweep of thirteen. **Coarse-grid / multigrid**: an ideal
+two-level cycle bought 0.0–1.4 % (the operator is second kind, its rate set by mesh quality, not size;
+those two-level numbers came from a scratchpad harness and are not re-adjudicable). **Over-relaxation** is
+refuted on the reactor (optimum at or just below 1.0). **Replacing the sweep by a local k-exact
+least-squares fit** is a poor bet in the worst cells (Betchen & Straatman 2010, Mavriplis 1993); least
+squares survives only as an unbuilt *preconditioner* idea. Any real gain needs reach, not cell-local
+accuracy. Detail: `.claude/notes/schemes-log.md`, "Responsibility → the UV reactor, and directions closed
+for the coupled sweep (2026-08-23)".
+
+## Krylov (GMRES) outer gradient solve as the default, and solving the full coupled `[g, H]` system — DOMINATED (2026-08-21)
+
+On pitzDaily a GMRES outer solve of the Hessian-corrected reconstruction costs 158.6x the swept
+`CorrectedGreenGauss` baseline on the `jvp` path against 59.9x for a 20-sweep fixed solve at equal
+accuracy: the implicit-function tangent solves a second Schur system per JVP. Fixed sweeps differentiate
+by unrolling at ~1.0x their forward cost. Separately, sweeping the full coupled `[g, H]` system is ~2.5x
+cheaper per unit work than the Schur route but gives up the gradient-sized primary unknown the elimination
+exists for. (GMRES stays available as `GmresGradientSolve` for exactness tests.) Detail:
+`.claude/notes/schemes-log.md`, "Krylov outer cost, the first Betchen A/B, and the sweep-count lever" and
+"The inner `A_HH` solve".
+
+## Mechanisms for the `SkewCorrectedGradient` stall on pitzDaily — three REFUTED before the cause was found (2026-08-24)
+
+Each measured, each left the target-rung stall unchanged to three figures: (i) the wall `omega` gradient
+(imposing the analytical one through `ImposedGradient`, two cold marches); (ii) the correction matrices'
+conditioning (`cond(M2⁻¹)` is *better* under skew); (iii) the closure's double correction on gradient-type
+patches (fixed by `boundary_values_at`, eighteen orders down, march bit-for-bit as stalled). Also refuted: a
+cap on the log-`omega` increment (it penalizes the arms that work). All three missed because they were
+measured at the cold state or on one reconstruction, where the arms are identical. The cause was the
+negative `J_kk` from the `k` production's own `k`-derivative amplifying a reconstruction difference into an
+unbounded upward `dk`, with the step length set by the global k-positivity cap (since deleted, 2026-10-14).
+Detail: `.claude/notes/schemes-log.md`, "`MultipleCorrectionGradient` — the initializer re-bind, and the
+`SkewCorrectedGradient` stall on pitzDaily".
+
+## Repairing `MultipleCorrectionGradient` on tetrahedra under a pressure coupling (#435) — CLOSED (2026-09-23)
+
+On the 2462-cell tetrahedral duct the second pass's weights flip Rhie–Chow damping diagonals and the
+coupled march finds no admissible step. Tried and did not fix it: both corner-cell boundary closures
+(`OwnerGradient`, the `SkewCorrectedGradient` repair), the first pass alone inside Rhie–Chow, ring and
+threshold withholding of the second pass, mixed per-cell schemes, and Betchen's scheme as a calibration
+source. The answer was a scheme that chooses its weights (`ProjectedStencilGradient`). Detail:
+`.claude/rules/schemes.md` (`MultipleCorrectionGradient` recommendation) and
+`.claude/notes/schemes-435-tetrahedral-gradient-log.md`.
+
+## A log-space ω shift (dropping the `× ω` coordinate factor) — LOSES THE MARCH (2026-07-25, #33)
+
+Under `LogScalars` the coupled ω shift is `transport_diagonal × ω`, which drags ω's evolving range into the
+damping (15 % of ω cells over-damped >2× at a developed pitzDaily state). Dropping the `× ω` factor collapsed
+that tail and looked transformative per step (up to 11× the single-step reduction at matched median damping),
+but on a cold-IC pitzDaily march at identical settings it reached a far deeper residual with a 3–6× smaller
+recirculation (`x_r/h` 0.05 against 0.6 at equal residual): the bare transport diagonal under-weights the
+near-wall cells (0.54× median against 2.95× with the factor), so the near-wall region is under-damped ~20×.
+The built cure is the factor split instead (#156: rebuild the transport diagonal, carry the coordinate
+factor). Full record: `.claude/notes/turbulence-log.md`, "The ω shift diagonal inherits ω's dynamic range".
+
+## A residual- or β-keyed taper of `turbulence_damping` — DOMINATED BY A CONSTANT RATIO (2026-09-10/11)
+
+Tapering the k/ω shift multiplier from a large value to 1 (keyed on `beta`, on `|R_turb|`, or switched per
+station) was measured on pitzDaily (momentum-only, 16 x 1) against constant ratios: every taper lost to a
+constant `gamma` of 2–3, because every signal a shift policy can read measures progress, and progress
+saturates inside the ramp (the release completes by step 12 or step 6 of 16), and because the damping's cost
+is deferred to the target station rather than removed (the handover residual scales with how hard the ramp
+damped). A β-keyed ratio also forms a positive feedback loop with the retry ladder. The strategies
+(`BetaTaperedDamping`, `ResidualTaperedDamping`) remain built. Full record: `.claude/notes/turbulence-log.md`,
+"ViscosityRampHomotopy — momentum-only scaling and `turbulence_damping`".
+
+## Predicting a dangerous continuation rung from path geometry — REFUTED (2026-09-08)
+
+The ratio `tau = E1/E0` of the first-order-corrected to the plain seed residual (how far the solution path
+stays linear over a rung) ranked pitzDaily's step into the target — the one that diverged at a warm
+`beta_start` of 0.05 — as twice as safe as the step into `Re/10`; `E0` ranks them the same wrong way. Both are
+parameter-space quantities, and what makes a high-Reynolds rung dangerous is state-space stiffness. The third
+refuted predictor of a bad continuation step (after the step-0 static diagnostics and an `alpha`-trend rule):
+adapt the spacing from the previous rung's observed cost. `E0` does predict the next rung's starting residual
+exactly. Full record: `.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies".
+
+## A local (point-implicit / aggregate-block) smoother in place of the Reynolds ladder — REFUTED (2026-09-08)
+
+At pitzDaily's cold hybrid start at the target viscosity, the explicit, row-scaled, per-cell block and
+aggregate-block directions `-D^-1 R` reduced the row-scaled residual by at most 0.26 %, and five damped
+nonlinear sweeps went non-finite at every damping tried; the unreachable state has the LOWER residual than the
+anchor rung's start, so this is a basin question, not a descent question. Not refuted: Mavriplis's
+line-preconditioned blended form, which needs a real line construction. Harness
+`validation/point_implicit_step.py`. Full record: `.claude/notes/turbulence-log.md`, "Reynolds-continuation
+ladder studies".
+
+## A finer Reynolds ladder at the same span — LOSES ~22 % OF WALL (2026-09-08)
+
+pitzDaily, span held at `Re/100`, ratio 3.16 (5 rungs) against 10 (3 rungs): every finer rung is cheaper, but
+the ladder takes 99 steps against 64 because each rung re-walks its own `beta_start`-to-`beta_min` descent;
+the finer ladder buys robustness (0 escalations against 1), not wall. Superseded as a direction by the
+in-march viscosity ramp (`ViscosityRampHomotopy`), which removes the per-rung descent. Full record:
+`.claude/notes/turbulence-log.md`, "Reynolds-continuation ladder studies".
+
+## Array (numpy-pass) DDA walk of the triangle grid — DELETED as dominated (2026-09-26)
+
+`TriangleGrid.blocks` first walked rays through the voxel grid as whole-array numpy passes over the live
+rays (`_Rays`, `_indexed_pair_is_cut`, a per-step `reduceat`), with the triangle test traced. Profiled on a
+51,200-triangle cylindrical wall (200,000 rays, jax 0.10.2, CPU, x64, Linux x86_64, 4 cores) the traced
+test was only 6-47 % of the walk; the rest was host bookkeeping at ~150-180 ns per ray per voxel step, so a
+finer grid was SLOWER on it (fewer tests, more steps). Replaced by one compiled Numba loop per ray
+(`grid_walk.walk_to_first_hit`), which measured 16.9-37.3x faster on two scenes at three grids each and
+13.8-21.9x through the user-facing paths, with identical answers (`validation/radiation_grid_walk.py` at
+`d9fc017`). Lesson that transfers: a per-item loop whose value is the work it SKIPS wants compiled host
+code — a traced loop pays its worst case for every item, and numpy passes pay per step for every item
+still in flight. Recover the code from git history before 2026-09-26.
+
+## A second cluster level in the silhouette cone cull (`ClusterHierarchy`) — MEASURED SLOWER, not shipped (2026-09-26, #555)
+
+On top of `FacetClusters` (one level of 32-facet Morton runs, 1.24x at 3,184 facets), a hierarchy of
+sizes (32, 8) cut from one Morton order, with the same pairwise cluster test at every level and only
+surviving pairs expanded. It kept exactly the dense cull's pair set and cut the member test 3.93M → 1.15M
+pairs (3.4x), but the whole cull went only ~41 → ~33 ms a receiver serially, and at the default 4 threads
+the build got SLOWER (155-160 s against one level's 141-142 s at 3,184 facets; 4-core Linux container,
+jax 0.10.2): each receiver made twice as many small compiled calls, and the waits on their results
+contended with the reject and clip passes beside them. Fewer member tests are not worth more dispatches;
+anyone retrying depth must fuse the levels into one compiled call per receiver (or batch across
+receivers). Code never merged.
+
+## Other radiation directions closed — moved to `.claude/notes/radiation-log.md`, not deleted
+
+- Receiver quadrature of visibility / source pixelation for the binary occlusion mask (2-4x for 4-16x the
+  rays) — "MEASURED AND REJECTED: two candidate fixes for the occlusion mask ...".
+- Two frozen `log cos` moments for a non-Lambertian profile — documented, not built (#447 item 1).
+- Cubic Morton cells for elongated lamps (#574) — measured at mesh scale, reverted.
+- A per-body culling ladder; testing the finest tiles as a flat pair list; the tile index innermost (#554
+  phase B).
+- Walk-from-the-nearer-end and empty-space skipping for the grid walk (#503).
+- Compaction of the cluster cull on the device; other cluster sizes (#555).
+- Merging coplanar triangles into convex patches for the silhouette clip (#474).
+- Capping the transfer build's row blocks by `PASS_PAIRS` (withdrawn); a streamed pass sized separately
+  from the traced chunk (no faster).
+- Shooting the gap routes through a neighbour sleeve (misses their steep paths); stopping a vmapped path
+  search early / lower caps / seeding corners from the centroid path (#604 step 2b-i).
+
+## Persisting the small programs (persistence floor 0) — OPT-IN, NOT THE DEFAULT (2026-10-17)
+
+**What was proposed:** lower `jax_persistent_cache_min_compile_time_secs` from 2.0 to 0, so that the
+~980 small programs pitzDaily compiles op by op before step 1 stop recompiling on every run.
+
+**Configuration:** `main` at `183e9ffa`, jax 0.11.2, CPU, 4-core / 15 GB Linux container. Two-step
+pitzDaily (`case.yaml` with `max_steps: 2` and an absolute mesh path, through `compare.solve_aquaflux`),
+`JAX_LOG_COMPILES=1`, a fresh `AQUAFLUX_COMPILATION_CACHE_DIR` per arm, one run each. Harness: a logging
+handler that records the Python stack at every compile (scratch, not kept).
+
+| arm | first step done at | compile events | of which cache hits |
+|---|---|---|---|
+| floor 2.0, cold | 124–128 s (two runs) | 983 (70–72 s) | 1 |
+| floor 2.0, warm | 79.4 s | 983 (28.7 s) | 6 |
+| floor 0, cold | 124.2 s | 983 (75.3 s) | 34 |
+| floor 0, warm | **53.7 s** | 983 (6.4 s of reads) | **983** |
+
+The floor-0 cache held 949 entries, 17 MB. A hit still logs `Finished XLA compilation of ...`, carrying the
+read time, right after a `Persistent compilation cache hit` line (at WARNING under `JAX_LOG_COMPILES`).
+`jax_persistent_cache_min_entry_size_bytes` is 0, which on CPU filters nothing.
+
+**Per program** (300 trivial eager programs at distinct shapes, first call each): compile 25 ms,
+compile plus cache write 46 ms, cache hit 4.2 ms, in-memory repeat 0.03 ms. So the warm saving is real
+(about 26 s on pitzDaily's warm start).
+
+**What shipped instead:** the floor stays 2.0 by default and a run opts in with
+`AQUAFLUX_COMPILATION_CACHE_MIN_COMPILE_SECS=0` (`aquaflux/__init__.py`, `_cache_floor_secs`), for a case
+run repeatedly on one mesh. Set it per run, not in a shell profile, or the test suite stores its small
+programs too. A second measurement (branch `claude/cache-floor`, same container and jax, through
+`validation/run_case.sh`, process wall clock, one run each) agrees with the table above: pitzDaily
+two-step floor 2.0 / 0 cold 132 / 141 s, warm 89 / **63 s** (977 compilations, 26.3 s, before step 1
+against none, 983 hits; the march log's step 1 at 64 / 49 s); the re20000 channel through `aquaflux run`
+cold 101 / 104 s, warm 87 / **65 s**. A warm run writes nothing (entry count unchanged across it).
+- **Keys ignore the calling code**: JAX strips debug locations before hashing, so the same eager
+  primitive at the same shape from another file and line is a hit (four-program probe). Entries grow per
+  new mesh or case (the channel's 590 share 48 with pitzDaily's 949, 12 MB), not per run or library change.
+- **Rescan cost on real `LRUCache` objects**: ~30 µs per entry per write (32 ms at 1000, 153 ms at 5000,
+  627 ms at 20000; 29 ms on a copy of pitzDaily's 949-entry cache); read 0.3 ms.
+- **Eviction is LRU by access time**: with a 101 MB bound, 3000 old 18 KB entries, a 20 MB entry read once,
+  then 3000 new ones kept the large entry and every new one and evicted 1500 old ones; a 20 MB entry
+  written before them all went first. At 10 GiB the bound holds hundreds of cases' small programs, so it
+  does not limit their count; the GiB-sized solve programs each library change writes are what age them out.
+- **The test suite at floor 0** (six fast-tier files, 274 tests, serial, its own directory, one run each):
+  326 s cold / 59 s warm with 3099 entries, against 155 s / 166 s at 2.0 and 156 s with the cache off.
+  The cold doubling is the per-write rescan (~30 µs × 3099²/2 ≈ 145 s).
+
+**Why it is not the default:** with a size bound set (aquaflux sets 10 GiB), JAX's `LRUCache.put` runs
+`_evict_if_needed` on every write. That globs the whole cache directory, stats every entry and reads its
+access-time file, under the inter-process lock. So a write costs time in proportion to the entry count.
+Measured on synthetic 18 KB entries: 27 ms per write at 1000 entries, 141 ms at 5000, 586 ms at 20000 and
+1.4 s at 50000. A read stays at 0.3–0.4 ms. At floor 0 every op-by-op program of every run goes in, and
+the test suite shares the default cache directory: four unit test files (198 tests) wrote 1804 entries,
+so a fast tier writes roughly ten times that, and every library change adds new keys. Within a few runs a
+small program's write costs far more than its 25 ms compile, and an unbounded cache (no scan) is the
+88 GiB growth the bound exists to stop. No floor in between helps: the programs worth persisting compile
+in 10–40 ms, so any floor that admits them admits everything.
+
+**Make it the default only if** JAX's eviction stops scanning per write (it is `jax/_src/lru_cache.py`), or the small
+programs go away (the next entry says they cannot be compiled away cheaply).
+
+## Compiling the eager set-up phases into a few programs — NOT WORTH BUILDING (2026-10-17)
+
+**What was proposed:** compile the op-by-op phases before step 1 as a few `eqx.filter_jit` programs, the
+way `norm_of_residual` was done.
+
+**Where the programs come from** (same configuration as the entry above, cold, stack-attributed;
+978 programs under 1 s, 24.0 s): the case build ~485 (`MomentumContinuity.build` 331, of which
+`BoundaryClosure.linearization` 140 and the multiple-correction bind 85; `SSTTurbulence.build` and the
+wall-distance gradient ~100; patch-index set-up ~55); the hybrid initialization 136 (the potential-flow
+Laplace solve 83); the session's first build ~330 (the shift source `_monolithic_shift_source` 209, the
+fit 74, the float32 traced split 44). Between steps of a full march: none (21 steps, `183e9ffa`). A
+snapshot harness timed the phases on their own: case build 483 programs / 13.5 s compile / 18.7 s wall,
+initialization 138 / 5.8 s / 14.1 s, shift source 210 / 6.3 s / 8.9 s, and a second shift source with the
+eager caches warm 0 programs / **2.0 s wall** (pure dispatch).
+
+**Why it loses, two independent reasons:**
+- **A compiled phase is not bit-identical to its eager run when it does arithmetic.** XLA contracts
+  multiply-adds inside one fused program, which a chain of separate eager programs cannot, and the CPU
+  backend has no flag to turn that off (its `xla_cpu_*` options cover fast-math and dot/conv strictness,
+  not contraction). Jitting the shift source's closure fields and mass flux moved 7 of 14 leaves at
+  ~1e-16 relative over thousands of cells; its `J·1` products moved by 7e-17. Rounding upstream of the
+  first fit moves bfs3d's thresholded coarsening (`validation.md`, PR #721), so such a change makes the
+  next bfs3d A/B uncontrolled.
+- **Compiling a phase that IS exact relocates its programs instead of removing them.** Eager programs are
+  cached per (primitive, shape, dtype) and shared by every later eager phase. `BoundaryClosure.linearization`
+  (0/1 tangents through affine maps) jits bit-identically on all 139 snapshotted arrays. It took the
+  case build from 483 to 411 programs, but the initialization rose 138 → 182 and the shift source
+  210 → 245. Over the two-step run that is 983 compiles against 989, with the first step done at
+  128.0 / 124.4 s against 131.5 / 121.9 s (two cold runs per arm).
+
+A gain needs most of the build, initialization and shift source compiled together. That is a large
+refactor through host code (numpy index set-up, scipy hierarchies, `float()` branches), and every
+arithmetic part of it moves rounding. **Reopen** for a residual-agnostic reason to restructure those
+builders anyway, or if a bit-identity requirement is waived.
+
+## A Schubert secant update of the materialized Jacobian between probes — REFUTED (2026-10-17)
+
+**What was proposed** (`solve-open-directions.md` 13): between probes, update the retained unshifted
+host Jacobian with each outer step's own secant pair, `s = x_{k+1} - x_k`, `y = R(x_{k+1}) - R(x_k)`, by
+Schubert's update (Broyden restricted to the fixed pattern, row by row: `J_i += ((y_i - J_i s) /
+(s_i.D s_i)) (D s_i)^T`), then re-apply the shift and refactor the split on its frozen coarsening. No JVP,
+pattern unchanged, so it would replace the coloured probe in a cost re-fit.
+
+**Probe:** `validation/pitzdaily_openfoam/secant_update_probe.py` on a fresh capture of the shipped
+pitzDaily march (`case.yaml` at `5661273a`, `PITZ_CHECKPOINT_KEEP=500 PITZ_INNER_DUMP_ABOVE=1`; 21 steps,
+106 restart cycles, `x_r/h` 8.0686, 233 s; Linux x86_64, 4 cores, jax 0.11.2, nothing else running).
+For every inner system of target steps 14-21 the march's float32 field split is re-fitted to each arm's
+Jacobian at the step's own shift (`beta_k d(x_{k-1})`, no refit floor), and solved by the march's
+residual-stop GMRES (restart 15, row-scaled measure) at the tolerance the march's adaptive rule gave that
+step (0.1 after a setback, else 0.3; `MarchReplay.tolerance`). The `marched` arm reproduces every
+recorded cycle count. Restart cycles summed:
+
+| arm | steps 14-21 | steps 15-20 |
+|---|---|---|
+| fresh probe at the step's start (= what the march does) | 40 | 31 |
+| probed one step back (stale-1) | 104 | -- |
+| stale-1 + one Schubert update | 101 | -- |
+| probed two steps back (stale-2) | -- | 148 |
+| stale-2 + two Schubert updates | -- | 142 |
+
+Over the probe's whole range (stale-2 arms on steps 15-21), two updates cost MORE than none: 184 against 175 cycles (2910 against 2744 applications); the column-weighted variant 171, the re-sweep 189. Chains of 3 and 4 updates tie stale (192 / 194, 182 / 182).
+
+**Why it fails:** the relative Frobenius distance of the updated Jacobian from the fresh one, read per
+(row field, column field) block, equals the stale one's to three figures in every block (one step:
+0.003-0.45; worst blocks the k and omega rows' couplings). The Jacobian moves 25-50 % per block between
+consecutive steps of this march (at the shift floor, line search clipped), a change of high rank; one
+secant condition per row recovers about one direction of ~120 stored entries. The variants did not move
+it: the update over every stored entry instead of the entries live at the probe, a per-field column
+weight `D` (the inverse mean square of each field's step), re-sweeping the last two pairs, and chains of
+2-4 updates (in a first run at a fixed 0.3, the chains were sometimes WORSE than stale; totals stale-2
+1526 / Schubert-2 1663 applications).
+
+**And it could not pay anyway:** on current main a probe costs 1.03-1.05 s, the refactor 1.2-1.4 s and
+the update (numpy, 5.66M stored entries, 2.94M nonzero) 0.56 s, and the march already re-fits at every
+station change and on nearly every target step (cost re-fits after each 3-cycle solve). Replacing every
+probe would save ~0.5 s each, <= ~10 s of 233 s. Staleness itself is real (one step stale costs ~2.5x the
+cycles of fresh), so re-fitting every step stays right; a secant update is just not a cheaper fresh probe.
+
+Reopen only with a probe far dearer than its refactor (bfs3d's was 8.2 s against 3.6-4.2 s before the
+adjugate change, unmeasured since) AND evidence that consecutive Jacobians differ by a low-rank change.
+A per-station `dJ/dmu` correction for the viscosity ramp (the larger share of re-fits) was not measured.
+
+## Cheaper GMRES bookkeeping in `_ResidualStopGMRES` — NOT WORTH BUILDING (2026-10-18)
+
+The candidates were to row-scale the system up front so the measured stop is the Euclidean norm of the
+small Hessenberg residual (no full-length residual vector per iteration), to form the classical
+Gram--Schmidt projections in one pass over the built rows, and to replace the per-iteration `lstsq` by a
+Givens recurrence. On pitzDaily's captured target-station systems (`main` `9efc5759`, 4-core Linux,
+jax 0.11.2, restart 15, row-scaled measure), the solve run with a free diagonal stand-in for the operator,
+at a fixed 60-iteration budget, costs **0.83-1.32 ms per iteration** against ~50 ms for a whole
+application inside the same loop, so all of the bookkeeping together is ~2 % (~1.3 s of a ~175 s march),
+below the container's 5-10 % run-to-run spread, and each candidate removes only part of it. Instrument:
+`validation/pitzdaily_openfoam/krylov_overhead.py`; table in `solve-open-directions.md`, "Inside the step
+program (2026-10-18)". Re-open only if the operator becomes an order of magnitude cheaper (or the restart
+length much longer).
+
+## The coloured probe as one compiled loop over its chunks — NO GAIN on pitzDaily (2026-10-18)
+
+The idea: a refit's probe calls `batched_jacobian_matvec` once per chunk of 8, and each call's temporary
+is mapped afresh and faulted (on glibc above 64 MiB no threshold stops it: XLA allocates on worker threads,
+whose arenas are 64 MiB heaps), so one `fori_loop` program over the chunks, seeds in and responses out by
+host callbacks, allocates once and keeps the one-chunk memory bound. Measured on pitzDaily's step-21 state
+(`validation/pitzdaily_openfoam/probe_loop_probe.py`, `main` `9efc5759`, 4-core Linux, jax 0.11.2, 100
+probes / 13 chunks, best of 5): faults per chunk fall 38 600 -> ~5 100, but the time does not move (three
+default-allocator runs: shipped 0.95-1.10 s, looped 0.90-1.09 s). The faults DO cost the shipped probe
+~0.3 s (0.67-0.72 s with `MALLOC_ARENA_MAX=1` and the thresholds raised, 0 faults); the loop gives that
+back because the same vmapped JVP runs slower inside a compiled loop than as separate calls (fault-free
+0.84-0.85 s against 0.60-0.69 s with no host work in either), and the looped responses differ from the
+shipped ones at 1.3e-12. jaxlib 0.11.2's XLA flags offer no CPU temporary-buffer or preallocation setting,
+so on CPU the remedy for the faults is the process allocator, which the user owns (`MALLOC_ARENA_MAX=1`
+with both thresholds, jemalloc with decay off, or `GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, the one that
+keeps returning freed memory: bfs3d re-fit 48.7 → 39.7 s at an unchanged footprint, `validation-log.md`,
+"Why bfs3d's probe tangent costs 5.5× pitzDaily's"). ⚠️ The first two keep freed memory: the single-arena setting
+took a bfs3d march to 12.3 GiB resident by step 2 (9.5 GiB at defaults) and the 15 GB container restarted. Untested on bfs3d, whose probe faults ~210 000 times
+per chunk and gains ~25 % fault-free (fixed-state refit, bfs3d session, 2026-10-18); re-open there only if
+the in-loop JVP penalty measures smaller than that.
+
+## Overlapping the probe's host de-compression with the next chunk — NO GAIN on bfs3d (2026-10-18)
+
+The idea: between batched calls the probe fills the next chunk's seeds and scatters the last chunk's
+responses into the matrix on one core (bfs3d: 0.12-0.17 s and 2.5-3.1 s of a ~36 s probe per re-fit), so
+starting chunk `k + 1` before scattering chunk `k` (one call in flight, two seed buffers) should hide them.
+Two traps, then the measurement. **Dispatching ahead does nothing as written**: `batched_jacobian_matvec`
+is an `eqx.filter_jit`, which blocks on its result after every call so it can report an `error_if` by
+name (a plain `jax.jit` of the same function returns in ~1.3 ms, the `filter_jit` after ~420 ms). With the
+call on one worker thread the scatter does run beside the next chunk (2.2 cores during it), and **a
+transfer may alias the host buffer** (`jax.device_put` of a large aligned array does on the CPU backend;
+`jnp.asarray` copies today), so the seeds need two buffers. Measured: bfs3d `state-00032`, β 0.005,
+`refit_profile.py`, glibc defaults, 4-core Linux, jax 0.11.2, `fe772f59`, mean of 3 re-fits: probe 36.2 s
+against 34.9 / 36.0 / 37.0 s for the serial loop in three runs. The JVP is memory-bound (~23 GB/s, 2-way
+partitioned kernels), so the concurrent scatter slows it by what it saves. Built with a test and
+reverted (branch `claude/bfs3d-probe-linux`). Re-open only on a machine where the probe is not
+bandwidth-bound, and then through a worker thread, not by dropping `filter_jit`.
+
+## Dense LU of the corrected-gradient operator `A_g` — DOMINATED, built and removed (2026-08)
+
+Factorizing the constant, geometry-only `A_g` of `CorrectedGreenGauss` once (dense, `jit`-ed `jacfwd` +
+`lu_factor`) and applying `A_g⁻¹` by back-substitution is exact, but dense means `O((n·dim)²)` per apply,
+so it lost to the matrix-free `SweptGradientSolve` at every size measured (run per step: N=12 0.27 vs
+0.21 s, N=16 2.0 vs 0.83 s, N=24 24 vs 4.8 s) and was slower than even the iterative baseline by N=32. A
+scalable sparse LU in JAX needs host callbacks (off-GPU). Related: solving `A_g` exactly to remove far
+Jacobian coupling is the wrong lever — the exact solve has *more* mass beyond any distance than the
+truncated sweeps (reach 9–11 against 5). Detail: `.claude/notes/schemes-log.md`, "Moved →
+`SweptGradientSolve`: cost, peel, reach-per-sweep, folding, dense LU".
+
+## Field-split block smoothers that are not incomplete-LU (Vanka on `[u,v,w,p]`, Chebyshev, flat block Jacobi on `[k,ω]`) — CLOSED (2026-08-09/10)
+
+**What was tried** (`bfs3d`, `field_split_probe.py`'s split arms — deleted #371, in git history; plain
+aggregation, ILU(0)×4 where not overridden, `coarse_eq_limit` 2000, reach 3, GMRES restart 15 to 1e-8 on the
+true residual, right-hand side `−R`, hard iterate β 0.0293 and converged `state-00069` at β = 0):
+*(a)* **Vanka on the four-field saddle** once a field split removed ω from the patch. Patch conditioning
+recovered (worst gain 12.8 against ~3e3 on the six-field block — confirming ω caused the bad patches) but it
+still stalled (2.9e-03 at the 58-cycle cap; multiplicative was worse, 1.55, at 5.6x the time) against the
+ILU(0) split's 11 cycles. Patch relaxation is closed on this operator for a measured reason.
+*(b)* **Chebyshev** fails on both blocks for different reasons: indefiniteness on the saddle and a complex
+(nonsymmetric, advection-dominated) spectrum on `[k,ω]`, where damped Jacobi converges. A hand-bounded or
+complex-spectrum polynomial was not tested. *(c)* **Flat block Jacobi as the whole `[k,ω]` inverse** (no
+hierarchy): 1.14–1.60x the ILU V-cycle's blended cost, and unstable across adjacent states (8.63 → 10.94);
+the coarse grid buys robustness, not average reduction. Not a verdict on block Jacobi as a smoother inside a
+hierarchy. Detail: `solve-field-split-log.md`, "The field split — a saddle plus two transported scalars".
+
+## Three remedies for the escalation cascade after a collapsed positivity cap — REFUTED BY ARCHIVED LOGS (2026-08-11)
+
+**What was proposed** (on the `bfs3d` traced/PETSc trailing-inverse march pair, under the global k cap since
+deleted 2026-10-14): *(a)* stop a retry ladder after N attempts that move nothing — at `march-20260811-161642`
+step 56 the third attempt after two bit-null ones cured the step, so N ≤ 2 stops one short; *(b)* carry a
+decayed fraction of the escalated β — it lands at or below a β just shown to fail and re-pays the escalation;
+*(c)* skip the step control's own backoff after an escalation — across 24 logs the control never backed off
+after a successful escalation, so the two are a serial search, not a redundancy. What survived as a lever
+was the asymmetric return (β recovers at ÷1.5 per step against ×2–×4 up), and the ladder's escape past
+`beta_max`. The futility reading was itself confounded: the escalated attempts ran on a V-cycle fitted at the
+pre-escalation β. Detail: `solve-field-split-log.md`, the 2026-08-11 march-confirmation entry.
+
+## Correcting a short probe's folded entries by the previous refit's far values — NOT WORTH BUILDING (2026-10-14)
+
+When a column is probed at a shorter reach than the materialized pattern, the colouring folds the
+far couplings onto near entries. Subtracting the previous refit's far values (from a full-reach probe)
+from those folded near entries was tried statically on pitzDaily (reach-2 colouring inside a reach-3
+pattern, shipped `case.yaml`, `compare.py` checkpoints, 4-core Linux, jax 0.11.2): between refits the
+far values change about as much as they are large, so the correction cut the per-block error by at most
+~2x and in some blocks not at all. The folded mass there is ~4e-4 of the Jacobian's norm and the
+shortened probe already marches identically (18 steps, 123 restart cycles), so there was nothing to
+recover. Detail: `.claude/notes/solve-direct-preconditioners-log.md`, "Probe colouring reach 2 —
+pitzDaily and bfs3d (2026-10-14/15)".
+
+## Residual- and cycle-count refresh triggers for the coupled march — CLOSED (dominated by ν_t drift)
+
+- **What:** re-freezing the coupled march's k/ω preconditioners when a residual threshold
+  (`refresh_rtol`) or the restart-cycle count (`CycleGrowthTrigger`) said they were stale. **Case:**
+  pitzDaily cold-IC coupled march (2026-07/08). **Why it lost:** cost rises with the SER `β` ramp as
+  well as with preconditioner staleness — on a separating flow by more — so a cost signal cannot
+  separate the two; the per-step cycle count exploded identically in two arms of very different step
+  boldness (monotone 10→12→21→53→119, relaxed 15→27→40→134), i.e. it tracked flow development. The
+  cycle trigger also needed a residual gate and `patience`. The shipped trigger is the drift of `ν_t`
+  since the freeze state (`CoefficientDriftTrigger` on `eddy_viscosity_drift`), the coefficient the
+  frozen operators are assembled from. **Detail:** `.claude/notes/turbulence-log.md`, "Segmented
+  refresh, the carried shift factor (#156), and refresh under `jax.grad`".
+
+## Treating bfs3d's march variance with the Krylov tolerance, or production frozen everywhere — REFUTED (2026-10-18)
+
+Both tried against bfs3d's corner `k` collapse (`turbulence.md`; full record in
+`.claude/notes/turbulence-log.md`, "bfs3d's corner `k` collapse (2026-10-18)"). **A tighter forward
+tolerance** (rtol 0.1, 0.03 against the shipped 0.3) still lost arms to the same rounding-level viscosity
+perturbations that broke the shipped tolerance (one failure each of two tried, Apple M3 Pro, `cf80be32`):
+the collapse is in the operator, not the solve. **`jacobian_production_viscosity=True`** (production frozen
+in all 23040 cells) stalled the unperturbed march at ‖R‖ ≈ 0.06 from step 13 (α 0.03–0.06, β to 4): it
+removes a derivative Newton needs everywhere but the corners. What survived is the per-cell freeze
+(`production_freeze.py`), with its inverse fitted to the same operator -- a first prototype at threshold
+0.5 with the inverse left on the exact Jacobian froze 230–850 cells a step and broke a converging march.
+
+
+## Freezing more of the `k` row's `k`-dependence — REFUTED (2026-10-18)
+
+Extensions of the per-cell production freeze, proposed when its library version did not reproduce the
+prototype, each tried at bfs3d's step-19 state (faithful replay, float32 split as shipped, β 0.005, nine
+draws over rounding-level perturbations of the residual) and the second also as a march: freezing `k` in
+the near-wall wall-function production (adds 1e-7–6e-6 to diagonals short by 1e-5–1e-3, fixes none);
+freezing the production cap's `k` (the cap is inactive there); freezing `k` in the `k` diffusivity's
+`nu_t` (7/9 descents by the march's acceptance rule against 5/9 for production alone, then a march that
+crawled to step 28 and diverged after the release to 1e-4); and freezing the strain rate's near-wall `k`
+blend as well (every `k` diagonal positive, yet 2/9 descents). They lost because the failure was not the
+`k` diagonal: the float32 split breaks at near-zero pivots, which the pivot floor below addresses without
+changing the operator. Detail: `.claude/notes/turbulence-log.md`, "Per-cell production freeze (2026-10-18)".
+
+## A pivot floor over every shifted row, or only just above zero — REFUTED (2026-10-18)
+
+The library `PivotFloor` was first written generic over every row that carries a shift. At bfs3d's step-19
+state it changed 11 664 rows, 11 538 of them momentum (a momentum pivot is small beside its pseudo-time
+diagonal without being singular), and the float32 solve ran to its cap with the first descending rung at
+α 1/4, against 7 cycles and a full step with `k` rows alone; problems now name their floored fields
+(`MaterializedProblem.floorable_fields`). Raising near-zero pivots only to ~6 % of their row's scale made the
+amplification worse (1e14 on one row), and also flooring the healthy negative pivots (75 rows) left every
+solve at its cap. Detail: `.claude/notes/solve-log.md`, "Near-zero pivots and the float32 split (2026-10-18)".
+
+## Per-cell production freeze — REMOVED (2026-10-19, the project owner's decision)
+
+**What it was:** at each materialized re-fit, freeze `k` inside the k-production's eddy viscosity in the
+Krylov operator (a Jacobian stand-in, never the residual) in the cells whose shifted k-row diagonal
+production had all but cancelled, `J_kk + s < t (J_kk + gain + s)` with `gain > 0` the diagonal the freeze
+adds, `t` 0.1; the inverse was fitted to the stand-in by adding `gain` to its diagonal. Exact as a
+diagonal-only change because each cell's production reads its own `k`. Off by default; built and tested
+(`production_freeze_threshold` on `open_session` / `coupled_step` / `CoupledMarch`, a generic
+`DiagonalStandIn` seam in `precondition/`, `SSTTurbulence.production_freeze_mask`), never shipped.
+
+**Why removed:** it treated a symptom. bfs3d's corner `k` collapse was decided by the float32 field split
+breaking at near-zero `k` pivots; the preconditioner's `PivotFloor` fixes that without touching the
+operator and converged bfs3d in 21 steps at eps 0 and +1e-14, where the freeze's march-level results were
+rounding draws (library 38 steps, its prototype 25, bit-identical given the prototype's two choices).
+Nothing else used the stand-in seam, so it went with it.
+
+**To reopen** (a case whose `k` linearization is wrong in a way no preconditioner can fix): the code is
+in commit `1e69b4ab` on branch `claude/pivot-floor` (PR #766): `aquaflux/turbulence/production_freeze.py`,
+`tests/unit/test_production_freeze.py`, `DiagonalStandIn` / `MaterializedProblem.diagonal_stand_in` in
+`precondition/materialized_session.py`, and the session-owned setting's plumbing in `turbulence/coupled.py`,
+`reynolds.py` and `case/solver.py`. Measurements: `.claude/notes/turbulence-log.md`, "Per-cell production
+freeze (2026-10-18)".

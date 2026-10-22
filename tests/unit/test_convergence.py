@@ -194,7 +194,11 @@ def test_each_step_stops_a_measure_following_linear_solve_in_its_own_measure(
     monkeypatch.setattr(newton_module, "solve_linear", recording)
 
     step.stepper()(
-        _Cube(), jnp.array([1.0, 1.5]), jnp.array(1.0), relative_residual_gmres(0.1, norm=None)
+        _Cube(),
+        jnp.array([1.0, 1.5]),
+        _Cube()(jnp.array([1.0, 1.5])),
+        jnp.array(1.0),
+        relative_residual_gmres(0.1, norm=None),
     )
 
     assert handed

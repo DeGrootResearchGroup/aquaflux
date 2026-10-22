@@ -39,6 +39,7 @@ from aquaflux.precondition import (
     JacobiSmoothed,
     MaterializedJacobian,
     MaterializedJacobianPreconditioner,
+    PivotFloor,
     SimpleSmoothed,
     field_split_inverse,
 )
@@ -47,7 +48,13 @@ from aquaflux.precondition.materialized_session import (
 )
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import DualTimeLoop, relative_residual_gmres, restart_cycles, solve_linear
+from aquaflux.solve import (
+    ConstantRelaxation,
+    DualTimeLoop,
+    relative_residual_gmres,
+    restart_cycles,
+    solve_linear,
+)
 from aquaflux.turbulence import (
     BlockDiagonal,
     CoupledRANS,
@@ -244,9 +251,16 @@ def test_it_drops_into_the_jax_callback_wrapper_unchanged(case):
     split.destroy()
 
 
-def _shipped_split() -> MaterializedJacobian:
+def _shipped_split(precision: str = "float64") -> MaterializedJacobian:
     """The coupled preconditioner both flagship cases ship: a field split of traced inverses."""
-    return MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+    return MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed(), precision=precision))
+
+
+def _single_precision_leaves(step) -> int:
+    """How many single-precision arrays a step carries: its split's, when the split is applied in it."""
+    return sum(
+        1 for leaf in jax.tree.leaves(eqx.filter(step, eqx.is_array)) if leaf.dtype == jnp.float32
+    )
 
 
 def _with_scaled_viscosity(coupled, nu_scale):
@@ -312,19 +326,25 @@ def test_a_split_builds_the_right_step_types(channel) -> None:
 
 
 @pytest.mark.slow
-def test_the_split_continuation_reaches_the_block_preconditioned_root(channel, block_root) -> None:
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_the_split_continuation_reaches_the_block_preconditioned_root(
+    channel, block_root, precision
+) -> None:
     """A field split is a drop-in: same solver, same root, only the frozen inverse differs.
 
     The point of routing it through `coupled_step` rather than a parallel builder is that the
     shift policy, forward solver, step tail and refresh hooks stay shared -- so this asserts the thing that
     would break if they had quietly diverged: the split reaches the root the block-triangular SIMPLE
-    preconditioner reaches, and a genuinely turbulent one.
+    preconditioner reaches, and a genuinely turbulent one. A split applied in single precision changes
+    only how the Krylov solves converge, so it reaches the same double-precision root; the step must
+    carry it in single precision for that to say anything.
     """
     coupled = channel["coupled"]
     flow, k, omega = channel["start"]
     split = coupled_step(
-        coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split()
+        coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split(precision)
     )
+    assert (_single_precision_leaves(split) > 0) == (precision == "float32")
     reached = solve_coupled(coupled, flow, k, omega, strategy=split, max_steps=40)
     _, k_s, omega_s = reached
     assert float(jnp.linalg.norm(coupled.residual(coupled.pack_state(*reached)))) < 1e-8
@@ -335,18 +355,58 @@ def test_the_split_continuation_reaches_the_block_preconditioned_root(channel, b
 
 
 @pytest.mark.slow
-def test_the_split_adjoint_matches_finite_difference(channel) -> None:
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_the_split_adjoint_matches_finite_difference(channel, precision) -> None:
     """The coupled implicit-function-theorem adjoint is exact through the split-preconditioned solve.
 
     The split only accelerates the Krylov solves and is ``stop_gradient``-ed, so the gradient is the one
     transpose solve on the unfrozen coupled residual -- preconditioned by the split's transpose -- and
-    must match a finite difference. Built once outside ``jax.grad`` on concrete parameters.
+    must match a finite difference. Built once outside ``jax.grad`` on concrete parameters. In single
+    precision the split is linear only up to its rounding, and the transpose solve runs to a tight
+    tolerance in double precision, so this is where a split applied in single precision would show it.
     """
     coupled = channel["coupled"]
     flow, k, omega = channel["start"]
     step = coupled_step(
-        coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split()
+        coupled, coupled.pack_state(flow, k, omega), preconditioner=_shipped_split(precision)
     )
+    assert (_single_precision_leaves(step) > 0) == (precision == "float32")
+
+    def objective(nu_scale):
+        scaled = _with_scaled_viscosity(coupled, nu_scale)
+        _, k_out, _ = solve_coupled(scaled, flow, k, omega, strategy=step, max_steps=40)
+        return jnp.sum(k_out**2)
+
+    analytic = float(jax.grad(objective)(1.0))
+    eps = 1e-4
+    finite_difference = float((objective(1.0 + eps) - objective(1.0 - eps)) / (2 * eps))
+    assert analytic != 0.0
+    assert abs(analytic - finite_difference) / abs(finite_difference) < 1e-5
+
+
+def test_the_adjoint_through_a_pivot_floored_fit_matches_finite_difference(channel) -> None:
+    """A pivot floor changes the inverse the adjoint's transpose solve is preconditioned by, never its answer.
+
+    The floor acts only at a re-fit, so the step is re-fitted here at a small shift, in single precision,
+    with a band wide enough that the channel's start floors some ``k`` rows (asserted, or the test would
+    exercise the unfloored fit); that step's split is the one the transpose solve then applies.
+    """
+    coupled = channel["coupled"]
+    flow, k, omega = channel["start"]
+    state = coupled.pack_state(flow, k, omega)
+    spec = MaterializedJacobian(
+        FieldSplit(SimpleSmoothed(), JacobiSmoothed(), precision="float32"),
+        pivot_floor=PivotFloor(threshold=0.9),
+    )
+    session = open_session(spec, coupled)
+    step = session.build(state)
+    active = eqx.tree_at(
+        lambda s: s.relaxation_schedule, step, ConstantRelaxation(jnp.asarray(1e-3))
+    )
+    update = session.refresh_preconditioner(active, state, due=True)
+    assert session._hook.floored_rows.size > 0
+    step = update(step)
+    assert _single_precision_leaves(step) > 0
 
     def objective(nu_scale):
         scaled = _with_scaled_viscosity(coupled, nu_scale)

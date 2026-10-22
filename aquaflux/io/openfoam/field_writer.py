@@ -37,7 +37,13 @@ import numpy as np
 
 from aquaflux.io.cell_fields import as_cell_values
 
-from .foamfile import read_foam_body, read_foam_file, resolve_polymesh_dir
+from .foamfile import (
+    SEPARATOR,
+    format_header,
+    read_foam_body,
+    read_foam_file,
+    resolve_polymesh_dir,
+)
 from .grammar import parse_vector_list, split_boundary_blocks
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -63,19 +69,6 @@ _CLASS_COMPONENTS = {"volScalarField": 1, "volVectorField": 3}
 #: written rather than from a rounding of it; ``repr``-grade round-tripping is not needed because
 #: the consumer parses decimal text into doubles either way.
 _PRECISION = 12
-
-# The banner every file in the format carries. The editor mode marker the format normally puts
-# on the first line is dropped: it is a syntax-highlighting hint for one editor, nothing reads
-# it back, and it names a language this repository keeps out of its own sources.
-_BANNER = r"""/*---------------------------------------------------------------------------*\
-  =========                 |
-  \\      /  F ield         | OpenFOAM
-   \\    /   O peration     |
-    \\  /    A nd           |
-     \\/     M anipulation  |
-\*---------------------------------------------------------------------------*/"""
-
-_SEPARATOR = "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //"
 
 
 class FieldTemplate(NamedTuple):
@@ -359,15 +352,7 @@ def format_volume_field(
     rows = _components(array, template, extruded_axis)
 
     lines = [
-        _BANNER,
-        "FoamFile",
-        "{",
-        "    format      ascii;",
-        f"    class       {template.class_name};",
-        f'    location    "{location}";',
-        f"    object      {object_name};",
-        "}",
-        _SEPARATOR,
+        *format_header(template.class_name, location, object_name),
         "",
         f"dimensions      {template.dimensions};",
         "",
@@ -384,7 +369,7 @@ def format_volume_field(
         lines.append("    {")
         lines.extend(_reindent_block(_resolve_internal_field(block, template, name), "        "))
         lines.append("    }")
-    lines.extend(["}", "", _SEPARATOR, ""])
+    lines.extend(["}", "", SEPARATOR, ""])
     return "\n".join(lines)
 
 

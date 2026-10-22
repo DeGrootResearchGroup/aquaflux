@@ -3,9 +3,10 @@
 Face geometry specializes by spatial dimension, so it is a strategy hierarchy —
 :class:`EdgeFaceGeometry` (2D) and :class:`PolygonFaceGeometry` (3D), selected by
 :func:`face_geometry_scheme` — each an ``equinox.Module``. A scheme computes the *raw*
-(node-order) area/centroid/normal for all faces at once; the shared, dimension-agnostic
-:meth:`FaceGeometryScheme.orient_owner_outward` fixes the normal to point out of the
-owner cell.
+(node-order) area/centroid/normal for all faces at once; the normal is then turned to point out
+of the owner cell by ``orientation.owner_outward_normals``, which orients each
+cell's faces consistently over the edges they share and turns them out by the cell's volume
+(:meth:`FaceGeometryScheme.orient_owner_outward` is its test for a cell whose faces do not all join).
 
 **2D** — a face is an edge with endpoints ``p0``, ``p1`` and displacement ``d = p1 - p0``:
 
@@ -112,9 +113,9 @@ class FaceGeometryScheme(eqx.Module):
     """Strategy interface for computing face geometry (dimension-specialized).
 
     A scheme returns area and centroid in final form, but a normal whose *sign* follows the
-    node-winding order — the "unoriented" normal. :meth:`orient_owner_outward` then flips it to
-    point out of the owner cell (a separate step because the owner-outward test needs the
-    approximate cell centroids, which in turn need the face centroids computed here first).
+    node-winding order — the "unoriented" normal, turned to point out of the owner cell afterwards
+    (a separate step, because turning it needs the cells' volumes, which need the face geometry
+    computed here first).
     """
 
     @abc.abstractmethod
@@ -126,7 +127,7 @@ class FaceGeometryScheme(eqx.Module):
         """Return ``(area, centroid, node_order_normal)`` for every face.
 
         Area and centroid are final; the normal's sign follows the node-winding order and is
-        fixed to owner-outward by :meth:`orient_owner_outward`.
+        turned owner-outward afterwards (``orientation.owner_outward_normals``).
 
         Parameters
         ----------
@@ -178,11 +179,13 @@ class FaceGeometryScheme(eqx.Module):
         face_centroids: jnp.ndarray,
         owner_approx_centroid: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Flip node-order normals so each points out of its owner cell.
+        """Flip node-order normals so each points away from its owner cell's approximate centroid.
 
-        A normal points out of the owner when the vector from the owner's (approximate)
-        centroid to the face centroid has a non-negative projection onto it. This flip is
-        applied once here so the stored normal is owner-outward. Dimension-agnostic.
+        The orientation of a cell whose faces do not all join at shared edges (see
+        ``orientation.owner_outward_normals``): a normal points out of the owner
+        when the vector from the owner's approximate centroid to the face centroid has a
+        non-negative projection onto it. Right for a convex cell; a cell whose centroid lies
+        beyond one of its own faces gets that face turned inward. Dimension-agnostic.
         """
         outward = face_centroids - owner_approx_centroid
         projection = jnp.sum(outward * node_order_normals, axis=1, keepdims=True)
@@ -229,7 +232,18 @@ class PolygonFaceGeometry(FaceGeometryScheme):
 
     Gives the vector-area unit normal and physical area ``|S|`` for any polygon, warped or
     not, with a vertex-order-independent centroid.
+
+    Attributes
+    ----------
+    block : int
+        Face-node incidences per block in :meth:`centre_fan`. Its triangles are formed and summed
+        into the faces a block at a time (``FaceNodeConnectivity.reduce_in_blocks``), so its
+        working memory is set by the block, not by the mesh: formed all at once, each of the
+        triangle's corners, directed area and weighted centroid is a buffer of three numbers per
+        incidence. Smaller blocks take more, shorter passes.
     """
+
+    block: int = eqx.field(default=2**18, static=True)
 
     def unoriented_geometry(
         self,
@@ -271,6 +285,7 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         node_coords: jnp.ndarray,
         face_nodes: FaceNodeConnectivity,
         apex: jnp.ndarray | None = None,
+        incidences: jnp.ndarray | None = None,
     ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """The centre-fan triangles themselves, one per face-node incidence.
 
@@ -286,16 +301,21 @@ class PolygonFaceGeometry(FaceGeometryScheme):
             The face→node gather/reduce operators.
         apex : jnp.ndarray, optional
             Per-face apex, shape ``(n_faces, 3)``; defaults to each face's vertex mean.
+        incidences : jnp.ndarray of int, optional
+            The incidences whose triangles to form, shape ``(n,)``; every one by default.
 
         Returns
         -------
-        (apex, start, end) : tuple of jnp.ndarray, each shape ``(n_incidences, 3)``
+        (apex, start, end) : tuple of jnp.ndarray, each shape ``(n_incidences, 3)`` (or ``(n, 3)``)
             The apex of each triangle, and the start and end of its perimeter edge.
         """
-        start = face_nodes.gather_node_coords(node_coords)
-        end = face_nodes.perimeter_next(start)
-        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords)
-        return centre[face_nodes.face_of_incidence], start, end
+        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords, self.block)
+        if incidences is None:
+            start = face_nodes.gather_node_coords(node_coords)
+            return centre[face_nodes.face_of_incidence], start, face_nodes.perimeter_next(start)
+        start = node_coords[face_nodes.face_node_indices[incidences]]
+        end = node_coords[face_nodes.face_node_indices[face_nodes.next_incidence[incidences]]]
+        return centre[face_nodes.face_of_incidence[incidences]], start, end
 
     def centre_fan(
         self,
@@ -334,22 +354,32 @@ class PolygonFaceGeometry(FaceGeometryScheme):
         area-weighted centroid. ``total_triangle_area`` keeps the unsigned sum, purely for the
         planarity diagnostic.
         """
-        pa, pb, pc = self.fan_triangles(node_coords, face_nodes, apex)
-        directed = 0.5 * jnp.cross(pb - pa, pc - pa, axis=-1)  # (n_triangles, 3)
-        tri_centroid = (pa + pb + pc) / 3.0
+        centre = apex if apex is not None else face_nodes.vertex_mean(node_coords, self.block)
 
-        vector_area = face_nodes.reduce_to_faces(directed)  # S
+        def triangles(incidences):
+            pa, pb, pc = self.fan_triangles(node_coords, face_nodes, centre, incidences)
+            return pa, pb, pc, 0.5 * jnp.cross(pb - pa, pc - pa, axis=-1)  # directed area d_i
+
+        def areas(incidences):
+            directed = triangles(incidences)[3]
+            return directed, norm(directed)
+
+        # Two passes over the triangles, a block at a time: the centroid's weights need the
+        # normal, which needs every triangle of the face first.
+        vector_area, total_tri_area = face_nodes.reduce_in_blocks(areas, self.block)  # S, sum|d_i|
         area = norm(vector_area)  # |S|
         normal = _safe_unit(vector_area)
-        # Signed projected area of each fan triangle onto the (unit) face normal. Summed per face
-        # this is exactly |S|, so it is the correct area-weight — and it is negative for a
-        # reflex-vertex triangle, which the unsigned |d_i| would wrongly add.
-        signed = dot(directed, normal[face_nodes.face_of_incidence])
-        safe_area = jnp.where(area > 0.0, area, 1.0)[
-            :, None
-        ]  # degenerate face -> 0 centroid, no NaN
-        centroid = face_nodes.reduce_to_faces(scale(tri_centroid, signed)) / safe_area
-        total_tri_area = face_nodes.reduce_to_faces(norm(directed))
+
+        def weighted_centroids(incidences):
+            pa, pb, pc, directed = triangles(incidences)
+            # Signed projected area of each fan triangle onto the (unit) face normal. Summed per
+            # face this is exactly |S|, so it is the correct area-weight — and it is negative for
+            # a reflex-vertex triangle, which the unsigned |d_i| would wrongly add.
+            signed = dot(directed, normal[face_nodes.face_of_incidence[incidences]])
+            return scale((pa + pb + pc) / 3.0, signed)
+
+        safe_area = jnp.where(area > 0.0, area, 1.0)[:, None]  # degenerate face -> 0, no NaN
+        centroid = face_nodes.reduce_in_blocks(weighted_centroids, self.block) / safe_area
         return area, centroid, normal, total_tri_area
 
 

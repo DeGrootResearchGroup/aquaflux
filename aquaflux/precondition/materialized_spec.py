@@ -5,7 +5,8 @@ either a block-triangular field split with a separate inverse for the leading an
 (:class:`FieldSplit`) or a single block inverse over every field (a
 :class:`~aquaflux.precondition.BlockInverse`). These are one family with a nested choice
 (:class:`MaterializedJacobian`) rather than two, because they share everything but the inverse: how the
-Jacobian is probed, the shift the first build is fitted at, and the floor its refresh is held above.
+Jacobian is probed, the shift the first build is fitted at, the floor its refresh is held above, and
+whether near-zero pivots are kept out of the fit.
 
 Nothing here names a residual. Every field defaults to ``None``, meaning "not set here" (see
 :class:`~aquaflux.solve.SettingsValue`), so a spec changes the settings it names and leaves every other one
@@ -16,10 +17,11 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from ..solve import SettingsMapping, SettingsValue
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
+from .pivot_floor import PivotFloor
 
 __all__ = [
     "MATERIALIZED_MAPPING",
@@ -68,6 +70,10 @@ class JacobianProbeSpec(SettingsValue):
             object.__setattr__(self, "column_reach", tuple(int(r) for r in self.column_reach))
 
 
+#: The precisions a field split can be applied in (:attr:`FieldSplit.precision`).
+SPLIT_PRECISIONS = ("float64", "float32")
+
+
 @dataclasses.dataclass(frozen=True)
 class FieldSplit:
     """A block-triangular field split: the problem's leading group of fields first, then the rest.
@@ -86,17 +92,37 @@ class FieldSplit:
     trailing : BlockInverse
         The inverse fitted to the trailing fields (``[k, omega]``), for example
         :class:`~aquaflux.precondition.JacobiSmoothed`.
+    precision : {"float64", "float32"}
+        The floating-point precision the split is applied in. Everything is fitted in double
+        precision -- the hierarchies, the inverted diagonal blocks, the coupling -- and under
+        ``"float32"`` the fitted arrays are then stored in single precision and each application runs
+        in it, its input rounded and its output widened back. The residual, the Krylov recurrences and
+        the stopping test stay in double precision, so the precision changes how fast a solve
+        converges, never what it converges to. A single-precision application moves fewer bytes per
+        stored entry. The adjoint's transpose solve applies the same rounded split in double-precision
+        arithmetic, since one applied in single precision is linear only to about ``1e-7`` and a solve
+        run tighter than that stagnates. Only a split applied on the device (both blocks offering a
+        traced cycle) can take it. A row whose shifted pivot is near zero can stall a single-precision
+        solve, because the inverse amplifies it far beyond its neighbours;
+        :attr:`MaterializedJacobian.pivot_floor` keeps such pivots out of the fit.
 
     Raises
     ------
     TypeError
         If either inverse is not a :class:`~aquaflux.precondition.BlockInverse`.
+    ValueError
+        If ``precision`` is neither ``"float64"`` nor ``"float32"``.
     """
 
     leading: BlockInverse
     trailing: BlockInverse
+    precision: Literal["float64", "float32"] = "float64"
 
     def __post_init__(self) -> None:
+        if self.precision not in SPLIT_PRECISIONS:
+            raise ValueError(
+                f"FieldSplit.precision must be one of {SPLIT_PRECISIONS}, got {self.precision!r}."
+            )
         for role in ("leading", "trailing"):
             inverse = getattr(self, role)
             if not isinstance(inverse, BlockInverse):
@@ -132,17 +158,27 @@ class MaterializedJacobian:
         This is not the march's own ``beta_floor`` (a field of
         :class:`~aquaflux.solve.Globalization`), which bounds the shift the *solve* runs at. This
         one bounds only the shift the *inverse is fitted to*.
+    pivot_floor : PivotFloor or None
+        Fit every re-fit with each near-zero shifted diagonal pivot moved out to its row's own
+        pseudo-time diagonal (:class:`~aquaflux.precondition.PivotFloor`). ``None`` (default) fits the
+        shifted Jacobian as it is. Like the shift floor above it changes only what the inverse is fitted
+        to, never what is solved. It matters most for a split applied in single precision, where a pivot
+        near zero turns rounding into an error of order one in the rows around it.
 
     Raises
     ------
     TypeError
-        If ``inverse`` or ``probe`` is not one of the accepted values.
+        If ``inverse``, ``probe`` or ``pivot_floor`` is not one of the accepted values.
     """
 
     inverse: FieldSplit | BlockInverse
     probe: JacobianProbeSpec = JacobianProbeSpec()
     build_beta: float | None = None
     refit_beta_floor: float | None = None
+    pivot_floor: PivotFloor | None = None
+
+    #: The settings for which unset means the feature is off (read by the case-file schema).
+    unset_means_off: ClassVar[tuple[str, ...]] = ("pivot_floor",)
 
     def __post_init__(self) -> None:
         if not isinstance(self.inverse, FieldSplit | BlockInverse):
@@ -153,6 +189,11 @@ class MaterializedJacobian:
         if not isinstance(self.probe, JacobianProbeSpec):
             raise TypeError(
                 f"MaterializedJacobian.probe must be a JacobianProbeSpec, got {type(self.probe).__name__}."
+            )
+        if self.pivot_floor is not None and not isinstance(self.pivot_floor, PivotFloor):
+            raise TypeError(
+                "MaterializedJacobian.pivot_floor must be a PivotFloor or None, got "
+                f"{type(self.pivot_floor).__name__}."
             )
 
 
@@ -165,6 +206,7 @@ MATERIALIZED_MAPPING = SettingsMapping(
         MaterializedJacobian,
         FieldSplit,
         JacobianProbeSpec,
+        PivotFloor,
         SimpleSmoothed,
         JacobiSmoothed,
         AirReduction,
@@ -182,6 +224,7 @@ def materialized_spec_from_mapping(mapping: Mapping[str, object]) -> Materialize
         inverse: {kind: FieldSplit, leading: {kind: SimpleSmoothed}, trailing: {kind: JacobiSmoothed}}
         probe: {kind: JacobianProbeSpec, stencil_reach: 2}
         refit_beta_floor: 0.05
+        pivot_floor: {kind: PivotFloor, threshold: 0.15}
 
     Parameters
     ----------

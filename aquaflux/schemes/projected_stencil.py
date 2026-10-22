@@ -34,7 +34,6 @@ already couples, so a residual's Jacobian gains no reach.
 
 from __future__ import annotations
 
-import warnings
 from typing import ClassVar
 
 import equinox as eqx
@@ -46,6 +45,7 @@ from scipy.sparse import csr_matrix
 from aquaflux.mesh import Mesh, MeshGeometry
 from aquaflux.vectors import scale
 
+from ..warn_once import warn_once
 from .gradient import (
     AveragedNeighbourHessian,
     BoundaryLinearization,
@@ -60,17 +60,6 @@ from .interpolation import interpolation_factor
 #: is a property of the mesh, and a caller with a worse mesh than this threshold assumes should see
 #: the number rather than have the scheme refuse.
 _ILL_CONDITIONED = 1e6
-
-_WARNED: set[str] = set()
-
-
-def _warn_once(kind: str, message: str) -> None:
-    """Warn once per process for each distinct ``kind`` — a scheme is bound once per field, and the
-    same mesh property would otherwise be reported once per field."""
-    if kind in _WARNED:
-        return
-    _WARNED.add(kind)
-    warnings.warn(message, UserWarning, stacklevel=3)
 
 
 def polynomial_basis(offsets: jnp.ndarray, dim: int) -> jnp.ndarray:
@@ -594,10 +583,12 @@ def _report_conditioning(normal_equations: jnp.ndarray, n_cells: int) -> None:
     condition = np.where(smallest > 0, largest / np.where(smallest > 0, smallest, 1.0), np.inf)
     bad = int((condition > _ILL_CONDITIONED).sum())
     if bad:
-        _warn_once(
-            "conditioning",
+        # Once per process: a scheme is bound once per field, and this is a property of the mesh.
+        warn_once(
+            "projected_stencil.conditioning",
             f"ProjectedStencilGradient: {bad} of {n_cells} cells have a stencil whose monomials are "
             f"nearly dependent (worst condition number {condition.max():.2e}), so the weights there "
             "are large and the reconstruction is sensitive. A larger `reach` gives those cells more "
             "cells to fit, at a wider Jacobian.",
+            stacklevel=2,
         )

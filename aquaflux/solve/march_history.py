@@ -35,7 +35,8 @@ class MarchRecorder(Protocol):
 
     A recorder offering only some of these -- a checkpointer, which keeps states and nothing else -- is
     handed ``on_checkpoint`` alone. ``on_residuals`` may be ``None``: each per-equation report costs a
-    residual evaluation per step, so a recorder that does not want them says so rather than being asked.
+    split of the step's residual into its blocks and a read back to the host, per step, so a recorder
+    that does not want them says so rather than being asked.
     """
 
     on_residuals: Callable[[Mapping[str, float]], None] | None

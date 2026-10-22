@@ -51,9 +51,8 @@ A radiation case has **no `fluid` and no `numerics` section**: there is no flow,
 the radiation's own numerics live inside the physics. Either section, or a `drive`, `sources` or
 `pressure_datum`, is refused.
 
-A small case needs no mesh file: a `StructuredGrid` with three cell counts and three lengths is a
-uniform box whose six patches are named `left`, `right` (x), `bottom`, `top` (y), `back` and `front`
-(z).
+The mesh is read from a file like any case's: an OpenFOAM polyMesh, or aquaflux's own `.aqmesh`
+file made from a drawing by `aquaflux mesh` ({doc}`mesh_files`).
 
 ## The patches
 

@@ -1,8 +1,8 @@
 """A case's mesh, drawn: its cells' outline, and the boundary patches, with chosen ones highlighted.
 
-The solver writes the mesh it reads or generates as VTK files (``aquaflux mesh``): ``mesh.vtu``, and
+The solver writes the mesh it reads as VTK files (``aquaflux export-mesh``): ``mesh.vtu``, and
 ``patches.vtm`` when it writes the boundary too -- one block per patch, named by the patch. Nothing
-here reads a mesh format or generates a grid of its own; it draws what the solver wrote.
+here reads a mesh format of its own; it draws what the solver wrote.
 
 :func:`mesh_layers` decides what is drawn and is pure; :class:`MeshView` draws it into a plotter.
 """

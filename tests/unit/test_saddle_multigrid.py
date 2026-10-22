@@ -324,15 +324,15 @@ def test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_comput
 ) -> None:
     """A frozen-coarsening refit on an unchanged pattern computes no structural pattern after the first.
 
-    Every structural pattern -- each level's Galerkin operator, and the SIMPLE level's ``D^-1 G`` and
-    Schur complement -- is computed over all-ones copies of its operands (``_ones``), which costs as much
-    as the product itself. On a frozen coarsening those patterns cannot move, so a second refresh must
-    compute none of them; and the refreshed hierarchy and smoother pieces must be exactly the ones an
-    inverse computing every pattern afresh arrives at.
+    Every structural pattern -- the SIMPLE level's ``D^-1 G`` and Schur complement -- is computed over
+    all-ones copies of its operands (``_ones``), which costs as much as the product itself, and so are
+    the entry maps the Galerkin products, block cuts and packings go through. On a frozen coarsening
+    none of them can move, so a second refresh must compute none of them; and the refreshed hierarchy
+    and smoother pieces must be exactly the ones an inverse computing every pattern and map afresh
+    arrives at (both sum each product in the map's order, so they agree bit for bit).
     """
     cached = SimpleSmoothedInverse(_saddle(), 4, **_SETTINGS, frozen_coarsening=True)
     fresh = SimpleSmoothedInverse(_saddle(), 4, **_SETTINGS, frozen_coarsening=True)
-    fresh._patterns = None  # every pattern computed afresh, as before the cache existed
     for inverse in (cached, fresh):
         inverse.refactor_block((_saddle() * 1.7).tocsr())
 
@@ -354,6 +354,7 @@ def test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_comput
     assert not computed
     monkeypatch.undo()
 
+    fresh._patterns = multigrid.StructuralPatterns()  # every pattern and map computed afresh
     fresh.refactor_block(refreshed)
     got = jax.tree.leaves(cached.traced_cycle().state)
     want = jax.tree.leaves(fresh.traced_cycle().state)

@@ -41,7 +41,7 @@ def test_damped_newton_stepper_reports_its_linear_solve_cost() -> None:
     # unpack stays legal when the record grows and silently shifts every field one place. This test
     # used to do that, and when `residual_norm` was inserted it read the norm as its cycle count --
     # while `inner` read `alpha` and its assertion still PASSED, because both happen to be 1.
-    outcome = step(residual_fn, phi0, jnp.linalg.norm(residual_fn(phi0)), None)
+    outcome = step(residual_fn, phi0, residual_fn(phi0), jnp.linalg.norm(residual_fn(phi0)), None)
     assert int(outcome.inner_iterations) == 1  # a single Newton step has no inner loop
 
     # A linear residual: the undamped step is exact in one call, so the step is unchanged by

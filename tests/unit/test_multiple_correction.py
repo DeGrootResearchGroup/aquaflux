@@ -36,6 +36,7 @@ from aquaflux.schemes import (
 from aquaflux.schemes.gradient import expand_symmetric
 from aquaflux.schemes.interpolation import non_orthogonal_correction
 from aquaflux.vectors import dot, scale
+from aquaflux.warn_once import forget_warnings
 
 from tests.support.meshes import (
     perturbed_grid_2d,
@@ -519,6 +520,47 @@ def test_a_prescribed_patch_is_left_alone_by_the_boundary_condition_weight() -> 
         boundary_gradient_weight=jnp.where(face_cells.interior[:, None], 0.0, displacement),
     )[0]
     assert not jnp.allclose(derived, plain)
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        perturbed_grid_2d(6, 6, perturb=0.25, seed=5),
+        perturbed_grid_3d(3, 3, 3, perturb=0.3, seed=4),
+    ],
+    ids=["quadrilateral", "hexahedral"],
+)
+def test_the_boundary_condition_first_pass_calls_no_library_factorization(mesh) -> None:
+    """The per-call inverse of ``M1 - B`` is the adjugate, not a batched LU the compiler cannot fuse.
+
+    It runs on every reconstruction a residual assembler asks for, so inside every residual evaluation
+    and every Jacobian--vector product. A batched library inverse there compiles to an LU
+    factorization call per reconstructed field, which cost the pitzDaily residual about four times
+    its time; this pins that it does not come back. It must also still be the inverse: it agrees
+    with a pivoted library inverse to roundoff on these well-conditioned blocks.
+    """
+    geometry = mesh.geometry()
+    face_cells = mesh.face_cells
+    displacement = geometry.face.centroid - geometry.cell.centroid[face_cells.owner]
+    tangential = displacement - scale(geometry.face.normal, dot(displacement, geometry.face.normal))
+    weight = jnp.where(face_cells.interior[:, None], 0.0, tangential)
+    scheme = MultipleCorrectionGradient().bind(mesh, geometry)
+    m1 = scheme.prepared.m1
+
+    inverse = multiple_correction._boundary_condition_first_pass(m1, weight, face_cells, geometry)
+    reference = jnp.linalg.inv(
+        m1 - multiple_correction.boundary_gradient_block(weight, face_cells, geometry)
+    )
+    np.testing.assert_allclose(np.asarray(inverse), np.asarray(reference), rtol=0, atol=1e-12)
+
+    field = jax.random.normal(jax.random.PRNGKey(4), (mesh.n_cells,))
+    values = jax.random.normal(jax.random.PRNGKey(5), (mesh.n_faces,))
+
+    def reconstruct(phi):
+        return scheme.reconstruct(phi, mesh, geometry, values, boundary_gradient_weight=weight)[0]
+
+    compiled = jax.jit(reconstruct).lower(field).compile().as_text()
+    assert "getrf" not in compiled
 
 
 def test_the_second_pass_reads_the_geometrys_own_first_pass_operator() -> None:
@@ -1232,7 +1274,7 @@ def test_a_repair_report_does_not_silence_a_later_graver_one() -> None:
     correction had been left singular -- which is how a stalled march on a real duct printed nothing.
     """
     mesh, geometry, linearization = _zero_gradient_tetrahedra()
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(mesh, geometry)
@@ -1341,7 +1383,7 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
     only the pair discriminates: a detector that fired on every tetrahedral mesh, or on every owner
     closure, would be useless -- it is the combination that is broken.
     """
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(boundary_closure=closure, fallback=None).bind(
@@ -1356,7 +1398,7 @@ def test_it_warns_when_the_mesh_and_closure_leave_the_hessian_underdetermined(
 def test_the_underdetermined_warning_is_emitted_once_per_process() -> None:
     """It reports a fixed property of the geometry, and a scheme is bound on every assembler."""
     mesh = QUADRATIC_MESHES[2]
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     scheme = MultipleCorrectionGradient(boundary_closure=OwnerGradient(), fallback=None)
     counts = []
     for _ in range(2):
@@ -1446,7 +1488,7 @@ def test_the_repair_is_exact_where_it_fires_and_absent_where_it_need_not() -> No
 
 def test_the_repair_says_so_rather_than_silently_changing_the_closure() -> None:
     """Asking for the repair and getting a different closure on some cells has to be visible."""
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         MultipleCorrectionGradient(fallback=SkewCorrectedGradient()).bind(
@@ -1468,7 +1510,7 @@ def test_the_default_leaves_undetermined_cells_unrepaired_and_names_the_opt_in()
     mesh with a corner tetrahedron. The warning is what makes the unrepaired state visible and names
     the opt-in, rather than requiring a reader to already know it exists.
     """
-    multiple_correction._WARNED.clear()
+    forget_warnings()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         scheme = MultipleCorrectionGradient().bind(  # fallback=None, the default

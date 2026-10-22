@@ -16,13 +16,15 @@ from pathlib import Path
 import pytest
 from aquaflux.__main__ import main, serve
 from aquaflux.case import (
+    Fluid,
     OpenFOAMTime,
-    StructuredGrid,
     prepare_run,
     read_case,
     read_case_document,
 )
 from aquaflux.case.paths import relocated
+
+from tests.support.case_meshes import grid_mesh
 
 REPO = Path(__file__).resolve().parents[2]
 PITZDAILY = REPO / "validation" / "pitzdaily_openfoam" / "case.yaml"
@@ -163,14 +165,14 @@ def test_relocating_a_case_re_bases_each_relative_path_it_states_and_no_other(tm
     assert moved.outputs.directory == spec.outputs.directory  # where this file's runs write
     absolute = dataclasses.replace(spec, mesh=dataclasses.replace(spec.mesh, path="/meshes/m"))
     assert relocated(absolute, Path("/a"), Path("/z")).mesh.path == "/meshes/m"
-    grid = StructuredGrid(cells=(4, 4), lengths=(1.0, 1.0))
-    assert relocated(grid, Path("/a"), Path("/z")) is grid
+    fluid = Fluid(density=1.0, kinematic_viscosity=1.0e-5)  # names no file
+    assert relocated(fluid, Path("/a"), Path("/z")) is fluid
 
 
-def test_mesh_generates_a_structured_grid_and_reports_its_patches(capsys, tmp_path, monkeypatch):
-    section = {"kind": "StructuredGrid", "cells": [4, 3], "lengths": [2.0, 1.0]}
+def test_export_mesh_writes_a_mesh_and_its_patches_as_vtk(capsys, tmp_path, monkeypatch):
+    section = grid_mesh([4, 3], [2.0, 1.0])
     status, reply = _run(
-        capsys, ["mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
+        capsys, ["export-mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
     )
     assert status == 0 and reply["error"] is None
     assert (tmp_path / "mesh.vtu").is_file() and reply["mesh"] == str(tmp_path / "mesh.vtu")
@@ -183,13 +185,13 @@ def test_mesh_generates_a_structured_grid_and_reports_its_patches(capsys, tmp_pa
     assert sorted(re.findall(r'name="([^"]+)"', index)) == ["bottom", "left", "right", "top"]
 
 
-def test_mesh_reads_a_mesh_relative_to_the_case_and_reports_its_groups(
+def test_export_mesh_reads_a_mesh_relative_to_the_case_and_reports_its_groups(
     capsys, tmp_path, monkeypatch
 ):
     section = read_case_document(PITZDAILY)["mesh"]
     status, reply = _run(
         capsys,
-        ["mesh", str(tmp_path), "--relative-to", str(PITZDAILY.parent)],
+        ["export-mesh", str(tmp_path), "--relative-to", str(PITZDAILY.parent)],
         json.dumps({"mesh": section}),
         monkeypatch,
     )
@@ -201,9 +203,11 @@ def test_mesh_reads_a_mesh_relative_to_the_case_and_reports_its_groups(
     ("section", "match"),
     [({"kind": "Wall"}, "names a mesh source"), ({"kind": "OpenFOAMMesh", "path": "nowhere"}, "")],
 )
-def test_mesh_refuses_a_section_that_is_no_mesh(capsys, tmp_path, monkeypatch, section, match):
+def test_export_mesh_refuses_a_section_that_is_no_mesh(
+    capsys, tmp_path, monkeypatch, section, match
+):
     status, reply = _run(
-        capsys, ["mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
+        capsys, ["export-mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
     )
     assert status == 2 and match in reply["error"]
 
@@ -254,7 +258,11 @@ def test_serve_answers_a_request_that_fails_unexpectedly_with_its_traceback(monk
     def broken():
         raise RuntimeError("an unforeseen failure")
 
-    monkeypatch.setattr("aquaflux.__main__.case_schema", broken)
+    import aquaflux.__main__ as command
+
+    monkeypatch.setattr(
+        command, "_CASE_FILE", dataclasses.replace(command._CASE_FILE, schema=broken)
+    )
     failed, bad_line = _serve({"arguments": ["schema"]}, {"no arguments": True})
     assert failed["status"] == 1 and "an unforeseen failure" in failed["errors"]
     assert bad_line["status"] == 2 and "bad request" in bad_line["errors"]
@@ -266,12 +274,12 @@ def test_serve_replies_on_a_channel_nothing_else_writes_to():
     import sys
 
     script = (
-        "import os, aquaflux.__main__ as m\n"
+        "import dataclasses, os, aquaflux.__main__ as m\n"
         "def noisy():\n"
         "    os.write(1, b'written straight to the file descriptor\\n')\n"
         "    print('printed')\n"
         "    return {'root': 'CaseSpec'}\n"
-        "m.case_schema = noisy\n"
+        "m._CASE_FILE = dataclasses.replace(m._CASE_FILE, schema=noisy)\n"
         "raise SystemExit(m._serve_process())\n"
     )
     done = subprocess.run(
@@ -303,3 +311,63 @@ def test_serve_returns_quietly_when_interrupted_or_when_its_reader_has_gone():
             raise BrokenPipeError
 
     serve(io.StringIO(json.dumps({"arguments": ["schema"]}) + "\n"), Closed())
+
+
+# --- the same commands for a mesh file ---------------------------------------------------------
+
+MESH_FILE = {
+    "drawing": {"file": "parts/vessel.step"},
+    "region": {"solids": ["vessel"]},
+    "sizes": {"max_size": 0.02, "feature_angle": 0.785},
+    "patches": {"inlet": {"kind": "FacesNear", "points": [[0.0, 0.0, 1.0]]}},
+}
+
+
+def test_schema_describes_a_mesh_file_when_asked_for_one(capsys):
+    status, schema = _run(capsys, ["schema", "--mesh-file"])
+    assert status == 0 and schema["root"] == "MeshSpec"
+    sections = [field["name"] for field in schema["kinds"]["MeshSpec"]["fields"]]
+    assert sections[:4] == ["drawing", "region", "sizes", "patches"]
+
+
+def test_a_mesh_file_is_shown_and_written_as_a_mesh_file(capsys, tmp_path, monkeypatch):
+    original = tmp_path / "meshes" / "mesh.yaml"
+    original.parent.mkdir()
+    given = json.dumps({"case": MESH_FILE})
+    status, result = _run(capsys, ["write", str(original), "--mesh-file"], given, monkeypatch)
+    assert status == 0 and result["error"] is None
+    status, shown = _run(capsys, ["show", str(original), "--mesh-file"])
+    assert status == 0 and shown == {"error": None, "case": MESH_FILE}
+    # Read as a case file it is refused, but still shown, for what it is not.
+    status, shown = _run(capsys, ["show", str(original)])
+    assert shown["case"] == MESH_FILE and "mesh" in shown["error"]
+    # A copy saved elsewhere still finds its drawing.
+    copy = tmp_path / "copy.yaml"
+    arguments = ["write", str(copy), "--mesh-file", "--relative-to", str(original.parent)]
+    status, _ = _run(capsys, arguments, given, monkeypatch)
+    _, shown = _run(capsys, ["show", str(copy), "--mesh-file"])
+    assert shown["case"]["drawing"]["file"] == "meshes/parts/vessel.step"
+
+
+def test_a_mesh_file_without_its_sizes_is_refused_and_writes_nothing(capsys, tmp_path, monkeypatch):
+    unfinished = {key: value for key, value in MESH_FILE.items() if key != "sizes"}
+    target = tmp_path / "mesh.yaml"
+    status, result = _run(
+        capsys, ["write", str(target), "--mesh-file"], json.dumps({"case": unfinished}), monkeypatch
+    )
+    assert status == 2 and "sizes" in result["error"] and not target.exists()
+
+
+def test_export_mesh_says_how_a_mesh_was_made_as_its_file_records_it(capsys, tmp_path, monkeypatch):
+    section = grid_mesh([4, 3], [2.0, 1.0])  # written without provenance
+    _, reply = _run(
+        capsys, ["export-mesh", str(tmp_path)], json.dumps({"mesh": section}), monkeypatch
+    )
+    assert reply["made"] == {}
+
+
+def test_the_drawing_of_a_mesh_file_without_one_is_refused(capsys, tmp_path, monkeypatch):
+    status, reply = _run(
+        capsys, ["drawing", str(tmp_path)], json.dumps({"mesh_file": {"region": {}}}), monkeypatch
+    )
+    assert status == 2 and "drawing is needed" in reply["error"]

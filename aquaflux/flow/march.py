@@ -20,7 +20,6 @@ from collections.abc import Callable, Mapping
 
 import jax.numpy as jnp
 import lineax as lx
-import numpy as np
 
 from aquaflux.precondition import (
     FieldGroups,
@@ -31,9 +30,11 @@ from aquaflux.precondition import (
 )
 from aquaflux.schemes import narrow_gradient_sweeps
 from aquaflux.solve import (
+    DEFAULT_ADAPTIVE_TOLERANCE,
     DEFAULT_GLOBALIZATION,
     NO_REFRESH,
     NO_RETRIES,
+    AdaptiveLinearTolerance,
     Convergence,
     DualTimeLoop,
     Globalization,
@@ -235,6 +236,9 @@ class _FlowProblem(MaterializedProblem):
     """
 
     momentum: MomentumContinuity
+    probes_by_field = (
+        True  # `MomentumContinuity.residual_with_field`, also on the sweep-capped stand-in
+    )
 
     @property
     def assembler(self) -> MomentumContinuity:
@@ -247,7 +251,7 @@ class _FlowProblem(MaterializedProblem):
     def with_assembler(self, assembler: MomentumContinuity) -> _FlowProblem:
         return dataclasses.replace(self, momentum=assembler)
 
-    def probe(self, settings: dict, active_rows: np.ndarray | None) -> JacobianProbe:
+    def probe(self, settings: dict, groups: FieldGroups | None) -> JacobianProbe:
         settings = dict(settings)
         sweeps = settings.pop("gradient_sweeps", None)
         return JacobianProbe.build(
@@ -255,7 +259,7 @@ class _FlowProblem(MaterializedProblem):
             self.momentum.mesh.n_cells,
             self.momentum.layout.n_fields,
             **settings,
-            active_rows=active_rows,
+            groups=groups,
             narrowing=None if sweeps is None else _GradientSweepCap(sweeps),
         )
 
@@ -447,6 +451,7 @@ def solve_flow_march(
     on_step: Callable[[StepReport], None] | None = None,
     on_checkpoint: Callable[[StepReport, jnp.ndarray], None] | None = None,
     retry: RetryPolicy = NO_RETRIES,
+    adaptive_tolerance: AdaptiveLinearTolerance | None = DEFAULT_ADAPTIVE_TOLERANCE,
     on_retry: Callable[[str, int, float], None] | None = None,
     homotopy: ResidualHomotopy | None = None,
     station_step: Callable[[NewtonStrategy, int, bool], NewtonStrategy] | None = None,
@@ -502,7 +507,7 @@ def solve_flow_march(
     refresh : RefreshPolicy
         How the frozen preconditioner is kept current. There is no coefficient to watch drift on a
         constant-viscosity flow, so use a cost trigger (:class:`~aquaflux.solve.CycleGrowthTrigger`).
-    step_control, on_step, on_checkpoint, retry, on_retry, homotopy, station_step, on_residuals, stopping_step
+    step_control, on_step, on_checkpoint, retry, adaptive_tolerance, on_retry, homotopy, station_step, on_residuals, stopping_step
         As for :func:`~aquaflux.turbulence.solve_coupled`. A dual-time march given no ``step_control``
         defaults to the Courant ramp. ``on_residuals`` arrives under
         :func:`flow_equation_names`, and only under the row-scaled measure (the default).
@@ -575,6 +580,7 @@ def solve_flow_march(
         on_step=on_step,
         on_checkpoint=on_checkpoint,
         retry=retry,
+        adaptive_tolerance=adaptive_tolerance,
         on_retry=on_retry,
         homotopy=homotopy,
         station_step=station_step,

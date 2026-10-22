@@ -94,7 +94,7 @@ def test_a_solver_given_as_the_forward_value_replaces_the_regime() -> None:
 @pytest.mark.parametrize(
     ("stop", "expected"),
     [
-        (None, "_RelativeResidualGMRES"),
+        (None, "_ResidualStopGMRES"),  # unset: the residual stop is the default
         ("lineax", "_RelativeResidualGMRES"),
         ("residual", "_ResidualStopGMRES"),
     ],

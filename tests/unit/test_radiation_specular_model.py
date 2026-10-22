@@ -25,6 +25,7 @@ from aquaflux.radiation.self_occlusion import (
 from aquaflux.radiation.surfaces import Surfaces
 from aquaflux.radiation.transfer import build_transfer, reciprocity_residual
 from aquaflux.solids import Box, Sphere
+from aquaflux.triangle_grid import TriangleGrid
 
 from tests.unit.radiation_references import cylinder_triangles, inward_box, rectangle_triangles
 
@@ -201,6 +202,28 @@ def test_a_mirror_on_a_plane_of_symmetry_reproduces_the_whole_scene_s_shadows(ca
     bare = build_radiation_model(points, half, specular=["mirror"], settings=UNSHADOWED)
     bare_field, _ = fluence_rate(bare, half, absorption=absorption)
     assert float(jnp.max(bare_field / whole_field)) > 1.01
+
+
+def test_a_streamed_model_with_mirrors_builds_its_triangle_grid_once_a_call(monkeypatch):
+    """The grid is prepared for the chunks' mirror masks, and that prepared strategy must be the
+    one the stream's direct masks get too; handed the unprepared one, the stream built it again.
+    """
+    n_left = len(_halves()[0])
+    half, _, _ = _symmetric_scene(np.ones(n_left), np.full(n_left, 0.5))
+    settings = RadiationSettings(
+        stream_receiver_mask=True, self_occlusion=RayCastOcclusion(grid=True)
+    )
+    model = build_radiation_model(_receivers(), half, specular=["mirror"], settings=settings)
+    built = []
+    original = TriangleGrid.build.__func__
+
+    def counted(cls, *args, **kwargs):
+        built.append(1)
+        return original(cls, *args, **kwargs)
+
+    monkeypatch.setattr(TriangleGrid, "build", classmethod(counted))
+    fluence_rate(model, half)
+    assert len(built) == 1
 
 
 # ---------------------------------------------------------------------------------------
@@ -445,6 +468,42 @@ def test_a_graded_medium_is_refused_with_specular_bodies():
     )
     with pytest.raises(NotImplementedError, match="a graded one cannot"):
         radiosity(model, surfaces, absorption=medium)
+
+
+def test_a_specular_body_with_no_areal_facet_is_refused_by_name():
+    """Only an areal facet can be a mirror, so a body of point sources has no plane at all; it
+    once reached an empty stack and raised a message naming no body."""
+    surfaces, _ = _plates_over_a_mirror()
+    spot = Surfaces.from_triangles(
+        np.concatenate([np.asarray(surfaces.vertices), np.zeros((1, 3, 3))]),
+        solid_id=[0, 0, 1, 1, 1, 1, 2],
+        solid_names=("floor", "lamps", "spot"),
+    )
+    with pytest.raises(ValueError, match="specular body 'spot' has no planes"):
+        build_transfer(spot, self_occlusion=NoOcclusion(), specular=["spot"])
+
+
+def test_a_mirror_whose_every_reflected_path_is_hidden_adds_nothing():
+    """A sheet facing up over the patches hides every path through the floor, from either side,
+    and sends nothing into it itself; the specular exchange then has no term and is empty."""
+    surfaces, _ = _plates_over_a_mirror()
+    sheet = rectangle_triangles([0.0, 0.0, 0.5], [4.0, 0.0, 0.0], [0.0, 4.0, 0.0])
+    covered = Surfaces.from_triangles(
+        np.concatenate([np.asarray(surfaces.vertices), sheet]),
+        solid_id=[0, 0, 1, 1, 1, 1, 2, 2],
+        solid_names=("floor", "lamps", "sheet"),
+        emission=np.concatenate([np.asarray(surfaces.emission), [0.0, 0.0]]),
+        diffuse_reflectance=np.concatenate([np.asarray(surfaces.diffuse_reflectance), [0, 0]]),
+        specular_reflectance=np.concatenate([np.asarray(surfaces.specular_reflectance), [0, 0]]),
+    )
+    assert np.all(np.asarray(covered.normal)[6:, 2] > 0.0), "the sheet must face away"
+    transfer = build_transfer(covered, specular=["floor"])
+    assert transfer.specular_terms == ()
+    assert transfer.specular_geometric.shape == (0, 8, 8)
+    reflected, _ = transfer.assemble(covered)
+    diffuse_only = covered.with_optics(specular_reflectance=0.0)
+    bare = build_transfer(diffuse_only, self_occlusion=RayCastOcclusion())
+    np.testing.assert_array_equal(reflected, bare.assemble(diffuse_only)[0])
 
 
 def test_a_curved_specular_body_is_refused_past_the_plane_limit():

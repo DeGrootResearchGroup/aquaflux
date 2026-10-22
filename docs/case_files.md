@@ -70,28 +70,18 @@ one form each, so they need no `kind`, and the top level is the case itself.
 
 ## The sections
 
-**`mesh`** — where the mesh comes from, read or generated:
+**`mesh`** — the file the mesh is read from:
 
+- {class}`~aquaflux.case.AquafluxMesh` reads aquaflux's own mesh file (`.aqmesh`; see
+  [the mesh](mesh.md)), exactly as it was written; a relative `path` is taken from the directory the
+  case file sits in.
 - {class}`~aquaflux.case.OpenFOAMMesh` reads an OpenFOAM polyMesh, or a case directory holding
   `constant/polyMesh`; a relative `path` is taken from the directory the case file sits in. A
   case one cell thick between `empty` patches reads as a two-dimensional mesh, and those patches
   are not named in the file.
-- {class}`~aquaflux.case.StructuredGrid` generates a two-dimensional structured grid on the box
-  `[0, lx] x [0, ly]`, with patches named by side — `left`, `right`, `bottom`, `top` — or, given
-  three counts and three lengths, a uniform three-dimensional box with `back` and `front` as well. An axis
-  listed as `periodic` wraps around, and its two sides are not patches at all; an axis given a
-  `grading` has its cells sized by it
-  ({class}`~aquaflux.case.GeometricGrading`: finest at the walls, growing by `growth`):
 
-  ```yaml
-  mesh:
-    kind: StructuredGrid
-    cells: [4, 96]
-    lengths: [1.0, 2.0]
-    periodic: [x]
-    grading:
-      y: {kind: GeometricGrading, growth: 1.09}
-  ```
+A case does not make its mesh: a mesh is made once from a mesh file, by `aquaflux mesh mesh.yaml`,
+and read by as many cases as use it (see {doc}`mesh_files`).
 
 **`fluid`** — a constant-density fluid, stated once for every equation. Give the `density`
 and **exactly one** of `kinematic_viscosity` and `dynamic_viscosity`: the other follows from
@@ -230,7 +220,8 @@ The two marches share their settings, each a value of the solver library written
   {func}`~aquaflux.turbulence.preconditioner_spec_from_mapping` reads;
 - `dual_time` — run each outer step as an inner loop, {class}`~aquaflux.solve.DualTimeLoop`;
 - `linear_solve` — each step's Krylov regime, {class}`~aquaflux.solve.LinearSolveSettings`:
-  its tolerance, restart length and cap, and `stop`, which rule ends a solve;
+  its tolerance, restart length and cap, and `stop`, which rule ends a solve (unset,
+  `residual`: the moment the residual meets the tolerance);
 - `step_control` — how the pseudo-time shift adapts: {class}`~aquaflux.solve.DualTimeControl`,
   {class}`~aquaflux.solve.ResidualRatioDualTimeControl` or
   {class}`~aquaflux.solve.CflResidualDualTimeControl`. Any of them takes `release_floor`, a shift
@@ -240,6 +231,11 @@ The two marches share their settings, each a value of the solver library written
   0.5) times the residual it was tried from;
 - `retry` — when a bad step is redone, {class}`~aquaflux.solve.RetryPolicy`, whose tighter
   `solver` is a {class}`~aquaflux.solve.GmresSolve`.
+- `adaptive_tolerance` — how tightly each step solves its linear system,
+  {class}`~aquaflux.solve.AdaptiveLinearTolerance`: tighter for the step after one the line search
+  cut back or whose residual rose, and tighter in a tail of full-length steps held back by their
+  own solve. Unset, both rules run at their defaults; to solve every step to `linear_solve`'s
+  `rtol`, set `{kind: AdaptiveLinearTolerance, after_setback: null, tail_gate: null}`.
 
 `CoupledMarch` adds the closure's: `turbulence_damping` (a multiplier on the `k` and `omega`
 rows' shift), `omega_step_ratio` (the largest factor one cell's `omega` may change by in one
@@ -395,7 +391,8 @@ browser interface's Setup section is built on them. Each prints JSON:
 aquaflux schema                                   # every kind, field and choice a case file may hold
 aquaflux show case.yaml                           # the file as aquaflux reads it, and why it is refused
 aquaflux write copy.yaml --relative-to . < case.json  # check, then write; re-base relative paths
-aquaflux mesh out/ --relative-to . < mesh.json        # read or generate a mesh section, as VTK
+aquaflux export-mesh out/ --relative-to . < mesh.json  # read a mesh section, as VTK
+aquaflux export-mesh out/ --case case.yaml --openfoam # a case file's mesh, as VTK and out/constant/polyMesh
 ```
 
 `schema` is read off the same definitions a file is checked against, so a program

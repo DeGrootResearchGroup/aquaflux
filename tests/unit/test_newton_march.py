@@ -10,6 +10,8 @@ hit (the property without which an eager march would recompile its linear solve 
 
 from __future__ import annotations
 
+import math
+
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
 import jax
@@ -49,10 +51,11 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, residual_fn=None, r
     The doubles used to build the tuple inline; when the protocol grew a field every one of them broke
     separately, which is the argument for a single constructor rather than five literal tuples.
 
-    ``residual_fn`` is the double's own residual, used to fill :attr:`StepOutcome.residual_norm` with
-    ``norm(R(phi))`` at the stepped iterate -- what a real step reports, and what the march used to
-    evaluate for itself. A double built outside a step (to be handed straight to a retry policy, which
-    reads only the cost fields) may leave it ``None``; the norm is then a stand-in.
+    ``residual_fn`` is the double's own residual, used to fill :attr:`StepOutcome.residual` with
+    ``R(phi)`` at the stepped iterate and :attr:`StepOutcome.residual_norm` with its norm -- what a real
+    step reports, and what the march carries into the next step. A double built outside a step (to be
+    handed straight to a retry policy, which reads only the cost fields) may leave it ``None``; the
+    residual is then a stand-in.
 
     ``reached`` defaults to **False** because these doubles model steps that do not converge -- which
     is what makes them useful for testing the escalation, and what the escalation now requires: a step
@@ -70,6 +73,7 @@ def _outcome(phi, cycles, alpha=1.0, inner=1, reached=False, residual_fn=None, r
         jnp.maximum(cycles - 2, 0),
         jnp.asarray(jnp.nan),
         jnp.asarray(refresh_due),
+        measured,
     )
 
 
@@ -230,7 +234,7 @@ class _PoisonUnlessTight(eqx.Module):
     """
 
     def stepper(self):
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             if solver == "tight":  # the recovered step lands on the root, at a higher cycle cost
                 return _outcome(jnp.zeros_like(phi), 6, reached=True, residual_fn=residual_fn)
             return _outcome(jnp.full_like(phi, jnp.inf), 3, residual_fn=residual_fn)
@@ -455,18 +459,38 @@ def test_checkpoint_receives_the_state_behind_each_report() -> None:
     assert not jnp.allclose(saved[0][1], saved[-1][1])
 
 
-def test_repeated_steps_reuse_the_compiled_march_step() -> None:
+@pytest.mark.parametrize("name", ["damped-newton", "pseudo-transient", "dual-time"])
+def test_repeated_steps_reuse_the_compiled_march_step(name) -> None:
     """Stepping the march must be a compilation-cache hit, or an eager march is unusable.
 
     Each step's shifted linear solve is expensive to compile, so retracing per step would dominate
     the march it is meant to accelerate. The step is compiled with the strategy and the residual as
     *arguments*, so a second march over the same objects adds no traces at all.
+
+    The first step is the one to watch: it is handed the residual the march measured its starting norm
+    with, and every later step the one the step before returned. Were the first handed something of
+    another kind (``None``, say), a one-step march would compile only the first-step program and the
+    longer march after it would compile the second -- which this catches, since the second march's
+    steps after its first add traces.
     """
     # A state size no other test uses, so the compiled step cannot already be cached from one of
     # them -- the compilation cache is module-level and lives for the whole process.
-    residual = _Cubic(jnp.array([8.0, 27.0, 64.0, 125.0, 216.0]))
-    phi0 = jnp.ones(5)
-    step = DampedNewtonStep(line_search=10)
+    size = {"damped-newton": 5, "pseudo-transient": 6, "dual-time": 7}[name]
+    residual = _Cubic(jnp.array([8.0, 27.0, 64.0, 125.0, 216.0, 343.0, 512.0])[:size])
+    phi0 = jnp.ones(size)
+    step = {
+        "damped-newton": DampedNewtonStep(line_search=10),
+        "pseudo-transient": PseudoTransientStep(
+            shift_policy=_UnitShiftPolicy(),
+            relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)),
+            line_search=10,
+        ),
+        "dual-time": DualTimeStep(
+            shift_policy=_UnitShiftPolicy(),
+            relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)),
+            inner_steps=3,
+        ),
+    }[name]
     common = dict(rtol=1e-14, atol=1e-16)
 
     # One step, which pays the compilation. (A single trace invokes the residual several times --
@@ -645,7 +669,7 @@ class _CyclesFromBeta(eqx.Module):
     def stepper(self):
         schedule, base = self.relaxation_schedule, self.base
 
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             cyc = jnp.round(base / jnp.maximum(schedule.beta, 1e-6)).astype(jnp.int32)
             return _outcome(phi, cyc, residual_fn=residual_fn)  # phi held: never converges
 
@@ -721,7 +745,7 @@ class _CostFromData(eqx.Module):
     relaxation_schedule: ConstantRelaxation
 
     def stepper(self):
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             return _outcome(phi, self.cost, residual_fn=residual_fn)
 
         return step
@@ -772,7 +796,7 @@ class _StopsForRefit(eqx.Module):
     refresh_on_cycles: int = eqx.field(static=True, default=3)
 
     def stepper(self):
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             return _outcome(0.5 * phi, 40, residual_fn=residual_fn, refresh_due=True)
 
         return step
@@ -823,7 +847,7 @@ class _ScalesByFactor(eqx.Module):
     relaxation_schedule: ConstantRelaxation
 
     def stepper(self):
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             return _outcome(self.factor * phi, 1, residual_fn=residual_fn)
 
         return step
@@ -876,9 +900,9 @@ class _JudgedOnItsScale(eqx.Module):
     relaxation_schedule: ConstantRelaxation
 
     def stepper(self):
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             stepped = 0.5 * phi
-            return _outcome(stepped, 1)._replace(
+            return _outcome(stepped, 1, residual_fn=residual_fn)._replace(
                 residual_norm=self.residual_norm(residual_fn(stepped))
             )
 
@@ -1158,7 +1182,7 @@ class _NaNUntilDamped(eqx.Module):
     def stepper(self):
         sched, thr = self.relaxation_schedule, self.threshold
 
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             if (
                 solver == "tight"
             ):  # the divergence fallback -- marked so the test can detect it fired
@@ -1267,7 +1291,7 @@ class _AlphaFromBeta(eqx.Module):
     def stepper(self):
         schedule, needed = self.relaxation_schedule, self.beta_needed
 
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             alpha = jnp.where(schedule.beta >= needed, 1.0, 0.0)
             return _outcome(
                 phi, 3, alpha=alpha, residual_fn=residual_fn
@@ -1525,7 +1549,7 @@ class _UnshiftedStep(eqx.Module):
     relaxation_schedule: SwitchedEvolutionRelaxation = SwitchedEvolutionRelaxation()
 
     def stepper(self):
-        def step(residual_fn, phi, residual_norm_0, solver):
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
             return _outcome(
                 phi, 40, residual_fn=residual_fn
             )  # held: never converges, escalation fires
@@ -1597,24 +1621,65 @@ def test_the_escalation_guard_still_rejects_a_step_that_can_never_escalate() -> 
         )
 
 
-def test_a_march_step_does_not_re_evaluate_the_residual_it_was_just_handed() -> None:
-    """The step reports its own measure, so the march forms no residual of its own.
+@pytest.mark.parametrize("line_search", [0, 6], ids=["full-step", "ladder"])
+@pytest.mark.parametrize("shifted", [False, True], ids=["damped-newton", "pseudo-transient"])
+def test_a_march_step_does_not_re_evaluate_the_residual_it_was_just_handed(
+    shifted, line_search
+) -> None:
+    """A single-step strategy's compiled program holds two copies of the residual, not three or four.
 
-    A globalized step ends in a line search that evaluated ``norm(R(phi + alpha delta))`` at every rung
-    it walked, so the value at the rung it kept is in hand when the step returns. The march used to
-    throw it away and evaluate the residual again at that same iterate -- a full residual per step.
+    Two re-evaluations are redundant and pinned out here. At the END of the step: a globalized step
+    ends in a line search that evaluated ``R(phi + alpha delta)`` at every rung it walked, so the
+    measure and the vector at the rung it kept are in hand when the step returns, and the march once
+    evaluated the residual again at that same iterate. At the START: the residual at ``phi`` is the one
+    the previous step returned, which the march hands in, and the step once evaluated it again as its
+    correction's right-hand side.
 
     Counted at TRACE time, which is what makes this deterministic: ``_march_step`` is compiled once, so
     how many times the residual appears in it is a static property of the program rather than a timing.
-    Three is the floor here -- the Newton correction's own ``R(phi)``, its Jacobian--vector product, and
-    the line-search ladder's body -- and a fourth would be the re-evaluation this pins out.
+    Two is the floor -- the Jacobian--vector product of the correction's solve, and the line search's
+    evaluation (the ladder's body, or the one full step) -- and a third would be a re-evaluation. The
+    handed-in vector is formed eagerly here, which is not a trace.
     """
-    for line_search in (0, 6):
-        _TRACES.clear()
-        step = DampedNewtonStep(line_search=line_search)
-        residual = _Cubic(jnp.array([8.0, 27.0]))
-        _march_step(step, residual, jnp.array([1.5, 2.5]), jnp.asarray(10.0), step.linear_solver())
-        assert len(_TRACES) == 3, f"line_search={line_search} traced {len(_TRACES)} residuals"
+    _TRACES.clear()
+    step = (
+        PseudoTransientStep(
+            shift_policy=_UnitShiftPolicy(),
+            relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0, exponent=1.0),
+            line_search=line_search,
+        )
+        if shifted
+        else DampedNewtonStep(line_search=line_search)
+    )
+    residual = _Cubic(jnp.array([8.0, 27.0]))
+    phi = jnp.array([1.5, 2.5])
+    _march_step(step, residual, phi, residual(phi), jnp.asarray(10.0), step.linear_solver())
+    assert len(_TRACES) == 2, f"traced {len(_TRACES)} residuals"
+
+
+@pytest.mark.parametrize("line_search", [0, 6], ids=["full-step", "ladder"])
+def test_a_dual_time_march_step_traces_the_residual_only_where_it_must(line_search) -> None:
+    """The dual-time step's compiled program holds two copies of the residual, not five.
+
+    Counted at trace time, so this is the size of what XLA compiles rather than a timing: the
+    line-search ladder's body and the Krylov solve's Jacobian--vector product. Three more copies are
+    redundant in arithmetic and pinned out here -- the anchor's ``R(phi^n)`` (the previous step ended
+    at ``phi^n`` holding it, and the march hands it in), re-evaluating ``G`` at each inner iterate for
+    the Newton right-hand side (the previous iteration's search already evaluated it there) and
+    re-evaluating ``R`` at the returned iterate for the step's measure (it is the kept ``G`` less the
+    transient term). On a coupled problem each copy is a whole residual assembly in the program.
+    """
+    _TRACES.clear()
+    step = DualTimeStep(
+        shift_policy=_UnitShiftPolicy(),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0, exponent=1.0),
+        inner_steps=3,
+        line_search=line_search,
+    )
+    residual = _Cubic(jnp.array([8.0, 27.0]))
+    phi = jnp.array([1.5, 2.5])
+    _march_step(step, residual, phi, residual(phi), jnp.asarray(10.0), step.linear_solver())
+    assert len(_TRACES) == 2, f"line_search={line_search} traced {len(_TRACES)} residuals"
 
 
 def test_every_strategy_reports_the_measure_at_the_iterate_it_returns() -> None:
@@ -1639,7 +1704,7 @@ def test_every_strategy_reports_the_measure_at_the_iterate_it_returns() -> None:
         ),
     ):
         r0 = step.norm()(residual_fn(phi0))
-        outcome = step.stepper()(residual_fn, phi0, r0, step.linear_solver())
+        outcome = step.stepper()(residual_fn, phi0, residual_fn(phi0), r0, step.linear_solver())
         expected = step.norm()(residual_fn(outcome.phi))
         assert jnp.allclose(outcome.residual_norm, expected, rtol=1e-12, atol=0.0), type(step)
 
@@ -1658,13 +1723,17 @@ def test_the_line_search_reports_the_fallback_rungs_own_measure() -> None:
     def residual(p):  # every rung increases the residual, so nothing is admissible
         return p
 
-    step = backtracking_line_search(residual, phi, delta, reference, steps=4)
+    step = backtracking_line_search(
+        residual, phi, delta, reference, steps=4, residual=residual(phi)
+    )
 
     assert (
         float(step.alpha) == 1.0
     )  # the fallback: the longest qualifying rung, capped at the full step
     assert jnp.allclose(step.phi, phi + delta)
     assert jnp.allclose(step.residual_norm, jnp.linalg.norm(residual(step.phi)))
+    # The vector too: the last rung walked was the shortest, so carrying the last one would be wrong.
+    assert jnp.array_equal(step.residual, residual(step.phi))
 
 
 def test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure() -> None:
@@ -1684,9 +1753,12 @@ def test_a_search_with_no_finite_rung_reports_a_NON_FINITE_measure() -> None:
     def poisoned(p):
         return jnp.full_like(p, jnp.nan)
 
-    step = backtracking_line_search(poisoned, phi, delta, reference, steps=4)
+    step = backtracking_line_search(poisoned, phi, delta, reference, steps=4, residual=phi)
 
     assert not bool(jnp.isfinite(step.residual_norm))
+    # The vector is non-finite like its measure -- not the caller's (finite) start residual, which
+    # belongs to a point the search did not return.
+    assert not bool(jnp.any(jnp.isfinite(step.residual)))
     assert float(step.alpha) == 0.5**4  # the shortest rung, exactly as before
     # ...and it agrees with what a caller recomputing at that iterate would have found.
     assert not bool(jnp.isfinite(jnp.linalg.norm(poisoned(step.phi))))
@@ -1708,7 +1780,9 @@ def test_the_fallback_refuses_a_rung_that_is_finite_but_an_excursion() -> None:
     unbounded = backtracking_line_search(
         blows_up, phi, delta, reference, steps=4, fallback_growth=jnp.inf
     )
-    bounded = backtracking_line_search(blows_up, phi, delta, reference, steps=4)
+    bounded = backtracking_line_search(
+        blows_up, phi, delta, reference, steps=4, residual=blows_up(phi)
+    )
 
     # Unbounded, the search hands back the longest finite rung however vast its measure.
     assert float(unbounded.alpha) == 1.0
@@ -1718,6 +1792,9 @@ def test_the_fallback_refuses_a_rung_that_is_finite_but_an_excursion() -> None:
     assert float(bounded.alpha) == 0.0
     assert jnp.allclose(bounded.phi, phi)
     assert jnp.allclose(bounded.residual_norm, reference)
+    # No step taken, so the residual at the returned iterate is the caller's, which the ladder never
+    # evaluated -- not the last rung's, whatever that was.
+    assert jnp.array_equal(bounded.residual, blows_up(phi))
 
 
 def test_the_bounded_fallback_prefers_a_shorter_rung_to_no_step() -> None:
@@ -1727,11 +1804,14 @@ def test_the_bounded_fallback_prefers_a_shorter_rung_to_no_step() -> None:
     def steep(p):  # alpha=1 -> 1.2e5 (over a ceiling of 100), alpha=1/2 -> 3.5e2, alpha=1/4 -> ~19
         return jnp.exp(11.7 * p) / jnp.exp(11.7)
 
-    step = backtracking_line_search(steep, phi, delta, reference, steps=6, fallback_growth=100.0)
+    step = backtracking_line_search(
+        steep, phi, delta, reference, steps=6, fallback_growth=100.0, residual=steep(phi)
+    )
 
     assert 0.0 < float(step.alpha) < 1.0  # a real step, shorter than the full one
     assert float(step.residual_norm) <= 100.0 * float(reference)
     assert jnp.allclose(step.residual_norm, jnp.linalg.norm(steep(step.phi)))
+    assert jnp.allclose(step.residual, steep(step.phi))
 
 
 def test_a_healthy_fallback_is_untouched_by_the_ceiling() -> None:
@@ -2603,3 +2683,322 @@ def test_the_staged_march_reads_its_norms_through_compiled_programs_not_op_by_op
     second = solve()
     assert jnp.array_equal(second.state, first.state)
     assert _CALLS == []
+
+
+# ---- The residual vector carried from one outer step into the next ------------------------------------
+
+# One entry per EXECUTION of `_counted_coupled`'s value (not per trace, and not per Jacobian product).
+_EXECUTIONS: list[int] = []
+
+
+def _coupled_residual(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
+    """Two unknowns, each equation reading both: ``x**3 + y - a``, ``y**3 - x - b``."""
+    return jnp.stack([phi[0] ** 3 + phi[1] - theta[0], phi[1] ** 3 - phi[0] - theta[1]])
+
+
+@jax.custom_jvp
+def _counted_coupled(phi: jnp.ndarray, theta: jnp.ndarray) -> jnp.ndarray:
+    jax.debug.callback(lambda: _EXECUTIONS.append(1))
+    return _coupled_residual(phi, theta)
+
+
+@_counted_coupled.defjvp
+def _counted_coupled_jvp(primals, tangents):
+    # The Krylov solve's Jacobian products go through this rule, which evaluates the uncounted copy, so
+    # what is counted is exactly the residual evaluations a step or the march forms for their own sake.
+    return jax.jvp(_coupled_residual, primals, tangents)
+
+
+class _CountedCoupled(eqx.Module):
+    """The coupled residual above, root ``(1, 1)`` at ``theta = (2, 0)``, counting each evaluation."""
+
+    theta: jnp.ndarray
+
+    def __call__(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return _counted_coupled(phi, self.theta)
+
+    def uncounted(self, phi: jnp.ndarray) -> jnp.ndarray:
+        return _coupled_residual(phi, self.theta)
+
+    def magnitudes(self, phi: jnp.ndarray) -> jnp.ndarray:
+        """The magnitudes each equation sums, the scale its rounding is relative to."""
+        x, y = jnp.abs(phi[0]), jnp.abs(phi[1])
+        a, b = jnp.abs(self.theta[0]), jnp.abs(self.theta[1])
+        return jnp.stack([x**3 + y + a, y**3 + x + b])
+
+
+class _NamedEuclidean(eqx.Module):
+    """The Euclidean norm, naming each of the two equations as a block of its own."""
+
+    names: tuple[str, ...] = eqx.field(static=True, default=("x", "y"))
+
+    def __call__(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return jnp.linalg.norm(residual)
+
+    def per_block(self, residual: jnp.ndarray) -> jnp.ndarray:
+        return jnp.abs(residual)
+
+
+def _carrying_strategies():
+    """One of each shipped strategy, judged in a measure that names its blocks."""
+    measure = _NamedEuclidean()
+    return {
+        "damped-newton": DampedNewtonStep(line_search=6, residual_norm=measure),
+        "pseudo-transient": PseudoTransientStep(
+            shift_policy=_UnitShiftPolicy(),
+            relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)),
+            line_search=6,
+            residual_norm=measure,
+        ),
+        "dual-time": DualTimeStep(
+            shift_policy=_UnitShiftPolicy(),
+            relaxation_schedule=ConstantRelaxation(jnp.asarray(0.5)),
+            inner_steps=3,
+            inner_tol=1e-3,
+            residual_norm=measure,
+        ),
+    }
+
+
+@pytest.mark.parametrize("observed", [False, True], ids=["plain", "on-residuals"])
+@pytest.mark.parametrize("name", ["damped-newton", "pseudo-transient", "dual-time"])
+def test_the_march_evaluates_the_residual_once_and_then_only_where_a_step_searches(
+    name, observed
+) -> None:
+    """One residual evaluation to open the march, then one per line-search rung -- none per outer step.
+
+    A step needs the residual at the state it starts from, and the step before it ended there holding
+    that very vector (its line search evaluated it at the rung it kept), so the march hands it on.
+    Counted by EXECUTION (a callback in the residual), the Jacobian products excluded: every rung here
+    is the full step (asserted), so a march of ``n`` single-step strategy steps, or of dual-time steps
+    with ``n`` inner iterations in all, evaluates ``1 + n`` times. A step that re-evaluated the residual
+    at its own start counts ``1 + n + steps``; one per outer step more. Reporting each equation's term
+    (``on_residuals``) reads the same vector and adds nothing.
+    """
+    step = _carrying_strategies()[name]
+    residual = _CountedCoupled(jnp.array([2.0, 0.0]))
+    terms: list[dict] = []
+    _EXECUTIONS.clear()
+    result = newton_march(
+        step,
+        residual,
+        jnp.array([1.3, 0.8]),
+        max_steps=30,
+        rtol=0.0,
+        atol=1e-10,
+        on_residuals=terms.append if observed else None,
+    )
+    jax.effects_barrier()
+
+    assert result.converged and len(result.reports) >= 3  # several steps, so the count spans them
+    assert all(report.alpha == 1.0 for report in result.reports)  # one rung per search
+    inner = sum(report.inner_iterations for report in result.reports)
+    assert len(_EXECUTIONS) == 1 + inner
+    if observed:
+        assert len(terms) == len(result.reports)
+        for report, term in zip(result.reports, terms, strict=True):
+            assert math.hypot(term["x"], term["y"]) == pytest.approx(
+                report.residual_norm, rel=1e-12
+            )
+
+
+@pytest.mark.parametrize("name", ["damped-newton", "pseudo-transient", "dual-time"])
+def test_each_reported_residual_is_the_residual_at_the_state_it_reports(name) -> None:
+    """The carried vector's norm is a fresh evaluation's at every state, to rounding.
+
+    Rounding is judged against the magnitudes each equation sums, not against the residual, which near
+    a root is a near-cancelling difference of terms of order one. A single-step strategy's vector IS
+    an evaluation at the kept rung, from another compiled program than this test's, so the two agree
+    to a few ulps of those terms. A dual-time step forms it as ``G - beta d (phi - phi^n)``, which
+    also rounds at the size of the shift term (``d = 1``, ``beta = 0.5``). A vector carried from the
+    wrong state -- the step's start, or the previous step's end -- misses by the step's whole change
+    in residual, here at least 1e-10, against a bound of about 8e-15.
+    """
+    step = _carrying_strategies()[name]
+    residual = _CountedCoupled(jnp.array([2.0, 0.0]))
+    states: list[tuple[StepReport, jnp.ndarray]] = []
+    phi0 = jnp.array([1.3, 0.8])
+    result = newton_march(
+        step,
+        residual,
+        phi0,
+        max_steps=30,
+        rtol=0.0,
+        atol=1e-10,
+        checkpoint=lambda report, state: states.append((report, state)),
+    )
+
+    assert result.converged and len(states) >= 3
+    eps = float(jnp.finfo(phi0.dtype).eps)
+    previous = phi0
+    for report, state in states:
+        fresh = float(jnp.linalg.norm(residual.uncounted(state)))
+        summed = float(jnp.linalg.norm(residual.magnitudes(state)))
+        shift_term = 0.5 * float(jnp.linalg.norm(state - previous))
+        bound = 8 * eps * (summed + (shift_term if name == "dual-time" else 0.0))
+        assert abs(report.residual_norm - fresh) <= bound, (
+            report.step,
+            report.residual_norm,
+            fresh,
+        )
+        previous = state
+
+
+_MISMATCHES: list[float] = []
+
+
+def _record_mismatch(handed: jnp.ndarray, fresh: jnp.ndarray) -> None:
+    """Record how far the residual a step was handed is from the residual at its state, relatively."""
+    _MISMATCHES.append(
+        float(jnp.max(jnp.abs(handed - fresh)) / max(1.0, float(jnp.max(jnp.abs(fresh)))))
+    )
+
+
+class _ChecksTheResidualItIsHanded(eqx.Module):
+    """A strategy that records, at each call, whether it was handed ``R(phi)``, then steps as ``inner``."""
+
+    inner: object
+
+    def stepper(self):
+        inner = self.inner.stepper()
+
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
+            jax.debug.callback(_record_mismatch, residual, residual_fn(phi))
+            return inner(residual_fn, phi, residual, residual_norm_0, solver)
+
+        return step
+
+    def linear_solver(self):
+        return self.inner.linear_solver()
+
+    def norm(self):
+        return self.inner.norm()
+
+    def with_norm(self, norm):
+        return eqx.tree_at(lambda s: s.inner, self, self.inner.with_norm(norm))
+
+    def adjoint_preconditioner(self):
+        return None
+
+
+def test_a_station_change_hands_the_step_the_new_station_s_residual() -> None:
+    """Within a station the vector carries over; entering a new one, it is evaluated for the new problem.
+
+    The march hands each step the residual its previous step ended at, which belongs to the problem that
+    step drove. A homotopy station change is a change of residual function, so the vector carried
+    across it is the old station's residual at the right state -- wrong by the change of ``theta``.
+    Two steps per station here, so the march both carries within a station and crosses three changes.
+    """
+    homotopy = _CubicRamp(
+        target=jnp.array([8.0, 27.0]), start=jnp.array([1.0, 1.0]), stations=3, steps_per_station=2
+    )
+    _MISMATCHES.clear()
+    result = newton_march(
+        _ChecksTheResidualItIsHanded(DampedNewtonStep(line_search=6)),
+        _Cubic(jnp.array([8.0, 27.0])),
+        jnp.array([1.0, 1.0]),
+        max_steps=12,
+        rtol=0.0,
+        atol=1e-10,
+        homotopy=homotopy,
+    )
+    jax.effects_barrier()
+
+    assert len(homotopy.changes) == 4  # the first station and three changes, all walked
+    assert len({report.station for report in result.reports}) == 4
+    assert len(_MISMATCHES) == len(result.reports)
+    assert max(_MISMATCHES) <= 1e-14, _MISMATCHES
+
+
+class _MovesUntilDamped(eqx.Module):
+    """A step that, below ``beta_needed``, jumps away and reports a collapsed step length; above, halves.
+
+    The failed attempt MOVES, so its outcome carries a residual at another state than the one the
+    retry restarts from: a retry handed that vector instead of the pre-step one would start from a
+    residual that is not its state's. Each call records whether it was handed ``R(phi)``.
+    """
+
+    relaxation_schedule: ConstantRelaxation
+    beta_needed: float = eqx.field(static=True, default=4.0)
+
+    def stepper(self):
+        schedule, needed = self.relaxation_schedule, self.beta_needed
+
+        def step(residual_fn, phi, residual, residual_norm_0, solver):
+            jax.debug.callback(_record_mismatch, residual, residual_fn(phi))
+            damped = schedule.beta >= needed
+            stepped = jnp.where(damped, 0.5 * phi, phi + 1.0)
+            return _outcome(stepped, 3, alpha=jnp.where(damped, 1.0, 0.0), residual_fn=residual_fn)
+
+        return step
+
+    def norm(self):
+        return jnp.linalg.norm
+
+    def with_norm(self, norm):
+        return self
+
+    def linear_solver(self):
+        return None
+
+    def adjoint_preconditioner(self):
+        return None
+
+
+def test_every_retried_attempt_is_handed_the_residual_at_the_state_it_restarts_from() -> None:
+    """An escalated redo starts from the pre-step state, so it is handed the pre-step residual.
+
+    Every step here fails twice (beta 1 and 2) before the escalation reaches the shift it needs, and
+    each failed attempt jumps to another state. The march must hand all three attempts the vector it
+    held before the step, and the next step the vector the accepted attempt returned.
+    """
+    _MISMATCHES.clear()
+    result = newton_march(
+        _MovesUntilDamped(relaxation_schedule=ConstantRelaxation(jnp.array(1.0))),
+        _Cubic(jnp.zeros((2,))),
+        jnp.array([1.0, 2.0]),
+        max_steps=3,
+        rtol=0.0,
+        atol=0.0,
+        retry=RetryPolicy(on_alpha=0.5, beta_factor=2.0, max_retries=3),
+    )
+    jax.effects_barrier()
+
+    assert [report.escalations for report in result.reports] == [2, 2, 2]
+    assert len(_MISMATCHES) == 9  # three attempts at each of three steps
+    assert max(_MISMATCHES) == 0.0, _MISMATCHES
+
+
+def test_a_dual_time_step_that_does_not_move_hands_on_its_own_residual() -> None:
+    """A step whose every inner search takes no step returns the residual it was handed, exactly.
+
+    ``alpha = 0`` leaves the iterate at the anchor, so the vector the next step is handed must be the
+    anchor's residual, not the last rung's: here every rung is an excursion (``exp(30 phi) - 1`` from
+    ``phi = -1`` under a weak shift), whose residual is near ``1e247``.
+    """
+
+    class _Exponential(eqx.Module):
+        def __call__(self, p):
+            return jnp.exp(30.0 * p) - 1.0
+
+    _MISMATCHES.clear()
+    result = newton_march(
+        _ChecksTheResidualItIsHanded(
+            DualTimeStep(
+                shift_policy=_UnitShiftPolicy(),
+                relaxation_schedule=ConstantRelaxation(jnp.asarray(0.05)),
+                inner_steps=2,
+                line_search=2,
+            )
+        ),
+        _Exponential(),
+        jnp.array([-1.0]),
+        max_steps=2,
+        rtol=0.0,
+        atol=0.0,
+    )
+    jax.effects_barrier()
+
+    assert [report.alpha for report in result.reports] == [0.0, 0.0]
+    assert len(_MISMATCHES) == 2
+    assert max(_MISMATCHES) == 0.0, _MISMATCHES

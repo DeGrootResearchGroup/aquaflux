@@ -35,6 +35,16 @@ import yaml
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import PinnedPoint, PressureDatum
 from aquaflux.mesh import Mesh
+from aquaflux.meshing import (
+    FacePlanarizer,
+    FaceSelection,
+    FacesNear,
+    FacesOn,
+    Graded,
+    OctreeCore,
+    PipeCore,
+    PrismLayers,
+)
 from aquaflux.radiation import (
     EveryPair,
     NoOcclusion,
@@ -56,6 +66,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import (
+    AdaptiveLinearTolerance,
     BlockScaled,
     CflResidualDualTimeControl,
     Convergence,
@@ -81,15 +92,16 @@ from .boundaries import (
     PatchCondition,
     Wall,
 )
+from .drawing import CadPlacement
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState
-from .mesh_source import GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
+from .mesh_file import Drawing, DrawingRegion, MeshOutput, MeshSizes, MeshSpec
+from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
 from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
 from .radiation import (
     CadFluid,
-    CadPlacement,
     CadSolid,
     CadSurface,
     Coarsen,
@@ -521,9 +533,20 @@ def _datum_misfits(datum: PinnedPoint, mesh: Mesh) -> list[str]:
 _CASE_MAPPING = SettingsMapping(
     [
         CaseSpec,
+        AquafluxMesh,
         OpenFOAMMesh,
-        StructuredGrid,
-        GeometricGrading,
+        MeshSpec,
+        Drawing,
+        DrawingRegion,
+        MeshSizes,
+        MeshOutput,
+        FacesNear,
+        FacesOn,
+        PrismLayers,
+        PipeCore,
+        Graded,
+        FacePlanarizer,
+        OctreeCore,
         Fluid,
         Laminar,
         RANS,
@@ -567,6 +590,7 @@ _CASE_MAPPING = SettingsMapping(
         ResidualRatioDualTimeControl,
         CflResidualDualTimeControl,
         RetryPolicy,
+        AdaptiveLinearTolerance,
         GmresSolve,
         DirectSolve,
         *PRECONDITIONER_SPEC_MAPPING.kinds,
@@ -661,11 +685,25 @@ def case_spec_from_mapping(mapping: Mapping[str, object]) -> CaseSpec:
         raise ValueError(
             f"a case file's top level is the case itself and names no kind, got kind {mapping['kind']!r}."
         )
+    return _CASE_MAPPING.from_mapping(_with_kinds(mapping, _CASE_KIND, _ONE_FORM_SECTIONS))
+
+
+def _with_kinds(mapping: Mapping[str, object], root: str, one_form) -> dict[str, object]:
+    """A file's top level with its own kind, ``root``, and each one-form section's kind, put in."""
     sections = dict(mapping)
-    for section, kind in _ONE_FORM_SECTIONS:
+    for section, kind in one_form:
         if isinstance(sections.get(section), Mapping) and "kind" not in sections[section]:
             sections[section] = {"kind": kind.__name__, **sections[section]}
-    return _CASE_MAPPING.from_mapping({**sections, "kind": _CASE_KIND})
+    return {**sections, "kind": root}
+
+
+def _without_kinds(mapping: dict[str, object], one_form) -> dict[str, object]:
+    """A written file's top level with the kinds :func:`_with_kinds` puts in taken out again."""
+    del mapping["kind"]
+    for section, _ in one_form:
+        if section in mapping:
+            del mapping[section]["kind"]
+    return mapping
 
 
 def _digest(mapping: Mapping[str, object]) -> str:
@@ -698,12 +736,7 @@ def case_spec_to_mapping(spec: CaseSpec) -> dict[str, object]:
     """
     if not isinstance(spec, CaseSpec):
         raise TypeError(f"only a CaseSpec is written as a case, got {type(spec).__name__}.")
-    mapping = _CASE_MAPPING.to_mapping(spec)
-    del mapping["kind"]
-    for section, _ in _ONE_FORM_SECTIONS:
-        if section in mapping:
-            del mapping[section]["kind"]
-    return mapping
+    return _without_kinds(_CASE_MAPPING.to_mapping(spec), _ONE_FORM_SECTIONS)
 
 
 def case_schema() -> dict[str, object]:
@@ -734,12 +767,13 @@ def mesh_source_from_mapping(mapping: Mapping[str, object]) -> MeshSource:
     """Read a case file's ``mesh`` section on its own, without the rest of the case.
 
     The section is read by the same rules as within a whole case (:func:`case_spec_from_mapping`), so
-    a mesh can be read or generated -- to be looked at, say -- while the rest of the case is unfinished.
+    a mesh can be read -- to be looked at, say -- while the rest of the case is unfinished.
 
     Parameters
     ----------
     mapping : mapping
-        The ``mesh`` section: ``{kind: OpenFOAMMesh, path: ...}`` or ``{kind: StructuredGrid, ...}``.
+        The ``mesh`` section: ``{kind: AquafluxMesh, path: ...}`` or ``{kind: OpenFOAMMesh, path:
+        ...}``.
 
     Returns
     -------
@@ -756,3 +790,143 @@ def mesh_source_from_mapping(mapping: Mapping[str, object]) -> MeshSource:
             f"a case's mesh section names a mesh source, got a {type(source).__name__}."
         )
     return source
+
+
+#: The sections of a mesh file that have one form each, so may leave out their ``kind``.
+_MESH_ONE_FORM_SECTIONS = (
+    ("drawing", Drawing),
+    ("region", DrawingRegion),
+    ("sizes", MeshSizes),
+    ("output", MeshOutput),
+)
+
+#: A mesh file's own kind name, which the file does not write.
+_MESH_KIND = MeshSpec.__name__
+
+
+def mesh_spec_from_mapping(mapping: Mapping[str, object]) -> MeshSpec:
+    """Read a mesh file from the nested mapping it parses to (see :mod:`aquaflux.case.mesh_file`).
+
+    The top level holds the sections and names no ``kind``, since the whole document is the mesh
+    file; ``drawing``, ``region``, ``sizes`` and ``output`` may leave out theirs.
+
+    Parameters
+    ----------
+    mapping : mapping
+        The mesh file, as parsed.
+
+    Returns
+    -------
+    MeshSpec
+
+    Raises
+    ------
+    ValueError
+        If a section or setting is unknown, missing or refused; the message gives the path to it.
+    TypeError
+        If a value is of the wrong family for its position.
+    """
+    if not isinstance(mapping, Mapping):
+        raise ValueError(f"a mesh file is a mapping of its sections, got {mapping!r}.")
+    if "kind" in mapping and mapping["kind"] != _MESH_KIND:
+        raise ValueError(
+            f"a mesh file's top level is the mesh file itself and names no kind, got kind "
+            f"{mapping['kind']!r}."
+        )
+    spec = _CASE_MAPPING.from_mapping(_with_kinds(mapping, _MESH_KIND, _MESH_ONE_FORM_SECTIONS))
+    if not isinstance(spec, MeshSpec):  # pragma: no cover - the root kind is put in above
+        raise ValueError(f"a mesh file reads as a MeshSpec, got a {type(spec).__name__}.")
+    return spec
+
+
+def drawing_sections_from_mapping(
+    mapping: Mapping[str, object],
+) -> tuple[Drawing, DrawingRegion | None, dict[str, FaceSelection], str | None]:
+    """Read the sections of a mesh file its patches are chosen by, without the rest of the file.
+
+    The drawing, the region, the patches and ``others``, read by the same rules as within a whole
+    mesh file (:func:`mesh_spec_from_mapping`), so the drawing can be looked at -- and its region
+    and patches chosen -- while the sizes and everything else are unfinished. A region not yet
+    given, or naming no solid yet, is ``None``.
+
+    Parameters
+    ----------
+    mapping : mapping
+        The mesh file, as it stands.
+
+    Returns
+    -------
+    tuple of (Drawing, DrawingRegion or None, dict of {str: FaceSelection}, str or None)
+
+    Raises
+    ------
+    ValueError
+        If the drawing is missing, or a section is refused; the message says where.
+    TypeError
+        If a value is of the wrong family for its position.
+    """
+    if not isinstance(mapping, Mapping):
+        raise ValueError(f"a mesh file is a mapping of its sections, got {mapping!r}.")
+    drawn = mapping.get("drawing")
+    if not isinstance(drawn, Mapping):
+        raise ValueError("a mesh file's drawing is needed to look at it.")
+    drawing = _CASE_MAPPING.from_mapping({"kind": Drawing.__name__, **drawn})
+    given_region = mapping.get("region")
+    region = None
+    if isinstance(given_region, Mapping) and given_region.get("solids"):
+        region = _CASE_MAPPING.from_mapping({"kind": DrawingRegion.__name__, **given_region})
+    given = mapping.get("patches") or {}
+    if not isinstance(given, Mapping):
+        raise ValueError(f"a mesh file's patches are a table of face selections, got {given!r}.")
+    patches = {}
+    for name, entry in given.items():
+        try:
+            selection = _CASE_MAPPING.from_mapping(entry)
+        except (ValueError, TypeError) as error:
+            raise type(error)(f"at 'patches.{name}': {error}") from error
+        if not isinstance(selection, FaceSelection):
+            raise ValueError(
+                f"at 'patches.{name}': a patch is a face selection, got {type(selection).__name__}."
+            )
+        patches[name] = selection
+    others = mapping.get("others")
+    if others is not None and not isinstance(others, str):
+        raise ValueError(f"a mesh file's others names a patch, got {others!r}.")
+    return drawing, region, patches, others
+
+
+def mesh_spec_to_mapping(spec: MeshSpec) -> dict[str, object]:
+    """Write a mesh file as the nested mapping it stores: the inverse of :func:`mesh_spec_from_mapping`.
+
+    Parameters
+    ----------
+    spec : MeshSpec
+
+    Returns
+    -------
+    dict
+        Plain data; every setting left at its default is omitted.
+
+    Raises
+    ------
+    TypeError
+        If ``spec`` is not a :class:`MeshSpec`.
+    """
+    if not isinstance(spec, MeshSpec):
+        raise TypeError(f"only a MeshSpec is written as a mesh file, got {type(spec).__name__}.")
+    return _without_kinds(_CASE_MAPPING.to_mapping(spec), _MESH_ONE_FORM_SECTIONS)
+
+
+def mesh_schema() -> dict[str, object]:
+    """What a mesh file may hold, as plain data, for a form that edits one (as :func:`case_schema`).
+
+    Returns
+    -------
+    dict
+        ``{"root": "MeshSpec", "one_form_sections": [...], "kinds": {...}}``.
+    """
+    return {
+        "root": _MESH_KIND,
+        "one_form_sections": [section for section, _ in _MESH_ONE_FORM_SECTIONS],
+        **_CASE_MAPPING.schema(),
+    }

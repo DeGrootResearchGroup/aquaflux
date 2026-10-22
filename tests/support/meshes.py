@@ -15,10 +15,13 @@ equivalent to perturbing before it (the topology is unchanged and geometry is de
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import Mesh, structured_grid_2d, structured_grid_3d
+from aquaflux.meshing import element_mesh
 
 
 def geometry_invariants(mesh: Mesh) -> dict:
@@ -276,25 +279,7 @@ def tetrahedral_grid_3d(n: int, *, perturb: float = 0.0, seed: int = 0) -> Mesh:
                         vertices.append(node(*corner))
                     cells.append(vertices)
 
-    # A triangle is shared by at most two tetrahedra, so the first sighting owns it and the second
-    # neighbours it. Keyed on the sorted node triple, which is the face's identity whichever cell
-    # names it; the stored order is the owner's, and any order of three nodes is a valid perimeter.
-    faces, owner, neighbour, seen = [], [], [], {}
-    for index, vertices in enumerate(cells):
-        for corner in range(4):
-            triangle = vertices[:corner] + vertices[corner + 1 :]
-            key = tuple(sorted(triangle))
-            if key in seen:
-                neighbour[seen[key]] = index
-            else:
-                seen[key] = len(faces)
-                faces.append(triangle)
-                owner.append(index)
-                neighbour.append(-1)
-
-    return Mesh.from_faces(
-        jnp.asarray(coords), faces, jnp.asarray(owner), jnp.asarray(neighbour), len(cells)
-    )
+    return element_mesh(coords, np.asarray(cells))
 
 
 def hexahedron_beside_a_prism():
@@ -318,3 +303,231 @@ def hexahedron_beside_a_prism():
     owner = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
     neighbour = [1, -1, -1, -1, -1, -1, -1, -1, -1, -1]
     return Mesh.from_faces(np.asarray(coords, dtype=float), faces, owner, neighbour, 2)
+
+
+def restated(mesh: Mesh, *, order=None, reverse=None, swap=None) -> Mesh:
+    """The same mesh stated differently: faces reordered, rings reversed, interior faces turned over.
+
+    None of the three changes alters the mesh: faces may be stored in any order, a ring describes
+    the same face in either direction, and an interior face is the same face whichever of its two
+    cells is called the owner. So a consumer that re-derives order and orientation instead of
+    trusting how they are stored must give the same answer for the restated mesh as for the
+    original. Zones, patches (moved with their faces), patch types and groups are kept.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        A non-periodic mesh (a seam face's ring belongs to its owner's side, so turning it over would
+        move it).
+    order : array-like of int, shape ``(n_faces,)``, optional
+        The old index of each new face, a permutation. Default: the existing order.
+    reverse : array-like of bool, shape ``(n_faces,)``, optional
+        Faces (by old index) whose node ring is reversed. Default: none.
+    swap : array-like of bool, shape ``(n_faces,)``, optional
+        Faces (by old index) whose owner and neighbour are exchanged; only interior faces may be
+        chosen. Default: none.
+    """
+    if mesh.face_cells.neighbour_offset is not None:
+        raise ValueError("restated needs a non-periodic mesh")
+    n_faces = mesh.n_faces
+    order = np.arange(n_faces) if order is None else np.asarray(order, dtype=np.int64)
+    reverse = np.zeros(n_faces, dtype=bool) if reverse is None else np.asarray(reverse, dtype=bool)
+    swap = np.zeros(n_faces, dtype=bool) if swap is None else np.asarray(swap, dtype=bool)
+    owner = np.asarray(mesh.face_cells.owner).copy()
+    neighbour = np.asarray(mesh.face_cells.neighbour).copy()
+    if np.any(swap & (neighbour < 0)):
+        raise ValueError("only an interior face can be turned over")
+    owner[swap], neighbour[swap] = neighbour[swap], owner[swap]
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    indices = np.asarray(mesh.face_nodes.face_node_indices)
+    rings = [indices[start:end] for start, end in pairwise(offsets)]
+    rings = [rings[f][::-1] if reverse[f] else rings[f] for f in order]
+    new_of_old = np.empty(n_faces, dtype=np.int64)
+    new_of_old[order] = np.arange(n_faces)
+    patches = mesh.face_patches
+    named = [name for name in patches.names if name not in ("interior", "boundary")]
+    zones = mesh.cell_zones
+    return Mesh.from_faces(
+        mesh.node_coords,
+        rings,
+        owner[order],
+        neighbour[order],
+        mesh.n_cells,
+        cell_zones={name: np.asarray(zones.indices(name)) for name in zones.names[1:]},
+        face_patches={
+            name: np.sort(new_of_old[np.asarray(patches.indices(name))]) for name in named
+        },
+        patch_types=dict(patches.patch_types),
+        patch_groups=dict(patches.patch_groups),
+    )
+
+
+def newell_outward(mesh: Mesh) -> np.ndarray:
+    """Whether each stored ring's Newell normal points from its owner's vertex mean toward the face.
+
+    An orientation test that shares nothing with the mesh's own face-geometry strategy (no centre
+    fan, no approximate centroid), for checking code that relies on that strategy. Sound on the
+    convex cells of the test fixtures, where the vertex mean lies inside the cell.
+    """
+    coords = np.asarray(mesh.node_coords)
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    indices = np.asarray(mesh.face_nodes.face_node_indices)
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    rings = [indices[a:b] for a, b in pairwise(offsets)]
+    cell_nodes = [set() for _ in range(mesh.n_cells)]
+    for face, ring in enumerate(rings):
+        cell_nodes[owner[face]].update(ring.tolist())
+        if neighbour[face] >= 0:
+            cell_nodes[neighbour[face]].update(ring.tolist())
+    centre = np.array([coords[sorted(nodes)].mean(axis=0) for nodes in cell_nodes])
+    result = np.empty(len(rings), dtype=bool)
+    for face, ring in enumerate(rings):
+        p = coords[ring]
+        newell = np.cross(p, np.roll(p, -1, axis=0)).sum(axis=0)
+        result[face] = newell @ (p.mean(axis=0) - centre[owner[face]]) > 0.0
+    return result
+
+
+def without_cells(mesh: Mesh, removed, *, patch: str) -> Mesh:
+    """``mesh`` with some cells taken out, the faces they exposed put in a new boundary patch.
+
+    For a non-convex domain from a convex one: an L from a block of hexahedra, say. Remaining cells
+    and the nodes still used are renumbered in their original order; existing named patches keep
+    their faces. A non-periodic mesh with one cell zone.
+
+    Parameters
+    ----------
+    mesh : Mesh
+    removed : array-like of int
+        The cells to take out.
+    patch : str
+        The name of the patch for the faces between a kept cell and a removed one.
+    """
+    removed = np.asarray(removed, dtype=np.int64)
+    keep = np.ones(mesh.n_cells, dtype=bool)
+    keep[removed] = False
+    new_cell = np.full(mesh.n_cells, -1, dtype=np.int64)
+    new_cell[keep] = np.arange(int(keep.sum()))
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    kept_owner = keep[owner]
+    kept_neighbour = (neighbour >= 0) & keep[np.maximum(neighbour, 0)]
+    faces = np.flatnonzero(kept_owner | kept_neighbour)
+    # A face whose owner went keeps its neighbour as owner; its ring direction does not matter.
+    new_owner = np.where(kept_owner[faces], new_cell[owner[faces]], new_cell[neighbour[faces]])
+    new_neighbour = np.where(
+        kept_owner[faces] & kept_neighbour[faces], new_cell[np.maximum(neighbour[faces], 0)], -1
+    )
+    exposed = (neighbour[faces] >= 0) & (new_neighbour < 0)
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    indices = np.asarray(mesh.face_nodes.face_node_indices)
+    rings = [indices[offsets[f] : offsets[f + 1]] for f in faces]
+    used = np.unique(np.concatenate(rings))
+    new_node = np.full(mesh.n_nodes, -1, dtype=np.int64)
+    new_node[used] = np.arange(used.size)
+    new_face = np.full(mesh.n_faces, -1, dtype=np.int64)
+    new_face[faces] = np.arange(faces.size)
+    patches = mesh.face_patches
+    named = {
+        name: new_face[np.asarray(patches.indices(name))]
+        for name in patches.names
+        if name not in ("interior", "boundary")
+    }
+    named = {name: idx[idx >= 0] for name, idx in named.items()}
+    named[patch] = np.flatnonzero(exposed)
+    return Mesh.from_faces(
+        np.asarray(mesh.node_coords)[used],
+        [new_node[ring] for ring in rings],
+        new_owner,
+        new_neighbour,
+        int(keep.sum()),
+        face_patches=named,
+        patch_types=dict(patches.patch_types),
+        patch_groups=dict(patches.patch_groups),
+    )
+
+
+def voxel_surface(voxels, n: int, size: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """The boundary of a union of cubes of edge ``size`` at integer corners ``voxels``, each cube
+    face cut into ``n x n`` quadrilaterals wound out of the union, every point used once."""
+    voxels = {tuple(v) for v in voxels}
+    keys, quads = {}, []
+
+    def point(p):
+        key = tuple(np.round(np.asarray(p) * n).astype(int))
+        return keys.setdefault(key, len(keys))
+
+    for voxel in voxels:
+        for axis in range(3):
+            for side in (0, 1):
+                across = list(voxel)
+                across[axis] += 1 if side else -1
+                if tuple(across) in voxels:
+                    continue
+                u, v = [a for a in range(3) if a != axis]
+                for i in range(n):
+                    for j in range(n):
+                        ring = []
+                        for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                            p = np.array(voxel, float)
+                            p[axis] += side
+                            p[u] += (i + di) / n
+                            p[v] += (j + dj) / n
+                            ring.append(point(p))
+                        # (u, v, axis) right-handed when axis follows v cyclically.
+                        right_handed = (axis - v) % 3 == 1
+                        quads.append(ring if right_handed == bool(side) else ring[::-1])
+    points = np.zeros((len(keys), 3))
+    for key, index in keys.items():
+        points[index] = np.asarray(key) / n * size
+    return points, np.array(quads)
+
+
+def box_surface(lo, hi, n, *, into_box, offset=0):
+    """The six faces of the cube ``[lo, hi]^3``, ``n`` x ``n`` squares each split in two.
+
+    Wound out of the cube, or into it with ``into_box`` (the walls of a hole). Point indices start
+    at ``offset``.
+    """
+    ticks = np.linspace(lo, hi, n + 1)
+    points, index, triangles = [], {}, []
+
+    def point(xyz):
+        key = tuple(np.round(xyz, 12))
+        if key not in index:
+            index[key] = offset + len(points)
+            points.append(xyz)
+        return index[key]
+
+    for axis in range(3):
+        a, b = (axis + 1) % 3, (axis + 2) % 3
+        for side in (lo, hi):
+            for i in range(n):
+                for j in range(n):
+                    ring = []
+                    for di, dj in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                        xyz = np.zeros(3)
+                        xyz[axis], xyz[a], xyz[b] = side, ticks[i + di], ticks[j + dj]
+                        ring.append(point(xyz))
+                    if (side == lo) != into_box:
+                        ring = ring[::-1]
+                    triangles += [ring[:3], [ring[0], ring[2], ring[3]]]
+    return np.array(points), np.array(triangles)
+
+
+def crossing_edges(points, triangles) -> int:
+    """How many times an edge of a triangle surface passes through a triangle not at its ends --
+    zero on a surface that does not cross itself. Every edge against every triangle, so for a small
+    surface."""
+    from aquaflux.meshing.regions import ray_hits
+
+    points = np.asarray(points, dtype=np.float64)
+    triangles = np.asarray(triangles, dtype=np.int64)
+    edges = np.unique(np.sort(triangles[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 2), axis=1), axis=0)
+    count = 0
+    for a, b in edges:
+        apart = ~np.any((triangles == a) | (triangles == b), axis=1)
+        hits = ray_hits(points[a], points[b] - points[a], points[triangles[apart]])
+        count += int(np.count_nonzero(hits < 1.0))
+    return count

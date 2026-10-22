@@ -42,6 +42,7 @@ PUBLIC_SUBPACKAGES = [
     "solids",
     "octree",
     "io.cad",
+    "meshing",
 ]
 
 # How the API reference groups each subpackage, keyed on the module a name is DEFINED in.
@@ -56,6 +57,7 @@ SUBPACKAGE_GROUPS = {
             "The sections of a case",
             [
                 "mesh_source",
+                "drawing",
                 "fluid",
                 "physics",
                 "boundaries",
@@ -66,13 +68,27 @@ SUBPACKAGE_GROUPS = {
             ],
         ),
         ("Running a case file", ["run"]),
+        ("Making a mesh from a mesh file", ["mesh_file", "mesh_run", "drawing_view"]),
+    ],
+    "meshing": [
+        ("Meshing a region of a CAD model", ["cad_mesher"]),
+        ("The polyhedral dual", ["dual"]),
+        ("Prism layers", ["layers"]),
+        ("Structured quadrilaterals on chosen faces", ["mapped"]),
+        ("Pipes, and their cores as structured O-grids", ["pipes", "pipe_core"]),
+        ("Surfaces of triangles and quadrilaterals, and pyramid caps", ["polygons", "caps"]),
+        ("A mesh of tetrahedra, prisms, hexahedra and pyramids", ["elements"]),
+        ("An octree hexahedral core", ["octree", "hex_core", "regions"]),
+        ("Hexahedral blocks", ["blocks", "divisions", "surfaces", "block_assembly"]),
+        ("Block lattices and round layouts", ["lattices", "block_topologies"]),
+        ("Netgen, in a child process", ["netgen_process"]),
     ],
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
         ("Cell zones and face patches", ["groups"]),
-        ("Building and transforming a mesh", ["structured", "collapse", "reorder"]),
+        ("Building and transforming a mesh", ["structured", "collapse", "reorder", "digest"]),
         ("Boundary patches as surfaces", ["surface"]),
-        ("Quality and connectivity diagnostics", ["quality", "distance", "graph"]),
+        ("Quality and connectivity diagnostics", ["quality", "distance", "graph", "winding"]),
     ],
     "solve": [
         ("The coupled state's layout", ["state"]),
@@ -113,6 +129,7 @@ SUBPACKAGE_GROUPS = {
                 "sparse_jacobian",
                 "jacobian_probe",
                 "materialized_spec",
+                "pivot_floor",
                 "materialized_session",
                 "materialized_preconditioner",
                 "block_preconditioner",
@@ -142,6 +159,7 @@ SUBPACKAGE_GROUPS = {
     ],
     "radiation": [
         ("The radiation model", ["model"]),
+        ("A scene of lamps, reflectors and receivers", ["scene"]),
         ("Engineering units", ["units"]),
         (
             "Emitting surfaces",
@@ -169,6 +187,7 @@ SUBPACKAGE_GROUPS = {
     "io.cad": [
         ("Reading a drawing", ["model", "placement"]),
         ("Recognizing solids", ["recognize", "faces"]),
+        ("Regions for meshing: topology, triangles, projection", ["topology"]),
     ],
     "solids": [
         ("Solid bodies, their combinations, and fluid regions", ["bodies"]),
@@ -183,7 +202,7 @@ SUBPACKAGE_GROUPS = {
         ("Wall treatment and boundary closures", ["boundary"]),
         (
             "The coupled flow-turbulence solve",
-            ["coupled", "march_settings", "driver", "continuation"],
+            ["coupled", "scalar_transforms", "march_settings", "driver", "continuation"],
         ),
         ("Reynolds-number continuation", ["reynolds"]),
         ("Preconditioners", ["preconditioner_spec", "preconditioner"]),

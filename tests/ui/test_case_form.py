@@ -12,9 +12,9 @@ import pytest
 
 pytest.importorskip("pyvista")
 
-from aquaflux.case import case_schema, case_spec_from_mapping, read_case_document
+from aquaflux.case import case_schema, case_spec_from_mapping, mesh_schema, read_case_document
 from aquaflux_ui import case_form
-from aquaflux_ui.case_form import CaseSchema, form_sections, parse_input
+from aquaflux_ui.case_form import ANY, CaseSchema, form_sections, parse_input
 
 REPO = Path(__file__).resolve().parents[2]
 CASE_FILES = sorted(REPO.glob("validation/*/case.yaml")) + sorted(
@@ -259,12 +259,14 @@ def test_help_text_is_plain():
 
 
 def test_a_list_of_fixed_choices_is_picked_from_its_choices():
-    document = read_case_document(
-        REPO / "validation" / "turbulent_channel" / "cases" / "re20000.yaml"
-    )
-    row = _rows(document)[("mesh", "periodic")]
+    # No case-file field is a list of fixed choices, so a schema of one such field: a tuple of
+    # Literal values, as the solver prints it.
+    axes = {"type": "list", "of": [{"type": "choice", "values": ["x", "y"]}]}
+    field = {"name": "axes", "accepts": [axes], "required": False, "doc": "", "default": []}
+    schema = CaseSchema({"root": "Probe", "kinds": {"Probe": {"summary": "", "fields": [field]}}})
+    (row,) = form_sections(schema, {"axes": ["x"]})[0]["rows"]
     assert row.widget == "choices" and row.value == ["x"]
-    assert [item["value"] for item in row.items] == ["x"]
+    assert [item["value"] for item in row.items] == ["x", "y"]
 
 
 def test_a_group_says_what_is_set_inside_it_so_it_can_stay_folded():
@@ -337,3 +339,24 @@ def test_a_setting_its_scope_requires_reads_as_required_where_it_is_offered():
     document = read_case_document(PITZDAILY)
     del document["numerics"]["turbulence_advection"]
     assert _rows(document)[("numerics", "turbulence_advection")].placeholder == "required"
+
+
+def test_a_list_of_names_is_chosen_from_the_names_given_for_its_path():
+    # A mesh file's solids are the drawing's, which the schema cannot know: the page passes them.
+    document = {
+        "drawing": {"file": "tank.step"},
+        "region": {"solids": ["tank", "old_part"]},
+        "patches": {"lamp": {"kind": "FacesOn", "solids": []}},
+        "mapped": ["walls"],
+    }
+    names = {("region", "solids"): ["tank", "lamp"], ("patches", ANY, "solids"): ["lamp"]}
+    sections = form_sections(CaseSchema(mesh_schema()), document, names)
+    rows = {row.path: row for section in sections for row in section["rows"]}
+    solids = rows[("region", "solids")]
+    # The names given, then one the file holds that is not among them -- never dropped.
+    assert solids.widget == "choices" and solids.value == ["tank", "old_part"]
+    assert [item["value"] for item in solids.items] == ["tank", "lamp", "old_part"]
+    assert rows[("patches", "lamp", "solids")].widget == "choices"  # any patch's solids
+    # A list no names are given for is still typed.
+    assert rows[("region", "without")].widget == "strings"
+    assert rows[("mapped",)].widget == "strings" and rows[("mapped",)].value == "walls"

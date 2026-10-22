@@ -1,0 +1,625 @@
+# Investigation log — `aquaflux/io/`
+
+> Split out of `.claude/rules/io.md` (2026-10-17). Lives in `.claude/notes/`, so it never auto-loads. It holds the dated record — measurements with their configuration, investigation narratives, mutation-pass lists, test inventories — behind the current-status entries in `io.md`. Moved verbatim: names in it may since have been renamed or deleted; check the rule and the code before acting on any of it.
+
+## From `.claude/rules/io.md` — OpenFOAM field writer (2026-09-12): the Docker restart and the phi decision
+
+## Structure — BUILT (OpenFOAM field writer, ASCII) — 2026-09-12
+
+Writing computed cell fields back into the case they were read from, as an ordinary time directory,
+so a solved state can be opened by the tools the reference solution is opened with — or used to
+restart a run. `io/openfoam/field_writer.py`, exported as `write_openfoam_time` (a whole time
+directory) and `write_openfoam_field` (one file).
+
+**⚠️ THE DESIGN DECISION THAT CARRIES THIS: ONLY THE INTERNAL VALUES ARE OURS.** Dimensions and the
+whole per-patch `boundaryField` dictionary are copied verbatim from a **template** — the case's own
+field of the same name, normally in `0/`. Three things follow, and each is a reason not to "improve"
+this into a boundary-condition translator:
+- **It is what makes the output restartable** rather than merely viewable. The boundary conditions
+  are the case's own by construction, spelled the way its solver expects, so there is no aquaflux-BC
+  → OpenFOAM-BC mapping to get wrong or to keep in step with either side.
+- **It handles the types this package cannot reconstruct at all.** An `empty` patch is *removed from
+  the mesh* by the 2D collapse, so a writer working from the imported mesh could not put it back.
+  Copying the dictionary does, and a test pins exactly that.
+- **It removes the units table.** A field's `dimensions` has one home — the template — so there is
+  no second place for it to be recorded and disagree.
+
+**Why the internal block is a straight dump, with no permutation.** A cell's aquaflux index *is*
+OpenFOAM's: `assemble` derives cell indices from the `owner`/`neighbour` labels it reads rather than
+renumbering, and `collapse_extruded_direction` keeps cells at their indices (it removes faces, not
+cells — `mesh/collapse.py`'s own docstring states this). ⚠️ **Faces are the opposite** — the collapse
+does renumber them — which is a second, independent reason the patch dictionaries are copied rather
+than rebuilt from the mesh.
+
+**⚠️ A 2D vector field is padded back to three components, and the dropped axis is genuinely NOT
+recoverable from the `Mesh`** — `collapse_extruded_direction` infers it, slices with it, and
+discards it, so `node_coords` really is `(n_nodes, 2)` and a y-extruded case collapses to a mesh
+byte-identical to a z-extruded one. There is no "plane the flat cells lie in" left to inspect.
+
+**It IS recoverable from the case on disk, and `write_openfoam_time` does that by default**
+(`infer_extruded_axis`). The collapse keeps surviving axes in **ascending** order and preserves
+their coordinate values, so there are only three candidates and the polyMesh's extents on the two
+axes a candidate keeps must equal the collapsed mesh's own two extents — exactly one matches. That
+is an identification, not the heuristic "take the thinnest axis", which would misread a domain thin
+in a resolved direction. Ambiguity (no match, or several) raises and asks for the axis rather than
+guessing.
+
+⚠️ **The reason this is cheap is worth keeping, because the obvious objection is wrong.** Parsing
+`points` sounds expensive at reactor scale — but **a mesh that needs this is one cell thick by
+construction**, so it is never one of the large ones (pitzDaily's `points` is 916 KB); a genuinely 3D
+mesh is never collapsed and never asks. The expensive meshes and the ambiguous meshes are disjoint
+sets. It is also only consulted when a **vector** field arrives with two components, so a
+scalar-only or 3D write opens nothing.
+
+`extruded_axis` survives as an explicit override — for a write with no case to consult, or when the
+extents cannot decide. `format_volume_field` and `write_openfoam_field` keep the plain `int` default
+of `-1`, since neither is handed a case directory.
+
+**Measured:** pitzDaily infers axis 2, and the Docker restart below is reproduced exactly through the
+inference path (no `extruded_axis` passed).
+
+**Refuses a non-finite field by default** (`allow_non_finite=True` to override). The point of
+writing is that it can be read back, and a solver handed a NaN restart fails in a way that never
+names this file.
+
+**Verified by an actual restart, not only by a round trip (2026-09-12).** Round trip through this
+package's own reader is exact (`0.000e+00`, not "close") on the committed pitzDaily case and on a
+`structured_grid_2d`, with values encoding their own cell index so a permutation would be visible
+rather than plausible. Then, against `openfoam13:latest` in Docker
+(`docker run --rm -v "$PWD":/work -w /work/case openfoam13:latest foamRun`): OpenFOAM's own converged
+`2000/` fields were read through aquaflux, written back as `2500/` by this writer, and `foamRun`
+restarted from `2500` for five iterations. **The velocity was handed to the writer as TWO
+components** so the 2D padding path is what the solver reads — a zero on the wrong axis makes the
+restart nonsense and the first residual says so.
+
+**It matches a control to every digit printed.** Against `foamRun` continuing from OpenFOAM's own
+`2000/` with `phi` removed, first-iteration initial residuals:
+
+| | control (OpenFOAM's own fields) | restarted from ours |
+|---|---|---|
+| Ux | 0.000657723 | **0.000657723** |
+| Uy | 0.00685219 | **0.00685219** |
+| p | 0.0127883 | **0.0127883** |
+| omega | 0.81593 | **0.81593** |
+| k | 0.0269429 | **0.0269429** |
+
+⚠️ **`omega`'s initial residual is ~0.8 in BOTH arms** — that is `omegaWallFunction` overwriting the
+near-wall values each iteration, not a defect in the written file. Read it against the control, never
+on its own.
+
+**⚠️ `phi` IS NOT WRITTEN, AND THAT IS THE WHOLE OF THE DIFFERENCE FROM A TRUE CONTINUATION.** A time
+directory OpenFOAM writes also holds `phi`, the face flux (`surfaceScalarField`), which this cell
+field writer does not produce; a solver restarting without it recomputes it from `U`. Measured: with
+`phi` present the control's first Ux residual is `0.000616969` against our `0.000657723`, and
+**deleting `phi` from the control collapses that gap to zero** — which is how the cause was
+established rather than guessed. So a restart from this writer is correct and stable, but is a
+*re-derived* flux restart, not a bit-identical continuation.
+
+**⚠️⚠️ AND THAT IS A DECISION, NOT A GAP TO CLOSE LATER — DO NOT "FIX" IT BY WRITING aquaflux's
+`phi`.** `phi` is not merely "the flux on a face": its defining property is **discrete
+divergence-freeness with respect to one particular continuity operator**. That is exactly why
+`.claude/rules/transport.md` makes it binding that a scalar advects on the flow's own Rhie--Chow flux
+and never on a rebuilt `(u·n)A` — a rebuilt one "satisfies no discrete continuity, so a uniform
+tracer would not stay uniform". **That argument is symmetric.** aquaflux's flux is conservative in
+*aquaflux's* operator — its differentiated `a_P`, its flux-continuous harmonic conductance, its
+non-orthogonal correction, its coupled p--U block — and there is no reason `fvc::div(phi) == 0` in
+OpenFOAM's operator except by coincidence. Writing it would therefore *not* beat omitting it (the
+first pressure correction projects it onto OpenFOAM's own manifold either way, which is what
+recomputing from `U` already does), could plausibly be **worse** than the `fvc::flux(U)` OpenFOAM
+forms with its own interpolation, and would silently assert a conservativeness that does not hold —
+in a file that looks right. Note also that OpenFOAM's incompressible `phi` is **volumetric** while
+aquaflux's primitive is `mass_flux` (`volume_flux(mdot, rho)` is derived), so the two are not even
+the same kind of quantity once density varies.
+
+*Separately* it would also be hard — `phi` is a **face** field and the `empty`-patch collapse
+renumbers faces, which is why `read_surface_scalar_field` refuses to run on a 2D case at all. But the
+difficulty is the second reason, not the first; if the renumbering were solved tomorrow the answer
+would still be no. ⚠️ This is argued from the discretization, not measured: writing an aquaflux
+solution's flux into a case and reporting `fvc::div(phi)` would settle it outright, and is the check
+to run before anyone reopens this.
+
+**⚠️⚠️ THE TRAP THAT ONLY A REAL SOLVER RUN FOUND: `value $internalField;`.** A `0` directory gives a
+patch the interior value by macro, and it is well defined only while that interior value is
+*uniform*. This writer always writes a list, so a macro carried through literally expands **every
+cell** onto the patch. OpenFOAM rejects it with `compound has already been transferred from token` at
+the patch's `value` — an error naming neither the macro nor the cause. The fix is that
+`$internalField` resolves against the **template's** own internal entry, which is what the entry
+meant where it was written; `FieldTemplate.internal_field` exists only to carry it. Every *other*
+`$name` is left alone deliberately — the whole `boundaryField` and `dimensions` are carried across, so
+those still resolve, and `internalField` is the one entry this writer replaces.
+
+**`template_time` is a real choice, and both options restart.** `"0"` (the default) gives the case's
+*intended* boundary conditions, with any macro resolved against that file's uniform value. A solved
+time directory instead gives the solved per-patch `value` lists. The second is the closer
+continuation; the first is the more honest statement of the case's boundary conditions and does not
+carry another solver's values into your output.
+
+## From `.claude/rules/io.md` — VTK `.vtu` writer: hexahedra, winding, periodic seams, binary, ParaView verification
+
+## Structure — BUILT (VTK XML `.vtu` writer) — 2026-09-12
+
+The general-purpose output path: a mesh and its cell-centred fields, written as a VTK XML
+unstructured grid a viewer opens directly. `io/vtk/{topology,xml,writer}.py`, exported as
+`write_vtu` (one frame) and `write_pvd` (a transient collection). Three seams mirroring the reader's:
+`topology` reconstructs the connectivity (pure numpy, file-free), `xml` serializes it (pure), and
+`writer` is the only part that opens a file.
+
+**Why hand-rolled, and why VTK's polyhedron in particular** (hexahedra excepted — next section). The mesh is face-based — nodes,
+owner/neighbour, ragged CSR face rings — and cells are *implicit*: there is no cell→vertex list.
+`VTK_POLYHEDRON` (type 42) is defined *by its face-node lists*, and `VTK_POLYGON` (type 7) by a
+vertex ring that is one edge-walk away, so the connectivity is a reconstruction rather than a
+translation. Alternatives were measured out before this was built: **VTKHDF**'s polyhedron support is
+unreleased and the installed ParaView (5.10.1 / 5.12.0) could not read it anyway; **meshio** cannot
+mix polyhedra with other cell types and would still need the topology hand-built; the **`vtk` /
+`pyvista`** wheels are a ~100 MB C++ dependency for a lean JAX package (still true of the solver: the
+browser viewer that does use them is a separate package behind the `ui` extra, `ui.md`); **XDMF**'s polyhedral support
+is poor. Nothing but the standard library is imported.
+
+### Hexahedra are written as `VTK_HEXAHEDRON` (type 12), everything else stays a polyhedron (2026-10-05)
+`topology._hexahedron_vertices` recognizes a 3D cell with **six faces, all quadrilaterals, and eight
+distinct points** — Euler's count leaves such a closed cell no shape but a cube — and orders its
+vertices from the outward rings already built: the first entry's ring **reversed** (right-hand
+normal into the cell) is VTK's 0–3, and for each of those the one outward directed edge leaving that
+face ends at its opposite vertex (4–7). The face stream then carries **only the polyhedra**, with
+`faceoffsets = -1` for every hexahedron, and is omitted entirely when no polyhedron remains (the
+legacy `faces`/`faceoffsets` convention VTK 9.7.1 reads; verified by opening hexahedral, perturbed,
+tetrahedral and mixed hexahedron+prism files in VTK and matching `compute_cell_sizes` to aquaflux's
+volumes to ≤1.2e-15 relative). Only the hexahedron is recognized: tetrahedra, prisms and pyramids
+stay polyhedra (widening this was not agreed).
+- **Why:** it is the *viewer's* cost. Measured 2026-10-05 on `structured_grid_3d(100,100,100)`
+  (1 000 000 cells, one scalar), VTK 9.7.1 / PyVista 0.49.0, macOS arm64: file **70 MB vs 198 MB**,
+  peak RSS after read + slice + threshold + surface **393 MB vs 1074 MB**, `extract_surface`
+  **0.06 s vs 1.13 s**; slice and threshold were ~0.03 s either way, and read 0.05 vs 0.17 s.
+- **Pinned by** `test_hexahedron_vertices_are_in_vtk_order` (base face's normal inward, top in the
+  same sense, each `i, i+4` side a mesh face — geometric, not a pinned array),
+  `test_a_hexahedral_cells_volume_is_the_meshs_own`, and
+  `test_a_mixed_mesh_carries_a_face_stream_for_its_polyhedra_only`; every one of seven targeted
+  mutations of the new code turns them red. **Two guards are deliberately unpinned:** the `sound`
+  incidence check and the 8-point count cannot be reached by a valid closed six-quadrilateral cell,
+  so no fixture distinguishes them; they stay as a refusal to guess on a malformed cell.
+- `tests/support/meshes.py::hexahedron_beside_a_prism` is the mixed fixture; the polyhedron-winding
+  tests run on it and on `tetrahedral_grid_3d`, since a structured grid no longer emits polyhedra.
+
+### ⚠️ THE WINDING RULE IS NOT "KEEP THE RING AS STORED" — THE PREMISE THAT SAYS SO IS FALSE
+VTK needs each polyhedron face listed outward from the cell listing it, and the obvious rule — keep a
+ring as stored under its **owner**, reverse it under its **neighbour** — is only half of it. It
+assumes a stored ring is owner-outward, and **a `Mesh` explicitly declines to promise that**:
+`Mesh.from_faces` accepts either direction ("the winding *direction* is free") and orients the
+**normal**, in a separate array, leaving the ring untouched. Measured on the day this was written:
+`structured_grid_3d(2,2,2)` stores **20 of 36** rings owner-outward and `structured_grid_2d(3,2)`
+**9 of 17** — so a writer built on the premise emits inward faces on roughly half of every cell.
+(pitzDaily read through the OpenFOAM reader is 12448 of 24730, because the `empty`-patch collapse
+rebuilds the faces and does not preserve OpenFOAM's own convention.)
+
+So the rule is the **composition of two facts**: `stored_ring_is_outward` (then in `io/vtk/topology.py`, in `aquaflux/mesh/winding.py` since 2026-10-19) recovers the
+ring's own direction — by running the mesh's *own* face-geometry strategy
+(`unoriented_geometry` → `orient_owner_outward`) rather than re-deriving the orientation test — and
+the entry reverses exactly when that disagrees with the side listing it. Pinned two ways:
+`test_every_emitted_polyhedron_face_winds_outward_from_its_own_cell` checks each emitted ring's own
+Newell normal against its cell centroid, and
+`test_the_output_is_invariant_to_the_direction_the_rings_are_stored_in` rebuilds the same mesh with
+**every** ring reversed and demands byte-identical output. A test comparing against a hand-written
+expected array would have pinned one generator's incidental winding instead, and passed.
+
+### The 2D ring is a permutation chase, and a fixed-length walk is not enough to validate it
+Each of a cell's edges is already directed outward-consistently by the rule above, so a cell's edges
+form one closed *directed* cycle and chaining them needs no geometric tie-break — `n` vectorized
+steps for a mesh whose largest cell has `n` edges, no Python loop over cells. ⚠️ **Checking only that
+the walk returns to its start is wrong**: a cell whose edges form two rings returns at every multiple
+of the shorter one, so a walk of `max(count)` steps lands back at the start and emits the shorter
+ring traversed twice, at exactly the right length. The check is that the *first* return is at the
+cell's own edge count. This was a live bug, found by the test written for it
+(`test_a_2d_cell_whose_edges_form_two_rings_is_refused`, concentric squares as one cell).
+
+### ⚠️ A periodic seam face is listed under its neighbour with the NEIGHBOUR'S nodes, found by position (2026-10-06)
+A fused periodic seam (`structured_grid_2d(periodic=…)`, or an OpenFOAM `cyclic` pair through
+`cyclic.py`) is one interior face whose ring sits on the **owner's** side; the neighbour cell is a
+whole period away and sees it through `neighbour_offset`. Before this fix the writer listed the stored
+ring under both cells. **In 2D that raised** (the neighbour's edges do not chain: `write_vtu` and so
+`aquaflux run` with the default `Vtk` output failed on every periodic 2D case, e.g.
+`validation/turbulent_channel`). **In 3D it did not raise — it was silently wrong, which is worse**: the
+neighbour's polyhedron took 12 points (its own 8 plus the far side's 4) and spanned the period —
+ParaView 5.12.0 `CellSize` on the old output gave the seam cells **4×** their volume on
+`cyclic_slab_polymesh_data(4, 3)` (total 1.4 vs 0.8) and **2×** on the cyclic two-cube (3.0 vs 2.0).
+Nothing caught it because no test wrote a periodic 3D mesh.
+
+The fix (`topology._onto_own_side`) maps each seam node of a **neighbour-side** entry to the node at
+`position − neighbour_offset`, via one `cKDTree` query over all nodes, **after** the winding reversal
+(a translation changes no winding). Both copies of a seam node always exist — the neighbour's other
+faces are built from them — so a missing counterpart is a mismatched periodic mesh and is **refused**
+(`PERIODIC_NODE_MATCH_TOLERANCE` = 1e-2 of the seam face's mean edge length: a true counterpart is off
+only by rounding, any other node by ~an edge, so the fraction only has to sit between the two). The
+sign convention is the mesh's (`neighbour_centroid = cc[neighbour] + offset`), so it holds for the
+generator and the cyclic fusion alike. Pinned by `test_a_periodic_2d_cell_is_a_ring_of_its_own_nodes_*`
+and `test_a_periodic_3d_cell_is_closed_by_its_own_nodes_*` (each recomputes the cell size from the emitted
+connectivity alone and compares it with `mesh.geometry().cell.volume`) and
+`test_a_periodic_seam_node_with_no_counterpart_is_refused`; mutation-checked 2026-10-06 — removing the
+translation, flipping its sign, translating the owner side as well, and disabling the refusal each turn
+at least one red (the sign flip and the owner-side mutation leave the refusal test green, correctly:
+it pins the refusal, the other three pin the geometry).
+- **With the hexahedron writer, both periodic 3D fixtures are written as `VTK_HEXAHEDRON`, not
+  polyhedra** — the seam shift happens on the entry rings *before* `_hexahedron_vertices` orders them,
+  so a seam cell is still a hexahedron of its own 8 nodes. The 3D test (renamed from `…_closed_polyhedron_…`
+  at the merge, 2026-10-06) reads a hexahedron's outward faces from VTK's vertex order
+  (`_HEXAHEDRON_FACES`) and a polyhedron's from the face stream (`_outward_rings`); removing the seam
+  shift still turns both fixtures red.
+
+### Binary is the default, and that was decided before shipping rather than after
+`<AppendedData encoding="raw">` with `header_type="UInt64"`; `binary=False` gives the same values to
+the last bit as decimal text, for reading a small mesh by eye. **Measured 2026-09-12** — macOS arm64,
+ParaView 5.12.0, `structured_grid_3d(60,60,60)` = 216 000 cells / 658 800 faces: raw **40.8 MiB
+written in 1.9 s and opened by ParaView in 0.2 s**, against ASCII **63.1 MiB / 6.9 s / 1.8 s** — i.e.
+**9× the load time**, which is the number that matters, because that cost is paid on every open.
+⚠️ **Size is not the argument and does not hold at small sizes**: on `structured_grid_3d(4,4,4)` the
+raw file is *larger* (15 125 B vs 10 419 B), because a toy mesh's indices are one or two characters
+against a fixed four bytes. A test asserting "binary is smaller" was written, failed, and was
+deleted rather than re-scaled — the property is load time, not bytes.
+
+**Scale it was built for** (same configuration, **measured with every cell written as a polyhedron —
+before hexahedra became type 12 (2026-10-05), so the face-stream size, peak and file size below no
+longer describe a hexahedral mesh**; `structured_grid_3d(118,118,118)` = 1 643 032 cells /
+4 970 868 faces, i.e. uvreactor scale): the face stream alone is **50.9 M integers**; reconstruction
+15.5 s + write 15.2 s at **3.37 GiB peak RSS** (1.83 GiB of which is the mesh), giving a 347 MiB file
+ParaView opens in **0.7 s**. The index arrays are formed at a width chosen once per build by
+`mesh.connectivity.index_dtype` — `int32` here — which is what keeps that peak off a second gigabyte.
+
+### ⚠️ A 2D vector is padded on the LAST axis, NOT on the collapsed one — the opposite of the OpenFOAM field writer
+`infer_extruded_axis` exists and is right for writing a field back into its original 3D case, whose
+coordinates still carry the dropped axis. It is **wrong here**, and calling it would be a plausible
+bug: a `.vtu` writes the mesh's *own* two coordinates into the plane `z = 0`, so the geometry has
+already been re-planarized. Padding a vector at the original axis would put `U_y` in the `z` slot
+while the geometry's `y` sits in `y`. The point and the vector must be padded the same way, and for
+the points that way is fixed by the file format.
+
+### Refuses nothing for being non-finite — also the opposite of the OpenFOAM field writer
+That writer refuses a `NaN` because a solver reading it back fails somewhere that never names the
+file. This one is read by a viewer, and looking at where a solution went non-finite is one of the
+things it is for; a viewer draws those cells as blanks.
+
+### Verified by opening the files, not by asserting on the XML produced
+Every number below is from `pvpython` inside `/Applications/ParaView-5.12.0.app` (5.12.0),
+2026-09-12, **when every 3D cell was written as type 42** — the `structured_grid_3d` and bfs3d hex rows
+are now written as type 12 and were re-checked only in VTK 9.7.1 (volumes to ≤1.2e-15, see the
+hexahedron section above), not in ParaView; the `polyDualMesh` row is unaffected (its cells are not
+six-quadrilateral). **The load-bearing check is `IntegrateVariables` and `CellSize`**: VTK computes a
+polyhedron's volume from the face stream by the divergence theorem, so a single inward-wound face
+makes it wrong or negative — the topology cannot be confirmed by counting cells.
+
+| case | result |
+|---|---|
+| `structured_grid_3d(3,2,2)`, raw and ASCII | 12 cells, 36 points, all type 42, integrated volume **1.0000000000000002** (exact domain 1.0) |
+| `structured_grid_2d(4,3)` | 12 cells, type 7, integrated area **1.0000000000000002**; `U` third component 0 |
+| pitzDaily (2D, 12 225 cells) | integrated area **0.01451603999974618** vs aquaflux's own cell-volume sum **0.014516039999746174** — 15 significant figures |
+| bfs3d (3D OpenFOAM hex, 23 040 cells) | counts and points identical to **ParaView's own OpenFOAM reader**; per-cell volume vs aquaflux max rel dev **1.9e-15**; **zero** negative volumes; cell centres agree with aquaflux to **5.6e-17** |
+| `polyDualMesh` of bfs3d (25 891 genuinely polyhedral cells: 6/8/10 faces per cell, 4/5/6 nodes per face) | counts identical to ParaView's OpenFOAM reader; **zero** negative volumes; per-cell volume **ours vs ParaView's own OpenFOAM reader 1.08e-6** |
+| periodic: `structured_grid_2d(4,4,periodic=("x",))`, the `turbulent_channel` re20000 mesh (4×96, graded, periodic x), `cyclic_slab_polymesh_data(4,3)` and the cyclic two-cube (3D, `assemble`d) — 2026-10-06 | every cell type 7 / 42 with 4 / 8 points; per-cell `CellSize` vs aquaflux's volume max rel dev **0.0** (both 2D) and **2.1e-16 / 1.1e-16** (3D); totals 1.0, 2.0, 0.8, 2.0 exactly |
+| `.pvd` of three frames | opens as one dataset, three timesteps, per-step field ranges correct |
+
+⚠️ **On the dual mesh aquaflux's own cell volumes differ from VTK's by up to 4.6 %, and that is NOT a
+writer defect** — do not "fix" it. The two VTK paths into the same case (our `.vtu`, and ParaView's
+independent OpenFOAM reader) agree to **1.08e-6** per cell, while aquaflux disagrees with *both* by
+4.6e-2. A dual mesh has **non-planar faces**, on which a cell's volume is not defined until a face
+triangulation is chosen: aquaflux uses the centre-fan decomposition its `CellGeometry` is built on,
+VTK uses its own. The bfs3d hex mesh, whose faces are planar, shows 1.9e-15 — which is how the two
+questions were separated. The same applies to the 1.9e-4 centroid gap there: ParaView's `CellCenters`
+is the mean of a cell's points, not its volume centroid, and the two coincide only on a hex.
+
+### Signature asymmetry with the OpenFOAM field writer is deliberate
+`write_vtu(mesh, fields, path)` against `write_openfoam_time(case, time, fields, mesh)`. The two are
+not the same contract dressed differently — see the `FieldWriter` entry under **Deferred**, which
+also records the one thing they *do* share (`io/cell_fields.as_cell_values`) and why the two
+questions have different answers.
+
+
+## From `.claude/rules/io.md` — boundary patches `.vtp` + `.vtm` (2026-10-05)
+
+## Structure — BUILT (boundary patches as VTK `.vtp` + `.vtm`) — 2026-10-05
+
+`io/vtk/patches.py`: `write_patches(mesh, fields_by_patch, path, *, patches=None, binary=True)` writes
+**one VTK XML `PolyData` file per boundary patch** (`<stem>/<patch>.vtp`: the patch's own nodes,
+compacted; its faces as `Polys` — or `Lines` on a 2D mesh, points at `z = 0`; face fields as `CellData`
+under their own names) and **a `vtkMultiBlockDataSet` index** (`<stem>.vtm`, one `DataSet` per patch,
+`name` = patch, `file` = `<stem>/<patch>.vtp`, relative). Every boundary patch holding faces is written by
+default (`boundary_patches(mesh)`), with or without fields — the layout was **agreed with the project owner
+because the `aquaflux_viz` viewer reads it** (`fields.vtu` + `patches.vtm` in a run directory); a change to
+it is a change to that contract. Serialization reuses `xml.py`'s `_Arrays` (appended raw, `UInt64`
+headers), `_narrowed` and `cell_data_arrays` (2-component vectors padded on the trailing axis, as the
+`.vtu`). **Faces are wound OUT of the domain** whatever their stored ring: `stored_ring_is_outward` (then in `io/vtk/topology.py`, in `aquaflux/mesh/winding.py` since 2026-10-19)
+decides per face, reversed rings read back to front (the `.vtu` writer's lesson — a `Mesh` does not promise
+the stored winding). A field of the wrong length is refused naming the patch. It is a `case.PatchVtk`
+field writer (`case.md`). This module does not touch `topology.py` beyond importing
+`stored_ring_is_outward` (another session was changing hex output there).
+
+Tests `tests/unit/test_vtk_patches.py`, decoded by `test_vtk_xml._decode` (independent of the writer):
+blocks and files; every face its own ring, Newell normal along the owner-outward normal, with HALF the
+rings stored reversed, binary and ASCII; a field encoding its face's centroid lands on that face; a 2D
+mesh as lines; the `patches=` filter; refusals.
+
+**Opened by ParaView's own reader** (`pvpython`, `/Applications/ParaView-5.12.0.app`, 2026-10-05), on the
+bunny room's floor run (`validation/ray_effects_room/work/cases/bunny_floor/`): `XMLMultiBlockDataReader`
+lists the five blocks by patch name with the face counts of the mesh's `boundary` file (floor 41,548,
+ceiling 7,788, walls 19,200, bunny 58,022, lamp 280), `E`/`E_absorbed` on the floor only;
+`IntegrateVariables` on `floor.vtp` gives area **15.999999999999279** and `∫E dA` **0.09948874772271568 W**
+against `run.yaml`'s `incident_power` 0.09948874772271586; every floor cell normal (`GenerateSurfaceNormals`,
+consistency off) is **(0, 0, −1)** — out of the room.
+
+## From `.claude/rules/io.md` — CAD import (2026-09-24, #505)
+
+## Structure — BUILT (CAD import: STEP → exact bodies and emitting triangles) — 2026-09-24, #505
+
+`aquaflux/io/cad/`: `read_step(path, placement) -> CadModel`, and the model hands out
+`solid(name)` (one exact `aquaflux.solids` body), `fluid(*names)` (an `Outside` — the vessel as the
+water it holds) and `triangles(name, chord=, facet_size=)` (an emitting surface). **`io` now depends
+on `solids` as well as `mesh`**; `solids` imports nothing back, and it is generic geometry, not a
+physics package (`.claude/rules/solids.md`), which is what makes that direction acceptable.
+
+**Why a library and not a reader of our own (decided with the user, 2026-09-24).** The stated
+direction is *arbitrary* CAD — B-spline surfaces, trimmed faces, fillets, booleans, tessellation to a
+tolerance, point-in-solid — and a reader for the primitive subset would be dominated the day the
+library path existed. Open-source full B-rep kernels that read STEP are, in practice, OpenCASCADE and
+things built on it (gmsh, FreeCAD, CadQuery, build123d); the Rust kernels are not mature and a bare
+STEP entity parser has no geometry. The binding is **OCP**, published by the CadQuery project as
+`cadquery-ocp` — **we use the binding, not CadQuery**. `pythonocc-core` is conda-only; `gmsh` embeds
+OCCT but does not hand back surface parameters. ⚠️ Pinned exactly
+(`cadquery-ocp-novtk==8.0.1.0.0`, the `cad` extra): two short probes of 8.0.1 hit four API breaks —
+`TDF_LabelSequence` → `OCP.collections.Sequence_TDF_Label`, `TopTools_ListOfShape` →
+`OCP.collections.List_TopoDS_Shape`, `TopoDS.Solid_s` → `TopoDS.Solid`, and `Bnd_Box.Get()` cannot
+convert its return type (use `CornerMin`/`CornerMax`). `-novtk` is the same `OCP` module without VTK
+(a further large wheel) and cannot be installed beside CadQuery. No cp310 wheel, so
+`requires-python` went to `>=3.11` (CI already ran 3.11/3.12 only). **Unlike `petsc4py` it runs in
+CI**: the `test` extra carries `aquaflux[cad]`, and `tests/unit/test_cad_step.py` is in the
+optional-dependency census as gated on `OCP`.
+
+**Layout — one module touches the kernel; everything else is plain numpy, testable without it.**
+- `kernel.py` — `OpenCascade`, the only `import OCP` in the package. Reads STEP into named, placed
+  solids; describes faces as records; builds `solids` bodies back into kernel solids; fuses;
+  measures boundary distances; triangulates. No kernel object leaves `CadModel`.
+- `faces.py` — `PlaneFace`, `CylinderFace`, `ConeFace`, `SphereFace`, `OtherFace`,
+  `SolidDescription`: the facts recognition needs, as numbers.
+- `recognize.py` — `RecognitionRule` strategies + `recognize(description, rules)`.
+- `placement.py` — `Placement(matrix, offset)`, orthogonal only (a reflection is allowed; a stretch
+  would make a cylinder elliptic and is refused; so is a uniform scale — units are the reader's job).
+- `model.py` — `CadModel`, `InexactBody`, `read_step` (imports the kernel lazily, so
+  `import aquaflux.io` needs no CAD kernel).
+
+**Recognition is two rules, and a proposal is a CLAIM that is checked, not a result.**
+- `CurvedPieces` — the solid is the union of the whole-turn convex surfaces it lies inside: each
+  cylinder / cone / sphere face with the solid on its axis side becomes that primitive over the
+  face's own axial extent. ⚠️ **Which side the solid is on is recorded per face** (`solid_inside`),
+  because a pipe wall and a sleeve's bore are the same cylinder read from opposite sides and only the
+  first is a convex piece; a whole-turn face with the solid outside is refused as a bore.
+  ⚠️ **Faces of one surface are merged before "whole turn" is decided** — exporters split a periodic
+  face into halves, reported from different origins with opposite axis signs, so faces are compared
+  on a canonical axis (`_Axial`: one direction sign, the foot of the line nearest the origin). A
+  partial face that remains is skipped and the proposal is marked `stands_alone=False`: that is the
+  **pipe whose end is cut to the curve of the vessel it joins** (the Sozzi riser's end is a 0.43-rad
+  patch of the *chamber's* cylinder with the pipe outside it). Its cylinder runs on into the vessel;
+  the union with the vessel is exact, the pipe alone is not, so `solid()` refuses it and `fluid()`
+  accepts it.
+- `ConvexPolyhedron` — an all-planar solid whose every vertex is inside every face's plane is the
+  `Intersection` of its faces' `HalfSpace`s. A theorem, so `proven=True` and no check; in a union
+  check the drawing's own solid stands in for it (a half-space has no finite kernel counterpart to
+  build — mutation-checked: rebuilding it fails `test_a_polyhedron_takes_part_in_a_fluid_as_the_solid_it_is`).
+- Anything else — a torus, a spline patch, a non-convex planar solid — raises `UnrecognizedSolid`
+  naming every rule's reason. **The reader does not fall back to triangles.** #510's triangle-backed
+  occluder now exists (`aquaflux.radiation.TriangleBody`, #554 phase B), but nothing here routes an
+  unrecognized solid to it: that is still a documented refusal, which is what #505's acceptance
+  allows. Wiring the fallback in behind the same refusal (the solid's own `CadModel.triangles`, as a
+  `TriangleBody`) is the remaining step, not built.
+
+**⚠️⚠️ THE CHECK IS BOUNDARY DISTANCE, NOT VOLUME — AND THE VOLUME VERSION WAS BUILT FIRST AND FAILED
+ON A CORRECT FILE.** Sample points on both boundaries (the union of the proposed bodies and the
+union of the drawing's solids; mesh nodes after cutting to `sample_spacing`, a sixteenth of the extent
+by default) and require every point within the drawing's **own declared tolerance**
+(`ShapeAnalysis_ShapeTolerance`, max over edges/vertices/faces) of the other boundary, in both
+directions. Why not the obvious symmetric-difference volume, measured on the Sozzi drawing:
+- The drawing's `outlet_pipe` is **1.48e-5 below its analytic volume**, and that is geometry, not
+  integration — OCCT's adaptive volume integration reports an error estimate of 3.8e-14 at
+  `eps` 1e-6/1e-9/1e-12 and the gap does not move. The saddle edge is a B-spline fitted to the
+  drawing's **declared 10 µm** tolerance (Onshape's export precision). The recognized primitives,
+  meanwhile, match the analytic union to **7e-10**. So the proposal was closer to the true shape than
+  the file was, and a 1e-7 relative volume tolerance refused it (measured 1.51e-7 → then 2.2e-7).
+- Loosening the volume tolerance to the file's precision (area × 10 µm = 3.6 cm³ here) would pass
+  a missing baffle. A volume test cannot be set: either it fails a correct file or it waves a thin
+  feature through.
+- The distance sees a thin feature regardless of its volume, because every face is sampled at least
+  at its own corners. Two configurations, not to be mixed:
+  - **Shipped defaults** (`sample_spacing` = extent/16 ≈ 0.056 m, chord = spacing; drawing
+    tolerance 1e-5): true fluid **7.5e-7 m**, true lamp **2.1e-6 m** — the numbers
+    `CadModel.discrepancy` reports.
+  - **The decoy probe** (spacing 0.05 m, chord 1e-4, a scratch harness): true fluid **1.66e-6 m**,
+    true lamp **2.33e-6 m**; riser radius −1% **9.55e-5 m** (caught), riser 0.5 mm short **5.0e-4 m**
+    (caught), riser radius **−0.1% → 9.6e-6 m, NOT caught** — below what a drawing exported at 10 µm
+    can resolve. That limit is the honest one: nothing can be compared to a drawing more finely than
+    the drawing was exported. The −1% case is pinned by `test_a_proposal_that_is_wrong_by_a_percent_is_refused`.
+- ⚠️ **Both directions are load-bearing, each with its own test** (mutation-checked): a phantom
+  flange on the proposal is seen only from the proposal's side
+  (`test_a_phantom_flange_on_the_proposal_is_refused`), a thin fin on the drawing that the rule
+  misses only from the drawing's side (`test_a_thin_fin_the_rules_do_not_see_is_refused`).
+- Cost: 0.5–0.8 s for the Sozzi vessel (BRepExtrema point-to-shape distance ≈ 0.1 ms/point). ⚠️
+  Sampling with a 1e-6 chord took > 10 min — millions of points — and was killed; the spacing, not
+  the chord, is what should set the sample count.
+
+**Three kernel details that are load-bearing, each found on the real file:**
+1. **Units: `XCAFDoc_DocumentTool.SetLengthUnit_s(doc, 1.0)` before transfer.** Otherwise every
+   length comes out in **millimetres** whatever the file declares (the Sozzi file is in metres), and
+   setting the `xstep.cascade.unit` static does *not* reach the XCAF reader. Pinned by the Sozzi
+   dimensions test and by a synthetic file written in millimetres.
+2. **`solid_inside` from face orientation, not from classifying a point.** The natural surface
+   normal flipped when the face is `REVERSED` points out of a valid solid everywhere on the surface;
+   a classifier needs a point certainly on the face, which a face with a hole does not give at its
+   parameter midpoint.
+3. **Never recognize from edge types.** The adaptor reports straight seam lines as
+   `GeomAbs_BSplineCurve` although the Sozzi file holds a single `B_SPLINE_CURVE_WITH_KNOTS`.
+
+**Assemblies**: locations are accumulated down the component tree (`location.Multiplied(...)`), and a
+part's own name is preferred to its instance's; a repeated name gets `[k]`, several solids under one
+name get `.k`. Pinned by a two-instance synthetic assembly (mutation: dropping the location or the
+suffix goes red).
+
+**Triangulation: facet SIZE is bounded by cutting the boundary SHELLS with a grid of planes, and the
+first two ways of doing it were wrong.**
+- OCCT's mesher bounds chord and angle only (`IMeshTools_Parameters` has `MinSize`, no maximum), so a
+  straight cylinder comes out as full-length slivers: the Sozzi lamp's cylinder was 100 triangles
+  0.8 m long and ~0.9 mm wide.
+- ⚠️ **Longest-edge (Rivara) bisection afterwards is the wrong tool on such input and was deleted.**
+  On slivers all three edges are within ~1e-7 of each other, "the longest" is arbitrary, and the
+  conformity closure splits three ways per pass: **148,467** triangles at 20 mm against ~18k needed,
+  median aspect 318. Marking only each triangle's longest edge (classic Rivara) changed not one count.
+- ⚠️ `ShapeUpgrade_ShapeDivideArea` (by area) left patches long and thin (median aspect 25–79, 10 s
+  at 2.5 mm); `ShapeUpgrade_FaceDivideArea` by number did nothing (it gates on an area threshold OCP
+  exposes only as a reference).
+- **What works**: `BRepAlgoAPI_Splitter` of the solid's **shells** (never the solid — splitting the
+  volume meshes the cutting planes' interior faces too: area **+175%**) by three families of planes
+  `facet_size` apart, then mesh. Every patch fits in a `facet_size` cube, so edges ≤ `√3·facet_size`
+  and in practice ≈ `facet_size`: lamp at chord 1e-5 → 11,002 / 22,271 / 40,085 / 86,315 triangles at
+  20 / 10 / 5 / 2.5 mm, longest edge 19.8 / 9.9 / 5.7 / 3.1 mm, area −1.8e-4…−1.4e-4, 0.07–6 s.
+  Remaining aspect (31 → 4.5) is `facet_size` over the chord-set circumferential spacing, which the
+  gather does not care about (its solid angle is exact at any shape).
+- **Zero-area triangles are dropped** — the mesher emits one or two at a pole, and a zero-area facet
+  is a *point source* to `radiation.Surfaces`, which an emitting surface must not contain by
+  accident. Mutation-checked.
+- **A reflecting placement keeps triangles outward** — `BRepBuilderAPI_Transform` with a negative
+  `gp_Trsf` reverses the faces itself; the Sozzi placement (x↔y) is a reflection and the lamp test
+  runs through it (signed volume positive to 2e-3 of the analytic value).
+
+**MEASURED (2026-09-24): the fluid read from the drawing shadows the Sozzi reactor exactly as the
+hand-derived occluder does** (`validation/sozzi_radiation/primitive_occlusion.py`, third arm): **0 of
+180,384,000 pairs** masked differently and `G` equal to 0.0 relative at median, p99 and max, on
+24,000 cells drawn from the meshed case's 1,635,909 (19,437 chamber / 2,214 inlet / 2,433 riser, after
+the hand-typed pipes' truncation was fixed — see `.claude/notes/radiation-log.md`, "MEASURED: the Sozzi reactor as three cylinders"; the first run's population
+was 22,250 / 640 / 1,200 and also gave 0), the
+case's `lampWall.stl` (7,516 facets), exitance 696.42 W/m², absorption 35.67 /m; jax 0.10.2, CPU, x64,
+macOS arm64, 11 cores, `cadquery-ocp-novtk` 8.0.1.0.0, CPython 3.13. The drawing's cylinders differ
+from the hand-typed ones in *parameters* (the riser carried into the chamber by recognition rather than
+by `REACH_BACK`), and the mask on the mesh's receivers is identical. ⚠️ An earlier version of this
+entry said the meshed domain cut the pipes at x = 1.10 / z = 0.40; that was the hand-typed pipes' cut,
+not the mesh's, which runs the full 850 mm. Read-and-check took 0.8 s. The three arms' single-pass
+timings (8.7 / 12.8 / 11.0 s) are one pass each and are **not** a ratio to quote (#513).
+
+## From `.claude/rules/io.md` — deferred: the FieldWriter question
+
+## Deferred (additive; no seam changes)
+Binary polyMesh; `faceZones`/`pointZones`; `.gz` compression / multi-region cases; **mesh writing**
+(a future `MeshWriter` counterpart to `MeshReader` — note the *field* writers are a different thing
+and need none, since each writes a mesh it was handed or into a case whose mesh is already on disk);
+other formats (Gmsh/VTK/CGNS) as new `MeshReader` subclasses under `io/<format>/`.
+
+**A `FieldWriter` ABC was held open until the second writer existed, and the answer is NO — but the
+shared piece was real and IS extracted (`io/cell_fields.py`, 2026-09-12).** Both halves of that
+matter, and they are not the same question.
+
+*The contract does not unify.* `write_openfoam_time(case, time, fields, mesh)` writes **N files into
+a directory of an existing case**, needs a per-field template on disk for dimensions and boundary
+conditions, and uses the mesh only for a length check and the extruded-axis inference;
+`write_vtu(mesh, fields, path)` writes **one file** in which the mesh *is* the payload, and needs
+nothing but what it is handed. A common `write(mesh, fields, destination)` would make `destination`
+mean a filesystem path in one and a time *name inside a case* in the other, and every remaining
+keyword (`template_time`, `extruded_axis`, `allow_non_finite` against `binary`) belongs to exactly
+one side — the union bundle the Module Review Rubric warns about. Two writers taking a
+`{name: array}` mapping is a shared *vocabulary*, not one configuration.
+
+*The formula did.* Both opened with `np.asarray(values, dtype=float)`, a length check against
+`n_cells`, and — the tell — a **byte-identical error message**, written independently a week apart.
+That is now `io/cell_fields.as_cell_values(name, values, n_cells)`, which both call. ⚠️ **Read this
+pair as the general lesson, because it is the shape that hides**: "these two are not the same
+abstraction" is a true statement that says *nothing* about whether they share an implementation, and
+answering only the abstraction question leaves the duplicate in place looking justified. Ask both.
+The duplicate was invisible to `tools/sibling_builders.py` by construction — neither function
+constructs a class, so no pair exists for it to report, and its silence here is not evidence.
+
+**`.pvtu`** (parallel pieces, for `parallel/PartitionedMesh`) is deferred with the seam already cut:
+`xml.cell_data_arrays` yields the array names and component counts a `.pvtu` declares, with no data
+attached, so it reuses that function unchanged.
+
+## From `.claude/rules/io.md` — testability seam (test inventory)
+
+## Testability seam (satisfied)
+- **Parse** — grammar/foamfile on string snippets (`tests/unit/test_foamfile.py`), no files;
+  including `parse_boundary` reading a `cyclic` patch's `neighbourPatch` entry.
+- **Assemble** — `assemble` on a hand-built `PolyMeshData` (`tests/support/polymesh.py`
+  `two_cube_polymesh_data`; `tests/unit/test_openfoam_assemble.py`), no files.
+- **Cyclic fusion** — `tests/unit/test_openfoam_cyclic.py`, file-free on hand-built cyclic-patch
+  fixtures (`tests/support/polymesh.py` `cyclic_two_cube_polymesh_data` /
+  `cyclic_slab_polymesh_data`): the fused seam's owner/neighbour/`neighbour_offset`, every
+  pairing error path (missing/unknown/self-referencing/asymmetric `neighbourPatch`, a partner that
+  is not itself `cyclic`, a face-count mismatch, a non-translational pair), and a fused-then-
+  collapsed slab cross-checked against `structured_grid_2d(periodic=("x",))` — the independent
+  oracle for the periodic connectivity a real OpenFOAM cyclic mesh should read in as.
+- **Collapse** — file-free: collapse `structured_grid_3d(nx, ny, 1)` and match
+  `structured_grid_2d(nx, ny)` up to renumbering (`tests/unit/test_collapse.py`), plus a hand-built
+  periodic slab pinning that the seam's `neighbour_offset` survives the face renumbering. (The
+  cyclic-fusion + collapse cross-check above is the reader-reachable version of this same property;
+  this one stays as the collapse transform's own file-free regression test.)
+- **Orchestrate** — end-to-end on committed ASCII fixtures (`tests/fixtures/polymesh_3d_two_cubes`,
+  `tests/fixtures/polymesh_2d_slab`), cross-checked against the structured generators
+  (`tests/unit/test_openfoam_reader.py`).
+- **Fields** — `tests/unit/test_openfoam_fields.py`: the parser on snippets, and placement end to
+  end on the two-cube fixture with a field whose **each value encodes its own face index**, so any
+  permutation shows up as a mismatch rather than as a plausible field. The ordering guard is tested
+  by feeding it a *generated* grid, which genuinely is not interior-first (its `left` patch occupies
+  faces 0–2 while the interior starts at 3) — a standing counter-example, not a contrived one. A
+  separate test pins that a periodic mesh (`structured_grid_2d(periodic=("x",))`, standing in for a
+  fused cyclic mesh) is refused directly, not by that same positional check. The committed two-cube
+  fixture's `boundary` file happens to declare its patches in the same order their faces occupy, so
+  a further hand-built case (`two_cube_polymesh_data()._replace(patches=...)`, reordering the
+  declared patches without moving their face ranges) declares them out of ascending-startFace order
+  and checks the same encode-your-own-face-index placement on it — the case that distinguishes
+  "laid out by startFace" from "laid out in file/declaration order," which the committed fixture
+  alone cannot.
+
+## From `.claude/rules/io.md` — interior phi placement measured on bfs3d (2026-08-17)
+
+## The interior placement is MEASURED, not only argued (bfs3d, 2026-08-17)
+
+The unit tests pin the *structure* (interior block leads, patches contiguous, lengths agree) on a
+two-cube fixture. Whether values land on the right faces **within** the interior block needs a real
+mesh's connectivity, so it is measured by `validation/bfs3d_openfoam/phi_placement.py` — kept in the
+repository precisely so the question can be re-asked rather than only cited.
+
+**Measured on** `validation/bfs3d_openfoam/of_case`, the steady `kOmegaSST` run's `2000/phi`; 23040
+cells, 71872 faces (66368 internal + 5504 boundary), 3D, uncollapsed. No solver defaults are involved
+— this is a mesh build and two scatters, so it does not expire when a solver default moves.
+
+- **Boundary placement.** Inlet net flux is exactly `-4.000000e-03` m³/s = `U_in x A` = `10 x (0.01 x
+  0.04)`; all three wall patches are exactly zero; net imbalance `1.15e-06` (`2.9e-04` of throughput)
+  is OpenFOAM's own continuity error.
+- **Interior placement.** The conservative scatter of `phi` on aquaflux's connectivity gives a max
+  per-cell imbalance of `1.96e-08` m³/s = **`4.9e-06` of the domain flow rate** — the reference's own
+  convergence level. A seeded permutation of the interior block (the mutation control, and the whole
+  point) gives `2.3e-02`, **4.7e+03x worse**. Placement CONFIRMED.
+- ⚠️ **Do NOT normalize a continuity error by the cell's own throughput.** It looks like the natural
+  measure and it is a trap: in the recirculation and side-wall corners a cell's throughput falls to
+  ~2% of median, so the reference's fixed absolute error divides up into a 2.2e-02 "relative" error
+  that reads as a failure. Checked, not assumed — the worst-ratio cells carry `3–9e-09` absolute,
+  *below* the global max of `1.96e-08`, so it is entirely the denominator. Normalize by the domain
+  flow rate; report the local ratio only as a distribution, whose *spread* is what would reveal a
+  genuine mis-placement (local, hence a cluster) as opposed to diffuse reference error.
+
+## 2026-10-19 — polyMesh writer checked by OpenFOAM's checkMesh
+
+`openfoam13:latest` in Docker, `checkMesh -allGeometry -allTopology`, on the writer-test meshes written by
+`write_openfoam` after `restated` (seed 11: shuffled faces, half the rings reversed, half the interior
+owners swapped). box (12 cells), skewed box (18), labelled box (12, zones and groups): Mesh OK.
+tetrahedra (48) and hexahedron beside a prism (2): upper-triangular ordering OK, max cell openness
+4.6e-17 and 0, non-orthogonality max 39.1 and 11.3, and one failed check each, "Cells with small
+determinant (< 0.001)", 12 of 48 and 2 of 2 cells -- cells bounded mostly by boundary faces. Controls on
+the skewed box: winding fix removed (`reverse = zeros`) failed 9 checks (17 open cells, 11 negative
+volumes, 22 non-orthogonality errors, 67 incorrectly oriented faces); sort removed failed "Faces not in
+upper triangular order". The blockMesh fixture (two graded blocks, 42 cells) is Mesh OK, and
+`disassemble(read_openfoam(fixture))` equals the fixture's parsed arrays exactly.
+
+## 2026-10-19 — CAD regions for a mesher: what the kernel reported
+
+cadquery-ocp-novtk 8.0.1.0.0, macOS arm64. A box fused with a cube on its half (an L) keeps 11 faces (the
+shared plane splits them) and 23 edges: 19 convex, 1 concave (x = 1, z = 1, along y), 3 flat. A first
+version flipped the traversal direction again for a reversed face and gave the plain box six -90 degree
+edges; exploring a face's edges already composes its orientation. Sozzi water (body + pipes - lamp), 9
+faces, 15 edges, 5 seams: concave only at edge 3 (body cylinder r 0.0445 / inlet riser r 0.00955) and
+edge 5 (end plate at x = 0.889 / outlet pipe); the lamp through the x = 0 plate is convex (90 degrees), the
+lamp's cylinder-to-hemisphere edge flat. A point at (0.7, 0.4, 0.9) inside the unit-height box projected
+with `BRepExtrema_DistShapeShape(vertex, solid)` returned distance 0 and the solid as support, hence the
+boundary shells. Face-tagged triangles of the Sozzi water: chord 2e-5, facet 0.03 m, 24384 triangles in
+0.7 s, per-face area within 1.5e-3 of the face's own; facet 5e-3 m took 319 s (the splitter, not the
+mesher).
+

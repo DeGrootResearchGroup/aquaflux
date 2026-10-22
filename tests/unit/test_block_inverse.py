@@ -34,7 +34,9 @@ def _fields(spec_class) -> set[str]:
     return {field.name for field in dataclasses.fields(spec_class)}
 
 
-_HIERARCHY = _keywords(HierarchyBlockInverse.__init__, drop={"report"})
+# `report` and `stored_precision` are how the inverse is built for a caller (where its record goes, and
+# the precision a split applies it in), supplied when a session binds the factory -- not settings.
+_HIERARCHY = _keywords(HierarchyBlockInverse.__init__, drop={"report", "stored_precision"})
 
 
 @pytest.mark.parametrize(

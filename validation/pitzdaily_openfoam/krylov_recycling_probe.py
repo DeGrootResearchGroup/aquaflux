@@ -18,8 +18,14 @@ checkpoints and refits the preconditioner where the march refitted it.
              PITZ_REFRESH_ON_CYCLES=3`` (the configuration this probe's recorded results were taken in);
              a mismatch is reported, since a replay that does not reproduce the march is measuring some
              other sequence.
-``gmres``    restarted GMRES(15) stopping the moment the true residual meets the same relative
-             tolerance in the same measure, checked after every iteration.
+``gmres``    restarted GMRES(15) stopping the moment its Arnoldi residual meets the same relative
+             tolerance in the same measure, checked after every iteration, and starting each cycle
+             from that residual -- the algorithm of ``residual_stop_gmres``, bar the one application
+             with which that solver reads the true residual for its verdict.
+``residual`` the library's own ``residual_stop_gmres`` at the march's tolerance, restart and cap, in the
+             step's measure, counting the applications it reports. It must take ``gmres-15``'s count
+             plus one, solve for solve; anything else means the probe's GMRES is not the one the march
+             runs (or that a verdict the recurrence gave was overturned by the true residual).
 ``gcro-k``   GCRO-DR with ``k`` recycled vectors carried from solve to solve, the same stop. Charged
              for the ``k`` applications that re-derive ``C = A M U`` for each new operator.
 
@@ -63,10 +69,15 @@ import equinox as eqx  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.linalg as sla  # noqa: E402
-from aquaflux.solve import relative_residual_gmres, restart_cycles  # noqa: E402
+from aquaflux.solve import (  # noqa: E402
+    relative_residual_gmres,
+    residual_stop_gmres,
+    restart_cycles,
+)
 from replay import MarchReplay  # noqa: E402
 
-#: The arms to run, by name: ``lineax`` (the march's own solver, and the fidelity check), ``gmres-R``
+#: The arms to run, by name: ``lineax`` (the march's own solver, and the fidelity check), ``residual``
+#: (the library's residual stop), ``gmres-R``
 #: (GMRES(R), residual stop every iteration), ``weighted-R`` (the same, minimizing a weighted 2-norm
 #: matched to the measure's row and field scales) and ``gcro-D`` (GCRO-DR keeping D vectors).
 ARMS = tuple(os.environ.get("PITZ_REPLAY_ARMS", "lineax,gmres-15,gcro-5,gcro-10").split(","))
@@ -184,6 +195,13 @@ def main():
     def measured(measure, r):
         return measure(r)
 
+    linear = replay.solver.linear_solve
+    reported = []
+
+    def report(applications, cycles):
+        # One callable for every solve: the observer is a static field, so a new one would recompile.
+        reported.append(int(applications))
+
     totals = dict.fromkeys(ARMS, 0)
     recycled = {arm: None for arm in ARMS}
     mismatches = 0
@@ -222,6 +240,22 @@ def main():
                 mismatches += cycles != system.recorded
                 # One application for the start-up residual, then RESTART + 1 per cycle.
                 counts[arm] = 1 + (RESTART + 1) * (raw - 1)
+            elif kind == "residual":
+                raw = replay.solve(
+                    system,
+                    residual_stop_gmres(
+                        rtol,
+                        norm=measure,
+                        restart=linear.restart,
+                        max_restarts=linear.max_restarts,
+                        on_solve=report,
+                    ),
+                )[1]
+                # Under a capture made with the residual stop the march recorded cycles RUN, which is
+                # this solver's count too: the same check of fidelity as the ``lineax`` arm's.
+                cycles = restart_cycles(int(raw))
+                mismatches += cycles != system.recorded
+                counts[arm] = reported[-1]
             elif kind == "gmres":
                 counts[arm] = gcro_dr(apply, bn, norm, rtol, int(number), 0, None)[1]
             elif kind == "weighted":

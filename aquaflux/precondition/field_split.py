@@ -49,6 +49,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from ..solve import FieldLayout
+from .entry_map import EntryMaps
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import FrozenInverse, release, require_refactorable
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
@@ -60,6 +61,7 @@ from .multigrid import (
     convection_multigrid_cycles,
     refresh_air_hierarchy,
 )
+from .padded_rows import _padded_operator, _PaddedRowOperator
 from .traced_cycle import TracedCycle
 
 __all__ = [
@@ -205,7 +207,7 @@ class FieldGroups:
         return slice(self.n_leading_dofs, self.n_dofs)
 
     def blocks(
-        self, matrix: sp.spmatrix
+        self, matrix: sp.spmatrix, maps: EntryMaps | None = None
     ) -> tuple[sp.csr_matrix, sp.csr_matrix, sp.csr_matrix, sp.csr_matrix]:
         """The operator's four blocks under this partition.
 
@@ -213,6 +215,9 @@ class FieldGroups:
         ----------
         matrix : scipy.sparse matrix
             The assembled field-major operator, shape ``(n_dofs, n_dofs)``.
+        maps : EntryMaps, optional
+            Where the gather of each block out of ``matrix`` is kept, for an owner that cuts blocks out
+            of operators of one pattern again and again (a refit). ``None`` slices afresh.
 
         Returns
         -------
@@ -231,12 +236,13 @@ class FieldGroups:
                 f"matrix is {matrix.shape}, but this partition describes "
                 f"{(self.n_dofs, self.n_dofs)} ({self.n_fields} fields over {self.n_cells} cells)."
             )
-        lead, trail = self.leading, self.trailing
-        return (
-            matrix[lead, :][:, lead],
-            matrix[lead, :][:, trail],
-            matrix[trail, :][:, lead],
-            matrix[trail, :][:, trail],
+        cuts = ((self.leading, self.leading), (self.leading, self.trailing))
+        cuts += ((self.trailing, self.leading), (self.trailing, self.trailing))
+        if maps is None:
+            return tuple(matrix[rows, columns] for rows, columns in cuts)
+        return tuple(
+            maps.csr(("block", position), matrix, lambda m, r=rows, c=columns: m[r, c])
+            for position, (rows, columns) in enumerate(cuts)
         )
 
     def active_rows(self) -> np.ndarray:
@@ -329,10 +335,16 @@ class FieldSplitInverse:
         self._trailing = trailing
         self._set_coupling(coupling)
         self._groups = groups
+        # The gathers that cut a refit's operator into blocks, kept between refits.
+        self._maps = EntryMaps()
 
     def _set_coupling(self, coupling: sp.spmatrix) -> None:
-        """Store the retained coupling block, discarding any transpose cached for the previous one."""
-        self._coupling = sp.csr_matrix(coupling)
+        """Store the retained coupling block, discarding any transpose cached for the previous one.
+
+        Copied: the block handed in may be a view of a larger array (one materialize's values), which
+        holding it would keep alive until the next refit.
+        """
+        self._coupling = sp.csr_matrix(coupling).copy()
         self._coupling_transpose: sp.csr_matrix | None = None
 
     @property
@@ -369,6 +381,14 @@ class FieldSplitInverse:
     def coupling(self) -> sp.csr_matrix:
         """The retained trailing-by-leading block, shape ``(n_trailing_dofs, n_leading_dofs)``."""
         return self._coupling
+
+    def padded_coupling(self) -> _PaddedRowOperator:
+        """The retained coupling in padded-row form, for a split composed on device.
+
+        Its packing is a fixed gather on the coupling's pattern, held between refits with the gathers
+        that cut the blocks, so a refit's re-composition moves only values.
+        """
+        return _padded_operator(self._coupling, maps=self._maps, slot="coupling")
 
     @property
     def n_dofs(self) -> int:
@@ -428,7 +448,26 @@ class FieldSplitInverse:
             If a block inverse offers no ``refactor_block`` (an injected inverse need not be refreshable
             at all). Both are checked before either is re-fitted, so a refusal leaves the split as it was.
         """
-        blocks = self._groups.blocks(block)
+        self.refactor_blocks(self._groups.blocks(block, self._maps))
+
+    def refactor_blocks(self, blocks: tuple[sp.csr_matrix, ...]) -> None:
+        """Re-fit to an operator already cut into this partition's blocks, IN PLACE.
+
+        :meth:`refactor_block` cuts the whole operator and lands here; a probe laid out block by block
+        (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`) hands its blocks straight in,
+        so the whole operator is never formed.
+
+        Parameters
+        ----------
+        blocks : tuple of scipy.sparse.csr_matrix
+            ``(A_ll, A_lt, A_tl, A_tt)`` as :meth:`FieldGroups.blocks` orders them, already shifted.
+            ``A_lt`` is not read. The blocks may share memory with each other: the coupling is copied.
+
+        Raises
+        ------
+        TypeError
+            As :meth:`refactor_block`.
+        """
         leading = require_refactorable(self._leading, "this field split's leading block")
         trailing = require_refactorable(self._trailing, "this field split's trailing block")
         leading.refactor_block(blocks[0])
@@ -476,7 +515,23 @@ def field_split_inverse(
     FieldSplitInverse
         The frozen preconditioner.
     """
-    leading_block, _, trailing_by_leading, trailing_block = groups.blocks(matrix)
+    return _field_split_of_blocks(
+        groups.blocks(matrix),
+        groups,
+        leading_inverse=leading_inverse,
+        trailing_inverse=trailing_inverse,
+    )
+
+
+def _field_split_of_blocks(
+    blocks: tuple[sp.csr_matrix, ...],
+    groups: FieldGroups,
+    *,
+    leading_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+    trailing_inverse: Callable[[sp.csr_matrix, int], FrozenInverse],
+) -> FieldSplitInverse:
+    """:func:`field_split_inverse` over an operator already cut into ``groups``' four blocks."""
+    leading_block, _, trailing_by_leading, trailing_block = blocks
     return FieldSplitInverse(
         leading_inverse(leading_block, groups.n_leading_fields),
         trailing_inverse(trailing_block, groups.n_trailing_fields),
@@ -549,16 +604,30 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
         FieldSplitPreconditioner
             The frozen preconditioner.
         """
+        inverses = {"leading_inverse": leading_inverse, "trailing_inverse": trailing_inverse}
+        if structure is not None and structure.layout is not None:
+            cls._require_partition(structure, groups)
+            probed = cls._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
+            probed.add_shift(shift_diagonal)
+            return cls(_field_split_of_blocks(probed.blocks(), groups, **inverses), groups)
         jacobian = cls._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
-        split = field_split_inverse(
-            cls._shifted(jacobian, shift_diagonal),
-            groups,
-            leading_inverse=leading_inverse,
-            trailing_inverse=trailing_inverse,
-        )
+        split = field_split_inverse(cls._shifted(jacobian, shift_diagonal), groups, **inverses)
         return cls(split, groups)
+
+    @staticmethod
+    def _require_partition(structure: ProbeGather, groups: FieldGroups) -> None:
+        """Refuse a probe laid out over another partition than the split's."""
+        if structure.layout.leading_dofs != groups.n_leading_dofs:
+            raise ValueError(
+                f"the probe's blocks split the operator after {structure.layout.leading_dofs} unknowns, "
+                f"and this field split after {groups.n_leading_dofs}."
+            )
+
+    def _refactor_blocks(self, blocks: tuple[sp.csr_matrix, ...]) -> None:
+        """Re-fit the split to a probe's blocks (see the base's :meth:`refresh_in_place`)."""
+        self.inverse.refactor_blocks(blocks)
 
 
 class _NodalSmoother(NamedTuple):
@@ -659,9 +728,8 @@ class JacobiSmoothedInverse(HierarchyBlockInverse):
 
     **``equilibrate`` rescales each cell block to a unit-magnitude diagonal**, which leaves the per-cell
     block triangular with a determinant of exactly one, so the block solve cannot meet a singular block.
-    It is **not** what keeps the build safe, though: the singularity test is a row-norm (Hadamard)
-    determinant bound, which is invariant under rescaling any row or column, so it reaches the same
-    verdict either way.
+    It is **not** what keeps the build safe, though: the singularity test is invariant under rescaling
+    any row or column of a block, so it reaches the same verdict either way.
 
     **It is not a free choice on a marched solve, and better conditioning is not the deciding property.**
     Rescaling is close to a similarity transform on the Jacobi-preconditioned operator, so the smoother

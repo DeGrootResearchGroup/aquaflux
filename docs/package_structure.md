@@ -51,6 +51,9 @@ cfd/                                  # repo root
 │   ├── vectors.py                    # leaf: per-element vector algebra — dot / norm_squared / scale (buries axis/[:,None] bookkeeping; imported everywhere)
 │   ├── context.py                    # leaf: MeshContext (face_cells/geometry/properties) + FieldContext (mesh + one field's boundary_values/gradient) — below schemes/boundary so both can take it without a cycle
 │   ├── text_table.py                 # fixed-width ASCII tables for solver reports
+│   ├── triangle_grid.py              # leaf: TriangleGrid — triangles registered in voxels; segments walked to a first hit (radiation's shadow masks), boxes tested for any triangle (the mesher's regions)
+│   ├── triangle_grid_walk.py         # leaf: the grid's compiled (Numba) segment walk
+│   ├── warn_once.py                  # leaf: warn_once / forget_warnings — a diagnostic said once per process per kind
 │   │
 │   ├── mesh/                         # Mesh container + face/cell geometry + connectivity (2D and 3D)
 │   │   ├── mesh.py                   #   Mesh(eqx.Module): SoA coords + connectivity objects + zones/patches; from_faces(), from_csr() (vectorized, no per-face Python loop), validate(), geometry() → MeshGeometry
@@ -59,19 +62,22 @@ cfd/                                  # repo root
 │   │   ├── face.py                   #   FaceGeometry + FaceGeometryScheme → EdgeFaceGeometry (2D) / PolygonFaceGeometry (3D, centre-fan)
 │   │   ├── cell.py                   #   CellGeometry: volume, centroid (divergence theorem, dim-general)
 │   │   ├── groups.py                 #   LabelledGroups base → CellZones / FacePatches (named partitions; derived interfaces)
-│   │   ├── quality.py                #   diagnostics: face_planarity, centroid_iteration_shift, closed_cell_residual
+│   │   ├── quality.py                #   diagnostics: face_planarity, centroid_iteration_shift, closed_cell_residual; QualitySummary.of(mesh) (what a mesh header records)
 │   │   ├── distance.py               #   distance_to_patches(): cell→named-patch distance, the geometric field wall models need
 │   │   ├── reorder.py                #   cell renumbering: permute_cells() (canonical P·A·Pᵀ) + CellReordering → Identity/ReverseCuthillMcKee/Random (RCM protects the AMG coarse space on large meshes)
 │   │   ├── graph.py                  #   cell↔cell adjacency (build-time): cell_adjacency_coo() (SciPy COO, for RCM) / cell_adjacency_csr() (CSR arrays, for partitioners)
 │   │   ├── structured.py             #   structured_grid_2d() / structured_grid_3d() / graded_nodes(): clean orthogonal quad/hex grids (interior-node skew for order studies lives in tests/support/meshes.py)
+│   │   ├── digest.py                 #   mesh_digest(mesh): one digest for one mesh, wherever it is read (checkpoints, .aqmesh headers)
 │   │   └── collapse.py               #   collapse_extruded_direction(): one-cell-thick extruded 3D mesh → genuine 2D Mesh (used by the OpenFOAM reader for empty-patch 2D cases)
 │   │
 │   ├── io/                           # mesh import (file formats → Mesh) and field output; depends on mesh, never the reverse
+│   │   ├── aqmesh/                   #   aquaflux's own mesh file (.aqmesh): write_aqmesh / read_aqmesh / read_aqmesh_header, read back exactly
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   ├── cell_fields.py            #   as_cell_values(): the conversion + per-cell length check every field writer makes
 │   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)
 │   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity (hexahedra as VTK hexahedra), each face wound outward from the cell listing it (pure numpy)
 │   │   │   ├── xml.py                #     VtkCells + cell fields → .vtu / .pvd document parts; raw appended binary by default, ASCII on request (pure)
+│   │   │   ├── surface.py            #     write_triangles: a surface of triangles and a value per triangle as one .vtp (a drawing's faces)
 │   │   │   └── writer.py             #     write_vtu / write_pvd: the only file I/O
 │   │   └── openfoam/                 #   OpenFOAM polyMesh reader (ASCII): read_openfoam() / OpenFOAMReader
 │   │       ├── records.py            #     FoamPatch / CellZone / PolyMeshData value records
@@ -132,12 +138,13 @@ cfd/                                  # repo root
 │   │
 │   ├── turbulence/                   # k–ω SST closure and the flow–turbulence coupling
 │   │   ├── sst.py                    #   SSTModel: the closure constants and the quantities derived directly from them
-│   │   ├── transport.py              #   assembly of the k and ω transport equations on a configured mesh (ScalarVariableTransform → DirectScalars / LogScalars)
+│   │   ├── transport.py              #   assembly of the k and ω transport equations on a configured mesh
 │   │   ├── sources.py                #   the SST source terms as VolumeSource operators: KProduction/KDestruction, OmegaProduction/OmegaDestruction/OmegaCrossDiffusion
 │   │   ├── strain.py                 #   strain_rate_magnitude: the scalar invariant the closure consumes
 │   │   ├── scales.py                 #   turbulence_scales: reference k and ω from the flow's speed and hydraulic length (sizes a scaled k/ω advection)
 │   │   ├── boundary.py               #   wall and inlet values: omega_wall, nut_wall, inlet_k/inlet_omega, wall_y_star, wall_shear_stress (y+-insensitive wall treatment)
 │   │   ├── coupled.py                #   CoupledRANS: the monolithic residual R(u, p, k, ω) + coupled_rans_layout
+│   │   ├── scalar_transforms.py      #   ScalarVariableTransform → DirectScalars / LogScalars: solved unknown ↔ physical k, ω
 │   │   ├── driver.py                 #   solve_segregated: the segregated outer loop coupling the flow solve to the closure
 │   │   ├── continuation.py           #   pseudo-transient continuation for the (k, ω) scalar transport solves
 │   │   ├── reynolds.py               #   solve_reynolds_continuation: reach a high-Reynolds root through easier lower-Re ones
@@ -184,12 +191,18 @@ cfd/                                  # repo root
 │   │   ├── materialized_spec.py      #   MaterializedJacobian / FieldSplit / JacobianProbeSpec: a materialized preconditioner as a value (and its mapping)
 │   │   ├── materialized_session.py   #   MaterializedSession over a MaterializedProblem: one probe, one inverse and one refresh hook per march
 │   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy: a base shift policy paired with a frozen monolithic inverse
+│   │   ├── padded_rows.py            #   _PaddedRowOperator: the padded-row (ELLPACK) level operator and its held packing
+│   │   ├── entry_map.py              #   EntryMap / EntryMaps: a refit's fixed-pattern sparse operations as fixed linear maps of the values
 │   │   └── phase_timer.py            #   PhaseTimer: a refresh split into named, consecutive timed phases
 │   │
 │   ├── case/                         # a whole case described in one YAML file (top layer: nothing else imports it)
 │   │   ├── spec.py                   #   CaseSpec (mesh/fluid/physics/boundaries/numerics/drive) + Numerics; case_spec_from/to_mapping; check_against(mesh)
 │   │   ├── case_file.py              #   read_case / write_case (YAML 1.2 scalars, duplicate keys refused); CaseFile.check() -> CheckedCase
-│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: OpenFOAMMesh (read) / StructuredGrid + GeometricGrading (generated)
+│   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: AquafluxMesh (.aqmesh) / OpenFOAMMesh (polyMesh); a case only reads its mesh
+│   │   ├── mesh_file.py              #   MeshSpec (+ Drawing, DrawingRegion, MeshSizes, MeshOutput): a mesh file, a STEP region meshed by CadMesher
+│   │   ├── mesh_run.py               #   make_mesh(path, overwrite, on_stage) -> MeshRecord: what `aquaflux mesh mesh.yaml` does (refuses an occupied output before meshing; records the quality)
+│   │   ├── drawing_view.py           #   view_drawing(...) -> DrawingView: a mesh file's drawing for choosing its patches (`aquaflux drawing`)
+│   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by the mesh file and the radiation sources)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
 │   │   ├── forcing.py                #   DriveSpec -> BulkVelocity (builds MassFlow); SourceSpec -> BodyForce (builds UniformBodyForce)
@@ -198,6 +211,27 @@ cfd/                                  # repo root
 │   │   ├── kinematic.py              #   pressure per unit density, the form OpenFOAM's incompressible solvers hold (both directions of the factor)
 │   │   ├── restart_file.py           #   the checkpoint file a case writes (physical fields + a header: physics, cells, mesh digest, case digests) and reads back, with the march history its step record carries
 │   │   └── boundaries.py             #   PatchCondition -> Inlet / Outlet / Wall, one per patch for every field; FixedTurbulence
+│   ├── meshing/                      # mesh generation from CAD (host-side numpy + numba; Netgen only in a child process)
+│   │   ├── blocks.py                 #   HexBlock: a curved hexahedron filled by transfinite interpolation; Arc, SampledCurve; placed / scaled_counts
+│   │   ├── divisions.py              #   Graded and the count / fractions divisions of a block direction; cell_counts
+│   │   ├── surfaces.py               #   PlaneSurface / CylinderSurface / ConeSurface / SphereSurface projections
+│   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
+│   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
+│   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
+│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches
+│   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
+│   │   ├── octree.py                 #   Octree: a 2:1-balanced octree of cubes; NearSurface refinement towards a region's boundary
+│   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
+│   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
+│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids
+│   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
+│   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_ends / fill_pipes: pipes found from the CAD (rims divided alike), their cores O-gridded inside their layers
+│   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
+│   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
+│   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
+│   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr
 │       ├── partition.py              #   PartitionedMesh + LocalPartition; partition_mesh(mesh, labels) → owned+halo local meshes, gathered geometry, halo plan

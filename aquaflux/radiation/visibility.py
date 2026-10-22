@@ -50,6 +50,7 @@ from aquaflux.radiation.work import DEFAULT_PAIR_LIMIT
 
 __all__ = [
     "Visibility",
+    "build_facet_visibility",
     "build_visibility",
     "refuse_points_inside",
     "same_receivers",
@@ -81,7 +82,9 @@ def surviving_fraction(blocked, hidden_by_geometry, transmittance, straight=None
 
     Returns
     -------
-    jnp.ndarray, shape ``(n_receivers, n_facets)``
+    jnp.ndarray, shape ``pairs``
+        Laid out as ``hidden_by_geometry`` is: the whole mask's ``(n_receivers, n_facets)``, or
+        the gathering of its pairs that was passed.
     """
     transmittance = jnp.broadcast_to(jnp.asarray(transmittance, dtype=float), (blocked.shape[0],))
     per_body = transmittance.reshape(-1, *([1] * (blocked.ndim - 1)))
@@ -441,15 +444,112 @@ def _unchecked_visibility(
     a stream, which would otherwise check every facet again for every pass.
     """
     points = jnp.asarray(points, dtype=float)
+    strategy = _strategy(self_occlusion)
+    receiver_normal = _unit_normals(receiver_normal, points.shape[0])
+    return _assembled(
+        occluders,
+        surfaces,
+        points,
+        lambda near: strategy.field(surfaces, points, near, receiver_facet, receiver_normal),
+        receiver_facet=receiver_facet,
+        body_culling=body_culling,
+        offset_scale=offset_scale,
+        pair_limit=pair_limit,
+        media=media,
+    )
+
+
+def build_facet_visibility(
+    occluders,
+    surfaces,
+    *,
+    needed=None,
+    self_occlusion: SelfOcclusion | None = None,
+    body_culling: BodyCulling | None = None,
+    offset_scale: float = 1e-6,
+    pair_limit: int = DEFAULT_PAIR_LIMIT,
+) -> Visibility:
+    """The mask between a surface's own facets, for the facet-to-facet transfer.
+
+    :func:`build_visibility` with every facet's centroid as a receiver lying on that facet, except
+    that the surface's own triangles are asked about each pair of facets as a pair
+    (:meth:`~aquaflux.radiation.self_occlusion.SelfOcclusion.between_facets`): a ray test casts one
+    ray for both directions, and only where an answer is ``needed``.
+
+    Parameters
+    ----------
+    occluders : sequence of aquaflux.solids.Body
+        The analytic bodies.
+    surfaces : Surfaces
+        The facets, which are the sources and the receivers.
+    needed : numpy.ndarray of bool, shape ``(n_facets, n_facets)``, optional
+        Which entries of the surface's own layer will be read, ``[i, j]`` for what facet ``j`` is
+        hidden from facet ``i``. Elsewhere that layer may be recorded clear without a test. The
+        bodies' layer is complete whatever this says. Omitted, every pair is needed.
+    self_occlusion, body_culling, offset_scale, pair_limit
+        As for :func:`build_visibility`.
+
+    Returns
+    -------
+    Visibility
+        With :attr:`~Visibility.receivers` the facet centroids.
+
+    Raises
+    ------
+    ValueError
+        If a facet centroid lies inside one of the bodies, or ``needed`` is not one answer per
+        pair of facets.
+
+    Notes
+    -----
+    It takes no transparent regions: the transfer between facets carries no refraction, and a
+    scene with regions refuses a reflecting surface.
+    """
     occluders = tuple(occluders)
-    strategy = RayCastOcclusion() if self_occlusion is None else self_occlusion
+    points = jnp.asarray(surfaces.centroid, dtype=float)
+    refuse_points_inside(occluders, surfaces, points)
+    strategy = _strategy(self_occlusion)
+    return _assembled(
+        occluders,
+        surfaces,
+        points,
+        lambda near: strategy.between_facets(surfaces, near, needed),
+        receiver_facet=surfaces.own_faces,
+        body_culling=body_culling,
+        offset_scale=offset_scale,
+        pair_limit=pair_limit,
+        media=None,
+    )
+
+
+def _strategy(self_occlusion: SelfOcclusion | None) -> SelfOcclusion:
+    """The self-occlusion strategy, the ray test when none is chosen."""
+    return RayCastOcclusion() if self_occlusion is None else self_occlusion
+
+
+def _assembled(
+    occluders,
+    surfaces,
+    points,
+    own_layer,
+    *,
+    receiver_facet,
+    body_culling: BodyCulling | None,
+    offset_scale: float,
+    pair_limit: int,
+    media: Media | None,
+) -> Visibility:
+    """A mask from its layers: the bodies', ``own_layer(near)``'s and the transparent regions'.
+
+    ``own_layer`` is the self-occlusion strategy asked about these receivers, given each facet's
+    margin.
+    """
+    occluders = tuple(occluders)
     n_receivers, n_facets = points.shape[0], surfaces.n_facets
 
-    # Relative to the facet's own size, per the `offset_scale` note above. A point source has no
-    # area and no surface to shadow itself with, so it needs no exclusion.
+    # Relative to the facet's own size, per the `offset_scale` note on `build_visibility`. A point
+    # source has no area and no surface to shadow itself with, so it needs no exclusion.
     near = offset_scale * jnp.sqrt(surfaces.area)
-
-    receiver_normal = _unit_normals(receiver_normal, n_receivers)
 
     # A receiver behind a source that is dark behind itself gets nothing from it, so the bodies
     # need not be asked about that pair; the mask then says it did not ask. That holds for a point
@@ -464,7 +564,7 @@ def _unchecked_visibility(
         if occluders
         else jnp.zeros((0, n_receivers, n_facets), dtype=bool)
     )
-    geometry = strategy.field(surfaces, points, near, receiver_facet, receiver_normal)
+    geometry = own_layer(near)
     straight = (
         None
         if media is None or not media.regions

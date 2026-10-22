@@ -88,7 +88,6 @@ settles one field, where that defect is in the closure's arithmetic and reaches 
 from __future__ import annotations
 
 import abc
-import warnings
 from typing import TYPE_CHECKING, ClassVar
 
 import equinox as eqx
@@ -97,6 +96,7 @@ import jax.numpy as jnp
 
 from aquaflux.vectors import dot, scale
 
+from ..warn_once import warn_once
 from .gradient import (
     BoundaryLinearization,
     GradientScheme,
@@ -104,6 +104,7 @@ from .gradient import (
     boundary_gradient_block,
     contract_symmetric,
     expand_symmetric,
+    small_inverse,
     symmetric_components,
 )
 from .interpolation import (
@@ -764,6 +765,9 @@ def _boundary_condition_first_pass(
     **Why it costs nothing.** That dependence is affine, so it moves to the left-hand side as the
     per-cell block :func:`~aquaflux.schemes.boundary_gradient_block` builds, and the pass is
     ``(M1 - B) grad phi = raw`` -- one per-cell inverse, exactly what ``M1`` already was.
+    The inverse is the closed-form adjugate rather than a batched library call, because it runs on
+    every reconstruction and the library call is one the compiler cannot fuse; ``M1 - B`` is
+    well-conditioned (below), which is what makes the unpivoted closed form adequate.
 
     **Why the weight is the condition's and not the owner's whole displacement ``d``.** An earlier
     form used ``w = d``, which reads nothing from the boundary condition, and left ``M1 - B``
@@ -787,7 +791,7 @@ def _boundary_condition_first_pass(
     jnp.ndarray
         ``(M1 - B)^-1``, shape ``(n_cells, dim, dim)``.
     """
-    return jnp.linalg.inv(
+    return small_inverse(
         m1 - boundary_gradient_block(boundary_gradient_weight, face_cells, geometry)
     )
 
@@ -856,24 +860,6 @@ def _one_exact(
 #: every mesh measured, and not as a bound on a healthy correction.
 _UNDETERMINED_CORRECTION = 1e8
 
-#: Which of the repair warnings below have been emitted in this process. One flag per warning, not
-#: one for all of them: a scheme is bound once per field, and the first binding on a tetrahedral mesh
-#: typically reports a repair, so a shared flag let that report silence a later, graver one -- a
-#: correction left singular, on a duct whose march then stalled with no warning printed at all.
-_WARNED: set[str] = set()
-
-
-def _warn_once(kind: str, message: str) -> None:
-    """Emit ``message`` the first time a warning of this ``kind`` is raised in this process.
-
-    Each reports a fixed property of a mesh and its conditions, and a scheme is bound on every
-    assembler, so repeating it would only bury it.
-    """
-    if kind in _WARNED:
-        return
-    _WARNED.add(kind)
-    warnings.warn(message, stacklevel=3)
-
 
 def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
     """Which cells' Hessian correction is singular enough to amplify, or ``None`` if none are.
@@ -908,13 +894,14 @@ def _undetermined_cells(m2_inverse: jnp.ndarray) -> jnp.ndarray | None:
 
 def _warn_repaired(cells: jnp.ndarray, primary, secondary, total: int) -> None:
     """Say once that the closure was repaired, since it is not what the caller asked for."""
-    _warn_once(
-        "repaired",
+    warn_once(
+        "multiple_correction.repaired",
         f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
         f"underdetermined under {type(primary).__name__} -- a tetrahedron with two or more boundary "
         f"faces is the usual cause -- so {type(secondary).__name__} is used on those cells' boundary "
         f"faces and the correction rebuilt. Every other cell is unchanged. Pass `fallback=None` to "
         f"get the unrepaired reconstruction and this warning instead.",
+        stacklevel=2,
     )
 
 
@@ -925,8 +912,11 @@ def _warn_unrepairable(cells: jnp.ndarray, closure, fallback, total: int) -> Non
         if fallback is None or type(fallback) is type(closure)
         else f"the fallback {type(fallback).__name__} does not determine them either"
     )
-    _warn_once(
-        "unrepairable",
+    # A kind of its own, not the repair's: the first binding on a tetrahedral mesh typically reports a
+    # repair, and sharing its record let that report silence this graver one -- a correction left
+    # singular, on a duct whose march then stalled with no warning printed at all.
+    warn_once(
+        "multiple_correction.unrepairable",
         f"MultipleCorrectionGradient: {cells.size} of {total} cells leave the Hessian "
         f"underdetermined under {type(closure).__name__} (a tetrahedron with two or more boundary "
         f"faces is the usual cause), and {reason}. The reconstruction amplifies in those cells "
@@ -934,6 +924,7 @@ def _warn_unrepairable(cells: jnp.ndarray, closure, fallback, total: int) -> Non
         f"repairs it where the boundary values determine the cell, at the cost of reading a boundary "
         f"value on those cells' faces -- which SkewCorrectedGradient's own docstring documents "
         f"destabilizing a coupled march at an unconverged iterate, so weigh that before opting in.",
+        stacklevel=2,
     )
 
 
@@ -1036,7 +1027,9 @@ def _probe_corrections(
     # M1: what the raw sum returns for each coordinate field. Its columns are indexed by the
     # direction probed, its rows by the gradient component returned.
     m1 = jnp.stack([raw(cell_x[:, i], face_x[:, i]) for i in range(dim)], axis=-1)
-    m1_inverse = jnp.linalg.inv(m1)
+    # The same inverse the per-call first pass takes of `M1 - B`, so a zero gradient weight inverts
+    # the identical matrix by the identical arithmetic and reproduces this one bit for bit.
+    m1_inverse = small_inverse(m1)
     if boundary_linearization is None:
         first_pass_inverse = m1_inverse
         value_weight = jnp.zeros(face_cells.n_faces)

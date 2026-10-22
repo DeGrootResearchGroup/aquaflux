@@ -86,19 +86,28 @@ class LineSearchStep(NamedTuple):
         the ratio of this to the reference says by how much it failed, so its trend over successive
         steps shows the full step becoming acceptable before it is. The ladder starts at the full step,
         so it is always evaluated.
+    residual : jnp.ndarray or None
+        The residual **vector** ``R(phi)`` at :attr:`phi`, whose measure is :attr:`residual_norm`. The
+        ladder evaluated it at the rung it kept, so a caller that needs the residual at the new iterate
+        -- the right-hand side of its next Newton correction, say -- reads it here rather than
+        evaluating the residual again at a point already visited. When the search takes no step
+        (``alpha = 0``) the iterate is the start point, whose residual the ladder never evaluated: it is
+        the one the caller handed in as ``residual``, and ``None`` when the caller handed in none.
+        When no rung was finite it is non-finite, like :attr:`residual_norm`.
     """
 
     phi: jnp.ndarray
     alpha: jnp.ndarray
     residual_norm: jnp.ndarray
     full_step_norm: jnp.ndarray
+    residual: jnp.ndarray | None
 
 
 class StepOutcome(NamedTuple):
     """What one Newton step produced, what it cost, and how it ended.
 
-    A record rather than a widening tuple: these nine values travel together through every stepper and
-    both consumers, and a positional 9-tuple is where a caller silently mis-unpacks one for another.
+    A record rather than a widening tuple: these ten values travel together through every stepper and
+    both consumers, and a positional 10-tuple is where a caller silently mis-unpacks one for another.
 
     Attributes
     ----------
@@ -113,8 +122,9 @@ class StepOutcome(NamedTuple):
         rung it settles on is in hand when the step returns; both drivers used to throw it away and
         evaluate the residual again at the same point. A step whose inner loop is judged by a
         *different* measure (a dual-time inner Newton, which converges the shifted ``G`` rather than
-        ``R``) has to form this itself -- there the field costs what the driver used to pay and saves
-        nothing, but it keeps one contract instead of an optional one.
+        ``R``) forms this from the ``G`` its line search kept, by removing the shift term
+        (``R = G - shift (phi - reference)``), which is one subtraction rather than a residual
+        evaluation.
     raw_cycles : jnp.ndarray
         The **raw** solver count summed over the step's inner iterations (lineax's ``num_steps``, with
         its per-solve offset still in). Total cost, and what a summed cost cap is measured against.
@@ -145,6 +155,15 @@ class StepOutcome(NamedTuple):
         before the next attempt runs. A dual-time step with ``refresh_on_cycles`` set stops its inner loop
         there, keeping the iterate it reached, and the march re-fits at that iterate before stepping on
         (see :func:`~aquaflux.solve.newton_march`). ``False`` for a step that never asks.
+    residual : jnp.ndarray
+        The residual **vector** ``R(phi)`` at :attr:`phi`, whose measure is :attr:`residual_norm`, shape
+        ``phi.shape``. The march hands it to the next step as the residual at the state that step starts
+        from, so no step evaluates the residual where the previous one already did. A step that did not
+        move (every attempt rejected, or a line search that kept ``alpha = 0``) returns the residual it
+        was handed; one whose every rung was non-finite returns a non-finite vector, as it does a
+        non-finite :attr:`residual_norm`. A dual-time step forms it from the shifted residual its last
+        search kept, ``R = G - shift (phi - reference)``, which rounds at the size of the shift term
+        rather than reproducing a fresh evaluation bit for bit.
     """
 
     phi: jnp.ndarray
@@ -156,10 +175,17 @@ class StepOutcome(NamedTuple):
     max_inner_cycles: jnp.ndarray
     full_step_ratio: jnp.ndarray
     refresh_due: jnp.ndarray
+    residual: jnp.ndarray
 
 
 StepFn = Callable[
-    [Callable[[jnp.ndarray], jnp.ndarray], jnp.ndarray, jnp.ndarray, lx.AbstractLinearSolver],
+    [
+        Callable[[jnp.ndarray], jnp.ndarray],
+        jnp.ndarray,
+        jnp.ndarray,
+        jnp.ndarray,
+        lx.AbstractLinearSolver,
+    ],
     StepOutcome,
 ]
 
@@ -167,9 +193,9 @@ StepFn = Callable[
 class NewtonStrategy(Protocol):
     """A globalized Newton forward-step strategy (line search, pseudo-transient continuation, ...).
 
-    The single point of variation in the forward loop: given the residual, the current iterate, the
-    starting residual norm, and the linear solver, a strategy returns the next iterate and the cost
-    of the linear solve that produced it. Every strategy must reduce to the undamped Newton step
+    The single point of variation in the forward loop: given the residual, the current iterate and
+    the residual there, the starting residual norm, and the linear solver, a strategy returns the next
+    iterate, the residual there, and the cost of the linear solve that produced it. Every strategy must reduce to the undamped Newton step
     near the root and impose no shift at the fixed point, so the converged state solves the
     unshifted ``R = 0`` and the implicit-function-theorem adjoint is independent of which strategy
     produced the forward path.
@@ -181,7 +207,14 @@ class NewtonStrategy(Protocol):
     """
 
     def stepper(self) -> StepFn:
-        """The Newton step ``(residual_fn, phi, residual_norm_0, solver) -> StepOutcome``.
+        """The Newton step ``(residual_fn, phi, residual, residual_norm_0, solver) -> StepOutcome``.
+
+        ``residual`` is ``residual_fn(phi)``, the residual at the state the step starts from, **handed
+        in rather than evaluated by the step**: the march holds it already -- the previous step returned
+        it as :attr:`StepOutcome.residual`, and the first is measured with the starting norm -- so a
+        step that evaluated it again would repeat a residual evaluation every outer step. A step uses it
+        as given and must not re-evaluate it; it is always an array of ``phi``'s shape, never ``None``,
+        so the compiled step has one signature from the first call on.
 
         ``StepOutcome.raw_cycles`` is the restart-cycle count of the linear solve behind the accepted step
         (its cost, which an observed march reads to detect a stale preconditioner);
@@ -450,6 +483,9 @@ class StepReport(NamedTuple):
         ``stopping_step``), where ``residual_norm`` stays the measure the step was steered by. Without
         these a log would report a residual the stop never compared with its tolerance. ``nan`` is
         "not recorded".
+    linear_tolerance : float
+        The relative tolerance the step's linear solves stopped at, when the march varied it from step to
+        step (its ``adaptive_tolerance``); ``nan`` when the march solved every step to its solver's own.
     """
 
     step: int
@@ -469,6 +505,7 @@ class StepReport(NamedTuple):
     full_step_ratio: float = float("nan")
     stopping_norm: float = float("nan")
     stopping_ratio: float = float("nan")
+    linear_tolerance: float = float("nan")
 
     @property
     def restart_cycles(self) -> int:

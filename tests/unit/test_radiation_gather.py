@@ -829,12 +829,20 @@ def test_the_gradient_reaches_every_vertex_of_every_facet():
     facet = rectangle_triangles([0.0, 0.0, 0.0], [0.05, 0.0, 0.0], [0.0, 0.05, 0.0])
     surfaces = Surfaces.from_triangles(facet, emission=100.0)
     probe = np.array([[0.02, 0.01, 0.3]])
-    jacobian = jax.grad(
-        lambda vertices: jnp.sum(direct_fluence_rate(surfaces.with_geometry(vertices), probe))
-    )(jnp.asarray(facet))
+
+    def field(vertices):
+        return jnp.sum(direct_fluence_rate(surfaces.with_geometry(vertices), probe))
+
+    jacobian = jax.grad(field)(jnp.asarray(facet))
     assert jacobian.shape == facet.shape
-    assert bool(jnp.all(jnp.isfinite(jacobian)))
     assert float(jnp.min(jnp.abs(jacobian).sum(axis=(1, 2)))) > 0.0
+    # Non-zero everywhere is not the same as right: a few entries, of both facets and of both an
+    # in-plane and an out-of-plane coordinate, against a central difference.
+    step = 1e-7
+    for index in [(0, 0, 0), (0, 2, 2), (1, 1, 0), (1, 2, 1)]:
+        offset = jnp.zeros(facet.shape).at[index].set(step)
+        difference = (field(facet + offset) - field(facet - offset)) / (2 * step)
+        assert float(jacobian[index]) == pytest.approx(float(difference), rel=1e-5, abs=1e-6)
 
 
 #: Every distribution an areal facet can emit with, including the exponents in ``[1, 2)`` whose

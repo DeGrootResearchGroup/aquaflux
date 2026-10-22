@@ -5,12 +5,10 @@
 # (second-order upwind, unlimited), k/omega `upwind`, uncorrected Green-Gauss gradients.
 
 mesh:
-  kind: StructuredGrid
-  cells: [4, 96]
-  lengths: [1.0, 2.0]
-  periodic: [x]
-  grading:
-    y: {kind: GeometricGrading, growth: 1.09}
+  # The periodic channel, 4 x 96 cells, its wall-normal cells growing by 1.09 from each wall
+  # toward the centre (written by validation/turbulent_channel/write_meshes.py).
+  kind: AquafluxMesh
+  path: ../../turbulent_channel/meshes/channel_96.aqmesh
 
 fluid:
   density: 1.0

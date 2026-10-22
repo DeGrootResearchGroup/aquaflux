@@ -206,6 +206,9 @@ VALIDATION_INTERNAL_REACHES = {
     # digit for digit is what makes a replayed arm evidence about the march, so it must run the march's
     # step, not a re-implementation of it.
     "_march_step",
+    # The shifted Newton solve one inner iteration makes, re-run by `step_descent_probe.py` to take a
+    # step's first direction loose, tight and clipped, and judge each by its descent in the step's measure.
+    "_shifted_solve",
     # The aggregation's internals, reached by the harness that measured whether equilibration changes
     # the graph the coarsening sees (it does not -- 0.03% of edges). Running the real `_cell_graph` /
     # `_aggregation_edges` / `_mis_aggregate` is the point: a re-implementation would have measured a
@@ -213,6 +216,9 @@ VALIDATION_INTERNAL_REACHES = {
     "_cell_graph",
     "_aggregation_edges",
     "_mis_aggregate",
+    # The level operator's own product, timed by `csr_kernel_precision.py` on a synthetic matrix beside
+    # the CSR and segment-sum forms it replaced: the comparison is only worth making with the real kernel.
+    "_PaddedRowOperator",
     # The strength graph and the Vanek aggregation, reached by the local-descent probe to build a
     # "line-like" block smoother out of the coarsening the preconditioner already uses. A line through
     # an anisotropic near-wall layer is a chain of strong couplings, so the strength filter is the
@@ -235,7 +241,11 @@ VALIDATION_INTERNAL_REACHES = {
     "PROBE_BATCH_SIZE",
     "ColumnProbePlan",
     "ProbeGather",
+    "batched_field_jacobian_matvec",
     "batched_jacobian_matvec",
+    # The one place a fit and a re-fit choose their products, reached by the harness that compares the
+    # per-column-field probe with the whole-state one entry for entry (`fieldwise_probe_identity.py`).
+    "_probe_products",
     "block_stencil_colouring",
     "block_stencil_gather_map",
     "column_probe_plan",
@@ -252,12 +262,25 @@ VALIDATION_INTERNAL_REACHES = {
     "InnerIterateCheckpointer",
     "combine_metrics",
     "in_progress_measure",
+    # The re-fit hook, whose re-materialize the bfs3d memory census (`bfs3d_openfoam/memory_by_stage.py`)
+    # wraps to read the resident set around each re-fit of the shipped march without restating it.
+    "BetaTrackingRefresh",
+    # The tolerance a configured solver stops at, read and re-set by the pitzDaily replay
+    # (`pitzdaily_openfoam/replay.py`) so each replayed system is solved to the tolerance the march's
+    # adaptive rule gave its own step. A fixed tolerance read 1-2 cycles low on 27 of 50 solves, so
+    # reproducing the march means setting the same field of the same solver, not building a second one.
+    "relative_tolerance",
+    "with_relative_tolerance",
     # The traced form of a fitted host split and the host-callback detector, reached by the two
     # traced-split harnesses: one times the traced split against the host one, the other checks a
     # refit keeps its array shapes. Both measure the object the session itself builds, so they take it
     # from the same function rather than assembling a lookalike.
     "contains_host_callback",
     "traced_field_split",
+    # A step with its traced split swapped for a refitted one, reached by the secant-update probe
+    # (`pitzdaily_openfoam/secant_update_probe.py`) to solve each arm's Jacobian under the same step the
+    # march builds; a step assembled by hand would put the split in one of its two places but not both.
+    "with_traced_split",
 }
 
 

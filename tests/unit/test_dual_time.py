@@ -82,7 +82,11 @@ def test_the_dual_time_step_hands_the_policy_the_residual_it_just_computed() -> 
         return _residual(phi, theta)
 
     step.stepper()(
-        residual_theta, phi0, jnp.linalg.norm(residual_theta(phi0)), step.linear_solver()
+        residual_theta,
+        phi0,
+        residual_theta(phi0),
+        jnp.linalg.norm(residual_theta(phi0)),
+        step.linear_solver(),
     )
 
     assert seen, "the policy was never asked for a shift"
@@ -211,7 +215,7 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
         step = DualTimeStep(
             policy, relaxation_schedule=schedule, inner_steps=inner_steps, inner_tol=1e-6
         )
-        return step.stepper()(residual_theta, phi0, r0, step.linear_solver())
+        return step.stepper()(residual_theta, phi0, residual_theta(phi0), r0, step.linear_solver())
 
     def gnorm(p: jnp.ndarray) -> float:
         return float(jnp.linalg.norm(_residual(p, theta) + (p - phi0)))
@@ -220,6 +224,117 @@ def test_dual_time_inner_loop_iterates_and_sums_cost() -> None:
     phi4, cyc4 = (lambda o: (o.phi, o.raw_cycles))(run(4))
     assert gnorm(phi4) < gnorm(phi1)  # more inner iterations converge the implicit step further
     assert int(cyc4) > int(cyc1)  # cycles are summed over the inner iterations, not overwritten
+
+
+def _counted_dual_time_step(line_search: int):
+    """A dual-time step on the cube-root residual, counting each EXECUTION of the residual.
+
+    The count is taken by a ``jax.debug.callback`` inside the residual, so it records evaluations the
+    step actually runs, not traces. The Krylov solve's Jacobian is formed from an uncounted copy of the
+    same residual (``jacobian_residual``), so its matrix-vector products do not enter the count: what
+    is counted is exactly the residual evaluations the step forms itself.
+    """
+    theta = jnp.array([8.0, 27.0, 64.0])
+    calls: list[int] = []
+
+    def uncounted(p: jnp.ndarray) -> jnp.ndarray:
+        return _residual(p, theta)
+
+    def counted(p: jnp.ndarray) -> jnp.ndarray:
+        jax.debug.callback(lambda: calls.append(1), ordered=True)
+        return uncounted(p)
+
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=1.0),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=4,
+        inner_tol=1e-12,
+        line_search=line_search,
+        jacobian_residual=uncounted,
+    )
+    phi0 = jnp.array([1.5, 2.5, 3.5])
+    return step, counted, uncounted, phi0, calls
+
+
+@pytest.mark.parametrize("line_search", [10, 0], ids=["ladder", "full-step"])
+def test_the_dual_time_step_evaluates_the_residual_once_per_inner_iteration(line_search) -> None:
+    """One residual evaluation per inner iteration -- and none at the anchor or at the end.
+
+    Each inner iteration needs ``G`` at its iterate twice over: as the right-hand side of its Newton
+    correction, and at the end to judge the step it took. The second is the first of the next
+    iteration (same point, same function), and the step's steady residual at the iterate it returns
+    is that last ``G`` less the transient term, so neither needs an evaluation of its own. The anchor's
+    ``R(phi^n)`` is handed in by the caller (the march carries it from the previous step), so the step
+    evaluates nothing there either. Every inner step here takes the full length (asserted), so its line
+    search walks one rung, and this counts ``n``: a step re-evaluating the anchor counts ``1 + n``, one
+    re-evaluating ``G`` for each right-hand side ``2 n``, and one re-evaluating ``R`` at the end
+    ``1 + n``.
+    """
+    step, counted, uncounted, phi0, calls = _counted_dual_time_step(line_search)
+    outcome = step.stepper()(
+        counted, phi0, uncounted(phi0), jnp.linalg.norm(uncounted(phi0)), step.linear_solver()
+    )
+    outcome.phi.block_until_ready()
+    jax.effects_barrier()
+
+    inner = int(outcome.inner_iterations)
+    assert inner == 4  # the loop ran to its cap, so the count below spans several iterations
+    assert float(outcome.alpha) == 1.0  # every rung count is one, which the arithmetic relies on
+    assert len(calls) == inner
+
+
+def test_the_dual_time_step_reports_the_steady_residual_at_the_iterate_it_returns() -> None:
+    """The reported measure is ``R(phi_next)``, formed from the carried ``G`` rather than evaluated.
+
+    ``R = G - beta d (phi - phi^n)`` holds exactly in arithmetic; in floating point it differs from a
+    fresh evaluation by a rounding of the summed terms, so the bound is a few ulps of
+    ``|R| + |beta d (phi - phi^n)|``. A step that reported ``G`` instead -- the subtraction forgotten --
+    misses by the transient term itself, here of order one, which is ~1e15 times the bound.
+    """
+    step, counted, uncounted, phi0, _calls = _counted_dual_time_step(10)
+    outcome = step.stepper()(
+        counted, phi0, uncounted(phi0), jnp.linalg.norm(uncounted(phi0)), step.linear_solver()
+    )
+    fresh = uncounted(outcome.phi)
+    # beta = beta0 (|R| / |R0|) = 1 at the anchor, and the policy's diagonal is one.
+    transient = outcome.phi - phi0
+    bound = 8 * jnp.finfo(fresh.dtype).eps * (jnp.linalg.norm(fresh) + jnp.linalg.norm(transient))
+    assert float(jnp.linalg.norm(transient)) > 0.1  # the step moved, so the two measures differ
+    assert abs(float(outcome.residual_norm) - float(jnp.linalg.norm(fresh))) <= float(bound)
+
+
+def test_a_step_whose_every_inner_search_takes_no_step_reports_the_anchor_s_own_residual() -> None:
+    """With ``alpha = 0`` the carried ``G`` must be the one at the unmoved iterate.
+
+    The line search never evaluates the residual at its start point, so when it takes no step the
+    vector it hands back is the one it was given. Here every rung is finite and every one is an
+    excursion past the fallback ceiling (``R = exp(30 phi) - 1`` from ``phi = -1`` with a weak shift,
+    so the Newton step lands at ``phi ~ 19``), so each inner iteration stalls and the step returns the
+    anchor -- whose steady residual is ``R(phi^n)``. A search that handed back the last rung's vector, or
+    its unfilled seed, would report a residual near ``1e247`` or a NaN.
+    """
+
+    def residual_fn(p: jnp.ndarray) -> jnp.ndarray:
+        return jnp.exp(30.0 * p) - 1.0
+
+    step = DualTimeStep(
+        UniformShiftPolicy(strength=0.05),
+        relaxation_schedule=SwitchedEvolutionRelaxation(beta0=1.0),
+        inner_steps=3,
+        line_search=2,
+    )
+    phi0 = jnp.array([-1.0])
+    outcome = step.stepper()(
+        residual_fn,
+        phi0,
+        residual_fn(phi0),
+        jnp.linalg.norm(residual_fn(phi0)),
+        step.linear_solver(),
+    )
+
+    assert float(outcome.alpha) == 0.0
+    assert jnp.array_equal(outcome.phi, phi0)
+    assert float(outcome.residual_norm) == float(jnp.linalg.norm(residual_fn(phi0)))
 
 
 def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_step() -> None:
@@ -245,10 +360,14 @@ def test_dual_time_inner_observer_surfaces_the_trajectory_without_changing_the_s
         policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8, inner_observer=observer
     )
     plain = DualTimeStep(policy, relaxation_schedule=schedule, inner_steps=4, inner_tol=1e-8)
-    outcome = observed.stepper()(residual_theta, phi0, r0, observed.linear_solver())
+    outcome = observed.stepper()(
+        residual_theta, phi0, residual_theta(phi0), r0, observed.linear_solver()
+    )
     phi_obs, n_inner = outcome.phi, outcome.inner_iterations
     phi_obs.block_until_ready()  # flush the ordered debug callbacks
-    phi_plain = plain.stepper()(residual_theta, phi0, r0, plain.linear_solver()).phi
+    phi_plain = plain.stepper()(
+        residual_theta, phi0, residual_theta(phi0), r0, plain.linear_solver()
+    ).phi
 
     assert len(records) == int(n_inner) >= 1  # one record per inner iteration
     assert [r[0] for r in records] == list(range(len(records)))  # indices 0,1,2,... in order
@@ -290,8 +409,12 @@ def test_dual_time_one_inner_step_is_a_single_shifted_step() -> None:
     def residual_theta(p: jnp.ndarray) -> jnp.ndarray:
         return _residual(p, theta)
 
-    dual_next = dual.stepper()(residual_theta, phi0, r0, dual.linear_solver()).phi
-    shifted_next = raw_shifted.stepper()(residual_theta, phi0, r0, raw_shifted.linear_solver()).phi
+    dual_next = dual.stepper()(
+        residual_theta, phi0, residual_theta(phi0), r0, dual.linear_solver()
+    ).phi
+    shifted_next = raw_shifted.stepper()(
+        residual_theta, phi0, residual_theta(phi0), r0, raw_shifted.linear_solver()
+    ).phi
     assert jnp.allclose(dual_next, shifted_next, atol=1e-10)
 
     # And the full dual-time march reaches the same root as the escalating pseudo-transient march.
@@ -325,8 +448,8 @@ def test_dual_time_cycle_budget_caps_the_inner_loop() -> None:
     unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     budgeted = DualTimeStep(UniformShiftPolicy(strength=1.0), cycle_budget=5, **common)
 
-    out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.linear_solver())
-    out_b = budgeted.stepper()(residual_fn, phi0, r0, budgeted.linear_solver())
+    out_u = unbounded.stepper()(residual_fn, phi0, residual_fn(phi0), r0, unbounded.linear_solver())
+    out_b = budgeted.stepper()(residual_fn, phi0, residual_fn(phi0), r0, budgeted.linear_solver())
     cyc_u, inner_u = out_u.raw_cycles, out_u.inner_iterations
     cyc_b, inner_b = out_b.raw_cycles, out_b.inner_iterations
 
@@ -351,8 +474,10 @@ def test_dual_time_cycle_budget_none_is_the_unbounded_step() -> None:
     default = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     explicit_none = DualTimeStep(UniformShiftPolicy(strength=1.0), cycle_budget=None, **common)
 
-    a = default.stepper()(residual_fn, phi0, r0, default.linear_solver())
-    b = explicit_none.stepper()(residual_fn, phi0, r0, explicit_none.linear_solver())
+    a = default.stepper()(residual_fn, phi0, residual_fn(phi0), r0, default.linear_solver())
+    b = explicit_none.stepper()(
+        residual_fn, phi0, residual_fn(phi0), r0, explicit_none.linear_solver()
+    )
     assert jnp.allclose(a[0], b[0]) and int(a[1]) == int(b[1]) and int(a[3]) == int(b[3])
 
 
@@ -373,8 +498,8 @@ def test_a_cut_short_step_reports_that_it_did_not_reach_its_target() -> None:
     cut = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_tol=0.0, cycle_budget=5, **common)
     met = DualTimeStep(UniformShiftPolicy(strength=1.0), inner_tol=1e-2, **common)
 
-    cut_out = cut.stepper()(residual_fn, phi0, r0, cut.linear_solver())
-    met_out = met.stepper()(residual_fn, phi0, r0, met.linear_solver())
+    cut_out = cut.stepper()(residual_fn, phi0, residual_fn(phi0), r0, cut.linear_solver())
+    met_out = met.stepper()(residual_fn, phi0, residual_fn(phi0), r0, met.linear_solver())
 
     assert not bool(cut_out.reached_target)  # an unreachable target, stopped by the budget
     assert bool(met_out.reached_target)  # a loose target the inner loop actually met
@@ -490,7 +615,7 @@ def test_the_step_reports_its_first_inner_iterations_full_step_ratio(
         inner_steps=4,
         inner_tol=1e-8,
     )
-    outcome = step.stepper()(residual_theta, phi0, r0, step.linear_solver())
+    outcome = step.stepper()(residual_theta, phi0, residual_theta(phi0), r0, step.linear_solver())
 
     shifted = strength * 1.0
     delta = -residual_theta(phi0) / (3.0 * phi0**2 + shifted)
@@ -523,8 +648,8 @@ def test_abort_above_inner_cycles_stops_a_doomed_attempt_early() -> None:
     # A threshold of 0 makes every solve "expensive", so the first one trips it.
     aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_above_inner_cycles=0, **common)
 
-    out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.linear_solver())
-    out_a = aborting.stepper()(residual_fn, phi0, r0, aborting.linear_solver())
+    out_u = unbounded.stepper()(residual_fn, phi0, residual_fn(phi0), r0, unbounded.linear_solver())
+    out_a = aborting.stepper()(residual_fn, phi0, residual_fn(phi0), r0, aborting.linear_solver())
 
     assert int(out_u.inner_iterations) == 20  # unreachable target -> the full inner budget
     assert int(out_a.inner_iterations) == 1  # stopped as soon as one solve crossed the threshold
@@ -555,8 +680,8 @@ def test_abort_above_inner_cycles_never_bins_an_expensive_success() -> None:
     plain = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_above_inner_cycles=0, **common)
 
-    out_p = plain.stepper()(residual_fn, phi0, r0, plain.linear_solver())
-    out_a = aborting.stepper()(residual_fn, phi0, r0, aborting.linear_solver())
+    out_p = plain.stepper()(residual_fn, phi0, residual_fn(phi0), r0, plain.linear_solver())
+    out_a = aborting.stepper()(residual_fn, phi0, residual_fn(phi0), r0, aborting.linear_solver())
 
     assert bool(out_p.reached_target)  # the target is reachable (sanity for the test)
     assert bool(out_a.reached_target)  # ...and the cost bailout did not prevent reaching it
@@ -580,8 +705,8 @@ def test_abort_above_inner_cycles_none_is_the_unbounded_step() -> None:
         UniformShiftPolicy(strength=1.0), abort_above_inner_cycles=None, **common
     )
 
-    out_d = default.stepper()(residual_fn, phi0, r0, default.linear_solver())
-    out_e = explicit.stepper()(residual_fn, phi0, r0, explicit.linear_solver())
+    out_d = default.stepper()(residual_fn, phi0, residual_fn(phi0), r0, default.linear_solver())
+    out_e = explicit.stepper()(residual_fn, phi0, residual_fn(phi0), r0, explicit.linear_solver())
     assert jnp.array_equal(out_d.phi, out_e.phi)
     assert int(out_d.raw_cycles) == int(out_e.raw_cycles)
 
@@ -645,12 +770,14 @@ def test_a_rebuilt_step_projection_is_a_compilation_cache_hit() -> None:
         return phi**3 - target
 
     phi0 = jnp.ones(5)
+    # The residual the step is handed, formed without the counting function: only traces are counted.
+    residual0 = phi0**3 - target
     policy = UniformShiftPolicy(strength=1.0)
 
     def run(projection) -> int:
         step = DualTimeStep(policy, inner_steps=2, inner_tol=1e-3, step_projection=projection)
         before = len(_TRACES)
-        _march_step(step, residual_fn, phi0, jnp.asarray(1.0), step.linear_solver())
+        _march_step(step, residual_fn, phi0, residual0, jnp.asarray(1.0), step.linear_solver())
         return len(_TRACES) - before
 
     _TRACES.clear()
@@ -682,7 +809,7 @@ def test_refresh_on_cycles_ends_the_step_keeping_the_iterate_it_reached() -> Non
             inner_tol=1e-14,  # never met, so only what is under test can end the loop early
             **fields,
         )
-        return step.stepper()(residual_theta, phi0, r0, step.linear_solver())
+        return step.stepper()(residual_theta, phi0, residual_theta(phi0), r0, step.linear_solver())
 
     stopped = run(inner_steps=6, refresh_on_cycles=0)  # every solve costs at least zero cycles
     one_inner = run(inner_steps=1)
@@ -719,7 +846,7 @@ def test_a_step_only_asks_for_a_refit_once_a_solve_reaches_the_threshold() -> No
             inner_tol=1e-14,
             refresh_on_cycles=threshold,
         )
-        return step.stepper()(residual_theta, phi0, r0, step.linear_solver())
+        return step.stepper()(residual_theta, phi0, residual_theta(phi0), r0, step.linear_solver())
 
     free = run(10_000)
     assert not bool(free.refresh_due)
@@ -759,8 +886,8 @@ def test_abort_below_alpha_stops_an_attempt_that_can_no_longer_move() -> None:
     unbounded = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     aborting = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_below_alpha=1e-6, **common)
 
-    out_u = unbounded.stepper()(residual_fn, phi0, r0, unbounded.linear_solver())
-    out_a = aborting.stepper()(residual_fn, phi0, r0, aborting.linear_solver())
+    out_u = unbounded.stepper()(residual_fn, phi0, residual_fn(phi0), r0, unbounded.linear_solver())
+    out_a = aborting.stepper()(residual_fn, phi0, residual_fn(phi0), r0, aborting.linear_solver())
 
     assert int(out_u.inner_iterations) == 20  # runs the full budget going nowhere
     assert int(out_a.inner_iterations) == 1  # stops as soon as the length collapses
@@ -790,7 +917,7 @@ def test_abort_below_alpha_never_bins_a_step_that_reaches_its_target() -> None:
         inner_tol=1.0,
         abort_below_alpha=1.0,  # would abort immediately if it were consulted first
     )
-    out = step.stepper()(residual_fn, phi0, r0, step.linear_solver())
+    out = step.stepper()(residual_fn, phi0, residual_fn(phi0), r0, step.linear_solver())
     assert bool(out.reached_target)
 
 
@@ -809,8 +936,8 @@ def test_abort_below_alpha_none_is_the_unbounded_step() -> None:
     default = DualTimeStep(UniformShiftPolicy(strength=1.0), **common)
     explicit = DualTimeStep(UniformShiftPolicy(strength=1.0), abort_below_alpha=None, **common)
 
-    out_d = default.stepper()(residual_fn, phi0, r0, default.linear_solver())
-    out_e = explicit.stepper()(residual_fn, phi0, r0, explicit.linear_solver())
+    out_d = default.stepper()(residual_fn, phi0, residual_fn(phi0), r0, default.linear_solver())
+    out_e = explicit.stepper()(residual_fn, phi0, residual_fn(phi0), r0, explicit.linear_solver())
     assert jnp.array_equal(out_d.phi, out_e.phi)
     assert int(out_d.inner_iterations) == int(out_e.inner_iterations)
 

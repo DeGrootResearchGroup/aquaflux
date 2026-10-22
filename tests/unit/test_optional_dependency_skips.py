@@ -47,6 +47,16 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
         "STEP reading through the OpenCASCADE kernel; fast tier. CI installs it through the `test` "
         "extra, so this gate removes coverage only from a local environment without the `cad` extra",
     ),
+    "unit/test_cad_topology.py": (
+        "OCP",
+        "a CAD region's topology, face-tagged triangles, file and projection; fast tier. CI installs "
+        "it through the `test` extra, as for test_cad_step.py",
+    ),
+    "unit/test_drawing_view.py": (
+        "OCP",
+        "a mesh file's drawing read and triangulated for choosing its patches; fast tier. CI installs "
+        "it through the `test` extra, as for test_cad_step.py",
+    ),
     "ui/test_history.py": (
         "pyvista",
         "the viewer reading and piping real VTK data; fast tier. CI installs it through the `test` extra, so this gate removes coverage only from a local environment without the `ui` extra",
@@ -106,6 +116,14 @@ GATED_MODULES: dict[str, tuple[str, str]] = {
     "ui/test_run_section.py": (
         "trame",
         "the viewer's page and its independence from the solver; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_mesh_section.py": (
+        "trame",
+        "the Mesh section on a built page; fast tier. CI installs it through the `test` extra, as for `pyvista`",
+    ),
+    "ui/test_patch_picking.py": (
+        "pyvista",
+        "what a click on a drawing's face does to a mesh file; fast tier. CI installs it through the `test` extra",
     ),
     "ui/test_independence.py": (
         "trame",
@@ -220,11 +238,23 @@ def test_a_gate_on_a_dependency_ci_does_not_install_is_recorded_as_such(path: st
 #: These are narrower than the module-level gates above -- most remove a single test -- with one
 #: exception worth naming, because it is the same whole-module shape by a different mechanism:
 #: ``integration/test_bfs3d_species.py`` skips every one of its tests through a module-scoped fixture
-#: when the case data is absent, and that data is deliberately not in the repository. It is therefore
+#: when the flow case's converged OpenFOAM fields are absent, and they are not tracked where it reads
+#: them (the mesh is). It is therefore
 #: skipped in the workflow exactly as the solver-library modules are, and it is the only test that
 #: reaches into the validation cases at all.
 CONDITIONALLY_SKIPPED: dict[str, str] = {
-    "integration/test_bfs3d_species.py": "the whole module: the case data is not in the repository",
+    "integration/test_bfs3d_species.py": (
+        "the whole module: the flow case's converged OpenFOAM fields (of_case/2000) are not tracked"
+    ),
+    "unit/test_compiled_residual_census.py": (
+        "the whole module, on a JAX backend other than the CPU: the compiled program it counts is "
+        "the CPU backend's. CI runs on the CPU, so this removes coverage only on a GPU machine"
+    ),
+    "unit/test_meshing_netgen.py": (
+        "the whole module, when netgen-mesher (the `meshing` extra) is not installed -- found with "
+        "importlib.util.find_spec, never imported, since Netgen beside OCP in one process aborts it "
+        "at exit -- and its solids when OCP is not. CI installs both through the `test` extra"
+    ),
     "unit/test_openfoam_fields.py": "one ordering case, when the generated grid is already ordered",
     "unit/test_partitioner.py": "the Scotch binding and command-line partitioners",
     "unit/test_sibling_builders.py": "the tool is in the repository, not the installed package",
