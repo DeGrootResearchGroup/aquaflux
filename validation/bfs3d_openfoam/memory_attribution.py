@@ -76,6 +76,9 @@ CENSUS = os.environ.get("BFS3D_MEMORY_CENSUS", "1") == "1"
 #: that should be gone, say), as referrer chains printed to the log; unset traces nothing.
 HOLDERS = os.environ.get("BFS3D_MEMORY_HOLDERS", "")
 RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.json"))
+#: ``1`` prints a checksum of every leaf of each traced split the session composes (at the fit and at
+#: every re-fit), so two checkouts' runs show whether anything the solve applies differs, bit for bit.
+CHECKSUMS = os.environ.get("BFS3D_MEMORY_CHECKSUMS", "0") == "1"
 GIB = 2**30
 
 
@@ -634,6 +637,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(hierarchy_inverse.HierarchyBlockInverse, "__init__", "block inverse build")
     wrap(hierarchy_inverse.HierarchyBlockInverse, "refactor_block", "block re-fit")
     wrap(materialized_session, "traced_field_split", "traced split (device leaves)")
+    if CHECKSUMS:
+        _print_split_checksums(materialized_session)
 
     captured: dict = {}
     step_program = march._march_step
@@ -654,6 +659,38 @@ def _instrument(recorder: Recorder, compare) -> dict:
     march._march_step = march_step
     captured["step_program"] = step_program
     return captured
+
+
+def _print_split_checksums(materialized_session) -> None:
+    """Print a digest of every leaf of each traced split the session composes, after the stage wrap."""
+    import hashlib
+
+    import jax
+    import numpy as np
+
+    composed = materialized_session.traced_field_split
+    splits = [0]
+
+    def checksummed(*args, **kwargs):
+        split = composed(*args, **kwargs)
+        splits[0] += 1
+        whole = hashlib.sha256()
+        leaves = jax.tree_util.tree_leaves_with_path(split)
+        for path, leaf in leaves:
+            data = np.asarray(leaf)
+            digest = hashlib.sha256(data.dtype.str.encode() + data.tobytes()).hexdigest()
+            whole.update(digest.encode())
+            print(
+                f"    split {splits[0]} leaf {jax.tree_util.keystr(path)} {data.dtype} "
+                f"{data.shape} {digest[:16]}",
+                flush=True,
+            )
+        print(
+            f"    split {splits[0]}: {len(leaves)} leaves, digest {whole.hexdigest()}", flush=True
+        )
+        return split
+
+    materialized_session.traced_field_split = checksummed
 
 
 def _program_sizes(captured: dict, case) -> dict[str, dict]:
