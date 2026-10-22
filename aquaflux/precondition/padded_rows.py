@@ -236,21 +236,46 @@ class _PaddedLayout(eqx.Module):
         In ``values``'s own floating-point type: a gather moves entries without arithmetic, so it is
         exact in any type, and a single-precision operator is packed into single-precision slots.
         """
+        return self.with_values(
+            self.rows.apply(values).reshape(self.columns.shape),
+            self.transposed.apply(values).reshape(self.t_columns.shape),
+        )
+
+    def with_values(self, values: jnp.ndarray, t_values: jnp.ndarray) -> _PaddedRowOperator:
+        """The operator holding this layout's index arrays and the given slot values.
+
+        Parameters
+        ----------
+        values : jnp.ndarray
+            The slot values, shape ``(n_rows, width)``.
+        t_values : jnp.ndarray
+            The transpose's slot values, shape ``(n_cols, transpose_width)``.
+        """
         return _PaddedRowOperator(
             columns=self.columns,
-            values=self.rows.apply(values).reshape(self.columns.shape),
+            values=values,
             row_lengths=self.row_lengths,
             shape=self.shape,
             t_columns=self.t_columns,
-            t_values=self.transposed.apply(values).reshape(self.t_columns.shape),
+            t_values=t_values,
         )
 
     def operator(self, a: sp.csr_matrix) -> _PaddedRowOperator:
         """``a`` in padded-row form: equal, slot for slot, to ``_PaddedRowOperator.from_scipy(a, ...)``.
 
-        ``a`` must store this layout's pattern (the caller holds the layout keyed by it).
+        ``a`` must store this layout's pattern (the caller holds the layout keyed by it). The gathers
+        are compiled as one program per layout shape (run eagerly, each would be a dispatch of its
+        own), and the operator holds this layout's own index arrays: a compiled function's outputs are
+        new buffers, so only the slot values come out of it.
         """
-        return self.packed(jnp.asarray(a.data))
+        return self.with_values(*_slot_values(self, jnp.asarray(a.data)))
+
+
+@eqx.filter_jit
+def _slot_values(layout: _PaddedLayout, values: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The padded-row slot values of ``values`` and of their transpose on ``layout``, compiled."""
+    packed = layout.packed(values)
+    return packed.values, packed.t_values
 
 
 def _padded_operator(

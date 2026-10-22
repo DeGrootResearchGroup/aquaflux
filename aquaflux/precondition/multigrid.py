@@ -55,7 +55,7 @@ import scipy.sparse as sp
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
-from .entry_map import EntryMaps, SparsePattern
+from .entry_map import EntryMaps, SparsePattern, compiled_apply
 from .frozen_operator import equilibration_scale, symmetrically_equilibrate
 from .level_fit import (
     CoarseningPlan,
@@ -861,7 +861,7 @@ def _fitted_level(plan: _LevelPlan, values) -> _SparseLevel:
     p_frow, p_ccol, p_val = plan.prolongation if plan.prolongation is not None else (None,) * 3
     return _SparseLevel(
         n=plan.n,
-        operator=values.operator,
+        operator=plan.layout.with_values(values.slot_values, values.transposed_slot_values),
         diagonal=values.diagonal,
         lam_max=values.lam_max,
         coarse_inv=values.coarse_inv,
@@ -1254,7 +1254,7 @@ def _build_aggregation_hierarchy(
         # The Galerkin coarse operator from the true A, on its structural pattern: the map sums every
         # product term into the slot it lands in, so an entry that comes out exactly zero stays stored
         # and the coarse shapes do not move with the operator's values.
-        values = plan.galerkin.apply(values)
+        values = compiled_apply(plan.galerkin, values)
         landing = _Landing(product, None, None)
         live_cells = occupied
         if budgeted is not None and occupied < n_coarse_cells:
@@ -1272,7 +1272,7 @@ def _build_aggregation_hierarchy(
             empty = slots[product.csr(np.asarray(values)).diagonal()[slots] == 0.0]
             landing = landing_with_diagonal(product, empty)
             if landing.embed is not None:
-                values = landing.embed.apply(values) + jnp.asarray(landing.constant)
+                values = compiled_apply(landing.embed, values) + jnp.asarray(landing.constant)
         pattern = landing.pattern
         a = pattern.csr(np.asarray(values))
     frozen = FrozenCoarsening(CoarseningPlan(tuple(plans), scale_rows, scale_columns), fine_pattern)

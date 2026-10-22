@@ -33,7 +33,7 @@ import scipy.sparse as sp
 
 from aquaflux.ragged import pairs_within_groups
 
-__all__ = ["DeviceEntryMap", "EntryMap", "EntryMaps", "SparsePattern"]
+__all__ = ["DeviceEntryMap", "EntryMap", "EntryMaps", "SparsePattern", "compiled_apply"]
 
 
 class SparsePattern:
@@ -350,10 +350,11 @@ class EntryMap:
                 n_out=self.n_out,
             )
         order = np.argsort(self.target, kind="stable")
+        index = self._index_dtype()
         return DeviceEntryMap(
             slots=None,
-            source=jnp.asarray(self.source[order]),
-            target=jnp.asarray(self.target[order]),
+            source=jnp.asarray(self.source[order].astype(index)),
+            target=jnp.asarray(self.target[order].astype(index)),
             weight=None if self.weight is None else jnp.asarray(self.weight[order]),
             n_in=self.pattern.nnz,
             n_out=self.n_out,
@@ -533,3 +534,13 @@ def _times(weight: np.ndarray | None, data: np.ndarray, index: np.ndarray) -> np
         return weight
     factor = np.asarray(data, dtype=np.float64)[index]
     return factor if weight is None else weight * factor
+
+
+@eqx.filter_jit
+def compiled_apply(entry_map: DeviceEntryMap, values: jnp.ndarray) -> jnp.ndarray:
+    """:meth:`DeviceEntryMap.apply` as one compiled program, for a caller outside a traced function.
+
+    Run eagerly, its gather, multiply and segment sum would each be a dispatch (and a compilation) of
+    their own.
+    """
+    return entry_map.apply(values)

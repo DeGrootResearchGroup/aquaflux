@@ -73,6 +73,7 @@ def block_singularity(blocks: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(largest > 0.0, determinant / jnp.where(largest > 0.0, largest, 1.0), 0.0)
 
 
+@jax.jit
 def invert_cell_blocks(blocks: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     """The inverse of each cell block, and how many are singular (:data:`SINGULAR_BLOCK`).
 
@@ -107,6 +108,7 @@ def apply_block_inverse(
     return jnp.einsum("cij,cj->ci", block_inverse, per_cell).T.ravel()
 
 
+@jax.jit
 def dense_inverse(dense: jnp.ndarray) -> jnp.ndarray:
     """The coarsest level's dense inverse, by LU where the operator admits one, else its pseudo-inverse.
 
@@ -269,8 +271,10 @@ class LevelValues(NamedTuple):
 
     Attributes
     ----------
-    operator : _PaddedRowOperator
-        The level operator.
+    slot_values, transposed_slot_values : jnp.ndarray
+        The level operator's padded-row values and those of its transpose, on the level's layout
+        (:meth:`_PaddedLayout.with_values`). Only the values: an array a compiled function returns is a
+        new buffer, so returning the whole operator would copy the layout's index arrays every fit.
     diagonal : jnp.ndarray
         Its diagonal, shape ``(n,)``.
     lam_max : jnp.ndarray
@@ -281,7 +285,8 @@ class LevelValues(NamedTuple):
         Each cell block's inverse, ``(n_cells, b, b)``, on a nodal level only.
     """
 
-    operator: _PaddedRowOperator
+    slot_values: jnp.ndarray
+    transposed_slot_values: jnp.ndarray
     diagonal: jnp.ndarray
     lam_max: jnp.ndarray
     coarse_inv: jnp.ndarray | None
@@ -362,7 +367,8 @@ def fit_levels(
             coarse_inv = dense_inverse(level.dense.apply(values).reshape(level.n, level.n))
         fitted.append(
             LevelValues(
-                operator=operator,
+                slot_values=operator.values,
+                transposed_slot_values=operator.t_values,
                 diagonal=diagonal,
                 lam_max=spectral_estimate(preconditioned, level.start),
                 coarse_inv=coarse_inv,
