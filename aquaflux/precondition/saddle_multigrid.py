@@ -16,9 +16,10 @@ smoother, carries the smooth global pressure mode a SIMPLE-type Schur approximat
 ``||I - F~^-1 F||_F`` over diagonal approximate inverses gives ``F~^-1_ii = F_ii / ||F_i||^2`` (Jemcov and
 Maruszewski, 2008) -- Jacobi with a derived per-row under-relaxation rather than a tuned constant. Under a
 plain Jacobi diagonal the sweep *amplifies*, so more sweeps make it worse; under this one it contracts.
-:func:`block_approximate_inverse` generalizes it to a per-cell block, where the transpose in
+Block splitting generalizes it to a per-cell block, where the transpose in
 ``M_i = F_ii^T (R_i R_i^T)^-1`` is easy to drop and reduces to the scalar form at one field per cell, so a
-scalar check cannot catch its absence.
+scalar check cannot catch its absence. Every piece is formed on the device from the level operator's
+values (:mod:`~aquaflux.precondition.simple_fit`), so a refit moves no level through the host.
 
 The cycle is a **fixed** linear operator -- a fixed number of cycles, sweeps and inner sweeps, with no
 inner Krylov method -- which is what a non-flexible outer GMRES requires and what lets the adjoint
@@ -33,22 +34,23 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 import scipy.sparse as sp
 
+from .entry_map import SparsePattern
 from .hierarchy_inverse import HierarchyBlockInverse
-from .multigrid import (
-    SmoothedHierarchy,
-    StructuralPatterns,
-    _ones,
-    _operator_matvec,
-    _smoothed_ops,
-    _structured,
+from .multigrid import SmoothedHierarchy, _operator_matvec, _smoothed_ops
+from .padded_rows import _PaddedRowOperator
+from .simple_fit import (
+    SimpleChecks,
+    SimplePlan,
+    SimpleValues,
+    fit_simple_level,
+    refuse_unusable,
+    simple_plan,
 )
-from .padded_rows import _padded_operator, _PaddedRowOperator
 from .traced_cycle import in_precision
 
-__all__ = ["SimpleSmoothedInverse", "block_approximate_inverse"]
+__all__ = ["SimpleSmoothedInverse"]
 
 
 class _SimplePieces(eqx.Module):
@@ -66,9 +68,8 @@ class _SimplePieces(eqx.Module):
     refresh cheap, and is defeated outright by a closure, since a closed-over array is a compile-time
     constant and every refresh mints a new one.
 
-    The formed Schur is deliberately **not** carried here. It has no traced form a diagnostic can
-    transpose, and a host sparse matrix is neither a leaf nor a hashable static field, so
-    :func:`_simple_pieces` returns it alongside instead.
+    The formed Schur is carried only in its traced form: a host sparse matrix is neither a leaf nor a
+    hashable static field, so :func:`_simple_pieces` returns a host copy alongside instead.
     """
 
     f_diagonal_inverse: jnp.ndarray  # (n_velocity,) 1 / diag(F)
@@ -84,201 +85,89 @@ class _SimplePieces(eqx.Module):
     n_velocity: int = eqx.field(static=True)
 
 
-def block_approximate_inverse(f_block, n_cells, n_fields, frobenius):
-    """A per-cell block approximate inverse of the velocity block, as a sparse operator.
-
-    The scalar diagonal this replaces throws away the coupling between a cell's own velocity components.
-    A block inverse keeps it at a precomputed ``n_fields x n_fields`` solve per cell -- nine multiplies
-    instead of three, negligible beside the matrix-vector products -- so it is the cheapest strengthening
-    of the splitting available, and the splitting error is what the eigenvalue clustering of a
-    block-diagonal saddle preconditioner is governed by.
-
-    ``frobenius`` selects the block generalization of the Frobenius-optimal diagonal. Minimizing
-    ``||I - M F||_F`` over block-diagonal ``M`` decouples by cell: with ``R_i`` the cell's row block of
-    ``F``, the minimizer is ``M_i = F_ii^T (R_i R_i^T)^-1``. At one field per cell this reduces exactly to
-    ``F_ii / ||F_i||^2``, the diagonal form that carries the derived per-row under-relaxation which decides
-    whether the sweep contracts at all -- so the block version should not be built without it.
-
-    Parameters
-    ----------
-    f_block : scipy.sparse matrix
-        The velocity block, shape ``(n_fields * n_cells,) * 2``, field-major.
-    n_cells, n_fields : int
-        Cells, and velocity components per cell.
-    frobenius : bool
-        Use the Frobenius-optimal block rather than the exact inverse of the diagonal block.
-
-    Returns
-    -------
-    scipy.sparse.csr_matrix
-        The block-diagonal approximate inverse, shape ``(n_fields * n_cells,) * 2``.
-    """
-    diagonal_blocks = np.zeros((n_cells, n_fields, n_fields))
-    for f in range(n_fields):
-        rows_f = f_block[f * n_cells : (f + 1) * n_cells]
-        for g in range(n_fields):
-            diagonal_blocks[:, f, g] = rows_f[:, g * n_cells : (g + 1) * n_cells].diagonal()
-    if frobenius:
-        # Gram matrix of each cell's row block: (R_i R_i^T)_{fg} = <row f, row g> over the whole row.
-        gram = np.zeros((n_cells, n_fields, n_fields))
-        row_blocks = [f_block[f * n_cells : (f + 1) * n_cells] for f in range(n_fields)]
-        for f in range(n_fields):
-            for g in range(n_fields):
-                gram[:, f, g] = np.asarray(
-                    row_blocks[f].multiply(row_blocks[g]).sum(axis=1)
-                ).ravel()
-        # M_i = F_ii^T G^-1 with G = R_i R_i^T symmetric, computed as solve(G, F_ii) transposed:
-        # (G^-1 F_ii)^T = F_ii^T G^-T = F_ii^T G^-1. Passing F_ii^T here instead would give F_ii G^-1,
-        # which differs whenever the cell's own velocity-component block is nonsymmetric -- and it
-        # coincides at one field per cell, so a scalar reduction check cannot catch the difference.
-        inverse = np.transpose(np.linalg.solve(gram, diagonal_blocks), (0, 2, 1))
-    else:
-        inverse = np.linalg.inv(diagonal_blocks)
-    cells = np.arange(n_cells)
-    rows, cols, vals = [], [], []
-    for f in range(n_fields):
-        for g in range(n_fields):
-            rows.append(cells + f * n_cells)
-            cols.append(cells + g * n_cells)
-            vals.append(inverse[:, f, g])
-    return sp.csr_matrix(
-        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
-        shape=(n_fields * n_cells,) * 2,
-    )
-
-
 def _simple_pieces(
-    a: sp.csr_matrix,
+    a: sp.spmatrix,
     block_size: int,
     frobenius: bool = True,
     schur_frobenius: bool = False,
     block_splitting: bool = False,
     simplec: bool = False,
     report: Callable[[str], None] = lambda _message: None,
-    patterns: StructuralPatterns | None = None,
     precision: str = "float64",
 ) -> tuple[_SimplePieces, sp.csr_matrix]:
-    """Form one level's SIMPLE pieces from that level's assembled operator.
+    """Form one level's SIMPLE pieces from an assembled operator, through a plan made for it.
 
     Works on **any** level, including a Galerkin coarse operator, because it reads nothing but the
     matrix -- which is the property that decides whether a SIMPLE relaxation can be a smoother at all.
     The assembler-built Schur cannot: it needs the mesh, the Rhie--Chow coefficients and the boundary
-    closures, none of which a coarse level has.
-
-    ``patterns``, when given, keeps the structural patterns of ``D⁻¹G`` and the Schur complement
-    between calls on a level whose blocks store the same entries (:class:`StructuralPatterns`), with the
-    gathers that cut the four blocks out of ``a`` and the padded-row packings of the pieces, so a re-fit
-    on a frozen coarsening computes each once.
-
-    ``precision`` is the floating-point type the traced pieces are held in. Every piece is computed in
-    double precision and rounded once as soon as it is formed, so a level's pieces are never all held
-    in double beside their rounded copies; the host Schur returned beside them stays double.
+    closures, none of which a coarse level has. :class:`SimpleSmoothedInverse` holds each level's plan
+    and fits it at every refit; this makes one for a single operator.
 
     Returns
     -------
     pieces : _SimplePieces
-        The traced record the smoother applies.
+        The traced record the smoother applies, in ``precision``.
     schur : scipy.sparse.csr_matrix
-        The same Schur complement in host sparse form, returned separately because it cannot ride on a
-        traced pytree. Forming it is the expensive part of this function, so a diagnostic that needs a
-        transposable sparse operator takes it from here rather than rebuilding it -- which would be a
-        second spelling of ``C - D diag(F)^-1 G``.
+        The same Schur complement in host sparse form and double precision, for a diagnostic that needs
+        a transposable sparse operator -- rather than forming ``C - D diag(F)^-1 G`` a second time.
     """
-    n_cells = a.shape[0] // block_size
-    nv = (block_size - 1) * n_cells
-    velocity, pressure = slice(None, nv), slice(nv, None)
-
-    def block(name: str, rows: slice, columns: slice) -> sp.csr_matrix:
-        if patterns is None:
-            return a[rows, columns].tocsr()
-        return patterns.maps.csr((name, a.shape[0]), a, lambda m: m[rows, columns])
-
-    def padded(name: str, matrix: sp.spmatrix) -> _PaddedRowOperator:
-        maps = None if patterns is None else patterns.maps
-        return in_precision(_padded_operator(matrix, maps=maps, slot=(name, a.shape[0])), precision)
-
-    f_block = block("velocity", velocity, velocity)
-    # The approximate velocity inverse the whole relaxation is built on. Jacobi (`1 / F_ii`) is what
-    # this smoother used when it amplified; the Frobenius-optimal diagonal is the same object with a
-    # derived per-row relaxation, and an under-relaxed sweep is exactly what an amplifying one is
-    # missing -- so the change is qualitative rather than a matter of degree: under Jacobi more sweeps
-    # make the residual worse, under this one they make it better.
-    f_inverse = _diagonal_approximate_inverse(
-        f_block, frobenius, row_sum=simplec, label=" (velocity)"
+    a = sp.csr_matrix(a).sorted_indices()
+    plan = simple_plan(
+        SparsePattern.of(a),
+        block_size,
+        frobenius=frobenius,
+        schur_frobenius=schur_frobenius,
+        block_splitting=block_splitting,
+        simplec=simplec,
     )
-    g_block = block("gradient", velocity, pressure)
-    d_block = block("divergence", pressure, velocity)
-    if block_splitting and simplec:
-        # The block inverse overrides the diagonal entirely, so a SIMPLEC diagonal built alongside it is
-        # computed, reported, and never applied -- an arm whose name claims a splitting it does not run.
-        # Caught because the pair returned a residual bit-identical to block splitting alone.
-        raise ValueError(
-            "block splitting overrides the velocity diagonal, so `simplec` would have no effect; "
-            "choose one."
-        )
-    if block_splitting:
-        f_inverse_matrix = block_approximate_inverse(f_block, n_cells, block_size - 1, frobenius)
-        block_inverse = padded("velocity inverse", f_inverse_matrix)
-    else:
-        # An explicit diagonal rather than `sp.diags`, whose conversion to compressed rows drops a zero
-        # entry and would make the products below value-dependent in pattern.
-        rows = np.arange(nv)
-        f_inverse_matrix = sp.csr_matrix((f_inverse, (rows, rows)), shape=(nv, nv))
-        block_inverse = None
-    # Both stored on their structural patterns: a sparse product or difference drops entries that come
-    # out exactly zero, so stored as computed their entry counts -- array shapes in the traced pieces --
-    # would move with the operator's values, and a refit on a fixed coarsening would retrace whatever
-    # compiled program holds them.
-    dg = _structured(
-        f_inverse_matrix @ g_block,
-        (f_inverse_matrix, g_block),
-        lambda: _ones(f_inverse_matrix) @ _ones(g_block),
-        patterns,
-        ("dg", a.shape[0]),
-    )
-    c_block = block("pressure", pressure, pressure)
-    schur = _structured(
-        c_block - d_block @ dg,
-        (c_block, d_block, dg),
-        lambda: _ones(c_block) + _ones(d_block) @ _ones(dg),
-        patterns,
-        ("schur", a.shape[0]),
-    )
+    values, checks = fit_simple_level(plan, _PaddedRowOperator.from_scipy(a).values)
+    schur = plan.schur_layout.with_values(*values.schur).to_scipy()
+    return _held_pieces(plan, values, checks, report, precision), schur
+
+
+def _held_pieces(
+    plan: SimplePlan,
+    values: SimpleValues,
+    checks: SimpleChecks,
+    report: Callable[[str], None],
+    precision: str,
+) -> _SimplePieces:
+    """A fitted level's pieces on its plan's layouts, in ``precision``, once its checks are clear.
+
+    Rounded as soon as they are held, so a level's pieces are never all held in double beside their
+    rounded copies.
+    """
+    refuse_unusable(checks)
+    c_entries, d_entries, g_entries, schur_entries = plan.entry_counts
     # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
     # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
     # which side carries more nonzeros. Printed rather than assumed.
     report(
-        f"      Schur {schur.data.shape[0] / 1e6:.1f}M nnz formed vs "
-        f"{(c_block.nnz + d_block.nnz + g_block.nnz) / 1e6:.1f}M as pieces "
-        f"(C {c_block.nnz / 1e6:.1f}M + D {d_block.nnz / 1e6:.1f}M + G {g_block.nnz / 1e6:.1f}M)",
+        f"      Schur {schur_entries / 1e6:.1f}M nnz formed vs "
+        f"{(c_entries + d_entries + g_entries) / 1e6:.1f}M as pieces "
+        f"(C {c_entries / 1e6:.1f}M + D {d_entries / 1e6:.1f}M + G {g_entries / 1e6:.1f}M)",
     )
-    schur_diagonal = schur.diagonal()
-    # A zero Schur diagonal would make the pressure relaxation undefined. It does not arise on this
-    # discretization -- Rhie-Chow damping gives the continuity row a genuine diagonal, and the
-    # correction only strengthens it -- so this is a guard against a coarse level degenerating, not a
-    # routine case to smooth over.
-    if np.any(schur_diagonal == 0.0):
-        raise ValueError("the Schur complement has a zero diagonal on some level.")
-    schur_inverse = _diagonal_approximate_inverse(schur, schur_frobenius)
-    if schur_frobenius:
-        ratio = (
-            schur_inverse * schur_diagonal
-        )  # vs Jacobi's 1/S_ii, so this is the relaxation factor
+    if plan.schur_frobenius:
+        low, median, high = (float(v) for v in checks.schur_relaxation)
+        n_pressure = plan.schur_layout.shape[0]
         report(
-            f"      Schur relaxation (Eq. 39): min {ratio.min():.3e} median {np.median(ratio):.3e} "
-            f"max {ratio.max():.3e}  ({schur.data.shape[0] / schur.shape[0]:.0f} nnz/row)",
+            f"      Schur relaxation (Eq. 39): min {low:.3e} median {median:.3e} "
+            f"max {high:.3e}  ({schur_entries / n_pressure:.0f} nnz/row)",
         )
-    return (
+    block_inverse = None
+    if values.block_inverse is not None:
+        block_inverse = plan.block_layout.with_values(*values.block_inverse)
+    return in_precision(
         _SimplePieces(
             f_block_inverse=block_inverse,
-            n_velocity=nv,
-            f_diagonal_inverse=in_precision(jnp.asarray(f_inverse), precision),
-            dg=padded("dg", dg),
-            divergence=padded("divergence", d_block),
-            schur=padded("schur", schur),
-            schur_diagonal_inverse=in_precision(jnp.asarray(schur_inverse), precision),
+            n_velocity=plan.n_velocity,
+            f_diagonal_inverse=values.velocity_inverse,
+            dg=plan.correction_layout.with_values(*values.correction),
+            divergence=plan.divergence_layout.with_values(*values.divergence),
+            schur=plan.schur_layout.with_values(*values.schur),
+            schur_diagonal_inverse=values.schur_inverse,
         ),
-        schur,
+        precision,
     )
 
 
@@ -439,66 +328,6 @@ def _simple_smoothed_cycle(
     return hierarchy.fixed_cycle_solve(residual, settings.cycles, ops)
 
 
-def _diagonal_approximate_inverse(
-    f_block: sp.csr_matrix,
-    frobenius: bool,
-    row_sum: bool = False,
-    label: str = "",
-    report: Callable[[str], None] = lambda _message: None,
-) -> np.ndarray:
-    """The diagonal approximate inverse of a block, Jacobi or Frobenius-optimal.
-
-    Written for the velocity block but specific to nothing about it -- the derivation reads only the
-    rows of whatever matrix it is handed, so it applies equally to the Schur complement, whose own
-    relaxation faces the same choice and whose diagonal is a **worse** approximation to its inverse,
-    because the Schur is denser per row than the flow block it is formed from.
-
-    Jacobi takes ``1 / F_ii``. The Frobenius-optimal diagonal instead minimizes ``||I - F~^-1 F||_F``,
-    which for a diagonal unknown decouples row by row and has the closed form ``F_ii / ||F_i||^2``.
-
-    **Written as a ratio the two differ by ``F_ii^2 / ||F_i||^2``, which is at most one and is the
-    fraction of row i's energy sitting on its diagonal — so the optimal choice is Jacobi with an
-    automatic, per-row under-relaxation.** That is worth stating plainly because the hand-tuned version
-    of the same quantity appears throughout this solver: a velocity-row under-relaxation, a
-    preconditioner-only shift floor on the velocity rows, and the relative velocity-row relaxation the
-    closest published work on this discretization never manages to drop. Here it is derived rather than
-    chosen, which is the paper's own argument for why its formulation needs no under-relaxation at all.
-    """
-    diagonal = f_block.diagonal()
-    if not np.all(np.isfinite(diagonal)) or np.any(diagonal == 0.0):
-        raise ValueError("the velocity block has a zero or non-finite diagonal.")
-    if row_sum:
-        # The SIMPLEC coefficient. Where SIMPLE drops the neighbour corrections entirely and divides by
-        # a_P, SIMPLEC approximates each neighbour correction by the cell's own, which collapses the
-        # neighbour sum onto the diagonal and divides by a_P - sum(a_nb) -- exactly this matrix's ROW
-        # SUM. Its appeal as a smoother is a property the other two choices lack: `I - F~^-1 F`
-        # annihilates the constant vector exactly, so the smoother does not fight the coarse grid over
-        # the smoothest mode, which is the one the coarse grid exists to carry.
-        #
-        # It has a failure mode the others do not. A row sum can approach zero where a diagonal cannot,
-        # and this operator is measurably NOT diagonally dominant, so rows whose sum is small relative
-        # to their own diagonal would produce an enormous coefficient. Those fall back to the
-        # Frobenius-optimal value, and the count is reported: if many rows fall back, SIMPLEC is not
-        # meaningfully in force and any result under it is really a result about the fallback.
-        sums = np.asarray(f_block.sum(axis=1)).ravel()
-        usable = sums > 0.1 * np.abs(diagonal)
-        squared = np.asarray(f_block.multiply(f_block).sum(axis=1)).ravel()
-        fallback = diagonal / squared
-        inverse = np.where(usable, 1.0 / np.where(usable, sums, 1.0), fallback)
-        report(
-            f"      SIMPLEC splitting{label}: {int((~usable).sum())} of {usable.size} rows fell back "
-            f"to Frobenius (row sum below a tenth of the diagonal)",
-        )
-        return inverse
-    if not frobenius:
-        return 1.0 / diagonal
-    # Row 2-norms squared, straight off the CSR values.
-    squared = np.asarray(f_block.multiply(f_block).sum(axis=1)).ravel()
-    if np.any(squared == 0.0):
-        raise ValueError("the velocity block has an empty row; the optimal inverse is undefined.")
-    return diagonal / squared
-
-
 class SimpleSmoothedInverse(HierarchyBlockInverse):
     """A traced multigrid over the flow saddle whose LEVEL SMOOTHER is a SIMPLE relaxation.
 
@@ -513,8 +342,10 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
     labour is the point: the smoother only has to damp high-frequency error, where a local algebraic
     Schur is accurate, and the coarse solve carries the global mode, where it is not.
 
-    Nothing in it is a host solver and nothing in it is sequential -- the setup is sparse products in
-    ``scipy`` and the apply is diagonal scalings and sparse matrix-vector products in JAX.
+    Nothing in it is a host solver and nothing in it is sequential -- each level's pieces are formed on
+    the device from the level operator's values (:func:`~aquaflux.precondition.simple_fit.fit_simple_level`,
+    on a plan made once per coarsening) and the apply is diagonal scalings and sparse matrix-vector
+    products in JAX.
 
     Parameters
     ----------
@@ -664,6 +495,10 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         self._avoid_singletons = avoid_singletons
         self._prolongation_smoothing = prolongation_smoothing
         self._equilibrate = equilibrate
+        # Each smoothed level's plan, and the level operators' index arrays they were made for: a
+        # frozen refit keeps those very arrays, a rebuild makes new ones (see `_simple_plans`).
+        self._plans: tuple[SimplePlan | None, ...] = ()
+        self._plans_for: tuple = ()
         # The cycle's static half, built once: it never changes over this inverse's life, so a refresh
         # cannot move the compilation key through it.
         self._smoother = _SmootherSettings(
@@ -709,24 +544,14 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         # handed the concrete level object and can look its pieces up by a static attribute. The
         # coarsest level solves directly and needs none.
         pieces = {}
-        for level in hierarchy.levels:
-            if level.coarse_inv is not None:
+        for level, plan in zip(hierarchy.levels, self._simple_plans(hierarchy), strict=True):
+            if plan is None:
                 continue
-            level_matrix = level.operator.to_scipy()
-            # The formed Schur is discarded: nothing here applies it, and the smoother's traced copy
-            # is the one the cycle uses. A diagnostic that wants it in host form calls `_simple_pieces`
-            # itself and takes it from the pair.
-            pieces[level.n], _ = _simple_pieces(
-                level_matrix,
-                level.block_size,
-                self._frobenius,
-                self._schur_frobenius,
-                self._block_splitting,
-                self._simplec,
-                report=self._report,
-                patterns=self._patterns,
-                precision=self._stored_precision,
+            values, checks = fit_simple_level(plan, level.operator.values)
+            pieces[level.n] = _held_pieces(
+                plan, values, checks, self._report, self._stored_precision
             )
+            del values
         sizes = ", ".join(
             f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.nnz / 1e6:.1f}M nnz"
             for n, p in pieces.items()
@@ -765,3 +590,33 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         )
 
         return pieces
+
+    def _simple_plans(self, hierarchy: SmoothedHierarchy) -> tuple[SimplePlan | None, ...]:
+        """Each level's SIMPLE plan (``None`` on the coarsest, which solves directly), made once.
+
+        A plan is the level's structure, so it stays valid while the level operator keeps its pattern.
+        A frozen coarsening's refit assembles every level operator on its layout's own index arrays,
+        so those arrays -- compared by identity -- say whether the held plans still apply; a rebuild
+        makes new ones, and the plans are made again.
+        """
+        columns = tuple(level.operator.columns for level in hierarchy.levels)
+        held = len(columns) == len(self._plans_for) and all(
+            a is b for a, b in zip(columns, self._plans_for, strict=True)
+        )
+        if not held:
+            self._plans = tuple(
+                None
+                if level.coarse_inv is not None
+                else simple_plan(
+                    SparsePattern.of(level.operator.to_scipy()),
+                    level.block_size,
+                    level.operator.width,
+                    frobenius=self._frobenius,
+                    schur_frobenius=self._schur_frobenius,
+                    block_splitting=self._block_splitting,
+                    simplec=self._simplec,
+                )
+                for level in hierarchy.levels
+            )
+            self._plans_for = columns
+        return self._plans

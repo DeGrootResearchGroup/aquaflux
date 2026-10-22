@@ -245,15 +245,6 @@ path.
     `test_a_threshold_free_mis_coarsening_keeps_its_shapes_when_a_coupling_becomes_exactly_zero`,
     `test_galerkin_coarse_pattern_does_not_move_when_a_weight_becomes_zero`; harness
     `validation/traced_split_refresh_shapes.py`.
-  - **`StructuralPatterns` pays for those patterns once**: one pattern per slot (call site, level), keyed
-    by a checksum of the operands' stored patterns; a collision can only yield a pattern missing an entry,
-    which `_Structure.store` refuses. `_Structure` also reuses the last operator's entry positions while
-    its `indptr` and `indices` are exactly equal (compared, not checksummed — a hit skips the subset check).
-    Each `HierarchyBlockInverse` owns one (`self._patterns`) and passes it to `_simple_pieces(patterns=)`;
-    it serves only the bilinear SIMPLE pieces (`D⁻¹G`, Schur) and, through its `maps`, their block cuts and
-    packings. Pinned by `test_structural_patterns_compute_a_pattern_once_while_the_operands_patterns_hold`
-    and `test_a_structure_reuses_positions_only_for_identical_stored_entries`; refit cost harness
-    `validation/refit_cost_probe.py`.
   - **A frozen coarsening's level values are fitted on the device, by one function for the first build
     and every refit (`level_fit.py`, 2026-10-22).** The host decides structure (aggregates, prolongations,
     every level's pattern) and holds it as a `CoarseningPlan` of `_LevelPlan`s, each carrying device entry
@@ -294,17 +285,15 @@ path.
     entry-moving operation once over `SparsePattern.numbered()` (cuts, transposes, `_padded_rows`,
     `cell_blocks` -- so each operation's index rule keeps its one home), and `EntryMap.product(L, pattern,
     R)` gives `M -> L M R` for fixed `L`, `R` onto the product's structural pattern (the same set
-    `_galerkin_coarse` stores on). `EntryMaps` (held as `StructuralPatterns.maps`, and by
-    `FieldSplitInverse._maps`) keys one gathering map per slot and rebuilds it when the operand's pattern
+    `_galerkin_coarse` stores on). `EntryMaps` (held by `FieldSplitInverse._maps`) keys one gathering map per slot and rebuilds it when the operand's pattern
     moved; `EntryMap.apply` itself refuses an operand of another pattern. **A pattern is held once however many owners
     read it**: `SparsePattern.of` returns the live pattern matching the operand by content (`matches`),
     used by `EntryMaps.pattern_of`, both landings and the coarsening's plan, since the split cuts a block
     and its hierarchy then fits a copy of it (a scaling or shift copies the index arrays, so identity alone
     misses it). Pinned by
-    `test_two_owners_reading_one_pattern_hold_one_copy_and_another_pattern_is_never_given_it`. Host-wired: `_simple_pieces` (the
-    four block cuts and every packing), `FieldGroups.blocks(maps=)` and
-    `FieldSplitInverse.padded_coupling()` (`traced_field_split`). Not mapped, because bilinear in the values
-    or not a sparse operation: `D⁻¹G`, the Schur, the Frobenius diagonals.
+    `test_two_owners_reading_one_pattern_hold_one_copy_and_another_pattern_is_never_given_it`. Host-wired: `FieldGroups.blocks(maps=)` and
+    `FieldSplitInverse.padded_coupling()` (`traced_field_split`). The SIMPLE pieces are fitted on the
+    device from their own plan (`solve-flow-block.md`).
     - **Why the Galerkin map is linear on both shipped blocks:** both run `prolongation_smoothing: "none"`
       (the class default; neither case file sets it), so `P` is the aggregates' 0/1 indicator, and a refit
       reuses the held `P` in any case. A smoothed `P` would still give a linear map at refit (the refit
