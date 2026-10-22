@@ -14,12 +14,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from aquaflux.precondition import SimpleSmoothed, SimpleSmoothedInverse, multigrid, saddle_multigrid
+from aquaflux.precondition import SimpleSmoothed, SimpleSmoothedInverse, saddle_multigrid
 from aquaflux.precondition.saddle_multigrid import (
     _simple_correction,
     _simple_pieces,
     _simple_smoothed_cycle,
-    block_approximate_inverse,
 )
 
 
@@ -319,43 +318,39 @@ def test_a_frozen_coarsening_refresh_reports_its_own_last_aggregation_not_a_stra
     assert leading._aggregate_stats != trailing._aggregate_stats
 
 
-def test_a_frozen_refresh_reuses_its_structural_patterns_and_returns_what_computing_them_would(
-    monkeypatch,
-) -> None:
-    """A frozen-coarsening refit on an unchanged pattern computes no structural pattern after the first.
+def test_a_frozen_refresh_reuses_its_plans_and_returns_what_fresh_plans_would(monkeypatch) -> None:
+    """A frozen-coarsening refit on an unchanged pattern makes no SIMPLE plan after the first.
 
-    Every structural pattern -- the SIMPLE level's ``D^-1 G`` and Schur complement -- is computed over
-    all-ones copies of its operands (``_ones``), which costs as much as the product itself, and so are
-    the entry maps the Galerkin products, block cuts and packings go through. On a frozen coarsening
-    none of them can move, so a second refresh must compute none of them; and the refreshed hierarchy
-    and smoother pieces must be exactly the ones an inverse computing every pattern and map afresh
-    arrives at (both sum each product in the map's order, so they agree bit for bit).
+    A level's plan -- its block cuts, the structural patterns of ``D^-1 G`` and the Schur complement,
+    their layouts -- is its structure, and on a frozen coarsening none of it can move, so a refresh must
+    make none; and the refreshed hierarchy and smoother pieces must be exactly the ones an inverse
+    making every plan afresh arrives at (the fit is one compiled function of the values).
     """
     cached = SimpleSmoothedInverse(_saddle(), 4, **_SETTINGS, frozen_coarsening=True)
     fresh = SimpleSmoothedInverse(_saddle(), 4, **_SETTINGS, frozen_coarsening=True)
     for inverse in (cached, fresh):
         inverse.refactor_block((_saddle() * 1.7).tocsr())
 
-    computed = []
-    ones = multigrid._ones
+    made = []
+    plan = saddle_multigrid.simple_plan
 
-    def counted(matrix):
-        computed.append(1)
-        return ones(matrix)
+    def counted(*args, **kwargs):
+        made.append(1)
+        return plan(*args, **kwargs)
 
-    monkeypatch.setattr(multigrid, "_ones", counted)
-    monkeypatch.setattr(saddle_multigrid, "_ones", counted)
+    monkeypatch.setattr(saddle_multigrid, "simple_plan", counted)
     refreshed = (_saddle(seed=1) * 0.6).tocsr()
-    # Stored exact zeros off the diagonal: the plain products drop what the patterns keep.
+    # Stored exact zeros off the diagonal: a plain product would drop what the patterns keep.
     rows = np.repeat(np.arange(refreshed.shape[0]), np.diff(refreshed.indptr))
     off_diagonal = np.flatnonzero(rows != refreshed.indices)
     refreshed.data[off_diagonal[::7]] = 0.0
     cached.refactor_block(refreshed)
-    assert not computed
+    assert not made
+    fresh._plans_for = ()  # every plan made afresh
+    fresh.refactor_block(refreshed)
+    assert made
     monkeypatch.undo()
 
-    fresh._patterns = multigrid.StructuralPatterns()  # every pattern and map computed afresh
-    fresh.refactor_block(refreshed)
     got = jax.tree.leaves(cached.traced_cycle().state)
     want = jax.tree.leaves(fresh.traced_cycle().state)
     assert len(got) == len(want)
@@ -384,8 +379,11 @@ def test_the_frobenius_block_inverse_beats_inverting_the_cell_block_alone() -> N
     a = _saddle(n_cells=40)
     n_cells, n_fields = 40, 4
 
-    fitted = block_approximate_inverse(a[: n_cells * 3, : n_cells * 3], n_cells, 3, frobenius=True)
-    exact = block_approximate_inverse(a[: n_cells * 3, : n_cells * 3], n_cells, 3, frobenius=False)
+    def block_inverse(frobenius):
+        pieces, _ = _simple_pieces(a, n_fields, frobenius=frobenius, block_splitting=True)
+        return pieces.f_block_inverse.to_scipy()
+
+    fitted, exact = block_inverse(True), block_inverse(False)
     velocity = a[: n_cells * 3, : n_cells * 3]
     identity = sp.eye(velocity.shape[0], format="csr")
 

@@ -44,8 +44,7 @@ diagonal rescaling in the apply.
 from __future__ import annotations
 
 import heapq
-import zlib
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable
 from typing import NamedTuple
 
 import equinox as eqx
@@ -55,7 +54,7 @@ import scipy.sparse as sp
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
-from .entry_map import EntryMaps, SparsePattern, compiled_apply
+from .entry_map import SparsePattern, compiled_apply
 from .frozen_operator import equilibration_scale, symmetrically_equilibrate
 from .level_fit import (
     CoarseningPlan,
@@ -2198,19 +2197,11 @@ def _entry_keys(matrix: sp.csr_matrix) -> np.ndarray:
 
 
 class _Structure:
-    """A structural pattern ready to store values on: the sorted pattern and its entry keys.
-
-    It also remembers where the last operator stored on it went. Locating an operator's entries is a
-    search over every key of the pattern, which on a refit costs more than the product it stores; but a
-    refit's product stores the same entries in the same order every time (it drops only entries that
-    come out exactly zero, which change its pattern and so miss), so the positions are reused whenever
-    the operator's index arrays equal the last one's exactly.
-    """
+    """A structural pattern ready to store values on: the sorted pattern and its entry keys."""
 
     def __init__(self, pattern: sp.csr_matrix, keys: np.ndarray) -> None:
         self.pattern = pattern
         self.keys = keys
-        self._placed: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
     @classmethod
     def of(cls, pattern: sp.spmatrix) -> _Structure:
@@ -2221,16 +2212,8 @@ class _Structure:
     def store(self, values: sp.spmatrix) -> sp.csr_matrix:
         """``values`` on this pattern (:func:`_onto_pattern`)."""
         values = sp.csr_matrix(values)
-        placed = self._placed
-        if (
-            placed is None
-            or not np.array_equal(placed[0], values.indptr)
-            or not np.array_equal(placed[1], values.indices)
-        ):
-            placed = (values.indptr, values.indices, self._locate(values))
-            self._placed = placed
         data = np.zeros(self.pattern.nnz, dtype=values.data.dtype)
-        data[placed[2]] = values.data
+        data[self._locate(values)] = values.data
         return sp.csr_matrix(
             (data, self.pattern.indices, self.pattern.indptr), shape=self.pattern.shape
         )
@@ -2248,96 +2231,6 @@ class _Structure:
                 "cannot happen for a pattern computed from the same expression."
             )
         return position
-
-
-def _pattern_fingerprint(operands: Sequence[sp.spmatrix]) -> tuple:
-    """Each operand's shape and a checksum of its stored pattern, independent of its values.
-
-    A collision could at worst hand :meth:`_Structure.store` a pattern missing one of the operator's
-    entries, which it refuses; a superset stores the same operator. So it can never change an answer.
-    """
-    fingerprint = []
-    for operand in operands:
-        operand = sp.csr_matrix(operand)
-        fingerprint.append(
-            (
-                operand.shape,
-                zlib.crc32(np.ascontiguousarray(operand.indptr)),
-                zlib.crc32(np.ascontiguousarray(operand.indices)),
-            )
-        )
-    return tuple(fingerprint)
-
-
-class StructuralPatterns:
-    """The structural patterns of computed operators, kept while their operands' patterns hold.
-
-    A structural pattern (:func:`_onto_pattern`) is the same product computed a second time over
-    all-ones copies of the operands, which costs as much as the product itself. It depends only on the
-    operands' patterns, and on a re-fit those do not move: a frozen coarsening keeps every prolongation,
-    and the fine operator comes from a probe with a fixed pattern. Held by one block inverse for its
-    life, this computes each pattern once and reuses it at every later re-fit, after checking that the
-    operands still store the same entries -- so the result is identical to computing it afresh, and an
-    operand whose pattern did change gets its pattern recomputed.
-
-    One entry per ``slot`` (a call site and level), replaced when the operands change, so it holds at
-    most one pattern per computed operator. A host object, never a leaf of a traced hierarchy.
-
-    ``maps`` holds the same owner's entry maps (:class:`~aquaflux.precondition.entry_map.EntryMaps`):
-    the fixed linear maps from an operand's values to a result's, for the operations that are linear in
-    one varying operand (a Galerkin product with frozen transfers, a sub-block, a padded-row packing).
-    Those need no structural pattern of their own, since a map lands on its product's.
-    """
-
-    def __init__(self) -> None:
-        self._entries: dict[Hashable, tuple[tuple, _Structure]] = {}
-        self.maps = EntryMaps()
-
-    def onto(
-        self,
-        slot: Hashable,
-        values: sp.spmatrix,
-        operands: Sequence[sp.spmatrix],
-        pattern: Callable[[], sp.spmatrix],
-    ) -> sp.csr_matrix:
-        """``values`` stored on the structural pattern of ``operands``, computed only when it moved.
-
-        Parameters
-        ----------
-        slot : hashable
-            Which computed operator this is, e.g. ``("galerkin", 0)``.
-        values : scipy.sparse matrix
-            The operator, computed from ``operands``.
-        operands : sequence of scipy.sparse matrix
-            The matrices it was computed from; their stored patterns decide the structural one.
-        pattern : callable
-            Computes the structural pattern from the operands over :func:`_ones`; called only when
-            this slot has none for the operands' current patterns.
-
-        Returns
-        -------
-        scipy.sparse.csr_matrix
-            ``values`` on the structural pattern.
-        """
-        fingerprint = _pattern_fingerprint(operands)
-        entry = self._entries.get(slot)
-        if entry is None or entry[0] != fingerprint:
-            entry = (fingerprint, _Structure.of(pattern()))
-            self._entries[slot] = entry
-        return entry[1].store(values)
-
-
-def _structured(
-    values: sp.spmatrix,
-    operands: Sequence[sp.spmatrix],
-    pattern: Callable[[], sp.spmatrix],
-    patterns: StructuralPatterns | None,
-    slot: Hashable,
-) -> sp.csr_matrix:
-    """``values`` on the structural pattern of ``operands``: from ``patterns`` if given, else computed."""
-    if patterns is None:
-        return _onto_pattern(values, pattern())
-    return patterns.onto(slot, values, operands, pattern)
 
 
 def _galerkin_coarse(

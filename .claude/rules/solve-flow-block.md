@@ -1,6 +1,7 @@
 ---
 paths:
   - "aquaflux/precondition/saddle_multigrid.py"
+  - "aquaflux/precondition/simple_fit.py"
   - "aquaflux/solve/shift_basis.py"
 ---
 
@@ -19,16 +20,34 @@ of magnitude on this operator, and the traced path is the only one with a GPU ro
 measured slower than the (since deleted, #371) PETSc ILU(0) incumbent — 1.26x at matched `inner_tol`
 1e-2 (log: "THE TRACED FLOW BLOCK IS STILL NOT FASTER ON A MARCH"); the default accepts that.
 
-**The SIMPLE level's derived pieces are stored on their structural pattern (binding, #290).**
-`saddle_multigrid.py` forms each level's `D⁻¹G` and Schur `C − D (D⁻¹G)` with `_structured(...)`
-(`multigrid.py`'s `_onto_pattern` rule), and the non-block-splitting `D⁻¹` as an explicit CSR rather
-than a `diags` product. A plain `scipy` product drops entries that come out exactly zero, so stored
-counts moved with the values and recompiled the coupled step on a refit. Do not "simplify" either back.
-The patterns are kept between refits by `StructuralPatterns` (`_simple_pieces(patterns=)`); see
-`solve-amg-multigrid.md`'s Galerkin-shape entry. With `patterns` given, `_simple_pieces` also cuts the
-four blocks out of the level operator and packs every piece through the held entry maps
-(`patterns.maps`, `solve-amg-multigrid.md`), bit-identical to slicing and `from_scipy`; the two products
-stay `scipy` products on their structural patterns (they are bilinear in the values).
+**The SIMPLE level's pieces are fitted on the device, from a plan made once per coarsening (binding,
+2026-10-22; `simple_fit.py`).** `simple_plan(pattern, block_size, width, ...)` holds a level's structure
+as a `SimplePlan`: the four block cuts (each row's columns ascending), the structural patterns of `M G`
+and the Schur `C − D (M G)` (products over ones, so an entry that comes out exactly zero stays stored and
+no shape moves with the values -- do not "simplify" that back), their padded-row layouts, where `C`'s
+entries sit among `S`'s, the cell-block gather and the block inverse's layout. `fit_simple_level(plan,
+level_slot_values)` (one `eqx.filter_jit`) forms every value from the level operator's padded-row values:
+the diagonal inverses (Jacobi / Frobenius / SIMPLEC), each cell's Frobenius block
+`M_i = F_ii^T (R_i R_i^T)^-1`, `M G`, `S` and `S`'s diagonal inverse, plus `SimpleChecks` the host reads
+once (`refuse_unusable`). `SimpleSmoothedInverse` holds the plans (`_simple_plans`), keyed by the
+identity of the level operators' `columns` arrays, which a frozen refit keeps and a rebuild replaces;
+`_simple_pieces(a, ...)` makes a plan for one host operator (tests, diagnostics) and returns the double
+host Schur beside the pieces. There is no `StructuralPatterns`, `_structured`, `block_approximate_inverse`
+or host `_diagonal_approximate_inverse`.
+- **No product term list is held (the owner's constraint: memory must not grow).** A product places
+  each term by a binary search of its column in its output row (`_search`, `scan_unrolled`, ~2x the
+  looped search), `TERMS_PER_CHUNK` terms at a time (2**18, a CPU cache calibration). A cell-level
+  position table would remove the search but costs ~7 MB on pitzDaily and ~0.2-0.5 GB on bfs3d.
+- **Two shortcuts, each decided per level at plan time and each with the general path beside it**
+  (pinned on all three fixture shapes by `tests/unit/test_simple_fit.py`): where a cell's velocity rows
+  store the same columns (`aligned_velocity_rows`; true of a probed Jacobian and its nodal Galerkin
+  levels) the Gram matrix is a dot product of slot values, no search (0.40 -> 0.004 s on pitzDaily's fine
+  level); where `D`'s rows store one run per velocity field and `M G`'s cell rows share columns
+  (`divergence_run_width`) the Schur product sums a cell's fields before placing a term, cutting the
+  searches by the field count.
+- ⚠️ Not bit-identical to the old host pieces: the products sum in another order (≤ ~6e-16 relative on
+  the test saddle). Cost on pitzDaily (CPU, 2026-10-22): same march, solve +2-3 % (the first fit; the
+  refits are level), peak resident +0.02-0.04 GiB; log, "SIMPLE pieces on the device (2026-10-22)".
 
 ## Defaults and why
 

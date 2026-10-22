@@ -200,35 +200,52 @@ class _PaddedLayout(eqx.Module):
     (:meth:`packed`).
 
     An ``equinox.Module`` whose arrays are leaves and whose shape is static, so a layout rides into a
-    jitted refit as an argument.
+    jitted refit as an argument. A layout built with ``transposed=False`` packs rows only
+    (:meth:`row_values`), for an operand read row by row and never applied.
     """
 
     rows: DeviceEntryMap
-    transposed: DeviceEntryMap
+    transposed: DeviceEntryMap | None
     columns: jnp.ndarray  # (n_rows, width) the slot columns of every operator packed by this layout
     row_lengths: jnp.ndarray  # (n_rows,)
-    t_columns: jnp.ndarray  # (n_cols, transpose_width)
+    t_columns: jnp.ndarray | None  # (n_cols, transpose_width)
     shape: tuple[int, int] = eqx.field(static=True)
 
     @classmethod
     def of(
-        cls, pattern: SparsePattern, width: int | None = None, transpose_width: int | None = None
+        cls,
+        pattern: SparsePattern,
+        width: int | None = None,
+        transpose_width: int | None = None,
+        *,
+        transposed: bool = True,
     ) -> _PaddedLayout:
         """The layout of ``pattern`` padded to ``width`` (``transpose_width`` for ``Aᵀ``) slots.
 
         ``None`` pads to the widest row (column), as :meth:`_PaddedRowOperator.from_scipy` does.
+        ``transposed=False`` leaves out the transpose's packing.
         """
         numbered = pattern.numbered()
         columns, numbers, lengths = _padded_rows(numbered, width, "row")
-        t_columns, t_numbers, _ = _padded_rows(sp.csr_matrix(numbered.T), transpose_width, "column")
+        t_map = t_columns = None
+        if transposed:
+            t_columns, t_numbers, _ = _padded_rows(
+                sp.csr_matrix(numbered.T), transpose_width, "column"
+            )
+            t_map = EntryMap.placing(pattern, t_numbers).on_device()
+            t_columns = jnp.asarray(t_columns)
         return cls(
             rows=EntryMap.placing(pattern, numbers).on_device(),
-            transposed=EntryMap.placing(pattern, t_numbers).on_device(),
+            transposed=t_map,
             columns=jnp.asarray(columns),
             row_lengths=jnp.asarray(lengths.astype(np.int32)),
-            t_columns=jnp.asarray(t_columns),
+            t_columns=t_columns,
             shape=pattern.shape,
         )
+
+    def row_values(self, values: jnp.ndarray) -> jnp.ndarray:
+        """The slot values of ``values``, shape ``(nnz,)``, on this layout's rows: ``(n_rows, width)``."""
+        return self.rows.apply(values).reshape(self.columns.shape)
 
     def packed(self, values: jnp.ndarray) -> _PaddedRowOperator:
         """The operator storing ``values`` on this layout's pattern, shape ``(nnz,)``, traced.
@@ -237,8 +254,7 @@ class _PaddedLayout(eqx.Module):
         exact in any type, and a single-precision operator is packed into single-precision slots.
         """
         return self.with_values(
-            self.rows.apply(values).reshape(self.columns.shape),
-            self.transposed.apply(values).reshape(self.t_columns.shape),
+            self.row_values(values), self.transposed.apply(values).reshape(self.t_columns.shape)
         )
 
     def with_values(self, values: jnp.ndarray, t_values: jnp.ndarray) -> _PaddedRowOperator:

@@ -43,7 +43,6 @@ from .multigrid import (
     FrozenCoarsening,
     ShapeBudget,
     SmoothedHierarchy,
-    StructuralPatterns,
     build_convection_hierarchy,
 )
 from .traced_cycle import TracedCycle, in_precision
@@ -187,10 +186,6 @@ class HierarchyBlockInverse:
         self._aggregate_stats: tuple[dict, ...] = ()
         # The coarsening the last build fitted through, on the device; a frozen refresh fits it again.
         self._coarsening: FrozenCoarsening | None = None
-        # The structural patterns of a smoother's derived pieces, kept between refreshes: they move
-        # only with the operands' patterns, which a frozen coarsening on a fixed-pattern block never
-        # changes, and they cost as much as the products they pattern.
-        self._patterns = StructuralPatterns()
         self._rebuild(matrix)
 
     # --- the four hooks a smoother supplies -------------------------------------------------

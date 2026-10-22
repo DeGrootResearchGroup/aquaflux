@@ -181,6 +181,7 @@ cfd/                                  # repo root
 │   │   ├── field_split.py            #   FieldGroups (a two-group partition view over a FieldLayout) + FieldSplitInverse: block-triangular field-split preconditioning for flow-plus-transport
 │   │   ├── hierarchy_inverse.py      #   HierarchyBlockInverse: the shared body of a traced block inverse (hierarchy, in-place refresh, transpose)
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
+│   │   ├── simple_fit.py             #   SimplePlan / fit_simple_level: a SIMPLE level's pieces, fitted on the device
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
 │   │   ├── host_preconditioner.py    #   FrozenInverse / RefactorableInverse / ReleasableInverse + HostPreconditioner: the frozen-inverse contract and its jit-callable apply
 │   │   ├── block_inverse.py          #   BlockInverse → SimpleSmoothed / JacobiSmoothed / AirReduction: the block inverses as settings values
