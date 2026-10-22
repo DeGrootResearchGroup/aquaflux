@@ -301,6 +301,36 @@ def test_two_applications_of_one_map_agree_bit_for_bit() -> None:
 # --- refusal: a map applies only to the structure it was built for ---------------------------------
 
 
+def test_two_owners_reading_one_pattern_hold_one_copy_and_another_pattern_is_never_given_it() -> (
+    None
+):
+    """Owners reading the same block -- a map's output, or a copy of it -- share one held pattern.
+
+    The second owner's operand is a separate copy (as a scaling or a shift makes), so only a match by
+    content can find the first owner's pattern. A pattern of the same shape and entry count but other
+    columns must not be given it: its values would land in the wrong slots.
+    """
+    block = _random_pattern(40, 40, 0.1, seed=40)
+    first, second = EntryMaps(), EntryMaps()
+    held = first.pattern_of(block)
+    copy = sp.csr_matrix((block.data * 2.0, block.indices.copy(), block.indptr.copy()), block.shape)
+    assert second.pattern_of(copy) is held
+    landing = EntryMap.gathering(
+        SparsePattern(block.T.tocsr()), lambda m: sp.csr_matrix(m.T)
+    ).landing
+    assert landing is held  # a map landing on a held pattern lands on that pattern
+    moved = block.copy()
+    row = int(np.flatnonzero(np.diff(moved.indptr) > 1)[0])
+    start, stop = moved.indptr[row], moved.indptr[row + 1]
+    taken = set(moved.indices[start:stop].tolist())
+    moved.indices[stop - 1] = next(
+        c for c in range(40) if c not in taken
+    )  # one entry, another column
+    moved.has_sorted_indices = False
+    other = second.pattern_of(moved)
+    assert other is not held and np.array_equal(other.indices, moved.indices)
+
+
 def test_a_map_refuses_an_operand_whose_structure_has_moved() -> None:
     """A different shape, or the same entry count in other places, is refused rather than gathered from.
 
