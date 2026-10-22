@@ -327,8 +327,8 @@ escalation are now separate responses".)
   `step -> step`:
   - `None` — nothing re-fitted, or a host preconditioner in a static field re-fitted in place
     (`MonolithicFactorShiftPolicy`) — a cache hit by construction.
-  - an update — a preconditioner carried as data (`TracedSplitShiftPolicy`, `with_traced_split(step,
-    split)`). The march applies it to **both** `strategy` and `active_step` (updating only the active
+  - an update — a preconditioner carried as data (`TracedFormShiftPolicy`, `with_traced_form(step,
+    form)`). The march applies it to **both** `strategy` and `active_step` (updating only the active
     step lasts one step) and reports the last on `MarchResult.strategy`, which `staged_march` carries to
     the next segment and the adjoint. Fixed shapes keep it a cache hit (`solve-field-split.md`).
   - **With `norm_builder` set, the march rebuilds the step's measure from the updated step** (#701): an

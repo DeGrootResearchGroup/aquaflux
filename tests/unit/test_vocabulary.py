@@ -141,6 +141,7 @@ RETIRED: dict[str, str] = {
     "f_iters": "f_sweeps: smoother sweeps are counted in sweeps everywhere else",
     "c_iters": "c_sweeps: smoother sweeps are counted in sweeps everywhere else",
     "explicit_limiter": "explicit_production_limiter: the name SSTTurbulence gives the same setting",
+    "with_traced_split": "with_traced_form: the traced inverse it swaps in need not be a field split",
 }
 
 

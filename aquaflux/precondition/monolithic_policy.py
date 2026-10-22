@@ -6,9 +6,10 @@ shift diagonal paired with a preconditioner that ignores the shift strength (the
 a transposed apply for the adjoint. Nothing here names a residual.
 
 The inverse reaches the step in one of two forms. A host inverse is applied through a host callback and
-rides in a static field, re-fitted in place (:class:`MonolithicFactorShiftPolicy`). A field split whose
-blocks are both traced multigrid cycles is applied on device and rides as data, so a refresh hands the
-march a step carrying the re-fitted arrays (:class:`TracedSplitShiftPolicy`, :func:`with_traced_split`).
+rides in a static field, re-fitted in place (:class:`MonolithicFactorShiftPolicy`). An inverse whose every
+block is a traced multigrid cycle -- a field split of two, or one block over the whole state -- is applied
+on device and rides as data, so a refresh hands the march a step carrying the re-fitted arrays
+(:class:`TracedFormShiftPolicy`, :func:`with_traced_form`).
 """
 
 from __future__ import annotations
@@ -21,13 +22,13 @@ import jax.numpy as jnp
 
 from ..solve import NewtonStrategy, ShiftPolicy, ShiftTerm, TransposedPreconditioner
 from .host_preconditioner import HostPreconditioner
-from .traced_field_split import TracedFieldSplit
+from .traced_cycle import TracedForm
 
 __all__ = [
     "FrozenTransposeFactory",
     "MonolithicFactorShiftPolicy",
-    "TracedSplitShiftPolicy",
-    "with_traced_split",
+    "TracedFormShiftPolicy",
+    "with_traced_form",
 ]
 
 
@@ -41,7 +42,9 @@ class MonolithicFactorShiftPolicy(eqx.Module):
     split of multigrid V-cycles (:class:`~aquaflux.precondition.FieldSplitPreconditioner`, bounded memory
     on a large three-dimensional mesh), or one block inverse over the whole state
     (:class:`~aquaflux.precondition.block_preconditioner.MaterializedBlockPreconditioner`) -- this policy
-    is agnostic to which, needing only the shared callback-matvec interface.
+    is agnostic to which, needing only the shared callback-matvec interface. It is the form for an
+    inverse with a block that has no traced cycle; one whose blocks all have one is applied on device by
+    :class:`TracedFormShiftPolicy` instead.
 
     The inverse is frozen at a reference state and shift (built off the jit path by a
     :class:`~aquaflux.precondition.MaterializedJacobian` session). Unlike the block
@@ -125,16 +128,17 @@ class FrozenTransposeFactory:
         return self.preconditioner.matvec(transpose=True)
 
 
-class TracedSplitShiftPolicy(eqx.Module):
-    """A :class:`~aquaflux.solve.ShiftPolicy` preconditioned by a field split applied entirely on device.
+class TracedFormShiftPolicy(eqx.Module):
+    """A :class:`~aquaflux.solve.ShiftPolicy` preconditioned by a frozen inverse applied entirely on device.
 
-    The counterpart of :class:`MonolithicFactorShiftPolicy` for a split whose two blocks are both traced
+    The counterpart of :class:`MonolithicFactorShiftPolicy` for an inverse whose blocks are all traced
     multigrid cycles: the same base shift diagonal, the same frozen inverse, but the inverse is a
-    :class:`~aquaflux.precondition.traced_field_split.TracedFieldSplit` held as **data** rather than a host
-    object in a static field. Its hierarchies are therefore arguments of the compiled step, not constants
-    baked into it, which is what lets a re-fitted split reuse the compiled step: a refresh does not
-    mutate this policy, it replaces the split in the step (:func:`with_traced_split`), and at unchanged
-    array shapes that is a compilation-cache hit that applies the new values.
+    :class:`~aquaflux.precondition.traced_cycle.TracedForm` -- a field split of two traced cycles, or one traced cycle
+    over the whole state -- held as **data** rather than a host object in a static field. Its hierarchies
+    are therefore arguments of the compiled step, not constants baked into it, which is what lets a
+    re-fitted inverse reuse the compiled step: a refresh does not mutate this policy, it replaces the
+    form in the step (:func:`with_traced_form`), and at unchanged array shapes that is a
+    compilation-cache hit that applies the new values.
 
     No host callback is emitted when the preconditioner is applied, so on an accelerator a Krylov
     iteration does not round-trip the state vector through the host.
@@ -143,15 +147,15 @@ class TracedSplitShiftPolicy(eqx.Module):
     ----------
     base : ShiftPolicy
         The policy supplying the pseudo-transient shift diagonal (and its per-row shift scale).
-    split : TracedFieldSplit
-        The frozen field split, as array leaves.
+    form : TracedForm
+        The frozen inverse, as array leaves.
     """
 
     base: ShiftPolicy
-    split: TracedFieldSplit
+    form: TracedForm
 
     def shift_term(self, phi: jnp.ndarray, residual: jnp.ndarray | None = None) -> ShiftTerm:
-        """The base policy's shift diagonal, glued to the traced split.
+        """The base policy's shift diagonal, glued to the traced inverse.
 
         Both of the base term's shift-dependent parts are forwarded, as in
         :meth:`MonolithicFactorShiftPolicy.shift_term`, and for the same reason.
@@ -164,67 +168,67 @@ class TracedSplitShiftPolicy(eqx.Module):
             ``R(phi)`` when the caller has it, handed on to the base policy.
         """
         base = self.base.shift_term(phi, residual)
-        apply = self.split.matvec()
+        apply = self.form.matvec()
         return ShiftTerm(base.diagonal, lambda shift_strength: apply, base.row_shift_scale)
 
-    def adjoint_factory(self) -> _TracedSplitAdjoint:
+    def adjoint_factory(self) -> _TracedFormAdjoint:
         """The ``state -> M`` factory for the adjoint, transposed there by :func:`jax.linear_transpose`.
 
-        The split is a traced linear map, so unlike the host form it needs no hand-written transpose:
-        the generic adjoint machinery derives ``M^T`` from the forward code.
+        The form is a traced linear map, so unlike the host one it needs no hand-written transpose: the
+        generic adjoint machinery derives ``M^T`` from the forward code.
         """
-        return _TracedSplitAdjoint(self.split)
+        return _TracedFormAdjoint(self.form)
 
 
-class _TracedSplitAdjoint(eqx.Module):
-    """``state -> M`` for a traced split, as a module so the split rides in the step as data.
+class _TracedFormAdjoint(eqx.Module):
+    """``state -> M`` for a traced inverse, as a module so the inverse rides in the step as data.
 
     The step's adjoint factory is a data field, so this module's arrays are leaves of the step like the
-    policy's own; a refit replaces both (:func:`with_traced_split`).
+    policy's own; a refit replaces both (:func:`with_traced_form`).
 
-    The adjoint is always preconditioned in double precision. A split stored in single precision is
+    The adjoint is always preconditioned in double precision. An inverse stored in single precision is
     widened here, once per transpose solve, so it applies its rounded entries in double-precision
     arithmetic: applied in single precision it is linear only to about ``1e-7``, and a transpose solve
     run to a tighter tolerance than that stagnates against the difference.
     """
 
-    split: TracedFieldSplit
+    form: TracedForm
 
     def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
-        del state  # frozen: the split does not depend on where the adjoint is taken
-        split = self.split
-        if split.precision != "float64":
-            split = split.in_precision("float64")
-        return split.matvec()
+        del state  # frozen: the inverse does not depend on where the adjoint is taken
+        form = self.form
+        if form.precision != "float64":
+            form = form.in_precision("float64")
+        return form.matvec()
 
 
-def with_traced_split(step: NewtonStrategy, split: TracedFieldSplit) -> NewtonStrategy:
-    """``step`` with its traced field split replaced by ``split``: the result of a refit, as a step.
+def with_traced_form(step: NewtonStrategy, form: TracedForm) -> NewtonStrategy:
+    """``step`` with its traced inverse replaced by ``form``: the result of a refit, as a step.
 
-    A traced split rides in two places of a step, the shift policy and the adjoint factory, and a refit
-    must reach both or the adjoint would precondition with the split the march started from. Both are
-    replaced together here, with ``equinox.tree_at``, so a split of the same shapes gives a step of the
+    A traced inverse rides in two places of a step, the shift policy and the adjoint factory, and a refit
+    must reach both or the adjoint would precondition with the inverse the march started from. Both are
+    replaced together here, with ``equinox.tree_at``, so a form of the same shapes gives a step of the
     same structure -- the compiled step is then a cache hit.
 
     Parameters
     ----------
     step : NewtonStrategy
-        A shifted step whose policy is a :class:`TracedSplitShiftPolicy`.
-    split : TracedFieldSplit
-        The re-fitted split.
+        A shifted step whose policy is a :class:`TracedFormShiftPolicy`.
+    form : TracedForm
+        The re-fitted inverse.
 
     Raises
     ------
     TypeError
-        If the step's policy is not a :class:`TracedSplitShiftPolicy`.
+        If the step's policy is not a :class:`TracedFormShiftPolicy`.
     """
-    if not isinstance(step.shift_policy, TracedSplitShiftPolicy):
+    if not isinstance(step.shift_policy, TracedFormShiftPolicy):
         raise TypeError(
-            "with_traced_split needs a step preconditioned by a TracedSplitShiftPolicy, not "
+            "with_traced_form needs a step preconditioned by a TracedFormShiftPolicy, not "
             f"{type(step.shift_policy).__name__}."
         )
     return eqx.tree_at(
-        lambda s: (s.shift_policy.split, s.adjoint_preconditioner_factory.split),
+        lambda s: (s.shift_policy.form, s.adjoint_preconditioner_factory.form),
         step,
-        (split, split),
+        (form, form),
     )

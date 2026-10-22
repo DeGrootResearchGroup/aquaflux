@@ -88,7 +88,7 @@ def _operator(assembler, p, shift, split, v):
 
 def measure(replay: MarchReplay, system, v) -> dict:
     """Every piece's best time (ms) and faults at ``system``, on the direction ``v``."""
-    split = replay.policy.split
+    split = replay.policy.form
     narrowed = v.astype(split.precision)
     lead = narrowed[: split.groups.n_leading_dofs]
     trail = narrowed[split.groups.n_leading_dofs :]
@@ -118,7 +118,7 @@ def main():
     last = max(replay.states)
     wanted = os.environ.get("PITZ_COST_STEPS")
     steps = {int(s) for s in wanted.split(",")} if wanted else {last - 2, last - 1, last}
-    print(f"[configuration] split precision {replay.policy.split.precision}; steps {sorted(steps)}")
+    print(f"[configuration] split precision {replay.policy.form.precision}; steps {sorted(steps)}")
     rng = np.random.default_rng(0)
     pieces = ("apply", "leading", "trailing", "coupling", "jvp", "operator")
     print("| step | " + " | ".join(f"{p} ms (faults)" for p in pieces) + " | M share |", flush=True)

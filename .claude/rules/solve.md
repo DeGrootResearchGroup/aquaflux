@@ -69,7 +69,7 @@ Follow the root `CLAUDE.md` "Writing the design records". Solve-specific:
 ## Names
 
 Old names are in `.claude/notes/solve-log.md` ("Renamed 2026-08-20", "Renamed 2026-09-15", "Renamed
-2026-10-10"); retired names are refused by `tests/unit/test_vocabulary.py`. No aliases exist.
+2026-10-10", "Renamed 2026-10-22"); retired names are refused by `tests/unit/test_vocabulary.py`. No aliases exist.
 - **Frozen-inverse family: the suffix names the contract, the stem the settings value that builds it.**
   `*Inverse` is a `FrozenInverse` (`n_dofs` + `apply(residual, *, transpose)`); `*Preconditioner` in the
   host family is a `HostPreconditioner` (the `pure_callback` matvec a jitted Krylov solve takes, holding
@@ -279,8 +279,9 @@ defect — fix it in the same change.
   on graph and reaches alone; `narrowing` (`assembler -> assembler`, compared by value) is the one
   residual-specific part. `MonolithicFactorShiftPolicy(base, preconditioner)` pairs a base shift
   diagonal with a frozen inverse; `FrozenTransposeFactory` is its value-equal transposed apply (equality
-  keeps a rung rebuild a cache hit). The traced counterpart `TracedSplitShiftPolicy(base, split)` (and
-  `_TracedSplitAdjoint`) is replaced together by `with_traced_split` (#290; `solve-field-split.md`).
+  keeps a rung rebuild a cache hit). The traced counterpart `TracedFormShiftPolicy(base, form)` (and
+  `_TracedFormAdjoint`), for a field split or a single block whose cycles are all traced, is replaced
+  together by `with_traced_form` (#290; `solve-field-split.md`, `TracedForm`).
   Coupled-RANS builders: `turbulence.coupled_jacobian_probe`, `_CoupledNarrowing`.
 
 - **`materialized_session.py` + `materialized_spec.py` (`precondition/`).** `MaterializedSession(spec,
@@ -297,16 +298,16 @@ defect — fix it in the same change.
   - **`BetaTrackingRefresh`** is a plain mutable class, **deliberately not an `equinox.Module`**: called
     per step as `(active_step, state, *, due=False)`, re-fits the host preconditioner it was given in
     place and returns whether it did; rides in a static field compared by identity (one hook shared
-    across rungs is a cache hit). After a traced-split re-fit the session returns
-    `with_traced_split(step, …)` for the march to apply. Tests: `tests/unit/test_beta_tracking_refresh.py`.
+    across rungs is a cache hit). After a re-fit of a traced form the session returns
+    `with_traced_form(step, …)` for the march to apply. Tests: `tests/unit/test_beta_tracking_refresh.py`.
   - Also here: `jacobian_matvec`/`batched_jacobian_matvec`/`batched_field_jacobian_matvec` and
     `_probe_products` (the one place a fit and a re-fit choose their products) (module-level `filter_jit`, assembler an
     argument), `frozen_shift_diagonal`, `PROBE_BATCH_SIZE`, `VCYCLE_LINEAR_SOLVE`; the specs
     (`MaterializedJacobian`, `FieldSplit`, `JacobianProbeSpec`) and `MATERIALIZED_MAPPING` (extend its
     kinds rather than restate them). `SessionSource` (`driver.py`) is the `ContinuationSource` over any session.
-  - **One traced split per fit, shared by every step the session builds (binding).** `_split` is taken
+  - **One traced form per fit, shared by every step the session builds (binding).** `_form` is taken
     at the fit and replaced after each re-fit, which also re-points the cached stopping steps
-    (`with_traced_split`), so no held step pins an old copy; each copy is a whole hierarchy in the
+    (`with_traced_form`), so no held step pins an old copy; each copy is a whole hierarchy in the
     split's precision (0.63 GiB float32 plus the int32 indices it pins on bfs3d). A per-step split held
     three copies at once and cost 1.1 GiB of the 2-step peak (`memory_attribution.py`, 2026-10-18; log,
     "bfs3d memory by owner"). Pinned by

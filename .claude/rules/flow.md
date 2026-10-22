@@ -357,8 +357,8 @@ question.
   exact, only costlier; the laminar reach was not measured), **no field groups** (so `FieldSplit` is refused
   and a bare block inverse allowed — the mirror of the coupled problem), the shift-only
   `momentum_shift_only_policy`, and the step. On a 384-cell channel it matched block-SIMPLE's trajectory
-  (log). ⚠️ The on-device traced split does not reach this path (`offers_traced_split` is false for a bare
-  block inverse); the step keeps the host `MonolithicFactorShiftPolicy`.
+  (log). The step carries the inverse's traced cycle (`TracedSingleBlock` in a `TracedFormShiftPolicy`,
+  `solve-field-split.md`), so a Krylov iteration makes no host round trip.
 - **The tetrahedral duct**: its failure was the single-step march from rest, fixed by dual-time with a
   materialized inverse; `MultipleCorrectionGradient` does not converge there (#435). Log § "the
   tetrahedral duct re-run".

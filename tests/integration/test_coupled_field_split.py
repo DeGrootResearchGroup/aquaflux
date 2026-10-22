@@ -453,7 +453,7 @@ def test_a_split_session_re_fits_at_the_current_beta(channel) -> None:
     # both blocks offer a traced cycle, so the step carries the split as data and the re-fit comes back
     # as a step update the march applies -- and that step must apply the re-fitted inverse
     assert update is not None, "a re-fitted traced split must hand the march a new step"
-    carried = update(active).shift_policy.split.matvec()
+    carried = update(active).shift_policy.form.matvec()
 
     # the same probe and the same shift diagonal, fitted from scratch at beta = 0.7. The same stored
     # pattern too: a threshold-free coarsening reads the pattern, stored zeros included, so a reference

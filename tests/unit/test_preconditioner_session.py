@@ -26,7 +26,7 @@ from aquaflux.precondition import (
     MonolithicFactorShiftPolicy,
     SimpleSmoothed,
 )
-from aquaflux.precondition.monolithic_policy import TracedSplitShiftPolicy
+from aquaflux.precondition.monolithic_policy import TracedFormShiftPolicy
 from aquaflux.precondition.traced_field_split import contains_host_callback
 from aquaflux.solve import ConstantRelaxation, DualTimeLoop
 from aquaflux.turbulence import BlockDiagonal, ScalarAir, ScalarTwoLevel, open_session
@@ -375,10 +375,8 @@ def test_every_build_of_a_session_shares_one_inverse_and_one_set_of_hooks(case) 
     hook = session.refresh_preconditioner
     first = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     second = session.build(state * 1.01, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
-    first_leaves, first_def = jax.tree.flatten(eqx.filter(first.shift_policy.split, eqx.is_array))
-    second_leaves, second_def = jax.tree.flatten(
-        eqx.filter(second.shift_policy.split, eqx.is_array)
-    )
+    first_leaves, first_def = jax.tree.flatten(eqx.filter(first.shift_policy.form, eqx.is_array))
+    second_leaves, second_def = jax.tree.flatten(eqx.filter(second.shift_policy.form, eqx.is_array))
     assert first_def == second_def
     assert all(jnp.array_equal(a, b) for a, b in zip(first_leaves, second_leaves, strict=True))
     assert session.refresh_preconditioner is hook
@@ -398,9 +396,9 @@ def test_a_split_of_two_traced_blocks_is_carried_in_the_step_and_each_refit_hand
     coupled, state = case
     session = open_session(MaterializedJacobian(_SPLIT), coupled)
     step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
-    assert isinstance(step.shift_policy, TracedSplitShiftPolicy)
+    assert isinstance(step.shift_policy, TracedFormShiftPolicy)
     n = state.shape[0]
-    assert not contains_host_callback(step.shift_policy.split.matvec(), jnp.zeros(n))
+    assert not contains_host_callback(step.shift_policy.form.matvec(), jnp.zeros(n))
 
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
     first = session.refresh_preconditioner(active, state)  # the forced first fit
@@ -410,12 +408,12 @@ def test_a_split_of_two_traced_blocks_is_carried_in_the_step_and_each_refit_hand
 
     r = jax.random.normal(jax.random.PRNGKey(0), (n,))
     # Applied before the re-fit: the re-fit releases the arrays only the superseded split holds.
-    before = active.shift_policy.split.apply(r)
+    before = active.shift_policy.form.apply(r)
     update = session.refresh_preconditioner(active, state * 1.05, due=True)
     assert update is not None
     refitted = update(active)
     host = session.preconditioner.inverse.apply(jnp.asarray(r))
-    applied = refitted.shift_policy.split.apply(r)
+    applied = refitted.shift_policy.form.apply(r)
     assert jnp.allclose(applied, host, rtol=1e-12, atol=1e-14)
     assert not jnp.allclose(applied, before)
     assert jnp.array_equal(refitted.adjoint_preconditioner_factory(state)(r), applied)
@@ -447,24 +445,24 @@ def test_every_step_built_from_one_fit_carries_the_one_traced_split_it_made(case
     anchor = target.with_scaled_molecular_viscosity(100.0)
     loop = DualTimeLoop(inner_steps=3)
     session, held = _materialized_step_held_on(target, anchor, state, loop)
-    split = held.shift_policy.split
+    split = held.shift_policy.form
     assert _same_arrays(
-        session.refresh(state * 1.01, held, dual_time=loop).shift_policy.split, split
+        session.refresh(state * 1.01, held, dual_time=loop).shift_policy.form, split
     )
     # Built (and cached) after that build, as a march's stopping test builds it, so the re-fit below
     # meets it in the session's cache.
     stopping = session.stopping_step(target)
-    assert _same_arrays(stopping(held).shift_policy.split, split)
+    assert _same_arrays(stopping(held).shift_policy.form, split)
 
     update = session.refresh_preconditioner(held, state * 1.05, due=True)
     assert update is not None
-    refitted = update(held).shift_policy.split
+    refitted = update(held).shift_policy.form
     assert not _same_arrays(refitted, split)
     # The stopping step lends the held step its own policy and adjoint factory, so these are the
     # stopping step's split, not the held step's.
     judged = stopping(held)
-    assert _same_arrays(judged.shift_policy.split, refitted)
-    assert _same_arrays(judged.adjoint_preconditioner_factory.split, refitted)
+    assert _same_arrays(judged.shift_policy.form, refitted)
+    assert _same_arrays(judged.adjoint_preconditioner_factory.form, refitted)
 
 
 class _HostOnly:
@@ -513,15 +511,15 @@ def test_a_single_precision_split_reaches_the_step_and_a_host_split_refuses_it(c
     single = dataclasses.replace(_SPLIT, precision="float32")
     session = open_session(MaterializedJacobian(single), coupled)
     step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
-    assert step.shift_policy.split.precision == "float32"
-    assert step.shift_policy.split.coupling.values.dtype == jnp.float32
+    assert step.shift_policy.form.precision == "float32"
+    assert step.shift_policy.form.coupling.values.dtype == jnp.float32
     # The host split holds its coupling as the step applies it, not a double copy beside it.
     assert session.preconditioner.inverse.coupling.dtype == jnp.float32
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
     session.refresh_preconditioner(active, state)  # the forced first fit
     refitted = session.refresh_preconditioner(active, state * 1.05, due=True)(active)
-    assert refitted.shift_policy.split.precision == "float32"
-    assert refitted.shift_policy.split.coupling.values.dtype == jnp.float32
+    assert refitted.shift_policy.form.precision == "float32"
+    assert refitted.shift_policy.form.coupling.values.dtype == jnp.float32
     assert session.preconditioner.inverse.coupling.dtype == jnp.float32
 
     def host_trailing(role, factory):
@@ -549,18 +547,18 @@ def test_a_re_fit_releases_the_arrays_only_the_superseded_split_held(case, preci
     step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
     old = session.refresh_preconditioner(active, state)(active)  # the forced first fit
-    superseded = jax.tree.leaves(old.shift_policy.split)
+    superseded = jax.tree.leaves(old.shift_policy.form)
     new = session.refresh_preconditioner(old, state * 1.05, due=True)(old)
-    current = {id(leaf) for leaf in jax.tree.leaves(new.shift_policy.split)}
+    current = {id(leaf) for leaf in jax.tree.leaves(new.shift_policy.form)}
     shared = [leaf for leaf in superseded if id(leaf) in current]
     only_old = [leaf for leaf in superseded if id(leaf) not in current]
     assert only_old and all(leaf.is_deleted() for leaf in only_old)
     assert shared and not any(leaf.is_deleted() for leaf in shared)
     r = jax.random.normal(jax.random.PRNGKey(1), (state.shape[0],))
-    assert bool(jnp.all(jnp.isfinite(new.shift_policy.split.apply(r))))
+    assert bool(jnp.all(jnp.isfinite(new.shift_policy.form.apply(r))))
     assert bool(jnp.all(jnp.isfinite(session.preconditioner.inverse.apply(r))))
     with pytest.raises(RuntimeError, match="deleted"):
-        old.shift_policy.split.apply(r)
+        old.shift_policy.form.apply(r)
 
 
 def test_a_single_precision_split_applies_the_hierarchies_its_inverses_hold_not_a_copy(
@@ -579,7 +577,7 @@ def test_a_single_precision_split_applies_the_hierarchies_its_inverses_hold_not_
     active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
     # The forced first fit, then an asked-for re-fit; each split checked before the next re-fit.
     for at, due in ((state, False), (state * 1.05, True)):
-        split = session.refresh_preconditioner(active, at, due=due)(active).shift_policy.split
+        split = session.refresh_preconditioner(active, at, due=due)(active).shift_policy.form
         inverse = session.preconditioner.inverse
         for applied, held in (
             (split.leading_cycle, inverse.leading.traced_cycle()),

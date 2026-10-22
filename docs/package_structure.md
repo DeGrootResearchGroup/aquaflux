@@ -184,13 +184,13 @@ cfd/                                  # repo root
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
 │   │   ├── host_preconditioner.py    #   FrozenInverse / RefactorableInverse / ReleasableInverse + HostPreconditioner: the frozen-inverse contract and its jit-callable apply
 │   │   ├── block_inverse.py          #   BlockInverse → SimpleSmoothed / JacobiSmoothed / AirReduction: the block inverses as settings values
-│   │   ├── traced_cycle.py           #   OffersTracedCycle / TracedCycle: a hierarchy held as array leaves, applied inside a traced solve
+│   │   ├── traced_cycle.py           #   OffersTracedCycle / TracedCycle: a hierarchy held as array leaves, applied inside a traced solve; TracedForm / TracedSingleBlock: what a step applies on device
 │   │   ├── traced_field_split.py     #   TracedFieldSplit: the field split as a traced cycle
 │   │   ├── block_preconditioner.py   #   MaterializedBlockPreconditioner: one block inverse fitted to the whole materialized Jacobian
 │   │   ├── jacobian_probe.py         #   JacobianProbe / jacobian_probe_plan: the coloured-probe plan for a cell graph and its reaches
 │   │   ├── materialized_spec.py      #   MaterializedJacobian / FieldSplit / JacobianProbeSpec: a materialized preconditioner as a value (and its mapping)
 │   │   ├── materialized_session.py   #   MaterializedSession over a MaterializedProblem: one probe, one inverse and one refresh hook per march
-│   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy: a base shift policy paired with a frozen monolithic inverse
+│   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy / TracedFormShiftPolicy: a base shift policy paired with a frozen monolithic inverse, on the host or on device
 │   │   ├── padded_rows.py            #   _PaddedRowOperator: the padded-row (ELLPACK) level operator and its held packing
 │   │   ├── entry_map.py              #   EntryMap / EntryMaps: a refit's fixed-pattern sparse operations as fixed linear maps of the values
 │   │   └── phase_timer.py            #   PhaseTimer: a refresh split into named, consecutive timed phases
