@@ -82,6 +82,48 @@ GIB = 2**30
 # --- process readings ---------------------------------------------------------------------------
 
 
+#: On macOS the process is read by its physical footprint, which counts compressed pages as the
+#: resident set does not: a process the system has compressed reads far smaller by its resident set.
+DARWIN = sys.platform == "darwin"
+
+
+class _RusageInfoV4(ctypes.Structure):
+    """``rusage_info_v4`` of ``<sys/resource.h>``: a UUID, then 64-bit counters in this order."""
+
+    _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [
+        (name, ctypes.c_uint64)
+        for name in (
+            "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups", "pageins",
+            "wired_size", "resident_size", "phys_footprint", "proc_start_abstime",
+            "proc_exit_abstime", "child_user_time", "child_system_time", "child_pkg_idle_wkups",
+            "child_interrupt_wkups", "child_pageins", "child_elapsed_abstime", "diskio_bytesread",
+            "diskio_byteswritten", "cpu_time_qos_default", "cpu_time_qos_maintenance",
+            "cpu_time_qos_background", "cpu_time_qos_utility", "cpu_time_qos_legacy",
+            "cpu_time_qos_user_initiated", "cpu_time_qos_user_interactive", "billed_system_time",
+            "serviced_system_time", "logical_writes", "lifetime_max_phys_footprint", "instructions",
+            "cycles", "billed_energy", "serviced_energy", "interval_max_phys_footprint",
+            "runnable_time",
+        )
+    ]  # fmt: skip
+
+
+def _rusage() -> _RusageInfoV4:
+    info = _RusageInfoV4()
+    if _LIBPROC.proc_pid_rusage(os.getpid(), 4, ctypes.byref(info)) != 0:  # RUSAGE_INFO_V4
+        raise OSError(ctypes.get_errno(), "proc_pid_rusage failed")
+    return info
+
+
+_LIBPROC = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True) if DARWIN else None
+
+
+def _peak_bytes() -> int:
+    """The process's peak: ``VmHWM`` on Linux, the lifetime peak physical footprint on macOS."""
+    if DARWIN:
+        return _rusage().lifetime_max_phys_footprint
+    return _status_bytes("VmHWM")
+
+
 def _status_bytes(field: str) -> int:
     for line in Path("/proc/self/status").read_text().splitlines():
         if line.startswith(field + ":"):
@@ -90,11 +132,17 @@ def _status_bytes(field: str) -> int:
 
 
 def _rss_bytes() -> int:
+    """The process's memory now: the resident set on Linux, the physical footprint on macOS."""
+    if DARWIN:
+        return _rusage().phys_footprint
     return int(Path("/proc/self/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE")
 
 
 def _smaps() -> dict[str, int]:
-    """Resident bytes by kind of mapping: anonymous executable, anonymous other, file-backed."""
+    """Resident bytes by kind of mapping: anonymous executable, anonymous other, file-backed (Linux
+    only; empty elsewhere)."""
+    if DARWIN:
+        return {}
     kinds = dict.fromkeys(("anon_exec", "anon", "file"), 0)
     kind = "anon"
     for line in Path("/proc/self/smaps").read_text().splitlines():
@@ -146,6 +194,19 @@ def _malloc() -> dict[str, int]:
         "in_use": info.uordblks,
         "free_retained": info.fordblks,
         "mmapped": info.hblkhd,
+    }
+
+
+def _machine_memory() -> dict[str, int]:
+    """The machine's memory and swap, in bytes, as ``MemTotal`` and ``SwapTotal``."""
+    if DARWIN:
+        sysctl = functools.partial(subprocess.run, capture_output=True, text=True, check=True)
+        total = int(sysctl(["sysctl", "-n", "hw.memsize"]).stdout)
+        swap = sysctl(["sysctl", "-n", "vm.swapusage"]).stdout.split()  # total = 1024.00M ...
+        return {"MemTotal": total, "SwapTotal": int(float(swap[2].rstrip("M")) * 2**20)}
+    return {
+        line.split(":")[0]: int(line.split()[1]) * 1024
+        for line in Path("/proc/meminfo").read_text().splitlines()
     }
 
 
@@ -399,7 +460,7 @@ class Recorder:
                 "rss": rss,
                 "rss_delta": rss - frame["rss0"],
                 "stage_peak": max(self.sampler.peak(frame["t0"], t1), rss),
-                "hwm": _status_bytes("VmHWM"),
+                "hwm": _peak_bytes(),
                 "traced": traced,
                 "traced_delta": traced - frame["traced0"],
                 "traced_peak": traced_peak,
@@ -443,7 +504,7 @@ class Recorder:
             f"| {indent}{row['label']} | {row['seconds']:.1f} | {row['rss'] / GIB:.2f} | "
             f"{row['rss_delta'] / GIB:+.2f} | {row['stage_peak'] / GIB:.2f} | {row['hwm'] / GIB:.2f} | "
             f"{row['traced'] / GIB:.2f} | {row['traced_peak'] / GIB:.2f} | {row['device'] / GIB:.2f} | "
-            f"{smaps['anon_exec'] / GIB:.2f} | "
+            f"{smaps.get('anon_exec', 0) / GIB:.2f} | "
             f"{row['malloc'].get('free_retained', 0) / GIB:.2f} | {row['tracer'] / GIB:.2f} |"
         )
         print(line, flush=True)
@@ -505,10 +566,7 @@ def _header() -> dict:
             text=True,
         ).stdout.strip()
     )
-    meminfo = {
-        line.split(":")[0]: int(line.split()[1]) * 1024
-        for line in Path("/proc/meminfo").read_text().splitlines()
-    }
+    meminfo = _machine_memory()
     cache = Path(
         os.environ.get("AQUAFLUX_COMPILATION_CACHE_DIR", Path.home() / ".cache/aquaflux/jax")
     )
@@ -519,7 +577,7 @@ def _header() -> dict:
         "mem_total_gib": meminfo["MemTotal"] / GIB,
         "swap_total_gib": meminfo["SwapTotal"] / GIB,
         "compilation_cache_entries": len(list(cache.iterdir())) if cache.is_dir() else 0,
-        "malloc_env": {k: v for k, v in os.environ.items() if k.startswith("MALLOC_")},
+        "malloc_env": {k: v for k, v in os.environ.items() if k.startswith(("MALLOC_", "Malloc"))},
         "steps": STEPS,
     }
     print(json.dumps(header), flush=True)
@@ -761,8 +819,11 @@ def main() -> None:
 
     with contextlib.suppress(_Stop), recorder.stage("march (to the last measured step)"):
         compare.solve_aquaflux(log_path=HERE / "memory_attribution.march.log", on_step=on_step)
-    peak = _status_bytes("VmHWM")
-    print(f"peak resident set (VmHWM) {peak / GIB:.2f} GiB after {len(steps)} steps", flush=True)
+    peak = _peak_bytes()
+    print(
+        f"peak (VmHWM, or the peak footprint on macOS) {peak / GIB:.2f} GiB after {len(steps)} steps",
+        flush=True,
+    )
 
     recorder.extra["peak"] = peak
     recorder.save()
