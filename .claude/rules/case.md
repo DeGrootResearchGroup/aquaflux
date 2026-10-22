@@ -47,7 +47,7 @@ its file alone.**
 | `scopes.py` | `FLOW` / `TURBULENCE` / `RADIATION`, `SCOPES`, the `Scoped` mixin (`setting_scopes`, `required_in_scope`, `settings_in`, `missing_in`) |
 | `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics, drive, pressure datum, sources, solver, initial, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
-| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` / `CadMesh` (a STEP region meshed by `meshing.CadMesher`; patches by `meshing.FacesNear` / `FacesOn`, layers by `meshing.PrismLayers` on the patches in `layered`, the patches in `mapped` meshed as structured quadrilaterals, pipes found (or named in `pipes`) and their cores O-gridded by `meshing.PipeCore` (`pipe_core`), the faces flattened by a `meshing.FacePlanarizer` in `planarizer` (off unless given), all read directly) |
+| `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `AquafluxMesh` (a `.aqmesh` file, read exactly; `io.md`) / `OpenFOAMMesh` / `StructuredGrid` + `AxisGrading` → `GeometricGrading` / `CadMesh` (a STEP region meshed by `meshing.CadMesher`; patches by `meshing.FacesNear` / `FacesOn`, layers by `meshing.PrismLayers` on the patches in `layered`, the patches in `mapped` meshed as structured quadrilaterals, pipes found (or named in `pipes`) and their cores O-gridded by `meshing.PipeCore` (`pipe_core`), the faces flattened by a `meshing.FacePlanarizer` in `planarizer` (off unless given), all read directly) |
 | `drawing.py` | `CadPlacement`, shared by `CadMesh` and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
@@ -55,7 +55,7 @@ its file alone.**
 | `initial.py` | `InitialState` → `Checkpoint` / `Fields`: `read(case_directory, spec, mesh)` → `StartingFields`, `starting_arguments` |
 | `axes.py` | `AXES`, `AxisName`, and the one refusal of an extruded axis stated for a 3D mesh |
 | `kinematic.py` | `kinematic_pressure` / `pressure_from_kinematic` — the one home of OpenFOAM's pressure-per-unit-density factor |
-| `restart_file.py` | `RestartHeader`, `mesh_digest`, `checkpoint_writer`, `read_restart` → `RestartFile` (`resumption`), `refuse_non_finite` |
+| `restart_file.py` | `RestartHeader` (its `mesh_digest` from `aquaflux.mesh`), `checkpoint_writer`, `read_restart` → `RestartFile` (`resumption`), `refuse_non_finite` |
 | `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` / `IntensityLength` |
 | `radiation.py` | `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers` |
 | `paths.py` | `named_paths` / `with_paths` / `relocated` (see "Paths") |

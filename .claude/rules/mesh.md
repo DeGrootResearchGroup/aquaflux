@@ -108,6 +108,9 @@ All classes are `equinox.Module`s.
   caps, carry owner/neighbour/zones/offsets, rebuild via `from_csr`). A **mesh** transform the OpenFOAM
   reader calls on `empty` patches; unit-tested file-free (`structured_grid_3d(nx, ny, 1)` → matches
   `structured_grid_2d`). Fully vectorized (no per-face Python loop) using `aquaflux/ragged.py::rows`.
+- `digest.py` — `mesh_digest(mesh)`: a SHA-256 of `owner`, `neighbour` and node coordinates binned to 1e-6 of
+  the largest extent, so the same mesh read on another machine agrees and a renumbered or moved one does not;
+  shared by case checkpoints and the `.aqmesh` header (`io.md`).
 - `distance.py` — `distance_to_patches(mesh, geometry, patch_names)`: per-cell distance to the nearest
   face **centroid** of named patches (near-exact at the wall, looser far away), for near-wall closures.
   - **The search dispatches on concrete vs traced inputs**: concrete → `scipy.spatial.cKDTree`

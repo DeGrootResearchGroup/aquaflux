@@ -95,7 +95,14 @@ from .drawing import CadPlacement
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState
-from .mesh_source import CadMesh, GeometricGrading, MeshSource, OpenFOAMMesh, StructuredGrid
+from .mesh_source import (
+    AquafluxMesh,
+    CadMesh,
+    GeometricGrading,
+    MeshSource,
+    OpenFOAMMesh,
+    StructuredGrid,
+)
 from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
 from .radiation import (
@@ -531,6 +538,7 @@ def _datum_misfits(datum: PinnedPoint, mesh: Mesh) -> list[str]:
 _CASE_MAPPING = SettingsMapping(
     [
         CaseSpec,
+        AquafluxMesh,
         OpenFOAMMesh,
         StructuredGrid,
         GeometricGrading,
@@ -758,8 +766,8 @@ def mesh_source_from_mapping(mapping: Mapping[str, object]) -> MeshSource:
     Parameters
     ----------
     mapping : mapping
-        The ``mesh`` section: ``{kind: OpenFOAMMesh, path: ...}``, ``{kind: StructuredGrid, ...}`` or
-        ``{kind: CadMesh, ...}``.
+        The ``mesh`` section: ``{kind: AquafluxMesh, path: ...}``, ``{kind: OpenFOAMMesh, path:
+        ...}``, ``{kind: StructuredGrid, ...}`` or ``{kind: CadMesh, ...}``.
 
     Returns
     -------

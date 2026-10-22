@@ -23,6 +23,31 @@ or as a file for a viewer. `io` owns file-format concerns only; `aquaflux/mesh/`
 - **The 2D collapse is a mesh transform** (`mesh/collapse.py::collapse_extruded_direction`); `io` only
   detects which patches to collapse (OpenFOAM `empty`) and calls it.
 
+## aquaflux's own mesh file (`.aqmesh`) — built
+
+`io/aqmesh/mesh_file.py`: `AquafluxMeshWriter(path, overwrite=False, provenance=None)` /
+`write_aqmesh`, `AquafluxMeshReader(path)` / `read_aqmesh` (`.read()`, `.header()`), `read_aqmesh_header`,
+`AquafluxMeshHeader`; the case kind is `case.AquafluxMesh(path)`. Agreed with the project owner,
+2026-10-21: **the native format is the mesher's output and the case's default mesh; OpenFOAM stays for
+import and export** (polyMesh reorders faces, has no 2D or periodic mesh without extrusion and matched
+cyclics, and our reader is ASCII only).
+- **The arrays as `Mesh` holds them**, in one uncompressed `.npz` (`allow_pickle=False` on read):
+  `node_coords`, `face_node_offsets`/`face_node_indices` (CSR), `owner`, `neighbour`, `patch_label`,
+  `zone_label`, `neighbour_offset` (periodic only), and `header` (JSON bytes: `format`, `version`, `dim`,
+  sizes, `patches` (named, in label order after `interior`/`boundary`), `patch_types`, `patch_groups`,
+  `zones`, `periodic`, `digest`, `provenance`).
+- **Read back exactly**: same pytree structure (every static field) and every leaf equal, dtype included
+  -- the reader rebuilds patches and zones by label through `Mesh.from_csr`, whose name order matches.
+  Pinned by `tests/unit/test_aqmesh.py` on a periodic graded 2D grid, a labelled perturbed hex grid
+  (types, a group, a zone), tetrahedra and a hex beside a prism.
+- **Refused**: another format or no header; a newer `version` (`AQMESH_VERSION` is 1; a reader reads its
+  own and older); a missing array; a mesh whose `mesh_digest` differs from the header's (changed or
+  damaged); an existing file without `overwrite`; a path not ending `.aqmesh`; non-JSON provenance; a
+  partition's padded mesh. **Written whole or not at all** (a temporary file beside it, then
+  `os.replace`).
+- **`mesh_digest` lives in `aquaflux/mesh/digest.py`** (moved from `case/restart_file.py`), shared by
+  checkpoints and this header.
+
 ## OpenFOAM polyMesh reader (ASCII) — built
 
 Three pure seams so most logic tests without a filesystem:

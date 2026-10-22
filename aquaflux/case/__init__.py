@@ -77,6 +77,7 @@ from .mesh_source import (
     CadMesh,
     GeometricGrading,
     MeshSource,
+    AquafluxMesh,
     OpenFOAMMesh,
     StructuredGrid,
 )
@@ -125,6 +126,7 @@ from .spec import (
 
 __all__ = [
     "RANS",
+    "AquafluxMesh",
     "AxisGrading",
     "BodyForce",
     "BulkVelocity",

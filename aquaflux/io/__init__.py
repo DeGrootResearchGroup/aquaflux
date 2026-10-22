@@ -8,7 +8,9 @@ as :class:`OpenFOAMReader` and the :func:`read_openfoam` convenience.
 
 A mesh goes out the way it came in: every writer implements the :class:`MeshWriter` contract
 (``write(mesh)``), and :class:`OpenFOAMWriter` / :func:`write_openfoam` write a polyMesh that
-:func:`read_openfoam` reads back with the same cells in the same order.
+:func:`read_openfoam` reads back with the same cells in the same order. aquaflux's own file,
+``.aqmesh`` (:func:`write_aqmesh` / :func:`read_aqmesh`), holds a mesh's arrays as the mesh holds them
+and reads back exactly, two-dimensional and periodic meshes included.
 
 The field export has two destinations, for two different purposes. :func:`write_openfoam_time` writes
 cell fields back into the case they were read from, as an ordinary time directory -- so a solved
@@ -26,6 +28,15 @@ its own namespace, so importing this package never requires it.
 
 from __future__ import annotations
 
+from .aqmesh import (
+    AQMESH_SUFFIX,
+    AquafluxMeshHeader,
+    AquafluxMeshReader,
+    AquafluxMeshWriter,
+    read_aqmesh,
+    read_aqmesh_header,
+    write_aqmesh,
+)
 from .openfoam import (
     FieldTemplate,
     OpenFOAMReader,
@@ -45,17 +56,24 @@ from .writer import MeshWriter
 from .vtk import write_patches, write_pvd, write_vtu
 
 __all__ = [
+    "AQMESH_SUFFIX",
+    "AquafluxMeshHeader",
+    "AquafluxMeshReader",
+    "AquafluxMeshWriter",
     "FieldTemplate",
     "MeshReader",
     "MeshWriter",
     "OpenFOAMReader",
     "OpenFOAMWriter",
     "infer_extruded_axis",
+    "read_aqmesh",
+    "read_aqmesh_header",
     "read_field_template",
     "read_openfoam",
     "read_openfoam_time",
     "read_surface_scalar_field",
     "read_volume_scalar_field",
+    "write_aqmesh",
     "write_openfoam",
     "write_openfoam_field",
     "write_openfoam_time",

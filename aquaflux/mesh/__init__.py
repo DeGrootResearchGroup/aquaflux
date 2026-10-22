@@ -15,6 +15,7 @@ from .connectivity import (
     index_dtype,
     interior_mask,
 )
+from .digest import mesh_digest
 from .distance import distance_to_patches
 from .face import (
     EdgeFaceGeometry,
@@ -89,6 +90,7 @@ __all__ = [
     "graded_nodes",
     "index_dtype",
     "interior_mask",
+    "mesh_digest",
     "patch_triangles",
     "permute_cells",
     "stored_ring_is_outward",

@@ -1,8 +1,9 @@
 """Where a case's mesh comes from.
 
-A case file names its mesh by source rather than holding it: a mesh file to read
-(:class:`OpenFOAMMesh`), a structured grid to generate (:class:`StructuredGrid`), or a region of a STEP
-drawing to mesh as polyhedra (:class:`CadMesh`). Relative paths are relative to the directory the case
+A case file names its mesh by source rather than holding it: aquaflux's own mesh file to read
+(:class:`AquafluxMesh`), an OpenFOAM polyMesh to read (:class:`OpenFOAMMesh`), a structured grid to
+generate (:class:`StructuredGrid`), or a region of a STEP drawing to mesh as polyhedra
+(:class:`CadMesh`). Relative paths are relative to the directory the case
 file sits in, so a case and its mesh can be moved together.
 """
 
@@ -18,7 +19,7 @@ from typing import ClassVar, Literal
 
 import numpy as np
 
-from aquaflux.io import OpenFOAMReader
+from aquaflux.io import AQMESH_SUFFIX, AquafluxMeshReader, OpenFOAMReader
 from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh, graded_nodes, structured_grid_2d, structured_grid_3d
 from aquaflux.meshing import (
@@ -34,6 +35,7 @@ from aquaflux.meshing import (
 from .drawing import CadPlacement
 
 __all__ = [
+    "AquafluxMesh",
     "AxisGrading",
     "CadMesh",
     "GeometricGrading",
@@ -64,6 +66,41 @@ class MeshSource(abc.ABC):
         Mesh
             The mesh.
         """
+
+
+@dataclasses.dataclass(frozen=True)
+class AquafluxMesh(MeshSource):
+    """aquaflux's own mesh file (``.aqmesh``), read with :class:`~aquaflux.io.AquafluxMeshReader`.
+
+    The mesh comes back exactly as it was written -- the same cells, faces, patches, groups and
+    zones, a two-dimensional or periodic mesh as such -- and a file changed since it was written is
+    refused.
+
+    Attributes
+    ----------
+    path : str
+        The ``.aqmesh`` file; relative to the case file's directory unless absolute.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` does not name a ``.aqmesh`` file.
+    """
+
+    path_fields: ClassVar[tuple[str, ...]] = ("path",)
+
+    path: str
+
+    def __post_init__(self) -> None:
+        if Path(self.path).suffix != AQMESH_SUFFIX:
+            raise ValueError(
+                f"an AquafluxMesh names a {AQMESH_SUFFIX} file, got {self.path!r}; an OpenFOAM "
+                "polyMesh is an OpenFOAMMesh."
+            )
+
+    def read(self, directory: Path) -> Mesh:
+        """The mesh in the file -- see :meth:`MeshSource.read`."""
+        return AquafluxMeshReader(Path(directory) / self.path).read()
 
 
 @dataclasses.dataclass(frozen=True)
