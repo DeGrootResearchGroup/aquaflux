@@ -1,7 +1,8 @@
 """Pictures of the solved bend: the axial velocity and the secondary flow at the stations, and the
 velocity on the plane of symmetry.
 
-Reads the fields ``aquaflux run validation/sudo_bend/case.yaml`` writes and writes
+Reads a grid's solved fields (``aquaflux run case.yaml`` in ``validation/sudo_bend/grids/<grid>``;
+by default the coarsest grid's) and writes
 ``figures/flow_sections.png`` and ``figures/flow_symmetry_plane.png``. Each cross-section is seen
 along the flow, the bend's inside on the left, +z up; the colour is the velocity along the pipe over
 the bulk velocity and the arrows the velocity across it (the Dean vortices). Needs the ``ui`` extra
@@ -29,7 +30,7 @@ import pyvista as pv
 from geometry import Bend
 
 HERE = Path(__file__).parent
-FIELDS = HERE / "work" / "results" / "fields.vtu"
+FIELDS = HERE / "grids" / "round36" / "work" / "results" / "fields.vtu"
 FIGURES = HERE / "figures"
 BULK = 6.0e4 * 1.5e-5 / Bend.diameter
 

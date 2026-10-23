@@ -1,6 +1,7 @@
 """The developed inflow: the precursor's profiles of axial velocity, k and omega against radius.
 
-Reads the table ``aquaflux run validation/sudo_bend/precursor.yaml`` writes and draws
+Reads a grid's precursor table (``aquaflux run precursor.yaml`` in
+``validation/sudo_bend/grids/<grid>``; by default the coarsest grid's) and draws
 ``figures/inflow_profiles.png``: the velocity against the one-seventh power law of a smooth pipe
 at this Reynolds number, and in wall units against the log law. The wall units are Blasius's
 friction velocity at this Reynolds number, so the comparison is not of the profile with itself; the
@@ -29,7 +30,7 @@ from geometry import Bend
 from scipy.optimize import brentq
 
 HERE = Path(__file__).parent
-TABLE = HERE / "work" / "precursor" / "profiles.csv"
+TABLE = HERE / "grids" / "round36" / "work" / "precursor" / "profiles.csv"
 NU = 1.5e-5
 REYNOLDS = 6.0e4
 KAPPA, B = 0.41, 5.2

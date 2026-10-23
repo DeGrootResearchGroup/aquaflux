@@ -333,20 +333,31 @@ run and compare the studies; numbers in its README.
 ## `sudo_bend` — a 90° pipe bend (Sudo, Sumida & Hibara 1998)
 
 The third canonical RANS case: curvature-driven secondary flow, no sharp-edged separation. **Meshed
-natively** from its own drawing (`geometry.py` → tracked `bend.step` and `precursor.step`; `mesh.yaml` →
-`work/bend.aqmesh`, gitignored, remade by `aquaflux mesh`), one O-grid from inlet to outlet through the
-bend (`meshing.md`, "Runs"); `render_mesh.py` draws `figures/`.
+natively** from its own drawings (`geometry.py` → tracked `bend.step`, `precursor.step`), one O-grid from
+inlet to outlet through the bend (`meshing.md`, "Runs").
+- **The case files are per grid, generated** (`write_grids.py` → tracked `grids/round{36,48,64}/{mesh,
+  precursor_mesh,precursor,case}.yaml`, each writing into its own gitignored `work/`): edit the script,
+  rerun it, never the files. `test_shipped_case_paths.py`'s `GENERATED` declares each grid's three
+  generated paths. The scripts (`render_mesh.py`, `render_flow.py`, `plot_inflow.py`) default to
+  `round36`.
 - **The inflow is developed in a precursor, then mapped by radius** (the project owner's choice,
-  2026-10-23: averaged into profiles of radius, laid out by distance from the inlet's centre): `precursor_mesh.yaml` meshes one diameter of the
-  same pipe with the bend's settings and joins its ends (`periodic`), `precursor.yaml` holds
-  `BulkVelocity` at Re 6e4 and writes `work/precursor/profiles.csv` (`RadialProfiles`), and
-  `case.yaml`'s inlet is a `DevelopedInlet` reading it (`case.md`). Both generated paths are in
-  `test_shipped_case_paths.py`'s `GENERATED`. The precursor is a `CoupledMarch` with `BlockDiagonal`:
-  the channel files' `Segregated` with `DirectSolve` asked 131 GB on the 3792-cell pipe (dense), and a
-  held bulk velocity refuses a `MaterializedJacobian` (#541).
-- `case.yaml` is bfs3d's march unchanged: 15 steps, 42 min, 1.1e-7 on 42,660 cells, ≥ 4.3 GB free of 15
-  (2026-10-23, one run; README). `render_flow.py` draws the sections; nothing is compared yet. The station list and digitized profiles are still to be taken from
-  the paper (the project owner is fetching them); a grid-resolution study round the pipe is agreed for later.
+  2026-10-23): each grid's `precursor_mesh.yaml` meshes one diameter of the pipe with that grid's settings
+  and joins its ends (`periodic`), `precursor.yaml` holds `BulkVelocity` at Re 6e4 and writes
+  `work/precursor/profiles.csv` (`RadialProfiles`), `case.yaml`'s inlet is a `DevelopedInlet`. The
+  precursor is a `CoupledMarch` with `BlockDiagonal`: the channel files' `Segregated` + `DirectSolve`
+  asked 131 GB on 3792 cells (dense), and a held bulk velocity refuses a `MaterializedJacobian` (#541).
+- **The grid study (GCI, Celik et al. 2008; agreed with the project owner 2026-10-23)**: `r = 4/3` in
+  `h = (V/N)^(1/3)` per level (36/48/64 round; measured 1.324 and 1.307: 42,660 / 98,987 / 221,102
+  cells), **the first cell fixed at 2.5 mm** (same wall-function regime), layers above it `1.2^(1/r^k)`
+  with one more a level (4, 5, 6: four layers would give r 1.285, under 1.3); `max_size = πD/N` gives
+  exactly N rim points. ⚠️ The worst non-orthogonality rises 13.4 → 17.7 → 21.5°, at the core's corners,
+  because the thicker layer stack thins the shell. `gci.py` reproduces Celik's Table 1 before anything
+  else (the check that it can fail) and reports K_loss, the 90° secondary-flow strength and local GCI of
+  the symmetry-plane axial velocity at the stations.
+- **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42
+  min); round48 (~20 GB) and round64 (~45 GB, estimated at ~200 KB/cell) are solved on a larger machine.
+- The station list and digitized profiles are still to be taken from the paper (the project owner is
+  fetching them).
 
 ## The aggressive Reynolds continuation does NOT need the complete LU
 

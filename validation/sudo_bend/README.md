@@ -35,9 +35,14 @@ the toroidal bend between them), and `mesh.yaml` meshes it with aquaflux's own m
 
 ```
 python validation/sudo_bend/geometry.py          # bend.step and precursor.step (tracked)
-aquaflux mesh validation/sudo_bend/mesh.yaml     # work/bend.aqmesh
-python validation/sudo_bend/render_mesh.py       # figures/mesh_*.png
+python validation/sudo_bend/write_grids.py       # grids/round{36,48,64}/*.yaml (tracked)
+cd validation/sudo_bend/grids/round36
+aquaflux mesh mesh.yaml                          # work/bend.aqmesh
+python ../../render_mesh.py                      # figures/mesh_*.png
 ```
+
+Each grid of the study (below) is a directory of case files under `grids/`, written by
+`write_grids.py`; the mesh described here is the coarsest, `grids/round36`.
 
 All three walls are found as pipes joined end to end, so a single structured O-grid runs from the
 inlet to the outlet: each cross-section is a 9 × 9 square core inside a shell and four wall layers,
@@ -75,9 +80,10 @@ pipe whose two ends are one periodic seam, so its outflow is its inflow, held at
 by a force solved with the flow:
 
 ```
-aquaflux mesh validation/sudo_bend/precursor_mesh.yaml   # work/precursor.aqmesh
-aquaflux run validation/sudo_bend/precursor.yaml         # work/precursor/profiles.csv
-aquaflux run validation/sudo_bend/case.yaml              # work/results
+cd validation/sudo_bend/grids/round36
+aquaflux mesh precursor_mesh.yaml   # work/precursor.aqmesh
+aquaflux run precursor.yaml         # work/precursor/profiles.csv
+aquaflux run case.yaml              # work/results
 ```
 
 `precursor_mesh.yaml` meshes one diameter of the pipe with the bend's own settings, so its
@@ -111,3 +117,39 @@ row-scaled measure, at least 4.3 GB of memory free throughout. The inlet admits 
 stations: the pair of Dean vortices, the core thrown to the outer wall by 90 degrees, slow fluid
 gathered at the inner wall, the largest cross-flow 0.45 `U_b` at 60 degrees) and
 `figures/flow_symmetry_plane.png`. Nothing is compared with the measurements yet.
+
+## The grid study
+
+The discretization error is estimated by the grid convergence index (GCI) of Celik et al. (2008),
+*J. Fluids Eng.* 130, 078001, on three grids each refined by `r = h_coarse / h_fine` above 1.3 in
+`h = (V / N)^(1/3)`. `write_grids.py` writes them, one directory each (`grids/round36`, `round48`,
+`round64`: the points round the pipe), refined systematically: the rims' points (36, 48, 64; `r =
+4/3` round the pipe, a multiple of four for the O-grid's core), and with them the core, the shell
+and the rows through the bend; the straight pipes' graded rows (growth `1.08^(1/r^k)`, longest `(D /
+5) / r^k`); and the wall layers above a first cell held at 2.5 mm on every grid, so the wall
+functions see the same first cell (growth `1.2^(1/r^k)`, one layer more a level: 4, 5, 6). Each
+grid's precursor is meshed with its settings, so every bend's inflow is developed on its own
+cross-section.
+
+Measured (2026-10-23, `write_grids.py` as tracked, 4-core Linux container):
+
+| grid | cells | `h` ratio to the next coarser | inlet faces | non-orthogonality max | meshing |
+|---|---|---|---|---|---|
+| `round36` | 42 660 | | 316 | 13.4° | 13 s, 0.80 GiB |
+| `round48` | 98 987 | 1.324 | 553 | 17.7° | 19 s, 0.97 GiB |
+| `round64` | 221 102 | 1.307 | 929 | 21.5° | 30 s, 1.35 GiB |
+
+The worst faces on every grid are at the corners of the O-grid's square core (r/R 0.43 to 0.50), the
+same in the precursors: the layers' stack thickens with the added layer (13.4, 16.8, 20.4 mm), so the
+shell between it and the core thins. Keeping four layers instead would give `r = 1.285`, under the
+procedure's 1.3.
+
+`gci.py` computes, for each quantity on the three grids, the apparent order, the extrapolated value
+and the fine-grid GCI: the pressure-loss coefficient from 1 D before the bend to 10 D after it, the
+strength of the secondary flow at 90 degrees, and the axial velocity along the plane of symmetry's
+diameter at each station (the local GCI). It first reproduces the paper's own worked example (its
+Table 1), and stops if it does not.
+
+The bend's march holds the whole materialized Jacobian: the coarse grid used about 10.5 GB of this
+container's 15, so the medium (about 20 GB) and the fine (about 45 GB) grids are solved on a larger
+machine, from the same files.

@@ -1,7 +1,8 @@
 """Pictures of the bend's mesh: its wall, cross-sections at the measuring stations, the plane of
 symmetry through the bend, and the quality of its faces.
 
-Reads the mesh ``aquaflux mesh validation/sudo_bend/mesh.yaml`` writes, and writes PNG files into
+Reads a grid's mesh (``aquaflux mesh mesh.yaml`` in ``validation/sudo_bend/grids/<grid>``; by default
+the coarsest grid's), and writes PNG files into
 ``validation/sudo_bend/figures/``. Needs the ``ui`` extra (PyVista) and an off-screen OpenGL
 (OSMesa or EGL, or a virtual X server on Linux).
 
@@ -30,7 +31,7 @@ from aquaflux.mesh import face_non_orthogonality, face_skewness
 from geometry import Bend
 
 HERE = Path(__file__).parent
-MESH = HERE / "work" / "bend.aqmesh"
+MESH = HERE / "grids" / "round36" / "work" / "bend.aqmesh"
 FIGURES = HERE / "figures"
 SIZE = (1600, 1200)
 HEXAHEDRON, OTHER = "#9ec5e8", "#f0a35e"

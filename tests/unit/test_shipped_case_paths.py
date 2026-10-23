@@ -35,13 +35,17 @@ GENERATED: dict[str, str] = {
     "validation/ray_effects_room/work/empty/case/constant/polyMesh": (
         "generate_dom.py (blockMesh + snappyHexMesh in OpenFOAM's Docker image)"
     ),
-    "validation/sudo_bend/work/bend.aqmesh": "aquaflux mesh validation/sudo_bend/mesh.yaml",
-    "validation/sudo_bend/work/precursor.aqmesh": (
-        "aquaflux mesh validation/sudo_bend/precursor_mesh.yaml"
-    ),
-    "validation/sudo_bend/work/precursor/profiles.csv": (
-        "aquaflux run validation/sudo_bend/precursor.yaml"
-    ),
+    **{
+        f"validation/sudo_bend/grids/{grid}/work/{path}": (
+            f"validation/sudo_bend/grids/{grid}: {command}"
+        )
+        for grid in ("round36", "round48", "round64")
+        for path, command in (
+            ("bend.aqmesh", "aquaflux mesh mesh.yaml"),
+            ("precursor.aqmesh", "aquaflux mesh precursor_mesh.yaml"),
+            ("precursor/profiles.csv", "aquaflux run precursor.yaml"),
+        )
+    },
 }
 
 
@@ -97,7 +101,7 @@ def test_the_census_reads_every_shipped_case_file() -> None:
     case_files = _case_files(tracked)
     assert "validation/bfs3d_openfoam/case.yaml" in case_files
     assert "validation/pitzdaily_openfoam/case.yaml" in case_files
-    assert "validation/sudo_bend/mesh.yaml" in _mesh_files(tracked)
+    assert "validation/sudo_bend/grids/round36/mesh.yaml" in _mesh_files(tracked)
     named = _named(tracked)
     assert any(path.endswith("polyMesh") for path in named)
     assert "validation/sudo_bend/bend.step" in named
