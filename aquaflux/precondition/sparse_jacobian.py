@@ -29,12 +29,15 @@ drops the far couplings).
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Sequence
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from .entry_map import DeviceMatrix, SparsePattern
 from .frozen_operator import require_valid_graph
 
 
@@ -702,9 +705,9 @@ class BlockLayout:
 
     The stored entries of a field-major matrix are ordered leading-by-leading, leading-by-trailing,
     trailing-by-leading, trailing-by-trailing, each block's entries in that block's own compressed-sparse-
-    row (CSR) order, so each block is a contiguous slice of the values and a matrix over that slice needs
-    no copy. The structure of each block is held here; only the values change from one materialize to
-    the next.
+    row (CSR) order, so each block is a contiguous slice of the values. The structure of each block is
+    held here, on the host, as the pattern every inverse fitted to that block checks against; only the
+    values change from one materialize to the next, and those stay on the device.
 
     Attributes
     ----------
@@ -718,14 +721,14 @@ class BlockLayout:
         self,
         leading_dofs: int,
         n_dofs: int,
-        blocks: tuple[tuple[int, int, np.ndarray, np.ndarray], ...],
-        diagonal: np.ndarray,
+        blocks: tuple[tuple[int, int, SparsePattern], ...],
+        diagonal: jnp.ndarray,
     ) -> None:
         self.leading_dofs = leading_dofs
         self.n_dofs = n_dofs
-        # Per block: (start, stop) of its slice of the values, and its CSR row pointers and columns.
+        # Per block: (start, stop) of its slice of the values, and its pattern.
         self._blocks = blocks
-        # Position of each degree of freedom's diagonal entry in the values, shape (n_dofs,).
+        # Position of each degree of freedom's diagonal entry in the values, shape (n_dofs,), on device.
         self._diagonal = diagonal
 
     @classmethod
@@ -747,19 +750,20 @@ class BlockLayout:
         order = np.argsort(key, kind="stable")
         bounds = np.concatenate([[0], np.cumsum(np.bincount(key, minlength=4))])
         offsets = (0, leading_dofs)
+        sizes = (leading_dofs, n_dofs - leading_dofs)
         blocks = []
         diagonal = np.full(n_dofs, -1, dtype=index_dtype)
         for block in range(4):
             start, stop = int(bounds[block]), int(bounds[block + 1])
             taken = order[start:stop]
             row0, col0 = offsets[block // 2], offsets[block % 2]
-            n_rows = (leading_dofs, n_dofs - leading_dofs)[block // 2]
             block_rows = rows[taken] - index_dtype(row0)
             indptr = np.concatenate(
-                [[0], np.cumsum(np.bincount(block_rows, minlength=n_rows))]
+                [[0], np.cumsum(np.bincount(block_rows, minlength=sizes[block // 2]))]
             ).astype(index_dtype)
             indices = (cols[taken] - index_dtype(col0)).astype(index_dtype, copy=False)
-            blocks.append((start, stop, indptr, indices))
+            shape = (sizes[block // 2], sizes[block % 2])
+            blocks.append((start, stop, SparsePattern.of_arrays(shape, indptr, indices)))
             if block in (0, 3):
                 on_diagonal = np.flatnonzero(block_rows == indices)
                 diagonal[block_rows[on_diagonal] + row0] = start + on_diagonal
@@ -768,33 +772,42 @@ class BlockLayout:
                 "BlockLayout: the pattern stores no diagonal entry for some degree of freedom, so the "
                 "shift has nowhere to be added."
             )
-        return cls(leading_dofs, n_dofs, tuple(blocks), diagonal), order
+        return cls(leading_dofs, n_dofs, tuple(blocks), jnp.asarray(diagonal)), order
 
-    def blocks(self, data: np.ndarray) -> tuple[sp.csr_matrix, ...]:
-        """The four blocks over ``data``, as matrices sharing its memory (no copy).
+    def blocks(self, data: jnp.ndarray) -> tuple[DeviceMatrix, ...]:
+        """The four blocks over ``data`` (shape ``(nnz,)``), each its slice of the values, on the device.
 
         Returns
         -------
-        tuple of scipy.sparse.csr_matrix
+        tuple of DeviceMatrix
             ``(A_ll, A_lt, A_tl, A_tt)``, as :meth:`~aquaflux.precondition.FieldGroups.blocks` orders them.
         """
-        sizes = (self.leading_dofs, self.n_dofs - self.leading_dofs)
-        blocks = []
-        for block, (start, stop, indptr, indices) in enumerate(self._blocks):
-            # Assigned, not passed to the constructor: scipy copies a ``data`` that is a view of a larger
-            # array, which would bring back exactly the copy this layout exists to remove.
-            matrix = sp.csr_matrix((sizes[block // 2], sizes[block % 2]))
-            matrix.indptr, matrix.indices, matrix.data = indptr, indices, data[start:stop]
-            blocks.append(matrix)
-        return tuple(blocks)
+        return tuple(
+            DeviceMatrix(pattern, data[start:stop]) for start, stop, pattern in self._blocks
+        )
 
-    def diagonal(self, data: np.ndarray) -> np.ndarray:
-        """The stored diagonal of ``data`` in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
-        return data[self._diagonal]
+    def diagonal(self, data: jnp.ndarray) -> jnp.ndarray:
+        """The stored diagonal of ``data`` in degree-of-freedom order, shape ``(n_dofs,)``."""
+        return _take(data, self._diagonal)
 
-    def add_to_diagonal(self, data: np.ndarray, shift_diagonal: np.ndarray) -> None:
-        """Add ``shift_diagonal`` (shape ``(n_dofs,)``) to the stored diagonal of ``data``, in place."""
-        data[self._diagonal] += np.asarray(shift_diagonal, dtype=np.float64)
+    def add_to_diagonal(self, data: jnp.ndarray, shift_diagonal: jnp.ndarray) -> jnp.ndarray:
+        """``data`` with ``shift_diagonal`` (shape ``(n_dofs,)``) added to its stored diagonal.
+
+        ``data`` is consumed: its buffer is reused for the result, so the shift costs no second copy.
+        """
+        return _add_at(data, self._diagonal, jnp.asarray(shift_diagonal, dtype=jnp.float64))
+
+
+@jax.jit
+def _take(values: jnp.ndarray, positions: jnp.ndarray) -> jnp.ndarray:
+    """``values[positions]``, compiled (run eagerly, a gather is a dispatch of its own)."""
+    return values[positions]
+
+
+@functools.partial(jax.jit, donate_argnums=0)
+def _add_at(values: jnp.ndarray, positions: jnp.ndarray, amounts: jnp.ndarray) -> jnp.ndarray:
+    """``values`` with ``amounts`` added at ``positions`` (distinct), reusing ``values``'s buffer."""
+    return values.at[positions].add(amounts, unique_indices=True)
 
 
 class ProbeGather:
@@ -810,6 +823,11 @@ class ProbeGather:
     by copying the lot. Sorting the entries by the probe that feeds them instead lets each chunk's
     responses be consumed as soon as they are computed and then dropped, so the only large array left is
     the matrix being built.
+
+    **The de-compression runs on the device**, where the probes are computed: the entry-to-response
+    order is held there, and each chunk is placed by one compiled program, so no response crosses to the
+    host. A whole-matrix materialize reads its values back once at the end; a block-major one does not
+    read them back at all (:class:`ProbedBlocks`).
 
     Entries lying outside their column's reach have no source probe at all (see
     :class:`ColumnProbePlan`); they simply never appear in the sorted order, so an output initialized to
@@ -866,32 +884,97 @@ class ProbeGather:
         grouped = sp.coo_matrix(
             (source, (probe_of, position)), shape=(n_probes, gather_map.shape[0])
         ).tocsr()
-        self._source = grouped.data
-        self._position = grouped.indices.astype(position_dtype, copy=False)
+        # On the device, where the responses are computed, so a materialize never moves one to the host.
+        # The host copies are dropped as soon as each is moved: only the probe boundaries stay here.
+        self._source = jnp.asarray(grouped.data)
+        self._position = jnp.asarray(grouped.indices.astype(position_dtype, copy=False))
         # One boundary per probe plus a closing one, so a chunk ending at the last probe still has a
         # `_probe_start[start + count]` to read -- exactly a CSR row-pointer array, which the conversion
         # above already produces.
         self._probe_start = grouped.indptr.astype(index_dtype, copy=False)
 
-    def scatter(self, data: np.ndarray, responses: np.ndarray, start: int, count: int) -> None:
-        """Fill every entry fed by probes ``[start, start + count)`` from that chunk's responses.
+    def width(self, chunks: Sequence[tuple[int, int, int]]) -> int:
+        """The most entries any one of ``chunks`` (``(field, start, count)`` each) fills.
+
+        :meth:`scatter` places every chunk's entries through this many lanes, so one compiled program
+        serves every chunk of a materialize.
+        """
+        return max(
+            (
+                int(self._probe_start[start + count] - self._probe_start[start])
+                for _, start, count in chunks
+            ),
+            default=0,
+        )
+
+    def scatter(
+        self, data: jnp.ndarray, responses: jnp.ndarray, start: int, count: int, width: int
+    ) -> jnp.ndarray:
+        """``data`` with every entry fed by probes ``[start, start + count)`` filled from their responses.
 
         Parameters
         ----------
-        data : np.ndarray
-            The CSR data array being filled, length :attr:`nnz`. Must start zeroed — entries outside
-            their column's reach are never written.
-        responses : np.ndarray
+        data : jnp.ndarray
+            The values being filled, shape ``(nnz,)``, starting from zero -- entries outside their
+            column's reach are never written. Consumed: its buffer is reused for the result.
+        responses : jnp.ndarray
             This chunk's responses, shape ``(rows >= count, n_fields * n_cells)``; rows beyond ``count``
             are ignored, so a padded final chunk needs no special case.
         start, count : int
             The chunk's half-open probe range.
+        width : int
+            At least the chunk's entry count: :meth:`width` of the materialize's chunks.
+
+        Returns
+        -------
+        jnp.ndarray
+            The values, shape ``(nnz,)``.
         """
-        lo, hi = self._probe_start[start], self._probe_start[start + count]
-        if hi > lo:
-            data[self._position[lo:hi]] = responses.reshape(-1)[
-                self._source[lo:hi].astype(np.int64) - start * self._nf
-            ]
+        lo, hi = int(self._probe_start[start]), int(self._probe_start[start + count])
+        if hi == lo:
+            return data
+        return _scatter_chunk(
+            data, responses, self._source, self._position, lo, hi, start * self._nf, width=width
+        )
+
+    def values(self, probing: _ChunkProbe) -> jnp.ndarray:
+        """Every stored entry's value, in this structure's order, by probing one chunk at a time.
+
+        De-compressed AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed values
+        and then dropped, so the only large array live at once is the values being built. Holding every
+        response instead costs ``n_probes * nf`` floats -- comparable to the matrix itself.
+        """
+        chunks = tuple(probing.chunks())
+        width = self.width(chunks)
+        data = jnp.zeros(self.nnz, dtype=jnp.float64)
+        for field, start, count in chunks:
+            data = self.scatter(data, probing.responses(field, start, count), start, count, width)
+        return data
+
+
+@functools.partial(jax.jit, static_argnames="width", donate_argnums=0)
+def _scatter_chunk(
+    data: jnp.ndarray,
+    responses: jnp.ndarray,
+    source: jnp.ndarray,
+    position: jnp.ndarray,
+    lo: int,
+    hi: int,
+    offset: int,
+    *,
+    width: int,
+) -> jnp.ndarray:
+    """Entries ``[lo, hi)`` of the probe-grouped order placed from one chunk's responses.
+
+    Through ``width`` lanes whatever the chunk's entry count, so one program serves every chunk: a lane
+    past ``hi`` is sent past the end of ``data`` and dropped. Each entry's position is distinct, so the
+    write is a plain placement.
+    """
+    lane = lo + jnp.arange(width)
+    live = lane < hi
+    taken = jnp.where(live, source.at[lane].get(mode="fill", fill_value=0) - offset, 0)
+    placed = jnp.where(live, position.at[lane].get(mode="fill", fill_value=0), data.shape[0])
+    return data.at[placed].set(responses.reshape(-1)[taken], mode="drop", unique_indices=True)
 
 
 def materialize_block_jacobian(
@@ -980,13 +1063,14 @@ def materialize_block_jacobian(
             raise ValueError(
                 "this structure lays its entries out block by block; materialize_blocks recovers it."
             )
-        data = _probed_values(probing, structure)
+        # Read back once, whole: this path hands the matrix to a host consumer.
+        data = np.array(structure.values(probing))
         return sp.csr_matrix((data, structure.indices, structure.indptr), shape=(nf, nf))
 
     probes = [plan.probe(index) for index in range(n_probes)]
     responses = np.empty((n_probes, nf), dtype=np.float64)
     for field, start, m in probing.chunks():
-        responses[start : start + m] = probing.responses(field, start, m)[:m]
+        responses[start : start + m] = np.asarray(probing.responses(field, start, m))[:m]
 
     # De-compress by scatter: each probe's response holds column `b` of every block in its colour's share.
     # The share is per (field, colour), since each column field carries its own colouring -- and only
@@ -1012,19 +1096,6 @@ def materialize_block_jacobian(
     )
     jacobian.eliminate_zeros()
     return jacobian
-
-
-def _probed_values(probing: _ChunkProbe, structure: ProbeGather) -> np.ndarray:
-    """Every stored entry's value, in ``structure``'s order, by probing one chunk at a time.
-
-    De-compressed AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed values
-    and then dropped, so the only large array live at once is the values being built. Holding every
-    response instead costs ``n_probes * nf`` floats -- comparable to the matrix itself.
-    """
-    data = np.zeros(structure.nnz)  # zero: entries outside their column's reach are never written
-    for field, start, m in probing.chunks():
-        structure.scatter(data, probing.responses(field, start, m), start, m)
-    return data
 
 
 def materialize_blocks(
@@ -1059,42 +1130,42 @@ def materialize_blocks(
             "this structure has no block layout; materialize_block_jacobian recovers it."
         )
     return ProbedBlocks(
-        _probed_values(_ChunkProbe(plan, probe_batch_size, matvec, batched_matvec), structure),
+        structure.values(_ChunkProbe(plan, probe_batch_size, matvec, batched_matvec)),
         structure.layout,
     )
 
 
 class ProbedBlocks:
-    """One materialize's values over a :class:`BlockLayout`: the blocks, and the shift added in place.
+    """One materialize's values over a :class:`BlockLayout`, on the device: the blocks, and the shift.
 
     Attributes
     ----------
-    data : np.ndarray
+    data : jnp.ndarray
         The values, block-major, shape ``(nnz,)``.
     layout : BlockLayout
         Where each block lies in them.
     """
 
-    def __init__(self, data: np.ndarray, layout: BlockLayout) -> None:
+    def __init__(self, data: jnp.ndarray, layout: BlockLayout) -> None:
         self.data = data
         self.layout = layout
 
-    def blocks(self) -> tuple[sp.csr_matrix, ...]:
-        """``(A_ll, A_lt, A_tl, A_tt)`` over :attr:`data`, sharing its memory."""
+    def blocks(self) -> tuple[DeviceMatrix, ...]:
+        """``(A_ll, A_lt, A_tl, A_tt)`` over :attr:`data`, each its own slice of the values."""
         return self.layout.blocks(self.data)
 
-    def diagonal(self) -> np.ndarray:
-        """The Jacobian's diagonal in degree-of-freedom order, a copy of shape ``(n_dofs,)``."""
+    def diagonal(self) -> jnp.ndarray:
+        """The Jacobian's diagonal in degree-of-freedom order, shape ``(n_dofs,)``."""
         return self.layout.diagonal(self.data)
 
-    def add_shift(self, shift_diagonal: np.ndarray) -> None:
+    def add_shift(self, shift_diagonal: jnp.ndarray) -> None:
         """Add the pseudo-transient shift to the diagonal, in place.
 
         The in-place counterpart of :func:`shifted_jacobian`, for values this materialize owns: the
         whole matrix is never formed, so there is no input to keep unmodified, and every diagonal entry
         is stored (:meth:`BlockLayout.of` refuses a pattern without one), so no entry is created.
         """
-        self.layout.add_to_diagonal(self.data, shift_diagonal)
+        self.data = self.layout.add_to_diagonal(self.data, shift_diagonal)
 
 
 class FieldwiseMatvec:
@@ -1154,20 +1225,23 @@ class _ChunkProbe:
         """``(field, start, count)`` for every chunk, as :meth:`ColumnProbePlan.field_chunks`."""
         return self._plan.field_chunks(self._chunk)
 
-    def responses(self, field: int, start: int, count: int) -> np.ndarray:
-        """Responses of probes ``[start, start + count)``, shape ``(rows >= count, n_fields * n_cells)``."""
+    def responses(self, field: int, start: int, count: int) -> jnp.ndarray:
+        """Responses of probes ``[start, start + count)``, shape ``(rows >= count, n_fields * n_cells)``.
+
+        Left on the device, where :meth:`ProbeGather.scatter` reads them.
+        """
         plan = self._plan
         if self._fieldwise:
             block = self._buffer(plan.n_cells, self._batched.seed_dtype(field))
             plan.field_seeds(start, start + count, out=block)
-            return np.asarray(self._batched(field, jnp.asarray(block)), dtype=np.float64)
+            return jnp.asarray(self._batched(field, jnp.asarray(block)), dtype=jnp.float64)
         block = self._buffer(plan.n_fields * plan.n_cells, np.dtype(np.float64))
         plan.seed_block(start, start + count, out=block)
         if self._batched is not None:
-            return np.asarray(self._batched(jnp.asarray(block)), dtype=np.float64)
-        return np.stack(
+            return jnp.asarray(self._batched(jnp.asarray(block)), dtype=jnp.float64)
+        return jnp.stack(
             [
-                np.asarray(self._matvec(jnp.asarray(block[row])), dtype=np.float64)
+                jnp.asarray(self._matvec(jnp.asarray(block[row])), dtype=jnp.float64)
                 for row in range(count)
             ]
         )

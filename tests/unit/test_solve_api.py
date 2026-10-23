@@ -245,6 +245,12 @@ VALIDATION_INTERNAL_REACHES = {
     # couplings just before every fit. Hooking the place both fit paths hand their values to the split
     # is what makes the screened split the one a march would build from such a Jacobian.
     "ProbedBlocks",
+    # A refit's blocks as the probe hands them to the split -- a host pattern with device values --
+    # rebuilt from captured matrices by `pitzdaily_openfoam/refit_profile.py`, so the profiled refit
+    # takes the path a march's does rather than reading host blocks back in.
+    "DeviceMatrix",
+    "SparsePattern",
+    "as_scipy",
     "batched_field_jacobian_matvec",
     "batched_jacobian_matvec",
     # The one place a fit and a re-fit choose their products, reached by the harness that compares the

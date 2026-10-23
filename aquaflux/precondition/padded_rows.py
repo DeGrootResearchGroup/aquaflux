@@ -19,7 +19,7 @@ import numpy as np
 import scipy.sparse as sp
 from jax.custom_derivatives import linear_call
 
-from .entry_map import DeviceEntryMap, EntryMap, EntryMaps, SparsePattern
+from .entry_map import DeviceEntryMap, DeviceMatrix, EntryMap, EntryMaps, SparsePattern
 
 
 class _PaddedRowOperator(eqx.Module):
@@ -276,15 +276,17 @@ class _PaddedLayout(eqx.Module):
             t_values=t_values,
         )
 
-    def operator(self, a: sp.csr_matrix) -> _PaddedRowOperator:
+    def operator(self, a: sp.csr_matrix | DeviceMatrix) -> _PaddedRowOperator:
         """``a`` in padded-row form: equal, slot for slot, to ``_PaddedRowOperator.from_scipy(a, ...)``.
 
-        ``a`` must store this layout's pattern (the caller holds the layout keyed by it). The gathers
-        are compiled as one program per layout shape (run eagerly, each would be a dispatch of its
-        own), and the operator holds this layout's own index arrays: a compiled function's outputs are
-        new buffers, so only the slot values come out of it.
+        ``a`` must store this layout's pattern (the caller holds the layout keyed by it); a
+        :class:`~aquaflux.precondition.entry_map.DeviceMatrix` is packed from its values where they are.
+        The gathers are compiled as one program per layout shape (run eagerly, each would be a dispatch
+        of its own), and the operator holds this layout's own index arrays: a compiled function's
+        outputs are new buffers, so only the slot values come out of it.
         """
-        return self.with_values(*_slot_values(self, jnp.asarray(a.data)))
+        values = a.values if isinstance(a, DeviceMatrix) else jnp.asarray(a.data)
+        return self.with_values(*_slot_values(self, values))
 
 
 @eqx.filter_jit
@@ -295,19 +297,25 @@ def _slot_values(layout: _PaddedLayout, values: jnp.ndarray) -> tuple[jnp.ndarra
 
 
 def _padded_operator(
-    a: sp.spmatrix,
+    a: sp.spmatrix | DeviceMatrix,
     width: int | None = None,
     transpose_width: int | None = None,
     maps: EntryMaps | None = None,
     slot: Hashable = "padded",
 ) -> _PaddedRowOperator:
-    """``a`` in padded-row form: by the layout ``maps`` holds under ``slot`` if given, else packed afresh."""
+    """``a`` in padded-row form: by the layout ``maps`` holds under ``slot`` if given, else packed afresh.
+
+    A :class:`~aquaflux.precondition.entry_map.DeviceMatrix` needs ``maps``: its layout is keyed by its
+    pattern, and it is packed on the device.
+    """
     if maps is None:
         return _PaddedRowOperator.from_scipy(a, width, transpose_width)
-    a = sp.csr_matrix(a)
+    on_device = isinstance(a, DeviceMatrix)
+    if not on_device:
+        a = sp.csr_matrix(a)
     return maps.held(
         (slot, width, transpose_width),
-        a,
+        a.pattern if on_device else a,
         lambda pattern: _PaddedLayout.of(pattern, width, transpose_width),
     ).operator(a)
 

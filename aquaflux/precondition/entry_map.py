@@ -34,7 +34,15 @@ import scipy.sparse as sp
 
 from aquaflux.ragged import pairs_within_groups
 
-__all__ = ["DeviceEntryMap", "EntryMap", "EntryMaps", "SparsePattern", "compiled_apply"]
+__all__ = [
+    "DeviceEntryMap",
+    "DeviceMatrix",
+    "EntryMap",
+    "EntryMaps",
+    "SparsePattern",
+    "as_scipy",
+    "compiled_apply",
+]
 
 
 class SparsePattern:
@@ -53,16 +61,32 @@ class SparsePattern:
 
     def __init__(self, matrix: sp.spmatrix) -> None:
         matrix = sp.csr_matrix(matrix)
-        self.shape: tuple[int, int] = matrix.shape
         # Copies: an operand sorted in place later must not change the pattern held here.
-        self.indptr = matrix.indptr.copy()
-        self.indices = matrix.indices.copy()
+        self._hold(matrix.shape, matrix.indptr.copy(), matrix.indices.copy())
+
+    @classmethod
+    def of_arrays(
+        cls, shape: tuple[int, int], indptr: np.ndarray, indices: np.ndarray
+    ) -> SparsePattern:
+        """The pattern with these CSR row pointers and columns, taking ownership of the two arrays.
+
+        For a pattern known before any matrix stores it (a probe's block layout): no matrix, and no
+        copy. The caller must not change either array afterwards.
+        """
+        pattern = cls.__new__(cls)
+        pattern._hold(tuple(shape), indptr, indices)
+        return pattern
+
+    def _hold(self, shape: tuple[int, int], indptr: np.ndarray, indices: np.ndarray) -> None:
+        self.shape: tuple[int, int] = shape
+        self.indptr = indptr
+        self.indices = indices
         # Weak references: remembering an operand's arrays must not keep them alive.
         self._accepted = (weakref.ref(self.indptr), weakref.ref(self.indices))
         SparsePattern._live.setdefault((self.shape, self.nnz), weakref.WeakSet()).add(self)
 
     @classmethod
-    def of(cls, matrix: sp.csr_matrix) -> SparsePattern:
+    def of(cls, matrix: sp.csr_matrix | SparsePattern) -> SparsePattern:
         """The live pattern ``matrix`` stores, whoever holds it; a new one only when none does.
 
         A pattern is held for an owner's session, and it is as large as the operand's index arrays, so
@@ -70,6 +94,8 @@ class SparsePattern:
         otherwise each hold a copy. :meth:`matches` decides, so a reused pattern is exactly the
         operand's.
         """
+        if isinstance(matrix, SparsePattern):
+            return matrix
         for held in tuple(cls._live.get((matrix.shape, int(matrix.nnz)), ())):
             if held.matches(matrix):
                 return held
@@ -80,8 +106,11 @@ class SparsePattern:
         """Stored entries."""
         return int(self.indices.size)
 
-    def matches(self, matrix: sp.csr_matrix) -> bool:
-        """Whether ``matrix`` stores exactly this pattern's entries, in this pattern's order."""
+    def matches(self, matrix: sp.csr_matrix | SparsePattern) -> bool:
+        """Whether ``matrix`` stores exactly this pattern's entries, in this pattern's order.
+
+        ``matrix`` may itself be a pattern, which matches when it holds the same entries.
+        """
         if matrix.shape != self.shape or matrix.nnz != self.nnz:
             return False
         if matrix.indptr is self._accepted[0]() and matrix.indices is self._accepted[1]():
@@ -109,6 +138,63 @@ class SparsePattern:
             (np.arange(1, self.nnz + 1, dtype=np.float64), self.indices.copy(), self.indptr.copy()),
             shape=self.shape,
         )
+
+
+class DeviceMatrix:
+    """A sparse matrix whose pattern is held on the host and whose stored values are on the device.
+
+    What a refit hands a frozen inverse when the values were formed on the device: the inverse checks
+    the pattern on the host and fits from the values where they are, so they never cross to the host
+    and back. :func:`as_scipy` reads one back for an inverse that needs the whole matrix on the host.
+
+    Attributes
+    ----------
+    pattern : SparsePattern
+        Where each value is stored.
+    values : jnp.ndarray
+        The stored values, in the pattern's order, shape ``(pattern.nnz,)``.
+    """
+
+    def __init__(self, pattern: SparsePattern, values: jnp.ndarray) -> None:
+        if values.shape != (pattern.nnz,):
+            raise ValueError(
+                f"DeviceMatrix: {values.shape} values for a pattern storing {pattern.nnz} entries."
+            )
+        self.pattern = pattern
+        self.values = values
+
+    @classmethod
+    def of(cls, matrix: sp.spmatrix | DeviceMatrix) -> DeviceMatrix:
+        """``matrix`` itself if it is one, else a host matrix's values moved to the device on its pattern."""
+        if isinstance(matrix, DeviceMatrix):
+            return matrix
+        matrix = sp.csr_matrix(matrix)
+        return cls(SparsePattern.of(matrix), jnp.asarray(matrix.data))
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """The matrix's shape."""
+        return self.pattern.shape
+
+    @property
+    def nnz(self) -> int:
+        """Stored entries."""
+        return self.pattern.nnz
+
+
+def as_scipy(matrix: sp.spmatrix | DeviceMatrix) -> sp.csr_matrix:
+    """``matrix`` as a host CSR matrix: a :class:`DeviceMatrix` read back, any other converted.
+
+    A matrix read back owns its arrays, index arrays included, so an operation that sorts it in place
+    cannot reach the pattern it was read from.
+    """
+    if not isinstance(matrix, DeviceMatrix):
+        return sp.csr_matrix(matrix)
+    pattern = matrix.pattern
+    return sp.csr_matrix(
+        (np.array(matrix.values), pattern.indices.copy(), pattern.indptr.copy()),
+        shape=pattern.shape,
+    )
 
 
 class EntryMap:
@@ -495,8 +581,8 @@ class EntryMaps:
         self._maps: dict[Hashable, tuple[SparsePattern, object]] = {}
         self._patterns: list[SparsePattern] = []
 
-    def pattern_of(self, matrix: sp.csr_matrix) -> SparsePattern:
-        """The held pattern ``matrix`` stores, or a new one held from now on."""
+    def pattern_of(self, matrix: sp.csr_matrix | SparsePattern) -> SparsePattern:
+        """The held pattern ``matrix`` stores (or is), or a new one held from now on."""
         for pattern in self._patterns:
             if pattern.matches(matrix):
                 return pattern
@@ -508,7 +594,7 @@ class EntryMaps:
     def held(
         self,
         slot: Hashable,
-        matrix: sp.csr_matrix,
+        matrix: sp.csr_matrix | SparsePattern,
         build: Callable[[SparsePattern], object],
     ):
         """What ``build`` made for this slot, reused while ``matrix``'s pattern holds.
@@ -517,8 +603,8 @@ class EntryMaps:
         ----------
         slot : hashable
             The call site.
-        matrix : scipy.sparse.csr_matrix
-            The operand whose values vary.
+        matrix : scipy.sparse.csr_matrix or SparsePattern
+            The operand whose values vary, or its pattern (an operand on the device).
         build : callable
             ``pattern -> object`` holding one or more maps over ``matrix``'s pattern.
 

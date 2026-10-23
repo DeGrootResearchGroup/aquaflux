@@ -54,7 +54,7 @@ import scipy.sparse as sp
 from jax.ops import segment_sum
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 
-from .entry_map import SparsePattern, compiled_apply
+from .entry_map import DeviceMatrix, SparsePattern, compiled_apply
 from .frozen_operator import equilibration_scale, symmetrically_equilibrate
 from .level_fit import (
     CoarseningPlan,
@@ -801,41 +801,41 @@ class FrozenCoarsening:
         """The fine operator's degrees of freedom."""
         return self.pattern.shape[0]
 
-    def fit(self, a: sp.spmatrix, where: str = "FrozenCoarsening.fit") -> SmoothedHierarchy:
+    def fit(
+        self, a: sp.spmatrix | DeviceMatrix, where: str = "FrozenCoarsening.fit"
+    ) -> SmoothedHierarchy:
         """The hierarchy over ``a`` on this coarsening: every level's values re-derived, nothing re-aggregated.
 
         Parameters
         ----------
-        a : scipy.sparse matrix
-            The fine operator, of this coarsening's shape and pattern.
+        a : scipy.sparse matrix or DeviceMatrix
+            The fine operator, of this coarsening's shape and pattern; a device one is fitted in place.
         where : str
             What to name in a refusal, with the level appended.
 
         Returns
         -------
         SmoothedHierarchy
-            A hierarchy over ``a`` with this coarsening; at unchanged shapes, a compilation-cache hit
-            for any cycle compiled over an earlier fit.
+            A hierarchy over ``a``; at unchanged shapes, any cycle compiled earlier is a cache hit.
 
         Raises
         ------
         ValueError
             If ``a``'s shape or stored pattern differs from the coarsening's, or a level's diagonal is
-            not usable (a scalar level's must be finite and positive, a nodal level's cell blocks
-            invertible).
+            unusable (a scalar level's finite and positive, a nodal level's cell blocks invertible).
         """
-        a = sp.csr_matrix(a)
+        a = DeviceMatrix.of(a)
         if a.shape != self.pattern.shape:
             raise ValueError(
                 f"cannot refit a {self.n_dofs}-dof hierarchy onto a {a.shape[0]}-dof operator."
             )
-        if not self.pattern.matches(a):
+        if not self.pattern.matches(a.pattern):
             raise ValueError(
                 f"cannot refit: the operator stores {a.nnz} entries in another pattern than the "
                 f"{self.pattern.nnz} this coarsening was built on, so its values would land in the "
                 "wrong slots. Coarsen the new operator instead."
             )
-        values = jnp.asarray(a.data, dtype=jnp.float64)
+        values = jnp.asarray(a.values, dtype=jnp.float64)
         scale = None
         if self.plan.equilibrated:
             # The rule is the host one, so a hierarchy equilibrates exactly as a frozen operator does.

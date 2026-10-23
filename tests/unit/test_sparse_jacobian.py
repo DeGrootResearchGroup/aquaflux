@@ -565,9 +565,12 @@ def test_gather_map_index_arrays_are_narrow_on_a_realistic_pattern():
     # The scatter must place each response element where the map says, unaffected by the width.
     nf = plan.n_fields * plan.n_cells
     responses = np.arange(plan.n_probes * nf, dtype=np.float64).reshape(plan.n_probes, nf)
-    data = np.zeros(gather.nnz)
-    for probe in range(plan.n_probes):
-        gather.scatter(data, responses[probe : probe + 1], probe, 1)
+    chunks = [(0, probe, 1) for probe in range(plan.n_probes)]
+    width = gather.width(chunks)
+    data = jnp.zeros(gather.nnz)
+    for _, probe, count in chunks:
+        data = gather.scatter(data, jnp.asarray(responses[probe : probe + 1]), probe, count, width)
+    data = np.asarray(data)
 
     rows = np.repeat(np.arange(gather.indptr.shape[0] - 1), np.diff(gather.indptr))
     field, cell = np.divmod(gather.indices.astype(np.int64), plan.n_cells)
@@ -676,8 +679,11 @@ def test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix(leadin
             got = probed.blocks()
         for want, have in zip(expected, got, strict=True):
             assert have.shape == want.shape, label
-            assert np.array_equal(have.indptr, want.indptr), label
-            assert np.array_equal(have.indices, want.indices), label
-            assert np.array_equal(have.data, want.data), label
-    assert all(np.shares_memory(block.data, probed.data) for block in got if block.nnz)
+            assert np.array_equal(have.pattern.indptr, want.indptr), label
+            assert np.array_equal(have.pattern.indices, want.indices), label
+            assert np.array_equal(np.asarray(have.values), want.data), label
+    # Each block's pattern is the layout's own, held once however often the blocks are taken.
+    assert all(
+        again.pattern is block.pattern for again, block in zip(probed.blocks(), got, strict=True)
+    )
     assert got[1].nnz == 0  # the triangle a split never reads is not stored

@@ -315,14 +315,15 @@ class Truncation:
         if key not in self._masks:
             self._masks = {key: self._mask(probed, reach)}
             self._report(probed, self._masks[key])
-        probed.data[self._masks[key]] = 0.0
+        probed.data = jnp.where(self._masks[key], 0.0, probed.data)
 
     def _entries(self, probed: ProbedBlocks):
         """Global (row dof, column dof) of every stored value, in the block-major order of ``data``."""
         layout = probed.layout
         offsets = (0, layout.leading_dofs)
         rows, cols = np.empty(probed.data.size, np.int64), np.empty(probed.data.size, np.int64)
-        for block, (start, stop, indptr, indices) in enumerate(layout._blocks):
+        for block, (start, stop, pattern) in enumerate(layout._blocks):
+            indptr, indices = pattern.indptr, pattern.indices
             rows[start:stop] = (
                 np.repeat(np.arange(indptr.size - 1), np.diff(indptr)) + offsets[block // 2]
             )
@@ -340,9 +341,10 @@ class Truncation:
 
     def _report(self, probed: ProbedBlocks, mask: np.ndarray) -> None:
         rows, cols = self._entries(probed)
+        data = np.asarray(probed.data)
         pair = (rows // self._n) * self._nf + cols // self._n
-        total = np.bincount(pair, weights=probed.data**2, minlength=self._nf**2)
-        dropped = np.bincount(pair[mask], weights=probed.data[mask] ** 2, minlength=self._nf**2)
+        total = np.bincount(pair, weights=data**2, minlength=self._nf**2)
+        dropped = np.bincount(pair[mask], weights=data[mask] ** 2, minlength=self._nf**2)
         kept = np.bincount(pair[~mask], minlength=self._nf**2)
         print(
             f"[{self.arm}] keeps {int((~mask).sum()) / 1e6:.2f}M of {mask.size / 1e6:.2f}M stored entries "

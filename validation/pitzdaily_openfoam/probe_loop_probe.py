@@ -6,7 +6,8 @@ glibc thresholds cannot stop it, since XLA allocates on worker threads), so a lo
 which allocates once, might remove that cost. This times, at the last captured state of a
 ``replay.py`` capture, on the step's own probe plan and gather:
 
-* ``shipped``            -- the probe as the session runs it (host seeds, one call per chunk, host scatter);
+* ``shipped``            -- the probe as the session runs it (host seeds, one call per chunk, device
+  scatter);
 * ``looped``             -- one ``fori_loop`` program, seeds in and responses out by host callbacks, so the
   memory bound stays one chunk;
 * ``compute-only loop``  -- the same loop over precomputed seeds with no host work, and
@@ -59,15 +60,21 @@ print(
 )
 
 
+CHUNKS = [(0, start, min(chunk, n_probes - start)) for start in range(0, n_probes, chunk)]
+WIDTH = structure.width(CHUNKS)
+# The looped arm places responses on the host, inside its callback, from host copies of the order.
+SOURCE, POSITION = np.asarray(structure._source), np.asarray(structure._position)
+STARTS = structure._probe_start
+
+
 def shipped():
-    data = np.zeros(structure.nnz)
+    data = jnp.zeros(structure.nnz)
     block = np.zeros((chunk, nf))
-    for start in range(0, n_probes, chunk):
-        m = min(chunk, n_probes - start)
+    for _, start, m in CHUNKS:
         plan.seed_block(start, start + m, out=block)
-        responses = np.asarray(batched_jacobian_matvec(probed, state, jnp.asarray(block)))
-        structure.scatter(data, responses, start, m)
-    return data
+        responses = batched_jacobian_matvec(probed, state, jnp.asarray(block))
+        data = structure.scatter(data, responses, start, m, WIDTH)
+    return np.asarray(data)
 
 
 class _Host:
@@ -84,7 +91,10 @@ class _Host:
 
     def take(self, index, responses):
         start = int(index) * chunk
-        structure.scatter(self.data, np.asarray(responses), start, min(chunk, n_probes - start))
+        lo, hi = STARTS[start], STARTS[min(start + chunk, n_probes)]
+        self.data[POSITION[lo:hi]] = np.asarray(responses).reshape(-1)[
+            SOURCE[lo:hi].astype(np.int64) - start * nf
+        ]
 
 
 HOST = _Host()

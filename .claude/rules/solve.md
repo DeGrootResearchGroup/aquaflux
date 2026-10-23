@@ -341,7 +341,9 @@ defect — fix it in the same change.
     ask, the hook's forced first re-fit does, before any step): a row of a field the problem names (`MaterializedProblem.floorable_fields`,
     default none) whose pivot `p = J_ii + s_i` has `|p| < threshold · d_i` is fitted at `sign(p) · d_i`, with
     `d` the base pseudo-time diagonal (`ShiftTerm.diagonal`, read off the same term as the shift, never
-    `shift / β`, which folds in `row_shift_scale`). The operator, the root and the adjoint are untouched;
+    `shift / β`, which folds in `row_shift_scale`). The shift, the scale and the floor's arithmetic stay on
+    the device (`PivotFloor.correction` is one jitted function returning a device array); only the floored
+    row set is read back, for `floored_rows`. The operator, the root and the adjoint are untouched;
     the adjoint's preconditioner sees the floored fit. `BetaTrackingRefresh.floored_rows` holds the rows
     changed at the last re-fit. A floor on a problem naming no field is refused at open.
     - **Why:** a near-zero pivot makes the fitted split amplify its rows ~10⁶–10⁷× beyond any other (bfs3d
