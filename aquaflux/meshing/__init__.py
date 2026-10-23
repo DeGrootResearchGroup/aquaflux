@@ -18,7 +18,8 @@ over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals 
 pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
 of triangles and quadrilaterals between these steps, and :class:`PyramidCaps` caps the
 quadrilaterals a tetrahedral fill meets. :class:`PipeCore` fills a pipe's core, inside its layers,
-with a structured O-grid; the mesher finds pipes by itself. :func:`element_mesh` makes a mesh of any
+with a structured O-grid; the mesher finds pipes by itself, and :class:`PipeGrading` lets a straight
+pipe's cross-sections grow longer away from what it joins. :func:`element_mesh` makes a mesh of any
 tetrahedra, triangular prisms, hexahedra and pyramids.
 
 :class:`OctreeCore` builds a core of hexahedra inside a :class:`Region` -- the region a closed
@@ -76,6 +77,7 @@ from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
 from .near_surface import NearSurface
 from .pipe_core import PipeCore, PipeCoreFill
+from .rows import PipeGrading
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
 from .polygons import Polygons, PyramidCaps
@@ -112,6 +114,7 @@ __all__ = [
     "OctreeCore",
     "PipeCore",
     "PipeCoreFill",
+    "PipeGrading",
     "PipeOGrid",
     "Planarization",
     "PlaneSurface",

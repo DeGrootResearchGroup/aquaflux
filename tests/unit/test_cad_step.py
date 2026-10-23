@@ -18,11 +18,13 @@ import pytest
 pytest.importorskip("OCP")
 
 from aquaflux.io.cad import (
+    CadRegion,
     CurvedPieces,
     InexactBody,
     Placement,
     Recognition,
     RecognitionRule,
+    TorusFace,
     UnrecognizedSolid,
     read_step,
 )
@@ -253,6 +255,42 @@ def test_a_polyhedron_takes_part_in_a_fluid_as_the_solid_it_is(tmp_path):
     assert len(water.regions) == 2
     distance, tolerance = model.discrepancy(("channel", "riser"))
     assert distance <= tolerance
+
+
+def test_a_bends_wall_and_a_groove_are_described_as_tori_with_the_fluid_on_their_own_sides(
+    tmp_path,
+):
+    # A quarter turn of a tube (radius 0.02) on a circle of radius 0.1 about z: the solid is
+    # inside the tube. A box with a whole ring of that tube cut out of it: outside.
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeEdge,
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakeWire,
+    )
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeRevol
+    from OCP.gp import gp_Ax1, gp_Circ
+
+    section = gp_Circ(gp_Ax2(gp_Pnt(0.1, 0.0, 0.0), gp_Dir(0, 1, 0)), 0.02)
+    disc = BRepBuilderAPI_MakeFace(
+        BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(section).Edge()).Wire()
+    ).Face()
+    bend = BRepPrimAPI_MakeRevol(disc, gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0.5 * math.pi)
+    ring = BRepPrimAPI_MakeTorus(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0.1, 0.02).Shape()
+    box = BRepPrimAPI_MakeBox(gp_Pnt(-0.2, -0.2, -0.05), 0.4, 0.4, 0.1).Shape()
+    path = write_step(
+        tmp_path / "tori.step",
+        {"bend": bend.Shape(), "grooved": BRepAlgoAPI_Cut(box, ring).Shape()},
+    )
+    model = read_step(path)
+    for name, inside, angle in (("bend", True, 0.5 * math.pi), ("grooved", False, 2 * math.pi)):
+        (torus,) = [f for f in model.topology(CadRegion((name,))).faces if isinstance(f, TorusFace)]
+        np.testing.assert_allclose(torus.centre, 0.0, atol=1e-12)
+        assert abs(float(np.asarray(torus.axis) @ [0.0, 0.0, 1.0])) == pytest.approx(1.0)
+        assert torus.major_radius == pytest.approx(0.1)
+        assert torus.minor_radius == pytest.approx(0.02)
+        assert torus.angle == pytest.approx(angle)
+        assert torus.solid_inside is inside, name
 
 
 def test_a_torus_is_refused_by_name(tmp_path):

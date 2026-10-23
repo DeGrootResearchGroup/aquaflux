@@ -39,6 +39,7 @@ from aquaflux.io.cad.faces import (
     PlaneFace,
     SolidDescription,
     SphereFace,
+    TorusFace,
 )
 from aquaflux.solids import Cone, Cylinder, HalfSpace, Intersection, Solid, Sphere, Union
 
@@ -231,9 +232,10 @@ class CurvedPieces(RecognitionRule):
 
     def propose(self, description: SolidDescription) -> Recognition | str:
         """Union the whole-turn convex pieces; decline on an unknown surface or a bore."""
-        unknown = description.of_kind(OtherFace)
+        # No body stands for a piece of a torus, so a bend is declined like an unknown surface.
+        unknown = description.of_kind(OtherFace) + description.of_kind(TorusFace)
         if unknown:
-            kinds = ", ".join(sorted({face.kind for face in unknown}))
+            kinds = ", ".join(sorted({getattr(face, "kind", "Torus") for face in unknown}))
             return f"it has faces on surfaces no rule describes ({kinds})"
         curved = [
             f for f in description.faces if isinstance(f, (CylinderFace, ConeFace, SphereFace))

@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
+from aquaflux.mesh import PERIODIC_MATCH_TOLERANCE, RESERVED_PATCH_NAMES, Mesh
 
-from .cyclic import DEFAULT_MATCH_TOLERANCE, fuse_cyclic_patches
+from .cyclic import fuse_cyclic_patches
 from .records import CellZone, FoamPatch, PolyMeshData, patch_face_range
 
 
 def assemble(
-    data: PolyMeshData, *, cyclic_match_tolerance: float = DEFAULT_MATCH_TOLERANCE
+    data: PolyMeshData, *, cyclic_match_tolerance: float = PERIODIC_MATCH_TOLERANCE
 ) -> Mesh:
     """Assemble parsed polyMesh arrays into a validated 3D :class:`~aquaflux.mesh.Mesh`.
 
@@ -32,7 +32,7 @@ def assemble(
     cyclic_match_tolerance : float
         Passed to :func:`~aquaflux.io.openfoam.cyclic.fuse_cyclic_patches` for matching a
         ``cyclic`` patch pair's faces (see
-        :data:`~aquaflux.io.openfoam.cyclic.DEFAULT_MATCH_TOLERANCE`).
+        :data:`~aquaflux.mesh.PERIODIC_MATCH_TOLERANCE`).
 
     Returns
     -------

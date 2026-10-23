@@ -75,7 +75,7 @@ SUBPACKAGE_GROUPS = {
         ("The polyhedral dual", ["dual"]),
         ("Prism layers", ["layers"]),
         ("Structured quadrilaterals on chosen faces", ["mapped"]),
-        ("Pipes, and their cores as structured O-grids", ["pipes", "pipe_core"]),
+        ("Pipes, and their cores as structured O-grids", ["pipes", "pipe_core", "rows"]),
         ("Surfaces of triangles and quadrilaterals, and pyramid caps", ["polygons", "caps"]),
         ("A mesh of tetrahedra, prisms, hexahedra and pyramids", ["elements"]),
         ("An octree hexahedral core", ["near_surface", "hex_core", "regions"]),
@@ -86,7 +86,10 @@ SUBPACKAGE_GROUPS = {
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
         ("Cell zones and face patches", ["groups"]),
-        ("Building and transforming a mesh", ["structured", "collapse", "reorder", "digest"]),
+        (
+            "Building and transforming a mesh",
+            ["structured", "collapse", "periodic", "reorder", "digest"],
+        ),
         ("Boundary patches as surfaces", ["surface"]),
         ("Quality and connectivity diagnostics", ["quality", "distance", "graph", "winding"]),
     ],

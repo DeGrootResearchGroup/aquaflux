@@ -799,7 +799,7 @@ def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path
     candidates = np.arange(topology.n_faces)
     own = netgen.triangulate(brep, max_size=0.0035)
     assert find_pipes(topology, own.points, own.triangles, own.face, candidates)[0] == []
-    divisions = rim_divisions(topology, own.triangles, own.face, candidates)
+    divisions = rim_divisions(topology, own.points, own.triangles, own.face, candidates)
     assert sorted(divisions.values()) == [5, 15, 20, 20, 20]  # the inlet rim's edges 15 and 5
     surface = netgen.triangulate(brep, max_size=0.0035, edge_divisions=divisions)
     pipes, _ = find_pipes(topology, surface.points, surface.triangles, surface.face, candidates)
@@ -809,3 +809,210 @@ def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path
             assert loop.size == 20
             step = np.linalg.norm(np.diff(surface.points[np.append(loop, loop[0])], axis=0), axis=1)
             assert step.max() < 1.001 * step.min()
+
+
+@pytest.mark.parametrize("graded", [False, True])
+def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tmp_path, graded):
+    # A straight pipe, a quarter bend (a torus) and a straight pipe, drawn as one solid: the three
+    # walls are pipes joined end to end at shared rims, so one O-grid runs through them, open at
+    # the inlet and the outlet. No tetrahedra are needed: every cell of the dual is a hexahedron
+    # but the triangular prisms along the core's four corners, and the mesh fills the tube.
+    pytest.importorskip("OCP")
+    import math
+    from collections import Counter
+
+    from aquaflux.io.cad import CadRegion, read_step
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, PipeGrading, PrismLayers
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeEdge,
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakeWire,
+    )
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakeRevol
+    from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pnt
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Interface import Interface_Static
+    from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
+    from OCP.STEPCAFControl import STEPCAFControl_Writer
+    from OCP.STEPControl import STEPControl_AsIs
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+
+    r, bend, leg = 0.05, 0.15, 0.3
+    top = gp_Dir(0.0, 0.0, 1.0)
+    before = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(-leg, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0), top), r, leg
+    ).Shape()
+    section = gp_Circ(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0), top), r)
+    disc = BRepBuilderAPI_MakeFace(
+        BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(section).Edge()).Wire()
+    ).Face()
+    turn = BRepPrimAPI_MakeRevol(
+        disc, gp_Ax1(gp_Pnt(0.0, bend, 0.0), gp_Dir(0.0, 0.0, 1.0)), 0.5 * math.pi
+    ).Shape()
+    after = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(bend, bend, 0.0), gp_Dir(0.0, 1.0, 0.0), top), r, leg
+    ).Shape()
+    unify = ShapeUpgrade_UnifySameDomain(
+        BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(before, turn).Shape(), after).Shape(), True, True, True
+    )
+    unify.Build()
+    # Written in millimetres from a document drawn in metres, as a CAD tool would.
+    document = TDocStd_Document(TCollection_ExtendedString("bend"))
+    XCAFDoc_DocumentTool.SetLengthUnit_s(document, 1.0)
+    XCAFDoc_DocumentTool.ShapeTool_s(document.Main()).AddShape(unify.Shape(), False)
+    Interface_Static.SetCVal_s("write.step.unit", "MM")
+    writer = STEPCAFControl_Writer()
+    writer.Transfer(document, STEPControl_AsIs)
+    assert writer.Write(str(tmp_path / "bend.step")) == IFSelect_RetDone
+    model = read_step(tmp_path / "bend.step")
+    patches = {
+        "inlet": FacesNear(((-leg, 0.0, 0.0),)),
+        "outlet": FacesNear(((bend, bend + leg, 0.0),)),
+    }
+    layers = PrismLayers(first_height=0.004, growth=1.2, count=2)
+    # Graded, each leg's cross-sections grow away from the bend toward its open end.
+    grading = PipeGrading(growth=1.15, max_length=0.06) if graded else None
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers, pipe_grading=grading).mesh(
+        model, CadRegion(model.names), patches, layered=("walls",)
+    )
+    geometry = mesh.geometry()
+    volume = np.asarray(geometry.cell.volume)
+    assert np.all(volume > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    # The mesh is the rims' polygon (the dual's inlet face runs round it through each rim point
+    # and each rim edge's middle, so twice as many edges) swept along the centreline, round the
+    # bend as along the legs (Pappus's theorem). A row of the bend's grid off its arc, a seam
+    # between two pipes' O-grids or a cell missing from one shows as volume lost or gained.
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    edges = Counter()
+    for f in np.asarray(mesh.face_patches.indices("inlet")).tolist():
+        ring = nodes[offsets[f] : offsets[f + 1]].tolist()
+        edges.update(tuple(sorted(e)) for e in zip(ring, ring[1:] + ring[:1], strict=True))
+    n = sum(1 for count in edges.values() if count == 1) // 2
+    polygon = 0.5 * n * r**2 * math.sin(2 * math.pi / n)
+    assert volume.sum() == pytest.approx(polygon * (2 * leg + 0.5 * math.pi * bend), rel=3e-3)
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    faces = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+        neighbour[neighbour >= 0], minlength=mesh.n_cells
+    )
+    assert set(np.unique(faces).tolist()) == {5, 6}
+    # The prisms are the core's four corners in each cross-section: four a row, along the wall's
+    # rows of n faces round it.
+    rows = np.asarray(mesh.face_patches.indices("walls")).size / n
+    assert np.count_nonzero(faces == 5) == 4 * rows
+    # Along the outlet leg (y > bend), the walls' cells lengthen from the bend toward the outlet
+    # when graded, and stay even otherwise.
+    walls = np.asarray(mesh.face_patches.indices("walls"))
+    wall_y = np.asarray(geometry.face.centroid)[walls, 1]
+    # A row of wall faces stands at one height; the rows within a radius of either end of the
+    # leg (the bend's last rows, the dual's half cells) are left out.
+    along = (wall_y > bend + r) & (wall_y < bend + leg - r)
+    lengths = np.diff(np.unique(np.round(wall_y[along], 6)))
+    if graded:
+        ratio = lengths[1:] / lengths[:-1]
+        assert np.all((ratio > 1.0 - 1e-6) & (ratio < 1.15 * 1.01))
+        assert lengths[-1] > 1.5 * lengths[0]
+        assert lengths.max() <= 0.06 * 1.05
+    else:
+        assert lengths.max() < 1.2 * lengths.min()
+
+
+def test_a_pipe_swept_along_a_free_curve_is_a_pipe_and_one_o_grid(tmp_path):
+    # A disc swept along a B-spline S (start and end parallel, a quarter of a cosine between):
+    # its wall is a free-form surface, neither a cylinder nor a torus, and its rims are one slide
+    # apart, so its rows are found by marching cross-sections along it. It is a pipe all the same,
+    # open at both ends: every cell a hexahedron but the core's corner prisms, and the mesh the
+    # rims' polygon swept along the curve.
+    pytest.importorskip("OCP")
+    import math
+    from collections import Counter
+
+    from aquaflux.io.cad import CadRegion, OtherFace, read_step
+    from aquaflux.mesh import closed_cell_residual, face_non_orthogonality
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeEdge,
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakeWire,
+    )
+    from OCP.BRepOffsetAPI import BRepOffsetAPI_MakePipe
+    from OCP.collections import Array1_gp_Pnt
+    from OCP.GCPnts import GCPnts_AbscissaPoint
+    from OCP.GeomAdaptor import GeomAdaptor_Curve
+    from OCP.GeomAPI import GeomAPI_PointsToBSpline
+    from OCP.gp import gp_Ax2, gp_Circ, gp_Dir, gp_Pnt
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Interface import Interface_Static
+    from OCP.STEPCAFControl import STEPCAFControl_Writer
+    from OCP.STEPControl import STEPControl_AsIs
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+
+    r, length, rise = 0.05, 1.0, 0.3
+    through = Array1_gp_Pnt(1, 9)
+    for i, x in enumerate(np.linspace(0.0, length, 9)):
+        through.SetValue(i + 1, gp_Pnt(x, 0.5 * rise * (1 - math.cos(math.pi * x / length)), 0.0))
+    curve = GeomAPI_PointsToBSpline(through).Curve()
+    tangent = curve.DN(curve.FirstParameter(), 1)
+    section = gp_Circ(
+        gp_Ax2(
+            gp_Pnt(0.0, 0.0, 0.0), gp_Dir(tangent.X(), tangent.Y(), tangent.Z()), gp_Dir(0, 0, 1)
+        ),
+        r,
+    )
+    disc = BRepBuilderAPI_MakeFace(
+        BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(section).Edge()).Wire()
+    ).Face()
+    path = BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(curve).Edge()).Wire()
+    document = TDocStd_Document(TCollection_ExtendedString("sweep"))
+    XCAFDoc_DocumentTool.SetLengthUnit_s(document, 1.0)
+    XCAFDoc_DocumentTool.ShapeTool_s(document.Main()).AddShape(
+        BRepOffsetAPI_MakePipe(path, disc).Shape(), False
+    )
+    Interface_Static.SetCVal_s("write.step.unit", "MM")
+    writer = STEPCAFControl_Writer()
+    writer.Transfer(document, STEPControl_AsIs)
+    assert writer.Write(str(tmp_path / "sweep.step")) == IFSelect_RetDone
+    model = read_step(tmp_path / "sweep.step")
+    region = CadRegion(model.names)
+    assert any(isinstance(f, OtherFace) for f in model.topology(region).faces)
+    patches = {
+        "inlet": FacesNear(((0.0, 0.0, 0.0),)),
+        "outlet": FacesNear(((length, rise, 0.0),)),
+    }
+    layers = PrismLayers(first_height=0.004, growth=1.2, count=2)
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers).mesh(
+        model, region, patches, layered=("walls",)
+    )
+    geometry = mesh.geometry()
+    volume = np.asarray(geometry.cell.volume)
+    assert np.all(volume > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    faces = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+        neighbour[neighbour >= 0], minlength=mesh.n_cells
+    )
+    assert set(np.unique(faces).tolist()) == {5, 6}
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    edges = Counter()
+    for f in np.asarray(mesh.face_patches.indices("inlet")).tolist():
+        ring = nodes[offsets[f] : offsets[f + 1]].tolist()
+        edges.update(tuple(sorted(e)) for e in zip(ring, ring[1:] + ring[:1], strict=True))
+    n = sum(1 for count in edges.values() if count == 1) // 2
+    polygon = 0.5 * n * r**2 * math.sin(2 * math.pi / n)
+    arc = GCPnts_AbscissaPoint.Length_s(GeomAdaptor_Curve(curve))
+    assert volume.sum() == pytest.approx(polygon * arc, rel=3e-3)
+    # Square cross-sections throughout: no face of the O-grid far from orthogonal.
+    angle = np.asarray(face_non_orthogonality(mesh))[np.asarray(mesh.face_cells.interior)]
+    assert float(angle.max()) < 25.0

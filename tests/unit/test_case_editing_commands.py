@@ -45,7 +45,13 @@ def test_schema_describes_the_case_file_from_its_top_level_sections(capsys):
     assert set(schema["one_form_sections"]) == {"fluid", "numerics", "outputs"}
     # A boundary is one of the patch kinds the registry holds -- read from it, not listed here.
     (boundaries,) = [f for f in schema["kinds"]["CaseSpec"]["fields"] if f["name"] == "boundaries"]
-    assert boundaries["accepts"][0]["of"][0]["kinds"] == ["Inlet", "Outlet", "Wall", "Lamp"]
+    assert boundaries["accepts"][0]["of"][0]["kinds"] == [
+        "Inlet",
+        "DevelopedInlet",
+        "Outlet",
+        "Wall",
+        "Lamp",
+    ]
 
 
 def test_show_prints_the_document_as_aquaflux_reads_it(capsys):

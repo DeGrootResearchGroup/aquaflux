@@ -28,7 +28,7 @@
     `ragged.rows` helper (`aquaflux/ragged.py`, the numpy-only leaf shared with `FaceNodeConnectivity.select` and the radiation coarsener; it was `collapse.py`'s private `_ragged_subset`) flattens an arbitrary (non-contiguous) subset of CSR rows the same way
     `FaceNodeConnectivity.from_csr` flattens every row, so both loops reduce to one vectorized pass:
     axis inference becomes an unbuffered per-face min/max (`np.minimum.at`/`np.maximum.at`, the same
-    idiom `aquaflux/io/openfoam/cyclic.py::_face_centroids` uses for its per-face vertex-mean sum) and
+    idiom `aquaflux/mesh/periodic.py::face_vertex_means` uses for its per-face vertex-mean sum) and
     a distinct-axis check; the side-quad reduction becomes a `(row, value)` lexsort whose block
     boundaries give each face's distinct in-plane node count and values, with no need to preserve
     perimeter order (an edge is undirected, so which of the two endpoints comes first does not

@@ -33,7 +33,7 @@ from typing import ClassVar
 
 from aquaflux.io import AQMESH_SUFFIX
 from aquaflux.io.cad import CadRegion, read_step
-from aquaflux.mesh import Mesh
+from aquaflux.mesh import Mesh, PeriodicJoin
 from aquaflux.meshing import (
     CadMesher,
     FacePlanarizer,
@@ -41,6 +41,7 @@ from aquaflux.meshing import (
     NetgenProcess,
     OctreeCore,
     PipeCore,
+    PipeGrading,
     PrismLayers,
     Stage,
 )
@@ -186,15 +187,20 @@ class MeshSpec:
         along it. Default: none.
     mapped : tuple of str
         The patches whose faces are meshed with structured quadrilaterals rather than triangles,
-        each face a band (a cylinder, a cone, a ring) or four-sided; layered, they carry hexahedra.
+        each face a band (a pipe's wall, a cone, a ring) or four-sided; layered, they carry hexahedra.
         Default: none.
     pipes : tuple of str or None
-        The patches whose faces are pipes -- each a cylinder the fluid fills, with nothing inside --
-        their walls meshed as grids and their cores as structured O-grids. Unset, every face that
+        The patches whose faces are pipes -- each a tube the fluid fills (straight, bent, coiled,
+        tapering or swept along any curve), with nothing inside -- their walls meshed as grids and their cores as structured O-grids,
+        one O-grid through pipes joined end to end. Unset, every face that
         is one; empty, none.
     pipe_core : PipeCore or None
         How the pipes' cores are filled; unset, the defaults of
         :class:`~aquaflux.meshing.PipeCore`.
+    pipe_grading : PipeGrading or None
+        How a straight pipe's cross-sections grow longer away from what it joins -- a bend,
+        another pipe, a vessel -- toward an open end or its middle; unset, every pipe's
+        cross-sections are about as far apart as the cells round it are wide.
     planarizer : FacePlanarizer or None
         Flattens the mesh's faces by moving the cells' interior vertices, never making a cell less
         convex, or its volume more dependent on how its faces are triangulated, or a face worse,
@@ -204,6 +210,11 @@ class MeshSpec:
         A core of hexahedra from an octree inside the region, kept clear of the walls and of the
         layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
         Unset, the core is polyhedral throughout.
+    periodic : PeriodicJoin or None
+        Two patches joined into one periodic seam once the region is meshed -- the two ends of a
+        length of pipe whose outflow is its own inflow, say -- so neither is a patch of the mesh
+        written. They must be meshed alike, each the other displaced by the period: the ends of a
+        straight pipe are. Unset, the mesh is not periodic.
     output : MeshOutput
         Where the mesh is written; by default ``mesh.aqmesh`` beside the mesh file.
 
@@ -211,8 +222,9 @@ class MeshSpec:
     ------
     ValueError
         If a size, the angle or the grading is not a positive, finite number; layers are given
-        without a patch to grow on, or patches are named without layers; or the core's size is
-        below an unset wall size.
+        without a patch to grow on, or patches are named without layers; the core's size is
+        below an unset wall size; or a periodic mesh is to be written as an OpenFOAM polyMesh,
+        which holds no periodic seam.
     """
 
     drawing: Drawing
@@ -225,8 +237,10 @@ class MeshSpec:
     mapped: tuple[str, ...] = ()
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
+    pipe_grading: PipeGrading | None = None
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
+    periodic: PeriodicJoin | None = None
     output: MeshOutput = dataclasses.field(default_factory=MeshOutput)
 
     #: Where an unset setting takes its default from (read by the case-file schema).
@@ -249,6 +263,11 @@ class MeshSpec:
                 "a mesh file grows layers on the patches it names in layered, so it takes both "
                 "layers and layered, or neither."
             )
+        if self.periodic is not None and self.output.openfoam is not None:
+            raise ValueError(
+                "output.openfoam: an OpenFOAM polyMesh is written without periodic seams, so a "
+                "periodic mesh is written only as an .aqmesh file. Remove one of the two."
+            )
         self.mesher()  # refuses a size, angle or grading out of range
 
     def mesher(self) -> CadMesher:
@@ -258,15 +277,17 @@ class MeshSpec:
             for name in ("min_size", "grading")
             if (value := getattr(self.sizes, name)) is not None
         }
-        if self.pipe_core is not None:
-            options["pipe_core"] = self.pipe_core
+        for name in ("pipe_core", "pipe_grading"):
+            if (value := getattr(self, name)) is not None:
+                options[name] = value
         return CadMesher(
             max_size=self.sizes.max_size, feature_angle=self.sizes.feature_angle,
             layers=self.layers, planarizer=self.planarizer, core=self.core, **options,
         )  # fmt: skip
 
     def mesh(self, directory: Path, on_stage: Stage | None = None) -> Mesh:
-        """The region, read from its drawing and meshed.
+        """The region, read from its drawing and meshed; its periodic patches are still patches
+        (:meth:`joined` joins them).
 
         Parameters
         ----------
@@ -293,3 +314,17 @@ class MeshSpec:
             layered=self.layered, mapped=self.mapped, pipes=self.pipes, on_stage=on_stage,
             **options,
         )  # fmt: skip
+
+    def joined(self, mesh: Mesh) -> Mesh:
+        """``mesh`` with :attr:`periodic`'s patches joined, or as it is when unset.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh :meth:`mesh` made.
+
+        Returns
+        -------
+        Mesh
+        """
+        return mesh if self.periodic is None else self.periodic.join(mesh)

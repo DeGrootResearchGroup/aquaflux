@@ -25,16 +25,28 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
+from pathlib import Path
 from typing import ClassVar, Literal
 
-from aquaflux.boundary import BoundaryCondition, Dirichlet, ZeroGradient
+import numpy as np
+
+from aquaflux.boundary import (
+    AxialVector,
+    BoundaryCondition,
+    Dirichlet,
+    DirichletField,
+    RadialProfile,
+    ZeroGradient,
+)
 from aquaflux.flow import FlowBoundary, MovingWall, NoSlipWall, PressureOutlet, VelocityInlet
+from aquaflux.io import read_profile_table
 from aquaflux.turbulence import SSTModel
 
 from .radiation import LampProfile, SurfaceSource
 from .scopes import FLOW, RADIATION, TURBULENCE, Scoped
 
 __all__ = [
+    "DevelopedInlet",
     "FixedTurbulence",
     "Inlet",
     "InletTurbulence",
@@ -42,6 +54,7 @@ __all__ = [
     "Lamp",
     "Outlet",
     "PatchCondition",
+    "PatchSite",
     "Wall",
 ]
 
@@ -193,6 +206,59 @@ class IntensityLength(InletTurbulence):
         return k, math.sqrt(k) / (model.beta_star**0.25 * self.length)
 
 
+#: How far, in radians, a face of a patch laid out flat may lean from the patch's mean normal.
+FLAT_PATCH = math.radians(1.0)
+
+
+@dataclasses.dataclass(frozen=True)
+class PatchSite:
+    """Where one boundary patch of a case's mesh is, and the directory the case's files are in.
+
+    What a patch condition is placed on (:meth:`PatchCondition.placed`), when what it admits depends
+    on where the patch is: a profile laid out from the patch's centre.
+
+    Attributes
+    ----------
+    name : str
+        The patch.
+    centroids : np.ndarray, shape ``(n_faces, dim)``
+    areas : np.ndarray, shape ``(n_faces,)``
+    normals : np.ndarray, shape ``(n_faces, dim)``
+        The patch's faces: their centroids, areas and unit normals out of the domain.
+    directory : pathlib.Path
+        The directory the case file sits in, which the files it names are relative to.
+    """
+
+    name: str
+    centroids: np.ndarray
+    areas: np.ndarray
+    normals: np.ndarray
+    directory: Path
+
+    @property
+    def centre(self) -> np.ndarray:
+        """The patch's area-weighted centroid, shape ``(dim,)``."""
+        return self.areas @ self.centroids / self.areas.sum()
+
+    def inward_normal(self) -> np.ndarray:
+        """The unit normal into the domain of a patch that is flat.
+
+        Raises
+        ------
+        ValueError
+            If a face leans from the patch's mean normal by more than :data:`FLAT_PATCH`.
+        """
+        mean = -(self.areas @ self.normals)
+        mean = mean / np.linalg.norm(mean)
+        lean = float(np.degrees(np.arccos(np.clip((-self.normals @ mean).min(), -1.0, 1.0))))
+        if lean > math.degrees(FLAT_PATCH):
+            raise ValueError(
+                f"boundaries.{self.name}: a face leans {lean:.2g} degrees from the patch's mean "
+                f"normal, so the patch is not flat; a profile is laid out across a flat patch."
+            )
+        return mean
+
+
 @dataclasses.dataclass(frozen=True)
 class PatchCondition(Scoped, abc.ABC):
     """What one boundary patch is: an :class:`Inlet`, an :class:`Outlet`, a :class:`Wall` or a :class:`Lamp`.
@@ -224,6 +290,30 @@ class PatchCondition(Scoped, abc.ABC):
         tuple of BoundaryCondition
             The ``k`` closure and the ``omega`` closure.
         """
+
+    def placed(self, site: PatchSite) -> PatchCondition:
+        """This condition as it applies on the patch at ``site``: itself, unless what it admits
+        depends on where the patch is or on a file it names.
+
+        Parameters
+        ----------
+        site : PatchSite
+            The patch.
+
+        Returns
+        -------
+        PatchCondition
+            A condition whose closures need nothing more.
+        """
+        del site
+        return self
+
+    def prescribes_pressure(self) -> bool:
+        """Whether the patch fixes the pressure level, as its flow closure says.
+
+        Asked before the mesh is read, of the condition as stated.
+        """
+        return self.flow_closure().prescribes_pressure()
 
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse this patch on a mesh of ``dim`` spatial dimensions if it cannot apply there.
@@ -299,6 +389,114 @@ class Inlet(PatchCondition):
     def refuse_for_dimension(self, dim: int, patch: str) -> None:
         """Refuse a velocity whose component count is not the mesh's dimension."""
         _refuse_a_velocity_of_the_wrong_dimension(self.velocity, dim, patch, "inlet")
+
+
+@dataclasses.dataclass(frozen=True)
+class DevelopedInlet(PatchCondition):
+    """An inlet admitting a fully developed pipe flow, its profiles read from a file.
+
+    The file is a table of the developed flow against the distance from the pipe's axis (one a
+    :class:`~aquaflux.case.RadialProfiles` output of a periodic pipe case writes): ``U``, the velocity
+    along the axis, and, for a Reynolds-averaged case, ``k`` and ``omega``. Each face of the patch is
+    given the values at its distance from the patch's centre, the velocity along the patch's inward
+    normal; so the patch must be flat (a pipe's end), and the profile is the pipe's however it is
+    placed and turned.
+
+    Attributes
+    ----------
+    profile_table : str
+        The table, relative to the case file unless absolute.
+
+    Raises
+    ------
+    ValueError
+        If ``profile_table`` is empty.
+    """
+
+    path_fields: ClassVar[tuple[str, ...]] = ("profile_table",)
+
+    profile_table: str
+
+    #: Which physics reads each setting (see :mod:`.scopes`).
+    setting_scopes: ClassVar[dict[str, str]] = {"profile_table": FLOW}
+
+    def __post_init__(self) -> None:
+        if not self.profile_table:
+            raise ValueError("DevelopedInlet.profile_table names the table of the developed flow.")
+
+    def placed(self, site: PatchSite) -> _ProfiledInlet:
+        """The profiles read and laid out across the patch from its centre -- see
+        :meth:`PatchCondition.placed`.
+
+        Raises
+        ------
+        ValueError
+            If the table has no ``U`` column, or the patch is not flat.
+        """
+        centre, axis = site.centre, site.inward_normal()
+        table = read_profile_table(site.directory / self.profile_table)
+        if "U" not in table.columns:
+            raise ValueError(
+                f"boundaries.{site.name}.profile_table: {self.profile_table} has no U column (it has "
+                f"{list(table.columns)})."
+            )
+
+        def along(name: str) -> RadialProfile | None:
+            column = table.columns.get(name)
+            return None if column is None else RadialProfile(centre, axis, table.radii, column)
+
+        return _ProfiledInlet(
+            f"boundaries.{site.name}.profile_table ({self.profile_table})",
+            AxialVector(along("U")),
+            along("k"),
+            along("omega"),
+        )
+
+    def prescribes_pressure(self) -> bool:
+        """``False``: a velocity inlet's pressure extrapolates from inside, whatever its profile."""
+        return False
+
+    def flow_closure(self) -> VelocityInlet:
+        """Refused: the profile is laid out across the patch, so ask the :meth:`placed` condition."""
+        raise ValueError(
+            "a developed inlet's velocity is laid out across its patch; place it on the patch first."
+        )
+
+    def turbulence_closures(self, model: SSTModel) -> tuple[DirichletField, DirichletField]:
+        """Refused, as :meth:`flow_closure` is."""
+        del model
+        return self.flow_closure()
+
+
+@dataclasses.dataclass(frozen=True)
+class _ProfiledInlet(PatchCondition):
+    """A :class:`DevelopedInlet` placed on its patch: its profiles as functions of face centroids."""
+
+    source: str
+    velocity: AxialVector
+    k: RadialProfile | None
+    omega: RadialProfile | None
+
+    def flow_closure(self) -> VelocityInlet:
+        """A :class:`~aquaflux.flow.VelocityInlet` at the developed velocity."""
+        return VelocityInlet(velocity=self.velocity)
+
+    def turbulence_closures(self, model: SSTModel) -> tuple[DirichletField, DirichletField]:
+        """The developed ``k`` and ``omega``, each prescribed.
+
+        Raises
+        ------
+        ValueError
+            If the table gives no ``k`` or no ``omega``.
+        """
+        del model
+        missing = [name for name in ("k", "omega") if getattr(self, name) is None]
+        if missing:
+            raise ValueError(
+                f"{self.source}: a Reynolds-averaged case admits the developed turbulence, and the "
+                f"table has no {' or '.join(missing)} column."
+            )
+        return DirichletField(self.k), DirichletField(self.omega)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -42,7 +42,8 @@ the pseudo-transient shift strength. `pressure_pin=` / `pressure_pin_value=` →
   - Whether a datum is needed is derived and enforced both ways by
     `refuse_an_unsuitable_pressure_datum(boundary, datum, caller)`: no closure `prescribes_pressure()`
     (`True` for `PressureOutlet` alone) ⇒ a datum is required (else singular); some does ⇒ refused (it
-    over-determines the level). The case file asks the same function.
+    over-determines the level). Its rule is `refuse_a_pressure_datum_beside(fixing, datum, caller)`,
+    which the case file asks with `PatchCondition.prescribes_pressure()` before its mesh is read.
   - No `PinnedPatch`/mean-pressure datum (a patch mean is a row coupling every patch face, which the
     coloured probe and the Schur preconditioner do not handle) and no `PinnedCell` (a point does it and
     survives renumbering).

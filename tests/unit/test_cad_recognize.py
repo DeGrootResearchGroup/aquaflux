@@ -22,6 +22,7 @@ from aquaflux.io.cad import (
     PlaneFace,
     SolidDescription,
     SphereFace,
+    TorusFace,
     UnrecognizedSolid,
     recognize,
 )
@@ -177,8 +178,17 @@ def test_a_cone_keeps_its_radii_at_the_ends_they_belong_to():
 
 
 def test_an_unknown_surface_is_declined_by_name():
-    torus = OtherFace(kind="Torus")
-    with pytest.raises(UnrecognizedSolid, match="Torus"):
+    patch = OtherFace(kind="BSplineSurface")
+    with pytest.raises(UnrecognizedSolid, match="BSplineSurface"):
+        recognize(solid(patch, name="blade"))
+
+
+def test_a_bends_torus_is_declined_by_name():
+    torus = TorusFace(
+        centre=np.zeros(3), axis=Z, major_radius=0.2, minor_radius=0.05, angle=0.5 * np.pi,
+        solid_inside=True,
+    )  # fmt: skip
+    with pytest.raises(UnrecognizedSolid, match="surfaces no rule describes \\(Torus\\)"):
         recognize(solid(torus, name="elbow"))
 
 
