@@ -729,6 +729,45 @@ def test_the_ramp_rebinds_once_per_station_change_not_once_per_step() -> None:
     assert math.isclose(seen[0], NU * 100.0, rel_tol=1e-12)
 
 
+def test_the_ramp_tells_its_observer_of_each_station_once_as_it_is_entered() -> None:
+    """Each station change is described once, counted from one, with that station's own viscosity.
+
+    The first step is entered twice (the march's damping anchor, then the step) and a station is held
+    for two steps, so an observer told on every ``enter`` would hear each station more than once. The
+    target is described as the case's own viscosity, not as a station at ``x1``.
+    """
+    seen: list[str] = []
+    ramp = ViscosityRampHomotopy(
+        _tiny_coupled(), anchor=100.0, ramp=RampSchedule(3, 2), on_station=seen.append
+    )
+
+    ramp.enter(0, None)
+    for step in range(8):
+        ramp.enter(step, None)
+
+    assert seen == [
+        "station 1/3: viscosity x100",
+        "station 2/3: viscosity x21.5",  # 100 ** (2/3)
+        "station 3/3: viscosity x4.64",  # 100 ** (1/3)
+        "the case's own viscosity",
+    ]
+
+
+def test_a_ramp_that_may_end_early_counts_its_stations_without_a_total() -> None:
+    """A ramp ended by the march does not know how many stations it will walk, so it claims none."""
+    seen: list[str] = []
+    ramp = ViscosityRampHomotopy(
+        _tiny_coupled(),
+        anchor=100.0,
+        ramp=RampSchedule(4, end_when=lambda report: False),
+        on_station=seen.append,
+    )
+
+    ramp.enter(0, None)
+
+    assert seen == ["station 1: viscosity x100"]
+
+
 def test_the_ramp_hands_back_the_CASES_OWN_assembler_at_the_target() -> None:
     """Identity, not a rescale by one: the root and its adjoint must belong to the case.
 
@@ -1403,6 +1442,25 @@ def test_the_ramp_arm_is_one_warm_started_solve_on_the_target_carrying_the_homot
         1,
     )
     assert calls[0]["kwargs"]["convergence"] == Convergence(rtol=1e-10)
+
+
+def test_the_ramp_arm_hands_its_station_observer_to_the_homotopy(monkeypatch) -> None:
+    """``on_station`` reaches the homotopy that describes the stations, not the march's options."""
+    from aquaflux.turbulence import solve_reynolds_ramp
+
+    coupled, calls, _ = _ramp_arm_fixtures(monkeypatch)
+    seen: list[str] = []
+
+    solve_reynolds_ramp(
+        coupled,
+        anchor=100.0,
+        ramp=RampSchedule(24, 1),
+        point_setup=lambda companion, state, point: {},
+        on_station=seen.append,
+    )
+
+    assert calls[0]["kwargs"]["homotopy"].on_station == seen.append
+    assert "on_station" not in calls[0]["kwargs"]
 
 
 def test_the_ramp_arm_merges_a_point_s_settings_value_field_by_field_over_the_shared_one(

@@ -234,7 +234,10 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `CoupledMarch` did: a laminar run's `history.csv` read `refits` 0 whatever it refitted. Pinned by
   `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. (`march.log` shows
   refits only with the logger's `"pc"` detail, which a case run does not ask for, on either march.) A `point_setup`
-  may observe a ramp's anchor and is refused if it returns settings. `Segregated` takes no observers and only
+  may observe a ramp's anchor and is refused if it returns settings. With a ramp, `CoupledMarch.observers_for`
+  notes `ViscosityRamp.description` at the anchor (`viscosity ramp: x100 down to the case's own in 12
+  stations of 1 step each, scaling the flow's viscosity only`) and passes `on_station=logger.on_station`,
+  which is refused without a ramp (`solve_coupled` has no such keyword). `Segregated` takes no observers and only
   warns when it runs out of sweeps (#543).
 - ⚠️ **`station_step` and `jacobian_gradient_sweeps` are not file settings and not in `_owned()`**; the
   pitzDaily harness's study path passes them to the library itself. Passing them as "observers" would be a

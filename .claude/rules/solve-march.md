@@ -401,7 +401,9 @@ reported in its own measure, so a march with one is step-for-step identical to o
 stops. Tolerance `atol + rtol * stopping_reference` (the starting residual in the stopping measure).
 Needs `norm_builder`; refused beside a `resume`.
 - `StepReport.stopping_norm` / `stopping_ratio` carry what the stop compared, on every step (equal to the
-  steered pair without a stopping step; `nan` on a hand-built report). `MarchLogger`'s `R` column and
+  steered pair without a stopping step; `nan` on a hand-built report), and `stopping_target` the bar it
+  compared with (`atol + rtol ·` the reference in the same measure; one value, also the adaptive
+  tolerance's `target`). `MarchLogger`'s `R` column and
   banner read them (falling back to the steered pair when `nan`); a step whose two norms differ gets a
   `steered R …` aside; the per-equation grid stays in the steered measure. `case/run.py` records
   `stopping_norm` as the run's residual. ⚠️ **`aquaflux_ui`'s Run section still plots and judges
@@ -520,7 +522,14 @@ Pinned by `tests/unit/test_march_log.py`, which reads cells, not substrings.
 - **Report fields that exist for the log:** `shift` (the β the step ran at), `escalations` /
   `diverged_retry` (`raw_cycles` counts only the accepted attempt, so a redone step otherwise looks
   cheap). The banner states `‖R₀‖` and the stopping target once per rung (and again whenever a rung
-  re-bases), not per row.
+  re-bases), not per row. **The target is the report's `stopping_target`; the logger takes no
+  tolerances of its own** (it once did, and the case runner passed none, so a run never showed its bar).
+- **A homotopy's stations:** `on_station(description)` stashes the station the next step enters
+  (a homotopy calls it from `enter` on each change; `ViscosityRampHomotopy(on_station=)`), written as
+  the first aside of that step. The first step with `arrived` after one without gets its own line,
+  `arrived at the target (<description>) on step N: the march may stop from here`, ahead of any re-based
+  banner, and takes the target station's description in place of an aside. A march without a homotopy
+  (`arrived` throughout) announces nothing. Pinned in `test_march_log.py`.
 - **Cost is reported offset-corrected:** lineax's `num_steps` carries +2 per solve;
   `restart_cycles(raw, solves)` in `solve/linear.py` is the one place the offset is stripped. The row
   shows `in` (inner count), `cyc` (corrected total) and `c/in`.

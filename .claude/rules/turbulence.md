@@ -500,6 +500,11 @@ Other files point here. If you find one of these names, read it through this tab
     the case (pinned per strategy).
   - **`rebind`** is called only when the station changes; `solve_reynolds_ramp` passes the shared
     session's `rebind` (either family since #386). A plain mutable object, forward-only.
+  - **`on_station`** (through `solve_reynolds_ramp(on_station=)`) is told `describe(position)` on the
+    same changes: `station 3/12: viscosity x46.4` (counted from one; no total when `end_when` may end the
+    ramp early) or `the case's own viscosity` at the target; the log's `MarchLogger.on_station`. The
+    ramp still calls `point_setup` with `ReynoldsPoint(1, 1, anchor)`, whose `label` reads `point 1/1` —
+    a ladder's label, so a ramp's log must not print it.
   - **`redamping` defaults to `ratio ** _REDAMPING_EXPONENT` (0.6)** — the station's own size; forced to
     1.0 (explicit value refused) at `steps_per_station == 1`, where β would otherwise run away as
     `beta_start · redamping^n`. An empirical one-point fit.

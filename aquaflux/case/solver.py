@@ -479,6 +479,21 @@ class ViscosityRamp:
             raise ValueError(_SETTLED_NEEDS_A_CONTROL)
         return self._schedule(step_control.settled)
 
+    @property
+    def description(self) -> str:
+        """The ramp in one line, as a run's log opens it: its span, its stations, what it scales."""
+        steps = self.steps_per_station
+        scaled = {
+            "flow": "the flow's viscosity only",
+            "both": "the flow's and the closure's viscosity",
+            None: "the flow's and the closure's viscosity",
+        }[self.scale]
+        ending = "" if self.end is None else f", ended once the march has {self.end}"
+        return (
+            f"viscosity ramp: x{self.anchor:g} down to the case's own in {self.stations} stations "
+            f"of {steps} step{'s' if steps != 1 else ''} each{ending}, scaling {scaled}"
+        )
+
     def solve(self, coupled: object, options: dict[str, object], point_setup: Callable) -> object:
         """March ``coupled`` along this ramp, by :func:`~aquaflux.turbulence.solve_reynolds_ramp`.
 
@@ -616,9 +631,9 @@ class CoupledMarch(_March):
         """The march's and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
         observers = super().observers_for(logger, recorder)
         if self.continuation is not None:
-            observers["point_setup"] = lambda companion, seed_state, point: logger.note(
-                f"[{point.label}]"
-            )
+            description = self.continuation.description
+            observers["point_setup"] = lambda companion, seed_state, point: logger.note(description)
+            observers["on_station"] = logger.on_station
         return observers
 
     def settings(self) -> dict[str, object]:
