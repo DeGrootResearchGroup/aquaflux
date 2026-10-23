@@ -212,7 +212,8 @@ def _restart_case(tmp_path: Path, name: str, outputs: dict, **sections: object) 
 
 def _reference_residual(directory: Path) -> float:
     """The residual a run's log says it started from."""
-    match = re.search(r"reference \|R0\| = (\S+)", (directory / "march.log").read_text())
+    # The number alone: the banner goes on to the stopping target after a comma.
+    match = re.search(r"reference \|R0\| = ([0-9.eE+-]+)", (directory / "march.log").read_text())
     return float(match.group(1))
 
 
