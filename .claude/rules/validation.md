@@ -93,6 +93,10 @@ branches.
   (`run_with_footprint`), never a bare `subprocess.run`.** Otherwise `kill <pid>` leaves the
   `/usr/bin/time` child and its Python grandchild running, invisible to `run_case.sh --status`. `kill -9`
   still orphans; after an interrupted run check `pgrep -fl "usr/bin/time"`.
+- ⚠️ **A case started with `&` from a non-interactive shell ignores SIGINT** (POSIX: the shell sets it to
+  `SIG_IGN`, and Python keeps it, so no `KeyboardInterrupt` ever reaches `aquaflux run`'s handler; `SigIgn`
+  in `/proc/<pid>/status` shows it). A watchdog or stop sent as SIGINT does nothing; send SIGTERM, as
+  `run_case.sh` forwards (2026-10-23: two SIGINTs to a precursor run went unseen for 20 min).
 - **A timer that blocks on its own result also waits for earlier, untimed asynchronous work.** A JAX
   breakdown is sound only where the work before each timed piece is timed too; time a surprisingly large
   piece alone before believing it.
