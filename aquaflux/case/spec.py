@@ -43,6 +43,7 @@ from aquaflux.meshing import (
     Graded,
     OctreeCore,
     PipeCore,
+    PipeGrading,
     PrismLayers,
 )
 from aquaflux.radiation import (
@@ -544,6 +545,7 @@ _CASE_MAPPING = SettingsMapping(
         FacesOn,
         PrismLayers,
         PipeCore,
+        PipeGrading,
         Graded,
         FacePlanarizer,
         OctreeCore,

@@ -120,6 +120,15 @@ their cores are filled:
 pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
 ```
 
+Along a straight pipe the cross-sections are by default as far apart as the cells round it are
+wide. `pipe_grading` lets them grow apart away from what the pipe joins -- a bend, another pipe, a
+vessel -- by `growth` a row, toward an inlet or outlet or the length's middle, to at most
+`max_length` ({class}`~aquaflux.meshing.PipeGrading`); bends keep theirs even:
+
+```yaml
+pipe_grading: {kind: PipeGrading, growth: 1.08, max_length: 0.02}
+```
+
 The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
 ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
 are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of

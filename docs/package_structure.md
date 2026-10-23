@@ -228,6 +228,7 @@ cfd/                                  # repo root
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
 │   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids swept along the RimMotion (slide or turn) between their rims
+│   │   ├── rows.py                   #   PipeGrading: a straight pipe's rows grown away from what it joins
 │   │   ├── sections.py               #   TubeWall.march: a tube's cross-sections, each the plane its wall normals lie in, marched along it
 │   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
 │   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_runs / pipe_ends / fill_pipes: pipes (any tube the fluid fills: straight, bent, swept) found from the face's triangulation (rims divided alike), joined end to end into runs, their cores O-gridded inside their layers

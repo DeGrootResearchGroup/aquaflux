@@ -13,7 +13,7 @@ from collections import Counter
 
 import numpy as np
 import pytest
-from aquaflux.meshing import MappedQuads, Polygons
+from aquaflux.meshing import MappedQuads, PipeGrading, Polygons
 from scipy.spatial import Delaunay, cKDTree
 
 
@@ -405,3 +405,41 @@ def test_an_s_bends_band_becomes_a_grid_of_its_cross_sections_marched_along_it()
     assert tilt.max() < 0.1
     spacing = np.diff(np.sort(arc))
     assert spacing.max() / spacing.min() < 1.02
+
+
+@pytest.mark.parametrize("open_rim", ["top", "bottom"])
+def test_a_straight_bands_rows_grow_away_from_its_joined_rim_toward_its_open_one(open_rim):
+    # The cylinder z in [0, 2], its top rim (or bottom) an open end: the rows start a spacing
+    # long at the other rim and grow by the grading's ratio toward it.
+    n = 24
+    points, triangles = _band(n, n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    z = points[:, 2]
+    open_points = np.flatnonzero(np.isclose(z, 2.0 if open_rim == "top" else 0.0))
+    grading = PipeGrading(growth=1.15)
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_cylinder,
+        graded={0: (grading, open_points)},
+    )  # fmt: skip
+    heights = mapped.points[mapped.grids[0]][:, :, 2].mean(axis=1)
+    if heights[0] > heights[-1]:
+        heights = heights[::-1]
+    rows = np.diff(heights)
+    if open_rim == "bottom":
+        rows = rows[::-1]
+    np.testing.assert_allclose(rows[1:] / rows[:-1], 1.15, rtol=1e-9)
+    assert rows[0] == pytest.approx(2 * np.sin(np.pi / n), rel=0.15)
+
+
+def test_a_bends_rows_stay_even_under_a_grading():
+    # Grading is for straight lengths: round a bend the flow changes all along it.
+    n = 24
+    points, triangles = _bend_band(n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    rim = np.flatnonzero(np.isclose(_bend_angle(points), 0.5 * np.pi))
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_torus,
+        graded={0: (PipeGrading(growth=1.3), rim)},
+    )  # fmt: skip
+    angle = _bend_angle(mapped.points[mapped.grids[0]][:, 0])
+    np.testing.assert_allclose(np.abs(np.diff(angle)), np.abs(np.diff(angle)).mean(), rtol=1e-9)

@@ -33,6 +33,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from .polygons import Polygons
+from .rows import PipeGrading
 from .sections import TubeWall
 
 __all__ = ["MappedQuads", "MappedSurface", "RimMotion"]
@@ -51,6 +52,11 @@ TUBE_RADII = 0.02
 #: marched along it. The wall's triangles stand inside the true wall by their sag, so this is
 #: more than that sag at any spacing a grid would use.
 SWEPT_WALL = 0.05
+
+#: How far round, as a share of its length, a rim's centroid may be carried for its path to be
+#: taken as straight: a straight pipe's rims fit with a twist about its own axis, which carries
+#: the centroid nowhere.
+STRAIGHT_PATH = 1e-3
 
 #: The wall points measured against the swept tube at a time, to bound the memory it takes.
 _FOLLOW_CHUNK = 2048
@@ -140,6 +146,15 @@ class RimMotion:
         pivot = 0.5 * (across + np.cross(axis, across) / np.tan(0.5 * angle))
         return cls(axis, pivot, angle, slide)
 
+    def bends(self, point: np.ndarray) -> bool:
+        """Whether the path ``point`` (shape ``(3,)``) travels is curved, not a straight line: a
+        turn about a line through it (a straight pipe's rims twisted against each other) leaves it
+        straight; the same turn about a line away from it (a bend's) does not."""
+        offset = point - self.pivot
+        radial = offset - (offset @ self.axis) * self.axis
+        across = self.angle * float(np.linalg.norm(radial))
+        return across > STRAIGHT_PATH * float(self.path_length(point[None])[0])
+
     def scaled(self, factor: float) -> RimMotion:
         """The same screw, its turn and slide scaled by ``factor``."""
         return RimMotion(self.axis, self.pivot, factor * self.angle, factor * self.slide)
@@ -197,6 +212,7 @@ class MappedQuads:
         chosen: np.ndarray,
         vertices: np.ndarray,
         onto: Callable[[np.ndarray, np.ndarray], np.ndarray],
+        graded: Mapping[int, tuple[PipeGrading, np.ndarray]] | None = None,
     ) -> MappedSurface:
         """The surface with the triangles of each chosen face replaced by a structured grid.
 
@@ -215,6 +231,11 @@ class MappedQuads:
             ``onto(points, faces)`` moves points ``(m, 3)`` onto the faces ``(m,)`` given and
             returns them with the face's unit normal at each (either way round), each shape
             ``(m, 3)``.
+        graded : mapping of {int: (PipeGrading, np.ndarray of int)}, optional
+            For the faces given, how rows are graded along them where the face is a straight
+            tube (its rims one slide apart), and the points of its rims that are open ends -- an
+            inlet or an outlet, joining nothing -- which the rows grow toward
+            (:class:`~aquaflux.meshing.PipeGrading`). Other faces' rows are evenly spread.
 
         Returns
         -------
@@ -242,7 +263,9 @@ class MappedQuads:
             mine = triangles[face == f]
             loops = _loops(mine)
             if len(loops) == 2:
-                new_triangles, new_quads = grid.band(*loops, mine, _on_face(onto, int(f)))
+                new_triangles, new_quads = grid.band(
+                    *loops, mine, _on_face(onto, int(f)), (graded or {}).get(int(f))
+                )
                 if grid.last_grid is not None:
                     grids[int(f)] = grid.last_grid
             elif len(loops) == 1:
@@ -294,7 +317,7 @@ class _Builder:
             self.points[added] = onto(new, np.full(new.shape[0], face, dtype=np.int64))[0]
         self.moved_from = self.points.shape[0]
 
-    def band(self, first: np.ndarray, second: np.ndarray, triangles: np.ndarray, onto):
+    def band(self, first: np.ndarray, second: np.ndarray, triangles: np.ndarray, onto, graded=None):
         """The grid between two closed loops: rows from the one with more points to the other.
 
         ``triangles`` are the face's own, and ``onto(points)`` moves points onto it, with its
@@ -303,8 +326,10 @@ class _Builder:
         whose wall is what that motion sweeps its rim along (:func:`_follows`: a straight pipe, a
         bend, a coil). Any other tube's rows are its cross-sections marched along its triangles
         (:class:`~aquaflux.meshing.sections.TubeWall`), as many as keep the cells as long as they
-        are wide, the tube's length its area over its rims' mean perimeter. Either way the rows
-        are then carried onto the second rim (:meth:`_rows`).
+        are wide, the tube's length its area over its rims' mean perimeter. A straight tube's rows
+        are graded when ``graded`` -- a :class:`~aquaflux.meshing.PipeGrading` and the points of
+        rims that are open ends -- is given: growing away from each rim that is not open. Either
+        way the rows are then carried onto the second rim (:meth:`_rows`).
         """
         # Both loops are wound with the face on their left, so they run opposite ways round it.
         a, b = (first, second[::-1]) if first.size >= second.size else (second, first[::-1])
@@ -336,6 +361,7 @@ class _Builder:
         start = nearest_start(flat_start)
         across = across_from(start)
         motion = RimMotion.fit(flat_start, across - _bow(across, b_normal))
+        fractions = None
         if _tube(p[a], p[b]) and not _follows(motion, flat_start, p[np.unique(triangles)]):
             # A pipe that turns other than by one screw: march its cross-sections along it.
             along = _mean_spacing(p[a])
@@ -344,24 +370,33 @@ class _Builder:
             marched = TubeWall.of(p, triangles, onto).march(flat_start, into, length / rows, rows)
             start = nearest_start(marched[-1])
             across = across_from(start)
+        elif graded is not None and not motion.bends(flat_start.mean(axis=0)):
+            # A straight tube, its rows graded away from the rims that join something.
+            grading, open_points = graded
+            fine = tuple(not np.isin(loop, open_points).all() for loop in (a, b))
+            length = float(np.mean(motion.path_length(flat_start)))
+            fractions = grading.fractions(length, _mean_spacing(p[a]), fine)
+            marched = [flat_start] * fractions.size
         else:
             marched = [flat_start] * (_row_count(p[a], across) + 1)
+        if fractions is None:
+            fractions = np.linspace(0.0, 1.0, len(marched))
         b = np.roll(b, -start)
-        rows = len(marched) - 1
         self.last_grid = None
         if equal:
-            self.last_grid = self._rows(a, bow_start, marched, across, b_normal, b)
+            self.last_grid = self._rows(a, bow_start, marched, fractions, across, b_normal, b)
             return np.zeros((0, 3), np.int64), _grid_quads(self.last_grid, True)
         # The loops differ: the grid stops one row short of ``b``, and a strip joins that row to it.
-        grid = self._rows(a, bow_start, marched, across, b_normal)
+        grid = self._rows(a, bow_start, marched, fractions, across, b_normal)
         return _zipped(grid[-1], b, self.points, closed=True), _grid_quads(grid, closed=True)
 
-    def _rows(self, a, bow_start, marched, across, b_normal, b=None):
+    def _rows(self, a, bow_start, marched, fractions, across, b_normal, b=None):
         """Rows of points from loop ``a`` (row 0) toward the points ``across``, row ``rows``:
         ending with ``b`` when given, else one row short of ``across``.
 
         Row ``j`` is ``marched[j]`` -- a tube's cross-section, its last where the march ends, or
-        for any other band the first loop flattened -- carried ``t = j / rows`` of the way along the rigid motion that
+        for any other band the first loop flattened -- carried ``t = fractions[j]`` of the way
+        (``j / rows`` unless graded) along the rigid motion that
         best carries the last of them onto the second loop flattened (:class:`RimMotion`), plus
         that share of what the motion leaves over (the change of radius along a cone, across a
         flat ring), plus each loop's own bow out of its plane, fading over :data:`RIM_ROWS` rows
@@ -377,7 +412,7 @@ class _Builder:
         flat_start = marched[0]
         grid = [a]
         for j in range(1, rows):
-            t = j / rows
+            t = float(fractions[j])
             row = motion.at(t, marched[j]) + t * left_over
             start_share = max(0.0, 1.0 - j / RIM_ROWS)
             end_share = max(0.0, 1.0 - (rows - j) / RIM_ROWS)

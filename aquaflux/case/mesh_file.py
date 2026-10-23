@@ -41,6 +41,7 @@ from aquaflux.meshing import (
     NetgenProcess,
     OctreeCore,
     PipeCore,
+    PipeGrading,
     PrismLayers,
     Stage,
 )
@@ -196,6 +197,10 @@ class MeshSpec:
     pipe_core : PipeCore or None
         How the pipes' cores are filled; unset, the defaults of
         :class:`~aquaflux.meshing.PipeCore`.
+    pipe_grading : PipeGrading or None
+        How a straight pipe's cross-sections grow longer away from what it joins -- a bend,
+        another pipe, a vessel -- toward an open end or its middle; unset, every pipe's
+        cross-sections are about as far apart as the cells round it are wide.
     planarizer : FacePlanarizer or None
         Flattens the mesh's faces by moving the cells' interior vertices, never making a cell less
         convex, or its volume more dependent on how its faces are triangulated, or a face worse,
@@ -226,6 +231,7 @@ class MeshSpec:
     mapped: tuple[str, ...] = ()
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
+    pipe_grading: PipeGrading | None = None
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
     output: MeshOutput = dataclasses.field(default_factory=MeshOutput)
@@ -259,8 +265,9 @@ class MeshSpec:
             for name in ("min_size", "grading")
             if (value := getattr(self.sizes, name)) is not None
         }
-        if self.pipe_core is not None:
-            options["pipe_core"] = self.pipe_core
+        for name in ("pipe_core", "pipe_grading"):
+            if (value := getattr(self, name)) is not None:
+                options[name] = value
         return CadMesher(
             max_size=self.sizes.max_size, feature_angle=self.sizes.feature_angle,
             layers=self.layers, planarizer=self.planarizer, core=self.core, **options,

@@ -42,25 +42,27 @@ python validation/sudo_bend/render_mesh.py       # figures/mesh_*.png
 All three walls are found as pipes joined end to end, so a single structured O-grid runs from the
 inlet to the outlet: each cross-section is a 9 × 9 square core inside a shell and four wall layers,
 36 cells round, and the bend's rows are its cross-sections turned about the bend's axis. No
-tetrahedra are used.
+tetrahedra are used. Along the two straight pipes the rows are graded (`pipe_grading`): as long as the
+cells round the pipe are wide where they join the bend (about 9 mm), growing 8 % a row toward the inlet
+and the outlet, to at most `D / 5`.
 
 Measured (2026-10-23, `mesh.yaml` as tracked, 4-core Linux container):
 
 | | |
 |---|---|
-| cells | 76 788, of which 98.6 % hexahedra (the rest the triangular prisms along the core's four corners) |
-| wall-grid rows along the pipe | 34 (upstream) + 36 (bend, 2.5° each) + 172 (downstream) |
+| cells | 42 660, of which 98.6 % hexahedra (the rest the triangular prisms along the core's four corners) |
+| rows | the bend's 36 (2.5° each); the straight pipes' graded from 9 mm at the bend to 20.8 mm |
 | first cell | 2.45 mm thick (centroid at 1.22 mm, median), `y+ ≈ 35` in the straight pipe |
-| non-orthogonality (interior faces) | mean 1.1°, 99th percentile 13.3°, max 25.9° |
-| skewness | max 0.66 |
+| non-orthogonality (interior faces) | mean 0.9°, 99th percentile 12.6°, max 13.4° |
+| skewness | max 0.21 |
 | concave cells | 0 |
-| meshing time | 14 s |
+| meshing time | 11 s |
+
+The ungraded mesh (rows 9 mm throughout) has 76 788 cells and the same quality. A resolution study
+round the pipe is still to be made.
 
 The figures are `figures/mesh_overview.png` (the whole pipe), `mesh_bend_wall.png` (the bend's
 wall grid), `mesh_inlet.png` (the inlet face, the O-grid the run is swept from), `mesh_sections.png`
 (cross-sections at the stations), `mesh_section_wall.png` (the wall layers and shell),
 `mesh_symmetry_plane.png` / `mesh_symmetry_plane_inner_wall.png` (the plane `z = 0` through the bend)
 and `mesh_quality.png` (face non-orthogonality and skewness).
-
-The axial spacing is uniform (about 9 mm, set by `max_size`), so the 15 `D` after the bend hold 70 %
-of the cells; the mesher has no grading along a pipe yet.

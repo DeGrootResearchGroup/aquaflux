@@ -37,9 +37,10 @@ from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
-from .pipes import fill_pipes, find_pipes, pipe_ends, pipe_runs, rim_divisions
+from .pipes import fill_pipes, find_pipes, open_ends, pipe_ends, pipe_runs, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
+from .rows import PipeGrading
 
 __all__ = [
     "CadMesher",
@@ -219,6 +220,9 @@ class CadMesher:
         one is a small cell between the quadrilateral and the fill.
     pipe_core : PipeCore
         How the cores of pipes (see :meth:`mesh`) are filled.
+    pipe_grading : PipeGrading or None
+        How a straight pipe's rows grow away from what it joins, toward an open end or its
+        middle; unset, every pipe's rows are about as long as the cells round it are wide.
     planarizer : FacePlanarizer or None
         Flattens the dual's faces once its boundary is on the drawing, moving only the centroids
         of the primal cells outside the layers: the boundary stays on the drawing, the cut cells'
@@ -239,6 +243,7 @@ class CadMesher:
     layers: PrismLayers | None = None
     cap_height: ClearedCaps | float = dataclasses.field(default_factory=ClearedCaps)
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
+    pipe_grading: PipeGrading | None = None
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
@@ -354,13 +359,23 @@ class CadMesher:
         chosen = np.union1d(_faces_of(patch_of_face, names, mapped), pipe_faces)
         if chosen.size:
             stage("meshing the mapped walls and pipes as grids")
-        walls = self._mapped(model, region, topology, surface, chosen)
+        layered_faces = np.isin(patch_of_face, [names.index(n) for n in layered])
+        graded = self._graded(topology, surface, pipe_faces, layered_faces)
+        walls = self._mapped(model, region, topology, surface, chosen, graded)
         on_layered = np.isin(patch_of_face[walls.face], [names.index(n) for n in layered])
         prisms = hexahedra = stacked = None
         sides = side_face = None
         if on_layered.any():
             stage("growing the layers")
-            grown = self.layers.extrude(walls.points, walls.faces, on_layered)
+            # A pipe's open end is replaced by its O-grid's last cross-section, so its own faces
+            # may turn as they are drawn in to the layers' top without thinning the layers.
+            opened = [
+                g
+                for f in np.asarray(pipe_faces).tolist()
+                for g in open_ends(topology, f, layered_faces)
+            ]
+            replaced = np.isin(walls.face, opened)
+            grown = self.layers.extrude(walls.points, walls.faces, on_layered, replaced)
             points, fill, wall_faces = grown.points, grown.inner, grown.walls
             prisms, hexahedra, stacked = grown.prisms, grown.hexahedra, grown.columns
             sides, side_face = grown.sides, walls.face[grown.side_face]
@@ -369,7 +384,7 @@ class CadMesher:
         wall_tag = walls.face
         if len(pipe_faces):
             stage("filling the pipes' cores with O-grids")
-            pipes_in = self._pipes(topology, walls, pipe_faces, on_layered, stacked)
+            pipes_in = self._pipes(topology, walls, pipe_faces, layered_faces, stacked)
             points, cores, fill, wall_faces, wall_tag = fill_pipes(
                 self.pipe_core, points, fill, wall_faces, wall_tag, pipes_in
             )
@@ -425,7 +440,7 @@ class CadMesher:
         stage("flattening the faces")
         return self.planarizer.planarize(mesh, _free_centroids(traced, columns)).mesh
 
-    def _pipes(self, topology, walls: MappedSurface, pipe_faces, on_layered, stacked):
+    def _pipes(self, topology, walls: MappedSurface, pipe_faces, layered_faces, stacked):
         """Each run of pipes' ends, and its rings round the core: the layers' top over its grid,
         where it is layered, else the grid itself."""
         top_of = np.arange(walls.points.shape[0])
@@ -433,20 +448,33 @@ class CadMesher:
             top_of[stacked[:, 0]] = stacked[:, -1]
         pipes = []
         for run, grid in pipe_runs({f: walls.grids[f] for f in np.asarray(pipe_faces).tolist()}):
-            ends = pipe_ends(topology, grid, run, walls.faces, walls.face, on_layered)
+            ends = pipe_ends(topology, grid, run, walls.faces, walls.face, layered_faces)
             pipes.append((ends, top_of[grid]))
         return pipes
 
     @staticmethod
-    def _mapped(model, region, topology, surface, chosen) -> MappedSurface:
+    def _mapped(model, region, topology, surface, chosen, graded=None) -> MappedSurface:
         """The triangulated surface, with the ``chosen`` faces remeshed as structured
-        quadrilaterals, each new point moved onto its face."""
+        quadrilaterals, each new point moved onto its face, the ``graded`` faces' rows graded."""
         if not chosen.size:
             return MappedSurface(surface.points, Polygons(surface.triangles), surface.face)
         return MappedQuads().remesh(
             surface.points, surface.triangles, surface.face, chosen, topology.vertices,
             lambda points, faces: _points_and_normals(model.project(region, points, faces=faces)),
+            graded,
         )  # fmt: skip
+
+    def _graded(self, topology, surface, pipe_faces, layered_faces):
+        """For each pipe, :attr:`pipe_grading` and the points of the ends it opens through; none
+        without a grading."""
+        if self.pipe_grading is None:
+            return None
+        graded = {}
+        for f in np.asarray(pipe_faces).tolist():
+            ends = open_ends(topology, f, layered_faces)
+            points = np.unique(surface.triangles[np.isin(surface.face, ends)])
+            graded[f] = (self.pipe_grading, points)
+        return graded
 
     def _cored(self, points: np.ndarray, surface: np.ndarray):
         """``points`` and the fill's closed ``surface``, with the hex core inside the surface:

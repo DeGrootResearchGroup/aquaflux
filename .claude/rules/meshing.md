@@ -396,9 +396,23 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   last, point for point, and filled by **one** `PipeCore.fill`, so no cross-section is left to caps and
   tets between them. `PipeEnds.faces` is the run, in order. Refused: three pipes at one rim (a tee is not
   a run) and a closed loop of pipes (no end to start from). Measured on `validation/sudo_bend` (36
-  round, layers 2.5 mm × 1.2 × 4, maxh 0.01, 2026-10-23): 76788 cells, 98.6 % hexahedra (the rest the
-  core-corner prisms), interior non-orthogonality p99 13.3°, max 25.9°, no concave cell; volume the
-  inscribed 36-gon's to 4e-5 in the legs and the bend alike.
+  round, layers 2.5 mm × 1.2 × 4, maxh 0.01, 2026-10-23): 76788 cells ungraded, 42660 graded (1.08 to
+  D/5), 98.6 % hexahedra (the rest the core-corner prisms), interior non-orthogonality max 13.4° either
+  way (with the open ends `replaced`), no concave cell; volume the inscribed 36-gon's to 4e-5 in the
+  legs and the bend alike.
+- **Grading along a straight pipe** (`rows.PipeGrading(growth, max_length=None)`, `CadMesher.pipe_grading`,
+  `MeshSpec.pipe_grading`; agreed with the project owner 2026-10-23): rows start at the rims' spacing at
+  each rim that joins something (another pipe of a run, a junction) and grow by `growth` toward an
+  **open end** (`open_ends`: a cap face without layers, the one rule `pipe_ends` uses too) or the length's
+  middle, up to `max_length`; none to grade from, even. Only where the band's motion does not bend
+  (`RimMotion.bends`, `STRAIGHT_PATH` 1e-3: a straight pipe's rims fit with a twist about its own axis);
+  bends and marched curves stay even. `MappedQuads.remesh(graded={face: (grading, open-rim points)})`.
+- ⚠️ **A pipe's open-end faces are `replaced` in `PrismLayers.extrude`**: the O-grid's last cross-section
+  takes their place, so their drawn-in triangles turning is not a reason to thin. Before, layers 14 mm
+  thick turned the end disc's rim triangles and were thinned to 3.7 mm at the outlet, tapering over the
+  end rows: the sudo bend's worst faces (25.9° even, 41.1° with 20 mm graded rows) were there; with the
+  mask 13.4° both (2026-10-23; pinned by
+  `test_layers_beside_faces_to_be_replaced_are_not_thinned_for_turning_them`).
 - **Ends** (`pipe_ends`, `fill_pipes`): an end of a run on a flat face without layers bounded only by the
   run's rims (`_is_cap`: its edges ⊆ the run's) is **open** -- the O-grid runs to it and its last
   cross-section replaces that face's own faces inside the layers' ring, same patch (inlet / outlet area

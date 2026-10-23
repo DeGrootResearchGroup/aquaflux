@@ -811,7 +811,8 @@ def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path
             assert step.max() < 1.001 * step.min()
 
 
-def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tmp_path):
+@pytest.mark.parametrize("graded", [False, True])
+def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tmp_path, graded):
     # A straight pipe, a quarter bend (a torus) and a straight pipe, drawn as one solid: the three
     # walls are pipes joined end to end at shared rims, so one O-grid runs through them, open at
     # the inlet and the outlet. No tetrahedra are needed: every cell of the dual is a hexahedron
@@ -822,7 +823,7 @@ def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tm
 
     from aquaflux.io.cad import CadRegion, read_step
     from aquaflux.mesh import closed_cell_residual
-    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+    from aquaflux.meshing import CadMesher, FacesNear, PipeGrading, PrismLayers
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
     from OCP.BRepBuilderAPI import (
         BRepBuilderAPI_MakeEdge,
@@ -840,7 +841,7 @@ def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tm
     from OCP.TDocStd import TDocStd_Document
     from OCP.XCAFDoc import XCAFDoc_DocumentTool
 
-    r, bend, leg = 0.05, 0.15, 0.1
+    r, bend, leg = 0.05, 0.15, 0.3
     top = gp_Dir(0.0, 0.0, 1.0)
     before = BRepPrimAPI_MakeCylinder(
         gp_Ax2(gp_Pnt(-leg, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0), top), r, leg
@@ -873,7 +874,9 @@ def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tm
         "outlet": FacesNear(((bend, bend + leg, 0.0),)),
     }
     layers = PrismLayers(first_height=0.004, growth=1.2, count=2)
-    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers).mesh(
+    # Graded, each leg's cross-sections grow away from the bend toward its open end.
+    grading = PipeGrading(growth=1.15, max_length=0.06) if graded else None
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers, pipe_grading=grading).mesh(
         model, CadRegion(model.names), patches, layered=("walls",)
     )
     geometry = mesh.geometry()
@@ -904,6 +907,21 @@ def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tm
     # rows of n faces round it.
     rows = np.asarray(mesh.face_patches.indices("walls")).size / n
     assert np.count_nonzero(faces == 5) == 4 * rows
+    # Along the outlet leg (y > bend), the walls' cells lengthen from the bend toward the outlet
+    # when graded, and stay even otherwise.
+    walls = np.asarray(mesh.face_patches.indices("walls"))
+    wall_y = np.asarray(geometry.face.centroid)[walls, 1]
+    # A row of wall faces stands at one height; the rows within a radius of either end of the
+    # leg (the bend's last rows, the dual's half cells) are left out.
+    along = (wall_y > bend + r) & (wall_y < bend + leg - r)
+    lengths = np.diff(np.unique(np.round(wall_y[along], 6)))
+    if graded:
+        ratio = lengths[1:] / lengths[:-1]
+        assert np.all((ratio > 1.0 - 1e-6) & (ratio < 1.15 * 1.01))
+        assert lengths[-1] > 1.5 * lengths[0]
+        assert lengths.max() <= 0.06 * 1.05
+    else:
+        assert lengths.max() < 1.2 * lengths.min()
 
 
 def test_a_pipe_swept_along_a_free_curve_is_a_pipe_and_one_o_grid(tmp_path):

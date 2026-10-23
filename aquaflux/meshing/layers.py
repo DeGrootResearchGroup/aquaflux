@@ -166,7 +166,10 @@ class PrismLayers:
             below = tops[k]
         return tops
 
-    def extrude(self, points: np.ndarray, faces: Polygons, layered: np.ndarray) -> LayerExtrusion:
+    def extrude(
+        self, points: np.ndarray, faces: Polygons, layered: np.ndarray,
+        replaced: np.ndarray | None = None,
+    ) -> LayerExtrusion:  # fmt: skip
         """Grow the layers.
 
         Parameters
@@ -176,6 +179,10 @@ class PrismLayers:
             A closed surface wound out of the region, every point used.
         layered : np.ndarray of bool, shape ``(faces.n_faces,)``
             Which faces carry layers, the triangles' first.
+        replaced : np.ndarray of bool, shape ``(faces.n_faces,)``, optional
+            Faces without layers that will be replaced after the layers are grown (a pipe's open
+            end, whose O-grid's cross-section takes its place), so may turn as they are drawn in
+            without the layers beside them being thinned. Unset, none.
 
         Returns
         -------
@@ -201,9 +208,10 @@ class PrismLayers:
         gap = _gaps(surface, direction, moving, 2.5 * thickness)
         share[moving] = np.minimum(1.0, self.gap_share * gap[moving] / thickness[moving])
         share = _smoothed_down(surface, share, moving)
+        kept = ~layered if replaced is None else ~layered & ~np.asarray(replaced, dtype=bool)
         for _ in range(self.max_halvings + 1):
             extrusion = _built(surface, layered, moving, direction, offsets, share * stretch)
-            bad = _to_be_thinned(extrusion, surface, layered, moving, self.min_top_share)
+            bad = _to_be_thinned(extrusion, surface, layered, kept, moving, self.min_top_share)
             if not bad.size:
                 return extrusion
             share[bad] *= 0.5
@@ -400,10 +408,12 @@ def _built(surface, layered, moving, direction, offsets, reach) -> LayerExtrusio
     )
 
 
-def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving, min_top_share):
-    """The moving points of any cell that is inside out, of any drawn-in face that turned, and at
-    either end of any edge of the layers' top shorter than ``min_top_share`` of the wall edge
-    under it."""
+def _to_be_thinned(
+    extrusion: LayerExtrusion, surface: _Surface, layered, kept, moving, min_top_share
+):  # fmt: skip
+    """The moving points of any cell that is inside out, of any drawn-in face that turned among
+    those ``kept`` (the faces without layers that stay), and at either end of any edge of the
+    layers' top shorter than ``min_top_share`` of the wall edge under it."""
     points = extrusion.points
     rows = []
     for cells, tetrahedra in ((extrusion.prisms, _PRISM_TETRAHEDRA),
@@ -419,8 +429,8 @@ def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving
             )
             bad |= volume >= 0.0
         rows.append(cells[bad].reshape(-1))
-    drawn = extrusion.walls.where(~layered)
-    turned = np.einsum("ij,ij->i", drawn.normals(points), surface.normals[~layered]) <= 0.0
+    drawn = extrusion.walls.where(kept)
+    turned = np.einsum("ij,ij->i", drawn.normals(points), surface.normals[kept]) <= 0.0
     turned_triangles, turned_quads = drawn.split(turned)
     rows += [drawn.triangles[turned_triangles].reshape(-1), drawn.quads[turned_quads].reshape(-1)]
     top = np.arange(points.shape[0])

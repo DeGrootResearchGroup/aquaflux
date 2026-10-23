@@ -45,7 +45,15 @@ from .regions import ClosedSurface
 #: flat ring none; the sign says which side the fluid is on.
 TUBE_VOLUME = 0.1
 
-__all__ = ["PipeEnds", "fill_pipes", "find_pipes", "pipe_ends", "pipe_runs", "rim_divisions"]
+__all__ = [
+    "PipeEnds",
+    "fill_pipes",
+    "find_pipes",
+    "open_ends",
+    "pipe_ends",
+    "pipe_runs",
+    "rim_divisions",
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -306,6 +314,22 @@ def _is_cap(topology: CadTopology, end: int, pipes) -> bool:
     return set(topology.edges_of_face(end).tolist()) <= edges
 
 
+def open_ends(topology: CadTopology, pipe: int, layered: np.ndarray) -> list[int]:
+    """The faces a pipe opens through, joining nothing: flat ends bounded by its rim alone (an
+    inlet, an outlet) whose faces carry no layers -- the ends :func:`pipe_ends` finds open.
+
+    Parameters
+    ----------
+    topology : CadTopology
+    pipe : int
+    layered : np.ndarray of bool, shape ``(n_faces,)``
+        Which of the drawing's faces carry layers.
+    """
+    return [
+        g for g in _neighbours(topology, pipe) if _is_cap(topology, g, [pipe]) and not layered[g]
+    ]
+
+
 def pipe_runs(grids: dict[int, np.ndarray]) -> list[tuple[tuple[int, ...], np.ndarray]]:
     """The pipes joined end to end at shared rims, each run as one grid.
 
@@ -377,8 +401,8 @@ def _continued(rim: np.ndarray, grid: np.ndarray) -> np.ndarray:
 
 
 def pipe_ends(topology, grid: np.ndarray, run, faces: Polygons, tag, layered) -> PipeEnds:
-    """What each end of a run of pipes' grid meets: the flat face without layers it ends on, if
-    any.
+    """What each end of a run of pipes' grid meets: the face it opens through
+    (:func:`open_ends`), if any.
 
     Parameters
     ----------
@@ -391,10 +415,11 @@ def pipe_ends(topology, grid: np.ndarray, run, faces: Polygons, tag, layered) ->
         The surface, in the same numbering.
     tag : np.ndarray of int
         Each of its faces' face of the drawing.
-    layered : np.ndarray of bool
-        Which of its faces carry layers.
+    layered : np.ndarray of bool, shape ``(topology.n_faces,)``
+        Which of the drawing's faces carry layers.
     """
     run = tuple(int(f) for f in run)
+    opening = {g for f in (run[0], run[-1]) for g in open_ends(topology, f, layered)}
     pairs, owner = faces.edges()
     keys = {
         tuple(sorted(pair)): k
@@ -404,15 +429,9 @@ def pipe_ends(topology, grid: np.ndarray, run, faces: Polygons, tag, layered) ->
     ends = []
     for rim in (grid[0], grid[-1]):
         rim_edges = zip(rim, np.roll(rim, -1), strict=True)
-        across = {owner[keys[tuple(sorted((a, b)))]] for a, b in rim_edges}
-        beside = {int(tag[k]) for k in across}
+        beside = {int(tag[owner[keys[tuple(sorted((a, b)))]]]) for a, b in rim_edges}
         end = beside.pop() if len(beside) == 1 else -1
-        open_end = (
-            end >= 0
-            and not np.any(layered[np.asarray(sorted(across))])
-            and _is_cap(topology, end, run)
-        )
-        ends.append(end if open_end else -1)
+        ends.append(end if end in opening else -1)
     return PipeEnds(run, *ends)
 
 

@@ -327,3 +327,65 @@ def test_a_top_face_collapsed_where_walls_meet_is_thinned_until_its_caps_clear_t
     assert inside.sum() == 6 * 9
     np.testing.assert_allclose(thickness[inside], 0.1225, rtol=1e-12)
     assert thickness.min() == pytest.approx(0.06125)
+
+
+def _capped_tube(n=12, rows=4, radius=1.0, height=3.0, rim_band=0.1):
+    """A tube's wall (``rows`` rings of ``n``) and its two end discs, each a ring of thin triangles
+    ``rim_band`` wide inside its rim, then a fan to its centre; all wound outward. Returns the
+    points, the triangles, and which triangles are the wall's."""
+    angle = 2 * np.pi * np.arange(n) / n
+    circle = np.c_[np.cos(angle), np.sin(angle)]
+    points, wall_rings = [], []
+    for j in range(rows + 1):
+        wall_rings.append(len(points) + np.arange(n))
+        points += [[radius * c, radius * s, height * j / rows] for c, s in circle]
+    triangles, wall = [], []
+    for j in range(rows):
+        a, b = wall_rings[j], wall_rings[j + 1]
+        for i in range(n):
+            k = (i + 1) % n
+            triangles += [[a[i], a[k], b[k]], [a[i], b[k], b[i]]]
+            wall += [True, True]
+    for z, rim in ((0.0, wall_rings[0]), (height, wall_rings[-1])):
+        inner = len(points) + np.arange(n)
+        points += [[(radius - rim_band) * c, (radius - rim_band) * s, z] for c, s in circle]
+        centre = len(points)
+        points.append([0.0, 0.0, z])
+        for i in range(n):
+            k = (i + 1) % n
+            triangles += [[rim[i], rim[k], inner[k]], [rim[i], inner[k], inner[i]],
+                          [inner[i], inner[k], centre]]  # fmt: skip
+            wall += [False, False, False]
+    points, triangles = np.array(points), np.array(triangles)
+    corner = points[triangles]
+    normal = np.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0])
+    centre = corner.mean(axis=1)
+    out = np.where(
+        np.array(wall)[:, None], np.c_[centre[:, :2], np.zeros(len(centre))],
+        np.c_[np.zeros((len(centre), 2)), centre[:, 2:] - 0.5 * height],
+    )  # fmt: skip
+    inward = np.einsum("ij,ij->i", normal, out) < 0
+    triangles[inward] = triangles[inward][:, ::-1]
+    return points, triangles, np.array(wall)
+
+
+def test_layers_beside_faces_to_be_replaced_are_not_thinned_for_turning_them():
+    # Layers thicker than the end discs' rim band turn its thin triangles over as they are drawn
+    # in, so the layers at the rims are thinned -- unless the discs are to be replaced (a pipe's
+    # open ends, which its O-grid's cross-sections take the place of): then the layers keep their
+    # thickness to the rims.
+    points, triangles, wall = _capped_tube()
+    layers = PrismLayers(first_height=0.04, growth=1.2, count=3)
+    full = layers.offsets()[-1]
+
+    def thickness(replaced):
+        grown = layers.extrude(points, Polygons(triangles), wall, replaced)
+        columns = grown.columns
+        return np.linalg.norm(grown.points[columns[:, -1]] - grown.points[columns[:, 0]], axis=1)
+
+    assert full > 0.1  # thicker than the rim band
+    assert thickness(None).min() < 0.6 * full
+    # Every column alike, the full thickness stretched to clear the polygon's facets.
+    kept = thickness(~wall)
+    assert np.ptp(kept) < 1e-9 * full
+    assert kept.min() >= full
