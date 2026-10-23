@@ -41,7 +41,8 @@ import numpy as np
 import pyvista as pv
 from aquaflux.io import read_aqmesh
 from geometry import Bend
-from scipy.interpolate import LinearNDInterpolator
+from scipy import sparse
+from scipy.spatial import cKDTree
 from scipy.optimize import brentq
 
 HERE = Path(__file__).parent
@@ -49,6 +50,8 @@ GRIDS = HERE / "grids"
 DEFAULT = ("round64", "round48", "round36")
 RHO, NU = 1.2, 1.5e-5
 BULK = 6.0e4 * NU / Bend.diameter
+#: How many nearest cells a point's stencil is grown from.
+TIED = 4
 #: Safety factor for three grids (Celik et al. 2008, step 5).
 SAFETY = 1.25
 
@@ -158,7 +161,19 @@ def stations(bend: Bend) -> list[Station]:
 
 
 class Solution:
-    """One grid's solved fields, interpolated linearly between cell centroids near a station."""
+    """One grid's solved fields, read at any point by a local linear fit to the cells round it.
+
+    The value at a point is the constant term of a linear least-squares fit, weighted by inverse
+    squared distance (bounded beside a centroid), to the cell values over a stencil from the mesh's
+    own connectivity: the :data:`TIED` cells whose centroids are nearest the point and two rings of
+    face neighbours round each (several, since on the pipe's axis four core cells are equally near,
+    and a stencil chosen among them by rounding moved a value by 0.007 U_b). It is exact for a linear field and unique whatever the centroids' arrangement. Two
+    plainer readings were measured and dropped: a linear interpolation over a Delaunay
+    triangulation of the centroids is not unique where they lie on near-regular planes (the graded
+    rows after the bend), and a 1e-7 m change of the mesh moved a sampled velocity by 0.02 U_b; the
+    nearest centroids by distance alone all lie in one long row's cross-section there, so the fit
+    misses the variation along the pipe.
+    """
 
     def __init__(self, grid: str):
         directory = GRIDS / grid / "work"
@@ -170,17 +185,35 @@ class Solution:
         self.h = (self.volume / self.n_cells) ** (1.0 / 3.0)
         fields = pv.read(directory / "results" / "fields.vtu")
         self.centroids = np.asarray(cells.centroid)
+        self.tree = cKDTree(self.centroids)
+        fc = mesh.face_cells
+        interior = np.asarray(fc.interior)
+        owner, neighbour = np.asarray(fc.owner)[interior], np.asarray(fc.neighbour)[interior]
+        n = mesh.n_cells
+        ring = sparse.coo_matrix(
+            (np.ones(2 * owner.size), (np.r_[owner, neighbour], np.r_[neighbour, owner])), (n, n)
+        ).tocsr() + sparse.identity(n, format="csr")
+        self.stencils = (ring @ ring).tocsr()
         self.velocity = np.asarray(fields.cell_data["U"])
         self.pressure = np.asarray(fields.cell_data["p"])
 
-    def _near(self, station: Station, reach: float) -> np.ndarray:
-        offset = self.centroids - station.centre
-        return np.abs(offset @ station.along) < reach
-
     def sample(self, station: Station, points: np.ndarray, values: np.ndarray) -> np.ndarray:
-        """``values`` (per cell) at ``points``, linearly between the centroids within two rows."""
-        near = self._near(station, 0.03)
-        return LinearNDInterpolator(self.centroids[near], values[near])(points)
+        """``values`` (per cell) at ``points``, shape ``(m,)``, each from the cells round it."""
+        del station
+        _, nearest = self.tree.query(points, k=TIED)
+        out = np.empty(len(points))
+        indptr, indices = self.stencils.indptr, self.stencils.indices
+        for i, (point, cells) in enumerate(zip(points, nearest, strict=True)):
+            stencil = np.unique(
+                np.concatenate([indices[indptr[cell] : indptr[cell + 1]] for cell in cells])
+            )
+            offsets = self.centroids[stencil] - point
+            distance = np.linalg.norm(offsets, axis=1)
+            scale = distance.max()
+            root = scale / np.maximum(distance, 0.05 * scale)
+            design = np.column_stack([np.ones(stencil.size), offsets / scale]) * root[:, None]
+            out[i] = np.linalg.lstsq(design, values[stencil] * root, rcond=None)[0][0]
+        return out
 
     def section(self, station: Station, radius: float, count: int = 41):
         """Points over the cross-section on a polar grid of equal areas, inside the first cells."""
