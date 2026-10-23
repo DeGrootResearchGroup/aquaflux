@@ -831,6 +831,6 @@ container, jax 0.12.0.1, CPU, arms alternated.
     all four runs. Build and solve main 116.7 (first), 104.3 s; branch 100.5, 102.4 s. Refits summed
     main 25.7, 23.2 s (assemble 0.8, 0.3); branch 21.9, 22.5 s (assemble 0.0). Peak resident main 2.287,
     2.176 GiB; branch 2.052, 2.079 GiB.
-- ⚠️ `aquaflux run`'s `history.csv` reports `refits` 0 on a laminar `FlowMarch` that does refit: its
-  `refits` column counts what the session reports through `on_refresh`, and the laminar march's run does
-  not wire one. `refit_cost.py` wraps the hook instead.
+- `aquaflux run`'s `history.csv` reported `refits` 0 on a laminar `FlowMarch` that did refit, because only
+  `CoupledMarch` wired the session's refit observer (fixed by #809, `case.md`), so these runs were timed by
+  `refit_cost.py`, which wraps the hook.
