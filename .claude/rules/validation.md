@@ -344,8 +344,8 @@ bend (`meshing.md`, "Runs"); `render_mesh.py` draws `figures/`.
   `test_shipped_case_paths.py`'s `GENERATED`. The precursor is a `CoupledMarch` with `BlockDiagonal`:
   the channel files' `Segregated` with `DirectSolve` asked 131 GB on the 3792-cell pipe (dense), and a
   held bulk velocity refuses a `MaterializedJacobian` (#541).
-- `case.yaml` is bfs3d's march unchanged; whether it fits this mesh (42,660 cells, 15 GB machine) and
-  converges is the open question. The station list and digitized profiles are still to be taken from
+- `case.yaml` is bfs3d's march unchanged: 15 steps, 42 min, 1.1e-7 on 42,660 cells, ≥ 4.3 GB free of 15
+  (2026-10-23, one run; README). `render_flow.py` draws the sections; nothing is compared yet. The station list and digitized profiles are still to be taken from
   the paper (the project owner is fetching them); a grid-resolution study round the pipe is agreed for later.
 
 ## The aggressive Reynolds continuation does NOT need the complete LU

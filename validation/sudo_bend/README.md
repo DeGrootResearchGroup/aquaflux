@@ -97,3 +97,17 @@ Measured (2026-10-23, the tracked files, 4-core Linux container, one run):
 
 `plot_inflow.py` draws `figures/inflow_profiles.png`: the velocity against the power law, in wall
 units against the log law, and `k` and `omega` against the radius.
+
+## The solve
+
+`case.yaml` marches the bend with bfs3d's settings unchanged (the field split of the materialized
+Jacobian, the dual-time loop and the viscosity ramp from 100 times the fluid's viscosity in 12
+stations). Measured (2026-10-23, the tracked files, `main` at `7fe27d07` merged, 4-core Linux
+container with 15 GB, one run): converged in 15 steps and 42 min (2514 s) to 1.1e-7 in the
+row-scaled measure, at least 4.3 GB of memory free throughout. The inlet admits 0.998 of
+`U_b` times its area (the faces take the profile at their own radius, the table holds cell means).
+
+`render_flow.py` draws `figures/flow_sections.png` (the axial velocity and the cross-flow at the
+stations: the pair of Dean vortices, the core thrown to the outer wall by 90 degrees, slow fluid
+gathered at the inner wall, the largest cross-flow 0.45 `U_b` at 60 degrees) and
+`figures/flow_symmetry_plane.png`. Nothing is compared with the measurements yet.
