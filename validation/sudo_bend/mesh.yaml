@@ -1,0 +1,17 @@
+# The Sudo, Sumida & Hibara (1998) 90-degree bend: D = 104 mm, R_c = 2 D, 3 D of straight pipe
+# before it and 15 D after it (geometry.py draws bend.step). Every wall is a pipe -- the two
+# straight lengths cylinders, the bend a torus -- joined end to end, so one structured O-grid runs
+# from the inlet to the outlet and no tetrahedra are needed.
+#
+# Sizes: max_size sets the rims' division, 36 points round (about 9 mm), and the rows along the
+# pipe the same length. The wall layers are sized for wall functions at Re = 6e4 (u_tau about
+# 0.43 m/s in air): the first cell 2.5 mm thick, its centroid near y+ = 35 in the straight pipe.
+drawing: {file: bend.step}
+region: {solids: [fluid]}
+sizes: {max_size: 0.01, feature_angle: 0.785}
+patches:
+  inlet: {kind: FacesNear, points: [[-0.312, 0.0, 0.0]]}
+  outlet: {kind: FacesNear, points: [[0.208, 1.768, 0.0]]}
+layers: {kind: PrismLayers, first_height: 0.0025, growth: 1.2, count: 4}
+layered: [walls]
+output: {path: work/bend.aqmesh}

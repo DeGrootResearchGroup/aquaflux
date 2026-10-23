@@ -26,6 +26,7 @@ from aquaflux.io.cad.faces import (
     PlaneFace,
     SolidDescription,
     SphereFace,
+    TorusFace,
 )
 from aquaflux.io.cad.model import CadModel, InexactBody, read_step
 from aquaflux.io.cad.placement import Placement
@@ -57,6 +58,7 @@ __all__ = [
     "RecognitionRule",
     "SolidDescription",
     "SphereFace",
+    "TorusFace",
     "UnrecognizedSolid",
     "read_step",
     "recognize",

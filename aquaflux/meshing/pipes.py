@@ -1,8 +1,8 @@
 """Pipes in a region: found from its faces, and their cores filled with structured O-grids.
 
-A pipe is a cylindrical face of the region with the fluid inside it, bounded by two loops that a
-structured grid joins row by row (:class:`~aquaflux.meshing.MappedQuads`), with nothing else inside
-it. Its wall is meshed as that grid and, where the walls carry layers, layered like any other wall;
+A pipe is a cylindrical or toroidal face of the region with the fluid inside it -- a straight
+length of pipe, or a bend -- bounded by two loops that a structured grid joins row by row
+(:class:`~aquaflux.meshing.MappedQuads`), with nothing else inside it. Its wall is meshed as that grid and, where the walls carry layers, layered like any other wall;
 the core the layers leave is filled with a :class:`~aquaflux.meshing.PipeCore` O-grid, which meets the
 layers' top quadrilateral for quadrilateral.
 
@@ -10,7 +10,9 @@ The O-grid needs both loops of one point count, a multiple of four. The loops' p
 triangulation's, whose division of the rims follows the mesh size, so :func:`rim_divisions` says how to
 divide each candidate's rim edges for the triangulation to give an O-grid's counts.
 
-At each end of a pipe:
+Pipes that share a rim -- a straight length, a bend, another straight length -- are one **run**
+(:func:`pipe_runs`), filled by one O-grid from end to end, so the cross-section where two of them
+meet is shared rather than left to the fill. At each end of a run:
 
 - **an open end** -- the pipe ends on a flat face without layers, such as an inlet, bounded only by
   the pipe's own rim -- the O-grid runs to the end, and its last cross-section takes the place of
@@ -27,29 +29,29 @@ import math
 
 import numpy as np
 
-from aquaflux.io.cad import CadTopology, CylinderFace
+from aquaflux.io.cad import CadTopology, CylinderFace, TorusFace
 
 from .mapped import _loops
 from .pipe_core import PipeCore
 from .polygons import Polygons
 
-__all__ = ["PipeEnds", "fill_pipes", "find_pipes", "pipe_ends", "rim_divisions"]
+__all__ = ["PipeEnds", "fill_pipes", "find_pipes", "pipe_ends", "pipe_runs", "rim_divisions"]
 
 
 @dataclasses.dataclass(frozen=True)
 class PipeEnds:
-    """A pipe's face and what each end of its grid meets.
+    """A run of pipes' faces and what each end of its grid meets.
 
     Attributes
     ----------
-    face : int
-        The pipe's face.
+    faces : tuple of int
+        The run's faces, in order along it.
     first, last : int
         For the grid's first and last row: the flat face it ends on (an open end), or ``-1`` where
         the pipe opens into the rest of the region (a junction).
     """
 
-    face: int
+    faces: tuple[int, ...]
     first: int
     last: int
 
@@ -81,8 +83,8 @@ def find_pipes(
     pipes, refused = [], {}
     for f in np.asarray(candidates, dtype=np.int64).tolist():
         record = topology.faces[f]
-        if not isinstance(record, CylinderFace):
-            refused[f] = "it is not a cylinder"
+        if not isinstance(record, (CylinderFace, TorusFace)):
+            refused[f] = "it is neither a cylinder nor a torus"
             continue
         if not record.solid_inside:
             refused[f] = "the fluid is outside it, not inside"
@@ -111,12 +113,13 @@ def rim_divisions(
     """The segments to ask of each rim edge so that every pipe candidate's rims can be joined by
     an O-grid: both rims of one count, a multiple of four.
 
-    A candidate is a cylinder with the fluid inside it, bounded by two loops of the triangulation
-    (the rest are left to :func:`find_pipes` to refuse). Where its loops' counts already agree and
-    are a multiple of four nothing is asked. Otherwise both rims get the larger count rounded up to
-    a multiple of four, so a rim is never divided more coarsely than the triangulation chose; a rim
-    drawn as several edges shares its count among them by length, each edge at least one segment.
-    An edge on the rims of two candidates takes the larger count asked of it.
+    A candidate is a cylinder or a torus with the fluid inside it, bounded by two loops of the
+    triangulation (the rest are left to :func:`find_pipes` to refuse). Candidates sharing a rim are
+    one run, given one count, so that the rims each shares are divided as both need. Where a
+    run's loops already agree and are a multiple of four nothing is asked. Otherwise every rim of
+    the run gets its largest count rounded up to a multiple of four, so a rim is never divided
+    more coarsely than the triangulation chose; a rim drawn as several edges shares its count
+    among them by length, each edge at least one segment.
 
     Parameters
     ----------
@@ -132,25 +135,49 @@ def rim_divisions(
     dict of {int: int}
         Segments per edge, by the edge's index in ``topology``; empty when no candidate needs any.
     """
-    divisions: dict[int, int] = {}
+    sizes, rims = {}, {}
     for f in np.asarray(candidates, dtype=np.int64).tolist():
         record = topology.faces[f]
-        if not (isinstance(record, CylinderFace) and record.solid_inside):
+        if not (isinstance(record, (CylinderFace, TorusFace)) and record.solid_inside):
             continue
         loops = _loops(triangles[face == f])
-        if len(loops) != 2:
+        found = _rims(topology, f)
+        if len(loops) != 2 or len(found) != 2:
             continue
-        sizes = [loop.size for loop in loops]
-        if sizes[0] == sizes[1] and sizes[0] % 4 == 0:
+        sizes[f], rims[f] = [loop.size for loop in loops], found
+    divisions: dict[int, int] = {}
+    for run in _joined(rims):
+        counts = [size for f in run for size in sizes[f]]
+        if len(set(counts)) == 1 and counts[0] % 4 == 0:
             continue
-        rims = _rims(topology, f)
-        if len(rims) != 2:
-            continue
-        count = 4 * math.ceil(max(sizes) / 4)
-        for rim in rims:
-            for edge, segments in _shared_by_length(topology.edge_length[rim], count, rim):
-                divisions[edge] = max(divisions.get(edge, 0), segments)
+        count = 4 * math.ceil(max(counts) / 4)
+        for f in run:
+            for rim in rims[f]:
+                for edge, segments in _shared_by_length(topology.edge_length[rim], count, rim):
+                    divisions[edge] = max(divisions.get(edge, 0), segments)
     return divisions
+
+
+def _joined(rims: dict[int, list[np.ndarray]]) -> list[list[int]]:
+    """The faces whose rims share an edge, gathered into groups (each face in exactly one)."""
+    group = {f: f for f in rims}
+
+    def root(f):
+        while group[f] != f:
+            f = group[f]
+        return f
+
+    by_edge: dict[int, int] = {}
+    for f, found in rims.items():
+        for edge in np.concatenate(found).tolist():
+            if edge in by_edge:
+                group[root(f)] = root(by_edge[edge])
+            else:
+                by_edge[edge] = f
+    groups: dict[int, list[int]] = {}
+    for f in rims:
+        groups.setdefault(root(f), []).append(f)
+    return list(groups.values())
 
 
 def _rims(topology: CadTopology, f: int) -> list[np.ndarray]:
@@ -189,20 +216,66 @@ def _shared_by_length(lengths: np.ndarray, count: int, edges: np.ndarray):
     return zip(edges.tolist(), segments.tolist(), strict=True)
 
 
-def _hollow(record: CylinderFace, points, triangles, face, f, topology) -> bool:
+def _hollow(record, points, triangles, face, f, topology) -> bool:
     """Whether no point of the surface but the pipe's own and its end faces' lies inside it."""
-    axis = np.asarray(record.axis, dtype=np.float64)
-    axis /= np.linalg.norm(axis)
-    origin = np.asarray(record.origin, dtype=np.float64)
     own = np.unique(triangles[face == f])
-    height = (points[own] - origin) @ axis
-    caps = [g for g in _neighbours(topology, f) if _is_cap(topology, g, f)]
+    caps = [g for g in _neighbours(topology, f) if _is_cap(topology, g, [f])]
     others = np.setdiff1d(np.unique(triangles[~np.isin(face, [f, *caps])]), own)
-    offset = points[others] - origin
-    along = offset @ axis
-    across = np.linalg.norm(offset - along[:, None] * axis, axis=1)
-    inside = (along > height.min()) & (along < height.max()) & (across < record.radius * (1 - 1e-6))
-    return not np.any(inside)
+    tube = _Tube.of(record, points[own])
+    return not np.any(tube.inside(points[others]))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Tube:
+    """The inside of a pipe's face, between its rims: within ``radius`` of its centreline, and
+    within the range its own points span along it.
+
+    The centreline is a straight line (a cylinder: ``bend`` is zero) or a circle of radius
+    ``bend`` about ``axis`` through ``origin`` (a torus); the position along it is a height in
+    the first case and an angle about the axis, from the direction ``reference``, in the second.
+    """
+
+    origin: np.ndarray
+    axis: np.ndarray
+    radius: float
+    bend: float
+    reference: np.ndarray
+    span: tuple[float, float]
+
+    @classmethod
+    def of(cls, record, own: np.ndarray) -> _Tube:
+        """The tube of a cylinder or torus record, spanning the points ``own`` (shape ``(n, 3)``)."""
+        if isinstance(record, CylinderFace):
+            origin, radius, bend = record.origin, record.radius, 0.0
+        else:
+            origin, radius, bend = record.centre, record.minor_radius, record.major_radius
+        origin = np.asarray(origin, dtype=np.float64)
+        axis = np.asarray(record.axis, dtype=np.float64)
+        axis = axis / np.linalg.norm(axis)
+        mean = own.mean(axis=0) - origin
+        reference = mean - (mean @ axis) * axis
+        norm = np.linalg.norm(reference)
+        reference = reference / norm if norm > 0.0 else reference
+        tube = cls(origin, axis, float(radius), float(bend), reference, (0.0, 0.0))
+        along, _ = tube._position(own)
+        return dataclasses.replace(tube, span=(float(along.min()), float(along.max())))
+
+    def _position(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Each point's position along the centreline, and its distance from it."""
+        offset = points - self.origin
+        height = offset @ self.axis
+        radial = offset - height[:, None] * self.axis
+        if self.bend == 0.0:
+            return height, np.linalg.norm(radial, axis=1)
+        sideways = np.cross(self.axis, self.reference)
+        angle = np.arctan2(radial @ sideways, radial @ self.reference)
+        return angle, np.hypot(np.linalg.norm(radial, axis=1) - self.bend, height)
+
+    def inside(self, points: np.ndarray) -> np.ndarray:
+        """Which of ``points`` (shape ``(m, 3)``) lie inside, shape ``(m,)``."""
+        along, across = self._position(points)
+        low, high = self.span
+        return (along > low) & (along < high) & (across < self.radius * (1 - 1e-6))
 
 
 def _neighbours(topology: CadTopology, f: int) -> list[int]:
@@ -214,20 +287,96 @@ def _neighbours(topology: CadTopology, f: int) -> list[int]:
     return sorted(found)
 
 
-def _is_cap(topology: CadTopology, end: int, pipe: int) -> bool:
-    """Whether face ``end`` is bounded by nothing but face ``pipe``'s edges: a pipe's end."""
-    return set(topology.edges_of_face(end).tolist()) <= set(topology.edges_of_face(pipe).tolist())
+def _is_cap(topology: CadTopology, end: int, pipes) -> bool:
+    """Whether face ``end`` is bounded by nothing but the edges of the faces ``pipes``: a pipe's
+    (or a run of pipes') end."""
+    edges = set()
+    for pipe in pipes:
+        edges.update(topology.edges_of_face(pipe).tolist())
+    return set(topology.edges_of_face(end).tolist()) <= edges
 
 
-def pipe_ends(topology, grid: np.ndarray, pipe: int, faces: Polygons, tag, layered) -> PipeEnds:
-    """What each end of a pipe's grid meets: the flat face without layers it ends on, if any.
+def pipe_runs(grids: dict[int, np.ndarray]) -> list[tuple[tuple[int, ...], np.ndarray]]:
+    """The pipes joined end to end at shared rims, each run as one grid.
+
+    Parameters
+    ----------
+    grids : dict of {int: np.ndarray of int}
+        Each pipe's grid, shape ``(rows + 1, n)``, by its face; grids sharing a rim share its
+        points.
+
+    Returns
+    -------
+    list of (tuple of int, np.ndarray of int)
+        Each run's faces in order along it, and its grid: theirs joined, the shared rows once,
+        every row round it in the same direction from the same column.
+
+    Raises
+    ------
+    ValueError
+        If three or more pipes share a rim, or the pipes close on themselves in a loop.
+    """
+    ends: dict[frozenset, list[int]] = {}
+    for f, grid in grids.items():
+        for row in (grid[0], grid[-1]):
+            ends.setdefault(frozenset(row.tolist()), []).append(f)
+    for faces in ends.values():
+        if len(faces) > 2:
+            raise ValueError(
+                f"pipes {sorted(faces)} all meet at one rim; an O-grid runs through two"
+            )
+
+    def beyond(f, row):
+        """The pipe across rim ``row`` of pipe ``f``, if any."""
+        others = [g for g in ends[frozenset(row.tolist())] if g != f]
+        return others[0] if others else None
+
+    runs, seen = [], set()
+    starts = [f for f, g in grids.items() if beyond(f, g[0]) is None or beyond(f, g[-1]) is None]
+    for start in starts:
+        if start in seen:
+            continue
+        grid = grids[start]
+        if beyond(start, grid[0]) is not None:
+            grid = grid[::-1]
+        faces = [start]
+        seen.add(start)
+        while (after := beyond(faces[-1], grid[-1])) is not None:
+            grid = np.vstack([grid, _continued(grid[-1], grids[after])[1:]])
+            faces.append(after)
+            seen.add(after)
+        runs.append((tuple(faces), grid))
+    if len(seen) != len(grids):
+        raise ValueError(
+            f"pipes {sorted(set(grids) - seen)} join end to end in a loop, which has no end to "
+            "start an O-grid from"
+        )
+    return runs
+
+
+def _continued(rim: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """``grid`` turned so its first row is ``rim``, point for point."""
+    if set(grid[0].tolist()) != set(rim.tolist()):
+        grid = grid[::-1]
+    row = grid[0].tolist()
+    at = row.index(int(rim[0]))
+    if row[(at + 1) % len(row)] != int(rim[1]):
+        grid = grid[:, ::-1]
+        at = len(row) - 1 - at
+    return np.roll(grid, -at, axis=1)
+
+
+def pipe_ends(topology, grid: np.ndarray, run, faces: Polygons, tag, layered) -> PipeEnds:
+    """What each end of a run of pipes' grid meets: the flat face without layers it ends on, if
+    any.
 
     Parameters
     ----------
     topology : CadTopology
     grid : np.ndarray of int, shape ``(rows + 1, n)``
-        The pipe's grid, in the surface's numbering.
-    pipe : int
+        The run's grid, in the surface's numbering.
+    run : sequence of int
+        The run's faces, in order along it.
     faces : Polygons
         The surface, in the same numbering.
     tag : np.ndarray of int
@@ -235,9 +384,12 @@ def pipe_ends(topology, grid: np.ndarray, pipe: int, faces: Polygons, tag, layer
     layered : np.ndarray of bool
         Which of its faces carry layers.
     """
+    run = tuple(int(f) for f in run)
     pairs, owner = faces.edges()
     keys = {
-        tuple(sorted(pair)): k for k, pair in enumerate(pairs.tolist()) if tag[owner[k]] != pipe
+        tuple(sorted(pair)): k
+        for k, pair in enumerate(pairs.tolist())
+        if int(tag[owner[k]]) not in run
     }
     ends = []
     for rim in (grid[0], grid[-1]):
@@ -248,10 +400,10 @@ def pipe_ends(topology, grid: np.ndarray, pipe: int, faces: Polygons, tag, layer
         open_end = (
             end >= 0
             and not np.any(layered[np.asarray(sorted(across))])
-            and _is_cap(topology, end, pipe)
+            and _is_cap(topology, end, run)
         )
         ends.append(end if open_end else -1)
-    return PipeEnds(pipe, *ends)
+    return PipeEnds(run, *ends)
 
 
 def fill_pipes(
@@ -270,7 +422,7 @@ def fill_pipes(
         The region's boundary faces, ``wall_tag`` (shape ``(walls.n_faces,)``) the face of the
         drawing under each.
     pipes : list of (PipeEnds, np.ndarray)
-        Each pipe's ends, and its rings: its grid's rows of points round the core (the layers' top
+        Each run of pipes' ends, and its rings: its grid's rows of points round the core (the layers' top
         over the grid, or the grid itself without layers), shape ``(rows + 1, n)``.
 
     Returns

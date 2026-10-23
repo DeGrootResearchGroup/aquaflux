@@ -24,13 +24,14 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable, Mapping
+from typing import ClassVar
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 from .polygons import Polygons
 
-__all__ = ["MappedQuads", "MappedSurface"]
+__all__ = ["MappedQuads", "MappedSurface", "RimMotion"]
 
 #: The rows over which a band's rows go from a rim's own shape to a flat ring.
 RIM_ROWS = 2
@@ -59,6 +60,97 @@ class MappedSurface:
     faces: Polygons
     face: np.ndarray
     grids: Mapping[int, np.ndarray] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True)
+class RimMotion:
+    """The rigid motion that best carries one loop of points onto another, as a screw.
+
+    A screw turns by :attr:`angle` about the line through :attr:`pivot` along :attr:`axis` while
+    sliding :attr:`slide` along it; every rigid motion is one. Part of the way along it, at
+    ``t`` in ``[0, 1]``, is the same turn and slide scaled by ``t``: a straight pipe's rims are
+    one slide apart, a bend's one turn about the bend's axis, and a point carried along traces
+    the pipe's own wall. The fit is the least-squares rotation (Kabsch's) between the loops'
+    points taken in order, so it asks only that they be matched one for one.
+
+    Attributes
+    ----------
+    axis : np.ndarray, shape ``(3,)``
+        Unit vector along the screw's line (any unit vector when it does not turn).
+    pivot : np.ndarray, shape ``(3,)``
+        A point on that line.
+    angle : float
+        The turn, in radians, in ``[0, pi]``.
+    slide : np.ndarray, shape ``(3,)``
+        The translation along the line; when the motion does not turn, the whole translation.
+    """
+
+    axis: np.ndarray
+    pivot: np.ndarray
+    angle: float
+    slide: np.ndarray
+
+    #: Below this turn, in radians, the motion is taken to be a translation: the rims of a
+    #: straight pipe fit with a turn of rounding error, about whose line a point is far away.
+    STRAIGHT: ClassVar[float] = 1e-6
+
+    @classmethod
+    def fit(cls, start: np.ndarray, end: np.ndarray) -> RimMotion:
+        """The rigid motion carrying ``start`` closest to ``end``, point ``i`` to point ``i``.
+
+        Parameters
+        ----------
+        start, end : np.ndarray, shape ``(n, 3)``
+        """
+        a_centre, b_centre = start.mean(axis=0), end.mean(axis=0)
+        u, _, vt = np.linalg.svd((start - a_centre).T @ (end - b_centre))
+        flip = np.diag([1.0, 1.0, np.sign(np.linalg.det(vt.T @ u.T))])
+        rotation = vt.T @ flip @ u.T
+        translation = b_centre - rotation @ a_centre
+        angle = float(np.arccos(np.clip(0.5 * (np.trace(rotation) - 1.0), -1.0, 1.0)))
+        if angle < cls.STRAIGHT:
+            return cls(np.array([0.0, 0.0, 1.0]), np.zeros(3), 0.0, translation)
+        skew = rotation - rotation.T
+        axis = np.array([skew[2, 1], skew[0, 2], skew[1, 0]])
+        if np.linalg.norm(axis) < cls.STRAIGHT:  # a half turn: the axis from R + I
+            axis = (rotation + np.eye(3))[np.argmax(np.diag(rotation))]
+        axis /= np.linalg.norm(axis)
+        slide = (translation @ axis) * axis
+        # The point on the line nearest the origin: what the turn about it moves by the rest.
+        across = translation - slide
+        pivot = 0.5 * (across + np.cross(axis, across) / np.tan(0.5 * angle))
+        return cls(axis, pivot, angle, slide)
+
+    def turned(self, t: float, vectors: np.ndarray) -> np.ndarray:
+        """``vectors`` (shape ``(n, 3)``) turned by ``t`` of the motion's turn."""
+        if self.angle == 0.0:
+            return vectors
+        k, theta = self.axis, t * self.angle
+        return (
+            vectors * np.cos(theta)
+            + np.cross(k, vectors) * np.sin(theta)
+            + np.outer(vectors @ k, k) * (1.0 - np.cos(theta))
+        )
+
+    def at(self, t: float, points: np.ndarray) -> np.ndarray:
+        """``points`` (shape ``(n, 3)`` or ``(3,)``) carried ``t`` of the way along the motion."""
+        points = np.asarray(points, dtype=np.float64)
+        flat = points.reshape(-1, 3)
+        moved = self.turned(t, flat - self.pivot) + self.pivot + t * self.slide
+        return moved.reshape(points.shape)
+
+    def direction(self, t: float, point: np.ndarray) -> np.ndarray:
+        """The velocity, per unit of ``t``, of the point the motion has carried to ``point`` at
+        ``t``; shape ``(3,)``."""
+        return self.angle * np.cross(self.axis, point - self.pivot) + self.slide
+
+    def path_length(self, points: np.ndarray) -> np.ndarray:
+        """How far each point (shape ``(n, 3)``) travels along the whole motion, shape ``(n,)``:
+        round a helix, which is an arc when nothing slides and a line when nothing turns."""
+        offset = points - self.pivot
+        radial = offset - np.outer(offset @ self.axis, self.axis)
+        across = self.angle * np.linalg.norm(radial, axis=1)
+        return np.hypot(across, np.linalg.norm(self.slide))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,15 +275,26 @@ class _Builder:
         # Both loops are wound with the face on their left, so they run opposite ways round it.
         a, b = (first, second[::-1]) if first.size >= second.size else (second, first[::-1])
         p = self.points
-        b = np.roll(b, -int(np.argmin(np.linalg.norm(p[b] - p[a[0]], axis=1))))
+        equal = a.size == b.size
+        fractions = _fractions(p[a], closed=True)
+
+        def across_from(start: int) -> np.ndarray:
+            """The points of ``b``, from its point ``start``, matched to ``a``'s one for one."""
+            rolled = np.roll(b, -start)
+            return p[rolled] if equal else _resampled(p[rolled], fractions, closed=True)
+
+        # Which point of ``b`` lies across from ``a``'s first: the start for which the two rims
+        # are carried one onto the other by the least turn. A circle maps onto itself turned
+        # through any angle, so every start fits a round rim alike; the least turn is the one
+        # whose columns run along the face rather than twisting round it.
+        start = min(range(b.size), key=lambda k: RimMotion.fit(p[a], across_from(k)).angle)
+        b = np.roll(b, -start)
         self.last_grid = None
-        if a.size == b.size:
-            shifts = [np.roll(b, -s) for s in (-1, 0, 1)]
-            b = min(shifts, key=lambda c: float(np.sum(np.linalg.norm(p[c] - p[a], axis=1) ** 2)))
+        if equal:
             rows = _row_count(p[a], p[b], closed=True)
             self.last_grid = self._between(a, p[b], rows, b)
             return np.zeros((0, 3), np.int64), _grid_quads(self.last_grid, True)
-        across = _resampled(p[b], _fractions(p[a], closed=True), closed=True)
+        across = across_from(0)
         rows = _row_count(p[a], across, closed=True)
         # The loops differ: the grid stops one row short of ``b``, and a strip joins that row to it.
         grid = self._between(a, across, rows)
@@ -201,23 +304,29 @@ class _Builder:
         """Rows of points from loop ``a`` (row 0) toward the points ``across``, row ``rows``:
         ending with ``b`` when given, else one row short of ``across``.
 
-        Each row is the linear interpolation of the two loops flattened -- each moved along the
-        band's axis onto the plane through its centroid across it -- plus each loop's own bow out
-        of that plane, fading over :data:`RIM_ROWS` rows from it. So away from a rim that is not
-        flat (a pipe's saddle where it meets a vessel) the rows are flat rings, as a pipe's
-        cross-sections are; a band between flat rims is the plain interpolation.
+        Each row is the first loop flattened, carried part of the way by the rigid motion that
+        best carries it onto the second flattened (:class:`RimMotion`: a slide along a straight
+        pipe, a turn round a bend), plus that share of what the motion leaves over (the change
+        of radius along a cone, across a flat ring), plus each loop's own bow out of its plane,
+        fading over :data:`RIM_ROWS` rows from it. A loop is flattened by moving each point
+        along the direction the motion carries the loop in, onto the plane through its centroid
+        across it. So away from a rim that is not flat (a pipe's saddle where it meets a vessel)
+        the rows are flat rings, as a pipe's cross-sections are; a band between flat rims is the
+        rims' own interpolation along the motion.
         """
-        start = self.points[a]
-        axis = across.mean(axis=0) - start.mean(axis=0)
-        axis /= np.linalg.norm(axis)
-        bow_start = ((start - start.mean(axis=0)) @ axis)[:, None] * axis
-        bow_end = ((across - across.mean(axis=0)) @ axis)[:, None] * axis
+        start, end = self.points[a], across
+        first_fit = RimMotion.fit(start, end)
+        bow_start = _bow(start, first_fit.direction(0.0, start.mean(axis=0)))
+        bow_end = _bow(end, first_fit.direction(1.0, first_fit.at(1.0, start.mean(axis=0))))
+        flat_start, flat_end = start - bow_start, end - bow_end
+        motion = RimMotion.fit(flat_start, flat_end)
+        left_over = flat_end - motion.at(1.0, flat_start)
         grid = [a]
         for j in range(1, rows):
             t = j / rows
-            row = (1 - t) * (start - bow_start) + t * (across - bow_end)
-            row += max(0.0, 1.0 - j / RIM_ROWS) * bow_start
-            row += max(0.0, 1.0 - (rows - j) / RIM_ROWS) * bow_end
+            row = motion.at(t, flat_start) + t * left_over
+            row += max(0.0, 1.0 - j / RIM_ROWS) * motion.turned(t, bow_start)
+            row += max(0.0, 1.0 - (rows - j) / RIM_ROWS) * motion.turned(t - 1.0, bow_end)
             grid.append(self._added(row))
         if b is not None:
             grid.append(b)
@@ -310,11 +419,25 @@ def _resampled(polyline: np.ndarray, fractions: np.ndarray, closed: bool) -> np.
 
 
 def _row_count(start: np.ndarray, end: np.ndarray, closed: bool) -> int:
-    """Rows between two matched polylines that keep the cells about as long as they are wide."""
-    across = float(np.mean(np.linalg.norm(end - start, axis=1)))
+    """Rows between two matched polylines that keep the cells about as long as they are wide.
+
+    A band's rows run along the rigid motion carrying one loop onto the other, so its length is
+    the mean path its points travel (round a bend, the arc rather than the chord).
+    """
+    if closed:
+        across = float(np.mean(RimMotion.fit(start, end).path_length(start)))
+    else:
+        across = float(np.mean(np.linalg.norm(end - start, axis=1)))
     path = np.vstack([start, start[:1]]) if closed else start
     along = float(np.mean(np.linalg.norm(np.diff(path, axis=0), axis=1)))
     return max(1, round(across / along))
+
+
+def _bow(loop: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    """Each point's offset along ``direction`` from the plane through the loop's centroid across
+    it, shape ``(n, 3)``."""
+    unit = direction / np.linalg.norm(direction)
+    return ((loop - loop.mean(axis=0)) @ unit)[:, None] * unit
 
 
 def _grid_quads(grid: np.ndarray, closed: bool) -> np.ndarray:

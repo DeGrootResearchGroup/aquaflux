@@ -189,8 +189,9 @@ class MeshSpec:
         each face a band (a cylinder, a cone, a ring) or four-sided; layered, they carry hexahedra.
         Default: none.
     pipes : tuple of str or None
-        The patches whose faces are pipes -- each a cylinder the fluid fills, with nothing inside --
-        their walls meshed as grids and their cores as structured O-grids. Unset, every face that
+        The patches whose faces are pipes -- each a cylinder or a torus (a bend) the fluid fills,
+        with nothing inside -- their walls meshed as grids and their cores as structured O-grids,
+        one O-grid through pipes joined end to end. Unset, every face that
         is one; empty, none.
     pipe_core : PipeCore or None
         How the pipes' cores are filled; unset, the defaults of

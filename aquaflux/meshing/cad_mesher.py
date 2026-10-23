@@ -37,7 +37,7 @@ from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
-from .pipes import fill_pipes, find_pipes, pipe_ends, rim_divisions
+from .pipes import fill_pipes, find_pipes, pipe_ends, pipe_runs, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
 
@@ -284,13 +284,14 @@ class CadMesher:
             (see :class:`~aquaflux.meshing.MappedQuads`): each face a band or four-sided. Layered,
             they carry hexahedra.
         pipes : sequence of str, or None
-            The patches whose faces are pipes: each a cylinder the fluid fills, bounded by two
-            loops (its rims), with nothing else inside it. A pipe's face is meshed as a structured
-            grid (as ``mapped``), layered if its patch is, and its core filled with a structured
-            O-grid (:attr:`pipe_core`; see :mod:`~aquaflux.meshing.pipes`). Where Netgen's
-            division of a candidate's rims would not take an O-grid (two counts, or one not a
-            multiple of four), the region is triangulated again with both rims divided alike,
-            into the larger count rounded up to a multiple of four. Unset, every face that is one;
+            The patches whose faces are pipes: each a cylinder or a torus (a bend) the fluid
+            fills, bounded by two loops (its rims), with nothing else inside it. A pipe's face is
+            meshed as a structured grid (as ``mapped``), layered if its patch is, and its core
+            filled with a structured O-grid (:attr:`pipe_core`; see :mod:`~aquaflux.meshing.pipes`),
+            one O-grid through pipes joined end to end. Where Netgen's division of a candidate's
+            rims would not take an O-grid (two counts, or one not a multiple of four), the region
+            is triangulated again with every rim of the pipes joined end to end divided alike,
+            into the largest count rounded up to a multiple of four. Unset, every face that is one;
             empty, none.
         on_stage : callable, optional
             Told the name of each stage as it starts (only the stages this mesh needs), so a long
@@ -422,15 +423,14 @@ class CadMesher:
         return self.planarizer.planarize(mesh, _free_centroids(traced, columns)).mesh
 
     def _pipes(self, topology, walls: MappedSurface, pipe_faces, on_layered, stacked):
-        """Each pipe's ends, and its rings round the core: the layers' top over its grid, where it
-        is layered, else the grid itself."""
+        """Each run of pipes' ends, and its rings round the core: the layers' top over its grid,
+        where it is layered, else the grid itself."""
         top_of = np.arange(walls.points.shape[0])
         if stacked is not None:
             top_of[stacked[:, 0]] = stacked[:, -1]
         pipes = []
-        for f in np.asarray(pipe_faces).tolist():
-            grid = walls.grids[f]
-            ends = pipe_ends(topology, grid, f, walls.faces, walls.face, on_layered)
+        for run, grid in pipe_runs({f: walls.grids[f] for f in np.asarray(pipe_faces).tolist()}):
+            ends = pipe_ends(topology, grid, run, walls.faces, walls.face, on_layered)
             pipes.append((ends, top_of[grid]))
         return pipes
 

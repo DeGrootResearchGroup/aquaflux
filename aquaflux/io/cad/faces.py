@@ -27,6 +27,7 @@ __all__ = [
     "PlaneFace",
     "SolidDescription",
     "SphereFace",
+    "TorusFace",
 ]
 
 
@@ -123,8 +124,37 @@ class SphereFace:
 
 
 @dataclasses.dataclass(frozen=True)
+class TorusFace:
+    """A face lying on a circular torus: the surface a circle sweeps turning about an axis in its
+    own plane, as the wall of a pipe bend does.
+
+    Attributes
+    ----------
+    centre : np.ndarray, shape ``(3,)``
+        The point on the axis in the plane of the swept circle's centre.
+    axis : np.ndarray, shape ``(3,)``
+        Unit vector along the axis the circle turns about.
+    major_radius : float
+        The radius of the circle its centre sweeps (a bend's centreline radius).
+    minor_radius : float
+        The swept circle's radius (a bend's pipe radius).
+    angle : float
+        How far round the axis the face sweeps, in radians.
+    solid_inside : bool
+        Whether the solid lies inside the tube the swept circle bounds -- the fluid in a bend.
+    """
+
+    centre: np.ndarray
+    axis: np.ndarray
+    major_radius: float
+    minor_radius: float
+    angle: float
+    solid_inside: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class OtherFace:
-    """A face on a surface no recognition rule knows — a torus, a free-form spline patch.
+    """A face on a surface no record above describes — a free-form spline patch.
 
     Attributes
     ----------

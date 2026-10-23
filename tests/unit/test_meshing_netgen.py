@@ -809,3 +809,98 @@ def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path
             assert loop.size == 20
             step = np.linalg.norm(np.diff(surface.points[np.append(loop, loop[0])], axis=0), axis=1)
             assert step.max() < 1.001 * step.min()
+
+
+def test_a_bend_between_two_straight_pipes_is_one_o_grid_from_inlet_to_outlet(tmp_path):
+    # A straight pipe, a quarter bend (a torus) and a straight pipe, drawn as one solid: the three
+    # walls are pipes joined end to end at shared rims, so one O-grid runs through them, open at
+    # the inlet and the outlet. No tetrahedra are needed: every cell of the dual is a hexahedron
+    # but the triangular prisms along the core's four corners, and the mesh fills the tube.
+    pytest.importorskip("OCP")
+    import math
+    from collections import Counter
+
+    from aquaflux.io.cad import CadRegion, read_step
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeEdge,
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakeWire,
+    )
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeCylinder, BRepPrimAPI_MakeRevol
+    from OCP.gp import gp_Ax1, gp_Ax2, gp_Circ, gp_Dir, gp_Pnt
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Interface import Interface_Static
+    from OCP.ShapeUpgrade import ShapeUpgrade_UnifySameDomain
+    from OCP.STEPCAFControl import STEPCAFControl_Writer
+    from OCP.STEPControl import STEPControl_AsIs
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+
+    r, bend, leg = 0.05, 0.15, 0.1
+    top = gp_Dir(0.0, 0.0, 1.0)
+    before = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(-leg, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0), top), r, leg
+    ).Shape()
+    section = gp_Circ(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0), top), r)
+    disc = BRepBuilderAPI_MakeFace(
+        BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(section).Edge()).Wire()
+    ).Face()
+    turn = BRepPrimAPI_MakeRevol(
+        disc, gp_Ax1(gp_Pnt(0.0, bend, 0.0), gp_Dir(0.0, 0.0, 1.0)), 0.5 * math.pi
+    ).Shape()
+    after = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(bend, bend, 0.0), gp_Dir(0.0, 1.0, 0.0), top), r, leg
+    ).Shape()
+    unify = ShapeUpgrade_UnifySameDomain(
+        BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(before, turn).Shape(), after).Shape(), True, True, True
+    )
+    unify.Build()
+    # Written in millimetres from a document drawn in metres, as a CAD tool would.
+    document = TDocStd_Document(TCollection_ExtendedString("bend"))
+    XCAFDoc_DocumentTool.SetLengthUnit_s(document, 1.0)
+    XCAFDoc_DocumentTool.ShapeTool_s(document.Main()).AddShape(unify.Shape(), False)
+    Interface_Static.SetCVal_s("write.step.unit", "MM")
+    writer = STEPCAFControl_Writer()
+    writer.Transfer(document, STEPControl_AsIs)
+    assert writer.Write(str(tmp_path / "bend.step")) == IFSelect_RetDone
+    model = read_step(tmp_path / "bend.step")
+    patches = {
+        "inlet": FacesNear(((-leg, 0.0, 0.0),)),
+        "outlet": FacesNear(((bend, bend + leg, 0.0),)),
+    }
+    layers = PrismLayers(first_height=0.004, growth=1.2, count=2)
+    mesh = CadMesher(max_size=0.02, feature_angle=0.785, layers=layers).mesh(
+        model, CadRegion(model.names), patches, layered=("walls",)
+    )
+    geometry = mesh.geometry()
+    volume = np.asarray(geometry.cell.volume)
+    assert np.all(volume > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    # The mesh is the rims' polygon (the dual's inlet face runs round it through each rim point
+    # and each rim edge's middle, so twice as many edges) swept along the centreline, round the
+    # bend as along the legs (Pappus's theorem). A row of the bend's grid off its arc, a seam
+    # between two pipes' O-grids or a cell missing from one shows as volume lost or gained.
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    edges = Counter()
+    for f in np.asarray(mesh.face_patches.indices("inlet")).tolist():
+        ring = nodes[offsets[f] : offsets[f + 1]].tolist()
+        edges.update(tuple(sorted(e)) for e in zip(ring, ring[1:] + ring[:1], strict=True))
+    n = sum(1 for count in edges.values() if count == 1) // 2
+    polygon = 0.5 * n * r**2 * math.sin(2 * math.pi / n)
+    assert volume.sum() == pytest.approx(polygon * (2 * leg + 0.5 * math.pi * bend), rel=3e-3)
+    owner = np.asarray(mesh.face_cells.owner)
+    neighbour = np.asarray(mesh.face_cells.neighbour)
+    faces = np.bincount(owner, minlength=mesh.n_cells) + np.bincount(
+        neighbour[neighbour >= 0], minlength=mesh.n_cells
+    )
+    assert set(np.unique(faces).tolist()) == {5, 6}
+    # The prisms are the core's four corners in each cross-section: four a row, along the wall's
+    # rows of n faces round it.
+    rows = np.asarray(mesh.face_patches.indices("walls")).size / n
+    assert np.count_nonzero(faces == 5) == 4 * rows

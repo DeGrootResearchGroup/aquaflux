@@ -330,6 +330,16 @@ run and compare the studies; numbers in its README.
   node-averaged mean G is not a converged volume integral. `render.py` draws figures from 0.5 mm pixels
   masked by the exact water test; plate-plane figures are direct light only.
 
+## `sudo_bend` — a 90° pipe bend (Sudo, Sumida & Hibara 1998)
+
+The third canonical RANS case: curvature-driven secondary flow, no sharp-edged separation. **Meshed
+natively** from its own drawing (`geometry.py` → tracked `bend.step`; `mesh.yaml` → `work/bend.aqmesh`,
+gitignored, remade by `aquaflux mesh`), one O-grid from inlet to outlet through the bend
+(`meshing.md`, "Runs"); `render_mesh.py` draws `figures/`. **No flow case yet**: the inlet needs a
+fully developed profile (the experiment's ~100 D upstream), and the station list and digitized
+profiles are still to be taken from the paper. ⚠️ Before a case file names the mesh it must be tracked
+or declared in `test_shipped_case_paths.py`'s `GENERATED`.
+
 ## The aggressive Reynolds continuation does NOT need the complete LU
 
 `pitzdaily_openfoam/compare_reynolds_continuation.py` runs the aggressive `DualTimeControl(beta_start=0.5,

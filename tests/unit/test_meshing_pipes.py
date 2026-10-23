@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 import pytest
-from aquaflux.io.cad import CadRegion, CadTopology, CylinderFace, PlaneFace, Projection
+from aquaflux.io.cad import CadRegion, CadTopology, CylinderFace, PlaneFace, Projection, TorusFace
 from aquaflux.mesh import closed_cell_residual
 from aquaflux.meshing import (
     CadMesher,
@@ -193,7 +193,7 @@ def test_a_cylinder_the_fluid_fills_with_nothing_inside_is_a_pipe():
     found, refused = find_pipes(_tube_topology(), points, triangles, face, np.arange(3))
     assert found == [0]
     assert set(refused) == {1, 2}
-    assert "not a cylinder" in refused[1]
+    assert "neither a cylinder nor a torus" in refused[1]
 
 
 def test_a_cylinder_the_fluid_is_outside_is_not_a_pipe():
@@ -399,3 +399,168 @@ def test_a_pipe_whose_rims_netgen_divided_unequally_is_triangulated_again_and_co
     assert netgen.asked == [None, {0: 16, 1: 16}]
     scale = float(np.max(np.asarray(mesh.geometry().face.area)))
     assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+
+
+# A bend: a quarter torus (face 0) of tube radius RADIUS about the z axis through (0, BEND, 0), from
+# the plane x = 0 to the plane y = BEND, and a straight pipe (face 1) on along +y from its far rim.
+BEND = 3.0 * RADIUS
+
+
+def _section(angle, n):
+    """The bend's cross-section at ``angle`` (``n`` points), or past its end for ``angle > pi/2``:
+    the straight pipe's, ``angle - pi/2`` bend radii along it."""
+    turn = min(angle, 0.5 * np.pi)
+    along = np.array([np.sin(turn), -np.cos(turn), 0.0])
+    centre = np.array([0.0, BEND, 0.0]) + BEND * along
+    centre = centre + max(0.0, angle - 0.5 * np.pi) * BEND * np.array([0.0, 1.0, 0.0])
+    t = 2 * np.pi * np.arange(n) / n
+    return centre + RADIUS * (np.cos(t)[:, None] * along + np.sin(t)[:, None] * [0.0, 0.0, 1.0])
+
+
+def _bend_surface(counts):
+    """The bend and the straight pipe after it, triangulated as bands between rings whose counts
+    are ``counts`` (from the bend's first rim, two rows per face)."""
+    angles = np.linspace(0.0, np.pi, len(counts))
+    points, rings = [], []
+    for angle, n in zip(angles, counts, strict=True):
+        rings.append(len(points) + np.arange(n))
+        points += list(_section(angle, n))
+    points = np.array(points)
+    triangles, face = [], []
+    for j in range(len(counts) - 1):
+        a, b = rings[j], rings[j + 1]
+        a2, b2 = np.append(a, a[0]), np.append(b, b[0])
+        i = k = 0
+        while i < a.size or k < b.size:
+            if k == b.size or (i < a.size and (i + 1) / a.size <= (k + 1) / b.size):
+                triangles.append([a2[i], a2[i + 1], b2[k]])
+                i += 1
+            else:
+                triangles.append([a2[i], b2[k + 1], b2[k]])
+                k += 1
+            face.append(0 if angles[j] < 0.5 * np.pi - 1e-9 else 1)
+    return points, np.array(triangles), np.array(face)
+
+
+def _bend_topology() -> CadTopology:
+    """The bend (face 0) and the straight pipe (face 1): rims 0, 1 (shared), 2, and two seams."""
+    torus = TorusFace(
+        centre=np.array([0.0, BEND, 0.0]), axis=np.array([0.0, 0.0, 1.0]), major_radius=BEND,
+        minor_radius=RADIUS, angle=0.5 * np.pi, solid_inside=True,
+    )  # fmt: skip
+    pipe = CylinderFace(
+        origin=np.array([BEND, BEND, 0.0]), axis=np.array([0.0, 1.0, 0.0]), radius=RADIUS,
+        axial_range=(0.0, 0.5 * np.pi * BEND), angle=2 * np.pi, solid_inside=True,
+    )  # fmt: skip
+    vertices = np.array([[RADIUS, 0.0, 0.0], [BEND, BEND - RADIUS, 0.0], [BEND, 2 * BEND, 0.0]])
+    circle = 2 * np.pi * RADIUS
+    return CadTopology(
+        faces=(torus, pipe),
+        face_area=np.array([circle * BEND * 0.5 * np.pi, circle * BEND * 0.5 * np.pi]),
+        vertices=vertices,
+        edge_vertices=np.array([[0, 0], [1, 1], [2, 2], [0, 1], [1, 2]]),
+        edge_length=np.full(5, circle),
+        edge_face_offsets=np.array([0, 1, 3, 4, 6, 8]),
+        edge_face_indices=np.array([0, 0, 1, 1, 0, 0, 1, 1]),
+        edge_angle=np.array([np.nan, 0.0, np.nan, np.nan, np.nan]),
+        seam=np.array([False, False, False, True, True]),
+    )
+
+
+def _lamp_at(points, triangles, face, centre):
+    """The surface with a small triangle of another face (2) about ``centre``."""
+    lamp = centre + 0.2 * RADIUS * np.eye(3)
+    return (
+        np.vstack([points, lamp]),
+        np.vstack([triangles, len(points) + np.arange(3)[None]]),
+        np.append(face, 2),
+    )
+
+
+def _on_centreline(angle):
+    return np.array([0.0, BEND, 0.0]) + BEND * np.array([np.sin(angle), -np.cos(angle), 0.0])
+
+
+def test_a_torus_the_fluid_fills_is_a_pipe_and_one_with_something_in_its_tube_is_not():
+    points, triangles, face = _bend_surface([N] * 5)
+    found, refused = find_pipes(_bend_topology(), points, triangles, face, np.array([0, 1]))
+    assert (found, refused) == ([0, 1], {})
+    # A triangle on the bend's centreline half way round it is something inside the bend.
+    lamp = _lamp_at(points, triangles, face, _on_centreline(0.25 * np.pi))
+    _, refused = find_pipes(_bend_topology(), *lamp, np.array([0]))
+    assert "something else lies inside it" in refused[0]
+
+
+def test_what_lies_on_a_bends_circle_beyond_its_ends_is_not_inside_it():
+    # On the torus's centreline circle a half turn round from the bend's start -- inside the whole
+    # torus, but not the bend's quarter of it -- a triangle leaves the bend a pipe.
+    points, triangles, face = _bend_surface([N] * 5)
+    lamp = _lamp_at(points, triangles, face, _on_centreline(np.pi))
+    found, _ = find_pipes(_bend_topology(), *lamp, np.array([0]))
+    assert found == [0]
+
+
+def test_pipes_joined_at_a_rim_are_divided_alike_all_along():
+    # The bend's rims are 12 and 12 points, the straight pipe's 12 and 14: alone the bend would
+    # ask nothing, but the shared rim must take the straight pipe's 16, so the bend's far rim too,
+    # or the bend's two rims would differ.
+    _, triangles, face = _bend_surface([12, 12, 12, 13, 14])
+    divisions = rim_divisions(_bend_topology(), triangles, face, np.array([0, 1]))
+    assert divisions == {0: 16, 1: 16, 2: 16}
+
+
+def _grid(rows, n, start=0):
+    return start + np.arange(rows * n).reshape(rows, n)
+
+
+def _grid_edges(grid):
+    """A grid's edges round its rows and along its columns, each as a sorted pair."""
+    closed = np.concatenate([grid, grid[:, :1]], axis=1)
+    around = np.stack([closed[:, :-1], closed[:, 1:]], axis=-1).reshape(-1, 2)
+    along = np.stack([grid[:-1], grid[1:]], axis=-1).reshape(-1, 2)
+    return {tuple(sorted(e)) for e in around.tolist()}, {tuple(sorted(e)) for e in along.tolist()}
+
+
+@pytest.mark.parametrize("reverse_rows", [False, True])
+@pytest.mark.parametrize("reverse_columns", [False, True])
+@pytest.mark.parametrize("roll", [0, 5])
+def test_pipes_sharing_a_rim_are_one_run_whose_grid_joins_them_point_for_point(
+    reverse_rows, reverse_columns, roll
+):
+    # The second pipe's grid starts at the first's last rim, however its rows and columns run:
+    # the run's grid holds every point once, row after row, and every edge round its rows and
+    # along its columns is one of the two pipes' own.
+    from aquaflux.meshing.pipes import pipe_runs
+
+    first = _grid(4, 8)
+    second = np.vstack([first[-1], _grid(3, 8, start=100)])
+    if reverse_columns:
+        second = second[:, ::-1]
+    second = np.roll(second, roll, axis=1)
+    if reverse_rows:
+        second = second[::-1]
+    ((faces, grid),) = pipe_runs({3: first, 7: second})
+    assert grid.shape == (7, 8)
+    assert sorted(faces) == [3, 7]
+    np.testing.assert_array_equal(
+        np.sort(grid, axis=None), np.r_[np.arange(32), 100 + np.arange(24)]
+    )
+    around, along = _grid_edges(grid)
+    for pipe in (first, second):
+        own_around, own_along = _grid_edges(pipe)
+        assert own_around <= around
+        assert own_along <= along
+    assert len(along) == 6 * 8
+
+
+def test_three_pipes_at_one_rim_or_a_loop_of_pipes_have_no_run():
+    from aquaflux.meshing.pipes import pipe_runs
+
+    first = _grid(3, 4)
+    branch = np.vstack([first[-1], _grid(2, 4, start=50)])
+    other = np.vstack([first[-1], _grid(2, 4, start=80)])
+    with pytest.raises(ValueError, match="all meet at one rim"):
+        pipe_runs({0: first, 1: branch, 2: other})
+    back = np.vstack([first[-1], _grid(1, 4, start=50), first[0]])
+    with pytest.raises(ValueError, match="in a loop"):
+        pipe_runs({0: first, 1: back})
