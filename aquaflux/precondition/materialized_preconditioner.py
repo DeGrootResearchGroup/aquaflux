@@ -71,9 +71,10 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
     ) -> ProbedBlocks:
         """The coupled Jacobian **without** the shift, probed into ``structure``'s block layout.
 
-        The same probe as :meth:`_materialize_jacobian`, into one block-major value array whose blocks
-        are views (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`), so a field split
-        is fitted without the whole matrix, its shifted copy or a cut of it ever being formed.
+        The same probe as :meth:`_materialize_jacobian`, into one block-major value array on the device
+        (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`), so an inverse is fitted
+        without a host matrix, its shifted copy or a cut of it ever being formed: a field split's
+        layout gives its blocks, a single group's gives the whole matrix as its one block.
         """
         from .sparse_jacobian import materialize_blocks
 
@@ -86,10 +87,8 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         )
 
     def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
-        """Re-fit the inverse to an operator probed into blocks; only a field split can take one."""
-        raise TypeError(
-            f"a probe laid out block by block feeds a field split only, not a {type(self).__name__}."
-        )
+        """Re-fit the inverse to an operator probed into its layout's blocks: the subclass's own."""
+        raise NotImplementedError
 
     @staticmethod
     def _shifted(jacobian_no_shift: sp.csr_matrix, shift_diagonal: np.ndarray) -> sp.csr_matrix:
@@ -112,8 +111,8 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
     ) -> jnp.ndarray:
         """The diagonal a re-fit adds to the Jacobian: the shift, plus ``diagonal_correction``'s amount.
 
-        Both re-fit paths -- the whole matrix and a probe straight into a split's blocks -- go through
-        here, so a correction reaches the fit whichever one runs. ``jacobian_diagonal`` reads the
+        Both re-fit paths -- a host matrix (no probe structure given) and a probe straight into its
+        layout's blocks -- go through here, so a correction reaches the fit whichever one runs. ``jacobian_diagonal`` reads the
         unshifted Jacobian's diagonal, shape ``(n_dofs,)``, and is called only when there is a
         correction to ask for. On the block path every operand is on the device, and so is the sum.
         """
@@ -167,9 +166,9 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
         """
         inverse = require_refactorable(self.inverse, f"this {type(self).__name__}")
         timer = PhaseTimer()
-        if structure is not None and structure.layout is not None:
-            # Probed into blocks on the device: the shift is added in place on values this refresh owns,
-            # and the blocks go straight to the inverse, so the whole matrix is never formed and no
+        if structure is not None:
+            # Probed into its layout's blocks on the device: the shift is added in place on values this
+            # refresh owns, and the blocks go straight to the inverse, so no host matrix is formed and no
             # value is read back to the host.
             probed = self._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
             # Each phase waits for its own device work, so the log charges it to the phase that did it.

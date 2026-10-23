@@ -687,3 +687,34 @@ def test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix(leadin
         again.pattern is block.pattern for again, block in zip(probed.blocks(), got, strict=True)
     )
     assert got[1].nnz == 0  # the triangle a split never reads is not stored
+
+
+def test_the_seeds_formed_on_the_device_are_each_probes_colour_indicator() -> None:
+    """Each seed row is the indicator of its probe's colour in its own field, and padding rows are zero.
+
+    Against the definition written out on the host, over a range spanning two column fields (whole-state
+    seeds may) and padded past its end, and for one field's seeds on their own; per-column reaches give
+    the fields different colourings, so a seed built from the wrong field's colours would differ.
+    """
+    owner, nb = _path_graph(30)
+    plan = column_probe_plan(owner, nb, 30, column_reach=(1, 3), pattern_reach=3)
+    n = plan.n_cells
+    assert plan.n_colours[0] != plan.n_colours[1]
+
+    def indicator(index: int) -> np.ndarray:
+        field, colour = plan.probe(index)
+        row = np.zeros(plan.n_fields * n)
+        row[field * n : (field + 1) * n] = plan.colour[field] == colour
+        return row
+
+    start, stop = plan.probe_base[1] - 2, plan.probe_base[1] + 3
+    seeds = np.asarray(plan.seed_block(start, stop, rows=stop - start + 4))
+    expected = np.zeros_like(seeds)
+    expected[: stop - start] = [indicator(index) for index in range(start, stop)]
+    np.testing.assert_array_equal(seeds, expected)
+
+    base = plan.probe_base[1]
+    alone = np.asarray(plan.field_seeds(base, base + 3, rows=5, dtype=np.float32))
+    assert alone.dtype == np.float32
+    np.testing.assert_array_equal(alone[:3], [indicator(i)[n:] for i in range(base, base + 3)])
+    assert not alone[3:].any()

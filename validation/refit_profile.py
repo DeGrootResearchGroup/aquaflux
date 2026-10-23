@@ -210,11 +210,11 @@ def main() -> None:
     pieces = _Pieces()
     pieces.wrap(host, "_materialize_jacobian", "probe (coloured JVPs + gather)")
     pieces.wrap(host, "_probed_blocks", "probe (coloured JVPs + gather)")  # a field split's probe
-    pieces.wrap(probe.plan, "seed_block", "probe: fill the seeds (host)")
+    pieces.wrap(probe.plan, "seed_block", "probe: form the seeds (device)")
     pieces.wrap(
-        probe.plan, "field_seeds", "probe: fill the seeds (host)"
+        probe.plan, "field_seeds", "probe: form the seeds (device)"
     )  # the per-field programs' seeds
-    pieces.wrap(probe.structure, "scatter", "probe: scatter the responses (host)")
+    pieces.wrap(probe.structure, "scatter", "probe: scatter the responses (device)")
     pieces.wrap(host, "_shifted", "assemble the shift")
     pieces.wrap(split._groups, "blocks", "refactor: slice the blocks")
     pieces.wrap(split._leading, "refactor_block", "refactor: leading [u,v,w,p]")

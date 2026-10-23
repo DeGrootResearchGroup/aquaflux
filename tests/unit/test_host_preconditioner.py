@@ -227,3 +227,74 @@ def test_the_shared_refresh_refuses_an_inverse_that_cannot_refit() -> None:
     preconditioner = MaterializedJacobianPreconditioner(_Doubling())
     with pytest.raises(TypeError, match="_Doubling offers no refactor_block"):
         preconditioner.refresh_in_place(lambda v: v, None, np.zeros(4))
+
+
+def test_a_single_block_refit_probed_on_the_device_fits_what_the_whole_host_matrix_fits(
+    monkeypatch,
+) -> None:
+    """One block inverse refitted from a probe laid out as one group never reads the matrix back.
+
+    The values, the shift and a diagonal correction stay on the device, and the hierarchy is fitted
+    where they are; the fit must be the one the host path gives from the whole shifted matrix, leaf for
+    leaf. A probe laid out over a field split's partition is refused rather than fitted to its leading
+    block.
+    """
+    from types import SimpleNamespace
+
+    import jax
+    from aquaflux.precondition import JacobiSmoothedInverse, block_preconditioner, hierarchy_inverse
+    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+
+    from tests.unit.test_field_split import _nodal_block
+
+    a = _nodal_block(n_cells=200, n_fields=2)
+    developed = (1.7 * a).tocsr()
+    developed.setdiag(developed.diagonal() * 1.1)
+    rng = np.random.default_rng(2)
+    shift = rng.uniform(1.0, 2.0, a.shape[0])
+    correction = rng.uniform(0.0, 0.5, a.shape[0])
+    on_device = MaterializedBlockPreconditioner(JacobiSmoothedInverse(a, 2))
+    on_host = MaterializedBlockPreconditioner(JacobiSmoothedInverse(a, 2))
+
+    orders = {}
+
+    def laid_out(leading_dofs: int):
+        layout, orders[id(layout)] = BlockLayout.of(developed, leading_dofs)
+        return SimpleNamespace(layout=layout)
+
+    def probed(*args):  # the probe, standing in: the developed values in the structure's own layout
+        layout = args[-1].layout
+        return ProbedBlocks(jnp.asarray(developed.data[orders[id(layout)]]), layout)
+
+    whole = laid_out(a.shape[0])
+    assert whole.layout.whole is not None
+    monkeypatch.setattr(MaterializedBlockPreconditioner, "_probed_blocks", staticmethod(probed))
+
+    def no_host(_block):
+        raise AssertionError("a refit probed on the device read the matrix back to the host")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hierarchy_inverse, "as_scipy", no_host)
+        patch.setattr(block_preconditioner, "as_scipy", no_host)
+        on_device.refresh_in_place(
+            None,
+            None,
+            jnp.asarray(shift),
+            structure=whole,
+            diagonal_correction=lambda _diagonal: jnp.asarray(correction),
+        )
+    monkeypatch.setattr(
+        MaterializedBlockPreconditioner,
+        "_materialize_jacobian",
+        staticmethod(lambda *_args: developed),
+    )
+    on_host.refresh_in_place(None, None, shift, diagonal_correction=lambda _diagonal: correction)
+
+    device_leaves = jax.tree.leaves(on_device.inverse.traced_cycle().state)
+    host_leaves = jax.tree.leaves(on_host.inverse.traced_cycle().state)
+    assert len(device_leaves) == len(host_leaves)
+    for got, want in zip(device_leaves, host_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+    with pytest.raises(ValueError, match="one block inverse is fitted to the whole matrix"):
+        on_device.refresh_in_place(None, None, jnp.asarray(shift), structure=laid_out(200))
