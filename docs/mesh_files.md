@@ -99,12 +99,15 @@ layered: [walls, lamp, lamp_tip]
 mapped: [lamp]
 ```
 
-Pipes are found by themselves: a cylindrical face -- or a toroidal one, a bend -- the fluid
-fills, with nothing else inside it, bounded by two rims. Both rims are divided alike, into a
+Pipes are found by themselves: any face shaped as a tube the fluid fills -- a straight length, a
+bend, a coil, a reducer, a pipe swept along any curve -- with nothing else inside it, bounded by two
+rims. They are told from the shape of the face itself, not from the kind of surface the drawing
+stores it as. Both rims are divided alike, into a
 multiple of four, so that the O-grid can join them at every mesh size: where Netgen's own division
 would not do, the region is triangulated again with the rims' division set. Its wall is meshed as a
-structured grid, its rows the cross-sections a rim passes through as it slides along a straight
-pipe or turns round a bend, layered if its patch is, and its core -- what the layers leave -- is
+structured grid whose rows are its cross-sections -- the rim slid along a straight pipe, turned
+round a bend or screwed along a coil, and for a pipe curving any other way, cross-sections found
+one after another along it -- layered if its patch is, and its core -- what the layers leave -- is
 filled with a structured O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core,
 whose sides may bow outward (`core_bow`) to even out its corners, and a shell out to the layers.
 Pipes joined end to end at shared rims -- a straight length, a bend, another straight length --

@@ -284,8 +284,9 @@ class CadMesher:
             (see :class:`~aquaflux.meshing.MappedQuads`): each face a band or four-sided. Layered,
             they carry hexahedra.
         pipes : sequence of str, or None
-            The patches whose faces are pipes: each a cylinder or a torus (a bend) the fluid
-            fills, bounded by two loops (its rims), with nothing else inside it. A pipe's face is
+            The patches whose faces are pipes: each a tube the fluid fills -- straight, bent,
+            coiled, tapering or swept along any curve, told from its triangles rather than its
+            kind of surface -- bounded by two loops (its rims), with nothing else inside it. A pipe's face is
             meshed as a structured grid (as ``mapped``), layered if its patch is, and its core
             filled with a structured O-grid (:attr:`pipe_core`; see :mod:`~aquaflux.meshing.pipes`),
             one O-grid through pipes joined end to end. Where Netgen's division of a candidate's
@@ -342,7 +343,9 @@ class CadMesher:
             )
             patch_of_face = assign_patches(faces, patches)
             candidates = _pipe_candidates(topology, patch_of_face, names, named_pipes)
-            divisions = rim_divisions(topology, surface.triangles, surface.face, candidates)
+            divisions = rim_divisions(
+                topology, surface.points, surface.triangles, surface.face, candidates
+            )
             if divisions:
                 # Netgen's own rims would not take an O-grid: triangulate again, rims divided alike.
                 stage("triangulating again, the pipes' rims divided alike")
@@ -442,7 +445,7 @@ class CadMesher:
             return MappedSurface(surface.points, Polygons(surface.triangles), surface.face)
         return MappedQuads().remesh(
             surface.points, surface.triangles, surface.face, chosen, topology.vertices,
-            lambda points, faces: model.project(region, points, faces=faces).points,
+            lambda points, faces: _points_and_normals(model.project(region, points, faces=faces)),
         )  # fmt: skip
 
     def _cored(self, points: np.ndarray, surface: np.ndarray):
@@ -536,6 +539,11 @@ def _compacted(points: np.ndarray, cells: list[np.ndarray]):
         return position[np.asarray(indices, dtype=np.int64)]
 
     return points[used], renumber
+
+
+def _points_and_normals(projection) -> tuple[np.ndarray, np.ndarray]:
+    """A projection onto the drawing as the points it lands on and the normals there."""
+    return projection.points, projection.normal
 
 
 def _faces_of(patch_of_face: np.ndarray, names, chosen) -> np.ndarray:

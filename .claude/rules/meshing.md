@@ -275,31 +275,45 @@ patches (agreed with the project owner, 2026-10-20: quads from mapped meshing of
 extruder for both kinds, pyramid caps to the fill; a block's faces as the source were the alternative
 not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells are hexahedra.
 - **Two shapes, read from the face's own triangles** (boundary edges used once, chained into loops in
-  their winding): **a band** (two loops: a cylinder, cone, torus sector, a flat ring) -- rows from the loop
-  with more points toward the other, `round(path / mean spacing)` rows;
+  their winding): **a band** (two loops: any tube, a cone, a flat ring) -- rows from the loop with more
+  points toward the other (below);
   **four-sided** (one loop, four points within `corner_tolerance` × extent of the drawing's vertices) --
   a Coons grid of its sides. Anything else (Sozzi's hemispherical lamp tip: one loop, no four corners;
   the vessel's cylinder: three loops, the riser's hole) is refused by name.
-- **A band's rows follow the rigid motion between its rims (`RimMotion`, a screw: turn about a line plus
-  slide along it, fitted by Kabsch to the rims point for point)**: row `t` is the first rim carried `t` of
-  the way, plus `t` of what the motion leaves (a cone's radius change, a flat ring), plus the rims' bows
-  fading over `RIM_ROWS`, each bow measured along the motion's own direction at that rim (the axis on a
-  straight pipe, the tangent round a bend). A straight pipe's rims are a slide, so its rows are the former
-  straight interpolation; a bend's are a turn, so each row is a cross-section through the bend's axis.
-  The path is each rim point's helix length (an arc round a bend, not its chord). **The roll of the second
-  rim is the one carried by the least turn** -- a round rim maps onto itself under any spin, so every roll
-  fits equally; the least turn is the untwisted one (pinned on the bend and as nearest-point roll).
+- **A band's rows, three ways** (`_Builder.band`; the second rim's roll is always the one its rows' end
+  is carried onto by the least turn -- a round rim maps onto itself under any spin, so every roll fits
+  equally; the least turn is the untwisted one):
+  - **the one rigid motion between the rims** (`RimMotion`, a screw: turn about a line plus slide along
+    it, fitted by Kabsch to the flattened rims point for point) when the band is no tube (rims' radii
+    more than `TUBE_RADII` 2 % apart: a cone, a flat ring) or when the wall *is* the tube its rim sweeps
+    along that screw (`_follows`: every wall point within `SWEPT_WALL` 5 % of the radius of the swept
+    centreline, carried on 2 r past either rim for a saddle): a straight pipe's slide, a bend's turn, a
+    coil's screw -- exact, rows `round(mean helix length / spacing)`. Row `t` is the first rim carried
+    `t` of the way, plus `t` of what the motion leaves (a cone's radius change);
+  - **else marched along the tube** (`sections.TubeWall.march`, an S-bend, a sweep along a free curve):
+    rows `round((area / mean rim perimeter) / spacing)` (the tube's length by Pappus), each cross-section
+    the plane **its wall normals lie in** (smallest eigenvector of `Σ ν νᵀ` over its cut points),
+    re-centred on the cut and refined to `SETTLED` 1e-6 rad (about three refinements), predicted from
+    the last by the last step's turn; cuts are rays on the face's triangles moved onto the drawing,
+    **normals from the drawing** (`onto` returns points and normals). ⚠️ Facet normals averaged at
+    vertices lean toward the larger facets where curvature changes: the S's inflection row leant 1.5°
+    with them, 0.04° with the drawing's (pinned by
+    `test_an_s_bends_band_becomes_a_grid_of_its_cross_sections_marched_along_it`). The marched end is
+    carried onto the far rim by the rigid motion between them, `t` of it at row `t`;
+  - either way the rims' bows (measured along each rim's Newell normal) fade over `RIM_ROWS`.
   ⚠️ **Turns under `STRAIGHT` (1e-6 rad) are a slide**: Netgen's rims of a straight pipe fit with a
   rounding-error turn (2e-8 rad seen) whose line is ~10⁷ m away, and a least-squares pivot then gave
   7·10⁸ rows; the pivot is the closed form `½(t⊥ + cot(θ/2) u × t⊥)` (pinned by
   `test_a_rim_motion_between_two_rims_of_a_straight_pipe_is_a_slide_despite_rounding`).
+- **`_loops` refuses a boundary that is not simple loops** (a point on it twice): walked on every face as
+  a pipe candidate since recognition went generic, the stub cube's faces looped forever.
 - **Netgen's edge points, kept**: the grid's sides are the triangulation's, which the neighbouring faces
   share (per-edge `maxh` is only a bound; an exact count needs `edge_divisions`, below, used for pipe
   rims only). **Unequal opposite
   sides**: the grid stops a row short and a strip of triangles (`_zipped`, shorter diagonal first) joins it
   to the shorter-counted side; a four-sided face with both pairs unequal is refused.
-- New points are interpolated in space and moved onto the face by the injected `onto` (the mesher's
-  `CadModel.project(faces=)`); no surface parameters are read. **Wound by construction** (rows run from a
+- New points are interpolated in space and moved onto the face by the injected `onto(points, faces) ->
+  (points, normals)` (the mesher's `CadModel.project(faces=)`); no surface parameters are read. **Wound by construction** (rows run from a
   loop, in its winding, into the face), pinned by the outward-normal assertion; a reorientation step was
   dominated and deleted.
 - Measured on Sozzi (lamp cylinder and both pipes mapped; log): 98.6 / 98.8 % of the lamp's / pipes'
@@ -327,8 +341,8 @@ not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells a
   (`CloseOpenQuads`) does not close quads given from Python (log). Background: log, "hexahedra to
   tetrahedra: what the literature and other meshers do". Pinned by `tests/unit/test_meshing_caps.py`
   and `test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge`.
-- Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, Coons grids with and
-  without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
+- Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, a bend's rows its
+  meridians, an S-bend marched, `RimMotion`'s fit, Coons grids with and without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
   wall face with no vertex on a CAD edge a hexahedron's; Sozzi's lamp and pipes).
 
 ## Pipes: structured O-grid cores (`pipes.py`, `pipe_core.py`) — built
@@ -338,11 +352,13 @@ structured O-grid** (`PipeCore`) whose outer quads are the layers' top quads, po
 seam, no caps inside the pipe (agreed with the project owner, 2026-10-20, over replacing whole pipes
 with the block mesher's `PipeOGrid`: the extruder keeps the wall cells and their hand-over to the
 vessel's layers at the junction; a few layers then a full O-grid inside gives the grading control).
-- **Found** (`find_pipes`): a `CylinderFace` or `TorusFace` (a bend) with the fluid inside
-  (`solid_inside`), two loops of equal counts, a multiple of four, nothing else of the surface inside it
-  between its rims (`_Tube`: within the tube radius of the straight or circular centreline, inside the
-  height or angle span the face's own points cover; refuses a vessel shell round a lamp); `rim_counts=False` skips the counts, for the drawing view (asked before any
-  rim is divided). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
+- **Found** (`find_pipes`) **from the face's triangulation, not its CAD record** (`_TubeShape`): two
+  simple loops; closed across them by centroid fans, a volume over `TUBE_VOLUME` 0.1 × area × rim radius
+  (a tube holds 0.5, a flat ring 0; negative is a bore, "the fluid is outside it"); equal rim counts, a
+  multiple of four; and no other surface point (the pipe's own and its caps' aside) inside the closed
+  tube (`ClosedSurface.inside`). So straight lengths, bends, coils, reducers and free-form sweeps (a
+  B-spline surface, an `OtherFace`) are all pipes; `rim_divisions(topology, points, ...)` uses the same
+  test. `rim_counts=False` skips the counts, for the drawing view (asked before any rim is divided). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
   the patches, each face of which must be one (else `ValueError` naming the reason); `()` none.
   `MeshSpec.pipes` / `MeshSpec.pipe_core` in a mesh file.
 - **Rims divided alike** (`rim_divisions`, #789): Netgen's rim counts follow the size (Sozzi: 12/13 at
@@ -394,12 +410,15 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   pipes' faces over 50° 32-37 against 85-93 without cores, p99 6.0° against 46.8°, worst 59-60° against
   87-89°, neighbour volume ratio p99 36-38 against 165-177; ~1k more cells. ⚠️ The junction discs'
   cap apexes leave 2-3 cells of ~3.5e-11 m³ (0.33 mm) per mesh -- #785, now confined to two discs.
-- Pinned in `tests/unit/test_meshing_pipes.py` (the bend as a pipe and its `_Tube` span, the joined
-  rim division, `pipe_runs`' joins and refusals; O-grid exact in a polygon prism, its outer faces the
+- Pinned in `tests/unit/test_meshing_pipes.py` (the bend as a pipe, one beyond its ends, a bore and a
+  flat ring refused, the joined rim division, `pipe_runs`' joins and refusals; O-grid exact in a polygon prism, its outer faces the
   rings' quads, corners, bow, radial lines not twisted; `find_pipes`' refusals; the whole mesher on a stub
   cylinder open at both ends, no Netgen, every cell hexahedral but the corner prisms) and
   `test_meshing_netgen.py` (Sozzi's pipes: closure, pipe p99 < 7°, hexahedra along both axes, end areas;
-  a leg-bend-leg run: only hexahedra and four core-corner prisms a row, volume the swept polygon's).
+  a leg-bend-leg run: only hexahedra and four core-corner prisms a row, volume the swept polygon's; a
+  disc swept along a B-spline S, its wall an `OtherFace`: the same, non-orthogonality under 25°).
+  ⚠️ At an open end the core's lines seem to kink in a slice: the dual's end cells are half cells, their
+  centroids nearer the primal core corners (27 against 24.5 mm on that sweep) -- the dual's, not the rows'.
 
 ## The block mesher — built as a library (`blocks.py`, `divisions.py`, `surfaces.py`, `lattices.py`, `block_assembly.py`, `block_topologies.py`)
 

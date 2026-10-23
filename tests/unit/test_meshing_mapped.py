@@ -14,7 +14,7 @@ from collections import Counter
 import numpy as np
 import pytest
 from aquaflux.meshing import MappedQuads, Polygons
-from scipy.spatial import Delaunay
+from scipy.spatial import Delaunay, cKDTree
 
 
 def _rings(points: np.ndarray, first: np.ndarray, second: np.ndarray) -> np.ndarray:
@@ -74,11 +74,13 @@ def _outward(points, triangles, outward):
 
 def _onto_cylinder(points, faces):
     radius = np.linalg.norm(points[:, :2], axis=1, keepdims=True)
-    return np.c_[points[:, :2] / radius, points[:, 2]]
+    landed = np.c_[points[:, :2] / radius, points[:, 2]]
+    return landed, np.c_[landed[:, :2], np.zeros(len(points))]
 
 
 def _onto_plane(points, faces):
-    return np.c_[points[:, :2], np.zeros(len(points))]
+    normal = np.tile([0.0, 0.0, 1.0], (len(points), 1))
+    return np.c_[points[:, :2], np.zeros(len(points))], normal
 
 
 SQUARE_CORNERS = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)
@@ -255,8 +257,9 @@ def _onto_centreline(points: np.ndarray) -> np.ndarray:
 
 def _onto_torus(points, faces):
     centre = _onto_centreline(points)
-    offset = points - centre
-    return centre + offset / np.linalg.norm(offset, axis=1, keepdims=True)
+    normal = points - centre
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    return centre + normal, normal
 
 
 def test_a_bends_band_becomes_a_grid_of_cross_sections_turned_round_its_axis():
@@ -323,3 +326,82 @@ def test_a_rim_motion_between_two_rims_of_a_straight_pipe_is_a_slide_despite_rou
     assert motion.angle == 0.0
     np.testing.assert_allclose(motion.path_length(rim), 3.0, rtol=1e-9)
     np.testing.assert_allclose(motion.at(0.5, rim), rim + np.array([1.5, 0.0, 0.0]), atol=1e-9)
+
+
+# An S-bend in one face: a quarter turn of radius TURN one way, then a quarter turn back, in the
+# plane z = 0, its tube of radius 1. Its rims are parallel, so the one rigid motion between them
+# is a slide, and only a march along it finds its cross-sections.
+TURN = 4.0
+
+
+def _s_bend_centreline(s: np.ndarray):
+    """The centreline at arc length ``s`` (from 0 to pi TURN) and its unit tangent there."""
+    half = 0.5 * np.pi * TURN
+    first = s <= half
+    angle = np.where(first, s / TURN, (2 * half - s) / TURN)
+    centre_first = np.c_[TURN * np.sin(angle), TURN * (1 - np.cos(angle)), 0 * s]
+    # The second turn is the first turned half a circle about the S's middle.
+    middle = np.array([TURN, TURN, 0.0])
+    centre_second = 2 * middle - centre_first
+    point = np.where(first[:, None], centre_first, centre_second)
+    tangent = np.c_[np.cos(angle), np.sin(angle), 0 * s]
+    return point, tangent
+
+
+def _s_bend_band(n: int = 24, rings: int = 64):
+    points, loops = [], []
+    s = np.linspace(0.0, np.pi * TURN, rings + 1)
+    centre, tangent = _s_bend_centreline(s)
+    t = 0.5 * np.pi + 2 * np.pi * np.arange(n) / n
+    for c, tan in zip(centre, tangent, strict=True):
+        side = np.cross([0.0, 0.0, 1.0], tan)
+        loops.append(len(points) + np.arange(n))
+        points += list(c + np.cos(t)[:, None] * side + np.sin(t)[:, None] * [0.0, 0.0, 1.0])
+    points = np.array(points)
+    triangles = np.concatenate([_rings(points, loops[j], loops[j + 1]) for j in range(rings)])
+    return points, _outward(points, triangles, lambda c: c - _s_bend_nearest(c)[0])
+
+
+_S_SAMPLES = np.linspace(0.0, np.pi * TURN, 20001)
+_S_CENTRE, _S_TANGENT = _s_bend_centreline(_S_SAMPLES)
+_S_TREE = cKDTree(_S_CENTRE)
+
+
+def _s_bend_nearest(points):
+    """The nearest centreline point to each point (to 6e-4 of the tube's radius), the
+    centreline's tangent there and its arc length."""
+    _, at = _S_TREE.query(points)
+    return _S_CENTRE[at], _S_TANGENT[at], _S_SAMPLES[at]
+
+
+def _onto_s_bend(points, faces):
+    centre = _s_bend_nearest(points)[0]
+    normal = points - centre
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    return centre + normal, normal
+
+
+def test_an_s_bends_band_becomes_a_grid_of_its_cross_sections_marched_along_it():
+    # Each row is a cross-section: its plane square to the centreline where it crosses it, the
+    # rows evenly spaced along it. Swept by the slide between its parallel rims instead, the rows
+    # in the middle of the S would stand at 45 degrees to it; with the wall's normals taken from
+    # its facets (averaged at their vertices), the row at the S's inflection leant 1.5 degrees.
+    n = 24
+    points, triangles = _s_bend_band(n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_s_bend
+    )
+    grid = mapped.grids[0]
+    rows = round(np.pi * TURN / (2 * np.sin(np.pi / n)))
+    assert grid.shape[0] - 1 == pytest.approx(rows, abs=1)
+    ring = mapped.points[grid]
+    centroid = ring.mean(axis=1)
+    _, tangent, arc = _s_bend_nearest(centroid)
+    offset = ring - centroid[:, None]
+    normal = np.cross(offset, np.roll(offset, -1, axis=1)).sum(axis=1)
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    tilt = np.degrees(np.arccos(np.clip(np.abs(np.einsum("ij,ij->i", normal, tangent)), 0, 1)))
+    assert tilt.max() < 0.1
+    spacing = np.diff(np.sort(arc))
+    assert spacing.max() / spacing.min() < 1.02

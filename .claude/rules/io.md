@@ -296,8 +296,9 @@ chord=, facet_size=)` (an emitting surface).
   - `ConvexPolyhedron`: an all-planar solid with every vertex inside every face plane is the `Intersection`
     of its `HalfSpace`s — proven, not checked; in a union check the drawing's own solid stands in for it.
   - A torus face is described (`TorusFace`: centre, axis, major/minor radius, swept angle,
-    `solid_inside` = the solid inside the tube, from the normal against the nearest centreline point) for
-    the mesher's bends, but no body stands for a piece of one: `CurvedPieces` declines it like an
+    `solid_inside` = the solid inside the tube, from the normal against the nearest centreline point; the
+    drawing view names it a torus; the mesher finds pipes from triangles, not records), but no body
+    stands for a piece of one: `CurvedPieces` declines it like an
     `OtherFace` ("surfaces no rule describes (Torus)"). Pinned by `test_cad_step.py` (a bend inside, a
     groove outside).
   - Anything else raises `UnrecognizedSolid` naming every rule's reason. **No fallback to triangles**:

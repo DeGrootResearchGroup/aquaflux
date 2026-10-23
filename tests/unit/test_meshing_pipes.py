@@ -193,15 +193,38 @@ def test_a_cylinder_the_fluid_fills_with_nothing_inside_is_a_pipe():
     found, refused = find_pipes(_tube_topology(), points, triangles, face, np.arange(3))
     assert found == [0]
     assert set(refused) == {1, 2}
-    assert "neither a cylinder nor a torus" in refused[1]
+    assert "bounded by 1 loops, not the two of a band" in refused[1]
+
+
+def _bored(triangles, face):
+    """The cylinder's wall wound into the cylinder: the fluid round it, as round a bore."""
+    triangles = triangles.copy()
+    triangles[face == 0] = triangles[face == 0][:, ::-1]
+    return triangles
 
 
 def test_a_cylinder_the_fluid_is_outside_is_not_a_pipe():
-    wall = CylinderFace(np.zeros(3), np.array([0.0, 0.0, 1.0]), RADIUS, (0.0, HEIGHT), 2 * np.pi,
-                        solid_inside=False)  # fmt: skip
     points, triangles, face = _tube_surface()
-    _, refused = find_pipes(_tube_topology(wall), points, triangles, face, np.array([0]))
+    _, refused = find_pipes(_tube_topology(), points, _bored(triangles, face), face, np.array([0]))
     assert "the fluid is outside it" in refused[0]
+
+
+def test_a_flat_ring_is_not_a_pipe():
+    # A band between two concentric circles in one plane: two rims, but no tube between them.
+    angle = 2 * np.pi * np.arange(N) / N
+    inner = np.c_[np.cos(angle), np.sin(angle), np.zeros(N)]
+    points = np.vstack([inner, 2.0 * inner])
+    triangles = []
+    for i in range(N):
+        j = (i + 1) % N
+        triangles += [[i, N + j, j], [i, N + i, N + j]]
+    triangles = np.array(triangles)
+    normal = np.cross(points[triangles[:, 1]] - points[triangles[:, 0]],
+                      points[triangles[:, 2]] - points[triangles[:, 0]])  # fmt: skip
+    triangles[normal[:, 2] < 0] = triangles[normal[:, 2] < 0][:, ::-1]
+    face = np.zeros(len(triangles), dtype=np.int64)
+    _, refused = find_pipes(_tube_topology(), points, triangles, face, np.array([0]))
+    assert "holds no tube's volume" in refused[0]
 
 
 def test_a_cylinder_whose_rims_differ_is_not_a_pipe():
@@ -338,21 +361,20 @@ def test_a_candidates_rims_are_both_asked_for_the_larger_count_rounded_up_to_fou
 ):
     # Netgen's rim counts as on Sozzi (12 and 13 at maxh 0.005, 17 and 17 at 0.0035): an O-grid
     # needs one count on both rims, a multiple of four, and never coarser than Netgen chose.
-    _, triangles, face = _tube_surface(bottom=bottom, top=top)
-    divisions = rim_divisions(_tube_topology(), triangles, face, np.arange(3))
+    points, triangles, face = _tube_surface(bottom=bottom, top=top)
+    divisions = rim_divisions(_tube_topology(), points, triangles, face, np.arange(3))
     assert divisions == {0: count, 1: count}
 
 
 def test_rims_an_o_grid_already_joins_are_left_as_netgen_divided_them():
-    _, triangles, face = _tube_surface(bottom=16, top=16)
-    assert rim_divisions(_tube_topology(), triangles, face, np.arange(3)) == {}
+    points, triangles, face = _tube_surface(bottom=16, top=16)
+    assert rim_divisions(_tube_topology(), points, triangles, face, np.arange(3)) == {}
 
 
 def test_a_cylinder_the_fluid_is_outside_is_not_asked_for_rim_divisions():
-    wall = CylinderFace(np.zeros(3), np.array([0.0, 0.0, 1.0]), RADIUS, (0.0, HEIGHT), 2 * np.pi,
-                        solid_inside=False)  # fmt: skip
-    _, triangles, face = _tube_surface(bottom=12, top=13)
-    assert rim_divisions(_tube_topology(wall), triangles, face, np.arange(3)) == {}
+    points, triangles, face = _tube_surface(bottom=12, top=13)
+    bored = _bored(triangles, face)
+    assert rim_divisions(_tube_topology(), points, bored, face, np.arange(3)) == {}
 
 
 def test_a_rim_drawn_in_two_edges_shares_its_count_between_them_by_length():
@@ -371,8 +393,8 @@ def test_a_rim_drawn_in_two_edges_shares_its_count_between_them_by_length():
         edge_angle=np.array([np.pi / 2, np.pi / 2, np.pi / 2, np.nan]),
         seam=np.array([False, False, False, True]),
     )
-    _, triangles, face = _tube_surface(bottom=12, top=13)
-    assert rim_divisions(topology, triangles, face, np.arange(3)) == {0: 12, 1: 4, 2: 16}
+    points, triangles, face = _tube_surface(bottom=12, top=13)
+    assert rim_divisions(topology, points, triangles, face, np.arange(3)) == {0: 12, 1: 4, 2: 16}
 
 
 class _RimsAsAsked(_NoFill):
@@ -439,7 +461,19 @@ def _bend_surface(counts):
                 triangles.append([a2[i], b2[k + 1], b2[k]])
                 k += 1
             face.append(0 if angles[j] < 0.5 * np.pi - 1e-9 else 1)
-    return points, np.array(triangles), np.array(face)
+    triangles = np.array(triangles)
+    # Wound out of the fluid: each triangle's normal away from the centreline beside it.
+    corner = points[triangles]
+    centroid = corner.mean(axis=1)
+    offset = centroid - np.array([0.0, BEND, 0.0])
+    turn = np.clip(np.arctan2(offset[:, 0], -offset[:, 1]), 0.0, 0.5 * np.pi)
+    beside = np.array([0.0, BEND, 0.0]) + BEND * np.c_[np.sin(turn), -np.cos(turn), 0 * turn]
+    past = centroid[:, 1] > BEND
+    beside[past] = np.c_[np.full(past.sum(), BEND), centroid[past, 1], np.zeros(past.sum())]
+    normal = np.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0])
+    inward = np.einsum("ij,ij->i", normal, centroid - beside) < 0
+    triangles[inward] = triangles[inward][:, ::-1]
+    return points, triangles, np.array(face)
 
 
 def _bend_topology() -> CadTopology:
@@ -504,8 +538,8 @@ def test_pipes_joined_at_a_rim_are_divided_alike_all_along():
     # The bend's rims are 12 and 12 points, the straight pipe's 12 and 14: alone the bend would
     # ask nothing, but the shared rim must take the straight pipe's 16, so the bend's far rim too,
     # or the bend's two rims would differ.
-    _, triangles, face = _bend_surface([12, 12, 12, 13, 14])
-    divisions = rim_divisions(_bend_topology(), triangles, face, np.array([0, 1]))
+    points, triangles, face = _bend_surface([12, 12, 12, 13, 14])
+    divisions = rim_divisions(_bend_topology(), points, triangles, face, np.array([0, 1]))
     assert divisions == {0: 16, 1: 16, 2: 16}
 
 

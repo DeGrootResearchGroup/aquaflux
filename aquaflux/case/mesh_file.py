@@ -186,11 +186,11 @@ class MeshSpec:
         along it. Default: none.
     mapped : tuple of str
         The patches whose faces are meshed with structured quadrilaterals rather than triangles,
-        each face a band (a cylinder, a cone, a ring) or four-sided; layered, they carry hexahedra.
+        each face a band (a pipe's wall, a cone, a ring) or four-sided; layered, they carry hexahedra.
         Default: none.
     pipes : tuple of str or None
-        The patches whose faces are pipes -- each a cylinder or a torus (a bend) the fluid fills,
-        with nothing inside -- their walls meshed as grids and their cores as structured O-grids,
+        The patches whose faces are pipes -- each a tube the fluid fills (straight, bent, coiled,
+        tapering or swept along any curve), with nothing inside -- their walls meshed as grids and their cores as structured O-grids,
         one O-grid through pipes joined end to end. Unset, every face that
         is one; empty, none.
     pipe_core : PipeCore or None

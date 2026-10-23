@@ -1,8 +1,12 @@
 """Pipes in a region: found from its faces, and their cores filled with structured O-grids.
 
-A pipe is a cylindrical or toroidal face of the region with the fluid inside it -- a straight
-length of pipe, or a bend -- bounded by two loops that a structured grid joins row by row
-(:class:`~aquaflux.meshing.MappedQuads`), with nothing else inside it. Its wall is meshed as that grid and, where the walls carry layers, layered like any other wall;
+A pipe is a face of the region shaped as a tube with the fluid inside it -- a straight length, a
+bend, a coil, a reducer, a pipe swept along any curve -- bounded by two loops that a structured grid
+joins row by row (:class:`~aquaflux.meshing.MappedQuads`), with nothing else inside it. It is told
+from the face's own triangulation, not from the kind of surface the drawing records: closed across
+its two rims, the face must enclose a volume (so it is a tube, not a flat ring), with its triangles
+facing out of it (the fluid is inside, not round it as round a bore), and no other point of the
+region's surface inside it. Its wall is meshed as that grid and, where the walls carry layers, layered like any other wall;
 the core the layers leave is filled with a :class:`~aquaflux.meshing.PipeCore` O-grid, which meets the
 layers' top quadrilateral for quadrilateral.
 
@@ -29,11 +33,17 @@ import math
 
 import numpy as np
 
-from aquaflux.io.cad import CadTopology, CylinderFace, TorusFace
+from aquaflux.io.cad import CadTopology
 
 from .mapped import _loops
 from .pipe_core import PipeCore
 from .polygons import Polygons
+from .regions import ClosedSurface
+
+#: How much volume, as a share of its area times its rims' radius, a face closed across its two
+#: rims must hold to be a tube: a tube holds half (its volume pi r^2 L over 2 pi r L times r), a
+#: flat ring none; the sign says which side the fluid is on.
+TUBE_VOLUME = 0.1
 
 __all__ = ["PipeEnds", "fill_pipes", "find_pipes", "pipe_ends", "pipe_runs", "rim_divisions"]
 
@@ -82,39 +92,104 @@ def find_pipes(
     """
     pipes, refused = [], {}
     for f in np.asarray(candidates, dtype=np.int64).tolist():
-        record = topology.faces[f]
-        if not isinstance(record, (CylinderFace, TorusFace)):
-            refused[f] = "it is neither a cylinder nor a torus"
+        own = triangles[face == f]
+        tube = _TubeShape.of(points, own)
+        if isinstance(tube, str):
+            refused[f] = tube
             continue
-        if not record.solid_inside:
-            refused[f] = "the fluid is outside it, not inside"
-            continue
-        loops = _loops(triangles[face == f])
-        sizes = sorted(loop.size for loop in loops)
-        if len(loops) != 2:
-            refused[f] = f"it is bounded by {len(loops)} loops, not the two of a band"
-            continue
+        sizes = sorted(loop.size for loop in tube.rims)
         if rim_counts and (sizes[0] != sizes[1] or sizes[0] % 4):
             refused[f] = (
                 f"its rims have {sizes[0]} and {sizes[1]} points; an O-grid needs equal counts, "
                 "a multiple of four"
             )
             continue
-        if not _hollow(record, points, triangles, face, f, topology):
+        caps = [g for g in _neighbours(topology, f) if _is_cap(topology, g, [f])]
+        others = np.setdiff1d(np.unique(triangles[~np.isin(face, [f, *caps])]), np.unique(own))
+        if np.any(tube.holds(points[others])):
             refused[f] = "something else lies inside it"
             continue
         pipes.append(f)
     return pipes, refused
 
 
+@dataclasses.dataclass(frozen=True)
+class _TubeShape:
+    """A face's triangles closed across its two rims, each by a fan from the rim's centroid.
+
+    Attributes
+    ----------
+    rims : tuple of np.ndarray of int
+        The face's two loops, in the triangles' winding.
+    points : np.ndarray, shape ``(n, 3)``
+        The surface's points, then the two rims' centroids.
+    triangles : np.ndarray of int, shape ``(m, 3)``
+        The closed surface: the face's triangles, then the fans across its rims.
+    """
+
+    rims: tuple[np.ndarray, np.ndarray]
+    points: np.ndarray
+    triangles: np.ndarray
+
+    @classmethod
+    def of(cls, points: np.ndarray, own: np.ndarray) -> _TubeShape | str:
+        """The face of triangles ``own`` (shape ``(m, 3)``, wound out of the region) as a closed
+        tube, or why it is not a pipe's: not two rims, the fluid round it rather than in it, or
+        no volume between its rims."""
+        try:
+            loops = _loops(own)
+        except ValueError as irregular:
+            return f"its boundary is not simple loops: {irregular}"
+        if len(loops) != 2:
+            return f"it is bounded by {len(loops)} loops, not the two of a band"
+        centres = np.stack([points[loop].mean(axis=0) for loop in loops])
+        extended = np.vstack([points, centres])
+        fans = [
+            np.stack([np.roll(loop, -1), loop, np.full(loop.size, points.shape[0] + k)], axis=1)
+            for k, loop in enumerate(loops)
+        ]  # each rim's edges the other way round, so every edge is used once each way
+        closed = np.vstack([own, *fans])
+        tube = cls((loops[0], loops[1]), extended, closed)
+        corner = extended[closed]
+        volume = (
+            float(np.einsum("ij,ij->i", corner[:, 0], np.cross(corner[:, 1], corner[:, 2])).sum())
+            / 6.0
+        )
+        normal = np.cross(
+            points[own[:, 1]] - points[own[:, 0]], points[own[:, 2]] - points[own[:, 0]]
+        )
+        area = 0.5 * float(np.linalg.norm(normal, axis=1).sum())
+        radius = float(np.mean([np.linalg.norm(points[loop] - centres[k], axis=1).mean()
+                                for k, loop in enumerate(loops)]))  # fmt: skip
+        if volume < -TUBE_VOLUME * area * radius:
+            return "the fluid is outside it, not inside"
+        if volume <= TUBE_VOLUME * area * radius:
+            return "closed across its rims it holds no tube's volume (a flat ring, or a short band)"
+        return tube
+
+    def holds(self, points: np.ndarray) -> np.ndarray:
+        """Which of ``points`` (shape ``(k, 3)``) lie inside the closed tube, shape ``(k,)``."""
+        inside = np.zeros(points.shape[0], dtype=bool)
+        corner = self.points[self.triangles]
+        low, high = corner.reshape(-1, 3).min(axis=0), corner.reshape(-1, 3).max(axis=0)
+        near = np.all((points > low) & (points < high), axis=1)
+        if not near.any():
+            return inside
+        edges = np.linalg.norm(corner - np.roll(corner, 1, axis=1), axis=2)
+        region = ClosedSurface.of(self.points, self.triangles, float(edges.mean()))
+        inside[near] = region.inside(points[near])
+        return inside
+
+
 def rim_divisions(
-    topology: CadTopology, triangles: np.ndarray, face: np.ndarray, candidates: np.ndarray
-) -> dict[int, int]:
+    topology: CadTopology, points: np.ndarray, triangles: np.ndarray, face: np.ndarray,
+    candidates: np.ndarray,
+) -> dict[int, int]:  # fmt: skip
     """The segments to ask of each rim edge so that every pipe candidate's rims can be joined by
     an O-grid: both rims of one count, a multiple of four.
 
-    A candidate is a cylinder or a torus with the fluid inside it, bounded by two loops of the
-    triangulation (the rest are left to :func:`find_pipes` to refuse). Candidates sharing a rim are
+    A candidate is a face that closes into a tube with the fluid inside it, bounded by two loops of
+    the triangulation (the rest are left to :func:`find_pipes` to refuse). Candidates sharing a rim are
     one run, given one count, so that the rims each shares are divided as both need. Where a
     run's loops already agree and are a multiple of four nothing is asked. Otherwise every rim of
     the run gets its largest count rounded up to a multiple of four, so a rim is never divided
@@ -124,9 +199,9 @@ def rim_divisions(
     Parameters
     ----------
     topology : CadTopology
-    triangles, face : np.ndarray
-        The region's surface triangulation, shape ``(n_triangles, 3)``, and each triangle's face,
-        shape ``(n_triangles,)``.
+    points, triangles, face : np.ndarray
+        The region's surface triangulation: points ``(n_points, 3)``, triangles
+        ``(n_triangles, 3)``, and each triangle's face ``(n_triangles,)``.
     candidates : np.ndarray of int
         The faces to look at.
 
@@ -137,14 +212,11 @@ def rim_divisions(
     """
     sizes, rims = {}, {}
     for f in np.asarray(candidates, dtype=np.int64).tolist():
-        record = topology.faces[f]
-        if not (isinstance(record, (CylinderFace, TorusFace)) and record.solid_inside):
-            continue
-        loops = _loops(triangles[face == f])
+        tube = _TubeShape.of(points, triangles[face == f])
         found = _rims(topology, f)
-        if len(loops) != 2 or len(found) != 2:
+        if isinstance(tube, str) or len(found) != 2:
             continue
-        sizes[f], rims[f] = [loop.size for loop in loops], found
+        sizes[f], rims[f] = [loop.size for loop in tube.rims], found
     divisions: dict[int, int] = {}
     for run in _joined(rims):
         counts = [size for f in run for size in sizes[f]]
@@ -214,68 +286,6 @@ def _shared_by_length(lengths: np.ndarray, count: int, edges: np.ndarray):
     for k in range(count - int(segments.sum())):
         segments[by_remainder[k % segments.size]] += 1
     return zip(edges.tolist(), segments.tolist(), strict=True)
-
-
-def _hollow(record, points, triangles, face, f, topology) -> bool:
-    """Whether no point of the surface but the pipe's own and its end faces' lies inside it."""
-    own = np.unique(triangles[face == f])
-    caps = [g for g in _neighbours(topology, f) if _is_cap(topology, g, [f])]
-    others = np.setdiff1d(np.unique(triangles[~np.isin(face, [f, *caps])]), own)
-    tube = _Tube.of(record, points[own])
-    return not np.any(tube.inside(points[others]))
-
-
-@dataclasses.dataclass(frozen=True)
-class _Tube:
-    """The inside of a pipe's face, between its rims: within ``radius`` of its centreline, and
-    within the range its own points span along it.
-
-    The centreline is a straight line (a cylinder: ``bend`` is zero) or a circle of radius
-    ``bend`` about ``axis`` through ``origin`` (a torus); the position along it is a height in
-    the first case and an angle about the axis, from the direction ``reference``, in the second.
-    """
-
-    origin: np.ndarray
-    axis: np.ndarray
-    radius: float
-    bend: float
-    reference: np.ndarray
-    span: tuple[float, float]
-
-    @classmethod
-    def of(cls, record, own: np.ndarray) -> _Tube:
-        """The tube of a cylinder or torus record, spanning the points ``own`` (shape ``(n, 3)``)."""
-        if isinstance(record, CylinderFace):
-            origin, radius, bend = record.origin, record.radius, 0.0
-        else:
-            origin, radius, bend = record.centre, record.minor_radius, record.major_radius
-        origin = np.asarray(origin, dtype=np.float64)
-        axis = np.asarray(record.axis, dtype=np.float64)
-        axis = axis / np.linalg.norm(axis)
-        mean = own.mean(axis=0) - origin
-        reference = mean - (mean @ axis) * axis
-        norm = np.linalg.norm(reference)
-        reference = reference / norm if norm > 0.0 else reference
-        tube = cls(origin, axis, float(radius), float(bend), reference, (0.0, 0.0))
-        along, _ = tube._position(own)
-        return dataclasses.replace(tube, span=(float(along.min()), float(along.max())))
-
-    def _position(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Each point's position along the centreline, and its distance from it."""
-        offset = points - self.origin
-        height = offset @ self.axis
-        radial = offset - height[:, None] * self.axis
-        if self.bend == 0.0:
-            return height, np.linalg.norm(radial, axis=1)
-        sideways = np.cross(self.axis, self.reference)
-        angle = np.arctan2(radial @ sideways, radial @ self.reference)
-        return angle, np.hypot(np.linalg.norm(radial, axis=1) - self.bend, height)
-
-    def inside(self, points: np.ndarray) -> np.ndarray:
-        """Which of ``points`` (shape ``(m, 3)``) lie inside, shape ``(m,)``."""
-        along, across = self._position(points)
-        low, high = self.span
-        return (along > low) & (along < high) & (across < self.radius * (1 - 1e-6))
 
 
 def _neighbours(topology: CadTopology, f: int) -> list[int]:

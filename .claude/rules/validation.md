@@ -261,7 +261,7 @@ pivot floor, by machine".
   regeneration that differs shows in `git status`; on 2026-10-17 its node lines matched the current
   `blockMeshDict`'s grading to the file's printed precision, 5e-11 m). The OpenFOAM fields are not
   tracked there; without them `compare.py` marches and skips the comparison.
-- **A shipped case file may name only a tracked path or one declared in
+- **A shipped case or mesh file may name only a tracked path or one declared in
   `tests/unit/test_shipped_case_paths.py`'s `GENERATED`** (with what writes it), fast tier; the bfs3d
   mesh once sat at an ignored `runs/kwsst/polyMesh` while tracked twice in `bfs3d_species/`.
 - ⚠️ `bfs3d_species/of_case/` still tracks a run's scratch output against its own `.gitignore` (`2000/`,
@@ -337,8 +337,9 @@ natively** from its own drawing (`geometry.py` → tracked `bend.step`; `mesh.ya
 gitignored, remade by `aquaflux mesh`), one O-grid from inlet to outlet through the bend
 (`meshing.md`, "Runs"); `render_mesh.py` draws `figures/`. **No flow case yet**: the inlet needs a
 fully developed profile (the experiment's ~100 D upstream), and the station list and digitized
-profiles are still to be taken from the paper. ⚠️ Before a case file names the mesh it must be tracked
-or declared in `test_shipped_case_paths.py`'s `GENERATED`.
+profiles are still to be taken from the paper. `test_shipped_case_paths.py` reads shipped **mesh files**
+too (a validation YAML with a `drawing` key): its drawing must be tracked, and `work/bend.aqmesh` is
+declared in `GENERATED`.
 
 ## The aggressive Reynolds continuation does NOT need the complete LU
 
