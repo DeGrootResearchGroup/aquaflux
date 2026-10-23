@@ -1,0 +1,37 @@
+# pitzDaily laminar: the step at Re_h ~ 250 (inlet 10 m/s, step height 25.4 mm, nu 1e-3), on the
+# turbulent case's mesh. Not a validation case -- there is no reference solution -- but the one case
+# in the repository marched with a single block inverse over the whole state
+# (MaterializedJacobian(SimpleSmoothed)), the preconditioner a laminar flow uses, at the turbulent
+# case's leading-block settings. refresh_on_cycles 1 refits after nearly every step (24 refits over the
+# march), so the march measures the refit; refit_cost.py times it.
+mesh:
+  kind: OpenFOAMMesh
+  path: ../runs/kwsst/polyMesh
+fluid:
+  density: 1.0
+  kinematic_viscosity: 1.0e-3
+physics:
+  kind: Laminar
+boundaries:
+  inlet: {kind: Inlet, velocity: [10.0, 0.0]}
+  outlet: {kind: Outlet, pressure: 0.0}
+  upperWall: {kind: Wall}
+  lowerWall: {kind: Wall}
+numerics:
+  momentum_advection:
+    kind: LimitedUpwind
+    limiter: {kind: VenkatakrishnanLimiter}
+  gradient: {kind: MultipleCorrectionGradient}
+solver:
+  kind: FlowMarch
+  max_steps: 150
+  convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-05}
+  preconditioner:
+    kind: MaterializedJacobian
+    inverse: {kind: SimpleSmoothed, sweeps: 2, pressure_sweeps: 2, smoother_weight: 1.0, aggressive_levels: 0,
+      avoid_singletons: true, block_splitting: true, strength_threshold: 0.25, max_levels: 5, max_coarse: 500,
+      frozen_coarsening: true}
+    probe: {kind: JacobianProbeSpec, stencil_reach: 3, column_reach: [2, 2, 2]}
+  dual_time: {kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 1}
+  linear_solve: {kind: LinearSolveSettings, rtol: 0.3, restart: 15, max_restarts: 14, stop: residual}
+  step_control: {kind: CflResidualDualTimeControl, beta_start: 0.5, beta_min: 0.005, grow: 3.0}

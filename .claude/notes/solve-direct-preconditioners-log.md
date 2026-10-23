@@ -809,3 +809,28 @@
       ~1e-30 (nonzero) recovered convergence bit-identically — positions, not values, were causal; and a
       stored EXACT zero is not that padding (sparse arithmetic prunes it). Re-measure under the traced
       hierarchy before lowering the pattern; ledger: `.claude/notes/solve-refuted-directions.md` (reach-2).
+
+### Seeds on the device, and the single-block refit on the device (2026-10-23)
+
+Branch `claude/aquaflux-host-device-review-ef4ffs` (`6fc9948c`) against `main` `c58bfd1d`, 4-core Linux
+container, jax 0.12.0.1, CPU, arms alternated.
+
+- **pitzDaily (`case.yaml` as shipped; the field split, so only the device seeds apply;
+  `validation/pitzdaily_openfoam/march_cost.py` under `run_case.sh`)**: same march on all four runs (21
+  steps, 102 cycles, final R 5.736e-06, `x_r/h` 8.0686). Solve main 241.1, 243.9 s; branch 246.2,
+  241.3 s. Refits summed main 31.5, 32.1 s; branch 32.0, 30.1 s. VmHWM main 3.106, 3.125 GiB; branch
+  2.975, 3.097 GiB.
+- **Laminar pitzDaily (`validation/pitzdaily_openfoam/laminar/case.yaml`, Re_h ~ 250, one
+  `SimpleSmoothed` over the whole state; both changes apply).**
+  - At `refresh_on_cycles` 3 the march never refits (no laminar solve reaches 3 cycles), so it exercises
+    only the first fit: 21 steps / 104 cycles on all ten runs; `aquaflux run` wall main 146.8 (cold),
+    130.0, 132.4, 137.6, 134.9 s against branch 134.5 (cold), 131.4, 132.4, 134.1, 133.3 s; peak resident
+    (the child's `ru_maxrss`) main 2.133 (cold), 2.045, 2.051, 2.050, 2.013 GiB against branch 1.942
+    (cold), 2.002, 1.967, 2.015, 2.003 GiB.
+  - At `refresh_on_cycles` 1 (the shipped file; `refit_cost.py`, in-process): 24 steps and 24 refits on
+    all four runs. Build and solve main 116.7 (first), 104.3 s; branch 100.5, 102.4 s. Refits summed
+    main 25.7, 23.2 s (assemble 0.8, 0.3); branch 21.9, 22.5 s (assemble 0.0). Peak resident main 2.287,
+    2.176 GiB; branch 2.052, 2.079 GiB.
+- ⚠️ `aquaflux run`'s `history.csv` reports `refits` 0 on a laminar `FlowMarch` that does refit: its
+  `refits` column counts what the session reports through `on_refresh`, and the laminar march's run does
+  not wire one. `refit_cost.py` wraps the hook instead.

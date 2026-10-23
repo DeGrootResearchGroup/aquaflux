@@ -118,7 +118,10 @@ bare block inverse).
   `field_seeds(start, stop, rows=, dtype=)` (one field's) are one jitted indicator, `_indicator_seeds`,
   over the plan's colours and each probe's (field, colour), moved to the device once (`_device`); `rows`
   pads a short chunk with zero rows (one shape per program, so each batched map compiles once). Pinned by
-  `test_the_seeds_formed_on_the_device_are_each_probes_colour_indicator`. **A chunk never spans two
+  `test_the_seeds_formed_on_the_device_are_each_probes_colour_indicator`. Cost (pitzDaily and the
+  laminar pitzDaily of `validation/pitzdaily_openfoam/laminar/`, whose `refit_cost.py` times the
+  single-block refit): log, "Seeds on the device, and the single-block refit on the device (2026-10-23)".
+  **A chunk never spans two
   column fields** (`ColumnProbePlan.field_chunks`; each field's last chunk may be short and is padded, so
   a materialize makes up to `n_fields − 1` more calls than `ceil(n_probes / batch)`; `probe_batch_size=None`
   is one batch per field),

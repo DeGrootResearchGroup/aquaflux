@@ -305,10 +305,6 @@ class ColumnProbePlan:
             for start in range(base, base + count, chunk):
                 yield field, start, min(chunk, base + count - start)
 
-    def _colour_cells(self, field: int, colour: int) -> np.ndarray:
-        """The cells column field ``field`` gives colour ``colour``, shape ``(n_in_colour,)``."""
-        return np.where(self.colour[field] == colour)[0]
-
 
 def column_probe_plan(
     owner: np.ndarray,
