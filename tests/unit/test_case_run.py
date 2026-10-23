@@ -347,13 +347,24 @@ def test_the_per_equation_residuals_are_asked_for_only_when_a_recorder_keeps_the
     assert seen == [{"u": 1.0}]
 
 
-def test_a_coupled_march_hands_each_refit_to_the_log_and_to_the_recorder() -> None:
+@pytest.mark.parametrize(
+    "march",
+    [
+        CoupledMarch(
+            preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
+        ),
+        FlowMarch(preconditioner=MaterializedJacobian(SimpleSmoothed())),
+    ],
+    ids=["coupled", "flow"],
+)
+def test_each_march_hands_each_refit_to_the_log_and_to_the_recorder(march) -> None:
+    """A materialized-Jacobian session's refits reach the log and the recorder, on either march; the
+    laminar one once handed its preconditioner to the solve unopened, so no refit was ever recorded."""
     seen = []
-    observers = CoupledMarch(
-        preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
-    ).observers_for(_hooks(seen, "log"), _hooks(seen, "file"))
+    observers = march.observers_for(_hooks(seen, "log"), _hooks(seen, "file"))
     observers["session_options"]["observer"]("timing")
     assert seen == [("log", "refresh", "timing"), ("file", "refresh", "timing")]
+    assert "session_options" not in type(march)().observers_for(_hooks(seen, "log"), None)
 
 
 def test_a_coupled_march_also_logs_its_refreshes_and_its_ramp() -> None:

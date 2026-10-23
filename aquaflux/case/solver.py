@@ -33,7 +33,13 @@ import warnings
 from collections.abc import Callable, Mapping
 from typing import ClassVar, Literal
 
-from aquaflux.flow import MassFlow, bulk_velocity_flow_solve, reused_flow_solve, solve_flow_march
+from aquaflux.flow import (
+    MassFlow,
+    bulk_velocity_flow_solve,
+    open_flow_session,
+    reused_flow_solve,
+    solve_flow_march,
+)
 from aquaflux.precondition import MaterializedJacobian
 from aquaflux.radiation import solve_scene
 from aquaflux.solve import (
@@ -288,7 +294,53 @@ class _March(SolverSpec):
         # The inner-loop observer exists only with an inner loop to observe; the step refuses it otherwise.
         if self.dual_time is not None:
             observers["inner_observer"] = logger.on_inner
+        # A materialized-Jacobian preconditioner is opened as a session (`_with_session`), whose refits
+        # the log and the recorder hear of through its observer.
+        if isinstance(self.preconditioner, MaterializedJacobian):
+            observers["session_options"] = {
+                "observer": _both(
+                    logger.on_refresh, None if recorder is None else recorder.on_refresh
+                )
+            }
         return observers
+
+    @abc.abstractmethod
+    def _open_session(
+        self, preconditioner: MaterializedJacobian, problem: object, options: Mapping[str, object]
+    ) -> object:
+        """Open ``preconditioner`` as a session on ``problem``, with the session keywords ``options``."""
+
+    def _with_session(
+        self,
+        settings: dict[str, object],
+        problem: object,
+        session_options: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        """``settings`` with a materialized-Jacobian preconditioner opened as one session on ``problem``.
+
+        The session is what the march takes, and what ``session_options`` observe (its ``observer`` is
+        told of every refit); a march opens it here rather than leaving it to the library solve, which
+        would open one with no observer.
+
+        Raises
+        ------
+        TypeError
+            If ``session_options`` are given and the preconditioner is not a materialized Jacobian,
+            which opens no session here.
+        """
+        preconditioner = settings.get("preconditioner")
+        if isinstance(preconditioner, MaterializedJacobian):
+            return settings | {
+                "preconditioner": self._open_session(
+                    preconditioner, problem, dict(session_options or {})
+                )
+            }
+        if session_options:
+            raise TypeError(
+                "session_options observe a materialized-Jacobian preconditioner's session, and this "
+                "march's preconditioner is not one."
+            )
+        return settings
 
     def _refuse_a_border_the_preconditioner_lacks(self, drive: DriveSpec | None) -> None:
         """Refuse a materialized-Jacobian preconditioner beside a held bulk velocity.
@@ -561,14 +613,8 @@ class CoupledMarch(_March):
     def observers_for(
         self, logger: MarchLogger, recorder: MarchRecorder | None
     ) -> dict[str, object]:
-        """The march's, the preconditioner's refreshes and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
+        """The march's and the ramp's anchor too -- see :meth:`SolverSpec.observers_for`."""
         observers = super().observers_for(logger, recorder)
-        if isinstance(self.preconditioner, MaterializedJacobian):
-            observers["session_options"] = {
-                "observer": _both(
-                    logger.on_refresh, None if recorder is None else recorder.on_refresh
-                )
-            }
         if self.continuation is not None:
             observers["point_setup"] = lambda companion, seed_state, point: logger.note(
                 f"[{point.label}]"
@@ -589,6 +635,12 @@ class CoupledMarch(_March):
         if self.turbulence_damping is not None:
             settings["shift"] = CoupledShiftSettings(turbulence_damping=self.turbulence_damping)
         return settings
+
+    def _open_session(
+        self, preconditioner: MaterializedJacobian, problem: object, options: Mapping[str, object]
+    ) -> object:
+        """A coupled Reynolds-averaged session (:func:`~aquaflux.turbulence.open_session`)."""
+        return open_session(preconditioner, problem, **options)
 
     def solve(
         self,
@@ -636,17 +688,7 @@ class CoupledMarch(_March):
             raise TypeError(
                 "point_setup observes a continuation's stations, and this march has none."
             )
-        preconditioner = settings.get("preconditioner")
-        if isinstance(preconditioner, MaterializedJacobian):
-            settings["preconditioner"] = open_session(
-                preconditioner, problem, **dict(session_options or {})
-            )
-        elif session_options:
-            raise TypeError(
-                "session_options observe a materialized-Jacobian preconditioner's session, and this "
-                "march's preconditioner is not one."
-            )
-        options = settings | observers
+        options = self._with_session(settings, problem, session_options) | observers
         if self.continuation is None:
             return solve_coupled(
                 problem,
@@ -714,15 +756,25 @@ class FlowMarch(_March):
         """
         return self._march_settings()
 
+    def _open_session(
+        self, preconditioner: MaterializedJacobian, problem: object, options: Mapping[str, object]
+    ) -> object:
+        """A laminar flow session (:func:`~aquaflux.flow.open_flow_session`)."""
+        return open_flow_session(preconditioner, problem, **options)
+
     def solve(
         self,
         problem: object,
         *,
         initial: object | None = None,
         resume: Resumption | None = None,
+        session_options: Mapping[str, object] | None = None,
         **observers: object,
     ) -> object:
         """March ``problem`` -- see :meth:`SolverSpec.solve`.
+
+        A materialized-Jacobian preconditioner is opened here as one session
+        (:func:`~aquaflux.flow.open_flow_session`).
 
         Parameters
         ----------
@@ -732,6 +784,10 @@ class FlowMarch(_March):
             The flow state to start from, shape ``((dim + 1) n_cells,)``; unset, a potential flow.
         resume : Resumption, optional
             The stopped march's history -- see :meth:`SolverSpec.solve`.
+        session_options : mapping, optional
+            Observers for that session -- ``observer``, ``on_build`` and the other keywords of
+            :func:`~aquaflux.flow.open_flow_session` beyond the spec. Refused without a
+            materialized-Jacobian preconditioner, which is not opened here.
         **observers
             Observer keywords of :func:`~aquaflux.flow.solve_flow_march` (``on_step``,
             ``on_checkpoint``, ``on_retry``, ...).
@@ -741,7 +797,7 @@ class FlowMarch(_March):
         jnp.ndarray
             The converged flow state.
         """
-        settings = self.settings()
+        settings = self._with_session(self.settings(), problem, session_options)
         _refuse_settings_as_observers("FlowMarch", self._owned(), observers)
         return solve_flow_march(
             problem,

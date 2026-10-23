@@ -131,3 +131,38 @@ def test_an_inlet_driven_rans_case_runs_the_segregated_loop_from_its_file(tmp_pa
     start = problem.pack_state(*sst_initial_fields(problem.momentum, problem.turbulence))
     residual = float(jnp.linalg.norm(problem.residual(problem.pack_state(flow, k, omega))))
     assert residual < 1e-3 * float(jnp.linalg.norm(problem.residual(start)))
+
+
+def test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes(tmp_path) -> None:
+    """``aquaflux run``'s history counts a laminar march's refits and the seconds they took.
+
+    The march refits the preconditioner whenever an inner solve takes a restart cycle, so it refits
+    on this channel; a run that handed the preconditioner to the solve without opening its session
+    observed none of them and recorded zero, which is what this would catch.
+    """
+    import csv
+    import io
+
+    from aquaflux.case import prepare_run
+
+    document = yaml.safe_load(_with_grid(_CHANNEL)) | {
+        "solver": _SOLVER
+        | {
+            "dual_time": {"kind": "DualTimeLoop", "inner_steps": 3, "refresh_on_cycles": 1},
+            "preconditioner": {
+                "kind": "MaterializedJacobian",
+                "inverse": {"kind": "SimpleSmoothed"},
+            },
+        },
+        "outputs": {"directory": "results", "history": "history.csv"},
+    }
+    path = tmp_path / "case.yaml"
+    path.write_text(yaml.safe_dump(document))
+
+    record = prepare_run(path).run(io.StringIO())
+
+    assert record.converged
+    rows = list(csv.DictReader((tmp_path / "results" / "history.csv").open()))
+    refits = sum(int(row["refits"]) for row in rows)
+    assert refits > 0
+    assert sum(float(row["refit_seconds"]) for row in rows) > 0.0
