@@ -155,6 +155,10 @@ coarse grid solved twice, on meshes 0.1 µm apart, gives every quantity to 1e-7.
 `round36` re-solved on its generated mesh (2026-10-23, one run): 15 steps, 2352 s, to 1.1e-7, its
 fields within 2e-6 of the first solve's.
 
+The precursors stop at 1e-6 of their starting residual (row-scaled). Measured from their histories
+(2026-10-23, run to 1e-8): 1e-6 is reached at step 42 (610 s) on `round36`, 55 (2554 s) on `round48`
+and 72 (3.1 h) on `round64`; the last was stopped at step 82 (2.4e-7) and wrote no profiles.
+
 The bend's march holds the whole materialized Jacobian: the coarse grid used about 10.5 GB of this
 container's 15, so the medium (about 20 GB) and the fine (about 45 GB) grids are solved on a larger
 machine, from the same files.

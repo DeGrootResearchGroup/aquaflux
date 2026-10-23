@@ -358,6 +358,8 @@ inlet to outlet through the bend (`meshing.md`, "Runs").
   value 0.02 U_b under a 1e-7 m mesh change (degenerate on the graded rows), k-nearest centroids by distance
   all fell in one row's cross-section, and one nearest cell flipped on the axis (0.007 U_b); now two coarse
   solves 0.1 µm apart agree to 1e-7.
+- **The precursors stop at rtol 1e-6** (project owner, 2026-10-23: enough on other cases); 1e-6 came at
+  steps 42 / 55 / 72 on the three grids, the fine one at ~140-345 s a step (README).
 - **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42
   min); round48 (~20 GB) and round64 (~45 GB, estimated at ~200 KB/cell) are solved on a larger machine.
 - The station list and digitized profiles are still to be taken from the paper (the project owner is

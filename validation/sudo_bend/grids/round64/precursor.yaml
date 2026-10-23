@@ -36,11 +36,12 @@ pressure_datum: {kind: PinnedPoint, point: [0.052, 0.0, 0.0]}
 
 # Marched monolithically, the bulk velocity held by a force solved with the flow; a block-diagonal
 # preconditioner, since the bordered system a held bulk velocity adds is not one the materialized
-# Jacobian holds.
+# Jacobian holds. It stops at a millionth of its starting residual, as other cases have found
+# enough; 1e-8 took the fine grid's 72 steps to 1e-6 on to well over 82.
 solver:
   kind: CoupledMarch
   max_steps: 300
-  convergence: {kind: Convergence, rtol: 1.0e-8, atol: 1.0e-10}
+  convergence: {kind: Convergence, rtol: 1.0e-6, atol: 1.0e-10}
   preconditioner: {kind: BlockDiagonal, scalar: {kind: ScalarAir}}
   dual_time: {kind: DualTimeLoop, inner_steps: 3}
 
