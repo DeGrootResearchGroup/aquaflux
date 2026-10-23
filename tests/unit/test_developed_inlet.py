@@ -110,7 +110,9 @@ def test_an_inlet_on_the_far_side_admits_the_flow_the_other_way(tmp_path):
 
 def test_a_table_without_a_velocity_is_refused_naming_the_patch(tmp_path):
     _table(tmp_path, k=np.ones(4))
-    with pytest.raises(ValueError, match=r"boundaries.left.profile_table: developed.csv has no U column"):
+    with pytest.raises(
+        ValueError, match=r"boundaries.left.profile_table: developed.csv has no U column"
+    ):
         _case(tmp_path)
 
 
