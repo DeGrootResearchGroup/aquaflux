@@ -226,8 +226,14 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   default needs the project owner (#542), and the validation files state their calibrated values.
 - **A script can observe a solve, never configure it.** `solve(problem, **observers)` refuses any keyword
   that is a solve setting, set in the file or not (`_owned()`). A materialized-Jacobian preconditioner is
-  opened as a session here (`open_session(spec, problem, **session_options)`), so a harness passes the
-  session's observers, not a session; `session_options` beside `BlockDiagonal` is refused. A `point_setup`
+  opened as a session here, by either march (`_March._with_session`, each march's `_open_session`:
+  `open_session` for `CoupledMarch`, `open_flow_session` for `FlowMarch`), so a harness passes the
+  session's observers, not a session; `session_options` beside a preconditioner that is not a
+  `MaterializedJacobian` is refused. `_March.observers_for` wires the session's `observer` to the log's
+  and the recorder's `on_refresh`, which is how `history.csv` counts refits. ⚠️ Before 2026-10-23 only
+  `CoupledMarch` did: a laminar run's `history.csv` read `refits` 0 whatever it refitted. Pinned by
+  `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. (`march.log` shows
+  refits only with the logger's `"pc"` detail, which a case run does not ask for, on either march.) A `point_setup`
   may observe a ramp's anchor and is refused if it returns settings. `Segregated` takes no observers and only
   warns when it runs out of sweeps (#543).
 - ⚠️ **`station_step` and `jacobian_gradient_sweeps` are not file settings and not in `_owned()`**; the
