@@ -36,6 +36,12 @@ GENERATED: dict[str, str] = {
         "generate_dom.py (blockMesh + snappyHexMesh in OpenFOAM's Docker image)"
     ),
     "validation/sudo_bend/work/bend.aqmesh": "aquaflux mesh validation/sudo_bend/mesh.yaml",
+    "validation/sudo_bend/work/precursor.aqmesh": (
+        "aquaflux mesh validation/sudo_bend/precursor_mesh.yaml"
+    ),
+    "validation/sudo_bend/work/precursor/profiles.csv": (
+        "aquaflux run validation/sudo_bend/precursor.yaml"
+    ),
 }
 
 

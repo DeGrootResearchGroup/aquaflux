@@ -45,8 +45,13 @@ from aquaflux.flow import (
     wetted_length,
 )
 from aquaflux.io import read_openfoam
-from aquaflux.io.openfoam.cyclic import DEFAULT_MATCH_TOLERANCE
-from aquaflux.mesh import Mesh, MeshGeometry, graded_nodes, structured_grid_2d
+from aquaflux.mesh import (
+    PERIODIC_MATCH_TOLERANCE,
+    Mesh,
+    MeshGeometry,
+    graded_nodes,
+    structured_grid_2d,
+)
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import (
     CorrectedGreenGauss,
@@ -229,7 +234,7 @@ def test_a_boundaries_table_given_in_code_is_frozen_and_copied() -> None:
             ),
             ValueError,
             r"at 'boundaries.top' is not accepted there; each entry of CaseSpec.boundaries takes one of "
-            r"'Inlet', 'Lamp', 'Outlet', 'Wall'",
+            r"'DevelopedInlet', 'Inlet', 'Lamp', 'Outlet', 'Wall'",
         ),
         (
             _sections(numerics={"gradient": {"kind": "CompactGreenGauss"}}),
@@ -584,7 +589,7 @@ def test_every_misfit_is_reported_at_once() -> None:
 
 def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() -> None:
     relative = str(SLAB.relative_to(REPO))
-    assert OpenFOAMMesh(relative).reader(REPO).cyclic_match_tolerance == DEFAULT_MATCH_TOLERANCE
+    assert OpenFOAMMesh(relative).reader(REPO).cyclic_match_tolerance == PERIODIC_MATCH_TOLERANCE
     tolerant = OpenFOAMMesh(relative, cyclic_match_tolerance=1e-3).reader(REPO)
     assert tolerant.cyclic_match_tolerance == 1e-3
     assert Path(tolerant.directory) == SLAB
@@ -631,7 +636,7 @@ def test_the_mesh_tolerance_reaches_the_reader_and_is_left_to_it_when_unset() ->
         (
             lambda: dataclasses.replace(_rans_case(), boundaries={"inlet": Outlet(0.0), "w": 3}),
             TypeError,
-            r"maps each patch name to an Inlet, Outlet, Wall or Lamp",
+            r"maps each patch name to an Inlet, DevelopedInlet, Outlet, Wall or",
         ),
         (lambda: dataclasses.replace(_rans_case(), physics="RANS"), TypeError, r"CaseSpec.physics"),
     ],

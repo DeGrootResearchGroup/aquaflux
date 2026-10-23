@@ -86,7 +86,10 @@ SUBPACKAGE_GROUPS = {
     "mesh": [
         ("The mesh and its geometry", ["mesh", "geometry", "cell", "face", "connectivity"]),
         ("Cell zones and face patches", ["groups"]),
-        ("Building and transforming a mesh", ["structured", "collapse", "reorder", "digest"]),
+        (
+            "Building and transforming a mesh",
+            ["structured", "collapse", "periodic", "reorder", "digest"],
+        ),
         ("Boundary patches as surfaces", ["surface"]),
         ("Quality and connectivity diagnostics", ["quality", "distance", "graph", "winding"]),
     ],

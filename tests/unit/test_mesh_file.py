@@ -32,7 +32,7 @@ from aquaflux.case import (
     write_mesh_file,
 )
 from aquaflux.io import read_aqmesh, read_aqmesh_header, read_openfoam
-from aquaflux.mesh import QualitySummary, structured_grid_3d
+from aquaflux.mesh import PeriodicJoin, QualitySummary, structured_grid_3d
 from aquaflux.meshing import (
     FacePlanarizer,
     FacesNear,
@@ -281,3 +281,36 @@ def test_the_drawing_and_its_patches_are_read_while_the_rest_is_unfinished():
 def test_the_drawings_sections_are_refused_by_name(document, message):
     with pytest.raises(ValueError, match=message):
         drawing_sections_from_mapping(document)
+
+
+# --- a periodic mesh -------------------------------------------------------------------------
+
+PERIODIC = {"kind": "PeriodicJoin", "first": "right", "second": "left"}
+
+
+def test_a_periodic_join_reads_writes_back_and_joins_the_written_mesh(tmp_path, boxed):
+    """The two patches are one seam in the file written; the quality is measured before the join."""
+    document = {**DOCUMENT, "periodic": PERIODIC, "output": {"path": "pipe.aqmesh"}}
+    spec = mesh_spec_from_mapping(document)
+    assert spec.periodic == PeriodicJoin("right", "left")
+    assert mesh_spec_to_mapping(spec) == document
+    path = tmp_path / "mesh.yaml"
+    write_mesh_file(spec, path)
+    told = []
+    record = make_mesh(path, on_stage=told.append)
+    assert told == [
+        "meshing the box", "measuring the mesh's quality", "joining the periodic patches",
+        "writing the mesh",
+    ]  # fmt: skip
+    written = read_aqmesh(record.aqmesh)
+    assert written.face_cells.neighbour_offset is not None
+    assert "left" not in written.face_patches.names and "right" not in written.face_patches.names
+    assert written.n_faces == BOX.n_faces - 3 * 2
+    assert record.quality == QualitySummary.of(BOX)
+
+
+def test_a_periodic_mesh_is_not_also_written_as_a_polymesh():
+    with pytest.raises(ValueError, match=r"written only as an \.aqmesh file"):
+        mesh_spec_from_mapping(
+            {**DOCUMENT, "periodic": PERIODIC, "output": {"path": "a.aqmesh", "openfoam": "of"}}
+        )

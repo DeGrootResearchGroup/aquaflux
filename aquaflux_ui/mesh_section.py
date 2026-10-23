@@ -57,6 +57,7 @@ MESH_SECTION_ICONS = {
     "pipe_grading": "mdi-pipe",
     "planarizer": "mdi-vector-square",
     "core": "mdi-cube-outline",
+    "periodic": "mdi-sync",
     "output": "mdi-folder-outline",
 }
 

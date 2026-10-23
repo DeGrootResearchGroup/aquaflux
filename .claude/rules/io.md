@@ -153,9 +153,11 @@ Three pure seams so most logic tests without a filesystem:
 A `cyclic` pair (`neighbourPatch` naming each other) is one periodic seam. `cyclic.fuse_cyclic_patches` turns
 it into interior faces carrying `neighbour_offset` before `Mesh.from_csr` — the same representation
 `structured_grid_2d(periodic=...)` produces (`mesh.md`).
+- **The matching is `aquaflux.mesh`'s** (`face_vertex_means`, `matched_by_translation`,
+  `without_faces`, `PERIODIC_MATCH_TOLERANCE`), shared with `mesh.PeriodicJoin` (`mesh.md`).
 - **The match is geometric, not declared**: `transform` is not parsed. The translation is estimated from the
   two patches' centroid means and centroids are nearest-neighbour matched (`cKDTree`, order-independent)
-  within `DEFAULT_MATCH_TOLERANCE` (a fraction of the kept patch's extent; overridable via
+  within `PERIODIC_MATCH_TOLERANCE` (a fraction of the kept patch's extent; overridable via
   `cyclic_match_tolerance` on `assemble` / `OpenFOAMReader` / `read_openfoam`). A rotational or mismatched
   pair fails to match and raises naming the pair — **rotational cyclics are not supported**.
 - **The patch declared first is kept**; the donor's faces are dropped. Both are removed from `face_patches`.
@@ -258,6 +260,13 @@ in binary order (corner `4i+2j+k` at `(i,j,k)`, `aquaflux.octree.tree.CORNERS`) 
 place, `_BINARY_TO_VTK_HEXAHEDRON`. A coarse leaf beside finer ones is written with its own eight corners,
 so a viewer draws it from those even where the octree's own interpolant uses the finer nodes on its faces.
 Pinned by `tests/unit/test_vtk_hexahedra.py`.
+
+## Profile tables — `io/profiles.py`
+
+`write_profile_table(path, radii, columns, comment=)` / `read_profile_table(path) -> ProfileTable(radii,
+columns)`: fields against radius as CSV (`#` comment lines, a `radius,<names>` header, `repr` numbers,
+so it reads back exactly). Written by `case.RadialProfiles`, read by `case.DevelopedInlet` (`case.md`).
+Pinned in `tests/unit/test_radial_profile.py`.
 
 ## The two field writers share a helper, not a contract
 

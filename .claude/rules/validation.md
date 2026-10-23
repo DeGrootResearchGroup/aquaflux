@@ -333,13 +333,20 @@ run and compare the studies; numbers in its README.
 ## `sudo_bend` — a 90° pipe bend (Sudo, Sumida & Hibara 1998)
 
 The third canonical RANS case: curvature-driven secondary flow, no sharp-edged separation. **Meshed
-natively** from its own drawing (`geometry.py` → tracked `bend.step`; `mesh.yaml` → `work/bend.aqmesh`,
-gitignored, remade by `aquaflux mesh`), one O-grid from inlet to outlet through the bend
-(`meshing.md`, "Runs"); `render_mesh.py` draws `figures/`. **No flow case yet**: the inlet needs a
-fully developed profile (the experiment's ~100 D upstream), and the station list and digitized
-profiles are still to be taken from the paper. `test_shipped_case_paths.py` reads shipped **mesh files**
-too (a validation YAML with a `drawing` key): its drawing must be tracked, and `work/bend.aqmesh` is
-declared in `GENERATED`.
+natively** from its own drawing (`geometry.py` → tracked `bend.step` and `precursor.step`; `mesh.yaml` →
+`work/bend.aqmesh`, gitignored, remade by `aquaflux mesh`), one O-grid from inlet to outlet through the
+bend (`meshing.md`, "Runs"); `render_mesh.py` draws `figures/`.
+- **The inflow is developed in a precursor, then mapped by radius** (the project owner's choice,
+  2026-10-23: averaged into profiles of radius, laid out by distance from the inlet's centre): `precursor_mesh.yaml` meshes one diameter of the
+  same pipe with the bend's settings and joins its ends (`periodic`), `precursor.yaml` holds
+  `BulkVelocity` at Re 6e4 and writes `work/precursor/profiles.csv` (`RadialProfiles`), and
+  `case.yaml`'s inlet is a `DevelopedInlet` reading it (`case.md`). Both generated paths are in
+  `test_shipped_case_paths.py`'s `GENERATED`. The precursor is a `CoupledMarch` with `BlockDiagonal`:
+  the channel files' `Segregated` with `DirectSolve` asked 131 GB on the 3792-cell pipe (dense), and a
+  held bulk velocity refuses a `MaterializedJacobian` (#541).
+- `case.yaml` is bfs3d's march unchanged; whether it fits this mesh (42,660 cells, 15 GB machine) and
+  converges is the open question. The station list and digitized profiles are still to be taken from
+  the paper (the project owner is fetching them); a grid-resolution study round the pipe is agreed for later.
 
 ## The aggressive Reynolds continuation does NOT need the complete LU
 

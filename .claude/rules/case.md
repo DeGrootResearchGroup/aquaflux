@@ -59,11 +59,11 @@ its file alone.**
 | `axes.py` | `AXES`, `AxisName`, and the one refusal of an extruded axis stated for a 3D mesh |
 | `kinematic.py` | `kinematic_pressure` / `pressure_from_kinematic` — the one home of OpenFOAM's pressure-per-unit-density factor |
 | `restart_file.py` | `RestartHeader` (its `mesh_digest` from `aquaflux.mesh`), `checkpoint_writer`, `read_restart` → `RestartFile` (`resumption`), `refuse_non_finite` |
-| `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` / `IntensityLength` |
+| `boundaries.py` | `PatchCondition` → `Inlet` / `DevelopedInlet` / `Outlet` / `Wall` / `Lamp`; `PatchSite`; `InletTurbulence` → `FixedTurbulence` / `IntensityLength` |
 | `radiation.py` | `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers` |
 | `paths.py` | `named_paths` / `with_paths` / `relocated` (see "Paths") |
 | `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (on `_March`) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for`; `NotConverged` |
-| `outputs.py` | `Outputs`, `RunFields(cells, patches)`, `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`, `Checkpoints` |
+| `outputs.py` | `Outputs`, `RunFields(cells, patches)`, `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk` / `RadialProfiles`, `Checkpoints` |
 | `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord`; `plan_run` → `RunPlan` |
 | `aquaflux/__main__.py` | the `aquaflux` command |
 
@@ -141,6 +141,18 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `turbulence_closures(model)` → `(k, omega)` (inlet: both `Dirichlet` from the inflow; outlet: both
   `ZeroGradient`; wall: `k` by `Wall.k`, and a placeholder `ZeroGradient` ω the closure fixes in the wall
   cells).
+- **A condition is placed on its patch before its closures are built** (`PatchCondition.placed(PatchSite)`,
+  default itself; `physics._placed_conditions`, the one source both flow builds read). `PatchSite(name,
+  centroids, areas, normals, directory)` carries the patch's faces (the face geometry taken to the host
+  once per build, not per patch) and the case directory. `DevelopedInlet(profile_table)` (a `path_fields` table, scope `flow`) places as a private
+  `_ProfiledInlet`: the table read (`io.read_profile_table`; `U` required, `k`/`omega` only under RANS),
+  laid out from the patch's area-weighted centre along its inward normal (`RadialProfile`/`AxialVector`,
+  `boundary.md`), the patch refused when a face leans past `FLAT_PATCH` (1°). Unplaced it builds no
+  closure (refused by name). **The datum rule asks `PatchCondition.prescribes_pressure()`** (default: its
+  flow closure's; `DevelopedInlet` `False`), since it runs before the mesh is read.
+  `RadialProfiles(file, centre, axis, bands)` is the writer of such a table (vectors along the axis,
+  `boundary.radial_average` by cell volume). Pinned by `tests/unit/test_developed_inlet.py` (a 3D box
+  through a real build, both sides, refusals, the writer's table read back).
 - **The wall set is `flow.sheared_patches(momentum.boundary)`**, so the flow/turbulence wall reconciliation
   at `CoupledRANS.build` holds by construction.
 - **One `PropertyModel`** (`Fluid.property_model()`), built in the momentum builder and handed to
@@ -149,7 +161,8 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   to a jitted function, so a continuation rescaling viscosity would recompile at every rung. `mu = rho * nu`
   in that order, bit-identical to the hand-built drivers.
 - **An unset setting is not passed** (`_set`), so the builder's default applies; nothing restates a default.
-- **`_momentum(spec, mesh, geometry)` is the one flow builder** both flow physics start from.
+- **`_momentum(spec, mesh, geometry, conditions)` is the one flow builder** both flow physics start from,
+  `conditions` the placed ones.
 
 ## Checking a build
 
@@ -173,7 +186,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   (so a checkpoint's digest would not match) and costs minutes at scale, and nobody runs a real case on a
   box grid.
 - **A mesh file is the mesher's input** (`mesh_file.py`: `MeshSpec(drawing, region, sizes, patches,
-  others, layers, layered, mapped, pipes, pipe_core, planarizer, core, output)`, the one-form sections
+  others, layers, layered, mapped, pipes, pipe_core, pipe_grading, planarizer, core, periodic, output)`, the one-form sections
   `drawing` / `region` / `sizes` / `output` written without `kind`), read by the case's own YAML parse
   and registry (`read_mesh_file` / `write_mesh_file` in `case_file.py`, `mesh_spec_from_mapping` /
   `mesh_spec_to_mapping` / `mesh_schema` in `spec.py`, sharing `_with_kinds` / `_without_kinds` with
@@ -182,7 +195,9 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   output before meshing** (each writer's `MeshWriter.replaces()`, the rule its own `write` refuses by),
   mesh, measure (`mesh.QualitySummary`), write the `.aqmesh` (its header's `provenance`: the settings as
   they ran, version, commit, modified, start, seconds, `quality`) and the polyMesh if `output.openfoam` is
-  set. Exit 2 on a refused file or an occupied output; not in `SERVED` (it can take minutes). **Each
+  set; with `periodic` (`mesh.PeriodicJoin`, one pair) the quality is measured before the join
+  (`QualitySummary` refuses a periodic mesh), then `MeshSpec.joined` runs as a stage of its own; a
+  periodic mesh with `output.openfoam` is refused at read. Exit 2 on a refused file or an occupied output; not in `SERVED` (it can take minutes). **Each
   stage is printed as it starts** (`  12.3 s  growing the layers`, flushed; `on_stage` threaded through
   `MeshSpec.mesh` into `CadMesher.mesh`, then "measuring the mesh's quality" and "writing the mesh"),
   then the summary and the quality line; the browser shows these lines as they are, parsing none.
@@ -419,4 +434,4 @@ Radiation is a physics of the case file (project owner, 2026-10-05), and its run
 - Source kinds beyond `BodyForce` (waits on #362).
 - A passive-scalar case referring to another case's converged flow (#662; `bfs3d_species` imports the flow
   harness by path).
-- Profiles (`DirichletField`, a callable).
+- Profiles other than a developed pipe flow's (`DirichletField`, a callable).

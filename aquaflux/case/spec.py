@@ -34,7 +34,7 @@ import yaml
 
 from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUpwind
 from aquaflux.flow import PinnedPoint, PressureDatum
-from aquaflux.mesh import Mesh
+from aquaflux.mesh import Mesh, PeriodicJoin
 from aquaflux.meshing import (
     FacePlanarizer,
     FaceSelection,
@@ -85,6 +85,7 @@ from aquaflux.solve import (
 from aquaflux.turbulence import PRECONDITIONER_SPEC_MAPPING, DirectScalars, LogScalars, SSTModel
 
 from .boundaries import (
+    DevelopedInlet,
     FixedTurbulence,
     Inlet,
     IntensityLength,
@@ -99,7 +100,7 @@ from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState
 from .mesh_file import Drawing, DrawingRegion, MeshOutput, MeshSizes, MeshSpec
 from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
-from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, Vtk
+from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, RadialProfiles, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
 from .radiation import (
     CadFluid,
@@ -291,7 +292,8 @@ class CaseSpec:
         for patch, condition in self.boundaries.items():
             if not isinstance(patch, str) or not isinstance(condition, PatchCondition):
                 raise TypeError(
-                    "CaseSpec.boundaries maps each patch name to an Inlet, Outlet, Wall or Lamp, got "
+                    "CaseSpec.boundaries maps each patch name to an Inlet, DevelopedInlet, Outlet, Wall or "
+                    "Lamp, got "
                     f"{patch!r}: {condition!r}."
                 )
         # A copy, read-only: the spec is frozen, and a dict handed in would otherwise stay mutable
@@ -546,6 +548,7 @@ _CASE_MAPPING = SettingsMapping(
         PrismLayers,
         PipeCore,
         PipeGrading,
+        PeriodicJoin,
         Graded,
         FacePlanarizer,
         OctreeCore,
@@ -557,6 +560,7 @@ _CASE_MAPPING = SettingsMapping(
         DirectScalars,
         LogScalars,
         Inlet,
+        DevelopedInlet,
         Outlet,
         Wall,
         Lamp,
@@ -621,6 +625,7 @@ _CASE_MAPPING = SettingsMapping(
         Vtk,
         PatchVtk,
         OpenFOAMTime,
+        RadialProfiles,
         Checkpoints,
         Checkpoint,
         Fields,

@@ -20,6 +20,8 @@ fields back onto a mesh -- a run's starting state. :func:`write_vtu` instead wri
 self-contained VTK XML file, which needs no case to write into and so is the path for a mesh that
 came from anywhere; :func:`write_pvd` indexes a series of those as one transient dataset, and
 :func:`write_hexahedra` writes axis-aligned hexahedra with no mesh at all -- an octree's leaves.
+:func:`write_profile_table` keeps fields tabulated against radius -- a developed pipe flow -- as a
+small text file, and :func:`read_profile_table` reads it back.
 
 Geometry comes in from computer-aided design (CAD) as well as from meshes: :mod:`aquaflux.io.cad`
 reads a STEP drawing into exact :mod:`aquaflux.solids` bodies — each checked against the drawing
@@ -52,6 +54,7 @@ from .openfoam import (
     write_openfoam_field,
     write_openfoam_time,
 )
+from .profiles import ProfileTable, read_profile_table, write_profile_table
 from .reader import MeshReader
 from .writer import MeshWriter
 from .vtk import write_hexahedra, write_patches, write_pvd, write_triangles, write_vtu
@@ -66,12 +69,14 @@ __all__ = [
     "MeshWriter",
     "OpenFOAMReader",
     "OpenFOAMWriter",
+    "ProfileTable",
     "infer_extruded_axis",
     "read_aqmesh",
     "read_aqmesh_header",
     "read_field_template",
     "read_openfoam",
     "read_openfoam_time",
+    "read_profile_table",
     "read_surface_scalar_field",
     "read_volume_scalar_field",
     "write_aqmesh",
@@ -80,6 +85,7 @@ __all__ = [
     "write_openfoam_field",
     "write_openfoam_time",
     "write_patches",
+    "write_profile_table",
     "write_pvd",
     "write_triangles",
     "write_vtu",

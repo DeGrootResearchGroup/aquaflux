@@ -18,6 +18,11 @@ detail: `.claude/notes/boundary-log.md`.
   solutions and varying walls), `ZeroGradient`, `Neumann`, `Convective` (Robin
   `Gamma dphi/dn = h(Tinf − phi_ip)`, `h`/`t_inf` differentiable). All share the tangential correction
   `_tangential_correction`: `corr = grad·(d − (d·n)n)` (zero on orthogonal grids).
+- **`radial.py`** — `RadialProfile(centre, axis, radii, values)` (an `equinox.Module`, values leaves; read by
+  each point's distance from the axis, `jnp.interp`, held at the ends; the axis made unit at
+  construction), `AxialVector(magnitude)` (a velocity along the profile's axis) and the host-side
+  `radial_average(points, weights, fields, centre, axis, bands)` (equal-width bands, empty ones dropped,
+  each row's radius its points' weighted mean). The developed-inflow pieces of `case.DevelopedInlet`.
 - **`collection.py` — `BoundaryConditions`**, a `{patch: closure}` `equinox.Module` built like a
   `PropertyModel` and passed to an assembler's `build` as the single `boundary` argument (not a bare dict).
   Two states: constructed **unbound** (`faces is None`), then bound by `build` via

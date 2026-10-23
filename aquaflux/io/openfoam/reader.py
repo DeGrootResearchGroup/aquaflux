@@ -17,10 +17,9 @@ import equinox as eqx
 import numpy as np
 
 from aquaflux.io.reader import MeshReader
-from aquaflux.mesh import Mesh, collapse_extruded_direction
+from aquaflux.mesh import PERIODIC_MATCH_TOLERANCE, Mesh, collapse_extruded_direction
 
 from .assembler import assemble
-from .cyclic import DEFAULT_MATCH_TOLERANCE
 from .foamfile import read_foam_body, resolve_polymesh_dir
 from .grammar import (
     parse_boundary,
@@ -45,9 +44,9 @@ class OpenFOAMReader(MeshReader):
     """
 
     directory: str = eqx.field(static=True)
-    cyclic_match_tolerance: float = eqx.field(static=True, default=DEFAULT_MATCH_TOLERANCE)
+    cyclic_match_tolerance: float = eqx.field(static=True, default=PERIODIC_MATCH_TOLERANCE)
 
-    def __init__(self, directory, *, cyclic_match_tolerance: float = DEFAULT_MATCH_TOLERANCE):
+    def __init__(self, directory, *, cyclic_match_tolerance: float = PERIODIC_MATCH_TOLERANCE):
         """Construct a reader for a polyMesh or case directory.
 
         Parameters
@@ -56,7 +55,7 @@ class OpenFOAMReader(MeshReader):
             Either the polyMesh directory itself or an OpenFOAM case directory containing
             ``constant/polyMesh``.
         cyclic_match_tolerance : float
-            See :data:`~aquaflux.io.openfoam.cyclic.DEFAULT_MATCH_TOLERANCE`.
+            See :data:`~aquaflux.mesh.PERIODIC_MATCH_TOLERANCE`.
         """
         self.directory = str(resolve_polymesh_dir(directory))
         self.cyclic_match_tolerance = cyclic_match_tolerance
@@ -121,7 +120,7 @@ class OpenFOAMReader(MeshReader):
         return mesh
 
 
-def read_openfoam(directory, *, cyclic_match_tolerance: float = DEFAULT_MATCH_TOLERANCE) -> Mesh:
+def read_openfoam(directory, *, cyclic_match_tolerance: float = PERIODIC_MATCH_TOLERANCE) -> Mesh:
     """Read an OpenFOAM polyMesh (or case) directory into a :class:`~aquaflux.mesh.Mesh`.
 
     Parameters
@@ -129,7 +128,7 @@ def read_openfoam(directory, *, cyclic_match_tolerance: float = DEFAULT_MATCH_TO
     directory : str or path-like
         Either a polyMesh directory or an OpenFOAM case directory containing ``constant/polyMesh``.
     cyclic_match_tolerance : float
-        See :data:`~aquaflux.io.openfoam.cyclic.DEFAULT_MATCH_TOLERANCE`.
+        See :data:`~aquaflux.mesh.PERIODIC_MATCH_TOLERANCE`.
 
     Returns
     -------

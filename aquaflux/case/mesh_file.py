@@ -33,7 +33,7 @@ from typing import ClassVar
 
 from aquaflux.io import AQMESH_SUFFIX
 from aquaflux.io.cad import CadRegion, read_step
-from aquaflux.mesh import Mesh
+from aquaflux.mesh import Mesh, PeriodicJoin
 from aquaflux.meshing import (
     CadMesher,
     FacePlanarizer,
@@ -210,6 +210,11 @@ class MeshSpec:
         A core of hexahedra from an octree inside the region, kept clear of the walls and of the
         layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
         Unset, the core is polyhedral throughout.
+    periodic : PeriodicJoin or None
+        Two patches joined into one periodic seam once the region is meshed -- the two ends of a
+        length of pipe whose outflow is its own inflow, say -- so neither is a patch of the mesh
+        written. They must be meshed alike, each the other displaced by the period: the ends of a
+        straight pipe are. Unset, the mesh is not periodic.
     output : MeshOutput
         Where the mesh is written; by default ``mesh.aqmesh`` beside the mesh file.
 
@@ -217,8 +222,9 @@ class MeshSpec:
     ------
     ValueError
         If a size, the angle or the grading is not a positive, finite number; layers are given
-        without a patch to grow on, or patches are named without layers; or the core's size is
-        below an unset wall size.
+        without a patch to grow on, or patches are named without layers; the core's size is
+        below an unset wall size; or a periodic mesh is to be written as an OpenFOAM polyMesh,
+        which holds no periodic seam.
     """
 
     drawing: Drawing
@@ -234,6 +240,7 @@ class MeshSpec:
     pipe_grading: PipeGrading | None = None
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
+    periodic: PeriodicJoin | None = None
     output: MeshOutput = dataclasses.field(default_factory=MeshOutput)
 
     #: Where an unset setting takes its default from (read by the case-file schema).
@@ -256,6 +263,11 @@ class MeshSpec:
                 "a mesh file grows layers on the patches it names in layered, so it takes both "
                 "layers and layered, or neither."
             )
+        if self.periodic is not None and self.output.openfoam is not None:
+            raise ValueError(
+                "output.openfoam: an OpenFOAM polyMesh is written without periodic seams, so a "
+                "periodic mesh is written only as an .aqmesh file. Remove one of the two."
+            )
         self.mesher()  # refuses a size, angle or grading out of range
 
     def mesher(self) -> CadMesher:
@@ -274,7 +286,8 @@ class MeshSpec:
         )  # fmt: skip
 
     def mesh(self, directory: Path, on_stage: Stage | None = None) -> Mesh:
-        """The region, read from its drawing and meshed.
+        """The region, read from its drawing and meshed; its periodic patches are still patches
+        (:meth:`joined` joins them).
 
         Parameters
         ----------
@@ -301,3 +314,17 @@ class MeshSpec:
             layered=self.layered, mapped=self.mapped, pipes=self.pipes, on_stage=on_stage,
             **options,
         )  # fmt: skip
+
+    def joined(self, mesh: Mesh) -> Mesh:
+        """``mesh`` with :attr:`periodic`'s patches joined, or as it is when unset.
+
+        Parameters
+        ----------
+        mesh : Mesh
+            The mesh :meth:`mesh` made.
+
+        Returns
+        -------
+        Mesh
+        """
+        return mesh if self.periodic is None else self.periodic.join(mesh)

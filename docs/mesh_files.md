@@ -129,6 +129,21 @@ vessel -- by `growth` a row, toward an inlet or outlet or the length's middle, t
 pipe_grading: {kind: PipeGrading, growth: 1.08, max_length: 0.02}
 ```
 
+A length of pipe whose outflow is its own inflow -- for the fully developed flow an inlet of another
+case admits -- is meshed with its two ends as patches, then the two joined into one periodic seam
+({class}`~aquaflux.mesh.PeriodicJoin`), so neither is a patch of the mesh written. The faces of
+`first` stay, each now between its own cell and the cell beside its twin on `second`; the two must
+be meshed alike, each the other moved by the period, as a straight pipe's ends are. The mesh's
+recorded quality is the mesh's before the join, and a periodic mesh is written as an `.aqmesh`
+file only (an OpenFOAM polyMesh written here holds no periodic seam):
+
+```yaml
+patches:
+  start: {kind: FacesNear, points: [[0.0, 0.0, 0.0]]}
+  end: {kind: FacesNear, points: [[0.104, 0.0, 0.0]]}
+periodic: {kind: PeriodicJoin, first: end, second: start}
+```
+
 The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
 ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
 are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of

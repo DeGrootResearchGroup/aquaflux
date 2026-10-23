@@ -68,12 +68,15 @@ cfd/                                  # repo root
 │   │   ├── graph.py                  #   cell↔cell adjacency (build-time): cell_adjacency_coo() (SciPy COO, for RCM) / cell_adjacency_csr() (CSR arrays, for partitioners)
 │   │   ├── structured.py             #   structured_grid_2d() / structured_grid_3d() / graded_nodes(): clean orthogonal quad/hex grids (interior-node skew for order studies lives in tests/support/meshes.py)
 │   │   ├── digest.py                 #   mesh_digest(mesh): one digest for one mesh, wherever it is read (checkpoints, .aqmesh headers)
+│   │   ├── periodic.py               #   PeriodicJoin: two boundary patches joined into one periodic seam; the face matching the OpenFOAM cyclic fusion shares
+│   │   ├── carried.py                #   carried_cell_zones / carried_face_patches: zones and patches onto a rebuilt mesh (the join, the collapse)
 │   │   └── collapse.py               #   collapse_extruded_direction(): one-cell-thick extruded 3D mesh → genuine 2D Mesh (used by the OpenFOAM reader for empty-patch 2D cases)
 │   │
 │   ├── io/                           # mesh import (file formats → Mesh) and field output; depends on mesh, never the reverse
 │   │   ├── aqmesh/                   #   aquaflux's own mesh file (.aqmesh): write_aqmesh / read_aqmesh / read_aqmesh_header, read back exactly
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   ├── cell_fields.py            #   as_cell_values(): the conversion + per-cell length check every field writer makes
+│   │   ├── profiles.py               #   write_profile_table / read_profile_table: fields against radius as CSV (a developed pipe flow)
 │   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)
 │   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity (hexahedra as VTK hexahedra), each face wound outward from the cell listing it (pure numpy)
 │   │   │   ├── xml.py                #     VtkCells + cell fields → .vtu / .pvd document parts; raw appended binary by default, ASCII on request (pure)
@@ -116,6 +119,7 @@ cfd/                                  # repo root
 │   │
 │   ├── boundary/                     # weak boundary-face-value closures (a BC is a special face interpolator)
 │   │   ├── conditions.py             #   BoundaryCondition → Dirichlet, DirichletField, ZeroGradient, Neumann, Convective
+│   │   ├── radial.py                 #   RadialProfile / AxialVector (values by distance from an axis) + radial_average (cell values over bands of radius)
 │   │   └── collection.py             #   BoundaryConditions: named {patch: closure} collection bound to a mesh's patches, applied by the shared iterate-patches → gather owner → set fold
 │   │
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block

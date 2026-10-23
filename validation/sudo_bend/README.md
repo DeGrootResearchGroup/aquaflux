@@ -20,7 +20,7 @@ yet the geometry is simple enough to be meshed natively and structured throughou
 |---|---|
 | pipe diameter `D` | 104 mm |
 | bend radius `R_c` | 2 `D` (208 mm, centreline) |
-| straight pipe before the bend | 3 `D` (the experiment's was ~100 `D`: the flow enters fully developed) |
+| straight pipe before the bend | 3 `D` (the experiment's was ~100 `D`: the flow enters fully developed, so the inlet admits a developed flow, below) |
 | straight pipe after it | 15 `D` (measuring stations to 10 `D`) |
 | fluid | air, `Re = 6.0e4` on the bulk velocity (about 8.7 m/s at ν = 1.5e-5 m²/s) |
 | measuring stations | upstream of the bend, through it (0 to 90°), and downstream to 10 `D`; the exact list and the digitized profiles are still to be taken from the paper |
@@ -34,7 +34,7 @@ The bend lies in the plane `z = 0`, a plane of symmetry of the mean flow; the fl
 the toroidal bend between them), and `mesh.yaml` meshes it with aquaflux's own mesher:
 
 ```
-python validation/sudo_bend/geometry.py          # bend.step (tracked)
+python validation/sudo_bend/geometry.py          # bend.step and precursor.step (tracked)
 aquaflux mesh validation/sudo_bend/mesh.yaml     # work/bend.aqmesh
 python validation/sudo_bend/render_mesh.py       # figures/mesh_*.png
 ```
@@ -66,3 +66,34 @@ wall grid), `mesh_inlet.png` (the inlet face, the O-grid the run is swept from),
 (cross-sections at the stations), `mesh_section_wall.png` (the wall layers and shell),
 `mesh_symmetry_plane.png` / `mesh_symmetry_plane_inner_wall.png` (the plane `z = 0` through the bend)
 and `mesh_quality.png` (face non-orthogonality and skewness).
+
+## The inflow
+
+The experiment's inlet pipe is long enough for the flow to reach the bend fully developed, and the
+3 `D` drawn here are not. The developed flow is computed instead in a straight length of the same
+pipe whose two ends are one periodic seam, so its outflow is its inflow, held at the bulk velocity
+by a force solved with the flow:
+
+```
+aquaflux mesh validation/sudo_bend/precursor_mesh.yaml   # work/precursor.aqmesh
+aquaflux run validation/sudo_bend/precursor.yaml         # work/precursor/profiles.csv
+aquaflux run validation/sudo_bend/case.yaml              # work/results
+```
+
+`precursor_mesh.yaml` meshes one diameter of the pipe with the bend's own settings, so its
+cross-section is the bend inlet's (3 792 cells, 12 rows of 316), and joins its ends. The precursor's
+fields, averaged over 40 bands of distance from the axis, are its profiles of axial velocity, `k`
+and `omega` against the radius (`profiles.csv`), and the bend's inlet is a `DevelopedInlet` that
+gives each face the values at its distance from the inlet's centre, along the inward normal.
+
+Measured (2026-10-23, the tracked files, 4-core Linux container, one run):
+
+| | |
+|---|---|
+| precursor march | 63 steps, 17.5 min, to 6.0e-10 (1.1e-8 of the start, row-scaled) |
+| profiles | 21 radii (40 bands, the empty ones in the core's corners dropped) |
+| centreline | 1.160 `U_b` (the one-seventh power law's 1.224) |
+| first cell | y+ 40 by Blasius's friction velocity, 0.435 m/s; the friction velocity that puts it on the log law (κ 0.41, B 5.2) is 0.425 m/s, 2.4 % lower |
+
+`plot_inflow.py` draws `figures/inflow_profiles.png`: the velocity against the power law, in wall
+units against the log law, and `k` and `omega` against the radius.

@@ -29,6 +29,7 @@ import numpy as np
 
 from aquaflux import ragged
 
+from .carried import carried_cell_zones, carried_face_patches
 from .mesh import Mesh
 
 # Faces normal to the extruded axis are constant along it to within this fraction of the mesh
@@ -120,8 +121,8 @@ def collapse_extruded_direction(mesh: Mesh, removed_patch_names: Sequence[str]) 
         owner,
         neighbour,
         n_cells=mesh.n_cells,
-        cell_zones=_carry_cell_zones(mesh),
-        face_patches=_carry_face_patches(mesh, removed, kept_faces),
+        cell_zones=carried_cell_zones(mesh),
+        face_patches=carried_face_patches(mesh, removed, kept_faces),
         patch_types=patch_types,
         patch_groups=patch_groups,
         neighbour_offset=offset,
@@ -248,33 +249,3 @@ def _side_faces_to_edges(
     distinct_values = sorted_values[starts]
     edges = distinct_values.reshape(kept_faces.size, 2).astype(np.int64)
     return edges
-
-
-def _carry_cell_zones(mesh: Mesh) -> dict[str, np.ndarray] | None:
-    """Rebuild the named (non-default) cell zones as an index dict; cells are unchanged (1:1)."""
-    named = {
-        name: np.nonzero(np.asarray(mesh.cell_zones.mask(name)))[0]
-        for name in mesh.cell_zones.names
-        if name != "default"
-    }
-    return named or None
-
-
-def _carry_face_patches(
-    mesh: Mesh, removed: list[str], kept_faces: np.ndarray
-) -> dict[str, np.ndarray] | None:
-    """Re-index the surviving named face patches onto the reduced (kept-face) numbering.
-
-    The two removed caps and the automatic ``"interior"``/``"boundary"`` patches are dropped; the
-    latter are reassigned automatically from the collapsed neighbour array by the mesh constructor.
-    """
-    new_of_old = np.full(mesh.n_faces, -1, dtype=np.int64)
-    new_of_old[kept_faces] = np.arange(kept_faces.size)
-    skip = {"interior", "boundary", *removed}
-    carried = {}
-    for name in mesh.face_patches.names:
-        if name in skip:
-            continue
-        old = np.nonzero(np.asarray(mesh.face_patches.mask(name)))[0]
-        carried[name] = new_of_old[old]
-    return carried or None

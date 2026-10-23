@@ -30,7 +30,7 @@ from aquaflux.boundary import BoundaryConditions
 from aquaflux.flow import (
     MomentumContinuity,
     reference_speed,
-    refuse_an_unsuitable_pressure_datum,
+    refuse_a_pressure_datum_beside,
     sheared_patches,
 )
 from aquaflux.mesh import patch_triangles
@@ -52,7 +52,7 @@ from aquaflux.turbulence import (
     coupled_fields,
 )
 
-from .boundaries import Lamp, PatchCondition, Wall
+from .boundaries import Lamp, PatchCondition, PatchSite, Wall
 from .radiation import MeshPatch, OccluderSpec, PatchSurface, Receivers, UniformMedium, _Drawings
 from .scopes import FLOW, RADIATION, SCOPES, TURBULENCE
 
@@ -321,10 +321,12 @@ class _Flow(Physics):
                 f"{'this setting' if len(needed) == 1 else 'these settings'}; give "
                 f"{'it' if len(needed) == 1 else 'them'}."
             )
-        refuse_an_unsuitable_pressure_datum(
-            BoundaryConditions(
-                {name: condition.flow_closure() for name, condition in spec.boundaries.items()}
-            ),
+        refuse_a_pressure_datum_beside(
+            [
+                name
+                for name, condition in spec.boundaries.items()
+                if condition.prescribes_pressure()
+            ],
             spec.pressure_datum,
             "the case",
         )
@@ -381,8 +383,7 @@ class Laminar(_Flow):
         self, spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry, directory: Path
     ) -> MomentumContinuity:
         """The flow assembler -- see :meth:`Physics.build`."""
-        del directory
-        return _momentum(spec, mesh, geometry)
+        return _momentum(spec, mesh, geometry, _placed_conditions(spec, mesh, geometry, directory))
 
     def output_fields(self, problem: MomentumContinuity, solution: object) -> dict[str, np.ndarray]:
         """``U`` and ``p`` -- see :meth:`Physics.output_fields`."""
@@ -477,13 +478,12 @@ class RANS(_Flow):
         property model the fluid gives, and the same gradient reconstruction; a limited turbulence
         advection takes its ``k`` and ``omega`` scales from the flow's speed.
         """
-        del directory
-        momentum = _momentum(spec, mesh, geometry)
+        conditions = _placed_conditions(spec, mesh, geometry, directory)
+        momentum = _momentum(spec, mesh, geometry, conditions)
         model = self.model
         # The model is the one the closure is built with, so an inlet's length scale reads its constants.
         closures = {
-            name: condition.turbulence_closures(model)
-            for name, condition in spec.patch_conditions(mesh).items()
+            name: condition.turbulence_closures(model) for name, condition in conditions.items()
         }
         options = _set(
             gradient_scheme=spec.numerics.gradient,
@@ -952,17 +952,37 @@ def _set(**settings: object) -> dict[str, object]:
     return {name: value for name, value in settings.items() if value is not None}
 
 
-def _momentum(spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry) -> MomentumContinuity:
-    """The flow assembler every physics starts from: the fluid, each patch's flow closure, the numerics."""
+def _placed_conditions(
+    spec: CaseSpec, mesh: Mesh, geometry: MeshGeometry, directory: Path
+) -> dict[str, PatchCondition]:
+    """Each patch's condition placed on its patch (:meth:`PatchCondition.placed`), which every closure
+    of a flow is built from."""
+    face = geometry.face
+    centroid, area, normal = (np.asarray(x) for x in (face.centroid, face.area, face.normal))
+    placed = {}
+    for name, condition in spec.patch_conditions(mesh).items():
+        faces = np.asarray(mesh.face_patches.indices(name))
+        site = PatchSite(name, centroid[faces], area[faces], normal[faces], Path(directory))
+        placed[name] = condition.placed(site)
+    return placed
+
+
+def _momentum(
+    spec: CaseSpec,
+    mesh: Mesh,
+    geometry: MeshGeometry,
+    conditions: Mapping[str, PatchCondition],
+) -> MomentumContinuity:
+    """The flow assembler every physics starts from: the fluid, each patch's flow closure, the numerics.
+
+    ``conditions`` are the patches' conditions placed on them (:func:`_placed_conditions`).
+    """
     return MomentumContinuity.build(
         mesh,
         geometry,
         spec.fluid.property_model(),
         BoundaryConditions(
-            {
-                name: condition.flow_closure()
-                for name, condition in spec.patch_conditions(mesh).items()
-            }
+            {name: condition.flow_closure() for name, condition in conditions.items()}
         ),
         advection_scheme=spec.numerics.momentum_advection,
         sources=tuple(source.momentum_source() for source in spec.sources),

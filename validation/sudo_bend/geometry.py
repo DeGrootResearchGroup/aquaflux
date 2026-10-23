@@ -14,9 +14,13 @@ through ``(0, R_c, 0)`` along ``z``, and leaves along ``+y`` through an outlet a
 are written as one solid, ``fluid``, with five faces: the inlet and outlet discs, the two pipe
 cylinders and the toroidal bend wall between them.
 
+The flow enters the bend fully developed, and the profile it enters with comes from a second
+drawing: a straight length of the same pipe (:class:`Precursor`), meshed alike and joined end to
+end, in which the flow develops until it no longer changes along the pipe.
+
 Usage::
 
-    python validation/sudo_bend/geometry.py [<out.step>]
+    python validation/sudo_bend/geometry.py [<bend.step> [<precursor.step>]]
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from OCP.XCAFDoc import XCAFDoc_DocumentTool
 
 HERE = Path(__file__).parent
 STEP = HERE / "bend.step"
+PRECURSOR_STEP = HERE / "precursor.step"
 SOLID = "fluid"
 
 
@@ -120,21 +125,62 @@ class Bend:
 
     def write_step(self, path: Path) -> None:
         """Write the fluid as a STEP file holding one solid named ``fluid``."""
-        document = TDocStd_Document(TCollection_ExtendedString("bend"))
-        # Lengths are written in metres, as drawn; the kernel's default unit is the millimetre.
-        XCAFDoc_DocumentTool.SetLengthUnit_s(document, 1.0)
-        Interface_Static.SetCVal_s("write.step.unit", "M")
-        tool = XCAFDoc_DocumentTool.ShapeTool_s(document.Main())
-        label = tool.AddShape(self.shape(), False)
-        TDataStd_Name.Set_s(label, TCollection_ExtendedString(SOLID))
-        writer = STEPCAFControl_Writer()
-        writer.SetNameMode(True)
-        writer.Transfer(document)
-        if writer.Write(str(path)) != IFSelect_RetDone:
-            raise OSError(f"could not write {path}")
+        write_solid(self.shape(), path)
+
+
+@dataclasses.dataclass(frozen=True)
+class Precursor:
+    """A straight length of the bend's pipe, along ``+x`` from the origin, for the developed flow.
+
+    Attributes
+    ----------
+    diameter : float
+        The pipe's inner diameter, the bend's.
+    length : float
+        The length, in diameters. The developed flow does not change along the pipe, so any length
+        holding a few cross-sections serves.
+    """
+
+    diameter: float = Bend.diameter
+    length: float = 1.0
+
+    @property
+    def outlet_centre(self) -> tuple[float, float, float]:
+        """The centre of the disc at the far end (the near end's is the origin)."""
+        return (self.length * self.diameter, 0.0, 0.0)
+
+    def shape(self):
+        """The fluid as one kernel solid, its seam on the top of the pipe (+z), as the bend's."""
+        return BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+            0.5 * self.diameter,
+            self.length * self.diameter,
+        ).Shape()
+
+    def write_step(self, path: Path) -> None:
+        """Write the fluid as a STEP file holding one solid named ``fluid``."""
+        write_solid(self.shape(), path)
+
+
+def write_solid(shape, path: Path) -> None:
+    """Write ``shape`` as a STEP file holding one solid named ``fluid``, its lengths in metres."""
+    document = TDocStd_Document(TCollection_ExtendedString("fluid"))
+    # Lengths are written in metres, as drawn; the kernel's default unit is the millimetre.
+    XCAFDoc_DocumentTool.SetLengthUnit_s(document, 1.0)
+    Interface_Static.SetCVal_s("write.step.unit", "M")
+    tool = XCAFDoc_DocumentTool.ShapeTool_s(document.Main())
+    label = tool.AddShape(shape, False)
+    TDataStd_Name.Set_s(label, TCollection_ExtendedString(SOLID))
+    writer = STEPCAFControl_Writer()
+    writer.SetNameMode(True)
+    writer.Transfer(document)
+    if writer.Write(str(path)) != IFSelect_RetDone:
+        raise OSError(f"could not write {path}")
 
 
 if __name__ == "__main__":
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else STEP
-    Bend().write_step(out)
-    print(f"wrote {out}", flush=True)
+    bend_out = Path(sys.argv[1]) if len(sys.argv) > 1 else STEP
+    precursor_out = Path(sys.argv[2]) if len(sys.argv) > 2 else PRECURSOR_STEP
+    Bend().write_step(bend_out)
+    Precursor().write_step(precursor_out)
+    print(f"wrote {bend_out} and {precursor_out}", flush=True)
