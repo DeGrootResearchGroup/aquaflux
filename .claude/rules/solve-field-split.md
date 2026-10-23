@@ -50,7 +50,7 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
   host 3.12 -> 2.74 GiB without the cut's maps, 2026-10-18).
   - **All of it on the device (2026-10-22)**: the values, the shift and the pivot floor stay there, the
     blocks are `entry_map.DeviceMatrix` slices (the whole array is let go before the fit, so the two are
-    not held through it together), and `_block_for` hands a `HierarchyBlockInverse` its block as it is
+    not held through it together), and `hierarchy_inverse.block_for` hands a `HierarchyBlockInverse` its block as it is
     (`FrozenCoarsening.fit` fits it in place) and any other inverse a host matrix (`as_scipy`), as
     `RefactorableInverse` promises. The first fit reads the two diagonal blocks back once (a factory
     coarsens on the host). `_set_coupling` holds the coupling as a `DeviceMatrix` in the split's

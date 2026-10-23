@@ -107,8 +107,9 @@ class JacobianProbe:
         runs, which is what fixes how many probes a materialize costs.
     structure : ProbeGather
         The fixed compressed-sparse-row (CSR) structure -- a row-pointer array plus a flat column-index
-        array -- together with the ordering that scatters the probe responses into it, so a materialize
-        de-compresses by one gather rather than a scatter loop and a re-sort.
+        array, per block of its layout -- together with the ordering that scatters the probe responses
+        into it on the device, so a materialize de-compresses by one gather rather than a scatter loop
+        and a re-sort.
     narrowing : callable or None
         ``assembler -> assembler``: the stand-in whose Jacobian is materialized in place of the
         assembler itself, or ``None`` to materialize the assembler as it stands. It is how a residual
@@ -157,8 +158,8 @@ class JacobianProbe:
             entries are laid out block by block over the partition, so a materialize yields the split's
             blocks directly and the whole matrix is never formed
             (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`). ``None`` (default, and
-            the only sound choice for a probe a monolithic consumer reads) keeps every block, in the whole
-            matrix's order.
+            the only sound choice for a probe a monolithic consumer reads) keeps every block, the whole
+            matrix in its own order as a layout of one group.
         narrowing : callable, optional
             The assembler stand-in; see the class.
 

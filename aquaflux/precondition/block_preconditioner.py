@@ -17,6 +17,8 @@ from collections.abc import Callable
 import numpy as np
 import scipy.sparse as sp
 
+from .entry_map import DeviceMatrix, as_scipy
+from .hierarchy_inverse import block_for
 from .host_preconditioner import FrozenInverse
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .sparse_jacobian import ProbeGather
@@ -72,7 +74,32 @@ class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
         MaterializedBlockPreconditioner
             The frozen preconditioner.
         """
+        if structure is not None:
+            cls._require_one_group(structure)
+            probed = cls._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
+            probed.add_shift(shift_diagonal)
+            (whole, *_) = probed.blocks()
+            del probed
+            # A factory coarsens on the host, so the first fit reads the matrix back once.
+            return cls(inverse(as_scipy(whole), n_fields))
         jacobian = cls._materialize_jacobian(
             matvec, plan, batched_matvec, probe_batch_size, structure
         )
         return cls(inverse(cls._shifted(jacobian, shift_diagonal), n_fields))
+
+    @staticmethod
+    def _require_one_group(structure: ProbeGather) -> None:
+        """Refuse a probe laid out over a field split's partition: this fits one inverse to all of it."""
+        if structure.layout.whole is None:
+            raise ValueError(
+                f"the probe's blocks split the operator after {structure.layout.leading_dofs} of "
+                f"{structure.layout.n_dofs} unknowns; one block inverse is fitted to the whole matrix."
+            )
+
+    def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
+        """Re-fit the inverse to the whole matrix, the one group's block, on the device where it can."""
+        if blocks[3].shape != (0, 0):
+            raise ValueError(
+                "the probe's blocks split the operator; one block inverse is fitted to the whole matrix."
+            )
+        self.inverse.refactor_block(block_for(self.inverse, blocks[0]))

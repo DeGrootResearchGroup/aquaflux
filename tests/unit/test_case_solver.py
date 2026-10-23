@@ -518,6 +518,7 @@ def recorded(monkeypatch):
         "solve_flow_march",
         "solve_segregated",
         "open_session",
+        "open_flow_session",
         "bulk_velocity_flow_solve",
         "reused_flow_solve",
         "scalar_pseudo_transient_solve",
@@ -625,15 +626,35 @@ def test_a_ramp_scales_the_viscosity_its_file_names(recorded, scale, companion) 
     assert ("companion" in kwargs) == (scale is not None)
 
 
+@pytest.mark.parametrize(
+    ("march", "spec", "opener", "solve"),
+    [
+        (
+            CoupledMarch,
+            MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
+            "open_session",
+            "solve_coupled",
+        ),
+        (
+            FlowMarch,
+            MaterializedJacobian(SimpleSmoothed()),
+            "open_flow_session",
+            "solve_flow_march",
+        ),
+    ],
+    ids=["coupled", "flow"],
+)
 def test_a_materialized_preconditioner_is_opened_as_one_session_from_the_files_spec(
-    recorded,
+    recorded, march, spec, opener, solve
 ) -> None:
-    spec = MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed()))
-    CoupledMarch(preconditioner=spec).solve("problem", session_options={"observer": "log"})
-    ((args, kwargs),) = recorded.open_session.calls
+    """Each march opens its own family's session, with the observers it was handed, and marches on it."""
+    march(preconditioner=spec).solve("problem", session_options={"observer": "log"})
+    ((args, kwargs),) = getattr(recorded, opener).calls
     assert args == (spec, "problem") and kwargs == {"observer": "log"}
-    ((_, solve_kwargs),) = recorded.solve_coupled.calls
-    assert solve_kwargs["preconditioner"] == "<open_session>"
+    ((_, solve_kwargs),) = getattr(recorded, solve).calls
+    assert solve_kwargs["preconditioner"] == f"<{opener}>"
+    with pytest.raises(TypeError, match=r"this march's preconditioner is not one"):
+        march().solve("problem", session_options={"observer": "log"})
 
 
 def test_a_block_diagonal_preconditioner_is_left_to_the_solve(recorded) -> None:

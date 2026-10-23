@@ -520,10 +520,11 @@ long as the hierarchies keep their array shapes. A coarsening with no strength t
 the sparsity pattern and keeps them; one with a `strength_threshold` reads the operator's values,
 so set `frozen_coarsening=True` on that block to re-fit the values on the coarsening it was first
 built with. A block without a traced cycle falls back to applying the whole split on the host.
-A re-fit of such a split keeps its values on the device too: the probed Jacobian is de-compressed
-there, the shift and any pivot floor are added there, and each block and the retained coupling reach
-their inverses as device values, so only a coarsening that is rebuilt rather than re-fitted reads a
-block back to the host.
+A re-fit of such a split keeps its values on the device too: the probes are seeded there, the probed
+Jacobian is de-compressed there, the shift and any pivot floor are added there, and each block and the
+retained coupling reach their inverses as device values, so only a coarsening that is rebuilt rather
+than re-fitted reads a block back to the host. A single block inverse over the whole state re-fits the
+same way.
 
 Open the session yourself to hear what each rebuild cost, through
 {class}`~aquaflux.solve.RefreshTiming` — which branch ran, the total, and the parts:

@@ -190,6 +190,8 @@ class ColumnProbePlan:
         self._probe_colour = np.concatenate(
             [np.arange(count) for count in n_colours] if total else [np.zeros(0, dtype=np.int64)]
         )
+        # The three arrays the seeds are formed from, on the device; moved there on first use.
+        self._device: tuple[jnp.ndarray, ...] | None = None
 
     @classmethod
     def uniform(
@@ -211,64 +213,57 @@ class ColumnProbePlan:
         """The ``(column field, colour)`` that flat probe ``index`` stands for."""
         return int(self._probe_field[index]), int(self._probe_colour[index])
 
-    def seed_block(self, start: int, stop: int, out: np.ndarray | None = None) -> np.ndarray:
-        """Seed vectors for probes ``[start, stop)``, shape ``(rows, n_fields * n_cells)``.
+    def seed_block(self, start: int, stop: int, rows: int | None = None) -> jnp.ndarray:
+        """Seed vectors for probes ``[start, stop)``, shape ``(rows, n_fields * n_cells)``, on the device.
 
         Probe ``probe_base[b] + c`` carries a one in field ``b`` of every cell of colour ``c`` — the
         directional derivative that reads column ``b`` of every block in that colour's share of the
         pattern.
 
-        **Built a block at a time, and reusing ``out``, because the full set is large and needed only
-        one chunk at a time.** All the seeds together are ``n_probes * n_fields * n_cells`` floats —
+        **Built a chunk at a time, on the device, because the full set is large and needed only one
+        chunk at a time.** All the seeds together are ``n_probes * n_fields * n_cells`` floats —
         hundreds of megabytes on a three-dimensional coupled case, held for the whole materialize
-        against a few megabytes for one chunk — and each is a cheap indicator vector, so keeping them
-        costs far more than rebuilding them.
-
-        ``out`` may be **longer** than ``stop - start``; the surplus rows are left zero, which is
-        exactly the padding a batched map needs to keep one compiled shape on a final short chunk.
+        against a few megabytes for one chunk — and each is an indicator of the plan's colours, which
+        one compiled program forms where the product reads it, so no seed crosses from the host.
 
         Parameters
         ----------
         start, stop : int
             Half-open range of flat probe indices.
-        out : np.ndarray, optional
-            A buffer of shape ``(rows >= stop - start, n_fields * n_cells)`` to fill. It is zeroed
-            first, so a caller may reuse one buffer across every chunk. ``None`` allocates one.
+        rows : int, optional
+            The number of rows to return, at least ``stop - start``; the surplus rows are zero, which is
+            exactly the padding a batched map needs to keep one compiled shape on a final short chunk.
+            ``None`` returns ``stop - start`` rows.
 
         Returns
         -------
-        np.ndarray
-            The buffer, filled.
+        jnp.ndarray
+            The seeds, float64.
         """
-        n = self.n_cells
-        rows = stop - start
-        if out is None:
-            out = np.zeros((rows, self.n_fields * n))
-        else:
-            out[:] = 0.0
-        for row, index in enumerate(range(start, stop)):
-            field, colour = self.probe(index)
-            out[row, field * n + self._colour_cells(field, colour)] = 1.0
-        return out
+        return self._seeds(start, stop, rows, whole_state=True, dtype=np.dtype(np.float64))
 
-    def field_seeds(self, start: int, stop: int, out: np.ndarray | None = None) -> np.ndarray:
-        """One column field's seeds for probes ``[start, stop)``, shape ``(rows, n_cells)``.
+    def field_seeds(
+        self, start: int, stop: int, rows: int | None = None, dtype: np.dtype | str = "float64"
+    ) -> jnp.ndarray:
+        """One column field's seeds for probes ``[start, stop)``, shape ``(rows, n_cells)``, on the device.
 
         The same indicators as :meth:`seed_block`, restricted to the one field every probe in the range
-        reads: what a product differentiating the residual in that field alone takes. Buffer handling
-        as :meth:`seed_block` (``out`` may be longer than the range; it is zeroed first).
+        reads: what a product differentiating the residual in that field alone takes. ``rows`` pads as
+        :meth:`seed_block`'s does.
 
         Parameters
         ----------
         start, stop : int
             Half-open range of flat probe indices, all of one column field.
-        out : np.ndarray, optional
-            A buffer of shape ``(rows >= stop - start, n_cells)`` to fill. ``None`` allocates one.
+        rows : int, optional
+            The number of rows to return, at least ``stop - start``. ``None`` returns ``stop - start``.
+        dtype : np.dtype or str
+            The seeds' floating type.
 
         Returns
         -------
-        np.ndarray
-            The buffer, filled.
+        jnp.ndarray
+            The seeds.
 
         Raises
         ------
@@ -281,13 +276,24 @@ class ColumnProbePlan:
                 f"probes [{start}, {stop}) read column fields {fields.tolist()}; one field's seeds "
                 "cannot carry another's."
             )
-        if out is None:
-            out = np.zeros((stop - start, self.n_cells))
-        else:
-            out[:] = 0.0
-        for row, index in enumerate(range(start, stop)):
-            out[row, self._colour_cells(*self.probe(index))] = 1.0
-        return out
+        return self._seeds(start, stop, rows, whole_state=False, dtype=np.dtype(dtype))
+
+    def _seeds(
+        self, start: int, stop: int, rows: int | None, *, whole_state: bool, dtype: np.dtype
+    ) -> jnp.ndarray:
+        rows = stop - start if rows is None else rows
+        if rows < stop - start:
+            raise ValueError(f"{rows} rows cannot hold the seeds of probes [{start}, {stop}).")
+        if self._device is None:
+            # The colours and each probe's (field, colour), moved once: every seed is formed from them.
+            narrow = _index_dtype(max(self.n_fields, max(self.n_colours, default=0)))
+            self._device = tuple(
+                jnp.asarray(np.asarray(array), dtype=narrow)
+                for array in (self.colour, self._probe_field, self._probe_colour)
+            )
+        return _indicator_seeds(
+            *self._device, start, stop - start, rows=rows, whole_state=whole_state, dtype=dtype
+        )
 
     def field_chunks(self, chunk: int):
         """The probes in ranges of at most ``chunk``, never spanning two column fields.
@@ -298,10 +304,6 @@ class ColumnProbePlan:
         for field, (base, count) in enumerate(zip(self.probe_base, self.n_colours, strict=True)):
             for start in range(base, base + count, chunk):
                 yield field, start, min(chunk, base + count - start)
-
-    def _colour_cells(self, field: int, colour: int) -> np.ndarray:
-        """The cells column field ``field`` gives colour ``colour``, shape ``(n_in_colour,)``."""
-        return np.where(self.colour[field] == colour)[0]
 
 
 def column_probe_plan(
@@ -618,7 +620,9 @@ def block_stencil_gather_map(
     With ``leading_fields`` the matrix is never laid out whole: the entries are ordered block by block
     over the partition of the fields into the first ``leading_fields`` and the rest (each block in its
     own CSR order), so the four blocks a field split consumes are slices of one value array
-    (:func:`materialize_blocks`) rather than cut out of a full matrix and its shifted copy.
+    (:func:`materialize_blocks`) rather than cut out of a full matrix and its shifted copy. Without it
+    the layout is the one group, the whole matrix in CSR order, so a single block inverse is fitted from
+    the same device values by the same path.
 
     Parameters
     ----------
@@ -626,7 +630,7 @@ def block_stencil_gather_map(
         The assembly pattern and the colouring probing each column field.
     leading_fields : int, optional
         Partition the stored entries into blocks at this many leading fields (see above). ``None``
-        (default) keeps the whole matrix's CSR order.
+        (default) keeps the whole matrix's CSR order, as a layout of one group.
 
     Returns
     -------
@@ -694,14 +698,45 @@ def block_stencil_gather_map(
         raise ValueError(
             "block_stencil_gather_map: duplicate (row, col) in the pattern (bad colouring)."
         )
-    if leading_fields is None:
-        return ProbeGather(csr.indptr, csr.indices, csr.data, zero_slot, nf)
-    layout, order = BlockLayout.of(csr, leading_fields * n)
-    return ProbeGather(None, None, csr.data[order], zero_slot, nf, layout=layout)
+    leading = n_fields if leading_fields is None else leading_fields
+    layout, order = BlockLayout.of(csr, leading * n)
+    return ProbeGather(csr.data[order], zero_slot, nf, layout)
+
+
+@functools.partial(jax.jit, static_argnames=("rows", "whole_state", "dtype"))
+def _indicator_seeds(
+    colour: jnp.ndarray,
+    probe_field: jnp.ndarray,
+    probe_colour: jnp.ndarray,
+    start: int,
+    count: int,
+    *,
+    rows: int,
+    whole_state: bool,
+    dtype: np.dtype,
+) -> jnp.ndarray:
+    """The seeds of probes ``[start, start + count)`` padded to ``rows`` rows: :meth:`ColumnProbePlan.seed_block`.
+
+    Row ``r`` is the indicator of the cells probe ``start + r`` seeds, in its field (``whole_state``) or
+    on its own; a row past ``count`` asks for colour ``-1``, which no cell has, so it is zero.
+    """
+    lane = jnp.arange(rows)
+    probe = jnp.minimum(start + lane, probe_field.shape[0] - 1)
+    field = probe_field[probe]
+    wanted = jnp.where(lane < count, probe_colour[probe], -1)
+    if not whole_state:
+        return (colour[field] == wanted[:, None]).astype(dtype)
+    n_fields, n_cells = colour.shape
+    in_field = jnp.arange(n_fields)[None, :, None] == field[:, None, None]
+    seeds = in_field & (colour[None] == wanted[:, None, None])
+    return seeds.reshape(rows, n_fields * n_cells).astype(dtype)
 
 
 class BlockLayout:
     """Where a two-group partition's four blocks lie in one block-major value array.
+
+    A partition whose leading group is every field is the one-group case: its leading block is the whole
+    matrix in CSR order (:attr:`whole`) and the other three are empty.
 
     The stored entries of a field-major matrix are ordered leading-by-leading, leading-by-trailing,
     trailing-by-leading, trailing-by-trailing, each block's entries in that block's own compressed-sparse-
@@ -774,6 +809,11 @@ class BlockLayout:
             )
         return cls(leading_dofs, n_dofs, tuple(blocks), jnp.asarray(diagonal)), order
 
+    @property
+    def whole(self) -> SparsePattern | None:
+        """The whole matrix's pattern, when this layout keeps it as one group; ``None`` when it splits it."""
+        return self._blocks[0][2] if self.leading_dofs == self.n_dofs else None
+
     def blocks(self, data: jnp.ndarray) -> tuple[DeviceMatrix, ...]:
         """The four blocks over ``data`` (shape ``(nnz,)``), each its slice of the values, on the device.
 
@@ -826,8 +866,8 @@ class ProbeGather:
 
     **The de-compression runs on the device**, where the probes are computed: the entry-to-response
     order is held there, and each chunk is placed by one compiled program, so no response crosses to the
-    host. A whole-matrix materialize reads its values back once at the end; a block-major one does not
-    read them back at all (:class:`ProbedBlocks`).
+    host. :func:`materialize_blocks` keeps them there (:class:`ProbedBlocks`); the public
+    :func:`materialize_block_jacobian` reads them back once, at its end, to return a host matrix.
 
     Entries lying outside their column's reach have no source probe at all (see
     :class:`ColumnProbePlan`); they simply never appear in the sorted order, so an output initialized to
@@ -835,29 +875,23 @@ class ProbeGather:
 
     Attributes
     ----------
+    layout : BlockLayout
+        Where the entries lie: block by block over a two-group partition, or, over one group, the whole
+        matrix in its own CSR order (:attr:`BlockLayout.whole`).
     indptr, indices : np.ndarray or None
-        The fixed CSR structure of the ``(n_fields n, n_fields n)`` Jacobian; ``None`` when the entries
-        are laid out by ``layout`` instead.
-    layout : BlockLayout or None
-        The block-major layout of the entries over a two-group partition, or ``None`` for the whole
-        matrix's CSR order.
+        The whole ``(n_fields n, n_fields n)`` Jacobian's CSR structure, the very arrays of the layout's
+        whole pattern; ``None`` when the layout splits the matrix into blocks.
     nnz : int
         Stored entries, including the explicit zeros the full pattern keeps.
     """
 
     def __init__(
-        self,
-        indptr: np.ndarray | None,
-        indices: np.ndarray | None,
-        gather_map: np.ndarray,
-        zero_slot: int,
-        nf: int,
-        *,
-        layout: BlockLayout | None = None,
+        self, gather_map: np.ndarray, zero_slot: int, nf: int, layout: BlockLayout
     ) -> None:
-        self.indptr = indptr
-        self.indices = indices
         self.layout = layout
+        whole = layout.whole
+        self.indptr = None if whole is None else whole.indptr
+        self.indices = None if whole is None else whole.indices
         self.nnz = int(gather_map.shape[0])
         self._nf = nf
         # Narrowed as each array is formed rather than at the end, so the wide form is never one of the
@@ -1059,7 +1093,7 @@ def materialize_block_jacobian(
     probing = _ChunkProbe(plan, probe_batch_size, matvec, batched_matvec)
 
     if structure is not None:
-        if structure.layout is not None:
+        if structure.indptr is None:
             raise ValueError(
                 "this structure lays its entries out block by block; materialize_blocks recovers it."
             )
@@ -1108,27 +1142,24 @@ def materialize_blocks(
 ) -> ProbedBlocks:
     """The block Jacobian of ``matvec`` over ``structure``'s partition, by the same coloured probing.
 
-    The counterpart of :func:`materialize_block_jacobian` for a structure built with
-    ``leading_fields`` (:func:`block_stencil_gather_map`): the probes fill one block-major value array,
-    and the four blocks are matrices over slices of it. Entry for entry, the blocks are those
-    :meth:`~aquaflux.precondition.FieldGroups.blocks` cuts from the whole matrix, explicit zeros included.
+    The counterpart of :func:`materialize_block_jacobian` that keeps the values on the device: the
+    probes fill one block-major value array (:func:`block_stencil_gather_map`), and the four blocks are
+    matrices over slices of it. Entry for entry, the blocks are those
+    :meth:`~aquaflux.precondition.FieldGroups.blocks` cuts from the whole matrix, explicit zeros included;
+    over one group, the leading block is the whole matrix.
 
     Parameters
     ----------
     matvec, plan, batched_matvec, probe_batch_size
         As :func:`materialize_block_jacobian` takes them.
     structure : ProbeGather
-        A structure with a :class:`BlockLayout`.
+        The structure, with its :class:`BlockLayout`.
 
     Returns
     -------
     ProbedBlocks
         The values and their blocks.
     """
-    if structure.layout is None:
-        raise ValueError(
-            "this structure has no block layout; materialize_block_jacobian recovers it."
-        )
     return ProbedBlocks(
         structure.values(_ChunkProbe(plan, probe_batch_size, matvec, batched_matvec)),
         structure.layout,
@@ -1206,7 +1237,7 @@ class _ChunkProbe:
 
     Chunks never span two column fields (:meth:`ColumnProbePlan.field_chunks`), so a
     :class:`FieldwiseMatvec` can be handed one field's seeds; a whole-state product is seeded with the
-    same chunks laid out over the whole state. Either way the buffer keeps one shape across every chunk
+    same chunks laid out over the whole state. Either way the seeds keep one shape across every chunk
     of a field, so a batched product compiles once per program and a padded final chunk needs no special
     case; without a batched product each chunk is a plain loop of ``matvec`` over its rows, which any
     ``matvec`` supports, including a non-vectorizable NumPy one.
@@ -1219,7 +1250,6 @@ class _ChunkProbe:
         self._matvec = matvec
         self._batched = batched_matvec
         self._fieldwise = isinstance(batched_matvec, FieldwiseMatvec)
-        self._block: np.ndarray | None = None
 
     def chunks(self):
         """``(field, start, count)`` for every chunk, as :meth:`ColumnProbePlan.field_chunks`."""
@@ -1228,29 +1258,18 @@ class _ChunkProbe:
     def responses(self, field: int, start: int, count: int) -> jnp.ndarray:
         """Responses of probes ``[start, start + count)``, shape ``(rows >= count, n_fields * n_cells)``.
 
-        Left on the device, where :meth:`ProbeGather.scatter` reads them.
+        Seeded and left on the device, where :meth:`ProbeGather.scatter` reads them.
         """
-        plan = self._plan
+        plan, end = self._plan, start + count
         if self._fieldwise:
-            block = self._buffer(plan.n_cells, self._batched.seed_dtype(field))
-            plan.field_seeds(start, start + count, out=block)
-            return jnp.asarray(self._batched(field, jnp.asarray(block)), dtype=jnp.float64)
-        block = self._buffer(plan.n_fields * plan.n_cells, np.dtype(np.float64))
-        plan.seed_block(start, start + count, out=block)
+            seeds = plan.field_seeds(start, end, self._chunk, self._batched.seed_dtype(field))
+            return jnp.asarray(self._batched(field, seeds), dtype=jnp.float64)
+        seeds = plan.seed_block(start, end, self._chunk)
         if self._batched is not None:
-            return jnp.asarray(self._batched(jnp.asarray(block)), dtype=jnp.float64)
+            return jnp.asarray(self._batched(seeds), dtype=jnp.float64)
         return jnp.stack(
-            [
-                jnp.asarray(self._matvec(jnp.asarray(block[row])), dtype=jnp.float64)
-                for row in range(count)
-            ]
+            [jnp.asarray(self._matvec(seeds[row]), dtype=jnp.float64) for row in range(count)]
         )
-
-    def _buffer(self, width: int, dtype: np.dtype) -> np.ndarray:
-        """The reused seed buffer, ``(chunk, width)`` in ``dtype``; reallocated only if either changes."""
-        if self._block is None or self._block.shape[1] != width or self._block.dtype != dtype:
-            self._block = np.zeros((self._chunk, width), dtype=dtype)
-        return self._block
 
 
 def jacobian_relative_error(
