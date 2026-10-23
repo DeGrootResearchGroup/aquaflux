@@ -148,7 +148,12 @@ procedure's 1.3.
 and the fine-grid GCI: the pressure-loss coefficient from 1 D before the bend to 10 D after it, the
 strength of the secondary flow at 90 degrees, and the axial velocity along the plane of symmetry's
 diameter at each station (the local GCI). It first reproduces the paper's own worked example (its
-Table 1), and stops if it does not.
+Table 1), and stops if it does not. A value at a point is read by a weighted linear least-squares
+fit over the cells round it, taken from the mesh's connectivity (exact for a linear field): the
+coarse grid solved twice, on meshes 0.1 µm apart, gives every quantity to 1e-7.
+
+`round36` re-solved on its generated mesh (2026-10-23, one run): 15 steps, 2352 s, to 1.1e-7, its
+fields within 2e-6 of the first solve's.
 
 The bend's march holds the whole materialized Jacobian: the coarse grid used about 10.5 GB of this
 container's 15, so the medium (about 20 GB) and the fine (about 45 GB) grids are solved on a larger

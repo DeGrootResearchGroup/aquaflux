@@ -353,7 +353,11 @@ inlet to outlet through the bend (`meshing.md`, "Runs").
   exactly N rim points. ⚠️ The worst non-orthogonality rises 13.4 → 17.7 → 21.5°, at the core's corners,
   because the thicker layer stack thins the shell. `gci.py` reproduces Celik's Table 1 before anything
   else (the check that it can fail) and reports K_loss, the 90° secondary-flow strength and local GCI of
-  the symmetry-plane axial velocity at the stations.
+  the symmetry-plane axial velocity at the stations. ⚠️ **Its point reading is a weighted linear fit over a
+  connectivity stencil (the 4 nearest cells' two face rings)**: a Delaunay `LinearNDInterpolator` moved a
+  value 0.02 U_b under a 1e-7 m mesh change (degenerate on the graded rows), k-nearest centroids by distance
+  all fell in one row's cross-section, and one nearest cell flipped on the axis (0.007 U_b); now two coarse
+  solves 0.1 µm apart agree to 1e-7.
 - **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42
   min); round48 (~20 GB) and round64 (~45 GB, estimated at ~200 KB/cell) are solved on a larger machine.
 - The station list and digitized profiles are still to be taken from the paper (the project owner is

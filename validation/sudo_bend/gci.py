@@ -42,8 +42,8 @@ import pyvista as pv
 from aquaflux.io import read_aqmesh
 from geometry import Bend
 from scipy import sparse
-from scipy.spatial import cKDTree
 from scipy.optimize import brentq
+from scipy.spatial import cKDTree
 
 HERE = Path(__file__).parent
 GRIDS = HERE / "grids"
