@@ -380,7 +380,9 @@ defect — fix it in the same change.
 
 - **`block_preconditioner.py` — `MaterializedBlockPreconditioner`**: one `BlockInverse` (e.g.
   `SimpleSmoothed`) fitted to the whole materialized, shifted Jacobian of a single-group problem, sharing
-  probe/shift/refresh with the field split; traced JAX hierarchy.
+  probe/shift/refresh with the field split; traced JAX hierarchy. Its probe is the one-group layout, so a
+  refit keeps the values, shift and pivot floor on the device like the split's
+  (`solve-direct-preconditioners.md`, "Every probe structure has a `BlockLayout`").
 
 - **`linear.py` — `solve_linear(matvec, b, solver, preconditioner=None, preconditioner_side="right")`
   returns `(x, cycles)`**, a matrix-free wrapper over `lineax` whose implicit differentiation is the

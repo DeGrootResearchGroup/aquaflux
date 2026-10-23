@@ -517,9 +517,7 @@ def main():
         probed_params, probed_static = eqx.partition(
             probe.narrow(session.problem.assembler), eqx.is_array
         )
-        seeds = jnp.asarray(
-            plan.seed_block(0, min(BATCH, plan.n_probes), out=np.zeros((BATCH, state.size)))
-        )
+        seeds = plan.seed_block(0, min(BATCH, plan.n_probes), rows=BATCH)
 
         def probe_batch(p, s, block):
             return batched_jacobian_matvec(eqx.combine(p, probed_static), s, block)
@@ -544,7 +542,7 @@ def main():
         for field in range(plan.n_fields):
             start = plan.probe_base[field]
             stop = start + min(BATCH, plan.n_colours[field])
-            seeds = jnp.asarray(plan.field_seeds(start, stop, out=np.zeros((BATCH, plan.n_cells))))
+            seeds = plan.field_seeds(start, stop, rows=BATCH)
 
             def field_batch(p, s, block, field=field):
                 return batched_field_jacobian_matvec(

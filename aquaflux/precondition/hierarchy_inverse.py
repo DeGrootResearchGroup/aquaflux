@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .entry_map import as_scipy
+from .entry_map import DeviceMatrix, as_scipy
 from .multigrid import (
     FrozenCoarsening,
     ShapeBudget,
@@ -387,3 +387,12 @@ class HierarchyBlockInverse:
 
     def destroy(self) -> None:
         """Nothing to release -- plain arrays, not a host solver's handles."""
+
+
+def block_for(inverse: object, block: sp.spmatrix | DeviceMatrix) -> sp.spmatrix | DeviceMatrix:
+    """``block`` in the form ``inverse`` re-fits from.
+
+    A :class:`HierarchyBlockInverse` fits on the device and takes a block there as it is; any other
+    inverse is handed a host matrix, as :class:`~aquaflux.precondition.RefactorableInverse` promises it.
+    """
+    return block if isinstance(inverse, HierarchyBlockInverse) else as_scipy(block)

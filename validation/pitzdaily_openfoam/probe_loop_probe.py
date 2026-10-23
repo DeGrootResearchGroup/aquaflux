@@ -6,7 +6,7 @@ glibc thresholds cannot stop it, since XLA allocates on worker threads), so a lo
 which allocates once, might remove that cost. This times, at the last captured state of a
 ``replay.py`` capture, on the step's own probe plan and gather:
 
-* ``shipped``            -- the probe as the session runs it (host seeds, one call per chunk, device
+* ``shipped``            -- the probe as the session runs it (device seeds, one call per chunk, device
   scatter);
 * ``looped``             -- one ``fori_loop`` program, seeds in and responses out by host callbacks, so the
   memory bound stays one chunk;
@@ -69,12 +69,21 @@ STARTS = structure._probe_start
 
 def shipped():
     data = jnp.zeros(structure.nnz)
-    block = np.zeros((chunk, nf))
     for _, start, m in CHUNKS:
-        plan.seed_block(start, start + m, out=block)
-        responses = batched_jacobian_matvec(probed, state, jnp.asarray(block))
+        block = plan.seed_block(start, start + m, rows=chunk)
+        responses = batched_jacobian_matvec(probed, state, block)
         data = structure.scatter(data, responses, start, m, WIDTH)
     return np.asarray(data)
+
+
+def host_seeds(start, stop, out):
+    """``plan.seed_block``'s indicators written on the host, for the callback (which may not call JAX)."""
+    n = plan.n_cells
+    out[:] = 0.0
+    for row, index in enumerate(range(start, stop)):
+        field, colour = plan.probe(index)
+        out[row, field * n : (field + 1) * n] = plan.colour[field] == colour
+    return out
 
 
 class _Host:
@@ -86,8 +95,7 @@ class _Host:
 
     def seeds(self, index):
         start = int(index) * chunk
-        plan.seed_block(start, min(start + chunk, n_probes), out=self.block)
-        return self.block
+        return host_seeds(start, min(start + chunk, n_probes), self.block)
 
     def take(self, index, responses):
         start = int(index) * chunk
@@ -132,9 +140,7 @@ def timed(f):
     return best, faults
 
 
-ALL = np.zeros((n_chunks * chunk, nf))
-plan.seed_block(0, n_probes, out=ALL)
-ALL = jnp.asarray(ALL.reshape(n_chunks, chunk, nf))
+ALL = plan.seed_block(0, n_probes, rows=n_chunks * chunk).reshape(n_chunks, chunk, nf)
 
 
 @eqx.filter_jit

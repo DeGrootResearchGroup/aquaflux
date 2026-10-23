@@ -95,18 +95,30 @@ bare block inverse).
   so colourings differ from a full-scan argmax but stay valid (`test_saturation_colouring_*`). Colour
   counts and the bucket-queue crossover (slower than the scan below ~100k–200k cells, faster above):
   log, "Saturation colouring and its bucket queue".
-- **A probe feeding a field split is laid out by the split's blocks** (`block_stencil_gather_map(plan,
-  leading_fields=)` -> `ProbeGather.layout`, a `BlockLayout`; `materialize_blocks` -> `ProbedBlocks`):
+- **Every probe structure has a `BlockLayout`** (`block_stencil_gather_map(plan, leading_fields=)` ->
+  `ProbeGather.layout`; `materialize_blocks` -> `ProbedBlocks`). A field split's is laid out by the
+  split's blocks; with no `leading_fields` it is the one group (`leading_dofs == n_dofs`,
+  `BlockLayout.whole` its pattern, the other three blocks empty, `ProbeGather.indptr`/`indices` the very
+  arrays of that pattern), so a single block inverse is fitted by the same device path (2026-10-23).
+  The layout gives:
   one block-major value array **on the device** (2026-10-22), each block an `entry_map.DeviceMatrix` of
   its slice over a host `SparsePattern` the layout owns (`SparsePattern.of_arrays`, so a hierarchy fitted
   to that block shares it rather than holding a copy), the shift added at the stored diagonal by one
-  donated scatter (`_add_at`; refused if a diagonal entry is missing). `materialize_block_jacobian`
-  refuses such a structure; `refresh_in_place` takes the block path when `structure.layout` is set and
-  calls `_refactor_blocks`, which only `FieldSplitPreconditioner` implements. A refit on this path reads
-  nothing back to the host but the pivot floor's row set (`solve-field-split.md`, "Refresh").
-- **A materialize holds the matrix plus one chunk.** Seeds are filled one chunk at a time into a reused
-  buffer (`ColumnProbePlan.seed_block(start, stop, out=)` for whole-state seeds, `field_seeds` for one
-  field's; one shape per program, so each batched map compiles once), and **a chunk never spans two
+  donated scatter (`_add_at`; refused if a diagonal entry is missing). `materialize_block_jacobian` (the
+  public host-matrix form) refuses a split layout and reads a whole one back once; `refresh_in_place`
+  takes the block path whenever a `structure` is given and calls `_refactor_blocks`:
+  `FieldSplitPreconditioner`'s cuts the split, `MaterializedBlockPreconditioner`'s refuses a split layout
+  and refits its inverse to the whole block, each through `hierarchy_inverse.block_for` (a
+  `HierarchyBlockInverse` gets the `DeviceMatrix`, any other inverse `as_scipy` of it). The first fit
+  reads the fitted block(s) back once, since a factory coarsens on the host. A refit reads nothing back
+  but the pivot floor's row set (`solve-field-split.md`, "Refresh"). Pinned for one group by
+  `test_a_single_block_refit_probed_on_the_device_fits_what_the_whole_host_matrix_fits`.
+- **A materialize holds the matrix plus one chunk.** Seeds are formed one chunk at a time **on the
+  device** (2026-10-23): `ColumnProbePlan.seed_block(start, stop, rows=)` (whole-state) and
+  `field_seeds(start, stop, rows=, dtype=)` (one field's) are one jitted indicator, `_indicator_seeds`,
+  over the plan's colours and each probe's (field, colour), moved to the device once (`_device`); `rows`
+  pads a short chunk with zero rows (one shape per program, so each batched map compiles once). Pinned by
+  `test_the_seeds_formed_on_the_device_are_each_probes_colour_indicator`. **A chunk never spans two
   column fields** (`ColumnProbePlan.field_chunks`; each field's last chunk may be short and is padded, so
   a materialize makes up to `n_fields − 1` more calls than `ceil(n_probes / batch)`; `probe_batch_size=None`
   is one batch per field),

@@ -50,7 +50,7 @@ import scipy.sparse as sp
 
 from ..solve import FieldLayout
 from .entry_map import DeviceMatrix, EntryMaps, SparsePattern, as_scipy
-from .hierarchy_inverse import HierarchyBlockInverse
+from .hierarchy_inverse import HierarchyBlockInverse, block_for
 from .host_preconditioner import FrozenInverse, release, require_refactorable
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
 from .multigrid import (
@@ -501,8 +501,8 @@ class FieldSplitInverse:
         """
         leading = require_refactorable(self._leading, "this field split's leading block")
         trailing = require_refactorable(self._trailing, "this field split's trailing block")
-        leading.refactor_block(_block_for(leading, blocks[0]))
-        trailing.refactor_block(_block_for(trailing, blocks[3]))
+        leading.refactor_block(block_for(leading, blocks[0]))
+        trailing.refactor_block(block_for(trailing, blocks[3]))
         # Solving the leading group first corrects the trailing equations: the block retained is
         # trailing-by-leading.
         self._set_coupling(blocks[2])
@@ -511,16 +511,6 @@ class FieldSplitInverse:
         """Release both block inverses' resources, if they hold any."""
         release(self._leading)
         release(self._trailing)
-
-
-def _block_for(inverse: object, block: sp.csr_matrix | DeviceMatrix) -> sp.spmatrix | DeviceMatrix:
-    """``block`` in the form ``inverse`` re-fits from.
-
-    A :class:`~aquaflux.precondition.HierarchyBlockInverse` fits on the device and takes a block there
-    as it is; any other inverse is handed a host matrix, as
-    :class:`~aquaflux.precondition.RefactorableInverse` promises it.
-    """
-    return block if isinstance(inverse, HierarchyBlockInverse) else as_scipy(block)
 
 
 def field_split_inverse(
@@ -661,7 +651,7 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
             "trailing_inverse": trailing_inverse,
             "stored_precision": stored_precision,
         }
-        if structure is not None and structure.layout is not None:
+        if structure is not None:
             cls._require_partition(structure, groups)
             probed = cls._probed_blocks(matvec, plan, batched_matvec, probe_batch_size, structure)
             probed.add_shift(shift_diagonal)
