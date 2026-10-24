@@ -4,7 +4,8 @@
 written as a boundary-representation (BREP) file; Netgen triangulates its faces, each triangle
 tagged by its face -- again, finer, where refinement regions (:class:`~aquaflux.meshing.Refinement`)
 reach it; the faces chosen are meshed again as structured quadrilaterals; layers are
-grown inward from the walls chosen; each quadrilateral left facing the rest is capped with a
+grown inward from the walls chosen; the cores of the pipes and rectangular ducts found among its
+faces are filled with structured hexahedra; each quadrilateral left facing the rest is capped with a
 pyramid; a core of hexahedra may be placed inside, clear of the walls, its own quadrilaterals
 capped too, its cubes smaller in the refinement regions; and Netgen fills what is left with
 tetrahedra, smaller there too; all the cells become a mesh whose boundary
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
+import functools
 import math
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -32,14 +34,17 @@ from aquaflux.io.cad import CadModel, CadRegion
 from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
 from .caps import ClearedCaps, capped
+from .conduits import Conduit, conduit_ends, fill_conduits
 from .dual import PolyhedralDual
+from .duct_core import DuctCore
+from .ducts import Duct, duct_divisions, duct_rings, find_ducts
 from .elements import element_mesh, face_keys, search_rows
 from .hex_core import OctreeCore
 from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import LocalSizes, NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
-from .pipes import fill_pipes, find_pipes, pipe_ends, rim_divisions
+from .pipes import find_pipes, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
 from .refinement import LocatedRefinement, Refinement
@@ -222,6 +227,8 @@ class CadMesher:
         one is a small cell between the quadrilateral and the fill.
     pipe_core : PipeCore
         How the cores of pipes (see :meth:`mesh`) are filled.
+    duct_core : DuctCore
+        How the cores of ducts (see :meth:`mesh`) are filled.
     planarizer : FacePlanarizer or None
         Flattens the dual's faces once its boundary is on the drawing, moving only the centroids
         of the primal cells outside the layers: the boundary stays on the drawing, the cut cells'
@@ -246,6 +253,7 @@ class CadMesher:
     layers: PrismLayers | None = None
     cap_height: ClearedCaps | float = dataclasses.field(default_factory=ClearedCaps)
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
+    duct_core: DuctCore = dataclasses.field(default_factory=DuctCore)
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
     refinements: tuple[Refinement, ...] = ()
@@ -284,6 +292,7 @@ class CadMesher:
         layered: Sequence[str] = (),
         mapped: Sequence[str] = (),
         pipes: Sequence[str] | None = None,
+        ducts: Sequence[str] | None = None,
         on_stage: Stage | None = None,
     ) -> Mesh:
         """The polyhedral mesh of ``region``.
@@ -312,6 +321,15 @@ class CadMesher:
             multiple of four), the region is triangulated again with both rims divided alike,
             into the larger count rounded up to a multiple of four. Unset, every face that is one;
             empty, none.
+        ducts : sequence of str, or None
+            The patches whose faces are the sides of rectangular ducts: four four-sided faces round
+            each stretch of a duct, each meeting the next along an edge folding convexly beyond
+            :attr:`feature_angle`, stretches sharing their ends making one duct, which may so
+            follow a curve, with nothing else inside it (see :mod:`~aquaflux.meshing.ducts`). A
+            duct's sides are meshed as structured grids (as ``mapped``), layered if their patches
+            are, and its core filled with hexahedra cross-section by cross-section
+            (:attr:`duct_core`). Every edge of a duct is divided at equal arc length, so the region
+            is triangulated again whenever there is one. Unset, every duct found; empty, none.
         on_stage : callable, optional
             Told the name of each stage as it starts (only the stages this mesh needs), so a long
             meshing can be followed.
@@ -327,8 +345,8 @@ class CadMesher:
             If a patch name is reserved or given twice, a selection finds no face, two selections
             share one, a layered or mapped patch is not a patch, a patch is layered without
             :attr:`layers`, a mapped patch's face is neither a band nor four-sided, a face of a
-            patch named in ``pipes`` is not a pipe, or a refinement names a patch that is not one
-            or reaches no part of the region's box.
+            patch named in ``pipes`` is not a pipe, one named in ``ducts`` is not a duct's side, or a
+            refinement names a patch that is not one or reaches no part of the region's box.
         MeshingError
             If Netgen fails.
         """
@@ -340,10 +358,12 @@ class CadMesher:
             raise ValueError("patches are named to be layered, but the mesher has no layers")
         mapped = list(mapped)
         named_pipes = None if pipes is None else list(pipes)
+        named_ducts = None if ducts is None else list(ducts)
         for role, chosen in (
             ("layered", layered),
             ("mapped", mapped),
             ("pipes", named_pipes or ()),
+            ("ducts", named_ducts or ()),
             ("refinements'", [n for r in self.refinements for n in r.patches_named()]),
         ):
             unknown = sorted(set(chosen) - set(names))
@@ -366,18 +386,35 @@ class CadMesher:
             if local_sizes is not None:
                 stage("triangulating again, finer in the refinement regions")
                 surface = self._triangulated(brep, local_sizes=local_sizes)
-            candidates = _pipe_candidates(topology, patch_of_face, names, named_pipes)
+            candidates = _candidates(topology, patch_of_face, names, named_pipes)
+            duct_candidates = _candidates(topology, patch_of_face, names, named_ducts)
             divisions = rim_divisions(topology, surface.triangles, surface.face, candidates)
+            found, _ = find_ducts(
+                topology, surface.points, surface.triangles, surface.face, duct_candidates,
+                self.feature_angle, edge_counts=False,
+            )  # fmt: skip
+            asked = duct_divisions(topology, surface.points, surface.triangles, surface.face, found)
+            for edge, division in asked.items():
+                held = divisions.get(edge, 0)
+                both = isinstance(division, int) and isinstance(held, int)
+                divisions[edge] = max(held, division) if both else division
             if divisions:
-                # Netgen's own rims would not take an O-grid: triangulate again, rims divided alike.
-                stage("triangulating again, the pipes' rims divided alike")
+                # Netgen's own rims would not take an O-grid, or there are ducts, whose edges are
+                # all divided at equal arc length: triangulate again, those edges divided so.
+                stage("triangulating again, the pipes' rims and the ducts' edges divided alike")
                 surface = self._triangulated(
                     brep, edge_divisions=divisions, local_sizes=local_sizes
                 )
         pipe_faces = _pipe_faces(topology, surface, patch_of_face, names, candidates, named_pipes)
-        chosen = np.union1d(_faces_of(patch_of_face, names, mapped), pipe_faces)
+        duct_list = self._ducts(
+            topology, surface, patch_of_face, names, duct_candidates, named_ducts
+        )
+        duct_faces = np.array([f for duct in duct_list for f in duct.faces], dtype=np.int64)
+        chosen = np.union1d(
+            _faces_of(patch_of_face, names, mapped), np.union1d(pipe_faces, duct_faces)
+        )
         if chosen.size:
-            stage("meshing the mapped walls and pipes as grids")
+            stage("meshing the mapped walls, pipes and ducts as grids")
         walls = self._mapped(model, region, topology, surface, chosen)
         on_layered = np.isin(patch_of_face[walls.face], [names.index(n) for n in layered])
         prisms = hexahedra = stacked = None
@@ -391,11 +428,11 @@ class CadMesher:
         else:
             points, fill, wall_faces = walls.points, walls.faces, walls.faces
         wall_tag = walls.face
-        if len(pipe_faces):
-            stage("filling the pipes' cores with O-grids")
-            pipes_in = self._pipes(topology, walls, pipe_faces, on_layered, stacked)
-            points, cores, fill, wall_faces, wall_tag = fill_pipes(
-                self.pipe_core, points, fill, wall_faces, wall_tag, pipes_in
+        conduits = self._conduits(topology, walls, pipe_faces, duct_list, on_layered, stacked)
+        if conduits:
+            stage("filling the pipes' and ducts' cores with hexahedra")
+            points, cores, fill, wall_faces, wall_tag = fill_conduits(
+                points, fill, wall_faces, wall_tag, conduits
             )
             hexahedra = cores if hexahedra is None else np.concatenate([hexahedra, cores])
         boundary = _Boundary.of(wall_faces, wall_tag, sides, side_face)
@@ -414,8 +451,8 @@ class CadMesher:
         hexahedra = core.hexahedra if hexahedra is None else np.vstack([hexahedra, core.hexahedra])
         pyramids = np.vstack([caps.pyramids, core.pyramids])
         layered_walls = walls.faces.where(on_layered)
-        if len(pipe_faces):
-            # An open pipe end's own points inside the layers' ring are left on no cell.
+        if conduits:
+            # An open conduit end's own points inside the layers' ring are left on no cell.
             cells = [tetrahedra, prisms, hexahedra, pyramids]
             points, renumber = _compacted(points, [c for c in cells if c is not None])
             tetrahedra, prisms, hexahedra, pyramids = (
@@ -451,18 +488,45 @@ class CadMesher:
         stage("flattening the faces")
         return self.planarizer.planarize(mesh, _free_centroids(traced, columns)).mesh
 
-    def _pipes(self, topology, walls: MappedSurface, pipe_faces, on_layered, stacked):
-        """Each pipe's ends, and its rings round the core: the layers' top over its grid, where it
-        is layered, else the grid itself."""
+    def _conduits(
+        self, topology, walls: MappedSurface, pipe_faces, ducts: list[Duct], on_layered, stacked
+    ) -> list[Conduit]:
+        """Each pipe and duct to be cored: its ends, and its rings round the core -- the layers'
+        top over its grid, where it is layered, else the grid itself."""
         top_of = np.arange(walls.points.shape[0])
         if stacked is not None:
             top_of[stacked[:, 0]] = stacked[:, -1]
-        pipes = []
+
+        def ends(rings, own):
+            rims = (rings[0], rings[-1])
+            return conduit_ends(topology, rims, own, walls.faces, walls.face, on_layered)
+
+        conduits = []
         for f in np.asarray(pipe_faces).tolist():
             grid = walls.grids[f]
-            ends = pipe_ends(topology, grid, f, walls.faces, walls.face, on_layered)
-            pipes.append((ends, top_of[grid]))
-        return pipes
+            conduits.append(Conduit(
+                ends(grid, [f]), top_of[grid], self.pipe_core.fill, self.pipe_core.junction_rows
+            ))  # fmt: skip
+        for duct in ducts:
+            rings, width = duct_rings(duct, walls.grids)
+            fill = functools.partial(self.duct_core.fill, width=width)
+            conduits.append(
+                Conduit(ends(rings, duct.faces), top_of[rings], fill, self.duct_core.junction_rows)
+            )
+        return conduits
+
+    def _ducts(self, topology, surface, patch_of_face, names, candidates, named) -> list[Duct]:
+        """The ducts among ``candidates``; each must be a duct's side when ``named`` names their
+        patches."""
+        found, refused = find_ducts(
+            topology, surface.points, surface.triangles, surface.face, candidates,
+            self.feature_angle,
+        )  # fmt: skip
+        if named is not None and refused:
+            face, reason = next(iter(refused.items()))
+            patch = names[patch_of_face[face]]
+            raise ValueError(f"face {face} of patch {patch!r} is not a duct's side: {reason}")
+        return found
 
     @staticmethod
     def _mapped(model, region, topology, surface, chosen) -> MappedSurface:
@@ -613,8 +677,9 @@ def _faces_of(patch_of_face: np.ndarray, names, chosen) -> np.ndarray:
     return np.flatnonzero(np.isin(patch_of_face, [names.index(n) for n in chosen]))
 
 
-def _pipe_candidates(topology, patch_of_face, names, named) -> np.ndarray:
-    """The faces that may be pipes: every face, or (``named`` given) those of the patches named."""
+def _candidates(topology, patch_of_face, names, named) -> np.ndarray:
+    """The faces that may be pipes, or ducts' sides: every face, or (``named`` given) those of the
+    patches named."""
     if named is None:
         return np.arange(topology.n_faces)
     return _faces_of(patch_of_face, names, named)

@@ -34,6 +34,7 @@ from aquaflux.case import (
 from aquaflux.io import read_aqmesh, read_aqmesh_header, read_openfoam
 from aquaflux.mesh import QualitySummary, structured_grid_3d
 from aquaflux.meshing import (
+    DuctCore,
     FacePlanarizer,
     FacesNear,
     FacesOn,
@@ -60,6 +61,8 @@ DOCUMENT = {
         "core_bow": 0.3,
         "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
     },
+    "ducts": ["vessel_walls"],
+    "duct_core": {"kind": "DuctCore", "junction_rows": 3},
     "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
     "refinements": [
         {"kind": "RefinedNear", "patches": ["lamp"], "distance": 0.03, "size": 0.005},
@@ -80,6 +83,8 @@ def test_the_file_reads_into_its_sections_and_writes_back_as_given():
         mapped=("lamp",),
         pipes=("inlet",),
         pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
+        ducts=("vessel_walls",),
+        duct_core=DuctCore(junction_rows=3),
         core=OctreeCore(size=0.08, clearance=0.03),
         refinements=(
             RefinedNear(patches=("lamp",), distance=0.03, size=0.005),
@@ -101,6 +106,7 @@ def test_a_file_on_disk_reads_back_equal_and_relative_to_its_own_directory(tmp_p
 def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaults():
     mesher = mesh_spec_from_mapping(DOCUMENT).mesher()
     assert mesher.pipe_core == PipeCore(core_bow=0.3, shell=Graded(3, 1.2))
+    assert mesher.duct_core == DuctCore(junction_rows=3)
     assert (mesher.max_size, mesher.feature_angle, mesher.grading, mesher.min_size) == (
         0.02, 0.785, 0.2, None,
     )  # fmt: skip
@@ -288,3 +294,22 @@ def test_the_drawing_and_its_patches_are_read_while_the_rest_is_unfinished():
 def test_the_drawings_sections_are_refused_by_name(document, message):
     with pytest.raises(ValueError, match=message):
         drawing_sections_from_mapping(document)
+
+
+def test_the_mesh_file_hands_the_mesher_its_patches_roles(monkeypatch, tmp_path):
+    # The roles a patch can be given -- layered, mapped, a pipe, a duct's side -- reach the mesh.
+    from aquaflux.case import mesh_file
+    from aquaflux.meshing import CadMesher
+
+    told = {}
+    monkeypatch.setattr(mesh_file, "read_step", lambda path, placement: "model")
+    monkeypatch.setattr(
+        CadMesher, "mesh", lambda self, model, region, patches, **options: told.update(options)
+    )
+    mesh_spec_from_mapping(DOCUMENT).mesh(tmp_path)
+    assert (told["pipes"], told["ducts"], told["mapped"]) == (
+        ("inlet",),
+        ("vessel_walls",),
+        ("lamp",),
+    )
+    assert told["others"] == "vessel_walls"

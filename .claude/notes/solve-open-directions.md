@@ -777,6 +777,15 @@ preconditioner is probably not the lever for that goal: with the split removed, 
 still about 4× the per-cell budget, and the compiled step's temporaries alone are about 44 KB a cell. **Take the
 measurement in 14a before any of 14b–14d.**
 
+**Re-baselined 2026-10-24 on `7fe27d07`** (`solve-direct-preconditioners-log.md`, "bfs3d memory by owner after
+the device fit, probe and seeds"): 2-step peak 8.87 GiB with the tracer, set in re-fit #2's leading block
+re-fit; the device holds 2.19 GiB of int32 pattern arrays against 0.66 GiB of float32 values, so the
+index storage, not the values, is now the split's memory, and 14d's "narrower column indices" means a
+cell-level (block) pattern with the field implicit, since global dof indices already need int32. The
+stored transposes are about half of every operator. Freed memory glibc keeps after the step program's
+first call (0.75 GiB) is in the baseline the peak sits on, so a `malloc_trim(0)` before each re-fit is
+an unmeasured, cheap arm on bfs3d (on pitzDaily it moved the peak 0.03 GiB).
+
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
 **What.** `jit(...).lower(...).compile().memory_analysis()` on bfs3d's march step and on the probe's batched
@@ -814,9 +823,11 @@ Jacobian and the peak does not fall.
 None of these needs a convergence study:
 - build the padded operators' stored transposes only when the adjoint asks;
 - do not store the fine Schur on its structural reach-6 pattern (133 MiB on bfs3d);
-- narrower column indices.
+- a cell-level pattern with the field implicit, in place of dof-level index arrays (2.19 GiB of int32 on
+  the device at bfs3d's step 1, 2026-10-24; the 36.7M dof entries are ~1.0M cell pairs × 36).
 
-They are worth doing for bfs3d's own sake, but not for the 300k target.
+The transposes and the cell-level pattern are worth about 0.6 and up to ~2 GiB on bfs3d; the pattern cut
+scales with the entry count, so it is the one of these that also bears on the 300k target.
 
 ## Smaller housekeeping
 

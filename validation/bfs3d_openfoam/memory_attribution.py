@@ -862,6 +862,9 @@ def main() -> None:
         if len(steps) >= STEPS:
             raise _Stop
 
+    # A one-step run captures its only step's arguments; a longer one captures the last step's, armed
+    # by `on_step` after the step before it.
+    captured["want_step"] = STEPS == 1
     with contextlib.suppress(_Stop), recorder.stage("march (to the last measured step)"):
         compare.solve_aquaflux(log_path=HERE / "memory_attribution.march.log", on_step=on_step)
     peak = _peak_bytes()

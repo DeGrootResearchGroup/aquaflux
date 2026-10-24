@@ -134,7 +134,7 @@ def _one_size(size: float) -> None:
     stages.wrap(NetgenProcess, "triangulate", "Netgen surface")
     stages.wrap(CadMesher, "_mapped", "mapped walls")
     stages.wrap(PrismLayers, "extrude", "layers")
-    stages.wrap(cad_mesher, "fill_pipes", "pipe cores")
+    stages.wrap(cad_mesher, "fill_conduits", "pipe and duct cores")
     stages.wrap(PyramidCaps, "on", "pyramid caps")
     stages.wrap(CadMesher, "_filled", "Netgen fill")
     stages.wrap(cad_mesher, "element_mesh", "primal Mesh")

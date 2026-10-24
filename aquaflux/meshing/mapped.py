@@ -52,7 +52,10 @@ class MappedSurface:
         For each band whose loops have equal counts, its points as a grid ``(rows + 1, n)``: row 0
         one loop, the last the other, each row round the band in the same direction, column ``i``
         of every row joined to column ``i`` of the next by the grid's edges. Its quadrilaterals are
-        ``[grid[j, i], grid[j, i + 1], grid[j + 1, i + 1], grid[j + 1, i]]``, round it.
+        ``[grid[j, i], grid[j, i + 1], grid[j + 1, i + 1], grid[j + 1, i]]``, round it. For each
+        four-sided face whose opposite sides have equal counts, its points as a grid
+        ``(rows + 1, columns + 1)``, its first and last rows two opposite sides and its first and
+        last columns the other two, with the same quadrilaterals but not round it.
     """
 
     points: np.ndarray
@@ -127,8 +130,6 @@ class MappedQuads:
             loops = _loops(mine)
             if len(loops) == 2:
                 new_triangles, new_quads = grid.band(*loops)
-                if grid.last_grid is not None:
-                    grids[int(f)] = grid.last_grid
             elif len(loops) == 1:
                 loop = loops[0]
                 distance, _ = corners.query(points[loop])
@@ -143,6 +144,8 @@ class MappedQuads:
                 raise ValueError(
                     f"face {f} is bounded by {len(loops)} loops, so is neither a band nor four-sided"
                 )
+            if grid.last_grid is not None:
+                grids[int(f)] = grid.last_grid
             grid.onto(onto, f)
             kept_triangles.append(new_triangles)
             kept_face.append(np.full(new_triangles.shape[0], f))
@@ -161,7 +164,7 @@ class _Builder:
     def __init__(self, points: np.ndarray) -> None:
         self.points = points
         self.moved_from = points.shape[0]
-        self.last_grid: np.ndarray | None = None  # the last band's grid, when it is one
+        self.last_grid: np.ndarray | None = None  # the last face's grid, when it is one
 
     def _added(self, new: np.ndarray) -> np.ndarray:
         """Append points (still to be moved onto their face); their indices."""
@@ -240,9 +243,10 @@ class _Builder:
             counts = counts[1:] + counts[:1]
         bottom, right, top, left = sides[0], sides[1], sides[2][::-1], sides[3][::-1]
         p = self.points
+        self.last_grid = None
         if counts[0] == counts[2]:
-            grid = self._coons(bottom, right, left, p[top], counts[1], top)
-            return np.zeros((0, 3), np.int64), _grid_quads(grid, closed=False)
+            self.last_grid = self._coons(bottom, right, left, p[top], counts[1], top)
+            return np.zeros((0, 3), np.int64), _grid_quads(self.last_grid, closed=False)
         # The top differs: the grid stops one row short of it, and a strip joins that row to it.
         resampled = _resampled(p[top], _fractions(p[bottom], closed=False), closed=False)
         grid = self._coons(bottom, right, left, resampled, counts[1])
@@ -273,7 +277,13 @@ class _Builder:
 
 
 def _loops(triangles: np.ndarray) -> list[np.ndarray]:
-    """The closed loops of edges each used once by ``triangles``, each in the triangles' winding."""
+    """The closed loops of edges each used once by ``triangles``, each in the triangles' winding.
+
+    Raises
+    ------
+    ValueError
+        If the triangles are not wound alike, so that their boundary edges do not chain into loops.
+    """
     directed = np.stack([triangles, np.roll(triangles, -1, axis=1)], axis=2).reshape(-1, 2)
     reverse = {(int(b), int(a)) for a, b in directed}
     following: dict[int, int] = {}
@@ -287,6 +297,10 @@ def _loops(triangles: np.ndarray) -> list[np.ndarray]:
         here = following[start]
         while here != start:
             loop.append(here)
+            if len(loop) > len(following) or here not in following:
+                raise ValueError(
+                    "the triangles' boundary edges do not chain into loops: they are not wound alike"
+                )
             here = following[here]
         left -= set(loop)
         loops.append(np.array(loop, dtype=np.int64))

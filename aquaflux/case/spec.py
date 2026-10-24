@@ -36,6 +36,7 @@ from aquaflux.discretization import AdvectionScheme, FirstOrderUpwind, LimitedUp
 from aquaflux.flow import PinnedPoint, PressureDatum
 from aquaflux.mesh import Mesh
 from aquaflux.meshing import (
+    DuctCore,
     FacePlanarizer,
     FaceSelection,
     FacesNear,
@@ -548,6 +549,7 @@ _CASE_MAPPING = SettingsMapping(
         FacesOn,
         PrismLayers,
         PipeCore,
+        DuctCore,
         Graded,
         FacePlanarizer,
         OctreeCore,

@@ -250,11 +250,7 @@ def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
         If the directions disagree at a point, as a ray through a triangle's edge or along its
         plane may.
     """
-    votes = np.array(
-        [[ray_hits(point, direction, vertices).size % 2 == 1 for direction in _RAY_DIRECTIONS]
-         for point in points],
-        dtype=bool,
-    ).reshape(-1, _RAY_DIRECTIONS.shape[0])  # fmt: skip
+    votes = parity_votes(points, vertices)
     torn = np.flatnonzero(np.any(votes != votes[:, :1], axis=1))
     if torn.size:
         raise ValueError(
@@ -262,6 +258,17 @@ def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
             "about which side of the surface it lies on: one grazes the surface"
         )
     return votes[:, 0]
+
+
+def parity_votes(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    """For each point and each of :data:`_RAY_DIRECTIONS`, whether a ray from it that way crosses
+    the closed surface ``vertices`` (shape ``(n, 3, 3)``) an odd number of times, shape
+    ``(n_points, n_directions)``: inside, by that ray."""
+    return np.array(
+        [[ray_hits(point, direction, vertices).size % 2 == 1 for direction in _RAY_DIRECTIONS]
+         for point in points],
+        dtype=bool,
+    ).reshape(-1, _RAY_DIRECTIONS.shape[0])  # fmt: skip
 
 
 def first_hits(points, faces, origins, directions, reach, skipped) -> np.ndarray:

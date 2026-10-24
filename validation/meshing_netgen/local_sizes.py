@@ -16,6 +16,7 @@ Run in an environment with ``netgen-mesher``::
 
 from __future__ import annotations
 
+import itertools
 import pathlib
 import sys
 import tempfile
@@ -47,7 +48,7 @@ def fill(size: float) -> None:
         radius = np.linalg.norm(middle - 0.5, axis=1)
         shells = [
             f"{np.median(length[(radius >= a) & (radius < b)]):.3f}"
-            for a, b in zip(SHELLS, SHELLS[1:], strict=False)
+            for a, b in itertools.pairwise(SHELLS)
         ]
         print(f"  {name:8s} tets {len(filled.tetrahedra):6d}  median edge by radius {shells}")
 
