@@ -832,9 +832,10 @@ scales with the entry count, so it is the one of these that also bears on the 30
 **The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
 cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
 end, step-1 peak 8.07 → 7.19 GiB, resident 7.13 → 6.11 (`solve-direct-preconditioners-log.md`, "Cell-level
-pattern (§14d), stages 1–3"). Still dof level: the host `SparsePattern`s of the probe's blocks and the
-levels (~140 MiB host on bfs3d), the diagonal and cell-block gathers (small), a non-nodal or
-diagonal-padded level, and the 1×1 Schur.
+pattern (§14d), stages 1–3"). The probe's host block patterns (140 MiB on bfs3d) followed
+(`CellLevelPattern`, branch `claude/host-cell-patterns`). Still dof level: the diagonal and cell-block
+gathers (small), a non-nodal or diagonal-padded level, the 1×1 Schur, and the plan's own COO coordinates
+(`ColumnProbePlan.pattern_rows`/`pattern_cols`/`in_reach`, ~18 MiB host on bfs3d).
 
 ## Smaller housekeeping
 
