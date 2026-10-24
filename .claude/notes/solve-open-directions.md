@@ -798,6 +798,11 @@ JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_row
   2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
 - If the padded products dominate, 14b–14d are worth doing.
 
+**The probe half, 2026-10-24:** the batched JVP's 829 MiB on bfs3d is the multiple-correction Green–Gauss
+face loop at its peak. Face-blocking it and the flux balance reaches ~440–472 MiB, no better than halving
+the batch, and is not built (`solve-refuted-directions.md`, "Assembling the residual's face sums in
+blocks").
+
 ### 14b. A consistent compact operator for the fit
 
 The Jacobian of a narrowed residual, compact by construction:
