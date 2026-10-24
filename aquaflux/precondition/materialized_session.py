@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..allocator import MemoryTrim
+from ..allocator import GlibcTrim, MemoryTrim
 from ..solve import FieldLayout, LinearSolveRegime, NewtonStrategy, RefreshTiming, shift_of
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
@@ -630,6 +630,12 @@ class MaterializedProblem(abc.ABC):
         """
 
 
+#: The trim every session hands its refresh hook unless told otherwise. A re-fit's transient lands on top
+#: of the freed memory the previous step's program left in the allocator's arenas, so returning that
+#: memory first lowers the peak a re-fit sets; it changes no value.
+_RETURN_FREED_MEMORY = GlibcTrim()
+
+
 class MaterializedSession:
     """The materialized-Jacobian family's session: one probe, one inverse and one refresh hook.
 
@@ -682,9 +688,10 @@ class MaterializedSession:
         ``hook -> hook``, wrapping the per-step :attr:`refresh_preconditioner` once.
     inverse_wrapper : callable, optional
         ``(role, factory) -> factory``, wrapping a field-split block-inverse factory before it is used.
-    memory_trim : MemoryTrim, optional
+    memory_trim : MemoryTrim or None, optional
         Handed to the refresh hook, which calls it before each re-fit (:class:`BetaTrackingRefresh`).
-        ``None`` (default) leaves the allocator alone.
+        The default is a :class:`~aquaflux.allocator.GlibcTrim`, which gives glibc's kept, freed memory
+        back to the operating system and does nothing without glibc; ``None`` leaves the allocator alone.
 
     Raises
     ------
@@ -702,7 +709,7 @@ class MaterializedSession:
         on_build: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
         precondition_wrapper: Callable[[Callable], Callable] | None = None,
         inverse_wrapper: Callable[[str, Callable], Callable] | None = None,
-        memory_trim: MemoryTrim | None = None,
+        memory_trim: MemoryTrim | None = _RETURN_FREED_MEMORY,
     ) -> None:
         if isinstance(spec.inverse, FieldSplit) and problem.groups() is None:
             raise TypeError(
