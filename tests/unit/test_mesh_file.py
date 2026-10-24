@@ -41,6 +41,8 @@ from aquaflux.meshing import (
     Graded,
     OctreeCore,
     PipeCore,
+    RefinedBox,
+    RefinedNear,
 )
 
 DOCUMENT = {
@@ -62,6 +64,10 @@ DOCUMENT = {
     "ducts": ["vessel_walls"],
     "duct_core": {"kind": "DuctCore", "junction_rows": 3},
     "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
+    "refinements": [
+        {"kind": "RefinedNear", "patches": ["lamp"], "distance": 0.03, "size": 0.005},
+        {"kind": "RefinedBox", "lower": [0.0, 0.0, 0.5], "upper": [0.2, 0.2, 0.8], "size": 0.01},
+    ],
     "output": {"path": "reactor.aqmesh"},
 }  # fmt: skip
 
@@ -80,6 +86,10 @@ def test_the_file_reads_into_its_sections_and_writes_back_as_given():
         ducts=("vessel_walls",),
         duct_core=DuctCore(junction_rows=3),
         core=OctreeCore(size=0.08, clearance=0.03),
+        refinements=(
+            RefinedNear(patches=("lamp",), distance=0.03, size=0.005),
+            RefinedBox(lower=(0.0, 0.0, 0.5), upper=(0.2, 0.2, 0.8), size=0.01),
+        ),
         output=MeshOutput(path="reactor.aqmesh"),
     )
     assert mesh_spec_to_mapping(spec) == DOCUMENT
@@ -102,6 +112,7 @@ def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaul
     )  # fmt: skip
     # The core's unset wall size is the mesher's size; its clearance is as set.
     assert mesher.core.resolved(mesher.max_size) == (0.02, 0.03)
+    assert [type(r).__name__ for r in mesher.refinements] == ["RefinedNear", "RefinedBox"]
 
 
 def test_an_unset_setting_is_described_by_what_it_falls_through_to():

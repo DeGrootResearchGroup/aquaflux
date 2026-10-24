@@ -143,3 +143,19 @@ in a narrow annulus, is left to the tetrahedra, and a region with no such room a
 ```yaml
 core: {kind: OctreeCore, size: 0.08}
 ```
+
+Parts of the region can be meshed finer than `max_size` with `refinements`, each at its own `size`
+(measured as `max_size` is): the fluid inside a box, a ball or a cylinder
+({class}`~aquaflux.meshing.RefinedBox`, {class}`~aquaflux.meshing.RefinedSphere`,
+{class}`~aquaflux.meshing.RefinedCylinder`), or within a `distance` of some patches
+({class}`~aquaflux.meshing.RefinedNear`) -- round a lamp, say, or along a jet. One refinement makes
+everything there smaller: the triangles where it reaches a wall, the tetrahedra, and a core's cubes,
+which are halved until they are no larger than its size. The size grows back to `max_size` away from
+the part as fast as `grading` allows, and where two parts overlap the finer size holds. A size must
+be below `max_size` and, if `min_size` is set, no smaller than it.
+
+```yaml
+refinements:
+  - {kind: RefinedNear, patches: [lamp], distance: 0.02, size: 0.004}
+  - {kind: RefinedCylinder, start: [0.0, 0.0, 0.3], end: [0.5, 0.0, 0.3], radius: 0.05, size: 0.005}
+```

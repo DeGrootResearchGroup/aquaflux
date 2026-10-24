@@ -226,6 +226,7 @@ cfd/                                  # repo root
 │   │   ├── near_surface.py           #   NearSurface: refine an octree towards a region's boundary; cube_samples
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
+│   │   ├── refinement.py             #   Refinement: RefinedBox / RefinedSphere / RefinedCylinder / RefinedNear(patches, distance) -> LocatedRefinement (octree criterion + Netgen LocalSizes)
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
 │   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, and their grids
 │   │   ├── conduits.py               #   Conduit / ConduitEnds / ConduitFill; conduit_ends / fill_conduits: pipes' and ducts' structured cores taken out of the fill, open ends and junctions
@@ -235,7 +236,7 @@ cfd/                                  # repo root
 │   │   ├── ducts.py                  #   Duct; find_ducts / duct_divisions / duct_rings: rectangular ducts (chained four-face segments) found from the CAD, rails' points on normal cross-sections
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
 │   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
-│   │   ├── netgen_process.py         #   NetgenProcess (triangulate, edges divided by count or EdgePoints / fill) run in a child; check_closed_surface
+│   │   ├── netgen_process.py         #   NetgenProcess (triangulate, edges divided by count or EdgePoints / fill; each with optional LocalSizes) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr

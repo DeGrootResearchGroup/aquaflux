@@ -173,7 +173,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   (so a checkpoint's digest would not match) and costs minutes at scale, and nobody runs a real case on a
   box grid.
 - **A mesh file is the mesher's input** (`mesh_file.py`: `MeshSpec(drawing, region, sizes, patches,
-  others, layers, layered, mapped, pipes, pipe_core, ducts, duct_core, planarizer, core, output)`, the one-form sections
+  others, layers, layered, mapped, pipes, pipe_core, ducts, duct_core, planarizer, core, refinements, output)`, the one-form sections
   `drawing` / `region` / `sizes` / `output` written without `kind`), read by the case's own YAML parse
   and registry (`read_mesh_file` / `write_mesh_file` in `case_file.py`, `mesh_spec_from_mapping` /
   `mesh_spec_to_mapping` / `mesh_schema` in `spec.py`, sharing `_with_kinds` / `_without_kinds` with
