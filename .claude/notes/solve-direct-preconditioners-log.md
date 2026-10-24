@@ -396,7 +396,8 @@
         the rest runtime, the step program's 984 MiB of temporaries, allocator retention. One full CSR copy
         is 36.7M stored entries: 280 MiB float64 values + 140 MiB int32 indices. `ProbeGather` keeps
         3 x 140 MiB; its build's transient (~1.1 GiB) and the case build (0.87 GiB) are below the peak.
-        Compiled code is ~20 MiB. A `gc.collect()` at every stage freed nothing: every copy is held.
+        Compiled code is ~20 MiB. A `gc.collect()` at every stage freed nothing: every copy is held (once the march returns, a
+        collection does free its session's cycles: 2026-10-24 entry "What the resident memory holds ...").
       - **After #757 (`fe772f59`)**, HWM **11.91 GiB**: the held entry maps add ~1.5 GiB of host memory
         (traced host after step 1 3.07 against 1.57) and the first re-fit's host transient peaks at 5.9 GiB;
         int32 no longer grows per re-fit except one generation (the first re-fit's held layouts beside the
@@ -482,8 +483,9 @@
         velocity correction 24 + 24 each) and the coupling (44). The forward march applies only `A x`.
       - **Not arrays (at step 1's end, resident 7.24)**: freed memory glibc retains 1.38 (0.75 of it
         kept after the step program's first call, in the XLA worker threads' arenas), compiled code 0.03,
-        and ~2.1 of runtime, Python objects and XLA structures the census does not see. The case build
-        (0.98) and `hybrid_initialize` (+0.52) are almost all of this kind (arrays 0.26 of 1.52).
+        and ~2.1 that is JAX's compiled-program cache (named in "What the resident memory holds beyond
+        live arrays, on two meshes", below). The case build (0.98) and `hybrid_initialize` (+0.52) are
+        almost all of this kind (arrays 0.26 of 1.52): the programs they compile.
       - A re-fit holds the old and new leading fine operator together (`float32(92160, 252)` ×4 against ×2
         at a step's end, +177 MiB) until `_release_superseded` runs.
       - **The compiled programs' temporaries** (`memory_analysis()`, a 1-step census-off run of the same
@@ -644,6 +646,75 @@
       - ⚠️ Measured before #818 made `malloc_trim(0)` before each re-fit the session's default; both
         arms ran without it, so the resident and peak columns are not today's. The host traced column does
         not depend on it.
+
+### What the resident memory holds beyond live arrays, on two meshes (2026-10-24)
+
+      `validation/memory_residue.py` (runs `memory_attribution.py`'s march and stages on either step case)
+      on `13fa17d4` (`main` `faea4a64` + the harness; library unchanged since `7fe27d07` but for #811's
+      march log), same 4-core Linux container as the entry above (15.7 GiB, no swap, glibc 2.39 defaults,
+      jax 0.12.0.1), compilation cache warm for both meshes (59 entries), shipped `case.yaml`s,
+      `BFS3D_MEMORY_STEPS=1`, census off, tracer on (0.17 / 0.30 GiB), `RESIDUE_READ=1 RESIDUE_TRIM=1
+      RESIDUE_CLEAR=end` (a `malloc_trim(0)` at every stage's end, so the peaks are not the record's).
+      pitzDaily 12 225 cells (2D), bfs3d 23 040 (3D). Readings at `end`, after the measured step and its
+      return from the march, GiB:
+
+      | | pitzDaily | bfs3d | slope per cell | at zero cells |
+      |---|---|---|---|---|
+      | resident at `end`, after a trim | 2.52 | 6.62 | | |
+      | freed by `gc.collect()` + trim (live arrays freed) | 0.20 (0.18) | 1.75 (1.60) | run-end only | |
+      | freed by `jax.clear_caches()` + collect + trim | **1.06** | **2.09** | ~100 KB | ~0 |
+      | of which traced by `tracemalloc` (Python: jaxprs, `SourceInfo`) | 0.19 | 0.38 | ~19 KB | ~0 |
+      | of which untraced (XLA executables, compiler state) | 0.87 | 1.71 | ~83 KB | ~0 |
+      | loaded executables (before the clear) | 1072 | 1242 | | |
+      | left: live arrays (the harness's captured step arguments) | 0.17 | 1.38 | | |
+      | left: file-backed / anonymous holding no array | 0.22 / 0.42 | 0.22 / 0.54 | | |
+      | glibc retention given back after the step program's first call | 0.38 | 0.68 | | |
+
+      - **The record's "~2.1 GiB the census does not see" is JAX's compiled-program cache**: 2.09 GiB on
+        bfs3d (1.71 untraced + 0.38 already inside the traced total), held as long as the executables
+        are. It grows by stage with the executable count (bfs3d 539 after the case build, 692 after
+        `hybrid_initialize`, 1215 after the fit, 1242 at the end; pitzDaily 514 / 675 / 1045 / 1072), so
+        the case build's and `hybrid_initialize`'s "not arrays" growth is the op-by-op programs they
+        compile. glibc's retention is separate and smaller once trimmed.
+      - **Two parts, and only one grows with the case.** The serialized HLO of every live executable
+        (`RESIDUE_HLO`; for bfs3d a fifth run on `605d2337` with only the HLO readings and the clear, whose
+        clear freed 2.08, reproducing 2.09) totals 0.246 GiB on bfs3d against 0.055 on pitzDaily, and 16 /
+        13 modules over 1 MiB hold 0.242 / 0.052 of it -- sizes only an embedded constant explains (a
+        program taking its data as arguments is kilobytes). bfs3d against pitzDaily, MiB:
+        `batched_field_jacobian_matvec` (one per column field) 6 × 17.9 against 5 × 3.3, `newton_step`
+        3 × 19.8 against 3 × 5.8, `_march_step` 43.8 against 12.0, `norm_of_residual` 17.0 against 2.7,
+        `_eddy_viscosity_drift` 14.5 against 1.7, `fit_simple_level` 4 × 1.4 against 3 × 1.2.
+        - **Programs carrying arrays as constants** grow 4.5× for 1.9× the cells, and each program embeds
+          its own copy (six batched-JVP programs). **What they are** (`validation/folded_constants.py`, the
+          compiled coupled residual, `main` `50fe3be0`): XLA's constant folding of the unit tangents
+          `BoundaryClosure.gradient_weight` builds as `jnp.zeros_like(gradient).at[:, k].set(1.0)` -- a
+          scatter of constants, evaluated at compile time and stored. bfs3d 15.87 MiB of constants in
+          the residual (nine `f64[23040, 3, 3]`, three `f64[23040, 3]`), pitzDaily 1.87 (four
+          `f64[12225, 2, 2]`, two `f64[12225, 2]`): cells × dim², which with one more batched-JVP program
+          is the 4.5×; not the stencil. The same tangent as `jnp.broadcast_to(unit_k, shape)` (not
+          folded) leaves 0.05 / 0.01 MiB and a bit-identical residual on both cases. A standalone probe (four jitted functions each closing over 32 MiB of
+          int32) cost 432 MiB resident for 114 MiB of HLO, ~3.4× the data; at that multiplier (an
+          estimate, not measured on the case) they hold ~0.8 GiB of bfs3d's 1.71 untraced and ~0.2 of
+          pitzDaily's 0.87, ~38 KB a bfs3d cell.
+        - **Everything else is ~0.7 MiB per small program**: (1.71 − 0.8) / ~1226 on bfs3d against
+          (0.87 − 0.2) / ~1059 on pitzDaily, the op-by-op programs the case build, `hybrid_initialize` and
+          the fit compile: about 0.7–0.9 GiB, fixed in the mesh. The traced 0.19 → 0.38 (jaxprs) is not
+          separated between the two parts.
+        - **For a 300k-cell case**: the constants at bfs3d's ~38 KB a cell are ~11 GB (estimated; the same
+          on a polyhedral mesh, since they follow cells × dim²), and a one-line library change removes
+          them (`solve-open-directions.md` §14e); the per-program part stays ~1 GiB.
+      - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
+        of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
+        not in the march's footprint; it is in the footprint of anything run after a solve in the same
+        process (the adjoint, a second solve) until Python's collector reaches its next full pass.
+      - Records: `memory_residue.<case>.json` and the run logs (git-ignored), copied into this entry. Two
+        runs per mesh with the clear's live-array readings (the first pair lacked them); a third pitzDaily
+        run (with the HLO ranking) reproduced the second (end 2.55, clear + trim freed 1.06).
+      - ⚠️ **Measured before #817 and #819** (the cell-level pattern on the device and on the host, entries
+        above) and before #818's trim by default. If the arrays compiled in as constants are dof-level
+        pattern arrays, #817 shrank them. They are not: the constants are folded tangents (above),
+        measured on `50fe3be0` (after #817--#819) by `folded_constants.py`; the cache totals are not
+        re-taken there.
 
 ## Condensed out of the rule (2026-10-17)
 
