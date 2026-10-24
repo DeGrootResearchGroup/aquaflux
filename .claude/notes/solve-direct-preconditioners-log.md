@@ -544,6 +544,16 @@
       are the loop's temporary). Index storage per operator (both directions, with the packing entries):
       4×4 360.6 → 17.2 MiB, 2×2 90.3 → 17.2, 2×4 180.5 → 17.2.
 
+      **By owner at step 1's end (census, `a287287d`, `BFS3D_MEMORY_STEPS=1`, census on, 2026-10-24;
+      arrays of at least 1 MiB; device 1.12 GiB, host traced 0.15):** `_KroneckerColumns` 264.0 MiB over
+      41 arrays (the cell-level padded columns, both directions, every level and piece: was
+      `_PaddedLayout` 591 with the packing maps under `DeviceEntryMap`); level operators' `values` /
+      `t_values` 171.3 + 171.3; host `SparsePattern` 140.1 over 3 (unchanged); `Corrections` 88.6;
+      `_SimplePieces` Schur 48.2 + 48.2; the adjoint form's coupling 44.3 + 44.3; `KroneckerGalerkin`
+      40.6 over 14; `KroneckerGather` 30.6 over 10 (was `SimplePlan` 108); `_CellEntries` 10.0 (was
+      `ProbeGather` 280); `SimplePlan` 6.1. No `DeviceEntryMap` array of 1 MiB remains (was 1082 over 66).
+      Run peak 6.87 GiB (step 1's first call), against 8.07 in the census-free base run above.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
