@@ -62,6 +62,7 @@ validation/**/run-*.log
 validation/**/run-*.exit
 validation/memory_residue.*.json
 validation/memory_residue.*.march.log
+validation/folded_constants.*.npy
 
 # States and march logs a probe writes for its own later runs. They are recomputable from the case
 # (one ramp, minutes) and a checkpoint is a snapshot of a measurement rather than a source.

@@ -668,9 +668,15 @@
         `batched_field_jacobian_matvec` (one per column field) 6 × 17.9 against 5 × 3.3, `newton_step`
         3 × 19.8 against 3 × 5.8, `_march_step` 43.8 against 12.0, `norm_of_residual` 17.0 against 2.7,
         `_eddy_viscosity_drift` 14.5 against 1.7, `fit_simple_level` 4 × 1.4 against 3 × 1.2.
-        - **Programs carrying arrays as constants** grow 4.5× for 1.9× the cells, so with the stencil
-          (2D against a 3D reach-3 pattern) more than with cells, and each program embeds its own copy
-          (six batched-JVP programs). A standalone probe (four jitted functions each closing over 32 MiB of
+        - **Programs carrying arrays as constants** grow 4.5× for 1.9× the cells, and each program embeds
+          its own copy (six batched-JVP programs). **What they are** (`validation/folded_constants.py`, the
+          compiled coupled residual, `main` `50fe3be0`): XLA's constant folding of the unit tangents
+          `BoundaryClosure.gradient_weight` builds as `jnp.zeros_like(gradient).at[:, k].set(1.0)` -- a
+          scatter of constants, evaluated at compile time and stored. bfs3d 15.87 MiB of constants in
+          the residual (nine `f64[23040, 3, 3]`, three `f64[23040, 3]`), pitzDaily 1.87 (four
+          `f64[12225, 2, 2]`, two `f64[12225, 2]`): cells × dim², which with one more batched-JVP program
+          is the 4.5×; not the stencil. The same tangent as `jnp.broadcast_to(unit_k, shape)` (not
+          folded) leaves 0.05 / 0.01 MiB and a bit-identical residual on both cases. A standalone probe (four jitted functions each closing over 32 MiB of
           int32) cost 432 MiB resident for 114 MiB of HLO, ~3.4× the data; at that multiplier (an
           estimate, not measured on the case) they hold ~0.8 GiB of bfs3d's 1.71 untraced and ~0.2 of
           pitzDaily's 0.87, ~38 KB a bfs3d cell.
@@ -678,9 +684,9 @@
           (0.87 − 0.2) / ~1059 on pitzDaily, the op-by-op programs the case build, `hybrid_initialize` and
           the fit compile: about 0.7–0.9 GiB, fixed in the mesh. The traced 0.19 → 0.38 (jaxprs) is not
           separated between the two parts.
-        - **For a 300k-cell polyhedral case**: the constants at bfs3d's ~38 KB a cell are ~11 GB, about
-          twice that on a polyhedral stencil, and removable; the per-program part stays ~1 GiB. Which arrays
-          are compiled in is not yet read (`solve-open-directions.md` §14e).
+        - **For a 300k-cell case**: the constants at bfs3d's ~38 KB a cell are ~11 GB (estimated; the same
+          on a polyhedral mesh, since they follow cells × dim²), and a one-line library change removes
+          them (`solve-open-directions.md` §14e); the per-program part stays ~1 GiB.
       - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
         of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
         not in the march's footprint; it is in the footprint of anything run after a solve in the same
@@ -690,8 +696,9 @@
         run (with the HLO ranking) reproduced the second (end 2.55, clear + trim freed 1.06).
       - ⚠️ **Measured before #817 and #819** (the cell-level pattern on the device and on the host, entries
         above) and before #818's trim by default. If the arrays compiled in as constants are dof-level
-        pattern arrays, #817 shrank them; re-take `RESIDUE_HLO` on current `main` before acting on the
-        constants' size.
+        pattern arrays, #817 shrank them. They are not: the constants are folded tangents (above),
+        measured on `50fe3be0` (after #817--#819) by `folded_constants.py`; the cache totals are not
+        re-taken there.
 
 ## Condensed out of the rule (2026-10-17)
 
