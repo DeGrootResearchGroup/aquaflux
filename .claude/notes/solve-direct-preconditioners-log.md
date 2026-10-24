@@ -486,6 +486,12 @@
         (0.98) and `hybrid_initialize` (+0.52) are almost all of this kind (arrays 0.26 of 1.52).
       - A re-fit holds the old and new leading fine operator together (`float32(92160, 252)` ×4 against ×2
         at a step's end, +177 MiB) until `_release_superseded` runs.
+      - **The compiled programs' temporaries** (`memory_analysis()`, a 1-step census-off run of the same
+        configuration with the cache warm, peak 8.07 GiB, fit 325 s): batched JVP of 8 tangents **829 MiB**
+        (arguments 98), single JVP 202, residual 106. So the probe's temporary is ~100 MiB a tangent plus
+        ~30, as the 2026-10-18 census read it, and a Krylov application's JVP needs ~200 MiB; what the step
+        program holds beyond that is the split's padded products. (The harness armed the step's capture
+        only after step `STEPS − 1`, so a 1-step run printed no step size; fixed the same day.)
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
         copied into this entry; the 2026-10-18 `memory_by_stage.py` configuration is otherwise unchanged.
 
