@@ -159,9 +159,13 @@ class _KroneckerColumns(PaddedColumns):
         """Per cell row and slot: the other side's field, the place in the cell row, and liveness."""
         slot = jnp.arange(self.width, dtype=jnp.int32)[None, :]
         length = self.lengths[:, None]
-        per_field = jnp.maximum(length, 1)
-        field = slot // per_field
-        place = jnp.minimum(slot - field * per_field, self.cells.shape[1] - 1)
+        # The other side's field, ``slot // length``, counted rather than divided: the field count is a
+        # handful, and a vector integer division is not (on a CPU it is several instructions a lane).
+        field = sum(
+            (slot >= step * length).astype(jnp.int32) for step in range(1, self.other_fields)
+        )
+        field = jnp.zeros_like(slot) if isinstance(field, int) else field
+        place = jnp.clip(slot - field * length, 0, self.cells.shape[1] - 1)
         return field, place, slot < self.other_fields * length
 
     def _by_row_field(self, per_cell: jnp.ndarray) -> jnp.ndarray:

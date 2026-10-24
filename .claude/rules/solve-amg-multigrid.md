@@ -200,7 +200,13 @@ path.
     The decode is `_padded_rows`'s own slot rule (slot `s` of row `(f, d)`: other field `s // len(d)`,
     place `s % len(d)`, padding at column 0), so every gather, product and row sum is unchanged; pinned
     array for array and the products exactly by
-    `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`.
+    `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`. ⚠️ **The field is counted, never
+    divided** (`Σ_t [s ≥ t·len(d)]`): a vector integer division made an isolated apply 1.6× (4×4) to 8×
+    (2×2) the held form's; counted, 1.08× / 1.8× / 1.2× (4×4 / 2×2 / 2×4 forward, transposed 1.0 / 1.8 /
+    0.9). Inside a loop (a Krylov or V-cycle loop, as the march applies them) XLA hoists the decode out
+    and the two forms tie (ten 4×4 applies 168 vs 176 ms, 2×2 25.3 vs 25.4), the decoded columns then
+    living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
+    jax 0.12.0.1, 2026-10-24 (log, "Cell-level pattern (§14d)").
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
       count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
       sized or static by the actual pattern retraced a budgeted rebuild
