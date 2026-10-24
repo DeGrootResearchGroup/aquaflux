@@ -81,6 +81,10 @@ RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.j
 #: ``1`` prints a checksum of every leaf of each traced split the session composes (at the fit and at
 #: every re-fit), so two checkouts' runs show whether anything the solve applies differs, bit for bit.
 CHECKSUMS = os.environ.get("BFS3D_MEMORY_CHECKSUMS", "0") == "1"
+#: ``1`` hands the session a :class:`aquaflux.allocator.GlibcTrim`, so every re-fit first gives the
+#: allocator's kept memory back (``malloc_trim(0)``); each trim prints the resident size and glibc's
+#: retained bytes on either side of it. An arm, not a reading: it changes what the rest of the run holds.
+TRIM = os.environ.get("BFS3D_MEMORY_TRIM", "0") == "1"
 GIB = 2**30
 
 
@@ -584,6 +588,7 @@ def _header() -> dict:
         "compilation_cache_entries": len(list(cache.iterdir())) if cache.is_dir() else 0,
         "malloc_env": {k: v for k, v in os.environ.items() if k.startswith(("MALLOC_", "Malloc"))},
         "steps": STEPS,
+        "memory_trim": TRIM,
     }
     print(json.dumps(header), flush=True)
     return header
@@ -641,6 +646,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(materialized_session, "traced_field_split", "traced split (device leaves)")
     if CHECKSUMS:
         _print_split_checksums(materialized_session)
+    if TRIM:
+        _hand_the_session_a_trim(materialized_session)
     if MAPS:
         from aquaflux.precondition import entry_map
 
@@ -667,6 +674,34 @@ def _instrument(recorder: Recorder, compare) -> dict:
     march._march_step = march_step
     captured["step_program"] = step_program
     return captured
+
+
+def _hand_the_session_a_trim(materialized_session) -> None:
+    """Open every session with a reporting :class:`~aquaflux.allocator.GlibcTrim` as its memory trim."""
+    from aquaflux.allocator import GlibcTrim
+
+    trim = GlibcTrim()
+    count = [0]
+
+    def reported() -> None:
+        before_rss, before_free = _rss_bytes(), _malloc().get("free_retained", 0)
+        trim()
+        count[0] += 1
+        print(
+            f"    [trim {count[0]}] released {trim.released}: resident {before_rss / GIB:.3f} -> "
+            f"{_rss_bytes() / GIB:.3f} GiB, malloc free {before_free / GIB:.3f} -> "
+            f"{_malloc().get('free_retained', 0) / GIB:.3f} GiB",
+            flush=True,
+        )
+
+    session = materialized_session.MaterializedSession
+    opened = session.__init__
+
+    @functools.wraps(opened)
+    def with_trim(self, *args, **kwargs):
+        opened(self, *args, memory_trim=reported, **kwargs)
+
+    session.__init__ = with_trim
 
 
 def _print_split_checksums(materialized_session) -> None:
