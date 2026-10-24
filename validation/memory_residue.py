@@ -257,6 +257,38 @@ def _executables() -> dict:
     return {"count": len(live), "code": code}
 
 
+def _executables_by_hlo(top: int = 15) -> dict:
+    """The live executables ranked by their serialized HLO module's size.
+
+    A jitted function that closes over a host array compiles it into its program as a constant, so its
+    HLO is about the array's size; a program whose data all arrive as arguments is a few kilobytes.
+    """
+    import jax
+
+    sizes = []
+    for executable in jax.devices()[0].client.live_executables():
+        try:
+            for module in executable.hlo_modules():
+                sizes.append((module.name, len(module.as_serialized_hlo_module_proto())))
+        except Exception:
+            continue
+    sizes.sort(key=lambda named: -named[1])
+    by_name: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for name, size in sizes:
+        by_name[name][0] += 1
+        by_name[name][1] += size
+    return {
+        "modules": len(sizes),
+        "bytes": sum(size for _, size in sizes),
+        "over_1_mib": sum(1 for _, size in sizes if size >= MIB),
+        "bytes_over_1_mib": sum(size for _, size in sizes if size >= MIB),
+        "top": sizes[:top],
+        "top_names": sorted(
+            ((name, count, size) for name, (count, size) in by_name.items()), key=lambda r: -r[2]
+        )[:top],
+    }
+
+
 def _trim() -> dict:
     before = _resident()
     _LIBC.malloc_trim(0)
@@ -292,6 +324,7 @@ def _clear() -> dict:
 
     before = _live()
     executables = _executables()["count"]
+    hlo = _executables_by_hlo()
     gc.collect()
     _LIBC.malloc_trim(0)
     collected = _live()
@@ -307,6 +340,7 @@ def _clear() -> dict:
         after["python"] = _objects_by_type()
     return {
         "executables_before": executables,
+        "hlo": hlo,
         "before": before,
         "after_collect_and_trim": collected,
         "after_clear": cleared,
@@ -391,6 +425,14 @@ def _print(label: str, residue: dict) -> None:
             f"{clear['after']['executables']}",
             flush=True,
         )
+        hlo = clear["hlo"]
+        print(
+            f"        HLO: {hlo['modules']} modules {hlo['bytes'] / GIB:.3f} GiB; "
+            f"{hlo['over_1_mib']} over 1 MiB hold {hlo['bytes_over_1_mib'] / GIB:.3f} GiB",
+            flush=True,
+        )
+        for name, count, size in hlo["top_names"][:10]:
+            print(f"          {size / MIB:9.1f} MiB  x{count:<4d} {name}", flush=True)
         for name in ("before", "after_collect_and_trim", "after_clear", "after_clear_and_trim"):
             live = clear[name]
             print(
