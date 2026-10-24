@@ -206,7 +206,8 @@ path.
     0.9). Inside a loop (a Krylov or V-cycle loop, as the march applies them) XLA hoists the decode out
     and the two forms tie (ten 4×4 applies 168 vs 176 ms, 2×2 25.3 vs 25.4), the decoded columns then
     living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
-    jax 0.12.0.1, 2026-10-24 (log, "Cell-level pattern (§14d)").
+    jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
+    1–3").
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
       count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
       sized or static by the actual pattern retraced a budgeted rebuild

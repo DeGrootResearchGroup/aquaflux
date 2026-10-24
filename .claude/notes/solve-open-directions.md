@@ -829,6 +829,13 @@ None of these needs a convergence study:
 The transposes and the cell-level pattern are worth about 0.6 and up to ~2 GiB on bfs3d; the pattern cut
 scales with the entry count, so it is the one of these that also bears on the 300k target.
 
+**The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
+cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
+end, step-1 peak 8.07 → 7.19 GiB, resident 7.13 → 6.11 (`solve-direct-preconditioners-log.md`, "Cell-level
+pattern (§14d), stages 1–3"). Still dof level: the host `SparsePattern`s of the probe's blocks and the
+levels (~140 MiB host on bfs3d), the diagonal and cell-block gathers (small), a non-nodal or
+diagonal-padded level, and the 1×1 Schur.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
