@@ -58,6 +58,7 @@ MESH_SECTION_ICONS = {
     "duct_core": "mdi-rectangle-outline",
     "planarizer": "mdi-vector-square",
     "core": "mdi-cube-outline",
+    "refinements": "mdi-magnify-plus-outline",
     "output": "mdi-folder-outline",
 }
 

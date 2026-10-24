@@ -118,7 +118,7 @@ class Mesh(eqx.Module):
             single-zone mesh.
         face_patches : dict of {str: indices}, optional
             Named face patches overlaying the default ``"interior"`` / ``"boundary"`` split
-            (boundary patches for BCs; interior patches for baffles / named interfaces).
+            (boundary patches for BCs, a baffle's included; interior patches for named interfaces).
         patch_types : dict of {str: str}, optional
             The type a mesh file declared for each named patch (``wall``, ``patch``, …), carried on
             :attr:`face_patches` uninterpreted. Omit when the source declares none.

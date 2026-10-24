@@ -11,8 +11,8 @@ from aquaflux.mesh import RESERVED_PATCH_NAMES, Mesh
 
 __all__ = ["element_mesh"]
 
-#: A tetrahedron's faces, each opposite one of its corners, in corner order.
-_TETRAHEDRON = [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]]
+#: A tetrahedron's faces, face ``k`` opposite corner ``k``.
+TETRAHEDRON_FACES = np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
 #: A prism's faces: its two triangles, then its three quadrilateral sides, each ring in order.
 _PRISM = [[0, 1, 2], [3, 4, 5], [0, 1, 4, 3], [1, 2, 5, 4], [2, 0, 3, 5]]
 #: A hexahedron's corners as the corners of the unit cube, in the order its corners are given: one
@@ -79,7 +79,7 @@ def element_mesh(
     """
     points = np.asarray(points, dtype=np.float64)
     kinds = [
-        (np.zeros((0, 4), np.int64) if tetrahedra is None else tetrahedra, _TETRAHEDRON),
+        (np.zeros((0, 4), np.int64) if tetrahedra is None else tetrahedra, TETRAHEDRON_FACES),
         (np.zeros((0, 6), np.int64) if prisms is None else prisms, _PRISM),
         (np.zeros((0, 8), np.int64) if hexahedra is None else hexahedra, _HEXAHEDRON),
         (np.zeros((0, 5), np.int64) if pyramids is None else pyramids, _PYRAMID),

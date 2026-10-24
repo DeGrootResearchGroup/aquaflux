@@ -86,13 +86,19 @@ fluid_solid     = zones.interface_mask_between(mesh.face_cells, "fluid", "solid"
 These take `mesh.face_cells` (the face → cell connectivity) rather than the whole mesh —
 the smallest input they need.
 
-**Named interior patches (baffles).** When a set of faces needs bespoke treatment that
-the zones do not imply — a **baffle** (an interior face acting as a thin wall), or an
-interface with a special model — promote it to a named face patch. Because patches
-partition *all* faces, interior ones included, an interior baffle is simply a named patch
-of interior faces, and the flux/boundary layer gives it its special treatment.
+**Named interior patches.** When a set of interior faces needs a name the zones do not
+imply — an interface with a special model, say — promote it to a named face patch.
+Because patches partition *all* faces, interior ones included, such a set is simply a
+named patch of interior faces.
 {meth}`FacePatches.is_boundary_patch <aquaflux.mesh.FacePatches.is_boundary_patch>`
 distinguishes a true boundary patch from such an interior one.
+
+**Baffles are boundary faces, not interior ones.** A **baffle** — a thin wall with the
+fluid on both sides — is two boundary faces at each place, one owned by the cell on each
+side, in an ordinary boundary patch. The cells either side share no face through it, so
+every boundary condition, the wall distance and a turbulence model's wall treatment see
+it as the wall it is, with nothing to add; the mesher makes baffles this way from the
+sheets of a drawing ({doc}`mesh_files`).
 
 **Patch types and patch groups.** A mesh file may say more about its patches than their
 faces: an OpenFOAM `boundary` file gives each patch a `type` (`wall`, `patch`, `symmetry`,

@@ -161,11 +161,7 @@ class ClosedSurface:
         used, local = np.unique(triangles, return_inverse=True)
         check_closed_surface(np.asarray(points, dtype=float)[used], local.reshape(-1, 3))
         vertices = np.asarray(points, dtype=float)[triangles]
-        extent = vertices.reshape(-1, 3).max(axis=0) - vertices.reshape(-1, 3).min(axis=0)
-        counts = np.maximum(np.ceil(extent / spacing), 1).astype(np.int64)
-        while np.prod(counts, dtype=float) > MAX_VOXELS:
-            counts = np.maximum(counts // 2, 1)
-        grid = TriangleGrid.build(vertices, resolution=tuple(int(n) for n in counts))
+        grid = triangle_grid(vertices, spacing)
         held = (np.diff(grid.starts) > 0).reshape(tuple(grid.resolution))
         label, n_labels = ndimage.label(~held)
         within = np.zeros(n_labels + 1, dtype=bool)
@@ -198,10 +194,50 @@ class ClosedSurface:
         """See :meth:`Region.meets`: whether any voxel a box overlaps holds a triangle, so never
         False where the surface passes through the box. A box clear of the grid, which holds the
         surface, overlaps none (the grid's own test would read it against its edge voxels)."""
-        lower, upper = np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
-        high = self.grid.low + self.grid.spacing * self.grid.resolution
-        overlaps = np.all((upper >= self.grid.low) & (lower <= high), axis=1)
-        return overlaps & self.grid.holds_any(lower, upper)
+        return grid_meets(self.grid, lower, upper)
+
+
+def triangle_grid(vertices: np.ndarray, spacing: float) -> TriangleGrid:
+    """Triangles registered in a grid of voxels about ``spacing`` across over their box, coarsened
+    where that would need more than :data:`~aquaflux.triangle_grid.MAX_VOXELS`.
+
+    Parameters
+    ----------
+    vertices : np.ndarray, shape ``(n, 3, 3)``
+        Each triangle's corners.
+    spacing : float
+        The voxels' edge wanted.
+
+    Returns
+    -------
+    TriangleGrid
+    """
+    extent = vertices.reshape(-1, 3).max(axis=0) - vertices.reshape(-1, 3).min(axis=0)
+    counts = np.maximum(np.ceil(extent / spacing), 1).astype(np.int64)
+    while np.prod(counts, dtype=float) > MAX_VOXELS:
+        counts = np.maximum(counts // 2, 1)
+    return TriangleGrid.build(vertices, resolution=tuple(int(n) for n in counts))
+
+
+def grid_meets(grid: TriangleGrid, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
+    """Whether any voxel each box overlaps holds a triangle of ``grid``, so never False where a
+    triangle passes through the box; a box clear of the grid, which holds every triangle, overlaps
+    none (the grid's own test would read it against its edge voxels).
+
+    Parameters
+    ----------
+    grid : TriangleGrid
+    lower, upper : np.ndarray, shape ``(m, 3)``
+        Opposite corners of each box.
+
+    Returns
+    -------
+    np.ndarray of bool, shape ``(m,)``
+    """
+    lower, upper = np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
+    high = grid.low + grid.spacing * grid.resolution
+    overlaps = np.all((upper >= grid.low) & (lower <= high), axis=1)
+    return overlaps & grid.holds_any(lower, upper)
 
 
 def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:

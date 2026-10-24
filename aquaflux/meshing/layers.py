@@ -31,6 +31,12 @@ sliver. A sliver is no face for a fill to meet (a pyramid on it stands over its 
 so an edge of the top shorter than ``min_top_share`` of the wall edge under it is halved the same
 way. Around a thinned point the layers taper back to full thickness, by at most half again from one
 point to the next.
+
+**Points at one place grow alike.** A surface opened along a sheet standing in the region has a
+point for each side of the sheet where the sides part, at one place. Where such a point slides along
+the sheet beside a layered wall, each copy grows the same column -- the same direction, the
+thinnest thickness of any -- so the layers' tops on the two sides meet at one place again, and the
+sheet's two sides above them stay one surface a fill can keep.
 """
 
 from __future__ import annotations
@@ -166,7 +172,13 @@ class PrismLayers:
             below = tops[k]
         return tops
 
-    def extrude(self, points: np.ndarray, faces: Polygons, layered: np.ndarray) -> LayerExtrusion:
+    def extrude(
+        self,
+        points: np.ndarray,
+        faces: Polygons,
+        layered: np.ndarray,
+        twins: np.ndarray | None = None,
+    ) -> LayerExtrusion:
         """Grow the layers.
 
         Parameters
@@ -176,6 +188,9 @@ class PrismLayers:
             A closed surface wound out of the region, every point used.
         layered : np.ndarray of bool, shape ``(faces.n_faces,)``
             Which faces carry layers, the triangles' first.
+        twins : np.ndarray of int, shape ``(n_points,)``, optional
+            For each point, the point it is a copy of, at the same place (itself if none): points
+            sharing one grow the same column. Unset, every point is its own.
 
         Returns
         -------
@@ -194,24 +209,69 @@ class PrismLayers:
         moving = np.zeros(points.shape[0], dtype=bool)
         rings = surface.rings[layered]
         moving[rings[rings >= 0]] = True
+        alike = _Alike.of(twins, points.shape[0])
         direction, stretch = _directions(surface, layered, moving, self.max_stretch)
+        direction, stretch = alike.direction(direction), alike.largest(stretch)
         offsets = self.offsets()
         thickness = stretch * offsets[-1]
         share = np.ones(points.shape[0])
         gap = _gaps(surface, direction, moving, 2.5 * thickness)
         share[moving] = np.minimum(1.0, self.gap_share * gap[moving] / thickness[moving])
-        share = _smoothed_down(surface, share, moving)
+        share = alike.smallest(_smoothed_down(surface, share, moving))
         for _ in range(self.max_halvings + 1):
             extrusion = _built(surface, layered, moving, direction, offsets, share * stretch)
             bad = _to_be_thinned(extrusion, surface, layered, moving, self.min_top_share)
             if not bad.size:
                 return extrusion
             share[bad] *= 0.5
-            share = _smoothed_down(surface, share, moving)
+            share = alike.smallest(_smoothed_down(surface, alike.smallest(share), moving))
         raise ValueError(
             f"{bad.size} point(s) still have a cell or a drawn-in face inside out, or an edge of "
             f"the layers' top too short, after their layers were thinned {self.max_halvings} times"
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class _Alike:
+    """Points at one place, given one value: each point's group (unset: each its own, and every
+    value is returned as it is)."""
+
+    group: np.ndarray | None
+    n_groups: int
+
+    @classmethod
+    def of(cls, twins: np.ndarray | None, n_points: int) -> _Alike:
+        if twins is None:
+            return cls(None, n_points)
+        _, group = np.unique(np.asarray(twins, dtype=np.int64), return_inverse=True)
+        return cls(group.reshape(-1), int(group.max()) + 1)
+
+    def smallest(self, values: np.ndarray) -> np.ndarray:
+        """Each point's value replaced by the smallest of its group's."""
+        if self.group is None:
+            return values
+        least = np.full(self.n_groups, np.inf)
+        np.minimum.at(least, self.group, values)
+        return least[self.group]
+
+    def largest(self, values: np.ndarray) -> np.ndarray:
+        """Each point's value replaced by the largest of its group's."""
+        if self.group is None:
+            return values
+        most = np.full(self.n_groups, -np.inf)
+        np.maximum.at(most, self.group, values)
+        return most[self.group]
+
+    def direction(self, directions: np.ndarray) -> np.ndarray:
+        """Each point's unit direction replaced by its group's mean, normalized; a point with no
+        direction (zero) adds nothing to it, and keeps none if its group has none."""
+        if self.group is None:
+            return directions
+        total = np.zeros((self.n_groups, 3))
+        np.add.at(total, self.group, directions)
+        length = np.linalg.norm(total, axis=1, keepdims=True)
+        mean = np.divide(total, length, out=np.zeros_like(total), where=length > 0.0)
+        return mean[self.group]
 
 
 @dataclasses.dataclass(frozen=True)

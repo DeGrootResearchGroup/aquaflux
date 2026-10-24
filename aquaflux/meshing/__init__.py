@@ -12,7 +12,8 @@ without loading it.
 
 :class:`CadMesher` meshes a region of a CAD model -- some solids' union, less others -- as polyhedra:
 Netgen's tetrahedra of it, their boundary in patches chosen by face (:class:`FacesNear`,
-:class:`FacesOn`), turned into their dual. :class:`PrismLayers` grows layers inward from the wall
+:class:`FacesOn`), turned into their dual. A sheet of the model standing in the region is a baffle:
+its faces become boundary faces on both its sides, in the patch :data:`BAFFLE_PATCH` unless chosen. :class:`PrismLayers` grows layers inward from the wall
 before the fill, sized for the dual, so a wall-resolved mesh's layers join its core conformally;
 over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals (a band, such as a
 pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
@@ -29,6 +30,11 @@ triangle surface bounds (:class:`ClosedSurface`), or an inside test (:class:`Sam
 from a balanced :class:`~aquaflux.octree.Octree` refined towards its boundary (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
 tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
 are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
+
+A :class:`Refinement` meshes part of the region finer than the rest -- the fluid inside a
+:class:`RefinedBox`, :class:`RefinedSphere` or :class:`RefinedCylinder`, or within a distance of
+some patches (:class:`RefinedNear`). Placed in the region as a :class:`LocatedRefinement`, it splits
+the core's cubes there and hands Netgen the :class:`LocalSizes` its triangles and tetrahedra keep to.
 
 :class:`HexBlock` is a curved hexahedron cut into hexahedra by transfinite interpolation from its
 edges (straight, an :class:`Arc`, a :class:`SampledCurve` or any :class:`Curve`) and faces (any
@@ -53,6 +59,7 @@ from .block_assembly import BlockMesh
 from .block_topologies import Annulus, CubedSphereCap, PipeOGrid
 from .blocks import Arc, Curve, HexBlock, SampledCurve, Surface
 from .cad_mesher import (
+    BAFFLE_PATCH,
     CadMesher,
     FaceSelection,
     FacesNear,
@@ -66,6 +73,7 @@ from .conduits import ConduitFill
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
     EdgePoints,
+    LocalSizes,
     MeshingError,
     NetgenProcess,
     SurfaceTriangulation,
@@ -85,11 +93,20 @@ from .near_surface import NearSurface
 from .pipe_core import PipeCore
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
+from .refinement import (
+    LocatedRefinement,
+    RefinedBox,
+    RefinedCylinder,
+    RefinedNear,
+    RefinedSphere,
+    Refinement,
+)
 from .polygons import Polygons, PyramidCaps
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 from .planarize import FacePlanarizer, Planarization
 
 __all__ = [
+    "BAFFLE_PATCH",
     "Annulus",
     "Arc",
     "BlockLattice",
@@ -115,6 +132,8 @@ __all__ = [
     "HexBlock",
     "HexCore",
     "LayerExtrusion",
+    "LocalSizes",
+    "LocatedRefinement",
     "MappedQuads",
     "MappedSurface",
     "MeshingError",
@@ -129,6 +148,11 @@ __all__ = [
     "PolyhedralDual",
     "PrismLayers",
     "PyramidCaps",
+    "RefinedBox",
+    "RefinedCylinder",
+    "RefinedNear",
+    "RefinedSphere",
+    "Refinement",
     "Region",
     "RegionFaces",
     "SampledCurve",

@@ -124,7 +124,8 @@ All classes are `equinox.Module`s.
   `patch_id`, `patch_names`, `face`): boundary patches cut into the centre-fan triangles, each wound to face
   **into the domain**, decided from the stored normal, never node order
   (`test_mesh_patch_triangles.py::test_every_triangle_faces_into_the_domain_whatever_the_node_order`).
-  Refuses 2D meshes, patches holding interior faces (baffles are two-sided), and faces **not star-shaped
+  Refuses 2D meshes, patches holding interior faces (two-sided; a mesher's baffle is boundary faces, one
+  patch face per side, and passes), and faces **not star-shaped
   from their vertex mean** (the fan folds). `allow_folded=True` keeps folded faces for surfaces that only
   **block** (the fan still covers the face; `case.PatchBody` uses it); emitters/reflectors keep the
   refusal (overlap double-counts area). Lives here because it is mesh, and `radiation/` imports no mesh.
@@ -217,7 +218,8 @@ Naming: not `metrics.py` (CFD "mesh metrics" are quality measures); say "face ge
   `groups.RESERVED_PATCH_NAMES` (the OpenFOAM reader's guard imports it).
   `FacePatches.uncovered_boundary_faces` backs `BoundaryConditions.resolve`'s coverage refusal
   (`boundary.md`). Zone interfaces are derived (`CellZones.interface_mask`/`interface_mask_between`) and
-  may also be named as patches (a baffle). Node groups not built; overlapping groups rejected.
+  may also be named as patches (an interface; a baffle is boundary faces instead, `meshing.md`). Node
+  groups not built; overlapping groups rejected.
 - **`FacePatches` carries what a mesh file declared** — static tuples `patch_types` (`(patch, type)`) and
   `patch_groups` (`(group, members)`), default `()`, **uninterpreted** by the numerics (the case file
   resolves groups via `addressed_by`). A group is not a partition, hence a separate record. `__check_init__`

@@ -23,7 +23,9 @@ cores cross-section by cross-section (`ducts.py`, `duct_core.py`; both through `
 `CadMesher` and the mesh file (`MeshSpec.core`). The block mesher is built as a library (below), not yet
 wired into `CadMesher` or the mesh file.
 Face planarization (`planarize.py`) is built and run by `CadMesher` when given a `planarizer` (off by
-default; `planarizer: {kind: FacePlanarizer}` in a case file).
+default; `planarizer: {kind: FacePlanarizer}` in a case file). Refinement regions (`refinement.py`) are
+built and wired into `CadMesher` and the mesh file (`MeshSpec.refinements`). Baffles -- the drawing's sheets standing in
+the fluid -- are built (`sheets.py`, below).
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -44,7 +46,8 @@ polyhedral bulk through OpenFOAM 13 non-conformal couples) is not available to u
   bulk conformally.
 - **Rectangular ducts get a structured core automatically, following a curve** (project owner,
   2026-10-24: "automatic detection, structured meshing, and able to follow a curve"), with an override.
-- **Baffles are a preset, detected automatically** (with an override) as faces with fluid on both sides.
+- **Baffles are detected automatically** (with an override) as faces with fluid on both sides: built as
+  the drawing's sheets standing in the region (below).
 - **No OpenFOAM tool anywhere in the pipeline** (no blockMesh, snappyHexMesh, polyDualMesh, gmshToFoam).
 - **Output: the `Mesh` in memory, and an OpenFOAM polyMesh writer**, as the first iteration.
 - **Scale: up to about 2M cells on a laptop.**
@@ -157,15 +160,15 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 ## The CAD mesher (`cad_mesher.py`) — built
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=ClearedCaps(),
-pipe_core=PipeCore(), duct_core=DuctCore(), planarizer=None, core=None, netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
-layered=(), mapped=(), pipes=None, ducts=None, on_stage=None) -> Mesh` (`on_stage`, a `Stage`, is told each stage's name as it starts,
-only the stages this mesh runs; `aquaflux mesh` prints them, `case.md`): `write_brep` → `triangulate` (face-tagged; again with the rims divided
-alike where a pipe candidate's need it, and whenever there is a duct, its edges divided as below) → pipes and ducts found (below) → the `mapped` patches' faces, the pipes' and the ducts' sides remeshed as structured quadrilaterals (below) →
+pipe_core=PipeCore(), duct_core=DuctCore(), planarizer=None, core=None, refinements=(), netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
+layered=(), mapped=(), pipes=None, ducts=None, baffle_patch=BAFFLE_PATCH, on_stage=None) -> Mesh` (`on_stage`, a `Stage`, is told each stage's name as it starts,
+only the stages this mesh runs; `aquaflux mesh` prints them, `case.md`): `write_brep` → `triangulate` (face-tagged; again with the refinements' local sizes when there are any, below;
+again with the rims divided alike where a pipe candidate's need it, and whenever there is a duct, its edges divided as below) → pipes and ducts found (below) → the `mapped` patches' faces, the pipes' and the ducts' sides remeshed as structured quadrilaterals (below) → the surface opened along the baffles ("Baffles", below) →
 layers on the `layered` patches (below) → the pipes' and ducts' cores filled, out of the fill (`fill_conduits`, below)
 → every quadrilateral left for the fill
 capped with a `PyramidCaps` pyramid on the fill's side (`caps.capped`: sized by `ClearedCaps`, below, or a fixed share of its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
 only) → with a `core`, the octree hex core inside the fill's surface, its capped surface added as a hole
-(`_cored`, below) → `fill` → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
+(`_cored`, below; its cubes refined by the refinements) → `fill` (with the refinements' local sizes) → `element_mesh` (tets, prisms, hexahedra, the caps as pyramids; boundary faces in
 patches by their CAD face; points no cell uses dropped) → `PolyhedralDual.build_traced` (the layers'
 columns passed); with nothing left for tetrahedra (a pipe open at both ends) Netgen's fill is not run
 → boundary vertices projected onto the CAD (below) → if `planarizer` is set, the faces flattened by
@@ -380,6 +383,63 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   cylinder open at both ends, no Netgen, every cell hexahedral but the corner prisms) and
   `test_meshing_netgen.py` (Sozzi's pipes: closure, pipe p99 < 7°, hexahedra along both axes, end areas).
 
+## Baffles (`sheets.py`) — built
+
+A baffle is a **sheet** of the drawing (a part with faces and no solid; `CadModel.sheets`) standing in
+the region; `CadRegion.baffles` unset takes every sheet, a tuple names them, `()` none (`io.md`).
+- **In the mesh, a baffle is two coincident boundary faces per place, one per side, in an ordinary
+  patch** (project owner, 2026-10-24, over an interior-face patch with a special flux): every boundary
+  condition, the wall distance, a wall function and the polyMesh writer then see a wall with nothing
+  added. `BAFFLE_PATCH` (`"baffles"`) collects the baffle faces no selection names --
+  `assign_patches` gives them `len(patches) + 1`, so the drawing view and the mesher agree; a selection
+  of that name collects them instead. Pinned by `test_a_baffle_standing_in_a_box_is_a_patch_of_faces_on_both_its_sides`
+  (with a polyMesh round trip).
+- **The surface is opened along the sheets right after mapping** (`opened`): each sheet triangle given
+  twice, one per side; each point copied once per side where the sides part (inside the sheet, along its
+  foot on a wall, at a wall corner), never along its free edge, round which the fluid of one side meets
+  the other's. Sides are read from the faces round each edge used more than twice, sorted by angle about
+  it: a face running along the edge low-to-high has the fluid on its decreasing-angle side, so each
+  high-to-low face pairs with the next face round; a sheet's two sides tie at one angle, **the low-to-high
+  one first** (else the slit between them reads as fluid). Copies follow from the joined corners
+  (`connected_components`); the first side met keeps the number, so `OpenedSurface.origin` maps a copy to
+  its point and the mapped grids keep their indices.
+  - ⚠️ **An edge a sheet uses whose ends both lie on its free edge is cut at its middle first**
+    (`_cut_free_chords`, midpoint moved onto the sheet): left whole it stays one edge of four faces, and
+    a triangle with three free-edge corners comes out as two faces on one point set. Junction edges
+    included. Lattice sheets' corner squares trip it (pinned).
+- **Layers grow alike on both sides** (`PrismLayers.extrude(twins=)`: each group's direction the mean,
+  stretch the largest, thickness share the smallest, applied after every smoothing), so the twin
+  columns coincide exactly; `cad_mesher._grown_twins` extends the twins up the columns and refuses a
+  point layered on one side only, or columns that do not meet. Untied, a sheet near one wall grows
+  different columns on its two sides (`test_layers_grow_alike_on_both_sides_of_a_sheets_foot`).
+- **The fill gets each sheet once, as internal triangles** (`SlitSurface.of`: points merged to their
+  twins, each pair of sides kept once; `NetgenProcess.fill(internal=)`, a `FaceDescriptor` with
+  `domin = domout = 1`), and **`parted` hands each tetrahedron its side's copies again**: tetrahedra round a
+  copied point joined through faces off the sheet are one side, named by the opened surface's face it
+  holds (a sheet face's holder is the tetrahedron behind it, away from its normal). ⚠️ **Netgen does not
+  fill the opened surface itself** (two coincident sides on their own points): no result within 120 s on a
+  box at maxh 0.1, where the internal form takes a second (`validation/meshing_netgen/baffle_quality.py
+  --opened-fill`, 2026-10-24).
+- **The dual**: two boundary faces folded right back onto each other fold by `-pi` (`boundary_folds`,
+  `_FOLDED_BACK`), so a free edge is the most concave edge and its points are cut into a piece per side
+  (coplanar sides read 0 rise, convex, before). **A column point lying on a sharp concave edge itself is
+  cut by its own walls, not its base's** (`_Pieces.of`): the walls' layers slide up a baffle, so the column
+  at the corner where its free edge meets a wall runs along that free edge; cut twice, the dual broke.
+- **Refused**: a sheet cutting a solid of the region in two (kernel); a named baffle standing nowhere in
+  the region; a layered patch holding a baffle (at a free-edge point the two sides' normals cancel); a
+  mapped or pipe patch holding a baffle or a face one stands on (the grid would not keep the foot). Pipe
+  candidates leave those faces out. Every edge of a sheet is a feature (`edge_angle` `nan`).
+- **Quality** (box with a plate at maxh 0.1, `baffle_quality.py`, log "baffles"): p99 non-convexity
+  unchanged; worst 0.60 against 0.31, and with layers 1.13 against 0.43 with one face over 90 degrees,
+  all at small faces where a free-edge cut meets a cell whose centroid lies on the sheet's plane. **Not
+  the baffle's own**: the L with layers has 8 faces over 90 degrees (worst 180) by the same cut. Open.
+- **Not built**: layers on a baffle; a sheet meeting the region only at a point; sheets crossing one
+  another (the pairing takes any number of faces round an edge, untested); a thin solid collapsed to its
+  midsurface.
+- Pinned in `tests/unit/test_meshing_sheets.py` (opening, cutting, sides, the slit fill and `parted` on
+  Kuhn tetrahedra, the dual's cut at the free edge, the layers' tie; no Netgen) and
+  `test_meshing_netgen.py` (the fill's internal triangles; the plate in a box, bare and with layers; the
+  refusals).
 ## Rectangular ducts: structured cores, following a curve (`ducts.py`, `duct_core.py`) — built
 
 Agreed with the project owner, 2026-10-24 (scope bullet above). A duct's sides are mapped four-sided
@@ -503,9 +563,10 @@ the log (2026-10-20). Dated numbers in the log.
 ## The octree hex core (`octree.py`, `hex_core.py`, `regions.py`) — built and wired in
 
 `OctreeCore(size, wall_size=None, clearance=None).mesh(region, lower, upper, *, cap_height,
-boundary_size) -> HexCore` (`points`, `hexahedra`, `pyramids`, `tetrahedra`, `caps`, `surface`, `octree`,
-`kept`); `within(points, triangles, *, cap_height, boundary_size)` is `mesh` of the `ClosedSurface` of a
-closed triangle surface over its box. Agreed with the project owner, 2026-10-20 (the design below):
+boundary_size, refinements=()) -> HexCore` (`points`, `hexahedra`, `pyramids`, `tetrahedra`, `caps`, `surface`, `octree`,
+`kept`); `within(points, triangles, *, cap_height, boundary_size, refinements=())` is `mesh` of the
+`ClosedSurface` of a closed triangle surface over its box. `refinements` are further
+`RefinementCriterion`s for `refined_by`, beside `NearSurface` (the refinement regions, below). Agreed with the project owner, 2026-10-20 (the design below):
 **one value the case file reads** — `size` (root cubes), `wall_size` (unset: `boundary_size`, which
 `CadMesher` passes as `max_size`; refused above `size`), `clearance` (unset: twice the wall size);
 `refinements` and its own `cap_height` were removed — **one `cap_height`, `CadMesher`'s, serves the wall
@@ -554,9 +615,12 @@ hexes, pyramids; earlier inputs unchanged).
   clearance alone, a coarse cube whose finer neighbour across is not kept faces the fill, cut about its
   centre (a transition cube's pyramids under wall-sized caps, so cap edges cannot show it). Pinned by
   `test_a_core_graded_towards_its_boundary_meets_it_with_wall_cubes_alone` (a wall off the lattice); on a
-  ball the children of refined cubes always form the boundary and a test cannot see it. So **the core's
-  boundary is wall cubes only, capped whole**: the fan-triangle path of `surface` is unreachable from
-  `OctreeCore` and kept as the general conformity rule (pinned on a hand-built tree).
+  ball the children of refined cubes always form the boundary and a test cannot see it. So **without a
+  refinement region the core's boundary is wall cubes only, capped whole**. ⚠️ **A refinement region
+  finer than the wall cubes that reaches the core's boundary makes the fan-triangle path of `surface`
+  reachable** (cubes of two sizes side by side on the boundary): it is the general conformity rule,
+  pinned on a hand-built tree (`_core_beside_a_refinement`) and through `OctreeCore.mesh` by
+  `test_the_hex_core_is_refined_inside_a_region_reaching_its_boundary_and_stays_conformal`.
 - **Kept**: a leaf the boundary `meets` nowhere within the cube grown by `clearance`, whose centre is
   `inside`.
 - **Hanging points: resolved by templates, not by Netgen (chosen 2026-10-19).** A cube with a smaller
@@ -601,9 +665,10 @@ hexes, pyramids; earlier inputs unchanged).
   wall caps' sides — so **the clearance is from the layers' top and the wall caps' apexes by
   construction**, not from the drawing. Its points follow the surface's, its capped surface joins the
   fill's as a hole, its tets follow the fill's, its hexahedra the layers' (a column's cells keep their
-  numbering), its pyramids and caps the wall caps. **No size field**: Netgen's fill grades its tets from
-  the triangles it is given (`validation/meshing_netgen/fill_grading.py`, log), so the fill's
-  `max_size` is only raised to the wall cubes' size where larger (`_CoreCells.fill_size`). `MeshSpec.core`
+  numbering), its pyramids and caps the wall caps. **No size field between the walls and the core**:
+  Netgen's fill grades its tets from the triangles it is given (`validation/meshing_netgen/fill_grading.py`,
+  log), so the fill's `max_size` is only raised to the wall cubes' size where larger
+  (`_CoreCells.fill_size`); the only local sizes the fill gets are the refinement regions'. `MeshSpec.core`
   is the case key (`{kind: OctreeCore, size: ...}`); unset, the polyhedral core.
 - **Interaction with #785**: each core cap's apex is a dual cell too; `ClearedCaps` sizes the core's
   caps and the walls' alike (small cells 1785-1832 → 257-322, with more faces over 50°: above). ⚠️
@@ -616,8 +681,50 @@ hexes, pyramids; earlier inputs unchanged).
   the transition cubes' polyhedra carry none (log, "Attribution"); wall cubes of `2 × maxh` save 19 % of the cells, still worse in volume ratio; Sozzi's 34 mm
   annulus keeps no cube at all. The defaults and #785's priority are with the project owner.
 - **Not yet**: snapping nodes to walls (the core always stays a clearance from every patch, inlets
-  included); user refinement regions; a core in a gap narrower than about `2 × clearance + wall` (left to
+  included); a core in a gap narrower than about `2 × clearance + wall` (left to
   the tets; Sozzi's annulus, log).
+
+## Refinement regions (`refinement.py`) — built
+
+A `Refinement` (frozen, keyword-only dataclasses, each with `size`) names a part of the region meshed
+finer than `max_size`: `RefinedBox(lower, upper)`, `RefinedSphere(centre, radius)`,
+`RefinedCylinder(start, end, radius)` (inside a `solids` body, via the private `_RefinedVolume.body()`),
+and `RefinedNear(patches, distance)` (the fluid within a distance of patches). `CadMesher(refinements=)`
+/ `MeshSpec.refinements` (case kinds registered in `_CASE_MAPPING`). Agreed with the project owner,
+2026-10-24: **one setting applied to the octree's cubes, the tets and the surface triangles alike**
+(refining one alone leaves a size jump where the core meets its band of tets), analytic primitives plus
+distance from patches as the shapes (a STEP solid as a region was not asked for), sizes measured as
+`max_size` is (a tet or cube edge; the dual cells come out larger).
+- **`Refinement.located(walls) -> LocatedRefinement(reach, size)`**, `walls` each patch's triangle
+  corners from the first triangulation (`CadMesher._located`). A `LocatedRefinement` is a
+  `RefinementCriterion` (`refines`: split a cube larger than `size` that `reach.meets`) and gives
+  `local_sizes(lower, upper) -> LocalSizes`: the centres of the cubes of exactly `size` it reaches, from
+  an octree over the region's box whose root is `size` doubled as often as the box needs, refined by
+  itself (cost: the part's volume over `size³`, not the box's).
+- **The reach errs towards yes**: a volume through `octree.signed_distance` at the box's centre within
+  half its diagonal (exact for a ball; a composed solid's distance outside is a lower bound, so
+  conservative); patches through `regions.triangle_grid` / `grid_meets` (shared with `ClosedSurface`)
+  of the box grown by the distance, so up to a voxel (`size`) and the box's diagonal beyond it.
+  `RefinedNear`'s distance is from the patch as first triangulated (chord included), before layers.
+- **In the octree core** the cubes in the part are the largest `size / 2**k` not over `size` (root cubes
+  are the core's `size`); Netgen gets `size` itself.
+- **Refused**: a size not below `max_size` or below a set `min_size` (`CadMesher.__post_init__`); a
+  `RefinedNear` patch that is not one, before Netgen runs (`Refinement.patches_named`, in `mesh`'s
+  role check); a refinement whose local sizes are empty ("reaches no part of the region's box").
+- **Overlaps**: the finer size holds (`refined_by` splits if any criterion asks; Netgen restricts to
+  the minimum).
+- **Cost**: one extra triangulation when any refinement is given (beside the pipe rims' one, which then
+  carries the sizes too).
+- Measured (`validation/meshing_netgen/local_sizes.py 0.04`, log "Refinement regions: Netgen's local
+  sizes"): in a unit box filled to 0.25, a ball of 0.15 at 0.04 gives median tet edges 0.050 inside,
+  then 0.054 / 0.075 / 0.139 / 0.250 outward by shell. Pinned in `tests/unit/test_meshing_refinement.py`
+  (cubes split against a ball's and a box's closed-form distance, points covering a ball / box /
+  cylinder / patch slab and not beyond, refusals, the hex core refined to its boundary and still closed),
+  `test_meshing_cad_mesher.py` (the stub Netgen asked to triangulate again and fill with the sizes, the
+  core's middle cubes halved, the refusals), `test_meshing_netgen.py` (the fill and the triangles finer
+  where asked; the L refined near its end wall, polyhedral and cored: closed, exact, cells < 0.1 × the
+  far ones) and `test_mesh_file.py` (the key round-trips). Mutation pass (2026-10-24): 18 lines broken,
+  each red.
 
 ## Face planarization (`planarize.py`) — built, run by `CadMesher` when asked
 
@@ -719,6 +826,13 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
 - ⚠️ **Hand Netgen the fluid shape OCP built, never the drawing.** `OCCGeometry` of the Sozzi drawing reads
   only its first solid (the lamp: 1 solid, 3 faces) where `read_step` finds four.
 - **What Netgen does for us** (`NetgenProcess`; pinned in `tests/unit/test_meshing_netgen.py`):
+  - **`local_sizes=LocalSizes(points, sizes)`** on both operations (the refinement regions): the mesh
+    no coarser than each size near its point. ⚠️ **The fill ignores `MeshingParameters.RestrictH`**: a
+    mesh assembled from supplied triangles has no local-size tree, so the child builds it from the
+    surface (`mesh.CalcLocalH(grading, 1)`) and sets each point with `mesh.RestrictLocalH`; building it
+    alone changes nothing (2026-10-24, log). The triangulation takes `RestrictH` on a
+    `MeshingParameters` (now always passed as `mp=`: bit-identical to the former keywords in a fresh
+    process; ⚠️ the keyword path is not even repeatable within one process, which the child never is).
   - **`triangulate(shape, max_size=, min_size=, grading=)`**: size-graded triangles on the faces of the one
     solid in a file, **wound outward**, each tagged by its face. ⚠️ **Netgen's face index `k` (one-based) is
     the `k−1`-th face in OCP's `TopExp_Explorer` order of the same file** — the contract the kernel's face
@@ -735,9 +849,10 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
     vertices, 2026-10-21). Keep the `shape.edges` list alive while its edges are used (a temporary
     segfaulted). Equal arc length matters on the riser's saddle, whose parameter is not arc length (spacing
     ratio 1.0002 against 1.004 in equal parameter steps).
-  - **`fill(points, triangles, max_size=, grading=)`**: tets filling the region a closed, outward-wound
-    surface bounds (holes wound into the hole), **keeping the surface exactly**: its points first, at their
-    indices and coordinates. This is the conformal gap fill. Tets are returned positively oriented
+  - **`fill(points, triangles, internal=None, max_size=, grading=)`**: tets filling the region a closed,
+    outward-wound surface bounds (holes wound into the hole), **keeping the surface exactly**: its points
+    first, at their indices and coordinates; `internal` triangles (a baffle) kept as faces between two
+    tets, checked so. This is the conformal gap fill. Tets are returned positively oriented
     (Netgen's own come out all negative).
   - ⚠️ **The child checks the fill, because Netgen can be wrong silently**: given a hole wound out of the
     hole it fills straight through it, keeping every supplied point and boundary element. So the faces used
@@ -761,7 +876,9 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
 ## Package and layering (agreed)
 
 - **`aquaflux/meshing/`, host-side numpy and numba, not JAX** (exception: `planarize.py`'s AD step; see
-  "Face planarization"). It depends on `aquaflux.mesh` (it ends at
+  "Face planarization"). The refinement regions' volumes are `aquaflux.solids` bodies, asked through
+  `aquaflux.octree.signed_distance` (jit-compiled per power-of-two batch there), so no JAX is written
+  in `meshing/` for them. It depends on `aquaflux.mesh` (it ends at
   `Mesh.from_csr`, which owns validation) and on `aquaflux.io.cad`; nothing imports it back except a case
   mesh file (`MeshSpec`, `aquaflux/case/mesh_file.py`) and the test fixtures.
 - **CAD access goes through `io/cad/kernel.py`**, via `CadModel` and a `CadRegion` (`io.md`, "Regions for a
@@ -792,7 +909,7 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
    `mesh.md`) and planarization (built, above; run by `CadMesher` when given a `planarizer`).
 
 **Phasing**: (1) CAD topology → surface triangulation → polygonal wall mesh → polyhedral core through the
-dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles; (4) octree hex core.
+dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles (built); (4) octree hex core.
 
 **Not decided**: radial basis function (RBF) morphing *beside* transfinite interpolation — for spreading a
 projection's displacement through a block (the pipe-to-chamber saddle), snapping octree nodes, and later

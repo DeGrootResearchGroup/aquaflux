@@ -146,9 +146,9 @@ class FacePatches(LabelledGroups):
     """A partition of faces into named patches, with what the mesh file declared about them.
 
     Boundary faces default to a ``"boundary"`` patch and interior faces to ``"interior"``;
-    named patches overlay these. A patch may name **interior** faces too — that is how a
-    baffle (an interior face acting as a wall) or an explicitly-treated interface is
-    represented.
+    named patches overlay these. A patch may name **interior** faces too — that is how an
+    explicitly-treated interface is represented. A baffle (a thin wall with the fluid on both
+    sides) is not: it is boundary faces, one for the cell on each side, in an ordinary patch.
 
     A mesh file may also say what kind of patch each one is (``wall``, ``patch``, ``symmetry``, …)
     and gather patches into named **patch groups** — an OpenFOAM ``boundary`` file's ``type`` and
@@ -345,8 +345,8 @@ class FacePatches(LabelledGroups):
         Every patch holding boundary faces that is not in ``covered`` is reported, in patch order.
         That includes the automatic ``"boundary"`` patch, which holds the boundary faces no named
         patch claims. The ``"padding"`` patch is never reported: its faces exist only to give a
-        distributed partition a uniform shape and carry no physics. ``"interior"``, and a baffle
-        patch on interior faces, hold no boundary faces and so never appear.
+        distributed partition a uniform shape and carry no physics. ``"interior"``, and a named
+        patch of interior faces, hold no boundary faces and so never appear.
 
         Runs on concrete labels (off the jit path).
 

@@ -143,3 +143,32 @@ def test_the_drawing_is_read_once_while_its_file_is_unchanged(tmp_path, monkeypa
     os.utime(copy, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # the file changed
     view_drawing(sections, tmp_path, tmp_path / "out")
     assert len(reads) == 2
+
+
+def test_a_baffles_face_is_shown_in_the_baffles_patch_as_the_mesher_puts_it(tmp_path):
+    from aquaflux.meshing import BAFFLE_PATCH
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Ax3, gp_Dir, gp_Pln, gp_Pnt
+
+    from tests.support.step import write_step
+
+    plane = gp_Pln(gp_Ax3(gp_Pnt(0.05, 0.0, 0.02), gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)))
+    write_step(
+        tmp_path / "tank.step",
+        {
+            "tank": BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.1, 0.1, 0.1).Shape(),
+            "plate": BRepBuilderAPI_MakeFace(plane, 0.0, 0.06, 0.0, 0.06).Face(),
+        },
+    )
+    drawing = Drawing("tank.step")
+    view = view_drawing(
+        DrawingSections(drawing, DrawingRegion(("tank",)), {}), tmp_path, tmp_path / "out"
+    )
+    assert view.solids == ("tank",)
+    assert sorted(view.patches) == sorted(["walls"] * 6 + [BAFFLE_PATCH])
+    plate = view.patches.index(BAFFLE_PATCH)
+    assert view.faces[plate]["area"] == pytest.approx(0.0036, rel=1e-9)
+    with pytest.raises(ValueError, match=r"baffles \['lid'\], which are not sheets"):
+        sections = DrawingSections(drawing, DrawingRegion(("tank",), baffles=("lid",)), {})
+        view_drawing(sections, tmp_path, tmp_path / "o")

@@ -25,7 +25,14 @@ import numpy as np
 
 from aquaflux.io import write_triangles
 from aquaflux.io.cad import CadModel, CadRegion, FaceTriangles, read_step
-from aquaflux.meshing import FacesNear, RegionFaces, assign_patches, find_ducts, find_pipes
+from aquaflux.meshing import (
+    BAFFLE_PATCH,
+    FacesNear,
+    RegionFaces,
+    assign_patches,
+    find_ducts,
+    find_pipes,
+)
 
 from .drawing import CadPlacement
 from .mesh_file import DrawingSections
@@ -133,6 +140,12 @@ def view_drawing(sections: DrawingSections, directory: str | Path, out: str | Pa
             f"the region names {unknown}, which the drawing does not hold; it holds "
             f"{list(model.names)}."
         )
+    unknown = sorted(set(cad_region.baffles or ()) - set(model.sheets))
+    if unknown:
+        raise ValueError(
+            f"the region names the baffles {unknown}, which are not sheets of the drawing; its "
+            f"sheets are {list(model.sheets)}."
+        )
     topology = model.topology(cad_region)
     surface = _triangles(model, cad_region)
     out = Path(out)
@@ -144,7 +157,8 @@ def view_drawing(sections: DrawingSections, directory: str | Path, out: str | Pa
         for name, selection in patches.items()
         if isinstance(selection, FacesNear)
     }
-    names = [*patches, sections.others if sections.others is not None else DEFAULT_OTHERS]
+    others = sections.others if sections.others is not None else DEFAULT_OTHERS
+    names = [*patches, others, BAFFLE_PATCH]
     try:
         assigned = tuple(names[index] for index in assign_patches(faces, patches).tolist())
         refused = None
