@@ -34,7 +34,8 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .entry_map import DeviceEntryMap, EntryMap, SparsePattern
+from .entry_map import DeviceEntryMap, EntryMap, SparsePattern, ValueMap
+from .kronecker_pattern import KroneckerGather, KroneckerPattern
 from .level_fit import cell_blocks
 from .padded_rows import _padded_rows, _PaddedLayout
 
@@ -54,11 +55,13 @@ class SimplePlan(eqx.Module):
 
     Attributes
     ----------
-    unpack : jnp.ndarray
-        Each stored entry's slot in the level operator's padded rows, shape ``(nnz,)``.
-    velocity, gradient, divergence, pressure : DeviceEntryMap
+    unpack : ValueMap
+        The level operator's stored values, in CSR order, read from its flattened padded-row slots.
+    velocity, gradient, divergence, pressure : ValueMap
         The cuts of the level's values into ``F``, ``G``, ``D`` and ``C``, each onto its block's pattern
-        with every row's columns ascending.
+        with every row's columns ascending. Computed from the cell pattern when the level stores one over
+        every field pair (:class:`~aquaflux.precondition.kronecker_pattern.KroneckerGather`), held as
+        gathers otherwise.
     velocity_layout, gradient_layout : _PaddedLayout
         ``F``'s and ``G``'s rows, read but never applied.
     divergence_layout, correction_layout, schur_layout : _PaddedLayout
@@ -73,11 +76,11 @@ class SimplePlan(eqx.Module):
         Each of ``M``'s stored entries as an index into the flattened cell blocks.
     """
 
-    unpack: jnp.ndarray
-    velocity: DeviceEntryMap
-    gradient: DeviceEntryMap
-    divergence: DeviceEntryMap
-    pressure: DeviceEntryMap
+    unpack: ValueMap
+    velocity: ValueMap
+    gradient: ValueMap
+    divergence: ValueMap
+    pressure: ValueMap
     velocity_layout: _PaddedLayout
     gradient_layout: _PaddedLayout
     divergence_layout: _PaddedLayout
@@ -188,24 +191,56 @@ def simple_plan(
     n_cells = pattern.shape[0] // block_size
     fields = block_size - 1
     nv = fields * n_cells
-    velocity, pressure = slice(None, nv), slice(nv, None)
 
-    def cut(rows: slice, columns: slice) -> EntryMap:
-        return EntryMap.gathering(pattern, lambda m: m[rows, columns].sorted_indices())
+    # The field ranges of the four blocks: (velocity, velocity), (velocity, pressure), ...
+    by_fields = {"velocity": (0, fields), "pressure": (fields, block_size)}
+    kronecker = KroneckerPattern.of_dof(pattern, block_size, block_size)
+    if kronecker is not None:
+        # One cell pattern over every field pair: each cut, and reading the level's stored values out
+        # of its padded rows, is a placement computed from the cell pattern.
+        def cut(rows: str, columns: str) -> tuple[ValueMap, SparsePattern]:
+            return KroneckerGather.of(kronecker, by_fields[rows], by_fields[columns])
 
-    f_map, g_map = cut(velocity, velocity), cut(velocity, pressure)
-    d_map, c_map = cut(pressure, velocity), cut(pressure, pressure)
-    f_pattern, g_pattern, d_pattern, c_pattern = (
-        f_map.landing,
-        g_map.landing,
-        d_map.landing,
-        c_map.landing,
+        widest = block_size * int(np.diff(kronecker.cells.indptr).max(initial=0))
+        unpack, _ = KroneckerGather.of(
+            kronecker,
+            (0, block_size),
+            (0, block_size),
+            slot_width=max(widest, 1) if width is None else width,
+        )
+    else:
+        by_dofs = {"velocity": slice(None, nv), "pressure": slice(nv, None)}
+
+        def cut(rows: str, columns: str) -> tuple[ValueMap, SparsePattern]:
+            gather = EntryMap.gathering(
+                pattern, lambda m: m[by_dofs[rows], by_dofs[columns]].sorted_indices()
+            )
+            return gather.on_device(), gather.landing
+
+        # A gather from the padded slots, each entry reading the slot it is stored in.
+        widest = int(np.diff(pattern.indptr).max(initial=0))
+        unpack = DeviceEntryMap(
+            slots=jnp.asarray(_slot_of_entry(pattern, width)),
+            source=None,
+            target=None,
+            weight=None,
+            n_in=pattern.shape[0] * (max(widest, 1) if width is None else width),
+            n_out=pattern.nnz,
+        )
+
+    (f_map, f_pattern), (g_map, g_pattern) = (
+        cut("velocity", "velocity"),
+        cut("velocity", "pressure"),
+    )
+    (d_map, d_pattern), (c_map, c_pattern) = (
+        cut("pressure", "velocity"),
+        cut("pressure", "pressure"),
     )
     cells = block_layout = block_order = None
     if block_splitting:
         cells = EntryMap.gathering(f_pattern, lambda m: cell_blocks(m, fields)).on_device()
         block_pattern, order = _block_pattern(n_cells, fields)
-        block_layout = _PaddedLayout.of(block_pattern)
+        block_layout = _PaddedLayout.of(block_pattern, fields=(fields, fields))
         block_order = jnp.asarray(order)
         inverse_pattern = block_pattern
     else:
@@ -213,22 +248,23 @@ def simple_plan(
     # The structural patterns: every entry the operands' patterns can produce, whatever their values.
     correction_pattern = _structural(_ones(inverse_pattern) @ _ones(g_pattern))
     schur_pattern = _structural(_ones(c_pattern) + _ones(d_pattern) @ _ones(correction_pattern))
-    correction_layout = (
-        _PaddedLayout.of(g_pattern)
+    correction_layout = _PaddedLayout.of(
+        g_pattern
         if correction_pattern.matches(g_pattern.csr(np.zeros(g_pattern.nnz)))
-        else _PaddedLayout.of(correction_pattern)
+        else correction_pattern,
+        fields=(fields, 1),
     )
     return SimplePlan(
-        unpack=jnp.asarray(_slot_of_entry(pattern, width)),
-        velocity=f_map.on_device(),
-        gradient=g_map.on_device(),
-        divergence=d_map.on_device(),
-        pressure=c_map.on_device(),
-        velocity_layout=_PaddedLayout.of(f_pattern, transposed=False),
-        gradient_layout=_PaddedLayout.of(g_pattern, transposed=False),
-        divergence_layout=_PaddedLayout.of(d_pattern),
+        unpack=unpack,
+        velocity=f_map,
+        gradient=g_map,
+        divergence=d_map,
+        pressure=c_map,
+        velocity_layout=_PaddedLayout.of(f_pattern, transposed=False, fields=(fields, fields)),
+        gradient_layout=_PaddedLayout.of(g_pattern, transposed=False, fields=(fields, 1)),
+        divergence_layout=_PaddedLayout.of(d_pattern, fields=(1, fields)),
         correction_layout=correction_layout,
-        schur_layout=_PaddedLayout.of(schur_pattern),
+        schur_layout=_PaddedLayout.of(schur_pattern, fields=(1, 1)),
         pressure_slots=jnp.asarray(_positions(c_pattern, schur_pattern)),
         cells=cells,
         block_layout=block_layout,
@@ -268,7 +304,7 @@ def fit_simple_level(
     checks : SimpleChecks
         What the host must refuse, and the Schur relaxation's spread.
     """
-    level = slot_values.ravel()[plan.unpack]
+    level = plan.unpack.apply(slot_values.ravel())
     f = plan.velocity.apply(level)
     f_rows = plan.velocity_layout.row_values(f)
     f_columns, f_lengths = plan.velocity_layout.columns, plan.velocity_layout.row_lengths
@@ -477,7 +513,7 @@ def _product_onto(left, right, out: _PaddedLayout) -> jnp.ndarray:
     rows, columns, values = left
     r_columns, r_values, r_lengths = right
     r_width = r_columns.shape[1]
-    n_out = out.rows.n_in
+    n_out = out.nnz
     if rows.shape[0] == 0:
         # No stored entry on the left (a level whose divergence block stores none): no terms, and no
         # chunk to slice -- a loop over none still traces its body once.

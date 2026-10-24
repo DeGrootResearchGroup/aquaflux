@@ -243,7 +243,7 @@ def test_a_single_block_refit_probed_on_the_device_fits_what_the_whole_host_matr
 
     import jax
     from aquaflux.precondition import JacobiSmoothedInverse, block_preconditioner, hierarchy_inverse
-    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+    from aquaflux.precondition.probe_layout import BlockLayout, ProbedBlocks
 
     from tests.unit.test_field_split import _nodal_block
 

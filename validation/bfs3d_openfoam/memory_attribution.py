@@ -603,6 +603,7 @@ def _instrument(recorder: Recorder, compare) -> dict:
         hierarchy_inverse,
         jacobian_probe,
         materialized_session,
+        probe_layout,
         sparse_jacobian,
     )
     from aquaflux.solve import march
@@ -623,7 +624,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(jacobian_probe, "block_stencil_colouring", "pattern, conflict graph, colouring", first=1)
     wrap(sparse_jacobian, "_saturation_colouring", "saturation colouring", first=1)
     wrap(jacobian_probe, "block_stencil_gather_map", "gather map", first=1)
-    wrap(sparse_jacobian.ProbeGather, "__init__", "ProbeGather grouping", first=1)
+    wrap(probe_layout._CellEntries, "__init__", "probe entry order (cell level)", first=1)
+    wrap(probe_layout._DofEntries, "__init__", "probe entry order (entry by entry)", first=1)
     wrap(session, "_fit", "fit (first build)", census=True, first=1)
     wrap(
         materialized_session,

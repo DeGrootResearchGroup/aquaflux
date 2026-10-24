@@ -40,6 +40,7 @@ __all__ = [
     "EntryMap",
     "EntryMaps",
     "SparsePattern",
+    "ValueMap",
     "as_scipy",
     "compiled_apply",
 ]
@@ -520,10 +521,24 @@ class EntryMap:
         return self.landing.csr(self.apply(matrix))
 
 
-class DeviceEntryMap(eqx.Module):
+class ValueMap(eqx.Module):
+    """A fixed linear map of an operator's stored values, applied traced: ``(n_in,) -> (n_out,)``.
+
+    :class:`DeviceEntryMap` holds one as index arrays over every term; a map whose operands store a
+    cell pattern over full field-pair blocks can compute its indices from the cell pattern instead
+    (:mod:`~aquaflux.precondition.kronecker_pattern`).
+    """
+
+    def apply(self, values: jnp.ndarray) -> jnp.ndarray:
+        """The output values for an operand's stored ``values``."""
+        raise NotImplementedError
+
+
+class DeviceEntryMap(ValueMap):
     """An :class:`EntryMap` on the device: ``out = sum over terms of weight * values[source]``, traced.
 
-    Built by :meth:`EntryMap.on_device`, never directly. One of two forms, decided by the map:
+    Built by :meth:`EntryMap.on_device`, or directly as a gather whose slots are known (a level's
+    stored values read out of its padded rows). One of two forms, decided by the map:
 
     - a **gather** (``slots`` set): each output slot reads at most one operand entry, ``slots`` holding
       its index or ``n_in`` for a slot no entry reaches, which reads a zero appended to the values;
@@ -659,8 +674,8 @@ def _times(weight: np.ndarray | None, data: np.ndarray, index: np.ndarray) -> np
 
 
 @eqx.filter_jit
-def compiled_apply(entry_map: DeviceEntryMap, values: jnp.ndarray) -> jnp.ndarray:
-    """:meth:`DeviceEntryMap.apply` as one compiled program, for a caller outside a traced function.
+def compiled_apply(entry_map: ValueMap, values: jnp.ndarray) -> jnp.ndarray:
+    """:meth:`ValueMap.apply` as one compiled program, for a caller outside a traced function.
 
     Run eagerly, its gather, multiply and segment sum would each be a dispatch (and a compilation) of
     their own.

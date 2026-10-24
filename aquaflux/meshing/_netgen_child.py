@@ -117,7 +117,8 @@ def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
     """Fill the region a closed, outward-wound triangle surface bounds with tetrahedra.
 
     The supplied surface is kept exactly: its points come back first, at their indices and
-    coordinates, and no boundary triangle is split or added. Tetrahedra come back positively oriented
+    coordinates, and no boundary triangle is split or added. Internal triangles, standing inside
+    the region, are kept as faces between two tetrahedra. Tetrahedra come back positively oriented
     (the fourth vertex on the side the first three's right-hand normal points to). Near each of the
     ``size_points`` given the tetrahedra are no larger than its size.
 
@@ -132,11 +133,16 @@ def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
     with np.load(work / "input.npz") as arrays:
         points = np.ascontiguousarray(arrays["points"], dtype=np.float64)
         triangles = np.ascontiguousarray(arrays["triangles"], dtype=np.int32)
+        internal = np.ascontiguousarray(arrays["internal"], dtype=np.int32).reshape(-1, 3)
     mesh = NetgenMesh(dim=3)
-    # The face descriptor says the region lies on the side opposite each triangle's normal.
+    # The face descriptor says the region lies on the side opposite each triangle's normal; an
+    # internal face has the region on both sides.
     descriptor = mesh.Add(FaceDescriptor(surfnr=1, domin=1, domout=0, bc=1))
     mesh.AddPoints(points)
     mesh.AddElements(dim=2, index=descriptor, data=triangles, base=0)
+    if len(internal):
+        inside = mesh.Add(FaceDescriptor(surfnr=2, domin=1, domout=1, bc=2))
+        mesh.AddElements(dim=2, index=inside, data=internal, base=0)
     local_sizes = _local_sizes(work, request)
     if local_sizes:
         mesh.CalcLocalH(request["grading"], 1)
@@ -148,24 +154,26 @@ def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
     coordinates = np.array(mesh.Coordinates(), dtype=np.float64)
     if not np.array_equal(coordinates[: len(points)], points):
         raise RuntimeError("Netgen moved or renumbered a supplied point")
-    if len(mesh.Elements2D()) != len(triangles):
+    if len(mesh.Elements2D()) != len(triangles) + len(internal):
         raise RuntimeError("Netgen changed the supplied surface")
     tetrahedra = mesh.Elements3D().NumPy()["nodes"].astype(np.int64) - 1
     corner = coordinates[tetrahedra]
     edges = corner[:, 1:] - corner[:, :1]
     volume = np.einsum("ij,ij->i", np.cross(edges[:, 0], edges[:, 1]), edges[:, 2]) / 6.0
     tetrahedra[volume < 0.0] = tetrahedra[volume < 0.0][:, [0, 2, 1, 3]]
-    _check_fills(points, triangles, tetrahedra, np.abs(volume).sum())
+    _check_fills(points, triangles, tetrahedra, np.abs(volume).sum(), internal)
     return {"points": coordinates, "tetrahedra": tetrahedra}
 
 
-def _check_fills(points, triangles, tetrahedra, volume) -> None:
-    """Raise unless the tetrahedra fill exactly the region the surface bounds.
+def _check_fills(points, triangles, tetrahedra, volume, internal) -> None:
+    """Raise unless the tetrahedra fill exactly the region the surface bounds, keeping the internal
+    triangles.
 
     Netgen can return a mesh that keeps every supplied point and boundary element and still fills
     the wrong region: given a hole whose walls are wound the wrong way it ignores the hole and fills
     straight through it. So the result is checked directly: the faces used by only one tetrahedron
-    must be the supplied triangles, and the tetrahedra's volume the volume the surface encloses.
+    must be the supplied triangles, each internal triangle a face of two, and the tetrahedra's volume
+    the volume the surface encloses.
     """
     faces = np.concatenate([tetrahedra[:, [1, 2, 3]], tetrahedra[:, [0, 3, 2]],
                             tetrahedra[:, [0, 1, 3]], tetrahedra[:, [0, 2, 1]]])  # fmt: skip
@@ -177,6 +185,16 @@ def _check_fills(points, triangles, tetrahedra, volume) -> None:
             f"Netgen's tetrahedra are bounded by {len(boundary)} triangles, not the {len(supplied)} "
             "supplied: the surface does not bound the region it was meant to (is a hole's wall wound "
             "out of the hole?)"
+        )
+    # Each face as one row of a structured array, so whole rows can be looked up at once.
+    row = [("", np.int64)] * 3
+    shared = np.ascontiguousarray(keys[counts == 2], dtype=np.int64).view(row)
+    wanted = np.ascontiguousarray(np.sort(internal, axis=1), dtype=np.int64).view(row)
+    found = np.isin(wanted, shared)
+    if not np.all(found):
+        raise RuntimeError(
+            f"{int(np.count_nonzero(~found))} internal triangle(s) are not a face between two of "
+            "Netgen's tetrahedra"
         )
     corner = points[triangles]
     enclosed = np.einsum("ij,ij->i", corner[:, 0], np.cross(corner[:, 1], corner[:, 2])).sum() / 6.0

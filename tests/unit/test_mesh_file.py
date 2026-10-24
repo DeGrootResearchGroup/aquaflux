@@ -18,6 +18,7 @@ from aquaflux.case import (
     CadPlacement,
     Drawing,
     DrawingRegion,
+    DrawingSections,
     MeshOutput,
     MeshSizes,
     MeshSpec,
@@ -268,15 +269,33 @@ def test_the_command_makes_the_mesh_and_refuses_a_bad_file(tmp_path, boxed, caps
 
 def test_the_drawing_and_its_patches_are_read_while_the_rest_is_unfinished():
     unfinished = {key: DOCUMENT[key] for key in ("drawing", "region", "patches", "others")}
-    drawing, region, patches, others = drawing_sections_from_mapping(unfinished)
+    read = drawing_sections_from_mapping(unfinished)
     spec = mesh_spec_from_mapping(DOCUMENT)
-    assert (drawing, region, patches, others) == (
-        spec.drawing, spec.region, dict(spec.patches), spec.others,
-    )  # fmt: skip
+    assert read == DrawingSections(spec.drawing, spec.region, dict(spec.patches), spec.others)
+    assert read.feature_angle is None  # no sizes yet
     # A region not yet given, or naming no solid yet, is not a refusal: the drawing is still shown.
     for region_section in ({}, {"region": {"solids": []}}):
         read = drawing_sections_from_mapping({"drawing": DOCUMENT["drawing"], **region_section})
-        assert read[1:] == (None, {}, None)
+        assert (read.region, read.patches, read.others) == (None, {}, None)
+
+
+@pytest.mark.parametrize(
+    ("sizes", "angle"),
+    [
+        ({"max_size": 0.02, "feature_angle": 0.785}, 0.785),
+        ({"feature_angle": 1}, 1.0),
+        ({"max_size": 0.02}, None),
+        ({"feature_angle": 0.0}, None),
+        ({"feature_angle": "0.785"}, None),
+        ({"feature_angle": True}, None),
+        ({"feature_angle": float("nan")}, None),
+        ("not a section", None),
+    ],
+)
+def test_the_feature_angle_is_read_once_it_is_a_positive_number(sizes, angle):
+    # It decides which faces are ducts' sides; until it is usable the drawing is shown without.
+    read = drawing_sections_from_mapping({"drawing": DOCUMENT["drawing"], "sizes": sizes})
+    assert read.feature_angle == angle
 
 
 @pytest.mark.parametrize(
@@ -294,6 +313,15 @@ def test_the_drawing_and_its_patches_are_read_while_the_rest_is_unfinished():
 def test_the_drawings_sections_are_refused_by_name(document, message):
     with pytest.raises(ValueError, match=message):
         drawing_sections_from_mapping(document)
+
+
+def test_a_regions_baffles_are_read_named_none_or_unset_and_written_back_as_given():
+    # Unset is every sheet standing in the region; an empty list is none; a list names them.
+    for given, expected in (([], ()), (["plate"], ("plate",)), (None, None)):
+        region = {"solids": ["vessel"], **({} if given is None else {"baffles": given})}
+        spec = mesh_spec_from_mapping({**DOCUMENT, "region": region})
+        assert spec.region.cad_region().baffles == expected
+        assert mesh_spec_to_mapping(spec)["region"] == region
 
 
 def test_the_mesh_file_hands_the_mesher_its_patches_roles(monkeypatch, tmp_path):

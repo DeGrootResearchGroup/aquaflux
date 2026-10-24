@@ -168,9 +168,10 @@ Mesh toggle.
 - **The drawing is the solver's** (`aquaflux drawing OUT --relative-to DIR`, the unsaved file on stdin,
   `case.md`): `drawing.vtp` (triangles carrying `face`) + each face's kind, area and a point on it, its
   patch by the mesher's own `assign_patches`, the face each `FacesNear` point lands on (`landed`), the
-  pipe faces. **Nothing here decides a selection**: a click edits the document (`patch_picking.picked`)
-  and the drawing is asked again (`MeshSection._changed` on any of drawing/region/patches/others; one
-  request in flight, one more queued, `load_drawing`). A pick while one is in flight is refused (the
+  pipe faces and the ducts' side faces (`None` until `sizes.feature_angle` is set). **Nothing here
+  decides a selection**: a click edits the document (`patch_picking.picked`) and the drawing is asked
+  again (`MeshSection._changed` on any of drawing/region/patches/others or the feature angle --
+  `_drawn` -- but not on the rest of `sizes`; one request in flight, one more queued, `load_drawing`). A pick while one is in flight is refused (the
   `landed` lists would not match the document).
 - **A click is a point** (agreed with the owner, 2026-10-19: all `FacesNear` stores): on a free face it
   appends the face's sample point (making a `FacesNear` for a new name); on the chosen patch's face it
@@ -188,8 +189,8 @@ Mesh toggle.
   `extract_cells` of the rest and `pick` reads `face` from what is drawn. **Show all** resets.
 - **Names from the drawing**: `DocumentForm(names=...)` → `form_sections(..., names)` makes the `strings`
   rows `region.solids`/`without`, `patches.*.solids` (the drawing's solids), `layered`/`mapped` (the
-  patch list) and `pipes` (patches every face of which is a pipe) into `choices`; held names not offered
-  are kept.
+  patch list), `pipes` and `ducts` (`_patches_within`: patches every face of which is a pipe, or a
+  duct's side; none while the ducts are unknown) into `choices`; held names not offered are kept.
 - **New** picks a STEP file first; the unsaved file's relative paths are taken from the drawing's
   directory (`DocumentForm.new(document, directory)`, `directory` property) and re-based on Save as.
 - **Make mesh** needs the saved, unmodified file; `SolverRun("mesh", ...)`; the console is polled each

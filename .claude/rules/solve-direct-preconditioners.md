@@ -1,15 +1,19 @@
 ---
 paths:
   - "aquaflux/precondition/sparse_jacobian.py"
+  - "aquaflux/precondition/probe_layout.py"
+  - "aquaflux/precondition/kronecker_pattern.py"
   - "aquaflux/precondition/host_preconditioner.py"
   - "aquaflux/precondition/materialized_preconditioner.py"
 ---
 
 # Rules — `aquaflux/precondition/` the frozen-host contract and Jacobian materialization (and the record of the deleted direct preconditioners)
 
-This file governs three live modules: the frozen-host contract (`host_preconditioner.py`), the shared
-materialized base (`materialized_preconditioner.py`) and the coloured-probe Jacobian
-(`sparse_jacobian.py`). Package-wide contracts are in `solve.md`. Dated measurements and the
+This file governs the frozen-host contract (`host_preconditioner.py`), the shared materialized base
+(`materialized_preconditioner.py`), the coloured-probe Jacobian (`sparse_jacobian.py`: colouring, plan,
+gather-map builders, seeds, materialize), the probe's stored layout and de-compression
+(`probe_layout.py`: `BlockLayout`, `ProbeGather`, `ProbedBlocks`, split out of `sparse_jacobian.py` at
+its size ratchet on 2026-10-24) and the cell-level pattern (`kronecker_pattern.py`). Package-wide contracts are in `solve.md`. Dated measurements and the
 investigation behind each entry are in `.claude/notes/solve-direct-preconditioners-log.md` (never
 auto-loads).
 
@@ -86,7 +90,7 @@ bare block inverse).
   `materialize_block_jacobian(matvec, plan)` (one `jax.jvp` per colour × column field). Both take a
   `ColumnProbePlan`: `ColumnProbePlan.uniform(colouring, n_fields)` for one reach, `column_probe_plan(owner,
   nb, n, column_reach, pattern_reach)` for a reach per column (built by `jacobian_probe.py`).
-  `block_stencil_gather_map(plan)` returns a `ProbeGather`. Field-major DOF layout `(cell i, field f) =
+  `block_stencil_gather_map(plan)` returns a `ProbeGather` (`probe_layout.py`). Field-major DOF layout `(cell i, field f) =
   f·n + i`. The coupled RANS residual reaches distance 3 on an unskewed mesh; `jacobian_relative_error`
   checks the reach covers it.
 - **The colouring is by saturation degree** (`_saturation_colouring`, vertex selection by a bucket queue,
@@ -113,6 +117,24 @@ bare block inverse).
   reads the fitted block(s) back once, since a factory coarsens on the host. A refit reads nothing back
   but the pivot floor's row set (`solve-field-split.md`, "Refresh"). Pinned for one group by
   `test_a_single_block_refit_probed_on_the_device_fits_what_the_whole_host_matrix_fits`.
+- **The probed pattern is a cell pattern over full blocks of field pairs, and the probe's index arrays are
+  held at cell level (2026-10-24, the first stage of `solve-open-directions.md` §14d).** Every pattern
+  entry keeps all its field pairs (`in_reach` zeros stay stored), and `active_rows` drops whole blocks, so
+  each block is `C ⊗ (r×c)`: `kronecker_pattern.KroneckerPattern(cells, row_fields, column_fields)`, with
+  `entry_position` the one formula placing entry `(a, cell entry, b)` in the degree-of-freedom CSR order
+  (`a·c·nnz_C + c·indptr[i] + b·len(i) + k`), so the **values keep exactly the order the dof pattern gives
+  them**. `block_stencil_gather_map` takes the cell path (`_cell_probe_gather`: `BlockLayout.of_cells`, the
+  dof block patterns expanded from `C` without a sort; `_CellEntries`, per distinct colouring the in-reach
+  cell entries grouped by column colour, plus each entry's row and `C`'s `indptr`; `_scatter_cell_chunk`
+  places a chunk for every stored row field) whenever `_stored_blocks` finds each of the four blocks kept
+  or dropped whole, else the entry-by-entry path (`_dof_probe_gather`, `_DofEntries` holding `_source` /
+  `_position`, two indices per stored entry). Pinned equal, layout array for array and values exactly, by
+  `test_the_cell_level_probe_order_lays_out_and_fills_what_the_entry_order_does`; the fallback by
+  `test_a_partition_keeping_part_of_a_block_is_probed_entry_by_entry`. On a 21952-cell lattice at 6
+  fields and reach 3 (45.5M entries) the structure retains 193 MB against 546 MB, the rest being the host
+  whole pattern's CSR arrays (`gather_map_memory.py --side 28 --reach 3 --fields 6`, 2026-10-24, 4-core
+  Linux, jax 0.12.0.1). The downstream patterns (padded layouts, entry maps, SIMPLE plans) are still dof
+  level.
 - **A materialize holds the matrix plus one chunk.** Seeds are formed one chunk at a time **on the
   device** (2026-10-23): `ColumnProbePlan.seed_block(start, stop, rows=)` (whole-state) and
   `field_seeds(start, stop, rows=, dtype=)` (one field's) are one jitted indicator, `_indicator_seeds`,
@@ -126,10 +148,10 @@ bare block inverse).
   a materialize makes up to `n_fields − 1` more calls than `ceil(n_probes / batch)`; `probe_batch_size=None`
   is one batch per field),
   and `ProbeGather` scatters each chunk's responses as they are computed, **on the device** (2026-10-22):
-  the probe-grouped order (`_source`, `_position`) lives there, `_ChunkProbe.responses` returns device
-  arrays, and `_scatter_chunk` (one jit, `donate_argnums=0`) places a chunk through `ProbeGather.width`
-  lanes (the most entries any chunk fills), so one program serves every chunk; a lane past the chunk's
-  end is dropped (`mode="drop"`). `ProbeGather.values(probing)` is the loop; the whole-matrix path reads
+  its entry order (above) lives there, `_ChunkProbe.responses` returns device arrays, and one jitted
+  kernel per order (`_scatter_cell_chunk` / `_scatter_chunk`, `donate_argnums=0`) places a chunk through
+  `ProbeGather.width` lanes (the most cell entries, or entries, any chunk reads), so one program serves
+  every chunk; a lane past the chunk's end is dropped (`mode="drop"`). `ProbeGather.values(probing)` is the loop; the whole-matrix path reads
   the values back once at its end. Out-of-reach entries need no sentinel. The gather map's one-time build (`_index_dtype`, COO→CSR grouping) runs at case construction
   and peaks above any single materialize. Measurements: log, "Chunked seeds and per-chunk
   de-compression" and "The gather map's build peak".

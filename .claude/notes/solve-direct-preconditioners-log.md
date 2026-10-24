@@ -499,6 +499,71 @@
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
         copied into this entry; the 2026-10-18 `memory_by_stage.py` configuration is otherwise unchanged.
 
+### Cell-level pattern (§14d), stages 1–3 (2026-10-24)
+
+      Branch `claude/cell-level-pattern` from `78a308f3` (= `7fe27d07` + the memory record): stage 1
+      `538b41c0` (the probe's entry order, `_CellEntries`), stage 2 `487b1400` (`PaddedColumns`, cell-level
+      padded layouts), stage 3 `d044e4d1` (`KroneckerGalerkin`, `KroneckerGather` for the SIMPLE cuts and
+      `unpack`), counted decode `d7c6751c`. 4-core Xeon container, 15.7 GiB, jax
+      0.12.0.1, glibc defaults, shipped `case.yaml`s.
+
+      **bfs3d, `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=0
+      BFS3D_MEMORY_CHECKSUMS=1`** (one run per arm; base ran with a cold compilation cache, the others
+      partly warm). GiB, device = int32 / total:
+
+      | stage | base `78a308f3` | stage 1 `538b41c0` | stages 1–3 `d044e4d1` |
+      |---|---|---|---|
+      | probe plan, stage peak | 4.03 | 1.79 | 1.74 |
+      | fit (first build): device int32 / total | 2.02 / 2.72 | 1.75 / 2.45 | 0.39 / 1.09 |
+      | re-fit #1: stage peak | 7.43 | 7.60 | 6.76 |
+      | march step 1, first call: stage peak | 8.07 | 8.12 | 7.19 |
+      | step 1 end: device int32 / total | 2.19 / 2.98 | 1.93 / 2.72 | 0.40 / 1.20 |
+      | step 1 end: resident | 7.13 | 7.17 | 6.11 |
+
+      - Every float leaf of both traced splits (322) has the base's digest at stages 1–3; step 1's inner
+        rows are identical. Stage 1's whole-tree digests equal the base's (stages 2–3 add integer leaves,
+        so only the float leaves compare).
+      - Stage 1 alone: device int32 −0.26 GiB (`ProbeGather`), yet resident at step 1's end level (+0.04):
+        malloc's arena `in_use` rose ~0.4 GiB at the fit against base with tracemalloc's numpy total
+        equal; not attributed (no census), and the compilation cache differed between the two runs.
+      - The compiled programs' sizes the harness prints (batched JVP 828.9 MiB temp, single JVP 201.5,
+        residual 105.8) are unchanged; the step program is not among them.
+
+      **pitzDaily `march_cost.py`, `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`, one run per arm:** base 21
+      steps / 102 cycles / final R 5.736e-06 / `x_r/h` 8.0686 / ν_t/ν peak 418.09, VmHWM 3.163 GiB,
+      solve 222.4 s (refits 26.7 s: probe 13.9, refactor 12.3); stages 1–3 the same counts with every
+      step row identical (β, inner steps, cycles, R, α), VmHWM 3.016 GiB, solve 212.5 s (refits 23.6 s:
+      probe 12.7, refactor 10.4).
+
+      **Not bit-identical at default compiler flags on pitzDaily, and that is fused multiply-add (FMA)
+      placement:** the hybrid start differs from base by ≤ 6.2e-15 (and so the split's leaves, ≤ 1.7e-15
+      relative). Bisected: the cell-level padded layouts alone move it (the Galerkin and SIMPLE maps do
+      not); under `XLA_FLAGS=--xla_cpu_max_isa=AVX` (no FMA) base and branch starts are identical; held
+      and cell-level operators built from one start give identical leaves and bit-equal applies in
+      isolation, in a loop and transposed. The values are the same; a changed program contracts
+      multiply-adds elsewhere in the potential-flow solve. bfs3d's start did not move.
+
+      **Apply time.** Isolated pitzDaily split apply (`split_apply_timing.py`, hybrid start, float64
+      traced split, best of 15): base 71.7–71.9 ms forward / 66.5–67.5 transposed; stages 1–3 with the
+      division decode 81.1–82.7 / 82.7–82.9; with the counted decode 86.9–96.6 / 83.9–84.4 (the counted
+      decode is faster per operator below, so the split-level number moved within its noise). On a
+      bfs3d-sized lattice (23400 cells, reach 3, float32), per padded operator, isolated, held → cell:
+      division 4×4 33.7 → 52.1 ms, 2×2 2.4 → 20.2, 2×4 16.5 → 38.9; counted 32.4 → 35.0, 2.4 → 4.4,
+      16.3 → 19.8 (transposed 33.4 → 33.4, 2.4 → 4.4, 16.3 → 14.7). Ten applies inside a `fori_loop`:
+      4×4 176 → 168 ms, 2×2 25.4 → 25.3 (XLA hoists the decode out of the loop, so the decoded columns
+      are the loop's temporary). Index storage per operator (both directions, with the packing entries):
+      4×4 360.6 → 17.2 MiB, 2×2 90.3 → 17.2, 2×4 180.5 → 17.2.
+
+      **By owner at step 1's end (census, `a287287d`, `BFS3D_MEMORY_STEPS=1`, census on, 2026-10-24;
+      arrays of at least 1 MiB; device 1.12 GiB, host traced 0.15):** `_KroneckerColumns` 264.0 MiB over
+      41 arrays (the cell-level padded columns, both directions, every level and piece: was
+      `_PaddedLayout` 591 with the packing maps under `DeviceEntryMap`); level operators' `values` /
+      `t_values` 171.3 + 171.3; host `SparsePattern` 140.1 over 3 (unchanged); `Corrections` 88.6;
+      `_SimplePieces` Schur 48.2 + 48.2; the adjoint form's coupling 44.3 + 44.3; `KroneckerGalerkin`
+      40.6 over 14; `KroneckerGather` 30.6 over 10 (was `SimplePlan` 108); `_CellEntries` 10.0 (was
+      `ProbeGather` 280); `SimplePlan` 6.1. No `DeviceEntryMap` array of 1 MiB remains (was 1082 over 66).
+      Run peak 6.87 GiB (step 1's first call), against 8.07 in the census-free base run above.
+
 ### A `malloc_trim(0)` before each re-fit, on bfs3d (2026-10-24)
 
       `memory_attribution.py` on `042e5107` (`7f62a3c4` plus the trim, then opt-in: `MaterializedSession(memory_trim=)`
@@ -533,6 +598,9 @@
       - **Shipped as the session's default** the same day (the owner's decision: the mean drop met the 0.5 GiB
         bar, the closest pair did not). `memory_attribution.py` now trims by default; `BFS3D_MEMORY_TRIM=0`
         is the off arm. Not yet measured: a whole march's peak.
+      - ⚠️ **Measured before #817** (cell-level pattern, entry above), which moved bfs3d's peak: its 1-step
+        runs peak in step 1's first call (7.19 GiB), above re-fit #1 (6.76). Whether a re-fit still sets the
+        2-step peak, and so what the trim saves on the current code, is unmeasured; re-run both arms here.
 
 ## Condensed out of the rule (2026-10-17)
 
