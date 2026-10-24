@@ -413,16 +413,20 @@ def _by_shape(census: dict[int, dict]) -> list[tuple[str, int, int]]:
 class Recorder:
     """Nested stages: each reports its own resident peak and traced peak, and optionally a census."""
 
-    def __init__(self) -> None:
+    def __init__(self, record: Path = RECORD) -> None:
         self.sampler = _Sampler()
         self.rows: list[dict] = []
         self._stack: list[dict] = []
         self._last_census: dict = {}
         self.extra: dict = {}
+        self.record = record
+        #: Further readings taken at every stage's end, each called with the stage's row to add to
+        #: (``validation/memory_residue.py`` adds its own); run after ``BFS3D_MEMORY_COLLECT``'s.
+        self.readings: list = []
 
     def save(self) -> None:
         """Write the record so far: a run stopped early still leaves everything measured before it."""
-        RECORD.write_text(json.dumps({"rows": self.rows, **self.extra}, indent=1, default=str))
+        self.record.write_text(json.dumps({"rows": self.rows, **self.extra}, indent=1, default=str))
 
     def start(self) -> None:
         tracemalloc.start(1)
@@ -482,6 +486,8 @@ class Recorder:
                     "device_after": sum(a.nbytes for a in jax.live_arrays()),
                     "rss_after": _rss_bytes(),
                 }
+            for reading in self.readings:
+                reading(row)
             if census:
                 after = _census()
                 # Against the previous census anywhere, so one census per stage boundary suffices.
@@ -604,7 +610,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     from aquaflux.turbulence import CoupledRANS, SSTTurbulence, reynolds, transport
 
     wrap = recorder.wrap
-    wrap(compare, "read_openfoam", "mesh read", first=1)
+    if hasattr(compare, "read_openfoam"):  # bfs3d reads its mesh itself; pitzDaily's case file does
+        wrap(compare, "read_openfoam", "mesh read", first=1)
     wrap(Mesh, "geometry", "geometry", first=1)
     wrap(compare, "build_case", "case build", census=True, first=1)
     wrap(MomentumContinuity, "build", "momentum + continuity build", first=1)
@@ -825,8 +832,27 @@ class _Stop(Exception):
     """Raised by the step observer once the measured steps are done."""
 
 
-def main() -> None:
-    recorder = Recorder()
+def _load_bfs3d():
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(HERE))
+    import compare  # imports aquaflux (x64) and reads case.yaml
+
+    return compare
+
+
+def main(
+    load_case=_load_bfs3d,
+    recorder: Recorder | None = None,
+    march_log: Path = HERE / "memory_attribution.march.log",
+    after_march=None,
+) -> None:
+    """Run the measured march.
+
+    ``load_case`` returns a step case's ``compare`` module (imported inside the ``imports`` stage);
+    ``after_march(recorder)``, if given, runs once the measured steps are done, before the programs'
+    memory analyses.
+    """
+    recorder = recorder or Recorder()
     recorder.start()
     header = _header()
     recorder.extra["header"] = header
@@ -836,12 +862,10 @@ def main() -> None:
         flush=True,
     )
     with recorder.stage("imports"):
-        sys.path.insert(0, str(ROOT))
-        sys.path.insert(0, str(HERE))
-        import compare  # imports aquaflux (x64) and reads case.yaml
+        compare = load_case()
         import jax
 
-    header["mesh"] = str(compare.MESH)
+    header["mesh"] = str(getattr(compare, "MESH", "the case file's"))
     header["jax"] = jax.__version__
     print(f"jax {jax.__version__}, mesh {header['mesh']}", flush=True)
 
@@ -866,7 +890,7 @@ def main() -> None:
     # by `on_step` after the step before it.
     captured["want_step"] = STEPS == 1
     with contextlib.suppress(_Stop), recorder.stage("march (to the last measured step)"):
-        compare.solve_aquaflux(log_path=HERE / "memory_attribution.march.log", on_step=on_step)
+        compare.solve_aquaflux(log_path=march_log, on_step=on_step)
     peak = _peak_bytes()
     print(
         f"peak (VmHWM, or the peak footprint on macOS) {peak / GIB:.2f} GiB after {len(steps)} steps",
@@ -875,9 +899,12 @@ def main() -> None:
 
     recorder.extra["peak"] = peak
     recorder.save()
+    if after_march is not None:
+        after_march(recorder)
+        recorder.save()
     recorder.extra["programs"] = _program_sizes(captured, compare.build_case())
     recorder.save()
-    print(f"record written to {RECORD}", flush=True)
+    print(f"record written to {recorder.record}", flush=True)
 
 
 if __name__ == "__main__":
