@@ -90,6 +90,11 @@ class BoundaryClosure:
         Robin condition carries its value along otherwise. One directional derivative per gradient
         component.
 
+        Each direction is the unit vector broadcast over the cells. Built instead by writing ones into
+        a zero array, it is a computation on constants alone, which the compiler evaluates and stores
+        in the program as an ``(n_cells, dim)`` array -- one per component, in every compiled program
+        that differentiates a residual reading the closure.
+
         Parameters
         ----------
         field : jnp.ndarray
@@ -97,12 +102,13 @@ class BoundaryClosure:
         gradient : jnp.ndarray
             Cell gradients, shape ``(n_cells, dim)``.
         """
+        units = jnp.eye(gradient.shape[1], dtype=gradient.dtype)
         return jnp.stack(
             [
                 jax.jvp(
                     lambda g: self.values(field, g),
                     (gradient,),
-                    (jnp.zeros_like(gradient).at[:, k].set(1.0),),
+                    (jnp.broadcast_to(units[k], gradient.shape),),
                 )[1]
                 for k in range(gradient.shape[1])
             ],

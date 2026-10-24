@@ -83,6 +83,13 @@ mesh, geometry, *, operator_hook, imposed)` (constant part at zero gradient, plu
 takes). A frozen dataclass (holds a callable, lives for one call). `ResidualAssembler` and
 `MomentumContinuity` (pressure, each velocity component) wrap their closures in it. **A new caller
 reconstructing against boundary closures wraps them in this; do not write another copy.**
+- ⚠️ **`gradient_weight`'s unit tangents are broadcasts (`jnp.broadcast_to(eye[k], shape)`), never
+  `zeros_like(...).at[:, k].set(1.0)`**: that scatter is a computation on constants, which XLA folds into
+  every compiled program holding the residual as an `(n_cells, dim)` constant (bfs3d 15.87 MiB in the
+  residual alone, ~0.8 GiB resident over its programs). Pinned by
+  `test_the_gradient_weight_compiles_to_no_per_cell_constant`; any per-cell tangent seeded in a traced
+  residual has the same trap (`.claude/notes/solve-direct-preconditioners-log.md`, "What the resident
+  memory holds beyond live arrays").
 
 ## `GradientScheme` interface and `bind`
 `gradients()` is a template method: it calls `_reconstruct_gradient` and applies an optional

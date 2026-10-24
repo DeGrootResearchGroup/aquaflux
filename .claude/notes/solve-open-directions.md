@@ -791,7 +791,7 @@ on two meshes")**: JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 
 GiB is ~0.7 MiB per small op-by-op program, fixed in the mesh. About 0.8 GiB (estimated) is arrays XLA folds
 into every program holding the residual or its JVP (`batched_field_jacobian_matvec` once per field,
 `newton_step`, `_march_step`, `norm_of_residual`, `_eddy_viscosity_drift`): the unit tangents of
-`BoundaryClosure.gradient_weight`, cells × dim², ~11 GB at 300k cells. 14e is the fix.
+`BoundaryClosure.gradient_weight`, cells × dim², ~11 GB at 300k cells; removed by 14e.
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -849,11 +849,13 @@ pattern (§14d), stages 1–3"). The probe's host block patterns (140 MiB on bfs
 gathers (small), a non-nodal or diagonal-padded level, the 1×1 Schur, and the plan's own COO coordinates
 (`ColumnProbePlan.pattern_rows`/`pattern_cols`/`in_reach`, ~18 MiB host on bfs3d).
 
-### 14e. Build `BoundaryClosure.gradient_weight`'s unit tangents as broadcasts (proposal, measured)
+### 14e. BUILT (2026-10-24) — `BoundaryClosure.gradient_weight`'s unit tangents are broadcasts
 
 **What.** In `aquaflux/schemes/boundary_closure.py`, `gradient_weight`'s tangent
 `jnp.zeros_like(gradient).at[:, k].set(1.0)` becomes `jnp.broadcast_to(jnp.eye(dim, dtype=gradient.dtype)[k],
-gradient.shape)`. A unit test can pin it: no constant of `n_cells` rows in the compiled residual.
+gradient.shape)`. Pinned by `tests/unit/test_boundary_closure.py::test_the_gradient_weight_compiles_to_no_per_cell_constant`
+(red against the scatter form). `folded_constants.py`'s `RESIDUE_SCATTER_TANGENT=1` restores the old form in
+its own process, to re-measure.
 
 **Why.** XLA's constant folding evaluates the scatter at compile time and stores an `(n_cells, dim)` result per
 component and field in every program that holds the residual (15.87 MiB in bfs3d's residual alone, cells ×

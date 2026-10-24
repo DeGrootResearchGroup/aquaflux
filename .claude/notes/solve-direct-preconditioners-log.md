@@ -701,8 +701,8 @@
           the fit compile: about 0.7–0.9 GiB, fixed in the mesh. The traced 0.19 → 0.38 (jaxprs) is not
           separated between the two parts.
         - **For a 300k-cell case**: the constants at bfs3d's ~38 KB a cell are ~11 GB (estimated; the same
-          on a polyhedral mesh, since they follow cells × dim²), and a one-line library change removes
-          them (`solve-open-directions.md` §14e); the per-program part stays ~1 GiB.
+          on a polyhedral mesh, since they follow cells × dim²), and broadcast tangents remove them
+          (built, `solve-open-directions.md` §14e); the per-program part stays ~1 GiB.
       - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
         of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
         not in the march's footprint; it is in the footprint of anything run after a solve in the same
