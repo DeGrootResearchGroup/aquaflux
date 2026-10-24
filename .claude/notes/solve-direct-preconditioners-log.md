@@ -487,11 +487,15 @@
       - A re-fit holds the old and new leading fine operator together (`float32(92160, 252)` ×4 against ×2
         at a step's end, +177 MiB) until `_release_superseded` runs.
       - **The compiled programs' temporaries** (`memory_analysis()`, a 1-step census-off run of the same
-        configuration with the cache warm, peak 8.07 GiB, fit 325 s): batched JVP of 8 tangents **829 MiB**
-        (arguments 98), single JVP 202, residual 106. So the probe's temporary is ~100 MiB a tangent plus
-        ~30, as the 2026-10-18 census read it, and a Krylov application's JVP needs ~200 MiB; what the step
-        program holds beyond that is the split's padded products. (The harness armed the step's capture
-        only after step `STEPS − 1`, so a 1-step run printed no step size; fixed the same day.)
+        configuration with the cache warm; two runs, peaks 8.07 and 8.46 GiB, fits 325 and 265 s): the
+        **march step 974 MiB** of temporaries over 1373 MiB of arguments (the split's leaves and the
+        state); batched JVP of 8 tangents **829 MiB** (arguments 98); single JVP 202; residual 106. So the
+        probe's temporary is ~100 MiB a tangent plus ~30, as the 2026-10-18 census read it; a Krylov
+        application's JVP needs ~200 MiB and the residual ~100; and ~770 MiB of the step's temporary is
+        the split's padded products and the solve's own vectors, which is the 14a answer: the step's
+        temporaries follow the split's storage, not the residual's. (The harness armed the step's capture
+        only after step `STEPS − 1`, so a 1-step run printed no step size; fixed the same day.) Two 1-step
+        runs of one configuration spread 0.4 GiB in peak, so a bfs3d peak is not pinned closer than that.
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
         copied into this entry; the 2026-10-18 `memory_by_stage.py` configuration is otherwise unchanged.
 
