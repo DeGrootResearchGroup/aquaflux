@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -174,3 +176,29 @@ def test_a_field_block_gathered_at_cell_level_is_the_sliced_block(rows, columns,
     assert np.array_equal(block.indptr, want.indptr)
     assert np.array_equal(block.indices, want.indices)
     assert np.array_equal(got, want.data)
+
+
+def test_a_cell_level_pattern_matches_exactly_the_patterns_storing_its_entries():
+    """Held as its cell pattern, a pattern matches the dof arrays it describes and nothing else, and is
+    the live pattern an owner reading a matrix of it is given, rather than a copy of its arrays."""
+    from aquaflux.precondition.kronecker_pattern import CellLevelPattern
+
+    cells = _cells((9, 9), 0.3, 5, diagonal=True)
+    held = CellLevelPattern(KroneckerPattern(cells, 2, 3))
+    dof = KroneckerPattern(cells, 2, 3).dof_pattern()
+    assert held.matches(dof) and dof.matches(held)
+    assert held.matches(
+        CellLevelPattern(KroneckerPattern(SparsePattern(cells.csr(np.ones(cells.nnz))), 2, 3))
+    )
+    assert not held.matches(CellLevelPattern(KroneckerPattern(cells, 3, 2)))
+    other = sp.csr_matrix(dof.csr(np.ones(dof.nnz)))
+    other.indices = other.indices.copy()
+    other.indices[[0, 1]] = other.indices[[1, 0]]  # the same entries, two stored out of order
+    assert not held.matches(other)
+    assert np.array_equal(
+        held.csr(np.arange(held.nnz)).toarray(), dof.csr(np.arange(dof.nnz)).toarray()
+    )
+    matrix = held.csr(np.ones(held.nnz))
+    del dof
+    gc.collect()  # no other live pattern of this shape: the owner reading `matrix` is given `held`
+    assert SparsePattern.of(matrix) is held

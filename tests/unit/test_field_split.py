@@ -719,3 +719,58 @@ def test_narrowing_a_hierarchy_replaces_each_double_level_in_the_list_it_is_give
         assert np.array_equal(held.operator.values, np.asarray(level.operator.values, np.float32))
         if level.p_val is not None:
             assert held.p_val is level.p_val
+
+
+def test_a_refit_never_expands_the_probe_s_cell_level_block_patterns() -> None:
+    """The probe's block patterns are held as their cell pattern, and a refit never forms their arrays.
+
+    Every refit checks its blocks against the patterns the split was built on, by identity, so the dof
+    row pointers and column indices are needed only when the first fit reads its blocks back to coarsen
+    them. Were a refit to form them, the host memory the cell-level form saves would be spent again,
+    transiently, at every refresh. Counted by spying on the one expansion every read goes through.
+    """
+    from aquaflux.precondition.field_split import _field_split_of_blocks
+    from aquaflux.precondition.kronecker_pattern import CellLevelPattern, KroneckerPattern
+    from aquaflux.precondition.sparse_jacobian import (
+        ColumnProbePlan,
+        block_stencil_colouring,
+        block_stencil_gather_map,
+        materialize_blocks,
+    )
+
+    n_cells = 60
+    groups = FieldGroups.by_counts(n_cells, n_leading_fields=2, n_trailing_fields=2)
+    owner, neighbour = np.arange(n_cells - 1), np.arange(1, n_cells)
+    plan = ColumnProbePlan.uniform(
+        block_stencil_colouring(owner, neighbour, n_cells, 2), 4, active_rows=groups.active_rows()
+    )
+    structure = block_stencil_gather_map(plan, leading_fields=2)
+    patterns = [block.pattern for block in structure.layout.blocks(np.zeros(structure.nnz))]
+    assert all(isinstance(p, CellLevelPattern) for i, p in enumerate(patterns) if i != 1)
+
+    def probed(scale: float):
+        matrix = _nodal_block(n_cells, n_fields=4, seed=3) * scale
+        return materialize_blocks(lambda v: matrix @ np.asarray(v), plan, structure=structure)
+
+    split = _field_split_of_blocks(
+        probed(1.0).blocks(),
+        groups,
+        leading_inverse=JacobiSmoothedInverse,
+        trailing_inverse=JacobiSmoothedInverse,
+    )
+    expanded = []
+    original = KroneckerPattern.dof_arrays
+
+    def counted(self):
+        expanded.append(self.shape)
+        return original(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(KroneckerPattern, "dof_arrays", counted)
+        split.refactor_blocks(probed(1.5).blocks())
+    assert expanded == []
+    # The spy sees an expansion when one happens: the first fit's host read-back forms them.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(KroneckerPattern, "dof_arrays", counted)
+        assert patterns[0].indices.size == patterns[0].nnz
+    assert expanded == [patterns[0].shape]

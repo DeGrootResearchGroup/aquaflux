@@ -18,6 +18,8 @@ order a degree-of-freedom pattern gives them.
 
 from __future__ import annotations
 
+import weakref
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -27,6 +29,7 @@ import scipy.sparse as sp
 from .entry_map import EntryMap, SparsePattern, ValueMap
 
 __all__ = [
+    "CellLevelPattern",
     "KroneckerGalerkin",
     "KroneckerGather",
     "KroneckerPattern",
@@ -154,8 +157,8 @@ class KroneckerPattern:
             candidate = cls(cells, row_fields, column_fields)
         except ValueError:
             return None
-        dof = candidate.dof_pattern()
-        if np.array_equal(dof.indptr, indptr) and np.array_equal(dof.indices, indices):
+        dof_indptr, dof_indices = candidate.dof_arrays()
+        if np.array_equal(dof_indptr, indptr) and np.array_equal(dof_indices, indices):
             return candidate
         return None
 
@@ -191,7 +194,11 @@ class KroneckerPattern:
         )
 
     def dof_pattern(self) -> SparsePattern:
-        """The same pattern at degree-of-freedom level, as the compressed-sparse-row arrays spell it.
+        """The same pattern at degree-of-freedom level, as the compressed-sparse-row arrays spell it."""
+        return SparsePattern.of_arrays(self.shape, *self.dof_arrays())
+
+    def dof_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """The degree-of-freedom pattern's row pointers and column indices, formed afresh each call.
 
         Every row of one field repeats the column template of the rows of the first, so the template is
         built once, for one row field, and repeated.
@@ -214,7 +221,15 @@ class KroneckerPattern:
                 np.cumsum(np.tile(self.column_fields * lengths, self.row_fields)),
             ]
         ).astype(index)
-        return SparsePattern.of_arrays(self.shape, row_pointers, np.tile(template, self.row_fields))
+        return row_pointers, np.tile(template, self.row_fields)
+
+    def same_as(self, other: KroneckerPattern) -> bool:
+        """Whether ``other`` stores this very pattern: the same fields over the same cell pattern."""
+        return (
+            self.row_fields == other.row_fields
+            and self.column_fields == other.column_fields
+            and (other.cells is self.cells or self.cells.matches(other.cells))
+        )
 
     def diagonal_positions(self) -> np.ndarray:
         """Where each degree of freedom's diagonal entry is stored, shape ``(shape[0],)``.
@@ -242,6 +257,63 @@ class KroneckerPattern:
             self.column_fields,
             self.cells.nnz,
         ).ravel()
+
+
+class CellLevelPattern(SparsePattern):
+    """A :class:`~aquaflux.precondition.entry_map.SparsePattern` held as its cell pattern over every field pair.
+
+    For a pattern held for a whole session but read as arrays only now and then -- a probe's block
+    patterns, against which every refit's operands are checked by identity -- the degree-of-freedom row
+    pointers and column indices are formed when asked and not kept: :attr:`indptr` and :attr:`indices`
+    each expand the cell pattern afresh (:meth:`KroneckerPattern.dof_arrays`), so a caller reading both
+    should read them once. :meth:`matches` compares cell patterns where the other side is held the same
+    way, and expands only against a pattern held as arrays.
+
+    Attributes
+    ----------
+    kronecker : KroneckerPattern
+        The cell pattern and the field counts.
+    """
+
+    def __init__(self, kronecker: KroneckerPattern) -> None:
+        self.kronecker = kronecker
+        self.shape = kronecker.shape
+        SparsePattern._live.setdefault((self.shape, self.nnz), weakref.WeakSet()).add(self)
+
+    @property
+    def indptr(self) -> np.ndarray:
+        """The degree-of-freedom row pointers, formed on this call."""
+        return self.kronecker.dof_arrays()[0]
+
+    @property
+    def indices(self) -> np.ndarray:
+        """The degree-of-freedom column indices, formed on this call."""
+        return self.kronecker.dof_arrays()[1]
+
+    @property
+    def nnz(self) -> int:
+        """Stored entries."""
+        return self.kronecker.nnz
+
+    def matches(self, matrix: sp.csr_matrix | SparsePattern) -> bool:
+        """Whether ``matrix`` stores exactly this pattern's entries, in this pattern's order."""
+        if matrix is self:
+            return True
+        if matrix.shape != self.shape or matrix.nnz != self.nnz:
+            return False
+        if isinstance(matrix, CellLevelPattern):
+            return self.kronecker.same_as(matrix.kronecker)
+        indptr, indices = self.kronecker.dof_arrays()
+        return np.array_equal(matrix.indptr, indptr) and np.array_equal(matrix.indices, indices)
+
+    def csr(self, values: np.ndarray) -> sp.csr_matrix:
+        """``values`` on this pattern, on index arrays formed for it."""
+        indptr, indices = self.kronecker.dof_arrays()
+        return sp.csr_matrix((values, indices, indptr), shape=self.shape, copy=False)
+
+    def numbered(self) -> sp.csr_matrix:
+        """As :meth:`SparsePattern.numbered`, on index arrays formed for it."""
+        return self.csr(np.arange(1, self.nnz + 1, dtype=np.float64))
 
 
 def nodal_cell_transfer(transfer: sp.csr_matrix, fields: int) -> sp.csr_matrix | None:

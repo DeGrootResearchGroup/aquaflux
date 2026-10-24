@@ -102,12 +102,13 @@ bare block inverse).
 - **Every probe structure has a `BlockLayout`** (`block_stencil_gather_map(plan, leading_fields=)` ->
   `ProbeGather.layout`; `materialize_blocks` -> `ProbedBlocks`). A field split's is laid out by the
   split's blocks; with no `leading_fields` it is the one group (`leading_dofs == n_dofs`,
-  `BlockLayout.whole` its pattern, the other three blocks empty, `ProbeGather.indptr`/`indices` the very
-  arrays of that pattern), so a single block inverse is fitted by the same device path (2026-10-23).
+  `BlockLayout.whole` its pattern, the other three blocks empty, `ProbeGather.indptr`/`indices` read off
+  that pattern), so a single block inverse is fitted by the same device path (2026-10-23).
   The layout gives:
   one block-major value array **on the device** (2026-10-22), each block an `entry_map.DeviceMatrix` of
-  its slice over a host `SparsePattern` the layout owns (`SparsePattern.of_arrays`, so a hierarchy fitted
-  to that block shares it rather than holding a copy), the shift added at the stored diagonal by one
+  its slice over a host `SparsePattern` the layout owns (a `CellLevelPattern` on the cell path, below;
+  `SparsePattern.of_arrays` on the entry-by-entry one; either way a hierarchy fitted to that block shares
+  it rather than holding a copy), the shift added at the stored diagonal by one
   donated scatter (`_add_at`; refused if a diagonal entry is missing). `materialize_block_jacobian` (the
   public host-matrix form) refuses a split layout and reads a whole one back once; `refresh_in_place`
   takes the block path whenever a `structure` is given and calls `_refactor_blocks`:
@@ -133,8 +134,19 @@ bare block inverse).
   `test_a_partition_keeping_part_of_a_block_is_probed_entry_by_entry`. On a 21952-cell lattice at 6
   fields and reach 3 (45.5M entries) the structure retains 193 MB against 546 MB, the rest being the host
   whole pattern's CSR arrays (`gather_map_memory.py --side 28 --reach 3 --fields 6`, 2026-10-24, 4-core
-  Linux, jax 0.12.0.1). The downstream patterns (padded layouts, entry maps, SIMPLE plans) are still dof
-  level.
+  Linux, jax 0.12.0.1, before the block patterns below were held at cell level). The padded layouts,
+  Galerkin maps and SIMPLE cuts downstream are cell level too (`solve-amg-multigrid.md`,
+  `solve-flow-block.md`).
+  - **The layout's block patterns are `kronecker_pattern.CellLevelPattern`s (2026-10-24):** a
+    `SparsePattern` held as its `KroneckerPattern`, whose `indptr`/`indices` are formed on each read
+    (`KroneckerPattern.dof_arrays`) and never kept, whose `matches` is identity, then cell patterns, and
+    expands only against a pattern held as arrays. These were the session's host `SparsePattern`s (140
+    MiB on bfs3d, 22 → 4.9 MiB of live host patterns on pitzDaily). Every refit checks its blocks against
+    them by identity, so only the first fit's host read-back (`as_scipy`) and `SparsePattern.of` at
+    build expand them; `ProbeGather.indptr`/`indices` are properties for the same reason. ⚠️ A caller
+    reading both arrays should read them once (each read expands). Pinned by
+    `test_a_refit_never_expands_the_probe_s_cell_level_block_patterns` (a spy on the expansion) and
+    `test_a_cell_level_pattern_matches_exactly_the_patterns_storing_its_entries`.
 - **A materialize holds the matrix plus one chunk.** Seeds are formed one chunk at a time **on the
   device** (2026-10-23): `ColumnProbePlan.seed_block(start, stop, rows=)` (whole-state) and
   `field_seeds(start, stop, rows=, dtype=)` (one field's) are one jitted indicator, `_indicator_seeds`,

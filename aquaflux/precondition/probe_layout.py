@@ -23,7 +23,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from .entry_map import DeviceMatrix, SparsePattern
-from .kronecker_pattern import KroneckerPattern, entry_position
+from .kronecker_pattern import CellLevelPattern, KroneckerPattern, entry_position
 
 if TYPE_CHECKING:
     from .sparse_jacobian import ColumnProbePlan, _ChunkProbe
@@ -153,13 +153,10 @@ class BlockLayout:
             fields = (counts[block // 2], counts[block % 2])
             shape = (fields[0] * n, fields[1] * n)
             if stored[block]:
+                # Held as its cell pattern: every refit checks its blocks against these by identity, so
+                # their dof arrays are needed only when a block is read back to the host.
                 kronecker = KroneckerPattern(cells, *fields)
-                dof = kronecker.dof_pattern()
-                pattern = SparsePattern.of_arrays(
-                    shape,
-                    dof.indptr.astype(index_dtype, copy=False),
-                    dof.indices.astype(index_dtype, copy=False),
-                )
+                pattern = CellLevelPattern(kronecker)
                 if block in (0, 3) and fields[0]:
                     row0 = offsets[block // 2]
                     diagonal[row0 : row0 + shape[0]] = start + kronecker.diagonal_positions()
@@ -262,20 +259,30 @@ class ProbeGather:
         Where the entries lie: block by block over a two-group partition, or, over one group, the whole
         matrix in its own CSR order (:attr:`BlockLayout.whole`).
     indptr, indices : np.ndarray or None
-        The whole ``(n_fields n, n_fields n)`` Jacobian's CSR structure, the very arrays of the layout's
-        whole pattern; ``None`` when the layout splits the matrix into blocks.
+        The whole ``(n_fields n, n_fields n)`` Jacobian's CSR structure, read off the layout's whole
+        pattern (formed on each read when that pattern is held at cell level); ``None`` when the layout
+        splits the matrix into blocks.
     nnz : int
         Stored entries, including the explicit zeros the full pattern keeps.
     """
 
     def __init__(self, entries: _CellEntries | _DofEntries, nf: int, layout: BlockLayout) -> None:
         self.layout = layout
-        whole = layout.whole
-        self.indptr = None if whole is None else whole.indptr
-        self.indices = None if whole is None else whole.indices
         self.nnz = layout.nnz
         self._entries = entries
         self._nf = nf
+
+    @property
+    def indptr(self) -> np.ndarray | None:
+        """The whole matrix's CSR row pointers, read off the layout's whole pattern."""
+        whole = self.layout.whole
+        return None if whole is None else whole.indptr
+
+    @property
+    def indices(self) -> np.ndarray | None:
+        """The whole matrix's CSR column indices, read off the layout's whole pattern."""
+        whole = self.layout.whole
+        return None if whole is None else whole.indices
 
     def width(self, chunks: Sequence[tuple[int, int, int]]) -> int:
         """The most lanes any one of ``chunks`` (``(field, start, count)`` each) needs.
