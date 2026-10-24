@@ -35,6 +35,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
+from .elements import TETRAHEDRON_FACES
 from .polygons import Polygons
 
 __all__ = ["OpenedSurface", "SlitSurface", "opened", "parted"]
@@ -313,10 +314,6 @@ def _bisected(faces: Polygons, face, on_sheet, pairs, owner, inverse, midpoint):
     return Polygons(triangles.astype(np.int64), quads.astype(np.int64)), face, on_sheet
 
 
-#: The four faces of a tetrahedron, each by the corners other than the one it faces.
-_TETRAHEDRON_FACES = np.array([[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]])
-
-
 @dataclasses.dataclass(frozen=True)
 class SlitSurface:
     """A surface opened along sheets, as a fill takes it: each point at the place it shares with its
@@ -407,7 +404,7 @@ def parted(
     if not copied.any():
         return tetrahedra
     n = tetrahedra.shape[0]
-    corners = tetrahedra[:, _TETRAHEDRON_FACES]  # (n, 4, 3)
+    corners = tetrahedra[:, TETRAHEDRON_FACES]  # (n, 4, 3)
     keys = np.sort(corners, axis=2).reshape(-1, 3)
     order = np.lexsort(keys.T[::-1])
     keys = keys[order]
@@ -424,7 +421,7 @@ def parted(
     # Two tetrahedra sharing a face away from the sheet are on one side at each of its corners.
     left, right = [], []
     for j in range(3):
-        point = tetrahedra[first // 4, _TETRAHEDRON_FACES[first % 4, j]]
+        point = tetrahedra[first // 4, TETRAHEDRON_FACES[first % 4, j]]
         keep = copied[point]
         a, b, p = first[keep] // 4, second[keep] // 4, point[keep]
         left.append(a * 4 + np.argmax(tetrahedra[a] == p[:, None], axis=1))
