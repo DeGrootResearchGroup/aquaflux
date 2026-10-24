@@ -1,4 +1,4 @@
-"""Would reconstructing the gradient in blocks of faces bound the coloured probe's temporary, and at what cost per tangent?
+"""Would assembling the residual's face sums in blocks of faces bound the coloured probe's temporary, and at what cost per tangent?
 
 The coloured Jacobian probe runs a batch of Jacobian-vector products of the coupled residual, compiled
 as one program whose temporary buffer scales with the face count: on bfs3d (23 040 cells, 71 872 faces)
@@ -24,8 +24,18 @@ copied; only the chunking is new. It is installed after the case is built, so th
 bound at build are byte-identical between arms. This wrapper is deleted with the screen's verdict or
 replaced by a library design; it is not a library path.
 
-**Arms.** ``whole/8``, ``whole/4`` (the whole-mesh assembly at batch 8 and 4), and ``blocked-B/8``
-for each ``B`` in ``SCREEN_BLOCKS``. Per arm: the compiled residual's and batched JVP's
+**The flux assembly too (``both`` arms, screen-only likewise).** With the gradient blocked the first
+bfs3d run found the peak moved into the flux operators (``DiffusionFlux.face_flux`` and the face blend,
+~240 of ~494 MiB, the same at every block count), so :func:`blocked_cell_balance` also replaces
+``CellBalance.residual``'s flux sum and scatter -- every equation's -- with a scan over face ranges:
+each range takes every array of the flux operators and the context whose leading axis is the face
+count, sliced, beside a ``FaceCellConnectivity`` rebuilt from the range's owner and neighbour, and
+calls the operators' own ``face_flux``. A slope limiter reduces over each cell's faces inside
+``face_flux``, so it is evaluated once on the whole mesh first and read per range. The volume sources and the transient stay whole. The face
+count must divide by ``B`` there (a zero-area padding face would put ``0/0`` into a diffusion flux).
+
+**Arms.** ``whole/8``, ``whole/4`` (the whole-mesh assembly at batch 8 and 4), ``blocked-B/8`` (the
+gradient's face loop in ``B`` ranges) and ``both-B/8`` (the gradient's and the flux balance's). Per arm: the compiled residual's and batched JVP's
 ``memory_analysis().temp_size_in_bytes``; the owners of the JVP's peak; time per tangent as the MEAN
 over the number of batched calls a whole-state re-fit makes (``ceil(n_probes / batch)``), on the
 re-fit's own seed sequence, after one warm call; minor faults per call; ``VmRSS``/``VmHWM`` (process-wide
@@ -39,13 +49,19 @@ temporary is below ``whole/4``'s, measured in the same run; OR (b) it is faster 
 ``whole/4`` at a smaller temporary than ``whole/4``'s. Halving the batch is the cheap way to halve the
 temporary; a blocked assembly must beat it.
 
+The bar was written before the first run and is unchanged by the ``both`` arms, which were added
+after it.
+
+The persistent compilation cache is disabled here: a cache hit compiles nothing and so dumps nothing
+to attribute.
+
 Usage::
 
     validation/run_case.sh validation/face_blocked_gradient_screen.py --wait
 
 Environment: ``SCREEN_CASE`` (``bfs3d``, default, or ``pitzdaily``); ``SCREEN_STATE``, a ``.npz``
 holding ``state`` (default the hybrid start); ``SCREEN_ARMS`` (default
-``whole/8,whole/4,blocked-2/8,blocked-4/8,blocked-8/8,blocked-16/8``); ``SCREEN_CALLS`` overrides the
+``whole/8,whole/4,blocked-2/8,both-2/8,both-4/8,both-8/8,both-16/8``); ``SCREEN_CALLS`` overrides the
 number of timed calls per arm. Allocator settings are reported as found (glibc defaults unless set).
 """
 
@@ -67,7 +83,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
-# The buffer attribution reads XLA's dumps, so the dump directory must be set before JAX starts.
+# The buffer attribution reads XLA's dumps, so the dump directory must be set before JAX starts, and
+# a persistent-cache hit would compile (and dump) nothing.
+os.environ["AQUAFLUX_DISABLE_COMPILATION_CACHE"] = "1"
 DUMP = tempfile.mkdtemp(prefix="face_blocked_screen_")
 os.environ["XLA_FLAGS"] = (
     os.environ.get("XLA_FLAGS", "")
@@ -80,20 +98,23 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+from aquaflux.discretization import CellBalance  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.mesh import FaceCellConnectivity  # noqa: E402
 from aquaflux.precondition.materialized_session import batched_jacobian_matvec  # noqa: E402
+from aquaflux.schemes import Limiter  # noqa: E402
 from aquaflux.turbulence import open_session  # noqa: E402
 from step_cases import load_case  # noqa: E402
 
 CASE = os.environ.get("SCREEN_CASE", "bfs3d")
 STATE = os.environ.get("SCREEN_STATE")
 ARMS = os.environ.get(
-    "SCREEN_ARMS", "whole/8,whole/4,blocked-2/8,blocked-4/8,blocked-8/8,blocked-16/8"
+    "SCREEN_ARMS", "whole/8,whole/4,blocked-2/8,both-2/8,both-4/8,both-8/8,both-16/8"
 ).split(",")
 CALLS = os.environ.get("SCREEN_CALLS")
 
 WHOLE_GREEN_GAUSS = multiple_correction._green_gauss
+WHOLE_CELL_BALANCE = CellBalance.residual
 
 
 def blocked_green_gauss(blocks: int):
@@ -139,6 +160,75 @@ def blocked_green_gauss(blocks: int):
         return total
 
     return green_gauss
+
+
+class _EvaluatedLimiter(eqx.Module):
+    """A limiter's per-cell value, evaluated once on the whole mesh before the face ranges run.
+
+    A limiter's neighbourhood extrema and its minimum over a cell's faces are reductions over every
+    face of a cell, so evaluated on one range of faces they would be wrong.
+    """
+
+    psi: jnp.ndarray
+
+    def limit(self, field, context):
+        return self.psi
+
+
+def blocked_cell_balance(blocks: int):
+    """``CellBalance.residual`` with its flux sum and scatter formed over ``blocks`` face ranges.
+
+    Every array of the flux operators and the context whose leading axis is the face count is sliced
+    per range; the range's connectivity is rebuilt from its owner and neighbour through the
+    constructor. A limiter is evaluated on the whole mesh first (:class:`_EvaluatedLimiter`). Sources and the transient are added whole, as the original does.
+    """
+
+    def residual(self, phi, context, phi_old=None, phi_older=None, dt=None, first_step=False):
+        face_cells = context.mesh.face_cells
+        n_faces, n_cells = face_cells.n_faces, face_cells.n_cells
+        if n_faces % blocks:
+            raise SystemExit(f"{n_faces} faces do not divide into {blocks} blocks")
+        size = n_faces // blocks
+
+        def per_face(x):
+            return eqx.is_array(x) and x.ndim >= 1 and x.shape[0] == n_faces
+
+        operators = jax.tree.map(
+            lambda x: _EvaluatedLimiter(x.limit(phi, context)) if isinstance(x, Limiter) else x,
+            self.flux_operators,
+            is_leaf=lambda x: isinstance(x, Limiter),
+        )
+        faces, rest = eqx.partition((operators, context), per_face)
+        stacked = jax.tree.map(lambda x: x.reshape(blocks, size, *x.shape[1:]), faces)
+
+        def body(total, block):
+            operators, part = eqx.combine(block, rest)
+            sliced = part.mesh.face_cells
+            part = eqx.tree_at(
+                lambda c: c.mesh.face_cells,
+                part,
+                FaceCellConnectivity(
+                    owner=sliced.owner,
+                    neighbour=sliced.neighbour,
+                    n_cells=n_cells,
+                    neighbour_offset=sliced.neighbour_offset,
+                ),
+            )
+            flux = jnp.zeros(size, dtype=phi.dtype)
+            for operator in operators:
+                flux = flux + operator.face_flux(phi, part)
+            return total + part.mesh.face_cells.scatter_conservative(flux), None
+
+        balance, _ = jax.lax.scan(body, jnp.zeros(n_cells, dtype=phi.dtype), stacked)
+        for operator in self.source_operators:
+            balance = balance - operator.source(phi, context)
+        if self.transient is not None:
+            balance = balance + self.transient.residual(
+                phi, phi_old, phi_older, dt, first_step, context.mesh.geometry.cell.volume
+            )
+        return balance
+
+    return residual
 
 
 # --- the peak attribution: which source lines own the buffers live at the temporary's peak ---------
@@ -289,11 +379,14 @@ def main() -> None:
     for arm in ARMS:
         kind, batch = arm.split("/")
         batch = int(batch)
-        blocks = int(kind.split("-")[1]) if kind.startswith("blocked") else 1
+        blocks = int(kind.split("-")[1]) if "-" in kind else 1
         multiple_correction._green_gauss = (
             WHOLE_GREEN_GAUSS if blocks == 1 else blocked_green_gauss(blocks)
         )
-        tag = f"b{blocks}_n{batch}"
+        CellBalance.residual = (
+            blocked_cell_balance(blocks) if kind.startswith("both") else WHOLE_CELL_BALANCE
+        )
+        tag = f"{kind.split('-')[0]}{blocks}_n{batch}"
 
         def residual(p, s):
             return eqx.combine(p, static).residual(s)
@@ -314,7 +407,7 @@ def main() -> None:
         product_temp = product_program.memory_analysis().temp_size_in_bytes / 2**20
 
         r = residual_program(params, state)
-        jv = product_program(params, state, plan.seed_block(0, min(8, plan.n_probes), rows=batch))
+        jv = product_program(params, state, seeds)
         if arm == ARMS[0]:
             reference["r"] = r
         if batch == 8 and "jv" not in reference:
@@ -368,6 +461,7 @@ def main() -> None:
         jax.clear_caches()
 
     multiple_correction._green_gauss = WHOLE_GREEN_GAUSS
+    CellBalance.residual = WHOLE_CELL_BALANCE
     print(
         "\n| arm | residual temp MiB | batched JVP temp MiB | ms per tangent | faults per call | "
         "calls | residual agreement | JVP agreement |\n|---|---|---|---|---|---|---|---|"
