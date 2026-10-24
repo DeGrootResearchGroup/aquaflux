@@ -423,6 +423,9 @@ class Recorder:
         #: Further readings taken at every stage's end, each called with the stage's row to add to
         #: (``validation/memory_residue.py`` adds its own); run after ``BFS3D_MEMORY_COLLECT``'s.
         self.readings: list = []
+        #: Write the record at every stage's end, not only after a census (a run that may be stopped
+        #: early, by a container restart say, keeps every stage measured before it).
+        self.save_every_stage = False
 
     def save(self) -> None:
         """Write the record so far: a run stopped early still leaves everything measured before it."""
@@ -503,7 +506,7 @@ class Recorder:
                     "all_by_shape": _by_shape(after)[:25],
                 }
             self.rows.append(row)
-            if census:
+            if census or self.save_every_stage:
                 self.save()
             self._print(row)
             tracemalloc.reset_peak()

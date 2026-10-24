@@ -24,7 +24,12 @@ and adds, at each stage's end, readings that split the remainder by what could h
   and the anonymous resident bytes before and after -- what glibc retains, separated from what it holds.
   It changes the run's later peaks (memory given back is not re-faulted from a retained arena).
 
-* **``RESIDUE_CLEAR=<stage label>,...``**, an arm: ``jax.clear_caches()`` and a ``gc.collect()`` at the
+* **``RESIDUE_HLO=<stage label>;...``**, a reading: the live executables ranked by their serialized
+  HLO module's size (a host array a jitted function closes over is compiled in as a constant, so a
+  program carrying data is about the data's size), with the resident, live array and traced bytes.
+  ``RESIDUE_CLEAR`` takes the same ranking before it clears.
+
+* **``RESIDUE_CLEAR=<stage label>;...``**, an arm: ``jax.clear_caches()`` and a ``gc.collect()`` at the
   end of each named stage (``end`` names the reading taken once the measured steps are done), then
   ``malloc_trim(0)``, reading the resident set and the executable count after each. Dropping the
   executables mid-run makes the next call recompile; ``end`` changes nothing measured after it but the
@@ -64,8 +69,11 @@ from step_cases import CASES, load_case  # noqa: E402
 CASE = os.environ.get("RESIDUE_CASE", "bfs3d")
 READ = os.environ.get("RESIDUE_READ", "0") == "1"
 TRIM = os.environ.get("RESIDUE_TRIM", "0") == "1"
-#: Stage labels (as the table prints them, without indentation) after which the caches are cleared.
-CLEAR = {label.strip() for label in os.environ.get("RESIDUE_CLEAR", "").split(",") if label.strip()}
+#: Stage labels (as the table prints them, without indentation; separated by `;`, since a label may
+#: hold a comma) after which the caches are cleared.
+CLEAR = {label.strip() for label in os.environ.get("RESIDUE_CLEAR", "").split(";") if label.strip()}
+#: Stage labels after which the live executables are ranked by HLO size, without clearing anything.
+HLO = {label.strip() for label in os.environ.get("RESIDUE_HLO", "").split(";") if label.strip()}
 RECORD = Path(os.environ.get("RESIDUE_RECORD", HERE / f"memory_residue.{CASE}.json"))
 GIB = 2**30
 MIB = 2**20
@@ -361,6 +369,8 @@ def reading(row: dict) -> None:
         residue["executables"] = _executables()
     if TRIM:
         residue["trim"] = _trim()
+    if label in HLO:
+        residue["hlo"] = {"live": _live(), **_executables_by_hlo()}
     if label in CLEAR:
         residue["clear"] = _clear()
     residue["seconds"] = time.perf_counter() - t0
@@ -397,6 +407,16 @@ def _print_reading(title: str, reading: dict) -> None:
     )
 
 
+def _print_hlo(hlo: dict) -> None:
+    print(
+        f"        HLO: {hlo['modules']} modules {hlo['bytes'] / GIB:.3f} GiB; "
+        f"{hlo['over_1_mib']} over 1 MiB hold {hlo['bytes_over_1_mib'] / GIB:.3f} GiB",
+        flush=True,
+    )
+    for name, count, size in hlo["top_names"][:10]:
+        print(f"          {size / MIB:9.1f} MiB  x{count:<4d} {name}", flush=True)
+
+
 def _print(label: str, residue: dict) -> None:
     resident = residue["resident"]
     print(
@@ -418,6 +438,14 @@ def _print(label: str, residue: dict) -> None:
             f" GiB (gave back {(trim['rss_before'] - trim['rss_after']) / GIB:.2f})",
             flush=True,
         )
+    if "hlo" in residue:
+        live = residue["hlo"]["live"]
+        print(
+            f"      live: VmRSS {live['rss'] / GIB:.2f} device {live['device'] / GIB:.2f} traced "
+            f"{live['traced'] / GIB:.2f} GiB",
+            flush=True,
+        )
+        _print_hlo(residue["hlo"])
     if "clear" in residue:
         clear = residue["clear"]
         print(
@@ -425,14 +453,7 @@ def _print(label: str, residue: dict) -> None:
             f"{clear['after']['executables']}",
             flush=True,
         )
-        hlo = clear["hlo"]
-        print(
-            f"        HLO: {hlo['modules']} modules {hlo['bytes'] / GIB:.3f} GiB; "
-            f"{hlo['over_1_mib']} over 1 MiB hold {hlo['bytes_over_1_mib'] / GIB:.3f} GiB",
-            flush=True,
-        )
-        for name, count, size in hlo["top_names"][:10]:
-            print(f"          {size / MIB:9.1f} MiB  x{count:<4d} {name}", flush=True)
+        _print_hlo(clear["hlo"])
         for name in ("before", "after_collect_and_trim", "after_clear", "after_clear_and_trim"):
             live = clear[name]
             print(
@@ -454,11 +475,13 @@ def main() -> None:
     attribution = _attribution()
     recorder = attribution.Recorder(record=RECORD)
     recorder.readings.append(reading)
+    recorder.save_every_stage = True
     recorder.extra["residue_settings"] = {
         "case": CASE,
         "read": READ,
         "trim": TRIM,
         "clear": sorted(CLEAR),
+        "hlo": sorted(HLO),
     }
     print(f"residue settings: {recorder.extra['residue_settings']}", flush=True)
     attribution.main(
