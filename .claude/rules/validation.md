@@ -123,6 +123,12 @@ branches.
   makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB
   trim threshold wraps to 0. Measurements: `.claude/notes/solve-open-directions.md`, "Inside the step
   program (2026-10-18)".
+- **Resident memory that is not a live array is mostly JAX's compiled-program cache** (2.1 GiB on bfs3d,
+  1.1 on pitzDaily, 2026-10-24): read it as what `jax.clear_caches()` + `gc.collect()` + `malloc_trim(0)`
+  frees (`memory_residue.py`, `RESIDUE_CLEAR`). ⚠️ **A reading taken after a solve returns also counts
+  its session as cyclic garbage** (1.6 GiB of arrays on bfs3d) until a collection; collect first, and
+  count what the harness itself keeps (captured step arguments) apart. Detail:
+  `.claude/notes/solve-direct-preconditioners-log.md`, "What the resident memory holds beyond live arrays".
 - **On macOS a footprint includes freed large blocks unless the run sets `MallocLargeCache=0`**: libmalloc
   keeps them charged to the process, so a stage's "held" memory and a peak read high (up to ~40 % on the
   mesher). Set it when the number is the question (`meshing.md`, memory bullet).
