@@ -30,6 +30,10 @@ from tests.support.meshes import tetrahedral_grid_3d
 
 REGION = CadRegion(("cube",))
 
+#: The cube's four walls round any axis are a duct's sides, which the mesher would mesh as a
+#: structured duct; these tests are of the tetrahedral fill's dual, so they name no duct.
+NO_DUCTS = ()
+
 
 def _wall(points: np.ndarray) -> np.ndarray:
     """The face of the cube nearest each point."""
@@ -164,6 +168,7 @@ def test_the_faces_each_selection_chooses_make_its_patch_and_the_rest_make_other
         REGION,
         {"lid": FacesNear(((0.5, 0.5, 1.0),)), "floor": FacesOn(("floor",))},
         others="sides",
+        ducts=NO_DUCTS,
     )
     assert _areas(mesh) == pytest.approx({"lid": 1.0, "floor": 1.0, "sides": 4.0}, rel=1e-12)
     assert float(np.asarray(mesh.geometry().cell.volume).sum()) == pytest.approx(1.0, rel=1e-12)
@@ -177,7 +182,7 @@ def test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by():
     # only the CAD's say-so keeps the cube's edges, and with them its corners and its volume.
     def volume(fold):
         mesher = CadMesher(max_size=0.5, feature_angle=math.radians(100), netgen=_Netgen())
-        mesh = mesher.mesh(_Cube(fold=fold), REGION)
+        mesh = mesher.mesh(_Cube(fold=fold), REGION, ducts=NO_DUCTS)
         return float(np.asarray(mesh.geometry().cell.volume).sum())
 
     assert volume(math.radians(120)) == pytest.approx(1.0, rel=1e-12)
@@ -188,7 +193,7 @@ def test_each_boundary_face_centroid_is_moved_onto_the_face_its_triangle_lies_on
     # Each of the drawing's faces stands 0.01 outside the cube's. The lid's dual vertices at the
     # centroids of its eight triangles move onto the lid's own plane; nothing else reaches it.
     mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
-    mesh = mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION)
+    mesh = mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION, ducts=NO_DUCTS)
     z = np.asarray(mesh.node_coords)[:, 2]
     assert np.count_nonzero(np.isclose(z, 1.01)) == 8
     assert float(z.max()) == pytest.approx(1.01)
@@ -200,7 +205,8 @@ def test_a_vertex_on_an_edge_drawn_in_two_pieces_lands_on_the_nearer_piece():
     # there (the mesh unchanged), not be carried to the halves' shared end by the upper half.
     def coordinates(split):
         mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
-        return np.asarray(mesher.mesh(_Cube(fold=math.pi / 2, split=split), REGION).node_coords)
+        cube = _Cube(fold=math.pi / 2, split=split)
+        return np.asarray(mesher.mesh(cube, REGION, ducts=NO_DUCTS).node_coords)
 
     np.testing.assert_allclose(coordinates(split=True), coordinates(split=False), atol=1e-14)
 
@@ -321,7 +327,7 @@ def test_a_planarizer_flattens_the_dual_moving_only_its_cell_centroids():
             max_size=0.5, feature_angle=math.radians(45), planarizer=planarizer,
             netgen=_Netgen(n=3, perturb=0.2),
         )  # fmt: skip
-        return mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION)
+        return mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION, ducts=NO_DUCTS)
 
     plain, flat = mesh(None), mesh(FacePlanarizer())
     before, after = np.asarray(plain.node_coords), np.asarray(flat.node_coords)
@@ -399,7 +405,7 @@ def test_each_stage_is_told_as_it_starts_and_only_the_stages_a_mesh_needs():
     told = []
     mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
     mesher.mesh(_Cube(fold=math.pi / 2), REGION, {"lid": FacesNear(((0.5, 0.5, 1.0),))},
-                on_stage=told.append)  # fmt: skip
+                ducts=NO_DUCTS, on_stage=told.append)  # fmt: skip
     # No layers, no mapped walls, no pipes (no face is a cylinder), no core, no planarizer.
     assert told == [
         "triangulating the surface",

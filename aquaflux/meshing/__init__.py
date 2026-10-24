@@ -18,8 +18,11 @@ over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals 
 pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
 of triangles and quadrilaterals between these steps, and :class:`PyramidCaps` caps the
 quadrilaterals a tetrahedral fill meets. :class:`PipeCore` fills a pipe's core, inside its layers,
-with a structured O-grid; the mesher finds pipes by itself. :func:`element_mesh` makes a mesh of any
-tetrahedra, triangular prisms, hexahedra and pyramids.
+with a structured O-grid, and :class:`DuctCore` a rectangular duct's -- four four-sided faces round
+it, along a straight line or a curve -- with hexahedra cross-section by cross-section, each a
+:class:`ConduitFill`; the mesher finds pipes and ducts by itself (:func:`find_pipes`,
+:func:`find_ducts`). :func:`element_mesh` makes a mesh of any tetrahedra, triangular prisms,
+hexahedra and pyramids.
 
 :class:`OctreeCore` builds a core of hexahedra inside a :class:`Region` -- the region a closed
 triangle surface bounds (:class:`ClosedSurface`), or an inside test (:class:`SampledRegion`) --
@@ -59,8 +62,10 @@ from .cad_mesher import (
     assign_patches,
 )
 from .caps import ClearedCaps
+from .conduits import ConduitFill
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
+    EdgePoints,
     MeshingError,
     NetgenProcess,
     SurfaceTriangulation,
@@ -68,6 +73,8 @@ from .netgen_process import (
     check_closed_surface,
     netgen_available,
 )
+from .duct_core import DuctCore
+from .ducts import Duct, find_ducts
 from .elements import element_mesh
 from .hex_core import HexCore, OctreeCore
 from .divisions import Graded, cell_counts
@@ -75,7 +82,7 @@ from .layers import LayerExtrusion, PrismLayers
 from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
 from .near_surface import NearSurface
-from .pipe_core import PipeCore, PipeCoreFill
+from .pipe_core import PipeCore
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
 from .polygons import Polygons, PyramidCaps
@@ -91,11 +98,15 @@ __all__ = [
     "CartesianFrame",
     "ClearedCaps",
     "ClosedSurface",
+    "ConduitFill",
     "ConeSurface",
     "CubedSphereCap",
     "Curve",
     "CylinderSurface",
     "CylindricalFrame",
+    "Duct",
+    "DuctCore",
+    "EdgePoints",
     "FacePlanarizer",
     "FaceSelection",
     "FacesNear",
@@ -111,7 +122,6 @@ __all__ = [
     "NetgenProcess",
     "OctreeCore",
     "PipeCore",
-    "PipeCoreFill",
     "PipeOGrid",
     "Planarization",
     "PlaneSurface",
@@ -134,6 +144,7 @@ __all__ = [
     "cell_counts",
     "check_closed_surface",
     "element_mesh",
+    "find_ducts",
     "find_pipes",
     "netgen_available",
 ]

@@ -44,6 +44,41 @@ def netgen_available() -> bool:
 
 
 @dataclasses.dataclass(frozen=True)
+class EdgePoints:
+    """Where to place an edge's points: at fractions of its arc length, from one of its ends.
+
+    Attributes
+    ----------
+    fractions : tuple of float
+        The edge's interior points, as fractions of its length from ``start``: strictly increasing,
+        each in ``(0, 1)``. The edge is divided into one more segment than there are fractions.
+    start : tuple of float
+        A point at the end the fractions are measured from; the edge's end nearer it is taken.
+
+    Raises
+    ------
+    ValueError
+        If a fraction is not in ``(0, 1)``, they do not increase, or ``start`` is not a point.
+    """
+
+    fractions: tuple[float, ...]
+    start: tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        fractions = tuple(float(f) for f in self.fractions)
+        start = tuple(float(x) for x in self.start)
+        steps = np.diff(np.concatenate([[0.0], fractions, [1.0]]))
+        if not np.all(steps > 0.0):
+            raise ValueError(
+                f"an edge's points must lie at fractions increasing within (0, 1), got {fractions}"
+            )
+        if len(start) != 3 or not all(np.isfinite(start)):
+            raise ValueError(f"an edge's points are measured from a point, got {self.start!r}")
+        object.__setattr__(self, "fractions", fractions)
+        object.__setattr__(self, "start", start)
+
+
+@dataclasses.dataclass(frozen=True)
 class SurfaceTriangulation:
     """Triangles on the faces of a solid.
 
@@ -100,7 +135,7 @@ class NetgenProcess:
         max_size: float,
         min_size: float = 0.0,
         grading: float = 0.3,
-        edge_divisions: Mapping[int, int] | None = None,
+        edge_divisions: Mapping[int, int | EdgePoints] | None = None,
     ) -> SurfaceTriangulation:
         """Triangulate the faces of the one solid in a BREP or STEP file.
 
@@ -114,12 +149,12 @@ class NetgenProcess:
         grading : float
             How fast the size may change between neighbouring triangles, in ``(0, 1]``; Netgen's own
             default is ``0.3``, and a smaller value grades more gently.
-        edge_divisions : mapping of {int: int}, optional
-            Edges to divide into exactly that many segments of equal length, in place of the
-            division the sizes would give; the faces either side meet them at those points. An edge
-            is numbered by its place among the solid's edges, each counted once where first met in
-            a topology explorer's order -- the order :meth:`~aquaflux.io.cad.CadModel.topology`
-            numbers them in.
+        edge_divisions : mapping of {int: int or EdgePoints}, optional
+            Edges to divide into exactly that many segments of equal length, or at the points
+            given (:class:`EdgePoints`), in place of the division the sizes would give; the faces
+            either side meet them at those points. An edge is numbered by its place among the
+            solid's edges, each counted once where first met in a topology explorer's order -- the
+            order :meth:`~aquaflux.io.cad.CadModel.topology` numbers them in.
 
         Returns
         -------
@@ -137,7 +172,7 @@ class NetgenProcess:
             "min_size": float(min_size),
             "grading": float(grading),
             "edge_divisions": [
-                [int(edge), int(segments)] for edge, segments in (edge_divisions or {}).items()
+                _division(int(edge), division) for edge, division in (edge_divisions or {}).items()
             ],
         }
         result = self._run(request, {})
@@ -255,3 +290,11 @@ def check_closed_surface(points: np.ndarray, triangles: np.ndarray) -> None:
             f"the surface encloses a volume of {volume:.6g}: it is wound into the region, not out of "
             "it"
         )
+
+
+def _division(edge: int, division: int | EdgePoints) -> list:
+    """An edge's division as the child reads it: ``[edge, segments]`` for equal segments, or
+    ``[edge, fractions, start]`` for points placed along it."""
+    if isinstance(division, EdgePoints):
+        return [edge, list(division.fractions), list(division.start)]
+    return [edge, int(division)]
