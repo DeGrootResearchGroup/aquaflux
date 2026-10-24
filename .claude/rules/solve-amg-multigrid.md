@@ -191,9 +191,9 @@ path.
   padded-row level operator — measurements".
   - **The index half is a `PaddedColumns` (2026-10-24, the second stage of `solve-open-directions.md`
     §14d): `columns()`, `row_lengths()` and `entries()` (the stored entry each slot is packed from,
-    `nnz` for padding), held (`_HeldColumns`) or computed at cell level (`_KroneckerColumns`).** The
-    operator's `rows`/`transposed` and the layout's are the same objects; `columns`, `row_lengths`,
-    `t_columns` are properties. `_PaddedLayout.of(pattern, ..., fields=(r, c))` holds a pattern at cell
+    `nnz` for padding), held (`_HeldColumns`) or computed at cell level (`_KroneckerColumns`, rows only:
+    a transpose is packed held, below).** The operator's `rows` and the layout's are the same objects;
+    `columns`, `row_lengths` are properties. `_PaddedLayout.of(pattern, ..., fields=(r, c))` holds a pattern at cell
     level when `KroneckerPattern.of_dof` finds it one cell pattern over every field pair, else as arrays;
     the callers that know their fields pass them (`level_plan`: `(block_size, block_size)`; `simple_plan`:
     `F`, `G`, `D`, `M G`, `S`, the block inverse; `FieldSplitInverse.padded_coupling`: trailing × leading).
@@ -203,7 +203,7 @@ path.
     `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`. ⚠️ **The field is counted, never
     divided** (`Σ_t [s ≥ t·len(d)]`): a vector integer division made an isolated apply 1.6× (4×4) to 8×
     (2×2) the held form's; counted, 1.08× / 1.8× / 1.2× (4×4 / 2×2 / 2×4 forward, transposed 1.0 / 1.8 /
-    0.9). Inside a loop (a Krylov or V-cycle loop, as the march applies them) XLA hoists the decode out
+    0.9; the transposed decode is deleted since). Inside a loop (a Krylov or V-cycle loop, as the march applies them) XLA hoists the decode out
     and the two forms tie (ten 4×4 applies 168 vs 176 ms, 2×2 25.3 vs 25.4), the decoded columns then
     living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
     jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
@@ -232,12 +232,26 @@ path.
     order as the dof map's segment sum does. Pinned bit for bit against `EntryMap.product`'s map, landing
     and values, by `test_the_cell_level_galerkin_map_is_the_degree_of_freedom_map_exactly`; any other
     level keeps `EntryMap.product`. `_LevelPlan.galerkin` is a `ValueMap`.
-  - **The transpose is stored (`t_columns` / `t_values`) and applied as a gather** through
-    `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward product, not a
-    scatter-add over every slot. Costs: a second copy of the storage; its own per-level budget
-    (`ShapeBudget.transpose_width`); and `apply` has **no `jax.vmap` rule** — nothing vmaps a
-    preconditioner apply today. Pinned by
-    `test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose`.
+  - **The transpose is packed only for an adjoint (2026-10-24, §14d's lazy transposes), and applied as a
+    gather** through `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward
+    product, not a scatter-add over every slot. A fit and a refit hold rows alone (`transposed`,
+    `t_values` are `None`: no leaves, no compile shape); `_PaddedRowOperator.with_transpose()` packs `Aᵀ`
+    on the host from `to_scipy()` by `_padded_rows` (held columns, the widest column, the values' own
+    precision), and **`solve.with_transposes(tree)` asks every `solve.PacksTranspose` leaf of a pytree**.
+    `root_adjoint` applies it to the adjoint's preconditioner factory at the start of each transpose
+    solve, so the copy lives only as long as that solve and reaches every residual (traced split, single
+    block, block-SIMPLE, scalar transport); the host inverses' `apply(transpose=True)` packs into their
+    lazy `_transpose_fn`, dropped at a refit. **Transposing an operator without its transpose raises
+    `RuntimeError` naming `with_transposes`**, never a scatter fallback. ⚠️ An adjoint factory must hold
+    its operators as pytree leaves, not close over them (`BlockPreconditioner.factory()` returns a
+    module for this reason); a closure raises. ⚠️ Packing needs concrete values (it raises under a
+    trace); `root_adjoint`'s backward rule runs eagerly under `jax.grad`. `apply` has **no `jax.vmap`
+    rule** — nothing vmaps a preconditioner apply today. Pinned by
+    `test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose`,
+    `test_a_padded_row_operator_holds_no_transpose_until_asked_and_then_packs_its_own_entries` and
+    `test_a_fitted_split_holds_no_transposes_and_an_adjoint_packs_them_for_its_solve_only`. Saved (both
+    case files' configuration, CPU, jax 0.12.0.1, 2026-10-24): pitzDaily march identical row for row,
+    peak 3.085 → 2.900 GiB; bfs3d: `solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)".
   - ⚠️ **On macOS the row-sum kernel (a single-threaded `__ynn_fusion`) is the bottleneck for wide rows**
     (bfs3d, up to ~364 wide), and no rewrite of the sum avoids it: `einsum`, a chunked sum, a column-major
     layout, a reduce-free halving sum and an unrolled sum were all measured slower. The XLA flag
