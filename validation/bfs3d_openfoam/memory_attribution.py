@@ -81,10 +81,10 @@ RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.j
 #: ``1`` prints a checksum of every leaf of each traced split the session composes (at the fit and at
 #: every re-fit), so two checkouts' runs show whether anything the solve applies differs, bit for bit.
 CHECKSUMS = os.environ.get("BFS3D_MEMORY_CHECKSUMS", "0") == "1"
-#: ``1`` hands the session a :class:`aquaflux.allocator.GlibcTrim`, so every re-fit first gives the
-#: allocator's kept memory back (``malloc_trim(0)``); each trim prints the resident size and glibc's
-#: retained bytes on either side of it. An arm, not a reading: it changes what the rest of the run holds.
-TRIM = os.environ.get("BFS3D_MEMORY_TRIM", "0") == "1"
+#: ``1`` (default, the session's own default) gives the allocator's kept memory back before every re-fit
+#: (``malloc_trim(0)``), each trim printing the resident size and glibc's retained bytes on either side
+#: of it; ``0`` opens every session with no trim. An arm, not a reading: it changes what the run holds.
+TRIM = os.environ.get("BFS3D_MEMORY_TRIM", "1") == "1"
 GIB = 2**30
 
 
@@ -646,8 +646,7 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(materialized_session, "traced_field_split", "traced split (device leaves)")
     if CHECKSUMS:
         _print_split_checksums(materialized_session)
-    if TRIM:
-        _hand_the_session_a_trim(materialized_session)
+    _hand_the_session_a_trim(materialized_session, TRIM)
     if MAPS:
         from aquaflux.precondition import entry_map
 
@@ -676,8 +675,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     return captured
 
 
-def _hand_the_session_a_trim(materialized_session) -> None:
-    """Open every session with a reporting :class:`~aquaflux.allocator.GlibcTrim` as its memory trim."""
+def _hand_the_session_a_trim(materialized_session, trimmed: bool) -> None:
+    """Open every session with a reporting :class:`~aquaflux.allocator.GlibcTrim`, or with none."""
     from aquaflux.allocator import GlibcTrim
 
     trim = GlibcTrim()
@@ -699,7 +698,7 @@ def _hand_the_session_a_trim(materialized_session) -> None:
 
     @functools.wraps(opened)
     def with_trim(self, *args, **kwargs):
-        opened(self, *args, memory_trim=reported, **kwargs)
+        opened(self, *args, memory_trim=reported if trimmed else None, **kwargs)
 
     session.__init__ = with_trim
 

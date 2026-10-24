@@ -501,7 +501,7 @@
 
 ### A `malloc_trim(0)` before each re-fit, on bfs3d (2026-10-24)
 
-      `memory_attribution.py` on `042e5107` (`7f62a3c4` plus the opt-in trim: `MaterializedSession(memory_trim=)`
+      `memory_attribution.py` on `042e5107` (`7f62a3c4` plus the trim, then opt-in: `MaterializedSession(memory_trim=)`
       handed to `BetaTrackingRefresh`, which calls `aquaflux.allocator.GlibcTrim` once per re-fit, before its
       probe; the solver is otherwise `7fe27d07`'s). 4-core Linux container, 15.7 GiB, no swap, glibc 2.39
       defaults (no `MALLOC_*`), jax 0.12.0.1, shipped `case.yaml`, `BFS3D_MEMORY_STEPS=2
@@ -530,6 +530,9 @@
         30.3--33.5 s on against 31.4--34.2 off, the 2-step march 578--622 s on against 598--611 off (warm).
       - Run 6 ran on `817c95a5` (this entry's first commit; no code change from `042e5107`). Records: the
         `memory_attribution_{off,on}{1,2,3}.json` and `run-20261024-02*.log`/`-03*.log` (git-ignored), copied here.
+      - **Shipped as the session's default** the same day (the owner's decision: the mean drop met the 0.5 GiB
+        bar, the closest pair did not). `memory_attribution.py` now trims by default; `BFS3D_MEMORY_TRIM=0`
+        is the off arm. Not yet measured: a whole march's peak.
 
 ## Condensed out of the rule (2026-10-17)
 
