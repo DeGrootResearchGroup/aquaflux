@@ -442,7 +442,7 @@ def level_plan(
             jnp.asarray(prolongation.data),
         )
     plan = _LevelPlan(
-        layout=_PaddedLayout.of(pattern, width, transpose_width),
+        layout=_PaddedLayout.of(pattern, width, transpose_width, fields=(block_size, block_size)),
         diagonal=EntryMap.gathering(pattern, lambda m: m.diagonal()).on_device(),
         cells=cells,
         dense=dense,

@@ -5,6 +5,7 @@ paths:
   - "aquaflux/precondition/entry_map.py"
   - "aquaflux/precondition/padded_rows.py"
   - "aquaflux/precondition/level_fit.py"
+  - "aquaflux/precondition/kronecker_pattern.py"
 ---
 
 # Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
@@ -188,6 +189,27 @@ path.
   `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (a
   gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
   padded-row level operator — measurements".
+  - **The index half is a `PaddedColumns` (2026-10-24, the second stage of `solve-open-directions.md`
+    §14d): `columns()`, `row_lengths()` and `entries()` (the stored entry each slot is packed from,
+    `nnz` for padding), held (`_HeldColumns`) or computed at cell level (`_KroneckerColumns`).** The
+    operator's `rows`/`transposed` and the layout's are the same objects; `columns`, `row_lengths`,
+    `t_columns` are properties. `_PaddedLayout.of(pattern, ..., fields=(r, c))` holds a pattern at cell
+    level when `KroneckerPattern.of_dof` finds it one cell pattern over every field pair, else as arrays;
+    the callers that know their fields pass them (`level_plan`: `(block_size, block_size)`; `simple_plan`:
+    `F`, `G`, `D`, `M G`, `S`, the block inverse; `FieldSplitInverse.padded_coupling`: trailing × leading).
+    The decode is `_padded_rows`'s own slot rule (slot `s` of row `(f, d)`: other field `s // len(d)`,
+    place `s % len(d)`, padding at column 0), so every gather, product and row sum is unchanged; pinned
+    array for array and the products exactly by
+    `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`.
+    - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
+      count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
+      sized or static by the actual pattern retraced a budgeted rebuild
+      (`test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit` caught both). The
+      layout's own static `nnz` is what `simple_fit` sizes its outputs by. A level whose pattern stops
+      being one cell pattern between two rebuilds (a nodal level gaining `landing_with_diagonal`'s unit
+      diagonals) changes form and so retraces; a frozen refit keeps its layout and cannot.
+    - ⚠️ `SimpleSmoothedInverse._simple_plans` keys its plans on the identity of every leaf of each level
+      operator's `rows`, never on `columns` (a computed property, new on every read).
   - **The transpose is stored (`t_columns` / `t_values`) and applied as a gather** through
     `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward product, not a
     scatter-add over every slot. Costs: a second copy of the storage; its own per-level budget

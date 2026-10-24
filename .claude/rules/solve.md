@@ -16,7 +16,7 @@ subsystem detail is in the files the Index names. Dated history: `.claude/notes/
 |---|---|---|
 | `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `probe_layout.py`, `kronecker_pattern.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; traps from the deleted incomplete-/complete-LU preconditioners |
 | `.claude/notes/solve-direct-preconditioners-log.md` | *(never auto-loads)* | Dated investigation behind Jacobian materialization: probing reach, #191, materialize cost |
-| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
+| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py`, `kronecker_pattern.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
 | `.claude/notes/solve-amg-multigrid-log.md` | *(never auto-loads)* | Dated investigation behind the traced multigrid and smoothed aggregation |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `simple_fit.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | Full dated flow-block investigation, including qualified/retracted findings |

@@ -419,7 +419,8 @@ class FieldSplitInverse:
         Its packing is a fixed gather on the coupling's pattern, held between refits with the gathers
         that cut the blocks, so a refit's re-composition moves only values, and those only on the device.
         """
-        return _padded_operator(self._coupling, maps=self._maps, slot="coupling")
+        fields = (self._groups.n_trailing_fields, self._groups.n_leading_fields)
+        return _padded_operator(self._coupling, maps=self._maps, slot="coupling", fields=fields)
 
     @property
     def n_dofs(self) -> int:

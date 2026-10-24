@@ -205,7 +205,7 @@ def simple_plan(
     if block_splitting:
         cells = EntryMap.gathering(f_pattern, lambda m: cell_blocks(m, fields)).on_device()
         block_pattern, order = _block_pattern(n_cells, fields)
-        block_layout = _PaddedLayout.of(block_pattern)
+        block_layout = _PaddedLayout.of(block_pattern, fields=(fields, fields))
         block_order = jnp.asarray(order)
         inverse_pattern = block_pattern
     else:
@@ -213,10 +213,11 @@ def simple_plan(
     # The structural patterns: every entry the operands' patterns can produce, whatever their values.
     correction_pattern = _structural(_ones(inverse_pattern) @ _ones(g_pattern))
     schur_pattern = _structural(_ones(c_pattern) + _ones(d_pattern) @ _ones(correction_pattern))
-    correction_layout = (
-        _PaddedLayout.of(g_pattern)
+    correction_layout = _PaddedLayout.of(
+        g_pattern
         if correction_pattern.matches(g_pattern.csr(np.zeros(g_pattern.nnz)))
-        else _PaddedLayout.of(correction_pattern)
+        else correction_pattern,
+        fields=(fields, 1),
     )
     return SimplePlan(
         unpack=jnp.asarray(_slot_of_entry(pattern, width)),
@@ -224,11 +225,11 @@ def simple_plan(
         gradient=g_map.on_device(),
         divergence=d_map.on_device(),
         pressure=c_map.on_device(),
-        velocity_layout=_PaddedLayout.of(f_pattern, transposed=False),
-        gradient_layout=_PaddedLayout.of(g_pattern, transposed=False),
-        divergence_layout=_PaddedLayout.of(d_pattern),
+        velocity_layout=_PaddedLayout.of(f_pattern, transposed=False, fields=(fields, fields)),
+        gradient_layout=_PaddedLayout.of(g_pattern, transposed=False, fields=(fields, 1)),
+        divergence_layout=_PaddedLayout.of(d_pattern, fields=(1, fields)),
         correction_layout=correction_layout,
-        schur_layout=_PaddedLayout.of(schur_pattern),
+        schur_layout=_PaddedLayout.of(schur_pattern, fields=(1, 1)),
         pressure_slots=jnp.asarray(_positions(c_pattern, schur_pattern)),
         cells=cells,
         block_layout=block_layout,
@@ -477,7 +478,7 @@ def _product_onto(left, right, out: _PaddedLayout) -> jnp.ndarray:
     rows, columns, values = left
     r_columns, r_values, r_lengths = right
     r_width = r_columns.shape[1]
-    n_out = out.rows.n_in
+    n_out = out.nnz
     if rows.shape[0] == 0:
         # No stored entry on the left (a level whose divergence block stores none): no terms, and no
         # chunk to slice -- a loop over none still traces its body once.

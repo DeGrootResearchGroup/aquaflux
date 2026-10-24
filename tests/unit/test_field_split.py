@@ -311,10 +311,11 @@ class TestBlockTriangularAlgebra:
                 assert np.array_equal(got.data, want.data)
             split.refactor_block(matrix)
             packed = _PaddedRowOperator.from_scipy(groups.blocks(matrix)[2])
-            for got, want in zip(
-                jax.tree.leaves(split.padded_coupling()), jax.tree.leaves(packed), strict=True
-            ):
-                assert np.array_equal(np.asarray(got), np.asarray(want))
+            coupling = split.padded_coupling()
+            for name in ("columns", "row_lengths", "values", "t_columns", "t_values"):
+                assert np.array_equal(
+                    np.asarray(getattr(coupling, name)), np.asarray(getattr(packed, name))
+                )
 
     def test_a_refit_with_a_block_that_cannot_refit_changes_nothing(self, groups, operator):
         """The refusal comes before either block is touched, so a split is never left half re-fitted."""

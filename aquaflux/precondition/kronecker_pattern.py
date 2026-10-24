@@ -113,6 +113,53 @@ class KroneckerPattern:
         cells = SparsePattern.of_arrays(shape, indptr, columns[order].astype(index))
         return cls(cells, *fields), order
 
+    @classmethod
+    def of_dof(
+        cls, pattern: SparsePattern, row_fields: int, column_fields: int
+    ) -> KroneckerPattern | None:
+        """``pattern`` as a cell pattern over ``row_fields x column_fields`` field pairs, if it is one.
+
+        The candidate cell pattern is the first row field's entries in the first column field; the
+        pattern is that cell pattern over full field-pair blocks exactly when expanding the candidate
+        gives back its arrays. ``None`` when it does not -- a pattern missing some field pair of some
+        cell entry, or storing a row's columns out of order.
+        """
+        rows, columns = pattern.shape
+        if row_fields < 1 or column_fields < 1 or rows % row_fields or columns % column_fields:
+            return None
+        n_rows, n_columns = rows // row_fields, columns // column_fields
+        indptr, indices = pattern.indptr, pattern.indices
+        first = np.repeat(np.arange(n_rows), np.diff(indptr[: n_rows + 1]))
+        kept = np.flatnonzero(indices[: indptr[n_rows]] < n_columns)
+        counts = np.bincount(first[kept], minlength=n_rows)
+        cell_indices = indices[kept]
+        if cell_indices.size * row_fields * column_fields != pattern.nnz:
+            return None
+        cells = SparsePattern.of_arrays(
+            (n_rows, n_columns),
+            np.concatenate([[0], np.cumsum(counts)]).astype(indptr.dtype),
+            cell_indices.astype(indices.dtype),
+        )
+        try:
+            candidate = cls(cells, row_fields, column_fields)
+        except ValueError:
+            return None
+        dof = candidate.dof_pattern()
+        if np.array_equal(dof.indptr, indptr) and np.array_equal(dof.indices, indices):
+            return candidate
+        return None
+
+    def transposed(self) -> tuple[KroneckerPattern, np.ndarray]:
+        """The transpose's pattern, and for each of its cell entries the cell entry it transposes."""
+        rows = self.cell_rows()
+        transpose, order = KroneckerPattern.of_coordinates(
+            self.cells.indices,
+            rows,
+            (self.cells.shape[1], self.cells.shape[0]),
+            (self.column_fields, self.row_fields),
+        )
+        return transpose, order.astype(self.cells.indices.dtype)
+
     @property
     def shape(self) -> tuple[int, int]:
         """The degree-of-freedom shape."""
