@@ -21,8 +21,9 @@ moves into the flux operators once the gradient is blocked is visible.
 scan over ``B`` equal face ranges, each calling the ORIGINAL ``_green_gauss`` on that range's own
 ``FaceCellConnectivity`` (built through its constructor) and slices of the face arrays. No formula is
 copied; only the chunking is new. It is installed after the case is built, so the correction matrices
-bound at build are byte-identical between arms. This wrapper is deleted with the screen's verdict or
-replaced by a library design; it is not a library path.
+bound at build are byte-identical between arms. It is not a library path: the screen found a blocked
+assembly no better than halving the probe batch (2026-10-24), so none was built, and the wrappers stay
+here only so that finding can be re-measured.
 
 **The flux assembly too (``both`` arms, screen-only likewise).** With the gradient blocked the first
 bfs3d run found the peak moved into the flux operators (``DiffusionFlux.face_flux`` and the face blend,
