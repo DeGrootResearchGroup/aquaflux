@@ -514,6 +514,22 @@
       | 2 | on | 8.53 | re-fit #2's `block re-fit #3` | 7.67 | 8.31 | 7.38 -> 6.74 | 1.03 | 7.32 |
       | 3 | off | 9.16 | re-fit #2's `block re-fit #3` | 7.81 | 8.49 | 7.55 | 1.12 | 7.62 |
       | 4 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.63 | 8.31 | 7.40 -> 6.73 | 0.99 | 7.26 |
+      | 5 | off | 9.04 | re-fit #2's `block re-fit #3` | 7.80 | 8.33 | 7.39 | 0.96 | 7.63 |
+      | 6 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.64 | 8.27 | 7.35 -> 6.73 | 0.95 | 7.19 |
+
+      - **Peak: off 8.92 / 9.16 / 9.04 (mean 9.04, spread 0.24); on 8.53 / 8.51 / 8.51 (mean 8.52, spread
+        0.02).** Means 0.52 apart; the closest pair (runs 1 and 2) 0.39. The trim also took out the run-to-run
+        spread: what varied between off runs was how much freed memory the arenas happened to keep.
+      - **The peak stays where it was** (re-fit #2's leading block re-fit) and is now 0.2--0.3 above the step
+        program's first call (8.27--8.31 on), the next thing a lower re-fit peak would meet.
+      - **The trim before re-fit #2 gives back 0.61--0.67 GiB of resident memory** (0.28--0.37 before re-fit
+        #1). `mallinfo2`'s `fordblks` does not move across it: `malloc_trim` returns free pages to the kernel
+        (`madvise`) and glibc still counts them as free, so the harness's `malloc free` column is not what a
+        trim lowers; read the resident set.
+      - Held resident at step 2's end 7.19--7.32 on against 7.47--7.63 off. No cost in time: re-fit #2's stage
+        30.3--33.5 s on against 31.4--34.2 off, the 2-step march 578--622 s on against 598--611 off (warm).
+      - Run 6 ran on `817c95a5` (this entry's first commit; no code change from `042e5107`). Records: the
+        `memory_attribution_{off,on}{1,2,3}.json` and `run-20261024-02*.log`/`-03*.log` (git-ignored), copied here.
 
 ## Condensed out of the rule (2026-10-17)
 

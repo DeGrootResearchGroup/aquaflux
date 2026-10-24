@@ -327,6 +327,12 @@ defect — fix it in the same change.
     a stale preconditioner — apply the update the hook returns (`MarchReplay.refit`,
     `endgame_shift_probe.py`'s `refreshed`). Pinned by
     `test_a_re_fit_releases_the_arrays_only_the_superseded_split_held` (both precisions).
+  - **An opt-in `malloc_trim(0)` before each re-fit** (`MaterializedSession(memory_trim=)` handed to
+    `BetaTrackingRefresh`, which calls it once per re-fit before the probe; `aquaflux/allocator.py`'s
+    `GlibcTrim`, a no-op without glibc, is the only `ctypes` in the package). Off (`None`) by default and not
+    reachable from a case file. bfs3d 2-step peak 9.04 -> 8.52 GiB mean over three runs each
+    (`.claude/notes/solve-direct-preconditioners-log.md`, "A `malloc_trim(0)` before each re-fit"). Pinned
+    by `test_the_memory_trim_runs_once_before_each_refit_and_never_on_a_skipped_step`.
   - **A re-pointed session re-fits the inverse and deliberately keeps the held step's shift (#701)** —
     the step control adapts the shift strength on the premise that the diagonal it scales is fixed, and
     every variant changing it mid-march lost (`.claude/notes/turbulence-log.md`, "#701 — the arms").
