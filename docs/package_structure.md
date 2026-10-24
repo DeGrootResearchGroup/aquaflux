@@ -220,17 +220,18 @@ cfd/                                  # repo root
 │   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
 │   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
 │   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
-│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches
+│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, baffle_patch, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches; BAFFLE_PATCH
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
 │   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
 │   │   ├── near_surface.py           #   NearSurface: refine an octree towards a region's boundary; cube_samples
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
-│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered, twins) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
 │   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids
 │   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
 │   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_ends / fill_pipes: pipes found from the CAD (rims divided alike), their cores O-gridded inside their layers
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
+│   │   ├── sheets.py                 #   baffles: opened (a surface opened along its sheets, a side each), SlitSurface (the sheet once, for the fill), parted (tets given their side's points)
 │   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
