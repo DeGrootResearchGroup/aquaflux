@@ -333,12 +333,23 @@ def _status() -> str:
         return "unavailable"
 
 
-def _relative(a, b, layout_fields: int) -> float:
-    """``max |a - b| / max |b|`` per field block of the flat state, worst field."""
+#: A field block whose largest reference entry is below this fraction of the whole vector's is at
+#: round-off (bfs3d's spanwise momentum residual at the hybrid start is ~3e-17 against ~1 for omega),
+#: so a relative difference against it measures nothing; it is reported in absolute terms instead.
+ROUND_OFF_FIELD = 1e-10
+
+
+def _relative(a, b, layout_fields: int) -> tuple[float, float]:
+    """``max |a - b| / max |b|`` per field block, worst field; and the largest absolute difference
+    in any field whose reference is at round-off (see ``ROUND_OFF_FIELD``)."""
     a = np.asarray(a).reshape(*a.shape[:-1], layout_fields, -1)
     b = np.asarray(b).reshape(*b.shape[:-1], layout_fields, -1)
     axes = tuple(i for i in range(a.ndim) if i != a.ndim - 2)
-    return float(np.max(np.max(np.abs(a - b), axis=axes) / np.max(np.abs(b), axis=axes)))
+    scale = np.max(np.abs(b), axis=axes)
+    difference = np.max(np.abs(a - b), axis=axes)
+    resolved = scale > ROUND_OFF_FIELD * scale.max()
+    worst = float(np.max(difference[resolved] / scale[resolved]))
+    return worst, float(np.max(difference[~resolved], initial=0.0))
 
 
 def main() -> None:
@@ -413,7 +424,9 @@ def main() -> None:
         if batch == 8 and "jv" not in reference:
             reference["jv"] = jv
         agreement_r = _relative(r, reference["r"], n_fields)
-        agreement_jv = _relative(jv, reference["jv"], n_fields) if batch == 8 else float("nan")
+        agreement_jv = (
+            _relative(jv, reference["jv"], n_fields) if batch == 8 else (float("nan"),) * 2
+        )
 
         calls = int(CALLS) if CALLS else math.ceil(plan.n_probes / batch)
         blocks_of_seeds = [
@@ -452,7 +465,8 @@ def main() -> None:
             f"\n[{arm}] residual temp {residual_temp:.1f} MiB, batched JVP temp {product_temp:.1f} MiB "
             f"(attributed peak {peak:.1f}), {per_tangent:.2f} ms per tangent over {calls} calls, "
             f"{faults / calls / 1e3:.1f}k faults per call, compile {compile_s:.0f} s; agreement with "
-            f"{ARMS[0]}: residual {agreement_r:.1e}, JVP {agreement_jv:.1e}; {_status()}",
+            f"{ARMS[0]}: residual {agreement_r[0]:.1e} (round-off fields {agreement_r[1]:.1e} absolute), JVP "
+            f"{agreement_jv[0]:.1e} ({agreement_jv[1]:.1e} absolute); {_status()}",
             flush=True,
         )
         for size, where in owners:
@@ -464,12 +478,12 @@ def main() -> None:
     CellBalance.residual = WHOLE_CELL_BALANCE
     print(
         "\n| arm | residual temp MiB | batched JVP temp MiB | ms per tangent | faults per call | "
-        "calls | residual agreement | JVP agreement |\n|---|---|---|---|---|---|---|---|"
+        "calls | residual agreement (resolved fields) | JVP agreement (resolved fields) |\n|---|---|---|---|---|---|---|---|"
     )
     for arm, rt, pt, _, ms, fl, calls, ar, aj, _ in rows:
         print(
-            f"| {arm} | {rt:.1f} | {pt:.1f} | {ms:.2f} | {fl / 1e3:.1f}k | {calls} | {ar:.1e} | "
-            f"{aj:.1e} |"
+            f"| {arm} | {rt:.1f} | {pt:.1f} | {ms:.2f} | {fl / 1e3:.1f}k | {calls} | {ar[0]:.1e} | "
+            f"{aj[0]:.1e} |"
         )
     shutil.rmtree(DUMP, ignore_errors=True)
 
