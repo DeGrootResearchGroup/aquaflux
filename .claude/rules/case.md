@@ -48,9 +48,9 @@ its file alone.**
 | `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics, drive, pressure datum, sources, solver, initial, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
 | `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `AquafluxMesh` (a `.aqmesh` file, read exactly; `io.md`) / `OpenFOAMMesh` |
-| `mesh_file.py` | `MeshSpec` and its one-form sections `Drawing`, `DrawingRegion`, `MeshSizes`, `MeshOutput`: a mesh file (below) |
+| `mesh_file.py` | `MeshSpec` and its one-form sections `Drawing`, `DrawingRegion`, `MeshSizes`, `MeshOutput`: a mesh file (below); `DrawingSections`, the parts the drawing view reads |
 | `mesh_run.py` | `make_mesh(path, overwrite, on_stage) -> MeshRecord`: `aquaflux mesh` |
-| `drawing_view.py` | `view_drawing(drawing, region, patches, others, directory, out) -> DrawingView`, `DRAWING_FILE`: `aquaflux drawing` |
+| `drawing_view.py` | `view_drawing(sections: DrawingSections, directory, out) -> DrawingView`, `DRAWING_FILE`: `aquaflux drawing` |
 | `drawing.py` | `CadPlacement`, shared by the mesh file and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
@@ -266,10 +266,12 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `mesh_source_from_mapping`, from stdin JSON or from a case file, whose directory is then the base; writes
   `OUT/mesh.vtu`, with `--openfoam` also `OUT/constant/polyMesh`; prints cells, dim, patches with faces,
   groups, `polymesh` and `made`), and `aquaflux drawing OUT [--relative-to DIR]` (`{"mesh_file": ...}` on
-  stdin, read by `drawing_sections_from_mapping` — drawing required, region `None` until it names a
-  solid, patches and `others`; `view_drawing` writes `OUT/drawing.vtp` by `io.write_triangles`, each
+  stdin, read by `drawing_sections_from_mapping` into a `DrawingSections` (`mesh_file.py`) — drawing
+  required, region `None` until it names a solid, patches, `others`, and `feature_angle` from `sizes`,
+  `None` until a positive finite number (read leniently: the view shows an unfinished file); `view_drawing` writes `OUT/drawing.vtp` by `io.write_triangles`, each
   triangle's `face`, and prints `solids`, `faces` (kind, area, point), `patches` (by
-  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`; ducts are not reported yet, `meshing.md`) and
+  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`), `ducts` (`find_ducts(edge_counts=False)`'s
+  side faces at the file's feature angle; `None` without one) and
   `selections_error` — a refused selection is not the reply's `error`, so the drawing is still shown).
   The drawing is read once per (path, mtime, placement) and triangulated once per region (`lru_cache`s
   in the serve process): Sozzi 1.2 s cold, 16 ms after (2026-10-21, macOS arm64). Pinned by

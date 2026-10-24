@@ -203,7 +203,7 @@ cfd/                                  # repo root
 │   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: AquafluxMesh (.aqmesh) / OpenFOAMMesh (polyMesh); a case only reads its mesh
 │   │   ├── mesh_file.py              #   MeshSpec (+ Drawing, DrawingRegion, MeshSizes, MeshOutput): a mesh file, a STEP region meshed by CadMesher
 │   │   ├── mesh_run.py               #   make_mesh(path, overwrite, on_stage) -> MeshRecord: what `aquaflux mesh mesh.yaml` does (refuses an occupied output before meshing; records the quality)
-│   │   ├── drawing_view.py           #   view_drawing(...) -> DrawingView: a mesh file's drawing for choosing its patches (`aquaflux drawing`)
+│   │   ├── drawing_view.py           #   view_drawing(DrawingSections, ...) -> DrawingView: a mesh file's drawing for choosing its patches, its pipes and ducts (`aquaflux drawing`)
 │   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by the mesh file and the radiation sources)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh

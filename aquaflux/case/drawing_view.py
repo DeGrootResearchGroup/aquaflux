@@ -5,8 +5,10 @@ it, which is all :class:`~aquaflux.meshing.FacesNear` stores. :func:`view_drawin
 and region a mesh file names, triangulates the region's faces finely enough to look at, writes them
 with each triangle's face, and says what each face is, which patch the file's selections give it (by
 the mesher's own rule, :func:`~aquaflux.meshing.assign_patches`), the face each point of a
-``FacesNear`` lands on, and which faces are pipes. It reads the file as it stands, unfinished or not:
-only the drawing need be set, and until the region is it says only which solids the drawing holds.
+``FacesNear`` lands on, and which faces are pipes and which are ducts' sides. It reads the file as it
+stands, unfinished or not: only the drawing need be set, and until the region is it says only which
+solids the drawing holds; ducts are told once the file states its feature angle, which decides
+which edges are a duct's corners.
 
 The drawing is read once and kept while its file is unchanged, so a page asking again after each
 click pays only for the selections.
@@ -25,15 +27,15 @@ from aquaflux.io import write_triangles
 from aquaflux.io.cad import CadModel, CadRegion, FaceTriangles, read_step
 from aquaflux.meshing import (
     BAFFLE_PATCH,
-    FaceSelection,
     FacesNear,
     RegionFaces,
     assign_patches,
+    find_ducts,
     find_pipes,
 )
 
 from .drawing import CadPlacement
-from .mesh_file import Drawing, DrawingRegion
+from .mesh_file import DrawingSections
 
 __all__ = ["DRAWING_FILE", "DrawingView", "view_drawing"]
 
@@ -72,6 +74,9 @@ class DrawingView:
     pipes : tuple of int
         The faces that are pipes -- each a cylinder the fluid fills, two rims, nothing inside --
         whatever their rims' division, which the mesher sets for them.
+    ducts : tuple of int or None
+        The faces that are rectangular ducts' sides, whatever their edges' division, which the
+        mesher sets for them; ``None`` until the file states its feature angle.
     selections_error : str or None
         Why the selections are refused, if they are.
     """
@@ -82,6 +87,7 @@ class DrawingView:
     patches: tuple[str, ...] | None
     landed: Mapping[str, tuple[int, ...]]
     pipes: tuple[int, ...]
+    ducts: tuple[int, ...] | None
     selections_error: str | None
 
     def to_mapping(self) -> dict:
@@ -93,29 +99,19 @@ class DrawingView:
             "patches": None if self.patches is None else list(self.patches),
             "landed": {name: list(faces) for name, faces in self.landed.items()},
             "pipes": list(self.pipes),
+            "ducts": None if self.ducts is None else list(self.ducts),
             "selections_error": self.selections_error,
         }
 
 
-def view_drawing(
-    drawing: Drawing,
-    region: DrawingRegion | None,
-    patches: Mapping[str, FaceSelection],
-    others: str | None,
-    directory: str | Path,
-    out: str | Path,
-) -> DrawingView:
+def view_drawing(sections: DrawingSections, directory: str | Path, out: str | Path) -> DrawingView:
     """Look at a mesh file's drawing: write the region's faces into ``out`` and say what each is.
 
     Parameters
     ----------
-    drawing : Drawing
-    region : DrawingRegion or None
-        The region; unset, only the drawing's solids are reported.
-    patches : mapping of {str: FaceSelection}
-        The mesh file's patches, as they stand.
-    others : str or None
-        The patch for the faces no selection chooses; unset, the mesher's default.
+    sections : DrawingSections
+        The mesh file's drawing, region (unset, only the drawing's solids are reported), patches,
+        others patch and feature angle, as they stand.
     directory : path-like
         The directory the mesh file's relative paths are taken from.
     out : path-like
@@ -132,10 +128,11 @@ def view_drawing(
     ValueError
         If the region names a solid the drawing does not hold.
     """
+    drawing, region, patches = sections.drawing, sections.region, sections.patches
     path = (Path(directory) / drawing.file).resolve()
     model = _model(path, path.stat().st_mtime_ns, drawing.placement)
     if region is None:
-        return DrawingView(None, tuple(model.names), (), None, {}, (), None)
+        return DrawingView(None, tuple(model.names), (), None, {}, (), None, None)
     cad_region = region.cad_region()
     unknown = sorted(set(cad_region.solids + cad_region.without) - set(model.names))
     if unknown:
@@ -160,17 +157,23 @@ def view_drawing(
         for name, selection in patches.items()
         if isinstance(selection, FacesNear)
     }
-    names = [*patches, others if others is not None else DEFAULT_OTHERS, BAFFLE_PATCH]
+    others = sections.others if sections.others is not None else DEFAULT_OTHERS
+    names = [*patches, others, BAFFLE_PATCH]
     try:
         assigned = tuple(names[index] for index in assign_patches(faces, patches).tolist())
         refused = None
     except ValueError as refusal:
         assigned, refused = None, str(refusal)
     points, inverse = np.unique(surface.triangles.reshape(-1, 3), axis=0, return_inverse=True)
-    pipes, _ = find_pipes(
-        topology, points, inverse.reshape(-1, 3), surface.face, np.arange(topology.n_faces),
-        rim_counts=False,
-    )  # fmt: skip
+    triangles, every = inverse.reshape(-1, 3), np.arange(topology.n_faces)
+    pipes, _ = find_pipes(topology, points, triangles, surface.face, every, rim_counts=False)
+    ducts = None
+    if sections.feature_angle is not None:
+        found, _ = find_ducts(
+            topology, points, triangles, surface.face, every, sections.feature_angle,
+            edge_counts=False,
+        )  # fmt: skip
+        ducts = tuple(sorted(f for duct in found for f in duct.faces))
     return DrawingView(
         surface=written,
         solids=tuple(model.names),
@@ -183,6 +186,7 @@ def view_drawing(
         patches=assigned,
         landed=landed,
         pipes=tuple(pipes),
+        ducts=ducts,
         selections_error=refused,
     )
 

@@ -82,7 +82,7 @@ from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState, StartingFields
 from .drawing_view import DRAWING_FILE, DrawingView, view_drawing
-from .mesh_file import Drawing, DrawingRegion, MeshOutput, MeshSizes, MeshSpec
+from .mesh_file import Drawing, DrawingRegion, DrawingSections, MeshOutput, MeshSizes, MeshSpec
 from .mesh_run import MeshRecord, make_mesh
 from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
 from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
@@ -152,6 +152,7 @@ __all__ = [
     "CoupledMarch",
     "Drawing",
     "DrawingRegion",
+    "DrawingSections",
     "DrawingView",
     "DriveSpec",
     "FieldWriter",

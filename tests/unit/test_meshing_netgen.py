@@ -1059,33 +1059,14 @@ def test_netgen_places_an_edges_points_at_the_fractions_asked_from_the_end_named
 
 
 def _bent_duct(tmp_path):
-    """A duct 0.2 m wide and 0.1 m high: a 0.3 m leg along ``y``, a quarter bend of centreline
-    radius 0.4 m about ``z``, and another 0.3 m leg along ``-x``, drawn by OCP as two boxes and a
-    revolved rectangle, so its sides are planes and, in the bend, two cylinders and two flat
-    sectors."""
+    """The bent duct of :func:`tests.support.drawings.write_bent_duct`, read back: the model and the
+    region of its one solid."""
     pytest.importorskip("OCP")
     from aquaflux.io.cad import CadRegion, read_step
-    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon
-    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeRevol
-    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt
-    from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
 
-    inner, outer, height, leg = 300.0, 500.0, 100.0, 300.0  # millimetres
-    rectangle = BRepBuilderAPI_MakePolygon(
-        gp_Pnt(inner, 0, 0), gp_Pnt(outer, 0, 0), gp_Pnt(outer, 0, height),
-        gp_Pnt(inner, 0, height), True,
-    ).Wire()  # fmt: skip
-    face = BRepBuilderAPI_MakeFace(rectangle).Face()
-    axis = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))
-    bend = BRepPrimAPI_MakeRevol(face, axis, np.pi / 2).Shape()
-    first = BRepPrimAPI_MakeBox(gp_Pnt(inner, -leg, 0), gp_Pnt(outer, 0, height)).Shape()
-    second = BRepPrimAPI_MakeBox(gp_Pnt(-leg, inner, 0), gp_Pnt(0, outer, height)).Shape()
-    shape = BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(first, bend).Shape(), second).Shape()
-    writer = STEPControl_Writer()
-    writer.Transfer(shape, STEPControl_AsIs)
-    writer.Write(str(tmp_path / "duct.step"))
-    model = read_step(tmp_path / "duct.step")
+    from tests.support.drawings import write_bent_duct
+
+    model = read_step(write_bent_duct(tmp_path / "duct.step"))
     return model, CadRegion((model.names[0],))
 
 

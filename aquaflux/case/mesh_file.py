@@ -53,7 +53,7 @@ from aquaflux.meshing import (
 
 from .drawing import CadPlacement
 
-__all__ = ["Drawing", "DrawingRegion", "MeshOutput", "MeshSizes", "MeshSpec"]
+__all__ = ["Drawing", "DrawingRegion", "DrawingSections", "MeshOutput", "MeshSizes", "MeshSpec"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -139,6 +139,30 @@ class MeshSizes:
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (NetgenProcess.triangulate,)
+
+
+@dataclasses.dataclass(frozen=True)
+class DrawingSections:
+    """The parts of a mesh file its patches are chosen by, read while the rest may be unfinished.
+
+    Attributes
+    ----------
+    drawing : Drawing
+    region : DrawingRegion or None
+        Unset until the file names a solid.
+    patches : mapping of {str: FaceSelection}
+    others : str or None
+        The patch for the faces no selection chooses; unset, the mesher's default.
+    feature_angle : float or None
+        The file's ``sizes.feature_angle``, which decides which edges are a duct's corners; unset
+        until the file states a positive one.
+    """
+
+    drawing: Drawing
+    region: DrawingRegion | None
+    patches: Mapping[str, FaceSelection]
+    others: str | None = None
+    feature_angle: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)

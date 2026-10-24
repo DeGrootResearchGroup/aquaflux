@@ -486,8 +486,10 @@ rectangle's corners need no core corner. Ends open or junctions as a pipe's (`co
   (bend), 16-17° with layers; the sweep 35° / 46° with layers, at its oblique ends. ⚠️ **A rectangular
   junction on a flat wall without layers stops the dual's concave cut** (`NotImplementedError`), as it did
   before ducts; with layers the duct case closes where the mesher before ducts left cells unclosed (0.46).
-- **Not built**: ducts in the drawing view and the browser's patch suggestions (`find_pipes` is there,
-  `find_ducts` needs the feature angle, which `aquaflux drawing` does not read yet); a side merged across
+- **In the drawing view and the browser** (`case.md`, `ui.md`): `aquaflux drawing` reports the ducts'
+  side faces at the file's `sizes.feature_angle` (none told until it is set), found on the kernel's
+  viewing triangulation, and the Mesh section offers the patches every face of which is one as `ducts`.
+- **Not built**: a side merged across
   segments (one planar face along a whole L, more than four edges) is not found; non-four-sided ducts.
 - Pinned in `tests/unit/test_meshing_ducts.py` (core exact in a box and round a bend; the search on a
   stub box of chained segments and its refusals; `_stations` on a parabola and an oblique rim; the

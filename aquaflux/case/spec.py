@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import functools
 import hashlib
+import math
 import types
 from collections.abc import Mapping
 from typing import ClassVar
@@ -101,7 +102,7 @@ from .drawing import CadPlacement
 from .fluid import Fluid
 from .forcing import BodyForce, BulkVelocity, DriveSpec, SourceSpec
 from .initial import Checkpoint, Fields, InitialState
-from .mesh_file import Drawing, DrawingRegion, MeshOutput, MeshSizes, MeshSpec
+from .mesh_file import Drawing, DrawingRegion, DrawingSections, MeshOutput, MeshSizes, MeshSpec
 from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
 from .outputs import Checkpoints, OpenFOAMTime, Outputs, PatchVtk, Vtk
 from .physics import RANS, Laminar, Physics, Radiation
@@ -849,15 +850,14 @@ def mesh_spec_from_mapping(mapping: Mapping[str, object]) -> MeshSpec:
     return spec
 
 
-def drawing_sections_from_mapping(
-    mapping: Mapping[str, object],
-) -> tuple[Drawing, DrawingRegion | None, dict[str, FaceSelection], str | None]:
+def drawing_sections_from_mapping(mapping: Mapping[str, object]) -> DrawingSections:
     """Read the sections of a mesh file its patches are chosen by, without the rest of the file.
 
     The drawing, the region, the patches and ``others``, read by the same rules as within a whole
     mesh file (:func:`mesh_spec_from_mapping`), so the drawing can be looked at -- and its region
     and patches chosen -- while the sizes and everything else are unfinished. A region not yet
-    given, or naming no solid yet, is ``None``.
+    given, or naming no solid yet, is ``None``; so is a feature angle that is not yet a positive,
+    finite number (the whole file's reading refuses it).
 
     Parameters
     ----------
@@ -866,7 +866,7 @@ def drawing_sections_from_mapping(
 
     Returns
     -------
-    tuple of (Drawing, DrawingRegion or None, dict of {str: FaceSelection}, str or None)
+    DrawingSections
 
     Raises
     ------
@@ -902,7 +902,16 @@ def drawing_sections_from_mapping(
     others = mapping.get("others")
     if others is not None and not isinstance(others, str):
         raise ValueError(f"a mesh file's others names a patch, got {others!r}.")
-    return drawing, region, patches, others
+    return DrawingSections(drawing, region, patches, others, _feature_angle(mapping.get("sizes")))
+
+
+def _feature_angle(sizes: object) -> float | None:
+    """A mesh file's ``sizes.feature_angle`` as it stands: the angle once it is a positive, finite
+    number, else ``None``."""
+    angle = sizes.get("feature_angle") if isinstance(sizes, Mapping) else None
+    if isinstance(angle, bool) or not isinstance(angle, (int, float)):
+        return None
+    return float(angle) if math.isfinite(angle) and angle > 0 else None
 
 
 def mesh_spec_to_mapping(spec: MeshSpec) -> dict[str, object]:

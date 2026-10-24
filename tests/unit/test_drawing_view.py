@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("OCP")
 
-from aquaflux.case import DRAWING_FILE, Drawing, DrawingRegion, view_drawing
+from aquaflux.case import DRAWING_FILE, Drawing, DrawingRegion, DrawingSections, view_drawing
 from aquaflux.case import drawing_view as module
 from aquaflux.io.cad import CadRegion, CylinderFace, SphereFace, read_step
 from aquaflux.meshing import FacesNear, FacesOn
@@ -37,9 +37,11 @@ def faces():
     return model.topology(CadRegion(REGION.solids, REGION.without)).faces
 
 
-def _view(tmp_path, patches, others=None, region=REGION, drawing=None):
-    drawing = drawing or Drawing(SOZZI.name)
-    return view_drawing(drawing, region, patches, others, SOZZI.parent, tmp_path / "out")
+def _view(tmp_path, patches, others=None, region=REGION, drawing=None, feature_angle=None):
+    sections = DrawingSections(
+        drawing or Drawing(SOZZI.name), region, patches, others, feature_angle
+    )
+    return view_drawing(sections, SOZZI.parent, tmp_path / "out")
 
 
 def test_every_face_is_written_and_described_and_given_its_patch(tmp_path, faces):
@@ -85,6 +87,30 @@ def test_the_pipes_are_found_whatever_their_rims(tmp_path, faces):
     assert len(pipes) == 2 and list(view.pipes) == pipes
 
 
+def test_ducts_are_told_once_the_feature_angle_is_and_sozzi_has_none(tmp_path):
+    assert _view(tmp_path, {}).ducts is None
+    assert _view(tmp_path, {}, feature_angle=0.785).ducts == ()
+
+
+def test_a_bent_ducts_sides_are_its_ducts_faces_and_its_ends_are_not(tmp_path):
+    # A leg, a bend and a leg: twelve sides round one duct, and its two end faces, neither a side.
+    from tests.support.drawings import write_bent_duct
+
+    drawn = write_bent_duct(tmp_path / "duct.step")
+    model = read_step(drawn)
+    region = DrawingRegion((model.names[0],))
+    sections = DrawingSections(Drawing(drawn.name), region, {}, None, 0.785)
+    view = view_drawing(sections, tmp_path, tmp_path / "out")
+    assert len(view.faces) == 14 and len(view.ducts) == 12
+    ends = sorted(set(range(14)) - set(view.ducts))
+    # Each end is a 0.2 x 0.1 m rectangle; every side is larger.
+    assert [view.faces[f]["area"] for f in ends] == pytest.approx([0.02, 0.02])
+    assert min(view.faces[f]["area"] for f in view.ducts) > 0.02
+    # A feature angle above the duct's right-angled corners makes no edge a corner: no duct.
+    flat = DrawingSections(Drawing(drawn.name), region, {}, None, 1.7)
+    assert view_drawing(flat, tmp_path, tmp_path / "flat").ducts == ()
+
+
 def test_selections_that_share_a_face_are_refused_but_the_drawing_is_still_shown(tmp_path):
     lamp = FacesOn(("lamp",))
     view = _view(tmp_path, {"sleeve": lamp, "again": lamp})
@@ -109,12 +135,13 @@ def test_the_drawing_is_read_once_while_its_file_is_unchanged(tmp_path, monkeypa
     monkeypatch.setattr(module, "read_step", lambda *a: reads.append(a) or real(*a))
     module._model.cache_clear()
     drawing = Drawing(copy.name)
+    sections = DrawingSections(drawing, REGION, {})
     for _ in range(2):
-        view_drawing(drawing, REGION, {}, None, tmp_path, tmp_path / "out")
+        view_drawing(sections, tmp_path, tmp_path / "out")
     assert len(reads) == 1
     stat = copy.stat()
     os.utime(copy, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))  # the file changed
-    view_drawing(drawing, REGION, {}, None, tmp_path, tmp_path / "out")
+    view_drawing(sections, tmp_path, tmp_path / "out")
     assert len(reads) == 2
 
 
@@ -135,12 +162,13 @@ def test_a_baffles_face_is_shown_in_the_baffles_patch_as_the_mesher_puts_it(tmp_
         },
     )
     drawing = Drawing("tank.step")
-    view = view_drawing(drawing, DrawingRegion(("tank",)), {}, None, tmp_path, tmp_path / "out")
+    view = view_drawing(
+        DrawingSections(drawing, DrawingRegion(("tank",)), {}), tmp_path, tmp_path / "out"
+    )
     assert view.solids == ("tank",)
     assert sorted(view.patches) == sorted(["walls"] * 6 + [BAFFLE_PATCH])
     plate = view.patches.index(BAFFLE_PATCH)
     assert view.faces[plate]["area"] == pytest.approx(0.0036, rel=1e-9)
     with pytest.raises(ValueError, match=r"baffles \['lid'\], which are not sheets"):
-        view_drawing(
-            drawing, DrawingRegion(("tank",), baffles=("lid",)), {}, None, tmp_path, tmp_path / "o"
-        )
+        sections = DrawingSections(drawing, DrawingRegion(("tank",), baffles=("lid",)), {})
+        view_drawing(sections, tmp_path, tmp_path / "o")
