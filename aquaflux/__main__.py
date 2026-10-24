@@ -324,15 +324,13 @@ def _drawing(directory: str, relative_to: str, given: str) -> int:
     """Write the drawing of the mesh file in the JSON ``given`` (``{"mesh_file": {...}}``) into
     ``directory`` as ``drawing.vtp``, and print its faces and their patches.
 
-    Only the file's drawing, region, patches and ``others`` are read, so a mesh file still being
-    written can be looked at; relative paths are taken from ``relative_to``. Prints
+    Only the file's drawing, region, patches, ``others`` and feature angle are read, so a mesh file
+    still being written can be looked at; relative paths are taken from ``relative_to``. Prints
     ``{"error": null, ...}`` with what :class:`~aquaflux.case.DrawingView` holds.
     """
     try:
-        drawing, region, patches, others = drawing_sections_from_mapping(
-            json.loads(given)["mesh_file"]
-        )
-        view = view_drawing(drawing, region, patches, others, Path(relative_to), Path(directory))
+        sections = drawing_sections_from_mapping(json.loads(given)["mesh_file"])
+        view = view_drawing(sections, Path(relative_to), Path(directory))
     except (*_REFUSALS, KeyError, json.JSONDecodeError, OSError) as error:
         print(json.dumps({"error": str(error)}))
         return _REFUSED

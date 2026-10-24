@@ -62,8 +62,9 @@ class StubCommands:
     """The solver's commands as the section calls them, the drawing's patches by the points given:
     each point lands on the face whose point it is."""
 
-    def __init__(self, document: dict) -> None:
+    def __init__(self, document: dict, pipes=(), ducts=None) -> None:
         self.document = document
+        self.pipes, self.ducts = list(pipes), ducts
         self.drawings: list[dict] = []
         self.made: dict | None = {"quality": QUALITY, "seconds": 7.04}
 
@@ -85,7 +86,9 @@ class StubCommands:
             for face in landed[name]:
                 patches[face] = name
         faces = [{"kind": "plane", "area": 1.0, "point": point} for point in POINTS]
-        return DrawingView(None, surface, ["square"], faces, patches, landed, [], None)
+        return DrawingView(
+            None, surface, ["square"], faces, patches, landed, pipes=self.pipes, ducts=self.ducts
+        )
 
     def write(self, path, case, relative_to=None, kind=None):
         self.written = (Path(path), case, relative_to, getattr(kind, "name", None))
@@ -97,12 +100,12 @@ class StubCommands:
         return MeshExport(None, Path(directory), mesh.n_cells, 3, [], {}, self.made)
 
 
-def _page(tmp_path, document=MESH_FILE):
+def _page(tmp_path, document=MESH_FILE, **faces):
     from aquaflux_ui.app import Workspace
     from trame.app import get_server
 
     server = get_server(name=f"test-mesh-{tmp_path.name}", client_type="vue3")
-    commands = StubCommands(document)
+    commands = StubCommands(document, **faces)
     workspace = Workspace(None, server, commands=commands)
     for name in ("meshing_drawing_update", "meshing_mesh_update", "mesh_view_update"):
         setattr(server.controller, name, lambda: None)
@@ -142,6 +145,65 @@ def test_an_opened_mesh_file_lists_its_patches_and_offers_the_drawings_solids(tm
     rows = {row["path"]: row for section in state.meshfile_sections for row in section["rows"]}
     solids = rows[json.dumps(["region", "solids"])]
     assert solids["widget"] == "choices" and [i["value"] for i in solids["items"]] == ["square"]
+
+
+def _offered(state, *path):
+    """The names the form offers for the list at ``path``."""
+    rows = {row["path"]: row for section in state.meshfile_sections for row in section["rows"]}
+    row = rows[json.dumps(list(path))]
+    assert row["widget"] == "choices"
+    return [item["value"] for item in row["items"]]
+
+
+def test_pipes_and_ducts_are_offered_the_patches_every_face_of_which_is_one(tmp_path):
+    # The square's faces 0 and 1 are a duct's sides, face 2 a pipe: the patch holding 0 and 1 is
+    # offered as ducts, the one holding 2 as pipes, and the others patch (face 3) as neither, nor is
+    # a patch holding a duct's side and a face that is not one.
+    patches = {
+        "sides": {"kind": "FacesNear", "points": [POINTS[0], POINTS[1]]},
+        "tube": {"kind": "FacesNear", "points": [POINTS[2]]},
+    }
+    document = {**MESH_FILE, "patches": patches}
+    workspace, _, state = _page(tmp_path, document, pipes=[2], ducts=[0, 1])
+    asyncio.run(workspace.mesh.form.open(tmp_path / "mesh.yaml"))
+    assert _offered(state, "pipes") == ["tube"]
+    assert _offered(state, "ducts") == ["sides"]
+    mixed = {**MESH_FILE, "patches": {"sides": {"kind": "FacesNear", "points": POINTS[:3]}}}
+    workspace, _, state = _page(tmp_path / "mixed", mixed, pipes=[2], ducts=[0, 1])
+    asyncio.run(workspace.mesh.form.open(tmp_path / "mesh.yaml"))
+    assert _offered(state, "ducts") == [] and _offered(state, "pipes") == []
+
+
+def test_ducts_are_offered_nothing_until_the_solver_can_tell_them(tmp_path):
+    # Without a feature angle the solver tells no ducts (None): no patch is offered.
+    workspace, _, state = _page(tmp_path, ducts=None)
+    asyncio.run(workspace.mesh.form.open(tmp_path / "mesh.yaml"))
+    assert _offered(state, "ducts") == []
+
+
+def test_an_edit_of_the_feature_angle_asks_for_the_drawing_again_and_of_the_size_does_not(tmp_path):
+    # The feature angle decides which faces are ducts' sides; the size changes nothing drawn.
+    workspace, _, _ = _page(tmp_path)
+    section = workspace.mesh
+    asked = []
+
+    async def recorded(frame=False):
+        asked.append(frame)
+
+    async def page():
+        await section.form.open(tmp_path / "mesh.yaml")
+        section.load_drawing = recorded
+        document = section.form.document
+        sizes = document["sizes"]
+        section._changed(document, {**document, "sizes": {**sizes, "max_size": 0.2}})
+        await asyncio.sleep(0)
+        after_size = len(asked)
+        section._changed(document, {**document, "sizes": {**sizes, "feature_angle": 1.0}})
+        await asyncio.sleep(0)
+        return after_size
+
+    after_size = asyncio.run(page())
+    assert (after_size, len(asked)) == (0, 1)
 
 
 def test_a_click_adds_a_face_to_the_chosen_patch_and_again_takes_it_away(tmp_path):
