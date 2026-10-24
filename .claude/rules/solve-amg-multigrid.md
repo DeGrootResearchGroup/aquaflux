@@ -215,6 +215,12 @@ path.
       layout's own static `nnz` is what `simple_fit` sizes its outputs by. A level whose pattern stops
       being one cell pattern between two rebuilds (a nodal level gaining `landing_with_diagonal`'s unit
       diagonals) changes form and so retraces; a frozen refit keeps its layout and cannot.
+    - ⚠️ **Not bit-identical to the held form at default compiler flags, and that is FMA placement, not a
+      defect (accepted by the project owner, 2026-10-24).** Values and slots are equal, but a changed
+      program contracts multiply-adds elsewhere: pitzDaily's hybrid start moved ≤ 6.2e-15 (the
+      potential-flow solve's scalar hierarchy), identical under `XLA_FLAGS=--xla_cpu_max_isa=AVX`; the
+      pitzDaily march's step rows and bfs3d's split leaves were unchanged. Pin identity under that flag,
+      never at default flags.
     - ⚠️ `SimpleSmoothedInverse._simple_plans` keys its plans on the identity of every leaf of each level
       operator's `rows`, never on `columns` (a computed property, new on every read).
   - **The Galerkin map of a nodal level is held at cell level (2026-10-24, the third stage of §14d).**
