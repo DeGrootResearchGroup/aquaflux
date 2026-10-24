@@ -268,22 +268,50 @@ def _trim() -> dict:
     }
 
 
-def _clear() -> dict:
+def _live() -> dict[str, int]:
+    """Resident, live JAX array and traced host bytes now."""
+    import tracemalloc
+
     import jax
 
-    before = _resident()
+    return {
+        "rss": _resident()["VmRSS"],
+        "device": sum(a.nbytes for a in jax.live_arrays()),
+        "traced": tracemalloc.get_traced_memory()[0],
+    }
+
+
+def _clear() -> dict:
+    """A collection and a trim, then the caches cleared, collected and trimmed, read after each.
+
+    The first reading separates what the collector frees from what only the caches held; the live
+    array bytes after the clear say how much of what it freed was arrays held by a cache (a jitted
+    function's captured constants) rather than compiled programs.
+    """
+    import jax
+
+    before = _live()
     executables = _executables()["count"]
+    gc.collect()
+    _LIBC.malloc_trim(0)
+    collected = _live()
     jax.clear_caches()
     gc.collect()
-    cleared = _resident()
+    cleared = _live()
     _LIBC.malloc_trim(0)
-    after = _resident()
+    trimmed = _live()
+    after = {"executables": _executables()["count"]}
+    if READ:
+        after["smaps"] = _smaps_by_owner()
+        after["arenas"] = _arenas()
+        after["python"] = _objects_by_type()
     return {
         "executables_before": executables,
-        "executables_after": _executables()["count"],
-        "rss_before": before["VmRSS"],
-        "rss_after_clear": cleared["VmRSS"],
-        "rss_after_clear_and_trim": after["VmRSS"],
+        "before": before,
+        "after_collect_and_trim": collected,
+        "after_clear": cleared,
+        "after_clear_and_trim": trimmed,
+        "after": after,
     }
 
 
@@ -306,6 +334,35 @@ def reading(row: dict) -> None:
     _print(label, residue)
 
 
+def _print_reading(title: str, reading: dict) -> None:
+    """The smaps classes, the arenas and the Python objects of one reading."""
+    if title:
+        print(f"      {title}:", flush=True)
+    smaps = reading["smaps"]
+    for name, entry in sorted(smaps["classes"].items(), key=lambda kv: -kv[1]["rss"]):
+        print(
+            f"      smaps {name:9s} x{entry['count']:<5d} rss {entry['rss'] / GIB:6.3f} "
+            f"(no array {entry['rss_without_arrays'] / GIB:6.3f}) arrays "
+            f"{entry['array_bytes'] / GIB:6.3f} GiB",
+            flush=True,
+        )
+    arenas = reading["arenas"]
+    print(
+        f"      arenas: main system {arenas['main']['system'] / GIB:.3f} free "
+        f"{arenas['main']['free'] / GIB:.3f}; {arenas['thread_arenas']} thread arenas system "
+        f"{arenas['thread_system'] / GIB:.3f} free {arenas['thread_free'] / GIB:.3f}; mmapped "
+        f"x{arenas['mmap_count']} {arenas['mmap_bytes'] / GIB:.3f} GiB; array buffers "
+        f"{smaps['array_buffers'] / GIB:.3f}",
+        flush=True,
+    )
+    python = reading["python"]
+    top = ", ".join(f"{n} {s / MIB:.0f}M/{c}" for n, c, s in python["top"][:6])
+    print(
+        f"      python: {python['objects']} objects {python['bytes'] / GIB:.3f} GiB ({top})",
+        flush=True,
+    )
+
+
 def _print(label: str, residue: dict) -> None:
     resident = residue["resident"]
     print(
@@ -314,29 +371,7 @@ def _print(label: str, residue: dict) -> None:
         flush=True,
     )
     if "smaps" in residue:
-        smaps = residue["smaps"]
-        for name, entry in sorted(smaps["classes"].items(), key=lambda kv: -kv[1]["rss"]):
-            print(
-                f"      smaps {name:9s} x{entry['count']:<5d} rss {entry['rss'] / GIB:6.3f} "
-                f"(no array {entry['rss_without_arrays'] / GIB:6.3f}) arrays "
-                f"{entry['array_bytes'] / GIB:6.3f} GiB",
-                flush=True,
-            )
-        arenas = residue["arenas"]
-        print(
-            f"      arenas: main system {arenas['main']['system'] / GIB:.3f} free "
-            f"{arenas['main']['free'] / GIB:.3f}; {arenas['thread_arenas']} thread arenas system "
-            f"{arenas['thread_system'] / GIB:.3f} free {arenas['thread_free'] / GIB:.3f}; mmapped "
-            f"x{arenas['mmap_count']} {arenas['mmap_bytes'] / GIB:.3f} GiB; array buffers "
-            f"{smaps['array_buffers'] / GIB:.3f}",
-            flush=True,
-        )
-        python = residue["python"]
-        top = ", ".join(f"{n} {s / MIB:.0f}M/{c}" for n, c, s in python["top"][:6])
-        print(
-            f"      python: {python['objects']} objects {python['bytes'] / GIB:.3f} GiB ({top})",
-            flush=True,
-        )
+        _print_reading("", residue)
         executables = residue["executables"]
         print(
             f"      executables: {executables['count']}, code {executables['code'] / MIB:.1f} MiB",
@@ -353,11 +388,18 @@ def _print(label: str, residue: dict) -> None:
         clear = residue["clear"]
         print(
             f"      clear_caches: executables {clear['executables_before']} -> "
-            f"{clear['executables_after']}, VmRSS {clear['rss_before'] / GIB:.2f} -> "
-            f"{clear['rss_after_clear'] / GIB:.2f} -> {clear['rss_after_clear_and_trim'] / GIB:.2f}"
-            " GiB (after the clear, then after a trim)",
+            f"{clear['after']['executables']}",
             flush=True,
         )
+        for name in ("before", "after_collect_and_trim", "after_clear", "after_clear_and_trim"):
+            live = clear[name]
+            print(
+                f"        {name:22s} VmRSS {live['rss'] / GIB:.2f} device {live['device'] / GIB:.2f}"
+                f" traced {live['traced'] / GIB:.2f} GiB",
+                flush=True,
+            )
+        if "smaps" in clear["after"]:
+            _print_reading("after the clear", clear["after"])
 
 
 def _after_march(recorder) -> None:
