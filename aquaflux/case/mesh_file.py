@@ -3,7 +3,8 @@
 A mesh is made once, by ``aquaflux mesh mesh.yaml``, and read by any number of case files after
 (:class:`~aquaflux.case.AquafluxMesh`): a flow case and a radiation case on one mesh, say. The file
 holds what the mesher needs -- the drawing, the region of it to mesh, the patches, the sizes, the
-layers, the walls meshed as structured quadrilaterals, the pipes, a hex core and the planarizer --
+layers, the walls meshed as structured quadrilaterals, the pipes and ducts, a hex core, the parts
+meshed finer (refinement regions) and the planarizer --
 and where the mesh is written: aquaflux's own ``.aqmesh`` file, and an OpenFOAM polyMesh too if
 asked for. Relative paths are relative to the directory the mesh file sits in.
 
@@ -18,6 +19,9 @@ asked for. Relative paths are relative to the directory the mesh file sits in.
     layers: {kind: PrismLayers, first_height: 0.0005, growth: 1.2, count: 5}
     layered: [walls, lamp]
     mapped: [lamp]
+    refinements:
+      - {kind: RefinedNear, patches: [lamp], distance: 0.02, size: 0.004}
+      - {kind: RefinedBox, lower: [0.2, -0.1, 0.0], upper: [0.4, 0.1, 0.2], size: 0.005}
     output: {path: reactor.aqmesh}
 
 The drawing, region, sizes and output sections have one form each, so they name no ``kind``.
@@ -36,12 +40,14 @@ from aquaflux.io.cad import CadRegion, read_step
 from aquaflux.mesh import Mesh
 from aquaflux.meshing import (
     CadMesher,
+    DuctCore,
     FacePlanarizer,
     FaceSelection,
     NetgenProcess,
     OctreeCore,
     PipeCore,
     PrismLayers,
+    Refinement,
     Stage,
 )
 
@@ -202,6 +208,14 @@ class MeshSpec:
     pipe_core : PipeCore or None
         How the pipes' cores are filled; unset, the defaults of
         :class:`~aquaflux.meshing.PipeCore`.
+    ducts : tuple of str or None
+        The patches whose faces are the sides of rectangular ducts -- four four-sided faces round
+        each stretch, along a straight line or a curve, with nothing inside -- their walls meshed as
+        grids and their cores as hexahedra, cross-section by cross-section. Unset, every duct found;
+        empty, none.
+    duct_core : DuctCore or None
+        How the ducts' cores are filled; unset, the defaults of
+        :class:`~aquaflux.meshing.DuctCore`.
     planarizer : FacePlanarizer or None
         Flattens the mesh's faces by moving the cells' interior vertices, never making a cell less
         convex, or its volume more dependent on how its faces are triangulated, or a face worse,
@@ -211,6 +225,12 @@ class MeshSpec:
         A core of hexahedra from an octree inside the region, kept clear of the walls and of the
         layers' top, joined to the rest through polyhedra; its unset wall size is ``max_size``.
         Unset, the core is polyhedral throughout.
+    refinements : tuple of Refinement
+        Parts of the region meshed finer than ``max_size``, each at its own size: inside a box, a
+        ball or a cylinder (:class:`~aquaflux.meshing.RefinedBox`,
+        :class:`~aquaflux.meshing.RefinedSphere`, :class:`~aquaflux.meshing.RefinedCylinder`), or
+        within a distance of some patches (:class:`~aquaflux.meshing.RefinedNear`). The surface,
+        the tetrahedra and the core's cubes are all made smaller there. Default: none.
     output : MeshOutput
         Where the mesh is written; by default ``mesh.aqmesh`` beside the mesh file.
 
@@ -218,8 +238,9 @@ class MeshSpec:
     ------
     ValueError
         If a size, the angle or the grading is not a positive, finite number; layers are given
-        without a patch to grow on, or patches are named without layers; or the core's size is
-        below an unset wall size.
+        without a patch to grow on, or patches are named without layers; the core's size is
+        below an unset wall size; or a refinement's size is not below ``max_size``, or is below a
+        set ``min_size``.
     """
 
     drawing: Drawing
@@ -232,8 +253,11 @@ class MeshSpec:
     mapped: tuple[str, ...] = ()
     pipes: tuple[str, ...] | None = None
     pipe_core: PipeCore | None = None
+    ducts: tuple[str, ...] | None = None
+    duct_core: DuctCore | None = None
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
+    refinements: tuple[Refinement, ...] = ()
     output: MeshOutput = dataclasses.field(default_factory=MeshOutput)
 
     #: Where an unset setting takes its default from (read by the case-file schema).
@@ -249,8 +273,10 @@ class MeshSpec:
         object.__setattr__(self, "patches", types.MappingProxyType(dict(self.patches)))
         object.__setattr__(self, "layered", tuple(self.layered))
         object.__setattr__(self, "mapped", tuple(self.mapped))
-        if self.pipes is not None:
-            object.__setattr__(self, "pipes", tuple(self.pipes))
+        object.__setattr__(self, "refinements", tuple(self.refinements))
+        for name in ("pipes", "ducts"):
+            if getattr(self, name) is not None:
+                object.__setattr__(self, name, tuple(getattr(self, name)))
         if (self.layers is None) != (not self.layered):
             raise ValueError(
                 "a mesh file grows layers on the patches it names in layered, so it takes both "
@@ -265,11 +291,13 @@ class MeshSpec:
             for name in ("min_size", "grading")
             if (value := getattr(self.sizes, name)) is not None
         }
-        if self.pipe_core is not None:
-            options["pipe_core"] = self.pipe_core
+        for name in ("pipe_core", "duct_core"):
+            if (value := getattr(self, name)) is not None:
+                options[name] = value
         return CadMesher(
             max_size=self.sizes.max_size, feature_angle=self.sizes.feature_angle,
-            layers=self.layers, planarizer=self.planarizer, core=self.core, **options,
+            layers=self.layers, planarizer=self.planarizer, core=self.core,
+            refinements=self.refinements, **options,
         )  # fmt: skip
 
     def mesh(self, directory: Path, on_stage: Stage | None = None) -> Mesh:
@@ -297,6 +325,7 @@ class MeshSpec:
         options = {} if self.others is None else {"others": self.others}
         return self.mesher().mesh(
             model, self.region.cad_region(), dict(self.patches),
-            layered=self.layered, mapped=self.mapped, pipes=self.pipes, on_stage=on_stage,
+            layered=self.layered, mapped=self.mapped, pipes=self.pipes, ducts=self.ducts,
+            on_stage=on_stage,
             **options,
         )  # fmt: skip

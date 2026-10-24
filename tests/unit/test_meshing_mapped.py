@@ -217,3 +217,12 @@ def test_a_bands_rows_flatten_within_two_rows_of_a_rim_that_is_not_flat():
     assert bow[0] == pytest.approx(0.6, rel=1e-9)  # the saddle itself
     assert 0.1 < bow[1] < 0.5  # half way out of it
     np.testing.assert_allclose(bow[2:], 0.0, atol=1e-12)
+
+
+def test_triangles_wound_unalike_are_refused_rather_than_walked_for_ever():
+    from aquaflux.meshing.mapped import _loops
+
+    # A square of two triangles, the second wound the other way: its boundary edges do not chain.
+    with pytest.raises(ValueError, match="not wound alike"):
+        _loops(np.array([[0, 1, 2], [0, 3, 2]]))
+    assert [loop.tolist() for loop in _loops(np.array([[0, 1, 2], [0, 2, 3]]))] == [[0, 1, 2, 3]]

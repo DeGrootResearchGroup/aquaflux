@@ -136,6 +136,24 @@ their cores are filled:
 pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
 ```
 
+Rectangular ducts are found by themselves too: four four-sided faces round the fluid, each meeting
+the next along an edge that folds outward by more than the feature angle, with nothing else inside.
+A duct may run along a curve: faces drawn in stretches -- a straight leg, a bend, another leg, as a
+sweep along a path is drawn -- are one duct where each stretch's end is the next one's start, and
+a stretch may itself be curved. Its sides are meshed as structured grids, layered if their patches
+are, and its core is filled with hexahedra, one cross-section of the grids after another
+({class}`~aquaflux.meshing.DuctCore`). For the grids to line up along a curve, the points along the
+duct's long edges are placed where cross-sections square to the duct's centreline cross them (or,
+near an end cut at a slant, leaning as that end does), so the region is triangulated a second time
+whenever it holds a duct. Its ends are open or junctions as a pipe's are. `ducts` names the patches
+whose faces are ducts' sides instead (`[]` for none), and `duct_core` sets how their cores are
+filled. An empty box -- four walls round the fluid and two ends -- is a duct too, meshed as
+hexahedra throughout; name `ducts: []` to mesh it as polyhedra.
+
+```yaml
+duct_core: {kind: DuctCore, junction_rows: 2}
+```
+
 The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
 ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
 are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of
@@ -146,4 +164,20 @@ in a narrow annulus, is left to the tetrahedra, and a region with no such room a
 
 ```yaml
 core: {kind: OctreeCore, size: 0.08}
+```
+
+Parts of the region can be meshed finer than `max_size` with `refinements`, each at its own `size`
+(measured as `max_size` is): the fluid inside a box, a ball or a cylinder
+({class}`~aquaflux.meshing.RefinedBox`, {class}`~aquaflux.meshing.RefinedSphere`,
+{class}`~aquaflux.meshing.RefinedCylinder`), or within a `distance` of some patches
+({class}`~aquaflux.meshing.RefinedNear`) -- round a lamp, say, or along a jet. One refinement makes
+everything there smaller: the triangles where it reaches a wall, the tetrahedra, and a core's cubes,
+which are halved until they are no larger than its size. The size grows back to `max_size` away from
+the part as fast as `grading` allows, and where two parts overlap the finer size holds. A size must
+be below `max_size` and, if `min_size` is set, no smaller than it.
+
+```yaml
+refinements:
+  - {kind: RefinedNear, patches: [lamp], distance: 0.02, size: 0.004}
+  - {kind: RefinedCylinder, start: [0.0, 0.0, 0.3], end: [0.5, 0.0, 0.3], radius: 0.05, size: 0.005}
 ```

@@ -173,7 +173,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   (so a checkpoint's digest would not match) and costs minutes at scale, and nobody runs a real case on a
   box grid.
 - **A mesh file is the mesher's input** (`mesh_file.py`: `MeshSpec(drawing, region, sizes, patches,
-  others, layers, layered, mapped, pipes, pipe_core, planarizer, core, output)`, the one-form sections
+  others, layers, layered, mapped, pipes, pipe_core, ducts, duct_core, planarizer, core, refinements, output)`, the one-form sections
   `drawing` / `region` / `sizes` / `output` written without `kind`; `region.baffles` names the drawing's
   sheets standing in it, unset all, `[]` none -- `DrawingRegion` → `CadRegion`), read by the case's own YAML parse
   and registry (`read_mesh_file` / `write_mesh_file` in `case_file.py`, `mesh_spec_from_mapping` /
@@ -269,7 +269,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   stdin, read by `drawing_sections_from_mapping` — drawing required, region `None` until it names a
   solid, patches and `others`; `view_drawing` writes `OUT/drawing.vtp` by `io.write_triangles`, each
   triangle's `face`, and prints `solids`, `faces` (kind, area, point), `patches` (by
-  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`) and
+  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`; ducts are not reported yet, `meshing.md`) and
   `selections_error` — a refused selection is not the reply's `error`, so the drawing is still shown).
   The drawing is read once per (path, mtime, placement) and triangulated once per region (`lru_cache`s
   in the serve process): Sozzi 1.2 s cold, 16 ms after (2026-10-21, macOS arm64). Pinned by

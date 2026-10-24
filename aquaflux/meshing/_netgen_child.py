@@ -8,7 +8,8 @@ interpreter -- so it imports neither ``aquaflux`` nor anything that could pull t
 and exchanges plain arrays with it through files in a work directory:
 
 * ``request.json``: ``{"operation": <name>, ...}`` with the operation's settings;
-* ``input.npz``: the operation's arrays, when it takes any;
+* ``input.npz``: the operation's arrays, when it takes any -- among them, for either operation,
+  ``size_points`` and ``sizes``: points at which the mesh is to be no coarser than the size given;
 * ``result.npz``: written by this script on success. On failure it raises, so the process exits
   non-zero with the reason on its standard error.
 
@@ -31,9 +32,10 @@ def _triangulate(work: Path, request: dict) -> dict[str, np.ndarray]:
     Netgen numbers faces in the order a topology explorer visits them in the shape it reads, which is
     the order OCP's explorer visits them in the same file; the returned ``face`` is that order.
     Triangles are wound outward from the solid. The edges in ``edge_divisions`` are divided as
-    :func:`_divide_edges` says.
+    :func:`_divide_edges` says, and the triangles near each of the ``size_points`` given are no
+    larger than its size.
     """
-    from netgen.meshing import MeshingStep
+    from netgen.meshing import MeshingParameters, MeshingStep
     from netgen.occ import OCCGeometry
 
     geometry = OCCGeometry(request["shape"])
@@ -44,12 +46,12 @@ def _triangulate(work: Path, request: dict) -> dict[str, np.ndarray]:
         _divide_edges(shape, request["edge_divisions"])
         # Netgen reads an edge's division when a geometry is made of the shape, so make it again.
         geometry = OCCGeometry(shape)
-    mesh = geometry.GenerateMesh(
-        perfstepsend=MeshingStep.MESHSURFACE,
-        maxh=request["max_size"],
-        minh=request["min_size"],
-        grading=request["grading"],
+    parameters = MeshingParameters(
+        maxh=request["max_size"], minh=request["min_size"], grading=request["grading"]
     )
+    for (x, y, z), size in _local_sizes(work, request):
+        parameters.RestrictH(x=x, y=y, z=z, h=size)
+    mesh = geometry.GenerateMesh(mp=parameters, perfstepsend=MeshingStep.MESHSURFACE)
     elements = mesh.Elements2D().NumPy()
     if elements.size == 0:
         raise RuntimeError("Netgen produced no surface triangles")
@@ -64,14 +66,16 @@ def _triangulate(work: Path, request: dict) -> dict[str, np.ndarray]:
 SAMPLES_PER_SEGMENT = 64
 
 
-def _divide_edges(shape, divisions: list[list[int]]) -> None:
-    """Divide edges of ``shape`` into segments of equal arc length: each ``[edge, segments]``.
+def _divide_edges(shape, divisions: list[list]) -> None:
+    """Divide edges of ``shape`` at given fractions of their arc length: each ``[edge, segments]``
+    (equal segments) or ``[edge, fractions, start]`` (points at those fractions of the length,
+    measured from the edge's end nearer the point ``start``).
 
     An edge is numbered by its place among the shape's distinct edges, in the order the explorer
     first meets each (it meets an edge once per face it bounds) -- the numbering of a topology map,
     which the CAD reader's topology uses. Netgen takes a division as the edge's interior points'
-    parameters, scaled to ``[0, 1]`` over the edge's parameter range; here they are placed at equal
-    arc length, the curve sampled at :data:`SAMPLES_PER_SEGMENT` points per segment.
+    parameters, scaled to ``[0, 1]`` over the edge's parameter range; here they are placed by arc
+    length, the curve sampled at :data:`SAMPLES_PER_SEGMENT` points per segment.
     """
     edges = shape.edges  # held: the edges are views into it
     distinct, seen = [], {}
@@ -80,14 +84,33 @@ def _divide_edges(shape, divisions: list[list[int]]) -> None:
         if not any(edges[k] == edges[j] for j in same):
             same.append(k)
             distinct.append(k)
-    for index, segments in divisions:
-        edge = edges[distinct[index]]
+    for division in divisions:
+        edge = edges[distinct[division[0]]]
+        if len(division) == 2:
+            segments = int(division[1])
+            wanted = np.linspace(0.0, 1.0, segments + 1)[1:-1]
+        else:
+            wanted = np.asarray(division[1], dtype=np.float64)
+            segments = wanted.size + 1
         start, end = edge.parameter_interval
         t = np.linspace(start, end, SAMPLES_PER_SEGMENT * segments + 1)
         points = np.array([[p.x, p.y, p.z] for p in map(edge.Value, t)])
+        if len(division) == 3:
+            origin = np.asarray(division[2], dtype=np.float64)
+            if np.linalg.norm(points[-1] - origin) < np.linalg.norm(points[0] - origin):
+                wanted = 1.0 - wanted[::-1]  # measured from the edge's last end
         length = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
-        at = np.interp(np.linspace(0.0, length[-1], segments + 1)[1:-1], length, t)
+        at = np.interp(wanted * length[-1], length, t)
         edge.partition = (at - start) / (end - start)
+
+
+def _local_sizes(work: Path, request: dict) -> list[tuple[list[float], float]]:
+    """The points the mesh is to be no coarser than a size at, each with its size; none unless
+    the request says the input holds them."""
+    if not request.get("local_sizes"):
+        return []
+    with np.load(work / "input.npz") as arrays:
+        return list(zip(arrays["size_points"].tolist(), arrays["sizes"].tolist(), strict=True))
 
 
 def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
@@ -96,9 +119,15 @@ def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
     The supplied surface is kept exactly: its points come back first, at their indices and
     coordinates, and no boundary triangle is split or added. Internal triangles, standing inside
     the region, are kept as faces between two tetrahedra. Tetrahedra come back positively oriented
-    (the fourth vertex on the side the first three's right-hand normal points to).
+    (the fourth vertex on the side the first three's right-hand normal points to). Near each of the
+    ``size_points`` given the tetrahedra are no larger than its size.
+
+    Netgen sizes a volume mesh by a tree of local sizes. A mesh assembled from supplied triangles
+    has none until it is asked to build one, and the sizes a set of meshing parameters restricts
+    are not read into it, so the tree is built from the surface first and each point's size is
+    then set in it directly.
     """
-    from netgen.meshing import FaceDescriptor
+    from netgen.meshing import FaceDescriptor, Pnt
     from netgen.meshing import Mesh as NetgenMesh
 
     with np.load(work / "input.npz") as arrays:
@@ -114,6 +143,11 @@ def _fill(work: Path, request: dict) -> dict[str, np.ndarray]:
     if len(internal):
         inside = mesh.Add(FaceDescriptor(surfnr=2, domin=1, domout=1, bc=2))
         mesh.AddElements(dim=2, index=inside, data=internal, base=0)
+    local_sizes = _local_sizes(work, request)
+    if local_sizes:
+        mesh.CalcLocalH(request["grading"], 1)
+        for point, size in local_sizes:
+            mesh.RestrictLocalH(Pnt(*point), size)
     mesh.GenerateVolumeMesh(maxh=request["max_size"], grading=request["grading"])
     if mesh.ne == 0:
         raise RuntimeError("Netgen produced no tetrahedra (its own message is in the output above)")

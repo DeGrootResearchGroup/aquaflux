@@ -19,14 +19,22 @@ over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals 
 pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
 of triangles and quadrilaterals between these steps, and :class:`PyramidCaps` caps the
 quadrilaterals a tetrahedral fill meets. :class:`PipeCore` fills a pipe's core, inside its layers,
-with a structured O-grid; the mesher finds pipes by itself. :func:`element_mesh` makes a mesh of any
-tetrahedra, triangular prisms, hexahedra and pyramids.
+with a structured O-grid, and :class:`DuctCore` a rectangular duct's -- four four-sided faces round
+it, along a straight line or a curve -- with hexahedra cross-section by cross-section, each a
+:class:`ConduitFill`; the mesher finds pipes and ducts by itself (:func:`find_pipes`,
+:func:`find_ducts`). :func:`element_mesh` makes a mesh of any tetrahedra, triangular prisms,
+hexahedra and pyramids.
 
 :class:`OctreeCore` builds a core of hexahedra inside a :class:`Region` -- the region a closed
 triangle surface bounds (:class:`ClosedSurface`), or an inside test (:class:`SampledRegion`) --
 from a balanced :class:`~aquaflux.octree.Octree` refined towards its boundary (:class:`NearSurface`): cubes beside smaller ones are cut into pyramids and
 tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
 are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
+
+A :class:`Refinement` meshes part of the region finer than the rest -- the fluid inside a
+:class:`RefinedBox`, :class:`RefinedSphere` or :class:`RefinedCylinder`, or within a distance of
+some patches (:class:`RefinedNear`). Placed in the region as a :class:`LocatedRefinement`, it splits
+the core's cubes there and hands Netgen the :class:`LocalSizes` its triangles and tetrahedra keep to.
 
 :class:`HexBlock` is a curved hexahedron cut into hexahedra by transfinite interpolation from its
 edges (straight, an :class:`Arc`, a :class:`SampledCurve` or any :class:`Curve`) and faces (any
@@ -61,8 +69,11 @@ from .cad_mesher import (
     assign_patches,
 )
 from .caps import ClearedCaps
+from .conduits import ConduitFill
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
+    EdgePoints,
+    LocalSizes,
     MeshingError,
     NetgenProcess,
     SurfaceTriangulation,
@@ -70,6 +81,8 @@ from .netgen_process import (
     check_closed_surface,
     netgen_available,
 )
+from .duct_core import DuctCore
+from .ducts import Duct, find_ducts
 from .elements import element_mesh
 from .hex_core import HexCore, OctreeCore
 from .divisions import Graded, cell_counts
@@ -77,9 +90,17 @@ from .layers import LayerExtrusion, PrismLayers
 from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
 from .near_surface import NearSurface
-from .pipe_core import PipeCore, PipeCoreFill
+from .pipe_core import PipeCore
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
+from .refinement import (
+    LocatedRefinement,
+    RefinedBox,
+    RefinedCylinder,
+    RefinedNear,
+    RefinedSphere,
+    Refinement,
+)
 from .polygons import Polygons, PyramidCaps
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 from .planarize import FacePlanarizer, Planarization
@@ -94,11 +115,15 @@ __all__ = [
     "CartesianFrame",
     "ClearedCaps",
     "ClosedSurface",
+    "ConduitFill",
     "ConeSurface",
     "CubedSphereCap",
     "Curve",
     "CylinderSurface",
     "CylindricalFrame",
+    "Duct",
+    "DuctCore",
+    "EdgePoints",
     "FacePlanarizer",
     "FaceSelection",
     "FacesNear",
@@ -107,6 +132,8 @@ __all__ = [
     "HexBlock",
     "HexCore",
     "LayerExtrusion",
+    "LocalSizes",
+    "LocatedRefinement",
     "MappedQuads",
     "MappedSurface",
     "MeshingError",
@@ -114,7 +141,6 @@ __all__ = [
     "NetgenProcess",
     "OctreeCore",
     "PipeCore",
-    "PipeCoreFill",
     "PipeOGrid",
     "Planarization",
     "PlaneSurface",
@@ -122,6 +148,11 @@ __all__ = [
     "PolyhedralDual",
     "PrismLayers",
     "PyramidCaps",
+    "RefinedBox",
+    "RefinedCylinder",
+    "RefinedNear",
+    "RefinedSphere",
+    "Refinement",
     "Region",
     "RegionFaces",
     "SampledCurve",
@@ -137,6 +168,7 @@ __all__ = [
     "cell_counts",
     "check_closed_surface",
     "element_mesh",
+    "find_ducts",
     "find_pipes",
     "netgen_available",
 ]

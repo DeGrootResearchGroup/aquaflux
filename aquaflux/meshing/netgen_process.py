@@ -18,7 +18,7 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +41,41 @@ def netgen_available() -> bool:
     Importing it here would load its geometry kernel into this process, which is the thing to avoid.
     """
     return importlib.util.find_spec("netgen") is not None
+
+
+@dataclasses.dataclass(frozen=True)
+class EdgePoints:
+    """Where to place an edge's points: at fractions of its arc length, from one of its ends.
+
+    Attributes
+    ----------
+    fractions : tuple of float
+        The edge's interior points, as fractions of its length from ``start``: strictly increasing,
+        each in ``(0, 1)``. The edge is divided into one more segment than there are fractions.
+    start : tuple of float
+        A point at the end the fractions are measured from; the edge's end nearer it is taken.
+
+    Raises
+    ------
+    ValueError
+        If a fraction is not in ``(0, 1)``, they do not increase, or ``start`` is not a point.
+    """
+
+    fractions: tuple[float, ...]
+    start: tuple[float, float, float]
+
+    def __post_init__(self) -> None:
+        fractions = tuple(float(f) for f in self.fractions)
+        start = tuple(float(x) for x in self.start)
+        steps = np.diff(np.concatenate([[0.0], fractions, [1.0]]))
+        if not np.all(steps > 0.0):
+            raise ValueError(
+                f"an edge's points must lie at fractions increasing within (0, 1), got {fractions}"
+            )
+        if len(start) != 3 or not all(np.isfinite(start)):
+            raise ValueError(f"an edge's points are measured from a point, got {self.start!r}")
+        object.__setattr__(self, "fractions", fractions)
+        object.__setattr__(self, "start", start)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -82,6 +117,51 @@ class TetrahedralMesh:
 
 
 @dataclasses.dataclass(frozen=True)
+class LocalSizes:
+    """Sizes a mesh is to be no coarser than at some points, finer than its largest size.
+
+    Netgen keeps the size near each point within the one given there, and lets it grow away from
+    the point no faster than its grading allows. A part of a region is meshed finer by covering it
+    with points spaced about its size apart.
+
+    Attributes
+    ----------
+    points : np.ndarray, shape ``(n, 3)``
+        The points.
+    sizes : np.ndarray, shape ``(n,)``
+        The size wanted at each, positive.
+    """
+
+    points: np.ndarray
+    sizes: np.ndarray
+
+    def __post_init__(self) -> None:
+        points = np.ascontiguousarray(self.points, dtype=np.float64)
+        sizes = np.ascontiguousarray(self.sizes, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3 or sizes.shape != points.shape[:1]:
+            raise ValueError(
+                f"local sizes take points of shape (n, 3) and one size each, got {points.shape} "
+                f"and {sizes.shape}"
+            )
+        if not (np.isfinite(points).all() and np.isfinite(sizes).all() and np.all(sizes > 0.0)):
+            raise ValueError("local sizes take finite points and positive, finite sizes")
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "sizes", sizes)
+
+    @classmethod
+    def joined(cls, parts: Sequence[LocalSizes]) -> LocalSizes:
+        """The points and sizes of every part, one after another."""
+        return cls(
+            np.concatenate([part.points for part in parts]).reshape(-1, 3),
+            np.concatenate([part.sizes for part in parts]),
+        )
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        """The arrays the child process reads them from."""
+        return {"size_points": self.points, "sizes": self.sizes}
+
+
+@dataclasses.dataclass(frozen=True)
 class NetgenProcess:
     """Netgen's meshing operations, each run in a fresh child interpreter.
 
@@ -100,7 +180,8 @@ class NetgenProcess:
         max_size: float,
         min_size: float = 0.0,
         grading: float = 0.3,
-        edge_divisions: Mapping[int, int] | None = None,
+        edge_divisions: Mapping[int, int | EdgePoints] | None = None,
+        local_sizes: LocalSizes | None = None,
     ) -> SurfaceTriangulation:
         """Triangulate the faces of the one solid in a BREP or STEP file.
 
@@ -114,12 +195,14 @@ class NetgenProcess:
         grading : float
             How fast the size may change between neighbouring triangles, in ``(0, 1]``; Netgen's own
             default is ``0.3``, and a smaller value grades more gently.
-        edge_divisions : mapping of {int: int}, optional
-            Edges to divide into exactly that many segments of equal length, in place of the
-            division the sizes would give; the faces either side meet them at those points. An edge
-            is numbered by its place among the solid's edges, each counted once where first met in
-            a topology explorer's order -- the order :meth:`~aquaflux.io.cad.CadModel.topology`
-            numbers them in.
+        edge_divisions : mapping of {int: int or EdgePoints}, optional
+            Edges to divide into exactly that many segments of equal length, or at the points
+            given (:class:`EdgePoints`), in place of the division the sizes would give; the faces
+            either side meet them at those points. An edge is numbered by its place among the
+            solid's edges, each counted once where first met in a topology explorer's order -- the
+            order :meth:`~aquaflux.io.cad.CadModel.topology` numbers them in.
+        local_sizes : LocalSizes, optional
+            Points near which the triangles are to be finer than ``max_size``.
 
         Returns
         -------
@@ -137,14 +220,22 @@ class NetgenProcess:
             "min_size": float(min_size),
             "grading": float(grading),
             "edge_divisions": [
-                [int(edge), int(segments)] for edge, segments in (edge_divisions or {}).items()
+                _division(int(edge), division) for edge, division in (edge_divisions or {}).items()
             ],
+            "local_sizes": local_sizes is not None,
         }
-        result = self._run(request, {})
+        result = self._run(request, {} if local_sizes is None else local_sizes.arrays())
         return SurfaceTriangulation(result["points"], result["triangles"], result["face"])
 
     def fill(
-        self, points, triangles, *, internal=None, max_size: float, grading: float = 0.3
+        self,
+        points,
+        triangles,
+        *,
+        internal=None,
+        max_size: float,
+        grading: float = 0.3,
+        local_sizes: LocalSizes | None = None,
     ) -> TetrahedralMesh:
         """Fill the region a closed triangle surface bounds with tetrahedra, keeping the surface.
 
@@ -167,6 +258,10 @@ class NetgenProcess:
             Upper bound on the tetrahedra's size.
         grading : float
             As in :meth:`triangulate`.
+        local_sizes : LocalSizes, optional
+            Points near which the tetrahedra are to be finer than ``max_size``. The surface is kept
+            as it is supplied, so where a point lies near it the tetrahedra grade from the
+            triangles' size to the point's.
 
         Returns
         -------
@@ -188,8 +283,15 @@ class NetgenProcess:
             np.zeros((0, 3)) if internal is None else internal, dtype=np.int64
         ).reshape(-1, 3)
         check_closed_surface(points, triangles, internal)
-        request = {"operation": "fill", "max_size": float(max_size), "grading": float(grading)}
+        request = {
+            "operation": "fill",
+            "max_size": float(max_size),
+            "grading": float(grading),
+            "local_sizes": local_sizes is not None,
+        }
         arrays = {"points": points, "triangles": triangles, "internal": internal}
+        if local_sizes is not None:
+            arrays.update(local_sizes.arrays())
         result = self._run(request, arrays)
         return TetrahedralMesh(result["points"], result["tetrahedra"])
 
@@ -275,3 +377,11 @@ def check_closed_surface(
             f"the surface encloses a volume of {volume:.6g}: it is wound into the region, not out of "
             "it"
         )
+
+
+def _division(edge: int, division: int | EdgePoints) -> list:
+    """An edge's division as the child reads it: ``[edge, segments]`` for equal segments, or
+    ``[edge, fractions, start]`` for points placed along it."""
+    if isinstance(division, EdgePoints):
+        return [edge, list(division.fractions), list(division.start)]
+    return [edge, int(division)]

@@ -20,6 +20,8 @@ from aquaflux.meshing import (
     Polygons,
     PrismLayers,
     PyramidCaps,
+    RefinedNear,
+    RefinedSphere,
     check_closed_surface,
     element_mesh,
     netgen_available,
@@ -165,6 +167,49 @@ def test_the_fill_keeps_the_surface_and_fills_exactly_what_it_encloses(solids, n
     np.testing.assert_allclose(
         volumes.sum(), _enclosed_volume(surface.points, surface.triangles), rtol=1e-12
     )
+
+
+def _edges(points, cells):
+    """Each edge of some cells, once per cell: its midpoint and its length."""
+    k = cells.shape[1]
+    pairs = np.concatenate([cells[:, [i, j]] for i in range(k) for j in range(i + 1, k)])
+    return points[pairs].mean(axis=1), np.linalg.norm(
+        points[pairs[:, 0]] - points[pairs[:, 1]], axis=1
+    )
+
+
+def test_the_fill_is_finer_where_local_sizes_ask_and_keeps_its_surface():
+    # A unit box of triangles a quarter across, filled to 0.25, but at 0.04 within a ball of 0.15
+    # at its centre: the tetrahedra there come out at about that size, those far from it larger.
+    points, triangles = box_surface(0.0, 1.0, 4, into_box=False)
+    ball = RefinedSphere(centre=(0.5, 0.5, 0.5), radius=0.15, size=0.04).located({})
+    netgen = NetgenProcess()
+    sizes = ball.local_sizes([0, 0, 0], [1, 1, 1])
+    filled = netgen.fill(points, triangles, max_size=0.25, local_sizes=sizes)
+    plain = netgen.fill(points, triangles, max_size=0.25)
+    np.testing.assert_array_equal(filled.points[: len(points)], points)
+    assert _boundary_triangles(filled.tetrahedra) == {
+        tuple(t) for t in np.sort(triangles, axis=1).tolist()
+    }
+    middle, length = _edges(filled.points, filled.tetrahedra)
+    inside = np.linalg.norm(middle - 0.5, axis=1) < 0.15
+    assert np.median(length[inside]) < 1.5 * 0.04
+    _, plain_length = _edges(plain.points, plain.tetrahedra)
+    assert np.median(plain_length) > 4 * np.median(length[inside])
+
+
+def test_the_triangles_are_finer_where_local_sizes_ask(solids):
+    # The box's face x = 0 refined within 0.2 of the point (0, 1, 1.5), to 0.05 against 0.5.
+    path, _ = solids["box"]
+    spot = RefinedSphere(centre=(0.0, 1.0, 1.5), radius=0.2, size=0.05).located({})
+    sizes = spot.local_sizes([0, 0, 0], list(BOX))
+    surface = NetgenProcess().triangulate(path, max_size=0.5, local_sizes=sizes)
+    check_closed_surface(surface.points, surface.triangles)
+    middle, length = _edges(surface.points, surface.triangles)
+    near = np.linalg.norm(middle - [0.0, 1.0, 1.5], axis=1) < 0.2
+    assert near.any()
+    assert np.median(length[near]) < 1.5 * 0.05
+    assert np.median(length[~near]) > 3 * np.median(length[near])
 
 
 def test_the_fill_meshes_the_gap_between_two_surfaces():
@@ -958,3 +1003,131 @@ def test_layers_or_a_grid_on_a_baffle_are_refused():
         ValueError, match=r"mapped patch\(es\) \['walls'\] hold a baffle, or a face"
     ):
         mesher.mesh(model, region, mapped=("walls",))
+
+
+def test_a_refinement_near_the_ls_inner_wall_makes_its_cells_smaller_there_alone(tmp_path):
+    # The L meshed at 0.02 with the fluid within 0.02 of its wall x = 0.2 refined to 0.005,
+    # polyhedral throughout and with an octree core: the dual still closes and fills the L, and
+    # its cells near that wall are far smaller than those far from it.
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, OctreeCore
+
+    model, region = _l_drawing(tmp_path)
+    end = RefinedNear(patches=("end",), distance=0.02, size=0.005)
+    patches = {"end": FacesNear(((0.2, 0.05, 0.05),))}
+    for core in (None, OctreeCore(size=0.04, wall_size=0.02, clearance=0.02)):
+        mesher = CadMesher(max_size=0.02, feature_angle=np.radians(45), core=core,
+                           refinements=(end,))  # fmt: skip
+        mesh = mesher.mesh(model, region, patches)
+        volume = np.asarray(mesh.geometry().cell.volume)
+        assert np.all(volume > 0.0)
+        np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
+        scale = float(np.max(np.asarray(mesh.geometry().face.area)))
+        assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+        x = np.asarray(mesh.geometry().cell.centroid)[:, 0]
+        assert np.median(volume[x > 0.19]) < 0.1 * np.median(volume[x < 0.1])
+
+
+def test_netgen_places_an_edges_points_at_the_fractions_asked_from_the_end_named(tmp_path):
+    # The box's edges are straight, so a point at a fraction of one's length is at that fraction of
+    # the way along it: measured from the end nearer the point named, whichever end Netgen starts.
+    pytest.importorskip("OCP")
+    from aquaflux.io.cad import CadRegion, read_step
+    from aquaflux.meshing import EdgePoints
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Pnt
+    from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+
+    writer = STEPControl_Writer()
+    writer.Transfer(BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 100, 100, 100).Shape(), STEPControl_AsIs)
+    writer.Write(str(tmp_path / "box.step"))
+    model = read_step(tmp_path / "box.step")
+    region = CadRegion((model.names[0],))
+    topology = model.topology(region)
+    brep = model.write_brep(region, tmp_path / "box.brep")
+    fractions = (0.1, 0.15, 0.5, 0.9)
+    for edge in (0, 5):
+        a, b = topology.vertices[topology.edge_vertices[edge]]
+        for start, end in ((a, b), (b, a)):
+            asked = {edge: EdgePoints(fractions, tuple(start))}
+            surface = NetgenProcess().triangulate(brep, max_size=0.03, edge_divisions=asked)
+            offset = surface.points - start
+            along = offset @ (end - start) / np.sum((end - start) ** 2)
+            off = np.linalg.norm(offset - along[:, None] * (end - start), axis=1)
+            on = np.sort(along[(off < 1e-9) & (along > 1e-9) & (along < 1 - 1e-9)])
+            np.testing.assert_allclose(on, fractions, atol=1e-6)
+
+
+def _bent_duct(tmp_path):
+    """A duct 0.2 m wide and 0.1 m high: a 0.3 m leg along ``y``, a quarter bend of centreline
+    radius 0.4 m about ``z``, and another 0.3 m leg along ``-x``, drawn by OCP as two boxes and a
+    revolved rectangle, so its sides are planes and, in the bend, two cylinders and two flat
+    sectors."""
+    pytest.importorskip("OCP")
+    from aquaflux.io.cad import CadRegion, read_step
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace, BRepBuilderAPI_MakePolygon
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeRevol
+    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt
+    from OCP.STEPControl import STEPControl_AsIs, STEPControl_Writer
+
+    inner, outer, height, leg = 300.0, 500.0, 100.0, 300.0  # millimetres
+    rectangle = BRepBuilderAPI_MakePolygon(
+        gp_Pnt(inner, 0, 0), gp_Pnt(outer, 0, 0), gp_Pnt(outer, 0, height),
+        gp_Pnt(inner, 0, height), True,
+    ).Wire()  # fmt: skip
+    face = BRepBuilderAPI_MakeFace(rectangle).Face()
+    axis = gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1))
+    bend = BRepPrimAPI_MakeRevol(face, axis, np.pi / 2).Shape()
+    first = BRepPrimAPI_MakeBox(gp_Pnt(inner, -leg, 0), gp_Pnt(outer, 0, height)).Shape()
+    second = BRepPrimAPI_MakeBox(gp_Pnt(-leg, inner, 0), gp_Pnt(0, outer, height)).Shape()
+    shape = BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(first, bend).Shape(), second).Shape()
+    writer = STEPControl_Writer()
+    writer.Transfer(shape, STEPControl_AsIs)
+    writer.Write(str(tmp_path / "duct.step"))
+    model = read_step(tmp_path / "duct.step")
+    return model, CadRegion((model.names[0],))
+
+
+def test_a_bent_duct_is_found_and_meshed_as_hexahedra_round_its_bend(tmp_path):
+    # Its three segments are found as one duct, its sides gridded, layered, and its core filled
+    # cross-section by cross-section, open at its inlet and outlet: no tetrahedra at all. Every
+    # cell is a hexahedron's six faces but at the layers' top's corners (a triangular prism and a
+    # seven-faced cell beside it, per corner per row); the cross-sections round the bend are radial,
+    # so the faces are as nearly orthogonal as in the straight legs.
+    from aquaflux.mesh import closed_cell_residual, face_non_orthogonality
+    from aquaflux.meshing import CadMesher, FacesNear, PrismLayers, find_ducts
+
+    model, region = _bent_duct(tmp_path)
+    topology = model.topology(region)
+    patches = {"inlet": FacesNear(((0.4, -0.3, 0.05),)), "outlet": FacesNear(((-0.3, 0.4, 0.05),))}
+    layers = PrismLayers(first_height=0.002, growth=1.2, count=3)
+    mesher = CadMesher(max_size=0.03, feature_angle=np.radians(45), layers=layers)
+    mesh = mesher.mesh(model, region, patches, layered=("walls",))
+    geometry = mesh.geometry()
+    volume = np.asarray(geometry.cell.volume)
+    assert np.all(volume > 0.0)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    # The legs exactly, the bend between the polygon through its rows and the true arc.
+    legs, bend = 2 * 0.2 * 0.1 * 0.3, 0.25 * np.pi * (0.5**2 - 0.3**2) * 0.1
+    assert legs + 0.995 * bend < volume.sum() < legs + bend
+    for name in ("inlet", "outlet"):
+        area = np.asarray(geometry.face.area)[np.asarray(mesh.face_patches.indices(name))].sum()
+        assert area == pytest.approx(0.2 * 0.1, rel=1e-12)
+    owner, neighbour = np.asarray(mesh.face_cells.owner), np.asarray(mesh.face_cells.neighbour)
+    faces = np.bincount(owner, minlength=mesh.n_cells)
+    faces += np.bincount(neighbour[neighbour >= 0], minlength=mesh.n_cells)
+    assert set(np.unique(faces).tolist()) == {5, 6, 7}
+    assert np.count_nonzero(faces == 5) == np.count_nonzero(faces == 7)
+    assert np.mean(faces == 6) > 0.9
+    assert float(np.max(np.asarray(face_non_orthogonality(mesh)))) < 20.0
+    # It was one duct of three segments: a leg, the bend, the other leg.
+    surface = NetgenProcess().triangulate(
+        model.write_brep(region, tmp_path / "duct.brep"), max_size=0.03
+    )
+    ducts, _ = find_ducts(
+        topology, surface.points, surface.triangles, surface.face, np.arange(topology.n_faces),
+        np.radians(45), edge_counts=False,
+    )  # fmt: skip
+    assert [duct.sides.shape for duct in ducts] == [(3, 4)]
