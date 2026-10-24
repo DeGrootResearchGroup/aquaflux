@@ -28,7 +28,8 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .entry_map import DeviceEntryMap, EntryMap, SparsePattern
+from .entry_map import DeviceEntryMap, EntryMap, SparsePattern, ValueMap
+from .kronecker_pattern import KroneckerGalerkin, KroneckerPattern, nodal_cell_transfer
 from .padded_rows import _PaddedLayout, _PaddedRowOperator
 
 #: Power-iteration steps behind a level's spectral estimate.
@@ -212,7 +213,7 @@ class _LevelPlan(eqx.Module):
         Each cell's dense block, flat ``(n_cells, b, b)``; ``None`` on a scalar level.
     dense : DeviceEntryMap or None
         The whole operator as a dense ``(n, n)`` matrix, flat, on the coarsest level only.
-    galerkin : DeviceEntryMap or None
+    galerkin : ValueMap or None
         The map to the next level's values (``R A P`` for the level's frozen transfers); ``None`` on the
         coarsest level.
     embed : DeviceEntryMap or None
@@ -234,7 +235,7 @@ class _LevelPlan(eqx.Module):
     diagonal: DeviceEntryMap
     cells: DeviceEntryMap | None
     dense: DeviceEntryMap | None
-    galerkin: DeviceEntryMap | None
+    galerkin: ValueMap | None
     embed: DeviceEntryMap | None
     constant: jnp.ndarray | None
     start: jnp.ndarray
@@ -433,8 +434,7 @@ def level_plan(
         dense = EntryMap.gathering(pattern, lambda m: m.toarray()).on_device()
     else:
         transfer = sp.csr_matrix(prolongation)
-        product = EntryMap.product(sp.csr_matrix(transfer.T), pattern, transfer)
-        galerkin, landing = product.on_device(), product.landing
+        galerkin, landing = _galerkin(pattern, block_size, transfer)
         n_coarse = transfer.shape[1]
         prolongation_arrays = (
             jnp.asarray(prolongation.row),
@@ -456,6 +456,24 @@ def level_plan(
         block_size=block_size,
     )
     return plan, landing
+
+
+def _galerkin(
+    pattern: SparsePattern, block_size: int, transfer: sp.csr_matrix
+) -> tuple[ValueMap, SparsePattern]:
+    """The map ``A -> Pᵀ A P`` onto the product's structural pattern, and that pattern.
+
+    At cell level (:class:`~aquaflux.precondition.kronecker_pattern.KroneckerGalerkin`) when the level
+    stores one cell pattern over every field pair and ``P`` carries each field on its own coarse unknown
+    through one cell transfer -- a nodal aggregation's tentative prolongation -- else over every term.
+    """
+    kronecker = KroneckerPattern.of_dof(pattern, block_size, block_size)
+    cell_transfer = None if kronecker is None else nodal_cell_transfer(transfer, block_size)
+    if cell_transfer is not None:
+        galerkin, coarse = KroneckerGalerkin.of(kronecker, cell_transfer)
+        return galerkin, coarse.dof_pattern()
+    product = EntryMap.product(sp.csr_matrix(transfer.T), pattern, transfer)
+    return product.on_device(), product.landing
 
 
 def landing_with_diagonal(landing: SparsePattern, slots: np.ndarray) -> _Landing:

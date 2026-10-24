@@ -18,11 +18,21 @@ order a degree-of-freedom pattern gives them.
 
 from __future__ import annotations
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
 import numpy as np
+import scipy.sparse as sp
 
-from .entry_map import SparsePattern
+from .entry_map import EntryMap, SparsePattern, ValueMap
 
-__all__ = ["KroneckerPattern", "entry_position"]
+__all__ = [
+    "KroneckerGalerkin",
+    "KroneckerGather",
+    "KroneckerPattern",
+    "entry_position",
+    "nodal_cell_transfer",
+]
 
 
 def entry_position(indptr, row, entry, row_field, column_field, column_fields: int, cell_nnz: int):
@@ -232,3 +242,242 @@ class KroneckerPattern:
             self.column_fields,
             self.cells.nnz,
         ).ravel()
+
+
+def nodal_cell_transfer(transfer: sp.csr_matrix, fields: int) -> sp.csr_matrix | None:
+    """The cell transfer ``T`` of a field-major transfer that is ``I_fields ⊗ T``, else ``None``.
+
+    A nodal aggregation's prolongation carries each field of a cell on that field's own coarse unknown,
+    so it is the identity over the fields times one cell-to-aggregate transfer; that transfer is read
+    off the first field's rows and accepted only if repeating it over the fields gives ``transfer`` back,
+    entry for entry.
+    """
+    rows, columns = transfer.shape
+    if fields < 1 or rows % fields or columns % fields:
+        return None
+    transfer = sp.csr_matrix(transfer)
+    transfer.sort_indices()
+    n_rows, n_columns = rows // fields, columns // fields
+    cell = sp.csr_matrix(transfer[:n_rows, :n_columns])
+    cell.sort_indices()
+    expected = sp.csr_matrix(sp.kron(sp.identity(fields, format="csr"), cell, format="csr"))
+    expected.sort_indices()
+    same = (
+        expected.nnz == transfer.nnz
+        and np.array_equal(expected.indptr, transfer.indptr)
+        and np.array_equal(expected.indices, transfer.indices)
+        and np.array_equal(expected.data, transfer.data)
+    )
+    return cell if same else None
+
+
+class KroneckerGalerkin(ValueMap):
+    """``Pᵀ A P`` for ``P = I ⊗ T`` and ``A`` a cell pattern over full field-pair blocks, at cell level.
+
+    The product of a cell pattern over every field pair is the coarse cell pattern over every field
+    pair, and each field pair's coarse entry sums the same fine cell entries, with the same weights, as
+    every other pair's: the map ``Tᵀ C T`` over the cell pattern says which. So the map holds that cell
+    map's terms -- source cell entry, its row, target coarse cell entry, sorted by target, and their
+    weights where not all one -- and places each field pair's terms by
+    :func:`entry_position` on both sides. Each target sums its terms in source order, as the
+    degree-of-freedom map's segment sum does.
+
+    Attributes
+    ----------
+    source, source_rows, target : jnp.ndarray
+        Each term's fine cell entry, its fine cell row, and its coarse cell entry; shape ``(n_terms,)``,
+        sorted by ``target``.
+    weight : jnp.ndarray or None
+        Each term's factor; ``None`` when every factor is one.
+    fine_indptr, coarse_indptr : jnp.ndarray
+        The two cell patterns' row pointers.
+    coarse_rows : jnp.ndarray
+        The coarse cell row of each coarse cell entry, shape ``(coarse_nnz,)``.
+    fields : int
+        Fields per cell, on both levels. Static.
+    fine_nnz, coarse_nnz : int
+        Stored entries of the two cell patterns. Static.
+    """
+
+    source: jnp.ndarray
+    source_rows: jnp.ndarray
+    target: jnp.ndarray
+    weight: jnp.ndarray | None
+    fine_indptr: jnp.ndarray
+    coarse_indptr: jnp.ndarray
+    coarse_rows: jnp.ndarray
+    fields: int = eqx.field(static=True)
+    fine_nnz: int = eqx.field(static=True)
+    coarse_nnz: int = eqx.field(static=True)
+
+    @classmethod
+    def of(
+        cls, pattern: KroneckerPattern, transfer: sp.csr_matrix
+    ) -> tuple[KroneckerGalerkin, KroneckerPattern]:
+        """The map for ``pattern`` (square, ``fields x fields``) and the cell transfer ``T``.
+
+        Returns
+        -------
+        galerkin : KroneckerGalerkin
+            The map.
+        coarse : KroneckerPattern
+            The coarse operator's pattern: the cell product's structural pattern over every field pair.
+        """
+        cells = EntryMap.product(sp.csr_matrix(transfer.T), pattern.cells, transfer)
+        source, target = cells.source, cells.target
+        order = np.argsort(target, kind="stable")
+        source, target = source[order], target[order]
+        rows = pattern.cell_rows()
+        coarse = KroneckerPattern(cells.landing, pattern.row_fields, pattern.column_fields)
+        index = np.int32
+        return (
+            cls(
+                source=jnp.asarray(source.astype(index)),
+                source_rows=jnp.asarray(rows[source].astype(index)),
+                target=jnp.asarray(target.astype(index)),
+                weight=None if cells.weight is None else jnp.asarray(cells.weight[order]),
+                fine_indptr=jnp.asarray(pattern.cells.indptr.astype(index)),
+                coarse_indptr=jnp.asarray(coarse.cells.indptr.astype(index)),
+                coarse_rows=jnp.asarray(coarse.cell_rows().astype(index)),
+                fields=pattern.row_fields,
+                fine_nnz=pattern.cells.nnz,
+                coarse_nnz=coarse.cells.nnz,
+            ),
+            coarse,
+        )
+
+    def apply(self, values: jnp.ndarray) -> jnp.ndarray:
+        """The coarse operator's stored values from the fine operator's, both in their CSR order."""
+        b = self.fields
+        pair = jnp.arange(b * b, dtype=jnp.int32)[:, None]
+        row_field, column_field = pair // b, pair % b
+        fine = entry_position(
+            self.fine_indptr,
+            self.source_rows[None],
+            self.source[None],
+            row_field,
+            column_field,
+            b,
+            self.fine_nnz,
+        )
+        terms = values[fine]
+        if self.weight is not None:
+            terms = terms * self.weight.astype(values.dtype)[None]
+        segment = self.target[None] + pair * self.coarse_nnz
+        summed = jax.ops.segment_sum(
+            terms.ravel(),
+            segment.ravel(),
+            num_segments=b * b * self.coarse_nnz,
+            indices_are_sorted=True,
+        )
+        entry = jnp.arange(self.coarse_nnz, dtype=jnp.int32)[None]
+        coarse = entry_position(
+            self.coarse_indptr,
+            self.coarse_rows[entry],
+            entry,
+            row_field,
+            column_field,
+            b,
+            self.coarse_nnz,
+        )
+        return (
+            jnp.zeros(b * b * self.coarse_nnz, dtype=values.dtype)
+            .at[coarse.ravel()]
+            .set(summed, unique_indices=True)
+        )
+
+
+class KroneckerGather(ValueMap):
+    """A block of field pairs of a cell pattern over full field-pair blocks, read into its own CSR order.
+
+    The output stores the cell pattern over the row fields ``[row_start, row_start + rows)`` and the
+    column fields ``[column_start, column_start + columns)`` of the operand, each entry the operand's
+    entry for the same field pair and cell entry. The operand is the pattern's stored values in CSR order
+    or, with ``slot_width``, the same operator's padded-row slots of that width (the slot of an entry is
+    its place in its row), flattened. A placement only, so exact in any floating-point type.
+
+    Attributes
+    ----------
+    indptr, rows : jnp.ndarray
+        The cell pattern's row pointers and each cell entry's row.
+    fields : int
+        Column fields of the operand. Static.
+    row_start, rows_out, column_start, columns_out : int
+        The block's field ranges. Static.
+    cell_nnz : int
+        Stored entries of the cell pattern. Static.
+    slot_width : int
+        The operand's padded-row width, or ``0`` for an operand in CSR order. Static.
+    """
+
+    indptr: jnp.ndarray
+    rows: jnp.ndarray
+    fields: int = eqx.field(static=True)
+    row_start: int = eqx.field(static=True)
+    rows_out: int = eqx.field(static=True)
+    column_start: int = eqx.field(static=True)
+    columns_out: int = eqx.field(static=True)
+    cell_nnz: int = eqx.field(static=True)
+    slot_width: int = eqx.field(static=True)
+
+    @classmethod
+    def of(
+        cls,
+        pattern: KroneckerPattern,
+        rows: tuple[int, int],
+        columns: tuple[int, int],
+        *,
+        slot_width: int = 0,
+    ) -> tuple[KroneckerGather, SparsePattern]:
+        """The gather of the field block ``rows x columns`` (half-open ranges), and its pattern."""
+        index = np.int32
+        block = KroneckerPattern(pattern.cells, rows[1] - rows[0], columns[1] - columns[0])
+        return (
+            cls(
+                indptr=jnp.asarray(pattern.cells.indptr.astype(index)),
+                rows=jnp.asarray(pattern.cell_rows().astype(index)),
+                fields=pattern.column_fields,
+                row_start=rows[0],
+                rows_out=rows[1] - rows[0],
+                column_start=columns[0],
+                columns_out=columns[1] - columns[0],
+                cell_nnz=pattern.cells.nnz,
+                slot_width=int(slot_width),
+            ),
+            block.dof_pattern(),
+        )
+
+    def apply(self, values: jnp.ndarray) -> jnp.ndarray:
+        """The block's stored values, in its CSR order, from the operand's."""
+        row_field = jnp.arange(self.rows_out, dtype=jnp.int32)[:, None, None]
+        column_field = jnp.arange(self.columns_out, dtype=jnp.int32)[None, :, None]
+        entry = jnp.arange(self.cell_nnz, dtype=jnp.int32)[None, None, :]
+        row = self.rows[entry]
+        if self.slot_width:
+            start = self.indptr[row]
+            length = self.indptr[row + 1] - start
+            n_cells = self.indptr.shape[0] - 1
+            source = (
+                ((row_field + self.row_start) * n_cells + row) * self.slot_width
+                + (column_field + self.column_start) * length
+                + (entry - start)
+            )
+        else:
+            source = entry_position(
+                self.indptr,
+                row,
+                entry,
+                row_field + self.row_start,
+                column_field + self.column_start,
+                self.fields,
+                self.cell_nnz,
+            )
+        target = entry_position(
+            self.indptr, row, entry, row_field, column_field, self.columns_out, self.cell_nnz
+        )
+        out = self.rows_out * self.columns_out * self.cell_nnz
+        return (
+            jnp.zeros(out, dtype=values.dtype)
+            .at[target.ravel()]
+            .set(values[source.ravel()], unique_indices=True)
+        )

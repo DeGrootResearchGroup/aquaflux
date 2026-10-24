@@ -210,6 +210,15 @@ path.
       diagonals) changes form and so retraces; a frozen refit keeps its layout and cannot.
     - ⚠️ `SimpleSmoothedInverse._simple_plans` keys its plans on the identity of every leaf of each level
       operator's `rows`, never on `columns` (a computed property, new on every read).
+  - **The Galerkin map of a nodal level is held at cell level (2026-10-24, the third stage of §14d).**
+    `level_fit._galerkin` takes `kronecker_pattern.KroneckerGalerkin` when the level stores one cell
+    pattern over every field pair and `nodal_cell_transfer` finds `P = I ⊗ T` (a nodal aggregation's
+    tentative prolongation; both shipped blocks run `prolongation_smoothing: "none"`): it builds the
+    cell product `Tᵀ C T` once, holds its terms (source, source row, target; sorted by target) and
+    places every field pair by `entry_position` on both sides, summing each target's terms in source
+    order as the dof map's segment sum does. Pinned bit for bit against `EntryMap.product`'s map, landing
+    and values, by `test_the_cell_level_galerkin_map_is_the_degree_of_freedom_map_exactly`; any other
+    level keeps `EntryMap.product`. `_LevelPlan.galerkin` is a `ValueMap`.
   - **The transpose is stored (`t_columns` / `t_values`) and applied as a gather** through
     `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward product, not a
     scatter-add over every slot. Costs: a second copy of the storage; its own per-level budget
@@ -270,7 +279,8 @@ path.
   - **A frozen coarsening's level values are fitted on the device, by one function for the first build
     and every refit (`level_fit.py`, 2026-10-22).** The host decides structure (aggregates, prolongations,
     every level's pattern) and holds it as a `CoarseningPlan` of `_LevelPlan`s, each carrying device entry
-    maps: the padded-row packing (`_PaddedLayout`), the diagonal and cell-block gathers, the Galerkin map
+    maps (`entry_map.ValueMap`, a `DeviceEntryMap` or a cell-level map): the padded-row packing
+    (`_PaddedLayout`), the diagonal and cell-block gathers, the Galerkin map
     `Pᵀ A P` to the next level's values, the coarsest level's dense gather, and the start vector of the
     spectral estimate. `fit_levels(plan, values, scale)` (one `eqx.filter_jit`) derives from the fine
     operator's stored values every level's operator, diagonal, cell-block inverse (`invert_cell_blocks`,

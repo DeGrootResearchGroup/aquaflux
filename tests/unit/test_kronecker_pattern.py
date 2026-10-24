@@ -91,3 +91,86 @@ def test_of_coordinates_sorts_the_coordinates_into_the_cell_pattern_and_says_how
     assert np.array_equal(pattern.cells.indices, [0, 2, 1, 0, 2])
     assert np.array_equal(rows[order], [0, 0, 1, 2, 2])
     assert np.array_equal(columns[order], pattern.cells.indices)
+
+
+@pytest.mark.parametrize(("fields", "weighted"), [(1, False), (2, False), (4, False), (3, True)])
+def test_the_cell_level_galerkin_map_is_the_degree_of_freedom_map_exactly(fields, weighted):
+    """``Pᵀ A P`` at cell level: the landing the term-by-term map lands on, and its values bit for bit.
+
+    The product of a cell pattern over every field pair through ``I ⊗ T`` sums, for each field pair, the
+    same cell entries in the same order as the degree-of-freedom map's segment sum does, so the two
+    agree exactly. A transfer with a fine cell in no aggregate (an empty row, as a dropped singleton
+    gives), unit and non-unit weights.
+    """
+    import jax.numpy as jnp
+    from aquaflux.precondition.entry_map import EntryMap
+    from aquaflux.precondition.kronecker_pattern import KroneckerGalerkin, nodal_cell_transfer
+
+    n, n_coarse = 12, 4
+    cells = _cells((n, n), 0.3, 7, diagonal=True)
+    aggregate = np.arange(n) % n_coarse
+    kept = np.arange(n) != 5  # cell 5 restricts nowhere
+    weights = np.random.default_rng(1).uniform(0.5, 2.0, n) if weighted else np.ones(n)
+    cell_transfer = sp.csr_matrix(
+        (weights[kept], (np.flatnonzero(kept), aggregate[kept])), shape=(n, n_coarse)
+    )
+    transfer = sp.csr_matrix(sp.kron(sp.identity(fields), cell_transfer))
+    pattern = KroneckerPattern(cells, fields, fields)
+    dof = pattern.dof_pattern()
+
+    assert nodal_cell_transfer(transfer, fields) is not None
+    galerkin, coarse = KroneckerGalerkin.of(pattern, nodal_cell_transfer(transfer, fields))
+    product = EntryMap.product(sp.csr_matrix(transfer.T), dof, transfer)
+    landing = coarse.dof_pattern()
+    assert np.array_equal(landing.indptr, product.landing.indptr)
+    assert np.array_equal(landing.indices, product.landing.indices)
+
+    values = jnp.asarray(np.random.default_rng(2).standard_normal(dof.nnz))
+    got = np.asarray(galerkin.apply(values))
+    want = np.asarray(product.on_device().apply(values))
+    assert np.array_equal(got, want)
+    reference = (transfer.T @ dof.csr(np.asarray(values)) @ transfer).toarray()
+    assert np.allclose(landing.csr(got).toarray(), reference, rtol=1e-12, atol=1e-12)
+
+
+def test_a_transfer_that_mixes_fields_is_no_nodal_cell_transfer():
+    from aquaflux.precondition.kronecker_pattern import nodal_cell_transfer
+
+    cell = sp.csr_matrix(np.array([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]))
+    transfer = sp.kron(sp.identity(2), cell, format="lil")
+    transfer[0, 3] = 1.0  # field 0 of cell 0 also interpolates field 1's coarse unknown
+    assert nodal_cell_transfer(sp.csr_matrix(transfer), 2) is None
+    assert nodal_cell_transfer(sp.kron(sp.identity(2), cell, format="csr"), 2) is not None
+
+
+@pytest.mark.parametrize("from_slots", [False, True])
+@pytest.mark.parametrize(
+    ("rows", "columns"), [((0, 3), (0, 3)), ((0, 3), (3, 4)), ((3, 4), (0, 3)), ((1, 4), (2, 4))]
+)
+def test_a_field_block_gathered_at_cell_level_is_the_sliced_block(rows, columns, from_slots):
+    """A block of field pairs read at cell level: the CSR slice of the dof pattern, its values exact.
+
+    From the stored values in CSR order, and from the operator's padded-row slots padded past the
+    widest row (as a budgeted level is), against slicing the assembled matrix.
+    """
+    import jax.numpy as jnp
+    from aquaflux.precondition.kronecker_pattern import KroneckerGather
+    from aquaflux.precondition.padded_rows import _padded_rows
+
+    cells = _cells((10, 10), 0.3, 3, diagonal=True)
+    pattern = KroneckerPattern(cells, 4, 4)
+    dof = pattern.dof_pattern()
+    values = np.random.default_rng(8).standard_normal(dof.nnz)
+    matrix = dof.csr(values)
+    width = 4 * int(np.diff(cells.indptr).max()) + 3
+    gather, block = KroneckerGather.of(
+        pattern, rows, columns, slot_width=width if from_slots else 0
+    )
+    operand = _padded_rows(matrix.copy(), width, "row")[1].ravel() if from_slots else matrix.data
+    got = np.asarray(gather.apply(jnp.asarray(operand)))
+
+    n = cells.shape[0]
+    want = matrix[rows[0] * n : rows[1] * n, columns[0] * n : columns[1] * n].sorted_indices()
+    assert np.array_equal(block.indptr, want.indptr)
+    assert np.array_equal(block.indices, want.indices)
+    assert np.array_equal(got, want.data)
