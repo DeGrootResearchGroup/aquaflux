@@ -786,6 +786,12 @@ stored transposes are about half of every operator. Freed memory glibc keeps aft
 first call (0.75 GiB) is in the baseline the peak sits on, so a `malloc_trim(0)` before each re-fit is
 an unmeasured, cheap arm on bfs3d (on pitzDaily it moved the peak 0.03 GiB).
 
+**The non-array residue is named (2026-10-24, same log, "What the resident memory holds beyond live arrays,
+on two meshes")**: it is JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 on pitzDaily (1242
+against 1072 executables), so it grows with the case, not per executable; whether with cells or with the
+3D stencil the two meshes do not separate. Per cell it would be ~30 GB at 300k cells and close the target
+alone; the HLO ranking (programs carrying arrays as constants) is the reading that decides.
+
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
 **What.** `jit(...).lower(...).compile().memory_analysis()` on bfs3d's march step and on the probe's batched
