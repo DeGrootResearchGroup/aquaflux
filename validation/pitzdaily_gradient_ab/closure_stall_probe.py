@@ -193,8 +193,6 @@ def capture() -> None:
         log_file,
         fields=coupled_fields(coupled),
         detail=("inner", "fields"),
-        rtol=compare.RTOL,
-        atol=compare.ATOL,
     )
     session = open_session(
         run_ab.arm_preconditioner(run_ab.REACH), coupled, observer=logger.on_refresh

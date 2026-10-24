@@ -20,6 +20,9 @@ from aquaflux.meshing import (
     FacePlanarizer,
     FacesNear,
     FacesOn,
+    OctreeCore,
+    RefinedBox,
+    RefinedNear,
     RegionFaces,
     SurfaceTriangulation,
     TetrahedralMesh,
@@ -29,6 +32,10 @@ from aquaflux.meshing import (
 from tests.support.meshes import tetrahedral_grid_3d
 
 REGION = CadRegion(("cube",))
+
+#: The cube's four walls round any axis are a duct's sides, which the mesher would mesh as a
+#: structured duct; these tests are of the tetrahedral fill's dual, so they name no duct.
+NO_DUCTS = ()
 
 
 def _wall(points: np.ndarray) -> np.ndarray:
@@ -103,7 +110,8 @@ class _Cube:
 
 
 class _Netgen:
-    """Kuhn tetrahedra of the cube, as a triangulation and a fill; counts its calls.
+    """Kuhn tetrahedra of the cube, as a triangulation and a fill; counts its calls and keeps
+    the options each was given (``asked``: the operation's name and its options).
 
     ``n`` cubes a side; ``perturb`` moves the interior points (the boundary stays the cube's).
     """
@@ -123,10 +131,12 @@ class _Netgen:
         self.tetrahedra = np.array([sorted(c) for c in corners])
         self.triangles = nodes[neighbour < 0]
         self.calls = 0
+        self.asked = []
 
     def triangulate(self, shape, **options):
         # As Netgen does: the surface's own points only, every one used by a triangle.
         self.calls += 1
+        self.asked.append(("triangulate", options))
         used, triangles = np.unique(self.triangles, return_inverse=True)
         triangles = triangles.reshape(-1, 3)
         face = _wall(self.points[used][triangles].mean(axis=1))
@@ -135,6 +145,7 @@ class _Netgen:
     def fill(self, points, triangles, **options):
         # As Netgen does: the given points first, in their order, then the points it adds.
         self.calls += 1
+        self.asked.append(("fill", options))
         points = np.asarray(points)
         given = {tuple(p): i for i, p in enumerate(points.round(12).tolist())}
         number = np.empty(len(self.points), dtype=np.int64)
@@ -164,6 +175,7 @@ def test_the_faces_each_selection_chooses_make_its_patch_and_the_rest_make_other
         REGION,
         {"lid": FacesNear(((0.5, 0.5, 1.0),)), "floor": FacesOn(("floor",))},
         others="sides",
+        ducts=NO_DUCTS,
     )
     assert _areas(mesh) == pytest.approx({"lid": 1.0, "floor": 1.0, "sides": 4.0}, rel=1e-12)
     assert float(np.asarray(mesh.geometry().cell.volume).sum()) == pytest.approx(1.0, rel=1e-12)
@@ -177,7 +189,7 @@ def test_the_cads_sharp_edges_are_kept_whatever_the_triangles_fold_by():
     # only the CAD's say-so keeps the cube's edges, and with them its corners and its volume.
     def volume(fold):
         mesher = CadMesher(max_size=0.5, feature_angle=math.radians(100), netgen=_Netgen())
-        mesh = mesher.mesh(_Cube(fold=fold), REGION)
+        mesh = mesher.mesh(_Cube(fold=fold), REGION, ducts=NO_DUCTS)
         return float(np.asarray(mesh.geometry().cell.volume).sum())
 
     assert volume(math.radians(120)) == pytest.approx(1.0, rel=1e-12)
@@ -188,7 +200,7 @@ def test_each_boundary_face_centroid_is_moved_onto_the_face_its_triangle_lies_on
     # Each of the drawing's faces stands 0.01 outside the cube's. The lid's dual vertices at the
     # centroids of its eight triangles move onto the lid's own plane; nothing else reaches it.
     mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
-    mesh = mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION)
+    mesh = mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION, ducts=NO_DUCTS)
     z = np.asarray(mesh.node_coords)[:, 2]
     assert np.count_nonzero(np.isclose(z, 1.01)) == 8
     assert float(z.max()) == pytest.approx(1.01)
@@ -200,7 +212,8 @@ def test_a_vertex_on_an_edge_drawn_in_two_pieces_lands_on_the_nearer_piece():
     # there (the mesh unchanged), not be carried to the halves' shared end by the upper half.
     def coordinates(split):
         mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
-        return np.asarray(mesher.mesh(_Cube(fold=math.pi / 2, split=split), REGION).node_coords)
+        cube = _Cube(fold=math.pi / 2, split=split)
+        return np.asarray(mesher.mesh(cube, REGION, ducts=NO_DUCTS).node_coords)
 
     np.testing.assert_allclose(coordinates(split=True), coordinates(split=False), atol=1e-14)
 
@@ -321,7 +334,7 @@ def test_a_planarizer_flattens_the_dual_moving_only_its_cell_centroids():
             max_size=0.5, feature_angle=math.radians(45), planarizer=planarizer,
             netgen=_Netgen(n=3, perturb=0.2),
         )  # fmt: skip
-        return mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION)
+        return mesher.mesh(_Cube(fold=math.pi / 2, push=0.01), REGION, ducts=NO_DUCTS)
 
     plain, flat = mesh(None), mesh(FacePlanarizer())
     before, after = np.asarray(plain.node_coords), np.asarray(flat.node_coords)
@@ -399,7 +412,7 @@ def test_each_stage_is_told_as_it_starts_and_only_the_stages_a_mesh_needs():
     told = []
     mesher = CadMesher(max_size=0.5, feature_angle=math.radians(45), netgen=_Netgen())
     mesher.mesh(_Cube(fold=math.pi / 2), REGION, {"lid": FacesNear(((0.5, 0.5, 1.0),))},
-                on_stage=told.append)  # fmt: skip
+                ducts=NO_DUCTS, on_stage=told.append)  # fmt: skip
     # No layers, no mapped walls, no pipes (no face is a cylinder), no core, no planarizer.
     assert told == [
         "triangulating the surface",
@@ -430,3 +443,84 @@ def test_a_face_is_sampled_on_itself_and_a_face_with_no_triangle_is_refused():
     # Each face's first triangle's centroid, moved onto that face (``push`` out of the cube).
     np.testing.assert_allclose(sampled.samples[5], [0.4, 0.4, 1.0], atol=1e-12)
     np.testing.assert_allclose(sampled.samples[0], [0.0, 0.4, 0.4], atol=1e-12)
+
+
+def test_refinements_reach_netgens_second_triangulation_and_its_fill_and_their_sizes_hold():
+    # A box in the cube's corner and the fluid near its lid: Netgen is asked to triangulate again
+    # and to fill with both parts' sizes at points covering each, and with nothing else changed.
+    netgen = _Netgen()
+    told = []
+    corner = RefinedBox(lower=(0.0, 0.0, 0.0), upper=(0.3, 0.3, 0.3), size=0.1)
+    lid = RefinedNear(patches=("lid",), distance=0.1, size=0.05)
+    CadMesher(max_size=0.5, feature_angle=math.radians(45), refinements=(corner, lid), netgen=netgen).mesh(
+        _Cube(fold=math.pi / 2), REGION, {"lid": FacesNear(((0.5, 0.5, 1.0),))}, ducts=NO_DUCTS,
+        on_stage=told.append,
+    )  # fmt: skip
+    assert "triangulating again, finer in the refinement regions" in told
+    operations = [operation for operation, _ in netgen.asked]
+    assert operations == ["triangulate", "triangulate", "fill"]
+    assert "local_sizes" not in netgen.asked[0][1]
+    second, fill = netgen.asked[1][1]["local_sizes"], netgen.asked[2][1]["local_sizes"]
+    np.testing.assert_array_equal(second.points, fill.points)
+    in_corner = np.all(second.points <= 0.3 + 0.05 * math.sqrt(3), axis=1)
+    near_lid = second.points[:, 2] >= 0.9 - 0.05 - 0.025 - 1e-9
+    # Every point belongs to one part or the other, at that part's size.
+    assert np.all(in_corner | near_lid)
+    np.testing.assert_allclose(second.sizes[second.sizes > 0.07], 0.1)
+    assert np.all(near_lid[second.sizes < 0.07])
+    assert {0.1, 0.05} == set(second.sizes.round(12).tolist())
+
+
+def test_a_refinement_near_a_patch_that_is_not_one_is_refused_before_netgen_runs():
+    netgen = _Netgen()
+    mesher = CadMesher(
+        max_size=0.5, feature_angle=1.0, netgen=netgen,
+        refinements=(RefinedNear(patches=("inlet",), distance=0.1, size=0.05),),
+    )  # fmt: skip
+    with pytest.raises(ValueError, match=r"refinements' patch\(es\) \['inlet'\] are not patches"):
+        mesher.mesh(_Cube(fold=math.pi / 2), REGION, ducts=NO_DUCTS)
+    assert netgen.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("size", "message"), [(0.5, "no finer than the mesher's max_size"), (0.01, "finer than")]
+)
+def test_a_refinement_no_finer_than_the_mesh_or_finer_than_its_least_size_is_refused(size, message):
+    with pytest.raises(ValueError, match=message):
+        CadMesher(
+            max_size=0.5, min_size=0.02, feature_angle=1.0,
+            refinements=(RefinedBox(lower=(0, 0, 0), upper=(1, 1, 1), size=size),),
+        )  # fmt: skip
+
+
+def test_a_refinement_reaching_no_part_of_the_region_is_refused():
+    away = RefinedBox(lower=(5.0, 5.0, 5.0), upper=(6.0, 6.0, 6.0), size=0.1)
+    mesher = CadMesher(max_size=0.5, feature_angle=1.0, refinements=(away,), netgen=_Netgen())
+    with pytest.raises(ValueError, match="reaches no part of the region's box"):
+        mesher.mesh(_Cube(fold=math.pi / 2), REGION, ducts=NO_DUCTS)
+
+
+def test_the_refinements_reach_the_hex_core():
+    # In a box of edge 2, cubes of 0.5 halved to 0.25 within a clearance and a wall cube of the
+    # walls -- which every cube is -- so the eight middle cubes are 0.25, and 0.125 where a box at
+    # the centre asks.
+    from tests.support.meshes import box_surface
+
+    points, surface = box_surface(0.0, 1.0, 8, into_box=False)
+    points = 2.0 * points
+    middle = RefinedBox(lower=(0.95, 0.95, 0.95), upper=(1.05, 1.05, 1.05), size=0.125)
+    mesher = CadMesher(
+        max_size=0.25, feature_angle=1.0, refinements=(middle,),
+        core=OctreeCore(size=0.5, wall_size=0.25, clearance=0.3),
+    )  # fmt: skip
+
+    def middle_edges(refinements):
+        corners, _, cells = mesher._cored(points, surface, refinements)
+        cubes = corners[cells.hexahedra]
+        centre = cubes.mean(axis=1)
+        near = np.linalg.norm(centre - 1.0, axis=1) < 0.25
+        assert near.any()
+        return np.linalg.norm(cubes[near, 1] - cubes[near, 0], axis=1)
+
+    np.testing.assert_allclose(middle_edges(()), 0.25)
+    np.testing.assert_allclose(middle_edges([middle.located({})]), 0.125)

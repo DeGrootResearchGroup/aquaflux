@@ -296,8 +296,6 @@ def solve_arm(gradient_scheme, log_path, *, reach=None, points=None, max_steps=N
         log_file,
         fields=coupled_fields(coupled),
         detail=("inner", "fields", "pc"),
-        rtol=compare.RTOL,
-        atol=compare.ATOL,
     )
     logger.note("[configuration]")
     for name, value in (

@@ -12,7 +12,13 @@ free of case specifics while the log still carries the quantity a study is actua
 
 It reports the **reference norm and the stopping target** alongside the residual. A log that prints
 only the residual leaves the reader unable to tell how close the solve is to stopping -- the tolerance
-test is ``‖R‖ <= atol + rtol·‖R₀‖``, so without ``‖R₀‖`` the target is invisible.
+test is ``‖R‖ <= atol + rtol·‖R₀‖``, so without ``‖R₀‖`` the target is invisible. Both are read off the
+step's report, so the log states the tolerance the march tested rather than a copy it was handed.
+
+A march that walks a homotopy (a viscosity ramp, say) reports where each step ran: the homotopy
+describes each station it enters through :meth:`MarchLogger.on_station`, the description rides beneath
+the step that entered it, and the step that first runs the target problem -- the first that may stop the
+march -- is announced on a line of its own.
 
 Solve cost is reported the same way. An implicit timestep spreads its linear-solve count over several
 inner Newton iterations, so a single summed count conflates *how many* solves the step needed with how
@@ -191,9 +197,6 @@ class MarchLogger:
         connects the instrumentation once and switches verbosity with this one argument rather than by
         rewiring. An unknown name raises: a silently-ignored typo would mean losing the diagnostic you
         believed you had enabled, which is worse than not asking for it.
-    rtol, atol : float, optional
-        The stopping tolerances the march is running under, used to report the target
-        ``atol + rtol·‖R₀‖`` next to the residual. Omit both to suppress the target column.
     clock : callable, optional
         ``() -> float`` seconds source for the elapsed-time column; injected so a test can supply a
         deterministic clock. Defaults to :func:`time.monotonic`.
@@ -205,7 +208,7 @@ class MarchLogger:
 
     Examples
     --------
-    >>> log = MarchLogger(metrics=lambda s: {"xr/h": reattachment(s)}, rtol=1e-3)  # doctest: +SKIP
+    >>> log = MarchLogger(metrics=lambda s: {"xr/h": reattachment(s)})  # doctest: +SKIP
     >>> solve_coupled(coupled, on_checkpoint=log.on_checkpoint)  # doctest: +SKIP
     """
 
@@ -257,8 +260,6 @@ class MarchLogger:
         fields: Callable[[Any], Mapping[str, Any]] | None = None,
         residuals: Callable[[Any], Mapping[str, float]] | None = None,
         detail: Collection[str] = (),
-        rtol: float | None = None,
-        atol: float | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
         unknown = sorted(set(detail) - self.DETAIL)
@@ -288,8 +289,10 @@ class MarchLogger:
         # only the last both under-counts them and under-reports their total cost, which is the one
         # number a reader needs to judge whether refreshing is paying for itself.
         self._refreshes: list[RefreshTiming] = []
-        self._rtol = rtol
-        self._atol = atol
+        # The station the homotopy said the next step enters, until that step's row is written.
+        self._station: str | None = None
+        # Whether the last logged step ran the target problem; `None` before the first step.
+        self._arrived: bool | None = None
         self._clock = time.monotonic if clock is None else clock
         self._start = self._clock()
         self._cumulative_cycles = 0
@@ -439,6 +442,18 @@ class MarchLogger:
         if "pc" in self._detail:
             self._refreshes.append(timing)
 
+    def on_station(self, description: str) -> None:
+        """A homotopy's station hook: record the station the next step enters, for that step's block.
+
+        A homotopy calls it from its ``enter`` on each station **change** (``"station 3/12: viscosity
+        x46.4"``), before the step that runs the station is taken, so it rides beneath that step's row.
+        The description of the target station is not an aside but part of the line announcing the
+        arrival, since that step is the first whose residual can stop the march. Written whatever
+        ``detail`` says: without it a ramp's steps read as one march with no indication of which problem
+        each one solved, or of when the residual started to count.
+        """
+        self._station = description
+
     def on_retry(self, reason: str, attempt: int, beta: float) -> None:
         """``on_retry`` callback: announce that the step about to be repeated is being redone, and why.
 
@@ -584,6 +599,19 @@ class MarchLogger:
         if state is not None and self._residuals is not None:
             residuals.update(self._residuals(state))
 
+        station, self._station = self._station, None
+        arriving = report.arrived and self._arrived is False
+        self._arrived = report.arrived
+        if arriving:
+            self._close_block()
+            self._write("")
+            self._write(
+                f"arrived at the target{'' if station is None else f' ({station})'} on step "
+                f"{self._steps}: the march may stop from here"
+            )
+            self._needs_headings = True
+            station = None
+
         # The stopping test is a constant within a rung, so it belongs in a banner rather than in every
         # row -- repeating `|R0|` and `target` on each line was most of the old line's width.
         judged, judged_ratio = self._judged(report)
@@ -592,8 +620,8 @@ class MarchLogger:
             self._reference is None or abs(reference - self._reference) > 1e-12 * self._reference
         ):
             self._reference = reference
-            target = self._target(reference)
-            stop = "" if target is None else f", stopping at |R| <= {target:.3e}"
+            target = report.stopping_target
+            stop = f", stopping at |R| <= {target:.3e}" if math.isfinite(target) else ""
             self._close_block()
             self._write("")
             self._write(f"reference |R0| = {reference:.4e}{stop}")
@@ -627,7 +655,7 @@ class MarchLogger:
         )
         self._rows += 1
         self._write_field_table(deltas, residuals)
-        self._write_aside(report, columns)
+        self._write_aside(report, columns, station)
         # This step is done, so the next block is a fresh step, not another attempt at this one.
         self._attempt = 1
 
@@ -676,17 +704,20 @@ class MarchLogger:
             )
         self._previous_residuals.update(residuals)
 
-    def _write_aside(self, report: StepReport, columns: Mapping[str, float]) -> None:
+    def _write_aside(
+        self, report: StepReport, columns: Mapping[str, float], station: str | None
+    ) -> None:
         """The readings that are not per-column, **one concern per line**, closing the step's block.
 
         Run together on one line these were unreadable: the preconditioner's activity, the case
         metrics and the solver's own counters have nothing to do with each other, so a reader looking
         for one of them had to parse all three. One line each costs vertical space and buys the
-        ability to find a quantity by position.
+        ability to find a quantity by position. A station the step entered heads them, since it says
+        which problem the row's numbers belong to.
         """
         assert self._step_table is not None
         self._write(self._step_table.rule(fill="=", segmented=False))
-        lines = []
+        lines = [] if station is None else [station]
         if "pc" in self._detail:
             lines.append(self._refresh_line(self._refreshes))
             self._refreshes = []
@@ -753,12 +784,6 @@ class MarchLogger:
         if not ratio > 0.0:
             return None
         return norm / ratio
-
-    def _target(self, reference: float) -> float | None:
-        """The stopping target ``atol + rtol·‖R₀‖``, or ``None`` when no tolerance was supplied."""
-        if self._rtol is None and self._atol is None:
-            return None
-        return (self._atol or 0.0) + (self._rtol or 0.0) * reference
 
     def _write(self, line: str, indent: str = "") -> None:
         self._stream.write(indent + line + "\n")

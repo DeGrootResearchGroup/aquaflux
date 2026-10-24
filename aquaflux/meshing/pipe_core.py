@@ -22,29 +22,10 @@ import numpy as np
 
 from .block_topologies import _core_ring, _CoreSides
 from .blocks import transfinite
+from .conduits import ConduitFill
 from .divisions import Graded, fractions_of
 
-__all__ = ["PipeCore", "PipeCoreFill"]
-
-
-@dataclasses.dataclass(frozen=True)
-class PipeCoreFill:
-    """The hexahedra filling a pipe's core, and its two end cross-sections.
-
-    Attributes
-    ----------
-    points : np.ndarray, shape ``(n_points, 3)``
-        The points given, then the O-grid's own.
-    hexahedra : np.ndarray of int, shape ``(n_hexahedra, 8)``
-        Each hexahedron's quadrilateral in one cross-section, then the same one in the next.
-    first, last : np.ndarray of int, shape ``(n_quads, 4)``
-        The quadrilaterals of the first and the last cross-section, the core's then the shell's.
-    """
-
-    points: np.ndarray
-    hexahedra: np.ndarray
-    first: np.ndarray
-    last: np.ndarray
+__all__ = ["PipeCore"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,7 +69,7 @@ class PipeCore:
                 f"PipeCore.junction_rows must be a whole number >= 1, got {self.junction_rows!r}"
             )
 
-    def fill(self, points: np.ndarray, rings: np.ndarray) -> PipeCoreFill:
+    def fill(self, points: np.ndarray, rings: np.ndarray) -> ConduitFill:
         """The O-grid inside ``rings``.
 
         Parameters
@@ -100,7 +81,7 @@ class PipeCore:
 
         Returns
         -------
-        PipeCoreFill
+        ConduitFill
 
         Raises
         ------
@@ -127,7 +108,7 @@ class PipeCore:
             base += added.shape[0]
         quads = np.stack([_section_quads(section) for section in sections])
         hexahedra = np.concatenate([quads[:-1], quads[1:]], axis=2).reshape(-1, 8)
-        return PipeCoreFill(np.vstack(new), hexahedra, quads[0], quads[-1])
+        return ConduitFill(np.vstack(new), hexahedra, quads[0], quads[-1])
 
     def _core(self, ring_points: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
         """A cross-section's square core inside its ring: the lattice ``(k + 1, k + 1, 3)``, and its

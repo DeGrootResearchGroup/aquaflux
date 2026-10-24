@@ -1287,8 +1287,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         fields=coupled_fields(coupled),
         residuals=residuals,
         detail=("inner", "fields", "residuals", "pc"),
-        rtol=RTOL,
-        atol=ATOL,
     )
     # Every run states the configuration it was taken under, in its own log, before any result. A march
     # log is compared against archived ones months later, and a number whose configuration is not written
@@ -1468,7 +1466,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             # The case's solve: the file's march, with the environment's study overrides. The session is
             # opened from its preconditioner, once, and the ramp re-points it at each station.
             flow, k, omega = SOLVER.solve(
-                coupled, session_options=session_options, point_setup=point_setup, **observers
+                coupled,
+                session_options=session_options,
+                point_setup=point_setup,
+                on_station=logger.on_station,
+                **observers,
             )
         else:
             # A script-only study arm: the SAME span walked as a ladder of converged rungs, from the

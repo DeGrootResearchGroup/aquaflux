@@ -1182,8 +1182,6 @@ def solve_aquaflux(
         log_file,
         fields=coupled_fields(coupled),
         detail=("inner", "fields", "pc"),
-        rtol=RTOL,
-        atol=ATOL,
     )
     # Every run states the configuration it was taken under, in its own log, before any result: a
     # number whose configuration is not written beside it cannot be re-adjudicated later, which is
@@ -1328,8 +1326,9 @@ def solve_aquaflux(
                     if solver.continuation is None
                     else {
                         "point_setup": lambda companion, seed_state, point: logger.note(
-                            f"[{point.label}]"
-                        )
+                            solver.continuation.description
+                        ),
+                        "on_station": logger.on_station,
                     }
                 ),
                 **observers,

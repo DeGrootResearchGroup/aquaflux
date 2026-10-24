@@ -483,6 +483,12 @@ class StepReport(NamedTuple):
         ``stopping_step``), where ``residual_norm`` stays the measure the step was steered by. Without
         these a log would report a residual the stop never compared with its tolerance. ``nan`` is
         "not recorded".
+    stopping_target : float
+        The tolerance the stopping test compared :attr:`stopping_norm` with,
+        ``atol + rtol * reference`` with the reference in the same measure, so a log can say how far a
+        march is from stopping without being told the tolerances a second time. Before a homotopy
+        arrives the march cannot stop, and this is the target it will be held to on arrival only if the
+        stopping measure is the steering one. ``nan`` is "not recorded".
     linear_tolerance : float
         The relative tolerance the step's linear solves stopped at, when the march varied it from step to
         step (its ``adaptive_tolerance``); ``nan`` when the march solved every step to its solver's own.
@@ -505,6 +511,7 @@ class StepReport(NamedTuple):
     full_step_ratio: float = float("nan")
     stopping_norm: float = float("nan")
     stopping_ratio: float = float("nan")
+    stopping_target: float = float("nan")
     linear_tolerance: float = float("nan")
 
     @property

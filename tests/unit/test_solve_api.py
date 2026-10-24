@@ -93,7 +93,6 @@ USER_CALLS = frozenset(
     {
         # Functions a user calls, and what public drivers hand back.
         "MarchResult",
-        "RampPosition",
         "RampWalk",
         # A shift control's carried state, as `MarchResult.control_state` hands it back, and its field.
         "ReleaseMemory",

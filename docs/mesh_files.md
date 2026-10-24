@@ -72,6 +72,28 @@ layers: {kind: PrismLayers, first_height: 0.0005, growth: 1.2, count: 5}
 layered: [walls, lamp]
 ```
 
+### Baffles
+
+A baffle -- a plate, a feedwell skirt, a scum baffle -- is drawn as a **sheet**: a surface of no
+thickness, a part of the drawing that holds faces but no solid. Every sheet standing in the region
+is meshed as a baffle unless the region names its `baffles` (an empty list for none), and the part
+of a sheet outside the region is left out:
+
+```yaml
+region: {solids: [tank], baffles: [inlet_baffle]}
+```
+
+A baffle is a wall with the fluid on both sides of it. Each of its faces becomes two boundary faces
+of the mesh, one for the cell on each side, so no cell reaches through it; round the baffle's edges
+free in the fluid, the cells on its two sides meet. Its faces make the patch `baffles` unless a
+selection names them -- a {class}`~aquaflux.meshing.FacesNear` point on the plate, say -- and that
+patch is given its own boundary condition, as any wall's is. A sheet must leave the fluid a way round
+it: one that cuts the region in two is refused.
+
+Layers are not grown on a baffle, so its patch may not be in `layered`; where a layered wall meets
+a baffle the wall's layers slide up the baffle on both sides of it. A baffle is not meshed as a
+structured grid, nor is a face a baffle stands on (`mapped` and `pipes`).
+
 The dual's faces are not flat: their corners are the centroids of the tetrahedra around an edge.
 A `planarizer` flattens them by moving those centroids
 ({class}`~aquaflux.meshing.FacePlanarizer`), never making a cell less convex than the least convex
@@ -114,6 +136,24 @@ their cores are filled:
 pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
 ```
 
+Rectangular ducts are found by themselves too: four four-sided faces round the fluid, each meeting
+the next along an edge that folds outward by more than the feature angle, with nothing else inside.
+A duct may run along a curve: faces drawn in stretches -- a straight leg, a bend, another leg, as a
+sweep along a path is drawn -- are one duct where each stretch's end is the next one's start, and
+a stretch may itself be curved. Its sides are meshed as structured grids, layered if their patches
+are, and its core is filled with hexahedra, one cross-section of the grids after another
+({class}`~aquaflux.meshing.DuctCore`). For the grids to line up along a curve, the points along the
+duct's long edges are placed where cross-sections square to the duct's centreline cross them (or,
+near an end cut at a slant, leaning as that end does), so the region is triangulated a second time
+whenever it holds a duct. Its ends are open or junctions as a pipe's are. `ducts` names the patches
+whose faces are ducts' sides instead (`[]` for none), and `duct_core` sets how their cores are
+filled. An empty box -- four walls round the fluid and two ends -- is a duct too, meshed as
+hexahedra throughout; name `ducts: []` to mesh it as polyhedra.
+
+```yaml
+duct_core: {kind: DuctCore, junction_rows: 2}
+```
+
 The middle of an open vessel may be meshed as cubes rather than polyhedra: a `core`
 ({class}`~aquaflux.meshing.OctreeCore`) of cubes `size` across, halved towards the walls until they
 are no larger than `wall_size` (unset, `max_size`), and kept `clearance` clear of the walls and of
@@ -124,4 +164,20 @@ in a narrow annulus, is left to the tetrahedra, and a region with no such room a
 
 ```yaml
 core: {kind: OctreeCore, size: 0.08}
+```
+
+Parts of the region can be meshed finer than `max_size` with `refinements`, each at its own `size`
+(measured as `max_size` is): the fluid inside a box, a ball or a cylinder
+({class}`~aquaflux.meshing.RefinedBox`, {class}`~aquaflux.meshing.RefinedSphere`,
+{class}`~aquaflux.meshing.RefinedCylinder`), or within a `distance` of some patches
+({class}`~aquaflux.meshing.RefinedNear`) -- round a lamp, say, or along a jet. One refinement makes
+everything there smaller: the triangles where it reaches a wall, the tetrahedra, and a core's cubes,
+which are halved until they are no larger than its size. The size grows back to `max_size` away from
+the part as fast as `grading` allows, and where two parts overlap the finer size holds. A size must
+be below `max_size` and, if `min_size` is set, no smaller than it.
+
+```yaml
+refinements:
+  - {kind: RefinedNear, patches: [lamp], distance: 0.02, size: 0.004}
+  - {kind: RefinedCylinder, start: [0.0, 0.0, 0.3], end: [0.5, 0.0, 0.3], radius: 0.05, size: 0.005}
 ```

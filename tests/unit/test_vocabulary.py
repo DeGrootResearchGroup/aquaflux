@@ -111,7 +111,6 @@ VOCABULARY: dict[str, Word] = {
             "solve/linear.py": "a relative tolerance on a residual norm",
             "solve/linear_solver_spec.py": "a relative tolerance on a residual norm",
             "solve/march.py": "a relative tolerance on a residual norm",
-            "solve/march_log.py": "a relative tolerance on a residual norm",
             "solve/shifted_step.py": "a relative tolerance on a residual norm",
             "solve/strategy.py": "a relative tolerance on a residual norm",
         },

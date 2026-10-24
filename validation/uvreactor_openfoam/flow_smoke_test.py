@@ -156,7 +156,7 @@ def main() -> None:
         flush=True,
     )
 
-    logger = MarchLogger(fields=coupled_fields(coupled), detail=("fields",), rtol=0.0, atol=1e-8)
+    logger = MarchLogger(fields=coupled_fields(coupled), detail=("fields",))
     t0 = time.time()
     # A smoke test does not expect MAX_STEPS to reach the stopping tolerance at this Reynolds number
     # (Re ~1e5, no continuation) -- catch the convergence guard's raise so the per-step log already

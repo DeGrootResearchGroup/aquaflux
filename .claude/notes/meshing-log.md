@@ -1059,3 +1059,121 @@ crossing check were scratch, and the cube tests reproduce what they showed.
 Rebased onto main after #792 (`ClearedCaps` the default) and #789 (`be11a08c`): maxh 0.0025 with pipe
 cores gives 666826 cells, closure 5.3e-16, smallest cell 1.16e-11 m³, peak 3.17 GiB -- the "#792's tip
 with the floor" row exactly.
+
+## 2026-10-24 — Rectangular ducts: found, divided along normal cross-sections, cored
+
+Harness `validation/meshing_netgen/ducts.py` (one run each, 4-core Linux container, netgen-mesher
+6.2.2608, OCP 8.0.1, `CadMesher` defaults, `feature_angle` 45°; layers `PrismLayers(first, 1.2, 3)`,
+first 2 mm, tank 3 mm). Tilt: each core ring's fitted plane against the line between its neighbours'
+centroids, degrees.
+
+| arm (maxh) | cells | closure | six-faced | tilt max / mean | non-orth max / p99 | concave |
+|---|---|---|---|---|---|---|
+| straight 0.2x0.1x1 m (0.025) | 1845 | 7.4e-16 | 1.000 | 0.0 / 0.0 | 1e-6 / 1e-6 | 0 |
+| straight, layers | 4797 | 7.2e-16 | 0.932 | 0.0 / 0.0 | 16.4 / 16.4 | 0 |
+| bent: leg, quarter bend R 0.4, leg (0.025) | 3240 | 7.2e-16 | 1.000 | 0.7 / 0.1 | 0.50 / 0.41 | 0 |
+| bent, layers | 8424 | 7.8e-16 | 0.932 | 0.7 / 0.1 | 17.1 / 16.4 | 0 |
+| spline sweep 0.1x0.06 (0.015) | 3640 | 5.6e-16 | 1.000 | 28.2 / 1.7 | 35.0 / 29.6 | 0 |
+| sweep, layers | 9646 | 6.0e-16 | 0.925 | 34.2 / 2.3 | 45.8 / 32.5 | 0 |
+| tank + inlet duct + lamp, layers (0.05) | 12320 | 5.6e-16 | 0.054 | 0.0 / 0.0 | 178.4 / 31.9 | 862 |
+| same, `ducts=()` (the mesher before ducts) | 10916 | **4.6e-1** | 0.004 | -- | 178.7 / 33.1 | 1107 |
+
+- **The rails' points**: at equal arc length on every rail (the first build) the sweep's rows tilted
+  max 44 / mean 31.8°, non-orth max 45.4 bare and 65.3 layered; cross-sections normal to the centreline
+  gave mean 25.9° because near its oblique ends (the profile is drawn in `z = 0`, the spline leaves the
+  origin leaning, so corners fold 73-125°) a normal plane misses a rail and three of four rails fell
+  back; turning the planes toward each rim's own plane within a width of it gave mean 1.7; a
+  second-order end tangent (`np.gradient(edge_order=2)`) removed a first-order chord's false obliquity
+  on the parabola unit test (2.75° → 0.10° at 16 segments; equal arc length 19.3°). The remaining max
+  is at the oblique ends, by design.
+- **The odd cells with layers** are at the layers' top's four corners: three primal cells meet along
+  each, so per row one triangular prism and one seven-faced cell beside it (straight: 164 + 164).
+- **The tank**: its worst faces are at the lamp's ends and the tank's three-wall corners (the deferred
+  convex-ridge normals), in both arms. Without layers both arms fail in the dual's concave-edge cut
+  (`NotImplementedError`: cells deepest behind one wall not connected) where the duct's rectangular
+  mouth meets the flat wall: the dual's limit, not the duct's. A box tank with nothing inside is itself
+  found as a duct (around the axis whose walls are four-sided), cored with a junction at the wall the
+  inlet duct opens through; the lamp arm keeps it out.
+- **Dismissed mutations** (`test_meshing_ducts.py`): `DuctCore`'s blend weights (zeroing `u`) stay green
+  -- with straight sides spaced alike, which every duct cross-section ring has, transfinite interpolation
+  reproduces the lattice whatever its weights. The closed-chain refusal ("closes on itself") and the
+  end-face exclusion in `_hollow` have no stub test: the first needs a ring-shaped duct drawing, the
+  second a non-cap end face whose points sit on the closing fan (the tank's wall with the duct's mouth).
+
+## 2026-10-24 — Refinement regions: Netgen's local sizes
+
+Configuration: Linux x86_64 container, Python 3.13, netgen-mesher 6.2.2608, branch
+`meshing-refinement-regions` on `main` at `4f6ec9f9`; one run each.
+
+**The API, probed in a child-like process (`python -P`, netgen only).** A unit box surface of 4 x 4
+squares per face, filled to `maxh` 0.25 with h = 0.03 asked on a lattice in `[0.4, 0.6]^3`: median tet
+edge there 0.505 with no request, **0.505 with `MeshingParameters.RestrictH` on the fill's parameters
+(ignored)**, 0.036 with `mesh.CalcLocalH(0.3, 1)` then `mesh.RestrictLocalH(Pnt, h)` per point
+(elsewhere 0.065, grading out); `CalcLocalH` alone left the mesh as it was (168 points, 604 tets). The
+supplied surface was kept in every arm. Surface meshing of an OCC box (`maxh` 0.25, points on z = 0 in
+`[0.4, 0.6]^2`): `RestrictH` on the `MeshingParameters` passed as `mp=` gives 0.035 near against 0.255.
+`GenerateMesh(mp=MeshingParameters(maxh, minh, grading))` is bit-identical to the keyword form in a
+fresh process (box less a cylinder, `maxh` 0.2: 1762 triangles, points, triangles and face indices
+equal); the keyword form is not even repeatable within one process (1762 then 1742).
+
+**Through the mesher's own path** (`validation/meshing_netgen/local_sizes.py 0.04`: a
+`RefinedSphere`'s local sizes): fill of the unit box at 0.25 with a ball of 0.15 at its centre at 0.04
+(437 points) -- median tet edge by distance from the centre [0, 0.15) 0.050, [0.15, 0.25) 0.054,
+[0.25, 0.35) 0.075, [0.35, 0.5) 0.139, [0.5, 0.87) 0.250; without, 0.485 / 0.373 / 0.394 / 0.371 / 0.354
+(277 tets against 7834). Triangles of a 1 x 2 x 3 box at 0.5 with a ball of 0.2 on its face x = 0 at
+0.04: median edge near 0.057, away 0.415 (394 triangles against 180).
+
+**Mutation pass** (each line broken, its tests rerun, restored; all red): the child's `RestrictLocalH`
+and `RestrictH`; `refines` always true; the body's reach without the half-diagonal; local sizes
+unfiltered; `RefinedNear` without its distance; the hex core dropping its refinements; `CadMesher`'s
+core, fill and second triangulation without them; the early patch-name check; the max/min size
+refusals; the empty-reach refusal; `MeshSpec.mesher()` not passing them; the unknown-patch refusal;
+`LocalSizes`' positivity; and the L end-to-end test with `_located` returning none. None dismissed.
+
+## 2026-10-24 — baffles: sheets standing in the region
+
+**Decided with the project owner (2026-10-24):** a baffle is two coincident boundary faces per place in
+an ordinary patch, not an interior-face patch with its own flux (`docs/mesh_zones_and_patches.md` had
+promised the latter; nothing implemented it, and every BC, the wall distance, the wall treatment, the
+dual and the polyMesh writer act on boundary faces only). Baffles come from the drawing's sheets.
+
+**Probes (Linux x86-64, netgen-mesher 6.2.2608, OCP 8.0.1.0.0; scratch scripts, the findings carried
+into `validation/meshing_netgen/baffle_quality.py` and the tests):**
+- `netgen.occ` `Glue([box, sheet])`: one solid, the sheet a face with `domin = domout = 1`; the surface
+  mesh carries it and the volume mesh conforms (every sheet triangle a face of two tets; none crossing).
+  A bare `Mesh` given the outer triangles plus the sheet's under a `domin = domout = 1` descriptor fills
+  the same way (unit box, sheet 0.6 x 0.6 standing on a wall, maxh 0.15: volume 1 to 12 digits).
+- OCP `BRepAlgoAPI_Splitter(box | plate)`: one solid; the plate a face oriented `INTERNAL` in a shell of
+  its own; topology 7 faces, the plate's three free edges bounding it alone, its foot an internal edge
+  of the wall face (faces `[wall, plate]`). Netgen's triangulation of `write_brep`'s file numbers all 7
+  faces as the explorer does (every triangle's centroid projects onto its own face), and the wall's
+  triangles carry the foot as edges.
+- A STEP file with a box and a sheet: `read_step` dropped the sheet (solids only) before this change.
+- **The opened surface itself (two coincident sides on their own points) does not fill**: the child sat at
+  100 % CPU, no result after 120 s, box with plate at maxh 0.1 (782 points); the internal form takes about
+  a second. Harness: `baffle_quality.py 0.1 --opened-fill`.
+
+**Quality** (`baffle_quality.py 0.1`, 2026-10-24, defaults in force: `ClearedCaps`, no core, no
+planarizer; feature angle 45 degrees; layers `first_height = maxh / 20`, growth 1.3, 3 layers on
+`walls`; one run each, Netgen's fill deterministic here):
+
+| mesh | cells | non-convexity max / p99 | non-orth. max | > 50 | > 90 | faces < 1 % median |
+|---|---|---|---|---|---|---|
+| box | 1304 | 0.312 / 0.170 | 49.5 | 0 | 0 | 0 |
+| box and plate | 1334 | 0.598 / 0.203 | 46.3 | 0 | 0 | 3 |
+| L | 3771 | 0.956 / 0.280 | 74.9 | 57 | 0 | 114 |
+| box + layers | 3324 | 0.432 / 0.355 | 41.5 | 0 | 0 | 0 |
+| box and plate + layers | 3339 | 1.130 / 0.365 | 124.9 | 2 | 1 | 4 |
+| L + layers | 8219 | 1.887 / 0.349 | 179.7 | 9 | 8 | 5 |
+
+The worst cells with the plate are ordinary interior points about a cell above or below a free edge;
+their worst vertex lies beyond a small quadrilateral (about 0.004 across at maxh 0.1) between them and a
+free-edge piece, where the piece's interface (the sheet's plane extended) passes close to a cell
+centroid. The same cut makes the L's worse faces, so this is the concave-edge cut's trait under layers,
+not the baffle's; not pursued here. What it does not distinguish: whether a different piece rule would
+help both.
+
+**Two defects found on the way, fixed:** a column point sliding along a free edge was cut twice -- as
+a concave-edge point of its own and as a point above its base -- which showed as the dual's edge faces
+losing count of their runs (a `zip()` length error, layered plate only); and the free edge read as
+convex (coplanar sides: zero rise), so its points were not cut.
