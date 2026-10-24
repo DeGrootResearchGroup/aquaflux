@@ -12,7 +12,8 @@ without loading it.
 
 :class:`CadMesher` meshes a region of a CAD model -- some solids' union, less others -- as polyhedra:
 Netgen's tetrahedra of it, their boundary in patches chosen by face (:class:`FacesNear`,
-:class:`FacesOn`), turned into their dual. :class:`PrismLayers` grows layers inward from the wall
+:class:`FacesOn`), turned into their dual. A sheet of the model standing in the region is a baffle:
+its faces become boundary faces on both its sides, in the patch :data:`BAFFLE_PATCH` unless chosen. :class:`PrismLayers` grows layers inward from the wall
 before the fill, sized for the dual, so a wall-resolved mesh's layers join its core conformally;
 over a wall that :class:`MappedQuads` has meshed with structured quadrilaterals (a band, such as a
 pipe's cylinder, or a four-sided face) the layers are hexahedra. :class:`Polygons` carries a surface
@@ -58,6 +59,7 @@ from .block_assembly import BlockMesh
 from .block_topologies import Annulus, CubedSphereCap, PipeOGrid
 from .blocks import Arc, Curve, HexBlock, SampledCurve, Surface
 from .cad_mesher import (
+    BAFFLE_PATCH,
     CadMesher,
     FaceSelection,
     FacesNear,
@@ -104,6 +106,7 @@ from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 from .planarize import FacePlanarizer, Planarization
 
 __all__ = [
+    "BAFFLE_PATCH",
     "Annulus",
     "Arc",
     "BlockLattice",

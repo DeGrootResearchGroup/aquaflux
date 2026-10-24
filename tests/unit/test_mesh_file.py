@@ -296,6 +296,15 @@ def test_the_drawings_sections_are_refused_by_name(document, message):
         drawing_sections_from_mapping(document)
 
 
+def test_a_regions_baffles_are_read_named_none_or_unset_and_written_back_as_given():
+    # Unset is every sheet standing in the region; an empty list is none; a list names them.
+    for given, expected in (([], ()), (["plate"], ("plate",)), (None, None)):
+        region = {"solids": ["vessel"], **({} if given is None else {"baffles": given})}
+        spec = mesh_spec_from_mapping({**DOCUMENT, "region": region})
+        assert spec.region.cad_region().baffles == expected
+        assert mesh_spec_to_mapping(spec)["region"] == region
+
+
 def test_the_mesh_file_hands_the_mesher_its_patches_roles(monkeypatch, tmp_path):
     # The roles a patch can be given -- layered, mapped, a pipe, a duct's side -- reach the mesh.
     from aquaflux.case import mesh_file

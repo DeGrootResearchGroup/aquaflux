@@ -1129,3 +1129,51 @@ unfiltered; `RefinedNear` without its distance; the hex core dropping its refine
 core, fill and second triangulation without them; the early patch-name check; the max/min size
 refusals; the empty-reach refusal; `MeshSpec.mesher()` not passing them; the unknown-patch refusal;
 `LocalSizes`' positivity; and the L end-to-end test with `_located` returning none. None dismissed.
+
+## 2026-10-24 — baffles: sheets standing in the region
+
+**Decided with the project owner (2026-10-24):** a baffle is two coincident boundary faces per place in
+an ordinary patch, not an interior-face patch with its own flux (`docs/mesh_zones_and_patches.md` had
+promised the latter; nothing implemented it, and every BC, the wall distance, the wall treatment, the
+dual and the polyMesh writer act on boundary faces only). Baffles come from the drawing's sheets.
+
+**Probes (Linux x86-64, netgen-mesher 6.2.2608, OCP 8.0.1.0.0; scratch scripts, the findings carried
+into `validation/meshing_netgen/baffle_quality.py` and the tests):**
+- `netgen.occ` `Glue([box, sheet])`: one solid, the sheet a face with `domin = domout = 1`; the surface
+  mesh carries it and the volume mesh conforms (every sheet triangle a face of two tets; none crossing).
+  A bare `Mesh` given the outer triangles plus the sheet's under a `domin = domout = 1` descriptor fills
+  the same way (unit box, sheet 0.6 x 0.6 standing on a wall, maxh 0.15: volume 1 to 12 digits).
+- OCP `BRepAlgoAPI_Splitter(box | plate)`: one solid; the plate a face oriented `INTERNAL` in a shell of
+  its own; topology 7 faces, the plate's three free edges bounding it alone, its foot an internal edge
+  of the wall face (faces `[wall, plate]`). Netgen's triangulation of `write_brep`'s file numbers all 7
+  faces as the explorer does (every triangle's centroid projects onto its own face), and the wall's
+  triangles carry the foot as edges.
+- A STEP file with a box and a sheet: `read_step` dropped the sheet (solids only) before this change.
+- **The opened surface itself (two coincident sides on their own points) does not fill**: the child sat at
+  100 % CPU, no result after 120 s, box with plate at maxh 0.1 (782 points); the internal form takes about
+  a second. Harness: `baffle_quality.py 0.1 --opened-fill`.
+
+**Quality** (`baffle_quality.py 0.1`, 2026-10-24, defaults in force: `ClearedCaps`, no core, no
+planarizer; feature angle 45 degrees; layers `first_height = maxh / 20`, growth 1.3, 3 layers on
+`walls`; one run each, Netgen's fill deterministic here):
+
+| mesh | cells | non-convexity max / p99 | non-orth. max | > 50 | > 90 | faces < 1 % median |
+|---|---|---|---|---|---|---|
+| box | 1304 | 0.312 / 0.170 | 49.5 | 0 | 0 | 0 |
+| box and plate | 1334 | 0.598 / 0.203 | 46.3 | 0 | 0 | 3 |
+| L | 3771 | 0.956 / 0.280 | 74.9 | 57 | 0 | 114 |
+| box + layers | 3324 | 0.432 / 0.355 | 41.5 | 0 | 0 | 0 |
+| box and plate + layers | 3339 | 1.130 / 0.365 | 124.9 | 2 | 1 | 4 |
+| L + layers | 8219 | 1.887 / 0.349 | 179.7 | 9 | 8 | 5 |
+
+The worst cells with the plate are ordinary interior points about a cell above or below a free edge;
+their worst vertex lies beyond a small quadrilateral (about 0.004 across at maxh 0.1) between them and a
+free-edge piece, where the piece's interface (the sheet's plane extended) passes close to a cell
+centroid. The same cut makes the L's worse faces, so this is the concave-edge cut's trait under layers,
+not the baffle's; not pursued here. What it does not distinguish: whether a different piece rule would
+help both.
+
+**Two defects found on the way, fixed:** a column point sliding along a free edge was cut twice -- as
+a concave-edge point of its own and as a point above its base -- which showed as the dual's edge faces
+losing count of their runs (a `zip()` length error, layered plate only); and the free edge read as
+convex (coplanar sides: zero rise), so its points were not cut.

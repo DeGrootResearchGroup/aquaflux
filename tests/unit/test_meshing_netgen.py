@@ -856,6 +856,155 @@ def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path
             assert step.max() < 1.001 * step.min()
 
 
+# ---------------------------------------------------------------------------------------------
+# Baffles: a sheet standing in the region
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_fill_keeps_internal_triangles_as_faces_between_two_tetrahedra():
+    # The cube's surface on a lattice of 1/4, and a square sheet inside it on the same lattice,
+    # free on every side: the sheet's triangles are faces of two tetrahedra each, one either side.
+    from tests.support.meshes import box_surface
+
+    points, triangles = box_surface(0.0, 1.0, 4, into_box=False)
+    points = [tuple(np.round(p, 12)) for p in points]
+    index = {p: k for k, p in enumerate(points)}
+
+    def point(y, z):
+        key = (0.5, y, z)
+        if key not in index:
+            index[key] = len(points)
+            points.append(key)
+        return index[key]
+
+    internal = []
+    for y0, y1, z0, z1 in [(0.25, 0.5, 0.25, 0.5), (0.5, 0.75, 0.25, 0.5),
+                           (0.25, 0.5, 0.5, 0.75), (0.5, 0.75, 0.5, 0.75)]:  # fmt: skip
+        ring = [point(y0, z0), point(y1, z0), point(y1, z1), point(y0, z1)]
+        internal += [ring[:3], [ring[0], ring[2], ring[3]]]
+    points, internal = np.array(points, float), np.array(internal)
+    filled = NetgenProcess().fill(points, triangles, internal=internal, max_size=0.25)
+    faces = np.concatenate([filled.tetrahedra[:, [1, 2, 3]], filled.tetrahedra[:, [0, 3, 2]],
+                            filled.tetrahedra[:, [0, 1, 3]], filled.tetrahedra[:, [0, 2, 1]]])  # fmt: skip
+    keys, counts = np.unique(np.sort(faces, axis=1), axis=0, return_counts=True)
+    shared = {tuple(k) for k in keys[counts == 2].tolist()}
+    assert {tuple(t) for t in np.sort(internal, axis=1).tolist()} <= shared
+    assert _boundary_triangles(filled.tetrahedra) == {
+        tuple(t) for t in np.sort(triangles, axis=1).tolist()
+    }
+    np.testing.assert_allclose(_signed_volumes(filled.points, filled.tetrahedra).sum(), 1.0)
+
+
+def _plate_in_a_box():
+    """The unit cube and a plate standing on its wall ``y = 0``: the plane ``x = 1/2``, ``y`` in
+    ``[0, 0.6]``, ``z`` in ``[0.2, 0.8]``, free on its other three sides."""
+    pytest.importorskip("OCP")
+    from aquaflux.io.cad import CadModel
+    from aquaflux.io.cad.kernel import OpenCascade
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+    from OCP.gp import gp_Ax3, gp_Dir, gp_Pln, gp_Pnt
+
+    # In the plane x = 1/2 the frame's first axis is +y and its second (+x) x (+y) = +z.
+    plane = gp_Pln(gp_Ax3(gp_Pnt(0.5, 0.0, 0.2), gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)))
+    return CadModel(
+        {"box": BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 1.0, 1.0, 1.0).Shape()},
+        OpenCascade(),
+        sheets={"plate": BRepBuilderAPI_MakeFace(plane, 0.0, 0.6, 0.0, 0.6).Face()},
+    )
+
+
+def _on_the_plate(points) -> np.ndarray:
+    """Whether each point lies on the plate, its edge excluded."""
+    return (
+        np.isclose(points[..., 0], 0.5, atol=1e-9)
+        & (points[..., 1] < 0.6 - 1e-9)
+        & (points[..., 2] > 0.2 + 1e-9)
+        & (points[..., 2] < 0.8 - 1e-9)
+    )
+
+
+def _check_baffled_box(mesh) -> None:
+    """The dual of the box with the plate standing in it: closed, filling the box, the plate a
+    patch of faces on both its sides, each facing away from its cell, and no cell reaching through
+    it to the other side."""
+    from aquaflux.mesh import closed_cell_residual
+
+    geometry = mesh.geometry()
+    volume = np.asarray(geometry.cell.volume)
+    assert np.all(volume > 0.0)
+    np.testing.assert_allclose(volume.sum(), 1.0, rtol=1e-12)
+    scale = float(np.max(np.asarray(geometry.face.area)))
+    assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+    patches = mesh.face_patches
+    label = np.asarray(patches.label)
+    owner, neighbour = np.asarray(mesh.face_cells.owner), np.asarray(mesh.face_cells.neighbour)
+    baffle = np.flatnonzero(label == patches.id_of("baffles"))
+    assert np.all(neighbour[baffle] < 0)
+    centroid, normal = np.asarray(geometry.face.centroid), np.asarray(geometry.face.normal)
+    assert np.all(_on_the_plate(centroid[baffle]) | np.isclose(centroid[baffle, 0], 0.5))
+    side = np.sign(np.asarray(geometry.cell.centroid)[owner[baffle], 0] - 0.5)
+    np.testing.assert_array_equal(np.sign(normal[baffle, 0]), -side)
+    area = np.asarray(geometry.face.area)[baffle]
+    for s in (-1.0, 1.0):
+        np.testing.assert_allclose(area[side == s].sum(), 0.36, rtol=1e-12)
+    # No face between two cells lies in the plate.
+    offsets = np.asarray(mesh.face_nodes.offsets)
+    nodes = np.asarray(mesh.face_nodes.face_node_indices)
+    on_plate = _on_the_plate(np.asarray(mesh.node_coords))[nodes]
+    within = np.add.reduceat(on_plate, offsets[:-1]) == np.diff(offsets)
+    assert not np.any(within & (neighbour >= 0))
+
+
+def test_a_baffle_standing_in_a_box_is_a_patch_of_faces_on_both_its_sides(tmp_path):
+    from aquaflux.io import read_openfoam, write_openfoam
+    from aquaflux.io.cad import CadRegion
+    from aquaflux.meshing import CadMesher
+
+    model = _plate_in_a_box()
+    mesh = CadMesher(max_size=0.1, feature_angle=np.radians(45)).mesh(model, CadRegion(("box",)))
+    _check_baffled_box(mesh)
+    assert {"walls", "baffles"} <= set(mesh.face_patches.names)
+    # An OpenFOAM polyMesh takes the baffle as the ordinary patch it is, and reads back as one.
+    write_openfoam(mesh, tmp_path / "case")
+    _check_baffled_box(read_openfoam(tmp_path / "case"))
+
+
+def test_layers_on_the_walls_slide_up_a_baffle_on_both_its_sides():
+    # The walls' layers meet the plate where it stands on the wall y = 0 and grow up it on both
+    # sides alike; where its free edge reaches the wall, the layers' points lie on that edge.
+    from aquaflux.io.cad import CadRegion
+    from aquaflux.meshing import CadMesher
+
+    model = _plate_in_a_box()
+    mesher = CadMesher(
+        max_size=0.1,
+        feature_angle=np.radians(45),
+        layers=PrismLayers(first_height=0.005, growth=1.3, count=3),
+    )
+    mesh = mesher.mesh(model, CadRegion(("box",)), layered=("walls",))
+    _check_baffled_box(mesh)
+
+
+def test_layers_or_a_grid_on_a_baffle_are_refused():
+    from aquaflux.io.cad import CadRegion
+    from aquaflux.meshing import CadMesher
+
+    model = _plate_in_a_box()
+    mesher = CadMesher(
+        max_size=0.1,
+        feature_angle=np.radians(45),
+        layers=PrismLayers(first_height=0.005, growth=1.3, count=3),
+    )
+    region = CadRegion(("box",))
+    with pytest.raises(ValueError, match=r"layered patch\(es\) \['baffles'\] hold a baffle"):
+        mesher.mesh(model, region, layered=("baffles",))
+    with pytest.raises(
+        ValueError, match=r"mapped patch\(es\) \['walls'\] hold a baffle, or a face"
+    ):
+        mesher.mesh(model, region, mapped=("walls",))
+
+
 def test_a_refinement_near_the_ls_inner_wall_makes_its_cells_smaller_there_alone(tmp_path):
     # The L meshed at 0.02 with the fluid within 0.02 of its wall x = 0.2 refined to 0.005,
     # polyhedral throughout and with an octree core: the dual still closes and fills the L, and

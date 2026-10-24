@@ -56,7 +56,7 @@ def disassemble(mesh: Mesh) -> PolyMeshData:
         If the mesh is two-dimensional (a polyMesh is always three-dimensional; a two-dimensional
         case is a one-cell-thick extrusion, which this does not build), if some boundary face is in
         no named patch (the format has no unnamed boundary), or if a named patch holds an interior
-        face (a baffle, which the format records as a face zone, not written here).
+        face (which the format records as a face zone, not written here).
     NotImplementedError
         If the mesh is periodic: its seam would be written as a pair of ``cyclic`` patches, which is
         not built. Also if a patch is declared ``cyclic``, which needs that pairing too.
@@ -141,13 +141,13 @@ def _check_writable(mesh: Mesh) -> None:
         )
     label = np.asarray(patches.label)
     interior = np.asarray(mesh.face_cells.neighbour) >= 0
-    baffles = [
+    on_interior = [
         name
         for name in patches.names
         if name not in RESERVED_PATCH_NAMES and np.any(interior & (label == patches.id_of(name)))
     ]
-    if baffles:
+    if on_interior:
         raise ValueError(
-            f"patch(es) {baffles} hold interior faces; the format records those as a face zone, "
+            f"patch(es) {on_interior} hold interior faces; the format records those as a face zone, "
             "which is not written"
         )
