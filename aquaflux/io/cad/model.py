@@ -7,8 +7,9 @@ of the package consumes, all in the case's frame and in metres:
 * :meth:`CadModel.fluid` — several named solids as the fluid they hold, an
   :class:`~aquaflux.solids.Outside`, for shadowing a vessel by what it contains;
 * :meth:`CadModel.triangles` — a solid's surface as triangles, for an emitting surface;
-* for a mesher, a :class:`~aquaflux.io.cad.CadRegion` (some solids' union, less others) and what it
-  needs of one: :meth:`CadModel.topology` (faces, edges, how they connect and fold),
+* for a mesher, a :class:`~aquaflux.io.cad.CadRegion` (some solids' union, less others, with the
+  model's sheets -- surfaces of no thickness, such as baffles -- standing in it) and what it needs of
+  one: :meth:`CadModel.topology` (faces, edges, how they connect and fold),
   :meth:`CadModel.face_triangles` (the surface as triangles tagged by face),
   :meth:`CadModel.write_brep` (the region as a file a mesher reads) and :meth:`CadModel.project`
   (points moved onto the boundary, with the outward normal there).
@@ -82,6 +83,9 @@ class CadModel:
         compared region's extent. Every face is sampled at its corners whatever this is, so a
         missing feature is seen however small; the spacing decides how finely a smooth departure
         in the middle of a face is looked for.
+    sheets : mapping of str to kernel shape, optional
+        The model's sheets, by name: surfaces of no thickness, such as baffles, which a region may
+        have standing in it (see :class:`~aquaflux.io.cad.CadRegion`). Default: none.
     """
 
     def __init__(
@@ -91,8 +95,14 @@ class CadModel:
         rules=DEFAULT_RULES,
         boundary_tolerance: float | None = None,
         sample_spacing: float | None = None,
+        sheets=None,
     ):
         self._shapes = dict(shapes)
+        self._sheets = dict(sheets or {})
+        both = sorted(set(self._shapes) & set(self._sheets))
+        if both:
+            msg = f"{both} name both a solid and a sheet"
+            raise ValueError(msg)
         self._kernel = kernel
         self._rules = tuple(rules)
         self._boundary_tolerance = boundary_tolerance
@@ -107,11 +117,29 @@ class CadModel:
         """The solids' names, in the order the file lists them."""
         return tuple(self._shapes)
 
+    @property
+    def sheets(self) -> tuple[str, ...]:
+        """The sheets' names, in the order the file lists them."""
+        return tuple(self._sheets)
+
     def _shape(self, name: str):
         try:
             return self._shapes[name]
         except KeyError:
-            msg = f"no solid named {name!r}; the model has {', '.join(map(repr, self.names))}"
+            if name in self._sheets:
+                msg = (
+                    f"{name!r} is a sheet, not a solid: a region has it standing in it as a baffle"
+                )
+            else:
+                msg = f"no solid named {name!r}; the model has {', '.join(map(repr, self.names))}"
+            raise KeyError(msg) from None
+
+    def _sheet(self, name: str):
+        try:
+            return self._sheets[name]
+        except KeyError:
+            sheets = ", ".join(map(repr, self.sheets)) or "none"
+            msg = f"no sheet named {name!r}; the model's sheets are {sheets}"
             raise KeyError(msg) from None
 
     def describe(self, name: str) -> SolidDescription:
@@ -251,10 +279,18 @@ class CadModel:
 
     def _region(self, region: CadRegion):
         if region not in self._regions:
-            self._regions[region] = self._kernel.region(
+            named = region.baffles is not None
+            baffles = region.baffles if named else self.sheets
+            shape, embedded = self._kernel.region(
                 [self._shape(name) for name in region.solids],
                 [self._shape(name) for name in region.without],
+                [self._sheet(name) for name in baffles],
             )
+            missed = [name for name, inside in zip(baffles, embedded, strict=True) if not inside]
+            if named and missed:
+                msg = f"the baffle(s) {missed} do not stand in the region anywhere"
+                raise ValueError(msg)
+            self._regions[region] = shape
         return self._regions[region]
 
     def topology(self, region: CadRegion) -> CadTopology:
@@ -385,5 +421,5 @@ def read_step(path: str | os.PathLike, placement: Placement | None = None, **opt
         )
         raise ImportError(msg) from error
     kernel = OpenCascade()
-    shapes = kernel.read_step(path, placement or Placement())
-    return CadModel(shapes, kernel, **options)
+    shapes, sheets = kernel.read_step(path, placement or Placement())
+    return CadModel(shapes, kernel, sheets=sheets, **options)

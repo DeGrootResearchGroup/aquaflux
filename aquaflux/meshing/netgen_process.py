@@ -143,7 +143,9 @@ class NetgenProcess:
         result = self._run(request, {})
         return SurfaceTriangulation(result["points"], result["triangles"], result["face"])
 
-    def fill(self, points, triangles, *, max_size: float, grading: float = 0.3) -> TetrahedralMesh:
+    def fill(
+        self, points, triangles, *, internal=None, max_size: float, grading: float = 0.3
+    ) -> TetrahedralMesh:
         """Fill the region a closed triangle surface bounds with tetrahedra, keeping the surface.
 
         Parameters
@@ -157,6 +159,10 @@ class NetgenProcess:
             wound into the hole -- but every edge must be shared by exactly two triangles, traversed
             in opposite directions. It must not intersect itself, which is not checked: two
             overlapping closed surfaces are each filled, and the fills overlap.
+        internal : array-like of int, shape ``(n_internal, 3)``, optional
+            Triangles standing inside the region, such as a baffle: kept as faces between two
+            tetrahedra, one on each side. Each shares its edges with the surface's triangles or each
+            other's. Default: none.
         max_size : float
             Upper bound on the tetrahedra's size.
         grading : float
@@ -173,13 +179,18 @@ class NetgenProcess:
         MeshingError
             If Netgen fails, with the end of its output -- including when its tetrahedra are not
             bounded by exactly the supplied triangles or do not hold the volume they enclose, which
-            is how a hole whose walls are wound the wrong way shows (Netgen fills through it).
+            is how a hole whose walls are wound the wrong way shows (Netgen fills through it), or
+            an internal triangle is not a face of two of them.
         """
         points = np.ascontiguousarray(points, dtype=np.float64)
         triangles = np.ascontiguousarray(triangles, dtype=np.int64)
-        check_closed_surface(points, triangles)
+        internal = np.ascontiguousarray(
+            np.zeros((0, 3)) if internal is None else internal, dtype=np.int64
+        ).reshape(-1, 3)
+        check_closed_surface(points, triangles, internal)
         request = {"operation": "fill", "max_size": float(max_size), "grading": float(grading)}
-        result = self._run(request, {"points": points, "triangles": triangles})
+        arrays = {"points": points, "triangles": triangles, "internal": internal}
+        result = self._run(request, arrays)
         return TetrahedralMesh(result["points"], result["tetrahedra"])
 
     def _run(self, request: dict, arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -207,13 +218,18 @@ class NetgenProcess:
                 return {name: result[name] for name in result.files}
 
 
-def check_closed_surface(points: np.ndarray, triangles: np.ndarray) -> None:
+def check_closed_surface(
+    points: np.ndarray, triangles: np.ndarray, internal: np.ndarray | None = None
+) -> None:
     """Refuse a triangle surface that does not bound a region consistently, naming the defect.
 
     Parameters
     ----------
     points : np.ndarray, shape ``(n_points, 3)``
     triangles : np.ndarray of int, shape ``(n_triangles, 3)``
+    internal : np.ndarray of int, shape ``(n_internal, 3)``, optional
+        Triangles standing inside the region (see :meth:`NetgenProcess.fill`): their points count
+        as used, and their indices must be in range.
 
     Raises
     ------
@@ -229,9 +245,13 @@ def check_closed_surface(points: np.ndarray, triangles: np.ndarray) -> None:
         raise ValueError(f"triangles must have shape (m, 3) with m > 0; got {triangles.shape}")
     if not np.isfinite(points).all():
         raise ValueError("a point has a non-finite coordinate")
-    if triangles.min() < 0 or triangles.max() >= points.shape[0]:
+    internal = np.zeros((0, 3), np.int64) if internal is None else np.asarray(internal)
+    if internal.ndim != 2 or internal.shape[1] != 3:
+        raise ValueError(f"internal triangles must have shape (k, 3); got {internal.shape}")
+    every = np.concatenate([triangles, internal])
+    if every.min() < 0 or every.max() >= points.shape[0]:
         raise ValueError(f"a triangle names a point outside [0, {points.shape[0]})")
-    unused = points.shape[0] - np.unique(triangles).size
+    unused = points.shape[0] - np.unique(every).size
     if unused:
         raise ValueError(f"{unused} point(s) are used by no triangle")
     # Each directed edge as one integer, so matching an edge to its reverse is a sorted lookup.
