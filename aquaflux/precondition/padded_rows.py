@@ -539,8 +539,10 @@ def _padded_product_transposed(arrays, y: jnp.ndarray) -> jnp.ndarray:
         raise RuntimeError(
             "a padded-row operator was transposed without its stored transpose, which a forward "
             "solve does not hold. Pack it first: aquaflux.solve.with_transposes(tree) over the "
-            "preconditioner (root_adjoint does this for an adjoint's preconditioner factory; a "
-            "map that closes over its operators instead of holding them as leaves cannot be reached "
-            "that way), or _PaddedRowOperator.with_transpose() for one operator."
+            "preconditioner (root_adjoint does this for an adjoint's preconditioner factory; "
+            "reverse-mode differentiation through a preconditioned linear solve, such as "
+            "newton_step's, needs the factory passed through it by its caller; a map that closes "
+            "over its operators instead of holding them as leaves cannot be reached that way), or "
+            "_PaddedRowOperator.with_transpose() for one operator."
         )
     return jnp.sum(t_values * y[transposed.columns()], axis=1)
