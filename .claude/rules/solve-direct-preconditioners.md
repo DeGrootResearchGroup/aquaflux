@@ -145,6 +145,9 @@ bare block inverse).
     Jacobian and the compiled step, not by building the case (0.84 GiB): 8.46 GiB over the shipped 17-step
     march against 12.25 GiB on `main` `1b68caf6`, identical step tables (2026-10-19, 4-core Linux, jax
     0.12.0): log, "bfs3d memory by owner" and "Where a run's memory goes".
+    After the device fit (#804–#808) the 2-step peak is 8.87 GiB in a later re-fit's leading block re-fit,
+    and the device holds 2.19 GiB of int32 pattern arrays against 0.66 GiB of float32 values (2026-10-24,
+    `7fe27d07`; log, "bfs3d memory by owner after the device fit, probe and seeds").
   - **One program per column field (2026-10-20).** A problem whose assembler implements
     `residual_with_field(state, field, values)` (`FieldwiseResidual`) sets `probes_by_field = True`
     (`_CoupledProblem`, `_FlowProblem`); the session (`_probe_products`, used by both the fit and the

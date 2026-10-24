@@ -444,6 +444,61 @@
         (`to_scipy`), the prolongation values (a refit reads them back), and the entry maps' weights
         (`None` for the 0/1 transfers both blocks use).
 
+### bfs3d memory by owner after the device fit, probe and seeds (2026-10-24)
+
+      `memory_attribution.py` on `7fe27d07` (`main` after #809: the fit, the probe's values, shift, pivot
+      floor, coupling and seeds all on the device, #804–#808, measured on pitzDaily only until now). 4-core
+      Xeon 2.8 GHz container, 15.7 GiB, no swap, THP `madvise`, glibc 2.39 defaults, jax 0.12.0.1,
+      compilation cache cold, shipped `case.yaml`, `BFS3D_MEMORY_STEPS=2`, census on. ⚠️ The container
+      restarted during step 2 (no exit record, cause unknown; the record's earlier restart was at 12.3 GiB
+      resident), so step 2's row and the final census are missing; the JSON record is written per stage
+      and everything through re-fit #2 survived. GiB:
+
+      | stage | s | stage peak | resident after | device | host traced | malloc free |
+      |---|---|---|---|---|---|---|
+      | case build | 58 | 1.00 | 1.00 | 0.10 | 0.13 | 0.15 |
+      | `hybrid_initialize` | 74 | 1.63 | 1.52 | 0.13 | 0.15 | 0.34 |
+      | probe plan (the gather map's build) | 61 | **4.04** | 2.19 | 0.41 | 0.45 | 0.35 |
+      | fit, first build (block inverse build #1 sets it) | 754 | 6.41 | 5.63 | 2.72 | 0.59 | 0.57 |
+      | re-fit #1 | 47 | 7.55 | 6.50 | 3.52 | 0.62 | 0.51 |
+      | march step, first call (compile + run) | 177 | 8.18 | 7.23 | 2.98 | 0.70 | 1.40 |
+      | re-fit #2 (its leading `block re-fit` sets it) | 50 | **8.87** | 7.75 | 3.52 | 0.76 | 1.26 |
+
+      - **The peak-setter moved.** The first re-fit's entry-map build (the 2026-10-22 peak-setter, a 4.8
+        GiB host transient) is gone: the maps are built at the first fit, on the device, and re-fit #1's
+        host transient is 0.64 GB. The peak is now a later re-fit's leading block re-fit on top of a
+        baseline the step program's first call raised (retained free memory 0.51 → 1.40 GiB across it).
+        The peak is 0.12 GiB above the 2026-10-22 record (8.75) with the tracer (0.32) included, so level.
+      - **The memory moved from the host to the device, and the device holds 3.3× more int32 than
+        float32.** At step 1's end: device 2.98 GiB = int32 **2.19** + float32 0.66 + float64 0.13; host
+        traced arrays 0.42 beside the tracer. By owner (device, MiB): `DeviceEntryMap` 1082 over 66
+        arrays; `_PaddedLayout` 591 over 40 (`columns`, `t_columns`, the packing maps); `ProbeGather` 280
+        (two int32 arrays over the 36.7M entries); `_SimplePieces` 193; the hierarchies' `values` 171 and
+        `t_values` 171; `SimpleSmoothedInverse` 131; `SimplePlan` 108; `Corrections` 89 over 28; host
+        `SparsePattern` 140. Every int32 array describes the one reach-3 block-stencil pattern on the cell
+        graph at dof level (36.7M entries against ~1.0M cell pairs).
+      - **The stored transposes are about half of every operator**: `t_values`/`t_columns` beside
+        `values`/`columns` on all 9 hierarchy levels, the SIMPLE pieces (Schur 48 + 48 MiB, divergence and
+        velocity correction 24 + 24 each) and the coupling (44). The forward march applies only `A x`.
+      - **Not arrays (at step 1's end, resident 7.24)**: freed memory glibc retains 1.38 (0.75 of it
+        kept after the step program's first call, in the XLA worker threads' arenas), compiled code 0.03,
+        and ~2.1 of runtime, Python objects and XLA structures the census does not see. The case build
+        (0.98) and `hybrid_initialize` (+0.52) are almost all of this kind (arrays 0.26 of 1.52).
+      - A re-fit holds the old and new leading fine operator together (`float32(92160, 252)` ×4 against ×2
+        at a step's end, +177 MiB) until `_release_superseded` runs.
+      - **The compiled programs' temporaries** (`memory_analysis()`, a 1-step census-off run of the same
+        configuration with the cache warm; two runs, peaks 8.07 and 8.46 GiB, fits 325 and 265 s): the
+        **march step 974 MiB** of temporaries over 1373 MiB of arguments (the split's leaves and the
+        state); batched JVP of 8 tangents **829 MiB** (arguments 98); single JVP 202; residual 106. So the
+        probe's temporary is ~100 MiB a tangent plus ~30, as the 2026-10-18 census read it; a Krylov
+        application's JVP needs ~200 MiB and the residual ~100; and ~770 MiB of the step's temporary is
+        the split's padded products and the solve's own vectors, which is the 14a answer: the step's
+        temporaries follow the split's storage, not the residual's. (The harness armed the step's capture
+        only after step `STEPS − 1`, so a 1-step run printed no step size; fixed the same day.) Two 1-step
+        runs of one configuration spread 0.4 GiB in peak, so a bfs3d peak is not pinned closer than that.
+      - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
+        copied into this entry; the 2026-10-18 `memory_by_stage.py` configuration is otherwise unchanged.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
