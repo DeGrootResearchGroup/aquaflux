@@ -1177,3 +1177,49 @@ help both.
 a concave-edge point of its own and as a point above its base -- which showed as the dual's edge faces
 losing count of their runs (a `zip()` length error, layered plate only); and the free edge read as
 convex (coplanar sides: zero rise), so its points were not cut.
+
+## 2026-10-24 — layers fanned round a baffle's free edge
+
+**Decided with the project owner (2026-10-24):** layers on a baffle fan round its free edge (a column
+per side and one between, ahead of the edge, the cells between wrapping it), over in-plane columns. A
+prototype of in-plane columns (each free-edge point's column turned into the sheet's plane) gave flat
+prisms that the extruder could only accept under a relaxed inverted-cell test, and then 161 faces over
+50 degrees and 22 over 90 on the plate in a box at maxh 0.1.
+
+**Steps that did not work, each measured on that plate (maxh 0.1, layers 0.005 x 1.3 x 3 on walls and
+plate):**
+- Landing cells as two pyramids over the two triangles of no area where the fan closes onto the wall:
+  merged, the two share two faces (the landing edge runs through both), and the dual made a face of two
+  vertices. One six-cornered tent instead.
+- The middle column at a landing set from the folded faces alone: it lay along the landing edge, and
+  the landing cells came out flat or inverted (6 points still inside out after 8 halvings). Bisecting
+  the sides' columns, tipped along the landing edge, fixed it.
+- The fan's columns cut by the dual with their base point (as any layered column at a concave edge):
+  498 faces over 50 degrees, 55 over 90. Not cut: 13 and 4 -- the 4 at 180 degrees at the sheet's two
+  corners, where the corner's one middle column had every cell around it reaching back 0.05 along the
+  free edges, so the cut between the corner point's pieces was put in the sheet's own plane, behind the
+  corner. Moving that cut's hub along its edge broke closure (a cell inside out); a third piece for the
+  fan, by depth or by the cells round the middle column, was worse (76 over 50, closure broken).
+- A middle column per edge at a corner joined by one quadrilateral of no area: its pyramid is flat (the
+  sides' columns grow straight off the sheet, so the corner point lies between their tops). Two
+  triangles split between the middles give two tetrahedra; their middles first leaned off the corner's
+  faces, whose centroids lie diagonally behind it, which aimed each ahead of the other edge (inside out).
+  Square off its own edge: 9 over 50, 0 over 90.
+- Cutting the sides' columns again at the landings only (they stand in the concave corner of sheet and
+  wall): 22-30 over 50 and 8-11 over 90 at maxh 0.05-0.13, against 8-9 and 0-1. Reverted.
+
+**Result** (`baffle_quality.py`, 2026-10-24, defaults in force: `ClearedCaps`, no core, no planarizer,
+feature angle 45 degrees, layers `first_height = maxh / 20`, growth 1.3, 3; Linux x86-64, netgen-mesher
+6.2.2608, one run each):
+
+| maxh | mesh | cells | non-convexity max / p99 | non-orth. max | > 50 | > 90 | faces < 1 % median |
+|---|---|---|---|---|---|---|---|
+| 0.1 | box and plate + layers on walls | 3339 | 1.130 / 0.365 | 124.9 | 2 | 1 | 4 |
+| 0.1 | box, plate + layers on both | 3838 | 1.343 / 0.380 | 74.4 | 9 | 0 | 2 |
+| 0.05 | box and plate + layers on walls | 16580 | 0.491 / 0.338 | 43.6 | 0 | 0 | 3 |
+| 0.05 | box, plate + layers on both | 18100 | 1.154 / 0.340 | 71.6 | 9 | 0 | 38 |
+
+At 0.07 (probe script, not the harness): 7768 cells, non-orth. max 73.4, 8 over 50, none over 90; at
+0.13: 2119 cells, one face of 151 degrees, 9 over 50. Every face over 50 degrees and the worst cells lie
+at the two points where the free edge lands on the wall: the tent and the floor's cells round it. Not
+pursued: the landing's cells are the open item.

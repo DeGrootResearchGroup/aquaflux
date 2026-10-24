@@ -90,9 +90,11 @@ selection names them -- a {class}`~aquaflux.meshing.FacesNear` point on the plat
 patch is given its own boundary condition, as any wall's is. A sheet must leave the fluid a way round
 it: one that cuts the region in two is refused.
 
-Layers are not grown on a baffle, so its patch may not be in `layered`; where a layered wall meets
-a baffle the wall's layers slide up the baffle on both sides of it. A baffle is not meshed as a
-structured grid, nor is a face a baffle stands on (`mapped` and `pipes`).
+With its patch in `layered`, each side of a baffle grows layers of its own, and round its free edge
+they fan from one side to the other, so the cells against the baffle are wall cells all the way
+round. Left bare, a baffle has the layers of a layered wall it stands on slide up it on both sides.
+A baffle is not meshed as a structured grid, nor is a face a baffle stands on (`mapped` and
+`pipes`).
 
 The dual's faces are not flat: their corners are the centroids of the tetrahedra around an edge.
 A `planarizer` flattens them by moving those centroids

@@ -32,6 +32,12 @@ so an edge of the top shorter than ``min_top_share`` of the wall edge under it i
 way. Around a thinned point the layers taper back to full thickness, by at most half again from one
 point to the next.
 
+**Where layered faces fold right back over each other** -- the two sides of a sheet standing in the
+region, along its free edge -- no one direction clears both, so the layers fan round the edge: each
+point there grows a column for each side and one between them, ahead of the edge (at a corner of
+the sheet, one ahead of each of its two edges), and the cells between the columns wrap round it
+(:mod:`~aquaflux.meshing.fans`). Where the edge ends on a wall, the fan closes down onto the wall.
+
 **Points at one place grow alike.** A surface opened along a sheet standing in the region has a
 point for each side of the sheet where the sides part, at one place. Where such a point slides along
 the sheet beside a layered wall, each copy grows the same column -- the same direction, the
@@ -48,6 +54,8 @@ import numpy as np
 
 from aquaflux import ragged
 
+from .dual import FOLDED_BACK
+from .fans import FannedSurface, fanned, merged
 from .polygons import Polygons
 from .regions import first_hits
 
@@ -58,6 +66,9 @@ __all__ = ["LayerExtrusion", "PrismLayers"]
 #: a right cell gives a negative volume: a prism's three of its standard split; a hexahedron's eight
 #: at its corners, each a corner and its three neighbours along the cell's edges.
 _PRISM_TETRAHEDRA = ((0, 1, 2, 3), (1, 2, 3, 4), (2, 3, 4, 5))
+#: The share of a layer cell's tetrahedra's volumes within which one of them counts as flat.
+_FLAT_SHARE = 1e-9
+
 _HEXAHEDRON_TETRAHEDRA = tuple(
     [(i, (i + 1) % 4, (i + 3) % 4, i + 4) for i in range(4)]
     + [(4 + i, 4 + (i + 3) % 4, 4 + (i + 1) % 4, i) for i in range(4)]
@@ -77,29 +88,44 @@ class LayerExtrusion:
         The cells over the layered triangles: each prism's lower triangle, then its upper one,
         corner over corner. Layer by layer, each layer in the surface's order.
     hexahedra : np.ndarray of int, shape ``(n_hexahedra, 8)``
-        The cells over the layered quadrilaterals, likewise.
+        The cells over the layered quadrilaterals, likewise. Where the layers fan round an edge,
+        the fan's cells follow each kind's: its wedges and hexahedra.
+    tetrahedra : np.ndarray of int, shape ``(n_tetrahedra, 4)``
+        The fan's first cells in the corners of a folded-back edge; none without a fan.
+    tents : np.ndarray of int, shape ``(n_tents, 6)``
+        The fan's first cells where it closes down onto a wall, as
+        :func:`~aquaflux.meshing.element_mesh` takes them; none without a fan.
     inner : Polygons
         The closed surface left for a fill: the top of the last layer and the faces without layers,
         wound out of the region still to be filled.
     walls : Polygons
         The boundary faces of the layered region with the faces without layers: the surface's
         faces, those without layers drawn in to the layers' top. In the surface's order.
-    sides : np.ndarray of int, shape ``(n_sides, 4)``
-        The layer cells' sides lying on a face without layers, each a boundary quadrilateral.
-    side_face : np.ndarray of int, shape ``(n_sides,)``
-        The surface face without layers each side lies beside.
+    sides : Polygons
+        The layer cells' sides lying on a face without layers, each a boundary face: a
+        quadrilateral, or where a fan closes down onto the face, a triangle.
+    side_face : np.ndarray of int, shape ``(sides.n_faces,)``
+        The surface face without layers each side lies on or beside.
     columns : np.ndarray of int, shape ``(n_moved, count + 1)``
-        Each moved surface point, then the point each layer grew above it.
+        Each moved surface point, then the point each layer grew above it. Where the layers fan
+        round an edge, a point heads one column for each copy it was split into.
+    fanned : np.ndarray of bool, shape ``(n_moved,)``
+        Whether each column stands on a point the layers fan round. Its cells wrap round the
+        edge, so a dual cutting the point's own cell there need not cut theirs (cut with it, the
+        cells beside the edge come out far less convex).
     """
 
     points: np.ndarray
     prisms: np.ndarray
     hexahedra: np.ndarray
+    tetrahedra: np.ndarray
+    tents: np.ndarray
     inner: Polygons
     walls: Polygons
-    sides: np.ndarray
+    sides: Polygons
     side_face: np.ndarray
     columns: np.ndarray
+    fanned: np.ndarray
 
 
 @dataclasses.dataclass(frozen=True)
@@ -205,16 +231,32 @@ class PrismLayers:
         """
         points = np.asarray(points, dtype=np.float64)
         layered = np.asarray(layered, dtype=bool)
-        surface = _Surface.of(points, faces)
-        moving = np.zeros(points.shape[0], dtype=bool)
+        fan = fanned(points, faces, layered)
+        if fan is None:
+            return self._grown(_Surface.of(points, faces), layered, twins)
+        n_points = points.shape[0]
+        own = np.arange(n_points) if twins is None else np.asarray(twins, dtype=np.int64)
+        twins = np.concatenate([own, np.arange(n_points, fan.points.shape[0])])
+        middles = _Middles.of(_Surface.of(points, faces), layered, fan)
+        surface = _Surface.of(fan.points, fan.faces, added=fan.added)
+        grown = self._grown(surface, layered[fan.face], twins, middles)
+        return _merged(grown, fan, layered[fan.face])
+
+    def _grown(self, surface: _Surface, layered, twins, middles=None) -> LayerExtrusion:
+        """The layers grown on ``surface``, every point with its own column, the fan's
+        ``middles``' columns set between their two sides'."""
+        n_points = surface.points.shape[0]
+        moving = np.zeros(n_points, dtype=bool)
         rings = surface.rings[layered]
         moving[rings[rings >= 0]] = True
-        alike = _Alike.of(twins, points.shape[0])
+        alike = _Alike.of(twins, n_points)
         direction, stretch = _directions(surface, layered, moving, self.max_stretch)
+        if middles is not None:
+            middles.set(direction, stretch, surface.points, self.max_stretch)
         direction, stretch = alike.direction(direction), alike.largest(stretch)
         offsets = self.offsets()
         thickness = stretch * offsets[-1]
-        share = np.ones(points.shape[0])
+        share = np.ones(n_points)
         gap = _gaps(surface, direction, moving, 2.5 * thickness)
         share[moving] = np.minimum(1.0, self.gap_share * gap[moving] / thickness[moving])
         share = alike.smallest(_smoothed_down(surface, share, moving))
@@ -276,7 +318,9 @@ class _Alike:
 
 @dataclasses.dataclass(frozen=True)
 class _Surface:
-    """A closed surface: its points, faces, unit normals and point neighbours."""
+    """A closed surface: its points, faces, unit normals and point neighbours, and which faces have
+    no area (joining copies of a point, :mod:`~aquaflux.meshing.fans`): theirs normals and angles
+    are zero, so they weigh nothing in a point's direction."""
 
     points: np.ndarray
     faces: Polygons
@@ -287,9 +331,11 @@ class _Surface:
     point_faces: np.ndarray
     edge_points: np.ndarray  # (n_edges, 2), ascending
     edge_faces: np.ndarray  # (n_edges, 2)
+    added: np.ndarray  # (n_faces,) bool: a face of no area
 
     @classmethod
-    def of(cls, points: np.ndarray, faces: Polygons) -> _Surface:
+    def of(cls, points: np.ndarray, faces: Polygons, added: np.ndarray | None = None) -> _Surface:
+        added = np.zeros(faces.n_faces, dtype=bool) if added is None else np.asarray(added, bool)
         rings = faces.padded()
         angles = np.zeros(rings.shape)
         base = 0
@@ -299,9 +345,10 @@ class _Surface:
             for k in range(size):
                 a = corner[:, (k + 1) % size] - corner[:, k]
                 b = corner[:, (k - 1) % size] - corner[:, k]
-                cosine = np.einsum("ij,ij->i", a, b) / (
-                    np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
-                )
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    cosine = np.einsum("ij,ij->i", a, b) / (
+                        np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)
+                    )
                 angles[base : base + kind.shape[0], k] = np.arccos(np.clip(cosine, -1.0, 1.0))
             base += kind.shape[0]
         used = rings >= 0
@@ -311,9 +358,13 @@ class _Surface:
         edges = np.sort(pairs, axis=1)
         sorter = np.lexsort(edges.T[::-1])
         edges, owner = edges[sorter], owner[sorter]
+        normals = np.zeros((faces.n_faces, 3))
+        real = faces.where(~added)
+        normals[~added] = real.normals(points)
+        angles[added] = 0.0
         return cls(
-            points, faces, rings, faces.normals(points), angles, point_offsets, point_faces,
-            edges[0::2], np.stack([owner[0::2], owner[1::2]], axis=1),
+            points, faces, rings, normals, angles, point_offsets, point_faces,
+            edges[0::2], np.stack([owner[0::2], owner[1::2]], axis=1), added,
         )  # fmt: skip
 
     def around(self, point: int) -> np.ndarray:
@@ -328,31 +379,140 @@ def _directions(surface: _Surface, layered, moving, max_stretch):
     point, turned into the plane of any face without layers it lies on (so it slides along it). The
     stretch makes every layered face at the point cleared by the full thickness: ``1 / cos`` of the
     largest angle between the direction and those faces' inward normals, at most ``max_stretch``.
+    Faces of no area take no part; a point on nothing else (the middle copy of a fanned point)
+    gets no direction here.
     """
     n_points = surface.points.shape[0]
     direction = np.zeros((n_points, 3))
     stretch = np.ones(n_points)
     for point in np.flatnonzero(moving):
         around = surface.around(point)
+        around = around[~surface.added[around]]
+        if not around.size:
+            continue
         position = np.argmax(surface.rings[around] == point, axis=1)
-        weight = surface.angles[around, position]
-        on = layered[around]
-        inward = -(weight[on, None] * surface.normals[around[on]]).sum(axis=0)
-        planes = _distinct_normals(surface.normals[around[~on]])
-        if len(planes) >= 3:
-            raise ValueError(
-                f"point {point} lies on three or more faces without layers, so cannot slide"
-            )
-        if len(planes) == 2:
-            along = np.cross(planes[0], planes[1])
-            inward = along if along @ inward >= 0.0 else -along
-        elif len(planes) == 1:
-            inward = inward - (inward @ planes[0]) * planes[0]
-        inward /= np.linalg.norm(inward)
-        direction[point] = inward
-        cosine = np.min(-(surface.normals[around[on]] @ inward))
-        stretch[point] = min(max_stretch, 1.0 / max(cosine, 1.0 / max_stretch))
+        direction[point], stretch[point] = _lean(
+            surface.normals[around], surface.angles[around, position], layered[around],
+            np.zeros((around.size, 3)), max_stretch, point,
+        )  # fmt: skip
     return direction, stretch
+
+
+@dataclasses.dataclass(frozen=True)
+class _Middles:
+    """The middle columns of a fan (:mod:`~aquaflux.meshing.fans`): each between its point's two
+    sides' columns.
+
+    Between two folded-back edges it goes ahead of them (``ahead``, leaning off nothing else); where
+    the edge turns, each of its two middle columns ahead of its own edge.
+    Where the fan closes down onto a wall along an edge, it bisects the two sides' columns, tipped
+    along that edge: so round the edge it lies between them, and the two cells closing the fan
+    there are right side out whatever way the edge runs. Each is stretched to clear the point's
+    other layered faces (``upright``, their unit mean inward normal; zero if none).
+    """
+
+    middles: np.ndarray
+    sides: np.ndarray  # (n, 2): the copies of the two sides
+    landing: np.ndarray
+    ahead: np.ndarray
+    upright: np.ndarray
+
+    @classmethod
+    def of(cls, surface: _Surface, layered, fan: FannedSurface) -> _Middles:
+        """The middle columns of ``fan``, read off the surface it split."""
+        centroids = surface.faces.centroids(surface.points)
+        ahead, upright = np.zeros((fan.split.size, 3)), np.zeros((fan.split.size, 3))
+        for k, point in enumerate(fan.split.tolist()):
+            around = surface.around(point)
+            position = np.argmax(surface.rings[around] == point, axis=1)
+            normals, weights = surface.normals[around], surface.angles[around, position]
+            back = centroids[around] - surface.points[point]
+            if fan.ahead_of[k] >= 0:
+                ahead[k] = _square_off(surface, point, fan.ahead_of[k], around, back)
+            else:
+                ahead[k], _ = _lean(normals, weights, layered[around], back, 1.0, point)
+            folded = _folded(normals, layered[around])
+            mean = -(weights[~folded & layered[around], None] * normals[~folded & layered[around]])
+            length = np.linalg.norm(mean.sum(axis=0))
+            upright[k] = mean.sum(axis=0) / length if length > 0.0 else 0.0
+        return cls(
+            fan.middles, np.stack([fan.split, fan.seconds], axis=1), fan.landing, ahead, upright
+        )
+
+    def set(self, direction, stretch, points, max_stretch) -> None:
+        """Set the middle copies' ``direction`` and ``stretch``, in place, from their sides'."""
+        for k, middle in enumerate(self.middles.tolist()):
+            if self.landing[k] >= 0:
+                along = points[self.landing[k]] - points[self.sides[k, 0]]
+                between = direction[self.sides[k]].sum(axis=0)
+                lean = between / np.linalg.norm(between) + along / np.linalg.norm(along)
+                direction[middle] = lean / np.linalg.norm(lean)
+            else:
+                direction[middle] = self.ahead[k]
+            cosine = direction[middle] @ self.upright[k]
+            stretch[middle] = (
+                1.0
+                if not self.upright[k].any()
+                else min(max_stretch, 1.0 / max(cosine, 1.0 / max_stretch))
+            )
+
+
+def _square_off(surface: _Surface, point: int, end: int, around, back) -> np.ndarray:
+    """The unit direction square off a folded-back edge from ``point`` to ``end``, in its faces'
+    plane, away from them: where the edge turns, the faces at the corner lie diagonally behind
+    it, so the way out of them is not square off either edge."""
+    along = surface.points[end] - surface.points[point]
+    along /= np.linalg.norm(along)
+    on_edge = np.any(surface.rings[around] == end, axis=1)
+    normal = surface.normals[around[on_edge][0]]
+    away = -back[on_edge].mean(axis=0)
+    away -= (away @ along) * along + (away @ normal) * normal
+    return away / np.linalg.norm(away)
+
+
+def _folded(normals: np.ndarray, layered: np.ndarray) -> np.ndarray:
+    """Which of the layered faces at a point fold right back over another layered one there."""
+    return layered & np.any((normals @ normals[layered].T) <= FOLDED_BACK - 1.0, axis=1)
+
+
+def _lean(normals, weights, layered, back, max_stretch, point):
+    """A point's unit direction into the region and its stretch, from the faces round it: their
+    outward ``normals``, angle ``weights`` at the point, which are ``layered``, and the way ``back``
+    from the point to each one's centroid.
+
+    The direction is the weighted mean of the layered faces' inward normals, turned into the plane
+    of any face without layers (so it slides along it). Layered faces folded right back over each
+    other give no direction: they are cleared by going ahead of the edge they fold at, along them
+    -- the way from their centroids back to the point, in their planes -- bisected with the other
+    layered faces' mean. The stretch clears every other layered face by the full thickness.
+    """
+    folded = _folded(normals, layered)
+    upright = layered & ~folded
+    inward = -(weights[upright, None] * normals[upright]).sum(axis=0)
+    if folded.any():
+        along = (
+            back[folded]
+            - np.einsum("ij,ij->i", back[folded], normals[folded])[:, None] * (normals[folded])
+        )
+        ahead = -(weights[folded, None] * along).sum(axis=0)
+        ahead /= np.linalg.norm(ahead)
+        length = np.linalg.norm(inward)
+        inward = ahead if length == 0.0 else ahead + inward / length
+    planes = _distinct_normals(normals[~layered])
+    if len(planes) >= 3:
+        raise ValueError(
+            f"point {point} lies on three or more faces without layers, so cannot slide"
+        )
+    if len(planes) == 2:
+        along_both = np.cross(planes[0], planes[1])
+        inward = along_both if along_both @ inward >= 0.0 else -along_both
+    elif len(planes) == 1:
+        inward = inward - (inward @ planes[0]) * planes[0]
+    inward /= np.linalg.norm(inward)
+    if not upright.any():
+        return inward, 1.0
+    cosine = np.min(-(normals[upright] @ inward))
+    return inward, min(max_stretch, 1.0 / max(cosine, 1.0 / max_stretch))
 
 
 def _distinct_normals(normals: np.ndarray, tolerance: float = 1e-3) -> list[np.ndarray]:
@@ -379,10 +539,23 @@ def _gaps(surface: _Surface, direction, moving, reach) -> np.ndarray:
     gap = np.full(surface.points.shape[0], np.inf)
     moved = np.flatnonzero(moving)
     gap[moved] = first_hits(
-        surface.points, surface.faces, surface.points[moved], direction[moved], reach[moved],
-        moved[:, None],
+        surface.points, surface.faces.where(~surface.added), surface.points[moved],
+        direction[moved], reach[moved], _at_one_place(surface.points)[moved],
     )  # fmt: skip
     return gap
+
+
+def _at_one_place(points: np.ndarray) -> np.ndarray:
+    """For each point, every point at its place (itself and any copies of it), padded with ``-1``:
+    a ray from it starts on all their faces. Shape ``(n_points, k)``."""
+    _, group, counts = np.unique(points, axis=0, return_inverse=True, return_counts=True)
+    group = group.reshape(-1)
+    offsets, order = ragged.group(group, counts.size)
+    rows = np.full((points.shape[0], int(counts.max())), -1, dtype=np.int64)
+    for k in range(int(counts.max())):
+        has = offsets[group] + k < offsets[group + 1]
+        rows[has, k] = order[offsets[group[has]] + k]
+    return rows
 
 
 def _smoothed_down(surface: _Surface, share, moving, ratio: float = 1.5) -> np.ndarray:
@@ -456,8 +629,10 @@ def _built(surface, layered, moving, direction, offsets, reach) -> LayerExtrusio
     )
     columns = np.stack([row[movers] for row in rows], axis=1)
     return LayerExtrusion(
-        all_points, cells[0], cells[1], inner, walls, sides, np.tile(beside, n_layers), columns
-    )
+        all_points, cells[0], cells[1], np.zeros((0, 4), np.int64), np.zeros((0, 6), np.int64),
+        inner, walls, Polygons(quads=sides), np.tile(beside, n_layers), columns,
+        np.zeros(columns.shape[0], dtype=bool),
+    )  # fmt: skip
 
 
 def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving, min_top_share):
@@ -469,18 +644,24 @@ def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving
     for cells, tetrahedra in ((extrusion.prisms, _PRISM_TETRAHEDRA),
                               (extrusion.hexahedra, _HEXAHEDRON_TETRAHEDRA)):  # fmt: skip
         corner = points[cells]
-        bad = np.zeros(cells.shape[0], dtype=bool)
         # Each tetrahedron keeps the orientation it has in a right cell: the lower face wound out of
-        # the region puts the inside at negative volume.
-        for tet in tetrahedra:
-            p = corner[:, tet]
-            volume = np.einsum(
-                "ij,ij->i", np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), p[:, 3] - p[:, 0]
+        # the region puts the inside at negative volume. One may be flat -- a cell at a sheet's free
+        # edge, its column grown along the sheet, has its front face in its lower face's plane --
+        # but none may turn, and the cell must hold volume.
+        volume = np.stack([
+            np.einsum(
+                "ij,ij->i",
+                np.cross(corner[:, b] - corner[:, a], corner[:, c] - corner[:, a]),
+                corner[:, d] - corner[:, a],
             )
-            bad |= volume >= 0.0
+            for a, b, c, d in tetrahedra
+        ], axis=1)  # fmt: skip
+        flat = _FLAT_SHARE * np.abs(volume).sum(axis=1)
+        bad = np.any(volume > flat[:, None], axis=1) | (volume.sum(axis=1) >= -flat)
         rows.append(cells[bad].reshape(-1))
-    drawn = extrusion.walls.where(~layered)
-    turned = np.einsum("ij,ij->i", drawn.normals(points), surface.normals[~layered]) <= 0.0
+    bare = ~layered & ~surface.added
+    drawn = extrusion.walls.where(bare)
+    turned = np.einsum("ij,ij->i", drawn.normals(points), surface.normals[bare]) <= 0.0
     turned_triangles, turned_quads = drawn.split(turned)
     rows += [drawn.triangles[turned_triangles].reshape(-1), drawn.quads[turned_quads].reshape(-1)]
     top = np.arange(points.shape[0])
@@ -501,3 +682,48 @@ def _wall_point(indices: np.ndarray, n_surface: int, movers: np.ndarray) -> np.n
     above = indices >= n_surface
     out[above] = movers[(indices[above] - n_surface) % movers.size]
     return out
+
+
+def _merged(grown: LayerExtrusion, fan: FannedSurface, layered: np.ndarray) -> LayerExtrusion:
+    """Layers grown on a fanned surface, its copies merged back into their points: the surface's
+    own faces as walls, in its order; the fan's faces of no area left out, but those without
+    layers, drawn in to the layers' top, kept as sides on the face they part."""
+    cells = merged(fan, grown.points.shape[0], layered, grown.prisms, grown.hexahedra)
+    renumber = cells.renumber
+    n_fanned, n_points = fan.points.shape[0], int(fan.point.max()) + 1
+    tri_added, quad_added = fan.faces.split(fan.added)
+    walls = Polygons(grown.walls.triangles[~tri_added], grown.walls.quads[~quad_added])
+    # Sides, with the surface face each lies on or beside: a face of no area without layers drawn
+    # in, then the cells' sides; each after merging, a corner repeated at a copy dropped.
+    drawn = fan.added & ~layered
+    rings = np.vstack([grown.walls.padded()[drawn], grown.sides.padded()])
+    lies_on = np.concatenate([fan.face[drawn], fan.face[grown.side_face]])
+    sides, side_face = _without_repeats(np.where(rings >= 0, renumber[rings], -1), lies_on)
+    return LayerExtrusion(
+        points=np.vstack([grown.points[:n_points], grown.points[n_fanned:]]),
+        prisms=cells.prisms,
+        hexahedra=cells.hexahedra,
+        tetrahedra=cells.tetrahedra,
+        tents=cells.tents,
+        inner=grown.inner.renumbered(renumber),
+        walls=walls.renumbered(renumber),
+        sides=sides,
+        side_face=side_face,
+        columns=renumber[grown.columns],
+        fanned=np.isin(fan.point[grown.columns[:, 0]], fan.split),
+    )
+
+
+def _without_repeats(rings: np.ndarray, face: np.ndarray) -> tuple[Polygons, np.ndarray]:
+    """Faces given as padded rings, ``(n, 4)``, each with a corner repeated round it dropped: a
+    quadrilateral with two corners at one point a triangle, a face left with fewer than three
+    corners gone. Returns the faces and ``face`` in their order (the triangles first)."""
+    kept = []
+    for ring in rings.tolist():
+        ring = [c for c in ring if c >= 0]
+        ring = [c for i, c in enumerate(ring) if c != ring[i - 1]]
+        kept.append(ring)
+    size = np.array([len(r) for r in kept])
+    triangles = np.reshape([r for r in kept if len(r) == 3], (-1, 3)).astype(np.int64)
+    quads = np.reshape([r for r in kept if len(r) == 4], (-1, 4)).astype(np.int64)
+    return Polygons(triangles, quads), np.concatenate([face[size == 3], face[size == 4]])

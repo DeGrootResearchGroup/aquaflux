@@ -225,7 +225,7 @@ cfd/                                  # repo root
 │   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
 │   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, pipes, ducts, baffle_patch, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches; BAFFLE_PATCH
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
-│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, tents, patches, patch_types) -> Mesh
 │   │   ├── near_surface.py           #   NearSurface: refine an octree towards a region's boundary; cube_samples
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
@@ -238,6 +238,7 @@ cfd/                                  # repo root
 │   │   ├── duct_core.py              #   DuctCore.fill(points, rings, width) -> ConduitFill: four-sided cross-sections by transfinite interpolation, joined
 │   │   ├── ducts.py                  #   Duct; find_ducts / duct_divisions / duct_rings: rectangular ducts (chained four-face segments) found from the CAD, rails' points on normal cross-sections
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
+│   │   ├── fans.py                   #   fanned / merged: a surface split where layered faces fold back (a sheet's free edge), so layers fan round it; wedges, corner tetrahedra, tents
 │   │   ├── sheets.py                 #   baffles: opened (a surface opened along its sheets, a side each), SlitSurface (the sheet once, for the fill), parted (tets given their side's points)
 │   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
 │   │   ├── netgen_process.py         #   NetgenProcess (triangulate, edges divided by count or EdgePoints / fill; each with optional LocalSizes) run in a child; check_closed_surface

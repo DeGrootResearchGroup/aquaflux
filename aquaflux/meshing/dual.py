@@ -201,8 +201,9 @@ class TracedDual:
 
 #: How near ``-1`` the cosine between two boundary faces' normals must be for them to be folded
 #: right back onto each other. A domain cannot fold convexly by so much (it would have no thickness
-#: there), so such a fold is the free edge of a sheet the domain wraps round.
-_FOLDED_BACK = 1e-9
+#: there), so such a fold is the free edge of a sheet the domain wraps round. Layers grown on such
+#: faces fan round it (:mod:`~aquaflux.meshing.fans`).
+FOLDED_BACK = 1e-9
 
 
 def boundary_folds(face_geometry: FaceGeometry, pairs: np.ndarray) -> np.ndarray:
@@ -227,7 +228,7 @@ def boundary_folds(face_geometry: FaceGeometry, pairs: np.ndarray) -> np.ndarray
     first, second = pairs[:, 0], pairs[:, 1]
     cosine = np.clip(np.einsum("ij,ij->i", normal[first], normal[second]), -1.0, 1.0)
     rises = np.einsum("ij,ij->i", centroid[second] - centroid[first], normal[first]) > 0.0
-    folded_back = cosine <= _FOLDED_BACK - 1.0
+    folded_back = cosine <= FOLDED_BACK - 1.0
     return np.where(rises | folded_back, -1.0, 1.0) * np.arccos(cosine)
 
 
