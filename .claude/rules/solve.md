@@ -14,9 +14,9 @@ subsystem detail is in the files the Index names. Dated history: `.claude/notes/
 
 | File | `paths:` | Covers |
 |---|---|---|
-| `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; traps from the deleted incomplete-/complete-LU preconditioners |
+| `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `probe_layout.py`, `kronecker_pattern.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; traps from the deleted incomplete-/complete-LU preconditioners |
 | `.claude/notes/solve-direct-preconditioners-log.md` | *(never auto-loads)* | Dated investigation behind Jacobian materialization: probing reach, #191, materialize cost |
-| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
+| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py`, `kronecker_pattern.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
 | `.claude/notes/solve-amg-multigrid-log.md` | *(never auto-loads)* | Dated investigation behind the traced multigrid and smoothed aggregation |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `simple_fit.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | Full dated flow-block investigation, including qualified/retracted findings |
@@ -46,7 +46,8 @@ Follow the root `CLAUDE.md` "Writing the design records". Solve-specific:
   `jacobian_probe`, `field_split`, `traced_field_split`, `traced_cycle`, `hierarchy_inverse`,
   `saddle_multigrid`, `host_preconditioner`, `block_inverse`, `block_preconditioner`,
   `materialized_preconditioner`, `materialized_spec`, `materialized_session`, `monolithic_policy`,
-  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `level_fit`, `simple_fit`). An older entry saying `solve/<one of those>.py` means the `precondition/`
+  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `level_fit`, `simple_fit`, `probe_layout`,
+  `kronecker_pattern`). An older entry saying `solve/<one of those>.py` means the `precondition/`
   one. `precondition/` imports `solve/` and nothing else; `solve/` imports nothing outside itself (so
   every residual can run on it); every scipy/numba import is on the `precondition/` side. Pinned by
   `tests/unit/test_layering.py` (`BUILT_ON = {"precondition": ("solve",)}`). The engine holds a session
@@ -327,6 +328,19 @@ defect — fix it in the same change.
     a stale preconditioner — apply the update the hook returns (`MarchReplay.refit`,
     `endgame_shift_probe.py`'s `refreshed`). Pinned by
     `test_a_re_fit_releases_the_arrays_only_the_superseded_split_held` (both precisions).
+  - **Every session gives glibc's freed memory back before each re-fit (default, the owner's decision of
+    2026-10-24).** `MaterializedSession(memory_trim=)` defaults to `GlibcTrim()` (`aquaflux/allocator.py`,
+    `malloc_trim(0)`, a no-op without glibc; the only `ctypes` in the package) and hands it to
+    `BetaTrackingRefresh`, which calls it once per re-fit, before the probe (the hook's own default is
+    `None`). `None` turns it off; a case file cannot reach it. It changes no value. **Why:** the step
+    program's first call leaves ~0.6 GiB of freed memory in XLA's worker-thread arenas, and the next re-fit's
+    transient landed on top of it: bfs3d 2-step peak 9.04 -> 8.52 GiB (mean of three runs each, spread
+    0.24 -> 0.02), no cost in time, measured before #817 moved the peak to the step program's first call
+    — unmeasured since (`.claude/notes/solve-direct-preconditioners-log.md`, "A `malloc_trim(0)` before
+    each re-fit"). Read its effect from the resident set, not `mallinfo2`'s free
+    bytes, which count trimmed pages as still free. Pinned by
+    `test_the_memory_trim_runs_once_before_each_refit_and_never_on_a_skipped_step` and
+    `test_a_session_gives_freed_memory_back_before_each_refit_by_default`.
   - **A re-pointed session re-fits the inverse and deliberately keeps the held step's shift (#701)** —
     the step control adapts the shift strength on the premise that the diagonal it scales is fixed, and
     every variant changing it mid-march lost (`.claude/notes/turbulence-log.md`, "#701 — the arms").

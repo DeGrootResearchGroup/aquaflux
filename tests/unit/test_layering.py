@@ -47,6 +47,7 @@ PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "aquaflux"
 
 #: Dependency-free leaf modules of the package, which any layer may import.
 NEUTRAL_LEAVES = (
+    "allocator",
     "morton",
     "ragged",
     "text_table",

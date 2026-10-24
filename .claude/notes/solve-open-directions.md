@@ -805,6 +805,11 @@ JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_row
   2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
 - If the padded products dominate, 14b–14d are worth doing.
 
+**The probe half, 2026-10-24:** the batched JVP's 829 MiB on bfs3d is the multiple-correction Green–Gauss
+face loop at its peak. Face-blocking it and the flux balance reaches ~440–472 MiB, no better than halving
+the batch, and is not built (`solve-refuted-directions.md`, "Assembling the residual's face sums in
+blocks").
+
 ### 14b. A consistent compact operator for the fit
 
 The Jacobian of a narrowed residual, compact by construction:
@@ -836,6 +841,14 @@ None of these needs a convergence study:
 The transposes and the cell-level pattern are worth about 0.6 and up to ~2 GiB on bfs3d; the pattern cut
 scales with the entry count, so it is the one of these that also bears on the 300k target.
 
+**The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
+cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
+end, step-1 peak 8.07 → 7.19 GiB, resident 7.13 → 6.11 (`solve-direct-preconditioners-log.md`, "Cell-level
+pattern (§14d), stages 1–3"). The probe's host block patterns (140 MiB on bfs3d) followed
+(`CellLevelPattern`, branch `claude/host-cell-patterns`). Still dof level: the diagonal and cell-block
+gathers (small), a non-nodal or diagonal-padded level, the 1×1 Schur, and the plan's own COO coordinates
+(`ColumnProbePlan.pattern_rows`/`pattern_cols`/`in_reach`, ~18 MiB host on bfs3d).
+
 ### 14e. Pass the arrays the probe and step programs compile in as constants as arguments (proposal)
 
 **What.** First read which arrays they are: dump the constant instructions, by size, of the largest
@@ -847,6 +860,7 @@ a static field carries.
 standalone probe; as arguments they are held once, or not at all where they duplicate an array the case already
 holds. It is the one part of the non-array residue that grows with the case (log entry above). Library work:
 not started.
+⚠️ Ranked before #817 moved the pattern arrays to cell level: re-take the ranking on current `main` first.
 
 ## Smaller housekeeping
 

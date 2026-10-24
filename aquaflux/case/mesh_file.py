@@ -53,7 +53,7 @@ from aquaflux.meshing import (
 
 from .drawing import CadPlacement
 
-__all__ = ["Drawing", "DrawingRegion", "MeshOutput", "MeshSizes", "MeshSpec"]
+__all__ = ["Drawing", "DrawingRegion", "DrawingSections", "MeshOutput", "MeshSizes", "MeshSpec"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -80,7 +80,8 @@ class Drawing:
 
 @dataclasses.dataclass(frozen=True)
 class DrawingRegion:
-    """The region of the drawing to mesh: the union of some solids, less others.
+    """The region of the drawing to mesh: the union of some solids, less others, with baffles
+    standing in it.
 
     The water in a vessel and its pipes, less a lamp sleeve standing in it.
 
@@ -90,20 +91,26 @@ class DrawingRegion:
         The solids whose union is the region, by name in the drawing.
     without : tuple of str
         The solids taken out of it. Default: none.
+    baffles : tuple of str, or None
+        The sheets of the drawing standing in the region as baffles -- surfaces of no thickness,
+        the fluid on both sides. Unset, every sheet standing in it; empty, none.
     """
 
     solids: tuple[str, ...]
     without: tuple[str, ...] = ()
+    baffles: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.solids:
             raise ValueError("a mesh file's region names the solids whose union is the region.")
         object.__setattr__(self, "solids", tuple(self.solids))
         object.__setattr__(self, "without", tuple(self.without))
+        if self.baffles is not None:
+            object.__setattr__(self, "baffles", tuple(self.baffles))
 
     def cad_region(self) -> CadRegion:
         """The drawing's region these name."""
-        return CadRegion(self.solids, self.without)
+        return CadRegion(self.solids, self.without, self.baffles)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,6 +139,30 @@ class MeshSizes:
 
     #: Where an unset setting takes its default from (read by the case-file schema).
     unset_resolves_to: ClassVar[tuple[Callable, ...]] = (NetgenProcess.triangulate,)
+
+
+@dataclasses.dataclass(frozen=True)
+class DrawingSections:
+    """The parts of a mesh file its patches are chosen by, read while the rest may be unfinished.
+
+    Attributes
+    ----------
+    drawing : Drawing
+    region : DrawingRegion or None
+        Unset until the file names a solid.
+    patches : mapping of {str: FaceSelection}
+    others : str or None
+        The patch for the faces no selection chooses; unset, the mesher's default.
+    feature_angle : float or None
+        The file's ``sizes.feature_angle``, which decides which edges are a duct's corners; unset
+        until the file states a positive one.
+    """
+
+    drawing: Drawing
+    region: DrawingRegion | None
+    patches: Mapping[str, FaceSelection]
+    others: str | None = None
+    feature_angle: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)

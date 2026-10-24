@@ -1617,6 +1617,22 @@ pitzDaily and bfs3d (2026-10-14/15)".
   frozen operators are assembled from. **Detail:** `.claude/notes/turbulence-log.md`, "Segmented
   refresh, the carried shift factor (#156), and refresh under `jax.grad`".
 
+## Assembling the residual's face sums in blocks of faces to bound the probe's JVP temporary — MARGINAL, NOT BUILT (2026-10-24, the project owner's decision)
+
+On bfs3d at the hybrid start (`validation/face_blocked_gradient_screen.py`; table in
+`.claude/notes/discretization-log.md`, "Face-blocked assembly screen"), a `lax.scan` over face ranges was
+tried on the whole-state batch-8 probe JVP (828.9 MiB temporary). The flux balance alone could not move
+the temporary, because the peak is the multiple-correction gradient's Green–Gauss face loop. Blocking that
+loop moved the peak into the flux operators. Blocking both (2 ranges, each limiter evaluated whole since it
+reduces over a cell's faces) reached 472 MiB, at +9–12 % per tangent over batch 8. Halving the batch reaches
+478 MiB at +19–26 %. More ranges floor the temporary at ~440 MiB and only cost time: compiler copies, the
+whole-mesh boundary closures and the limiter set the floor. It passed the pre-registered bar (b) by 1.2 % of
+memory, and the owner chose not to build it. Building it would need a cell stage split out of
+`AdvectionScheme`/`Limiter` and a declared face-indexed-leaf seam for ~10 % of probe time over batch 4. Not
+measured: the per-field probe programs the re-fit actually runs, and a converged state. Reopen only if
+those show a wider margin.
+
+
 ## Treating bfs3d's march variance with the Krylov tolerance, or production frozen everywhere — REFUTED (2026-10-18)
 
 Both tried against bfs3d's corner `k` collapse (`turbulence.md`; full record in

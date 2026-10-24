@@ -24,7 +24,8 @@ cores cross-section by cross-section (`ducts.py`, `duct_core.py`; both through `
 wired into `CadMesher` or the mesh file.
 Face planarization (`planarize.py`) is built and run by `CadMesher` when given a `planarizer` (off by
 default; `planarizer: {kind: FacePlanarizer}` in a case file). Refinement regions (`refinement.py`) are
-built and wired into `CadMesher` and the mesh file (`MeshSpec.refinements`).
+built and wired into `CadMesher` and the mesh file (`MeshSpec.refinements`). Baffles -- the drawing's sheets standing in
+the fluid -- are built (`sheets.py`, below).
 The design below was agreed with the project owner on 2026-10-19. The probe harnesses are in
 `validation/meshing_netgen/` and `validation/meshing_dual/`. The package is on the published API page.
 
@@ -45,7 +46,8 @@ polyhedral bulk through OpenFOAM 13 non-conformal couples) is not available to u
   bulk conformally.
 - **Rectangular ducts get a structured core automatically, following a curve** (project owner,
   2026-10-24: "automatic detection, structured meshing, and able to follow a curve"), with an override.
-- **Baffles are a preset, detected automatically** (with an override) as faces with fluid on both sides.
+- **Baffles are detected automatically** (with an override) as faces with fluid on both sides: built as
+  the drawing's sheets standing in the region (below).
 - **No OpenFOAM tool anywhere in the pipeline** (no blockMesh, snappyHexMesh, polyDualMesh, gmshToFoam).
 - **Output: the `Mesh` in memory, and an OpenFOAM polyMesh writer**, as the first iteration.
 - **Scale: up to about 2M cells on a laptop.**
@@ -121,7 +123,9 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
     whose exact intersection is far off (131 mm on Sozzi's inlet saddle); a boundary edge's hub on the
     segment between its two boundary-face centroids, where it crosses.
   - **Layers' columns are cut with their base point** (`PolyhedralDual(columns=)`: each row a boundary
-    point, then the points grown above it; `CadMesher` passes `LayerExtrusion.columns`). The layer points
+    point, then the points grown above it; `CadMesher` passes `LayerExtrusion.columns` less the
+    `fanned` ones -- a fan's columns wrap round a baffle's free edge, and cut with their base they
+    gave faces to 180 degrees, 498 over 50 against 9; "Prism layers", below). The layer points
     above a sharp concave edge have dual cells that turn the corner too; uncut, their faces along the
     corner fold and the cells do not close (Netgen L with layers on every face: 22 unclosed on `main`
     before this). Each column point is cut by its base point's walls, origin at itself; its pieces follow
@@ -159,9 +163,9 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=ClearedCaps(),
 pipe_core=PipeCore(), duct_core=DuctCore(), planarizer=None, core=None, refinements=(), netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
-layered=(), mapped=(), pipes=None, ducts=None, on_stage=None) -> Mesh` (`on_stage`, a `Stage`, is told each stage's name as it starts,
+layered=(), mapped=(), pipes=None, ducts=None, baffle_patch=BAFFLE_PATCH, on_stage=None) -> Mesh` (`on_stage`, a `Stage`, is told each stage's name as it starts,
 only the stages this mesh runs; `aquaflux mesh` prints them, `case.md`): `write_brep` → `triangulate` (face-tagged; again with the refinements' local sizes when there are any, below;
-again with the rims divided alike where a pipe candidate's need it, and whenever there is a duct, its edges divided as below) → pipes and ducts found (below) → the `mapped` patches' faces, the pipes' and the ducts' sides remeshed as structured quadrilaterals (below) →
+again with the rims divided alike where a pipe candidate's need it, and whenever there is a duct, its edges divided as below) → pipes and ducts found (below) → the `mapped` patches' faces, the pipes' and the ducts' sides remeshed as structured quadrilaterals (below) → the surface opened along the baffles ("Baffles", below) →
 layers on the `layered` patches (below) → the pipes' and ducts' cores filled, out of the fill (`fill_conduits`, below)
 → every quadrilateral left for the fill
 capped with a `PyramidCaps` pyramid on the fill's side (`caps.capped`: sized by `ClearedCaps`, below, or a fixed share of its **first** edge, which on a mapped grid runs round the band; Netgen takes triangles
@@ -207,18 +211,18 @@ and their stub's triangles are not wound alike (`_loops` refuses such triangles 
 - **Cost** (Sozzi water, maxh 0.01, 13297 cells, one run, macOS arm64): 8.7 s and 0.77 GB peak for the
   whole `aquaflux mesh` (then a case-file mesh section, with `--openfoam`) before projection; `CadMesher.mesh` 6.8 s with it (3.8 → 5.6 s
   at maxh 0.02: the kernel's one query per vertex, ~15k vertices).
-- `element_mesh(points, tetrahedra=None, prisms=None, hexahedra=None, pyramids=None, patches=None,
-  patch_types=None)` numbers cells in that order and faces in first-sighting order (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
+- `element_mesh(points, tetrahedra=None, prisms=None, hexahedra=None, pyramids=None, tents=None, patches=None,
+  patch_types=None)` numbers cells in that order (tents: the fan's, "Prism layers") and faces in first-sighting order (the test fixture `tetrahedral_grid_3d` is built with it, bit-identical to its former
   hand assembly); patches take triangles and quadrilaterals by corners. `HEXAHEDRON_CORNERS` (the unit
   cube's corners in hexahedron order) lives here, shared by the blocks and the octree core.
 
 ## Prism layers (`layers.py`) — built, on triangles and quadrilaterals
 
 `PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8, min_top_share=0.1).extrude(points,
-faces: Polygons, layered) -> LayerExtrusion(points, prisms, hexahedra, inner, walls, sides, side_face,
-columns)`: one extruder for both kinds, prisms over triangles and hexahedra over quadrilaterals, layer by
-layer in the surface's order; `inner` and `walls` are `Polygons`; `columns` each moved point then its
-layer points. A mesh file states it as `MeshSpec.layers` with the patch names in `MeshSpec.layered` (both
+faces: Polygons, layered, twins=None) -> LayerExtrusion(points, prisms, hexahedra, tetrahedra, tents, inner, walls, sides, side_face,
+columns, fanned)`: one extruder for both kinds, prisms over triangles and hexahedra over quadrilaterals, layer by
+layer in the surface's order; `inner`, `walls` and `sides` are `Polygons`; `columns` each moved point then its
+layer points; `tetrahedra`, `tents` and `fanned` are the fan's (below; empty without one). A mesh file states it as `MeshSpec.layers` with the patch names in `MeshSpec.layered` (both
 or neither). A surface of both kinds travels as a `Polygons` (`polygons.py`: two arrays, never one padded
 one, so a face is never read with a missing corner; a per-face quantity runs over the triangles first).
 - **Inside-out test per kind**: a prism's three tets of its standard split (as before); a hexahedron's
@@ -257,6 +261,37 @@ one, so a face is never read with a missing corner; a per-face quantity runs ove
   and the Netgen cube `test_capped_hexahedral_layers_meeting_at_an_edge_leave_a_surface_netgen_fills`.
   Open: a drawn-in bare face can shrink the same way (not checked); smoothing the columns' directions
   near the edge would spread the shrink instead of thinning (not built). Log: "the fill's overlap at maxh 0.0025".
+- **Layers fan round a baffle's free edge** (`fans.py`; project owner chose the fan, 2026-10-24, over
+  in-plane columns, which a prototype showed giving flat prisms): two layered faces folded right back
+  (`dual.FOLDED_BACK`) have opposite normals, so no one column clears both. `fanned` splits every point
+  of such an edge into copies -- the first side keeps the point, one for the second side, one *middle*
+  -- joined by faces of no area (`FannedSurface.added`); the layers grow on that surface as on any
+  (middle columns set by `_Middles`), and `merged` makes the copies one point again: the first layer's
+  cells over quadrilaterals of no area are **wedges** (prisms), the layers above hexahedra and prisms.
+  - **A corner of the sheet** (the edge turns by more than `fans.TURNED`, 45°) **has a middle per
+    edge**, each square off its own edge in the sheet's plane (`_square_off`; the faces' centroids lie
+    diagonally behind a corner, and leaning off them aimed each middle ahead of the other edge, inside
+    out), and two triangles of no area split between the middles, whose first cells are **tetrahedra**.
+    ⚠️ With one middle the corner's cells all reached back along the free edges: the dual put the cut
+    between the corner's pieces in the sheet's own plane, 4 faces at 180°. A quadrilateral joining the
+    four copies makes a flat pyramid (the sides' columns grow straight off the sheet, the point between
+    their tops).
+  - **Where the edge lands on a wall** (one cut round the point) the run of faces is parted at its
+    angular middle (`_half_way`), the fan closing down along that edge (`FannedSurface.landing`); its
+    middle column bisects the sides' columns tipped along the landing edge (else it lay along that
+    edge and the cells closing the fan were flat or inverted), and the two prisms over the landing
+    triangles, merged, would share two faces, so they are one **tent** (`element_mesh(tents=)`: six
+    corners, an edge `p q` with two quadrilaterals through it and four triangles; `q` has two faces).
+    A landing parted between a layered and a bare face is refused (`NotImplementedError`), as is a
+    point on more than two folded edges.
+  - **The fan's columns are not cut by the dual** (`LayerExtrusion.fanned`; above). Cutting the sides'
+    columns again at a landing only (they stand in the corner between sheet and wall) was worse at
+    every size (faces over 90°: 8-11 against 0-1).
+  - Measured with `validation/meshing_netgen/baffle_quality.py` (log, "layers fanned round a baffle's
+    free edge"): no face over 90° at maxh 0.05-0.1; the faces over 50° (8-9) and the worst cells all
+    at the two landings; one face of 151° at 0.13. The landings are the weak spot. Pinned in
+    `tests/unit/test_meshing_fans.py` (no Netgen: the split surface closed, a middle per corner edge,
+    the cells filling the room exactly, a tent's faces) and `test_layers_on_a_baffle_fan_round_its_free_edge`.
 - **The fill gets only the layers' top plus the bare triangles** (`inner`); `CadMesher._filled` hands Netgen
   just the points that surface uses (Netgen renumbers otherwise) and maps the tets back.
 - ⚠️ **Projection must follow the layers** (`_Columns`): a wall face's centroid moves onto the CAD by up to the
@@ -381,6 +416,64 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   cylinder open at both ends, no Netgen, every cell hexahedral but the corner prisms) and
   `test_meshing_netgen.py` (Sozzi's pipes: closure, pipe p99 < 7°, hexahedra along both axes, end areas).
 
+## Baffles (`sheets.py`) — built
+
+A baffle is a **sheet** of the drawing (a part with faces and no solid; `CadModel.sheets`) standing in
+the region; `CadRegion.baffles` unset takes every sheet, a tuple names them, `()` none (`io.md`).
+- **In the mesh, a baffle is two coincident boundary faces per place, one per side, in an ordinary
+  patch** (project owner, 2026-10-24, over an interior-face patch with a special flux): every boundary
+  condition, the wall distance, a wall function and the polyMesh writer then see a wall with nothing
+  added. `BAFFLE_PATCH` (`"baffles"`) collects the baffle faces no selection names --
+  `assign_patches` gives them `len(patches) + 1`, so the drawing view and the mesher agree; a selection
+  of that name collects them instead. Pinned by `test_a_baffle_standing_in_a_box_is_a_patch_of_faces_on_both_its_sides`
+  (with a polyMesh round trip).
+- **The surface is opened along the sheets right after mapping** (`opened`): each sheet triangle given
+  twice, one per side; each point copied once per side where the sides part (inside the sheet, along its
+  foot on a wall, at a wall corner), never along its free edge, round which the fluid of one side meets
+  the other's. Sides are read from the faces round each edge used more than twice, sorted by angle about
+  it: a face running along the edge low-to-high has the fluid on its decreasing-angle side, so each
+  high-to-low face pairs with the next face round; a sheet's two sides tie at one angle, **the low-to-high
+  one first** (else the slit between them reads as fluid). Copies follow from the joined corners
+  (`connected_components`); the first side met keeps the number, so `OpenedSurface.origin` maps a copy to
+  its point and the mapped grids keep their indices.
+  - ⚠️ **An edge a sheet uses whose ends both lie on its free edge is cut at its middle first**
+    (`_cut_free_chords`, midpoint moved onto the sheet): left whole it stays one edge of four faces, and
+    a triangle with three free-edge corners comes out as two faces on one point set. Junction edges
+    included. Lattice sheets' corner squares trip it (pinned).
+- **Layers grow alike on both sides** (`PrismLayers.extrude(twins=)`: each group's direction the mean,
+  stretch the largest, thickness share the smallest, applied after every smoothing), so the twin
+  columns coincide exactly; `cad_mesher._grown_twins` extends the twins up the columns and refuses a
+  point layered on one side only, or columns that do not meet. Untied, a sheet near one wall grows
+  different columns on its two sides (`test_layers_grow_alike_on_both_sides_of_a_sheets_foot`).
+- **The fill gets each sheet once, as internal triangles** (`SlitSurface.of`: points merged to their
+  twins, each pair of sides kept once; `NetgenProcess.fill(internal=)`, a `FaceDescriptor` with
+  `domin = domout = 1`), and **`parted` hands each tetrahedron its side's copies again**: tetrahedra round a
+  copied point joined through faces off the sheet are one side, named by the opened surface's face it
+  holds (a sheet face's holder is the tetrahedron behind it, away from its normal). ⚠️ **Netgen does not
+  fill the opened surface itself** (two coincident sides on their own points): no result within 120 s on a
+  box at maxh 0.1, where the internal form takes a second (`validation/meshing_netgen/baffle_quality.py
+  --opened-fill`, 2026-10-24).
+- **The dual**: two boundary faces folded right back onto each other fold by `-pi` (`boundary_folds`,
+  `FOLDED_BACK`), so a free edge is the most concave edge and its points are cut into a piece per side
+  (coplanar sides read 0 rise, convex, before). **A column point lying on a sharp concave edge itself is
+  cut by its own walls, not its base's** (`_Pieces.of`): the walls' layers slide up a baffle, so the column
+  at the corner where its free edge meets a wall runs along that free edge; cut twice, the dual broke.
+- **Refused**: a sheet cutting a solid of the region in two (kernel); a named baffle standing nowhere in
+  the region; a mapped or pipe patch holding a baffle or a face one stands on (the grid would not keep the foot). Pipe
+  candidates leave those faces out. Every edge of a sheet is a feature (`edge_angle` `nan`).
+- **Quality** (box with a plate at maxh 0.1, `baffle_quality.py`, log "baffles"): p99 non-convexity
+  unchanged; worst 0.60 against 0.31, and with layers 1.13 against 0.43 with one face over 90 degrees,
+  all at small faces where a free-edge cut meets a cell whose centroid lies on the sheet's plane. **Not
+  the baffle's own**: the L with layers has 8 faces over 90 degrees (worst 180) by the same cut. Open.
+- **Layered**, a baffle's twins are untied (`cad_mesher._parted_by_layers`: each side's layers' top is
+  its own) and its layers fan round its free edge ("Prism layers", above).
+- **Not built**: a sheet meeting the region only at a point; sheets crossing one
+  another (the pairing takes any number of faces round an edge, untested); a thin solid collapsed to its
+  midsurface.
+- Pinned in `tests/unit/test_meshing_sheets.py` (opening, cutting, sides, the slit fill and `parted` on
+  Kuhn tetrahedra, the dual's cut at the free edge, the layers' tie; no Netgen) and
+  `test_meshing_netgen.py` (the fill's internal triangles; the plate in a box, bare and with layers; the
+  refusals).
 ## Rectangular ducts: structured cores, following a curve (`ducts.py`, `duct_core.py`) — built
 
 Agreed with the project owner, 2026-10-24 (scope bullet above). A duct's sides are mapped four-sided
@@ -427,8 +520,10 @@ rectangle's corners need no core corner. Ends open or junctions as a pipe's (`co
   (bend), 16-17° with layers; the sweep 35° / 46° with layers, at its oblique ends. ⚠️ **A rectangular
   junction on a flat wall without layers stops the dual's concave cut** (`NotImplementedError`), as it did
   before ducts; with layers the duct case closes where the mesher before ducts left cells unclosed (0.46).
-- **Not built**: ducts in the drawing view and the browser's patch suggestions (`find_pipes` is there,
-  `find_ducts` needs the feature angle, which `aquaflux drawing` does not read yet); a side merged across
+- **In the drawing view and the browser** (`case.md`, `ui.md`): `aquaflux drawing` reports the ducts'
+  side faces at the file's `sizes.feature_angle` (none told until it is set), found on the kernel's
+  viewing triangulation, and the Mesh section offers the patches every face of which is one as `ducts`.
+- **Not built**: a side merged across
   segments (one planar face along a whole L, more than four edges) is not found; non-four-sided ducts.
 - Pinned in `tests/unit/test_meshing_ducts.py` (core exact in a box and round a bend; the search on a
   stub box of chained segments and its refusals; `_stations` on a parabola and an oblique rim; the
@@ -788,9 +883,10 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
     vertices, 2026-10-21). Keep the `shape.edges` list alive while its edges are used (a temporary
     segfaulted). Equal arc length matters on the riser's saddle, whose parameter is not arc length (spacing
     ratio 1.0002 against 1.004 in equal parameter steps).
-  - **`fill(points, triangles, max_size=, grading=)`**: tets filling the region a closed, outward-wound
-    surface bounds (holes wound into the hole), **keeping the surface exactly**: its points first, at their
-    indices and coordinates. This is the conformal gap fill. Tets are returned positively oriented
+  - **`fill(points, triangles, internal=None, max_size=, grading=)`**: tets filling the region a closed,
+    outward-wound surface bounds (holes wound into the hole), **keeping the surface exactly**: its points
+    first, at their indices and coordinates; `internal` triangles (a baffle) kept as faces between two
+    tets, checked so. This is the conformal gap fill. Tets are returned positively oriented
     (Netgen's own come out all negative).
   - ⚠️ **The child checks the fill, because Netgen can be wrong silently**: given a hole wound out of the
     hole it fills straight through it, keeping every supplied point and boundary element. So the faces used
@@ -847,7 +943,7 @@ lamp (17912 cells) 5.9 s without, 58.8 s with (one run, macOS arm64, 2026-10-20)
    `mesh.md`) and planarization (built, above; run by `CadMesher` when given a `planarizer`).
 
 **Phasing**: (1) CAD topology → surface triangulation → polygonal wall mesh → polyhedral core through the
-dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles; (4) octree hex core.
+dual; (2) prism layers; (3) block mesher, presets, pipe O-grids, baffles (built); (4) octree hex core.
 
 **Not decided**: radial basis function (RBF) morphing *beside* transfinite interpolation — for spreading a
 projection's displacement through a block (the pipe-to-chamber saddle), snapping octree nodes, and later

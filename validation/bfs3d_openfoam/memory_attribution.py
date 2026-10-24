@@ -81,6 +81,10 @@ RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.j
 #: ``1`` prints a checksum of every leaf of each traced split the session composes (at the fit and at
 #: every re-fit), so two checkouts' runs show whether anything the solve applies differs, bit for bit.
 CHECKSUMS = os.environ.get("BFS3D_MEMORY_CHECKSUMS", "0") == "1"
+#: ``1`` (default, the session's own default) gives the allocator's kept memory back before every re-fit
+#: (``malloc_trim(0)``), each trim printing the resident size and glibc's retained bytes on either side
+#: of it; ``0`` opens every session with no trim. An arm, not a reading: it changes what the run holds.
+TRIM = os.environ.get("BFS3D_MEMORY_TRIM", "1") == "1"
 GIB = 2**30
 
 
@@ -593,6 +597,7 @@ def _header() -> dict:
         "compilation_cache_entries": len(list(cache.iterdir())) if cache.is_dir() else 0,
         "malloc_env": {k: v for k, v in os.environ.items() if k.startswith(("MALLOC_", "Malloc"))},
         "steps": STEPS,
+        "memory_trim": TRIM,
     }
     print(json.dumps(header), flush=True)
     return header
@@ -607,6 +612,7 @@ def _instrument(recorder: Recorder, compare) -> dict:
         hierarchy_inverse,
         jacobian_probe,
         materialized_session,
+        probe_layout,
         sparse_jacobian,
     )
     from aquaflux.solve import march
@@ -628,7 +634,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(jacobian_probe, "block_stencil_colouring", "pattern, conflict graph, colouring", first=1)
     wrap(sparse_jacobian, "_saturation_colouring", "saturation colouring", first=1)
     wrap(jacobian_probe, "block_stencil_gather_map", "gather map", first=1)
-    wrap(sparse_jacobian.ProbeGather, "__init__", "ProbeGather grouping", first=1)
+    wrap(probe_layout._CellEntries, "__init__", "probe entry order (cell level)", first=1)
+    wrap(probe_layout._DofEntries, "__init__", "probe entry order (entry by entry)", first=1)
     wrap(session, "_fit", "fit (first build)", census=True, first=1)
     wrap(
         materialized_session,
@@ -651,6 +658,7 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(materialized_session, "traced_field_split", "traced split (device leaves)")
     if CHECKSUMS:
         _print_split_checksums(materialized_session)
+    _hand_the_session_a_trim(materialized_session, TRIM)
     if MAPS:
         from aquaflux.precondition import entry_map
 
@@ -677,6 +685,34 @@ def _instrument(recorder: Recorder, compare) -> dict:
     march._march_step = march_step
     captured["step_program"] = step_program
     return captured
+
+
+def _hand_the_session_a_trim(materialized_session, trimmed: bool) -> None:
+    """Open every session with a reporting :class:`~aquaflux.allocator.GlibcTrim`, or with none."""
+    from aquaflux.allocator import GlibcTrim
+
+    trim = GlibcTrim()
+    count = [0]
+
+    def reported() -> None:
+        before_rss, before_free = _rss_bytes(), _malloc().get("free_retained", 0)
+        trim()
+        count[0] += 1
+        print(
+            f"    [trim {count[0]}] released {trim.released}: resident {before_rss / GIB:.3f} -> "
+            f"{_rss_bytes() / GIB:.3f} GiB, malloc free {before_free / GIB:.3f} -> "
+            f"{_malloc().get('free_retained', 0) / GIB:.3f} GiB",
+            flush=True,
+        )
+
+    session = materialized_session.MaterializedSession
+    opened = session.__init__
+
+    @functools.wraps(opened)
+    def with_trim(self, *args, **kwargs):
+        opened(self, *args, memory_trim=reported if trimmed else None, **kwargs)
+
+    session.__init__ = with_trim
 
 
 def _print_split_checksums(materialized_session) -> None:

@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("OCP")
 
 from aquaflux.io.cad import (
+    CadRegion,
     CurvedPieces,
     InexactBody,
     Placement,
@@ -34,16 +35,9 @@ from OCP.BRepPrimAPI import (
     BRepPrimAPI_MakeCylinder,
     BRepPrimAPI_MakeTorus,
 )
-from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
-from OCP.IFSelect import IFSelect_RetDone
-from OCP.Interface import Interface_Static
-from OCP.STEPCAFControl import STEPCAFControl_Writer
-from OCP.STEPControl import STEPControl_AsIs
-from OCP.TCollection import TCollection_ExtendedString
-from OCP.TDataStd import TDataStd_Name
-from OCP.TDocStd import TDocStd_Document
-from OCP.TopLoc import TopLoc_Location
-from OCP.XCAFDoc import XCAFDoc_DocumentTool
+from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+from tests.support.step import write_step
 
 SOZZI = (
     Path(__file__).resolve().parents[2]
@@ -67,33 +61,6 @@ R_BODY, X_BODY_END, R_PIPE, X_RISER, R_LAMP, X_LAMP_TIP = (
 @pytest.fixture(scope="module")
 def sozzi():
     return read_step(SOZZI, SWAP_XY)
-
-
-def write_step(path, parts, instances=None):
-    """Write named solids to STEP in millimetres; ``instances`` places a part several times.
-
-    ``parts`` maps a name to a kernel solid given in metres. ``instances``, if given, maps a part's
-    name to translations (in metres); the part is then written once and placed at each, as an
-    assembly, which is how a CAD tool writes a repeated component.
-    """
-    document = TDocStd_Document(TCollection_ExtendedString("test"))
-    XCAFDoc_DocumentTool.SetLengthUnit_s(document, 1.0)
-    tool = XCAFDoc_DocumentTool.ShapeTool_s(document.Main())
-    assembly = tool.NewShape() if instances else None
-    for name, shape in parts.items():
-        label = tool.AddShape(shape, False)
-        TDataStd_Name.Set_s(label, TCollection_ExtendedString(name))
-        for offset in (instances or {}).get(name, ()):
-            move = gp_Trsf()
-            move.SetTranslation(gp_Vec(*offset))
-            tool.AddComponent(assembly, label, TopLoc_Location(move))
-    if assembly is not None:
-        tool.UpdateAssemblies()
-    Interface_Static.SetCVal_s("write.step.unit", "MM")
-    writer = STEPCAFControl_Writer()
-    writer.Transfer(document, STEPControl_AsIs)
-    assert writer.Write(str(path)) == IFSelect_RetDone
-    return path
 
 
 def cylinder(base, axis, radius, height):
@@ -292,3 +259,22 @@ def test_the_lamp_triangulates_outward_onto_its_true_surface_and_to_size(sozzi):
     lamp = sozzi.solid("lamp")
     _, tolerance = sozzi.discrepancy(["lamp"])
     assert np.abs(np.asarray(lamp.signed_distance(triangles.reshape(-1, 3)))).max() < tolerance
+
+
+def test_a_part_with_faces_and_no_solid_is_read_as_a_sheet(tmp_path):
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCP.gp import gp_Ax3, gp_Pln
+
+    plane = gp_Pln(gp_Ax3(gp_Pnt(0.05, 0.0, 0.02), gp_Dir(1, 0, 0), gp_Dir(0, 1, 0)))
+    plate = BRepBuilderAPI_MakeFace(plane, 0.0, 0.06, 0.0, 0.06).Face()
+    path = write_step(
+        tmp_path / "tank.step",
+        {"tank": BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 0.1, 0.1, 0.1).Shape(), "plate": plate},
+    )
+    model = read_step(path)
+    assert model.names == ("tank",)
+    assert model.sheets == ("plate",)
+    # Read in metres like a solid, and standing in the tank as its seventh face, of 6 x 6 cm.
+    topology = model.topology(CadRegion(("tank",)))
+    assert topology.n_faces == 7
+    assert topology.face_area[topology.sheet].tolist() == pytest.approx([0.0036], rel=1e-9)

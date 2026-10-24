@@ -5,6 +5,7 @@ paths:
   - "aquaflux/precondition/entry_map.py"
   - "aquaflux/precondition/padded_rows.py"
   - "aquaflux/precondition/level_fit.py"
+  - "aquaflux/precondition/kronecker_pattern.py"
 ---
 
 # Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
@@ -188,6 +189,49 @@ path.
   `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (a
   gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
   padded-row level operator — measurements".
+  - **The index half is a `PaddedColumns` (2026-10-24, the second stage of `solve-open-directions.md`
+    §14d): `columns()`, `row_lengths()` and `entries()` (the stored entry each slot is packed from,
+    `nnz` for padding), held (`_HeldColumns`) or computed at cell level (`_KroneckerColumns`).** The
+    operator's `rows`/`transposed` and the layout's are the same objects; `columns`, `row_lengths`,
+    `t_columns` are properties. `_PaddedLayout.of(pattern, ..., fields=(r, c))` holds a pattern at cell
+    level when `KroneckerPattern.of_dof` finds it one cell pattern over every field pair, else as arrays;
+    the callers that know their fields pass them (`level_plan`: `(block_size, block_size)`; `simple_plan`:
+    `F`, `G`, `D`, `M G`, `S`, the block inverse; `FieldSplitInverse.padded_coupling`: trailing × leading).
+    The decode is `_padded_rows`'s own slot rule (slot `s` of row `(f, d)`: other field `s // len(d)`,
+    place `s % len(d)`, padding at column 0), so every gather, product and row sum is unchanged; pinned
+    array for array and the products exactly by
+    `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`. ⚠️ **The field is counted, never
+    divided** (`Σ_t [s ≥ t·len(d)]`): a vector integer division made an isolated apply 1.6× (4×4) to 8×
+    (2×2) the held form's; counted, 1.08× / 1.8× / 1.2× (4×4 / 2×2 / 2×4 forward, transposed 1.0 / 1.8 /
+    0.9). Inside a loop (a Krylov or V-cycle loop, as the march applies them) XLA hoists the decode out
+    and the two forms tie (ten 4×4 applies 168 vs 176 ms, 2×2 25.3 vs 25.4), the decoded columns then
+    living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
+    jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
+    1–3").
+    - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
+      count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
+      sized or static by the actual pattern retraced a budgeted rebuild
+      (`test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit` caught both). The
+      layout's own static `nnz` is what `simple_fit` sizes its outputs by. A level whose pattern stops
+      being one cell pattern between two rebuilds (a nodal level gaining `landing_with_diagonal`'s unit
+      diagonals) changes form and so retraces; a frozen refit keeps its layout and cannot.
+    - ⚠️ **Not bit-identical to the held form at default compiler flags, and that is FMA placement, not a
+      defect (accepted by the project owner, 2026-10-24).** Values and slots are equal, but a changed
+      program contracts multiply-adds elsewhere: pitzDaily's hybrid start moved ≤ 6.2e-15 (the
+      potential-flow solve's scalar hierarchy), identical under `XLA_FLAGS=--xla_cpu_max_isa=AVX`; the
+      pitzDaily march's step rows and bfs3d's split leaves were unchanged. Pin identity under that flag,
+      never at default flags.
+    - ⚠️ `SimpleSmoothedInverse._simple_plans` keys its plans on the identity of every leaf of each level
+      operator's `rows`, never on `columns` (a computed property, new on every read).
+  - **The Galerkin map of a nodal level is held at cell level (2026-10-24, the third stage of §14d).**
+    `level_fit._galerkin` takes `kronecker_pattern.KroneckerGalerkin` when the level stores one cell
+    pattern over every field pair and `nodal_cell_transfer` finds `P = I ⊗ T` (a nodal aggregation's
+    tentative prolongation; both shipped blocks run `prolongation_smoothing: "none"`): it builds the
+    cell product `Tᵀ C T` once, holds its terms (source, source row, target; sorted by target) and
+    places every field pair by `entry_position` on both sides, summing each target's terms in source
+    order as the dof map's segment sum does. Pinned bit for bit against `EntryMap.product`'s map, landing
+    and values, by `test_the_cell_level_galerkin_map_is_the_degree_of_freedom_map_exactly`; any other
+    level keeps `EntryMap.product`. `_LevelPlan.galerkin` is a `ValueMap`.
   - **The transpose is stored (`t_columns` / `t_values`) and applied as a gather** through
     `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward product, not a
     scatter-add over every slot. Costs: a second copy of the storage; its own per-level budget
@@ -248,7 +292,8 @@ path.
   - **A frozen coarsening's level values are fitted on the device, by one function for the first build
     and every refit (`level_fit.py`, 2026-10-22).** The host decides structure (aggregates, prolongations,
     every level's pattern) and holds it as a `CoarseningPlan` of `_LevelPlan`s, each carrying device entry
-    maps: the padded-row packing (`_PaddedLayout`), the diagonal and cell-block gathers, the Galerkin map
+    maps (`entry_map.ValueMap`, a `DeviceEntryMap` or a cell-level map): the padded-row packing
+    (`_PaddedLayout`), the diagonal and cell-block gathers, the Galerkin map
     `Pᵀ A P` to the next level's values, the coarsest level's dense gather, and the start vector of the
     spectral estimate. `fit_levels(plan, values, scale)` (one `eqx.filter_jit`) derives from the fine
     operator's stored values every level's operator, diagonal, cell-block inverse (`invert_cell_blocks`,

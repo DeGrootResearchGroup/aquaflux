@@ -1129,3 +1129,97 @@ unfiltered; `RefinedNear` without its distance; the hex core dropping its refine
 core, fill and second triangulation without them; the early patch-name check; the max/min size
 refusals; the empty-reach refusal; `MeshSpec.mesher()` not passing them; the unknown-patch refusal;
 `LocalSizes`' positivity; and the L end-to-end test with `_located` returning none. None dismissed.
+
+## 2026-10-24 — baffles: sheets standing in the region
+
+**Decided with the project owner (2026-10-24):** a baffle is two coincident boundary faces per place in
+an ordinary patch, not an interior-face patch with its own flux (`docs/mesh_zones_and_patches.md` had
+promised the latter; nothing implemented it, and every BC, the wall distance, the wall treatment, the
+dual and the polyMesh writer act on boundary faces only). Baffles come from the drawing's sheets.
+
+**Probes (Linux x86-64, netgen-mesher 6.2.2608, OCP 8.0.1.0.0; scratch scripts, the findings carried
+into `validation/meshing_netgen/baffle_quality.py` and the tests):**
+- `netgen.occ` `Glue([box, sheet])`: one solid, the sheet a face with `domin = domout = 1`; the surface
+  mesh carries it and the volume mesh conforms (every sheet triangle a face of two tets; none crossing).
+  A bare `Mesh` given the outer triangles plus the sheet's under a `domin = domout = 1` descriptor fills
+  the same way (unit box, sheet 0.6 x 0.6 standing on a wall, maxh 0.15: volume 1 to 12 digits).
+- OCP `BRepAlgoAPI_Splitter(box | plate)`: one solid; the plate a face oriented `INTERNAL` in a shell of
+  its own; topology 7 faces, the plate's three free edges bounding it alone, its foot an internal edge
+  of the wall face (faces `[wall, plate]`). Netgen's triangulation of `write_brep`'s file numbers all 7
+  faces as the explorer does (every triangle's centroid projects onto its own face), and the wall's
+  triangles carry the foot as edges.
+- A STEP file with a box and a sheet: `read_step` dropped the sheet (solids only) before this change.
+- **The opened surface itself (two coincident sides on their own points) does not fill**: the child sat at
+  100 % CPU, no result after 120 s, box with plate at maxh 0.1 (782 points); the internal form takes about
+  a second. Harness: `baffle_quality.py 0.1 --opened-fill`.
+
+**Quality** (`baffle_quality.py 0.1`, 2026-10-24, defaults in force: `ClearedCaps`, no core, no
+planarizer; feature angle 45 degrees; layers `first_height = maxh / 20`, growth 1.3, 3 layers on
+`walls`; one run each, Netgen's fill deterministic here):
+
+| mesh | cells | non-convexity max / p99 | non-orth. max | > 50 | > 90 | faces < 1 % median |
+|---|---|---|---|---|---|---|
+| box | 1304 | 0.312 / 0.170 | 49.5 | 0 | 0 | 0 |
+| box and plate | 1334 | 0.598 / 0.203 | 46.3 | 0 | 0 | 3 |
+| L | 3771 | 0.956 / 0.280 | 74.9 | 57 | 0 | 114 |
+| box + layers | 3324 | 0.432 / 0.355 | 41.5 | 0 | 0 | 0 |
+| box and plate + layers | 3339 | 1.130 / 0.365 | 124.9 | 2 | 1 | 4 |
+| L + layers | 8219 | 1.887 / 0.349 | 179.7 | 9 | 8 | 5 |
+
+The worst cells with the plate are ordinary interior points about a cell above or below a free edge;
+their worst vertex lies beyond a small quadrilateral (about 0.004 across at maxh 0.1) between them and a
+free-edge piece, where the piece's interface (the sheet's plane extended) passes close to a cell
+centroid. The same cut makes the L's worse faces, so this is the concave-edge cut's trait under layers,
+not the baffle's; not pursued here. What it does not distinguish: whether a different piece rule would
+help both.
+
+**Two defects found on the way, fixed:** a column point sliding along a free edge was cut twice -- as
+a concave-edge point of its own and as a point above its base -- which showed as the dual's edge faces
+losing count of their runs (a `zip()` length error, layered plate only); and the free edge read as
+convex (coplanar sides: zero rise), so its points were not cut.
+
+## 2026-10-24 — layers fanned round a baffle's free edge
+
+**Decided with the project owner (2026-10-24):** layers on a baffle fan round its free edge (a column
+per side and one between, ahead of the edge, the cells between wrapping it), over in-plane columns. A
+prototype of in-plane columns (each free-edge point's column turned into the sheet's plane) gave flat
+prisms that the extruder could only accept under a relaxed inverted-cell test, and then 161 faces over
+50 degrees and 22 over 90 on the plate in a box at maxh 0.1.
+
+**Steps that did not work, each measured on that plate (maxh 0.1, layers 0.005 x 1.3 x 3 on walls and
+plate):**
+- Landing cells as two pyramids over the two triangles of no area where the fan closes onto the wall:
+  merged, the two share two faces (the landing edge runs through both), and the dual made a face of two
+  vertices. One six-cornered tent instead.
+- The middle column at a landing set from the folded faces alone: it lay along the landing edge, and
+  the landing cells came out flat or inverted (6 points still inside out after 8 halvings). Bisecting
+  the sides' columns, tipped along the landing edge, fixed it.
+- The fan's columns cut by the dual with their base point (as any layered column at a concave edge):
+  498 faces over 50 degrees, 55 over 90. Not cut: 13 and 4 -- the 4 at 180 degrees at the sheet's two
+  corners, where the corner's one middle column had every cell around it reaching back 0.05 along the
+  free edges, so the cut between the corner point's pieces was put in the sheet's own plane, behind the
+  corner. Moving that cut's hub along its edge broke closure (a cell inside out); a third piece for the
+  fan, by depth or by the cells round the middle column, was worse (76 over 50, closure broken).
+- A middle column per edge at a corner joined by one quadrilateral of no area: its pyramid is flat (the
+  sides' columns grow straight off the sheet, so the corner point lies between their tops). Two
+  triangles split between the middles give two tetrahedra; their middles first leaned off the corner's
+  faces, whose centroids lie diagonally behind it, which aimed each ahead of the other edge (inside out).
+  Square off its own edge: 9 over 50, 0 over 90.
+- Cutting the sides' columns again at the landings only (they stand in the concave corner of sheet and
+  wall): 22-30 over 50 and 8-11 over 90 at maxh 0.05-0.13, against 8-9 and 0-1. Reverted.
+
+**Result** (`baffle_quality.py`, 2026-10-24, defaults in force: `ClearedCaps`, no core, no planarizer,
+feature angle 45 degrees, layers `first_height = maxh / 20`, growth 1.3, 3; Linux x86-64, netgen-mesher
+6.2.2608, one run each):
+
+| maxh | mesh | cells | non-convexity max / p99 | non-orth. max | > 50 | > 90 | faces < 1 % median |
+|---|---|---|---|---|---|---|---|
+| 0.1 | box and plate + layers on walls | 3339 | 1.130 / 0.365 | 124.9 | 2 | 1 | 4 |
+| 0.1 | box, plate + layers on both | 3838 | 1.343 / 0.380 | 74.4 | 9 | 0 | 2 |
+| 0.05 | box and plate + layers on walls | 16580 | 0.491 / 0.338 | 43.6 | 0 | 0 | 3 |
+| 0.05 | box, plate + layers on both | 18100 | 1.154 / 0.340 | 71.6 | 9 | 0 | 38 |
+
+At 0.07 (probe script, not the harness): 7768 cells, non-orth. max 73.4, 8 over 50, none over 90; at
+0.13: 2119 cells, one face of 151 degrees, 9 over 50. Every face over 50 degrees and the worst cells lie
+at the two points where the free edge lands on the wall: the tent and the floor's cells round it. Not
+pursued: the landing's cells are the open item.

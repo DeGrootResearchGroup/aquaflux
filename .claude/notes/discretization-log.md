@@ -119,3 +119,50 @@ Krylov matvec and the coloured probe are made of, and the answer is no. Harness:
   standalone on Linux overstates the march's matvec by ~40 % at this size**. Quote it with its fault
   count, and do not project a march gain from it. macOS's allocator is a different mechanism and was
   not measured.
+
+## Face-blocked assembly screen — the coloured probe's batched JVP on bfs3d (2026-10-24)
+
+`validation/face_blocked_gradient_screen.py` (pass bar pre-registered in its docstring). bfs3d (23 040
+cells, 71 872 faces, 6 fields, 576 probes), hybrid start (no checkpoint under
+`validation/bfs3d_openfoam/checkpoints/`), shipped `case.yaml` probe narrowing, the WHOLE-STATE batched
+JVP (`batched_jacobian_matvec`; the re-fit itself runs the per-field programs, not measured here);
+4-core Xeon 2.1 GHz container, 15.7 GiB, THP `madvise`, jax 0.12.0.1, glibc defaults, persistent
+compilation cache disabled. Time per tangent is the mean over the 72 (batch 8) or 144 (batch 4) calls
+a whole-state re-fit makes, after one warm call. Arms: `whole` = shipped assembly; `blocked-B` =
+`multiple_correction._green_gauss` as a `lax.scan` over B face ranges; `both-B` = that plus
+`CellBalance.residual`'s flux sum and scatter in B ranges, each limiter evaluated whole first.
+
+**Where the temporary is (attribution from XLA's buffer assignment at the peak).** `whole/8`'s
+828.9 MiB peak is the multiple-correction Green–Gauss face loop (`_green_gauss` + its
+`scatter_conservative`, ~440 MiB, plus the face blend ~66), ~130–164 MiB compiler copies, ~15 MiB
+flux operators. Blocking only the gradient moves the peak into the flux operators
+(`DiffusionFlux.face_flux` ~148, the face blend ~92) and floors it at ~494 MiB for every B. Blocking
+both floors it at ~438 MiB: compiler copies ~198, the whole-mesh boundary closures
+(`BoundaryConditions.apply`) ~79, the face blend ~39, the limiter (whole by necessity: it reduces
+over each cell's faces) ~50.
+
+Run 1 (`9ed0da4e`, all arms) and run 2 (`1041c2f8`, decisive arms); absolute times moved ~15 %
+between runs, so compare within a run:
+
+| arm | residual temp MiB | JVP temp MiB | run 1 ms/tangent | run 2 ms/tangent | faults/call |
+|---|---|---|---|---|---|
+| whole/8 | 105.8 | 828.9 | 81.8 | 70.6 | 212k |
+| whole/4 | 105.8 | 477.7 | 97.6 | 89.0 | 122k |
+| blocked-2/8 | 99.6 | 508.9 | 88.4 | — | 130k |
+| both-2/8 | 94.2 | 472.1 | 88.8 | 78.8 | 121k |
+| both-4/8 | 93.3 | 448.0 | 90.8 | 89.5 | 115k |
+| both-8/8 | 93.1 | 441.3 | 101.8 | — | 113k |
+| both-16/8 | 93.1 | 443.8 | 132.0 | — | 114k |
+
+(gradient-only `blocked-4/8`, `-8/8`, `-16/8` in an earlier run of the same commit range: 499 / 498 /
+498 MiB at +17 / +38 / +60 % over that run's `whole/8`.) Agreement with `whole/8`: residual 3.6e-15,
+batched JVP 2.2e-13 of each field's largest entry; the spanwise momentum residual is ~3e-17 at the
+hybrid start, so it is scored in absolute terms (6.8e-21). VmHWM 3.8–3.9 GiB throughout, set by the
+case build and probe plan, not by the arms.
+
+**Against the bar.** (a) — equal time within 5 % and a temporary below batch 4's — fails: `both-2`
+is +8.6 / +11.5 % over `whole/8`. (b) — faster than `whole/4` at a smaller temporary — **passes for
+`both-2/8` in both runs, by 1.2 % of temporary (472.1 against 477.7 MiB) at ~10 % less time per
+tangent**; `both-4/8` passes in run 1 and misses by 0.5 % in run 2. More blocks only cost time: the
+temporary floors at ~440 MiB on what stays whole. The ~1.25× L3-spill hypothesis for bfs3d's probe
+throughput is not borne out here: every blocked arm is slower per tangent than `whole/8`.

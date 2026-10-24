@@ -21,7 +21,7 @@ from .entry_map import DeviceMatrix, as_scipy
 from .hierarchy_inverse import block_for
 from .host_preconditioner import FrozenInverse
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
-from .sparse_jacobian import ProbeGather
+from .probe_layout import ProbeGather
 
 __all__ = ["MaterializedBlockPreconditioner"]
 

@@ -501,6 +501,136 @@
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
         copied into this entry; the 2026-10-18 `memory_by_stage.py` configuration is otherwise unchanged.
 
+### Cell-level pattern (§14d), stages 1–3 (2026-10-24)
+
+      Branch `claude/cell-level-pattern` from `78a308f3` (= `7fe27d07` + the memory record): stage 1
+      `538b41c0` (the probe's entry order, `_CellEntries`), stage 2 `487b1400` (`PaddedColumns`, cell-level
+      padded layouts), stage 3 `d044e4d1` (`KroneckerGalerkin`, `KroneckerGather` for the SIMPLE cuts and
+      `unpack`), counted decode `d7c6751c`. 4-core Xeon container, 15.7 GiB, jax
+      0.12.0.1, glibc defaults, shipped `case.yaml`s.
+
+      **bfs3d, `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=0
+      BFS3D_MEMORY_CHECKSUMS=1`** (one run per arm; base ran with a cold compilation cache, the others
+      partly warm). GiB, device = int32 / total:
+
+      | stage | base `78a308f3` | stage 1 `538b41c0` | stages 1–3 `d044e4d1` |
+      |---|---|---|---|
+      | probe plan, stage peak | 4.03 | 1.79 | 1.74 |
+      | fit (first build): device int32 / total | 2.02 / 2.72 | 1.75 / 2.45 | 0.39 / 1.09 |
+      | re-fit #1: stage peak | 7.43 | 7.60 | 6.76 |
+      | march step 1, first call: stage peak | 8.07 | 8.12 | 7.19 |
+      | step 1 end: device int32 / total | 2.19 / 2.98 | 1.93 / 2.72 | 0.40 / 1.20 |
+      | step 1 end: resident | 7.13 | 7.17 | 6.11 |
+
+      - Every float leaf of both traced splits (322) has the base's digest at stages 1–3; step 1's inner
+        rows are identical. Stage 1's whole-tree digests equal the base's (stages 2–3 add integer leaves,
+        so only the float leaves compare).
+      - Stage 1 alone: device int32 −0.26 GiB (`ProbeGather`), yet resident at step 1's end level (+0.04):
+        malloc's arena `in_use` rose ~0.4 GiB at the fit against base with tracemalloc's numpy total
+        equal; not attributed (no census), and the compilation cache differed between the two runs.
+      - The compiled programs' sizes the harness prints (batched JVP 828.9 MiB temp, single JVP 201.5,
+        residual 105.8) are unchanged; the step program is not among them.
+
+      **pitzDaily `march_cost.py`, `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`, one run per arm:** base 21
+      steps / 102 cycles / final R 5.736e-06 / `x_r/h` 8.0686 / ν_t/ν peak 418.09, VmHWM 3.163 GiB,
+      solve 222.4 s (refits 26.7 s: probe 13.9, refactor 12.3); stages 1–3 the same counts with every
+      step row identical (β, inner steps, cycles, R, α), VmHWM 3.016 GiB, solve 212.5 s (refits 23.6 s:
+      probe 12.7, refactor 10.4).
+
+      **Not bit-identical at default compiler flags on pitzDaily, and that is fused multiply-add (FMA)
+      placement:** the hybrid start differs from base by ≤ 6.2e-15 (and so the split's leaves, ≤ 1.7e-15
+      relative). Bisected: the cell-level padded layouts alone move it (the Galerkin and SIMPLE maps do
+      not); under `XLA_FLAGS=--xla_cpu_max_isa=AVX` (no FMA) base and branch starts are identical; held
+      and cell-level operators built from one start give identical leaves and bit-equal applies in
+      isolation, in a loop and transposed. The values are the same; a changed program contracts
+      multiply-adds elsewhere in the potential-flow solve. bfs3d's start did not move.
+
+      **Apply time.** Isolated pitzDaily split apply (`split_apply_timing.py`, hybrid start, float64
+      traced split, best of 15): base 71.7–71.9 ms forward / 66.5–67.5 transposed; stages 1–3 with the
+      division decode 81.1–82.7 / 82.7–82.9; with the counted decode 86.9–96.6 / 83.9–84.4 (the counted
+      decode is faster per operator below, so the split-level number moved within its noise). On a
+      bfs3d-sized lattice (23400 cells, reach 3, float32), per padded operator, isolated, held → cell:
+      division 4×4 33.7 → 52.1 ms, 2×2 2.4 → 20.2, 2×4 16.5 → 38.9; counted 32.4 → 35.0, 2.4 → 4.4,
+      16.3 → 19.8 (transposed 33.4 → 33.4, 2.4 → 4.4, 16.3 → 14.7). Ten applies inside a `fori_loop`:
+      4×4 176 → 168 ms, 2×2 25.4 → 25.3 (XLA hoists the decode out of the loop, so the decoded columns
+      are the loop's temporary). Index storage per operator (both directions, with the packing entries):
+      4×4 360.6 → 17.2 MiB, 2×2 90.3 → 17.2, 2×4 180.5 → 17.2.
+
+      **By owner at step 1's end (census, `a287287d`, `BFS3D_MEMORY_STEPS=1`, census on, 2026-10-24;
+      arrays of at least 1 MiB; device 1.12 GiB, host traced 0.15):** `_KroneckerColumns` 264.0 MiB over
+      41 arrays (the cell-level padded columns, both directions, every level and piece: was
+      `_PaddedLayout` 591 with the packing maps under `DeviceEntryMap`); level operators' `values` /
+      `t_values` 171.3 + 171.3; host `SparsePattern` 140.1 over 3 (unchanged); `Corrections` 88.6;
+      `_SimplePieces` Schur 48.2 + 48.2; the adjoint form's coupling 44.3 + 44.3; `KroneckerGalerkin`
+      40.6 over 14; `KroneckerGather` 30.6 over 10 (was `SimplePlan` 108); `_CellEntries` 10.0 (was
+      `ProbeGather` 280); `SimplePlan` 6.1. No `DeviceEntryMap` array of 1 MiB remains (was 1082 over 66).
+      Run peak 6.87 GiB (step 1's first call), against 8.07 in the census-free base run above.
+
+### A `malloc_trim(0)` before each re-fit, on bfs3d (2026-10-24)
+
+      `memory_attribution.py` on `042e5107` (`7f62a3c4` plus the trim, then opt-in: `MaterializedSession(memory_trim=)`
+      handed to `BetaTrackingRefresh`, which calls `aquaflux.allocator.GlibcTrim` once per re-fit, before its
+      probe; the solver is otherwise `7fe27d07`'s). 4-core Linux container, 15.7 GiB, no swap, glibc 2.39
+      defaults (no `MALLOC_*`), jax 0.12.0.1, shipped `case.yaml`, `BFS3D_MEMORY_STEPS=2
+      BFS3D_MEMORY_CENSUS=0`, `BFS3D_MEMORY_TRIM` 0/1, one arm per process, arms alternated; run 1 compiled
+      cold, the rest warm. GiB:
+
+      | run | trim | peak (`HWM`) | set by | re-fit #1 stage peak | step 1's first call | resident before re-fit #2 -> after the trim | `malloc free` at step 1's end | resident at step 2's end |
+      |---|---|---|---|---|---|---|---|---|
+      | 1 | off | 8.92 | re-fit #2's `block re-fit #3` | 7.41 | 8.24 | 7.30 | 1.49 | 7.47 |
+      | 2 | on | 8.53 | re-fit #2's `block re-fit #3` | 7.67 | 8.31 | 7.38 -> 6.74 | 1.03 | 7.32 |
+      | 3 | off | 9.16 | re-fit #2's `block re-fit #3` | 7.81 | 8.49 | 7.55 | 1.12 | 7.62 |
+      | 4 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.63 | 8.31 | 7.40 -> 6.73 | 0.99 | 7.26 |
+      | 5 | off | 9.04 | re-fit #2's `block re-fit #3` | 7.80 | 8.33 | 7.39 | 0.96 | 7.63 |
+      | 6 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.64 | 8.27 | 7.35 -> 6.73 | 0.95 | 7.19 |
+
+      - **Peak: off 8.92 / 9.16 / 9.04 (mean 9.04, spread 0.24); on 8.53 / 8.51 / 8.51 (mean 8.52, spread
+        0.02).** Means 0.52 apart; the closest pair (runs 1 and 2) 0.39. The trim also took out the run-to-run
+        spread: what varied between off runs was how much freed memory the arenas happened to keep.
+      - **The peak stays where it was** (re-fit #2's leading block re-fit) and is now 0.2--0.3 above the step
+        program's first call (8.27--8.31 on), the next thing a lower re-fit peak would meet.
+      - **The trim before re-fit #2 gives back 0.61--0.67 GiB of resident memory** (0.28--0.37 before re-fit
+        #1). `mallinfo2`'s `fordblks` does not move across it: `malloc_trim` returns free pages to the kernel
+        (`madvise`) and glibc still counts them as free, so the harness's `malloc free` column is not what a
+        trim lowers; read the resident set.
+      - Held resident at step 2's end 7.19--7.32 on against 7.47--7.63 off. No cost in time: re-fit #2's stage
+        30.3--33.5 s on against 31.4--34.2 off, the 2-step march 578--622 s on against 598--611 off (warm).
+      - Run 6 ran on `817c95a5` (this entry's first commit; no code change from `042e5107`). Records: the
+        `memory_attribution_{off,on}{1,2,3}.json` and `run-20261024-02*.log`/`-03*.log` (git-ignored), copied here.
+      - **Shipped as the session's default** the same day (the owner's decision: the mean drop met the 0.5 GiB
+        bar, the closest pair did not). `memory_attribution.py` now trims by default; `BFS3D_MEMORY_TRIM=0`
+        is the off arm. Not yet measured: a whole march's peak.
+      - ⚠️ **Measured before #817** (cell-level pattern, entry above), which moved bfs3d's peak: its 1-step
+        runs peak in step 1's first call (7.19 GiB), above re-fit #1 (6.76). Whether a re-fit still sets the
+        2-step peak, and so what the trim saves on the current code, is unmeasured; re-run both arms here.
+
+### The probe's host block patterns at cell level (2026-10-24)
+
+      `CellLevelPattern` (`d9fe819d`, branch `claude/host-cell-patterns`) against `main` `0c76b4ec` (#817):
+      bfs3d `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=0
+      BFS3D_MEMORY_CHECKSUMS=1`, one run per arm, `main` first (its compilation cache warmer for the
+      second), 4-core Xeon container, jax 0.12.0.1. GiB, `main` → branch:
+
+      | stage | stage peak | resident after | host traced |
+      |---|---|---|---|
+      | probe plan | 1.79 → 1.65 | 1.78 → 1.56 | 0.321 → 0.183 |
+      | fit (first build) | 5.55 → 5.37 | 4.36 → 4.10 | 0.608 → 0.471 |
+      | re-fit #1 | 6.54 → 6.30 | 5.19 → 4.85 | 0.639 → 0.502 |
+      | march step 1, first call | 7.05 → 6.71 | 6.05 → 5.72 | 0.717 → 0.580 |
+      | step 1 end | 6.07 → 5.73 | 6.07 → 5.73 | 0.729 → 0.592 |
+
+      - Host traced arrays fall 0.137–0.138 GiB at every stage: the three block patterns (140 MiB). The
+        resident and peak readings fall more (0.24–0.34 GiB), which is within the 0.4 GiB spread two
+        1-step runs of one configuration showed (entry above); read only the traced column as this
+        change's.
+      - Device memory unchanged (1.20 GiB at step 1's end); all 1130 split leaf digests (both splits,
+        integer leaves included) and step 1's inner rows identical to `main`'s.
+      - pitzDaily, live host `SparsePattern`s after the session's build: 22.1 → 4.9 MiB (the three block
+        patterns now one shared 1.2 MiB cell pattern).
+      - ⚠️ Measured before #818 made `malloc_trim(0)` before each re-fit the session's default; both
+        arms ran without it, so the resident and peak columns are not today's. The host traced column does
+        not depend on it.
+
 ### What the resident memory holds beyond live arrays, on two meshes (2026-10-24)
 
       `validation/memory_residue.py` (runs `memory_attribution.py`'s march and stages on either step case)
@@ -558,6 +688,10 @@
       - Records: `memory_residue.<case>.json` and the run logs (git-ignored), copied into this entry. Two
         runs per mesh with the clear's live-array readings (the first pair lacked them); a third pitzDaily
         run (with the HLO ranking) reproduced the second (end 2.55, clear + trim freed 1.06).
+      - ⚠️ **Measured before #817 and #819** (the cell-level pattern on the device and on the host, entries
+        above) and before #818's trim by default. If the arrays compiled in as constants are dof-level
+        pattern arrays, #817 shrank them; re-take `RESIDUE_HLO` on current `main` before acting on the
+        constants' size.
 
 ## Condensed out of the rule (2026-10-17)
 

@@ -72,6 +72,30 @@ layers: {kind: PrismLayers, first_height: 0.0005, growth: 1.2, count: 5}
 layered: [walls, lamp]
 ```
 
+### Baffles
+
+A baffle -- a plate, a feedwell skirt, a scum baffle -- is drawn as a **sheet**: a surface of no
+thickness, a part of the drawing that holds faces but no solid. Every sheet standing in the region
+is meshed as a baffle unless the region names its `baffles` (an empty list for none), and the part
+of a sheet outside the region is left out:
+
+```yaml
+region: {solids: [tank], baffles: [inlet_baffle]}
+```
+
+A baffle is a wall with the fluid on both sides of it. Each of its faces becomes two boundary faces
+of the mesh, one for the cell on each side, so no cell reaches through it; round the baffle's edges
+free in the fluid, the cells on its two sides meet. Its faces make the patch `baffles` unless a
+selection names them -- a {class}`~aquaflux.meshing.FacesNear` point on the plate, say -- and that
+patch is given its own boundary condition, as any wall's is. A sheet must leave the fluid a way round
+it: one that cuts the region in two is refused.
+
+With its patch in `layered`, each side of a baffle grows layers of its own, and round its free edge
+they fan from one side to the other, so the cells against the baffle are wall cells all the way
+round. Left bare, a baffle has the layers of a layered wall it stands on slide up it on both sides.
+A baffle is not meshed as a structured grid, nor is a face a baffle stands on (`mapped` and
+`pipes`).
+
 The dual's faces are not flat: their corners are the centroids of the tetrahedra around an edge.
 A `planarizer` flattens them by moving those centroids
 ({class}`~aquaflux.meshing.FacePlanarizer`), never making a cell less convex than the least convex
