@@ -1059,3 +1059,43 @@ crossing check were scratch, and the cube tests reproduce what they showed.
 Rebased onto main after #792 (`ClearedCaps` the default) and #789 (`be11a08c`): maxh 0.0025 with pipe
 cores gives 666826 cells, closure 5.3e-16, smallest cell 1.16e-11 m³, peak 3.17 GiB -- the "#792's tip
 with the floor" row exactly.
+
+## 2026-10-24 — Rectangular ducts: found, divided along normal cross-sections, cored
+
+Harness `validation/meshing_netgen/ducts.py` (one run each, 4-core Linux container, netgen-mesher
+6.2.2608, OCP 8.0.1, `CadMesher` defaults, `feature_angle` 45°; layers `PrismLayers(first, 1.2, 3)`,
+first 2 mm, tank 3 mm). Tilt: each core ring's fitted plane against the line between its neighbours'
+centroids, degrees.
+
+| arm (maxh) | cells | closure | six-faced | tilt max / mean | non-orth max / p99 | concave |
+|---|---|---|---|---|---|---|
+| straight 0.2x0.1x1 m (0.025) | 1845 | 7.4e-16 | 1.000 | 0.0 / 0.0 | 1e-6 / 1e-6 | 0 |
+| straight, layers | 4797 | 7.2e-16 | 0.932 | 0.0 / 0.0 | 16.4 / 16.4 | 0 |
+| bent: leg, quarter bend R 0.4, leg (0.025) | 3240 | 7.2e-16 | 1.000 | 0.7 / 0.1 | 0.50 / 0.41 | 0 |
+| bent, layers | 8424 | 7.8e-16 | 0.932 | 0.7 / 0.1 | 17.1 / 16.4 | 0 |
+| spline sweep 0.1x0.06 (0.015) | 3640 | 5.6e-16 | 1.000 | 28.2 / 1.7 | 35.0 / 29.6 | 0 |
+| sweep, layers | 9646 | 6.0e-16 | 0.925 | 34.2 / 2.3 | 45.8 / 32.5 | 0 |
+| tank + inlet duct + lamp, layers (0.05) | 12320 | 5.6e-16 | 0.054 | 0.0 / 0.0 | 178.4 / 31.9 | 862 |
+| same, `ducts=()` (the mesher before ducts) | 10916 | **4.6e-1** | 0.004 | -- | 178.7 / 33.1 | 1107 |
+
+- **The rails' points**: at equal arc length on every rail (the first build) the sweep's rows tilted
+  max 44 / mean 31.8°, non-orth max 45.4 bare and 65.3 layered; cross-sections normal to the centreline
+  gave mean 25.9° because near its oblique ends (the profile is drawn in `z = 0`, the spline leaves the
+  origin leaning, so corners fold 73-125°) a normal plane misses a rail and three of four rails fell
+  back; turning the planes toward each rim's own plane within a width of it gave mean 1.7; a
+  second-order end tangent (`np.gradient(edge_order=2)`) removed a first-order chord's false obliquity
+  on the parabola unit test (2.75° → 0.10° at 16 segments; equal arc length 19.3°). The remaining max
+  is at the oblique ends, by design.
+- **The odd cells with layers** are at the layers' top's four corners: three primal cells meet along
+  each, so per row one triangular prism and one seven-faced cell beside it (straight: 164 + 164).
+- **The tank**: its worst faces are at the lamp's ends and the tank's three-wall corners (the deferred
+  convex-ridge normals), in both arms. Without layers both arms fail in the dual's concave-edge cut
+  (`NotImplementedError`: cells deepest behind one wall not connected) where the duct's rectangular
+  mouth meets the flat wall: the dual's limit, not the duct's. A box tank with nothing inside is itself
+  found as a duct (around the axis whose walls are four-sided), cored with a junction at the wall the
+  inlet duct opens through; the lamp arm keeps it out.
+- **Dismissed mutations** (`test_meshing_ducts.py`): `DuctCore`'s blend weights (zeroing `u`) stay green
+  -- with straight sides spaced alike, which every duct cross-section ring has, transfinite interpolation
+  reproduces the lattice whatever its weights. The closed-chain refusal ("closes on itself") and the
+  end-face exclusion in `_hollow` have no stub test: the first needs a ring-shaped duct drawing, the
+  second a non-cap end face whose points sit on the closing fan (the tank's wall with the duct's mouth).

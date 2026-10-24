@@ -64,14 +64,16 @@ def _triangulate(work: Path, request: dict) -> dict[str, np.ndarray]:
 SAMPLES_PER_SEGMENT = 64
 
 
-def _divide_edges(shape, divisions: list[list[int]]) -> None:
-    """Divide edges of ``shape`` into segments of equal arc length: each ``[edge, segments]``.
+def _divide_edges(shape, divisions: list[list]) -> None:
+    """Divide edges of ``shape`` at given fractions of their arc length: each ``[edge, segments]``
+    (equal segments) or ``[edge, fractions, start]`` (points at those fractions of the length,
+    measured from the edge's end nearer the point ``start``).
 
     An edge is numbered by its place among the shape's distinct edges, in the order the explorer
     first meets each (it meets an edge once per face it bounds) -- the numbering of a topology map,
     which the CAD reader's topology uses. Netgen takes a division as the edge's interior points'
-    parameters, scaled to ``[0, 1]`` over the edge's parameter range; here they are placed at equal
-    arc length, the curve sampled at :data:`SAMPLES_PER_SEGMENT` points per segment.
+    parameters, scaled to ``[0, 1]`` over the edge's parameter range; here they are placed by arc
+    length, the curve sampled at :data:`SAMPLES_PER_SEGMENT` points per segment.
     """
     edges = shape.edges  # held: the edges are views into it
     distinct, seen = [], {}
@@ -80,13 +82,23 @@ def _divide_edges(shape, divisions: list[list[int]]) -> None:
         if not any(edges[k] == edges[j] for j in same):
             same.append(k)
             distinct.append(k)
-    for index, segments in divisions:
-        edge = edges[distinct[index]]
+    for division in divisions:
+        edge = edges[distinct[division[0]]]
+        if len(division) == 2:
+            segments = int(division[1])
+            wanted = np.linspace(0.0, 1.0, segments + 1)[1:-1]
+        else:
+            wanted = np.asarray(division[1], dtype=np.float64)
+            segments = wanted.size + 1
         start, end = edge.parameter_interval
         t = np.linspace(start, end, SAMPLES_PER_SEGMENT * segments + 1)
         points = np.array([[p.x, p.y, p.z] for p in map(edge.Value, t)])
+        if len(division) == 3:
+            origin = np.asarray(division[2], dtype=np.float64)
+            if np.linalg.norm(points[-1] - origin) < np.linalg.norm(points[0] - origin):
+                wanted = 1.0 - wanted[::-1]  # measured from the edge's last end
         length = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))])
-        at = np.interp(np.linspace(0.0, length[-1], segments + 1)[1:-1], length, t)
+        at = np.interp(wanted * length[-1], length, t)
         edge.partition = (at - start) / (end - start)
 
 
