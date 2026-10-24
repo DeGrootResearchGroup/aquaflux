@@ -243,8 +243,11 @@ path.
     block, block-SIMPLE, scalar transport); the host inverses' `apply(transpose=True)` packs into their
     lazy `_transpose_fn`, dropped at a refit. **Transposing an operator without its transpose raises
     `RuntimeError` naming `with_transposes`**, never a scatter fallback. ⚠️ An adjoint factory must hold
-    its operators as pytree leaves, not close over them (`BlockPreconditioner.factory()` returns a
-    module for this reason); a closure raises. ⚠️ Packing needs concrete values (it raises under a
+    its operators as pytree leaves, not close over them (`BlockPreconditioner.factory()` and
+    `bordered_preconditioner` return modules for this reason); a closure raises. ⚠️ Reverse mode through
+    a preconditioned `solve_linear` outside `root_adjoint` (`newton_step` under `jax.grad`) is transposed
+    by lineax, which asks nothing: that caller passes its factory through `with_transposes` itself
+    (`test_preconditioned_solve_is_differentiable`). ⚠️ Packing needs concrete values (it raises under a
     trace); `root_adjoint`'s backward rule runs eagerly under `jax.grad`. `apply` has **no `jax.vmap`
     rule** — nothing vmaps a preconditioner apply today. Pinned by
     `test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose`,
