@@ -20,8 +20,9 @@ thin layer where it is not. This package samples such a field on an octree inste
   miss against the tree before it, and split again where a miss exceeds the tolerance. Returns a
   :class:`SampledField`, which interpolates to any points in the box.
 
-The region is a solid in the sense of :mod:`aquaflux.solids`, used only through its methods, and the
-field through a callable, so nothing here knows what is being sampled. Build-time numpy throughout:
+The region is a solid in the sense of :mod:`aquaflux.solids`, used only through its methods
+(:func:`signed_distance` asks one in compiled batches, for the sampler and for a mesher deciding which
+cubes a solid reaches), and the field through a callable, so nothing here knows what is being sampled. Build-time numpy throughout:
 nothing is traced or differentiated.
 """
 
@@ -30,6 +31,7 @@ from __future__ import annotations
 from .cuts import LeafCuts, crossing_points, exit_points, leaf_cuts, merged_intervals
 from .ghosts import ghost_values
 from .hierarchy import Hierarchy
+from .region import signed_distance
 from .sampling import Linear, Logarithm, Round, SampledField, sample_adaptively
 from .tree import Octree, RefinementCriterion
 
@@ -48,4 +50,5 @@ __all__ = [
     "leaf_cuts",
     "merged_intervals",
     "sample_adaptively",
+    "signed_distance",
 ]

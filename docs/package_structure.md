@@ -226,13 +226,14 @@ cfd/                                  # repo root
 │   │   ├── near_surface.py           #   NearSurface: refine an octree towards a region's boundary; cube_samples
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
+│   │   ├── refinement.py             #   Refinement: RefinedBox / RefinedSphere / RefinedCylinder / RefinedNear(patches, distance) -> LocatedRefinement (octree criterion + Netgen LocalSizes)
 │   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
 │   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids
 │   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
 │   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_ends / fill_pipes: pipes found from the CAD (rims divided alike), their cores O-gridded inside their layers
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
 │   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
-│   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
+│   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill, each with optional LocalSizes) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr

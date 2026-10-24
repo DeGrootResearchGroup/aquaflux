@@ -18,7 +18,7 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -82,6 +82,51 @@ class TetrahedralMesh:
 
 
 @dataclasses.dataclass(frozen=True)
+class LocalSizes:
+    """Sizes a mesh is to be no coarser than at some points, finer than its largest size.
+
+    Netgen keeps the size near each point within the one given there, and lets it grow away from
+    the point no faster than its grading allows. A part of a region is meshed finer by covering it
+    with points spaced about its size apart.
+
+    Attributes
+    ----------
+    points : np.ndarray, shape ``(n, 3)``
+        The points.
+    sizes : np.ndarray, shape ``(n,)``
+        The size wanted at each, positive.
+    """
+
+    points: np.ndarray
+    sizes: np.ndarray
+
+    def __post_init__(self) -> None:
+        points = np.ascontiguousarray(self.points, dtype=np.float64)
+        sizes = np.ascontiguousarray(self.sizes, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3 or sizes.shape != points.shape[:1]:
+            raise ValueError(
+                f"local sizes take points of shape (n, 3) and one size each, got {points.shape} "
+                f"and {sizes.shape}"
+            )
+        if not (np.isfinite(points).all() and np.isfinite(sizes).all() and np.all(sizes > 0.0)):
+            raise ValueError("local sizes take finite points and positive, finite sizes")
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "sizes", sizes)
+
+    @classmethod
+    def joined(cls, parts: Sequence[LocalSizes]) -> LocalSizes:
+        """The points and sizes of every part, one after another."""
+        return cls(
+            np.concatenate([part.points for part in parts]).reshape(-1, 3),
+            np.concatenate([part.sizes for part in parts]),
+        )
+
+    def arrays(self) -> dict[str, np.ndarray]:
+        """The arrays the child process reads them from."""
+        return {"size_points": self.points, "sizes": self.sizes}
+
+
+@dataclasses.dataclass(frozen=True)
 class NetgenProcess:
     """Netgen's meshing operations, each run in a fresh child interpreter.
 
@@ -101,6 +146,7 @@ class NetgenProcess:
         min_size: float = 0.0,
         grading: float = 0.3,
         edge_divisions: Mapping[int, int] | None = None,
+        local_sizes: LocalSizes | None = None,
     ) -> SurfaceTriangulation:
         """Triangulate the faces of the one solid in a BREP or STEP file.
 
@@ -120,6 +166,8 @@ class NetgenProcess:
             is numbered by its place among the solid's edges, each counted once where first met in
             a topology explorer's order -- the order :meth:`~aquaflux.io.cad.CadModel.topology`
             numbers them in.
+        local_sizes : LocalSizes, optional
+            Points near which the triangles are to be finer than ``max_size``.
 
         Returns
         -------
@@ -139,11 +187,20 @@ class NetgenProcess:
             "edge_divisions": [
                 [int(edge), int(segments)] for edge, segments in (edge_divisions or {}).items()
             ],
+            "local_sizes": local_sizes is not None,
         }
-        result = self._run(request, {})
+        result = self._run(request, {} if local_sizes is None else local_sizes.arrays())
         return SurfaceTriangulation(result["points"], result["triangles"], result["face"])
 
-    def fill(self, points, triangles, *, max_size: float, grading: float = 0.3) -> TetrahedralMesh:
+    def fill(
+        self,
+        points,
+        triangles,
+        *,
+        max_size: float,
+        grading: float = 0.3,
+        local_sizes: LocalSizes | None = None,
+    ) -> TetrahedralMesh:
         """Fill the region a closed triangle surface bounds with tetrahedra, keeping the surface.
 
         Parameters
@@ -161,6 +218,10 @@ class NetgenProcess:
             Upper bound on the tetrahedra's size.
         grading : float
             As in :meth:`triangulate`.
+        local_sizes : LocalSizes, optional
+            Points near which the tetrahedra are to be finer than ``max_size``. The surface is kept
+            as it is supplied, so where a point lies near it the tetrahedra grade from the
+            triangles' size to the point's.
 
         Returns
         -------
@@ -178,8 +239,16 @@ class NetgenProcess:
         points = np.ascontiguousarray(points, dtype=np.float64)
         triangles = np.ascontiguousarray(triangles, dtype=np.int64)
         check_closed_surface(points, triangles)
-        request = {"operation": "fill", "max_size": float(max_size), "grading": float(grading)}
-        result = self._run(request, {"points": points, "triangles": triangles})
+        request = {
+            "operation": "fill",
+            "max_size": float(max_size),
+            "grading": float(grading),
+            "local_sizes": local_sizes is not None,
+        }
+        arrays = {"points": points, "triangles": triangles}
+        if local_sizes is not None:
+            arrays.update(local_sizes.arrays())
+        result = self._run(request, arrays)
         return TetrahedralMesh(result["points"], result["tetrahedra"])
 
     def _run(self, request: dict, arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:

@@ -20,6 +20,8 @@ from aquaflux.meshing import (
     Polygons,
     PrismLayers,
     PyramidCaps,
+    RefinedNear,
+    RefinedSphere,
     check_closed_surface,
     element_mesh,
     netgen_available,
@@ -165,6 +167,49 @@ def test_the_fill_keeps_the_surface_and_fills_exactly_what_it_encloses(solids, n
     np.testing.assert_allclose(
         volumes.sum(), _enclosed_volume(surface.points, surface.triangles), rtol=1e-12
     )
+
+
+def _edges(points, cells):
+    """Each edge of some cells, once per cell: its midpoint and its length."""
+    k = cells.shape[1]
+    pairs = np.concatenate([cells[:, [i, j]] for i in range(k) for j in range(i + 1, k)])
+    return points[pairs].mean(axis=1), np.linalg.norm(
+        points[pairs[:, 0]] - points[pairs[:, 1]], axis=1
+    )
+
+
+def test_the_fill_is_finer_where_local_sizes_ask_and_keeps_its_surface():
+    # A unit box of triangles a quarter across, filled to 0.25, but at 0.04 within a ball of 0.15
+    # at its centre: the tetrahedra there come out at about that size, those far from it larger.
+    points, triangles = box_surface(0.0, 1.0, 4, into_box=False)
+    ball = RefinedSphere(centre=(0.5, 0.5, 0.5), radius=0.15, size=0.04).located({})
+    netgen = NetgenProcess()
+    sizes = ball.local_sizes([0, 0, 0], [1, 1, 1])
+    filled = netgen.fill(points, triangles, max_size=0.25, local_sizes=sizes)
+    plain = netgen.fill(points, triangles, max_size=0.25)
+    np.testing.assert_array_equal(filled.points[: len(points)], points)
+    assert _boundary_triangles(filled.tetrahedra) == {
+        tuple(t) for t in np.sort(triangles, axis=1).tolist()
+    }
+    middle, length = _edges(filled.points, filled.tetrahedra)
+    inside = np.linalg.norm(middle - 0.5, axis=1) < 0.15
+    assert np.median(length[inside]) < 1.5 * 0.04
+    _, plain_length = _edges(plain.points, plain.tetrahedra)
+    assert np.median(plain_length) > 4 * np.median(length[inside])
+
+
+def test_the_triangles_are_finer_where_local_sizes_ask(solids):
+    # The box's face x = 0 refined within 0.2 of the point (0, 1, 1.5), to 0.05 against 0.5.
+    path, _ = solids["box"]
+    spot = RefinedSphere(centre=(0.0, 1.0, 1.5), radius=0.2, size=0.05).located({})
+    sizes = spot.local_sizes([0, 0, 0], list(BOX))
+    surface = NetgenProcess().triangulate(path, max_size=0.5, local_sizes=sizes)
+    check_closed_surface(surface.points, surface.triangles)
+    middle, length = _edges(surface.points, surface.triangles)
+    near = np.linalg.norm(middle - [0.0, 1.0, 1.5], axis=1) < 0.2
+    assert near.any()
+    assert np.median(length[near]) < 1.5 * 0.05
+    assert np.median(length[~near]) > 3 * np.median(length[near])
 
 
 def test_the_fill_meshes_the_gap_between_two_surfaces():
@@ -809,3 +854,26 @@ def test_netgen_divides_the_sozzi_pipes_rims_as_asked_so_both_are_pipes(tmp_path
             assert loop.size == 20
             step = np.linalg.norm(np.diff(surface.points[np.append(loop, loop[0])], axis=0), axis=1)
             assert step.max() < 1.001 * step.min()
+
+
+def test_a_refinement_near_the_ls_inner_wall_makes_its_cells_smaller_there_alone(tmp_path):
+    # The L meshed at 0.02 with the fluid within 0.02 of its wall x = 0.2 refined to 0.005,
+    # polyhedral throughout and with an octree core: the dual still closes and fills the L, and
+    # its cells near that wall are far smaller than those far from it.
+    from aquaflux.mesh import closed_cell_residual
+    from aquaflux.meshing import CadMesher, FacesNear, OctreeCore
+
+    model, region = _l_drawing(tmp_path)
+    end = RefinedNear(patches=("end",), distance=0.02, size=0.005)
+    patches = {"end": FacesNear(((0.2, 0.05, 0.05),))}
+    for core in (None, OctreeCore(size=0.04, wall_size=0.02, clearance=0.02)):
+        mesher = CadMesher(max_size=0.02, feature_angle=np.radians(45), core=core,
+                           refinements=(end,))  # fmt: skip
+        mesh = mesher.mesh(model, region, patches)
+        volume = np.asarray(mesh.geometry().cell.volume)
+        assert np.all(volume > 0.0)
+        np.testing.assert_allclose(volume.sum(), 0.2 * 0.1 * 0.1 + 0.1 * 0.1 * 0.1, rtol=1e-12)
+        scale = float(np.max(np.asarray(mesh.geometry().face.area)))
+        assert float(np.max(np.asarray(closed_cell_residual(mesh)))) < 1e-12 * scale
+        x = np.asarray(mesh.geometry().cell.centroid)[:, 0]
+        assert np.median(volume[x > 0.19]) < 0.1 * np.median(volume[x < 0.1])

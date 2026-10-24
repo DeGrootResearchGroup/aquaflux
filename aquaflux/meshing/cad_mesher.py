@@ -2,10 +2,12 @@
 
 :class:`CadMesher` meshes a region (some solids' union, less others) in these steps: the region is
 written as a boundary-representation (BREP) file; Netgen triangulates its faces, each triangle
-tagged by its face; the faces chosen are meshed again as structured quadrilaterals; layers are
+tagged by its face -- again, finer, where refinement regions (:class:`~aquaflux.meshing.Refinement`)
+reach it; the faces chosen are meshed again as structured quadrilaterals; layers are
 grown inward from the walls chosen; each quadrilateral left facing the rest is capped with a
 pyramid; a core of hexahedra may be placed inside, clear of the walls, its own quadrilaterals
-capped too; and Netgen fills what is left with tetrahedra; all the cells become a mesh whose boundary
+capped too, its cubes smaller in the refinement regions; and Netgen fills what is left with
+tetrahedra, smaller there too; all the cells become a mesh whose boundary
 faces are in patches chosen by face (:class:`FaceSelection`); that mesh's polyhedral dual is built,
 the region's sharp edges kept as features; the dual's boundary vertices, which sit at the
 boundary faces' centroids and the midpoints of their edges, are moved onto the region's faces and
@@ -35,11 +37,12 @@ from .elements import element_mesh, face_keys, search_rows
 from .hex_core import OctreeCore
 from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
-from .netgen_process import NetgenProcess, SurfaceTriangulation
+from .netgen_process import LocalSizes, NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
 from .pipes import fill_pipes, find_pipes, pipe_ends, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
+from .refinement import LocatedRefinement, Refinement
 
 __all__ = [
     "CadMesher",
@@ -228,6 +231,10 @@ class CadMesher:
         A core of hexahedra inside the fill, kept clear of the layers' top and the other walls,
         its unset wall size ``max_size``; unset, none, and the whole core is the tetrahedra's
         polyhedral dual.
+    refinements : tuple of Refinement
+        Parts of the region meshed finer than ``max_size`` -- the surface triangles, the
+        tetrahedra and the core's cubes alike -- each at its own size, at least ``min_size`` and
+        below ``max_size``. Where two overlap, the finer size holds. Default: none.
     netgen : NetgenProcess
         The Netgen it runs.
     """
@@ -241,6 +248,7 @@ class CadMesher:
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
+    refinements: tuple[Refinement, ...] = ()
     netgen: NetgenProcess = dataclasses.field(default_factory=NetgenProcess)
 
     def __post_init__(self) -> None:
@@ -254,6 +262,18 @@ class CadMesher:
             PyramidCaps.check_height(self.cap_height, "CadMesher.cap_height")
         if self.core is not None:
             self.core.resolved(self.max_size)  # refuses a core smaller than an unset wall size
+        object.__setattr__(self, "refinements", tuple(self.refinements))
+        for refinement in self.refinements:
+            if not refinement.size < self.max_size:
+                raise ValueError(
+                    f"{refinement!r} asks for cells of {refinement.size!r}, no finer than the "
+                    f"mesher's max_size ({self.max_size!r}): a refinement only makes cells smaller."
+                )
+            if self.min_size is not None and refinement.size < self.min_size:
+                raise ValueError(
+                    f"{refinement!r} asks for cells of {refinement.size!r}, finer than the mesher's "
+                    f"min_size ({self.min_size!r})."
+                )
 
     def mesh(
         self,
@@ -306,8 +326,9 @@ class CadMesher:
         ValueError
             If a patch name is reserved or given twice, a selection finds no face, two selections
             share one, a layered or mapped patch is not a patch, a patch is layered without
-            :attr:`layers`, a mapped patch's face is neither a band nor four-sided, or a face of a
-            patch named in ``pipes`` is not a pipe.
+            :attr:`layers`, a mapped patch's face is neither a band nor four-sided, a face of a
+            patch named in ``pipes`` is not a pipe, or a refinement names a patch that is not one
+            or reaches no part of the region's box.
         MeshingError
             If Netgen fails.
         """
@@ -323,6 +344,7 @@ class CadMesher:
             ("layered", layered),
             ("mapped", mapped),
             ("pipes", named_pipes or ()),
+            ("refinements'", [n for r in self.refinements for n in r.patches_named()]),
         ):
             unknown = sorted(set(chosen) - set(names))
             if unknown:
@@ -340,12 +362,18 @@ class CadMesher:
                 model, region, surface.points[surface.triangles], surface.face
             )
             patch_of_face = assign_patches(faces, patches)
+            located, local_sizes = self._located(surface, patch_of_face, names)
+            if local_sizes is not None:
+                stage("triangulating again, finer in the refinement regions")
+                surface = self._triangulated(brep, local_sizes=local_sizes)
             candidates = _pipe_candidates(topology, patch_of_face, names, named_pipes)
             divisions = rim_divisions(topology, surface.triangles, surface.face, candidates)
             if divisions:
                 # Netgen's own rims would not take an O-grid: triangulate again, rims divided alike.
                 stage("triangulating again, the pipes' rims divided alike")
-                surface = self._triangulated(brep, edge_divisions=divisions)
+                surface = self._triangulated(
+                    brep, edge_divisions=divisions, local_sizes=local_sizes
+                )
         pipe_faces = _pipe_faces(topology, surface, patch_of_face, names, candidates, named_pipes)
         chosen = np.union1d(_faces_of(patch_of_face, names, mapped), pipe_faces)
         if chosen.size:
@@ -376,9 +404,11 @@ class CadMesher:
         points = np.vstack([points, caps.apexes])
         if self.core is not None:
             stage("placing the hexahedral core")
-        points, surface, core = self._cored(points, np.vstack([fill.triangles, caps.sides]))
+        points, surface, core = self._cored(
+            points, np.vstack([fill.triangles, caps.sides]), located
+        )
         stage("filling with tetrahedra")
-        points, tetrahedra = self._filled(points, surface, core.fill_size)
+        points, tetrahedra = self._filled(points, surface, core.fill_size, local_sizes)
         tetrahedra = np.vstack([tetrahedra, core.tetrahedra])
         # The layers' hexahedra first, so a column's cells are numbered as the layers grew them.
         hexahedra = core.hexahedra if hexahedra is None else np.vstack([hexahedra, core.hexahedra])
@@ -445,15 +475,50 @@ class CadMesher:
             lambda points, faces: model.project(region, points, faces=faces).points,
         )  # fmt: skip
 
-    def _cored(self, points: np.ndarray, surface: np.ndarray):
-        """``points`` and the fill's closed ``surface``, with the hex core inside the surface:
-        its points after ``points``, its capped surface added to the fill's as a hole, and its
-        cells (:class:`_CoreCells`, numbered after ``points``)."""
+    def _located(
+        self, surface: SurfaceTriangulation, patch_of_face: np.ndarray, names: list[str]
+    ) -> tuple[list[LocatedRefinement], LocalSizes | None]:
+        """The refinements placed on the triangulated ``surface``, whose faces are in the patches
+        ``names[patch_of_face]``, and the sizes they ask of Netgen over the surface's box (unset
+        when there are none).
+
+        Raises
+        ------
+        ValueError
+            If a refinement names a patch that is not one, or reaches no part of the box.
+        """
+        if not self.refinements:
+            return [], None
+        patch = patch_of_face[surface.face]
+        corners = surface.points[surface.triangles]
+        walls = {name: corners[patch == k] for k, name in enumerate(names)}
+        lower, upper = surface.points.min(axis=0), surface.points.max(axis=0)
+        located, sizes = [], []
+        for refinement in self.refinements:
+            placed = refinement.located(walls)
+            asked = placed.local_sizes(lower, upper)
+            if not len(asked.sizes):
+                raise ValueError(f"{refinement!r} reaches no part of the region's box")
+            located.append(placed)
+            sizes.append(asked)
+        return located, LocalSizes.joined(sizes)
+
+    def _cored(
+        self,
+        points: np.ndarray,
+        surface: np.ndarray,
+        refinements: Sequence[LocatedRefinement] = (),
+    ):
+        """``points`` and the fill's closed ``surface``, with the hex core inside the surface,
+        its cubes smaller where ``refinements`` reach: its points after ``points``, its capped
+        surface added to the fill's as a hole, and its cells (:class:`_CoreCells`, numbered after
+        ``points``)."""
         if self.core is None:
             return points, surface, _CoreCells.none(self.max_size)
         core = self.core.within(
-            points, surface, cap_height=self.cap_height, boundary_size=self.max_size
-        )
+            points, surface, cap_height=self.cap_height, boundary_size=self.max_size,
+            refinements=refinements,
+        )  # fmt: skip
         wall, _ = self.core.resolved(self.max_size)
         start = points.shape[0]
         cells = _CoreCells(
@@ -465,10 +530,14 @@ class CadMesher:
         return np.vstack([points, core.points]), np.vstack([surface, start + core.surface]), cells
 
     def _filled(
-        self, points: np.ndarray, triangles: np.ndarray, max_size: float
+        self,
+        points: np.ndarray,
+        triangles: np.ndarray,
+        max_size: float,
+        local_sizes: LocalSizes | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """``points`` with the fill's new points after them, and the fill's tetrahedra, none
-        over ``max_size``.
+        over ``max_size`` nor, near each of the ``local_sizes``' points, over its size.
 
         Netgen is given only the points the surface uses (it renumbers when one is not), and its
         tetrahedra are put back in the numbering of ``points``. With no surface left (every cell
@@ -480,8 +549,9 @@ class CadMesher:
         position = np.full(points.shape[0], -1, dtype=np.int64)
         position[used] = np.arange(used.size)
         filled = self.netgen.fill(
-            points[used], position[triangles], max_size=max_size, **self._netgen_options()
-        )
+            points[used], position[triangles], max_size=max_size,
+            **self._netgen_options(local_sizes=local_sizes),
+        )  # fmt: skip
         added = filled.points[used.size :]
         back = np.concatenate([used, points.shape[0] + np.arange(added.shape[0])])
         return np.vstack([points, added]), back[filled.tetrahedra]
