@@ -169,3 +169,25 @@ def test_a_schedule_with_no_readable_shift_is_refused() -> None:
     step.relaxation_schedule = SimpleNamespace()
     with pytest.raises(ValueError, match="readable constant"):
         refresh(step, _STATE)
+
+
+def test_the_memory_trim_runs_once_before_each_refit_and_never_on_a_skipped_step() -> None:
+    """The trim lowers the resident set a re-fit's transient lands on, so it must run before the fit.
+
+    Run after the fit it would lower only what is held, not the peak; run on every step it would pay a
+    whole-arena walk where nothing is re-fitted. Both are asserted, by one ordered record of the trim and
+    the fit.
+    """
+    events: list[str] = []
+
+    class _OrderedPreconditioner(_RecordingPreconditioner):
+        def refresh_in_place(self, *args, **kwargs):
+            events.append("fit")
+            return super().refresh_in_place(*args, **kwargs)
+
+    refresh = _hook(_OrderedPreconditioner(), memory_trim=lambda: events.append("trim"))
+    step = _stub_step(beta=0.5, diagonal=_DIAGONAL)
+    refresh(step, _STATE)  # full
+    refresh(step, _STATE)  # skipped
+    refresh(step, _STATE, due=True)  # cost
+    assert events == ["trim", "fit", "trim", "fit"]

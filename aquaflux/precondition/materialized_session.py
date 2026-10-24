@@ -26,6 +26,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..allocator import GlibcTrim, MemoryTrim
 from ..solve import FieldLayout, LinearSolveRegime, NewtonStrategy, RefreshTiming, shift_of
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
@@ -376,6 +377,10 @@ class BetaTrackingRefresh:
         The state's layout when the assembler is a :class:`FieldwiseResidual`, so each column field is
         probed by its own program (:func:`batched_field_jacobian_matvec`); ``None`` (default) probes
         with whole-state seeds.
+    memory_trim : MemoryTrim, optional
+        Called just before each re-fit's probe, to give the allocator's kept, freed memory back to the
+        operating system (:class:`~aquaflux.allocator.GlibcTrim`), so a re-fit's own transient lands on
+        a lower resident set. It changes no value. ``None`` (default) leaves the allocator alone.
 
     Attributes
     ----------
@@ -396,8 +401,10 @@ class BetaTrackingRefresh:
         pivot_floor: PivotFloor | None = None,
         floorable_rows: np.ndarray | None = None,
         by_field: FieldLayout | None = None,
+        memory_trim: MemoryTrim | None = None,
     ) -> None:
         self._probe = probe
+        self._memory_trim = memory_trim
         self._by_field = by_field
         self._pivot_floor = pivot_floor
         # On the device, where the floor is applied, once rather than at every re-fit.
@@ -448,6 +455,8 @@ class BetaTrackingRefresh:
         # the re-fits the march's own cadence pays for from the ones its solves provoked.
         kind = "full" if self._full_rebuild_pending else "cost"
         self._full_rebuild_pending = False
+        if self._memory_trim is not None:
+            self._memory_trim()
         self._report(kind, started, self._materialize_at(active_step, state, float(beta)))
         return True
 
@@ -621,6 +630,12 @@ class MaterializedProblem(abc.ABC):
         """
 
 
+#: The trim every session hands its refresh hook unless told otherwise. A re-fit's transient lands on top
+#: of the freed memory the previous step's program left in the allocator's arenas, so returning that
+#: memory first lowers the peak a re-fit sets; it changes no value.
+_RETURN_FREED_MEMORY = GlibcTrim()
+
+
 class MaterializedSession:
     """The materialized-Jacobian family's session: one probe, one inverse and one refresh hook.
 
@@ -673,6 +688,10 @@ class MaterializedSession:
         ``hook -> hook``, wrapping the per-step :attr:`refresh_preconditioner` once.
     inverse_wrapper : callable, optional
         ``(role, factory) -> factory``, wrapping a field-split block-inverse factory before it is used.
+    memory_trim : MemoryTrim or None, optional
+        Handed to the refresh hook, which calls it before each re-fit (:class:`BetaTrackingRefresh`).
+        The default is a :class:`~aquaflux.allocator.GlibcTrim`, which gives glibc's kept, freed memory
+        back to the operating system and does nothing without glibc; ``None`` leaves the allocator alone.
 
     Raises
     ------
@@ -690,6 +709,7 @@ class MaterializedSession:
         on_build: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
         precondition_wrapper: Callable[[Callable], Callable] | None = None,
         inverse_wrapper: Callable[[str, Callable], Callable] | None = None,
+        memory_trim: MemoryTrim | None = _RETURN_FREED_MEMORY,
     ) -> None:
         if isinstance(spec.inverse, FieldSplit) and problem.groups() is None:
             raise TypeError(
@@ -715,6 +735,7 @@ class MaterializedSession:
         self._reports = dict(reports or {})
         self._on_build = on_build
         self._inverse_wrapper = inverse_wrapper
+        self._memory_trim = memory_trim
         self._probe: JacobianProbe | None = None
         self._hook: BetaTrackingRefresh | None = None
         self._preconditioner: object | None = None
@@ -896,6 +917,7 @@ class MaterializedSession:
                 pivot_floor=self._spec.pivot_floor,
                 floorable_rows=self._floorable_row_mask(),
                 by_field=self._by_field,
+                memory_trim=self._memory_trim,
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook
