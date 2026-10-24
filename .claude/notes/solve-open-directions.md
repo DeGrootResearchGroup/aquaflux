@@ -787,10 +787,11 @@ first call (0.75 GiB) is in the baseline the peak sits on, so a `malloc_trim(0)`
 an unmeasured, cheap arm on bfs3d (on pitzDaily it moved the peak 0.03 GiB).
 
 **The non-array residue is named (2026-10-24, same log, "What the resident memory holds beyond live arrays,
-on two meshes")**: it is JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 on pitzDaily (1242
-against 1072 executables), so it grows with the case, not per executable; whether with cells or with the
-3D stencil the two meshes do not separate. Per cell it would be ~30 GB at 300k cells and close the target
-alone; the HLO ranking (programs carrying arrays as constants) is the reading that decides.
+on two meshes")**: JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 on pitzDaily. About 0.7–0.9
+GiB is ~0.7 MiB per small op-by-op program, fixed in the mesh. About 0.8 GiB (estimated) is arrays compiled
+into a few programs as constants (`batched_field_jacobian_matvec` once per field, `newton_step`, `_march_step`,
+`norm_of_residual`, `_eddy_viscosity_drift`), growing 4.5× for 1.9× the cells: ~11 GB at 300k bfs3d-like
+cells, more on a polyhedral stencil. 14e is the proposal.
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -834,6 +835,18 @@ None of these needs a convergence study:
 
 The transposes and the cell-level pattern are worth about 0.6 and up to ~2 GiB on bfs3d; the pattern cut
 scales with the entry count, so it is the one of these that also bears on the 300k target.
+
+### 14e. Pass the arrays the probe and step programs compile in as constants as arguments (proposal)
+
+**What.** First read which arrays they are: dump the constant instructions, by size, of the largest
+`batched_field_jacobian_matvec` and `_march_step` modules on bfs3d (`client.live_executables()`,
+`hlo_modules()`). Then make each a traced leaf of the pytree the program takes, not a host array a closure or
+a static field carries.
+
+**Why.** Each program embeds its own copy (six batched-JVP programs), at ~3.4× the data in resident memory by a
+standalone probe; as arguments they are held once, or not at all where they duplicate an array the case already
+holds. It is the one part of the non-array residue that grows with the case (log entry above). Library work:
+not started.
 
 ## Smaller housekeeping
 

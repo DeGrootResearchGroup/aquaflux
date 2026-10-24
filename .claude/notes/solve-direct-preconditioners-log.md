@@ -530,25 +530,34 @@
         `hybrid_initialize`, 1215 after the fit, 1242 at the end; pitzDaily 514 / 675 / 1045 / 1072), so
         the case build's and `hybrid_initialize`'s "not arrays" growth is the op-by-op programs they
         compile. glibc's retention is separate and smaller once trimmed.
-      - **It doubled between the meshes while the executable count rose 16 %**, so it is not a fixed cost
-        per executable; the two-point fit has no fixed part. ⚠️ **The two points do not say what it scales
-        with**: cells, the stencil (2D against a 3D reach-3 pattern, so pattern entries per cell differ
-        several-fold), hierarchy levels and arrays compiled in as constants all move together between these
-        cases. Projected per cell it is ~30 GB at 300k cells; projected per executable it is ~1–2 GiB.
-      - **Programs carrying data**: on pitzDaily the 1072 serialized HLO modules total 0.055 GiB, 13 over
-        1 MiB holding 0.052 (`newton_step` 3 × 5.8, `batched_field_jacobian_matvec` 5 × 3.3,
-        `_march_step` 12.0, `fit_simple_level` 3 × 1.2, `norm_of_residual` 2.7 MiB) — sizes only an
-        embedded constant explains (a program taking its data as arguments is kilobytes). A standalone probe
-        (four jitted functions each closing over 32 MiB of int32) cost 432 MiB resident for 114 MiB of HLO,
-        ~3.4× the data, so these 13 hold ~0.2 GiB of pitzDaily's 0.87; the rest is ~1060 small programs at
-        ~0.65 MiB each.
+      - **Two parts, and only one grows with the case.** The serialized HLO of every live executable
+        (`RESIDUE_HLO`; for bfs3d a fifth run on `605d2337` with only the HLO readings and the clear, whose
+        clear freed 2.08, reproducing 2.09) totals 0.246 GiB on bfs3d against 0.055 on pitzDaily, and 16 /
+        13 modules over 1 MiB hold 0.242 / 0.052 of it -- sizes only an embedded constant explains (a
+        program taking its data as arguments is kilobytes). bfs3d against pitzDaily, MiB:
+        `batched_field_jacobian_matvec` (one per column field) 6 × 17.9 against 5 × 3.3, `newton_step`
+        3 × 19.8 against 3 × 5.8, `_march_step` 43.8 against 12.0, `norm_of_residual` 17.0 against 2.7,
+        `_eddy_viscosity_drift` 14.5 against 1.7, `fit_simple_level` 4 × 1.4 against 3 × 1.2.
+        - **Programs carrying arrays as constants** grow 4.5× for 1.9× the cells, so with the stencil
+          (2D against a 3D reach-3 pattern) more than with cells, and each program embeds its own copy
+          (six batched-JVP programs). A standalone probe (four jitted functions each closing over 32 MiB of
+          int32) cost 432 MiB resident for 114 MiB of HLO, ~3.4× the data; at that multiplier (an
+          estimate, not measured on the case) they hold ~0.8 GiB of bfs3d's 1.71 untraced and ~0.2 of
+          pitzDaily's 0.87, ~38 KB a bfs3d cell.
+        - **Everything else is ~0.7 MiB per small program**: (1.71 − 0.8) / ~1226 on bfs3d against
+          (0.87 − 0.2) / ~1059 on pitzDaily, the op-by-op programs the case build, `hybrid_initialize` and
+          the fit compile: about 0.7–0.9 GiB, fixed in the mesh. The traced 0.19 → 0.38 (jaxprs) is not
+          separated between the two parts.
+        - **For a 300k-cell polyhedral case**: the constants at bfs3d's ~38 KB a cell are ~11 GB, about
+          twice that on a polyhedral stencil, and removable; the per-program part stays ~1 GiB. Which arrays
+          are compiled in is not yet read (`solve-open-directions.md` §14e).
       - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
         of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
         not in the march's footprint; it is in the footprint of anything run after a solve in the same
         process (the adjoint, a second solve) until Python's collector reaches its next full pass.
       - Records: `memory_residue.<case>.json` and the run logs (git-ignored), copied into this entry. Two
         runs per mesh with the clear's live-array readings (the first pair lacked them); a third pitzDaily
-        run reproduced the second (end 2.55, clear + trim freed 1.06).
+        run (with the HLO ranking) reproduced the second (end 2.55, clear + trim freed 1.06).
 
 ## Condensed out of the rule (2026-10-17)
 
