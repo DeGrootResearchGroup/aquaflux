@@ -44,7 +44,9 @@ the drawing unless told otherwise. The side panel holds the file's settings sect
 section, in the same form Setup uses for a case file, every choice offered by the
 installed mesher. The lists of solids (the region's, a lamp's surface) are chosen from
 the drawing's own solids, and the patches that are layered or meshed as grids from the
-file's patches.
+file's patches. The pipes and the ducts are chosen from the patches every face of which is
+a pipe, or a rectangular duct's side; ducts are told once the file's `sizes` states its
+feature angle, which decides which edges are a duct's corners.
 
 Beside the form the drawing is drawn as aquaflux reads it: the faces of the region,
 each in the colour of its patch, and grey for the faces no patch chooses. Until the

@@ -157,7 +157,8 @@ def test_the_drawing_sends_the_mesh_file_and_reads_its_faces():
         "patches": ["walls"],
         "landed": {},
         "pipes": [0],
-        "selections_error": None,
+        "ducts": [1, 2],
+        "selections_error": "two patches share a face",
     }
     runner = Recorder(
         CommandResult(0, json.dumps(reply)), CommandResult(2, json.dumps({"error": "no drawing"}))
@@ -167,7 +168,8 @@ def test_the_drawing_sends_the_mesh_file_and_reads_its_faces():
     ((arguments, stdin),) = runner.calls
     assert arguments == ["drawing", "out", "--relative-to", "mesh_dir"]
     assert json.loads(stdin) == {"mesh_file": {"drawing": {"file": "tank.step"}}}
-    assert (str(view.surface), view.solids, view.patches, view.pipes) == (
-        "out/drawing.vtp", ["tank"], ["walls"], [0],
+    assert (str(view.surface), view.solids, view.patches, view.pipes, view.ducts) == (
+        "out/drawing.vtp", ["tank"], ["walls"], [0], [1, 2],
     )  # fmt: skip
+    assert view.selections_error == "two patches share a face"
     assert commands.drawing({}, "mesh_dir", "out").error == "no drawing"
