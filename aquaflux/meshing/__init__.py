@@ -30,6 +30,11 @@ from a balanced :class:`~aquaflux.octree.Octree` refined towards its boundary (:
 tetrahedra about their centres so no point hangs on an edge, and the core's boundary quadrilaterals
 are capped with pyramids, leaving a closed triangle surface for a tetrahedral fill.
 
+A :class:`Refinement` meshes part of the region finer than the rest -- the fluid inside a
+:class:`RefinedBox`, :class:`RefinedSphere` or :class:`RefinedCylinder`, or within a distance of
+some patches (:class:`RefinedNear`). Placed in the region as a :class:`LocatedRefinement`, it splits
+the core's cubes there and hands Netgen the :class:`LocalSizes` its triangles and tetrahedra keep to.
+
 :class:`HexBlock` is a curved hexahedron cut into hexahedra by transfinite interpolation from its
 edges (straight, an :class:`Arc`, a :class:`SampledCurve` or any :class:`Curve`) and faces (any
 :class:`Surface`), its cells spread by a count, a :class:`Graded` progression or node fractions, its
@@ -66,6 +71,7 @@ from .conduits import ConduitFill
 from .dual import PolyhedralDual, TracedDual
 from .netgen_process import (
     EdgePoints,
+    LocalSizes,
     MeshingError,
     NetgenProcess,
     SurfaceTriangulation,
@@ -85,6 +91,14 @@ from .near_surface import NearSurface
 from .pipe_core import PipeCore
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
+from .refinement import (
+    LocatedRefinement,
+    RefinedBox,
+    RefinedCylinder,
+    RefinedNear,
+    RefinedSphere,
+    Refinement,
+)
 from .polygons import Polygons, PyramidCaps
 from .surfaces import ConeSurface, CylinderSurface, PlaneSurface, SphereSurface
 from .planarize import FacePlanarizer, Planarization
@@ -115,6 +129,8 @@ __all__ = [
     "HexBlock",
     "HexCore",
     "LayerExtrusion",
+    "LocalSizes",
+    "LocatedRefinement",
     "MappedQuads",
     "MappedSurface",
     "MeshingError",
@@ -129,6 +145,11 @@ __all__ = [
     "PolyhedralDual",
     "PrismLayers",
     "PyramidCaps",
+    "RefinedBox",
+    "RefinedCylinder",
+    "RefinedNear",
+    "RefinedSphere",
+    "Refinement",
     "Region",
     "RegionFaces",
     "SampledCurve",

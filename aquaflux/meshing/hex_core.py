@@ -2,7 +2,8 @@
 quadrilaterals capped with pyramids for a tetrahedral fill.
 
 **Which cubes.** An :class:`~aquaflux.octree.Octree` of root cubes of the core's ``size``
-covers the region's box, is refined towards the region's boundary, and is balanced, so cubes
+covers the region's box, is refined towards the region's boundary (and wherever any further
+refinement criterion asks, such as a part of the region meshed finer), and is balanced, so cubes
 sharing a face or part of an edge differ by at most one level. A leaf is kept when the region's
 boundary passes nowhere through the cube grown by ``clearance`` on every side and the cube's centre
 lies inside -- asked of a :class:`~aquaflux.meshing.Region`, exactly of a closed triangle surface
@@ -50,7 +51,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
-from aquaflux.octree import Octree
+from aquaflux.octree import Octree, RefinementCriterion
 
 from .caps import ClearedCaps, capped
 from .elements import HEXAHEDRON_CORNERS
@@ -181,6 +182,7 @@ class OctreeCore:
         *,
         cap_height: float | ClearedCaps,
         boundary_size: float,
+        refinements: Sequence[RefinementCriterion] = (),
     ) -> HexCore:
         """The core of ``region``, within the box from ``lower`` to ``upper``.
 
@@ -199,6 +201,11 @@ class OctreeCore:
             (:class:`~aquaflux.meshing.ClearedCaps`, the clearance free in front of every cap).
         boundary_size : float
             The size the region's boundary is meshed at, for an unset :attr:`wall_size`.
+        refinements : sequence of RefinementCriterion, optional
+            Further cubes to split, beside those near the boundary (see
+            :meth:`~aquaflux.meshing.LocatedRefinement.refines`): balance grades the cubes back
+            out from them, and where they reach the core's boundary its faces there are smaller
+            cubes', or a transition cube's triangles.
 
         Returns
         -------
@@ -219,7 +226,8 @@ class OctreeCore:
                 f"({clearance!r}) kept from the boundary"
             )
         tree = Octree.lattice(lower, upper, self.size)
-        tree = tree.refined_by([NearSurface(region, wall, margin=clearance + wall)]).balanced()
+        near = NearSurface(region, wall, margin=clearance + wall)
+        tree = tree.refined_by([near, *refinements]).balanced()
         grown = tree.lower - clearance
         clear = ~region.meets(grown, grown + tree.size[:, None] + 2.0 * clearance)
         candidates = np.flatnonzero(clear)
@@ -239,6 +247,7 @@ class OctreeCore:
         *,
         cap_height: float | ClearedCaps,
         boundary_size: float,
+        refinements: Sequence[RefinementCriterion] = (),
     ) -> HexCore:
         """The core inside a closed triangle surface: :meth:`mesh` of its :class:`ClosedSurface`.
 
@@ -250,7 +259,7 @@ class OctreeCore:
         points : np.ndarray, shape ``(n_points, 3)``
         triangles : np.ndarray of int, shape ``(n_triangles, 3)``
             The surface, closed and consistently wound.
-        cap_height, boundary_size : float
+        cap_height, boundary_size, refinements
             As in :meth:`mesh`.
 
         Returns
@@ -263,7 +272,7 @@ class OctreeCore:
         used = np.asarray(points, dtype=float)[np.unique(triangles)]
         return self.mesh(
             region, used.min(axis=0), used.max(axis=0), cap_height=cap_height,
-            boundary_size=boundary_size,
+            boundary_size=boundary_size, refinements=refinements,
         )  # fmt: skip
 
     @staticmethod

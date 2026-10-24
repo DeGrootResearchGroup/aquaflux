@@ -45,6 +45,10 @@ from aquaflux.meshing import (
     OctreeCore,
     PipeCore,
     PrismLayers,
+    RefinedBox,
+    RefinedCylinder,
+    RefinedNear,
+    RefinedSphere,
 )
 from aquaflux.radiation import (
     EveryPair,
@@ -549,6 +553,10 @@ _CASE_MAPPING = SettingsMapping(
         Graded,
         FacePlanarizer,
         OctreeCore,
+        RefinedBox,
+        RefinedCylinder,
+        RefinedNear,
+        RefinedSphere,
         Fluid,
         Laminar,
         RANS,

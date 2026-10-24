@@ -1099,3 +1099,33 @@ centroids, degrees.
   reproduces the lattice whatever its weights. The closed-chain refusal ("closes on itself") and the
   end-face exclusion in `_hollow` have no stub test: the first needs a ring-shaped duct drawing, the
   second a non-cap end face whose points sit on the closing fan (the tank's wall with the duct's mouth).
+
+## 2026-10-24 — Refinement regions: Netgen's local sizes
+
+Configuration: Linux x86_64 container, Python 3.13, netgen-mesher 6.2.2608, branch
+`meshing-refinement-regions` on `main` at `4f6ec9f9`; one run each.
+
+**The API, probed in a child-like process (`python -P`, netgen only).** A unit box surface of 4 x 4
+squares per face, filled to `maxh` 0.25 with h = 0.03 asked on a lattice in `[0.4, 0.6]^3`: median tet
+edge there 0.505 with no request, **0.505 with `MeshingParameters.RestrictH` on the fill's parameters
+(ignored)**, 0.036 with `mesh.CalcLocalH(0.3, 1)` then `mesh.RestrictLocalH(Pnt, h)` per point
+(elsewhere 0.065, grading out); `CalcLocalH` alone left the mesh as it was (168 points, 604 tets). The
+supplied surface was kept in every arm. Surface meshing of an OCC box (`maxh` 0.25, points on z = 0 in
+`[0.4, 0.6]^2`): `RestrictH` on the `MeshingParameters` passed as `mp=` gives 0.035 near against 0.255.
+`GenerateMesh(mp=MeshingParameters(maxh, minh, grading))` is bit-identical to the keyword form in a
+fresh process (box less a cylinder, `maxh` 0.2: 1762 triangles, points, triangles and face indices
+equal); the keyword form is not even repeatable within one process (1762 then 1742).
+
+**Through the mesher's own path** (`validation/meshing_netgen/local_sizes.py 0.04`: a
+`RefinedSphere`'s local sizes): fill of the unit box at 0.25 with a ball of 0.15 at its centre at 0.04
+(437 points) -- median tet edge by distance from the centre [0, 0.15) 0.050, [0.15, 0.25) 0.054,
+[0.25, 0.35) 0.075, [0.35, 0.5) 0.139, [0.5, 0.87) 0.250; without, 0.485 / 0.373 / 0.394 / 0.371 / 0.354
+(277 tets against 7834). Triangles of a 1 x 2 x 3 box at 0.5 with a ball of 0.2 on its face x = 0 at
+0.04: median edge near 0.057, away 0.415 (394 triangles against 180).
+
+**Mutation pass** (each line broken, its tests rerun, restored; all red): the child's `RestrictLocalH`
+and `RestrictH`; `refines` always true; the body's reach without the half-diagonal; local sizes
+unfiltered; `RefinedNear` without its distance; the hex core dropping its refinements; `CadMesher`'s
+core, fill and second triangulation without them; the early patch-name check; the max/min size
+refusals; the empty-reach refusal; `MeshSpec.mesher()` not passing them; the unknown-patch refusal;
+`LocalSizes`' positivity; and the L end-to-end test with `_located` returning none. None dismissed.
