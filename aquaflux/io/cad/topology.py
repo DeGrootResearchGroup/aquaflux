@@ -25,7 +25,8 @@ __all__ = ["CadRegion", "CadTopology", "FaceTriangles", "Projection"]
 
 @dataclasses.dataclass(frozen=True)
 class CadRegion:
-    """A region of space bounded by a CAD model's solids: the union of some, less the union of others.
+    """A region of space bounded by a CAD model's solids: the union of some, less the union of others,
+    with sheets standing in it.
 
     A plain description, not a shape: :class:`~aquaflux.io.cad.CadModel` builds the region from it
     and answers questions about it, so the kernel's shape never leaves the model.
@@ -36,6 +37,10 @@ class CadRegion:
         The solids whose union is the region: a vessel and the pipes joining it, say.
     without : tuple of str
         The solids taken out of it: a lamp sleeve standing in the vessel, say. Default: none.
+    baffles : tuple of str, or None
+        The sheets standing in it -- surfaces of no thickness, the region on both sides, such as a
+        baffle plate -- each cut to the part inside the region. Unset, every sheet of the model that
+        stands in the region; empty, none.
 
     Examples
     --------
@@ -46,10 +51,13 @@ class CadRegion:
 
     solids: tuple[str, ...]
     without: tuple[str, ...] = ()
+    baffles: tuple[str, ...] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "solids", tuple(self.solids))
         object.__setattr__(self, "without", tuple(self.without))
+        if self.baffles is not None:
+            object.__setattr__(self, "baffles", tuple(self.baffles))
         if not self.solids:
             raise ValueError("a region needs at least one solid")
         both = set(self.solids) & set(self.without)
@@ -79,16 +87,21 @@ class CadTopology:
         Compressed-sparse-row (CSR) row pointers into :attr:`edge_face_indices`.
     edge_face_indices : np.ndarray of int
         The distinct faces each edge bounds, concatenated: two on a closed region's ordinary edge,
-        one on a seam (a face meeting itself) or a degenerate edge, more where a sheet meets a
-        surface.
+        one on a seam (a face meeting itself), a degenerate edge or a sheet's free edge, and more
+        where a sheet meets a surface.
     edge_angle : np.ndarray, shape ``(n_edges,)``
         The fold at an edge between two faces: the angle, in radians, between their outward normals
         at the edge's midpoint, **positive where the region is convex** (a box's edges, ``pi/2``)
         and **negative where it is concave** (the inside corner of an L). ``0`` where the faces
-        meet smoothly, and ``nan`` on an edge that does not bound exactly two faces.
+        meet smoothly, and ``nan`` on an edge that does not bound exactly two faces or bounds a
+        sheet.
     seam : np.ndarray of bool, shape ``(n_edges,)``
         Whether the edge is a seam: a face's boundary running along itself, where a closed surface
         (a cylinder, a sphere) is cut open to be parametrized. Not a feature of the region.
+    sheet : np.ndarray of bool, shape ``(n_faces,)``
+        Whether the face is part of a sheet standing in the region (see :class:`CadRegion`), the
+        region on both sides of it rather than one. Every edge of a sheet is a feature. Unset,
+        no face is.
     """
 
     faces: tuple
@@ -100,6 +113,11 @@ class CadTopology:
     edge_face_indices: np.ndarray
     edge_angle: np.ndarray
     seam: np.ndarray
+    sheet: np.ndarray | None = None
+
+    def __post_init__(self):
+        if self.sheet is None:
+            object.__setattr__(self, "sheet", np.zeros(len(self.faces), dtype=bool))
 
     @property
     def n_faces(self) -> int:

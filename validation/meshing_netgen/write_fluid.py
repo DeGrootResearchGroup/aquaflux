@@ -24,7 +24,7 @@ STEP = pathlib.Path(__file__).parents[1] / "uvreactor_openfoam" / "of_case" / "S
 
 def main(stem: str) -> None:
     kernel = OpenCascade()
-    solids = kernel.read_step(STEP, Placement())
+    solids, _ = kernel.read_step(STEP, Placement())  # the drawing has no sheets
     body = kernel.fuse([solids["reactor_body"], solids["inlet_pipe"], solids["outlet_pipe"]])
     fluid = BRepAlgoAPI_Cut(body, solids["lamp"]).Shape()
     BRepTools.Write_s(fluid, f"{stem}.brep")

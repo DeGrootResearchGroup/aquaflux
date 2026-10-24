@@ -270,3 +270,83 @@ def test_a_region_needs_a_solid_and_cannot_take_one_out_of_itself():
         CadRegion(())
     with pytest.raises(ValueError, match="both in the region and taken out"):
         CadRegion(("a", "b"), without=("b",))
+
+
+# ---------------------------------------------------------------------------------------------
+# Sheets standing in a region: baffles
+# ---------------------------------------------------------------------------------------------
+
+
+def _sheet(origin, normal, along, u, v):
+    """A rectangular sheet: ``u`` long along ``along`` and ``v`` along ``normal x along``, from
+    ``origin``."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeFace
+    from OCP.gp import gp_Ax3, gp_Dir, gp_Pln
+
+    plane = gp_Pln(gp_Ax3(gp_Pnt(*origin), gp_Dir(*normal), gp_Dir(*along)))
+    return BRepBuilderAPI_MakeFace(plane, 0.0, u, 0.0, v).Face()
+
+
+@pytest.fixture(scope="module")
+def baffled():
+    """The unit cube, a plate standing in it on its wall ``y = 0`` (the plane ``x = 1/2``, ``y`` in
+    ``[0, 0.6]``, ``z`` in ``[0.2, 0.8]``), a plate wholly outside it, and one spanning it."""
+    shapes = {"box": BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 1.0, 1.0, 1.0).Shape()}
+    # In the plane x = 1/2 the frame's x axis is +y and its y axis is (+x) x (+y) = +z.
+    sheets = {
+        "plate": _sheet((0.5, 0.0, 0.2), (1, 0, 0), (0, 1, 0), 0.6, 0.6),
+        "away": _sheet((0.5, 2.0, 0.2), (1, 0, 0), (0, 1, 0), 0.6, 0.6),
+        "wall": _sheet((0.5, -0.5, -0.5), (1, 0, 0), (0, 1, 0), 2.0, 2.0),
+    }
+    return CadModel(shapes, OpenCascade(), sheets=sheets)
+
+
+PLATE = CadRegion(("box",), baffles=("plate",))
+
+
+def test_a_sheet_standing_in_a_region_is_a_face_with_the_region_on_both_sides(baffled):
+    topology = baffled.topology(PLATE)
+    assert topology.n_faces == 7
+    (plate,) = np.flatnonzero(topology.sheet)
+    assert topology.face_area[plate] == pytest.approx(0.36, rel=1e-12)
+    np.testing.assert_allclose(np.delete(topology.face_area, plate), 1.0, rtol=1e-12)
+    # Its four edges: three free in the region, bounding it alone, and its foot on the wall y = 0.
+    edges = topology.edges_of_face(plate)
+    faces = [set(topology.faces_of_edge(e).tolist()) for e in edges]
+    assert sorted(len(f) for f in faces) == [1, 1, 1, 2]
+    (foot,) = [f - {plate} for f in faces if len(f) == 2]
+    assert _plane_of(topology.faces[foot.pop()]) == (1, 0.0, -1)
+    # No fold is defined at a sheet's edge, so every one of them is a feature; the box's twelve
+    # edges keep their right-angled folds.
+    assert np.all(np.isnan(topology.edge_angle[edges]))
+    others = np.setdiff1d(np.arange(topology.n_edges), edges)
+    np.testing.assert_allclose(topology.edge_angle[others], math.pi / 2, rtol=1e-12)
+    assert set(edges.tolist()) <= set(topology.feature_edges(math.radians(30)).tolist())
+
+
+def test_unset_baffles_take_every_sheet_and_empty_ones_none(baffled):
+    # Unset, every sheet is taken: the spanning one among them cuts the box in two, refused.
+    with pytest.raises(ValueError, match=r"cut the region's 1 solid\(s\) into 2"):
+        baffled.topology(CadRegion(("box",)))
+    assert baffled.topology(CadRegion(("box",), baffles=())).n_faces == 6
+    assert not baffled.topology(CadRegion(("box",), baffles=())).sheet.any()
+
+
+def test_a_baffle_named_but_standing_nowhere_in_the_region_is_refused(baffled):
+    with pytest.raises(ValueError, match=r"baffle\(s\) \['away'\] do not stand in the region"):
+        baffled.topology(CadRegion(("box",), baffles=("plate", "away")))
+
+
+def test_a_point_beside_a_baffle_projects_onto_it(baffled):
+    topology = baffled.topology(PLATE)
+    (plate,) = np.flatnonzero(topology.sheet)
+    projection = baffled.project(PLATE, [[0.49, 0.3, 0.5], [0.52, 0.1, 0.25]])
+    np.testing.assert_array_equal(projection.face, [plate, plate])
+    np.testing.assert_allclose(projection.points, [[0.5, 0.3, 0.5], [0.5, 0.1, 0.25]], atol=1e-12)
+
+
+def test_a_sheet_is_not_a_solid(baffled):
+    with pytest.raises(KeyError, match="'plate' is a sheet, not a solid"):
+        baffled.topology(CadRegion(("plate",)))
+    with pytest.raises(KeyError, match="no sheet named 'box'"):
+        baffled.topology(CadRegion(("box",), baffles=("box",)))
