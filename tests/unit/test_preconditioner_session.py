@@ -15,6 +15,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.allocator import GlibcTrim
 from aquaflux.flow.block_preconditioner import _characteristic_reference_state
 from aquaflux.precondition import (
     AirReduction,
@@ -703,3 +704,21 @@ def test_a_bare_block_inverse_is_refused_for_a_problem_with_two_groups(case) -> 
     coupled, _ = case
     with pytest.raises(TypeError, match="single group"):
         open_session(MaterializedJacobian(SimpleSmoothed()), coupled)
+
+
+def test_a_session_gives_freed_memory_back_before_each_refit_by_default(case, monkeypatch) -> None:
+    """The shipped session trims glibc's arenas once per re-fit, and never on a step that re-fits nothing.
+
+    A default that stopped reaching the hook would let bfs3d's peak rise by half a gigabyte with every
+    value unchanged, which nothing else in the suite would see.
+    """
+    coupled, state = case
+    trims: list[int] = []
+    monkeypatch.setattr(GlibcTrim, "__call__", lambda self: trims.append(1))
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    session.refresh_preconditioner(active, state)  # the forced first re-fit
+    session.refresh_preconditioner(active, state)  # nothing to re-fit
+    session.refresh_preconditioner(active, state, due=True)
+    assert len(trims) == 2

@@ -564,6 +564,44 @@
       `ProbeGather` 280); `SimplePlan` 6.1. No `DeviceEntryMap` array of 1 MiB remains (was 1082 over 66).
       Run peak 6.87 GiB (step 1's first call), against 8.07 in the census-free base run above.
 
+### A `malloc_trim(0)` before each re-fit, on bfs3d (2026-10-24)
+
+      `memory_attribution.py` on `042e5107` (`7f62a3c4` plus the trim, then opt-in: `MaterializedSession(memory_trim=)`
+      handed to `BetaTrackingRefresh`, which calls `aquaflux.allocator.GlibcTrim` once per re-fit, before its
+      probe; the solver is otherwise `7fe27d07`'s). 4-core Linux container, 15.7 GiB, no swap, glibc 2.39
+      defaults (no `MALLOC_*`), jax 0.12.0.1, shipped `case.yaml`, `BFS3D_MEMORY_STEPS=2
+      BFS3D_MEMORY_CENSUS=0`, `BFS3D_MEMORY_TRIM` 0/1, one arm per process, arms alternated; run 1 compiled
+      cold, the rest warm. GiB:
+
+      | run | trim | peak (`HWM`) | set by | re-fit #1 stage peak | step 1's first call | resident before re-fit #2 -> after the trim | `malloc free` at step 1's end | resident at step 2's end |
+      |---|---|---|---|---|---|---|---|---|
+      | 1 | off | 8.92 | re-fit #2's `block re-fit #3` | 7.41 | 8.24 | 7.30 | 1.49 | 7.47 |
+      | 2 | on | 8.53 | re-fit #2's `block re-fit #3` | 7.67 | 8.31 | 7.38 -> 6.74 | 1.03 | 7.32 |
+      | 3 | off | 9.16 | re-fit #2's `block re-fit #3` | 7.81 | 8.49 | 7.55 | 1.12 | 7.62 |
+      | 4 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.63 | 8.31 | 7.40 -> 6.73 | 0.99 | 7.26 |
+      | 5 | off | 9.04 | re-fit #2's `block re-fit #3` | 7.80 | 8.33 | 7.39 | 0.96 | 7.63 |
+      | 6 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.64 | 8.27 | 7.35 -> 6.73 | 0.95 | 7.19 |
+
+      - **Peak: off 8.92 / 9.16 / 9.04 (mean 9.04, spread 0.24); on 8.53 / 8.51 / 8.51 (mean 8.52, spread
+        0.02).** Means 0.52 apart; the closest pair (runs 1 and 2) 0.39. The trim also took out the run-to-run
+        spread: what varied between off runs was how much freed memory the arenas happened to keep.
+      - **The peak stays where it was** (re-fit #2's leading block re-fit) and is now 0.2--0.3 above the step
+        program's first call (8.27--8.31 on), the next thing a lower re-fit peak would meet.
+      - **The trim before re-fit #2 gives back 0.61--0.67 GiB of resident memory** (0.28--0.37 before re-fit
+        #1). `mallinfo2`'s `fordblks` does not move across it: `malloc_trim` returns free pages to the kernel
+        (`madvise`) and glibc still counts them as free, so the harness's `malloc free` column is not what a
+        trim lowers; read the resident set.
+      - Held resident at step 2's end 7.19--7.32 on against 7.47--7.63 off. No cost in time: re-fit #2's stage
+        30.3--33.5 s on against 31.4--34.2 off, the 2-step march 578--622 s on against 598--611 off (warm).
+      - Run 6 ran on `817c95a5` (this entry's first commit; no code change from `042e5107`). Records: the
+        `memory_attribution_{off,on}{1,2,3}.json` and `run-20261024-02*.log`/`-03*.log` (git-ignored), copied here.
+      - **Shipped as the session's default** the same day (the owner's decision: the mean drop met the 0.5 GiB
+        bar, the closest pair did not). `memory_attribution.py` now trims by default; `BFS3D_MEMORY_TRIM=0`
+        is the off arm. Not yet measured: a whole march's peak.
+      - ⚠️ **Measured before #817** (cell-level pattern, entry above), which moved bfs3d's peak: its 1-step
+        runs peak in step 1's first call (7.19 GiB), above re-fit #1 (6.76). Whether a re-fit still sets the
+        2-step peak, and so what the trim saves on the current code, is unmeasured; re-run both arms here.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
