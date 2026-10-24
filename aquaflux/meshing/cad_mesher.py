@@ -216,7 +216,8 @@ class CadMesher:
     A baffle -- a sheet standing in the region (see :class:`~aquaflux.io.cad.CadRegion`) -- is a
     wall with the fluid on both sides: each of its faces becomes two boundary faces of the mesh, one
     for the cell on each side, in its patch, and the cells either side share no face through it.
-    Round its edge free in the fluid, the cells on its two sides meet.
+    Round its edge free in the fluid, the cells on its two sides meet; layered, the layers on its
+    two sides fan round that edge from one side to the other.
 
     Attributes
     ----------
@@ -346,8 +347,8 @@ class CadMesher:
             is triangulated again whenever there is one. Unset, every duct found; empty, none.
         baffle_patch : str
             The patch for the faces of baffles no selection names -- a selection's, if one has this
-            name. Layers are not grown on a baffle, nor is it meshed as a grid: its patch may be
-            neither layered nor mapped.
+            name. A baffle is not meshed as a grid: its patch may not be mapped. Layered, its two
+            sides grow layers of their own, which fan round its free edge.
         on_stage : callable, optional
             Told the name of each stage as it starts (only the stages this mesh needs), so a long
             meshing can be followed.
@@ -365,8 +366,7 @@ class CadMesher:
             :attr:`layers`, a mapped patch's face is neither a band nor four-sided, a face of a
             patch named in ``pipes`` is not a pipe, one named in ``ducts`` is not a duct's side, a
             refinement names a patch that is not one or reaches no part of the region's box, or a
-            layered, mapped, pipe or duct patch holds a baffle (or, mapped, a pipe or a duct, a face
-            a baffle stands on).
+            mapped, pipe or duct patch holds a baffle or a face a baffle stands on.
         MeshingError
             If Netgen fails.
         """
@@ -404,9 +404,7 @@ class CadMesher:
             )
             patch_of_face = assign_patches(faces, patches)
             patch_of_face[patch_of_face == len(patches) + 1] = on_baffles
-            _check_baffles(
-                topology, patch_of_face, names, layered, mapped, named_pipes, named_ducts
-            )
+            _check_baffles(topology, patch_of_face, names, mapped, named_pipes, named_ducts)
             located, local_sizes = self._located(surface, patch_of_face, names)
             if local_sizes is not None:
                 stage("triangulating again, finer in the refinement regions")
@@ -446,15 +444,19 @@ class CadMesher:
             stage("opening the surface along the baffles")
             walls, twins = self._opened(model, region, topology, walls)
         on_layered = np.isin(patch_of_face[walls.face], [names.index(n) for n in layered])
-        prisms = hexahedra = stacked = None
+        twins = _parted_by_layers(twins, walls.faces, topology.sheet[walls.face] & on_layered)
+        prisms = hexahedra = stacked = cut_up = None
         sides = side_face = None
+        fan_tetrahedra, tents = np.zeros((0, 4), dtype=np.int64), np.zeros((0, 6), dtype=np.int64)
         if on_layered.any():
             stage("growing the layers")
             grown = self.layers.extrude(walls.points, walls.faces, on_layered, twins=twins)
             twins = _grown_twins(grown, twins)
             points, fill, wall_faces = grown.points, grown.inner, grown.walls
             prisms, hexahedra, stacked = grown.prisms, grown.hexahedra, grown.columns
+            cut_up = ~grown.fanned  # the columns the dual cuts with their base
             sides, side_face = grown.sides, walls.face[grown.side_face]
+            fan_tetrahedra, tents = grown.tetrahedra, grown.tents
         else:
             points, fill, wall_faces = walls.points, walls.faces, walls.faces
         wall_tag = walls.face
@@ -476,16 +478,16 @@ class CadMesher:
         )
         stage("filling with tetrahedra")
         points, tetrahedra = self._filled(points, surface, core.fill_size, twins, local_sizes)
-        tetrahedra = np.vstack([tetrahedra, core.tetrahedra])
+        tetrahedra = np.vstack([tetrahedra, core.tetrahedra, fan_tetrahedra])
         # The layers' hexahedra first, so a column's cells are numbered as the layers grew them.
         hexahedra = core.hexahedra if hexahedra is None else np.vstack([hexahedra, core.hexahedra])
         pyramids = np.vstack([caps.pyramids, core.pyramids])
         layered_walls = walls.faces.where(on_layered)
         if conduits:
             # An open conduit end's own points inside the layers' ring are left on no cell.
-            cells = [tetrahedra, prisms, hexahedra, pyramids]
+            cells = [tetrahedra, prisms, hexahedra, pyramids, tents]
             points, renumber = _compacted(points, [c for c in cells if c is not None])
-            tetrahedra, prisms, hexahedra, pyramids = (
+            tetrahedra, prisms, hexahedra, pyramids, tents = (
                 None if c is None else renumber(c) for c in cells
             )
             boundary = boundary.renumbered(renumber)
@@ -493,7 +495,7 @@ class CadMesher:
             stacked = None if stacked is None else renumber(stacked)
         stage("building the polyhedral dual")
         primal = element_mesh(
-            points, tetrahedra, prisms, hexahedra, pyramids,
+            points, tetrahedra, prisms, hexahedra, pyramids, tents,
             patches=boundary.patches(patch_of_face, names),
         )  # fmt: skip
         columns = None
@@ -508,7 +510,9 @@ class CadMesher:
             if topology.faces_of_edge(edge).size >= 2
         }
         dual = PolyhedralDual(
-            self.feature_angle, feature_edges=edges.between(feature_pairs), columns=stacked
+            self.feature_angle,
+            feature_edges=edges.between(feature_pairs),
+            columns=None if stacked is None else stacked[cut_up],
         )
         traced = dual.build_traced(primal)
         stage("moving the boundary onto the drawing")
@@ -769,14 +773,12 @@ def _standing(topology) -> tuple[np.ndarray, np.ndarray]:
     return sheet, np.unique(np.concatenate([sheet, *edges]))
 
 
-def _check_baffles(topology, patch_of_face, names, layered, mapped, pipes, ducts) -> None:
-    """Refuse layers or a grid on a baffle, and a grid, a pipe or a duct on a face a baffle stands
-    on."""
+def _check_baffles(topology, patch_of_face, names, mapped, pipes, ducts) -> None:
+    """Refuse a grid, a pipe or a duct on a baffle or a face a baffle stands on."""
     if not topology.sheet.any():
         return
-    sheet, standing = _standing(topology)
+    _, standing = _standing(topology)
     for role, chosen, faces, what in (
-        ("layered", layered, sheet, "a baffle: layers on a baffle are not built"),
         ("mapped", mapped, standing, "a baffle, or a face one stands on"),
         ("pipes", pipes or (), standing, "a baffle, or a face one stands on"),
         ("ducts", ducts or (), standing, "a baffle, or a face one stands on"),
@@ -786,9 +788,24 @@ def _check_baffles(topology, patch_of_face, names, layered, mapped, pipes, ducts
             raise ValueError(f"{role} patch(es) {held} hold {what}")
 
 
+def _parted_by_layers(twins: np.ndarray, faces: Polygons, layered_sheet: np.ndarray) -> np.ndarray:
+    """``twins`` with the points of layered baffles each their own again.
+
+    A baffle's two sides stay at one place only while it is bare; layered, each side grows its own
+    layers, whose tops are apart, and its copies of a point part for good.
+    """
+    rings = faces.padded()[np.asarray(layered_sheet, dtype=bool)]
+    parted = np.unique(twins[rings[rings >= 0]])
+    result = np.asarray(twins).copy()
+    on = np.isin(result, parted)
+    result[on] = np.flatnonzero(on)
+    return result
+
+
 def _grown_twins(grown, twins: np.ndarray) -> np.ndarray:
     """Each point's twin after layers are grown: a layer point's is the point its twin's column
-    grew at the same layer, at the same place.
+    grew at the same layer, at the same place. Points with no twin keep their own, whatever
+    columns they grew (a point where layers fan round an edge grows several).
 
     Raises
     ------
@@ -798,6 +815,8 @@ def _grown_twins(grown, twins: np.ndarray) -> np.ndarray:
     columns = grown.columns
     full = np.arange(grown.points.shape[0])
     full[: twins.size] = twins
+    paired = np.bincount(twins, minlength=twins.size)[twins] > 1
+    columns = columns[paired[columns[:, 0]]]
     if not columns.size:
         return full
     row = np.full(twins.size, -1, dtype=np.int64)
@@ -854,8 +873,8 @@ def _unobserved(stage: str) -> None:
 class _Boundary:
     """The primal's boundary faces, triangles and quadrilaterals, with the drawing's face under each.
 
-    The quadrilaterals are a mapped wall's, and the layer cells' sides lying on a face without
-    layers.
+    The quadrilaterals are a mapped wall's; the layer cells' sides lying on a face without layers
+    are quadrilaterals, or triangles where layers fan round an edge onto it.
     """
 
     triangles: np.ndarray
@@ -864,14 +883,24 @@ class _Boundary:
     quad_face: np.ndarray = dataclasses.field(default_factory=lambda: np.zeros(0, np.int64))
 
     @classmethod
-    def of(cls, faces: Polygons, face: np.ndarray, sides=None, side_face=None) -> _Boundary:
-        """The boundary of ``faces``, tagged by ``face``, and of any further quadrilaterals."""
+    def of(
+        cls, faces: Polygons, face: np.ndarray, sides: Polygons | None = None, side_face=None
+    ) -> _Boundary:
+        """The boundary of ``faces``, tagged by ``face``, and of any further ``sides``, tagged by
+        ``side_face``."""
         triangle_face, quad_face = faces.split(face)
-        quads, under = [faces.quads], [quad_face]
+        triangles, quads = [faces.triangles], [faces.quads]
+        under_triangles, under_quads = [triangle_face], [quad_face]
         if sides is not None:
-            quads.append(sides)
-            under.append(side_face)
-        return cls(faces.triangles, triangle_face, np.concatenate(quads), np.concatenate(under))
+            side_triangles, side_quads = sides.split(side_face)
+            triangles.append(sides.triangles)
+            quads.append(sides.quads)
+            under_triangles.append(side_triangles)
+            under_quads.append(side_quads)
+        return cls(
+            np.concatenate(triangles), np.concatenate(under_triangles),
+            np.concatenate(quads), np.concatenate(under_quads),
+        )  # fmt: skip
 
     def renumbered(self, renumber) -> _Boundary:
         """The same faces with their points renumbered by ``renumber``."""

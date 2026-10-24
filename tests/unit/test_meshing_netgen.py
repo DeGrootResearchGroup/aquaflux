@@ -986,23 +986,42 @@ def test_layers_on_the_walls_slide_up_a_baffle_on_both_its_sides():
     _check_baffled_box(mesh)
 
 
-def test_layers_or_a_grid_on_a_baffle_are_refused():
+def test_layers_on_a_baffle_fan_round_its_free_edge():
+    # Layers on the walls and on both sides of the plate: they fan round its free edge, two
+    # columns of their own in each of its corners, and close down onto the wall y = 0 where the
+    # edge lands on it. Before the fan the layers could not be grown there at all (the two sides'
+    # normals cancel); cut with their base, the fan's columns gave faces up to 180 degrees.
     from aquaflux.io.cad import CadRegion
+    from aquaflux.mesh import face_non_orthogonality
     from aquaflux.meshing import CadMesher
 
-    model = _plate_in_a_box()
+    first_height = 0.005
     mesher = CadMesher(
         max_size=0.1,
         feature_angle=np.radians(45),
-        layers=PrismLayers(first_height=0.005, growth=1.3, count=3),
+        layers=PrismLayers(first_height=first_height, growth=1.3, count=3),
     )
-    region = CadRegion(("box",))
-    with pytest.raises(ValueError, match=r"layered patch\(es\) \['baffles'\] hold a baffle"):
-        mesher.mesh(model, region, layered=("baffles",))
+    mesh = mesher.mesh(_plate_in_a_box(), CadRegion(("box",)), layered=("walls", "baffles"))
+    _check_baffled_box(mesh)
+    inner = np.asarray(mesh.face_cells.neighbour) >= 0
+    assert np.max(np.asarray(face_non_orthogonality(mesh))[inner]) < 90.0
+    # The plate's cells are layer cells: half the first dual layer from it, not a core cell's.
+    geometry = mesh.geometry()
+    baffle = np.asarray(mesh.face_patches.label) == mesh.face_patches.id_of("baffles")
+    owner = np.asarray(mesh.face_cells.owner)[baffle]
+    away = np.abs(np.asarray(geometry.cell.centroid)[owner, 0] - 0.5)
+    assert np.median(away) < first_height
+
+
+def test_a_grid_on_a_baffle_or_a_face_it_stands_on_is_refused():
+    from aquaflux.io.cad import CadRegion
+    from aquaflux.meshing import CadMesher
+
+    mesher = CadMesher(max_size=0.1, feature_angle=np.radians(45))
     with pytest.raises(
         ValueError, match=r"mapped patch\(es\) \['walls'\] hold a baffle, or a face"
     ):
-        mesher.mesh(model, region, mapped=("walls",))
+        mesher.mesh(_plate_in_a_box(), CadRegion(("box",)), mapped=("walls",))
 
 
 def test_a_refinement_near_the_ls_inner_wall_makes_its_cells_smaller_there_alone(tmp_path):

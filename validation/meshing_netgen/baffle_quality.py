@@ -3,7 +3,8 @@
 The unit cube with a plate standing on its wall ``y = 0`` (the plane ``x = 1/2``, ``y`` in
 ``[0, 0.6]``, ``z`` in ``[0.2, 0.8]``), meshed by ``CadMesher`` at ``max_size`` with a feature angle
 of 45 degrees, with and without the plate and with and without three layers on the walls
-(``first_height = max_size / 20``, growth 1.3). The L of two unit boxes (the first concave edge the
+(``first_height = max_size / 20``, growth 1.3), and with layers on the plate too, fanned round its
+free edge. The L of two unit boxes (the first concave edge the
 dual was built for) is meshed the same way, for comparison: whatever the cut at a concave edge costs
 there, it costs at a baffle's free edge too, which is the most concave fold there is. Each row
 prints the cells, the worst and 99th-percentile cell non-convexity, and the interior faces'
@@ -88,6 +89,12 @@ def table(size: float) -> None:
         suffix = " + layers" if layered else ""
         quality("box" + suffix, mesher.mesh(model, CadRegion(("box",), baffles=()), layered=walls))
         quality("box and plate" + suffix, mesher.mesh(model, CadRegion(("box",)), layered=walls))
+        if layered:
+            on_both = ("walls", "baffles")
+            quality(
+                "box, plate + layers on both",
+                mesher.mesh(model, CadRegion(("box",)), layered=on_both),
+            )
         quality("L" + suffix, mesher.mesh(l_model, CadRegion(("l",)), layered=walls))
 
 
@@ -96,7 +103,9 @@ def opened_fill(size: float, timeout: float) -> None:
     topology = model.topology(region)
     with tempfile.TemporaryDirectory() as directory:
         work = pathlib.Path(directory)
-        surface = NetgenProcess().triangulate(model.write_brep(region, work / "r.brep"), max_size=size)
+        surface = NetgenProcess().triangulate(
+            model.write_brep(region, work / "r.brep"), max_size=size
+        )
         result = opened(
             surface.points, Polygons(surface.triangles), surface.face,
             np.flatnonzero(topology.sheet),
