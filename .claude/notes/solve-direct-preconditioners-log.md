@@ -753,9 +753,11 @@
 
 ### Lazy transposes (§14d) (2026-10-24)
 
-      Branch `claude/lazy-transposes` on `claude/cell-level-pattern` (#817; rebased onto `main` at `0c76b4ec` after it merged, the measured
-      code unchanged by the rebase, so `f235016a` below is `5a00a9c8` on the rebased branch, and base
-      `02c3e7c4` has #817's `aquaflux/` as squashed into `0c76b4ec`): padded-row operators hold
+      Branch `claude/lazy-transposes` on `claude/cell-level-pattern` (#817; the branch was rebased onto `main` after #817 merged, so
+      `f235016a` below is the rebased commit "Pack the transposes where a caller transposes a
+      preconditioner itself", whose `aquaflux/precondition` and `aquaflux/solve` the rebase left as they
+      were measured, and base `02c3e7c4` has #817's `aquaflux/` as squashed into `0c76b4ec`): padded-row
+      operators hold
       their rows alone; `solve.with_transposes` packs `Aᵀ` for an adjoint's transpose solve only
       (`solve-amg-multigrid.md`, "The transpose is packed only for an adjoint"). Base `02c3e7c4`, branch
       `f235016a`, each run once in its own worktree, one after the other on one otherwise idle 4-core
