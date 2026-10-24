@@ -334,10 +334,10 @@ defect — fix it in the same change.
     `BetaTrackingRefresh`, which calls it once per re-fit, before the probe (the hook's own default is
     `None`). `None` turns it off; a case file cannot reach it. It changes no value. **Why:** the step
     program's first call leaves ~0.6 GiB of freed memory in XLA's worker-thread arenas, and the next re-fit's
-    transient landed on top of it: bfs3d 2-step peak 9.04 -> 8.52 GiB (mean of three runs each, spread
-    0.24 -> 0.02), no cost in time, measured before #817 moved the peak to the step program's first call
-    — unmeasured since (`.claude/notes/solve-direct-preconditioners-log.md`, "A `malloc_trim(0)` before
-    each re-fit"). Read its effect from the resident set, not `mallinfo2`'s free
+    transient landed on top of it: bfs3d 2-step peak 7.78 -> 7.30 GiB on `2e7949e8` (after #817; mean
+    of three runs each, spread 0.21 -> 0.06; re-fit #2 still sets the peak, ~1 GiB above the step
+    program's first call), no cost in time; 9.04 -> 8.52 before #817
+    (`.claude/notes/solve-direct-preconditioners-log.md`, "A `malloc_trim(0)` before each re-fit"). Read its effect from the resident set, not `mallinfo2`'s free
     bytes, which count trimmed pages as still free. Pinned by
     `test_the_memory_trim_runs_once_before_each_refit_and_never_on_a_skipped_step` and
     `test_a_session_gives_freed_memory_back_before_each_refit_by_default`.

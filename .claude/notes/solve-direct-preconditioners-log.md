@@ -598,9 +598,25 @@
       - **Shipped as the session's default** the same day (the owner's decision: the mean drop met the 0.5 GiB
         bar, the closest pair did not). `memory_attribution.py` now trims by default; `BFS3D_MEMORY_TRIM=0`
         is the off arm. Not yet measured: a whole march's peak.
-      - ⚠️ **Measured before #817** (cell-level pattern, entry above), which moved bfs3d's peak: its 1-step
-        runs peak in step 1's first call (7.19 GiB), above re-fit #1 (6.76). Whether a re-fit still sets the
-        2-step peak, and so what the trim saves on the current code, is unmeasured; re-run both arms here.
+      - **Re-measured after #817** (cell-level pattern, entry above) on `2e7949e8` (`main` with #817 and the
+        trim), same machine, jax, allocator, case and harness settings; run 1 recompiled #817's changed
+        programs, the rest warm. #817's 1-step runs peak in step 1's first call; in a 2-step run re-fit #2's
+        leading block re-fit (`block re-fit #3`) still sets the peak, about 1 GiB above that first call
+        (6.68--6.87), so the trim still lands on the peak. GiB:
+
+        | run | trim | peak (`HWM`) | re-fit #1 stage peak | resident before re-fit #2 -> after the trim | `malloc free` at step 1's end | resident at step 2's end |
+        |---|---|---|---|---|---|---|
+        | 1 | off | 7.88 | 6.43 | 5.88 | 1.38 | 6.07 |
+        | 2 | on | 7.31 | 6.32 | 5.89 -> 5.14 | 1.13 | 5.74 |
+        | 3 | off | 7.67 | 6.47 | 5.69 | 0.90 | 5.97 |
+        | 4 | on | 7.27 | 6.30 | 5.75 -> 5.12 | 0.99 | 5.70 |
+        | 5 | off | 7.78 | 6.47 | 5.79 | 0.99 | 6.03 |
+        | 6 | on | 7.33 | 6.33 | 5.84 -> 5.15 | 1.05 | 5.74 |
+
+        Peak: off mean **7.78** (spread 0.21), on mean **7.30** (spread 0.06): 0.48 apart, closest pair 0.34.
+        The trim before re-fit #2 gives back 0.62--0.76 GiB of resident memory. The 2-step march took
+        537--563 s on against 539--621 s off (run 1 recompiling), so no cost in time. Records:
+        `memory_attribution_r817_{off,on}{1,2,3}.json` and `run-20261024-{195807,2*}.log` (git-ignored).
 
 ### The probe's host block patterns at cell level (2026-10-24)
 
