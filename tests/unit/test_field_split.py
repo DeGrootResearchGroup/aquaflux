@@ -311,10 +311,11 @@ class TestBlockTriangularAlgebra:
                 assert np.array_equal(got.data, want.data)
             split.refactor_block(matrix)
             packed = _PaddedRowOperator.from_scipy(groups.blocks(matrix)[2])
-            for got, want in zip(
-                jax.tree.leaves(split.padded_coupling()), jax.tree.leaves(packed), strict=True
-            ):
-                assert np.array_equal(np.asarray(got), np.asarray(want))
+            coupling = split.padded_coupling()
+            for name in ("columns", "row_lengths", "values", "t_columns", "t_values"):
+                assert np.array_equal(
+                    np.asarray(getattr(coupling, name)), np.asarray(getattr(packed, name))
+                )
 
     def test_a_refit_with_a_block_that_cannot_refit_changes_nothing(self, groups, operator):
         """The refusal comes before either block is touched, so a split is never left half re-fitted."""
@@ -583,7 +584,7 @@ def test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path(
     from types import SimpleNamespace
 
     from aquaflux.precondition.field_split import FieldSplitPreconditioner
-    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+    from aquaflux.precondition.probe_layout import BlockLayout, ProbedBlocks
 
     jacobian = sp.csr_matrix(operator)
     leading, _, trailing_by_leading, trailing = groups.blocks(jacobian)
@@ -638,7 +639,7 @@ def test_a_refit_probed_into_blocks_stays_on_the_device_and_fits_what_the_host_c
     """
     import jax.numpy as jnp
     from aquaflux.precondition import field_split, hierarchy_inverse
-    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+    from aquaflux.precondition.probe_layout import BlockLayout, ProbedBlocks
 
     n_cells = 200
     groups = FieldGroups.by_counts(n_cells, n_leading_fields=2, n_trailing_fields=2)

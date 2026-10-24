@@ -30,10 +30,19 @@ level_slot_values)` (one `eqx.filter_jit`) forms every value from the level oper
 the diagonal inverses (Jacobi / Frobenius / SIMPLEC), each cell's Frobenius block
 `M_i = F_ii^T (R_i R_i^T)^-1`, `M G`, `S` and `S`'s diagonal inverse, plus `SimpleChecks` the host reads
 once (`refuse_unusable`). `SimpleSmoothedInverse` holds the plans (`_simple_plans`), keyed by the
-identity of the level operators' `columns` arrays, which a frozen refit keeps and a rebuild replaces;
+identity of every leaf of the level operators' `rows` (`PaddedColumns`; `columns` is computed, new on
+each read), which a frozen refit keeps and a rebuild replaces;
 `_simple_pieces(a, ...)` makes a plan for one host operator (tests, diagnostics) and returns the double
 host Schur beside the pieces. There is no `StructuralPatterns`, `_structured`, `block_approximate_inverse`
 or host `_diagonal_approximate_inverse`.
+- **A level storing one cell pattern over every field pair cuts and unpacks at cell level (2026-10-24,
+  §14d).** `simple_plan` builds `F`/`G`/`D`/`C` and `unpack` (the level's CSR values read from its padded
+  slots) as `kronecker_pattern.KroneckerGather` maps, field ranges in place of index arrays, when
+  `KroneckerPattern.of_dof` finds the level one (a probed Jacobian and its nodal Galerkin levels are),
+  else as dof gathers (`unpack` then a `DeviceEntryMap` over `_slot_of_entry`). The plan's maps are
+  `ValueMap`s; the padded layouts of `F`, `G`, `D`, `M G`, `S` and the block inverse are given their
+  fields (`solve-amg-multigrid.md`, `PaddedColumns`). Pinned against the slice by
+  `test_a_field_block_gathered_at_cell_level_is_the_sliced_block`.
 - **No product term list is held (the owner's constraint: memory must not grow).** A product places
   each term by a binary search of its column in its output row (`_search`, `scan_unrolled`, ~2x the
   looped search), `TERMS_PER_CHUNK` terms at a time (2**18, a CPU cache calibration). A cell-level

@@ -96,10 +96,15 @@ def build_plan(side: int, reach: int, n_fields: int) -> ColumnProbePlan:
 
 
 def retained_bytes(gather: ProbeGather) -> int:
-    """Bytes the finished map holds for the life of the preconditioner."""
-    return sum(
-        array.nbytes for array in (gather.indptr, gather.indices, gather._position, gather._source)
-    )
+    """Bytes the finished map holds for the life of the preconditioner: the whole pattern's CSR arrays
+    and every array of its entry order (cell level or entry by entry, whichever the plan takes)."""
+    held = [gather.indptr, gather.indices]
+    for value in vars(gather._entries).values():
+        held += value if isinstance(value, list) else [value]
+    arrays = []
+    for value in held:
+        arrays += [v for v in value if hasattr(v, "nbytes")] if isinstance(value, tuple) else [value]
+    return sum(array.nbytes for array in arrays if hasattr(array, "nbytes"))
 
 
 def measure(plan: ColumnProbePlan) -> None:

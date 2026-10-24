@@ -183,6 +183,8 @@ cfd/                                  # repo root
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── simple_fit.py             #   SimplePlan / fit_simple_level: a SIMPLE level's pieces, fitted on the device
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
+│   │   ├── probe_layout.py           #   BlockLayout / ProbeGather / ProbedBlocks: where a probed Jacobian's entries are stored and which response fills each
+│   │   ├── kronecker_pattern.py      #   KroneckerPattern: a cell pattern over a full block of field pairs, its index arrays at cell level
 │   │   ├── host_preconditioner.py    #   FrozenInverse / RefactorableInverse / ReleasableInverse + HostPreconditioner: the frozen-inverse contract and its jit-callable apply
 │   │   ├── block_inverse.py          #   BlockInverse → SimpleSmoothed / JacobiSmoothed / AirReduction: the block inverses as settings values
 │   │   ├── traced_cycle.py           #   OffersTracedCycle / TracedCycle: a hierarchy held as array leaves, applied inside a traced solve; TracedForm / TracedSingleBlock: what a step applies on device

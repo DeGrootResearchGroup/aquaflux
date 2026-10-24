@@ -43,7 +43,7 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
   `FieldSplitPreconditioner` inherits `MaterializedJacobianPreconditioner.refresh_in_place`
   (`materialized_preconditioner.py`). A block inverse without `refactor_block` is refused with a
   `TypeError` before either block is touched. **A session's split never sees the whole matrix**: its
-  probe is laid out by the split's blocks (`JacobianProbe.build(groups=)`, `sparse_jacobian.BlockLayout`),
+  probe is laid out by the split's blocks (`JacobianProbe.build(groups=)`, `probe_layout.BlockLayout`),
   so a fit and every refit probe one block-major value array, add the shift on its stored diagonal in
   place (`ProbedBlocks.add_shift`) and hand the blocks to `FieldSplitInverse.refactor_blocks` /
   `_field_split_of_blocks` — no whole CSR, shifted copy or cut (bfs3d 2-step peak 9.42 -> 8.47 GiB, held

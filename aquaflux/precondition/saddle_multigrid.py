@@ -599,7 +599,9 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
         so those arrays -- compared by identity -- say whether the held plans still apply; a rebuild
         makes new ones, and the plans are made again.
         """
-        columns = tuple(level.operator.columns for level in hierarchy.levels)
+        columns = tuple(
+            array for level in hierarchy.levels for array in jax.tree.leaves(level.operator.rows)
+        )
         held = len(columns) == len(self._plans_for) and all(
             a is b for a, b in zip(columns, self._plans_for, strict=True)
         )

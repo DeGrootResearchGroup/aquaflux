@@ -6,9 +6,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import scipy.sparse as sp
+from aquaflux.precondition.probe_layout import _CellEntries, _DofEntries, _index_dtype
 from aquaflux.precondition.sparse_jacobian import (
     ColumnProbePlan,
-    _index_dtype,
+    _dof_probe_gather,
     _saturation_colouring,
     block_stencil_colouring,
     block_stencil_gather_map,
@@ -549,18 +550,26 @@ def test_index_width_is_chosen_from_the_bound_and_widens_when_it_must():
     assert int(np.array(4 * limit, dtype=_index_dtype(4 * limit))) == 4 * limit
 
 
-def test_gather_map_index_arrays_are_narrow_on_a_realistic_pattern():
+@pytest.mark.parametrize("entry_by_entry", [False, True])
+def test_gather_map_index_arrays_are_narrow_on_a_realistic_pattern(entry_by_entry):
     """A real pattern's map is assembled in 32-bit, and its scatter still lands the right values.
 
     The narrowing is only sound because every index is bounded before it is formed, so this pins the
-    outcome (the dtype) together with the behaviour it must not disturb (what `scatter` writes).
+    outcome (the dtype) together with the behaviour it must not disturb (what `scatter` writes), for
+    both orders: the cell-level one this plan takes, and the entry-by-entry one any other takes.
     """
     owner, nb = _path_graph(24)
     plan = ColumnProbePlan.uniform(block_stencil_colouring(owner, nb, 24, 2), 3)
-    gather = block_stencil_gather_map(plan)
+    gather = _dof_probe_gather(plan, 3) if entry_by_entry else block_stencil_gather_map(plan)
+    entries = gather._entries
+    assert isinstance(entries, _DofEntries if entry_by_entry else _CellEntries)
 
-    assert gather._source.dtype == np.int32
-    assert gather._position.dtype == np.int32
+    held = (
+        (entries._source, entries._position)
+        if entry_by_entry
+        else (entries._rows, entries._indptr, *(c.entries for c in entries._colourings))
+    )
+    assert all(array.dtype == np.int32 for array in held)
 
     # The scatter must place each response element where the map says, unaffected by the width.
     nf = plan.n_fields * plan.n_cells
@@ -577,6 +586,71 @@ def test_gather_map_index_arrays_are_narrow_on_a_realistic_pattern():
     expected = (np.asarray(plan.probe_base)[field] + plan.colour[field, cell]) * nf + rows
     written = data != 0.0
     assert np.array_equal(data[written], expected[written].astype(np.float64))
+    assert written.sum() >= gather.nnz - 1  # every entry but one fed by response element 0
+
+
+@pytest.mark.parametrize(
+    ("leading_fields", "column_reach"),
+    [(None, (2, 2, 2)), (2, (2, 2, 2)), (1, (2, 1, 2)), (None, (1, 2, 1))],
+)
+def test_the_cell_level_probe_order_lays_out_and_fills_what_the_entry_order_does(
+    leading_fields, column_reach
+):
+    """Described at cell level, the probe's structure is the entry-by-entry one, array for array.
+
+    The cell order replaces two indices per stored entry by indices over the cell pattern, and must
+    change nothing else: the same block patterns, the same diagonal positions, and every entry filled
+    from the same response element -- so the values are equal exactly, not to rounding. Plans with a
+    column probed short (its out-of-reach entries never written) and partitions with one or two leading
+    fields, the dropped triangle among them.
+    """
+    from aquaflux.precondition import FieldGroups
+
+    n = 15
+    owner, nb = _path_graph(n)
+    rng = np.random.default_rng(5)
+    nvar = len(column_reach)
+    leading = nvar if leading_fields is None else leading_fields
+    active = (
+        None
+        if leading_fields is None
+        else FieldGroups.by_counts(n, leading, nvar - leading).active_rows()
+    )
+    plan = column_probe_plan(owner, nb, n, column_reach, pattern_reach=2, active_rows=active)
+    k = _mixed_reach_matrix(n, column_reach, rng)
+
+    cell = block_stencil_gather_map(plan, leading_fields=leading_fields)
+    dof = _dof_probe_gather(plan, leading)
+    assert isinstance(cell._entries, _CellEntries) and isinstance(dof._entries, _DofEntries)
+    assert cell.nnz == dof.nnz
+    for (s0, e0, p0), (s1, e1, p1) in zip(cell.layout._blocks, dof.layout._blocks, strict=True):
+        assert (s0, e0, p0.shape) == (s1, e1, p1.shape)
+        assert np.array_equal(p0.indptr, p1.indptr) and np.array_equal(p0.indices, p1.indices)
+    assert np.array_equal(np.asarray(cell.layout._diagonal), np.asarray(dof.layout._diagonal))
+
+    values = [
+        np.asarray(materialize_blocks(_matvec_of(k), plan, structure=s, probe_batch_size=2).data)
+        for s in (cell, dof)
+    ]
+    assert np.array_equal(values[0], values[1])
+    assert np.count_nonzero(values[0]) > 0.5 * values[0].size  # the comparison saw real entries
+
+
+def test_a_partition_keeping_part_of_a_block_is_probed_entry_by_entry():
+    """A block keeping only some of its field pairs is no cell pattern over a full block, so the probe
+    falls back to the entry-by-entry order -- and still recovers the matrix."""
+    n, nvar = 10, 3
+    rng = np.random.default_rng(2)
+    k, colouring = _random_block_matrix(n, nvar, 2, rng)
+    active = np.ones((nvar, nvar), dtype=bool)
+    active[0, 2] = False  # one pair inside the one leading block
+    plan = ColumnProbePlan.uniform(colouring, nvar, active_rows=active)
+    structure = block_stencil_gather_map(plan)
+    assert isinstance(structure._entries, _DofEntries)
+    got = materialize_block_jacobian(_matvec_of(k), plan, structure=structure)
+    mask = np.ones((nvar * n, nvar * n), dtype=bool)
+    mask[0:n, 2 * n : 3 * n] = False
+    assert np.array_equal(got.toarray(), np.where(mask, k.toarray(), 0.0))
 
 
 def test_rejects_bad_inputs():
