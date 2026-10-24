@@ -564,6 +564,30 @@
       `ProbeGather` 280); `SimplePlan` 6.1. No `DeviceEntryMap` array of 1 MiB remains (was 1082 over 66).
       Run peak 6.87 GiB (step 1's first call), against 8.07 in the census-free base run above.
 
+### The probe's host block patterns at cell level (2026-10-24)
+
+      `CellLevelPattern` (`d9fe819d`, branch `claude/host-cell-patterns`) against `main` `0c76b4ec` (#817):
+      bfs3d `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=0
+      BFS3D_MEMORY_CHECKSUMS=1`, one run per arm, `main` first (its compilation cache warmer for the
+      second), 4-core Xeon container, jax 0.12.0.1. GiB, `main` → branch:
+
+      | stage | stage peak | resident after | host traced |
+      |---|---|---|---|
+      | probe plan | 1.79 → 1.65 | 1.78 → 1.56 | 0.321 → 0.183 |
+      | fit (first build) | 5.55 → 5.37 | 4.36 → 4.10 | 0.608 → 0.471 |
+      | re-fit #1 | 6.54 → 6.30 | 5.19 → 4.85 | 0.639 → 0.502 |
+      | march step 1, first call | 7.05 → 6.71 | 6.05 → 5.72 | 0.717 → 0.580 |
+      | step 1 end | 6.07 → 5.73 | 6.07 → 5.73 | 0.729 → 0.592 |
+
+      - Host traced arrays fall 0.137–0.138 GiB at every stage: the three block patterns (140 MiB). The
+        resident and peak readings fall more (0.24–0.34 GiB), which is within the 0.4 GiB spread two
+        1-step runs of one configuration showed (entry above); read only the traced column as this
+        change's.
+      - Device memory unchanged (1.20 GiB at step 1's end); all 1130 split leaf digests (both splits,
+        integer leaves included) and step 1's inner rows identical to `main`'s.
+      - pitzDaily, live host `SparsePattern`s after the session's build: 22.1 → 4.9 MiB (the three block
+        patterns now one shared 1.2 MiB cell pattern).
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
