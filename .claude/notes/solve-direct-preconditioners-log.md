@@ -499,6 +499,22 @@
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
         copied into this entry; the 2026-10-18 `memory_by_stage.py` configuration is otherwise unchanged.
 
+### A `malloc_trim(0)` before each re-fit, on bfs3d (2026-10-24)
+
+      `memory_attribution.py` on `042e5107` (`7f62a3c4` plus the opt-in trim: `MaterializedSession(memory_trim=)`
+      handed to `BetaTrackingRefresh`, which calls `aquaflux.allocator.GlibcTrim` once per re-fit, before its
+      probe; the solver is otherwise `7fe27d07`'s). 4-core Linux container, 15.7 GiB, no swap, glibc 2.39
+      defaults (no `MALLOC_*`), jax 0.12.0.1, shipped `case.yaml`, `BFS3D_MEMORY_STEPS=2
+      BFS3D_MEMORY_CENSUS=0`, `BFS3D_MEMORY_TRIM` 0/1, one arm per process, arms alternated; run 1 compiled
+      cold, the rest warm. GiB:
+
+      | run | trim | peak (`HWM`) | set by | re-fit #1 stage peak | step 1's first call | resident before re-fit #2 -> after the trim | `malloc free` at step 1's end | resident at step 2's end |
+      |---|---|---|---|---|---|---|---|---|
+      | 1 | off | 8.92 | re-fit #2's `block re-fit #3` | 7.41 | 8.24 | 7.30 | 1.49 | 7.47 |
+      | 2 | on | 8.53 | re-fit #2's `block re-fit #3` | 7.67 | 8.31 | 7.38 -> 6.74 | 1.03 | 7.32 |
+      | 3 | off | 9.16 | re-fit #2's `block re-fit #3` | 7.81 | 8.49 | 7.55 | 1.12 | 7.62 |
+      | 4 | on | 8.51 | re-fit #2's `block re-fit #3` | 7.63 | 8.31 | 7.40 -> 6.73 | 0.99 | 7.26 |
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
