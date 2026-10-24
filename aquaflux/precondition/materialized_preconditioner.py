@@ -25,7 +25,7 @@ from .phase_timer import PhaseTimer
 
 if TYPE_CHECKING:
     from .entry_map import DeviceMatrix
-    from .sparse_jacobian import ProbedBlocks, ProbeGather
+    from .probe_layout import ProbedBlocks, ProbeGather
 
 
 class MaterializedJacobianPreconditioner(HostPreconditioner):

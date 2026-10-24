@@ -91,7 +91,7 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition import SmoothedHierarchy  # noqa: E402
 from aquaflux.precondition.materialized_session import jacobian_matvec  # noqa: E402
-from aquaflux.precondition.sparse_jacobian import ProbedBlocks  # noqa: E402
+from aquaflux.precondition.probe_layout import ProbedBlocks  # noqa: E402
 from aquaflux.solve import ConstantRelaxation  # noqa: E402
 from aquaflux.solve.continuation import _shifted_solve  # noqa: E402
 from aquaflux.solve.linear import in_progress_measure  # noqa: E402

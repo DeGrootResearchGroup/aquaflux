@@ -37,7 +37,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from .sparse_jacobian import ProbeGather
+    from .probe_layout import ProbeGather
 
 import dataclasses
 from collections.abc import Callable

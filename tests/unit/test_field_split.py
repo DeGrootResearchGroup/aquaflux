@@ -583,7 +583,7 @@ def test_a_diagonal_correction_reaches_the_split_s_fit_on_either_refit_path(
     from types import SimpleNamespace
 
     from aquaflux.precondition.field_split import FieldSplitPreconditioner
-    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+    from aquaflux.precondition.probe_layout import BlockLayout, ProbedBlocks
 
     jacobian = sp.csr_matrix(operator)
     leading, _, trailing_by_leading, trailing = groups.blocks(jacobian)
@@ -638,7 +638,7 @@ def test_a_refit_probed_into_blocks_stays_on_the_device_and_fits_what_the_host_c
     """
     import jax.numpy as jnp
     from aquaflux.precondition import field_split, hierarchy_inverse
-    from aquaflux.precondition.sparse_jacobian import BlockLayout, ProbedBlocks
+    from aquaflux.precondition.probe_layout import BlockLayout, ProbedBlocks
 
     n_cells = 200
     groups = FieldGroups.by_counts(n_cells, n_leading_fields=2, n_trailing_fields=2)
