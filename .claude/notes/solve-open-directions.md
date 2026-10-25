@@ -803,8 +803,8 @@ again; released since 14g.
 JVP, each compiled twice: with the shipped split and with an identity preconditioner. Compile only, no march.
 Optionally add one device-memory snapshot at the first re-fit's peak.
 
-**Why.** It splits the step's ~984 MiB of temporaries into the preconditioner's share and the residual
-JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_rows, width)` products.
+**Why.** It splits the step's ~1 GiB of temporaries into the preconditioner's share and the residual
+JVP's.
 - If the residual's share alone exceeds the per-cell budget once projected by face count, which is about
   2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
 - If the padded products dominate, 14b–14d are worth doing.
@@ -813,6 +813,23 @@ JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_row
 face loop at its peak. Face-blocking it and the flux balance reaches ~440–472 MiB, no better than halving
 the batch, and is not built (`solve-refuted-directions.md`, "Assembling the residual's face sums in
 blocks").
+
+**The step half, 2026-10-25 (bfs3d, first step, `validation/step_temporaries.py`;
+`solve-direct-preconditioners-log.md`, "What the march step's temporary holds"):** the step's 1017 MiB of
+temporaries is 624 MiB the split's (the identity arm is 393), and 591 of that is int32 decoded padded
+columns, every operator's `s32[n_rows, width]` live twice at the peak: one copy XLA hoisted to the entry
+computation (the Arnoldi and final `x = M y` applications share it) and one rebuilt inside the true-residual
+`lax.cond` of `_ResidualStopGMRES`, where both arms peak. The gathered operand is one `f32[n_rows·width]`
+per application, not held; the solve's own vectors are 4 MiB. The residual's share without a split is ~2× a
+JVP (393 MiB, 17 KB a cell) because that cond branch recomputes a whole JVP while the Arnoldi loop's hoisted
+linearization is still held. So the split is the lever on the step's temporary, but through its decoded
+indices, not 14b–14c's values. The true residual moved out of the `lax.cond` into a one-trip loop saves
+nothing (+13.8 MiB; the decode is rebuilt in that loop too; ledger). **Built**: the cell-level padded
+product gathers once per cell row (`a0fca85b`): the step's temporary 1022.7 → 683.7 MiB, the split's share
+629.8 → 290.7; both marches unchanged in every count, bfs3d's 17.5 % faster, peak 5.29 → 5.12 GiB. Left: the decode is still held per call site
+(~295 MiB); keeping it in the loop body (`validation/padded_decode_hoisting.py`: four operators 443 → 161
+MiB) is untimed and would re-decode every apply. Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+not its temporary).
 
 ### 14b. A consistent compact operator for the fit
 

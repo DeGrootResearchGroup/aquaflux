@@ -493,9 +493,9 @@
         **march step 974 MiB** of temporaries over 1373 MiB of arguments (the split's leaves and the
         state); batched JVP of 8 tangents **829 MiB** (arguments 98); single JVP 202; residual 106. So the
         probe's temporary is ~100 MiB a tangent plus ~30, as the 2026-10-18 census read it; a Krylov
-        application's JVP needs ~200 MiB and the residual ~100; and ~770 MiB of the step's temporary is
-        the split's padded products and the solve's own vectors, which is the 14a answer: the step's
-        temporaries follow the split's storage, not the residual's. (The harness armed the step's capture
+        application's JVP needs ~200 MiB and the residual ~100. What the step's temporary holds is
+        measured in "What the march step's temporary holds" (2026-10-25, below): chiefly hoisted int32
+        decoded columns, not padded products or the solve's vectors. (The harness armed the step's capture
         only after step `STEPS − 1`, so a 1-step run printed no step size; fixed the same day.) Two 1-step
         runs of one configuration spread 0.4 GiB in peak, so a bfs3d peak is not pinned closer than that.
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
@@ -902,6 +902,182 @@
       (`adjoint_probe.py`'s docstring), 1.2–1.3 % of the transpose solve's applications. Not measured: a
       whole adjoint on both arms (the probe's converged state, `state-00067`, is from a march that no
       longer exists, so it needs a fresh march and a `STATES` entry first).
+
+### What the march step's temporary holds: split against no preconditioner (2026-10-25)
+
+      `validation/step_temporaries.py` (§14a's step half; `validation/hlo_text.py` reads the dumps,
+      shared with `fusion_profile.py`) on `1bd8d292` (`main`): the case's own march with `_march_step`
+      stubbed, so its first step's arguments are captured after the fit and the forced first re-fit and no
+      step runs (state: the ramp's anchor station at the hybrid start; a `DualTimeStep`); the step compiled
+      twice with the persistent cache off, (1) as built, (2) with its shift policy wrapped so the
+      `ShiftTerm` keeps diagonal and row scale and `make_preconditioner` returns `None` (same shift, line
+      search, dual-time loop, GMRES restart 15). Read per arm: `memory_analysis()`, XLA's buffer assignment
+      and live ranges (`--xla_dump_to`); a temp slot (offset, size) is live while any of its values is, the
+      peak is the schedule position with most temp bytes live, each slot named by the value live there and
+      owned by the innermost `aquaflux` frame of its HLO metadata (rule in the docstring); "hoisted" =
+      defined in fewer `while` loops than its `op_name` was traced in. 4-core Linux container, 15.7 GiB,
+      jax 0.12.0.1, shipped `case.yaml`s (split `SimpleSmoothed` / `JacobiSmoothed`, float32, pivot floor
+      0.15, `linear_solve` restart 15).
+
+      **pitzDaily** (12 225 cells, 61 125 dof), MiB:
+
+      | | split arm | identity arm |
+      |---|---|---|
+      | temp (`memory_analysis`) / peak live in it | 165.0 / 162.1 | 90.2 / 89.8 |
+      | argument | 132.8 | 18.0 |
+      | split: decoded padded columns, `s32[n_rows, width]` `add_select` (hoisted, 31 slots) | 55.2 | -- |
+      | split: decoded columns not hoisted (9) + cell gathers of the decode `s32[n·w]` (2) | 6.2 + 5.8 | -- |
+      | split: gathered `x[columns]`, `f32[2750625]` = 36675 × 75 (1, one application's) | 10.5 | -- |
+      | residual JVP: hoisted linearization (357 slots) | 34.1 | 34.1 |
+      | residual JVP: not hoisted (in the identity arm, the cond branch's whole JVP, primal included) | 23.9 | 29.2 |
+      | copies without metadata (loop-carried values into the restart branch) | 13.4 | 13.9 |
+      | hoisted state-independent residual pieces (traced in the dual-time loop's line search) | 10.3 | 10.3 |
+      | Krylov vectors live at the peak (the 7.5 MiB basis is not live there) | 1.4 | 1.4 |
+
+      - **The method check fails, for a found reason.** A standalone JVP is 42.9 MiB of temp (residual
+        22.8, `jacobian_matvec` at the same state); the identity arm is 90.2, not ~52 (a JVP + the basis +
+        a few vectors). The identity peak sits in the restart branch's true-residual JVP, and on top of
+        that JVP's working set it holds 44 MiB XLA hoisted out of the loops for the whole step: the JVP's
+        linearization at the fixed state (34.1) and state-independent pieces of the line search's residual
+        (10.3), plus 13.9 of copies of loop-carried values. A standalone JVP frees those after one use.
+      - **The split's share is 74.8 MiB (165.0 − 90.2), and its peak slots sum to 78.2**: 67 of it is int32
+        decoded columns. Every padded operator's `x[rows.columns()]` (`padded_rows.py`,
+        `_padded_product`) decodes the cell-level columns and passes them through the gather's index
+        normalization (`select(c < 0, c + n, c)`); XLA hoists that out of the Krylov and V-cycle loops and
+        holds an `s32[n_rows, width]` array per operator, **twice** at the peak (`s32[36675,75]` ×2,
+        `s32[12225,85]` ×2, ...). The split is traced at three sites in `solve/linear.py`: `A M v` in the
+        Arnoldi loop (`:288`), the true residual `b − A M y` in `_ResidualStopGMRES`'s `lax.cond` (`:330`),
+        and the final `x = M y` (`recover`, `:572`). XLA hoists the Arnoldi and `recover` decodes to the
+        entry computation as one shared copy, held for the whole step; it does not hoist out of a
+        conditional branch, so the cond branch rebuilds its own copy each time it runs, and both arms' peaks
+        fall inside that branch. The gathered values `x[columns]` are materialized once per application
+        (an `f32[n_rows·width]`, 10.5 at the peak, not held); the multiply and row sum are one kernel.
+      - Record: `validation/step_temporaries.pitzdaily.json` and `run-20261025-021615.log` (git-ignored).
+
+      **bfs3d** (23 040 cells, 138 240 dof; run on `a8ff053a`, `1bd8d292` plus the harness, no library
+      change; capture 229 s, compiles 53 / 42 s), MiB:
+
+      | | split arm | identity arm |
+      |---|---|---|
+      | temp (`memory_analysis`) / peak live in it | **1017.3** / 1001.7 | **392.9** / 391.1 |
+      | argument | 1010.2 | 98.8 |
+      | split: decoded padded columns `s32[n_rows, width]` (70 slots: one entry copy + one cond-branch copy per operator) | 497.1 | -- |
+      | split: decoded columns not hoisted (12) + cell gathers of the decode `s32[n·w]` (12) | 50.2 + 43.2 | -- |
+      | split: gathered `x[columns]`, `f32[23224320]` = 92160 × 252 (1, one application's) | 88.6 | -- |
+      | residual JVP: hoisted linearization (419 slots) | 124.2 | 124.2 |
+      | residual JVP: not hoisted (in the identity arm, the cond branch's whole JVP, primal included) | 83.8 | 166.5 |
+      | copies without metadata | 65.2 | 52.8 |
+      | hoisted state-independent residual pieces (line search) | 41.7 | 41.7 |
+      | Krylov vectors live at the peak (the basis, 16 × 138240 × 8 = 16.9, is not live there) | 3.9 | 3.9 |
+
+      - **The method reproduces the record**: the split arm's temp and arguments are the 2026-10-25 entry's
+        (1.02 / 1.01 GiB), and a standalone JVP / residual at this state 201.5 / 105.7 MiB (record 202 / 106).
+      - **The step's temporary is 61 % the split's (624.4 MiB = 1017.3 − 392.9; its peak slots sum to
+        680.8), and 590.5 MiB of that is int32 decoded columns**, not products or the solve's vectors. Each
+        operator's `x[rows.columns()]` decodes and normalizes its columns; at the peak every operator's
+        decode is live twice: the entry computation's copy (Arnoldi and `recover` sites merged by XLA, 317.6)
+        and the true-residual cond branch's own (272.8; carry tracing by the independent review below): the
+        leading fine operator alone is `s32[92160,252]` ×2 = 177 MiB. These are the dof-level forward columns #817 took out of the
+        arguments (`_PaddedLayout`, 591 MiB with the transposes and packing maps on `7fe27d07`),
+        recreated as temporaries.
+      - **The 2026-10-24 entry's "~770 MiB is the split's padded products and the solve's own vectors" had
+        the wrong owner**: the padded apply writes one `f32[n_rows·width]` gathered operand per application
+        (88.6 MiB for the leading fine operator, not held across applications; the multiply and row sum are
+        one kernel after it), the int32 decoded columns are 590 MiB, and the solve's own vectors at the
+        peak 4 MiB.
+      - **Without a split the step still holds 393 MiB, ~2× a JVP, because two JVP traces are live
+        together** at the peak: the true-residual cond branch recomputes a whole JVP (~200 MiB, primal
+        included; the "not hoisted" row) while the Arnoldi loop's linearization, hoisted out of GMRES, is
+        still held (118–124 MiB), beside 42–46 MiB of state-independent residual pieces in the entry
+        computation and ~53 MiB of copies. The ~200 / 118 split is from slot sizes; the owner rule cannot
+        separate primal from tangent. That is the residual's share for §14a's per-cell budget: 17 KB a
+        cell, ~5 of it the second JVP trace.
+      - **Proposals, not built (no library change here), in the review's order**: (1) take the true-residual
+        application out of the `lax.cond` -- **measured and refuted, next bullet**; (2) a Kronecker-aware `_padded_product` -- **built, see "Built: the cell-level product" below**:
+        `_by_row_field` repeats one `(n_cells, width)` column array across the `F` row fields, so gathering
+        at `(n_cells, width)` and multiplying with `values.reshape(F, n_cells, width)` divides the decode and
+        the gathered operand by `F` (leading fine operator 177 → 44 MiB) and the gather work too; (3) keep
+        the decode inside the loop body, so one
+        operator's decoded columns are live at a time. `validation/padded_decode_hoisting.py` (compile only,
+        a stand-in `_padded_product` at the leading fine operator's shape, 10 applies in a `fori_loop`):
+        one operator 177.2 MiB plain, 177.2 with `mode="promise_in_bounds"` (the normalization is not the
+        cost; the decode is materialized regardless), 160.6 with the stored cells passed through
+        `lax.optimization_barrier` with the iterate each iteration; **four operators 443.3 plain against
+        160.9 with the barrier**. On the step that would bound the split's ~590 MiB of decoded columns near
+        the largest operator's 89 (+ the gathered operand), at the price of re-decoding every apply (the
+        counted decode measured +8 % on an isolated 4×4 apply, 2026-10-24 entry), which the toy does not
+        time; it models hoisting from one loop, not the cond branch or operators of differing sizes. (2) and (3) are not
+        measured on the step.
+      - Does NOT distinguish: the arms are one state (the first step, anchor station); temporaries follow
+        shapes, so another state with the same coarsening gives the same buffers, but a re-fit that
+        re-coarsens would not. "Owner" is the innermost `aquaflux` frame of an instruction's metadata, so a
+        fused kernel mixing the split's and the residual's work is named by one of them; the copies carry no
+        metadata and are not attributed. The peak is XLA's static schedule, not a measured resident peak.
+        The harness's "hoisted" flag (more `while/body` in the `op_name` than loops around the defining
+        computation) also fires on a one-trip `fori_loop` XLA inlined -- the gathered operand comes from
+        `smooth_zero`'s one-trip sweep loop (`saddle_multigrid.py:295`) and is not hoisted -- and a slot's
+        site is the metadata of whichever instruction survived XLA's merging (the entry decode's names
+        `:572` and also serves `:288`); per-site claims above come from tracing `while` carries.
+      - **The true residual in a one-trip loop instead of the `lax.cond` saves nothing** (`split-loop` /
+        `identity-loop` arms, bfs3d, `954aabe0`'s library + the arms, one process, 2026-10-25): split temp
+        1022.7 → 1036.5 MiB (+13.8), identity 392.9 → 393.5 (+0.6). The arm swaps `solve/linear.py`'s only
+        `lax.cond` for a `while_loop` of at most one trip during lowering; `_check_cond_as_loop` first
+        confirmed the same solution and operator applications on a 60 × 60 system (37 / 37; a substitution
+        that always or never ran the branch gave 43 / 36, so the check can fail). The compiled step has no
+        conditional there and a second inner `while` instead, yet the decode in that loop's body (272.8 MiB)
+        is still rebuilt in it, not shared with the entry copy (317.6), and the peak moved into that loop's
+        JVP. Why XLA hoists the Arnoldi loop's decode and not this one is not established: a compile-only
+        toy (decode then gather inside a `fori_loop` of 10, a one-trip `while` and a `cond`, all in an outer
+        loop) fuses the decode into the gather in the last two and materializes nothing, so it does not
+        reproduce the step. Ledger: `solve-refuted-directions.md`, "The true residual out of the `lax.cond`".
+      - **Built: the cell-level product gathers once per cell row (`a0fca85b`, the review's cut 2).**
+        `_KroneckerColumns.product` gathers `x` at `(n_cells, width)` and multiplies every row field's entries
+        against it, where `columns()` had repeated the same columns `fields` times. bfs3d first step
+        (`d5f7ff02` + the change; capture 254 s): **split arm temp 1022.7 → 683.7 MiB**, identity arm 392.9
+        unchanged, the split's share 629.8 → 290.7 (its peak slots 680.5 → 329.2); decoded indices
+        590.5 → 294.6 MiB (273.5 `add_select` + 21.1 cell gathers; the leading fine operator's decode
+        `s32[23040,252]` 22 MiB against `s32[92160,252]` 88.6, still per call site); the largest gathered
+        operand 88.6 → 33.1 (`f32[23040·377]`). Leading fine operator alone (92160 × 252, a random cell
+        pattern of width 63, float32, `/tmp` probe, best of 15): one apply 39.6 → 13.6 ms (temp 110.7 →
+        22.1 MiB), ten in a `fori_loop` 289 → 264 ms (temp 177.2 → 44.3). float64 products bit-identical;
+        float32 not (summation order, the same under `--xla_cpu_max_isa=AVX`): at most 8.5e-8 of the row's
+        `Σ|terms|` (eps 1.2e-7). **pitzDaily `march_cost.py`, before (`d5f7ff02`, a worktree) and after,
+        one run each, same container**: 21 steps / 102 cycles / final R 5.736e-06 / `x_r/h` 8.0686 / ν_t/ν
+        peak 418.09 both; 19 of 21 step rows identical, steps 12 and 14's step residual 8.988e-03 →
+        8.987e-03 and 8.723e-03 → 8.722e-03, every β, inner count, cycle count and α equal; solve 356 → 302 s
+        (each arm's first run on its checkout, so partly compilation), VmHWM 2.640 → 2.656 GiB. bfs3d's
+        march was run afterwards (next bullet).
+      - **bfs3d full march with the change** (`march_timing.py`, shipped `case.yaml`, `1bd64df9`, 4-core
+        Linux container, jax 0.12.0.1, warm cache, 2026-10-25): **17 steps, 147 cycles, `x_r/h` 8.361**
+        (`xr/h_full` 12.53), final steered R 1.550e-06, march 1545 s, **VmHWM 5.12 GiB**, VmRSS at the end
+        3.59. **Before (`d5f7ff02`, a worktree with the same harness, run straight after, nothing else
+        on the machine)**: the same trajectory -- 17 steps, 147 cycles, 11 line-search clips, `x_r/h` 8.361,
+        steered R 1.551e-06; 15 of 17 step rows identical, steps 6 and 15 differ in the step residual's
+        last printed digit (5.592e-03 / 5.589e-03, 1.908e-03 / 1.907e-03; float32 summation order) --
+        march 1867 s, VmHWM 5.29 GiB, VmRSS 3.87. **So: march 1835 → 1513 s (−17.5 %); steps 2–17 1508 →
+        1185 s (−21 %), step 1 (with its compilation) 327 / 328 s; re-fits unchanged (preconditioner
+        446 / 443 s, probe 314 / 312), so the time is the split's applications in the Krylov solves; peak
+        5.29 → 5.12 GiB (−0.17; the march's peak is not the step's temporary alone).** One draw per arm,
+        but the same work in both, so the seconds compare (`march_log_compare.py`: "the same trajectory
+        for as far as both go").
+      - **Independent review (2026-10-25, a separate agent reading the same dumps, read-only)**: agreed the
+        totals, the split's share, the 590.5 MiB of decoded columns, the one-kernel multiply and row sum,
+        the 4 MiB of solve vectors and #825's effect; found the third call site (the cond branch) and the
+        identity arm's second JVP trace, corrected in place above. Unverified by it: the operator count
+        and the +8 % re-decode cost.
+      - **Re-taken on `599fe380` (`main` after #825, lazy transposes, merged while this ran)**: split arm
+        temp 1022.7 MiB, arguments 513.6 (from 1010.2: #825 shrinks the arguments, not the temporary); the
+        split-owned slots are unchanged slot for slot (497.1 + 50.2 + 43.2 decode, 88.6 gathered operand),
+        the not-hoisted JVP rows at the peak 93.7 (from 83.8); identity arm
+        identical (392.9). Split's share 629.8 MiB. capture 174 s, compiles 52 / 40 s.
+        ⚠️ Two first attempts on this commit read nothing: their arms were persistent-cache hits on the
+        `1bd8d292` run's entries (a hit compiles nothing, so XLA dumps nothing). `jax.config.update(
+        "jax_enable_compilation_cache", False)` mid-process did not stop it -- JAX decides once per process
+        whether the cache is used -- and `xla_dump_to` is not in the cache key; the harness now resets that
+        decision (`_bypass_compilation_cache`). The `1bd8d292` and pitzDaily arms above were real compiles:
+        each wrote the CPU buffer dumps only a compile writes.
+      - Record: `validation/step_temporaries.bfs3d.json` (the `599fe380` run) and `run-20261025-023437.log`,
+        `run-20261025-025431.log` (git-ignored).
 
 ### What sets bfs3d's 2-step peak: re-fit #2's leading block re-fit, by owner (2026-10-25)
 
