@@ -217,8 +217,9 @@ path.
       `_ResidualStopGMRES`'s true-residual `lax.cond`), so this was the step's largest temporary: bfs3d's
       first step 1022.7 → 683.7 MiB, decoded indices 590.5 → 294.6 (`validation/step_temporaries.py`).
       float64 products are bit-identical; float32 rows may be summed in another order (≤ 0.71 eps of the
-      row's `Σ|terms|`): the pitzDaily march's step residuals moved in the 4th digit at two of 21 steps,
-      every count unchanged. Pinned by `test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field`
+      row's `Σ|terms|`): the pitzDaily and bfs3d marches keep every count (bfs3d 17 steps, 147 cycles,
+      `x_r/h` 8.361), two step residuals each moving in their last printed digit; bfs3d's march 1835 →
+      1513 s, its steps after the first −21 %, peak 5.29 → 5.12 GiB (one run each, 4-core Linux). Pinned by `test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field`
       (the gather's shape) and `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays` (the values).
       Log, "What the march step's temporary holds".
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field

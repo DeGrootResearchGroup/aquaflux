@@ -1047,7 +1047,16 @@
       - **bfs3d full march with the change** (`march_timing.py`, shipped `case.yaml`, `1bd64df9`, 4-core
         Linux container, jax 0.12.0.1, warm cache, 2026-10-25): **17 steps, 147 cycles, `x_r/h` 8.361**
         (`xr/h_full` 12.53), final steered R 1.550e-06, march 1545 s, **VmHWM 5.12 GiB**, VmRSS at the end
-        3.59. One draw; the before arm (`d5f7ff02`) follows.
+        3.59. **Before (`d5f7ff02`, a worktree with the same harness, run straight after, nothing else
+        on the machine)**: the same trajectory -- 17 steps, 147 cycles, 11 line-search clips, `x_r/h` 8.361,
+        steered R 1.551e-06; 15 of 17 step rows identical, steps 6 and 15 differ in the step residual's
+        last printed digit (5.592e-03 / 5.589e-03, 1.908e-03 / 1.907e-03; float32 summation order) --
+        march 1867 s, VmHWM 5.29 GiB, VmRSS 3.87. **So: march 1835 → 1513 s (−17.5 %); steps 2–17 1508 →
+        1185 s (−21 %), step 1 (with its compilation) 327 / 328 s; re-fits unchanged (preconditioner
+        446 / 443 s, probe 314 / 312), so the time is the split's applications in the Krylov solves; peak
+        5.29 → 5.12 GiB (−0.17; the march's peak is not the step's temporary alone).** One draw per arm,
+        but the same work in both, so the seconds compare (`march_log_compare.py`: "the same trajectory
+        for as far as both go").
       - **Independent review (2026-10-25, a separate agent reading the same dumps, read-only)**: agreed the
         totals, the split's share, the 590.5 MiB of decoded columns, the one-kernel multiply and row sum,
         the 4 MiB of solve vectors and #825's effect; found the third call site (the cond branch) and the
