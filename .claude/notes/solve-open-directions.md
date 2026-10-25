@@ -870,14 +870,15 @@ HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the
 
 ### 14f. What the leading block re-fit holds at the march's peak (proposals, measured 2026-10-25)
 
-**Evidence.** A 2-step bfs3d march peaks in re-fit #2's leading block re-fit (6.80 GiB with the tracer, `main`
-`1bd8d292`): +1.06 GiB of live device arrays over step 1's end, the rest ~0.3 (log, "What sets bfs3d's 2-step
-peak"). Measured before #825, which stops storing the transposes (about half the doubled operators).
+**Evidence.** A 2-step bfs3d march peaks in re-fit #2's leading block re-fit: 6.80 GiB with the tracer on
+`1bd8d292`, +1.06 GiB of live device arrays over step 1's end (log, "What sets bfs3d's 2-step peak"); after
+#825, 5.82 GiB and +0.67 (log, "Fitting the leading block last"; one run each).
 
 **What.** Three library changes, each to be measured with `memory_attribution.py`
 (`BFS3D_MEMORY_CENSUS_STAGES="block re-fit #3"`, `BFS3D_MEMORY_SAMPLE_DEVICE=1`, two steps):
-- the probe's result is held on the device in float64 through the block re-fits (`DeviceMatrix.values`, 320
-  MiB against 40 at a step's end): release it, or keep only each block's float32 cut, before the re-fits;
+- CLOSED (2026-10-25): letting the probe's other float64 blocks go before the leading fit, by fitting it
+  last, measured no lower (ledger, "Fitting a refit's leading block last"); the leading block itself is its
+  fit's input, and the fit is computed in float64 by design;
 - the superseded leading inverse (fine operator 177 MiB, levels 85, SIMPLE pieces 192) lives beside the new
   one until `_release_superseded`: release it before the new one is built, where the step does not still
   hold it, or build in place;
