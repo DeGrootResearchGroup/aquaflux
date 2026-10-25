@@ -6,19 +6,26 @@ A SIMPLE-smoothed level relaxes the saddle ``[[F, G], [D, C]]`` with an approxim
 are fixed too; what changes at a refit is their values, and every value is a fixed function of the level
 operator's values.
 
+``S`` itself is never held. The smoother applies it as ``C x - D (M G x)`` from pieces it holds anyway
+(``D`` and ``M G``) plus ``C``, and needs of ``S`` only its diagonal and its row norms, for the pressure
+relaxation. ``S`` reaches about twice as far as the level operator, so its rows are wider than all of
+its pieces' together on a fine level, and holding it (with its transpose) cost more than the pieces.
+
 This module splits the two as :mod:`~aquaflux.precondition.level_fit` splits a hierarchy's levels. The
 host decides structure once per level -- the four block cuts, the structural patterns of ``M G`` and
-``S``, their padded-row layouts, where ``C``'s entries sit inside ``S`` -- and holds it as a
-:class:`SimplePlan`. One compiled function, :func:`fit_simple_level`, then forms every value from the
-level operator's slot values, on the device:
+``S``, the padded-row layouts of ``M G``, ``D`` and ``C``, and the columns of ``S``'s rows -- and holds
+it as a :class:`SimplePlan`. One compiled function, :func:`fit_simple_level`, then forms every value from
+the level operator's slot values, on the device:
 
 - the diagonal approximate inverses (Jacobi, the Frobenius-optimal diagonal ``F_ii / ||F_i||^2``, or the
   SIMPLEC row sum) and, for block splitting, each cell's Frobenius-optimal block
   ``M_i = F_ii^T (R_i R_i^T)^-1``, whose Gram matrix ``R_i R_i^T`` is read by looking each of a row's
   columns up in its sibling rows (sorted, so a binary search);
-- the two products ``M G`` and ``D (M G)``, formed onto their structural patterns a bounded chunk of rows
-  at a time: each term is placed by a binary search of its column in the output row, so no list of
-  product terms is ever held -- it would outweigh the operands several times over.
+- the product ``M G``, formed onto its structural pattern a bounded chunk of its terms at a time, and
+  ``S``'s diagonal and squared row norms, formed a bounded chunk of ``S``'s rows at a time and reduced
+  before the next: each term is placed by a binary search of its column in the output row, so no list
+  of product terms is ever held -- it would outweigh the operands several times over -- and of ``S``
+  only one chunk of rows is.
 
 Every product sums its terms in another order than a host sparse product, so its entries differ from
 one in the last bits.
@@ -64,10 +71,11 @@ class SimplePlan(eqx.Module):
         gathers otherwise.
     velocity_layout, gradient_layout : _PaddedLayout
         ``F``'s and ``G``'s rows, read but never applied.
-    divergence_layout, correction_layout, schur_layout : _PaddedLayout
-        The pieces the smoother applies: ``D``, ``M G`` and ``S``.
-    pressure_slots : jnp.ndarray
-        Where each of ``C``'s entries sits among ``S``'s, shape ``(nnz(C),)``.
+    divergence_layout, correction_layout, pressure_layout : _PaddedLayout
+        The pieces the smoother applies: ``D``, ``M G`` and ``C``, which give ``S x = C x - D (M G x)``.
+    schur_rows : _PaddedLayout
+        The columns of ``S``'s rows on its structural pattern, without a transpose: where the fit places
+        each term of ``S`` while it reduces a chunk of rows to their diagonal and norms.
     cells : DeviceEntryMap or None
         ``F``'s cell blocks, ``(n_cells, b, b)`` flattened, with block splitting.
     block_layout : _PaddedLayout or None
@@ -85,8 +93,8 @@ class SimplePlan(eqx.Module):
     gradient_layout: _PaddedLayout
     divergence_layout: _PaddedLayout
     correction_layout: _PaddedLayout
-    schur_layout: _PaddedLayout
-    pressure_slots: jnp.ndarray
+    pressure_layout: _PaddedLayout
+    schur_rows: _PaddedLayout
     cells: DeviceEntryMap | None
     block_layout: _PaddedLayout | None
     block_order: jnp.ndarray | None
@@ -98,10 +106,10 @@ class SimplePlan(eqx.Module):
     #: Whether every cell's velocity rows store the same columns, so their Gram matrix needs no search.
     aligned_velocity_rows: bool = eqx.field(static=True)
     #: When every row of ``D`` stores its columns as one run per velocity field and every cell's rows of
-    #: ``M G`` share their columns, the widest run: the Schur product then sums a cell's fields before
+    #: ``M G`` share their columns, the widest run: the Schur rows then sum a cell's fields before
     #: placing a term. ``0`` otherwise.
     divergence_run_width: int = eqx.field(static=True)
-    #: The stored entries of ``C``, ``D``, ``G`` and ``S``, for the build record.
+    #: The stored entries of ``C``, ``D``, ``G`` and ``S`` (structural, never held), for the build record.
     entry_counts: tuple[int, int, int, int] = eqx.field(static=True)
 
     @property
@@ -127,8 +135,8 @@ class SimpleValues(NamedTuple):
     block_inverse: tuple[jnp.ndarray, jnp.ndarray] | None
     correction: tuple[jnp.ndarray, jnp.ndarray]
     divergence: tuple[jnp.ndarray, jnp.ndarray]
-    schur: tuple[jnp.ndarray, jnp.ndarray]
-    schur_inverse: jnp.ndarray  # (n_pressure,)
+    pressure: tuple[jnp.ndarray, jnp.ndarray]
+    schur_inverse: jnp.ndarray  # (n_pressure,) the approximate inverse of S's diagonal
 
 
 class SimpleChecks(NamedTuple):
@@ -264,8 +272,8 @@ def simple_plan(
         gradient_layout=_PaddedLayout.of(g_pattern, transposed=False, fields=(fields, 1)),
         divergence_layout=_PaddedLayout.of(d_pattern, fields=(1, fields)),
         correction_layout=correction_layout,
-        schur_layout=_PaddedLayout.of(schur_pattern, fields=(1, 1)),
-        pressure_slots=jnp.asarray(_positions(c_pattern, schur_pattern)),
+        pressure_layout=_PaddedLayout.of(c_pattern, fields=(1, 1)),
+        schur_rows=_PaddedLayout.of(schur_pattern, transposed=False, fields=(1, 1)),
         cells=cells,
         block_layout=block_layout,
         block_order=block_order,
@@ -357,30 +365,26 @@ def fit_simple_level(
     correction = plan.correction_layout.packed(
         _product_onto(left, gradient, plan.correction_layout)
     )
-    divergence_values = plan.divergence.apply(level)
-    divergence = plan.divergence_layout.packed(divergence_values)
+    divergence = plan.divergence_layout.packed(plan.divergence.apply(level))
     if plan.divergence_run_width:
-        divergence_entries = _cell_rows(
+        divergence_rows = _rows_by_cell(
             divergence.columns,
             divergence.values,
             divergence.row_lengths,
-            divergence_values.size,
             plan.n_velocity_fields,
             plan.divergence_run_width,
         )
     else:
-        divergence_entries = _single_rows(
-            divergence.columns, divergence.row_lengths, divergence_values
+        divergence_rows = _rows_by_entry(
+            divergence.columns, divergence.values, divergence.row_lengths
         )
-    product = _product_onto(
-        divergence_entries,
+    pressure = plan.pressure_layout.packed(plan.pressure.apply(level))
+    schur_diagonal, schur_squared = _schur_rows(
+        (pressure.columns, pressure.values, pressure.row_lengths),
+        divergence_rows,
         (correction.columns, correction.values, correction.row_lengths),
-        plan.schur_layout,
+        plan.schur_rows,
     )
-    schur_flat = (-product).at[plan.pressure_slots].add(plan.pressure.apply(level))
-    schur = plan.schur_layout.packed(schur_flat)
-    schur_diagonal = _row_diagonal(schur.columns, schur.values)
-    schur_squared = jnp.sum(schur.values * schur.values, axis=1)
     if plan.schur_frobenius:
         schur_inverse = schur_diagonal / jnp.where(schur_squared == 0.0, 1.0, schur_squared)
         relaxation = schur_inverse * schur_diagonal
@@ -388,14 +392,14 @@ def fit_simple_level(
         schur_empty = jnp.sum(schur_squared == 0.0)
     else:
         schur_inverse = 1.0 / schur_diagonal
-        spread = jnp.ones(3, dtype=schur_flat.dtype)
+        spread = jnp.ones(3, dtype=schur_diagonal.dtype)
         schur_empty = jnp.zeros((), dtype=jnp.int32)
     values = SimpleValues(
         velocity_inverse=velocity_inverse,
         block_inverse=block_inverse,
         correction=(correction.values, correction.t_values),
         divergence=(divergence.values, divergence.t_values),
-        schur=(schur.values, schur.t_values),
+        pressure=(pressure.values, pressure.t_values),
         schur_inverse=schur_inverse,
     )
     checks = SimpleChecks(
@@ -498,48 +502,123 @@ def _chunked(arrays: tuple[jnp.ndarray, ...], per_entry: int):
     return tuple(_padded_to(array, total, 0) for array in arrays), chunk, n_chunks, real
 
 
+def _placed_terms(row_columns, columns, values, stored, right):
+    """Left entries' product terms against ``R``'s rows, and where each term lands in its output row.
+
+    ``columns`` and ``values`` are ``(e, k)``: per left entry the ``k`` rows of ``R`` it combines and
+    their weights -- one row for a plain sparse product, or a cell's rows of every field when those share
+    their columns, so the fields are summed before any term is placed; the first combined row gives the
+    columns. ``stored`` is ``(e,)``, false for a padding entry. ``row_columns`` is ``(e, w)``: each
+    entry's output row's columns, ascending and padded with a sentinel past every column. ``right`` is
+    padded rows ``(columns, values, lengths)``.
+
+    Returns ``(terms, places, kept)``, each ``(e, width(R))``: a term, its slot in its output row (by a
+    binary search), and whether it is a stored one.
+    """
+    r_columns, r_values, r_lengths = right
+    r_width = r_columns.shape[1]
+    terms = jnp.einsum("ek,ekb->eb", values, r_values[columns])
+    lead = columns[:, 0]
+    kept = stored[:, None] & (jnp.arange(r_width)[None, :] < r_lengths[lead][:, None])
+    return terms, _search(row_columns, r_columns[lead]), kept
+
+
 def _product_onto(left, right, out: _PaddedLayout) -> jnp.ndarray:
     """``L R`` summed into the stored entries of ``out``'s pattern, shape ``(nnz(out),)``.
 
-    ``left`` is ``(rows, columns, values)``: per left entry its output row, and the ``(n, k)`` rows of
-    ``R`` it combines with their weights -- one row for a plain sparse product (``k = 1``), or a cell's
-    rows of every field when those share their columns, so the fields are summed before any term is
-    placed. ``right`` is padded rows ``(columns, values, lengths)``, and the first combined row gives the
-    columns. ``out``'s pattern must hold every entry the product can produce (its structural pattern).
+    ``left`` is ``(rows, columns, values)``: per left entry its output row and, as
+    :func:`_placed_terms` takes them, the rows of ``R`` it combines with their weights. ``right`` is
+    padded rows ``(columns, values, lengths)``. ``out``'s pattern must hold every entry the product can
+    produce (its structural pattern).
 
-    The left entries are taken a chunk at a time: each term is placed by a binary search of its column
-    in its output row of ``out`` and added in, so the terms of one chunk are all that is ever held.
+    The left entries are taken a chunk at a time and each term is added in where it lands, so the terms
+    of one chunk are all that is ever held.
     """
     rows, columns, values = left
-    r_columns, r_values, r_lengths = right
-    r_width = r_columns.shape[1]
     n_out = out.nnz
     if rows.shape[0] == 0:
-        # No stored entry on the left (a level whose divergence block stores none): no terms, and no
-        # chunk to slice -- a loop over none still traces its body once.
-        return jnp.zeros(n_out, r_values.dtype)
+        # No stored entry on the left: no terms, and no chunk to slice -- a loop over none still traces
+        # its body once.
+        return jnp.zeros(n_out, right[1].dtype)
     out_columns = _sentinel_columns(out.columns, out.row_lengths, out.shape[1])
     out_starts = jnp.cumsum(out.row_lengths) - out.row_lengths
-    r_stored = jnp.arange(r_width)[None, :] < r_lengths[:, None]
     (rows, columns, values), chunk, n_chunks, real = _chunked(
-        (rows, columns, values), r_width * columns.shape[1]
+        (rows, columns, values), right[0].shape[1] * columns.shape[1]
     )
 
     def add_chunk(index, result):
-        start = index * chunk
-
         def of_chunk(array):
-            return jax.lax.dynamic_slice_in_dim(array, start, chunk)
+            return jax.lax.dynamic_slice_in_dim(array, index * chunk, chunk)
 
-        row, column = of_chunk(rows), of_chunk(columns)
-        terms = jnp.einsum("ek,ekb->eb", of_chunk(values), r_values[column])
-        lead = column[:, 0]
-        stored = of_chunk(real)[:, None] & r_stored[lead]
-        places = _search(out_columns[row], r_columns[lead])
-        targets = jnp.where(stored, out_starts[row][:, None] + places, n_out)
+        row = of_chunk(rows)
+        terms, places, kept = _placed_terms(
+            out_columns[row], of_chunk(columns), of_chunk(values), of_chunk(real), right
+        )
+        targets = jnp.where(kept, out_starts[row][:, None] + places, n_out)
         return result.at[targets.ravel()].add(terms.ravel(), mode="drop")
 
-    return jax.lax.fori_loop(0, n_chunks, add_chunk, jnp.zeros(n_out, r_values.dtype))
+    return jax.lax.fori_loop(0, n_chunks, add_chunk, jnp.zeros(n_out, right[1].dtype))
+
+
+def _schur_rows(pressure, divergence, correction, rows: _PaddedLayout):
+    """The diagonal and squared row norms of ``S = C - D (M G)``, shape ``(n,)`` each, ``S`` never held.
+
+    ``pressure`` and ``correction`` are padded rows ``(columns, values, lengths)`` of ``C`` and ``M G``;
+    ``divergence`` is ``D``'s rows as :func:`_rows_by_entry` or :func:`_rows_by_cell` give them; ``rows``
+    holds the columns of ``S``'s rows on its structural pattern. A chunk of rows at a time, every term
+    of ``D (M G)`` is placed in its row of ``S`` (as :func:`_product_onto` places them, in the same
+    order), negated, ``C``'s entries are added, and the chunk is reduced to its diagonal and norms
+    before the next is formed.
+    """
+    d_columns, d_values, d_stored = divergence
+    c_columns, c_values, c_lengths = pressure
+    n, width = rows.shape[0], rows.width
+    dtype = correction[1].dtype
+    if n == 0:
+        return jnp.zeros(0, dtype), jnp.zeros(0, dtype)
+    entries, fields = d_columns.shape[1], d_columns.shape[2]
+    per_row = entries * correction[0].shape[1] * fields + c_columns.shape[1] + width
+    chunk, n_chunks = _in_chunks(n, per_row)
+    total = chunk * n_chunks
+    s_columns = _padded_to(_sentinel_columns(rows.columns, rows.row_lengths, n), total, n)
+    d_columns, d_values, c_columns, c_values = (
+        _padded_to(array, total, 0) for array in (d_columns, d_values, c_columns, c_values)
+    )
+    d_stored = _padded_to(d_stored, total, False)
+    c_stored = _padded_to(
+        jnp.arange(c_columns.shape[1])[None, :] < c_lengths[:, None], total, False
+    )
+    local = jnp.arange(chunk, dtype=jnp.int32)
+
+    def reduced(index):
+        def of_chunk(array):
+            return jax.lax.dynamic_slice_in_dim(array, index * chunk, chunk)
+
+        own = of_chunk(s_columns)  # (chunk, width)
+        row = jnp.repeat(local, entries)
+        terms, places, kept = _placed_terms(
+            own[row],
+            of_chunk(d_columns).reshape(-1, fields),
+            of_chunk(d_values).reshape(-1, fields),
+            of_chunk(d_stored).ravel(),
+            correction,
+        )
+        out = chunk * width
+        targets = jnp.where(kept, row[:, None] * width + places, out)
+        values = jnp.zeros(out, dtype).at[targets.ravel()].add(terms.ravel(), mode="drop")
+        c_targets = jnp.where(
+            of_chunk(c_stored), local[:, None] * width + _search(own, of_chunk(c_columns)), out
+        )
+        values = (-values).at[c_targets.ravel()].add(of_chunk(c_values).ravel(), mode="drop")
+        values = values.reshape(chunk, width)
+        on_diagonal = own == (index * chunk + local)[:, None]
+        return (
+            jnp.sum(jnp.where(on_diagonal, values, 0.0), axis=1),
+            jnp.sum(values * values, axis=1),
+        )
+
+    diagonal, squared = jax.lax.map(reduced, jnp.arange(n_chunks))
+    return diagonal.ravel()[:n], squared.ravel()[:n]
 
 
 def _single_rows(columns: jnp.ndarray, lengths: jnp.ndarray, values: jnp.ndarray):
@@ -548,12 +627,22 @@ def _single_rows(columns: jnp.ndarray, lengths: jnp.ndarray, values: jnp.ndarray
     return rows, entry_columns[:, None], values[:, None]
 
 
-def _cell_rows(columns, values, lengths, nnz: int, fields: int, width: int):
-    """A padded operator storing each row's columns as ``fields`` equal runs, one per field (cell
-    ``c``'s field-``f`` column is ``c + f n``), as :func:`_product_onto`'s left side: one entry per
-    cell of a row, carrying that cell's ``fields`` columns and values.
+def _rows_by_entry(columns: jnp.ndarray, values: jnp.ndarray, lengths: jnp.ndarray):
+    """A padded operator's rows as :func:`_schur_rows`'s left side: per slot one combined row.
 
-    ``nnz`` is the operator's stored entries and ``width`` its widest run.
+    Returns ``(columns, values, stored)``, shapes ``(n, width, 1)``, ``(n, width, 1)`` and ``(n, width)``.
+    """
+    stored = jnp.arange(columns.shape[1])[None, :] < lengths[:, None]
+    return columns[..., None], values[..., None], stored
+
+
+def _rows_by_cell(columns, values, lengths, fields: int, width: int):
+    """A padded operator storing each row's columns as ``fields`` equal runs, one per field (cell
+    ``c``'s field-``f`` column is ``c + f n``), as :func:`_schur_rows`'s left side: per slot of a run one
+    cell, carrying that cell's ``fields`` columns and values.
+
+    ``width`` is the widest run. Returns ``(columns, values, stored)``, shapes ``(n, width, fields)``
+    twice and ``(n, width)``.
     """
     run = lengths // fields
     slots = jnp.arange(width)
@@ -563,16 +652,12 @@ def _cell_rows(columns, values, lengths, nnz: int, fields: int, width: int):
     )  # (fields, n_rows, width): field f's slot a of each row
 
     def by_field(array):
-        return jnp.take_along_axis(jnp.broadcast_to(array, (fields, *array.shape)), within, axis=2)
+        picked = jnp.take_along_axis(
+            jnp.broadcast_to(array, (fields, *array.shape)), within, axis=2
+        )
+        return jnp.transpose(picked, (1, 2, 0))
 
-    by_field_columns, by_field_values = by_field(columns), by_field(values)
-    stored = slots[None, :] < run[:, None]
-    (flat,) = jnp.nonzero(stored.ravel(), size=nnz // fields)
-    return (
-        (flat // width).astype(jnp.int32),
-        by_field_columns.reshape(fields, -1)[:, flat].T,
-        by_field_values.reshape(fields, -1)[:, flat].T,
-    )
+    return by_field(columns), by_field(values), slots[None, :] < run[:, None]
 
 
 def _cell_gram(columns, values, lengths, n_cells: int, fields: int, aligned: bool) -> jnp.ndarray:
@@ -645,17 +730,6 @@ def _block_pattern(n_cells: int, fields: int) -> tuple[SparsePattern, np.ndarray
     ).sorted_indices()
     order = (matrix.data - 1).astype(np.int32)
     return SparsePattern.of(matrix), order
-
-
-def _positions(inner: SparsePattern, outer: SparsePattern) -> np.ndarray:
-    """Where each stored entry of ``inner`` sits among ``outer``'s, which stores every one of them."""
-
-    def keys(pattern: SparsePattern) -> np.ndarray:
-        rows = np.repeat(np.arange(pattern.shape[0], dtype=np.int64), np.diff(pattern.indptr))
-        return rows * pattern.shape[1] + pattern.indices
-
-    places = np.searchsorted(keys(outer), keys(inner))
-    return places.astype(np.int32)
 
 
 def _slot_of_entry(pattern: SparsePattern, width: int | None) -> np.ndarray:

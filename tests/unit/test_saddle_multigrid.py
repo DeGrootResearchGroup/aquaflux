@@ -117,7 +117,7 @@ def test_the_schur_correction_sign_is_load_bearing() -> None:
     The 0.95 bound sits with real margin on both sides of that gap.
     """
     a = _saddle(velocity_pressure_coupling=2.0)
-    pieces, _ = _simple_pieces(a, block_size=4, frobenius=True, schur_frobenius=True)
+    pieces = _simple_pieces(a, block_size=4, frobenius=True, schur_frobenius=True)
     b = np.asarray(np.random.default_rng(1).normal(size=a.shape[0]))
 
     x = np.asarray(
@@ -126,6 +126,35 @@ def test_the_schur_correction_sign_is_load_bearing() -> None:
 
     assert np.all(np.isfinite(x))
     assert np.linalg.norm(a @ x - b) / np.linalg.norm(b) < 0.95
+
+
+@pytest.mark.parametrize("block_splitting", [False, True])
+def test_the_schur_is_applied_from_its_pieces_both_ways(block_splitting) -> None:
+    """``S p`` is ``(C - D M G) p`` formed on the host, and its transpose ``Sᵀ y``, from the pieces alone.
+
+    The pieces hold no Schur, so the pressure sweep's product and the adjoint's transpose of it are only
+    as right as the three products they chain; a sign, or a piece transposed in the wrong place, shows
+    here on a nonsymmetric saddle.
+    """
+    a = _saddle()
+    pieces = _simple_pieces(a, 4, frobenius=True, block_splitting=block_splitting)
+    nv = pieces.n_velocity
+    f, g, d, c = a[:nv, :nv], a[:nv, nv:], a[nv:, :nv], a[nv:, nv:]
+    m = (
+        pieces.f_block_inverse.to_scipy()
+        if block_splitting
+        else sp.diags(np.asarray(pieces.f_diagonal_inverse))
+    )
+    schur = (c - d @ (m @ g)).toarray()
+    assert not np.allclose(schur, schur.T)
+    rng = np.random.default_rng(4)
+    p, y = rng.standard_normal(c.shape[0]), rng.standard_normal(c.shape[0])
+    np.testing.assert_allclose(
+        np.asarray(pieces.schur_apply(jnp.asarray(p))), schur @ p, rtol=1e-12, atol=1e-12
+    )
+    (transposed,) = jax.linear_transpose(pieces.schur_apply, jnp.asarray(p))(jnp.asarray(y))
+    np.testing.assert_allclose(np.asarray(transposed), schur.T @ y, rtol=1e-12, atol=1e-12)
+    assert f.shape == (nv, nv)
 
 
 def test_the_cycle_is_a_fixed_linear_operator() -> None:
@@ -241,8 +270,7 @@ def test_the_pieces_carry_no_host_matrix_so_they_can_be_traced() -> None:
     """A host sparse matrix on the record is neither a traced leaf nor a hashable static field.
 
     Carrying one would make the record unusable as a jit argument — silently, by falling back to a
-    closure — so the formed Schur rides out of :func:`_simple_pieces` as a second return value instead,
-    which a caller that wants it in host form takes from the pair.
+    closure.
     """
     a = _saddle()
     inverse = SimpleSmoothedInverse(a, 4, **_SETTINGS)
@@ -252,9 +280,6 @@ def test_the_pieces_carry_no_host_matrix_so_they_can_be_traced() -> None:
     assert all(isinstance(leaf, jnp.ndarray) for leaf in leaves), (
         "a non-array leaf would be traced as one and fail"
     )
-
-    _, schur = _simple_pieces(a, 4)
-    assert sp.issparse(schur) and schur.shape == (a.shape[0] // 4,) * 2
 
 
 def test_a_mismatched_block_is_rejected() -> None:
@@ -380,7 +405,7 @@ def test_the_frobenius_block_inverse_beats_inverting_the_cell_block_alone() -> N
     n_cells, n_fields = 40, 4
 
     def block_inverse(frobenius):
-        pieces, _ = _simple_pieces(a, n_fields, frobenius=frobenius, block_splitting=True)
+        pieces = _simple_pieces(a, n_fields, frobenius=frobenius, block_splitting=True)
         return pieces.f_block_inverse.to_scipy()
 
     fitted, exact = block_inverse(True), block_inverse(False)
@@ -403,15 +428,13 @@ def test_pieces_held_in_single_precision_are_the_double_pieces_rounded_once(
     A level's pieces are rounded one at a time so that they are never all held in double beside their
     rounded copies. The rounding must be the one a single-precision split applies, entry for entry, and
     every floating piece must come out narrow -- a piece left double would be rounded later anyway,
-    silently keeping the double copy alive -- while the host Schur returned beside them stays double.
+    silently keeping the double copy alive.
     """
     from aquaflux.precondition.traced_cycle import in_precision
 
     a = _saddle()
-    wide, wide_schur = _simple_pieces(a, 4, block_splitting=block_splitting)
-    narrow, narrow_schur = _simple_pieces(
-        a, 4, block_splitting=block_splitting, precision="float32"
-    )
+    wide = _simple_pieces(a, 4, block_splitting=block_splitting)
+    narrow = _simple_pieces(a, 4, block_splitting=block_splitting, precision="float32")
     assert (narrow.f_block_inverse is None) == (not block_splitting)
     rounded = jax.tree.leaves(in_precision(wide, "float32"))
     held = jax.tree.leaves(narrow)
@@ -421,8 +444,6 @@ def test_pieces_held_in_single_precision_are_the_double_pieces_rounded_once(
             assert leaf.dtype == jnp.float32
         assert leaf.dtype == reference.dtype
         assert np.array_equal(np.asarray(leaf), np.asarray(reference))
-    assert narrow_schur.dtype == np.float64
-    assert (narrow_schur != wide_schur).nnz == 0
 
 
 def test_an_inverse_held_in_single_precision_forms_its_pieces_narrow() -> None:
