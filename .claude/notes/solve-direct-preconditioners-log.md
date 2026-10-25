@@ -895,9 +895,7 @@
         separate primal from tangent. That is the residual's share for §14a's per-cell budget: 17 KB a
         cell, ~5 of it the second JVP trace.
       - **Proposals, not built (no library change here), in the review's order**: (1) take the true-residual
-        application out of the `lax.cond` (a `while_loop` of at most one trip, out of which XLA hoists), so
-        it shares the entry decode and the hoisted linearization: up to −273 MiB split arm, up to −118
-        identity arm, no runtime cost, one harness compile to decide; (2) a Kronecker-aware `_padded_product`:
+        application out of the `lax.cond` -- **measured and refuted, next bullet**; (2) a Kronecker-aware `_padded_product`:
         `_by_row_field` repeats one `(n_cells, width)` column array across the `F` row fields, so gathering
         at `(n_cells, width)` and multiplying with `values.reshape(F, n_cells, width)` divides the decode and
         the gathered operand by `F` (leading fine operator 177 → 44 MiB) and the gather work too; (3) keep
@@ -910,8 +908,8 @@
         160.9 with the barrier**. On the step that would bound the split's ~590 MiB of decoded columns near
         the largest operator's 89 (+ the gathered operand), at the price of re-decoding every apply (the
         counted decode measured +8 % on an isolated 4×4 apply, 2026-10-24 entry), which the toy does not
-        time; it models hoisting from one loop, not the cond branch or operators of differing sizes. None
-        of the three is measured on the step.
+        time; it models hoisting from one loop, not the cond branch or operators of differing sizes. (2) and (3) are not
+        measured on the step.
       - Does NOT distinguish: the arms are one state (the first step, anchor station); temporaries follow
         shapes, so another state with the same coarsening gives the same buffers, but a re-fit that
         re-coarsens would not. "Owner" is the innermost `aquaflux` frame of an instruction's metadata, so a
@@ -922,6 +920,18 @@
         `smooth_zero`'s one-trip sweep loop (`saddle_multigrid.py:295`) and is not hoisted -- and a slot's
         site is the metadata of whichever instruction survived XLA's merging (the entry decode's names
         `:572` and also serves `:288`); per-site claims above come from tracing `while` carries.
+      - **The true residual in a one-trip loop instead of the `lax.cond` saves nothing** (`split-loop` /
+        `identity-loop` arms, bfs3d, `954aabe0`'s library + the arms, one process, 2026-10-25): split temp
+        1022.7 → 1036.5 MiB (+13.8), identity 392.9 → 393.5 (+0.6). The arm swaps `solve/linear.py`'s only
+        `lax.cond` for a `while_loop` of at most one trip during lowering; `_check_cond_as_loop` first
+        confirmed the same solution and operator applications on a 60 × 60 system (37 / 37; a substitution
+        that always or never ran the branch gave 43 / 36, so the check can fail). The compiled step has no
+        conditional there and a second inner `while` instead, yet the decode in that loop's body (272.8 MiB)
+        is still rebuilt in it, not shared with the entry copy (317.6), and the peak moved into that loop's
+        JVP. Why XLA hoists the Arnoldi loop's decode and not this one is not established: a compile-only
+        toy (decode then gather inside a `fori_loop` of 10, a one-trip `while` and a `cond`, all in an outer
+        loop) fuses the decode into the gather in the last two and materializes nothing, so it does not
+        reproduce the step. Ledger: `solve-refuted-directions.md`, "The true residual out of the `lax.cond`".
       - **Independent review (2026-10-25, a separate agent reading the same dumps, read-only)**: agreed the
         totals, the split's share, the 590.5 MiB of decoded columns, the one-kernel multiply and row sum,
         the 4 MiB of solve vectors and #825's effect; found the third call site (the cond branch) and the

@@ -818,10 +818,10 @@ computation (the Arnoldi and final `x = M y` applications share it) and one rebu
 per application, not held; the solve's own vectors are 4 MiB. The residual's share without a split is ~2× a
 JVP (393 MiB, 17 KB a cell) because that cond branch recomputes a whole JVP while the Arnoldi loop's hoisted
 linearization is still held. So the split is the lever on the step's temporary, but through its decoded
-indices, not 14b–14c's values. Unbuilt cuts, in order: the true residual out of the `lax.cond` (up to −273
-MiB split, −118 identity, no runtime cost); a Kronecker-aware padded product (decode and gathered operand ÷
-the row-field count); the decode kept in the loop body (`validation/padded_decode_hoisting.py`: four
-operators 443 → 161 MiB, untimed). Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+indices, not 14b–14c's values. The true residual moved out of the `lax.cond` into a one-trip loop saves
+nothing (+13.8 MiB; the decode is rebuilt in that loop too; ledger). Unbuilt cuts, in order: a
+Kronecker-aware padded product (decode and gathered operand ÷ the row-field count, both copies); the decode
+kept in the loop body (`validation/padded_decode_hoisting.py`: four operators 443 → 161 MiB, untimed). Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
 not its temporary).
 
 ### 14b. A consistent compact operator for the fit

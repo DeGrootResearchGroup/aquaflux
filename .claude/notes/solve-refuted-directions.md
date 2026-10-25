@@ -1836,3 +1836,25 @@ the re-fits, does not fall by 887 MiB.
 held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. Or with a Schur
 relaxation that needs no row norms and is shown to work: plain damped Jacobi is the one other candidate, and
 `solve-flow-block.md` records that an undamped one diverges.
+
+## The true residual out of the `lax.cond`, to share the step's hoisted decode — REFUTED (2026-10-25)
+
+**What.** The march step holds every padded operator's decoded `s32[n_rows, width]` columns twice at its
+peak: one copy XLA hoisted to the entry computation (the Arnoldi and final `x = M y` applications) and
+one rebuilt inside `_ResidualStopGMRES`'s true-residual `lax.cond` (`solve/linear.py`), where every arm
+peaks. Running that branch as a `while_loop` of at most one trip, out of which XLA could hoist, was
+expected to merge the two (up to −273 MiB on bfs3d's split arm, −118 on the identity arm).
+
+**On what.** bfs3d's first step (anchor station, hybrid start), `validation/step_temporaries.py` arms
+`split-loop` / `identity-loop` against `split` / `identity` in one process, compile only, jax 0.12.0.1.
+
+**Why it lost.** Temp 1022.7 → 1036.5 MiB (split) and 392.9 → 393.5 (identity). The conditional is gone
+from the compiled step, but the one-trip loop rebuilds the decode (272.8 MiB) in its body just as the
+branch did. The arm reproduced the cond's solution and operator applications exactly (self-check in the
+harness). Why XLA hoists the Arnoldi loop's decode and not this loop's is not established; a toy did not
+reproduce the step.
+
+**Detail.** `solve-direct-preconditioners-log.md`, "What the march step's temporary holds". **Reopen with**
+an account of why the Arnoldi decode is hoisted (XLA's pass order or its size rule) that predicts a
+construct which shares it.
+

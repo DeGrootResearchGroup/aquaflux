@@ -19,6 +19,15 @@ number for its temporary buffer. This names what fills it. On a step case (``STE
      settings are the split arm's; the split's arrays are still arguments (the adjoint factory holds
      them) but nothing reads them;
 
+   * ``split-loop`` / ``identity-loop`` -- either arm with the true-residual ``lax.cond`` of the
+     residual-stop GMRES (``solve/linear.py``, its only ``lax.cond``) run as a ``while_loop`` of at most
+     one trip: while it is lowered, that module's ``jax`` is a proxy whose ``lax.cond`` is
+     ``_cond_as_loop`` and whose every other name is JAX's own. Same arithmetic; the question is whether
+     XLA, which does not move code out of a conditional branch, then hoists the branch's decode and
+     linearization and shares them with the loop's. ``_check_cond_as_loop`` first solves a small system
+     both ways and refuses to measure unless the operator applications (counted by a host callback) and
+     the solution are identical;
+
    with the persistent compilation cache bypassed for those compiles (``_bypass_compilation_cache``): a
    cache hit compiles nothing and so dumps nothing, the dump options are not in the cache key, and JAX
    decides whether the cache is in use once per process, so the switch is the config and a reset of
@@ -147,6 +156,87 @@ def _capture(compare):
 
 def _no_preconditioner(_shift_strength):
     return None
+
+
+def _cond_as_loop(pred, true_fn, false_fn, *operands):
+    """``lax.cond`` as a ``while_loop`` running ``true_fn`` at most once (bfs3d: XLA kept the decode in it)."""
+    import jax
+    import jax.numpy as jnp
+
+    def once(_):
+        return jnp.asarray(False), true_fn(*operands)
+
+    start = (jnp.asarray(pred), false_fn(*operands))
+    return jax.lax.while_loop(lambda carry: carry[0], once, start)[1]
+
+
+@contextlib.contextmanager
+def _true_residual_in_a_loop():
+    """While open, ``solve/linear.py`` sees a ``jax`` whose ``lax.cond`` is :func:`_cond_as_loop`."""
+    import types
+
+    import jax
+    from aquaflux.solve import linear
+
+    class Namespace(types.SimpleNamespace):
+        def __init__(self, real, **replaced):
+            super().__init__(**replaced)
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real = linear.jax
+    linear.jax = Namespace(jax, lax=Namespace(jax.lax, cond=_cond_as_loop))
+    try:
+        yield
+    finally:
+        linear.jax = real
+
+
+def _check_cond_as_loop():
+    """Refuse to measure unless the looped arm solves exactly as the cond does, application for application."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from aquaflux.solve import linear
+
+    rng = np.random.default_rng(0)
+    n = 60
+    a = jnp.asarray(np.eye(n) * 4 + rng.standard_normal((n, n)) * 0.3)
+    b = jnp.asarray(rng.standard_normal(n))
+    inverse_diagonal = 1.0 / jnp.diag(a)
+    solver = linear.in_progress_measure(
+        linear.residual_stop_gmres(1e-10, restart=7, max_restarts=40), jnp.linalg.norm
+    )
+    count = [0]
+
+    def matvec(x):
+        jax.debug.callback(lambda: count.__setitem__(0, count[0] + 1))
+        return a @ x
+
+    def solve():
+        count[0] = 0
+        jax.clear_caches()
+        x, cycles = jax.jit(
+            lambda b: linear.solve_linear(
+                matvec, b, solver, preconditioner=lambda v: inverse_diagonal * v
+            )
+        )(b)
+        jax.effects_barrier()
+        return np.asarray(x), int(cycles), count[0]
+
+    as_cond = solve()
+    with _true_residual_in_a_loop():
+        as_loop = solve()
+    same = as_cond[1:] == as_loop[1:] and np.array_equal(as_cond[0], as_loop[0])
+    print(
+        f"cond as a loop: applications {as_cond[2]} / {as_loop[2]}, cycles {as_cond[1]} / "
+        f"{as_loop[1]}, solutions {'identical' if same else 'DIFFER'}",
+        flush=True,
+    )
+    if not same:
+        raise SystemExit("the looped true residual does not reproduce the cond; nothing measured")
 
 
 def _identity_arm(step):
@@ -422,9 +512,17 @@ def _reread():
 
 
 def _print_difference(record):
-    if not {"split", "identity"} <= record["arms"].keys():
+    arms = record["arms"]
+    for name in ("split", "identity"):
+        if {name, f"{name}-loop"} <= arms.keys():
+            print(
+                f"\n{name}-loop minus {name}: temp "
+                f"{(arms[name + '-loop']['temp'] - arms[name]['temp']) / MIB:+.1f} MiB",
+                flush=True,
+            )
+    if not {"split", "identity"} <= arms.keys():
         return
-    split, identity = record["arms"]["split"], record["arms"]["identity"]
+    split, identity = arms["split"], arms["identity"]
     owned = sum(row["bytes"] for row in split["slots_at_peak"] if row["owner"].startswith("split"))
     print(
         f"\nsplit arm minus identity arm: temp {(split['temp'] - identity['temp']) / MIB:.1f} MiB, "
@@ -435,10 +533,11 @@ def _print_difference(record):
 
 
 def main():
-
     if REREAD:
         _reread()
         return
+
+    import jax
 
     compare = load_case(CASE)
     started = time.perf_counter()
@@ -446,14 +545,20 @@ def main():
     print(f"step arguments captured in {time.perf_counter() - started:.0f} s", flush=True)
     record = {"header": _header(compare, args), "arms": {}}
     _bypass_compilation_cache()
+    if any(arm.endswith("-loop") for arm in ARMS):
+        _check_cond_as_loop()
     for arm in ARMS:
-        if arm == "split":
+        base, _, variant = arm.partition("-")
+        if base == "split":
             arm_args = args
-        elif arm == "identity":
+        elif base == "identity":
             arm_args = (_identity_arm(args[0]), *args[1:])
-        else:
-            raise SystemExit(f"unknown arm {arm!r}: split or identity")
-        record["arms"][arm] = _analyse(program, arm_args, kwargs, arm)
+        if base not in ("split", "identity") or variant not in ("", "loop"):
+            raise SystemExit(f"unknown arm {arm!r}: split, identity, split-loop or identity-loop")
+        # A trace is cached per function, so an arm lowered after another could reuse its trace.
+        jax.clear_caches()
+        with _true_residual_in_a_loop() if variant else contextlib.nullcontext():
+            record["arms"][arm] = _analyse(program, arm_args, kwargs, arm)
         RECORD.write_text(json.dumps(record, indent=1))
     _print_difference(record)
     record["sanity"] = _sanity(args)
