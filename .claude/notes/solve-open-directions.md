@@ -914,6 +914,22 @@ process. **Candidate forms, none measured:**
 Audit any other place a per-call closure reaches a module-level `eqx.filter_jit` (only this call site in
 `aquaflux/` on 2026-10-25). Worth ~0.2–0.35 GiB on bfs3d, ~5 % of its peak.
 
+### 14h. Two small allocator-side ideas (proposals, not built, 2026-10-25)
+
+- **Collect the march's cycles when a solve returns.** After `staged_march` returns, its session and splits
+  are cyclic garbage until Python's collector reaches them: 1.60 GiB of device arrays on bfs3d on
+  `13fa17d4` (before #817--#825), 0.16 GiB on `39786723` (after #817--#819), each read by
+  `memory_residue.py`'s `RESIDUE_CLEAR=end` as a `gc.collect()` + `malloc_trim(0)` before the cache clear
+  (log, "What the resident memory holds beyond live arrays, on two meshes"). The resident drop at that step
+  (1.0--1.3 GiB) includes the trim's and is not separated from the collection's. It costs what runs next in
+  the same process (the adjoint, a second solve), never the march's own peak. Candidate: one `gc.collect()`
+  at the end of `solve_coupled` / `solve_flow_march`, before `root_adjoint` is attached; measure the
+  adjoint's peak with and without.
+- **Trim after the step program's first call.** That call leaves 0.68 GiB (bfs3d) / 0.38 (pitzDaily) of freed
+  memory in glibc's arenas (`memory_residue.py`, `RESIDUE_TRIM`, `13fa17d4`). The session already trims before
+  every re-fit (#818), so this would not lower a march's peak, only what a march holds between its first
+  step and its next re-fit. Worth doing only if a case's peak is ever set there, which bfs3d's is not.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the
