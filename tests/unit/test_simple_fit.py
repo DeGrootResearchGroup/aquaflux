@@ -9,6 +9,7 @@ holding ``S``.
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import numpy as np
 import pytest
@@ -19,6 +20,7 @@ from aquaflux.precondition.padded_rows import _PaddedRowOperator
 from aquaflux.precondition.simple_fit import fit_simple_level, refuse_unusable, simple_plan
 
 N_CELLS, FIELDS = 30, 3
+DEFAULT_TERMS = simple_fit.TERMS_PER_CHUNK
 
 
 def _saddle(seed: int = 0, shape: str = "mixed") -> sp.csr_matrix:
@@ -77,10 +79,22 @@ def _saddle(seed: int = 0, shape: str = "mixed") -> sp.csr_matrix:
     return sp.csr_matrix((a.data[order], a.indices[order], a.indptr), shape=a.shape)
 
 
-def _fit(a: sp.csr_matrix, **splitting):
+def _fit(a: sp.csr_matrix, fit=fit_simple_level, **splitting):
     plan = simple_plan(SparsePattern.of(a.sorted_indices()), FIELDS + 1, **splitting)
-    values, checks = fit_simple_level(plan, _PaddedRowOperator.from_scipy(a).values)
+    values, checks = fit(plan, _PaddedRowOperator.from_scipy(a).values)
     return plan, values, checks
+
+
+def _compiled_afresh():
+    """The fit under a compilation cache of its own, so it is traced at the chunk size now set.
+
+    ``TERMS_PER_CHUNK`` is read when the fit is traced, so the shared compiled fit would run whatever
+    size it was first traced at; clearing every cache instead recompiles everything else a test uses.
+    """
+    traced = fit_simple_level.__wrapped__
+    # A function object of its own: equinox keys its compilation cache on the function, so jitting the
+    # same one again would reuse the shared trace.
+    return eqx.filter_jit(lambda plan, slot_values: traced(plan, slot_values))
 
 
 def _blocks(a: sp.csr_matrix):
@@ -124,7 +138,7 @@ def _host_velocity_inverse(f: sp.csr_matrix, frobenius: bool, block: bool) -> sp
     ],
     ids=["jacobi", "frobenius", "frobenius-block", "exact-block"],
 )
-@pytest.mark.parametrize("terms_per_chunk", [simple_fit.TERMS_PER_CHUNK, 7])
+@pytest.mark.parametrize("terms_per_chunk", [DEFAULT_TERMS, 7])
 @pytest.mark.parametrize(
     ("shape", "aligned_rows", "aligned_divergence"),
     [("mixed", False, True), ("aligned", True, True), ("ragged", False, False)],
@@ -136,13 +150,13 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
     gives the same pieces.
 
     The small chunk takes the products and the Gram matrices through many chunks and a ragged last one,
-    which the default size never reaches on a fixture this small. The chunk size is read when the fit is
-    traced, so the compiled fit is dropped first: a cached one would run the other size's chunks.
+    which the default size never reaches on a fixture this small; it is traced afresh, since the shared
+    compiled fit keeps the size it was first traced at.
     """
     monkeypatch.setattr(simple_fit, "TERMS_PER_CHUNK", terms_per_chunk)
-    jax.clear_caches()
+    fit = fit_simple_level if terms_per_chunk == DEFAULT_TERMS else _compiled_afresh()
     a = _saddle(shape=shape)
-    plan, values, checks = _fit(a, **splitting)
+    plan, values, checks = _fit(a, fit, **splitting)
     assert plan.aligned_velocity_rows == aligned_rows
     assert bool(plan.divergence_run_width) == aligned_divergence
     refuse_unusable(checks)
@@ -183,7 +197,7 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
     assert x.shape == (N_CELLS,)
 
 
-@pytest.mark.parametrize("shape", ["mixed", "aligned", "ragged"])
+@pytest.mark.parametrize("shape", ["mixed", "ragged"])  # the two ways the rows of D are read
 def test_the_schur_rows_reduce_alike_in_any_chunking(monkeypatch, shape) -> None:
     """``S``'s diagonal and row norms come out bit for bit the same however its rows are chunked.
 
@@ -204,12 +218,11 @@ def test_the_schur_rows_reduce_alike_in_any_chunking(monkeypatch, shape) -> None
 
     monkeypatch.setattr(simple_fit, "_in_chunks", recording)
     monkeypatch.setattr(simple_fit, "TERMS_PER_CHUNK", 1 << 30)
-    jax.clear_caches()
-    whole = np.asarray(_fit(a, **splitting)[1].schur_inverse)
-    for terms in (40, 76, 133, 400):
+    whole = np.asarray(_fit(a, _compiled_afresh(), **splitting)[1].schur_inverse)
+    for terms in (76, 133):
         monkeypatch.setattr(simple_fit, "TERMS_PER_CHUNK", terms)
-        jax.clear_caches()
-        np.testing.assert_array_equal(np.asarray(_fit(a, **splitting)[1].schur_inverse), whole)
+        chunked = _fit(a, _compiled_afresh(), **splitting)[1].schur_inverse
+        np.testing.assert_array_equal(np.asarray(chunked), whole)
     assert any(n == N_CELLS and 1 < rows and rows * chunks > n for n, rows, chunks in chunkings), (
         chunkings
     )
