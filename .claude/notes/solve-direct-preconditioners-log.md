@@ -751,6 +751,54 @@
         So bfs3d's 1-step peak on current `main` is ~6.3 ± 0.2 GiB, against 7.19 after #817 alone and
         8.07 on `7fe27d07`.
 
+### What the march step's temporary holds: split against no preconditioner (2026-10-25)
+
+      `validation/step_temporaries.py` (§14a's step half; `validation/hlo_text.py` reads the dumps,
+      shared with `fusion_profile.py`) on `1bd8d292` (`main`): the case's own march with `_march_step`
+      stubbed, so its first step's arguments are captured after the fit and the forced first re-fit and no
+      step runs (state: the ramp's anchor station at the hybrid start; a `DualTimeStep`); the step compiled
+      twice with the persistent cache off, (1) as built, (2) with its shift policy wrapped so the
+      `ShiftTerm` keeps diagonal and row scale and `make_preconditioner` returns `None` (same shift, line
+      search, dual-time loop, GMRES restart 15). Read per arm: `memory_analysis()`, XLA's buffer assignment
+      and live ranges (`--xla_dump_to`); a temp slot (offset, size) is live while any of its values is, the
+      peak is the schedule position with most temp bytes live, each slot named by the value live there and
+      owned by the innermost `aquaflux` frame of its HLO metadata (rule in the docstring); "hoisted" =
+      defined in fewer `while` loops than its `op_name` was traced in. 4-core Linux container, 15.7 GiB,
+      jax 0.12.0.1, shipped `case.yaml`s (split `SimpleSmoothed` / `JacobiSmoothed`, float32, pivot floor
+      0.15, `linear_solve` restart 15).
+
+      **pitzDaily** (12 225 cells, 61 125 dof), MiB:
+
+      | | split arm | identity arm |
+      |---|---|---|
+      | temp (`memory_analysis`) / peak live in it | 165.0 / 162.1 | 90.2 / 89.8 |
+      | argument | 132.8 | 18.0 |
+      | split: decoded padded columns, `s32[n_rows, width]` `add_select` (hoisted, 31 slots) | 55.2 | -- |
+      | split: decoded columns not hoisted (9) + cell gathers of the decode `s32[n·w]` (2) | 6.2 + 5.8 | -- |
+      | split: gathered `x[columns]`, `f32[2750625]` = 36675 × 75 (hoisted, 1) | 10.5 | -- |
+      | residual JVP: hoisted linearization (357 slots) | 34.1 | 34.1 |
+      | residual JVP: tangent working set | 23.9 | 29.2 |
+      | copies without metadata (loop-carried values into the restart branch) | 13.4 | 13.9 |
+      | hoisted state-independent residual pieces (traced in the dual-time loop's line search) | 10.3 | 10.3 |
+      | Krylov vectors live at the peak (the 7.5 MiB basis is not live there) | 1.4 | 1.4 |
+
+      - **The method check fails, for a found reason.** A standalone JVP is 42.9 MiB of temp (residual
+        22.8, `jacobian_matvec` at the same state); the identity arm is 90.2, not ~52 (a JVP + the basis +
+        a few vectors). The identity peak sits in the restart branch's true-residual JVP, and on top of
+        that JVP's working set it holds 44 MiB XLA hoisted out of the loops for the whole step: the JVP's
+        linearization at the fixed state (34.1) and state-independent pieces of the line search's residual
+        (10.3), plus 13.9 of copies of loop-carried values. A standalone JVP frees those after one use.
+      - **The split's share is 74.8 MiB (165.0 − 90.2), and its peak slots sum to 78.2**: 67 of it is int32
+        decoded columns. Every padded operator's `x[rows.columns()]` (`padded_rows.py`,
+        `_padded_product`) decodes the cell-level columns and passes them through the gather's index
+        normalization (`select(c < 0, c + n, c)`); XLA hoists that out of the Krylov and V-cycle loops and
+        holds an `s32[n_rows, width]` array per operator for the step, **twice**: the split is traced at
+        two call sites (`M v` in the Arnoldi loop, `x = M V y` at the restart boundary) and each has its
+        own copy (`s32[36675,75]` ×2, `s32[12225,85]` ×2, ...). The gathered values `x[columns]` are
+        materialized too (one `f32[n_rows·width]` live at the peak, 10.5); the multiply and row sum are one
+        kernel after it, so no `(n_rows, width)` product array exists.
+      - Record: `validation/step_temporaries.pitzdaily.json` and `run-20261025-021615.log` (git-ignored).
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
