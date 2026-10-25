@@ -31,7 +31,10 @@ uniform-reach-3 march of either case, the two things that could separate them:
 
 Arms (``REACH_FOLDING_ARMS``, comma-separated, default ``3,2,each``): ``3`` probes every column at reach 3,
 ``2`` every column at reach 2, ``each`` adds one arm per field with only that column at reach 2 --
-which column's folding costs the solve -- and a field name (``p``) adds that one such arm.
+which column's folding costs the solve -- and a field name (``p``) adds that one such arm. ``A/B`` builds
+the session under probe ``A`` and re-fits it under ``B`` (``3/p``): the leading hierarchy's coarsening is
+frozen at the build from the values it read then, so this separates a fold that moves the COARSENING from
+one that moves the fitted VALUES.
 
 Usage, one checkpoint per run (``state-<step-1>`` is the step's start, ``state-<step>`` gives its shift)::
 
@@ -110,22 +113,32 @@ def field_names(n_fields):
     return ("u", "v", "w", "p", "k", "omega") if n_fields == 6 else ("u", "v", "p", "k", "omega")
 
 
+def probe_reach(token, n_fields, names):
+    """``(label, column_reach)`` for one probe token (``None`` is a uniform reach-3 probe)."""
+    if token == "3":
+        return "uniform 3", None
+    if token == "2":
+        return "all at 2", (2,) * n_fields
+    if token in names:
+        f = names.index(token)
+        return f"{token} at 2", tuple(2 if g == f else 3 for g in range(n_fields))
+    raise SystemExit(f"REACH_FOLDING_ARMS: unknown probe {token!r} (3, 2, or a field name)")
+
+
 def arms(n_fields, names):
-    """``label -> column_reach`` (``None`` is a uniform reach-3 probe) for ``REACH_FOLDING_ARMS``."""
+    """``label -> (build column_reach, refit column_reach)`` for ``REACH_FOLDING_ARMS``."""
     out = {}
     for token in os.environ.get("REACH_FOLDING_ARMS", "3,2,each").split(","):
-        if token == "3":
-            out["uniform 3"] = None
-        elif token == "2":
-            out["all at 2"] = (2,) * n_fields
-        elif token == "each":
-            for f in range(n_fields):
-                out[f"{names[f]} at 2"] = tuple(2 if g == f else 3 for g in range(n_fields))
-        elif token in names:
-            f = names.index(token)
-            out[f"{token} at 2"] = tuple(2 if g == f else 3 for g in range(n_fields))
+        if token == "each":
+            for name in names:
+                label, reach = probe_reach(name, n_fields, names)
+                out[label] = (reach, reach)
+        elif "/" in token:
+            (built, build), (fitted, refit) = (probe_reach(t, n_fields, names) for t in token.split("/"))
+            out[f"coarsened {built}, re-fitted {fitted}"] = (build, refit)
         else:
-            raise SystemExit(f"REACH_FOLDING_ARMS: unknown arm {token!r} (3, 2, each, or a field name)")
+            label, reach = probe_reach(token, n_fields, names)
+            out[label] = (reach, reach)
     return out
 
 
@@ -153,16 +166,28 @@ class StepRebuild:
         self.station = min(step_number - 1, ramp.stations)
         self.assembler = assembler_for(self.station)
 
-    def fitted(self, column_reach):
-        """The step's state after the re-fit, under a probe of ``column_reach``; and its session."""
+    def fitted(self, build_reach, refit_reach):
+        """The step's state after the re-fit, and its session.
+
+        The session is built (which fixes the frozen coarsening) under a probe of ``build_reach`` and
+        re-fitted (which supplies every value) under one of ``refit_reach``. Swapping the probe between
+        the two reaches into the session's private spec and probe, which this harness may do and the
+        library never does.
+        """
         settings = self.spec.settings()
-        pc = settings["preconditioner"]
-        pc = dataclasses.replace(pc, probe=dataclasses.replace(pc.probe, column_reach=column_reach))
+        file_pc = settings["preconditioner"]
+
+        def with_reach(reach):
+            return dataclasses.replace(file_pc, probe=dataclasses.replace(file_pc.probe, column_reach=reach))
+
         allowed = inspect.signature(coupled_step).parameters
         march = {k: v for k, v in settings.items() if k in allowed and k != "preconditioner"}
-        session = open_session(pc, self.coupled)
+        session = open_session(with_reach(build_reach), self.coupled)
         session.rebind(self.anchor)
         base = session.build(self.seed, **march)
+        if refit_reach != build_reach:
+            session._spec = with_reach(refit_reach)
+            session._probe = None  # rebuilt from the swapped spec when the refresh hook is made
         session.rebind(self.assembler)
         active = eqx.tree_at(
             lambda s: s.relaxation_schedule, base, ConstantRelaxation(jnp.asarray(self.beta))
@@ -184,9 +209,9 @@ class StepRebuild:
         return g, shift, term.make_preconditioner(strength)
 
 
-def solve_arm(rebuild, label, column_reach, names, tight_rtol):
+def solve_arm(rebuild, label, reaches, names, tight_rtol):
     started = time.time()
-    active, session = rebuild.fitted(column_reach)
+    active, session = rebuild.fitted(*reaches)
     n = rebuild.coupled.layout.n_cells
     floored = getattr(getattr(session, "_hook", None), "floored_rows", None)
     floored_text = (
@@ -384,8 +409,8 @@ def main():
         flush=True,
     )
     shift = None
-    for label, column_reach in arms(n_fields, names).items():
-        arm_shift = solve_arm(rebuild, label, column_reach, names, tight_rtol)
+    for label, reaches in arms(n_fields, names).items():
+        arm_shift = solve_arm(rebuild, label, reaches, names, tight_rtol)
         shift = arm_shift if shift is None else shift
     if os.environ.get("REACH_FOLDING_SKIP_MATRIX") != "1":
         folding_report(coupled, rebuild.iterate, shift, names)
