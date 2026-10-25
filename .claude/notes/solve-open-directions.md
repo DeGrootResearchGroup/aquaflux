@@ -824,9 +824,11 @@ per application, not held; the solve's own vectors are 4 MiB. The residual's sha
 JVP (393 MiB, 17 KB a cell) because that cond branch recomputes a whole JVP while the Arnoldi loop's hoisted
 linearization is still held. So the split is the lever on the step's temporary, but through its decoded
 indices, not 14b–14c's values. The true residual moved out of the `lax.cond` into a one-trip loop saves
-nothing (+13.8 MiB; the decode is rebuilt in that loop too; ledger). Unbuilt cuts, in order: a
-Kronecker-aware padded product (decode and gathered operand ÷ the row-field count, both copies); the decode
-kept in the loop body (`validation/padded_decode_hoisting.py`: four operators 443 → 161 MiB, untimed). Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+nothing (+13.8 MiB; the decode is rebuilt in that loop too; ledger). **Built**: the cell-level padded
+product gathers once per cell row (`a0fca85b`): the step's temporary 1022.7 → 683.7 MiB, the split's share
+629.8 → 290.7, pitzDaily's march unchanged in every count. Left: the decode is still held per call site
+(~295 MiB); keeping it in the loop body (`validation/padded_decode_hoisting.py`: four operators 443 → 161
+MiB) is untimed and would re-decode every apply. Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
 not its temporary).
 
 ### 14b. A consistent compact operator for the fit

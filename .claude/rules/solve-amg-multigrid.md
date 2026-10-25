@@ -186,7 +186,7 @@ path.
 - **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
   `_padded_rows`, the one slot rule, and `_PaddedLayout`/`_padded_operator`; moved out of `multigrid.py`
   to keep it under its size budget, 2026-10-18). `columns` / `values` are
-  `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (a
+  `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (by `rows.product`; a
   gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
   padded-row level operator — measurements".
   - **The index half is a `PaddedColumns` (2026-10-24, the second stage of `solve-open-directions.md`
@@ -208,15 +208,19 @@ path.
     living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
     jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
     1–3").
-    - ⚠️ **In the march step the decoded columns are the step's largest temporary**: every operator's
-      `s32[n_rows, width]` is live twice at the peak -- one copy hoisted to the entry computation (shared by
-      the Arnoldi and final `x = M y` applications) and one rebuilt inside the true-residual `lax.cond` of
-      `_ResidualStopGMRES`, which XLA does not hoist out of: 591 of bfs3d's 1017 MiB step temporary, first
-      step, `main` `1bd8d292` (unchanged after #825). The gathered `x[columns]` is materialized once per
-      application, not held. `columns()` repeats one `(n_cells, width)` array over the row fields
-      (`_by_row_field`), so the decode and the gather are `F` times what a cell-level product needs
-      (`validation/step_temporaries.py`; log, "What the march step's temporary holds", with the unbuilt
-      cuts).
+    - **A cell-level operator's product gathers `x` once per cell row (`PaddedColumns.product`,
+      2026-10-25).** `columns()` repeats one `(n_cells, width)` array across the row fields
+      (`_by_row_field`); `_KroneckerColumns.product` gathers at `(n_cells, width)` and multiplies each row
+      field's entries (`values` viewed `(fields, n_cells, width)`) against that one gather, so the decode
+      and the gathered operand are a row field's, not all of them. In the march step XLA keeps every
+      operator's decode live per call site of the split (an entry-computation copy and one inside
+      `_ResidualStopGMRES`'s true-residual `lax.cond`), so this was the step's largest temporary: bfs3d's
+      first step 1022.7 → 683.7 MiB, decoded indices 590.5 → 294.6 (`validation/step_temporaries.py`).
+      float64 products are bit-identical; float32 rows may be summed in another order (≤ 0.71 eps of the
+      row's `Σ|terms|`): the pitzDaily march's step residuals moved in the 4th digit at two of 21 steps,
+      every count unchanged. Pinned by `test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field`
+      (the gather's shape) and `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays` (the values).
+      Log, "What the march step's temporary holds".
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
       count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
       sized or static by the actual pattern retraced a budgeted rebuild

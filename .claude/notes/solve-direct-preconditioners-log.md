@@ -990,7 +990,7 @@
         separate primal from tangent. That is the residual's share for §14a's per-cell budget: 17 KB a
         cell, ~5 of it the second JVP trace.
       - **Proposals, not built (no library change here), in the review's order**: (1) take the true-residual
-        application out of the `lax.cond` -- **measured and refuted, next bullet**; (2) a Kronecker-aware `_padded_product`:
+        application out of the `lax.cond` -- **measured and refuted, next bullet**; (2) a Kronecker-aware `_padded_product` -- **built, see "Built: the cell-level product" below**:
         `_by_row_field` repeats one `(n_cells, width)` column array across the `F` row fields, so gathering
         at `(n_cells, width)` and multiplying with `values.reshape(F, n_cells, width)` divides the decode and
         the gathered operand by `F` (leading fine operator 177 → 44 MiB) and the gather work too; (3) keep
@@ -1027,6 +1027,23 @@
         toy (decode then gather inside a `fori_loop` of 10, a one-trip `while` and a `cond`, all in an outer
         loop) fuses the decode into the gather in the last two and materializes nothing, so it does not
         reproduce the step. Ledger: `solve-refuted-directions.md`, "The true residual out of the `lax.cond`".
+      - **Built: the cell-level product gathers once per cell row (`a0fca85b`, the review's cut 2).**
+        `_KroneckerColumns.product` gathers `x` at `(n_cells, width)` and multiplies every row field's entries
+        against it, where `columns()` had repeated the same columns `fields` times. bfs3d first step
+        (`d5f7ff02` + the change; capture 254 s): **split arm temp 1022.7 → 683.7 MiB**, identity arm 392.9
+        unchanged, the split's share 629.8 → 290.7 (its peak slots 680.5 → 329.2); decoded indices
+        590.5 → 294.6 MiB (273.5 `add_select` + 21.1 cell gathers; the leading fine operator's decode
+        `s32[23040,252]` 22 MiB against `s32[92160,252]` 88.6, still per call site); the largest gathered
+        operand 88.6 → 33.1 (`f32[23040·377]`). Leading fine operator alone (92160 × 252, a random cell
+        pattern of width 63, float32, `/tmp` probe, best of 15): one apply 39.6 → 13.6 ms (temp 110.7 →
+        22.1 MiB), ten in a `fori_loop` 289 → 264 ms (temp 177.2 → 44.3). float64 products bit-identical;
+        float32 not (summation order, the same under `--xla_cpu_max_isa=AVX`): at most 8.5e-8 of the row's
+        `Σ|terms|` (eps 1.2e-7). **pitzDaily `march_cost.py`, before (`d5f7ff02`, a worktree) and after,
+        one run each, same container**: 21 steps / 102 cycles / final R 5.736e-06 / `x_r/h` 8.0686 / ν_t/ν
+        peak 418.09 both; 19 of 21 step rows identical, steps 12 and 14's step residual 8.988e-03 →
+        8.987e-03 and 8.723e-03 → 8.722e-03, every β, inner count, cycle count and α equal; solve 356 → 302 s
+        (each arm's first run on its checkout, so partly compilation), VmHWM 2.640 → 2.656 GiB. bfs3d's
+        march is not run: a float32 rounding change makes a bfs3d pair two draws (`validation.md`).
       - **Independent review (2026-10-25, a separate agent reading the same dumps, read-only)**: agreed the
         totals, the split's share, the 590.5 MiB of decoded columns, the one-kernel multiply and row sum,
         the 4 MiB of solve vectors and #825's effect; found the third call site (the cond branch) and the
