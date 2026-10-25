@@ -18,8 +18,8 @@ The recorded numbers (`solve-march.md`, `solve-march-log.md`, `solve-refuted-dir
 
 | case | cells | dofs | wall | compile | Krylov matvec |
 |---|---|---|---|---|---|
-| pitzDaily coupled RANS | 12 225 | 61 125 | 304 s cold (2026-10-25, below) | ~100 s cold | JVP 27–34 ms, split 78–86 ms (standalone, below) |
-| bfs3d coupled RANS | 23 040 | 138 240 | 1635 s warm, 1749 s cold (2026-10-25, below) | ~116 s warm | JVP 142–147 ms, split 525–576 ms (standalone, below) |
+| pitzDaily coupled RANS | 12 225 | 61 125 | 304 s cold before entry 15; back to back 265 s without it, 220 s with it, warm (2026-10-25, below) | ~100 s cold | JVP 27–34 ms, split 78–86 ms, 33 ms with entry 15 (standalone, below) |
+| bfs3d coupled RANS | 23 040 | 138 240 | 1635 s warm, 1749 s cold before entry 15; back to back later that day 1853 s without it, 1274 s with it (2026-10-25, below) | ~116 s warm | JVP 142–147 ms, split 525–576 ms, 206 ms with entry 15 (standalone, below) |
 
 The matvec actually run is `jax.jvp` through the full residual, which reconstructs nine gradients per
 evaluation on pitzDaily. Measured 2026-10-07 on pitzDaily (4-core Linux, jax 0.11.2): the jvp is 44 ms,
@@ -253,7 +253,7 @@ two per apply), 37 % the row-sum custom fusions that read it back (`ynn_fusion`,
 negligible. One kernel is in flight for 74 % of the 4-core span: a V-cycle is a chain, and each memory-bound
 gather is split into at most `ceil(sqrt(4))` = 2–4 parts. `--xla_cpu_experimental_ynn_fusion_type=-reduce`
 on Linux: split 525 → 586 ms (leading 343 → 482, trailing 143 → 107), not a lever, as recorded for macOS.
-**Where this points: entry 15.**
+**Built since: entry 15** (the split apply 576 → 206 ms on bfs3d, the march −31 %).
 
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
@@ -1030,44 +1030,14 @@ Audit any other place a per-call closure reaches a module-level `eqx.filter_jit`
   every re-fit (#818), so this would not lower a march's peak, only what a march holds between its first
   step and its next re-fit. Worth doing only if a case's peak is ever set there, which bfs3d's is not.
 
-## 15. A fused level product for the traced hierarchies (registered 2026-10-25)
+## 15. BUILT (2026-10-25) — a fused level product for the traced hierarchies
 
-**What.** Every level product of both hierarchies (and the coupling product) is XLA's two-kernel padded-row
-form: a gather fusion writing `values * x[columns]` out whole, then a single-threaded row-sum kernel reading it
-back (`solve-amg-multigrid.md`, `_PaddedRowOperator`). A fused loop over the same padded arrays (one pass,
-no intermediate, rows threaded over every core) does the same product in a fraction of the time.
-
-**Measured kernel bound** (`validation/spmv_kernel_probe.py`, the configuration above, hybrid start, mean of
-30 calls, float32, numba 0.68 on 4 threads; differences from the traced product ≤ 1.4e-7 of the largest
-result entry, float32 summation order):
-
-| operator | XLA padded, glibc | XLA, `glibc.malloc.hugetlb=1` | XLA, jemalloc (no faults) | numba fused ELL | numba fused CSR | scipy CSR (1 thread) |
-|---|---|---|---|---|---|---|
-| bfs3d leading fine (21.0M entries, width 252) | 52.6 ms | 43.9 | 33.9 | 11.5–15.2 | 15.3–19.1 | 33.4–39.8 |
-| bfs3d trailing fine (5.2M, width 126) | 15.9 | 15.7 | 9.0 | 1.9–2.4 | 3.2–4.4 | 5.3–8.7 |
-| pitzDaily leading fine (2.7M, width 75) | 6.9 | | | 0.8 | 1.6 | 2.0 |
-| pitzDaily trailing fine (1.2M, width 50) | 3.4 | | | 0.5 | 0.9 | 0.9 |
-
-Inside the step's loop the XLA product pays no faults, so compare against the jemalloc column: **2.2–3× on the
-leading fine level, ~4× on the trailing**, the fused loops at ~3.6–3.9 cores against XLA's ~2.8. Ranges are
-across three runs of the probe (one per allocator arm), which also moved the numba timings.
-
-**What is not known.** The numba kernels run on the host. Reaching them from inside the compiled step needs an
-XLA custom call on CPU (`jax.ffi` with a compiled target; numba threads started from an XLA worker thread, and
-two such calls in flight at once, need a thread-safe numba threading layer), with the transpose for the
-adjoint (`linear_call`'s transposed product) and the XLA form kept for any other backend. A `pure_callback`
-form would be simpler and pays a host crossing per product; neither is measured.
-
-**Expected size, as a bound only.** Products are ~96 % of the split's one-core kernel time; at 2.5× on every
-level the split falls ~525 → ~210–250 ms, an application ~720 → ~400 ms, and bfs3d's steps outside the re-fits
-~970 → ~550 s of a 1635 s march (−25 %), pitzDaily's proportionally. Not separated: how much of the leading
-cycle is fine-level products against SIMPLE pieces and coarse levels, whose rows are narrower.
-
-**Pre-registered measurement.** (1) A custom-call padded-row product in one standalone program against
-`_PaddedRowOperator.apply`, both fault-free: the split apply's mean over 30 calls on both cases. (2) If (1)
-holds ≥ 2× on bfs3d's split: both marches with it, identical step tables required (the summation order
-changes, so read them as `validation.md`'s FMA bullet says), wall from the march log, and the adjoint's
-transpose solve (`adjoint_transpose_cost.py`) unchanged or better. Pass bar: bfs3d march −15 % warm.
+Every padded-row product on the CPU is one fused, threaded Numba loop called from inside the compiled
+program (`precondition/fused_product.py`; rule: `solve-amg-multigrid.md`). Back to back on a 4-core Linux
+container: bfs3d 1853 → 1274 s, its step work outside the re-fits 1111 → 570 s; pitzDaily 265 → 220 s with an
+identical step table. The kernel bound that motivated it (`validation/spmv_kernel_probe.py`), the spikes and
+the measurements: `solve-amg-multigrid-log.md`, "The fused level product (2026-10-25)". Still unmeasured: the
+Mac, where Numba's pip wheels usually offer only the `workqueue` layer, which keeps XLA's form.
 
 ## Smaller housekeeping
 

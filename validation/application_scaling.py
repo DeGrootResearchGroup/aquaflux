@@ -2,7 +2,8 @@
 
 A step's restart cycle is a run of applications of ``v -> (J + s) M v``: one field-split apply ``M``
 (its leading ``[velocity, p]`` V-cycle, its trailing ``[k, omega]`` V-cycle and the coupling product
-between them) and one Jacobian-vector product. ``pitzdaily_openfoam/application_cost.py`` times these on
+between them) and one Jacobian-vector product. The last row times the two compiled as one program, as a
+Krylov iteration runs them, so whatever one costs the other (threads competing for the cores) shows there. ``pitzdaily_openfoam/application_cost.py`` times these on
 pitzDaily's replayed systems; this times the same pieces on either step case (``SCALING_CASE``), at its
 hybrid start or a saved state, so that the two cases can be set side by side and the piece whose cost grows
 faster than the unknowns can be named.
@@ -130,6 +131,10 @@ def main():
         "  leading cycle": (eqx.filter_jit(lambda s, x: s.leading_cycle(x)), (split, lead)),
         "  trailing cycle": (eqx.filter_jit(lambda s, x: s.trailing_cycle(x)), (split, trail)),
         "  coupling product": (eqx.filter_jit(lambda s, x: s.coupling.apply(x)), (split, first)),
+        "application J M v": (
+            eqx.filter_jit(lambda a, x, s, v: jacobian_matvec(a, x, s.apply(v))),
+            (coupled, state, split, v),
+        ),
     }
     print(
         "| piece | mean ms | best ms | cores | faults/call | ns per unknown (mean) |\n|---|---|---|---|---|---|"

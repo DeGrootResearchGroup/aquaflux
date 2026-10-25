@@ -213,6 +213,10 @@ VALIDATION_INTERNAL_REACHES = {
     # by on the host inside its looped arm: the session's own structure holds its order at cell level,
     # so the harness builds the entry-by-entry one over the same layout.
     "_dof_probe_gather",
+    # Whether the padded-row products run as the fused loop in this process, printed by
+    # `spmv_kernel_probe.py` beside its "operator apply" row: that row is the fused loop or XLA's
+    # gathered form depending on it, so the banner must say which one was timed.
+    "fused_products",
     # The march's own single-step call, reached by the harness that replays one outer step of a recorded
     # march from its checkpoint (`bfs3d_openfoam/step_replay.py`). Reproducing the march's inner rows
     # digit for digit is what makes a replayed arm evidence about the march, so it must run the march's

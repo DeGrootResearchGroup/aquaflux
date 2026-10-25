@@ -1947,3 +1947,65 @@ Harness `validation/pitzdaily_openfoam/march_cost.py` under `run_case.sh`; captu
   operators from the fit copied every level's index arrays (~37 MiB); a map's in-order source list was
   promoted to int64 on the device (~32 MiB); eager gathers in the SIMPLE packing compiled op by op (4.1 s
   of a first fit).
+
+### The fused level product (2026-10-25)
+
+Built: `precondition/fused_product.py`, routed from `PaddedColumns.product` (rule: `solve-amg-multigrid.md`,
+"On the CPU every padded-row product is one fused, threaded Numba loop"). Registered as
+`solve-open-directions.md` entry 15 the same day; its pre-registered measurement is below.
+
+**Configuration.** Linux x86_64 container, 4-core Xeon @ 2.1 GHz, 15 GB, no swap; Python 3.13.17, jax/jaxlib
+0.12.0.1, numba 0.68.0 (threading layer `omp`, 4 threads); `main` `5c3fe7b4` plus this change; both shipped
+`case.yaml`s. Arms in one checkout: fused (default) against `AQUAFLUX_DISABLE_FUSED_PRODUCT=1`. Glibc allocator
+unless an arm says jemalloc (`LD_PRELOAD=libjemalloc.so.2 MALLOC_CONF=dirty_decay_ms:-1,muzzy_decay_ms:-1`,
+fixed-state probes only).
+
+**How the path was chosen (spikes, not kept).**
+- The legacy custom-call API (`api_version=0`) runs, but XLA:CPU logs an error on every call and has scheduled
+  its removal, so the typed FFI it is. A typed handler must answer XLA's registration-time metadata question
+  (the version it was written against) or registration is refused; registered before the CPU backend starts,
+  that refusal stops the backend instead of raising.
+- Threading by splitting the rows over several independent custom calls bought little (one call 32 ms, four
+  26 ms, random pattern): XLA did not run them concurrently enough. Threading inside the loop it is.
+- One-thread loop against XLA, in a program: bfs3d leading fine 46 vs 56 ms, trailing fine 14.1 vs 6.9 ms, ten
+  chained trailing products 140 vs 116 ms. So the loop is taken only with a thread-safe threading layer.
+- Threaded (`omp`), in a program: leading fine 14.5 vs 55 ms, trailing fine 2.5 vs 6.4 ms, ten chained trailing
+  products 27 vs 90 ms.
+
+**Measurement (1): one application** (`validation/application_scaling.py`, hybrid start, mean of 30 calls;
+"J M v" is the two compiled as one program):
+
+| case, allocator | arm | split apply ms | leading | trailing | coupling | J M v | JVP |
+|---|---|---|---|---|---|---|---|
+| bfs3d, glibc | XLA | 576–613 | 367–386 | 168–174 | 34 | 695 | 150–161 |
+| bfs3d, glibc | fused | 205–232 | 139–152 | 62–65 | 7–10 | **340** | 140–178 |
+| bfs3d, jemalloc | XLA | 530 | 308 | 183 | 23 | | 104 |
+| bfs3d, jemalloc | fused | **206** | 143 | 64 | 10 | | 113 |
+| pitzDaily, glibc | XLA | 101 | 64 | 23 | 6.5 | | 37 |
+| pitzDaily, glibc | fused | **33** | 24 | 9 | 1.9 | | 31 |
+
+Fault-free, bfs3d's split is 2.6× faster (gate ≥ 2×: passed); the fused split takes no page faults at all (the
+177 MiB intermediate is gone). The JVP does not move beyond its spread; `OMP_WAIT_POLICY=passive` changed
+nothing (J M v 371 vs 340 ms), so idle OpenMP threads do not compete with XLA's.
+
+**Measurement (2): the marches.** The container slowed ~13 % between the morning and the afternoon (the same
+XLA march: 1635 s, then 1853 s; one re-fit at a fixed state 31.5 / 33.2 s in both arms that afternoon), so the
+pair below was run back to back, XLA first, the fused arm's changed programs compiled by an earlier run.
+
+| case | arm | steps / cycles / re-fits | solve | set-up through step 1 | re-fits | steps 2–end outside re-fits | root |
+|---|---|---|---|---|---|---|---|
+| bfs3d | XLA | 17 / 147 / 14 | 1853 s | 259 s | 452 s | 1111 s (7.8 s a cycle) | `R` 3.672e-06, `x_r/h` 8.36 |
+| bfs3d | fused | 18 / 149 / 15 | **1274 s (−31 %)** | 237 s | 439 s | **570 s (4.0 s a cycle)** | `R` 7.751e-07, `x_r/h` 8.36 |
+| pitzDaily | XLA | 21 / 102 / 21 | 265 s | 83 s | 37 s | 125 s | `R` 5.736e-06, `x_r/h` 8.0686 |
+| pitzDaily | fused | 21 / 102 / 21 | **220 s (−17 %)** | 84 s | 36 s | **80 s** | identical step table |
+
+bfs3d's pass bar (−15 % warm) is met. Its two arms part at step 2 (`R` 9.521e-02 against 9.508e-02, the
+summation order), as any rounding change does on this case (`validation.md`, the ensemble bullet), so the two
+step counts are two draws; every `x_r/h` station agrees to the printed digits. Two fused bfs3d runs gave the
+identical step table (the loop is deterministic). pitzDaily's march did not move at all.
+
+**The adjoint** (`validation/bfs3d_openfoam/adjoint_transpose_cost.py` at the fused march's root
+`state-00018`, the split widened to double as the transpose solve applies it, mean of 20): one transposed
+application **1462 → 269 ms** (best 1359 → 230), the first call's compile 144 → 133 s. Packing the transposes
+(30 s) did not move, so it is now ~115 transposed applications, 6.8–7.3 % of a transpose solve's
+1454–1575, against 20.5 (1.3–1.4 %) with XLA's form.

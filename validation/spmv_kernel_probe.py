@@ -1,26 +1,26 @@
-"""What one product with a step case's widest preconditioner operator costs, as XLA runs it and as a fused kernel.
+"""What one product with a step case's widest preconditioner operator costs, compiled and as host kernels.
 
-A field-split application on bfs3d spends most of its time in its hierarchies' level products
-``A x``, each a padded-row (ELLPACK) product that XLA compiles as two kernels: a gather fusion that
+A field-split application on bfs3d spends most of its time in its hierarchies' level products ``A x``,
+padded-row (ELLPACK) products. Written in JAX, XLA compiles one as two kernels: a gather fusion that
 writes ``values * x[columns]`` out as a whole ``(n_rows * width)`` array, then a row-sum kernel that reads
-it back (on Linux a single-threaded custom fusion). On bfs3d's leading fine level that intermediate is
-177 MiB, written and read once per product. This asks how much of that product's time is the two-kernel
-form rather than the work: it times, on the same operator and vector,
+it back (on Linux a single-threaded custom fusion); on bfs3d's leading fine level that intermediate is
+177 MiB. On the CPU the library now computes it as a fused Numba loop called from inside the compiled
+program (``aquaflux.precondition.fused_product``). This times, on the same operator and vector,
 
-* ``xla padded``  -- the operator's own ``apply`` (the shipped traced product), compiled alone;
+* ``operator apply`` -- the operator's own ``apply``, compiled alone: the fused loop where the library
+  chooses it, XLA's two kernels under ``AQUAFLUX_DISABLE_FUSED_PRODUCT=1`` (the banner says which);
 * ``scipy csr``   -- ``scipy``'s CSR product (one thread), as a reference point;
 * ``numba csr``   -- a fused CSR product (one pass over the stored entries, no intermediate), threaded
   over rows with ``numba.prange`` on every core, in the operator's own precision;
 * ``numba ell``   -- the same fused, threaded loop over the padded-row arrays the traced operator holds.
 
 Each is the mean of ``SPMV_REPEATS`` back-to-back calls after a warm one, with the cores it kept busy.
-The numba results are checked against the traced product (largest difference over the largest entry of
+The host results are checked against the compiled product (largest difference over the largest entry of
 the result). The operators are the case's leading and trailing fine levels, fitted at the case's own
 settings at its hybrid start (``SPMV_CASE``: ``bfs3d`` or ``pitzdaily``).
 
-This is a kernel question only: the numba kernels run on the host, outside the compiled step, so a
-march using them would also pay whatever crossing into and out of the compiled program costs. That is
-not measured here.
+The host kernels run outside any compiled program; they bound what a fused loop can do, which the
+``operator apply`` row with the library's fused product shows from inside one.
 
 Usage
 -----
@@ -106,7 +106,7 @@ def _compare(name, operator):
     reference = np.asarray(traced(operator, x_device))
     scale = float(np.max(np.abs(reference)))
     rows = [
-        ("xla padded", lambda: jax.block_until_ready(traced(operator, x_device)), None),
+        ("operator apply", lambda: jax.block_until_ready(traced(operator, x_device)), None),
         ("scipy csr", lambda: matrix @ x, None),
         (
             "numba csr",
@@ -134,10 +134,12 @@ def main():
     import jax
     import numba
     from aquaflux.initialization import hybrid_initialize
+    from aquaflux.precondition.fused_product import fused_products
     from aquaflux.turbulence import open_session
 
     print(
-        f"[configuration] case {CASE}, the hybrid start, jax {jax.__version__}, numba {numba.__version__} "
+        f"[configuration] case {CASE}, the hybrid start, operator apply "
+        f"{'fused' if fused_products() else 'gathered (XLA)'}, jax {jax.__version__}, numba {numba.__version__} "
         f"on {numba.config.NUMBA_NUM_THREADS} threads, {os.cpu_count()} cpus, {REPEATS} calls per row",
         flush=True,
     )

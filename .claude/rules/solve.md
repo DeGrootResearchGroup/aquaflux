@@ -46,7 +46,7 @@ Follow the root `CLAUDE.md` "Writing the design records". Solve-specific:
   `jacobian_probe`, `field_split`, `traced_field_split`, `traced_cycle`, `hierarchy_inverse`,
   `saddle_multigrid`, `host_preconditioner`, `block_inverse`, `block_preconditioner`,
   `materialized_preconditioner`, `materialized_spec`, `materialized_session`, `monolithic_policy`,
-  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `level_fit`, `simple_fit`, `probe_layout`,
+  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `fused_product`, `level_fit`, `simple_fit`, `probe_layout`,
   `kronecker_pattern`). An older entry saying `solve/<one of those>.py` means the `precondition/`
   one. `precondition/` imports `solve/` and nothing else; `solve/` imports nothing outside itself (so
   every residual can run on it); every scipy/numba import is on the `precondition/` side. Pinned by
@@ -330,7 +330,7 @@ defect — fix it in the same change.
     `test_a_re_fit_releases_the_arrays_only_the_superseded_split_held` (both precisions).
   - **Every session gives glibc's freed memory back before each re-fit (default, the owner's decision of
     2026-10-24).** `MaterializedSession(memory_trim=)` defaults to `GlibcTrim()` (`aquaflux/allocator.py`,
-    `malloc_trim(0)`, a no-op without glibc; the only `ctypes` in the package) and hands it to
+    `malloc_trim(0)`, a no-op without glibc) and hands it to
     `BetaTrackingRefresh`, which calls it once per re-fit, before the probe (the hook's own default is
     `None`). `None` turns it off; a case file cannot reach it. It changes no value. **Why:** the step
     program's first call leaves ~0.6 GiB of freed memory in XLA's worker-thread arenas, and the next re-fit's

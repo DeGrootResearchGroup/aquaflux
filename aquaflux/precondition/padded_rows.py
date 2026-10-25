@@ -23,6 +23,7 @@ import numpy as np
 import scipy.sparse as sp
 from jax.custom_derivatives import linear_call
 
+from . import fused_product
 from .entry_map import DeviceMatrix, EntryMap, EntryMaps, SparsePattern
 from .kronecker_pattern import KroneckerPattern
 
@@ -47,6 +48,28 @@ class PaddedColumns(eqx.Module):
         """The stored entry each slot holds, shape ``(n_rows, width)``; ``n_in`` for a padding slot."""
         raise NotImplementedError
 
+    def product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        """``A x`` for the operator storing ``values`` in these slots, shape ``(n_rows,)``.
+
+        On the CPU, where :func:`~aquaflux.precondition.fused_product.fused_products` allows it, one
+        fused, threaded loop over the stored slots; otherwise a gather of ``x`` at every slot's column,
+        a multiply and a sum along each row.
+
+        Parameters
+        ----------
+        values : jnp.ndarray
+            The slot values, shape ``(n_rows, width)``; a padding slot holds zero.
+        x : jnp.ndarray
+            The vector, shape ``(n_cols,)``.
+        """
+        return fused_product.routed(self._fused_product, self._gathered_product, values, x)
+
+    def _gathered_product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        return jnp.sum(values * x[self.columns()], axis=1)
+
+    def _fused_product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        raise NotImplementedError
+
 
 class _HeldColumns(PaddedColumns):
     """:class:`PaddedColumns` held as arrays, for any pattern.
@@ -66,6 +89,9 @@ class _HeldColumns(PaddedColumns):
 
     def entries(self) -> jnp.ndarray:
         return self.held_entries
+
+    def _fused_product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        return fused_product.held_product(self.held_columns, self.lengths, values, x)
 
 
 class _KroneckerColumns(PaddedColumns):
@@ -165,6 +191,12 @@ class _KroneckerColumns(PaddedColumns):
     def row_lengths(self) -> jnp.ndarray:
         return self._by_row_field(self.other_fields * self.lengths)
 
+    def _fused_product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        # The loop decodes each slot's column from the cell pattern itself, so ``columns()`` is not formed.
+        return fused_product.cell_product(
+            self.cells, self.lengths, values, x, self.other_fields, self.n_other
+        )
+
     def entries(self) -> jnp.ndarray:
         _, _, live = self._slots()
         row_field = jnp.arange(self.fields, dtype=jnp.int32)[:, None, None]
@@ -183,9 +215,10 @@ class _PaddedRowOperator(eqx.Module):
 
     Stored in padded-row form (the ELLPACK layout): each row's column indices and entries in
     ``(n_rows, width)`` slots, rows shorter than ``width`` filled with zero-valued slots. The product is
-    then a gather of ``x`` at the stored columns, a multiply, and a sum along each row, each step split
-    across threads by the compiler. (The gather is written out to memory before the row sum reads it
-    back; the two are not fused into one loop.)
+    a sum along each row of ``values * x[columns]``, which the index half computes
+    (:meth:`PaddedColumns.product`): on the CPU, one fused loop over the stored slots threaded over rows
+    (:mod:`~aquaflux.precondition.fused_product`); elsewhere a gather, a multiply and a row sum, whose
+    gathered products are written out to memory before the row sum reads them back.
 
     The column indices are a :class:`PaddedColumns`: held as an array, or -- for an operator storing a
     cell pattern over full field-pair blocks -- computed inside the product from the cell pattern, so the
@@ -530,7 +563,7 @@ def _padded_operator(
 
 def _padded_product(arrays, x: jnp.ndarray) -> jnp.ndarray:
     rows, values, _, _ = arrays
-    return jnp.sum(values * x[rows.columns()], axis=1)
+    return rows.product(values, x)
 
 
 def _padded_product_transposed(arrays, y: jnp.ndarray) -> jnp.ndarray:
@@ -545,4 +578,4 @@ def _padded_product_transposed(arrays, y: jnp.ndarray) -> jnp.ndarray:
             "over its operators instead of holding them as leaves cannot be reached that way), or "
             "_PaddedRowOperator.with_transpose() for one operator."
         )
-    return jnp.sum(t_values * y[transposed.columns()], axis=1)
+    return transposed.product(t_values, y)
