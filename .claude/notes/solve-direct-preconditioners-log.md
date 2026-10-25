@@ -793,7 +793,17 @@
       the pivot-floored fit, refit every step) and the other gradient tests of the integration suite pass;
       a transpose is packed by the operator's own slot rule at the widest column, so it equals what a
       fit packed whenever no transpose budget applied (neither case sets `shape_headroom`). The adjoint
-      now pays one host read-back of every operator per transpose solve (not timed here).
+      now pays one host read-back of every operator per transpose solve, timed below.
+
+      **What the packing costs an adjoint** (`adjoint_transpose_cost.py`, branch at "Time what packing the
+      transposes costs a bfs3d adjoint", same container, shipped `case.yaml`, the hybrid start, one run,
+      2026-10-25): `with_transposes` over the step's adjoint factory 22.9 s, resident high-water unchanged
+      at 4.43 GiB; the factory's widening to double 3.5 s (paid before too); one transposed application of
+      the widened split 1.13 s best / 1.19 s mean of 20, its first call (compile) 123 s. The packing is 19
+      mean applications: against the 1454–1575 a bfs3d adjoint was measured to spend
+      (`adjoint_probe.py`'s docstring), 1.2–1.3 % of the transpose solve's applications. Not measured: a
+      whole adjoint on both arms (the probe's converged state, `state-00067`, is from a march that no
+      longer exists, so it needs a fresh march and a `STATES` entry first).
 
 ## Condensed out of the rule (2026-10-17)
 

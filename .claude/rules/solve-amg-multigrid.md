@@ -254,7 +254,9 @@ path.
     `test_a_padded_row_operator_holds_no_transpose_until_asked_and_then_packs_its_own_entries` and
     `test_a_fitted_split_holds_no_transposes_and_an_adjoint_packs_them_for_its_solve_only`. Saved (both
     case files' configuration, CPU, jax 0.12.0.1, 2026-10-24): pitzDaily march identical row for row,
-    peak 3.085 → 2.900 GiB; bfs3d: `solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)".
+    peak 3.085 → 2.900 GiB; bfs3d: `solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)". The
+    adjoint pays the packing instead: 22.9 s on bfs3d, 19 transposed applications, ~1.3 % of a
+    transpose solve (`adjoint_transpose_cost.py`, 2026-10-25).
   - ⚠️ **On macOS the row-sum kernel (a single-threaded `__ynn_fusion`) is the bottleneck for wide rows**
     (bfs3d, up to ~364 wide), and no rewrite of the sum avoids it: `einsum`, a chunked sum, a column-major
     layout, a reduce-free halving sum and an unrolled sum were all measured slower. The XLA flag
