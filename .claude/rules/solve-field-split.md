@@ -66,6 +66,9 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
   (`FieldSplitInverse.padded_coupling()`); all bit-identical to slicing and `from_scipy`
   (`solve-amg-multigrid.md`, "entry maps"). Pinned by
   `test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix`.
+- **`FieldSplitInverse.refit_keeps()`** is both blocks' (`solve-amg-multigrid.md`) plus the packing layouts
+  `EntryMaps.held_objects()` holds; `None` if either block cannot say (lAIR has no `refit_keeps`), and then
+  the session frees nothing before the fit.
 - **Transpose is closed-form** (reverse the block solves, use `Cᵀ`), so the adjoint is served. `Cᵀ` is
   formed on first use (`_transposed_coupling`) and dropped by `_set_coupling`, the one place a coupling is
   stored; do not re-derive it per apply (`A.T` on CSR is a CSC view that converts on every product).

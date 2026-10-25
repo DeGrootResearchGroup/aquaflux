@@ -422,6 +422,22 @@ class FieldSplitInverse:
         fields = (self._groups.n_trailing_fields, self._groups.n_leading_fields)
         return _padded_operator(self._coupling, maps=self._maps, slot="coupling", fields=fields)
 
+    def refit_keeps(self) -> tuple | None:
+        """What a re-fit reuses of what this split holds now, or ``None`` if either block cannot say.
+
+        Each block's own (:meth:`HierarchyBlockInverse.refit_keeps`), and the packing layouts held
+        between refits, which a re-fit packs the new coupling on; the coupling's values are new at every
+        refit. A block without the method, or one that re-coarsens, makes the whole split ``None``.
+        """
+        kept = []
+        for block in (self._leading, self._trailing):
+            keeps = getattr(block, "refit_keeps", None)
+            block_keeps = None if keeps is None else keeps()
+            if block_keeps is None:
+                return None
+            kept.append(block_keeps)
+        return (*kept, self._maps.held_objects())
+
     @property
     def n_dofs(self) -> int:
         """Degrees of freedom the preconditioner acts on."""

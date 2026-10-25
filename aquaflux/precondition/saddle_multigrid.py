@@ -597,6 +597,10 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
 
         return pieces
 
+    def _refit_structure(self) -> tuple:
+        """The SIMPLE plans and the index arrays they were made for, which a frozen refit reuses."""
+        return (self._plans, self._plans_for)
+
     def _simple_plans(self, hierarchy: SmoothedHierarchy) -> tuple[SimplePlan | None, ...]:
         """Each level's SIMPLE plan (``None`` on the coarsest, which solves directly), made once.
 

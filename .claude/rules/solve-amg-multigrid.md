@@ -374,6 +374,13 @@ path.
       (2026-10-22)"; pinned by `test_the_product_map_holds_the_terms_of_the_plain_construction_in_its_order`).
       Host-map measurements: log, "Refit by entry maps (2026-10-17)"; harness
       `validation/pitzdaily_openfoam/refit_profile.py`.
+- **`HierarchyBlockInverse.refit_keeps()` names what a re-fit reuses (2026-10-25)**: the coarsening's
+  `CoarseningPlan` plus the smoother's `_refit_structure()` (`SimpleSmoothedInverse`: its SIMPLE plans and
+  the index arrays they were made for), or `None` when the re-fit re-coarsens. Everything else in the
+  current `traced_cycle()` state is dead once a re-fit starts, which is what lets the materialized session
+  free it before the fit (`solve.md`). A frozen re-fit lets go of `_hierarchy` and `_extras` before fitting.
+  A new block inverse family that holds structure across refits must return it here, or the session frees
+  it early and the re-fit reads deleted arrays (the bit-identity test catches it).
 - **A coarsening that reads no values is refitted, not re-aggregated** (`HierarchyBlockInverse.
   refactor_block`, `_coarsening_reads_values()`): at `strength_threshold` 0, `prolongation_smoothing`
   `"none"` and no `shape_headroom`, a rebuild provably reproduces the held aggregates and `P`, so the
