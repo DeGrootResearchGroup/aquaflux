@@ -200,6 +200,30 @@ def test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays(fields, budget
     assert np.allclose(np.asarray(packed[0].apply(x)), want @ np.asarray(x), rtol=1e-13, atol=1e-13)
 
 
+def test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field() -> None:
+    """The product of an operator held at cell level gathers ``x`` at ``(n_cells, width)``, not per row.
+
+    Every row field's rows read the same columns, so the product gathers them once and every row field
+    multiplies its own entries against that one gather. Gathering per row instead decodes and gathers
+    ``fields`` identical copies, which a loop then keeps live for its whole length. The values are pinned
+    by the test above; this pins the shape of the work.
+    """
+    fields = (4, 4)
+    cells = SparsePattern(_random_pattern(9, 9, 0.3, seed=3))
+    pattern = KroneckerPattern(cells, *fields).dof_pattern()
+    layout = _PaddedLayout.of(pattern, None, fields=fields)
+    operator = layout.packed(jax.numpy.ones(pattern.nnz))
+    x = jax.numpy.ones(pattern.shape[1])
+
+    jaxpr = jax.make_jaxpr(lambda x: operator.rows.product(operator.values, x))(x)
+    gathered = [
+        equation.outvars[0].aval.shape
+        for equation in jaxpr.jaxpr.eqns
+        if equation.primitive.name == "gather" and equation.invars[0].aval.shape == x.shape
+    ]
+    assert gathered == [(cells.shape[0], operator.width)]
+
+
 def test_a_pattern_missing_a_field_pair_is_held_as_arrays_whatever_its_fields() -> None:
     """Told its fields, a pattern that is not one cell pattern over every field pair keeps the held form."""
     cells = SparsePattern(_random_pattern(6, 6, 0.4, seed=3))
