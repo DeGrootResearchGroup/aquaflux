@@ -636,6 +636,10 @@ class EntryMaps:
         self._maps[slot] = (pattern, built)
         return built
 
+    def held_objects(self) -> tuple:
+        """Everything built and held for a slot, as :meth:`held` returns it, in slot order."""
+        return tuple(built for _, built in self._maps.values())
+
     def csr(
         self,
         slot: Hashable,
