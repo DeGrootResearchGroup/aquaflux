@@ -1617,6 +1617,22 @@ pitzDaily and bfs3d (2026-10-14/15)".
   frozen operators are assembled from. **Detail:** `.claude/notes/turbulence-log.md`, "Segmented
   refresh, the carried shift factor (#156), and refresh under `jax.grad`".
 
+## Fitting a refit's leading block last, with the other probed blocks let go first — REFUTED (2026-10-25)
+
+Built on `claude/refit-release-blocks` (`1e128348`, not merged): `FieldSplitInverse.refactor_blocks` took a
+list it emptied as it used each block, fitted the trailing block and stored the coupling first, and fitted
+the leading block last with no other probed block held. The aim was to free the float64 coupling (80 MiB)
+and trailing block (40 MiB) before the leading fit, which sets a 2-step bfs3d march's peak. Measured on
+bfs3d (`memory_attribution.py`, 2 steps, census at the leading block re-fit, peak-instant sampling, split
+checksums; `main` with #825, one run per arm): live device arrays at the leading re-fit's peak **1.36 GiB at
+base, 1.45 reordered**; run peak 5.82 against 5.87; every split leaf bit-identical. It lost because the
+trailing block's new hierarchy and the new coupling then sit under the leading fit beside the old ones,
+which live until the re-fit ends, and they outweigh the blocks freed. A variant storing only the coupling
+first would save at most ~80 MiB (~1 % of the peak) for a contract change on `refactor_blocks`; not built.
+The live-array excess at this peak is the old and new leading inverse held together (backlog §14f). Detail:
+`.claude/notes/solve-direct-preconditioners-log.md`, "Fitting the leading block last".
+
+
 ## Assembling the residual's face sums in blocks of faces to bound the probe's JVP temporary — MARGINAL, NOT BUILT (2026-10-24, the project owner's decision)
 
 On bfs3d at the hybrid start (`validation/face_blocked_gradient_screen.py`; table in
@@ -1833,6 +1849,9 @@ are probed through the aggregates, a re-fit still holds the fine Jacobian and th
 the re-fits, does not fall by 887 MiB.
 
 **Reopen with** an exact, cheap `|S_i|²`: for instance, forming `S` in row chunks at the fit from transiently
-held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. Or with a Schur
+held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. The stored split does
+this since 2026-10-25 (`_schur_rows`, from the held `D` and `M G`), on `S`'s row columns, which it keeps;
+without them the row norms need a sort of each chunk's terms, ~4× the whole fit's time on a bfs3d-sized
+lattice (`solve-flow-block.md`, "`S` is never held"). Or with a Schur
 relaxation that needs no row norms and is shown to work: plain damped Jacobi is the one other candidate, and
 `solve-flow-block.md` records that an undamped one diverges.
