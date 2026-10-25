@@ -751,6 +751,17 @@
         So bfs3d's 1-step peak on current `main` is ~6.3 ± 0.2 GiB, against 7.19 after #817 alone and
         8.07 on `7fe27d07`.
 
+### How much of the compiled-program cache a mid-run clear gives back, on bfs3d (2026-10-25)
+
+      IN PROGRESS -- interim readings, one run per arm, bfs3d, `memory_residue.py` on `f02c710d` (`main`
+      `1bd8d292` + compile counters in the harness), 4-core Linux container, 15.7 GiB, no swap, glibc 2.39
+      defaults, jax 0.12.0.1, `BFS3D_MEMORY_STEPS=1`, census off, tracer on.
+      - (a) control `RESIDUE_CLEAR=end`, cold cache (0 entries; on `1bd8d292`): peak 6.27, resident at step
+        1's end 5.32, the end clear frees 1.54 GiB (0.40 traced) of 1311 executables.
+      - (b) `RESIDUE_CLEAR="hybrid_initialize;end"`, warm cache (31 entries): the mid-run clear frees 0.38
+        GiB (0.03 traced) of 701 executables; peak 5.94, resident at step 1's end 4.96, 1044 executables
+        at the end, whose clear frees 1.52 (0.38 traced). A clear changes the rest of the run: an arm.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
