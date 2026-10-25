@@ -1043,7 +1043,11 @@
         peak 418.09 both; 19 of 21 step rows identical, steps 12 and 14's step residual 8.988e-03 →
         8.987e-03 and 8.723e-03 → 8.722e-03, every β, inner count, cycle count and α equal; solve 356 → 302 s
         (each arm's first run on its checkout, so partly compilation), VmHWM 2.640 → 2.656 GiB. bfs3d's
-        march is not run: a float32 rounding change makes a bfs3d pair two draws (`validation.md`).
+        march was run afterwards (next bullet).
+      - **bfs3d full march with the change** (`march_timing.py`, shipped `case.yaml`, `1bd64df9`, 4-core
+        Linux container, jax 0.12.0.1, warm cache, 2026-10-25): **17 steps, 147 cycles, `x_r/h` 8.361**
+        (`xr/h_full` 12.53), final steered R 1.550e-06, march 1545 s, **VmHWM 5.12 GiB**, VmRSS at the end
+        3.59. One draw; the before arm (`d5f7ff02`) follows.
       - **Independent review (2026-10-25, a separate agent reading the same dumps, read-only)**: agreed the
         totals, the split's share, the 590.5 MiB of decoded columns, the one-kernel multiply and row sum,
         the 4 MiB of solve vectors and #825's effect; found the third call site (the cond branch) and the
