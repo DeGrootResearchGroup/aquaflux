@@ -761,6 +761,9 @@
       - (b) `RESIDUE_CLEAR="hybrid_initialize;end"`, warm cache (31 entries): the mid-run clear frees 0.38
         GiB (0.03 traced) of 701 executables; peak 5.94, resident at step 1's end 4.96, 1044 executables
         at the end, whose clear frees 1.52 (0.38 traced). A clear changes the rest of the run: an arm.
+      - (c) `RESIDUE_CLEAR="fit (first build);end"`, warm cache: the mid-run clear frees 1.39 GiB (0.32
+        traced) of 1287 executables; re-fit #1 then takes 196.8 s (its probe 148.6 s re-traces the batched
+        JVPs), peak 5.85, resident at step 1's end 4.85, 817 executables at the end whose clear frees 1.39.
 
 ## Condensed out of the rule (2026-10-17)
 
