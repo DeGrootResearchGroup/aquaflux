@@ -1313,5 +1313,19 @@ class BlockPreconditioner(eqx.Module):
         return apply
 
     def factory(self) -> Callable[[jnp.ndarray], Callable[[jnp.ndarray], jnp.ndarray]]:
-        """Return the ``state -> M`` factory the Newton step applies (``M`` frozen at that iterate)."""
-        return lambda state: self.apply_at(state, self.frozen_momentum_diagonal(state))
+        """Return the ``state -> M`` factory the Newton step applies (``M`` frozen at that iterate).
+
+        A module holding this preconditioner as data rather than a closure over it, so its hierarchies
+        stay reachable as leaves: an adjoint's transpose solve packs their transposes through it.
+        """
+        return _FrozenAtState(self)
+
+
+class _FrozenAtState(eqx.Module):
+    """``state -> M``: a block preconditioner frozen at the momentum diagonal of the state given."""
+
+    preconditioner: BlockPreconditioner
+
+    def __call__(self, state: jnp.ndarray) -> Callable[[jnp.ndarray], jnp.ndarray]:
+        block = self.preconditioner
+        return block.apply_at(state, block.frozen_momentum_diagonal(state))

@@ -147,16 +147,17 @@ def test_a_padded_gather_holds_its_filled_slots_as_a_mask_and_still_names_each_t
 
 
 def test_a_held_padded_layout_packs_exactly_what_a_fresh_packing_does() -> None:
-    """``_padded_operator`` through a held layout equals ``_PaddedRowOperator.from_scipy``, both ways."""
+    """``_padded_operator`` through a held layout equals ``_PaddedRowOperator.from_scipy``, slot for slot."""
     pattern = _random_pattern(25, 25, 0.2, seed=5)
     maps = EntryMaps()
     for seed in (6, 7):
         operand = _revalued(pattern, seed)
         got = _padded_operator(operand, maps=maps, slot="level")
         want = _PaddedRowOperator.from_scipy(operand)
-        for name in ("columns", "row_lengths", "values", "t_columns", "t_values"):
+        for name in ("columns", "row_lengths", "values"):
             assert np.array_equal(np.asarray(getattr(got, name)), np.asarray(getattr(want, name)))
         assert got.shape == want.shape
+        assert got.transposed is None and got.t_values is None
 
 
 @pytest.mark.parametrize(
@@ -165,10 +166,10 @@ def test_a_held_padded_layout_packs_exactly_what_a_fresh_packing_does() -> None:
 def test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays(fields, budget) -> None:
     """A cell pattern over full field-pair blocks, held at cell level, gives the held layout's every slot.
 
-    The cell-level form computes each slot's column and the stored entry filling it, both ways; equal to
-    the arrays the held form reads off :func:`_padded_rows`, and so the products are equal exactly, not
-    to rounding. Square and rectangular field blocks, a cell pattern with an empty row, and padding to
-    a budget wider than the widest row.
+    The cell-level form computes each slot's column and the stored entry filling it; equal to the arrays
+    the held form reads off :func:`_padded_rows`, and so the products are equal exactly, not to rounding
+    -- transposed too, once each operator packs its transpose. Square and rectangular field blocks, a
+    cell pattern with an empty row, and padding to a budget wider than the widest row.
     """
     rows, columns = fields
     cells = _random_pattern(9, 7, 0.3, seed=11).tolil()
@@ -177,30 +178,23 @@ def test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays(fields, budget
     pattern = KroneckerPattern(cells, rows, columns).dof_pattern()
     lengths = np.diff(cells.indptr)
     width = None if budget is None else columns * (int(lengths.max()) + budget)
-    t_lengths = np.bincount(cells.indices, minlength=7)
-    t_width = None if budget is None else rows * (int(t_lengths.max()) + budget)
 
-    cell_level = _PaddedLayout.of(pattern, width, t_width, fields=fields)
-    held = _PaddedLayout.of(pattern, width, t_width)
+    cell_level = _PaddedLayout.of(pattern, width, fields=fields)
+    held = _PaddedLayout.of(pattern, width)
     assert isinstance(cell_level.rows, _KroneckerColumns)
-    assert isinstance(cell_level.transposed, _KroneckerColumns)
     assert isinstance(held.rows, _HeldColumns)
-    for name in ("columns", "row_lengths", "t_columns"):
+    for name in ("columns", "row_lengths"):
         assert np.array_equal(
             np.asarray(getattr(cell_level, name)), np.asarray(getattr(held, name))
         )
-    for direction in ("rows", "transposed"):
-        assert np.array_equal(
-            np.asarray(getattr(cell_level, direction).entries()),
-            np.asarray(getattr(held, direction).entries()),
-        )
+    assert np.array_equal(np.asarray(cell_level.rows.entries()), np.asarray(held.rows.entries()))
 
     values = jax.numpy.asarray(np.random.default_rng(4).standard_normal(pattern.nnz))
     x = jax.numpy.asarray(np.random.default_rng(5).standard_normal(pattern.shape[1]))
     y = jax.numpy.asarray(np.random.default_rng(6).standard_normal(pattern.shape[0]))
     packed = (cell_level.packed(values), held.packed(values))
     assert np.array_equal(np.asarray(packed[0].apply(x)), np.asarray(packed[1].apply(x)))
-    transposed = [jax.linear_transpose(op.apply, x)(y)[0] for op in packed]
+    transposed = [jax.linear_transpose(op.with_transpose().apply, x)(y)[0] for op in packed]
     assert np.array_equal(np.asarray(transposed[0]), np.asarray(transposed[1]))
     want = sp.csr_matrix((np.asarray(values), pattern.indices, pattern.indptr), shape=pattern.shape)
     assert np.allclose(np.asarray(packed[0].apply(x)), want @ np.asarray(x), rtol=1e-13, atol=1e-13)

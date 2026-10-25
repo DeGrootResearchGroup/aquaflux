@@ -469,6 +469,11 @@ defect — fix it in the same change.
   may produce it. **It does not check that `root` is a root** — the caller owns the convergence test.
   `TransposedPreconditioner` and `stop_array_gradients` (filters by `eqx.is_array`; a callable leaf in
   `theta` is refused by the `custom_vjp`) live here.
+  - **`with_transposes(tree)` / `PacksTranspose` (2026-10-24) — the adjoint asks for transposes; nothing
+    else holds them.** The backward rule applies `with_transposes` to the adjoint preconditioner factory
+    before `jax.linear_transpose`, so every leaf with `with_transpose()` (a padded-row operator,
+    `solve-amg-multigrid.md`) packs its transpose for that transpose solve only. Generic, so every
+    residual reaches it; a factory must hold its operators as leaves, not close over them.
   - **`solve_coupled(adjoint_solver=…)` reaches the transpose solve** (also through
     `solve_reynolds_continuation`'s `**solve_kwargs`); `None` → `default_linear_solver()`. Build one with
     `relative_residual_gmres(rtol, restart=…, stagnation_iters=…, max_restarts=…)`. **Keep it separate

@@ -48,7 +48,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from ..solve import FieldLayout
+from ..solve import FieldLayout, with_transposes
 from .entry_map import DeviceMatrix, EntryMaps, SparsePattern, as_scipy
 from .hierarchy_inverse import HierarchyBlockInverse, block_for
 from .host_preconditioner import FrozenInverse, release, require_refactorable
@@ -974,7 +974,7 @@ class AirReductionInverse:
             return np.asarray(self._solve(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                with_transposes(self.traced_cycle()), jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

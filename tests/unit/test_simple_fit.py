@@ -148,8 +148,8 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
     correction = (m @ g).toarray()
     schur = (c - d @ (m @ g)).toarray()
 
-    def dense(layout, pair):
-        return layout.with_values(*pair).to_scipy().toarray()
+    def dense(layout, values):
+        return layout.with_values(values).to_scipy().toarray()
 
     np.testing.assert_allclose(
         dense(plan.correction_layout, values.correction), correction, rtol=1e-12, atol=1e-14
@@ -168,8 +168,7 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
         else 1.0 / schur_diagonal
     )
     np.testing.assert_allclose(np.asarray(values.schur_inverse), expected, rtol=1e-12)
-    # Both halves of the transpose are the same operator's.
-    schur_operator = plan.schur_layout.with_values(*values.schur)
+    schur_operator = plan.schur_layout.with_values(values.schur)
     x = np.random.default_rng(3).standard_normal(N_CELLS)
     np.testing.assert_allclose(
         np.asarray(schur_operator.apply(x)), schur @ x, rtol=1e-12, atol=1e-13
@@ -234,6 +233,6 @@ def test_a_level_storing_no_velocity_pressure_coupling_has_the_pressure_block_as
         plan, values, checks = _fit(a, **splitting)
         refuse_unusable(checks)
         c = _blocks(a)[3].toarray()
-        schur = plan.schur_layout.with_values(*values.schur).to_scipy().toarray()
+        schur = plan.schur_layout.with_values(values.schur).to_scipy().toarray()
         np.testing.assert_array_equal(schur, c)
-        assert plan.correction_layout.with_values(*values.correction).to_scipy().nnz == 0
+        assert plan.correction_layout.with_values(values.correction).to_scipy().nnz == 0
