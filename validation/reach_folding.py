@@ -13,7 +13,7 @@ uniform-reach-3 march of either case, the two things that could separate them:
             share of rows whose DIAGONAL moved, with quantiles of ``|E_ii| / |J3_ii + s_i|`` against the
             shifted diagonal the preconditioner sees (a far coupling folds onto the diagonal when the
             row's own cell shares the far cell's colour).
-  solves    the step's first inner solve, rebuilt as the viscosity-ramp march builds it (session bound
+  solves    one inner solve of the step (the first, or ``REACH_FOLDING_INNER``), rebuilt as the viscosity-ramp march builds it (session bound
             to the anchor companion and built at the anchor's seed, then re-bound to the step's station
             and re-fitted at the checkpoint and the step's shift), once per probe arm: the step's own
             solver at the march's tolerance and again at ``REACH_FOLDING_TIGHT_RTOL``, with cycles, the
@@ -34,9 +34,18 @@ programs, and they are not all released: on a 15 GiB machine the fifth arm died 
 (2026-10-25). Run the ``3`` arm with the matrix report, then each other arm alone with
 ``REACH_FOLDING_SKIP_MATRIX=1``.
 
+A step's first solve is usually its easy one; the hard solves come later in its inner loop. With
+``REACH_FOLDING_INNER=i`` the harness replays inner solve ``i`` instead: it linearizes at the iterate the
+march dumped after inner ``i - 1`` (run the case with ``BFS3D_INNER_DUMP_ABOVE=1`` /
+``PITZ_INNER_DUMP_ABOVE=1``, which writes ``inner-<attempt>-<inner>.npz`` beside the checkpoints) and
+solves ``(J(p_i) + s) d = -(R(p_i) + s (p_i - phi_n))`` on the preconditioner fitted at the step's start
+``phi_n``. That is the march's own system wherever the step re-fitted at its start, which every
+viscosity-ramp step does (each changes station); ``REACH_FOLDING_ATTEMPT`` names the dump's attempt
+(default: the step number, right for a march with no redone step).
+
 Environment: ``REACH_FOLDING_CASE`` (``bfs3d_openfoam`` or ``pitzdaily_openfoam``), ``REACH_FOLDING_STEP``
 (one-based), ``REACH_FOLDING_CHECKPOINTS`` (default the case's ``checkpoints/``), ``REACH_FOLDING_ARMS``,
-``REACH_FOLDING_TIGHT_RTOL`` (default 1e-5), ``REACH_FOLDING_SKIP_MATRIX=1`` to run the solves only.
+``REACH_FOLDING_INNER`` (default 0), ``REACH_FOLDING_ATTEMPT``, ``REACH_FOLDING_TIGHT_RTOL`` (default 1e-5), ``REACH_FOLDING_SKIP_MATRIX=1`` to run the solves only.
 """
 
 from __future__ import annotations
@@ -114,8 +123,10 @@ def arms(n_fields, names):
 class StepRebuild:
     """The march's step at a checkpoint, rebuilt per preconditioner spec as the viscosity ramp builds it."""
 
-    def __init__(self, coupled, phi, beta, step_number):
+    def __init__(self, coupled, phi, beta, step_number, iterate=None):
         self.coupled, self.phi, self.beta = coupled, phi, beta
+        #: Where the solve linearizes: the step's start, or a later inner iterate of the same step.
+        self.iterate = phi if iterate is None else iterate
         solver_spec = compare.SOLVER
         self.spec = solver_spec
         ramp = solver_spec.continuation
@@ -154,12 +165,14 @@ class StepRebuild:
         return active, session
 
     def shift_and_preconditioner(self, active):
+        """The solve's right-hand side ``R(p) + s (p - phi)``, the shift ``s`` and the preconditioner."""
         norm = active.residual_norm
         g0 = self.assembler.residual(self.phi)
         term = active.shift_policy.shift_term(self.phi, g0)
         strength = active.relaxation_schedule.shift_strength(norm(g0), norm(g0))
         shift = jax.lax.stop_gradient(term.shift(strength))
-        return g0, shift, term.make_preconditioner(strength)
+        g = self.assembler.residual(self.iterate) + shift * (self.iterate - self.phi)
+        return g, shift, term.make_preconditioner(strength)
 
 
 def solve_arm(rebuild, label, column_reach, names, tight_rtol):
@@ -175,11 +188,11 @@ def solve_arm(rebuild, label, column_reach, names, tight_rtol):
         + ")"
     )
     residual_fn = rebuild.assembler.residual
-    phi = rebuild.phi
+    phi, p = rebuild.phi, rebuild.iterate
     g, shift, preconditioner = rebuild.shift_and_preconditioner(active)
     norm = active.residual_norm
-    apply_a = jax.jit(lambda v: jax.jvp(residual_fn, (phi,), (v,))[1] + shift * v)
-    G = jax.jit(lambda p: residual_fn(p) + shift * (p - phi))
+    apply_a = jax.jit(lambda v: jax.jvp(residual_fn, (p,), (v,))[1] + shift * v)
+    G = jax.jit(lambda x: residual_fn(x) + shift * (x - phi))
     base_solver = active.linear_solver()
     project = active.step_projection
     print(f"[arm] {label}: fitted in {time.time() - started:.0f} s, floored rows {floored_text}", flush=True)
@@ -189,7 +202,7 @@ def solve_arm(rebuild, label, column_reach, names, tight_rtol):
     ):
         solver = in_progress_measure(solver, norm)
         t0 = time.time()
-        d, cycles = _shifted_solve(residual_fn, phi, g, shift, preconditioner, solver)
+        d, cycles = _shifted_solve(residual_fn, p, g, shift, preconditioner, solver)
         linear = apply_a(d) + g
         line = (
             f"  {tag:11s} cycles {int(cycles):3d}  Euclidean "
@@ -197,8 +210,8 @@ def solve_arm(rebuild, label, column_reach, names, tight_rtol):
             f"{float(norm(linear) / norm(g)):.3e}  ({time.time() - t0:.0f} s)"
         )
         if tag == "march rtol":
-            v = project(phi, d) if project is not None else d
-            ladder = [float(norm(G(phi + a * v))) / float(norm(g)) for a in LADDER]
+            v = project(p, d) if project is not None else d
+            ladder = [float(norm(G(p + a * v))) / float(norm(g)) for a in LADDER]
             line += "  ladder " + " ".join(f"{r:.3f}" for r in ladder)
         print(line, flush=True)
     shift = np.asarray(shift)
@@ -281,13 +294,24 @@ def main():
         start = {k: data[k] for k in ("step", "residual_norm", "shift") if k in data.files}
     with np.load(checkpoints / f"state-{step_number:05d}.npz") as data:
         beta = float(data["shift"])
+    inner = int(os.environ.get("REACH_FOLDING_INNER", "0"))
+    iterate, where = None, "the step's start"
+    if inner > 0:
+        attempt = int(os.environ.get("REACH_FOLDING_ATTEMPT", str(step_number)))
+        dump = checkpoints / f"inner-{attempt:05d}-{inner - 1:02d}.npz"
+        with np.load(dump) as data:
+            iterate = jnp.asarray(data["state"])
+            where = (
+                f"inner {inner} (after {dump.name}: {int(data['cycles'])} cycles, alpha "
+                f"{float(data['alpha']):g})"
+            )
     coupled = compare.build_case()["coupled"]
     n, n_fields = coupled.layout.n_cells, coupled.layout.n_fields
     names = field_names(n_fields)
-    rebuild = StepRebuild(coupled, phi, beta, step_number)
+    rebuild = StepRebuild(coupled, phi, beta, step_number, iterate)
     print(
         f"[configuration] case {CASE_NAME}, {n} cells, step {step_number} (station {rebuild.station}) from "
-        f"state-{step_number - 1:05d} {start}, beta {beta:g}, file probe "
+        f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, file probe "
         f"{compare.SOLVER.preconditioner.probe}, jax {jax.__version__}",
         flush=True,
     )
@@ -296,7 +320,7 @@ def main():
         arm_shift = solve_arm(rebuild, label, column_reach, names, tight_rtol)
         shift = arm_shift if shift is None else shift
     if os.environ.get("REACH_FOLDING_SKIP_MATRIX") != "1":
-        folding_report(coupled, phi, shift, names)
+        folding_report(coupled, rebuild.iterate, shift, names)
 
 
 if __name__ == "__main__":
