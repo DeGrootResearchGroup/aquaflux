@@ -200,6 +200,13 @@ def test_the_multigrid_surface_is_complete() -> None:
 #: reviewable instead of invisible. Adding a row is cheap and deliberate; the guard below is what stops
 #: the list growing by accident.
 VALIDATION_INTERNAL_REACHES = {
+    # One SIMPLE level's plan, fit and pieces, built by `schur_storage_probe.py` on a lattice saddle to
+    # price holding the Schur complement against applying it from its pieces; `in_precision` rounds a
+    # formed Schur as a single-precision split rounds its pieces.
+    "_simple_pieces",
+    "fit_simple_level",
+    "simple_plan",
+    "in_precision",
     # The probe's entry-by-entry order, which `pitzdaily_openfoam/probe_loop_probe.py` places responses
     # by on the host inside its looped arm: the session's own structure holds its order at cell level,
     # so the harness builds the entry-by-entry one over the same layout.

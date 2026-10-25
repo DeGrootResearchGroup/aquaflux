@@ -2134,3 +2134,52 @@ library). `validation/pitzdaily_openfoam/march_cost.py` under `run_case.sh`, the
   term with the looped binary search (1.32 s); entries rather than padded rows, the unrolled search and
   2**18-term chunks (against 2**21) took it to ~0.42; the aligned Gram matrix 0.40 -> 0.004 s, and the
   per-cell field sum before the Schur product's search halved its searches on this 2D case.
+
+### The Schur applied from its pieces (2026-10-25)
+
+`solve-open-directions.md` §14d's second bullet. The SIMPLE smoother stored `S = C − D (M G)` on its
+structural pattern (reach 6 for a reach-3 Jacobian) with its transpose; it now applies `C p − D (M G p)` and
+the fit forms only `S`'s diagonal and squared row norms, a chunk of rows at a time on `S`'s row columns.
+The project owner chose this (design A) from these options:
+
+| option | memory | apply | march |
+|---|---|---|---|
+| A: matrix-free apply, `C` stored, row stats on kept row columns | − values, transpose, transpose layout; + `C` | ties | apply order changes; diagonal inverse bit-identical |
+| A′: as A, row stats by sorting each chunk's terms, no `S` columns | − 33 MiB more (lattice) | ties | as A; fit 23.6 s against 6.3 s for the whole fit |
+| B: formed `S`, forward only | − transpose and its layout | unchanged | identical; a fragment of §14d's first bullet |
+
+**Configuration (all):** 4-core Linux container, 15.7 GiB, jax 0.12.0.1, base `main` `1bd8d292`, arm branch
+`claude/schur-storage`; shipped case files (bfs3d: float32 split, `PivotFloor(0.15)`, SIMPLE 2 sweeps × 2
+inner, block splitting, Frobenius on both halves); `GlibcTrim` on.
+
+**Sizes.** bfs3d fine level: `S` 7.1M entries (308 a row) against 9.2M as pieces (C 1.3M + D 3.9M + M G 3.9M);
+level 1 1.7M against 2.1M; every level's formed `S` is smaller than its pieces, so storing it was never
+about the product's cost. A 40×24×24 reach-3 hexahedral lattice (23040 cells, random values, 4 fields)
+reproduces those counts (7.2M / 9.3M) and was used for what needs the arrays in hand
+(`validation/schur_storage_probe.py`): `S`'s values 33.1
+MiB + transpose values 33.1 (float32, width 377), row layout 33.3 MiB, transpose layout 66.4 MiB; `C`
+5.5 + 5.5 MiB values (width 63).
+
+**Isolated product, lattice, float32, default flags, mean of 50 calls, three repeats:** formed 22.9–27.3
+ms, from pieces 22.7–25.0 ms; transposed 24.6–26.6 against 22.2–25.8. Results 1.1e-7 apart (relative).
+
+**bfs3d, `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=0 BFS3D_MEMORY_CHECKSUMS=1`,
+one run per arm** (base on a cold compilation cache, arm on the base's, so seconds are not compared):
+- traced split's leaves by owner (from the checksum lines' shapes, split 2): 911.4 → 709.5 MiB; fine
+  `schur` 166.0 → `pressure` 28.0, level 1 60.9 → 9.8, level 2 14.5 → 3.0, level 3 1.9 → under 0.5; every
+  other owner unchanged.
+- device arrays: step end 1.20 → 1.04 GiB; leading block re-fit 1.92 → 1.69; first traced split 1.19 → 1.03.
+- `VmHWM` after step 1 6.50 → 6.39 GiB; first fit stage peak 5.19 → 4.84; re-fit stage peak 5.77 → 5.56.
+- step program: arguments 1010.2 → 808.3 MiB, temporaries 1017.3 → 953.5 MiB.
+- every float leaf both splits share (306) and every shared int leaf: bit-identical, so the diagonal
+  inverse and every other piece are unchanged; the Schur relaxation spreads print equal.
+
+**pitzDaily, `march_cost.py`, `AQUAFLUX_DISABLE_COMPILATION_CACHE=1`, one run per arm and flag:** default
+flags: 21 steps, 102 cycles, final R 5.736e-06, x_r/h 8.0686 both, every step row equal; `VmHWM` 2.739 /
+2.746 GiB, solve 419.6 / 419.2 s. `XLA_FLAGS=--xla_cpu_max_isa=AVX`: the same counts and final R, steps 12 and
+14 differ in R's fourth digit (8.988e-03 / 8.987e-03, 8.723e-03 / 8.722e-03): the apply's own summation
+order, not fused multiply-add placement; `VmHWM` 2.765 / 2.709, solve 425.8 / 443.4 s.
+
+**pitzDaily, `split_apply_timing.py`, hybrid start, best of 15, two runs per arm:** apply 182.6 / 152.7 ms
+(base) against 153.5 / 171.1 (arm); transpose 158.9 / 157.3 against 141.6 / 166.7. Tied within the
+run-to-run spread. Outputs 2.4e-9 of the largest entry apart; the base reproduces itself exactly.
