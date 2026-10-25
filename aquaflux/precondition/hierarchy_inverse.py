@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from ..solve import with_transposes
 from .entry_map import DeviceMatrix, as_scipy
 from .multigrid import (
     FrozenCoarsening,
@@ -252,8 +253,7 @@ class HierarchyBlockInverse:
             self._budget = self._hierarchy.shape_budget(self._shape_headroom)
             self._report(
                 f"      shape ladder: cells {self._budget.coarse_cells}, "
-                f"row widths {self._budget.operator_width}, transposed "
-                f"{self._budget.transpose_width} (headroom {self._shape_headroom})",
+                f"row widths {self._budget.operator_width} (headroom {self._shape_headroom})",
             )
             self._hierarchy = self._coarsen(matrix, self._budget)
         self._after_coarsening()
@@ -273,7 +273,8 @@ class HierarchyBlockInverse:
             self._hierarchy = _narrowed(levels, equilibration, self._stored_precision)
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose
         # -- only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per
-        # arm for something most callers never touch. Dropped rather than kept here, because it
+        # arm for something most callers never touch -- and it holds the level operators' packed
+        # transposes beside them (`with_transposes`). Dropped rather than kept here, because it
         # describes the hierarchy this call has just replaced.
         self._transpose_fn = None
 
@@ -381,7 +382,7 @@ class HierarchyBlockInverse:
             return np.asarray(self._solve(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                with_transposes(self.traced_cycle()), jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

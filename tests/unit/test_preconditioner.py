@@ -41,6 +41,7 @@ from aquaflux.flow.rhie_chow import momentum_diagonal
 from aquaflux.mesh import structured_grid_2d
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
+from aquaflux.solve import with_transposes
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -772,7 +773,7 @@ def test_every_composition_transposes_for_the_adjoint(composition) -> None:
     asm = _channel(1.0)
     preconditioner = BlockPreconditioner.build(asm, composition=composition)
     state = asm.initial_state()
-    m = preconditioner.factory()(state)
+    m = with_transposes(preconditioner.factory())(state)
 
     rng = np.random.default_rng(2)
     x = jnp.asarray(rng.normal(size=state.shape))

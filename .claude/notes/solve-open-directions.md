@@ -843,13 +843,12 @@ Jacobian and the peak does not fall.
 ### 14d. Arithmetic-preserving storage cuts
 
 None of these needs a convergence study:
-- build the padded operators' stored transposes only when the adjoint asks;
 - do not store the fine Schur on its structural reach-6 pattern (133 MiB on bfs3d);
 - a cell-level pattern with the field implicit, in place of dof-level index arrays (2.19 GiB of int32 on
   the device at bfs3d's step 1, 2026-10-24; the 36.7M dof entries are ~1.0M cell pairs × 36).
 
-The transposes and the cell-level pattern are worth about 0.6 and up to ~2 GiB on bfs3d; the pattern cut
-scales with the entry count, so it is the one of these that also bears on the 300k target.
+The cell-level pattern was worth up to ~2 GiB on bfs3d; it scales with the entry count, so it is the one of
+these that also bears on the 300k target. The stored transposes, a third such cut, are built (below).
 
 **The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
 cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
@@ -858,6 +857,12 @@ pattern (§14d), stages 1–3"). The probe's host block patterns (140 MiB on bfs
 (`CellLevelPattern`, branch `claude/host-cell-patterns`). Still dof level: the diagonal and cell-block
 gathers (small), a non-nodal or diagonal-padded level, the 1×1 Schur, and the plan's own COO coordinates
 (`ColumnProbePlan.pattern_rows`/`pattern_cols`/`in_reach`, ~18 MiB host on bfs3d).
+
+**The transposes are packed only for an adjoint (2026-10-24, branch `claude/lazy-transposes`):** bfs3d
+device at step 1's end 1.20 → 0.69 GiB, step-1 peak 6.49 → 6.13 GiB (census runs), every forward leaf's
+digest and step 1's rows unchanged; pitzDaily march identical, peak 3.085 → 2.900 GiB
+(`solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)"). Left in §14d: the fine Schur on its
+reach-6 pattern.
 
 ### 14e. BUILT (2026-10-24) — `BoundaryClosure.gradient_weight`'s unit tangents are broadcasts
 

@@ -47,6 +47,7 @@ from aquaflux.precondition.multigrid import (
     smoothed_multigrid_cycles,
 )
 from aquaflux.precondition.padded_rows import _PaddedRowOperator
+from aquaflux.solve import with_transposes
 
 
 def _poisson(n):
@@ -168,7 +169,7 @@ def test_a_padded_row_operator_takes_a_wider_budget_and_refuses_a_narrower_one()
 
 def test_a_padded_row_operator_transposes_to_the_transposed_matrix() -> None:
     a = _ragged_operator()
-    operator = _PaddedRowOperator.from_scipy(a)
+    operator = _PaddedRowOperator.from_scipy(a).with_transpose()
     y = np.random.default_rng(2).standard_normal(4)
     (transposed,) = jax.linear_transpose(operator.apply, jnp.zeros(5))(jnp.asarray(y))
     assert np.allclose(np.asarray(transposed), a.T @ y, rtol=0, atol=1e-14)
@@ -195,7 +196,7 @@ def test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose() ->
     either, so a program free of any scatter is the stored path and nothing else.
     """
     a = _ragged_operator()
-    operator = _PaddedRowOperator.from_scipy(a)
+    operator = _PaddedRowOperator.from_scipy(a).with_transpose()
     assert operator.t_values.shape == (5, 2), "A^T padded to the widest column"
     transposed = jax.linear_transpose(operator.apply, jnp.zeros(5))
     primitives = _primitives(jax.make_jaxpr(transposed)(jnp.zeros(4)).jaxpr)
@@ -203,15 +204,42 @@ def test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose() ->
     assert not any("scatter" in name for name in primitives)
 
 
-def test_a_padded_row_operators_transpose_takes_its_own_budget() -> None:
+def test_a_padded_row_operator_holds_no_transpose_until_asked_and_then_packs_its_own_entries() -> (
+    None
+):
+    """A forward solve never applies the transpose, so a frozen operator does not hold one.
+
+    Asked for, the transpose is the operator's own entries moved, in their own precision: its product
+    is ``Aᵀ y`` with every column's terms in ascending row order, which a single-precision ``A`` gives
+    exactly when ``y`` and the entries are small integers.
+    """
     a = _ragged_operator()
-    padded = _PaddedRowOperator.from_scipy(a, transpose_width=6)
-    assert padded.t_values.shape == (5, 6)
-    y = jnp.asarray(np.random.default_rng(3).standard_normal(4))
-    (transposed,) = jax.linear_transpose(padded.apply, jnp.zeros(5))(y)
-    assert np.allclose(np.asarray(transposed), a.T @ np.asarray(y), rtol=0, atol=1e-14)
-    with pytest.raises(ValueError, match="a column of 2 entries, wider than the 1 budgeted"):
-        _PaddedRowOperator.from_scipy(a, transpose_width=1)
+    a.data = np.arange(1, a.nnz + 1, dtype=np.float32)
+    forward = _PaddedRowOperator.from_scipy(a)
+    assert forward.transposed is None and forward.t_values is None
+    assert len(jax.tree.leaves(forward)) == len(jax.tree.leaves(forward.rows)) + 1
+
+    operator = forward.with_transpose()
+    assert operator.values is forward.values and operator.rows is forward.rows
+    assert operator.t_values.dtype == jnp.float32
+    assert operator.with_transpose() is operator
+    y = jnp.arange(1.0, 5.0, dtype=jnp.float32)
+    (transposed,) = jax.linear_transpose(operator.apply, jnp.zeros(5, dtype=jnp.float32))(y)
+    np.testing.assert_array_equal(np.asarray(transposed), a.T @ np.asarray(y))
+
+
+def test_transposing_a_padded_row_operator_without_its_transpose_raises_rather_than_scattering() -> (
+    None
+):
+    operator = _PaddedRowOperator.from_scipy(_ragged_operator())
+    with pytest.raises(RuntimeError, match="transposed without its stored transpose"):
+        jax.linear_transpose(operator.apply, jnp.zeros(5))(jnp.ones(4))
+
+
+def test_a_padded_row_operators_transpose_is_packed_from_concrete_values_only() -> None:
+    operator = _PaddedRowOperator.from_scipy(_ragged_operator())
+    with pytest.raises(RuntimeError, match="packed on the host, from concrete values"):
+        jax.jit(lambda op: op.with_transpose().t_values)(operator)
 
 
 def test_smoothed_aggregation_v_cycle_is_mesh_independent() -> None:
@@ -707,7 +735,7 @@ def test_air_multigrid_is_linear_and_transposable() -> None:
     ``M^T`` adjoint."""
     stencil = _convective_grid(12, mu=1e-2, speed=1.0)
     n = stencil.n
-    hierarchy = build_air_hierarchy(stencil.assemble())
+    hierarchy = with_transposes(build_air_hierarchy(stencil.assemble()))
     rng = np.random.default_rng(1)
     r1 = jnp.asarray(rng.standard_normal(n))
     r2 = jnp.asarray(rng.standard_normal(n))
@@ -1440,7 +1468,9 @@ def test_an_equilibrated_cycle_is_a_fixed_linear_operator_and_transposes() -> No
     preconditions, silently.
     """
     n = 120
-    hierarchy = build_convection_hierarchy(_badly_scaled_chain(n), equilibrate=True)
+    hierarchy = with_transposes(
+        build_convection_hierarchy(_badly_scaled_chain(n), equilibrate=True)
+    )
 
     def cycle(b):
         return convection_multigrid_cycles(hierarchy, b, cycles=2)
@@ -1883,19 +1913,17 @@ def test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit() -
                 level.n,
                 level.n_coarse,
                 level.operator.values.shape,
-                level.operator.t_values.shape,
                 None if level.p_val is None else int(level.p_val.shape[0]),
             )
             for level in hierarchy.levels
         ]
 
     assert signature(built[0]) == signature(built[1])
-    # Each coarse level is padded to its budget, operator and stored transpose alike; equal signatures
-    # alone would hold for any two builds whose natural widths happened to agree.
+    # Each coarse level is padded to its budget; equal signatures alone would hold for any two builds
+    # whose natural widths happened to agree.
     for hierarchy in built:
         coarse = hierarchy.levels[1:]
         assert [level.operator.width for level in coarse] == list(budget.operator_width)
-        assert [level.operator.transpose_width for level in coarse] == list(budget.transpose_width)
 
     traces = []
 
