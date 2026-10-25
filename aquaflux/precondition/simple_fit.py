@@ -9,7 +9,8 @@ operator's values.
 ``S`` itself is never held. The smoother applies it as ``C x - D (M G x)`` from pieces it holds anyway
 (``D`` and ``M G``) plus ``C``, and needs of ``S`` only its diagonal and its row norms, for the pressure
 relaxation. ``S`` reaches about twice as far as the level operator, so its rows are wider than all of
-its pieces' together on a fine level, and holding it (with its transpose) cost more than the pieces.
+its pieces' together on a fine level, and holding it (with its transpose) cost more memory than ``C``,
+the one piece the smoother would not hold otherwise.
 
 This module splits the two as :mod:`~aquaflux.precondition.level_fit` splits a hierarchy's levels. The
 host decides structure once per level -- the four block cuts, the structural patterns of ``M G`` and

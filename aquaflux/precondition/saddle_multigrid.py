@@ -70,8 +70,8 @@ class _SimplePieces(eqx.Module):
 
     The Schur complement ``S = C - D M G`` is not held: :meth:`schur_apply` applies it from ``C``, ``D``
     and ``M G``. Formed, it reaches twice as far as the level operator and its rows are wider than its
-    pieces' together, so holding it, with its transpose, cost more memory than the pieces it is built
-    from, for no faster a product.
+    pieces' together, so holding it, with its transpose, cost more memory than the one piece it adds,
+    ``C``; the product from the pieces reads about a third more entries than a formed one would.
     """
 
     f_diagonal_inverse: jnp.ndarray  # (n_velocity,) 1 / diag(F)
