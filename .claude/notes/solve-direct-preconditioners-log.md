@@ -721,6 +721,36 @@
         measured on `50fe3be0` (after #817--#819) by `folded_constants.py`; the cache totals are not
         re-taken there.
 
+### bfs3d memory by owner after #817–#819 and broadcast tangents (2026-10-25)
+
+      `memory_attribution.py` on `3636ab49` (`main` `39786723` + broadcast tangents, #824): 4-core Linux
+      container, 15.7 GiB, no swap, glibc 2.39 defaults, jax 0.12.0.1, warm cache, shipped `case.yaml`
+      (re-fit trim on by default since #818), `BFS3D_MEMORY_STEPS=1`, census on (tracer 0.31 GiB at the
+      end). **Peak 6.35 GiB, set in the step program's first call** (stage peak; re-fit #1's leading
+      block re-fit 5.94, the fit's block inverse build 5.21). Resident at step 1's end 5.38 GiB:
+
+      | owner | GiB |
+      |---|---|
+      | live device arrays (int32 0.40, float32 0.66, float64 0.13) | 1.20 |
+      | -- cell-level padded columns `_KroneckerColumns` (41 arrays) | 0.26 |
+      | -- hierarchy level operators, `values` + stored `t_values` (9 levels) | 0.17 + 0.17 |
+      | -- SIMPLE pieces (Schur, divergence, dg; each with its transpose) | 0.19 |
+      | -- gradient `Corrections` 0.09, coupling 0.04 + 0.04, `KroneckerGalerkin` + `KroneckerGather` 0.07, probe `DeviceMatrix` 0.04 | 0.28 |
+      | host traced by `tracemalloc` (Python objects, jaxprs; arrays ≥ 1 MiB only 0.02) | 0.59 |
+      | `tracemalloc`'s own records | 0.31 |
+      | compiled-program cache outside Python (freed by `clear_caches` + trim, less its traced 0.40; `memory_residue.py` run of the same commit) | ~1.16 |
+      | glibc free-but-retained (`mallinfo2` 1.05; the step program's first call adds most of it) | ~1.05 |
+      | file-backed (libraries) | 0.21 |
+      | rest (interpreter, XLA runtime, thread stacks, arena fragmentation) | ~0.8 |
+
+      - The peak is the step program's 1.02 GiB of temporaries (`memory_analysis`, beside 1.01 GiB of
+        arguments that are the split's leaves and the state) on a 4.6 GiB baseline. Of that baseline,
+        live arrays are 1.2; the cache, retention and tracer about 2.5.
+      - Every peak number in this entry carries the tracer; a census-free run of the same commit peaked
+        at 6.43 and `main` without the tangents at 6.25 (`memory_residue.py`, entry above), one run each.
+        So bfs3d's 1-step peak on current `main` is ~6.3 ± 0.2 GiB, against 7.19 after #817 alone and
+        8.07 on `7fe27d07`.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
