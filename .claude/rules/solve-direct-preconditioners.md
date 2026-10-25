@@ -220,14 +220,12 @@ bare block inverse).
 - **Probe colouring reach is a per-case choice, set by measurement; the pattern stays at reach 3.**
   pitzDaily probes every column at reach 2 inside a reach-3 pattern (`column_reach: [2, 2, 2, 2, 2]`,
   2026-10-14: same 18 steps / 123 cycles / `x_r/h` 8.0686, probe per refit 4.3–5.8 → 2.5–3.4 s; at zero
-  shift 7 % more forward applies, none transposed). bfs3d keeps uniform reach 3 because the same colouring
-  cost it 34 % of its wall in one run per arm -- a single draw from a march whose step count spread 22–82 under last-bit perturbations (2026-10-17/18) (`validation.md`) -- (measured by the project owner, PR #722, `validation/bfs3d_openfoam/compare.py`
-  with `BFS3D_COLUMN_REACH=2,2,2,2,2,2`, shipped `case.yaml`, `77b03c18`, Apple M3 Pro, jax 0.10.2):
-
-  | probe colouring (pattern reach 3) | steps | restart cycles | final `\|R\|` | refit (probe / refactor) | solve |
-  |---|---|---|---|---|---|
-  | uniform reach 3 (shipped) | 18 | 137 | 5.1e-06 | 11.9–12.7 s (8.2–8.5 / 3.6–4.2) | 522 s |
-  | reach 2 | 21 | 216 | 5.0e-06 | 6.0–6.7 s (3.4–3.6 / 2.4–3.0) | 697 s |
+  shift 7 % more forward applies, none transposed). bfs3d keeps uniform reach 3: with the pivot floor,
+  three perturbed draws per arm (`BFS3D_NU_PERTURBATION` 0 / ±1e-14, shipped `case.yaml`, `fc802f5`,
+  4-core Linux, jax 0.12.0.1, 2026-10-25), uniform reach 3 took 17 steps / 147 cycles every draw
+  (1519–1632 s) and the reach-2 colouring 21 / 23 / 40 steps, 194–384 cycles (1957–3870 s), all to
+  `x_r/h` 8.3611. The probe halves (~18.5 → ~8.6 s per fit), the march does not pay it back. Table:
+  log, "Probe colouring reach 2 — pitzDaily and bfs3d".
 
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor

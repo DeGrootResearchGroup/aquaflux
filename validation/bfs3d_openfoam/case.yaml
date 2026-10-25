@@ -46,7 +46,10 @@ solver:
   convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-05}
   # The field split of the materialized Jacobian, [u, v, w, p] then [k, omega]. Probed at a uniform
   # reach of three: under this gradient every column carries couplings at distance three, so no column
-  # may be shortened. Re-fitted at the step's own shift (no floor), as on pitzDaily.
+  # may be shortened. Re-fitted at the step's own shift (no floor), as on pitzDaily. Probing every column
+  # at reach 2 inside this pattern, as pitzDaily does, halves the probe but loses the march: with the
+  # pivot floor, three perturbed draws per arm took 17 steps every time at reach 3 against 21, 23 and 40
+  # at reach 2, same root (compare.py, BFS3D_COLUMN_REACH and BFS3D_NU_PERTURBATION, 2026-10-25).
   preconditioner:
     kind: MaterializedJacobian
     inverse:

@@ -412,6 +412,12 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # velocity columns reach four through the eddy viscosity under this scheme). Everything below was
 # measured under the corrected Green-Gauss scheme and holds only for it.
 #
+# The march agrees. With the pivot floor (2026-10-25, the shipped file otherwise, 4-core Linux, jax
+# 0.12.0.1), three draws per arm at `BFS3D_NU_PERTURBATION` 0 / +1e-14 / -1e-14: the uniform reach-three
+# probe took 17 steps / 147 restart cycles on every draw (1519-1632 s); every column at reach two took
+# 40 / 21 / 23 steps and 384 / 205 / 194 cycles (1957-3870 s), all to mid-span `x_r/h` 8.3611. The
+# probe per fit halves (~18.5 s -> ~8.6 s); the extra steps, each with its own refit, cost more than that.
+#
 # The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
 # 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The

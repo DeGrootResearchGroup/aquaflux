@@ -1186,6 +1186,32 @@
       only the colouring is shortened. Harnesses: `validation/pitzdaily_openfoam/compare.py` (the arms are
       `case.yaml` edits; a reach-4 pattern is `PITZ_STENCIL_REACH=4`).
 
+    - **✅ RE-MEASURED WITH THE PIVOT FLOOR (2026-10-25): bfs3d still does NOT take the reach-2 colouring,
+      now over three draws per arm.** #722's pair above was one unfloored draw each, taken while a
+      last-bit perturbation moved this march 22–82 steps. Re-run on the shipped `case.yaml`
+      (`PivotFloor(0.15)`, float32 split, `refresh_on_cycles` 4, `MultipleCorrectionGradient`, pattern
+      reach 3) at `fc802f5`, 4-core Linux container, jax 0.12.0.1, glibc defaults, one case at a time, no
+      test tier running; draws are `BFS3D_NU_PERTURBATION` 0 / +1e-14 / -1e-14, the reach-2 arm
+      `BFS3D_COLUMN_REACH=2,2,2,2,2,2`. Reproduce with `validation/bfs3d_openfoam/run_arm.sh <arm>
+      BFS3D_COLUMN_REACH=... BFS3D_NU_PERTURBATION=...` and `march_log_compare.py --table`:
+
+      | probe colouring | eps | steps | restart cycles (incl. rejected) | redone | final `\|R\|` | fits | probe / refactor per fit | solve |
+      |---|---|---|---|---|---|---|---|---|
+      | uniform reach 3 (shipped) | 0 | 17 | 147 | none | 3.67e-06 | 14 | 17.4–19.9 / 7.0–9.6 s | 1632 s |
+      | uniform reach 3 (shipped) | +1e-14 | 17 | 147 | none | 3.67e-06 | 14 | 17.2–19.8 / 6.8–8.8 s | 1563 s |
+      | uniform reach 3 (shipped) | -1e-14 | 17 | 147 | none | 3.67e-06 | 14 | 16.8–20.7 / 6.6–10.1 s | 1519 s |
+      | reach 2 | 0 | 40 | 384 (435) | steps 31–33, `e2` each | 3.47e-07 | 32 | 7.4–24.2 / 6.7–21.2 s | 3870 s |
+      | reach 2 | +1e-14 | 21 | 205 | none | 5.90e-06 | 20 | 7.0–9.0 / 6.9–10.0 s | 1957 s |
+      | reach 2 | -1e-14 | 23 | 194 | none | 6.86e-07 | 22 | 7.3–10.4 / 7.0–11.1 s | 2093 s |
+
+      Every run converged to mid-span `x_r/h` 8.3611. With the floor the reach-3 march is no longer
+      rounding-decided (three draws, one step table to the cycle); the reach-2 colouring brings the
+      spread back (21–40 steps) and is slower on every draw (+20 % to +137 % solve wall): the probe
+      halves (~18.5 → ~8.6 s per fit) but the folded far mass costs more steps, solves at the 14-restart
+      cap, quarter-to-1/64 step lengths from step ~5 on, and a refit per step. So the floor did not change
+      the verdict; it only made the reach-3 side a single number. Not run: shortening only some columns
+      on bfs3d.
+
 ### The residual reaching past stencil_reach — the gradient-sweep trap (2026-08-16)
 
       **⚠️ THE OTHER SIDE OF THE SAME TRAP: the RESIDUAL can reach past `stencil_reach`, and then EVERY

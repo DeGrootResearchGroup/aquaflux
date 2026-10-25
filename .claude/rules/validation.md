@@ -177,8 +177,7 @@ branches.
   move (2026-10-15, PR #721).
 - ⚠️ **A single bfs3d march is one draw from a wide spread: judge a change on several perturbed draws per
   arm** (failure count and step spread). A last-bit viscosity change (`1 ± 1e-14`) moves it from ~20 to ~80
-  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, PR #722's reach-2
-  cost, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
+  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
   pivot nears zero make the **float32** field split's `A·M` wrong by order one around them, so the
   step's solve stalls at its cap and its direction is decided by rounding. `BFS3D_PIVOT_FLOOR=0.15` /
   `PITZ_PIVOT_FLOOR` (`MaterializedJacobian.pivot_floor`, `solve.md`) removes it: 21 steps both at `1 ± 0`
@@ -197,7 +196,8 @@ branches.
 - **A per-column probe reach is licensed by the gradient scheme and the split; re-audit it when either
   changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships `MultipleCorrectionGradient` at a
   uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond reach 2, and a reach-2 colouring
-  cost it 18→21 steps / 137→216 cycles (PR #722; one run per arm, so a single draw -- see the ensemble bullet above). pitzDaily deliberately probes every column at reach 2
+  cost it 17 → 21–40 steps over three perturbed draws per arm with the pivot floor (2026-10-25,
+  `BFS3D_NU_PERTURBATION`; uniform reach 3 gave 17 steps on every draw). pitzDaily deliberately probes every column at reach 2
   inside its reach-3 pattern: its march is unchanged and the probe 40 % cheaper (2026-10-14).
 
 ## Machine contention and run records
