@@ -884,9 +884,9 @@ HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the
 - CLOSED (2026-10-25): letting the probe's other float64 blocks go before the leading fit, by fitting it
   last, measured no lower (ledger, "Fitting a refit's leading block last"); the leading block itself is its
   fit's input, and the fit is computed in float64 by design;
-- the superseded leading inverse (fine operator 177 MiB, levels 85, SIMPLE pieces 192) lives beside the new
-  one until `_release_superseded`: release it before the new one is built, where the step does not still
-  hold it, or build in place;
+- BUILT (2026-10-25): the superseded leading inverse is freed at the start of a re-fit (`refit_keeps()`,
+  `solve.md`); live arrays at the re-fit's peak 1.36 -> 1.05 GiB, 2-step peak 5.80 -> 5.58 GiB, now set
+  by the step program's first call (log, "Freeing the superseded split at the start of a re-fit");
 - `fit_simple_level`'s 993 MiB of temporaries (as large as the step program's): fit per level or per row
   chunk.
 

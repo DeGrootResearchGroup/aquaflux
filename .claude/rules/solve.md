@@ -339,7 +339,11 @@ defect — fix it in the same change.
     `test_a_re_fit_frees_the_outgoing_split_before_it_fits`). ⚠️ **A re-fit that raises after the release
     leaves the session with no preconditioner, form or hook**, so the next `build` fits afresh rather than
     gluing deleted arrays (`test_a_re_fit_that_fails_after_the_early_release_leaves_the_session_to_fit_afresh`).
-    `_release_superseded` still runs after the fit, for whatever was kept.
+    `_release_superseded` still runs after the fit, for whatever was kept. bfs3d (2 steps, `main`
+    `1c5a1875`, one run each, 2026-10-25): live arrays at the leading re-fit's peak 1.36 -> 1.05 GiB, peak
+    5.80 -> 5.58 GiB, now set by the step program's first call; every split leaf bit-identical
+    (`.claude/notes/solve-direct-preconditioners-log.md`, "Freeing the superseded split at the start of a
+    re-fit").
   - **Every session gives glibc's freed memory back before each re-fit (default, the owner's decision of
     2026-10-24).** `MaterializedSession(memory_trim=)` defaults to `GlibcTrim()` (`aquaflux/allocator.py`,
     `malloc_trim(0)`, a no-op without glibc; the only `ctypes` in the package) and hands it to
@@ -347,8 +351,8 @@ defect — fix it in the same change.
     `None`). `None` turns it off; a case file cannot reach it. It changes no value. **Why:** the step
     program's first call leaves ~0.6 GiB of freed memory in XLA's worker-thread arenas, and the next re-fit's
     transient landed on top of it: bfs3d 2-step peak 7.78 -> 7.30 GiB on `2e7949e8` (after #817; mean
-    of three runs each, spread 0.21 -> 0.06; re-fit #2 still sets the peak, ~1 GiB above the step
-    program's first call), no cost in time; 9.04 -> 8.52 before #817
+    of three runs each, spread 0.21 -> 0.06; there re-fit #2 set the peak, ~1 GiB above the step
+    program's first call, which sets it since the early release below), no cost in time; 9.04 -> 8.52 before #817
     (`.claude/notes/solve-direct-preconditioners-log.md`, "A `malloc_trim(0)` before each re-fit"). Read its effect from the resident set, not `mallinfo2`'s free
     bytes, which count trimmed pages as still free. Pinned by
     `test_the_memory_trim_runs_once_before_each_refit_and_never_on_a_skipped_step` and

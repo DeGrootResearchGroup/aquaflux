@@ -969,6 +969,37 @@
         and the 2-step peak is 5.82 GiB with the tracer (6.80 on `1bd8d292`, before #825; one run each).
       - Records: `run-20261025-025721.log` (arm) and `run-20261025-032029.log` (base), git-ignored.
 
+### Freeing the superseded split at the start of a re-fit (2026-10-25)
+
+      `memory_attribution.py`, bfs3d, `BFS3D_MEMORY_STEPS=2`, census only at the leading block re-fit of
+      re-fit #2 (`block re-fit #3`), `BFS3D_MEMORY_SAMPLE_DEVICE=1 BFS3D_MEMORY_CHECKSUMS=1`, tracer on (0.32
+      GiB), 4-core Linux container, 15.7 GiB, glibc 2.39 defaults, jax 0.12.0.1, shipped `case.yaml` (re-fit
+      trim on). Base `main` `1c5a1875`; arm `98bf8e07` (the session frees the outgoing traced form's leaves
+      the inverse does not name in `refit_keeps()` before the probe, and the host inverse drops `_extras`
+      before the fit). One run each, back to back in one container. GiB:
+
+      | | base | early release |
+      |---|---|---|
+      | re-fit #1, leading block re-fit: stage peak / live device at it | 4.98 / 1.36 | 4.47 / 1.05 |
+      | re-fit #2, leading block re-fit: stage peak / live device at it | **5.80 / 1.36** | **5.27 / 1.05** |
+      | step 1's program, first call: stage peak | 5.53 | 5.58 |
+      | run peak (VmHWM) | **5.80** | **5.58** |
+      | live device at `block re-fit #3`'s end (census) | 1.14 | 0.83 |
+
+      - **Every leaf of all three traced splits (981) has the same digest in both runs**: no value moved.
+      - Live arrays at the leading re-fit's peak fall 0.31 GiB (pre-registered bar 0.2), the superseded
+        leading inverse's values and SIMPLE pieces and the packed coupling, about the 0.27 the census shapes
+        estimated. The re-fit no longer sets the 2-step peak: the step program's first call does (5.58),
+        so a lower re-fit peak now buys nothing more until the step's temporaries move.
+      - ⚠️ **A digest comparison across containers can fail for the SIMPLE pieces alone.** The first arm run
+        was compared against a base run from earlier in the day (`89e1710b`, the same library) and 13
+        SIMPLE-piece leaves of splits 1 and 2 differed (`dg`, `schur`, `f_block_inverse` values); unmodified
+        `main` re-run in the arm's container reproduced the arm's digests exactly. The difference was a
+        recompiled `fit_simple_level` (the arm's run compiled where the earlier one hit the cache), not
+        the change. Compare digests between runs in one container, back to back.
+      - Records: `run-20261025-152739.log` (arm), `run-20261025-161055.log` (base),
+        `run-20261025-155834.log` (the 1-step determinism check), git-ignored.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
