@@ -211,7 +211,7 @@ path.
     - ⚠️ **In the march step that hoisting is the step's largest temporary**: no `(n_rows, width)` float
       product is materialized (the gathered `x[columns]` is, one operator at a time), but every operator's
       decoded `s32[n_rows, width]` columns are, hoisted and live together, once per call site of the split
-      (two): 591 of bfs3d's 1017 MiB step temporary, first step, `main` `1bd8d292`
+      (two): 591 of bfs3d's 1017 MiB step temporary, first step, `main` `1bd8d292` (unchanged after #825)
       (`validation/step_temporaries.py`; log, "What the march step's temporary holds"). Keeping the decode
       in the loop body is the unbuilt cut (`validation/padded_decode_hoisting.py`).
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field

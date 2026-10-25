@@ -818,7 +818,8 @@ solve's own vectors are 4 MiB. The residual's share without a split is ~2× a JV
 7 KB a cell of it loop invariants XLA hoisted. So the split is the lever on the step's temporary, but
 through its decoded indices, not 14b–14c's values: keeping the decode inside the loop body
 (`validation/padded_decode_hoisting.py`: four operators 443 → 161 MiB) is the cut to measure on the step
-first, unbuilt.
+first, unbuilt. Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+not its temporary).
 
 ### 14b. A consistent compact operator for the fit
 

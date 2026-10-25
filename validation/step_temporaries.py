@@ -19,7 +19,10 @@ number for its temporary buffer. This names what fills it. On a step case (``STE
      settings are the split arm's; the split's arrays are still arguments (the adjoint factory holds
      them) but nothing reads them;
 
-   with the persistent compilation cache off for those compiles (a cache hit writes no dump);
+   with the persistent compilation cache bypassed for those compiles (``_bypass_compilation_cache``): a
+   cache hit compiles nothing and so dumps nothing, the dump options are not in the cache key, and JAX
+   decides whether the cache is in use once per process, so the switch is the config and a reset of
+   that decision (``jax._src.compilation_cache.reset_cache``, a private hook);
 3. for each arm reads ``memory_analysis()`` (temp, argument, output, alias, code) and XLA's own dumps
    of the program (``--xla_dump_to``, set here before JAX starts, limited to the step's module): the
    buffer assignment (which values share the ``preallocated-temp`` allocation, at which offsets) and the
@@ -237,6 +240,15 @@ def _name_of(values, ranges, at, instructions):
     return next((n for n in live if n in instructions), live[0] if live else values[0][0])
 
 
+def _bypass_compilation_cache():
+    """Compile from here on without reading or writing the persistent compilation cache."""
+    import jax
+    from jax._src import compilation_cache
+
+    jax.config.update("jax_enable_compilation_cache", False)
+    compilation_cache.reset_cache()
+
+
 def _analyse(program, args, kwargs, label):
     before = set(DUMP.glob("*march_step*cpu_after_optimizations-live-range.txt"))
     started = time.perf_counter()
@@ -418,7 +430,6 @@ def _print_difference(record):
 
 
 def main():
-    import jax
 
     if REREAD:
         _reread()
@@ -429,7 +440,7 @@ def main():
     program, args, kwargs = _capture(compare)
     print(f"step arguments captured in {time.perf_counter() - started:.0f} s", flush=True)
     record = {"header": _header(compare, args), "arms": {}}
-    jax.config.update("jax_enable_compilation_cache", False)
+    _bypass_compilation_cache()
     for arm in ARMS:
         if arm == "split":
             arm_args = args

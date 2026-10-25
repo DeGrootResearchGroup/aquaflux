@@ -902,7 +902,19 @@
         re-coarsens would not. "Owner" is the innermost `aquaflux` frame of an instruction's metadata, so a
         fused kernel mixing the split's and the residual's work is named by one of them; the copies carry no
         metadata and are not attributed. The peak is XLA's static schedule, not a measured resident peak.
-      - Record: `validation/step_temporaries.bfs3d.json` and `run-20261025-023437.log` (git-ignored).
+      - **Re-taken on `599fe380` (`main` after #825, lazy transposes, merged while this ran)**: split arm
+        temp 1022.7 MiB, arguments 513.6 (from 1010.2: #825 shrinks the arguments, not the temporary); the
+        split-owned slots are unchanged slot for slot (497.1 hoisted decoded columns, 88.6 gathered operand,
+        50.2 + 43.2 other decode), the JVP's tangent working set at the peak 93.7 (from 83.8); identity arm
+        identical (392.9). Split's share 629.8 MiB. capture 174 s, compiles 52 / 40 s.
+        ⚠️ Two first attempts on this commit read nothing: their arms were persistent-cache hits on the
+        `1bd8d292` run's entries (a hit compiles nothing, so XLA dumps nothing). `jax.config.update(
+        "jax_enable_compilation_cache", False)` mid-process did not stop it -- JAX decides once per process
+        whether the cache is used -- and `xla_dump_to` is not in the cache key; the harness now resets that
+        decision (`_bypass_compilation_cache`). The `1bd8d292` and pitzDaily arms above were real compiles:
+        each wrote the CPU buffer dumps only a compile writes.
+      - Record: `validation/step_temporaries.bfs3d.json` (the `599fe380` run) and `run-20261025-023437.log`,
+        `run-20261025-025431.log` (git-ignored).
 
 ## Condensed out of the rule (2026-10-17)
 
